@@ -207,14 +207,12 @@ def forward_attention(
     query_start_loc = q_len * torch.arange(
         batch_size + 1, device=q.device, dtype=torch.int32
     )
-    query_lens = torch.diff(query_start_loc)
     seq_lens = torch.full(
         (batch_size,),
         seqlen_k,
         device=q.device,
         dtype=torch.int32,
     )
-    context_lens = seq_lens - query_lens
     max_seq_len = int(seq_lens.max())
     max_query_len = q_len
     num_actual_tokens = query_start_loc[-1]
@@ -242,8 +240,6 @@ def forward_attention(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),
         seq_lens=seq_lens,
-        _seq_lens_cpu=seq_lens.cpu(),
-        _num_computed_tokens_cpu=context_lens.cpu(),
         num_reqs=batch_size,
         num_actual_tokens=num_actual_tokens,
         max_query_len=max_query_len,

@@ -296,8 +296,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         prefill_metadata = None
         if num_prefills > 0:
+            seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+
             chunk_seq_ids = split_prefill_chunks(
-                common_attn_metadata.seq_lens_cpu[num_decodes:],
+                seq_lens_cpu[num_decodes:],
                 self.max_prefill_buffer_size,
                 request_offset=num_decodes,
             )
@@ -306,7 +308,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     reqs_start,
                     reqs_end,
                     query_start_loc_cpu,
-                    common_attn_metadata.seq_lens_cpu,
+                    seq_lens_cpu,
                     common_attn_metadata.block_table_tensor,
                 )
                 for reqs_start, reqs_end in chunk_seq_ids

@@ -1807,9 +1807,6 @@ class GPUModelRunner(
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
             seq_lens=self.seq_lens.gpu[:num_reqs_padded],
             _seq_lens_cpu=self.seq_lens.cpu[:num_reqs_padded],
-            _num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[
-                :num_reqs_padded
-            ],
             num_reqs=num_reqs_padded,
             num_actual_tokens=num_tokens_padded,
             max_query_len=max_query_len,
@@ -3789,9 +3786,10 @@ class GPUModelRunner(
                     propose_draft_token_ids(sampled_token_ids)
                 elif self.valid_sampled_token_count_event is not None:
                     assert spec_decode_common_attn_metadata is not None
+                    num_reqs = self.input_batch.num_reqs
                     next_token_ids, valid_sampled_tokens_count = (
                         self.drafter.prepare_next_token_ids_padded(
-                            spec_decode_common_attn_metadata,
+                            self.seq_lens.cpu[:num_reqs],
                             sampled_token_ids,
                             self.requests,
                             self.input_batch,
@@ -4096,7 +4094,7 @@ class GPUModelRunner(
                 )
                 next_token_ids, valid_sampled_tokens_count = (
                     self.drafter.prepare_next_token_ids_padded(
-                        common_attn_metadata,
+                        self.seq_lens.cpu[: self.input_batch.num_reqs],
                         sampled_token_ids,
                         self.requests,
                         self.input_batch,

@@ -561,7 +561,6 @@ class SpecDecodeBaseProposer:
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
             # Invalidate the CPU-side shadows to avoid H<>D sync.
             common_attn_metadata._seq_lens_cpu = None
-            common_attn_metadata._num_computed_tokens_cpu = None
 
         for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
@@ -609,8 +608,6 @@ class SpecDecodeBaseProposer:
             # removed in when common_attn_metadata.seq_lens_cpu is deprecated.
             if common_attn_metadata._seq_lens_cpu is not None:
                 common_attn_metadata._seq_lens_cpu += 1
-            if common_attn_metadata._num_computed_tokens_cpu is not None:
-                common_attn_metadata._num_computed_tokens_cpu += 1
 
             # Compute the slot mapping.
             block_size = attn_metadata_builder.kv_cache_spec.block_size
@@ -869,7 +866,7 @@ class SpecDecodeBaseProposer:
 
     def prepare_next_token_ids_padded(
         self,
-        common_attn_metadata: CommonAttentionMetadata,
+        seq_lens_cpu: torch.Tensor,
         sampled_token_ids: torch.Tensor,
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
@@ -887,7 +884,7 @@ class SpecDecodeBaseProposer:
         self.backup_next_token_ids.np[:num_reqs] = np.array(
             [
                 requests[gpu_input_batch.req_ids[i]].get_token_id(
-                    common_attn_metadata.seq_lens_cpu[i].item()
+                    seq_lens_cpu[i].item()
                 )
                 for i in range(num_reqs)
             ],
@@ -967,13 +964,12 @@ class SpecDecodeBaseProposer:
         spec_common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=common_attn_metadata.query_start_loc,
             seq_lens=common_attn_metadata.seq_lens,
-            query_start_loc_cpu=query_start_loc_cpu,
             _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
-            _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
+            query_start_loc_cpu=query_start_loc_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             max_query_len=new_query_len_per_req.max().item(),
-            max_seq_len=common_attn_metadata.seq_lens_cpu.max().item(),
+            max_seq_len=common_attn_metadata.max_seq_len,
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[:total_num_tokens],
             causal=True,
@@ -1187,15 +1183,18 @@ class SpecDecodeBaseProposer:
         #                 q1, q1 + 1, ..., q1 + q2 - n2 - 1,
         #                 q1 + q2, q1 + q2 + 1, ..., q1 + q2 + q3 - n3 - 1]
 
-        num_rejected_tokens = [
+        num_rejected_tokens_list = [
             n + 1 - len(sampled_token_ids[i]) if n > 0 else 0
             for i, n in enumerate(num_draft_tokens)
         ]
-        num_rejected_tokens = torch.tensor(num_rejected_tokens, dtype=torch.int32)
+        num_rejected_tokens = torch.tensor(num_rejected_tokens_list, dtype=torch.int32)
 
         device = common_attn_metadata.query_start_loc.device
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        new_seq_lens_cpu = common_attn_metadata.seq_lens_cpu - num_rejected_tokens
+        new_seq_lens = common_attn_metadata.seq_lens - num_rejected_tokens.to(device)
+        new_seq_lens_cpu: torch.Tensor | None = None
+        if common_attn_metadata._seq_lens_cpu is not None:
+            new_seq_lens_cpu = common_attn_metadata._seq_lens_cpu - num_rejected_tokens
 
         # [0, q1, q1 + q2, q1 + q2 + q3] -> [q1, q2, q3]
         new_query_len_per_req = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
@@ -1245,14 +1244,15 @@ class SpecDecodeBaseProposer:
 
         spec_common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=new_query_start_loc_cpu.to(device, non_blocking=True),
-            seq_lens=new_seq_lens_cpu.to(device, non_blocking=True),
-            query_start_loc_cpu=new_query_start_loc_cpu,
+            seq_lens=new_seq_lens,
             _seq_lens_cpu=new_seq_lens_cpu,
-            _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
+            query_start_loc_cpu=new_query_start_loc_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             max_query_len=new_query_len_per_req.max().item(),
-            max_seq_len=new_seq_lens_cpu.max().item(),
+            # max_seq_len is just an upper bound; so use a rough estimate that doesn't
+            # involve a D<>H transfer
+            max_seq_len=common_attn_metadata.max_seq_len + max(num_draft_tokens),
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[token_indices],
             causal=True,
