@@ -32,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOMode,
     ReqId,
     ReqMeta,
+    TransferId,
     WriteTask,
     get_moriio_mode,
     get_port_offset,
@@ -309,7 +310,11 @@ class MoRIIOConnectorScheduler:
         return len(token_ids) - 1 - num_computed_tokens, False
 
     def send_notify_block(
-        self, req_id: str, block_notify_list: list[int], host=None, port=None
+        self,
+        transfer_id: TransferId,
+        block_notify_list: list[int],
+        host=None,
+        port=None,
     ):
         path = make_zmq_path("tcp", host, port)
         if path not in self.paths:
@@ -320,7 +325,7 @@ class MoRIIOConnectorScheduler:
             self.paths[path] = sock
 
         data = {
-            "req_id": req_id,
+            "transfer_id": transfer_id,
             "block_notify_list": block_notify_list or [],
             "decode_rank": self.dp_rank,
             "type": "remote_blocks",
@@ -377,6 +382,7 @@ class MoRIIOConnectorScheduler:
                     "kv_transfer_params should not be None"
                 )
 
+                transfer_id: TransferId = request.kv_transfer_params["transfer_id"]
                 remote_dp_rank = request.kv_transfer_params.get("remote_dp_rank", 0)
 
                 for tp_index in range(self.tp_size):
@@ -385,7 +391,7 @@ class MoRIIOConnectorScheduler:
                     ] + get_port_offset(remote_dp_rank, tp_index)
 
                     self.send_notify_block(
-                        req_id=request.request_id,
+                        transfer_id=transfer_id,
                         block_notify_list=blocks.get_block_ids()[0],
                         host=params.get("remote_host"),
                         port=target_port,
@@ -695,8 +701,12 @@ class MoRIIOConnectorWorker:
         # have the same number of blocks.
         self.dst_num_blocks: dict[EngineId, int] = {}
         # In progress transfers.
-        self._recving_transfers: defaultdict[ReqId, list] = defaultdict(list)
-        self._recving_transfers_callback_addr: dict[ReqId, tuple[str, str]] = {}
+        self._recving_transfers: defaultdict[TransferId, list] = defaultdict(list)
+        self._recving_transfers_callback_addr: dict[TransferId, tuple[str, str]] = {}
+
+        # Bidirectional mapping between transfer_id and internal request_id
+        self._transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        self._request_id_to_transfer_id: dict[ReqId, TransferId] = {}
 
         # Track the expiration time of requests that are waiting to be sent.
         self._reqs_to_send: dict[ReqId, float] = {}
@@ -709,7 +719,7 @@ class MoRIIOConnectorWorker:
             max_workers=1,
             thread_name_prefix="vllm-moriio-handshake-initiator",
         )
-        self._ready_requests = queue.Queue[tuple[ReqId, ReqMeta]]()
+        self._ready_requests = queue.Queue[tuple[TransferId, ReqMeta]]()
         self._handshake_futures: dict[EngineId, Future[set[str]]] = {}
         # Protects _handshake_futures and _remote_agents.
         self._handshake_lock = threading.RLock()
@@ -736,7 +746,7 @@ class MoRIIOConnectorWorker:
 
     def schedule_write_blocks(
         self,
-        request_id: str,
+        transfer_id: TransferId,
         dst_engine_id: str,
         local_block_ids: list[int],
         remote_block_ids: list[int] | None,
@@ -748,7 +758,7 @@ class MoRIIOConnectorWorker:
         """Schedule a block write operation.
 
         Args:
-            request_id: Unique identifier for the request
+            transfer_id: Unique identifier for the transfer (shared between P/D)
             dst_engine_id: Destination engine ID
             local_block_ids: Local block IDs to transfer
             remote_block_ids: Hint for remote block IDs
@@ -768,7 +778,7 @@ class MoRIIOConnectorWorker:
         event.record(stream)
 
         task = WriteTask(
-            request_id=request_id,
+            transfer_id=transfer_id,
             dst_engine_id=dst_engine_id,
             local_block_ids=local_block_ids,
             remote_block_ids_hint=remote_block_ids,
@@ -1011,7 +1021,7 @@ class MoRIIOConnectorWorker:
         return {remote_agent_name}
 
     def _background_moriio_handshake(
-        self, req_id: str, remote_engine_id: EngineId, meta: ReqMeta
+        self, transfer_id: TransferId, remote_engine_id: EngineId, meta: ReqMeta
     ):
         # Do MoRIIO handshake in background and add to _ready_requests when done.
         fut = None
@@ -1023,8 +1033,8 @@ class MoRIIOConnectorWorker:
             tp_size = int(meta.tp_size)
             remote_dp_size = int(meta.remote_dp_size)
 
-        def request_ready(_f: Future[Any], entry=(req_id, meta)):
-            logger.info("MoRIIO handshake done for request %s", req_id)
+        def request_ready(_f: Future[Any], entry=(transfer_id, meta)):
+            logger.info("MoRIIO handshake done for request %s", transfer_id)
             self._ready_requests.put(entry)
             self.load_ready_flag[remote_engine_id] = True
             self.write_ready_flags[remote_engine_id] = True
@@ -1172,43 +1182,75 @@ class MoRIIOConnectorWorker:
         ready_event.wait()  # Wait for listener ZMQ socket to be ready.
         self.moriio_wrapper.async_wait_reqid()
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_finished(self) -> tuple[set[ReqId], set[ReqId]]:
         """
         Get requests that are done sending or recving on this specific worker.
         The scheduler process (via the MultiprocExecutor) will use this output
         to track which workers are done.
+
+        Returns:
+            Tuple of (done_sending, done_recving) as internal request_ids
         """
 
-        done_sending, done_recving = set(), set()
+        done_sending: set[ReqId] = set()
+        done_recving: set[ReqId] = set()
 
         if self.is_producer:
-            done_sending = self.moriio_wrapper.pop_finished_req_ids()
+            # Worker returns transfer_ids, we translate to internal
+            done_transfer_ids: set[TransferId] = (
+                self.moriio_wrapper.pop_finished_transfer_ids()
+            )
+            for transfer_id in done_transfer_ids:
+                internal_id = self._transfer_id_to_request_id[transfer_id]
+                done_sending.add(internal_id)
+
+            # Clean up mappings
+            for transfer_id in done_transfer_ids:
+                internal_id = self._transfer_id_to_request_id.pop(transfer_id)
+                self._request_id_to_transfer_id.pop(internal_id)
 
         else:
             if self.mode == MoRIIOMode.WRITE:
-                done_recving = self.moriio_wrapper.pop_finished_write_req_ids()
+                # Worker returns transfer_ids, we translate to internal
+                done_transfer_ids = (
+                    self.moriio_wrapper.pop_finished_write_transfer_ids()
+                )
+                for transfer_id in done_transfer_ids:
+                    internal_id = self._transfer_id_to_request_id[transfer_id]
+                    done_recving.add(internal_id)
+
+                # Clean up mappings
+                for transfer_id in done_transfer_ids:
+                    internal_id = self._transfer_id_to_request_id.pop(transfer_id)
+                    self._request_id_to_transfer_id.pop(internal_id)
             else:
+                # READ mode already returns internal IDs via _pop_done_transfers()
                 done_recving = self._pop_done_transfers()
 
         return done_sending, done_recving
 
-    def _pop_done_transfers(self) -> set[str]:
-        done_req_ids: set[str] = set()
+    def _pop_done_transfers(self) -> set[ReqId]:
+        done_req_ids: set[ReqId] = set()
         with self.moriio_wrapper.lock:
-            to_remove = []
-            for req_id, status_list in self._recving_transfers.items():
+            to_remove: list[TransferId] = []
+            for transfer_id, status_list in self._recving_transfers.items():
                 if status_list[-1].Succeeded():
-                    done_req_ids.add(req_id)
+                    # Translate to internal request_id
+                    internal_id = self._transfer_id_to_request_id[transfer_id]
+                    done_req_ids.add(internal_id)
 
                     self.moriio_wrapper.send_notify(
-                        req_id,
-                        self._recving_transfers_callback_addr[req_id][0],
-                        self._recving_transfers_callback_addr[req_id][1],
+                        transfer_id,
+                        self._recving_transfers_callback_addr[transfer_id][0],
+                        self._recving_transfers_callback_addr[transfer_id][1],
                     )
-                    to_remove.append(req_id)
-            for req_id in to_remove:
-                del self._recving_transfers[req_id]
-                del self._recving_transfers_callback_addr[req_id]
+                    to_remove.append(transfer_id)
+            for transfer_id in to_remove:
+                del self._recving_transfers[transfer_id]
+                del self._recving_transfers_callback_addr[transfer_id]
+                # Clean up mapping
+                internal_id = self._transfer_id_to_request_id.pop(transfer_id)
+                self._request_id_to_transfer_id.pop(internal_id)
 
             return done_req_ids
 
@@ -1227,6 +1269,12 @@ class MoRIIOConnectorWorker:
         remote_engine_id = None
 
         for req_id, meta in metadata.reqs_to_save.items():
+            transfer_id: TransferId = meta.transfer_id
+
+            # Establish mapping
+            self._transfer_id_to_request_id[transfer_id] = req_id
+            self._request_id_to_transfer_id[req_id] = transfer_id
+
             # we only need to check if dp0 in rank
             remote_engine_id = (
                 str(meta.remote_host) + ":" + str(meta.remote_handshake_port)
@@ -1240,11 +1288,11 @@ class MoRIIOConnectorWorker:
                 with self._handshake_lock:
                     if remote_engine_id not in self._remote_agents:
                         self._background_moriio_handshake(
-                            req_id, remote_engine_id, meta
+                            transfer_id, remote_engine_id, meta
                         )
 
                         continue
-            self._write_blocks_for_req(req_id, meta, layer_name, kv_layer)
+            self._write_blocks_for_req(transfer_id, meta, layer_name, kv_layer)
 
         while True:
             if (
@@ -1280,6 +1328,12 @@ class MoRIIOConnectorWorker:
         remote_engine_id = None
 
         for req_id, meta in metadata.reqs_to_recv.items():
+            transfer_id: TransferId = meta.transfer_id
+
+            # Establish mapping
+            self._transfer_id_to_request_id[transfer_id] = req_id
+            self._request_id_to_transfer_id[req_id] = transfer_id
+
             remote_engine_id = (
                 str(meta.remote_host) + ":" + str(meta.remote_handshake_port)
             )
@@ -1290,14 +1344,14 @@ class MoRIIOConnectorWorker:
                 with self._handshake_lock:
                     if remote_engine_id not in self._remote_agents:
                         self._background_moriio_handshake(
-                            req_id, remote_engine_id, meta
+                            transfer_id, remote_engine_id, meta
                         )
                         wait_handshake_readd_req = True
 
                         continue
 
             # Handshake already completed, start async read xfer.
-            self._read_blocks_for_req(req_id, meta)
+            self._read_blocks_for_req(transfer_id, meta)
         # Start transfers for requests whose handshakes have now finished.
 
         while True:
@@ -1318,14 +1372,14 @@ class MoRIIOConnectorWorker:
 
         self._reqs_to_send.update(metadata.reqs_to_send)
 
-    def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
+    def _read_blocks_for_req(self, transfer_id: TransferId, meta: ReqMeta):
         logger.debug(
             "Remote agent %s available, calling _read_blocks for req %s",
             meta.remote_engine_id,
-            req_id,
+            transfer_id,
         )
         self._read_blocks(
-            request_id=req_id,
+            transfer_id=transfer_id,
             dst_engine_id=meta.remote_engine_id,
             local_block_ids=meta.local_block_ids,
             remote_block_ids=meta.remote_block_ids,
@@ -1333,9 +1387,11 @@ class MoRIIOConnectorWorker:
             remote_notify_port=meta.remote_notify_port,
         )
 
-    def _write_blocks_for_req(self, req_id: str, meta: ReqMeta, layer_name, kv_layer):
+    def _write_blocks_for_req(
+        self, transfer_id: TransferId, meta: ReqMeta, layer_name, kv_layer
+    ):
         self.schedule_write_blocks(
-            request_id=req_id,
+            transfer_id=transfer_id,
             dst_engine_id=meta.remote_engine_id,
             local_block_ids=meta.local_block_ids,
             remote_block_ids=meta.remote_block_ids,
@@ -1484,7 +1540,7 @@ class MoRIIOConnectorWorker:
         local_block_ids: list[int],
         remote_block_ids: list[int],
         dst_engine_id: str,
-        request_id: str,
+        transfer_id: TransferId,
         remote_host: str,
         remote_notify_port: int,
     ) -> None:
@@ -1508,8 +1564,8 @@ class MoRIIOConnectorWorker:
                 offs[2], offs[0], offs[1], sessions[sess_idx]
             )
             with self.moriio_wrapper.lock:
-                self._recving_transfers[request_id].append(transfer_status)
-                self._recving_transfers_callback_addr[request_id] = (
+                self._recving_transfers[transfer_id].append(transfer_status)
+                self._recving_transfers_callback_addr[transfer_id] = (
                     remote_host,
                     str(remote_notify_port + self.tp_rank),
                 )
