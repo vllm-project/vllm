@@ -85,7 +85,7 @@ def run_comb_workload(
     )
 
 
-def explore_comb_workload(
+def explore_comb_workloads(
     server: ServerProcess | None,
     bench_cmd: list[str],
     *,
@@ -192,7 +192,7 @@ def explore_comb_workload(
     return serial_workload_data + inter_workloads_data + batch_workload_data
 
 
-def explore_combs_workload(
+def explore_combs_workloads(
     serve_cmd: list[str],
     bench_cmd: list[str],
     after_bench_cmd: list[str],
@@ -227,7 +227,7 @@ def explore_combs_workload(
             dry_run=dry_run,
         ) as server:
             for bench_comb in bench_params:
-                comb_data = explore_comb_workload(
+                comb_data = explore_comb_workloads(
                     server,
                     bench_cmd,
                     serve_comb=serve_comb,
@@ -305,7 +305,7 @@ def run_main(args: SweepServeWorkloadArgs):
         raise ValueError(f"Cannot resume from non-existent directory ({output_dir})")
 
     try:
-        return explore_combs_workload(
+        return explore_combs_workloads(
             serve_cmd=args.serve_cmd,
             bench_cmd=args.bench_cmd,
             after_bench_cmd=args.after_bench_cmd,
