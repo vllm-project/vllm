@@ -346,7 +346,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         with self.maybe_dummy_run_with_lora(
             self.lora_config,
-            num_scheduled_tokens == np.array(num_tokens_per_request, dtype=np.int32),
+            num_scheduled_tokens = np.array(num_tokens_per_request, dtype=np.int32),
             num_sampled_tokens=None,
             remove_lora=True,
             num_active_loras=self.lora_config.max_loras
