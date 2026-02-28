@@ -2681,6 +2681,14 @@ class MMVUDataset(HuggingFaceDataset):
         + (" ".join(f"{k}.{v}" for k, v in x["choices"].items())),
     }
 
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+
+        self._remote_path_root = (
+            f"https://huggingface.co/datasets/{self.hf_name}/resolve/main"
+        )
+        self._local_path_root = snapshot_download(self.hf_name, repo_type="dataset")
+
     def sample(
         self,
         tokenizer: TokenizerLike,
@@ -2695,11 +2703,6 @@ class MMVUDataset(HuggingFaceDataset):
         if parser_fn is None:
             raise ValueError(f"Unsupported dataset path: {self.hf_name}")
 
-        remote_path_root = (
-            f"https://huggingface.co/datasets/{self.hf_name}/resolve/main"
-        )
-        local_path_root = snapshot_download(self.hf_name, repo_type="dataset")
-
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
 
         sampled_requests = []
@@ -2709,7 +2712,7 @@ class MMVUDataset(HuggingFaceDataset):
 
             prompt = parser_fn(item)
             mm_content = process_video(
-                item["video"].replace(remote_path_root, local_path_root)
+                item["video"].replace(self._remote_path_root, self._local_path_root)
             )
             prompt_len = len(tokenizer.encode(prompt))
             if enable_multimodal_chat:
