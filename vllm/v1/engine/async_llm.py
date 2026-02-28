@@ -463,6 +463,7 @@ class AsyncLLM(EngineClient):
 
         async def handle_inputs():
             cancelled = False
+            session_started = False
             try:
                 async for input_chunk in input_stream:
                     sp = input_chunk.sampling_params
@@ -487,6 +488,7 @@ class AsyncLLM(EngineClient):
                         self.model_config, input_chunk.prompt
                     )
                     await self._add_request(req, prompt_text, None, 0, queue)
+                    session_started = True
             except (asyncio.CancelledError, GeneratorExit):
                 cancelled = True
             except Exception as error:
@@ -496,9 +498,17 @@ class AsyncLLM(EngineClient):
             finally:
                 queue._input_stream_task = None
                 if not cancelled:
-                    # Send empty final request to indicate that inputs have
-                    # finished. Don't send if cancelled (session was aborted).
-                    await self._add_request(final_req, None, None, 0, queue)
+                    if session_started:
+                        # Send empty final request to indicate that inputs have
+                        # finished. Don't send if cancelled (session was aborted).
+                        await self._add_request(final_req, None, None, 0, queue)
+                    else:
+                        # No inputs were processed (empty input stream). Signal
+                        # completion directly without submitting to the engine,
+                        # since the engine would process a placeholder request
+                        # with no actual data (which can crash models that require
+                        # multimodal inputs at every step, e.g. realtime models).
+                        queue.put(STREAM_FINISHED)
 
         # Ensure output handler is running.
         self._run_output_handler()
