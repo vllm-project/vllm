@@ -61,7 +61,6 @@ class Sampler:
         cu_num_logits_np: np.ndarray,
         pos: torch.Tensor,
         input_ids: torch.Tensor,
-        expanded_local_pos: torch.Tensor,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
@@ -72,7 +71,6 @@ class Sampler:
             idx_mapping_np,
             pos,
             input_ids,
-            expanded_local_pos,
         )
 
         max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
@@ -105,7 +103,6 @@ class Sampler:
         idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
         input_ids: torch.Tensor,
-        expanded_local_pos: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Copy logits to a new FP32 tensor.
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
@@ -119,7 +116,6 @@ class Sampler:
             idx_mapping,
             idx_mapping_np,
             input_ids,
-            expanded_local_pos,
             self.num_speculative_tokens,
         )
 
