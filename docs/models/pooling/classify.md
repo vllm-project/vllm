@@ -10,7 +10,7 @@ Classification is the task of predicting which of predefined categories or class
 | `GPT2ForSequenceClassification` | GPT2 | `nie3e/sentiment-polish-gpt2-small` | |  |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
 
-<sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./pooling_models.md#model-conversion))  
+<sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./../pooling_models.md#model-conversion))  
 \* Feature support is the same as that of the original model.
 
 If your model is not in the above list, we will try to automatically convert the model using
@@ -58,7 +58,7 @@ probs = output.outputs.probs
 print(f"Class Probabilities: {probs!r} (size={len(probs)})")
 ```
 
-A code example can be found here: [examples/offline_inference/basic/classify.py](../../examples/offline_inference/basic/classify.py)
+A code example can be found here: [examples/offline_inference/basic/classify.py](../../../examples/offline_inference/basic/classify.py)
 
 ### `LLM.encode`
 
@@ -229,7 +229,3 @@ curl -v "http://127.0.0.1:8000/classify" \
 ### Remove softmax from PoolingParams
 
 We have already removed softmax and activation from PoolingParams in v0.15. Instead, use `use_activation`, since we allow `classify` and `token_classify` to use any activation function.
-
-
-
-

@@ -101,7 +101,7 @@ print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 
 A code example can be found here: [examples/offline_inference/basic/embed.py](../../examples/offline_inference/basic/embed.py)
 
-### [`LLM.classify`](./pooling/classify.md#offline_inference)
+### [`LLM.classify`](./pooling/classify.md#offline-inference)
 
 ### `LLM.score`
 

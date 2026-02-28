@@ -547,7 +547,7 @@ If your model is not in the above list, we will try to automatically convert the
 [as_embedding_model][vllm.model_executor.models.adapters.as_embedding_model]. By default, the embeddings
 of the whole prompt are extracted from the normalized hidden state corresponding to the last token.
 
-#### [Classification](./pooling/classify.md#supported_models)
+#### [Classification](./pooling/classify.md#supported-models)
 
 #### Cross-encoder / Reranker
 
