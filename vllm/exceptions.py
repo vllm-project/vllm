@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 """Custom exceptions for vLLM."""
+
 import sys
 import traceback
 from http import HTTPStatus
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.engine.protocol import ErrorResponse
@@ -43,7 +44,6 @@ class VLLMValidationError(ValueError):
         return f"{base} ({', '.join(extras)})" if extras else base
 
 
-
 def create_error_response(
     message: str | Exception,
     err_type: str = "BadRequestError",
@@ -53,8 +53,8 @@ def create_error_response(
 ) -> ErrorResponse:
     exc: Exception | None = None
 
-    from vllm.entrypoints.utils import sanitize_message
     from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
+    from vllm.entrypoints.utils import sanitize_message
 
     if isinstance(message, Exception):
         exc = message

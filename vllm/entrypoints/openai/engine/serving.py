@@ -3,19 +3,17 @@
 import asyncio
 import json
 import sys
-import time
 import traceback
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeVar
+from typing import Any, ClassVar, Protocol, TypeAlias
 
 import numpy as np
 from fastapi import Request
 from openai.types.responses import (
     ToolChoiceFunction,
 )
-from pydantic import ConfigDict, TypeAdapter
+from pydantic import TypeAdapter
 from starlette.datastructures import Headers
 
 import vllm.envs as envs
@@ -190,27 +188,6 @@ AnyResponse: TypeAlias = (
     | ScoreResponse
     | GenerateResponse
 )
-
-
-RequestT = TypeVar("RequestT", bound=AnyRequest)
-
-
-@dataclass(kw_only=True)
-class ServeContext(Generic[RequestT]):
-    request: RequestT
-    raw_request: Request | None = None
-    model_name: str
-    request_id: str
-    created_time: int = field(default_factory=lambda: int(time.time()))
-    lora_request: LoRARequest | None = None
-    engine_prompts: list[ProcessorInputs] | None = None
-
-    result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
-        None
-    )
-    final_res_batch: list[PoolingRequestOutput] = field(default_factory=list)
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class OpenAIServing:

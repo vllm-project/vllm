@@ -10,21 +10,26 @@ from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
+    ClassificationResponse,
 )
 from vllm.entrypoints.pooling.embed.protocol import (
+    EmbeddingBytesResponse,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
+    EmbeddingResponse,
 )
 from vllm.entrypoints.pooling.pooling.protocol import (
     IOProcessorRequest,
     PoolingChatRequest,
     PoolingCompletionRequest,
+    PoolingResponse,
 )
 from vllm.entrypoints.pooling.score.protocol import (
     RerankRequest,
     ScoreDataRequest,
     ScoreQueriesDocumentsRequest,
     ScoreRequest,
+    ScoreResponse,
     ScoreTextRequest,
 )
 from vllm.exceptions import VLLMValidationError
@@ -44,6 +49,14 @@ PoolingChatLikeRequest: TypeAlias = (
 
 AnyPoolingRequest: TypeAlias = (
     PoolingCompletionLikeRequest | PoolingChatLikeRequest | IOProcessorRequest
+)
+
+AnyPoolingResponse: TypeAlias = (
+    ClassificationResponse
+    | EmbeddingResponse
+    | EmbeddingBytesResponse
+    | PoolingResponse
+    | ScoreResponse
 )
 
 

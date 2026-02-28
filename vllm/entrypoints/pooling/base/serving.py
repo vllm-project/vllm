@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections.abc import AsyncGenerator, Mapping
+from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import (
     ClassVar,
+    Generic,
+    TypeVar,
     assert_never,
 )
 from wsgiref.headers import Headers
 
 from fastapi import Request
+from pydantic import ConfigDict
 from starlette.responses import JSONResponse
 
 from vllm import (
@@ -23,11 +28,6 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse, OpenAIBaseModel
-from vllm.entrypoints.openai.engine.serving import (
-    AnyRequest,
-    AnyResponse,
-    ServeContext,
-)
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.exceptions import create_error_response
 from vllm.inputs import ProcessorInputs
@@ -43,7 +43,27 @@ from vllm.tracing import (
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import merge_async_iterators
 
-from .io_processor import PoolingIOProcessor
+from .io_processor import AnyPoolingRequest, AnyPoolingResponse, PoolingIOProcessor
+
+RequestT = TypeVar("RequestT", bound=AnyPoolingRequest)
+
+
+@dataclass(kw_only=True)
+class ServeContext(Generic[RequestT]):
+    request: RequestT
+    raw_request: Request | None = None
+    model_name: str
+    request_id: str
+    created_time: int = field(default_factory=lambda: int(time.time()))
+    lora_request: LoRARequest | None = None
+    engine_prompts: list[ProcessorInputs] | None = None
+
+    result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
+        None
+    )
+    final_res_batch: list[PoolingRequestOutput] = field(default_factory=list)
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class PoolingServing:
@@ -206,7 +226,7 @@ class PoolingServing:
     async def _build_response(
         self,
         ctx: ServeContext,
-    ) -> AnyResponse:
+    ) -> AnyPoolingResponse:
         raise NotImplementedError
 
     @staticmethod
