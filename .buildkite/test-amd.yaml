@@ -145,8 +145,8 @@ steps:
 
 - label: Async Engine, Inputs, Utils, Worker, Config (CPU) # 26.6m
   timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  agent_pool: mi300_1
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_1
   optional: true
   no_gpu: true
   source_file_dependencies:
@@ -178,8 +178,8 @@ steps:
 
 - label: Python-only Installation # 6.3m
   timeout_in_minutes: 13
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  agent_pool: mi300_1
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_1
   grade: Blocking
   optional: true
   source_file_dependencies:
@@ -642,8 +642,8 @@ steps:
 
 - label: Platform Tests (CUDA) # 5.0m
   timeout_in_minutes: 9
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  agent_pool: mi300_1
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_1
   grade: Blocking
   source_file_dependencies:
   - vllm/
@@ -1175,7 +1175,7 @@ steps:
 
 - label: Transformers Nightly Models # 50.9m
   timeout_in_minutes: 102
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   optional: true
   working_dir: "/vllm-workspace/"
@@ -1317,12 +1317,13 @@ steps:
   - pip install -e ./plugins/prithvi_io_processor_plugin
   - pytest -v -s plugins_tests/test_io_processor_plugins.py
   - pip uninstall prithvi_io_processor_plugin -y
-  # test bge_m3_sparse io_processor plugin
+  # END: `io_processor` plugins test
+  # BEGIN: `bge_m3_sparse io_processor` test
   - pip install -e ./plugins/bge_m3_sparse_plugin
   - pytest -v -s plugins_tests/test_bge_m3_sparse_io_processor_plugins.py
   - pip uninstall bge_m3_sparse_plugin -y
-  # end io_processor plugins test
-  # begin stat_logger plugins test
+  # END: `bge_m3_sparse io_processor` test
+  # BEGIN: `stat_logger` plugins test
   - pip install -e ./plugins/vllm_add_dummy_stat_logger
   - pytest -v -s plugins_tests/test_stats_logger_plugins.py
   - pip uninstall dummy_stat_logger -y
@@ -1389,7 +1390,7 @@ steps:
 
 - label: Weight Loading Multiple GPU - Large Models # 12.6m
   timeout_in_minutes: 26
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_2
   grade: Blocking
   num_gpus: 2
@@ -1434,7 +1435,7 @@ steps:
 
 - label: Distributed Tests (4 GPUs)(MI325) # 20.9m
   timeout_in_minutes: 37
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
   num_gpus: 4
   source_file_dependencies:
@@ -2734,12 +2735,13 @@ steps:
   - pip install -e ./plugins/prithvi_io_processor_plugin
   - pytest -v -s plugins_tests/test_io_processor_plugins.py
   - pip uninstall prithvi_io_processor_plugin -y
-  # test bge_m3_sparse io_processor plugin
+  # END: `io_processor` plugins test
+  # BEGIN: `bge_m3_sparse io_processor` test
   - pip install -e ./plugins/bge_m3_sparse_plugin
   - pytest -v -s plugins_tests/test_bge_m3_sparse_io_processor_plugins.py
   - pip uninstall bge_m3_sparse_plugin -y
-  # end io_processor plugins test
-  # begin stat_logger plugins test
+  # END: `bge_m3_sparse io_processor` test
+  # BEGIN: `stat_logger` plugins test
   - pip install -e ./plugins/vllm_add_dummy_stat_logger
   - pytest -v -s plugins_tests/test_stats_logger_plugins.py
   - pip uninstall dummy_stat_logger -y
