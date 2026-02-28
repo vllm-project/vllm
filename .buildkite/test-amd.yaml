@@ -1120,7 +1120,7 @@ steps:
     - pytest -v -s tests/models/test_transformers.py
     # - pytest -v -s tests/models/multimodal/processing/
     - pytest -v -s tests/models/multimodal/test_mapping.py -k 'not (Gemma3 or Qwen2VL or Qwen2_5_VL)'
-    - python3 examples/offline_inference/basic/chat.py
+    - python3 examples/basic/offline_inference/chat.py
     # - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
     # Whisper needs spawn method to avoid deadlock
     - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
@@ -1145,7 +1145,7 @@ steps:
   - vllm/platforms/cuda.py
   commands:
     - nvidia-smi
-    - python3 examples/offline_inference/basic/chat.py
+    - python3 examples/basic/offline_inference/chat.py
     # Attention
     # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
     - pytest -v -s tests/kernels/attention/test_attention_selector.py
@@ -2701,7 +2701,7 @@ steps:
     - pytest -v -s tests/models/test_transformers.py
     # - pytest -v -s tests/models/multimodal/processing/
     - pytest -v -s tests/models/multimodal/test_mapping.py -k 'not (Gemma3 or Qwen2VL or Qwen2_5_VL)'
-    - python3 examples/offline_inference/basic/chat.py
+    - python3 examples/basic/offline_inference/chat.py
     # - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
     # Whisper needs spawn method to avoid deadlock
     - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
@@ -2726,7 +2726,7 @@ steps:
   - vllm/platforms/cuda.py
   commands:
     - nvidia-smi
-    - python3 examples/offline_inference/basic/chat.py
+    - python3 examples/basic/offline_inference/chat.py
     # Attention
     # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
     - pytest -v -s tests/kernels/attention/test_attention_selector.py

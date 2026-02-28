@@ -34,7 +34,7 @@ function cpu_tests() {
   # offline inference
   docker exec cpu-test bash -c "
     set -e
-    python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m"
+    python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m"
 
   # Run model tests
   docker exec cpu-test bash -c "
