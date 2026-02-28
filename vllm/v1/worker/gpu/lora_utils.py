@@ -35,10 +35,13 @@ class LoraState:
         lora_ids = self.lora_ids[idx_mapping]
         prompt_lora_mapping = tuple(lora_ids)
         token_lora_mapping = tuple(lora_ids.repeat(num_scheduled_tokens))
+        active_lora_requests: set[LoRARequest] = self.get_activate_loras(req_ids)
+        return prompt_lora_mapping, token_lora_mapping, active_lora_requests
 
+    def get_activate_loras(self, req_ids: list[str]) -> set[LoRARequest]:
         active_lora_requests: set[LoRARequest] = set()
         for req_id in req_ids:
             lora_request = self.lora_requests.get(req_id)
             if lora_request is not None:
                 active_lora_requests.add(lora_request)
-        return prompt_lora_mapping, token_lora_mapping, active_lora_requests
+        return active_lora_requests
