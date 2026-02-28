@@ -392,7 +392,12 @@ WORKDIR /workspace
 
 # Copy pre-built csrc wheel directly
 COPY --from=csrc-build /workspace/dist /precompiled-wheels
-COPY . .
+
+# Copy only what setup.py bdist_wheel needs so that changes to tests,
+# benchmarks, examples, or docs don't invalidate the wheel build layer
+COPY vllm/ vllm/
+COPY setup.py pyproject.toml ./
+COPY requirements/ requirements/
 
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
@@ -483,7 +488,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 #################### DEV IMAGE ####################
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-FROM ${FINAL_BASE_IMAGE} AS vllm-base
+FROM ${FINAL_BASE_IMAGE} AS vllm-base-deps
 
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
@@ -627,6 +632,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi; \
     uv pip install --system accelerate hf_transfer modelscope \
         "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs]${RUNAI_MODEL_STREAMER_VERSION}"
+#################### vLLM base environment IMAGE ####################
+
+#################### vLLM installation IMAGE ####################
+# This stage adds vLLM wheel and extension installs on top of vllm-base-deps.
+# These use --mount=type=bind,from=build which re-execute when the build
+# stage output changes, so we keep them separate to allow the test stage
+# to inherit from vllm-base-deps and cache its own dependency installs.
+FROM vllm-base-deps AS vllm-base
+
+ARG CUDA_VERSION
+ARG TARGETPLATFORM
 
 # ============================================================
 # VLLM INSTALLATION (depends on build stage)
@@ -693,12 +709,13 @@ COPY ./vllm/collect_env.py .
 #################### vLLM installation IMAGE ####################
 #################### TEST IMAGE ####################
 # image to run unit testing suite
-# note that this uses vllm installed by `pip`
-FROM vllm-base AS test
+# Inherits from vllm-base-deps (not vllm-base) so that apt-get/pip install
+# steps are cacheable, since they run before any bind mount dependencies.
+FROM vllm-base-deps AS test
 
-ADD . /vllm-workspace/
-
+ARG CUDA_VERSION
 ARG PYTHON_VERSION
+ARG TARGETPLATFORM
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -743,14 +760,50 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         fi \
     fi
 
-# install development dependencies (for testing)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -e tests/vllm_test_utils
-
 # enable fast downloads from hf (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system hf_transfer
 ENV HF_HUB_ENABLE_HF_TRANSFER 1
+
+# Install vLLM and extension wheels from the build stage
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
+    --mount=type=cache,target=/root/.cache/uv \
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        echo "Installing torch nightly..." \
+        && uv pip install --system $(cat torch_lib_versions.txt | xargs) --pre \
+        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        && echo "Installing vLLM..." \
+        && uv pip install --system dist/*.whl --verbose \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+    else \
+        echo "Installing vLLM..." \
+        && uv pip install --system dist/*.whl --verbose \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+    fi
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,from=build,source=/tmp/deepgemm/dist,target=/tmp/deepgemm/dist,ro \
+    sh -c 'if ls /tmp/deepgemm/dist/*.whl >/dev/null 2>&1; then \
+              uv pip install --system /tmp/deepgemm/dist/*.whl; \
+           else \
+              echo "No DeepGEMM wheels to install; skipping."; \
+           fi'
+
+# Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+
+RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system ep_kernels/dist/*.whl --verbose \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
+# Copy the full source tree AFTER installing dependencies so that
+# test/benchmark/example changes don't invalidate the pip install layers
+ADD . /vllm-workspace/
+
+# install test utilities (needs source from ADD above)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -e tests/vllm_test_utils
 
 # Copy in the v1 package for testing (it isn't distributed yet)
 COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
