@@ -209,8 +209,7 @@ def is_residual_scattered_for_sp(
     """Check if the residual tensor is scattered for sequence parallelism.
 
     The residual tensor is scattered across tensor parallel ranks when either
-    sequence parallelism (`enable_sp`) or sequence-parallel MoE
-    (`enable_sp_moe`) is enabled with tensor parallelism.
+    sequence parallelism (`enable_sp`) is enabled with tensor parallelism.
 
     This follows the same logic as SequenceParallelismPass.is_applicable_for_range():
     - In full-graph compilation mode (no splitting ops or using inductor graph
