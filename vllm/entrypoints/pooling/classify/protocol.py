@@ -40,7 +40,6 @@ class ClassificationCompletionRequest(
     def to_pooling_params(self):
         return PoolingParams(
             task="classify",
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
             use_activation=self.use_activation,
         )
 
@@ -63,7 +62,6 @@ class ClassificationChatRequest(
     def to_pooling_params(self):
         return PoolingParams(
             task="classify",
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
             use_activation=self.use_activation,
         )
 

@@ -289,9 +289,6 @@ def get_temporal_copy_spec(
     )
 
 
-get_full_copy_spec = get_temporal_copy_spec
-
-
 class MambaStateCopyFuncCalculator:
     @classmethod
     def linear_attention_state_copy_func(cls):
