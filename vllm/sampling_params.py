@@ -507,10 +507,9 @@ class SamplingParams(
 
                 # If no space at the beginning
                 # or if prefix space produces a new word token
-                if (not add_prefix_space) or (
-                    add_prefix_space
-                    and prompt_token_ids[0] != self._bad_words_token_ids[-1][0]
-                    and len(prompt_token_ids) == len(self._bad_words_token_ids[-1])
+                if (
+                    not add_prefix_space
+                    or prompt_token_ids != self._bad_words_token_ids[-1]
                 ):
                     self._bad_words_token_ids.append(prompt_token_ids)
 
