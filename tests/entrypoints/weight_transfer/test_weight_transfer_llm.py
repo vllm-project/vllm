@@ -28,7 +28,7 @@ from vllm.distributed.weight_transfer.base import (
 from ...utils import create_new_process_for_each_test
 
 # Use a tiny model for fast testing
-MODEL_NAME = "/mnt/data3/models/Qwen/Qwen3.5-35B-A3B"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 
 # --- Mock Weight Transfer Engine ---
