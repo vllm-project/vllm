@@ -36,6 +36,7 @@ from transformers import AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer.nccl_engine import (
+    NCCLTrainerSendWeightsArgs,
     NCCLWeightTransferEngine,
 )
 from vllm.utils.network_utils import get_ip, get_open_port
@@ -90,10 +91,13 @@ class TrainModel:
 
     def broadcast_weights(self, packed: bool = True):
         """Broadcast weights to the inference engine."""
-        NCCLWeightTransferEngine.trainer_send_weights(
-            iterator=self.model.named_parameters(),
+        trainer_args = NCCLTrainerSendWeightsArgs(
             group=self.model_update_group,
             packed=packed,
+        )
+        NCCLWeightTransferEngine.trainer_send_weights(
+            iterator=self.model.named_parameters(),
+            trainer_args=trainer_args,
         )
 
 
@@ -156,6 +160,8 @@ for output in outputs:
     print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
     print("-" * 50)
 
+ray.get(llm.sleep.remote(level=0))
+
 # Set up the communication channel between the training process and the
 # inference engine.
 master_address, master_port = ray.get(train_model.get_master_address_and_port.remote())
@@ -196,6 +202,8 @@ inference_handle = llm.update_weights.remote(
 # Broadcast all weights from trainer using the weight transfer API
 train_handle = train_model.broadcast_weights.remote(packed=True)
 ray.get([train_handle, inference_handle])
+
+ray.get(llm.wake_up.remote(tags=["scheduling"]))
 
 # Generate text with the updated model. The output is expected to be normal
 # because the weights are updated.
