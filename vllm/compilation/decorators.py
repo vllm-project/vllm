@@ -449,10 +449,15 @@ def _support_torch_compile(
                 self.was_aot_compile_fn_loaded_from_disk = True
             except Exception as e:
                 if os.path.exists(aot_compilation_path):
+                    if isinstance(e, EOFError):
+                        message = "Compile cache file corrupted."
+                    else:
+                        message = str(e)
                     logger.warning(
-                        "Cannot load aot compilation from path %s, error: %s",
+                        "Compiling model again due to a load failure from %s, "
+                        "reason: %s",
                         aot_compilation_path,
-                        str(e),
+                        message,
                     )
                 if envs.VLLM_FORCE_AOT_LOAD:
                     raise e
