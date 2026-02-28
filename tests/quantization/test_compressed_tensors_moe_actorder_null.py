@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Test that CompressedTensorsWNA16MarlinMoEMethod does not register g_idx
 parameters when actorder is null. Regression test for #35303.
@@ -30,14 +34,17 @@ class TestCompressedTensorsMoEActorderNull(unittest.TestCase):
         moe = MagicMock()
         moe.is_act_and_mul = True
 
-        with patch(
-            "vllm.model_executor.layers.quantization.compressed_tensors."
-            "compressed_tensors_moe.get_marlin_input_dtype",
-            return_value=None,
-        ), patch(
-            "vllm.model_executor.layers.quantization.compressed_tensors."
-            "compressed_tensors_moe.is_flashinfer_mxint4_moe_available",
-            return_value=False,
+        with (
+            patch(
+                "vllm.model_executor.layers.quantization.compressed_tensors."
+                "compressed_tensors_moe.get_marlin_input_dtype",
+                return_value=None,
+            ),
+            patch(
+                "vllm.model_executor.layers.quantization.compressed_tensors."
+                "compressed_tensors_moe.is_flashinfer_mxint4_moe_available",
+                return_value=False,
+            ),
         ):
             method = CompressedTensorsWNA16MarlinMoEMethod(
                 moe=moe,
@@ -110,17 +117,21 @@ class TestCompressedTensorsMoEActorderNull(unittest.TestCase):
 
         # After process_weights, g_idx should be set as plain attributes
         # (empty tensors), not nn.Parameters
-        with patch(
-            "vllm.model_executor.layers.quantization.compressed_tensors."
-            "compressed_tensors_moe.ops"
-        ) as mock_ops, patch(
-            "vllm.model_executor.layers.quantization.compressed_tensors."
-            "compressed_tensors_moe.marlin_moe_permute_scales",
-            side_effect=lambda s, **kw: s,
-        ), patch(
-            "vllm.model_executor.layers.quantization.compressed_tensors."
-            "compressed_tensors_moe.marlin_make_workspace_new",
-            return_value=torch.empty(0),
+        with (
+            patch(
+                "vllm.model_executor.layers.quantization.compressed_tensors."
+                "compressed_tensors_moe.ops"
+            ) as mock_ops,
+            patch(
+                "vllm.model_executor.layers.quantization.compressed_tensors."
+                "compressed_tensors_moe.marlin_moe_permute_scales",
+                side_effect=lambda s, **kw: s,
+            ),
+            patch(
+                "vllm.model_executor.layers.quantization.compressed_tensors."
+                "compressed_tensors_moe.marlin_make_workspace_new",
+                return_value=torch.empty(0),
+            ),
         ):
             mock_ops.gptq_marlin_moe_repack.side_effect = lambda w, *a, **kw: w
             method.process_weights_after_loading(layer)

@@ -1488,9 +1488,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 ),
                 requires_grad=False,
             )
-            layer.register_parameter(
-                "w13_g_idx_sort_indices", w13_g_idx_sort_indices
-            )
+            layer.register_parameter("w13_g_idx_sort_indices", w13_g_idx_sort_indices)
             set_weight_attrs(w13_g_idx_sort_indices, extra_weight_attrs)
 
             w2_g_idx_sort_indices = torch.nn.Parameter(
@@ -1501,9 +1499,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 ),
                 requires_grad=False,
             )
-            layer.register_parameter(
-                "w2_g_idx_sort_indices", w2_g_idx_sort_indices
-            )
+            layer.register_parameter("w2_g_idx_sort_indices", w2_g_idx_sort_indices)
             set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
 
         layer.a13_scale = None
