@@ -345,6 +345,12 @@ def dummy_video_path():
             32,
             id="molmo2-uniform_last_frame",
         ),
+        pytest.param(
+            "molmo2",
+            {"fps": 2, "frame_sample_mode": "fps"},
+            119,
+            id="molmo2-fps",
+        ),
     ],
 )
 def test_video_loader_frames_sampling(
