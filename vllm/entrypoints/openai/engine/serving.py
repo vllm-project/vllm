@@ -623,8 +623,12 @@ class OpenAIServing:
             from vllm.exceptions import VLLMValidationError
 
             if isinstance(exc, VLLMValidationError):
-                err_type = "BadRequestError"
-                status_code = HTTPStatus.BAD_REQUEST
+                status_code = exc.http_status or HTTPStatus.BAD_REQUEST
+                err_type = (
+                    "PayloadTooLarge"
+                    if status_code == HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+                    else "BadRequestError"
+                )
                 param = exc.parameter
             elif isinstance(exc, (ValueError, TypeError, RuntimeError, OverflowError)):
                 # Common validation errors from user input
@@ -850,6 +854,7 @@ class OpenAIServing:
                     f"Please reduce the length of the input.",
                     parameter="input_tokens",
                     value=token_num,
+                    http_status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                 )
             return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
@@ -878,6 +883,7 @@ class OpenAIServing:
                 "the input messages.",
                 parameter="input_tokens",
                 value=token_num,
+                http_status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             )
 
         if max_tokens is not None and token_num + max_tokens > max_model_len:
@@ -889,6 +895,7 @@ class OpenAIServing:
                 f" - {token_num}).",
                 parameter="max_tokens",
                 value=max_tokens,
+                http_status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             )
 
         return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
