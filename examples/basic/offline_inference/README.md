@@ -1,4 +1,4 @@
-# Basic
+# Offline Inference
 
 The `LLM` class provides the primary Python interface for doing offline inference, which is interacting with a model without using a separate model inference server.
 
