@@ -137,5 +137,27 @@ async def cancel_responses(response_id: str, raw_request: Request):
     return JSONResponse(content=response.model_dump())
 
 
+@router.delete("/v1/responses/{response_id}")
+@load_aware_call
+async def delete_responses(response_id: str, raw_request: Request):
+    handler = responses(raw_request)
+    if handler is None:
+        base_server = raw_request.app.state.openai_serving_tokenization
+        return base_server.create_error_response(
+            message="The model does not support Responses API"
+        )
+
+    try:
+        response = await handler.delete_response(response_id)
+    except Exception as e:
+        return handler.create_error_response(e)
+
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(
+            content=response.model_dump(), status_code=response.error.code
+        )
+    return JSONResponse(content=response.model_dump())
+
+
 def attach_router(app: FastAPI):
     app.include_router(router)

@@ -200,6 +200,7 @@ if TYPE_CHECKING:
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
+    VLLM_RESPONSES_API_STORE_MAX_SIZE: int = 10000
     VLLM_NVFP4_GEMM_BACKEND: str | None = None
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
@@ -1447,10 +1448,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # NOTE/WARNING:
     # 1. Messages are kept in memory only (not persisted to disk) and will be
     #    lost when the vLLM server shuts down.
-    # 2. Enabling this option will cause a memory leak, as stored messages are
-    #    never removed from memory until the server terminates.
+    # 2. The store uses LRU eviction to limit memory usage. The maximum number
+    #    of stored responses is controlled by VLLM_RESPONSES_API_STORE_MAX_SIZE.
     "VLLM_ENABLE_RESPONSES_API_STORE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))
+    ),
+    # Maximum number of responses to keep in the in-memory store for the
+    # Responses API. When the limit is reached, the oldest entries are evicted.
+    # Only effective when VLLM_ENABLE_RESPONSES_API_STORE is enabled.
+    "VLLM_RESPONSES_API_STORE_MAX_SIZE": lambda: int(
+        os.getenv("VLLM_RESPONSES_API_STORE_MAX_SIZE", "10000")
     ),
     # If set, use the fp8 mfma in rocm paged attention.
     "VLLM_ROCM_FP8_MFMA_PAGE_ATTN": lambda: bool(
