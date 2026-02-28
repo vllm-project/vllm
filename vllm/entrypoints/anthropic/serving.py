@@ -692,7 +692,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         _, engine_prompts = result
 
         input_tokens = sum(  # type: ignore
-            len(prompt["prompt_token_ids"])
+            len(prompt["prompt_token_ids"])  # type: ignore[typeddict-item, misc]
             for prompt in engine_prompts
             if "prompt_token_ids" in prompt
         )
