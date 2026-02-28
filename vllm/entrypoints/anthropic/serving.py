@@ -112,7 +112,7 @@ class AnthropicServingMessages(OpenAIServingChat):
 
     @classmethod
     def _convert_anthropic_to_openai_request(
-        cls, anthropic_request: AnthropicMessagesRequest
+        cls, anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest
     ) -> ChatCompletionRequest:
         """Convert Anthropic message format to OpenAI format"""
         openai_messages = []
@@ -239,23 +239,27 @@ class AnthropicServingMessages(OpenAIServingChat):
                     continue
 
             openai_messages.append(openai_msg)
-
-        req = ChatCompletionRequest(
-            model=anthropic_request.model,
-            messages=openai_messages,
-            max_tokens=anthropic_request.max_tokens,
-            max_completion_tokens=anthropic_request.max_tokens,
-            stop=anthropic_request.stop_sequences,
-            temperature=anthropic_request.temperature,
-            top_p=anthropic_request.top_p,
-            top_k=anthropic_request.top_k,
-        )
-
-        if anthropic_request.stream:
-            req.stream = anthropic_request.stream
-            req.stream_options = StreamOptions.validate(
-                {"include_usage": True, "continuous_usage_stats": True}
+        if isinstance(anthropic_request, AnthropicCountTokensRequest):
+            req = ChatCompletionRequest(
+                model=anthropic_request.model,
+                messages=openai_messages,
             )
+        else:
+            req = ChatCompletionRequest(
+                model=anthropic_request.model,
+                messages=openai_messages,
+                max_tokens=anthropic_request.max_tokens,
+                max_completion_tokens=anthropic_request.max_tokens,
+                stop=anthropic_request.stop_sequences,
+                temperature=anthropic_request.temperature,
+                top_p=anthropic_request.top_p,
+                top_k=anthropic_request.top_k,
+            )
+            if anthropic_request.stream:
+                req.stream = anthropic_request.stream
+                req.stream_options = StreamOptions.model_validate(
+                    {"include_usage": True, "continuous_usage_stats": True}
+                )
 
         if anthropic_request.tool_choice is None:
             req.tool_choice = None
@@ -680,11 +684,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         raw_request: Request | None = None,
     ) -> AnthropicCountTokensResponse | ErrorResponse:
         """Implements Anthropic's messages.count_tokens endpoint."""
-        dummy_messages_request = AnthropicMessagesRequest(
-            **request.model_dump(),
-            max_tokens=1,
-        )
-        chat_req = self._convert_anthropic_to_openai_request(dummy_messages_request)
+        chat_req = self._convert_anthropic_to_openai_request(request)
         result = await self.render_chat_request(chat_req)
         if isinstance(result, ErrorResponse):
             return result
