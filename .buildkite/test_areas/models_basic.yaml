@@ -57,7 +57,7 @@ steps:
 
 
 - label: Model strategy test
-  num_devices: 2
+  device: b200
   source_file_dependencies: []
   commands:
     - pytest -v -s models/nightly/gptoss.py

@@ -43,7 +43,7 @@ def default_server_args():
         "--max-num-seqs", "256",
         "--gpu-memory-utilization", "0.85",
         "--reasoning-parser", "openai_gptoss",
-        "--tensor-parallel-size", "4",
+        "--tensor-parallel-size", "2",
         "--attention-backend", attention_backend,
     ]
 
@@ -309,7 +309,7 @@ def test_compare_guidellm_results(
 
     # Resolve baseline path relative to this test file (works in CI regardless of cwd)
     baseline_path = os.path.join(
-        os.path.dirname(__file__), "output", "gptoss120b.json"
+        os.path.dirname(__file__), "output", "gptoss120b_0.15.2rc1.json"
     )
     assert os.path.exists(baseline_path), (
         f"Baseline file not found: {baseline_path}"
