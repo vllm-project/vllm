@@ -13,11 +13,12 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
+from vllm.v1.worker.gpu.model_states.interface import ModelStateInterface
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
 
-class ModelState:
+class ModelState(ModelStateInterface):
     def __init__(
         self,
         vllm_config: VllmConfig,
