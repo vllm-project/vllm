@@ -219,10 +219,10 @@ class RoutedExpertsCapturer:
 
         with _file_lock(self._lock_file):
             if self._owned_layers is not None:
-                for layer_idx in sorted(self._owned_layers):
-                    self._host_buffer_view[indices, layer_idx, :] = data[
-                        :, layer_idx, :
-                    ]
+                owned_layers_list = sorted(list(self._owned_layers))
+                self._host_buffer_view[indices, owned_layers_list, :] = data[
+                    :, owned_layers_list, :
+                ]
             else:
                 self._host_buffer_view[indices, :, :] = data
 
