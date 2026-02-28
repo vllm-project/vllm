@@ -53,8 +53,8 @@ These parameters apply when `method` is set to `"ngram"`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `prompt_lookup_max` | `int` | `None` | Maximum n-gram token window size. Required when using the ngram method. |
-| `prompt_lookup_min` | `int` | `None` | Minimum n-gram token window size. Defaults to 1 if not provided. |
+| `prompt_lookup_max` | `int` | `None` | Maximum n-gram token window size. If unset, defaults to the value of `prompt_lookup_min` if provided, otherwise 5. |
+| `prompt_lookup_min` | `int` | `None` | Minimum n-gram token window size. If unset, defaults to the value of `prompt_lookup_max` if provided, otherwise 5. |
 
 ## Suffix Decoding Parameters
 
