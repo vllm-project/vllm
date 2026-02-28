@@ -290,6 +290,9 @@ def make_zmq_socket(
         socket.setsockopt(zmq.SNDHWM, 0)
         socket.setsockopt(zmq.SNDBUF, buf_size)
 
+    if socket_type == zmq.ROUTER:
+        socket.setsockopt(zmq.ROUTER_HANDOVER, 1)
+
     if identity is not None:
         socket.setsockopt(zmq.IDENTITY, identity)
 
