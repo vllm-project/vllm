@@ -316,7 +316,6 @@ def async_tp_pass_on_test_model(
 
     # initialize distributed
     init_distributed_environment()
-    initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     # configure vllm config for SequenceParallelismPass
     vllm_config = VllmConfig()
@@ -334,11 +333,10 @@ def async_tp_pass_on_test_model(
         model=model_name, trust_remote_code=True, dtype=dtype, seed=42
     )
 
-    async_tp_pass = AsyncTPPass(vllm_config)
-
-    # Set the global vllm_config for TestBackend which calls
-    # get_current_vllm_config()
     with set_current_vllm_config(vllm_config):
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
+
+        async_tp_pass = AsyncTPPass(vllm_config)
         backend = TestBackend(async_tp_pass)
 
         assert (

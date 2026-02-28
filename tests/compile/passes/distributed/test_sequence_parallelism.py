@@ -242,7 +242,6 @@ def sequence_parallelism_pass_on_test_model(
 
     # initialize distributed
     init_distributed_environment()
-    initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     # configure vllm config for SequenceParallelismPass
     custom_ops_list = custom_ops.split(",") if custom_ops else []
@@ -272,6 +271,7 @@ def sequence_parallelism_pass_on_test_model(
     )
 
     with set_current_vllm_config(vllm_config):
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
         noop_pass = NoOpEliminationPass(vllm_config)
         sequence_parallelism_pass = SequenceParallelismPass(vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)

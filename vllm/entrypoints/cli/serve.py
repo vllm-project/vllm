@@ -246,8 +246,12 @@ def run_multi_api_server(args: argparse.Namespace):
 
     api_server_manager: APIServerProcessManager | None = None
 
+    from vllm.v1.engine.utils import get_engine_zmq_addresses
+
+    addresses = get_engine_zmq_addresses(vllm_config, num_api_servers)
+
     with launch_core_engines(
-        vllm_config, executor_class, log_stats, num_api_servers
+        vllm_config, executor_class, log_stats, addresses, num_api_servers
     ) as (local_engine_manager, coordinator, addresses):
         # Construct common args for the APIServerProcessManager up-front.
         api_server_manager_kwargs = dict(
