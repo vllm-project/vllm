@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import json
 import shlex
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -135,7 +136,7 @@ def run_benchmark(
 
 
 def _get_comb_base_path(
-    output_dir: Path,
+    experiment_dir: Path,
     serve_comb: ParameterSweepItem,
     bench_comb: ParameterSweepItem,
     *,
@@ -149,7 +150,7 @@ def _get_comb_base_path(
     if extra_parts:
         parts.extend(extra_parts)
 
-    return output_dir / sanitize_filename("-".join(parts))
+    return experiment_dir / sanitize_filename("-".join(parts))
 
 
 def _get_comb_run_path(base_path: Path, run_number: int | None):
@@ -162,10 +163,10 @@ def _get_comb_run_path(base_path: Path, run_number: int | None):
 def _comb_needs_server(
     serve_comb: ParameterSweepItem,
     bench_combs: ParameterSweep,
-    output_dir: Path,
+    experiment_dir: Path,
 ):
     for bench_comb in bench_combs:
-        base_path = _get_comb_base_path(output_dir, serve_comb, bench_comb)
+        base_path = _get_comb_base_path(experiment_dir, serve_comb, bench_comb)
         if not _get_comb_run_path(base_path, run_number=None).exists():
             return True
 
@@ -179,11 +180,11 @@ def server_ctx(
     show_stdout: bool,
     serve_comb: ParameterSweepItem,
     bench_params: ParameterSweep,
-    output_dir: Path,
+    experiment_dir: Path,
     dry_run: bool,
     server_ready_timeout: int = 300,
 ):
-    if not _comb_needs_server(serve_comb, bench_params, output_dir):
+    if not _comb_needs_server(serve_comb, bench_params, experiment_dir):
         return contextlib.nullcontext()
 
     return run_server(
@@ -215,10 +216,10 @@ def run_comb(
     *,
     serve_comb: ParameterSweepItem,
     bench_comb: ParameterSweepItem,
+    link_vars: list[tuple[str, str]],
     base_path: Path,
     num_runs: int,
     dry_run: bool,
-    link_vars: list[tuple[str, str]],
 ):
     if not _comb_is_valid(serve_comb, bench_comb, link_vars):
         return None
@@ -257,10 +258,10 @@ def run_combs(
     server_ready_timeout: int,
     serve_params: ParameterSweep,
     bench_params: ParameterSweep,
-    output_dir: Path,
+    link_vars: list[tuple[str, str]],
+    experiment_dir: Path,
     num_runs: int,
     dry_run: bool,
-    link_vars: list[tuple[str, str]],
 ):
     all_data = list[dict[str, object]]()
     for serve_comb in serve_params:
@@ -270,22 +271,22 @@ def run_combs(
             show_stdout=show_stdout,
             serve_comb=serve_comb,
             bench_params=bench_params,
-            output_dir=output_dir,
+            experiment_dir=experiment_dir,
             dry_run=dry_run,
             server_ready_timeout=server_ready_timeout,
         ) as server:
             for bench_comb in bench_params:
-                base_path = _get_comb_base_path(output_dir, serve_comb, bench_comb)
+                base_path = _get_comb_base_path(experiment_dir, serve_comb, bench_comb)
 
                 comb_data = run_comb(
                     server,
                     bench_cmd,
                     serve_comb=serve_comb,
                     bench_comb=bench_comb,
+                    link_vars=link_vars,
                     base_path=base_path,
                     num_runs=num_runs,
                     dry_run=dry_run,
-                    link_vars=link_vars,
                 )
 
                 if comb_data is not None:
@@ -295,7 +296,7 @@ def run_combs(
         return None
 
     combined_df = pd.DataFrame.from_records(all_data)
-    combined_df.to_csv(output_dir / "summary.csv")
+    combined_df.to_csv(experiment_dir / "summary.csv")
 
     return combined_df
 
@@ -309,11 +310,12 @@ class SweepServeArgs:
     server_ready_timeout: int
     serve_params: ParameterSweep
     bench_params: ParameterSweep
+    link_vars: list[tuple[str, str]]
     output_dir: Path
+    experiment_name: str
     num_runs: int
     dry_run: bool
-    resume: str | None
-    link_vars: list[tuple[str, str]]
+    resume: bool
 
     parser_name: ClassVar[str] = "serve"
     parser_help: ClassVar[str] = "Run vLLM server benchmark under multiple settings."
@@ -340,6 +342,11 @@ class SweepServeArgs:
 
         link_vars = cls.parse_link_vars(args.link_vars)
 
+        if args.experiment_name:
+            experiment_name = args.experiment_name
+        else:
+            experiment_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+
         num_runs = args.num_runs
         if num_runs < 1:
             raise ValueError("`num_runs` should be at least 1.")
@@ -351,11 +358,12 @@ class SweepServeArgs:
             show_stdout=args.show_stdout,
             serve_params=serve_params,
             bench_params=bench_params,
+            link_vars=link_vars,
             output_dir=Path(args.output_dir),
+            experiment_name=experiment_name,
             num_runs=num_runs,
             dry_run=args.dry_run,
             resume=args.resume,
-            link_vars=link_vars,
             server_ready_timeout=args.server_ready_timeout,
         )
 
@@ -392,6 +400,7 @@ class SweepServeArgs:
             default=300,
             help="Timeout in seconds to wait for the server to become ready.",
         )
+
         parser.add_argument(
             "--serve-params",
             type=str,
@@ -402,6 +411,16 @@ class SweepServeArgs:
             "If both `serve_params` and `bench_params` are given, "
             "this script will iterate over their Cartesian product.",
         )
+        parser.add_argument(
+            "--link-vars",
+            type=str,
+            default="",
+            help=(
+                "Comma-separated list of linked variables between serve and bench, "
+                "e.g. max_num_seqs=max_concurrency,max_model_len=random_input_len"
+            ),
+        )
+
         parser.add_argument(
             "--bench-params",
             type=str,
@@ -417,7 +436,15 @@ class SweepServeArgs:
             "--output-dir",
             type=str,
             default="results",
-            help="The directory to which results are written.",
+            help="The main directory to which results are written.",
+        )
+        parser.add_argument(
+            "-e",
+            "--experiment-name",
+            type=str,
+            default=None,
+            help="The name of this experiment (defaults to current timestamp). "
+            "Results will be stored under `output_dir/experiment_name`.",
         )
         parser.add_argument(
             "--num-runs",
@@ -433,21 +460,10 @@ class SweepServeArgs:
         )
         parser.add_argument(
             "--resume",
-            type=str,
-            default=None,
-            help="Set this to the name of a directory under `output_dir` (which is a "
-            "timestamp) to resume a previous execution of this script, i.e., only run "
-            "parameter combinations for which there are still no output files.",
-        )
-
-        parser.add_argument(
-            "--link-vars",
-            type=str,
-            default="",
-            help=(
-                "Comma-separated list of linked variables between serve and bench, "
-                "e.g. max_num_seqs=max_concurrency,max_model_len=random_input_len"
-            ),
+            action="store_true",
+            help="Resume a previous execution of this script, i.e., only run "
+            "parameter combinations for which there are still no output files "
+            "under `output_dir/experiment_name`.",
         )
 
         return parser
@@ -462,33 +478,51 @@ class SweepServeArgs:
             pairs.append((a.strip(), b.strip()))
         return pairs
 
+    def resolve_experiment_dir(self) -> Path:
+        experiment_dir = self.output_dir / self.experiment_name
+
+        if self.resume:
+            if not experiment_dir.exists():
+                raise ValueError(f"Cannot resume from non-existent {experiment_dir=}")
+        else:
+            if experiment_dir.exists():
+                raise ValueError(f"Cannot overwrite existing {experiment_dir=}")
+
+        return experiment_dir
+
+    @contextmanager
+    def run_ctx(self, experiment_dir: Path):
+        if self.dry_run:
+            yield
+            print(f"Experiment will be saved at: {experiment_dir}")
+        else:
+            try:
+                yield
+                print(f"Experiment has been saved at: {experiment_dir}")
+            except BaseException as exc:
+                raise RuntimeError(
+                    "The script was terminated early. Use `--resume` "
+                    "to continue the script from its last checkpoint."
+                ) from exc
+
 
 def run_main(args: SweepServeArgs):
-    timestamp = args.resume or datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = args.output_dir / timestamp
+    experiment_dir = args.resolve_experiment_dir()
 
-    if args.resume and not output_dir.exists():
-        raise ValueError(f"Cannot resume from non-existent directory ({output_dir})")
-
-    try:
+    with args.run_ctx(experiment_dir):
         return run_combs(
             serve_cmd=args.serve_cmd,
             bench_cmd=args.bench_cmd,
+            link_vars=args.link_vars,
             after_bench_cmd=args.after_bench_cmd,
             show_stdout=args.show_stdout,
             server_ready_timeout=args.server_ready_timeout,
             serve_params=args.serve_params,
             bench_params=args.bench_params,
-            output_dir=output_dir,
+            experiment_dir=experiment_dir,
             num_runs=args.num_runs,
             dry_run=args.dry_run,
-            link_vars=args.link_vars,
         )
-    except BaseException as exc:
-        raise RuntimeError(
-            f"The script was terminated early. Use `--resume {timestamp}` "
-            f"to continue the script from its last checkpoint."
-        ) from exc
 
 
 def main(args: argparse.Namespace):

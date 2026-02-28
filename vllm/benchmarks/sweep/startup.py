@@ -4,6 +4,7 @@ import argparse
 import json
 import shlex
 import subprocess
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
@@ -111,7 +112,7 @@ def _apply_output_json(cmd: list[str], output_path: Path) -> list[str]:
 
 
 def _get_comb_base_path(
-    output_dir: Path,
+    experiment_dir: Path,
     serve_comb: ParameterSweepItem,
     startup_comb: ParameterSweepItem,
 ) -> Path:
@@ -120,7 +121,8 @@ def _get_comb_base_path(
         parts.extend(("SERVE-", serve_comb.name))
     if startup_comb:
         parts.extend(("STARTUP-", startup_comb.name))
-    return output_dir / sanitize_filename("-".join(parts))
+
+    return experiment_dir / sanitize_filename("-".join(parts))
 
 
 def _get_comb_run_path(base_path: Path, run_number: int | None) -> Path:
@@ -225,7 +227,7 @@ def run_combs(
     *,
     serve_params: ParameterSweep,
     startup_params: ParameterSweep,
-    output_dir: Path,
+    experiment_dir: Path,
     num_runs: int,
     show_stdout: bool,
     dry_run: bool,
@@ -233,7 +235,7 @@ def run_combs(
     all_data = list[dict[str, object]]()
     for serve_comb in serve_params:
         for startup_comb in startup_params:
-            base_path = _get_comb_base_path(output_dir, serve_comb, startup_comb)
+            base_path = _get_comb_base_path(experiment_dir, serve_comb, startup_comb)
             comb_data = run_comb(
                 startup_cmd,
                 serve_comb=serve_comb,
@@ -250,7 +252,7 @@ def run_combs(
         return None
 
     combined_df = pd.DataFrame.from_records(all_data)
-    combined_df.to_csv(output_dir / "summary.csv")
+    combined_df.to_csv(experiment_dir / "summary.csv")
     return combined_df
 
 
@@ -260,11 +262,11 @@ class SweepStartupArgs:
     serve_params: ParameterSweep
     startup_params: ParameterSweep
     output_dir: Path
+    experiment_name: str
     num_runs: int
     show_stdout: bool
     dry_run: bool
     resume: str | None
-    strict_params: bool
 
     parser_name: ClassVar[str] = "startup"
     parser_help: ClassVar[str] = (
@@ -286,12 +288,18 @@ class SweepStartupArgs:
             startup_params = ParameterSweep.from_records([{}])
 
         supported = _get_supported_startup_keys()
+        strict_params = args.strict_params
         serve_params = _filter_params(
-            serve_params, supported=supported, strict=args.strict_params
+            serve_params, supported=supported, strict=strict_params
         )
         startup_params = _filter_params(
-            startup_params, supported=supported, strict=args.strict_params
+            startup_params, supported=supported, strict=strict_params
         )
+
+        if args.experiment_name:
+            experiment_name = args.experiment_name
+        else:
+            experiment_name = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         if args.num_runs < 1:
             raise ValueError("`num_runs` should be at least 1.")
@@ -301,11 +309,11 @@ class SweepStartupArgs:
             serve_params=serve_params,
             startup_params=startup_params,
             output_dir=Path(args.output_dir),
+            experiment_name=experiment_name,
             num_runs=args.num_runs,
             show_stdout=args.show_stdout,
             dry_run=args.dry_run,
             resume=args.resume,
-            strict_params=args.strict_params,
         )
 
     @classmethod
@@ -316,6 +324,7 @@ class SweepStartupArgs:
             default="vllm bench startup",
             help="The command used to run the startup benchmark.",
         )
+
         parser.add_argument(
             "--serve-params",
             type=str,
@@ -332,11 +341,26 @@ class SweepStartupArgs:
             "for the `vllm bench startup` command.",
         )
         parser.add_argument(
+            "--strict-params",
+            action="store_true",
+            help="If set, unknown parameters in sweep files raise an error "
+            "instead of being ignored.",
+        )
+
+        parser.add_argument(
             "-o",
             "--output-dir",
             type=str,
             default="results",
-            help="The directory to which results are written.",
+            help="The main directory to which results are written.",
+        )
+        parser.add_argument(
+            "-e",
+            "--experiment-name",
+            type=str,
+            default=None,
+            help="The name of this experiment (defaults to current timestamp). "
+            "Results will be stored under `output_dir/experiment_name`.",
         )
         parser.add_argument(
             "--num-runs",
@@ -357,43 +381,55 @@ class SweepStartupArgs:
         )
         parser.add_argument(
             "--resume",
-            type=str,
-            default=None,
-            help="Set this to the name of a directory under `output_dir` (which is a "
-            "timestamp) to resume a previous execution of this script, i.e., only run "
-            "parameter combinations for which there are still no output files.",
-        )
-        parser.add_argument(
-            "--strict-params",
             action="store_true",
-            help="If set, unknown parameters in sweep files raise an error "
-            "instead of being ignored.",
+            help="Resume a previous execution of this script, i.e., only run "
+            "parameter combinations for which there are still no output files "
+            "under `output_dir/experiment_name`.",
         )
+
         return parser
+
+    def resolve_experiment_dir(self) -> Path:
+        experiment_dir = self.output_dir / self.experiment_name
+
+        if self.resume:
+            if not experiment_dir.exists():
+                raise ValueError(f"Cannot resume from non-existent {experiment_dir=}")
+        else:
+            if experiment_dir.exists():
+                raise ValueError(f"Cannot overwrite existing {experiment_dir=}")
+
+        return experiment_dir
+
+    @contextmanager
+    def run_ctx(self, experiment_dir: Path):
+        if self.dry_run:
+            yield
+            print(f"Experiment will be saved at: {experiment_dir}")
+        else:
+            try:
+                yield
+                print(f"Experiment has been saved at: {experiment_dir}")
+            except BaseException as exc:
+                raise RuntimeError(
+                    "The script was terminated early. Use `--resume` "
+                    "to continue the script from its last checkpoint."
+                ) from exc
 
 
 def run_main(args: SweepStartupArgs):
-    timestamp = args.resume or datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = args.output_dir / timestamp
+    experiment_dir = args.resolve_experiment_dir()
 
-    if args.resume and not output_dir.exists():
-        raise ValueError(f"Cannot resume from non-existent directory ({output_dir})")
-
-    try:
+    with args.run_ctx(experiment_dir):
         return run_combs(
             startup_cmd=args.startup_cmd,
             serve_params=args.serve_params,
             startup_params=args.startup_params,
-            output_dir=output_dir,
+            experiment_dir=experiment_dir,
             num_runs=args.num_runs,
             show_stdout=args.show_stdout,
             dry_run=args.dry_run,
         )
-    except BaseException as exc:
-        raise RuntimeError(
-            f"The script was terminated early. Use `--resume {timestamp}` "
-            f"to continue the script from its last checkpoint."
-        ) from exc
 
 
 def main(args: argparse.Namespace):

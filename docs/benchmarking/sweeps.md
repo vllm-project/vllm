@@ -72,7 +72,7 @@ Follow these steps to run the script:
     ]
     ```
 
-5. Determine where you want to save the results, and pass that to `--output-dir`.
+5. Set `--output-dir` and optionally `--experiment-name` to control where to save the results.
 
 Example command:
 
@@ -82,7 +82,8 @@ vllm bench sweep serve \
     --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
     --serve-params benchmarks/serve_hparams.json \
     --bench-params benchmarks/bench_hparams.json \
-    -o benchmarks/results
+    --output-dir benchmarks/results \
+    --experiment-name demo
 ```
 
 By default, each parameter combination is benchmarked 3 times to make the results more reliable. You can adjust the number of runs by setting `--num-runs`.
@@ -118,7 +119,8 @@ vllm bench sweep serve_workload \
     --serve-params benchmarks/serve_hparams.json \
     --bench-params benchmarks/bench_hparams.json \
     --num-runs 1 \
-    -o benchmarks/results
+    --output-dir benchmarks/results \
+    --experiment-name demo
 ```
 
 The algorithm for exploring different workload levels can be summarized as follows:
@@ -186,7 +188,8 @@ vllm bench sweep startup \
     --startup-cmd 'vllm bench startup --model Qwen/Qwen3-0.6B' \
     --serve-params benchmarks/serve_hparams.json \
     --startup-params benchmarks/startup_hparams.json \
-    -o benchmarks/results
+    --output-dir benchmarks/results \
+    --experiment-name demo
 ```
 
 !!! important
@@ -204,11 +207,10 @@ Control the variables to plot via `--var-x` and `--var-y`, optionally applying `
 Example commands for visualizing [Workload Explorer](#workload-explorer) results:
 
 ```bash
-# Name of the directory that stores the results
-TIMESTAMP=$1
+EXPERIMENT_DIR=${1:-"benchmarks/results/demo"}
 
 # Latency increases as the workload increases
-vllm bench sweep plot benchmarks/results/$TIMESTAMP \
+vllm bench sweep plot $EXPERIMENT_DIR \
     --var-x max_concurrency \
     --var-y median_ttft_ms \
     --col-by _benchmark_name \
@@ -216,7 +218,7 @@ vllm bench sweep plot benchmarks/results/$TIMESTAMP \
     --fig-name latency_curve
 
 # Throughput saturates as workload increases
-vllm bench sweep plot benchmarks/results/$TIMESTAMP \
+vllm bench sweep plot $EXPERIMENT_DIR \
     --var-x max_concurrency \
     --var-y total_token_throughput \
     --col-by _benchmark_name \
@@ -224,7 +226,7 @@ vllm bench sweep plot benchmarks/results/$TIMESTAMP \
     --fig-name throughput_curve
 
 # Tradeoff between latency and throughput
-vllm bench sweep plot benchmarks/results/$TIMESTAMP \
+vllm bench sweep plot $EXPERIMENT_DIR \
     --var-x total_token_throughput \
     --var-y median_ttft_ms \
     --col-by _benchmark_name \
@@ -249,7 +251,10 @@ Higher concurrency or batch size can raise GPU efficiency (per-GPU), but can add
 Example:
 
 ```bash
-vllm bench sweep plot_pareto benchmarks/results/<timestamp> \
+# Name of the directory that stores the results
+EXPERIMENT_DIR=${1:-"benchmarks/results/demo"}
+
+vllm bench sweep plot_pareto $EXPERIMENT_DIR \
   --label-by max_concurrency,tensor_parallel_size,pipeline_parallel_size
 ```
 
