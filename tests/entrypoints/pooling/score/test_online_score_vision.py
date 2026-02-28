@@ -32,10 +32,10 @@ BACKEND_TOL: dict[str, float] = {
     "default": 0.05,  # 5% tolerance for other backends (e.g. FLASH_ATTN)
     # Relaxed tolerances for ROCm attn
     # See: https://github.com/vllm-project/vllm/issues/35569
-    "ROCM_ATTN": 0.09,  # observed max: 8.45%
-    "ROCM_AITER_FA": 0.045,  # observed max: 5.07%
-    "TRITON_ATTN": 0.045,  # observed max: 4.59%
-    "FLEX_ATTENTION": 0.045,  # observed max: 7.39%
+    "ROCM_ATTN": 0.09,  # gfx950:~8.45%, gfx942:~3.70%
+    "ROCM_AITER_FA": 0.045,  # gfx950:~2.00%, gfx942:~0.80%
+    "TRITON_ATTN": 0.045,  # gfx950:~3.00%, gfx942:~2.20%
+    "FLEX_ATTENTION": 0.045,  # gfx950:~3.25%, gfx942:~1.10%
 }
 
 # ROCm: disable skinny GEMM to avoid non-deterministic results from
@@ -112,15 +112,14 @@ def server(request):
     with RemoteOpenAIServer(
         MODEL_NAME, args, override_hf_configs=HF_OVERRIDES, env_dict=ROCM_ENV_OVERRIDES
     ) as remote_server:
-        remote_server.attn_backend = backend
         print(f"=== Server ready with backend: {backend} ===")
-        yield remote_server
+        yield remote_server, backend
 
 
 def test_score_api_queries_str_documents_str(server: RemoteOpenAIServer):
-    backend = server.attn_backend
+    remote_server, backend = server
     score_response = requests.post(
-        server.url_for("score"),
+        remote_server.url_for("score"),
         json={
             "model": MODEL_NAME,
             "queries": query,
@@ -138,9 +137,9 @@ def test_score_api_queries_str_documents_str(server: RemoteOpenAIServer):
 
 
 def test_score_api_queries_str_documents_text_content(server: RemoteOpenAIServer):
-    backend = server.attn_backend
+    remote_server, backend = server
     score_response = requests.post(
-        server.url_for("score"),
+        remote_server.url_for("score"),
         json={
             "model": MODEL_NAME,
             "queries": query,
@@ -158,9 +157,9 @@ def test_score_api_queries_str_documents_text_content(server: RemoteOpenAIServer
 
 
 def test_score_api_queries_str_documents_image_url_content(server: RemoteOpenAIServer):
-    backend = server.attn_backend
+    remote_server, backend = server
     score_response = requests.post(
-        server.url_for("score"),
+        remote_server.url_for("score"),
         json={
             "model": MODEL_NAME,
             "queries": query,
@@ -180,9 +179,9 @@ def test_score_api_queries_str_documents_image_url_content(server: RemoteOpenAIS
 def test_score_api_queries_str_documents_image_base64_content(
     server: RemoteOpenAIServer,
 ):
-    backend = server.attn_backend
+    remote_server, backend = server
     score_response = requests.post(
-        server.url_for("score"),
+        remote_server.url_for("score"),
         json={
             "model": MODEL_NAME,
             "queries": query,
@@ -202,9 +201,9 @@ def test_score_api_queries_str_documents_image_base64_content(
 def test_score_api_queries_str_documents_image_url_plus_text_content(
     server: RemoteOpenAIServer,
 ):
-    backend = server.attn_backend
+    remote_server, backend = server
     score_response = requests.post(
-        server.url_for("score"),
+        remote_server.url_for("score"),
         json={
             "model": MODEL_NAME,
             "queries": query,
@@ -224,9 +223,9 @@ def test_score_api_queries_str_documents_image_url_plus_text_content(
 
 
 def test_score_api_queries_str_documents_list(server: RemoteOpenAIServer):
-    backend = server.attn_backend
+    remote_server, backend = server
     score_response = requests.post(
-        server.url_for("score"),
+        remote_server.url_for("score"),
         json={
             "model": MODEL_NAME,
             "queries": query,
@@ -257,9 +256,9 @@ def test_score_api_queries_str_documents_list(server: RemoteOpenAIServer):
 
 
 def test_rerank_api_queries_str_documents_list(server: RemoteOpenAIServer):
-    backend = server.attn_backend
+    remote_server, backend = server
     rerank_response = requests.post(
-        server.url_for("rerank"),
+        remote_server.url_for("rerank"),
         json={
             "model": MODEL_NAME,
             "query": query,
@@ -307,9 +306,9 @@ def test_rerank_api_queries_str_documents_list(server: RemoteOpenAIServer):
 
 
 def test_score_api_queries_list_documents_list(server: RemoteOpenAIServer):
-    backend = server.attn_backend
+    remote_server, backend = server
     score_response = requests.post(
-        server.url_for("score"),
+        remote_server.url_for("score"),
         json={
             "model": MODEL_NAME,
             "queries": [query] * 4,
