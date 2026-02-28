@@ -3627,6 +3627,13 @@ class GPUModelRunner(
             if not self.broadcast_pp_output:
                 # Common case.
                 if not get_pp_group().is_last_rank:
+                    # Save captured routing decisions before the early return
+                    # so they are not lost for non-last PP ranks.
+                    if self.model_config.enable_return_routed_experts:
+                        capturer = RoutedExpertsCapturer.get_instance()
+                        if capturer is not None:
+                            capturer.save_captured_experts(indices=self.slot_mapping)
+
                     # Return the intermediate tensors.
                     assert isinstance(hidden_states, IntermediateTensors)
                     hidden_states.kv_connector_output = kv_connector_output
@@ -6068,14 +6075,19 @@ class GPUModelRunner(
             BaseRouter,
         )
 
+        owned_layers: set[int] = set()
         for module in self.compilation_config.static_forward_context.values():
             if isinstance(module, FusedMoE) and isinstance(module.router, BaseRouter):
                 layer_id = module.layer_id
+                owned_layers.add(layer_id)
 
                 def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
                     _capturer.capture(_layer_id, topk_ids)
 
                 module.router.set_capture_fn(_capture_fn)
+
+        if owned_layers:
+            capturer._owned_layers = owned_layers
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
