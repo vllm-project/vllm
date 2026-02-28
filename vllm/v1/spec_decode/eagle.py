@@ -23,6 +23,7 @@ from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models.qwen3_vl_eagle3 import Eagle3Qwen3vlForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
@@ -400,7 +401,10 @@ class SpecDecodeBaseProposer:
         batch_size = common_attn_metadata.batch_size()
 
         if self.method == "eagle3":
-            assert isinstance(self.model, Eagle3LlamaForCausalLM)
+            # Accept both Llama-based and Qwen3-VL-specific Eagle3 wrappers.
+            assert isinstance(
+                self.model, (Eagle3LlamaForCausalLM, Eagle3Qwen3vlForCausalLM)
+            )
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states
             )
@@ -1332,7 +1336,7 @@ class SpecDecodeBaseProposer:
             try:
                 dummy_input_ids = torch.tensor([[1]], device=self.input_ids.device)
                 self.model.embed_input_ids(dummy_input_ids, multimodal_embeddings=None)
-            except (NotImplementedError, AttributeError, TypeError):
+            except (NotImplementedError, AttributeError, TypeError, ValueError):
                 logger.warning(
                     "Draft model does not support multimodal inputs, "
                     "falling back to text-only mode"
