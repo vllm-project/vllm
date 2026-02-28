@@ -1081,6 +1081,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.eplb_state.logical_replica_count,
         ), "MXFP4 are not supported with this configuration."
 
+        # Apply routing simulation strategy if specified.
+        # This applies to all monolithic backends (SM100_FI and TRITON).
+        routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
+        if routing_strategy == "uniform_random":
+            router_logits = torch.rand_like(router_logits)
+
         if (
             self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
             or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
