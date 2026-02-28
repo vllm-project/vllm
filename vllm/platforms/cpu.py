@@ -483,3 +483,27 @@ class CpuPlatform(Platform):
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
+
+    @classmethod
+    def import_kernels(cls) -> None:
+        if Platform.get_cpu_architecture() in (CpuArchEnum.X86,):
+            if torch._C._cpu._is_avx512_supported():
+                try:
+                    import vllm._C  # noqa: F401
+                except ImportError as e:
+                    logger.warning("Failed to import from vllm._C: %r", e)
+            else:
+                # Note: The lib name is _C_AVX2, but the module name is _C.
+                # This will cause a exception "dynamic module does define
+                # module export function". But the library is imported
+                # successfully. So ignore the exception for now, until we find
+                # a solution.
+                try:
+                    import vllm._C_AVX2  # noqa: F401
+                except ImportError as e:
+                    logger.warning("Failed to import from vllm._C_AVX2: %r", e)
+        else:
+            try:
+                import vllm._C  # noqa: F401
+            except ImportError as e:
+                logger.warning("Failed to import from vllm._C: %r", e)

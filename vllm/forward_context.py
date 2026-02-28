@@ -241,7 +241,7 @@ class ForwardContext:
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
-        assert self.cudagraph_runtime_mode.valid_runtime_modes(), (
+        assert self.cudagraph_runtime_mode.is_valid_runtime_mode(), (
             f"Invalid cudagraph runtime mode: {self.cudagraph_runtime_mode}"
         )
 
@@ -347,7 +347,6 @@ def set_forward_context(
                 num_tokens_unpadded=num_tokens,
                 parallel_config=vllm_config.parallel_config,
                 allow_microbatching=False,
-                allow_dp_padding=False,
             )
             assert num_tokens_across_dp is not None
         dp_metadata = DPMetadata.make(
