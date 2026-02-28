@@ -81,8 +81,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     is_layer_skipped,
     kFp8DynamicTokenSym,
+    kFp8StaticChannelSym,
     kFp8StaticTensorSym,
-    kFp8StaticTokenSym,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
@@ -538,7 +538,7 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
         self.quant_config = quant_config
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=kFp8DynamicTokenSym,
-            weight_quant_key=kFp8StaticTokenSym,
+            weight_quant_key=kFp8StaticChannelSym,
             out_dtype=torch.get_default_dtype(),
             module_name=self.__class__.__name__,
         )
