@@ -87,8 +87,12 @@ class WorkerBase:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
 
-    def compile_or_warm_up_model(self) -> None:
-        """Prepare model for execution through compilation/warmup."""
+    def compile_or_warm_up_model(self) -> float:
+        """Prepare model for execution through compilation/warmup.
+
+        Returns:
+            The accumulated compilation time in seconds.
+        """
         raise NotImplementedError
 
     def check_health(self) -> None:
