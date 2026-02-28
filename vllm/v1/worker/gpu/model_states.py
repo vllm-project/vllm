@@ -77,7 +77,7 @@ class ModelState:
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
         req_states: RequestState,
-    ) -> tuple[torch.Tensor | None, dict[str, Any]]:
+    ) -> torch.Tensor:
         mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
             scheduled_encoder_inputs
         )
@@ -94,7 +94,7 @@ class ModelState:
             self.model, input_batch.input_ids, mm_embeds, is_mm_embed
         )
         inputs_embeds = inputs_embeds[: input_batch.num_tokens_after_padding]
-        return inputs_embeds, {}
+        return inputs_embeds
 
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState

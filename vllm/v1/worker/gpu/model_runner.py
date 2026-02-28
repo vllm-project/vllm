@@ -21,7 +21,6 @@ import functools
 import gc
 import time
 from copy import deepcopy
-from typing import Any
 
 import numpy as np
 import torch
@@ -875,11 +874,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         inputs_embeds = None
-        mm_model_inputs: dict[str, Any] = {}
         if self.supports_mm_inputs and self.is_first_pp_rank and not dummy_run:
             # Run MM encoder (if needed) and get multimodal embeddings.
             # Only first PP rank prepares multimodal embeddings.
-            inputs_embeds, mm_model_inputs = self.model_state.get_mm_embeddings(
+            inputs_embeds = self.model_state.get_mm_embeddings(
                 scheduler_output.scheduled_encoder_inputs,
                 input_batch,
                 self.req_states,
@@ -892,7 +890,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE: Values returned by `prepare_inputs` will override the default
             # values above.
             **self.model_state.prepare_inputs(input_batch, self.req_states),
-            **mm_model_inputs,
         }
         if not self.is_first_pp_rank:
             # Update for non-first PP ranks.
