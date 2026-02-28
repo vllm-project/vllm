@@ -489,31 +489,36 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             num_experts = self.num_experts
             mxfp4_block = 32
 
-            # Quantize w13 (gate_proj + up_proj fused)
-            w13_staging = layer.w13_weight_staging.data  # [E, 2*I, H] BF16
-            for e in range(num_experts):
-                # dynamic_mxfp4_quant expects 2-D input [rows, cols]
-                # Output: packed uint8 [rows, cols//2], scales uint8 [rows, cols//32]
-                w_q, w_s = dynamic_mxfp4_quant(
-                    w13_staging[e].reshape(-1, w13_staging.shape[-1])
-                )
-                rows = w13_staging.shape[1]  # 2 * intermediate
-                cols = w13_staging.shape[2]  # hidden
-                layer.w13_weight.data[e] = w_q.reshape(rows, cols // 2)
-                layer.w13_weight_scale.data[e] = w_s.reshape(rows, cols // mxfp4_block)
-            del layer.w13_weight_staging
+            def _quantize_expert_weights(
+                staging_name: str, weight_name: str, scale_name: str
+            ):
+                """Quantize BF16 staging buffer to packed MXFP4 uint8."""
+                if not hasattr(layer, staging_name):
+                    return
+                staging_tensor = getattr(layer, staging_name).data
+                weight_tensor = getattr(layer, weight_name).data
+                scale_tensor = getattr(layer, scale_name).data
+                for e in range(num_experts):
+                    # dynamic_mxfp4_quant expects 2-D [rows, cols]
+                    # Output: packed uint8 [rows, cols//2],
+                    #         scales uint8 [rows, cols//32]
+                    w_q, w_s = dynamic_mxfp4_quant(
+                        staging_tensor[e].reshape(-1, staging_tensor.shape[-1])
+                    )
+                    rows = staging_tensor.shape[1]
+                    cols = staging_tensor.shape[2]
+                    weight_tensor[e] = w_q.reshape(rows, cols // 2)
+                    scale_tensor[e] = w_s.reshape(rows, cols // mxfp4_block)
+                delattr(layer, staging_name)
 
+            # Quantize w13 (gate_proj + up_proj fused)
+            _quantize_expert_weights(
+                "w13_weight_staging", "w13_weight", "w13_weight_scale"
+            )
             # Quantize w2 (down_proj)
-            w2_staging = layer.w2_weight_staging.data  # [E, H, I] BF16
-            for e in range(num_experts):
-                w_q, w_s = dynamic_mxfp4_quant(
-                    w2_staging[e].reshape(-1, w2_staging.shape[-1])
-                )
-                rows = w2_staging.shape[1]  # hidden
-                cols = w2_staging.shape[2]  # intermediate
-                layer.w2_weight.data[e] = w_q.reshape(rows, cols // 2)
-                layer.w2_weight_scale.data[e] = w_s.reshape(rows, cols // mxfp4_block)
-            del layer.w2_weight_staging
+            _quantize_expert_weights(
+                "w2_weight_staging", "w2_weight", "w2_weight_scale"
+            )
 
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
             prepare_moe_fp4_layer_for_marlin(

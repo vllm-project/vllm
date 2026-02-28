@@ -102,7 +102,7 @@ def _can_support_mxfp4(
         or e_score_correction_bias
         or apply_router_weight_on_input
         or scoring_func != "softmax"
-        or activation != MoEActivation.SWIGLUOAI
+        or activation not in (MoEActivation.SWIGLUOAI, MoEActivation.SILU)
         or expert_load_view
         or logical_to_physical_map
         or logical_replica_count

@@ -1328,20 +1328,14 @@ class FusedMoE(CustomOp):
             # that was allocated in create_weights.  The actual MXFP4
             # quantization happens later in process_weights_after_loading.
             if loaded_weight.is_floating_point() and not param.data.is_floating_point():
-                # Try to get the staging parameter from the layer.
-                staging_param_name = None
-                for candidate in ("w13_weight_staging", "w2_weight_staging"):
-                    if (
-                        candidate in weight_name
-                        or ("w13" in weight_name and candidate == "w13_weight_staging")
-                        or (
-                            "w2" in weight_name
-                            and "w13" not in weight_name
-                            and candidate == "w2_weight_staging"
-                        )
-                    ) and hasattr(self, candidate):
-                        staging_param_name = candidate
-                        break
+                # Determine the correct staging buffer using shard_id,
+                # which is reliable across all model architectures
+                # (Qwen3, Mixtral w1/w2/w3, etc.).
+                staging_param_name: str | None = None
+                if shard_id in ("w1", "w3") and hasattr(self, "w13_weight_staging"):
+                    staging_param_name = "w13_weight_staging"
+                elif shard_id == "w2" and hasattr(self, "w2_weight_staging"):
+                    staging_param_name = "w2_weight_staging"
                 if staging_param_name is not None:
                     staging_param = getattr(self, staging_param_name)
                     staging_expert_data = staging_param.data[expert_id]
