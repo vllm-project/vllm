@@ -1,0 +1,116 @@
+# .rules for vLLM NixOS Development Environment
+
+This adds a NixOS development environment with CUDA support for vLLM
+development using Nix flakes.
+
+**Purpose:** Provide a reproducible, cross-platform development environment
+with all dependencies (CUDA, Python, build tools) properly configured.
+
+---
+
+## 1) General Rules
+
+### Hard Rules
+- **Keep flake.nix minimal** - only essential dependencies
+- **Pin nixpkgs version** - avoid glibc/CUDA incompatibilities 
+- **Test on actual NixOS** before claiming it works
+- **Document CUDA requirements** clearly
+- **Follow Nix best practices** - pure builds, reproducible environments
+
+### Soft Rules
+- Prefer stable nixpkgs over unstable
+- Keep build times reasonable
+- Add helpful shell prompts and instructions
+
+---
+
+## 2) Dependencies
+
+### Core Requirements
+- Python 3.12 with pip/setuptools/wheel
+- CUDA 12.8 toolkit with all libraries
+- Build tools: cmake, ninja, gcc13
+- Development tools: git, pre-commit, ruff
+
+### CUDA Libraries Required
+- cudatoolkit, nvcc, cudart, cupti, nvrtc
+- cublas, cufft, curand, cusolver, cusparse
+- cudnn, nccl
+
+---
+
+## 3) Environment Setup
+
+### FHS Environment
+Uses `buildFHSEnv` to provide a Linux-compatible environment with:
+- Proper CUDA paths in `CUDA_HOME`, `PATH`, `LD_LIBRARY_PATH`
+- Python virtual environment via `uv`
+- All system libraries available
+
+### Key Environment Variables
+- `CUDA_HOME` - Points to CUDA toolkit
+- `VLLM_TARGET_DEVICE=cuda` - Target CUDA builds
+- `MAX_JOBS=20` - Parallel build jobs (adjust for your RAM)
+
+---
+
+## 4) Usage
+
+### Enter Development Shell
+```bash
+nix develop
+```
+
+### First Time Setup
+```bash
+# Recommended: Use the provided build script
+./build_vllm.sh
+
+# Manual installation
+uv pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128
+uv pip install -e .  # Editable install with CUDA kernels
+```
+
+### Build Script Features
+- `build_vllm.sh` - Optimized build script with:
+  - Automatic MAX_JOBS calculation based on RAM
+  - RTX 3080 Ti CUDA architecture (sm_86)
+  - Proper NVIDIA driver library paths
+  - Pre-flight checks and error handling
+
+### Testing
+```bash
+python -c "import vllm; print(vllm.__version__)"
+```
+
+---
+
+## 5) Troubleshooting
+
+### Common Issues
+- **glibc version conflicts**: Use nixos-25.11 (pinned)
+- **CUDA not found**: Check `CUDA_HOME` and `nvcc --version`
+- **Build OOM**: Reduce `MAX_JOBS` for systems with <32GB RAM
+- **Library not found**: Check `LD_LIBRARY_PATH` includes CUDA libs
+
+### System Requirements
+- NixOS or Nix package manager
+- NVIDIA GPU with CUDA capability
+- 16GB+ RAM for building (32GB+ recommended)
+- 10GB+ disk space for dependencies
+
+---
+
+## 6) Contributing
+
+### Before Submitting PR
+- [ ] Test `nix develop` works on clean system
+- [ ] Test `./build_vllm.sh` completes successfully
+- [ ] Test vLLM builds and imports successfully
+- [ ] Test CUDA functionality works
+- [ ] Update documentation for any new dependencies
+- [ ] Keep flake.lock committed for reproducibility
+
+---
+
+**End of .rules**
