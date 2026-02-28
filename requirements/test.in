@@ -54,7 +54,7 @@ grpcio-reflection==1.78.0
 grpcio-tools==1.78.0
 
 arctic-inference == 0.1.1 # Required for suffix decoding test
-numba == 0.61.2 # Required for N-gram speculative decoding
+numba == 0.63.1 # Required for N-gram speculative decoding
 numpy
 runai-model-streamer[s3,gcs]==0.15.3
 fastsafetensors>=0.2.2 # 0.2.2 contains important fixes for multi-GPU mem usage
