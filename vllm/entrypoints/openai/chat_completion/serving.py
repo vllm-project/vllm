@@ -1249,13 +1249,23 @@ class OpenAIServingChat(OpenAIServing):
                                 )
 
                             # get the expected call based on partial JSON
-                            # parsing which "autocompletes" the JSON
-                            expected_call = json.dumps(
-                                tool_parser.prev_tool_call_arr[index].get(
-                                    "arguments", {}
-                                ),
-                                ensure_ascii=False,
+                            # parsing which "autocompletes" the JSON.
+                            # Tool parsers (e.g. Qwen3Coder) store
+                            # arguments as a JSON string in
+                            # prev_tool_call_arr. Calling json.dumps()
+                            # on an already-serialized string would
+                            # double-serialize it (e.g. '{"k":1}' becomes
+                            # '"{\\"k\\":1}"'), which then causes the
+                            # replace() below to fail and append the
+                            # entire double-serialized string as a
+                            # spurious final delta.
+                            args = tool_parser.prev_tool_call_arr[index].get(
+                                "arguments", {}
                             )
+                            if isinstance(args, str):
+                                expected_call = args
+                            else:
+                                expected_call = json.dumps(args, ensure_ascii=False)
 
                             # get what we've streamed so far for arguments
                             # for the current tool
