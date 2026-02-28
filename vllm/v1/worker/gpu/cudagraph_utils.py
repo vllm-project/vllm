@@ -20,6 +20,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     build_slot_mappings_by_layer,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states import ModelState
@@ -417,8 +418,15 @@ def prepare_inputs_to_capture(
     input_buffers.seq_lens[:num_reqs] = num_tokens
     input_buffers.seq_lens[num_reqs:] = 0
 
-    input_buffers.dcp_local_seq_lens[:num_reqs] = num_tokens
-    input_buffers.dcp_local_seq_lens[num_reqs:] = 0
+    # global seq_lens to local seq_lens
+    prepare_dcp_local_seq_lens(
+        input_buffers.dcp_local_seq_lens,
+        input_buffers.seq_lens,
+        num_reqs,
+        block_tables.cp_size,
+        block_tables.cp_rank,
+        block_tables.cp_interleave,
+    )
 
     input_block_tables = [x[:num_reqs] for x in block_tables.input_block_tables]
     slot_mappings = block_tables.slot_mappings[:, :num_tokens]

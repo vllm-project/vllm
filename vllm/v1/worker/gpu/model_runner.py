@@ -697,8 +697,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def prepare_attn(
         self, input_batch: InputBatch
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-        # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
-        block_tables = self.block_tables.gather_block_tables(input_batch.idx_mapping)
+        # Block tables: num_kv_cache_groups x [max_num_reqs, max_num_blocks].
+        # gather_block_tables() updates the first `num_reqs` rows in-place.
+        self.block_tables.gather_block_tables(input_batch.idx_mapping)
+        block_tables = tuple(self.block_tables.input_block_tables)
         # Compute slot mappings: [num_kv_cache_groups, num_tokens]
         slot_mappings = self.block_tables.compute_slot_mappings(
             input_batch.idx_mapping,
