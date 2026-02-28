@@ -8,6 +8,7 @@ from itertools import islice
 import torch
 from einops import rearrange
 from torch import nn
+from torch.nn.parameter import UninitializedParameter
 from transformers.activations import ACT2FN
 
 from vllm.compilation.decorators import support_torch_compile
@@ -92,7 +93,6 @@ from .interfaces import (
     SupportsPP,
 )
 from .utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     extract_layer_index,
     is_pp_missing_parameter,
@@ -1104,10 +1104,12 @@ class Qwen3NextModel(nn.Module):
         self.config = config
 
         self.vocab_size = config.vocab_size
+        quant_config = vllm_config.quant_config
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
         )
 
         def get_layer(prefix: str):
@@ -1196,6 +1198,22 @@ class Qwen3NextModel(nn.Module):
             if name.startswith("mtp."):
                 continue
 
+            # ---- GGUF data transformations for qwen3_next ----
+            # ssm_a: GGUF stores -exp(A_log), model expects A_log
+            if "A_log" in name or "ssm_a" in name:
+                loaded_weight = torch.log(-loaded_weight.float()).to(
+                    loaded_weight.dtype
+                )
+            # Norm weights: GGUF stores weight+1, reverse: weight-1
+            # Exception: ssm_norm (linear_attn.norm) was NOT +1'd
+            elif (
+                "norm" in name
+                and name.endswith(".weight")
+                and "ssm_norm" not in name
+                and "linear_attn.norm" not in name
+            ):
+                loaded_weight = loaded_weight - 1
+
             # Remapping the name of FP8 kv-scale.
             if name.endswith("scale"):
                 name = maybe_remap_kv_scale_name(name, params_dict)
@@ -1256,14 +1274,33 @@ class Qwen3NextModel(nn.Module):
                     if is_pp_missing_parameter(name, self):
                         continue
                     if name not in params_dict:
-                        logger.warning_once(
-                            f"Parameter {name} not found in params_dict, skip loading"
+                        logger.warning(
+                            "Parameter %s not found in params_dict, skip loading",
+                            name,
                         )
                         continue
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
+                    # GGUF shape fixups (only for materialized params)
+                    if not isinstance(param, UninitializedParameter):
+                        # GGUF may provide 1D weights for 2D parameters
+                        # (e.g. shared_expert_gate [hidden] -> [1, hidden])
+                        if (
+                            loaded_weight.dim() == 1
+                            and param.dim() == 2
+                            and param.size(0) == 1
+                        ):
+                            loaded_weight = loaded_weight.unsqueeze(0)
+                        # GGUF conv1d weights are 2D [channels, kernel]
+                        # but nn.Conv1d expects 3D [channels, 1, kernel]
+                        if (
+                            loaded_weight.dim() == 2
+                            and param.dim() == 3
+                            and param.size(1) == 1
+                        ):
+                            loaded_weight = loaded_weight.unsqueeze(1)
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -1356,6 +1393,7 @@ class Qwen3NextForCausalLM(
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
+            quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -1427,11 +1465,41 @@ class Qwen3NextForCausalLM(
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["mtp."],
+        # Bypass AutoWeightsLoader to avoid itertools.groupby splitting
+        # non-contiguous prefix groups from the GGUF two-pass iterator
+        # (pass 1 yields all qweight_type, then pass 2 yields all qweight,
+        #  with lm_head entries between them breaking the "model" group).
+        from vllm.model_executor.model_loader.weight_utils import (
+            default_weight_loader,
         )
-        return loader.load_weights(weights)
+
+        lm_head_weights: list[tuple[str, torch.Tensor]] = []
+
+        def _route_to_model() -> Iterable[tuple[str, torch.Tensor]]:
+            for name, w in weights:
+                if name.startswith("mtp."):
+                    continue
+                elif name.startswith("lm_head."):
+                    lm_head_weights.append((name, w))
+                elif name.startswith("model."):
+                    yield name[len("model.") :], w
+                else:
+                    # GGUF names may already lack model. prefix
+                    yield name, w
+
+        model_loaded = self.model.load_weights(_route_to_model())
+        loaded = {"model." + n for n in model_loaded}
+
+        # Load lm_head weights that were collected during iteration
+        params = dict(self.named_parameters())
+        for name, w in lm_head_weights:
+            if name in params:
+                param = params[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, w)
+                loaded.add(name)
+
+        return loaded
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
