@@ -650,6 +650,9 @@ class OpenAIServingChat(OpenAIServing):
                 get_streamable_parser_for_assistant() for _ in range(num_choices)
             ]
             harmony_tools_streamed = [False] * num_choices
+            harmony_tool_call_ids: list[dict[str, tuple[int, str]]] = [
+                {} for _ in range(num_choices)
+            ]
         tools_streamed = [False] * num_choices
 
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
@@ -889,6 +892,7 @@ class OpenAIServingChat(OpenAIServing):
                                 token_states=token_states,
                                 prev_recipient=prev_recipient,
                                 include_reasoning=request.include_reasoning,
+                                tool_call_ids=harmony_tool_call_ids[i],
                             )
                         )
                         harmony_tools_streamed[i] |= tools_streamed_flag
@@ -1234,6 +1238,7 @@ class OpenAIServingChat(OpenAIServing):
                                 delta_message, output
                             )
                             and tool_parser
+                            and auto_tools_called
                         ):
                             latest_delta_len = 0
                             if (
