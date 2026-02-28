@@ -15,7 +15,7 @@ from msgspec import msgpack
 
 from vllm.config import FaultToleranceConfig, ParallelConfig, VllmConfig
 from vllm.v1.engine.core import EngineLoopPausedError
-from vllm.v1.fault_tolerance.sentinel import EngineCoreSentinel
+from vllm.v1.fault_tolerance import EngineCoreSentinel
 from vllm.v1.fault_tolerance.utils import (
     FaultInfo,
     FaultToleranceRequest,

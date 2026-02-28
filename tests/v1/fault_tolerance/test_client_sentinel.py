@@ -15,7 +15,7 @@ import zmq
 
 from vllm.config import FaultToleranceConfig, ParallelConfig, VllmConfig
 from vllm.v1.engine import EngineStatusType
-from vllm.v1.fault_tolerance.sentinel import ClientSentinel
+from vllm.v1.fault_tolerance import ClientSentinel
 from vllm.v1.fault_tolerance.utils import (
     FaultInfo,
     FaultToleranceRequest,

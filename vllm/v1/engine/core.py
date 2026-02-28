@@ -62,7 +62,10 @@ from vllm.v1.engine.utils import (
     get_device_indices,
 )
 from vllm.v1.executor import Executor
-from vllm.v1.fault_tolerance.sentinel import EngineCoreSentinel
+from vllm.v1.fault_tolerance.engine_core_sentinel import (
+    EngineCoreSentinel,
+    busy_loop_wrapper,
+)
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
@@ -71,7 +74,6 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import (
     MsgpackDecoder,
     MsgpackEncoder,
-    run_method,
 )
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import compute_iteration_details, get_engine_client_zmq_addr
@@ -82,75 +84,6 @@ logger = init_logger(__name__)
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
-
-
-def busy_loop_wrapper(busy_loop_func):
-    """
-    Wrap the busy loop function to perform fault tolerance.
-    """
-
-    def run_with_fault_tolerance(self):
-        while True:
-            try:
-                if self.enable_fault_tolerance:
-                    self.busy_loop_active.set()
-                busy_loop_func(self)
-            except SystemExit:
-                raise
-            except Exception as original_exc:
-                if self.enable_fault_tolerance:
-                    self.busy_loop_active.clear()
-                    self.fault_signal_q.put(original_exc)
-                    logger.warning(
-                        "[BusyLoopWrapper] EngineCore busy loop raised an exception. "
-                        "Suspended and waiting for fault tolerance "
-                        "instructions."
-                    )
-
-                    # Put running requests into waiting list.
-                    timestamp = time.monotonic()
-                    while self.scheduler.running:
-                        request = self.scheduler.running.pop()
-                        self.scheduler.preempt_request(request, timestamp)
-                    self.scheduler.prev_step_scheduled_req_ids.clear()
-                    if self.batch_queue is not None:
-                        self.batch_queue.clear()
-
-                    try:
-                        # Block until recovery command received
-                        ft_request = self.cmd_q.get(
-                            timeout=self.engine_recovery_timeout
-                        )
-
-                        if ft_request is not None:
-                            logger.debug(
-                                "[BusyLoopWrapper] Received fault tolerance "
-                                "command: %s",
-                                ft_request.instruction,
-                            )
-                            method, params = (ft_request.instruction, ft_request.params)
-                            run_method(self, method, args=(), kwargs=params)
-                        # recovery succeeded; restart the busy loop
-                        continue
-                    except queue.Empty:
-                        # No handling instruction received within predefined
-                        # timeout period.
-                        logger.error(
-                            "[BusyLoopWrapper] Fault tolerance instruction not received"
-                            " within timeout. Proceeding with default exception "
-                            "handling."
-                        )
-                    except Exception as cmd_exc:
-                        raise RuntimeError(
-                            "Fault tolerance execution failed."
-                        ) from cmd_exc
-
-                # Fault tolerance not enabled OR no instruction received
-                # before timeout. Re-raise the original exception
-                # for upper level handling.
-                raise original_exc
-
-    return run_with_fault_tolerance
 
 
 class EngineCore:
