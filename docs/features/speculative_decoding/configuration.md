@@ -29,7 +29,7 @@ This page documents all accepted keys for the `--speculative-config` CLI argumen
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `method` | `str` | `None` | Speculative method to use. See [Supported Methods](#supported-methods) below. If `model` is provided, the method is auto-detected when possible. If `model` is not provided, this is required. |
+| `method` | `str` | `None` | Speculative method to use. See [Supported Methods](#supported-methods) below. If not provided, defaults to `"draft_model"` (or `"ngram"` if `model` is set to `"ngram"`). |
 | `num_speculative_tokens` | `int` | `None` | Number of speculative tokens to generate per step. Required unless the draft model config provides a default. Must be > 0. |
 | `model` | `str` | `None` | Name or path of the draft model, EAGLE head, or additional weights. |
 | `enforce_eager` | `bool` | `None` | Override the target model's `enforce_eager` setting for the draft model. |
@@ -89,4 +89,7 @@ The `method` parameter accepts the following values:
 | `"mlp_speculator"` | Uses an MLP-based draft model. See [MLP](mlp.md). | Yes |
 | `"suffix"` | Uses suffix tree matching against prompt and past generations. See [Suffix Decoding](suffix.md). | No |
 | `"medusa"` | Uses Medusa-style multi-head prediction. | Yes |
-| `"deepseek_mtp"`, `"qwen3_5_mtp"`, ... | Model-specific MTP (Multi-Token Prediction) methods. Auto-detected from model architecture. | No |
+| `"mtp"` | Multi-Token Prediction. Auto-detected from model architecture for supported models (DeepSeek-V3, Qwen3.5, etc.). | No |
+
+!!! note
+    Legacy method names like `"deepseek_mtp"`, `"qwen3_5_mtp"`, etc. are deprecated and automatically mapped to `"mtp"`.
