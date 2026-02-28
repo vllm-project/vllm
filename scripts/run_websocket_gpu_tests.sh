@@ -18,11 +18,11 @@ nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
 # Check model cache
 echo ""
 echo "Checking model cache..."
-if [ -d ~/.cache/huggingface/hub/models--facebook--opt-125m ]; then
-    echo "Model facebook/opt-125m found in cache"
+if [ -d ~/.cache/huggingface/hub/models--Qwen--Qwen2-0.5B-Instruct ]; then
+    echo "Model Qwen/Qwen2-0.5B-Instruct found in cache"
 else
-    echo "Model facebook/opt-125m not in cache, downloading..."
-    python3 -c "from huggingface_hub import snapshot_download; snapshot_download('facebook/opt-125m')"
+    echo "Model Qwen/Qwen2-0.5B-Instruct not in cache, downloading..."
+    python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen2-0.5B-Instruct')"
 fi
 
 # Install test dependencies if needed
