@@ -28,6 +28,7 @@ CacheDType = Literal[
     "fp8_e5m2",
     "fp8_inc",
     "fp8_ds_mla",
+    "int8",
 ]
 MambaDType = Literal["auto", "float32", "float16"]
 MambaCacheMode = Literal["all", "align", "none"]
@@ -219,12 +220,30 @@ class CacheConfig:
     @field_validator("cache_dtype", mode="after")
     @classmethod
     def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
+        warn_info = (
+            "Using %s data type to store kv cache. It reduces the GPU "
+            "memory footprint and boosts the performance. "
+            "Meanwhile, it may cause accuracy drop without a proper "
+            "scaling factor"
+        )
         if cache_dtype.startswith("fp8"):
             logger.info(
-                "Using fp8 data type to store kv cache. It reduces the GPU "
-                "memory footprint and boosts the performance. "
-                "Meanwhile, it may cause accuracy drop without a proper "
-                "scaling factor."
+                warn_info,
+                str(cache_dtype),
+            )
+        elif cache_dtype.startswith("int8"):
+            int8_warn_info = (
+                "int8 kv cache requires calibrated scaling factors. "
+                "Make sure --calculate_kv_scales argument is set and "
+                "K_SCALE_CONSTANT/V_SCALE_CONSTANT environment variables are set, "
+                "normally set to 127 for int8."
+            )
+            logger.info(
+                warn_info,
+                str(cache_dtype),
+            )
+            logger.info(
+                int8_warn_info,
             )
         return cache_dtype
 
