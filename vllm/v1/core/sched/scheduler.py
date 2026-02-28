@@ -480,7 +480,22 @@ class Scheduler(SchedulerInterface):
                         break
 
             if new_blocks is None:
-                # Cannot schedule this request.
+                # Cannot schedule this request. If it permanently exceeds KV
+                # capacity, fail it so we can make progress.
+                num_blocks_required = self.kv_cache_manager.get_num_blocks_required(
+                    request,
+                    num_new_tokens,
+                    num_lookahead_tokens=self.num_lookahead_tokens,
+                )
+                num_total_blocks = self.kv_cache_manager.get_num_total_blocks()
+                if num_blocks_required > num_total_blocks:
+                    self.running.remove(request)
+                    self.finish_requests(
+                        [request.request_id], RequestStatus.FINISHED_ERROR
+                    )
+                    # Do not increment req_index; the next request is now at this index.
+                    continue
+                # Temporary: not enough free blocks.
                 break
 
             # Schedule the request.
@@ -735,10 +750,31 @@ class Scheduler(SchedulerInterface):
                 )
 
                 if new_blocks is None:
-                    # The request cannot be scheduled.
-
-                    # NOTE: we need to untouch the request from the encode cache
-                    # manager
+                    # The request cannot be scheduled. Distinguish permanent
+                    # failure (request exceeds total KV capacity) from temporary
+                    # (not enough free blocks). Only for permanent failure do we
+                    # fail the request and continue; otherwise we break so we
+                    # don't block other requests indefinitely.
+                    num_blocks_required = self.kv_cache_manager.get_num_blocks_required(
+                        request,
+                        num_new_tokens,
+                        num_new_computed_tokens=num_new_local_computed_tokens,
+                        new_computed_blocks=new_computed_blocks,
+                        num_lookahead_tokens=effective_lookahead_tokens,
+                        num_external_computed_tokens=num_external_computed_tokens,
+                        num_encoder_tokens=num_encoder_tokens,
+                    )
+                    num_total_blocks = self.kv_cache_manager.get_num_total_blocks()
+                    if num_blocks_required > num_total_blocks:
+                        # Request can never be satisfied (e.g. num_gpu_blocks_override
+                        # too low). Fail it so the rest of the queue can be scheduled.
+                        if request.has_encoder_inputs:
+                            self.encoder_cache_manager.free(request)
+                        self.finish_requests(
+                            [request.request_id], RequestStatus.FINISHED_ERROR
+                        )
+                        continue
+                    # Temporary: not enough free blocks; leave at head and break.
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
                     break
