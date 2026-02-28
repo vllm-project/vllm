@@ -19,8 +19,10 @@
 #include <cuda_runtime.h>
 #include <cuda_fp8.h>
 
-#if (defined(NVFP4_ENABLE_ELTS16) && (CUDART_VERSION >= 12090) && \
-     defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100)
+#include "../../cuda_vec_utils.cuh"
+
+#if defined(NVFP4_ENABLE_ELTS16) && defined(CUDA_VERSION) && \
+    CUDA_VERSION >= 12090
   #define ELTS_PER_THREAD 16
 constexpr int CVT_FP4_ELTS_PER_THREAD = 16;
 constexpr bool CVT_FP4_PACK16 = true;
@@ -33,68 +35,6 @@ constexpr bool CVT_FP4_PACK16 = false;
 constexpr int CVT_FP4_SF_VEC_SIZE = 16;
 
 namespace vllm {
-
-// Convert PyTorch cpp type to CUDA type
-template <typename T>
-struct CUDATypeConverter {
-  using Type = T;
-};
-
-template <>
-struct CUDATypeConverter<at::Half> {
-  using Type = half;
-};
-
-template <>
-struct CUDATypeConverter<at::BFloat16> {
-  using Type = __nv_bfloat16;
-};
-
-// Get type2 from type or vice versa (applied to half and bfloat16)
-template <typename T>
-struct TypeConverter {
-  using Type = half2;
-};  // keep for generality
-
-template <>
-struct TypeConverter<half2> {
-  using Type = half;
-};
-
-template <>
-struct TypeConverter<half> {
-  using Type = half2;
-};
-
-template <>
-struct TypeConverter<__nv_bfloat162> {
-  using Type = __nv_bfloat16;
-};
-
-template <>
-struct TypeConverter<__nv_bfloat16> {
-  using Type = __nv_bfloat162;
-};
-
-#if (defined(NVFP4_ENABLE_ELTS16) && (CUDART_VERSION >= 12090) && \
-     defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100)
-// Define a 32 bytes packed data type.
-template <class Type>
-struct alignas(32) PackedVec {
-  typename TypeConverter<Type>::Type elts[8];
-};
-#else
-// Define a 16 bytes packed data type.
-template <class Type>
-struct alignas(16) PackedVec {
-  typename TypeConverter<Type>::Type elts[4];
-};
-#endif
-
-template <>
-struct PackedVec<__nv_fp8_e4m3> {
-  __nv_fp8x2_e4m3 elts[8];
-};
 
 template <typename Int>
 __host__ __device__ inline Int round_up(Int x, Int y) {
@@ -208,56 +148,6 @@ __device__ __forceinline__ float reciprocal_approximate_ftz(float a) {
   return b;
 }
 
-template <class Type>
-__device__ __forceinline__ void ld128_or_zero_cg_u32(PackedVec<Type>& out,
-                                                     const void* ptr,
-                                                     bool pred) {
-  uint32_t r0, r1, r2, r3;
-
-  asm volatile(
-      "{\n"
-      "  .reg .pred pr;\n"
-      "  setp.ne.u32 pr, %4, 0;\n"
-      "  mov.u32 %0, 0;\n"
-      "  mov.u32 %1, 0;\n"
-      "  mov.u32 %2, 0;\n"
-      "  mov.u32 %3, 0;\n"
-      "  @pr ld.global.cg.v4.u32 {%0,%1,%2,%3}, [%5];\n"
-      "}\n"
-      : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3)
-      : "r"((int)pred), "l"(ptr));
-
-  *reinterpret_cast<uint4*>(&out) = uint4{r0, r1, r2, r3};
-}
-
-template <class Type>
-__device__ __forceinline__ void ld256_or_zero_cg_u32(PackedVec<Type>& out,
-                                                     const void* ptr,
-                                                     bool pred) {
-  uint32_t r0, r1, r2, r3, r4, r5, r6, r7;
-
-  asm volatile(
-      "{\n"
-      "  .reg .pred pr;\n"
-      "  setp.ne.u32 pr, %8, 0;\n"
-      "  mov.u32 %0, 0;\n"
-      "  mov.u32 %1, 0;\n"
-      "  mov.u32 %2, 0;\n"
-      "  mov.u32 %3, 0;\n"
-      "  mov.u32 %4, 0;\n"
-      "  mov.u32 %5, 0;\n"
-      "  mov.u32 %6, 0;\n"
-      "  mov.u32 %7, 0;\n"
-      "  @pr ld.global.cg.v8.u32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%9];\n"
-      "}\n"
-      : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3), "=r"(r4), "=r"(r5), "=r"(r6),
-        "=r"(r7)
-      : "r"((int)pred), "l"(ptr));
-
-  reinterpret_cast<uint4*>(&out)[0] = uint4{r0, r1, r2, r3};
-  reinterpret_cast<uint4*>(&out)[1] = uint4{r4, r5, r6, r7};
-}
-
 // Compute SF output offset for swizzled tensor core layout.
 // SF layout: [numMTiles, numKTiles, 32, 4, 4]
 // Caller must precompute: numKTiles = (numCols + 63) / 64
@@ -315,8 +205,8 @@ __device__ __forceinline__ uint8_t* sf_out_rowmajor_u8(int row, int pack,
 
 // Quantizes the provided PackedVec into the uint32_t output
 template <class Type, int CVT_FP4_NUM_THREADS_PER_SF, bool UE8M0_SF = false>
-__device__ __forceinline__ fp4_packed_t
-cvt_warp_fp16_to_fp4(PackedVec<Type>& vec, float SFScaleVal, uint8_t* SFout) {
+__device__ __forceinline__ fp4_packed_t cvt_warp_fp16_to_fp4(
+    PackedVec<Type, CVT_FP4_PACK16>& vec, float SFScaleVal, uint8_t* SFout) {
   // Get absolute maximum values among the local 8 values.
   auto localMax = __habs2(vec.elts[0]);
 
@@ -372,11 +262,7 @@ cvt_warp_fp16_to_fp4(PackedVec<Type>& vec, float SFScaleVal, uint8_t* SFout) {
 
 #pragma unroll
   for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
-    if constexpr (std::is_same_v<Type, half>) {
-      fp2Vals[i] = __half22float2(vec.elts[i]);
-    } else {
-      fp2Vals[i] = __bfloat1622float2(vec.elts[i]);
-    }
+    fp2Vals[i] = cast_to_float2(vec.elts[i]);
     fp2Vals[i].x *= outputScale;
     fp2Vals[i].y *= outputScale;
   }
@@ -395,22 +281,19 @@ __device__ __forceinline__ float2 silu2(float2 x) {
 }
 
 template <class Type>
-__inline__ __device__ PackedVec<Type> compute_silu_mul(
-    const PackedVec<Type>& x_vec, const PackedVec<Type>& y_vec) {
-  PackedVec<Type> result;
+__inline__ __device__ PackedVec<Type, CVT_FP4_PACK16> compute_silu_mul(
+    const PackedVec<Type, CVT_FP4_PACK16>& x_vec,
+    const PackedVec<Type, CVT_FP4_PACK16>& y_vec) {
+  PackedVec<Type, CVT_FP4_PACK16> result;
 
 #pragma unroll
   for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
     // silu_mul in float32
-    if constexpr (std::is_same_v<Type, half>) {
-      float2 silu_vec = silu2(__half22float2(x_vec.elts[i]));
-      result.elts[i] = __float22half2_rn(
-          __fmul2_rn(silu_vec, __half22float2(y_vec.elts[i])));
-    } else {
-      float2 silu_vec = silu2(__bfloat1622float2(x_vec.elts[i]));
-      result.elts[i] = __float22bfloat162_rn(
-          __fmul2_rn(silu_vec, __bfloat1622float2(y_vec.elts[i])));
-    }
+    using packed_t = typename PackedTypeConverter<Type>::Type;
+    float2 silu_vec = silu2(cast_to_float2(x_vec.elts[i]));
+    float2 y_f2 = cast_to_float2(y_vec.elts[i]);
+    result.elts[i] = cast_to_packed<packed_t>(
+        make_float2(silu_vec.x * y_f2.x, silu_vec.y * y_f2.y));
   }
   return result;
 }
