@@ -152,6 +152,7 @@ class Olmo3_2HybridConfig(PretrainedConfig):
         linear_allow_neg_eigval: bool = True,
         **kwargs,
     ):
+        super().__init__(**kwargs)
         if layer_types is None:
             # Default: linear attention for most layers, full attention every 4th layer
             layer_types = ["linear_attention"] * int(num_hidden_layers)
@@ -214,4 +215,3 @@ class Olmo3_2HybridConfig(PretrainedConfig):
         self.pad_token_id = pad_token_id
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
-        super().__init__(**kwargs)
