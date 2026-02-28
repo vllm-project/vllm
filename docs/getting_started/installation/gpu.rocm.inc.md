@@ -274,15 +274,19 @@ To build an image with support for DeepEP and NixlConnector, please follow the b
 ```
 # Build the base image with ROCm 7.2
 cd  vllm/docker
-docker build --progress=plain  --target final   -t rocm/dev-ubuntu-22.04:7.2-vllm-base   -f Dockerfile.rocm_base . --build-arg BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2-complete
+DOCKER_BUILDKIT=1 docker build --progress=plain  --target final   -t rocm/dev-ubuntu-22.04:7.2-vllm-base   -f Dockerfile.rocm_base . --build-arg BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2-complete
 
 # Build DeepEP and NIXL Connectors
+# Supported option for DEEPEP_GPU_ARCH is "gfx942" or "gfx950"
+# Supported option for DEEPEP_NIC_TYPE is "cx7" or "thor2"
 cd  vllm/docker
-DOCKER_BUILDKIT=1 docker build   --target final -t rocm/dev-ubuntu-22.04:7.2-vllm-eppd  -f Dockerfile.rocm_deepep . --build-arg BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2-vllm-base
+DOCKER_BUILDKIT=1 docker build   --target final -t rocm/dev-ubuntu-22.04:7.2-vllm-ep-pd  -f Dockerfile.rocm_deepep --build-arg BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2-vllm-base \
+--build-arg DEEPEP_GPU_ARCH=gfx942 \
+--build-arg DEEPEP_NIC_TYPE=cx7 .
 
 # Build final image
 cd  vllm
-DOCKER_BUILDKIT=1 docker build --progress=plain -t  vllm/vllm-openai-rocm  -f ./docker/Dockerfile.rocm --build-arg BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2-vllm-eppd   .
+DOCKER_BUILDKIT=1 docker build --progress=plain -t  vllm/vllm-openai-rocm  -f ./docker/Dockerfile.rocm --build-arg BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2-vllm-ep-pd   .
 ```
 
 
