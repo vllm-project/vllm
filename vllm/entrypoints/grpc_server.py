@@ -228,13 +228,16 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         Returns:
             GetServerInfoResponse protobuf
         """
+        # TODO: last_receive_timestamp is meant to be the time of the last received
+        # request, not the current time; track it when requests are received.
+        last_receive_timestamp = time.time()
         num_requests = self.async_llm.output_processor.get_num_unfinished_requests()
 
         return vllm_engine_pb2.GetServerInfoResponse(
             active_requests=num_requests,
-            is_paused=False,  # TODO
-            last_receive_timestamp=time.time(),  # TODO looks wrong?
-            uptime_seconds=time.time() - self.start_time,
+            is_paused=self.async_llm.is_paused,
+            last_receive_timestamp=last_receive_timestamp,
+            uptime_seconds=last_receive_timestamp - self.start_time,
             server_type="vllm-grpc",
         )
 
