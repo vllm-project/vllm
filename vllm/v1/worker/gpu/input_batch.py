@@ -66,8 +66,6 @@ class InputBatch:
     input_ids: torch.Tensor
     # [num_tokens_after_padding]
     positions: torch.Tensor
-    # [num_tokens_after_padding, hidden_size]
-    inputs_embeds: torch.Tensor | None
 
     # [total_num_logits]
     logits_indices: torch.Tensor
@@ -138,7 +136,6 @@ class InputBatch:
             dcp_local_seq_lens=None,
             input_ids=input_ids,
             positions=positions,
-            inputs_embeds=None,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
