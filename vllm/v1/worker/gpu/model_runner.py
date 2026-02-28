@@ -21,6 +21,7 @@ import functools
 import gc
 import time
 from copy import deepcopy
+from typing import Any
 
 import numpy as np
 import torch
@@ -75,7 +76,7 @@ from vllm.v1.worker.gpu.kv_connector import (
     get_kv_connector,
 )
 from vllm.v1.worker.gpu.lora_utils import LoraState
-from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states import ModelState
 from vllm.v1.worker.gpu.pp_utils import pp_broadcast, pp_receive
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -125,20 +126,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.max_model_len = self.model_config.max_model_len
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
-        self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
 
         # Multimodal
         self.mm_registry = MULTIMODAL_REGISTRY
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             self.model_config
         )
+        self.encoder_cache = None
         if self.supports_mm_inputs:
-            self.encoder_runner = EncoderRunner(
-                max_num_tokens=self.max_num_tokens,
-                hidden_size=self.inputs_embeds_size,
-                dtype=self.dtype,
-                device=self.device,
-            )
+            self.encoder_cache = EncoderCache()
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.output_copy_stream = torch.cuda.Stream(self.device)
@@ -262,7 +258,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prepare_communication_buffer_for_model(self.speculator)
 
         # Initialize the components that require the model.
-        self.model_state = ModelState(self.vllm_config, self.model, self.device)
+        self.model_state = ModelState(
+            self.vllm_config, self.model, self.encoder_cache, self.device
+        )
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -415,12 +413,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         gc.collect()
 
     def reset_mm_cache(self) -> None:
-        if self.supports_mm_inputs:
-            self.encoder_runner.reset_mm_cache()
+        if self.encoder_cache is not None:
+            self.encoder_cache.reset_mm_cache()
 
     def reset_encoder_cache(self) -> None:
-        if self.supports_mm_inputs:
-            self.encoder_runner.reset_encoder_cache()
+        if self.encoder_cache is not None:
+            self.encoder_cache.reset_encoder_cache()
 
     def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
         # SP is not supported yet.
@@ -449,14 +447,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
-            inputs_embeds = None
-            if self.supports_mm_inputs:
-                inputs_embeds = self.encoder_runner.inputs_embeds
             self.cudagraph_manager.capture(
                 model=self.model,
                 model_state=self.model_state,
                 input_buffers=self.input_buffers,
-                inputs_embeds=inputs_embeds,
                 block_tables=self.block_tables,
                 attn_groups=self.attn_groups,
                 kv_cache_config=self.kv_cache_config,
@@ -491,15 +485,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             finished_req_ids = finished_req_ids.union(preempted_req_ids)
         for req_id in finished_req_ids:
             self.req_states.remove_request(req_id)
-            if self.supports_mm_inputs:
-                self.encoder_runner.remove_request(req_id)
+            if self.encoder_cache is not None:
+                self.encoder_cache.remove_request(req_id)
             self.prompt_logprobs_worker.remove_request(req_id)
             self.lora_state.remove_request(req_id)
 
     def free_states(self, scheduler_output: SchedulerOutput) -> None:
-        if self.supports_mm_inputs:
+        if self.encoder_cache is not None:
             for mm_hash in scheduler_output.free_encoder_mm_hashes:
-                self.encoder_runner.free_encoder_cache(mm_hash)
+                self.encoder_cache.free_encoder_cache(mm_hash)
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
@@ -516,8 +510,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             req_index = self.req_states.req_id_to_index[req_id]
 
-            if self.supports_mm_inputs:
-                self.encoder_runner.add_request(req_id, new_req_data.mm_features)
+            if self.encoder_cache is not None:
+                self.encoder_cache.add_request(req_id, new_req_data.mm_features)
 
             self.model_state.add_request(req_index, new_req_data)
             self.block_tables.append_block_ids(
@@ -674,7 +668,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             dcp_local_seq_lens=dcp_local_seq_lens,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
-            inputs_embeds=None,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
@@ -702,26 +695,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.num_tokens
         )
         return block_tables, slot_mappings
-
-    @torch.inference_mode()
-    def get_mm_embeddings(
-        self,
-        scheduled_encoder_inputs: dict[str, list[int]],
-        input_batch: InputBatch,
-    ) -> tuple[list[torch.Tensor], torch.Tensor]:
-        mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
-            scheduled_encoder_inputs
-        )
-        self.encoder_runner.execute_mm_encoder(self.model, mm_hashes, mm_kwargs)
-        mm_embeds, is_mm_embed = self.encoder_runner.gather_mm_embeddings(
-            input_batch.req_ids,
-            input_batch.num_tokens,
-            input_batch.num_scheduled_tokens,
-            input_batch.query_start_loc_np,
-            self.req_states.prefill_len.np[input_batch.idx_mapping_np],
-            self.req_states.num_computed_prefill_tokens[input_batch.idx_mapping_np],
-        )
-        return mm_embeds, is_mm_embed
 
     def sample(
         self,
@@ -869,18 +842,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     input_batch.num_scheduled_tokens,
                 )
                 self._set_active_loras(*lora_inputs)
-
-            # Only first PP rank prepares multimodal embeddings.
-            if self.supports_mm_inputs and self.is_first_pp_rank:
-                mm_embeds, is_mm_embed = self.get_mm_embeddings(
-                    scheduler_output.scheduled_encoder_inputs, input_batch
-                )
-                inputs_embeds = self.encoder_runner.get_inputs_embeds(
-                    self.model, input_batch.input_ids, mm_embeds, is_mm_embed
-                )
-                input_batch.inputs_embeds = inputs_embeds[
-                    : input_batch.num_tokens_after_padding
-                ]
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
             num_reqs = min(num_tokens_after_padding, self.max_num_reqs)
@@ -913,13 +874,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.kv_cache_config,
             )
 
+        inputs_embeds = None
+        mm_model_inputs: dict[str, Any] = {}
+        if self.supports_mm_inputs and self.is_first_pp_rank and not dummy_run:
+            # Run MM encoder (if needed) and get multimodal embeddings.
+            # Only first PP rank prepares multimodal embeddings.
+            inputs_embeds, mm_model_inputs = self.model_state.get_mm_embeddings(
+                scheduler_output.scheduled_encoder_inputs,
+                input_batch,
+                self.req_states,
+            )
+
         model_inputs = {
             "input_ids": input_batch.input_ids,
             "positions": input_batch.positions,
-            "inputs_embeds": input_batch.inputs_embeds,
+            "inputs_embeds": inputs_embeds,
             # NOTE: Values returned by `prepare_inputs` will override the default
             # values above.
             **self.model_state.prepare_inputs(input_batch, self.req_states),
+            **mm_model_inputs,
         }
         if not self.is_first_pp_rank:
             # Update for non-first PP ranks.
