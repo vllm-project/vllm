@@ -28,7 +28,7 @@ from vllm.distributed.weight_transfer.base import (
 from ...utils import create_new_process_for_each_test
 
 # Use a tiny model for fast testing
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "/mnt/data3/models/Qwen/Qwen3.5-35B-A3B"
 
 
 # --- Mock Weight Transfer Engine ---
@@ -89,6 +89,10 @@ class MockWeightTransferEngine(WeightTransferEngine[MockInitInfo, MockUpdateInfo
 
     def shutdown(self) -> None:
         MockWeightTransferEngine.shutdown_called = True
+
+    def trainer_send_weights(self, *args, **kwargs):
+        """Mock method to simulate trainer sending weights."""
+        pass
 
 
 def mock_create_engine(config, parallel_config):
