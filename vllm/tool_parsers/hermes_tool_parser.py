@@ -224,7 +224,31 @@ class Hermes2ProToolParser(ToolParser):
                 logger.debug("Generating text content! skipping tool parsing.")
                 return DeltaMessage(content=delta_text)
 
-            if self.tool_call_end_token in delta_text:
+            # multiple tool calls in different delta_text are supported, but
+            # multiple tool calls in one delta_text cases are not supported yet.
+            # only handle special case where one delta_text has complete tool call
+            # i.e. <start>tool call content<end>
+            if (
+                self.tool_call_start_token in delta_text
+                and self.tool_call_end_token in delta_text
+                and delta_text.index(self.tool_call_start_token)
+                < delta_text.index(self.tool_call_end_token)
+            ):
+                logger.debug(
+                    "both tool_call_start_token and tool_call_end_token in delta_text"
+                )
+
+                tool_call_portion = (
+                    delta_text.split(self.tool_call_start_token)[-1]
+                    .split(self.tool_call_end_token)[0]
+                    .rstrip()
+                )
+                self.current_tool_id += 1
+                self.current_tool_name_sent = False
+                self.streamed_args_for_tool.append("")
+                self.prev_tool_call_arr.append({})
+
+            elif self.tool_call_end_token in delta_text:
                 logger.debug("tool_call_end_token in delta_text")
                 full_text = current_text + delta_text
                 tool_call_portion = (
@@ -261,6 +285,7 @@ class Hermes2ProToolParser(ToolParser):
                 self.current_tool_id += 1
                 self.current_tool_name_sent = False
                 self.streamed_args_for_tool.append("")
+                self.prev_tool_call_arr.append({})
                 logger.debug("Starting on a new tool %s", self.current_tool_id)
 
             # case -- we're updating an existing tool call
@@ -280,33 +305,13 @@ class Hermes2ProToolParser(ToolParser):
                 if self.prev_tool_call_arr is None or len(self.prev_tool_call_arr) == 0:
                     logger.debug("attempting to close tool call, but no tool call")
                     return None
-                diff = self.prev_tool_call_arr[self.current_tool_id].get("arguments")
-                if diff:
-                    diff = (
-                        diff.encode("utf-8").decode("unicode_escape")
-                        if diff is str
-                        else diff
-                    )
-                    if '"}' not in delta_text:
-                        return None
-                    end_loc = delta_text.rindex('"}')
-                    diff = delta_text[:end_loc] + '"}'
-                    logger.debug(
-                        "Finishing tool and found diff that had not "
-                        "been streamed yet: %s",
-                        diff,
-                    )
-                    self.streamed_args_for_tool[self.current_tool_id] += diff
-                    return DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_id,
-                                function=DeltaFunctionCall(arguments=diff).model_dump(
-                                    exclude_none=True
-                                ),
-                            )
-                        ]
-                    )
+                # e.g. </tool_call>
+                # e.g. <tool_call>{...}</tool_call>
+                # e.g. "arguments": {"dir": "/src"}}</tool_call>
+                # e.g. nts": {"dir": "/src"}}</tool_call>
+                # when stream interval is greater than 1, we may need tokens in this
+                # delta to complete the tool call arguments.
+                # So we need keep parsing and cannot return yet.
 
             # case -- otherwise we're just generating text
             else:
@@ -337,6 +342,30 @@ class Hermes2ProToolParser(ToolParser):
                 function_name: str | None = current_tool_call.get("name")
                 if function_name:
                     self.current_tool_name_sent = True
+                    match = re.search(
+                        r'\{"name":\s*"'
+                        + re.escape(function_name)
+                        + r'"\s*,\s*"arguments":\s*(.*)',
+                        tool_call_portion.strip(),
+                        re.DOTALL,
+                    )
+                    function_arguments = ""
+                    if match:
+                        function_arguments = match.group(1)
+                        try:
+                            json.loads(tool_call_portion)
+                            if (
+                                isinstance(function_arguments, str)
+                                and len(function_arguments.rstrip()) >= 1
+                                and function_arguments.rstrip()[-1] == "}"
+                            ):
+                                function_arguments = function_arguments.rstrip()[:-1]
+                        except Exception:
+                            pass
+                    self.streamed_args_for_tool[self.current_tool_id] += (
+                        function_arguments
+                    )
+                    self.prev_tool_call_arr[self.current_tool_id] = current_tool_call
                     return DeltaMessage(
                         tool_calls=[
                             DeltaToolCall(
@@ -344,7 +373,7 @@ class Hermes2ProToolParser(ToolParser):
                                 type="function",
                                 id=make_tool_call_id(),
                                 function=DeltaFunctionCall(
-                                    name=function_name
+                                    name=function_name, arguments=function_arguments
                                 ).model_dump(exclude_none=True),
                             )
                         ]
@@ -387,13 +416,13 @@ class Hermes2ProToolParser(ToolParser):
             logger.debug("against new ones: %s", cur_arguments)
 
             # case -- no arguments have been created yet. skip sending a delta.
-            if not cur_arguments and not prev_arguments:
+            if cur_arguments is None and prev_arguments is None:
                 logger.debug("Skipping text %s - no arguments", delta_text)
                 delta = None
 
             # case -- prev arguments are defined, but non are now.
             #   probably impossible, but not a fatal error - just keep going
-            elif not cur_arguments and prev_arguments:
+            elif cur_arguments is None and prev_arguments is not None:
                 logger.error(
                     "should be impossible to have arguments reset "
                     "mid-call. skipping streaming anything."
@@ -402,7 +431,23 @@ class Hermes2ProToolParser(ToolParser):
 
             # case -- we now have the first info about arguments available from
             #   autocompleting the JSON
-            elif cur_arguments and not prev_arguments:
+            elif cur_arguments is not None and prev_arguments is None:
+                # although this is the first info about arguments, it could at the
+                # same time be the last info - because large chunks size can
+                # include both the beginning and the end of the arguments JSON.
+                # If so, we should trim off the last '}' from delta_text.
+                try:
+                    json.loads(tool_call_portion)
+                    is_complete_json = True
+                    if (
+                        isinstance(delta_text, str)
+                        and len(delta_text.rstrip()) >= 1
+                        and delta_text.rstrip()[-1] == "}"
+                    ):
+                        delta_text = delta_text.rstrip()[:-1]
+                except Exception:
+                    is_complete_json = False
+
                 # extract the content after {"name": ..., "arguments":
                 #   directly from tool_call_portion as cur_arguments_json,
                 #   since cur_arguments may differ from the original text
@@ -419,22 +464,32 @@ class Hermes2ProToolParser(ToolParser):
                     tool_call_portion.strip(),
                     re.DOTALL,
                 )
+                cur_arguments_start_index = 0
                 if match:
                     cur_arguments_json = match.group(1)
+                    cur_arguments_start_index = match.start(1)
                 else:
                     cur_arguments_json = json.dumps(cur_arguments, ensure_ascii=False)
+                delta_text_start_index = tool_call_portion.strip().rindex(delta_text)
+                delta_text_args_start_index = (
+                    cur_arguments_start_index - delta_text_start_index
+                )
+                if delta_text_args_start_index < 0:
+                    delta_text_args_start_index = 0
+                delta_text_args = delta_text[delta_text_args_start_index:]
 
-                logger.debug("finding %s in %s", delta_text, cur_arguments_json)
+                logger.debug("finding %s in %s", delta_text_args, cur_arguments_json)
 
                 # get the location where previous args differ from current.
-                if delta_text not in cur_arguments_json:
+                if delta_text_args not in cur_arguments_json:
                     return None
-                args_delta_start_loc = cur_arguments_json.rindex(delta_text) + len(
-                    delta_text
-                )
+                args_delta_start_loc = cur_arguments_json.rindex(delta_text_args)
+                args_delta_end_loc = args_delta_start_loc + len(delta_text_args)
 
                 # use that to find the actual delta
-                arguments_delta = cur_arguments_json[:args_delta_start_loc]
+                arguments_delta = cur_arguments_json[
+                    args_delta_start_loc:args_delta_end_loc
+                ]
                 logger.debug("First tokens in arguments received: %s", arguments_delta)
 
                 delta = DeltaMessage(
@@ -450,7 +505,7 @@ class Hermes2ProToolParser(ToolParser):
                 self.streamed_args_for_tool[self.current_tool_id] += arguments_delta
 
             # last case -- we have an update to existing arguments.
-            elif cur_arguments and prev_arguments:
+            elif cur_arguments is not None and prev_arguments is not None:
                 # judge whether the tool_call_portion is a complete JSON
                 try:
                     json.loads(tool_call_portion)
