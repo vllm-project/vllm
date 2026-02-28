@@ -85,7 +85,7 @@ class CPUWorker(Worker):
             self.local_omp_cpuid = omp_cpuids_list[self.rank]
 
         if self.local_omp_cpuid != "nobind":
-            ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
+            ret = torch.ops._C.init_cpu_threads_env(self.local_omp_cpuid)
             if ret:
                 logger.info(ret)
 
@@ -118,11 +118,12 @@ class CPUWorker(Worker):
     def determine_available_memory(self) -> int:
         return self.cache_config.cpu_kvcache_space_bytes or 0
 
-    def compile_or_warm_up_model(self) -> None:
+    def compile_or_warm_up_model(self) -> float:
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
         self.model_runner.warming_up_model()
+        return self.compilation_config.compilation_time
 
     def _get_autobind_cpu_ids(
         self, cpu_selector: Callable[[list[LogicalCPUInfo]], list[LogicalCPUInfo]]
