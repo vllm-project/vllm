@@ -5,7 +5,7 @@ import glob
 import itertools
 import math
 import os
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterable
 from typing import Any
 
 import numpy as np
@@ -79,6 +79,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         self.pre_quant: bool = False
         self.load_8bit: bool = False
         self.is_pool_model: bool = False
+        # Flag for models with fused 3D MoE weights (e.g., Qwen3-VL-MoE)
+        self.is_3d_moe_weight: bool = False
 
     def _get_weight_files(
         self,
@@ -357,10 +359,96 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 tp_size = global_tp_size
                 tp_rank = global_tp_rank
 
-            if any(
+            # Check if this is a 3D MoE weight (no .weight suffix)
+            is_3d_moe_target = (
+                self.is_3d_moe_weight
+                and any(
+                    mapped_weight_name == target_module
+                    for target_module in self.target_modules
+                )
+                and len(weight_tensor.shape) == 3
+            )
+
+            is_regular_target = any(
                 target_module in mapped_weight_name
                 for target_module in self.target_modules
-            ) and mapped_weight_name.endswith(".weight"):
+            ) and mapped_weight_name.endswith(".weight")
+
+            if is_3d_moe_target:
+                # Handle 3D fused MoE weights (e.g., Qwen3-VL-MoE)
+                # Checkpoint: [n_experts, dim1, dim2], transposed to match FusedMoE
+                # FusedMoE expects:
+                #   w13_weight: [num_experts, intermediate_size*2, hidden_size]
+                #   w2_weight: [num_experts, hidden_size, intermediate_size]
+                num_experts = weight_tensor.shape[0]
+
+                # Transpose to FusedMoE layout: [n_exp, out, in]
+                weight_tensor = weight_tensor.transpose(-1, -2)
+
+                # Quantize each expert separately and store their quant states
+                quantized_experts = []
+                quant_states_list = []
+
+                # TP sharding: gate_up (column) shards dim 0, down (row) shards dim -1
+                is_down_proj = "down_proj" in mapped_weight_name
+
+                for expert_id in range(num_experts):
+                    expert_weight = weight_tensor[expert_id]
+
+                    # Apply TP sharding per expert
+                    if is_down_proj:
+                        # down_proj is row parallel, shard input (dim -1)
+                        total_size = expert_weight.size(-1)
+                        start_index = total_size // tp_size * tp_rank
+                        end_index = total_size // tp_size * (tp_rank + 1)
+                        expert_weight = expert_weight[..., start_index:end_index]
+                    else:
+                        # gate_up is column parallel, shard output (dim 0)
+                        total_size = expert_weight.size(0)
+                        start_index = total_size // tp_size * tp_rank
+                        end_index = total_size // tp_size * (tp_rank + 1)
+                        expert_weight = expert_weight[start_index:end_index, ...]
+
+                    # Move to GPU and make contiguous
+                    if expert_weight.is_cuda:
+                        loaded_weight = expert_weight
+                    else:
+                        loaded_weight = expert_weight.to(
+                            device=current_platform.device_type
+                        )
+
+                    if loaded_weight.is_contiguous() is False:
+                        loaded_weight = loaded_weight.contiguous()
+
+                    # Quantize
+                    with set_default_torch_dtype(torch.float32):
+                        quantized, quant_state = quantize_4bit(
+                            loaded_weight,
+                            compress_statistics=True,
+                            quant_type="nf4",
+                        )
+                    quantized_experts.append(quantized)
+                    quant_states_list.append(quant_state)
+
+                # Stack quantized experts to match param shape
+                # quantize_4bit returns [quantized_size, 1], so after stack:
+                # Output shape: [num_experts, quantized_size, 1]
+                processed_weight = torch.stack(quantized_experts, dim=0)
+
+                # Custom weight_loader for direct copy in _wrap_3d_moe_iterator
+                def fused_moe_weight_loader(param, loaded_weight):
+                    param.data.copy_(loaded_weight)
+                    return True
+
+                set_weight_attrs(
+                    processed_weight,
+                    {"fused_moe_weight_loader": fused_moe_weight_loader},
+                )
+
+                # Store quant states as a list for later fusion
+                quant_state_dict[mapped_weight_name] = quant_states_list
+
+            elif is_regular_target:
                 # Without sharding
                 if any(
                     check_match(mapped_weight_name, module)
@@ -477,12 +565,22 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 # Get the corresponding weight name using module name and
                 # expert_params_mapping.
 
-                for exp in self.expert_params_mapping:
-                    weight_name = exp[1]
-                    rep_name = name.replace("experts", "") + weight_name.removesuffix(
-                        "."
-                    )
-                    self.target_modules.append(rep_name)
+                if self.is_3d_moe_weight:
+                    # For fused 3D MoE weights (e.g., Qwen3-VL-MoE), the checkpoint
+                    # has weights like "experts.gate_up_proj" and "experts.down_proj"
+                    # without the ".weight" suffix and without per-expert indices.
+                    # Add these to target modules for proper quantization.
+                    fused_3d_weight_names = ["gate_up_proj", "down_proj"]
+                    for weight_name in fused_3d_weight_names:
+                        # Append fused weight name to target modules
+                        rep_name = f"{name}.{weight_name}"
+                        self.target_modules.append(rep_name)
+                else:
+                    for exp in self.expert_params_mapping:
+                        weight_name = exp[1]
+                        base = name.replace("experts", "")
+                        rep_name = base + weight_name.removesuffix(".")
+                        self.target_modules.append(rep_name)
 
         assert self.target_modules, (
             "vLLM currently does not support BNB quantization for"
@@ -510,14 +608,19 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             elif isinstance(module, (RowParallelLinear,)):
                 self.column_sharded_weights_modules.append(name)
             elif isinstance(module, FusedMoE):
-                expert_mapping = self.expert_params_mapping
-                for exp in expert_mapping:
-                    if exp[-1] == "w2":
-                        weight_name = exp[1]
-                        rep_name = name.replace(
-                            "experts", ""
-                        ) + weight_name.removesuffix(".")
-                        self.column_sharded_weights_modules.append(rep_name)
+                if self.is_3d_moe_weight:
+                    # For 3D MoE, down_proj is row parallel (column sharded)
+                    rep_name = f"{name}.down_proj"
+                    self.column_sharded_weights_modules.append(rep_name)
+                else:
+                    expert_mapping = self.expert_params_mapping
+                    for exp in expert_mapping:
+                        if exp[-1] == "w2":
+                            weight_name = exp[1]
+                            rep_name = name.replace(
+                                "experts", ""
+                            ) + weight_name.removesuffix(".")
+                            self.column_sharded_weights_modules.append(rep_name)
 
     def _verify_model_compatibility(
         self, model: nn.Module, model_config: ModelConfig
@@ -568,12 +671,15 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         if is_moe_model(model):
             self.expert_params_mapping = get_moe_expert_mapping(model)
-            if not self.expert_params_mapping:
+            # Check if model uses fused 3D MoE weights (e.g., Qwen3-VL-MoE)
+            self.is_3d_moe_weight = getattr(model, "is_3d_moe_weight", False)
+            if not self.expert_params_mapping and not self.is_3d_moe_weight:
                 raise AttributeError(
                     f"MoE Model {type(model).__name__} does not support "
                     "BitsAndBytes quantization yet. Ensure this model has "
                     "'get_expert_mapping' method."
                 )
+
         # For some models like Molmo, we need to use hf_to_vllm_mapper
         # to ensure correct loading of weights.
         if hf_to_vllm_mapper := getattr(model, "hf_to_vllm_mapper", None):
@@ -623,6 +729,10 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         fused representations for w13 and w2.
         """
         from bitsandbytes.functional import QuantState
+
+        if self.is_3d_moe_weight:
+            # Handle 3D MoE weights (e.g., Qwen3-VL-MoE)
+            return self._fuse_3d_moe_quant_states(model, quant_states_dict)
 
         if not self.expert_params_mapping:
             return dict()
@@ -693,6 +803,100 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             w2_weight_name = name + ".w2_weight"
             expert_qs_dict[w13_weight_name] = w13_qs
             expert_qs_dict[w2_weight_name] = w2_qs
+        return expert_qs_dict
+
+    def _fuse_3d_moe_quant_states(
+        self, model: nn.Module, quant_states_dict: dict
+    ) -> dict:
+        """
+        Fuse quant states for 3D MoE weights (e.g., Qwen3-VL-MoE).
+
+        For 3D weights, quant_states_dict contains:
+        - "module.experts.gate_up_proj": list of QuantState per expert
+        - "module.experts.down_proj": list of QuantState per expert
+
+        We need to convert these to:
+        - "module.experts.w13_weight": fused QuantState for gate+up
+        - "module.experts.w2_weight": fused QuantState for down
+        """
+        from bitsandbytes.functional import QuantState
+
+        expert_qs_dict = {}
+        for name, module in model.named_modules():
+            if not isinstance(module, FusedMoE):
+                continue
+
+            # Find the corresponding quant states in the dict
+            gate_up_key = f"{name}.gate_up_proj"
+            down_key = f"{name}.down_proj"
+
+            if gate_up_key not in quant_states_dict:
+                continue
+
+            if down_key not in quant_states_dict:
+                logger.warning(
+                    "Missing down_proj quant state for %s, skipping fusion", name
+                )
+                continue
+
+            gate_up_states = quant_states_dict[gate_up_key]  # list of QuantState
+            down_states = quant_states_dict[down_key]  # list of QuantState
+
+            # Dequantize nested states
+            for qs in gate_up_states:
+                self._dequantize_dq(qs)
+            for qs in down_states:
+                self._dequantize_dq(qs)
+
+            # For gate_up_proj, each expert's state covers both gate and up
+            # The shape is [intermediate_size * 2, hidden_size] after transpose
+            # We need to split and interleave
+            w13_absmax_lst = []
+            w13_total_dim0 = 0
+            for qs in gate_up_states:
+                # Each gate_up_proj quant state covers both w1 (gate) and w3 (up)
+                # The absmax is for the combined weight
+                w13_absmax_lst.append(qs.absmax)
+                w13_total_dim0 += qs.shape[0]
+
+            w2_absmax_lst = []
+            w2_total_dim0 = 0
+            for qs in down_states:
+                w2_absmax_lst.append(qs.absmax)
+                w2_total_dim0 += qs.shape[0]
+
+            w13_absmax = torch.cat(w13_absmax_lst)
+            w2_absmax = torch.cat(w2_absmax_lst)
+
+            # Create fused quantization state for w13
+            w13_qs = QuantState(
+                absmax=w13_absmax,
+                shape=(w13_total_dim0, gate_up_states[0].shape[1]),
+                code=gate_up_states[0].code,
+                blocksize=gate_up_states[0].blocksize,
+                quant_type="nf4",
+                dtype=gate_up_states[0].dtype,
+            )
+
+            # Create fused quantization state for w2
+            w2_qs = QuantState(
+                absmax=w2_absmax,
+                shape=(w2_total_dim0, down_states[0].shape[1]),
+                code=down_states[0].code,
+                blocksize=down_states[0].blocksize,
+                quant_type="nf4",
+                dtype=down_states[0].dtype,
+            )
+
+            w13_weight_name = name + ".w13_weight"
+            w2_weight_name = name + ".w2_weight"
+            expert_qs_dict[w13_weight_name] = w13_qs
+            expert_qs_dict[w2_weight_name] = w2_qs
+
+            # Remove original keys
+            del quant_states_dict[gate_up_key]
+            del quant_states_dict[down_key]
+
         return expert_qs_dict
 
     def _stack_quantization_states(
@@ -791,7 +995,22 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             model_config.revision,
         )
         weights_to_load = {name for name, _ in model.named_parameters()}
-        loaded_weights = model.load_weights(qweight_iterator)
+
+        # For 3D MoE models with BNB, wrap the iterator to handle 3D MoE
+        # weights inline. This avoids materializing all weights into memory.
+        if self.is_3d_moe_weight:
+            bnb_loaded_weights: set[str] = set()
+            wrapped_iterator = self._wrap_3d_moe_iterator(
+                model, qweight_iterator, bnb_loaded_weights
+            )
+            loaded_weights = model.load_weights(wrapped_iterator)
+            # Merge the BNB-loaded weights with the model-loaded weights
+            if loaded_weights is not None:
+                loaded_weights = loaded_weights | bnb_loaded_weights
+        else:
+            # Standard loading for non-3D-MoE models
+            loaded_weights = model.load_weights(qweight_iterator)
+
         # Some models may have weights loading tracker unimplemented.
         if loaded_weights is not None:
             weights_not_loaded = weights_to_load - loaded_weights
@@ -815,3 +1034,48 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)
+
+    def _wrap_3d_moe_iterator(
+        self,
+        model: nn.Module,
+        weights_iterator: Iterable[tuple[str, torch.Tensor]],
+        bnb_loaded_weights: set[str],
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        """Wrap weights iterator to intercept and directly load 3D MoE weights."""
+        params_dict = dict(model.named_parameters())
+
+        fused_expert_params_mapping = [
+            ("experts.w13_weight", "experts.gate_up_proj"),
+            ("experts.w2_weight", "experts.down_proj"),
+        ]
+
+        for org_name, loaded_weight in weights_iterator:
+            mapped_name = self.weight_mapper(org_name)
+
+            is_3d_moe_weight = (
+                "experts.gate_up_proj" in mapped_name
+                or "experts.down_proj" in mapped_name
+            ) and len(loaded_weight.shape) == 3
+
+            if not is_3d_moe_weight:
+                yield org_name, loaded_weight
+                continue
+
+            for model_suffix, checkpoint_suffix in fused_expert_params_mapping:
+                if checkpoint_suffix not in mapped_name:
+                    continue
+
+                param_name = mapped_name.replace(checkpoint_suffix, model_suffix)
+                if param_name not in params_dict:
+                    continue
+
+                param = params_dict[param_name]
+                fused_moe_weight_loader = getattr(
+                    loaded_weight, "fused_moe_weight_loader", None
+                )
+
+                if fused_moe_weight_loader is not None and fused_moe_weight_loader(
+                    param, loaded_weight
+                ):
+                    bnb_loaded_weights.add(param_name)
+                break
