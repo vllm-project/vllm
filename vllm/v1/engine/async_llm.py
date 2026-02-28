@@ -37,7 +37,12 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
-from vllm.v1.engine import EngineCoreRequest, PauseMode
+from vllm.v1.engine import (
+    EngineCoreRequest,
+    FaultToleranceRequest,
+    FaultToleranceResult,
+    PauseMode,
+)
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
@@ -999,6 +1004,16 @@ class AsyncLLM(EngineClient):
                 engine_idxs=list(range(new_data_parallel_size)),
                 custom_stat_loggers=None,
             )
+
+    async def handle_fault(
+        self, fault_tolerance_request: FaultToleranceRequest
+    ) -> FaultToleranceResult:
+        """send fault tolerance instruction to the engine"""
+        return await self.engine_core.handle_fault(fault_tolerance_request)
+
+    async def get_fault_info(self):
+        """report exception in engine core"""
+        return await self.engine_core.fault_reporter()
 
     @property
     def is_running(self) -> bool:
