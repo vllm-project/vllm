@@ -142,6 +142,13 @@ class TestCompressedTensorsMoEActorderNull(unittest.TestCase):
         self.assertEqual(layer.w13_weight_g_idx.shape[1], 0)
         self.assertEqual(layer.w2_weight_g_idx.shape[1], 0)
 
+        # Verify g_idx are NOT registered as nn.Parameters
+        param_names = {name for name, _ in layer.named_parameters()}
+        self.assertNotIn("w13_weight_g_idx", param_names)
+        self.assertNotIn("w2_weight_g_idx", param_names)
+        self.assertNotIn("w13_g_idx_sort_indices", param_names)
+        self.assertNotIn("w2_g_idx_sort_indices", param_names)
+
 
 if __name__ == "__main__":
     unittest.main()

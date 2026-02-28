@@ -1570,21 +1570,19 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
 
         else:
-            layer.w13_weight_g_idx = torch.nn.Parameter(
-                torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-                requires_grad=False,
+            # When actorder is null, assign g_idx as plain tensors (not
+            # nn.Parameter) since they are not real model weights.
+            layer.w13_weight_g_idx = torch.empty(
+                (num_experts, 0), dtype=torch.int32, device=device
             )
-            layer.w2_weight_g_idx = torch.nn.Parameter(
-                torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-                requires_grad=False,
+            layer.w2_weight_g_idx = torch.empty(
+                (num_experts, 0), dtype=torch.int32, device=device
             )
-            layer.w13_g_idx_sort_indices = torch.nn.Parameter(
-                torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-                requires_grad=False,
+            layer.w13_g_idx_sort_indices = torch.empty(
+                (num_experts, 0), dtype=torch.int32, device=device
             )
-            layer.w2_g_idx_sort_indices = torch.nn.Parameter(
-                torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-                requires_grad=False,
+            layer.w2_g_idx_sort_indices = torch.empty(
+                (num_experts, 0), dtype=torch.int32, device=device
             )
 
         marlin_w13_qweight = ops.gptq_marlin_moe_repack(
