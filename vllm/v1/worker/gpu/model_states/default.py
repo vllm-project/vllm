@@ -81,7 +81,7 @@ class ModelState(ModelStateInterface):
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
         req_states: RequestState,
-    ) -> torch.Tensor | None:
+    ) -> torch.Tensor:
         mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
             scheduled_encoder_inputs
         )
