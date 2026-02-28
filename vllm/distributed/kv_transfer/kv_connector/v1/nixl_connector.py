@@ -948,7 +948,10 @@ class NixlConnectorWorker:
         # type based on kv_buffer_device
         nixl_memory_type = current_platform.get_nixl_memory_type()
         if nixl_memory_type is None:
-            nixl_memory_type = "DRAM" if self.kv_buffer_device == "cpu" else "VRAM"
+            if self.kv_buffer_device in ["cuda", "xpu"]:
+                nixl_memory_type = "VRAM"
+            elif self.kv_buffer_device == "cpu":
+                nixl_memory_type = "DRAM"
         if nixl_memory_type is None:
             raise RuntimeError(
                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
