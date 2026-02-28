@@ -45,10 +45,9 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
 
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, dict[str, Any]]:
-        video, metadata = self.video_loader.load_bytes(
+        return self.video_loader.load_bytes(
             data, num_frames=self.num_frames, **self.kwargs
         )
-        return video, metadata
 
     def load_base64(
         self, media_type: str, data: str

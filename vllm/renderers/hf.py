@@ -621,6 +621,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
@@ -635,6 +636,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
+            mm_processor_kwargs=mm_processor_kwargs,
         )
 
         prompt_raw = safe_apply_chat_template(
@@ -675,6 +677,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
@@ -689,6 +692,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
+            mm_processor_kwargs=mm_processor_kwargs,
         )
 
         prompt_raw = safe_apply_chat_template(
