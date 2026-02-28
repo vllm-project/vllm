@@ -42,7 +42,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
@@ -213,7 +213,7 @@ def test_select_common_block_size_prefers_manager_block_size():
         AttentionGroup(backend_b, [], [], _make_kv_cache_spec(), 0),
     ]
 
-    selected_size = GPUModelRunner.select_common_block_size(128, attn_groups)
+    selected_size = select_common_block_size(128, attn_groups)
     assert selected_size == 128
 
 
@@ -225,7 +225,7 @@ def test_select_common_block_size_uses_largest_shared_int():
         AttentionGroup(backend_b, [], [], _make_kv_cache_spec(), 0),
     ]
 
-    selected_size = GPUModelRunner.select_common_block_size(256, attn_groups)
+    selected_size = select_common_block_size(256, attn_groups)
     assert selected_size == 64
 
 
@@ -238,7 +238,7 @@ def test_select_common_block_size_no_valid_option():
     ]
 
     with pytest.raises(ValueError):
-        GPUModelRunner.select_common_block_size(48, attn_groups)
+        select_common_block_size(48, attn_groups)
 
 
 def test_update_states_new_request(model_runner, dist_init):
