@@ -3982,11 +3982,9 @@ class GPUModelRunner(
         with record_function_or_nullcontext(
             "gpu_model_runner: AsyncGPUModelRunnerOutput"
         ):
-            sampled_token_ids = sampler_output.sampled_token_ids
-
             async_output = AsyncGPUModelRunnerOutput(
                 model_runner_output=output,
-                sampled_token_ids=sampled_token_ids,
+                sampled_token_ids=sampler_output.sampled_token_ids,
                 logprobs_tensors=sampler_output.logprobs_tensors,
                 invalid_req_indices=invalid_req_indices,
                 async_output_copy_stream=self.async_output_copy_stream,
