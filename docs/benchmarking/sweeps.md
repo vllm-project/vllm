@@ -128,7 +128,6 @@ The algorithm for exploring different workload levels can be summarized as follo
 3. Estimate the value of `workload_var` corresponding to Step 2.
 4. Run the benchmark over intermediate values of `workload_var` uniformly using the remaining iterations.
 
-
 You can override the number of iterations in the algorithm by setting `--workload-iters`.
 
 !!! tip
