@@ -1380,6 +1380,13 @@ class OpenAIServingChat(OpenAIServing):
             logger.exception("Error in chat completion stream generator.")
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
+        finally:
+            # Reset tool parser streaming state so that any section-level
+            # buffers or counters are cleaned up promptly rather than
+            # waiting for garbage collection.
+            for tp in tool_parsers:
+                if tp is not None:
+                    tp.reset_streaming_state()
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
 
