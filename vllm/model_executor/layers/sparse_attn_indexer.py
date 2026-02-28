@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+import os
+
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
@@ -24,6 +26,14 @@ elif current_platform.is_xpu():
     from vllm._xpu_ops import xpu_ops as ops
 
 logger = init_logger(__name__)
+
+# Maximum logits tensor size for the sparse attention indexer prefill path.
+# When the full-chunk logits would exceed this budget, we process each request
+# separately (and sub-chunk queries for very long sequences) to avoid OOM.
+# See: https://github.com/vllm-project/vllm/issues/34553
+_MAX_LOGITS_BYTES = int(
+    os.environ.get("VLLM_SPARSE_INDEXER_MAX_LOGITS_BYTES", str(1 * 1024**3))
+)
 
 
 def sparse_attn_indexer(
@@ -103,29 +113,100 @@ def sparse_attn_indexer(
                 chunk.cu_seq_lens,
             )
 
-            logits = fp8_mqa_logits(
-                q_fp8[chunk.token_start : chunk.token_end],
-                (k_fp8, k_scale.view(torch.float32).flatten()),
-                weights[chunk.token_start : chunk.token_end],
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                clean_logits=False,
-            )
-            num_rows = logits.shape[0]
+            chunk_m = chunk.token_end - chunk.token_start
+            chunk_n = chunk.total_seq_lens
 
-            topk_indices = topk_indices_buffer[
-                chunk.token_start : chunk.token_end, :topk_tokens
-            ]
-            torch.ops._C.top_k_per_row_prefill(
-                logits,
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
-            )
+            # Fast path: if the full-chunk logits tensor fits within
+            # budget, use the original batched call (zero overhead).
+            if chunk_m * chunk_n * 4 <= _MAX_LOGITS_BYTES:
+                logits = fp8_mqa_logits(
+                    q_fp8[chunk.token_start : chunk.token_end],
+                    (k_fp8, k_scale.view(torch.float32).flatten()),
+                    weights[chunk.token_start : chunk.token_end],
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    clean_logits=False,
+                )
+                num_rows = logits.shape[0]
+
+                topk_indices = topk_indices_buffer[
+                    chunk.token_start : chunk.token_end, :topk_tokens
+                ]
+                torch.ops._C.top_k_per_row_prefill(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
+            else:
+                # Per-request processing to bound logits memory.
+                # At high concurrency, the batched [M, N] logits tensor
+                # (M=query tokens, N=total KV across all requests) can
+                # exceed GPU memory. Processing each request separately
+                # reduces peak logits to [m_i, n_i] per request.
+                # Cross-request logits are never used (masked by
+                # cu_seqlen_ks/ke), so results are identical.
+                max_logits_elems = _MAX_LOGITS_BYTES // 4  # float32
+
+                for req_idx in range(chunk.num_reqs):
+                    # KV boundaries from CPU tensor (no GPU sync)
+                    k_start = chunk.cu_seq_lens_cpu[req_idx].item()
+                    k_end = chunk.cu_seq_lens_cpu[req_idx + 1].item()
+                    n_i = k_end - k_start
+                    if n_i == 0:
+                        continue
+
+                    # Query boundaries from CPU tensor (no GPU sync)
+                    q_local_start = chunk.cu_query_lens_cpu[req_idx].item()
+                    q_local_end = chunk.cu_query_lens_cpu[req_idx + 1].item()
+                    m_i = q_local_end - q_local_start
+                    if m_i == 0:
+                        continue
+
+                    q_global_start = chunk.token_start + q_local_start
+
+                    # Per-request KV slice (views, not copies)
+                    k_fp8_req = k_fp8[k_start:k_end]
+                    k_scale_req = k_scale[k_start:k_end]
+
+                    # Adjust cu_seqlen offsets to be relative to this
+                    # request's K start position
+                    cu_ks = chunk.cu_seqlen_ks[q_local_start:q_local_end] - k_start
+                    cu_ke = chunk.cu_seqlen_ke[q_local_start:q_local_end] - k_start
+
+                    # Sub-chunk query dimension if single-request logits
+                    # would still exceed budget
+                    max_q = max(1, max_logits_elems // n_i)
+
+                    for sub_s in range(0, m_i, max_q):
+                        sub_e = min(sub_s + max_q, m_i)
+                        g_s = q_global_start + sub_s
+                        g_e = q_global_start + sub_e
+
+                        logits = fp8_mqa_logits(
+                            q_fp8[g_s:g_e],
+                            (k_fp8_req, k_scale_req.view(torch.float32).flatten()),
+                            weights[g_s:g_e],
+                            cu_ks[sub_s:sub_e],
+                            cu_ke[sub_s:sub_e],
+                            clean_logits=False,
+                        )
+
+                        topk_idx = topk_indices_buffer[g_s:g_e, :topk_tokens]
+                        torch.ops._C.top_k_per_row_prefill(
+                            logits,
+                            cu_ks[sub_s:sub_e],
+                            cu_ke[sub_s:sub_e],
+                            topk_idx,
+                            logits.shape[0],
+                            logits.stride(0),
+                            logits.stride(1),
+                            topk_tokens,
+                        )
 
             # Compute lengths from row spans
             # lengths = (chunk.cu_seqlen_ke - chunk.cu_seqlen_ks).to(torch.int32)
