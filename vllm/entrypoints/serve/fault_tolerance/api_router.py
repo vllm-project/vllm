@@ -13,7 +13,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.logger import init_logger
-from vllm.v1.engine import FaultToleranceRequest
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 
 logger = init_logger(__name__)
 

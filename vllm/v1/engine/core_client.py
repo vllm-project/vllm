@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import contextlib
-import json
 import queue
 import sys
 import threading
@@ -40,8 +39,6 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     EngineCoreRequestType,
     EngineStatusType,
-    FaultToleranceRequest,
-    FaultToleranceResult,
     PauseMode,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
@@ -56,7 +53,12 @@ from vllm.v1.engine.utils import (
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
-from vllm.v1.sentinel import ClientSentinel
+from vllm.v1.fault_tolerance.sentinel import ClientSentinel
+from vllm.v1.fault_tolerance.utils import (
+    FaultToleranceRequest,
+    FaultToleranceResult,
+    FaultToleranceZmqAddresses,
+)
 from vllm.v1.serial_utils import (
     MsgpackDecoder,
     MsgpackEncoder,
@@ -507,41 +509,16 @@ class MPClient(EngineCoreClient):
         self.resources = BackgroundResources(ctx=sync_ctx)
         self._finalizer = weakref.finalize(self, self.resources)
         success = False
-
         try:
             # State used for data parallel.
             self.engines_running = False
 
             self.stats_update_address: str | None = None
-            self.engine_fault_socket_addr: str | None = None
-            self.client_sentinel_request_addr: str | None = None
-            self.engine_core_sentinel_cmd_addr: str | None = None
-            self.engine_core_sentinel_identities: dict[int, bytes] | None = None
-            self.fault_state_pub_socket_addr: str | None = None
             if client_addresses:
                 # Engines are managed externally to this client.
                 input_address = client_addresses["input_address"]
                 output_address = client_addresses["output_address"]
                 self.stats_update_address = client_addresses.get("stats_update_address")
-                if vllm_config.fault_tolerance_config.enable_fault_tolerance:
-                    self.engine_fault_socket_addr = client_addresses[
-                        "engine_fault_socket_addr"
-                    ]
-                    self.client_sentinel_request_addr = client_addresses[
-                        "client_sentinel_request_addr"
-                    ]
-                    self.engine_core_sentinel_cmd_addr = client_addresses[
-                        "engine_core_sentinel_cmd_addr"
-                    ]
-                    self.engine_core_sentinel_identities = {
-                        int(k): v.encode("utf-8")
-                        for k, v in json.loads(
-                            client_addresses["engine_core_sentinel_identities"]
-                        ).items()
-                    }
-                    self.fault_state_pub_socket_addr = client_addresses[
-                        "fault_state_pub_socket_addr"
-                    ]
             else:
                 # Engines are managed by this client.
                 with launch_core_engines(vllm_config, executor_class, log_stats) as (
@@ -556,19 +533,12 @@ class MPClient(EngineCoreClient):
                 (output_address,) = addresses.outputs
                 self.stats_update_address = addresses.frontend_stats_publish_address
                 if vllm_config.fault_tolerance_config.enable_fault_tolerance:
-                    self.engine_fault_socket_addr = addresses.engine_fault_socket_addr
-                    self.client_sentinel_request_addr = (
-                        addresses.client_sentinel_request_addr
+                    assert client_addresses is not None
+                    assert addresses.fault_tolerance_addresses is not None
+                    client_addresses["fault_tolerance_addresses"] = (
+                        addresses.fault_tolerance_addresses.to_str()
                     )
-                    self.engine_core_sentinel_cmd_addr = (
-                        addresses.engine_core_sentinel_cmd_addr
-                    )
-                    self.engine_core_sentinel_identities = (
-                        addresses.engine_core_sentinel_identities
-                    )
-                    self.fault_state_pub_socket_addr = (
-                        addresses.fault_state_pub_socket_addr
-                    )
+
                 if coordinator is not None:
                     assert self.stats_update_address == (
                         coordinator.get_stats_publish_address()
@@ -904,6 +874,8 @@ class AsyncMPClient(MPClient):
         client_count: int = 1,
         client_index: int = 0,
     ):
+        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            client_addresses = client_addresses or {}
         super().__init__(
             asyncio_mode=True,
             vllm_config=vllm_config,
@@ -911,27 +883,20 @@ class AsyncMPClient(MPClient):
             log_stats=log_stats,
             client_addresses=client_addresses,
         )
-
         self.client_count = client_count
         self.client_index = client_index
         self.outputs_queue = asyncio.Queue[EngineCoreOutputs | Exception]()
 
-        self.identity = str(uuid.uuid4()).encode("utf8")
         if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            assert client_addresses is not None
             self.is_faulted = threading.Event()
-            assert self.engine_fault_socket_addr is not None
-            assert self.client_sentinel_request_addr is not None
-            assert self.engine_core_sentinel_cmd_addr is not None
-            assert self.engine_core_sentinel_identities is not None
-            assert self.fault_state_pub_socket_addr is not None
+            ft_addr = FaultToleranceZmqAddresses.from_str(
+                client_addresses["fault_tolerance_addresses"]
+            )
             if self.client_index == 0:
                 self.client_sentinel = ClientSentinel(
-                    vllm_config,
-                    self.engine_fault_socket_addr,
-                    self.client_sentinel_request_addr,
-                    self.engine_core_sentinel_cmd_addr,
-                    self.engine_core_sentinel_identities,
-                    self.fault_state_pub_socket_addr,
+                    vllm_config=vllm_config,
+                    fault_tolerance_addresses=ft_addr,
                 )
                 self.resources.client_sentinel = self.client_sentinel
             self.ft_request_lock = threading.Lock()
@@ -944,22 +909,24 @@ class AsyncMPClient(MPClient):
                     for engine_index in self.engine_ranks_managed
                 }.items()
             )
-            self.sync_ctx = self.resources.ctx
 
             self.client_sentinel_req_socket = make_zmq_socket(
-                self.sync_ctx,
-                self.client_sentinel_request_addr,
+                self.resources.ctx,
+                ft_addr.client_sentinel_request_addr,
                 zmq.DEALER,
                 bind=False,
-                identity=self.identity,
+                identity=str(uuid.uuid4()).encode("utf8"),
             )
             self.fault_state_sub_socket = make_zmq_socket(
-                self.sync_ctx, self.fault_state_pub_socket_addr, zmq.SUB, bind=False
+                self.resources.ctx,
+                ft_addr.fault_state_pub_socket_addr,
+                zmq.SUB,
+                bind=False,
             )
-            topic = (
-                self.vllm_config.fault_tolerance_config.fault_state_pub_topic.encode()
+            self.fault_state_sub_socket.setsockopt(
+                zmq.SUBSCRIBE,
+                self.vllm_config.fault_tolerance_config.fault_state_pub_topic.encode(),
             )
-            self.fault_state_sub_socket.setsockopt(zmq.SUBSCRIBE, topic)
             self.resources.client_sentinel_req_socket = self.client_sentinel_req_socket
             self.resources.fault_state_sub_socket = self.fault_state_sub_socket
             threading.Thread(

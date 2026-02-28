@@ -26,19 +26,18 @@ from vllm.distributed.device_communicators.cuda_communicator import CudaCommunic
 from vllm.logger import init_logger
 from vllm.utils.collection_utils import ThreadSafeDict
 from vllm.utils.network_utils import close_sockets, get_open_port, make_zmq_socket
-from vllm.v1.engine import (
-    EngineCoreRequestType,
-    EngineStatusType,
+from vllm.v1.engine import EngineCoreRequestType, EngineStatusType
+from vllm.v1.engine.exceptions import EngineLoopPausedError
+from vllm.v1.fault_tolerance.utils import (
+    FaultInfo,
     FaultToleranceRequest,
     FaultToleranceResult,
+    FaultToleranceZmqAddresses,
 )
-from vllm.v1.engine.exceptions import EngineLoopPausedError, FaultInfo
 from vllm.v1.serial_utils import run_method
 from vllm.v1.utils import get_engine_client_zmq_addr
 
 logger = init_logger(__name__)
-# Polling timeout in milliseconds for non-blocking message reception
-POLL_TIMEOUT_MS = 100
 
 
 class BaseSentinel:
@@ -75,6 +74,8 @@ class BaseSentinel:
                 bind=False,
                 identity=sentinel_identity,
             )
+            self.upstream_cmd_poller = zmq.Poller()
+            self.upstream_cmd_poller.register(self.upstream_cmd_socket, zmq.POLLIN)
         if downstream_cmd_addr is not None:
             self.downstream_cmd_socket = make_zmq_socket(
                 ctx=self.ctx,
@@ -82,6 +83,8 @@ class BaseSentinel:
                 socket_type=zmq.ROUTER,
                 bind=True,
             )
+            self.downstream_cmd_poller = zmq.Poller()
+            self.downstream_cmd_poller.register(self.downstream_cmd_socket, zmq.POLLIN)
 
     def _make_logger(self):
         def log(msg, *args, level="info", **kwargs):
@@ -116,13 +119,10 @@ class BaseSentinel:
         Receive and execute a command from upstream sentinel and send back
         the execution result.
         """
-        poll_timeout_ms = 100
         assert self.upstream_cmd_socket is not None
         try:
             # Polls the upstream command socket
-            poller = zmq.Poller()
-            poller.register(self.upstream_cmd_socket, zmq.POLLIN)
-            events = poller.poll(timeout=poll_timeout_ms)
+            events = self.upstream_cmd_poller.poll(timeout=100)
             if events:
                 _, ft_request_bytes = self.upstream_cmd_socket.recv_multipart()
                 ft_request = msgspec.msgpack.decode(
@@ -235,14 +235,12 @@ class BaseSentinel:
         deadline = time.monotonic() + timeout
         responses: dict[bytes, FaultToleranceResult] = {}
         pending = set(target_identities)
-        poller = zmq.Poller()
-        poller.register(self.downstream_cmd_socket, zmq.POLLIN)
         while pending:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             try:
-                events = poller.poll(int(remaining * 1000))
+                events = self.downstream_cmd_poller.poll(int(remaining * 1000))
                 if not events:
                     break
                 identity, _, payload = self.downstream_cmd_socket.recv_multipart()
@@ -270,11 +268,7 @@ class ClientSentinel(BaseSentinel):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        engine_fault_socket_addr: str,
-        client_sentinel_request_addr: str,
-        engine_core_sentinel_cmd_addr: str,
-        engine_core_sentinel_identities: dict[int, bytes],
-        fault_state_pub_socket_addr: str,
+        fault_tolerance_addresses: FaultToleranceZmqAddresses,
     ):
         dp_rank = vllm_config.parallel_config.data_parallel_index
         dp_size = vllm_config.parallel_config.data_parallel_size
@@ -288,7 +282,7 @@ class ClientSentinel(BaseSentinel):
 
         super().__init__(
             upstream_cmd_addr=None,
-            downstream_cmd_addr=engine_core_sentinel_cmd_addr,
+            downstream_cmd_addr=fault_tolerance_addresses.engine_core_sentinel_cmd_addr,
             sentinel_identity=None,
             sentinel_tag=None,
             vllm_config=vllm_config,
@@ -296,21 +290,21 @@ class ClientSentinel(BaseSentinel):
 
         self.fault_tolerance_req_socket = make_zmq_socket(
             ctx=self.ctx,
-            path=client_sentinel_request_addr,
+            path=fault_tolerance_addresses.client_sentinel_request_addr,
             socket_type=zmq.ROUTER,
             bind=True,
         )
 
         self.fault_receiver_socket = make_zmq_socket(
             ctx=self.ctx,
-            path=engine_fault_socket_addr,
+            path=fault_tolerance_addresses.engine_fault_socket_addr,
             socket_type=zmq.ROUTER,
             bind=True,
         )
 
         self.fault_state_pub_socket = make_zmq_socket(
             ctx=self.ctx,
-            path=fault_state_pub_socket_addr,
+            path=fault_tolerance_addresses.fault_state_pub_socket_addr,
             socket_type=zmq.PUB,
             bind=True,
         )
@@ -344,7 +338,9 @@ class ClientSentinel(BaseSentinel):
         )
         # todo: use identities as the key, indexes as the value as the index may
         # change in dp scale down and up
-        self.engine_core_sentinel_identities = engine_core_sentinel_identities
+        self.engine_core_sentinel_identities = (
+            fault_tolerance_addresses.engine_core_sentinel_identities
+        )
 
         threading.Thread(
             target=self.run, daemon=True, name="ClientSentinelCmdAndFaultReceiverThread"
@@ -603,7 +599,6 @@ class EngineCoreSentinel(BaseSentinel):
             identity=sentinel_identity,
         )
 
-        self.poller = zmq.Poller()
         self.communicator_aborted = False
         self.engine_running = True
         threading.Thread(

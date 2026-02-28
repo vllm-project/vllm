@@ -48,7 +48,6 @@ from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreRequest,
     EngineCoreRequestType,
-    FaultToleranceRequest,
     FinishReason,
     PauseMode,
     ReconfigureDistributedRequest,
@@ -63,11 +62,12 @@ from vllm.v1.engine.utils import (
     get_device_indices,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance.sentinel import EngineCoreSentinel
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.sentinel import EngineCoreSentinel
 from vllm.v1.serial_utils import (
     MsgpackDecoder,
     MsgpackEncoder,
@@ -892,10 +892,10 @@ class EngineCoreProc(EngineCore):
                     maxsize=1
                 )
                 self.engine_recovery_timeout = ft_config.engine_recovery_timeout
-                engine_core_sentinel_ids = addresses.engine_core_sentinel_identities
-                assert engine_core_sentinel_ids is not None
-                assert addresses.engine_fault_socket_addr is not None
-                assert addresses.engine_core_sentinel_cmd_addr is not None
+                assert addresses.fault_tolerance_addresses is not None
+                ft_addresses = addresses.fault_tolerance_addresses
+                engine_core_sentinel_ids = ft_addresses.engine_core_sentinel_identities
+
                 # The ZMQ address between engine_core_sentinel and worker_sentinel.
                 worker_cmd_addr = get_engine_client_zmq_addr(True, "0.0.0.0")
                 self.engine_core_sentinel = EngineCoreSentinel(
@@ -904,8 +904,8 @@ class EngineCoreProc(EngineCore):
                     cmd_q=self.cmd_q,
                     busy_loop_active=self.busy_loop_active,
                     engine_input_q=self.input_queue,
-                    engine_fault_socket_addr=addresses.engine_fault_socket_addr,
-                    upstream_cmd_addr=addresses.engine_core_sentinel_cmd_addr,
+                    engine_fault_socket_addr=ft_addresses.engine_fault_socket_addr,
+                    upstream_cmd_addr=ft_addresses.engine_core_sentinel_cmd_addr,
                     downstream_cmd_addr=worker_cmd_addr,
                     sentinel_identity=engine_core_sentinel_ids[self.engine_index],
                     vllm_config=vllm_config,

@@ -247,26 +247,6 @@ class ReconfigureRankType(enum.IntEnum):
     SHUTDOWN_CURRENT_RANK = -2
 
 
-class FaultToleranceRequest(msgspec.Struct):
-    """
-    Request for fault tolerance instructions, used in the fault tolerance protocol.
-    """
-
-    request_id: str
-    instruction: str
-    params: dict[str, Any]
-
-
-class FaultToleranceResult(msgspec.Struct):
-    """
-    Result of applying fault tolerance instructions.
-    """
-
-    request_id: str
-    success: bool
-    reason: str | None = None
-
-
 class EngineStatusType(enum.IntEnum):
     HEALTHY = 0
     DEAD = 1

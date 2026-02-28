@@ -266,11 +266,7 @@ def run_multi_api_server(args: argparse.Namespace):
             stats_update_address=coordinator.get_stats_publish_address()
             if coordinator
             else None,
-            engine_fault_socket_addr=addresses.engine_fault_socket_addr,
-            client_sentinel_request_addr=addresses.client_sentinel_request_addr,
-            engine_core_sentinel_cmd_addr=addresses.engine_core_sentinel_cmd_addr,
-            engine_core_sentinel_identities=addresses.engine_core_sentinel_identities,
-            fault_state_pub_socket_addr=addresses.fault_state_pub_socket_addr,
+            fault_tolerance_addresses=addresses.fault_tolerance_addresses,
         )
 
         # For dp ranks > 0 in external/hybrid DP LB modes, we must delay the

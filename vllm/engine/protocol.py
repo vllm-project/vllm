@@ -21,10 +21,9 @@ from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.v1.engine import (
     EngineCoreRequest,
-    FaultToleranceRequest,
-    FaultToleranceResult,
 )
 from vllm.v1.engine.input_processor import InputProcessor
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
 
 if TYPE_CHECKING:
     from vllm.v1.engine import PauseMode

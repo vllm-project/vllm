@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import time
-
-import msgspec
-
-
 class EngineGenerateError(Exception):
     """Raised when a AsyncLLM.generate() fails. Recoverable."""
 
@@ -30,33 +25,3 @@ class EngineLoopPausedError(Exception):
     """
 
     pass
-
-
-class FaultInfo(msgspec.Struct):
-    type: str
-    message: str
-    engine_id: str
-    timestamp: str | None = None
-    additional_info: dict | None = None
-
-    def __post_init__(self):
-        # If no exit time is specified, the current timestamp will be used by default.
-
-        local_time = time.localtime(time.time())
-        if self.timestamp is None:
-            self.timestamp = time.strftime("%H:%M:%S", local_time)
-
-    @classmethod
-    def from_exception(
-        cls,
-        exception: Exception,
-        engine_id: str | int,
-        additional_info: dict | None = None,
-    ) -> "FaultInfo":
-        """Create FaultInfo from an exception."""
-        return cls(
-            type=type(exception).__name__,
-            message=str(exception),
-            engine_id=str(engine_id),
-            additional_info=additional_info or {},
-        )

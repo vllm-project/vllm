@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-import multiprocessing
 import os
 import uuid
 import weakref
@@ -29,8 +28,8 @@ from vllm.utils.network_utils import (
 )
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
-from vllm.v1.engine.exceptions import FaultInfo
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance.utils import FaultInfo, FaultToleranceZmqAddresses
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
@@ -63,7 +62,6 @@ class EngineZmqAddresses:
     inputs: list[str]
     # ZMQ output socket addresses for each front-end client (responses)
     outputs: list[str]
-
     # ZMQ input socket address of DP coordinator if applicable
     coordinator_input: str | None = None
     # ZMQ output socket address of DP coordinator if applicable
@@ -72,18 +70,8 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
-    # ZMQ fault_state_pub_socket address of client sentinel
-    fault_state_pub_socket_addr: str | None = None
-    # ZMQ client_sentinel_request socket address of client sentinel
-    client_sentinel_request_addr: str | None = None
-    # ZMQ engine_core_sentinel_cmd socket address of engine_core sentinel
-    engine_core_sentinel_cmd_addr: str | None = None
-    # ZMQ engine_fault socket address of EngineCoreSentinel
-    engine_fault_socket_addr: str | None = None
-    # Identities of engine core DEALER sockets, keyed by engine index.
-    # These identities are used by the ClientSentinel (ROUTER) to route
-    # messages to the corresponding engine core.
-    engine_core_sentinel_identities: dict[int, bytes] | None = None
+    # ZMQ socket addresses for fault tolerance if applicable
+    fault_tolerance_addresses: FaultToleranceZmqAddresses | None = None
 
 
 @dataclass
@@ -163,7 +151,6 @@ class CoreEngineProcManager:
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
         self.shutdown_monitor = False
-
         self.vllm_config = vllm_config
 
         data_parallel = vllm_config.parallel_config.data_parallel_size > 1
@@ -216,7 +203,7 @@ class CoreEngineProcManager:
         """
         sentinels = [proc.sentinel for proc in self.processes]
         while sentinels and not self.shutdown_monitor:
-            died = multiprocessing.connection.wait(sentinels)
+            died = connection.wait(sentinels)
             for sentinel in died:
                 sentinel = cast(int, sentinel)
                 died_proc = next(
@@ -944,25 +931,8 @@ def launch_core_engines(
     )
 
     if vllm_config.fault_tolerance_config.enable_fault_tolerance is True:
-        addresses.engine_fault_socket_addr = get_engine_client_zmq_addr(
-            local_only=False,
-            host=vllm_config.parallel_config.data_parallel_master_ip,
-            port=vllm_config.fault_tolerance_config.internal_fault_report_port,
-        )
-        addresses.client_sentinel_request_addr = get_engine_client_zmq_addr(
-            local_only=True, host=host
-        )
-        addresses.engine_core_sentinel_cmd_addr = get_engine_client_zmq_addr(
-            local_only=local_engines_only, host=host
-        )
-        identity_group = [str(uuid.uuid4()).encode("utf8") for _ in range(dp_size)]
-        addresses.engine_core_sentinel_identities = {
-            rank: identity for rank, identity in enumerate(identity_group)
-        }
-        addresses.fault_state_pub_socket_addr = get_engine_client_zmq_addr(
-            local_only=False,
-            host=host,
-            port=vllm_config.fault_tolerance_config.external_fault_notify_port,
+        addresses.fault_tolerance_addresses = FaultToleranceZmqAddresses.build(
+            host, local_engines_only, dp_size, vllm_config.fault_tolerance_config
         )
 
     # Run the DP Coordinator process with rank 0 when in online DP mode.
