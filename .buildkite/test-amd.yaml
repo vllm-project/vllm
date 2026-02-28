@@ -1390,6 +1390,10 @@ steps:
   - pip install -e ./plugins/prithvi_io_processor_plugin
   - pytest -v -s plugins_tests/test_io_processor_plugins.py
   - pip uninstall prithvi_io_processor_plugin -y
+  # test bge_m3_sparse io_processor plugin
+  - pip install -e ./plugins/bge_m3_sparse_plugin
+  - pytest -v -s plugins_tests/test_bge_m3_sparse_io_processor_plugins.py
+  - pip uninstall bge_m3_sparse_plugin -y
   # end io_processor plugins test
   # begin stat_logger plugins test
   - pip install -e ./plugins/vllm_add_dummy_stat_logger
@@ -2967,6 +2971,10 @@ steps:
   - pip install -e ./plugins/prithvi_io_processor_plugin
   - pytest -v -s plugins_tests/test_io_processor_plugins.py
   - pip uninstall prithvi_io_processor_plugin -y
+  # test bge_m3_sparse io_processor plugin
+  - pip install -e ./plugins/bge_m3_sparse_plugin
+  - pytest -v -s plugins_tests/test_bge_m3_sparse_io_processor_plugins.py
+  - pip uninstall bge_m3_sparse_plugin -y
   # end io_processor plugins test
   # begin stat_logger plugins test
   - pip install -e ./plugins/vllm_add_dummy_stat_logger

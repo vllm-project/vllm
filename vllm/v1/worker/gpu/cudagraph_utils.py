@@ -22,7 +22,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
-from vllm.v1.worker.gpu.model_states.interface import ModelStateInterface
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -87,7 +87,7 @@ class CudaGraphManager:
         num_tokens: int,
         capture_cg_mode: CUDAGraphMode,
         model: nn.Module,
-        model_state: ModelStateInterface,
+        model_state: ModelState,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
@@ -250,7 +250,7 @@ class CudaGraphManager:
     def capture(
         self,
         model: nn.Module,
-        model_state: ModelStateInterface,
+        model_state: ModelState,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
@@ -396,7 +396,7 @@ def prepare_inputs_to_capture(
     num_tokens: int,
     input_buffers: InputBuffers,
     block_tables: BlockTables,
-    model_state: ModelStateInterface | None,
+    model_state: ModelState | None,
     attn_groups: list[list[AttentionGroup]],
     max_model_len: int,
     kv_cache_config: KVCacheConfig,

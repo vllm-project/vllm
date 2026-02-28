@@ -72,7 +72,7 @@ Follow these steps to run the script:
     ]
     ```
 
-5. Determine where you want to save the results, and pass that to `--output-dir`.
+5. Set `--output-dir` and optionally `--experiment-name` to control where to save the results.
 
 Example command:
 
@@ -82,7 +82,8 @@ vllm bench sweep serve \
     --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
     --serve-params benchmarks/serve_hparams.json \
     --bench-params benchmarks/bench_hparams.json \
-    -o benchmarks/results
+    --output-dir benchmarks/results \
+    --experiment-name demo
 ```
 
 By default, each parameter combination is benchmarked 3 times to make the results more reliable. You can adjust the number of runs by setting `--num-runs`.
@@ -102,36 +103,40 @@ By default, each parameter combination is benchmarked 3 times to make the result
 !!! tip
     You can use the `--resume` option to continue the parameter sweep if an unexpected error occurs, e.g., timeout when connecting to HF Hub.
 
-### SLA Scanner
+### Workload Explorer
 
-`vllm bench sweep serve_sla` is a variant of `vllm bench sweep serve` that scans through values of request rate or concurrency (choose using `--sla-variable`) in order to find the tradeoff between latency and throughput. The results can then be [visualized](#visualization) to determine the feasible SLAs.
+`vllm bench sweep serve_workload` is a variant of `vllm bench sweep serve` that explores different workload levels in order to find the tradeoff between latency and throughput. The results can also be [visualized](#visualization) to determine the feasible SLAs.
+
+The workload can be expressed in terms of request rate or concurrency (choose using `--workload-var`).
 
 Example command:
 
 ```bash
-vllm bench sweep serve_sla \
+vllm bench sweep serve_workload \
     --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
     --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json --num-prompts 100' \
-    --sla-variable max_concurrency \
+    --workload-var max_concurrency \
     --serve-params benchmarks/serve_hparams.json \
-    --bench-params benchmarks/bench_hparams.json
-    -o benchmarks/results
+    --bench-params benchmarks/bench_hparams.json \
+    --num-runs 1 \
+    --output-dir benchmarks/results \
+    --experiment-name demo
 ```
 
-The algorithm for scanning through different values of `sla_variable` can be summarized as follows:
+The algorithm for exploring different workload levels can be summarized as follows:
 
-1. Run the benchmark by sending requests one at a time (serial inference). This results in the lowest possible latency and throughput.
-2. Run the benchmark by sending all requests at once (batch inference). This results in the highest possible latency and throughput.
-3. Estimate the maximum value of `sla_variable` that can be supported by the server without oversaturating it.
-4. Run the benchmark over intermediate values of `sla_variable` uniformly using the remaining iterations.
+1. Run the benchmark by sending requests one at a time (serial inference, lowest workload). This results in the lowest possible latency and throughput.
+2. Run the benchmark by sending all requests at once (batch inference, highest workload). This results in the highest possible latency and throughput.
+3. Estimate the value of `workload_var` corresponding to Step 2.
+4. Run the benchmark over intermediate values of `workload_var` uniformly using the remaining iterations.
 
-You can override the number of iterations in the algorithm by setting `--sla-iters`.
+You can override the number of iterations in the algorithm by setting `--workload-iters`.
 
 !!! tip
     This is our equivalent of [GuideLLM's `--profile sweep`](https://github.com/vllm-project/guidellm/blob/v0.5.3/src/guidellm/benchmark/profiles.py#L575).
 
-    In general, `--sla-variable max_concurrency` produces more reliable results because it directly controls the workload imposed on the vLLM engine.
-    Nevertheless, we default to `--sla-variable request_rate` to maintain similar behavior as GuideLLM.
+    In general, `--workload-var max_concurrency` produces more reliable results because it directly controls the workload imposed on the vLLM engine.
+    Nevertheless, we default to `--workload-var request_rate` to maintain similar behavior as GuideLLM.
 
 ## Startup Benchmark
 
@@ -183,7 +188,8 @@ vllm bench sweep startup \
     --startup-cmd 'vllm bench startup --model Qwen/Qwen3-0.6B' \
     --serve-params benchmarks/serve_hparams.json \
     --startup-params benchmarks/startup_hparams.json \
-    -o benchmarks/results
+    --output-dir benchmarks/results \
+    --experiment-name demo
 ```
 
 !!! important
@@ -198,14 +204,13 @@ vllm bench sweep startup \
 
 Control the variables to plot via `--var-x` and `--var-y`, optionally applying `--filter-by` and `--bin-by` to the values. The plot is organized according to `--fig-by`, `--row-by`, `--col-by`, and `--curve-by`.
 
-Example commands for visualizing [SLA Scanner](#sla-scanner) results:
+Example commands for visualizing [Workload Explorer](#workload-explorer) results:
 
 ```bash
-# Name of the directory that stores the results
-TIMESTAMP=$1
+EXPERIMENT_DIR=${1:-"benchmarks/results/demo"}
 
 # Latency increases as the workload increases
-vllm bench sweep plot benchmarks/results/$TIMESTAMP \
+vllm bench sweep plot $EXPERIMENT_DIR \
     --var-x max_concurrency \
     --var-y median_ttft_ms \
     --col-by _benchmark_name \
@@ -213,7 +218,7 @@ vllm bench sweep plot benchmarks/results/$TIMESTAMP \
     --fig-name latency_curve
 
 # Throughput saturates as workload increases
-vllm bench sweep plot benchmarks/results/$TIMESTAMP \
+vllm bench sweep plot $EXPERIMENT_DIR \
     --var-x max_concurrency \
     --var-y total_token_throughput \
     --col-by _benchmark_name \
@@ -221,7 +226,7 @@ vllm bench sweep plot benchmarks/results/$TIMESTAMP \
     --fig-name throughput_curve
 
 # Tradeoff between latency and throughput
-vllm bench sweep plot benchmarks/results/$TIMESTAMP \
+vllm bench sweep plot $EXPERIMENT_DIR \
     --var-x total_token_throughput \
     --var-y median_ttft_ms \
     --col-by _benchmark_name \
@@ -246,7 +251,9 @@ Higher concurrency or batch size can raise GPU efficiency (per-GPU), but can add
 Example:
 
 ```bash
-vllm bench sweep plot_pareto benchmarks/results/<timestamp> \
+EXPERIMENT_DIR=${1:-"benchmarks/results/demo"}
+
+vllm bench sweep plot_pareto $EXPERIMENT_DIR \
   --label-by max_concurrency,tensor_parallel_size,pipeline_parallel_size
 ```
 

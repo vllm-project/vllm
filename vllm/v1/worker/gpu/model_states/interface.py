@@ -16,7 +16,7 @@ from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
 
-class ModelStateInterface(ABC):
+class ModelState(ABC):
     @abstractmethod
     def __init__(
         self,

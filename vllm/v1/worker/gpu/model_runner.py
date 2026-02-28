@@ -83,8 +83,7 @@ from vllm.v1.worker.gpu.kv_connector import (
 )
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.gpu.model_states import create_model_state
-from vllm.v1.worker.gpu.model_states.interface import ModelStateInterface
+from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import pp_broadcast, pp_receive
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -226,7 +225,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: tuple | None = None
-        self.model_state: ModelStateInterface
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -287,7 +285,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prepare_communication_buffer_for_model(self.speculator)
 
         # Initialize the components that require the model.
-        self.model_state = create_model_state(
+        self.model_state = init_model_state(
             self.vllm_config, self.model, self.encoder_cache, self.device
         )
         if self.is_pooling_model:
