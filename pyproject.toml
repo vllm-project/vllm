@@ -176,6 +176,7 @@ tme = "tme"
 dout = "dout"
 Pn = "Pn"
 arange = "arange"
+AKS = "AKS"
 
 [tool.typos.type.py]
 extend-glob = []
