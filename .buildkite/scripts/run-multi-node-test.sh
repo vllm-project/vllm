@@ -67,7 +67,7 @@ start_nodes() {
         # 3. map the huggingface cache directory to the container
         # 3. assign ip addresses to the containers (head node: 192.168.10.10, worker nodes:
         #    starting from 192.168.10.11)
-        docker run -d "$GPU_DEVICES" --shm-size=10.24gb -e HF_TOKEN \
+        docker run -d $GPU_DEVICES --shm-size=10.24gb -e HF_TOKEN \
             -v ~/.cache/huggingface:/root/.cache/huggingface --name "node$node" \
             --network docker-net --ip 192.168.10.$((10 + $node)) --rm "$DOCKER_IMAGE" \
             /bin/bash -c "tail -f /dev/null"

@@ -3,7 +3,7 @@
 """Sampling parameters for text generation."""
 
 import copy
-import json
+import json as json_mod
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -16,6 +16,7 @@ from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
+from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.serial_utils import PydanticMsgspecMixin
 
 logger = init_logger(__name__)
@@ -677,9 +678,9 @@ class SamplingParams(
             return
 
         # Some sampling parameters are not yet compatible with spec decoding.
-        if self.min_tokens > 1 or self.min_p > _SAMPLING_EPS or self.logit_bias:
+        if self.min_p > _SAMPLING_EPS or self.logit_bias:
             raise ValueError(
-                "The min_tokens, min_p, and logit_bias sampling parameters "
+                "The min_p and logit_bias sampling parameters "
                 "are not yet supported with speculative decoding."
             )
 
@@ -731,7 +732,6 @@ class SamplingParams(
         ):
             raise ValueError("structured_outputs.grammar cannot be an empty string")
 
-        from vllm.tokenizers.mistral import MistralTokenizer
         from vllm.v1.structured_output.backend_guidance import (
             has_guidance_unsupported_json_features,
             validate_guidance_grammar,
@@ -752,7 +752,7 @@ class SamplingParams(
             # allows <|special_token|> and similar, see
             # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
             # Without tokenizer these are disallowed in grammars.
-            if isinstance(tokenizer, MistralTokenizer):
+            if is_mistral_tokenizer(tokenizer):
                 raise ValueError(
                     "Mistral tokenizer is not supported for the 'guidance' "
                     "structured output backend. Please use ['xgrammar', 'outlines'] "
@@ -764,7 +764,7 @@ class SamplingParams(
             validate_structured_output_request_outlines(self)
         elif backend == "lm-format-enforcer":
             # lm format enforcer backend
-            if isinstance(tokenizer, MistralTokenizer):
+            if is_mistral_tokenizer(tokenizer):
                 raise ValueError(
                     "Mistral tokenizer is not supported for the 'lm-format-enforcer' "
                     "structured output backend. Please use ['xgrammar', 'outlines'] "
@@ -791,12 +791,12 @@ class SamplingParams(
                 skip_guidance = False
                 if so_params.json:
                     if isinstance(so_params.json, str):
-                        schema = json.loads(so_params.json)
+                        schema = json_mod.loads(so_params.json)
                     else:
                         schema = so_params.json
                     skip_guidance = has_guidance_unsupported_json_features(schema)
 
-                if isinstance(tokenizer, MistralTokenizer) or skip_guidance:
+                if is_mistral_tokenizer(tokenizer) or skip_guidance:
                     # Fall back to outlines if the tokenizer is Mistral
                     # or if schema contains features unsupported by guidance
                     validate_structured_output_request_outlines(self)
@@ -838,6 +838,24 @@ class SamplingParams(
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"structured_outputs={self.structured_outputs}, "
             f"extra_args={self.extra_args})"
+        )
+
+    @staticmethod
+    def for_sampler_warmup() -> "SamplingParams":
+        """Set parameters to exercise all sampler logic."""
+        return SamplingParams(
+            temperature=0.9,
+            top_p=0.9,
+            top_k=50,
+            min_p=0.1,
+            frequency_penalty=0.5,
+            presence_penalty=0.5,
+            repetition_penalty=1.2,
+            min_tokens=2,
+            logit_bias={0: -1.0, 1: 0.5},
+            _bad_words_token_ids=[[0], [1, 2]],
+            logprobs=5,
+            prompt_logprobs=1,
         )
 
 

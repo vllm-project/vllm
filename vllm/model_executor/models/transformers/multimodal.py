@@ -31,15 +31,19 @@ from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalInputs,
-    MultiModalUUIDDict,
     PlaceholderRange,
     mm_inputs,
 )
-from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
+from vllm.multimodal.parse import (
+    ImageProcessorItems,
+    MultiModalDataItems,
+)
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    ProcessorInputs,
+    TimingContext,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -98,14 +102,13 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, "BaseDummyOptions"] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, "BaseDummyOptions"],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = self.info.get_max_image_size()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -175,11 +178,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
     def apply(
         self,
-        prompt: str | list[int],
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object] | None = None,
-        mm_uuids: MultiModalUUIDDict | None = None,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -187,27 +187,30 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         Apply HF Processor on prompt text and multi-modal data together,
         outputting token IDs and processed tensors.
         """
-        if tokenization_kwargs is None:
-            tokenization_kwargs = {}
+        prompt = inputs.prompt
+        mm_items = inputs.mm_data_items
+        hf_processor_mm_kwargs = inputs.hf_processor_mm_kwargs
+        tokenization_kwargs = inputs.tokenization_kwargs
 
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        if not isinstance(prompt, str):
-            # the prompt is the tokenized ids which is not supported
-            # by the hf_processor, which is why we would need to decode the ids
-            # into string
-            prompt = hf_processor.decode(prompt)
+        with timing_ctx.record("apply_hf_processor"):
+            hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+            if not isinstance(prompt, str):
+                # the prompt is the tokenized ids which is not supported
+                # by the hf_processor, which is why we would need to decode the ids
+                # into string
+                prompt = hf_processor.decode(prompt)
 
-        # Bypass cached processor and always apply to the full set of mm inputs
-        # NOTE: we can't just set caching=False because base class method
-        # transforms outputs to `MultiModalKwargs` which is not going to
-        # work for Transformers. We have a lot of logic tied to
-        # `mm_tokens_per_modality` below
-        prompt_ids, processed_data, _ = self._apply_hf_processor_text_mm(
-            prompt_text=prompt,
-            mm_items=mm_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-        )
+            # Bypass cached processor and always apply to the full set of mm inputs
+            # NOTE: we can't just set caching=False because base class method
+            # transforms outputs to `MultiModalKwargs` which is not going to
+            # work for Transformers. We have a lot of logic tied to
+            # `mm_tokens_per_modality` below
+            prompt_ids, processed_data, _ = self._apply_hf_processor_text_mm(
+                prompt_text=prompt,
+                mm_items=mm_items,
+                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                tokenization_kwargs=tokenization_kwargs,
+            )
 
         # For gemma3 we check `token_type_ids` as the key
         token_type_key = (
@@ -215,21 +218,20 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             if "mm_token_type_ids" in processed_data
             else "token_type_ids"
         )
-        mm_token_type_ids = processed_data.pop(token_type_key)
+        mm_token_type_ids = processed_data.get(token_type_key)
 
         # We can infer vLLM style placeholder from token type ids, if we split
         # it for each input `mm_data`.
         mm_positions = torch.where(mm_token_type_ids == 1)[1]
         images = mm_items.get_items("image", ImageProcessorItems)
-        multimodal_config = self.info.ctx.model_config.multimodal_config
-        mm_processor_kwargs = multimodal_config.mm_processor_kwargs or {}
         image_sizes = []
         for item_idx in range(len(images)):
             image_size = images.get_image_size(item_idx)
             image_sizes.append((image_size.height, image_size.width))
 
         mm_tokens_per_modality = hf_processor._get_num_multimodal_tokens(
-            image_sizes=image_sizes, **mm_processor_kwargs
+            image_sizes=image_sizes,
+            **self.info.ctx.get_merged_mm_kwargs({}),
         )
 
         mm_placeholders = {}
@@ -257,9 +259,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         )
 
         # Use overrides if provided; fallback to data-dependent hashing.
-        mm_hashes = self._hash_mm_items(
-            mm_items, hf_processor_mm_kwargs, tokenization_kwargs, mm_uuids=mm_uuids
-        )
+        with timing_ctx.record("get_mm_hashes"):
+            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
 
         return mm_inputs(
             prompt_token_ids=prompt_ids,
@@ -352,6 +353,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         num_image_patches = kwargs.pop("num_image_patches")
         kwargs.pop("token_type_ids", None)  # used only in `forward`
+        kwargs.pop("mm_token_type_ids", None)  # used only in `model.get_rope_index`
 
         if pixel_values is not None:
             # ROCm: Force math SDP backend for vision encoder to avoid accuracy issues
@@ -442,6 +444,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             {
                 "image_grid_thw",
                 "video_grid_thw",
+                "mm_token_type_ids",
                 "second_per_grid_ts",
                 "audio_feature_lengths",
                 "use_audio_in_video",
@@ -450,7 +453,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         if any(
             v
             for k, v in kwargs.items()
-            if k not in {"image_grid_thw", "video_grid_thw"}
+            if k not in {"image_grid_thw", "mm_token_type_ids"}
         ):
             raise NotImplementedError(
                 "Transformers modeling backend only supports images."
@@ -458,6 +461,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         image_grid_thw = kwargs.get("image_grid_thw", [])
         video_grid_thw = kwargs.get("video_grid_thw", [])
+        mm_token_type_ids = kwargs.get("mm_token_type_ids")
 
         image_grid_thw = (torch.stack if image_grid_thw else torch.tensor)(
             image_grid_thw
@@ -466,10 +470,17 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             video_grid_thw
         )
 
+        # In v4 `get_rope_index` doesn't have wildcard `kwargs`, and
+        # can't accept arbitrary args, even if its value is `None`
+        kwargs = {}
+        if mm_token_type_ids:
+            kwargs["mm_token_type_ids"] = torch.cat(mm_token_type_ids)
+
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
             input_ids=torch.tensor(input_tokens).unsqueeze(0),
             image_grid_thw=image_grid_thw,
             video_grid_thw=video_grid_thw,
+            **kwargs,
         )
 
         mrope_positions = mrope_positions[:, 0]

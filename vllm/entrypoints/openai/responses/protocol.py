@@ -328,8 +328,9 @@ class ResponsesRequest(OpenAIBaseModel):
         # Also check text.format for OpenAI-style json_schema
         if self.text is not None and self.text.format is not None:
             if structured_outputs is not None:
-                raise ValueError(
-                    "Cannot specify both structured_outputs and text.format"
+                raise VLLMValidationError(
+                    "Cannot specify both structured_outputs and text.format",
+                    parameter="structured_outputs",
                 )
             response_format = self.text.format
             if (
@@ -337,7 +338,9 @@ class ResponsesRequest(OpenAIBaseModel):
                 and response_format.schema_ is not None
             ):
                 structured_outputs = StructuredOutputsParams(
-                    json=response_format.schema_
+                    json=response_format.schema_  # type: ignore[call-arg]
+                    # --follow-imports skip hides the class definition but also hides
+                    # multiple third party conflicts, so best of both evils
                 )
 
         stop = self.stop if self.stop else []
@@ -376,14 +379,19 @@ class ResponsesRequest(OpenAIBaseModel):
         )
 
     @model_validator(mode="before")
+    @classmethod
     def validate_background(cls, data):
         if not data.get("background"):
             return data
         if not data.get("store", True):
-            raise ValueError("background can only be used when `store` is true")
+            raise VLLMValidationError(
+                "background can only be used when `store` is true",
+                parameter="background",
+            )
         return data
 
     @model_validator(mode="before")
+    @classmethod
     def validate_prompt(cls, data):
         if data.get("prompt") is not None:
             raise VLLMValidationError(
@@ -392,16 +400,19 @@ class ResponsesRequest(OpenAIBaseModel):
         return data
 
     @model_validator(mode="before")
+    @classmethod
     def check_cache_salt_support(cls, data):
         if data.get("cache_salt") is not None and (
             not isinstance(data["cache_salt"], str) or not data["cache_salt"]
         ):
-            raise ValueError(
-                "Parameter 'cache_salt' must be a non-empty string if provided."
+            raise VLLMValidationError(
+                "Parameter 'cache_salt' must be a non-empty string if provided.",
+                parameter="cache_salt",
             )
         return data
 
     @model_validator(mode="before")
+    @classmethod
     def function_call_parsing(cls, data):
         """Parse function_call dictionaries into ResponseFunctionToolCall objects.
         This ensures Pydantic can properly resolve union types in the input field.

@@ -60,10 +60,7 @@ class RequestState:
 
         # Last sampled tokens.
         self.last_sampled_tokens = torch.zeros(
-            self.max_num_reqs,
-            1,
-            dtype=torch.int64,
-            device=device,
+            self.max_num_reqs, 1, dtype=torch.int64, device=device
         )
 
         # Draft tokens.
@@ -118,3 +115,9 @@ class RequestState:
             return
         self.index_to_req_id.pop(req_idx, None)
         self.free_indices.append(req_idx)
+
+    def any_prefills(self, idx_mapping_np: np.ndarray) -> bool:
+        return np.any(
+            self.num_computed_prefill_tokens[idx_mapping_np]
+            < self.prefill_len.np[idx_mapping_np]
+        )

@@ -129,25 +129,28 @@ def is_supported_config_trtllm_fp8(
         return f"kernel does not support {reason}"
 
     if not _supports_current_device():
-        return False, _make_reason("current device")
+        return False, _make_reason(f"current device {current_platform.device_name}")
     elif not (moe_config.is_act_and_mul or _supports_no_act_and_mul()):
         return False, _make_reason("no act_and_mul MLP layer")
     elif not _supports_activation(moe_config.activation):
         return False, _make_reason(f"{moe_config.activation} activation")
     elif not _supports_quant_scheme(weight_key, activation_key):
-        return False, _make_reason("quantization scheme")
+        return False, _make_reason(f"quantization scheme {weight_key}x{activation_key}")
     elif not _supports_parallel_config(moe_config.moe_parallel_config):
-        return False, _make_reason("parallel config")
+        return False, _make_reason(f"parallel config {moe_config.moe_parallel_config}")
     elif not _supports_routing_method(
         weight_key, activation_key, moe_config.routing_method
     ):
-        return False, _make_reason("routing method")
+        return False, _make_reason(f"routing method {moe_config.routing_method}")
     elif activation_format != mk.FusedMoEActivationFormat.Standard:
-        return False, _make_reason("activation format")
+        return False, _make_reason(f"activation format {activation_format}")
     elif not _supports_router_logits_dtype(
         moe_config.router_logits_dtype, moe_config.routing_method
     ):
-        return False, _make_reason("float32 router_logits with non-DeepSeekV3 routing")
+        return False, _make_reason(
+            "float32 router_logits with non-DeepSeekV3 routing "
+            f"{moe_config.router_logits_dtype}x{moe_config.routing_method}"
+        )
 
     return True, None
 
@@ -165,17 +168,17 @@ def is_supported_config_trtllm_bf16(
         return f"kernel does not support {reason}"
 
     if not _supports_current_device():
-        return False, _make_reason("current device")
+        return False, _make_reason(f"current device {current_platform.device_name}")
     elif not (moe_config.is_act_and_mul or _supports_no_act_and_mul()):
         return False, _make_reason("no act_and_mul MLP layer")
     elif not _supports_activation(moe_config.activation):
         return False, _make_reason(f"{moe_config.activation} activation")
     elif not _supports_parallel_config(moe_config.moe_parallel_config):
-        return False, _make_reason("parallel config")
+        return False, _make_reason(f"parallel config {moe_config.moe_parallel_config}")
     elif not _supports_routing_method_bf16(moe_config.routing_method):
-        return False, _make_reason("routing method")
+        return False, _make_reason(f"routing method {moe_config.routing_method}")
     elif activation_format != mk.FusedMoEActivationFormat.Standard:
-        return False, _make_reason("activation format")
+        return False, _make_reason(f"activation format {activation_format}")
 
     return True, None
 

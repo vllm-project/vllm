@@ -52,9 +52,6 @@
     "DEEPGEMM_GIT_REF": {
       "default": "477618cd51baffca09c4b0b87e97c03fe827ef03"
     },
-    "PPLX_COMMIT_HASH": {
-      "default": "12cecfd"
-    },
     "DEEPEP_COMMIT_HASH": {
       "default": "73b6ea4"
     },
@@ -68,7 +65,7 @@
       "default": "true"
     },
     "FLASHINFER_VERSION": {
-      "default": "0.6.3"
+      "default": "0.6.4"
     },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"
