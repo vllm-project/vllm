@@ -3,6 +3,7 @@
 
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -61,8 +62,12 @@ class EPLBConfig:
     of the last `lb_window_size` steps will be used for rearranging experts.
     """
 
-    num_redundant_experts: int = Field(default=0, ge=0)
-    """Number of redundant experts to use for expert parallelism."""
+    num_redundant_experts: int | None = Field(default=None, ge=0)
+    """Number of redundant experts to use for expert parallelism.
+    If None (default), the minimum valid value will be computed automatically
+    based on the number of logical experts and the expert parallel size.
+    The value will be rounded to the nearest multiple of the expert parallel size.
+    """
 
     log_balancedness: bool = False
     """
@@ -91,6 +96,7 @@ class EPLBConfig:
 
 
 @config
+@dataclass
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
@@ -372,14 +378,19 @@ class ParallelConfig:
                     f"to be greater than 1, but got "
                     f"TP={self.tensor_parallel_size},DP={self.data_parallel_size}."
                 )
-        else:
-            if self.eplb_config.num_redundant_experts != 0:
-                raise ValueError(
-                    "num_redundant_experts is set to "
-                    f"{self.eplb_config.num_redundant_experts} but EPLB is not "
-                    "enabled. Either enable EPLB or unset "
-                    "num_redundant_experts."
-                )
+
+        # When EPLB is disabled, num_redundant_experts must be None or 0
+        if (
+            not self.enable_eplb
+            and self.eplb_config.num_redundant_experts is not None
+            and self.eplb_config.num_redundant_experts != 0
+        ):
+            raise ValueError(
+                "num_redundant_experts is set to "
+                f"{self.eplb_config.num_redundant_experts} but EPLB is not "
+                "enabled. Either enable EPLB or unset "
+                "num_redundant_experts."
+            )
 
         # Note(hc): In the current implementation of decode context
         # parallel(DCP), tp_size needs to be divisible by dcp_size,
@@ -393,6 +404,38 @@ class ParallelConfig:
             )
 
         return self
+
+    def compute_eplb_num_redundant_experts(self, num_logical_experts: int) -> None:
+        """Compute and set num_redundant_experts if not explicitly specified.
+
+        This method should be called after ParallelConfig is initialized and
+        when the number of logical experts is known (from ModelConfig).
+
+        Args:
+            num_logical_experts: The number of logical experts from the model.
+        """
+        if self.eplb_config.num_redundant_experts is not None:
+            # Already explicitly set, don't override
+            return
+
+        if self.enable_eplb:
+            # EP size is TP * DP for EPLB
+            ep_size = self.tensor_parallel_size * self.data_parallel_size
+            # Ensure (num_logical_experts + num_redundant_experts) is
+            # divisible by ep_size, supporting non-standard ep_size values
+            min_redundant = (ep_size - num_logical_experts % ep_size) % ep_size
+            self.eplb_config.num_redundant_experts = min_redundant
+            logger.info(
+                "EPLB num_redundant_experts not specified, "
+                "defaulting to minimum valid value: %d "
+                "(num_logical_experts=%d, ep_size=%d)",
+                min_redundant,
+                num_logical_experts,
+                ep_size,
+            )
+        else:
+            # EPLB disabled, default to 0
+            self.eplb_config.num_redundant_experts = 0
 
     @property
     def world_size_across_dp(self) -> int:
