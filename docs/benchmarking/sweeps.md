@@ -112,6 +112,7 @@ Example command:
 vllm bench sweep serve_sla \
     --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
     --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json --num-prompts 100' \
+    --sla-variable max_concurrency \
     --serve-params benchmarks/serve_hparams.json \
     --bench-params benchmarks/bench_hparams.json
     -o benchmarks/results
@@ -119,8 +120,8 @@ vllm bench sweep serve_sla \
 
 The algorithm for scanning through different values of `sla_variable` can be summarized as follows:
 
-1. Run the benchmark once with `sla_variable = 1` to simulate serial inference. This results in the lowest possible latency and throughput.
-2. Run the benchmark once with `sla_variable = num_prompts` to simulate batch inference over the whole dataset. This results in the highest possible latency and throughput.
+1. Run the benchmark by sending requests one at a time (serial inference). This results in the lowest possible latency and throughput.
+2. Run the benchmark by sending all requests at once (batch inference). This results in the highest possible latency and throughput.
 3. Estimate the maximum value of `sla_variable` that can be supported by the server without oversaturating it.
 4. Run the benchmark over intermediate values of `sla_variable` uniformly using the remaining iterations.
 
@@ -128,6 +129,9 @@ You can override the number of iterations in the algorithm by setting `--sla-ite
 
 !!! tip
     This is our equivalent of [GuideLLM's `--profile sweep`](https://github.com/vllm-project/guidellm/blob/v0.5.3/src/guidellm/benchmark/profiles.py#L575).
+
+    In general, `--sla-variable max_concurrency` produces more reliable results because it directly controls the workload imposed on the vLLM engine.
+    Nevertheless, we default to `--sla-variable request_rate` to maintain similar behavior as GuideLLM.
 
 ## Startup Benchmark
 
@@ -197,23 +201,32 @@ Control the variables to plot via `--var-x` and `--var-y`, optionally applying `
 Example commands for visualizing [SLA Scanner](#sla-scanner) results:
 
 ```bash
-# Latency increases as the request rate increases
-vllm bench sweep plot benchmarks/results/<timestamp> \
-    --var-x request_rate \
-    --var-y p99_ttft_ms \
-    --row-by random_input_len \
-    --col-by random_output_len \
+# Name of the directory that stores the results
+TIMESTAMP=$1
+
+# Latency increases as the workload increases
+vllm bench sweep plot benchmarks/results/$TIMESTAMP \
+    --var-x max_concurrency \
+    --var-y median_ttft_ms \
+    --col-by _benchmark_name \
     --curve-by max_num_seqs,max_num_batched_tokens \
-    --filter-by 'request_rate<=128'
+    --fig-name latency_curve
+
+# Throughput saturates as workload increases
+vllm bench sweep plot benchmarks/results/$TIMESTAMP \
+    --var-x max_concurrency \
+    --var-y total_token_throughput \
+    --col-by _benchmark_name \
+    --curve-by max_num_seqs,max_num_batched_tokens \
+    --fig-name throughput_curve
 
 # Tradeoff between latency and throughput
-vllm bench sweep plot benchmarks/results/<timestamp> \
-    --var-x request_throughput \
+vllm bench sweep plot benchmarks/results/$TIMESTAMP \
+    --var-x total_token_throughput \
     --var-y median_ttft_ms \
-    --row-by random_input_len \
-    --col-by random_output_len \
+    --col-by _benchmark_name \
     --curve-by max_num_seqs,max_num_batched_tokens \
-    --filter-by 'request_rate<=128'
+    --fig-name latency_throughput
 ```
 
 !!! tip

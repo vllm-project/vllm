@@ -138,12 +138,16 @@ def _get_comb_base_path(
     output_dir: Path,
     serve_comb: ParameterSweepItem,
     bench_comb: ParameterSweepItem,
+    *,
+    extra_parts: tuple[str, ...] = (),
 ):
     parts = list[str]()
     if serve_comb:
         parts.extend(("SERVE-", serve_comb.name))
     if bench_comb:
         parts.extend(("BENCH-", bench_comb.name))
+    if extra_parts:
+        parts.extend(extra_parts)
 
     return output_dir / sanitize_filename("-".join(parts))
 
