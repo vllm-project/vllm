@@ -332,7 +332,7 @@ def test_cutlass_w4a8_moe_mm_cuda_graph():
     a_static = setup.a.clone()  # static input tensor for graph replay
 
     stream = torch.cuda.Stream()
-    with torch.cuda.stream(stream):
+    with stream:
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
             out_static = model(a_static)

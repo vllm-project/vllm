@@ -229,7 +229,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         # Initiate the copy on a separate stream, but do not synchronize it.
         default_stream = torch.cuda.current_stream()
-        with torch.cuda.stream(async_output_copy_stream):
+        with async_output_copy_stream:
             async_output_copy_stream.wait_stream(default_stream)
             self.sampled_token_ids_cpu = self._sampled_token_ids.to(
                 "cpu", non_blocking=True
@@ -337,7 +337,7 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
 
         # Initiate the copy on a separate stream, but do not synchronize it.
         default_stream = torch.cuda.current_stream()
-        with torch.cuda.stream(async_output_copy_stream):
+        with async_output_copy_stream:
             async_output_copy_stream.wait_stream(default_stream)
             self._model_runner_output.pooler_output = _copy_pooler_output_to_cpu(
                 raw_pooler_output=self._raw_pooler_output,
@@ -721,16 +721,16 @@ class GPUModelRunner(
         # Pre-allocated tensor for copying valid sampled token counts to CPU,
         # with dedicated stream for overlapping and event for coordination.
         self.valid_sampled_token_count_event: torch.Event | None = None
-        self.valid_sampled_token_count_copy_stream: torch.cuda.Stream | None = None
+        self.valid_sampled_token_count_copy_stream: torch.Stream | None = None
         # We also copy the drafted tokens to the CPU asynchronously,
         # in case we need them for structured outputs.
         self.draft_token_ids_event: torch.Event | None = None
-        self.draft_token_ids_copy_stream: torch.cuda.Stream | None = None
+        self.draft_token_ids_copy_stream: torch.Stream | None = None
         self.valid_sampled_token_count_cpu: torch.Tensor | None = None
         self.draft_token_ids_cpu: torch.Tensor | None = None
         if self.num_spec_tokens:
             self.draft_token_ids_event = torch.Event()
-            self.draft_token_ids_copy_stream = torch.cuda.Stream()
+            self.draft_token_ids_copy_stream = torch.Stream()
             self.draft_token_ids_cpu = torch.empty(
                 (self.max_num_reqs, self.num_spec_tokens),
                 dtype=torch.int64,
@@ -739,7 +739,7 @@ class GPUModelRunner(
             )
             if self.use_async_scheduling:
                 self.valid_sampled_token_count_event = torch.Event()
-                self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
+                self.valid_sampled_token_count_copy_stream = torch.Stream()
                 self.valid_sampled_token_count_cpu = torch.empty(
                     self.max_num_reqs,
                     dtype=torch.int64,
@@ -3937,7 +3937,7 @@ class GPUModelRunner(
         assert self.draft_token_ids_cpu is not None
         default_stream = torch.cuda.current_stream()
         num_reqs = draft_token_ids.shape[0]
-        with torch.cuda.stream(self.draft_token_ids_copy_stream):
+        with self.draft_token_ids_copy_stream:
             if not zeros_only:
                 # Trigger async copy of draft token ids to cpu.
                 self.draft_token_ids_copy_stream.wait_stream(default_stream)
@@ -3969,8 +3969,12 @@ class GPUModelRunner(
         default_stream = torch.cuda.current_stream()
         # Initialize a new stream to overlap the copy operation with
         # prepare_input of draft model.
-        with torch.cuda.stream(self.valid_sampled_token_count_copy_stream):
-            self.valid_sampled_token_count_copy_stream.wait_stream(default_stream)  # type: ignore
+        valid_sampled_token_count_copy_stream = (
+            self.valid_sampled_token_count_copy_stream
+            or torch.accelerator.current_stream()
+        )
+        with valid_sampled_token_count_copy_stream:
+            valid_sampled_token_count_copy_stream.wait_stream(default_stream)  # type: ignore
             counts = valid_sampled_tokens_count
             counts_cpu = self.valid_sampled_token_count_cpu
             assert counts_cpu is not None

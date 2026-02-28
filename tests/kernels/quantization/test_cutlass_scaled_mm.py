@@ -537,7 +537,7 @@ def test_cutlass_cuda_graph(per_act_token: bool, per_out_ch: bool):
 
     # Run the model with a cuda graph
     stream = torch.cuda.Stream()
-    with torch.cuda.stream(stream):
+    with stream:
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
             out = model(a)
