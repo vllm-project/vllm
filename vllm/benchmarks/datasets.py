@@ -1776,10 +1776,10 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
         # HuggingFaceDataset base class
         hf_kwargs = {}
         if (
-            args.dataset_path in VisionArenaMultiQADataset.SUPPORTED_DATASET_PATHS
-            or args.hf_name in VisionArenaMultiQADataset.SUPPORTED_DATASET_PATHS
+            args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in VisionArenaDataset.SUPPORTED_DATASET_PATHS
         ):
-            dataset_class = VisionArenaMultiQADataset
+            dataset_class = VisionArenaDataset
             args.hf_split = args.hf_split if args.hf_split else "train"
             args.hf_subset = None
         elif (
@@ -2658,72 +2658,6 @@ class VisionArenaDataset(HuggingFaceDataset):
                     request_id=request_id_prefix + str(i),
                 )
             )
-
-        self.maybe_oversample_requests(
-            sampled_requests, num_requests, request_id_prefix, no_oversample
-        )
-        return sampled_requests
-
-
-class VisionArenaMultiQADataset(HuggingFaceDataset):
-    """
-    Vision Arena Dataset with custom questions.
-    """
-
-    DEFAULT_OUTPUT_LEN = 128
-    SUPPORTED_DATASET_PATHS = {
-        "lmarena-ai/VisionArena-Chat",
-        "lmarena-ai/vision-arena-bench-v0.1",
-    }
-    QUESTIONS = [
-        "What is in this image? Explain briefly",
-        "What is in this image? Explain briefly.",
-        "Summarize this image in one sentence",
-        "Summarize this image in one sentence.",
-    ]
-    IS_MULTIMODAL = True
-
-    def sample(
-        self,
-        tokenizer: TokenizerLike,
-        num_requests: int,
-        output_len: int | None = None,
-        enable_multimodal_chat: bool = False,
-        request_id_prefix: str = "",
-        no_oversample: bool = False,
-        **kwargs,
-    ) -> list:
-        output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
-        prompts = self.QUESTIONS
-        prompt_lens = [len(tokenizer.encode(suffix)) for suffix in prompts]
-
-        sampled_requests = []
-        for item in self.data:
-            if len(sampled_requests) >= num_requests:
-                break
-
-            mm_content = process_image(item["images"][0])
-            for prompt, prompt_len in zip(prompts, prompt_lens):
-                if len(sampled_requests) >= num_requests:
-                    break
-
-                if enable_multimodal_chat:
-                    # Note: when chat is enabled the request prompt_len is no longer
-                    # accurate and we will be using request output to count the
-                    # actual prompt len
-                    prompt = self.apply_multimodal_chat_transformation(
-                        prompt, mm_content
-                    )
-
-                sampled_requests.append(
-                    SampleRequest(
-                        prompt=prompt,
-                        prompt_len=prompt_len,
-                        expected_output_len=output_len,
-                        multi_modal_data=mm_content,
-                        request_id=request_id_prefix + str(len(sampled_requests)),
-                    )
-                )
 
         self.maybe_oversample_requests(
             sampled_requests, num_requests, request_id_prefix, no_oversample
