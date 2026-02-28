@@ -41,7 +41,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.decorators import ignore_torch_compile, support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
@@ -140,9 +140,13 @@ class FlashConfig(PretrainedConfig):
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
         self.hidden_size = hidden_size
-        self.num_hidden_layers = (
-            num_hidden_layers if num_hidden_layers is not None else num_layers
-        )
+        # Longcat Flash HF configs use num_layers as the actual layer count.
+        # num_hidden_layers is often derived (e.g., 2 * num_layers) and should
+        # not drive vLLM layer construction.
+        if num_layers is not None:
+            self.num_hidden_layers = num_layers
+        else:
+            self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.ep_size = ep_size
         self.kv_lora_rank = kv_lora_rank
@@ -187,6 +191,169 @@ class FlashConfig(PretrainedConfig):
             self.moe_intermediate_size = self.expert_ffn_hidden_size
         else:
             self.moe_intermediate_size = self.intermediate_size
+
+
+class NgramEmbedding(nn.Module):
+    """N-gram enhanced embeddings."""
+
+    def __init__(
+        self,
+        config: FlashConfig,
+        base_embeddings: VocabParallelEmbedding,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.config = config
+        self.word_embeddings = base_embeddings
+
+        if config.emb_neighbor_num is None or config.emb_split_num is None:
+            raise ValueError("N-gram embedding config is missing.")
+        if config.ngram_vocab_size_ratio is None:
+            raise ValueError("ngram_vocab_size_ratio is missing in config.")
+
+        self.n = int(config.emb_neighbor_num)
+        self.k = int(config.emb_split_num)
+        self.context_len = self.n - 1
+        if self.context_len <= 0:
+            raise ValueError("emb_neighbor_num must be >= 2 for N-gram embedding.")
+
+        self.m = config.ngram_vocab_size_ratio * config.vocab_size
+        self._vocab_mods_cache: dict[tuple[int, int], list[int]] | None = None
+
+        self._init_ngram_embeddings(prefix)
+
+    def _init_ngram_embeddings(self, prefix: str) -> None:
+        num_embedders = self.k * (self.n - 1)
+        emb_dim = self.config.hidden_size // num_embedders
+        if emb_dim * num_embedders != self.config.hidden_size:
+            raise ValueError("hidden_size must be divisible by k*(n-1).")
+
+        embedders = []
+        post_projs = []
+        for i in range(num_embedders):
+            vocab_size = int(self.m + i * 2 + 1)
+            embedders.append(
+                VocabParallelEmbedding(
+                    vocab_size,
+                    emb_dim,
+                    prefix=maybe_prefix(prefix, f"embedders.{i}"),
+                )
+            )
+            post_projs.append(
+                ReplicatedLinear(
+                    emb_dim,
+                    self.config.hidden_size,
+                    bias=False,
+                    prefix=maybe_prefix(prefix, f"post_projs.{i}"),
+                )
+            )
+
+        self.embedders = nn.ModuleList(embedders)
+        self.post_projs = nn.ModuleList(post_projs)
+
+    def _shift_right_ignore_eos(
+        self, tensor: torch.Tensor, n: int, eos_token_id: int
+    ) -> torch.Tensor:
+        """Shift tensor right by n positions, resetting at EOS tokens."""
+        batch_size, seq_len = tensor.shape
+        idx = torch.arange(seq_len, device=tensor.device, dtype=torch.int64)
+        eos_mask = tensor == eos_token_id
+        eos_pos = torch.where(eos_mask, idx, -1)
+        prev_eos_inclusive = torch.cummax(eos_pos, dim=1).values
+        prev_eos = torch.cat(
+            [eos_pos.new_full((batch_size, 1), -1), prev_eos_inclusive[:, :-1]],
+            dim=1,
+        )
+        segment_start = prev_eos + 1
+        dist = idx.unsqueeze(0) - segment_start
+        shift_mask = dist >= n
+
+        src_idx = idx - n
+        src_idx_clamped = torch.clamp(src_idx, min=0)
+        gather_idx = src_idx_clamped.unsqueeze(0).expand(batch_size, -1)
+        shifted = tensor.gather(dim=1, index=gather_idx)
+        shifted = shifted.masked_fill(src_idx.unsqueeze(0) < 0, 0)
+        return shifted.masked_fill(~shift_mask, 0)
+
+    def _precompute_vocab_mods(self) -> dict[tuple[int, int], list[int]]:
+        if self._vocab_mods_cache is not None:
+            return self._vocab_mods_cache
+
+        vocab_mods: dict[tuple[int, int], list[int]] = {}
+        vocab_size = int(self.config.vocab_size)
+
+        for i in range(2, self.n + 1):
+            for j in range(self.k):
+                index = (i - 2) * self.k + j
+                emb_vocab_dim = int(self.m + index * 2 + 1)
+
+                mods = [pow(vocab_size, p, emb_vocab_dim) for p in range(1, i)]
+
+                vocab_mods[(i, j)] = mods
+
+        self._vocab_mods_cache = vocab_mods
+        return vocab_mods
+
+    def _get_ngram_ids(
+        self,
+        input_ids: torch.Tensor,
+        shifted_ids: dict[int, torch.Tensor],
+        vocab_mods: list[int],
+        ngram: int,
+    ) -> torch.Tensor:
+        ngram_ids = input_ids.clone()
+        for k in range(2, ngram + 1):
+            ngram_ids = ngram_ids + shifted_ids[k] * vocab_mods[k - 2]
+        return ngram_ids
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        ngram_context: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if input_ids.dim() != 2:
+            raise ValueError("input_ids must be a 2D tensor.")
+
+        batch_size, seq_len = input_ids.shape
+        eos_token_id = int(self.config.eos_token_id)
+
+        x = self.word_embeddings(input_ids)
+
+        if ngram_context is None:
+            ngram_context = input_ids.new_full(
+                (batch_size, self.context_len), eos_token_id
+            )
+        elif ngram_context.shape != (batch_size, self.context_len):
+            raise ValueError("ngram_context shape mismatch.")
+
+        context = torch.cat([ngram_context, input_ids], dim=-1).to(torch.int64)
+        vocab_mods = self._precompute_vocab_mods()
+
+        ngram_range = range(2, self.n + 1)
+        shifted_ids = {
+            i: self._shift_right_ignore_eos(context, i - 1, eos_token_id)
+            for i in ngram_range
+        }
+
+        for i in ngram_range:
+            base = (i - 2) * self.k
+            for j in range(self.k):
+                index = base + j
+                emb_vocab_dim = int(self.m + index * 2 + 1)
+
+                ngram_ids = self._get_ngram_ids(
+                    context, shifted_ids, vocab_mods[(i, j)], ngram=i
+                )
+                new_ids = (ngram_ids % emb_vocab_dim)[..., -seq_len:].to(
+                    input_ids.dtype
+                )
+
+                x_ngram = self.embedders[index](new_ids)
+                x_proj, _ = self.post_projs[index](x_ngram)
+                x = x + x_proj
+
+        x = x / (1 + self.k * (self.n - 1))
+        return x
 
 
 class FlashMLP(nn.Module):
@@ -552,6 +719,91 @@ class FlashModel(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
+class FlashNgramModel(FlashModel):
+    """Flash model with N-gram enhanced embeddings."""
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        if get_pp_group().is_first_rank:
+            self.ngram_embeddings = NgramEmbedding(
+                self.config,
+                self.embed_tokens,
+                prefix=maybe_prefix(prefix, "ngram_embeddings"),
+            )
+        else:
+            self.ngram_embeddings = PPMissingLayer()
+
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        ngram_context: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if input_ids.numel() == 0:
+            return input_ids.new_empty((0, self.config.hidden_size))
+
+        query_start_loc = query_start_loc.to(torch.int64)
+        num_reqs = query_start_loc.numel() - 1
+        lengths = query_start_loc[1:] - query_start_loc[:-1]
+        max_len = int(lengths.max().item())
+        eos_token_id = int(self.config.eos_token_id)
+
+        padded_input_ids = input_ids.new_full((num_reqs, max_len), eos_token_id)
+
+        token_positions = torch.arange(input_ids.shape[0], device=input_ids.device)
+        req_indices = torch.searchsorted(
+            query_start_loc[1:], token_positions, right=True
+        )
+        col_indices = token_positions - query_start_loc[req_indices]
+        padded_input_ids[req_indices, col_indices] = input_ids
+
+        embeds = self.ngram_embeddings(padded_input_ids, ngram_context=ngram_context)
+        return embeds[req_indices, col_indices]
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        query_start_loc: torch.Tensor | None = None,
+        ngram_context: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                if query_start_loc is None:
+                    raise ValueError("query_start_loc is required for N-gram input.")
+                hidden_states = self.embed_input_ids(
+                    input_ids,
+                    query_start_loc=query_start_loc,
+                    ngram_context=ngram_context,
+                )
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+            )
+
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
+
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
+
+
 class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     """Flash model for causal language modeling."""
 
@@ -728,6 +980,271 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
+        for layer_id in range(self.config.num_hidden_layers):
+            for i in range(2):
+                if isinstance(self.model.layers[layer_id], PPMissingLayer):
+                    continue
+                self_attn = self.model.layers[layer_id].self_attn[i]
+                if hasattr(
+                    self.quant_config, "weight_block_size"
+                ) and self_attn.kv_b_proj.weight.dtype in (
+                    torch.float8_e4m3fn,
+                    torch.float8_e4m3fnuz,
+                ):
+                    weight_block_size = self.quant_config.weight_block_size
+                    if weight_block_size is not None:
+                        assert hasattr(self_attn.kv_b_proj, "weight_scale_inv")
+                        dtype = torch.get_default_dtype()
+                        w = block_dequant(
+                            self_attn.kv_b_proj.weight,
+                            self_attn.kv_b_proj.weight_scale_inv,
+                            weight_block_size,
+                        ).to(dtype)
+                else:
+                    w = self_attn.kv_b_proj.weight
+
+                w_kc, w_vc = w.unflatten(
+                    0, (-1, self_attn.qk_nope_head_dim + self_attn.v_head_dim)
+                ).split([self_attn.qk_nope_head_dim, self_attn.v_head_dim], dim=1)
+                self_attn.w_kc = w_kc.transpose(1, 2).contiguous().transpose(1, 2)
+                self_attn.w_vc = w_vc.contiguous().transpose(1, 2)
+                if self.config.mla_scale_q_lora:
+                    self_attn.q_a_layernorm.weight.data *= (
+                        self.config.hidden_size / self.config.q_lora_rank
+                    ) ** 0.5
+                if self.config.mla_scale_kv_lora:
+                    self_attn.kv_a_layernorm.weight.data *= (
+                        self.config.hidden_size / self.config.kv_lora_rank
+                    ) ** 0.5
+        return loaded_params
+
+
+@ignore_torch_compile
+class LongcatFlashNgramForCausalLM(
+    LongcatFlashForCausalLM,
+):
+    """Flash model for causal LM with N-gram embeddings."""
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        nn.Module.__init__(self)
+        config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
+        quant_config = vllm_config.quant_config
+
+        self.config = config
+        config.intermediate_size = (
+            config.ffn_hidden_size
+            if hasattr(config, "ffn_hidden_size")
+            else config.intermediate_size
+        )
+        self.quant_config = quant_config
+
+        self.model = FlashNgramModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+        else:
+            self.lm_head = PPMissingLayer()
+
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
+
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        *,
+        query_start_loc: torch.Tensor,
+        ngram_context: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.model.embed_input_ids(
+            input_ids,
+            query_start_loc=query_start_loc,
+            ngram_context=ngram_context,
+        )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        query_start_loc: torch.Tensor | None = None,
+        ngram_context: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        return self.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            query_start_loc=query_start_loc,
+            ngram_context=ngram_context,
+        )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            ("fused_qkv_a_proj", "q_a_proj", 0),
+            ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
+            (".gate_up_proj", ".gate_proj", 0),
+            (".gate_up_proj", ".up_proj", 1),
+        ]
+
+        expert_params_mapping = self.get_expert_mapping()
+        loaded_params: set[str] = set()
+        params_dict = dict(self.named_parameters())
+        alias_to_param: dict[str, torch.nn.Parameter] = {}
+        param_aliases: dict[int, list[str]] = {}
+        for param_name, param in self.named_parameters(remove_duplicate=False):
+            alias_to_param[param_name] = param
+            param_aliases.setdefault(id(param), []).append(param_name)
+        canonical_name_by_id = {id(param): name for name, param in params_dict.items()}
+
+        def _mark_loaded(param: torch.nn.Parameter) -> None:
+            for alias in param_aliases.get(id(param), ()):
+                loaded_params.add(alias)
+
+        def _canonical_name(name: str) -> str | None:
+            if name in params_dict:
+                return name
+            param = alias_to_param.get(name)
+            if param is None:
+                return None
+            return canonical_name_by_id.get(id(param), name)
+
+        def _insert_mla_attn(name: str) -> str | None:
+            token = ".self_attn."
+            if token not in name or ".mla_attn." in name:
+                return None
+            prefix, rest = name.split(token, 1)
+            parts = rest.split(".", 1)
+            if len(parts) != 2:
+                return None
+            idx, tail = parts
+            return f"{prefix}{token}{idx}.mla_attn.{tail}"
+
+        def _resolve_param_name(name: str) -> str | None:
+            resolved = _canonical_name(name)
+            if resolved is not None:
+                return resolved
+            if ".self_attn." in name and ".mla_attn." not in name:
+                alt = _insert_mla_attn(name)
+                if alt is not None:
+                    resolved = _canonical_name(alt)
+                    if resolved is not None:
+                        return resolved
+            if ".mla_attn." in name:
+                alt = name.replace(".mla_attn.", ".")
+                resolved = _canonical_name(alt)
+                if resolved is not None:
+                    return resolved
+            if ".mlp.gate." in name:
+                alt = name.replace(".mlp.gate.", ".mlp.router.")
+                resolved = _canonical_name(alt)
+                if resolved is not None:
+                    return resolved
+            return None
+
+        for name, loaded_weight in weights:
+            if "rotary_emb.inv_freq" in name:
+                continue
+
+            loaded_name = None
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                if ".mlp.experts." in name:
+                    continue
+                name_mapped = name.replace(weight_name, param_name)
+                name_mapped = _resolve_param_name(name_mapped)
+                if name_mapped is None:
+                    continue
+                # Skip loading extra bias for GPTQ models.
+                if (
+                    name_mapped.endswith(".bias") or name_mapped.endswith("_bias")
+                ) and name_mapped not in params_dict:
+                    continue
+                # Skip mtp
+                if ".mtp." in name_mapped:
+                    continue
+                if is_pp_missing_parameter(name_mapped, self):
+                    continue
+                param = params_dict[name_mapped]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                _mark_loaded(param)
+                loaded_name = name_mapped
+                break
+
+            if loaded_name is not None:
+                continue
+
+            is_expert_weight = False
+            for mapping in expert_params_mapping:
+                param_name, weight_name, expert_id, shard_id = mapping
+                if weight_name not in name:
+                    continue
+                is_expert_weight = True
+                name_mapped = name.replace(weight_name, param_name)
+                name_mapped = _resolve_param_name(name_mapped)
+                if name_mapped is None:
+                    continue
+                # Skip mtp
+                if ".mtp." in name_mapped:
+                    continue
+                if (
+                    name_mapped.endswith(".bias") or name_mapped.endswith("_bias")
+                ) and name_mapped not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name_mapped, self):
+                    continue
+                param = params_dict[name_mapped]
+                weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
+                success = weight_loader(
+                    param,
+                    loaded_weight,
+                    name_mapped,
+                    shard_id=shard_id,
+                    expert_id=expert_id,
+                    return_success=True,
+                )
+                if success:
+                    loaded_name = name_mapped
+                    _mark_loaded(param)
+                    break
+
+            if loaded_name is not None:
+                continue
+            if is_expert_weight:
+                continue
+
+            name_mapped = _resolve_param_name(name)
+            if name_mapped is None:
+                continue
+            # Skip loading extra bias for GPTQ models.
+            if (
+                name_mapped.endswith(".bias") or name_mapped.endswith("_bias")
+            ) and name_mapped not in params_dict:
+                continue
+            # Skip loading kv_scale from ckpts towards new design.
+            if name_mapped.endswith(".kv_scale") and name_mapped not in params_dict:
+                continue
+            # Skip mtp
+            if ".mtp." in name_mapped:
+                continue
+            if is_pp_missing_parameter(name_mapped, self):
+                continue
+            param = params_dict[name_mapped]
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader(param, loaded_weight)
+            _mark_loaded(param)
+
         for layer_id in range(self.config.num_hidden_layers):
             for i in range(2):
                 if isinstance(self.model.layers[layer_id], PPMissingLayer):
