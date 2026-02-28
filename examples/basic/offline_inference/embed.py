@@ -42,6 +42,7 @@ def main(args: Namespace):
         embeds = output.outputs.embedding
         print(f"Prompt: {prompt!r}")
         print_embeddings(embeds)
+        print("-" * 60)
 
 
 if __name__ == "__main__":
