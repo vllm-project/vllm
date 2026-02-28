@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_ASSETS_CACHE_MODEL_CLEAN: bool = False
+    VLLM_AIOHTTP_READ_BUFSIZE_MB: int = 4
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
@@ -746,6 +747,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # this path $VLLM_ASSETS_CACHE/model_streamer/$model_name
     "VLLM_ASSETS_CACHE_MODEL_CLEAN": lambda: bool(
         int(os.getenv("VLLM_ASSETS_CACHE_MODEL_CLEAN", "0"))
+    ),
+    # Read buffer size in MB for aiohttp when downloading media files.
+    # Default is 4 MB
+    "VLLM_AIOHTTP_READ_BUFSIZE_MB": lambda: int(
+        os.getenv("VLLM_AIOHTTP_READ_BUFSIZE_MB", "4")
     ),
     # Timeout for fetching images when serving multimodal models
     # Default is 5 seconds
