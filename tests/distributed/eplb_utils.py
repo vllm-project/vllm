@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import atexit
 import os
 import random
 
@@ -37,13 +38,22 @@ def distributed_run(fn, world_size, *args):
         assert p.exitcode == 0
 
 
-def set_env_vars_and_device(env: dict[str, str]) -> None:
+def set_env_vars_and_device(
+    env: dict[str, str], eplb_communicator: str | None = None
+) -> None:
+    if eplb_communicator == "symm_mem":
+        env["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
     update_environment_variables(env)
     local_rank = os.environ["LOCAL_RANK"]
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
     init_distributed_environment()
-
+    atexit.register(_destroy_process_group_if_initialized)
     # Ensure each worker process has the same random seed
     random.seed(42)
     torch.manual_seed(42)
+
+
+def _destroy_process_group_if_initialized() -> None:
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
