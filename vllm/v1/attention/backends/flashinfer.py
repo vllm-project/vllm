@@ -1539,13 +1539,35 @@ class FlashInferImpl(AttentionImpl):
             else:
                 # decode_query may be non-contiguous or have degenerate strides
                 assert isinstance(attn_metadata.decode, TRTLLMDecode)
-                # First ensure memory contiguity, then fix degenerate strides
-                # with reshape. contiguous() alone doesn't fix degenerate
-                # strides when a dimension has size 1.
-                decode_query = decode_query.contiguous().reshape(decode_query.shape)
+                decode_query = decode_query.contiguous()
+                # Ensure canonical strides by creating new tensor with copy if needed
+                # .contiguous() alone doesn't fix degenerate strides
+                if not is_strictly_contiguous(decode_query):
+                    new_query = torch.empty(
+                        decode_query.shape,
+                        dtype=decode_query.dtype,
+                        device=decode_query.device,
+                    )
+                    new_query.copy_(decode_query)
+                    decode_query = new_query
                 workspace_buffer = _get_trtllm_gen_workspace_buffer()
                 block_tables_decode = attn_metadata.decode.block_tables
                 seq_lens_decode = attn_metadata.decode.seq_lens
+
+                # Ensure all tensors have canonical strides for CUDA kernels
+                def ensure_canonical_strides(tensor):
+                    if not is_strictly_contiguous(tensor):
+                        new_tensor = torch.empty(
+                            tensor.shape, dtype=tensor.dtype, device=tensor.device
+                        )
+                        new_tensor.copy_(tensor)
+                        return new_tensor
+                    return tensor
+
+                kv_cache_permute = ensure_canonical_strides(kv_cache_permute)
+                workspace_buffer = ensure_canonical_strides(workspace_buffer)
+                block_tables_decode = ensure_canonical_strides(block_tables_decode)
+                seq_lens_decode = ensure_canonical_strides(seq_lens_decode)
 
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 assert get_kv_cache_layout() == "HND"
