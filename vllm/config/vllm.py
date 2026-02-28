@@ -1293,7 +1293,7 @@ class VllmConfig:
         capture as:
 
         ```python
-        max_graph_size = min(max_num_seqs * 2, 512)
+        max_graph_size = min(max_num_seqs * (1 + num_speculative_tokens), 512)
         # 1, 2, 4, then multiples of 8 up to 256 and then multiples of 16
         # up to max_graph_size
         cudagraph_capture_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
@@ -1344,7 +1344,7 @@ class VllmConfig:
                 ):
                     decode_query_len += self.speculative_config.num_speculative_tokens
                 max_cudagraph_capture_size = min(
-                    self.scheduler_config.max_num_seqs * decode_query_len * 2, 512
+                    self.scheduler_config.max_num_seqs * decode_query_len, 512
                 )
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
             max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
