@@ -241,6 +241,8 @@ if TYPE_CHECKING:
     VLLM_LORA_DISABLE_PDL: bool = False
     VLLM_ENABLE_CUDA_COMPATIBILITY: bool = False
     VLLM_CUDA_COMPATIBILITY_PATH: str | None = None
+    VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
+    VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
 
 
 def get_default_cache_root():
@@ -1605,6 +1607,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Path to the CUDA compatibility libraries when CUDA compatibility is enabled.
     "VLLM_CUDA_COMPATIBILITY_PATH": lambda: os.environ.get(
         "VLLM_CUDA_COMPATIBILITY_PATH", None
+    ),
+    # Whether it is a scale up launch engine for elastic EP,
+    # Should only be set by EngineCoreClient.
+    "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": lambda: bool(
+        int(os.getenv("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH", "0"))
+    ),
+    # Whether to wait for all requests to drain before sending the
+    # scaling command in elastic EP.
+    "VLLM_ELASTIC_EP_DRAIN_REQUESTS": lambda: bool(
+        int(os.getenv("VLLM_ELASTIC_EP_DRAIN_REQUESTS", "0"))
     ),
 }
 

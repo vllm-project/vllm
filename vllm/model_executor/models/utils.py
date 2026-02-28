@@ -311,8 +311,9 @@ class AutoWeightsLoader:
 
                     continue
 
+                named_parameters = module.named_parameters(recurse=True)
                 desc_param_keys = {
-                    base_prefix + k for k, _ in module.named_parameters(recurse=True)
+                    maybe_prefix(base_prefix, k) for k, _ in named_parameters
                 }
                 msg = (
                     f"There is no module or parameter named {prefix!r} "
