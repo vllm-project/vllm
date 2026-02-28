@@ -4,10 +4,10 @@ These models primarily support the `classify` task.
 
 ## Supported Models
 
-| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
-|--------------|--------|-------------------|----------------------|---------------------------|
+| Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
+|--------------|--------|-------------------|------------------------------|--------------------------------------------|
 | `JambaForSequenceClassification` | Jamba | `ai21labs/Jamba-tiny-reward-dev`, etc. | ✅︎ | ✅︎ |
-| `GPT2ForSequenceClassification` | GPT2 | `nie3e/sentiment-polish-gpt2-small` | | |
+| `GPT2ForSequenceClassification` | GPT2 | `nie3e/sentiment-polish-gpt2-small` | |  |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
 
 <sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./pooling_models.md#model-conversion))  
@@ -207,6 +207,7 @@ curl -v "http://127.0.0.1:8000/classify" \
       }
     }
     ```
+## Deprecated Features
 
 ### Remove softmax from PoolingParams
 
