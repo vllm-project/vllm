@@ -495,15 +495,16 @@ class SweepServeArgs:
         if self.dry_run:
             yield
             print(f"Experiment will be saved at: {experiment_dir}")
-        else:
-            try:
-                yield
-                print(f"Experiment has been saved at: {experiment_dir}")
-            except BaseException as exc:
-                raise RuntimeError(
-                    "The script was terminated early. Use `--resume` "
-                    "to continue the script from its last checkpoint."
-                ) from exc
+            return
+
+        try:
+            yield
+            print(f"Experiment has been saved at: {experiment_dir}")
+        except BaseException as exc:
+            raise RuntimeError(
+                "The script was terminated early. Use `--resume` "
+                "to continue the script from its last checkpoint."
+            ) from exc
 
 
 def run_main(args: SweepServeArgs):
