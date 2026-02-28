@@ -579,13 +579,13 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         2. Core attention (custom op)
         3. Output projection
         """
-        num_tokens = hidden_states.size(0)
 
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
         projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
         projected_states_ba, _ = self.in_proj_ba(hidden_states)
+        num_tokens = projected_states_qkvz.size(0)
         query, key, value, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba
         )
