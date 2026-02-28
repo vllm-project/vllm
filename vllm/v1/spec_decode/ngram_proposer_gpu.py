@@ -173,7 +173,8 @@ class NgramGPUKernel(nn.Module):
 
         Returns:
             draft_tokens: [batch_size, k] on GPU
-            is_empty_draft_tokens: [batch_size] bool on GPU
+            num_valid_draft_tokens: [batch_size] int32 on GPU, count of
+                leading valid (non -1) tokens per request.
         """
 
         device = token_ids_gpu.device
@@ -198,9 +199,13 @@ class NgramGPUKernel(nn.Module):
 
         draft_tokens = torch.where(combined_mask.unsqueeze(1), results, -1)
 
-        is_empty_draft_tokens = (draft_tokens == -1).all(dim=1)
+        # Count leading contiguous valid (non -1) tokens per request.
+        is_valid = draft_tokens != -1  # [batch, k]
+        cum_valid = is_valid.int().cumsum(dim=1)  # [batch, k]
+        positions = torch.arange(1, self.k + 1, device=device).unsqueeze(0)
+        num_valid_draft_tokens = (cum_valid == positions).int().sum(dim=1)
 
-        return draft_tokens, is_empty_draft_tokens
+        return draft_tokens, num_valid_draft_tokens
 
     def load_model(self, *args, **kwargs):
         """No model to load for N-gram proposer."""
@@ -316,22 +321,25 @@ class NgramProposerGPU:
         """
         Propose draft tokens using GPU-accelerated n-gram matching.
 
-        Steps: scatter new tokens, update lengths, build masks, run kernel.
+        Scatter sampled tokens into `token_ids_gpu`, compute temporary
+        updated lengths, then run the kernel.
 
         Args:
-            num_tokens_no_spec: Number of tokens per sequence (modified in-place)
+            num_tokens_no_spec: Number of tokens per sequence (read-only)
             token_ids_gpu: Token IDs tensor (modified in-place with new tokens)
             valid_sampled_token_ids_gpu: Newly sampled tokens to scatter
             valid_sampled_tokens_count: Count of valid tokens per sequence
 
         Returns:
             draft_tokens: Proposed draft token IDs [batch_size, k]
-            is_empty_draft_tokens: Boolean mask for empty proposals [batch_size]
+            num_valid_draft_tokens: Count of leading valid draft tokens
+                per request [batch_size]
         """
         assert token_ids_gpu.device == self.device
         assert num_tokens_no_spec.device == self.device
 
         batch_size = num_tokens_no_spec.shape[0]
+        max_seq_len = token_ids_gpu.shape[1]
         max_new_tokens = valid_sampled_token_ids_gpu.shape[1]  # num_spec_tokens + 1
 
         # Scatter newly sampled tokens into token_ids_gpu.
@@ -340,9 +348,12 @@ class NgramProposerGPU:
         valid_write_mask = offsets.unsqueeze(0) < valid_sampled_tokens_count.unsqueeze(
             1
         )
-        scatter_mask = valid_write_mask & (valid_sampled_token_ids_gpu != -1)
+        in_bounds = write_positions < max_seq_len
+        scatter_mask = (
+            valid_write_mask & (valid_sampled_token_ids_gpu != -1) & in_bounds
+        )
 
-        write_positions_long = write_positions.long()
+        write_positions_long = write_positions.clamp(max=max_seq_len - 1).long()
         existing_values = token_ids_gpu.gather(1, write_positions_long)
 
         tokens_cast = valid_sampled_token_ids_gpu.to(token_ids_gpu.dtype)
@@ -353,26 +364,23 @@ class NgramProposerGPU:
         )
         token_ids_gpu.scatter_(1, write_positions_long, tokens_to_scatter)
 
-        # Update num_tokens_no_spec in-place.
-        num_tokens_no_spec += valid_sampled_tokens_count
+        num_tokens_tmp = num_tokens_no_spec + valid_sampled_tokens_count
 
         # Compute validity masks.
         sampled_flags = valid_sampled_tokens_count > 0
         valid_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
 
         with set_forward_context(None, self.vllm_config):
-            combined_mask = (
-                sampled_flags & valid_mask & (num_tokens_no_spec >= self.min_n)
-            )
+            combined_mask = sampled_flags & valid_mask & (num_tokens_tmp >= self.min_n)
 
             with record_function_or_nullcontext("ngram_proposer_gpu: kernel"):
-                draft_tokens, is_empty_draft_tokens = self.kernel(
-                    num_tokens_no_spec,
+                draft_tokens, num_valid_draft_tokens = self.kernel(
+                    num_tokens_tmp,
                     token_ids_gpu,
                     combined_mask,
                 )
 
-            return draft_tokens, is_empty_draft_tokens
+            return draft_tokens, num_valid_draft_tokens
 
     def update_token_ids_ngram(
         self,
@@ -453,37 +461,47 @@ class NgramProposerGPU:
         self.kernel.load_model(*args, **kwargs)
 
 
-def update_scheduler_for_empty_drafts(
-    is_empty_draft_tokens_event: torch.cuda.Event,
-    is_empty_draft_tokens_cpu: torch.Tensor,
+def update_scheduler_for_invalid_drafts(
+    num_valid_draft_tokens_event: torch.cuda.Event,
+    num_valid_draft_tokens_cpu: torch.Tensor,
     scheduler_output: "SchedulerOutput",
     req_id_to_index: dict[str, int],
 ) -> None:
-    """Update scheduler_output for requests with empty draft tokens.
-
-    Called between _update_states and _prepare_inputs to delay the sync so
-    the async D2H copy can finish and reduce kernel bubbles.
+    """Trim invalid speculative slots using per-request valid draft counts.
 
     Args:
-        scheduler_output: The scheduler output to update.
-        req_id_to_index: A mapping from request IDs to their indices in the batch.
+        num_valid_draft_tokens_event: Event for async D2H completion.
+        num_valid_draft_tokens_cpu: CPU buffer of valid draft counts.
+        scheduler_output: Scheduler metadata to update in-place.
+        req_id_to_index: Request-id to batch-index mapping.
     """
     req_data = scheduler_output.scheduled_cached_reqs
-
-    # Sync the is_empty_draft_tokens copy (should be complete).
-    is_empty_draft_tokens_event.synchronize()
+    num_valid_draft_tokens_event.synchronize()
 
     for req_id in req_data.req_ids:
         req_index = req_id_to_index.get(req_id)
+        if req_index is None:
+            continue
 
-        if req_index is None or is_empty_draft_tokens_cpu[req_index].item():
-            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
-                req_id, []
-            )
-            num_spec_tokens = len(spec_token_ids)
-            scheduler_output.total_num_scheduled_tokens -= num_spec_tokens
-            scheduler_output.num_scheduled_tokens[req_id] -= num_spec_tokens
+        spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(req_id)
+        if spec_token_ids is None:
+            continue
+
+        scheduled_k = len(spec_token_ids)
+
+        valid_k = int(num_valid_draft_tokens_cpu[req_index].item())
+        valid_k = max(0, min(valid_k, scheduled_k))
+
+        tokens_to_trim = scheduled_k - valid_k
+        scheduler_output.total_num_scheduled_tokens -= tokens_to_trim
+        scheduler_output.num_scheduled_tokens[req_id] -= tokens_to_trim
+
+        if valid_k == 0:
             scheduler_output.scheduled_spec_decode_tokens.pop(req_id, None)
+        else:
+            scheduler_output.scheduled_spec_decode_tokens[req_id] = spec_token_ids[
+                :valid_k
+            ]
 
 
 def update_ngram_gpu_tensors_incremental(
@@ -492,14 +510,11 @@ def update_ngram_gpu_tensors_incremental(
     num_tokens_no_spec_gpu: torch.Tensor,
     new_reqs: list[CachedRequestState],
     device: torch.device,
+    _pinned_idx_buf: torch.Tensor,
+    _pinned_val_buf: torch.Tensor,
 ) -> None:
     """Incrementally update token_ids_gpu_tensor and num_tokens_no_spec_gpu
     for ngram GPU proposer.
-
-    Handles three cases: first run, reorder, and new/resumed requests.
-
-    Args:
-        new_reqs: List of new or resumed requests that need full tensor copy.
     """
     prev_req_id_to_index = input_batch.prev_req_id_to_index
     curr_req_id_to_index = input_batch.req_id_to_index
@@ -507,31 +522,45 @@ def update_ngram_gpu_tensors_incremental(
     if not curr_req_id_to_index:
         return
 
+    active_indices = list(curr_req_id_to_index.values())
+    n_active = len(active_indices)
+
+    # Use resident pinned buffers to avoid per-call allocation.
+    active_idx_cpu = _pinned_idx_buf[:n_active]
+    active_idx_cpu.copy_(torch.as_tensor(active_indices, dtype=torch.long))
+
+    active_idx_gpu = active_idx_cpu.to(device=device, non_blocking=True)
+
     new_req_ids = {req.req_id for req in new_reqs}
 
-    # First run, no previous state
+    # First run, no previous state.
     if prev_req_id_to_index is None:
-        for idx in curr_req_id_to_index.values():
+        for idx in active_indices:
             num_tokens = input_batch.num_tokens_no_spec[idx]
             if num_tokens > 0:
                 token_ids_gpu_tensor[idx, :num_tokens].copy_(
                     input_batch.token_ids_cpu_tensor[idx, :num_tokens],
                     non_blocking=True,
                 )
-                num_tokens_no_spec_gpu[idx : idx + 1].copy_(
-                    input_batch.num_tokens_no_spec_cpu_tensor[idx : idx + 1],
-                    non_blocking=True,
-                )
+
+        _sync_num_tokens(
+            input_batch,
+            num_tokens_no_spec_gpu,
+            active_idx_cpu,
+            active_idx_gpu,
+            n_active,
+            device,
+            _pinned_val_buf,
+        )
         return
 
-    # Detect index changes for reorder
+    # Detect index changes for reorder.
     reorder_src: list[int] = []
     reorder_dst: list[int] = []
 
     for req_id, curr_idx in curr_req_id_to_index.items():
         if req_id in new_req_ids:
             continue
-
         prev_idx = prev_req_id_to_index.get(req_id)
         if prev_idx is not None and prev_idx != curr_idx:
             reorder_src.append(prev_idx)
@@ -547,7 +576,7 @@ def update_ngram_gpu_tensors_incremental(
         token_ids_gpu_tensor[dst_tensor] = temp_token_ids
         num_tokens_no_spec_gpu[dst_tensor] = temp_num_tokens
 
-    # Full copy for new/resumed requests
+    # Full copy for new/resumed requests.
     for req_state in new_reqs:
         new_req_idx = curr_req_id_to_index.get(req_state.req_id)
         if new_req_idx is None:
@@ -559,36 +588,73 @@ def update_ngram_gpu_tensors_incremental(
                 input_batch.token_ids_cpu_tensor[new_req_idx, :num_tokens],
                 non_blocking=True,
             )
-            num_tokens_no_spec_gpu[new_req_idx : new_req_idx + 1].copy_(
-                input_batch.num_tokens_no_spec_cpu_tensor[
-                    new_req_idx : new_req_idx + 1
-                ],
-                non_blocking=True,
-            )
+
+    # Always batch-sync sequence lengths from CPU for ALL active requests.
+    _sync_num_tokens(
+        input_batch,
+        num_tokens_no_spec_gpu,
+        active_idx_cpu,
+        active_idx_gpu,
+        n_active,
+        device,
+        _pinned_val_buf,
+    )
 
 
-def copy_is_empty_draft_tokens(
-    is_empty_draft_tokens_cpu: torch.Tensor,
-    is_empty_draft_tokens_copy_stream: torch.cuda.Stream,
-    is_empty_draft_tokens_event: torch.cuda.Event,
-    is_empty_draft_tokens: torch.Tensor | None,
+def _sync_num_tokens(
+    input_batch: InputBatch,
+    num_tokens_no_spec_gpu: torch.Tensor,
+    active_idx_cpu: torch.Tensor,
+    active_idx_gpu: torch.Tensor,
+    n_active: int,
+    device: torch.device,
+    _pinned_val_buf: torch.Tensor,
+) -> None:
+    """Batch-sync GPU sequence lengths from CPU source of truth.
+
+    Inputs:
+        input_batch: Batch container with CPU length tensor.
+        num_tokens_no_spec_gpu: Destination GPU length tensor.
+        active_idx_cpu: Active request indices on CPU.
+        active_idx_gpu: Active request indices on GPU.
+        n_active: Number of active requests.
+        device: Target CUDA device.
+        _pinned_val_buf: Resident pinned int32 staging buffer.
+    Outputs:
+        None (updates num_tokens_no_spec_gpu in-place).
+    """
+    src_cpu = input_batch.num_tokens_no_spec_cpu_tensor
+    vals = _pinned_val_buf[:n_active]
+    vals.copy_(src_cpu.index_select(0, active_idx_cpu))
+
+    num_tokens_no_spec_gpu.index_copy_(
+        0,
+        active_idx_gpu,
+        vals.to(device=device, non_blocking=True),
+    )
+
+
+def copy_num_valid_draft_tokens(
+    num_valid_draft_tokens_cpu: torch.Tensor,
+    num_valid_draft_tokens_copy_stream: torch.cuda.Stream,
+    num_valid_draft_tokens_event: torch.cuda.Event,
+    num_valid_draft_tokens: torch.Tensor | None,
     batch_size: int,
 ) -> None:
-    """Async copy is_empty_draft_tokens to CPU using dedicated stream.
-
-    Uses a separate CUDA stream to overlap D2H copy with kernel execution.
     """
-    if is_empty_draft_tokens is None:
+    Async D2H copy of per-request valid draft counts.
+    """
+    if num_valid_draft_tokens is None:
         return
 
-    num_reqs_to_copy = min(batch_size, is_empty_draft_tokens.shape[0])
+    num_reqs_to_copy = min(batch_size, num_valid_draft_tokens.shape[0])
     if num_reqs_to_copy <= 0:
         return
 
     default_stream = torch.cuda.current_stream()
-    with torch.cuda.stream(is_empty_draft_tokens_copy_stream):
-        is_empty_draft_tokens_copy_stream.wait_stream(default_stream)
-        is_empty_draft_tokens_cpu[:num_reqs_to_copy].copy_(
-            is_empty_draft_tokens[:num_reqs_to_copy], non_blocking=True
+    with torch.cuda.stream(num_valid_draft_tokens_copy_stream):
+        num_valid_draft_tokens_copy_stream.wait_stream(default_stream)
+        num_valid_draft_tokens_cpu[:num_reqs_to_copy].copy_(
+            num_valid_draft_tokens[:num_reqs_to_copy], non_blocking=True
         )
-        is_empty_draft_tokens_event.record()
+        num_valid_draft_tokens_event.record()
