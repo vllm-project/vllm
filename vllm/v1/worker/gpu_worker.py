@@ -207,11 +207,7 @@ class Worker(WorkerBase):
 
     def _iter_attn_metadata_builders(self):
         runner = self.model_runner
-        # V2 model runner stores builders in a top-level list.
-        if hasattr(runner, "attn_metadata_builders"):
-            yield from runner.attn_metadata_builders
-        # V1 model runner nests builders inside attn_groups.
-        elif hasattr(runner, "attn_groups"):
+        if hasattr(runner, "attn_groups"):
             for group_list in runner.attn_groups:
                 for group in group_list:
                     yield from group.metadata_builders
