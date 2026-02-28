@@ -409,10 +409,16 @@ class Qwen3_5MTP(nn.Module, SupportsMultiModal):
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        spec_step_idx: int = 0,
         **kwargs: object,
     ):
         hidden_states = self.model(
-            input_ids, positions, hidden_states, intermediate_tensors, inputs_embeds
+            input_ids=input_ids,
+            positions=positions,
+            hidden_states=hidden_states,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            spec_step_idx=spec_step_idx,
         )
         return hidden_states
 
