@@ -18,6 +18,7 @@ from vllm.grpc import vllm_engine_pb2, vllm_engine_pb2_grpc
 
 # Use a small model for fast testing
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+EMBED_MODEL_NAME = "intfloat/multilingual-e5-small"
 
 
 def find_free_port() -> int:
@@ -426,3 +427,140 @@ async def test_abort_request(grpc_client):
     assert was_aborted and received_chunks < 500, (
         "Request should have been aborted before generating all 500 tokens"
     )
+
+
+# ========== Embedding tests ==========
+
+
+class EmbedGrpcServerProcess:
+    """Manages a gRPC server running an embedding model in a subprocess."""
+
+    def __init__(self):
+        self.process: subprocess.Popen | None = None
+        self.port: int | None = None
+
+    async def start(self):
+        """Start the gRPC server process with an embedding model."""
+        self.port = find_free_port()
+
+        self.process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "vllm.entrypoints.grpc_server",
+                "--model",
+                EMBED_MODEL_NAME,
+                "--host",
+                "localhost",
+                "--port",
+                str(self.port),
+                "--runner",
+                "pooling",
+                "--max-model-len",
+                "512",
+                "--disable-log-stats-server",
+            ],
+        )
+
+        if not await wait_for_server(self.port):
+            self.stop()
+            raise RuntimeError("gRPC embedding server failed to start within timeout")
+
+    def stop(self):
+        """Stop the gRPC server process."""
+        if self.process:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+
+
+@pytest_asyncio.fixture(scope="module")
+async def grpc_embed_server():
+    """Fixture providing a running gRPC embedding server in a subprocess."""
+    server = EmbedGrpcServerProcess()
+    await server.start()
+
+    yield server
+
+    server.stop()
+
+
+@pytest_asyncio.fixture
+async def grpc_embed_client(grpc_embed_server):
+    """Fixture providing a gRPC client connected to the embedding server."""
+    channel = grpc.aio.insecure_channel(f"localhost:{grpc_embed_server.port}")
+    stub = vllm_engine_pb2_grpc.VllmEngineStub(channel)
+
+    yield stub
+
+    await channel.close()
+
+
+@pytest.mark.asyncio
+async def test_embed_basic(grpc_embed_client):
+    """Test the Embed RPC with tokenized input."""
+    # Tokens for "The best thing about vLLM" from multilingual-e5-small
+    request = vllm_engine_pb2.EmbedRequest(
+        request_id="test-embed-basic",
+        tokenized=vllm_engine_pb2.TokenizedInput(
+            original_text="The best thing about vLLM",
+            input_ids=[0, 581, 2965, 13580, 1672, 81, 23708, 2],
+        ),
+    )
+
+    response = await grpc_embed_client.Embed(request)
+
+    # Should return a non-empty embedding vector
+    assert len(response.embedding) > 0
+    assert response.prompt_tokens > 0
+    assert response.embedding_dim > 0
+    # multilingual-e5-small produces 384-dim embeddings
+    assert response.embedding_dim == 384
+    assert len(response.embedding) == response.embedding_dim
+    # Verify embedding values are finite floats
+    assert all(isinstance(v, float) for v in response.embedding)
+
+
+@pytest.mark.asyncio
+async def test_embed_text_input(grpc_embed_client):
+    """Test the Embed RPC with raw text input (no pre-tokenization)."""
+    request = vllm_engine_pb2.EmbedRequest(
+        request_id="test-embed-text",
+        text="The best thing about vLLM",
+    )
+
+    response = await grpc_embed_client.Embed(request)
+
+    assert len(response.embedding) > 0
+    assert response.prompt_tokens > 0
+    assert response.embedding_dim == 384
+    assert len(response.embedding) == response.embedding_dim
+
+
+@pytest.mark.asyncio
+async def test_embed_multiple_requests(grpc_embed_client):
+    """Test handling multiple concurrent Embed requests."""
+
+    async def make_embed_request(request_id: str):
+        request = vllm_engine_pb2.EmbedRequest(
+            request_id=request_id,
+            tokenized=vllm_engine_pb2.TokenizedInput(
+                original_text="Hello world",
+                input_ids=[0, 35378, 8999, 2],
+            ),
+        )
+        return await grpc_embed_client.Embed(request)
+
+    # Send multiple requests concurrently
+    tasks = [make_embed_request(f"test-embed-concurrent-{i}") for i in range(3)]
+    responses = await asyncio.gather(*tasks)
+
+    # Verify all requests completed successfully
+    assert len(responses) == 3
+    for response in responses:
+        assert len(response.embedding) == 384
+        assert response.prompt_tokens > 0
+        assert response.embedding_dim == 384
