@@ -36,6 +36,8 @@ The class provides the following primitives:
 
         get_finished() - called with ids of finished requests, returns
             ids of requests that have completed async sending/recving.
+        build_connector_worker_meta() - builds metadata to be sent
+            back to the scheduler-side connector
 """
 
 import enum
@@ -137,11 +139,32 @@ class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
 
 class KVConnectorMetadata(ABC):  # noqa: B024
     """
-    Abstract Metadata used to communicate between the
-    Scheduler KVConnector and Worker KVConnector.
+    Abstract Metadata used to communicate
+    Scheduler KVConnector -> Worker KVConnector.
     """
 
     pass
+
+
+class KVConnectorWorkerMetadata(ABC):
+    """
+    Abstract Metadata used to communicate back
+    Worker KVConnector -> Scheduler KVConnector.
+
+    Each worker can output its own metadata.
+    For a single engine step, all metadata objects returned by workers
+    will be aggregated using the `aggregate` method below, before
+    being passed to the Scheduler KVConnector.
+    """
+
+    @abstractmethod
+    def aggregate(
+        self, other: "KVConnectorWorkerMetadata"
+    ) -> "KVConnectorWorkerMetadata":
+        """
+        Aggregate metadata with another `KVConnectorWorkerMetadata` object.
+        """
+        pass
 
 
 class KVConnectorBase_V1(ABC):
@@ -406,6 +429,16 @@ class KVConnectorBase_V1(ABC):
         Returns:
             KVConnectorHandshakeMetadata: the handshake metadata.
             None if no handshake metadata is available.
+        """
+        return None
+
+    def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
+        """
+        Build the KVConnector worker metadata for this engine step.
+
+        Returns:
+            KVConnectorWorkerMetadata: the worker metadata.
+            None if no worker metadata is available.
         """
         return None
 
