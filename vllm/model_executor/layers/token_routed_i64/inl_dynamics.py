@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Copyright INL Dynamics / Complexity-ML
 """
 INL Dynamics — Inertial Navigation Layer.
@@ -57,9 +58,9 @@ class INLDynamics(nn.Module):
         # Initialize for stability: alpha ≈ 0.9, beta ≈ 0.1, gate ≈ 0.5
         with torch.no_grad():
             bias = self.controller_out.bias
-            bias[:hidden_size].fill_(2.2)               # sigmoid(2.2) ≈ 0.9
-            bias[hidden_size:hidden_size * 2].fill_(-2.2)  # softplus(-2.2) ≈ 0.1
-            bias[hidden_size * 2:].fill_(0.0)            # sigmoid(0) = 0.5
+            bias[:hidden_size].fill_(2.2)  # sigmoid(2.2) ≈ 0.9
+            bias[hidden_size : hidden_size * 2].fill_(-2.2)  # softplus(-2.2) ≈ 0.1
+            bias[hidden_size * 2 :].fill_(0.0)  # sigmoid(0) = 0.5
             self.controller_out.weight.normal_(0, 0.01)
 
     def forward(
@@ -87,9 +88,7 @@ class INLDynamics(nn.Module):
         ctrl = F.silu(self.controller_in(hv))
         ctrl_out = self.controller_out(ctrl)
 
-        alpha_raw, beta_raw, gate_raw = torch.split(
-            ctrl_out, self.hidden_size, dim=-1
-        )
+        alpha_raw, beta_raw, gate_raw = torch.split(ctrl_out, self.hidden_size, dim=-1)
         alpha = torch.sigmoid(alpha_raw)
         beta = torch.clamp(F.softplus(beta_raw), max=2.0)
         gate = torch.sigmoid(gate_raw)

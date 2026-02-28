@@ -48,14 +48,12 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
 from .utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     extract_layer_index,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
 )
-
 
 # =============================================================================
 # Standard MLP (fallback when token-routed is disabled)
@@ -382,11 +380,9 @@ class ComplexityModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "velocity_states", "mu_prev", "mu_residual"],
-                config.hidden_size,
-            )
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "velocity_states", "mu_prev", "mu_residual"],
+            config.hidden_size,
         )
 
     def forward(
@@ -431,12 +427,14 @@ class ComplexityModel(nn.Module):
             mu_prev = mu_current + 0.1 * mu_residual
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({
-                "hidden_states": hidden_states,
-                "velocity_states": velocity_states,
-                "mu_prev": mu_prev,
-                "mu_residual": mu_residual,
-            })
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                    "velocity_states": velocity_states,
+                    "mu_prev": mu_prev,
+                    "mu_residual": mu_residual,
+                }
+            )
 
         hidden_states = self.norm(hidden_states)
         return hidden_states

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Copyright INL Dynamics / Complexity-ML
 """
 Token-Routed Expert Dispatch — Fused Operations.
@@ -49,10 +50,10 @@ def fused_token_routed_forward(
         return x
 
     if x.shape[0] <= bmm_threshold:
-        return _bmm_forward(x, gate_up_proj, down_proj, expert_ids,
-                            intermediate_per_tp)
-    return _chunked_forward(x, gate_up_proj, down_proj, expert_ids,
-                            num_experts, intermediate_per_tp)
+        return _bmm_forward(x, gate_up_proj, down_proj, expert_ids, intermediate_per_tp)
+    return _chunked_forward(
+        x, gate_up_proj, down_proj, expert_ids, num_experts, intermediate_per_tp
+    )
 
 
 def _bmm_forward(
