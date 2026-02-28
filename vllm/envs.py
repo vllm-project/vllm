@@ -547,6 +547,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # VLLM_PORT will be used as the first port, and the rest will be generated
     # by incrementing the VLLM_PORT value.
     "VLLM_PORT": get_vllm_port,
+    # Optional port range for vLLM internal ZMQ sockets (e.g. shm_broadcast).
+    # Useful in clusters where only a subset of TCP ports are reachable between
+    # nodes. Format: "start-end" or "start:end" (e.g. "18000-18799").
+    "VLLM_ZMQ_PORT_RANGE": lambda: os.getenv("VLLM_ZMQ_PORT_RANGE", ""),
     # path used for ipc when the frontend api server is running in
     # multi-processing mode to communicate with the backend engine process.
     "VLLM_RPC_BASE_PATH": lambda: os.getenv(
