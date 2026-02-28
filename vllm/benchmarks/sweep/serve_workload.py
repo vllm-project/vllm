@@ -120,7 +120,7 @@ def explore_comb_workload(
 
     print(f"Dataset size: {dataset_size}")
 
-    serial_comb_data = run_comb_workload(
+    serial_workload_data = run_comb_workload(
         server,
         bench_cmd,
         serve_comb=serve_comb,
@@ -132,7 +132,7 @@ def explore_comb_workload(
         workload_var=workload_var,
         workload_value=1,
     )
-    batch_comb_data = run_comb_workload(
+    batch_workload_data = run_comb_workload(
         server,
         bench_cmd,
         serve_comb=serve_comb,
@@ -145,7 +145,7 @@ def explore_comb_workload(
         workload_value=dataset_size,
     )
 
-    if serial_comb_data is None or batch_comb_data is None:
+    if serial_workload_data is None or batch_workload_data is None:
         if dry_run:
             print("Omitting intermediate Workload iterations.")
             print("[WL END]")
@@ -153,12 +153,12 @@ def explore_comb_workload(
         return
 
     serial_workload_value = math.ceil(
-        _estimate_workload_avg(serial_comb_data, workload_var)
+        _estimate_workload_avg(serial_workload_data, workload_var)
     )
     print(f"Serial inference: {workload_var}={serial_workload_value}")
 
     batch_workload_value = math.floor(
-        _estimate_workload_avg(batch_comb_data, workload_var)
+        _estimate_workload_avg(batch_workload_data, workload_var)
     )
     print(f"Batch inference: {workload_var}={batch_workload_value}")
 
@@ -169,10 +169,10 @@ def explore_comb_workload(
     )[1:-1]
     inter_workload_values = sorted(set(map(round, inter_workload_values)))
 
-    inter_combs_data: list[dict[str, object]] = []
+    inter_workloads_data: list[dict[str, object]] = []
     for inter_workload_value in inter_workload_values:
         print(f"Exploring: {workload_var}={inter_workload_value}")
-        inter_comb_data = run_comb_workload(
+        inter_workload_data = run_comb_workload(
             server,
             bench_cmd,
             serve_comb=serve_comb,
@@ -184,12 +184,12 @@ def explore_comb_workload(
             workload_var=workload_var,
             workload_value=inter_workload_value,
         )
-        if inter_comb_data is not None:
-            inter_combs_data.extend(inter_comb_data)
+        if inter_workload_data is not None:
+            inter_workloads_data.extend(inter_workload_data)
 
     print("[WL END]")
 
-    return serial_comb_data + inter_combs_data + batch_comb_data
+    return serial_workload_data + inter_workloads_data + batch_workload_data
 
 
 def explore_combs_workload(
