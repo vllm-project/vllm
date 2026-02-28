@@ -91,6 +91,7 @@ class RoutedExpertsCapturer:
         self._shm: shared_memory.SharedMemory | None = None
         self._host_buffer_view: np.ndarray | None = None
         self._lock_file: str | None = None
+        self._owned_layers: set[int] | None = None
 
     @classmethod
     def create(cls) -> RoutedExpertsCapturer:
@@ -198,6 +199,10 @@ class RoutedExpertsCapturer:
         """
         Save captured experts from device buffer to shared memory.
 
+        With pipeline parallelism (PP > 1), each rank only captures routing
+        decisions for its own layers.  Writing only the owned layers avoids
+        overwriting another rank's data with zeros.
+
         Args:
             indices: Array of indices indicating where to store the data.
         """
@@ -209,12 +214,17 @@ class RoutedExpertsCapturer:
             return
         if self._device_buffer is None:
             raise RuntimeError("Device buffer not initialized.")
-
         num_tokens = len(indices)
         data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
 
         with _file_lock(self._lock_file):
-            self._host_buffer_view[indices, :, :] = data
+            if self._owned_layers is not None:
+                for layer_idx in sorted(self._owned_layers):
+                    self._host_buffer_view[indices, layer_idx, :] = data[
+                        :, layer_idx, :
+                    ]
+            else:
+                self._host_buffer_view[indices, :, :] = data
 
     def cleanup(self) -> None:
         """Explicitly clean up shared memory resources."""
