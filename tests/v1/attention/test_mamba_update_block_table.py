@@ -41,6 +41,9 @@ def _make_vllm_config(block_size, max_model_len, max_num_seqs):
             cudagraph_mode=CUDAGraphMode.FULL,
             max_cudagraph_capture_size=None,
         ),
+        speculative_config=None,
+        num_speculative_tokens=0,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
         model_config=SimpleNamespace(max_model_len=max_model_len),
     )
@@ -92,7 +95,10 @@ def test_update_block_table_copies_block_idx_to_persistent_buffers():
         has_initial_states_p=None,
         query_start_loc_p=None,
         num_computed_tokens_p=None,
-        state_indices_tensor=builder_a.state_indices_tensor[:num_reqs],
+        state_indices_tensor_p=None,
+        query_start_loc_d=None,
+        num_accepted_tokens=None,
+        state_indices_tensor_d=builder_a.state_indices_tensor_d[:num_reqs],
         block_idx_last_scheduled_token=(
             builder_a.block_idx_last_scheduled_token[:num_reqs]
         ),
