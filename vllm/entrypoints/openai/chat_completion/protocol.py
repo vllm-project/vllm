@@ -12,7 +12,7 @@ from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
 )
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from vllm.config import ModelConfig
 from vllm.config.utils import replace
@@ -337,6 +337,32 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
 
     # --8<-- [end:chat-completion-extra-params]
+
+    @field_validator("messages", mode="before")
+    @classmethod
+    def _materialize_tool_calls(cls, messages: object) -> object:
+        """Eagerly convert tool_calls from Iterable to list.
+
+        The OpenAI Python library types tool_calls as Iterable[...] in
+        ChatCompletionAssistantMessageParam. When Pydantic v2 validates from
+        Python objects (not JSON), it wraps Iterable fields in a one-shot
+        lazy iterator. If anything iterates that field first (e.g. debug
+        logging via model_dump_json()), the iterator is exhausted and
+        downstream code (e.g. the Mistral tokenizer) sees empty tool_calls.
+
+        Using mode="before" ensures we materialise the generator before
+        Pydantic's own validation (which may consume the iterator when it
+        validates each message against the union type).
+        """
+        if not isinstance(messages, list):
+            return messages
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            tool_calls = msg.get("tool_calls")
+            if tool_calls is not None and not isinstance(tool_calls, list):
+                msg["tool_calls"] = list(tool_calls)
+        return messages
 
     def build_chat_params(
         self,
