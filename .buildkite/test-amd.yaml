@@ -1317,8 +1317,12 @@ steps:
   - pip install -e ./plugins/prithvi_io_processor_plugin
   - pytest -v -s plugins_tests/test_io_processor_plugins.py
   - pip uninstall prithvi_io_processor_plugin -y
-  # END: `io_processor` plugins test
-  # BEGIN: `stat_logger` plugins test
+  # test bge_m3_sparse io_processor plugin
+  - pip install -e ./plugins/bge_m3_sparse_plugin
+  - pytest -v -s plugins_tests/test_bge_m3_sparse_io_processor_plugins.py
+  - pip uninstall bge_m3_sparse_plugin -y
+  # end io_processor plugins test
+  # begin stat_logger plugins test
   - pip install -e ./plugins/vllm_add_dummy_stat_logger
   - pytest -v -s plugins_tests/test_stats_logger_plugins.py
   - pip uninstall dummy_stat_logger -y
@@ -2730,8 +2734,12 @@ steps:
   - pip install -e ./plugins/prithvi_io_processor_plugin
   - pytest -v -s plugins_tests/test_io_processor_plugins.py
   - pip uninstall prithvi_io_processor_plugin -y
-  # END: `io_processor` plugins test
-  # BEGIN: `stat_logger` plugins test
+  # test bge_m3_sparse io_processor plugin
+  - pip install -e ./plugins/bge_m3_sparse_plugin
+  - pytest -v -s plugins_tests/test_bge_m3_sparse_io_processor_plugins.py
+  - pip uninstall bge_m3_sparse_plugin -y
+  # end io_processor plugins test
+  # begin stat_logger plugins test
   - pip install -e ./plugins/vllm_add_dummy_stat_logger
   - pytest -v -s plugins_tests/test_stats_logger_plugins.py
   - pip uninstall dummy_stat_logger -y
@@ -2971,17 +2979,3 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
-
-
-- label: Attention Benchmarks Smoke Test (MI355) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  agent_pool: mi355_2
-  num_gpus: 2
-  optional: true
-  working_dir: "/vllm-workspace/"
-  source_file_dependencies:
-  - benchmarks/attention_benchmarks/
-  - vllm/v1/attention/
-  commands:
-  - python3 benchmarks/attention_benchmarks/benchmark.py --backends ROCM_ATTN ROCM_AITER_FA ROCM_AITER_UNIFIED_ATTN --batch-specs "8q1s1k" --repeats 1 --warmup-iters 1
