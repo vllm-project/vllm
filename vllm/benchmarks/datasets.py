@@ -60,6 +60,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_NUM_PROMPTS = 1000
+
 # -----------------------------------------------------------------------------
 # Data Classes
 # -----------------------------------------------------------------------------
@@ -1338,7 +1340,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--num-prompts",
         type=int,
-        default=1000,
+        default=DEFAULT_NUM_PROMPTS,
         help="Number of prompts to process.",
     )
     parser.add_argument(
