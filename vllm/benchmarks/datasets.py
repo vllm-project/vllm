@@ -305,9 +305,11 @@ def process_image(image: Any) -> Mapping[str, Any]:
        a JPEG in memory.  - Encodes the JPEG data as a base64 string.  - Returns
        a dictionary with the image as a base64 data URL.
 
-    3. String input: - Treats the string as a URL or local file path.  -
-       Prepends "file://" if the string doesn't start with "http://" or
-       "file://".  - Returns a dictionary with the image URL.
+    3. String input: - Treats the string as a URL, local file path, or base64
+       encoded data.  - If string starts with "data:image/", treats as base64.
+       - If string starts with "http://", "https://", or "file://", treats as URL.
+       - Otherwise treats as local file path and prepends "file://".
+       - Returns a dictionary with the image URL or base64 data.
 
     Raises:
         ValueError: If the input is not a supported type.
@@ -327,14 +329,14 @@ def process_image(image: Any) -> Mapping[str, Any]:
     if isinstance(image, str):
         image_url = (
             image
-            if image.startswith(("http://", "https://", "file://"))
+            if image.startswith(("http://", "https://", "file://", "data:image/"))
             else f"file://{image}"
         )
         return {"type": "image_url", "image_url": {"url": image_url}}
 
     raise ValueError(
-        f"Invalid image input {image}. Must be a PIL.Image.Image"
-        " or str or dictionary with raw image bytes."
+        f"Invalid image input {image}. Must be a PIL.Image.Image, "
+        "str (URL, file path, or base64 data URL), or dictionary with raw image bytes."
     )
 
 
