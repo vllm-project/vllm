@@ -324,6 +324,11 @@ def _plot_fig(
     df = filter_by.apply(df)
     df = bin_by.apply(df)
 
+    if len(df) == 0:
+        print(f"No data to plot. Filters: {filter_by}")
+        print("[END FIGURE]")
+        return
+
     # Sort by curve_by columns alphabetically for consistent legend ordering
     if curve_by:
         df = df.sort_values(by=curve_by)
@@ -570,13 +575,13 @@ class SweepPlotArgs:
         parser.add_argument(
             "--var-x",
             type=str,
-            default="request_throughput",
+            default="total_token_throughput",
             help="The variable for the x-axis.",
         )
         parser.add_argument(
             "--var-y",
             type=str,
-            default="p99_ttft_ms",
+            default="median_ttft_ms",
             help="The variable for the y-axis",
         )
         parser.add_argument(
