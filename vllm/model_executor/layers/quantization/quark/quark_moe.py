@@ -1087,7 +1087,7 @@ class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):
         del layer.w2_weight
         layer.w13_weight = None
         layer.w2_weight = None
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
         if self.static_input_scales:
             if layer.w13_input_scale is None or layer.w2_input_scale is None:
