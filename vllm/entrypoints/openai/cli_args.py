@@ -224,6 +224,11 @@ class FrontendArgs(BaseFrontendArgs):
     """Log level for uvicorn."""
     disable_uvicorn_access_log: bool = False
     """Disable uvicorn access log."""
+    disable_uvicorn_metrics_access_log: bool = False
+    """Shorthand to disable uvicorn access logs for /health and /metrics
+    endpoints. Equivalent to --disable-access-log-for-endpoints
+    '/health,/metrics'. Can be combined with
+    --disable-access-log-for-endpoints for additional paths."""
     disable_access_log_for_endpoints: str | None = None
     """Comma-separated list of endpoint paths to exclude from uvicorn access
     logs. This is useful to reduce log noise from high-frequency endpoints
