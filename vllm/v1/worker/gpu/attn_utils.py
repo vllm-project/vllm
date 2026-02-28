@@ -3,6 +3,7 @@
 from collections.abc import Sequence
 from typing import Any, cast
 
+import numpy as np
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
@@ -180,6 +181,9 @@ def build_attn_metadata(
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
     dcp_local_seq_lens: torch.Tensor | None = None,
+    encoder_seq_lens_by_kv_group: (
+        dict[int, tuple[torch.Tensor, np.ndarray]] | None
+    ) = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
@@ -204,6 +208,10 @@ def build_attn_metadata(
             causal=True,
             dcp_local_seq_lens=dcp_local_seq_lens,
         )
+        if encoder_seq_lens_by_kv_group and i in encoder_seq_lens_by_kv_group:
+            encoder_seq_lens, encoder_seq_lens_cpu = encoder_seq_lens_by_kv_group[i]
+            common_attn_metadata.encoder_seq_lens = encoder_seq_lens
+            common_attn_metadata.encoder_seq_lens_cpu = encoder_seq_lens_cpu
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)

@@ -36,9 +36,14 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.models.interfaces import (
+    supports_realtime,
+    supports_transcription,
+)
+from vllm.model_executor.models.interfaces_base import is_text_generation_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
-from vllm.tasks import SupportedTask
+from vllm.tasks import GenerationTask, SupportedTask
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -78,7 +83,8 @@ from vllm.v1.worker.gpu.kv_connector import (
 )
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.gpu.model_states.default import ModelState
+from vllm.v1.worker.gpu.model_states import create_model_state
+from vllm.v1.worker.gpu.model_states.interface import ModelStateInterface
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import pp_broadcast, pp_receive
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -220,6 +226,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: tuple | None = None
+        self.model_state: ModelStateInterface
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -228,7 +235,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks: list[SupportedTask] = []
         if self.model_config.runner_type == "generate":
-            tasks.append("generate")
+            generation_tasks = list[GenerationTask]()
+            model = self.get_model()
+            if is_text_generation_model(model):
+                generation_tasks.append("generate")
+
+            if supports_transcription(model):
+                if model.supports_transcription_only:
+                    return ("transcription",)
+                generation_tasks.append("transcription")
+
+            if supports_realtime(model):
+                generation_tasks.append("realtime")
+
+            tasks.extend(generation_tasks)
         if self.pooling_runner is not None:
             tasks.extend(self.pooling_runner.get_supported_pooling_tasks())
         return tuple(tasks)
@@ -267,7 +287,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prepare_communication_buffer_for_model(self.speculator)
 
         # Initialize the components that require the model.
-        self.model_state = ModelState(
+        self.model_state = create_model_state(
             self.vllm_config, self.model, self.encoder_cache, self.device
         )
         if self.is_pooling_model:
@@ -291,12 +311,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_group.kv_cache_spec.block_size
             for kv_cache_group in kv_cache_config.kv_cache_groups
         ]
+        block_table_max_model_len = self.max_model_len
+        if self.model_config.is_encoder_decoder:
+            # Cross-attention block tables need to index encoder tokens
+            # (e.g., Whisper ~1500), which can exceed decoder max_model_len.
+            block_table_max_model_len = max(
+                block_table_max_model_len,
+                getattr(
+                    self.model_config.hf_config,
+                    "max_source_positions",
+                    block_table_max_model_len,
+                ),
+            )
 
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
-            max_model_len=self.max_model_len,
+            max_model_len=block_table_max_model_len,
             device=self.device,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
@@ -878,6 +910,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings = None
             # FIXME(woosuk): Fix warmup for LoRA.
 
+        # Encoder-decoder models should run eager/non-compiled when encoder
+        # inputs are scheduled, because this step updates cross-attention cache
+        # with dynamic encoder outputs.
+        has_encoder_input = (
+            self.model_config.is_encoder_decoder
+            and len(scheduler_output.scheduled_encoder_inputs) > 0
+        )
+        if has_encoder_input:
+            cudagraph_runtime_mode = CUDAGraphMode.NONE
+
         attn_metadata = None
         slot_mappings_by_layer = None
         if not (dummy_run and skip_attn_for_dummy_run):
@@ -947,6 +989,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens_across_dp=num_tokens_across_dp,
                 batch_descriptor=batch_descriptor,
                 slot_mapping=slot_mappings_by_layer,
+                skip_compiled=has_encoder_input,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
                 model_output = self.model(**model_inputs)

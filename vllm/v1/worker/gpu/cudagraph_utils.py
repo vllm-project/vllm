@@ -22,7 +22,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
-from vllm.v1.worker.gpu.model_states.default import ModelState
+from vllm.v1.worker.gpu.model_states.interface import ModelStateInterface
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -87,7 +87,7 @@ class CudaGraphManager:
         num_tokens: int,
         capture_cg_mode: CUDAGraphMode,
         model: nn.Module,
-        model_state: ModelState,
+        model_state: ModelStateInterface,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
@@ -125,6 +125,7 @@ class CudaGraphManager:
             num_tokens,
             input_buffers,
             block_tables,
+            model_state,
             attn_groups,
             self.max_model_len,
             kv_cache_config,
@@ -249,7 +250,7 @@ class CudaGraphManager:
     def capture(
         self,
         model: nn.Module,
-        model_state: ModelState,
+        model_state: ModelStateInterface,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
@@ -395,6 +396,7 @@ def prepare_inputs_to_capture(
     num_tokens: int,
     input_buffers: InputBuffers,
     block_tables: BlockTables,
+    model_state: ModelStateInterface | None,
     attn_groups: list[list[AttentionGroup]],
     max_model_len: int,
     kv_cache_config: KVCacheConfig,
@@ -425,6 +427,14 @@ def prepare_inputs_to_capture(
     slot_mappings_by_layer = build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
     )
+    encoder_seq_lens_by_kv_group = {}
+    if model_state is not None:
+        encoder_seq_lens_by_kv_group = model_state.get_encoder_seq_lens_by_kv_group(
+            attn_groups=attn_groups,
+            num_reqs=num_reqs,
+            req_ids=None,
+            for_cudagraph_capture=True,
+        )
 
     attn_metadata = build_attn_metadata(
         attn_groups=attn_groups,
@@ -439,5 +449,6 @@ def prepare_inputs_to_capture(
         slot_mappings=slot_mappings,
         kv_cache_config=kv_cache_config,
         dcp_local_seq_lens=input_buffers.dcp_local_seq_lens,
+        encoder_seq_lens_by_kv_group=encoder_seq_lens_by_kv_group,
     )
     return attn_metadata, slot_mappings_by_layer

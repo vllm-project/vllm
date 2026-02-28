@@ -78,6 +78,7 @@ class EagleCudaGraphManager:
             num_tokens,
             input_buffers,
             block_tables,
+            None,
             attn_groups,
             self.max_model_len,
             kv_cache_config,

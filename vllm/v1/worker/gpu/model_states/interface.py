@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -40,19 +41,17 @@ class ModelStateInterface(ABC):
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
         req_states: RequestState,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | None:
         raise NotImplementedError
 
     @abstractmethod
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
-    ) -> dict[str, torch.Tensor | None]:
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
-    def prepare_dummy_inputs(
-        self, num_reqs: int, num_tokens: int
-    ) -> dict[str, torch.Tensor | None]:
+    def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -64,4 +63,15 @@ class ModelStateInterface(ABC):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
     ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_encoder_seq_lens_by_kv_group(
+        self,
+        attn_groups: list[list[AttentionGroup]],
+        num_reqs: int,
+        req_ids: list[str] | None,
+        for_cudagraph_capture: bool = False,
+    ) -> dict[int, tuple[torch.Tensor, np.ndarray]]:
+        """Return encoder seq-lens keyed by kv-cache group index."""
         raise NotImplementedError

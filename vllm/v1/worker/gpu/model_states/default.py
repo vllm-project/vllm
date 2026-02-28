@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -41,7 +42,9 @@ class ModelState(ModelStateInterface):
 
         if self.supports_mm_inputs:
             assert encoder_cache is not None
+            self.encoder_cache = encoder_cache
             self.encoder_runner = EncoderRunner(
+                model=self.model,
                 max_num_tokens=self.max_num_tokens,
                 hidden_size=self.inputs_embeds_size,
                 encoder_cache=encoder_cache,
@@ -78,11 +81,15 @@ class ModelState(ModelStateInterface):
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
         req_states: RequestState,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | None:
         mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
             scheduled_encoder_inputs
         )
-        self.encoder_runner.execute_mm_encoder(self.model, mm_hashes, mm_kwargs)
+        if mm_kwargs:
+            # Execute the multimodal encoder.
+            encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+            self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
+
         mm_embeds, is_mm_embed = self.encoder_runner.gather_mm_embeddings(
             input_batch.req_ids,
             input_batch.num_tokens,
@@ -92,13 +99,13 @@ class ModelState(ModelStateInterface):
             req_states.num_computed_prefill_tokens[input_batch.idx_mapping_np],
         )
         inputs_embeds = self.encoder_runner.get_inputs_embeds(
-            self.model, input_batch.input_ids, mm_embeds, is_mm_embed
+            input_batch.input_ids, mm_embeds, is_mm_embed
         )
         return inputs_embeds[: input_batch.num_tokens_after_padding]
 
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
-    ) -> dict[str, torch.Tensor | None]:
+    ) -> dict[str, Any]:
         if not self.uses_mrope:
             # Common case (1D positions).
             return {}
@@ -115,9 +122,7 @@ class ModelState(ModelStateInterface):
         ]
         return {"positions": mrope_positions}
 
-    def prepare_dummy_inputs(
-        self, num_reqs: int, num_tokens: int
-    ) -> dict[str, torch.Tensor | None]:
+    def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = {}
         if self.supports_mm_inputs:
             inputs_embeds = self.encoder_runner.inputs_embeds[:num_tokens]
@@ -137,6 +142,11 @@ class ModelState(ModelStateInterface):
     ) -> dict[str, Any]:
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
+        encoder_seq_lens_by_kv_group = self.get_encoder_seq_lens_by_kv_group(
+            attn_groups=attn_groups,
+            num_reqs=input_batch.num_reqs,
+            req_ids=input_batch.req_ids,
+        )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=input_batch.num_reqs,
@@ -150,5 +160,15 @@ class ModelState(ModelStateInterface):
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            encoder_seq_lens_by_kv_group=encoder_seq_lens_by_kv_group,
         )
         return attn_metadata
+
+    def get_encoder_seq_lens_by_kv_group(
+        self,
+        attn_groups: list[list[AttentionGroup]],
+        num_reqs: int,
+        req_ids: list[str] | None,
+        for_cudagraph_capture: bool = False,
+    ) -> dict[int, tuple[torch.Tensor, np.ndarray]]:
+        return {}
