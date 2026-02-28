@@ -32,7 +32,7 @@ else:
 
 logger = init_logger(__name__)
 
-ExpertPlacementStrategy = Literal["linear", "round_robin"]
+ExpertPlacementStrategy = Literal["linear", "round_robin", "custom"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
@@ -146,7 +146,17 @@ class ParallelConfig:
     - "round_robin": Experts are placed in a round-robin manner. For example,
       with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
       will have experts [1, 3]. This strategy can help improve load balancing
-      for grouped expert models with no redundant experts."""
+      for grouped expert models with no redundant experts.\n
+    - "custom": Experts are placed according to a user-specified mapping file
+      provided via --expert-placement-file. Each expert is assigned to a
+      specific EP rank."""
+    expert_placement_file: str | None = None
+    """Path to a JSON file specifying custom expert-to-EP-rank placement.
+    The file must contain a JSON object with an \"expert_to_ep_rank\" key
+    mapping to a list of EP rank assignments, one per expert. For example:
+    {\"expert_to_ep_rank\": [0, 0, 1, 1]} assigns experts 0-1 to rank 0 and
+    experts 2-3 to rank 1. When set, --expert-placement-strategy is
+    automatically set to \"custom\". Mutually exclusive with EPLB."""
     all2all_backend: All2AllBackend = "allgather_reducescatter"
     """All2All backend for MoE expert parallel communication. Available options:
 
@@ -356,6 +366,33 @@ class ParallelConfig:
         if self.data_parallel_size <= 1 and self.data_parallel_external_lb:
             raise ValueError(
                 "data_parallel_external_lb can only be set when data_parallel_size > 1"
+            )
+
+        if self.expert_placement_file is not None:
+            if self.enable_eplb:
+                raise ValueError(
+                    "--expert-placement-file is mutually exclusive with "
+                    "--enable-eplb. Custom static placement cannot be combined "
+                    "with dynamic expert load balancing."
+                )
+            if (
+                self.expert_placement_strategy != "custom"
+                and self.expert_placement_strategy != "linear"
+            ):
+                raise ValueError(
+                    "--expert-placement-file requires "
+                    "--expert-placement-strategy to be 'custom' or unset "
+                    f"(default), but got '{self.expert_placement_strategy}'."
+                )
+            self.expert_placement_strategy = "custom"
+
+        if (
+            self.expert_placement_strategy == "custom"
+            and self.expert_placement_file is None
+        ):
+            raise ValueError(
+                "--expert-placement-strategy 'custom' requires "
+                "--expert-placement-file to be set."
             )
 
         if self.enable_eplb:

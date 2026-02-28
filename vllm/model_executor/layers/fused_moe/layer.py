@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from collections.abc import Callable, Iterable
 from enum import Enum
 from typing import Literal, cast, get_args, overload
@@ -57,6 +58,71 @@ from vllm.utils.math_utils import round_up
 logger = init_logger(__name__)
 
 
+def load_expert_placement_file(
+    file_path: str,
+    global_num_experts: int,
+    ep_size: int,
+) -> list[int]:
+    """Load and validate a custom expert placement JSON file.
+
+    The file must contain a JSON object with an "expert_to_ep_rank" key
+    mapping to a list of EP rank assignments, one per expert.
+
+    Args:
+        file_path: Path to the JSON placement file.
+        global_num_experts: Expected number of experts.
+        ep_size: Number of EP ranks.
+
+    Returns:
+        A list of EP rank assignments of length global_num_experts.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        ValueError: If the file contents are invalid.
+    """
+    with open(file_path) as f:
+        data = json.load(f)
+
+    if not isinstance(data, dict) or "expert_to_ep_rank" not in data:
+        raise ValueError(
+            f"Expert placement file '{file_path}' must contain a JSON "
+            "object with an 'expert_to_ep_rank' key."
+        )
+
+    mapping = data["expert_to_ep_rank"]
+    if not isinstance(mapping, list):
+        raise ValueError(
+            f"'expert_to_ep_rank' in '{file_path}' must be a list, "
+            f"got {type(mapping).__name__}."
+        )
+
+    if len(mapping) != global_num_experts:
+        raise ValueError(
+            f"'expert_to_ep_rank' in '{file_path}' has length "
+            f"{len(mapping)}, expected {global_num_experts} "
+            f"(global_num_experts)."
+        )
+
+    for idx, rank in enumerate(mapping):
+        if not isinstance(rank, int) or rank < 0 or rank >= ep_size:
+            raise ValueError(
+                f"Invalid EP rank {rank} for expert {idx} in "
+                f"'{file_path}'. Must be an integer in [0, {ep_size})."
+            )
+
+    # Ensure every EP rank has at least one expert
+    assigned_ranks = set(mapping)
+    for r in range(ep_size):
+        if r not in assigned_ranks:
+            raise ValueError(
+                f"EP rank {r} has no experts assigned in '{file_path}'. "
+                f"Every rank in [0, {ep_size}) must have at least one "
+                "expert."
+            )
+
+    return mapping
+
+
 class FusedMoeWeightScaleSupported(Enum):
     TENSOR = "tensor"
     CHANNEL = "channel"
@@ -71,6 +137,7 @@ def determine_expert_map(
     expert_placement_strategy: ExpertPlacementStrategy = "linear",
     num_fused_shared_experts: int = 0,
     return_expert_mask: bool = False,
+    custom_expert_to_ep_rank: list[int] | None = None,
 ) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
     """
     Calculates how many experts should be assigned to each rank for EP and
@@ -84,6 +151,10 @@ def determine_expert_map(
             group
         global_num_experts: The total number of experts in the model.
         expert_placement_strategy: The expert placement strategy.
+        custom_expert_to_ep_rank: A list of length global_num_experts
+            where each element is the EP rank that expert should be
+            assigned to. Only used when expert_placement_strategy is
+            "custom".
 
     Returns:
         tuple[int, Optional[torch.Tensor]]: A tuple containing:
@@ -104,33 +175,45 @@ def determine_expert_map(
     if ep_size == 1:
         return (global_num_experts, None, None)
 
-    # Distribute experts as evenly as possible to each rank.
-    base_experts = global_num_experts // ep_size
-    remainder = global_num_experts % ep_size
-    local_num_experts = base_experts + 1 if ep_rank < remainder else base_experts
+    if expert_placement_strategy == "custom":
+        assert custom_expert_to_ep_rank is not None, (
+            "custom_expert_to_ep_rank must be provided when "
+            "expert_placement_strategy is 'custom'"
+        )
+        # Build expert_map from the user-provided mapping
+        mapping = torch.tensor(custom_expert_to_ep_rank, dtype=torch.int32)
+        mask = mapping == ep_rank
 
-    # Create a tensor of size num_experts filled with -1
-    expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
-    # Create an expert map for the local experts
-    if expert_placement_strategy == "linear":
-        start_idx = ep_rank * base_experts + min(ep_rank, remainder)
-        expert_map[start_idx : start_idx + local_num_experts] = torch.arange(
-            0, local_num_experts, dtype=torch.int32
-        )
-    elif expert_placement_strategy == "round_robin":
-        local_log_experts = torch.arange(
-            ep_rank, global_num_experts, ep_size, dtype=torch.int32
-        )
+        local_num_experts = mask.sum().item()
+        expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
+        expert_map[mask] = torch.arange(local_num_experts, dtype=torch.int32)
 
-        expert_map[local_log_experts] = torch.arange(
-            0, local_num_experts, dtype=torch.int32
-        )
-    else:
-        raise ValueError(
-            "Unsupported expert placement strategy "
-            f"'{expert_placement_strategy}', expected one of "
-            f"{get_args(ExpertPlacementStrategy)}"
-        )
+        base_experts = global_num_experts // ep_size
+        remainder = global_num_experts % ep_size
+        local_num_experts = base_experts + 1 if ep_rank < remainder else base_experts
+
+        # Create a tensor of size num_experts filled with -1
+        expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
+        # Create an expert map for the local experts
+        if expert_placement_strategy == "linear":
+            start_idx = ep_rank * base_experts + min(ep_rank, remainder)
+            expert_map[start_idx : start_idx + local_num_experts] = torch.arange(
+                0, local_num_experts, dtype=torch.int32
+            )
+        elif expert_placement_strategy == "round_robin":
+            local_log_experts = torch.arange(
+                ep_rank, global_num_experts, ep_size, dtype=torch.int32
+            )
+
+            expert_map[local_log_experts] = torch.arange(
+                0, local_num_experts, dtype=torch.int32
+            )
+        else:
+            raise ValueError(
+                "Unsupported expert placement strategy "
+                f"'{expert_placement_strategy}', expected one of "
+                f"{get_args(ExpertPlacementStrategy)}"
+            )
 
     expert_mask = None
     if return_expert_mask:
@@ -421,6 +504,7 @@ class FusedMoE(CustomOp):
             )
 
         # Determine expert maps
+        self._custom_expert_to_ep_rank: list[int] | None = None
         if self.use_ep:
             if self.enable_eplb:
                 assert self.global_num_experts % self.ep_size == 0, (
@@ -430,6 +514,15 @@ class FusedMoE(CustomOp):
             else:
                 assert num_redundant_experts == 0, (
                     "Redundant experts are only supported with EPLB."
+                )
+
+            # Load custom placement file if configured
+            placement_file = vllm_config.parallel_config.expert_placement_file
+            if placement_file is not None:
+                self._custom_expert_to_ep_rank = load_expert_placement_file(
+                    file_path=placement_file,
+                    global_num_experts=self.global_num_experts,
+                    ep_size=self.ep_size,
                 )
 
             self.expert_placement_strategy = determine_expert_placement_strategy(
@@ -446,6 +539,7 @@ class FusedMoE(CustomOp):
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts,
                 expert_placement_strategy=self.expert_placement_strategy,
+                custom_expert_to_ep_rank=self._custom_expert_to_ep_rank,
                 num_fused_shared_experts=self.num_fused_shared_experts,
                 return_expert_mask=self.rocm_aiter_fmoe_enabled,
             )
@@ -828,6 +922,7 @@ class FusedMoE(CustomOp):
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts,
                 expert_placement_strategy=self.expert_placement_strategy,
+                custom_expert_to_ep_rank=self._custom_expert_to_ep_rank,
                 num_fused_shared_experts=self.num_fused_shared_experts,
                 return_expert_mask=self.rocm_aiter_fmoe_enabled,
             )
