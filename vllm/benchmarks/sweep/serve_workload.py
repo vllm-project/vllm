@@ -3,7 +3,6 @@
 import argparse
 import math
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import ClassVar, Literal, get_args
 
@@ -59,10 +58,10 @@ def run_comb_workload(
     *,
     serve_comb: ParameterSweepItem,
     bench_comb: ParameterSweepItem,
-    output_dir: Path,
+    link_vars: list[tuple[str, str]],
+    experiment_dir: Path,
     num_runs: int,
     dry_run: bool,
-    link_vars: list[tuple[str, str]],
     workload_var: WorkloadVariable,
     workload_value: int,
 ) -> list[dict[str, object]] | None:
@@ -73,15 +72,15 @@ def run_comb_workload(
         bench_cmd,
         serve_comb=serve_comb,
         bench_comb=bench_comb_workload,
+        link_vars=link_vars,
         base_path=_get_comb_base_path(
-            output_dir,
+            experiment_dir,
             serve_comb,
             bench_comb,
             extra_parts=("WL-", f"{workload_var}={workload_value}"),
         ),
         num_runs=num_runs,
         dry_run=dry_run,
-        link_vars=link_vars,
     )
 
 
@@ -91,12 +90,12 @@ def explore_comb_workloads(
     *,
     serve_comb: ParameterSweepItem,
     bench_comb: ParameterSweepItem,
+    link_vars: list[tuple[str, str]],
     workload_var: WorkloadVariable,
     workload_iters: int,
-    output_dir: Path,
+    experiment_dir: Path,
     num_runs: int,
     dry_run: bool,
-    link_vars: list[tuple[str, str]],
 ):
     print("[WL START]")
     print(f"Serve parameters: {serve_comb.as_text() or '(None)'}")
@@ -125,10 +124,10 @@ def explore_comb_workloads(
         bench_cmd,
         serve_comb=serve_comb,
         bench_comb=bench_comb | {"max_concurrency": 1},
-        output_dir=output_dir,
+        link_vars=link_vars,
+        experiment_dir=experiment_dir,
         num_runs=num_runs,
         dry_run=dry_run,
-        link_vars=link_vars,
         workload_var=workload_var,
         workload_value=1,
     )
@@ -137,10 +136,10 @@ def explore_comb_workloads(
         bench_cmd,
         serve_comb=serve_comb,
         bench_comb=bench_comb | {"max_concurrency": dataset_size},
-        output_dir=output_dir,
+        link_vars=link_vars,
+        experiment_dir=experiment_dir,
         num_runs=num_runs,
         dry_run=dry_run,
-        link_vars=link_vars,
         workload_var=workload_var,
         workload_value=dataset_size,
     )
@@ -177,10 +176,10 @@ def explore_comb_workloads(
             bench_cmd,
             serve_comb=serve_comb,
             bench_comb=bench_comb,
-            output_dir=output_dir,
+            link_vars=link_vars,
+            experiment_dir=experiment_dir,
             num_runs=num_runs,
             dry_run=dry_run,
-            link_vars=link_vars,
             workload_var=workload_var,
             workload_value=inter_workload_value,
         )
@@ -201,12 +200,12 @@ def explore_combs_workloads(
     server_ready_timeout: int,
     serve_params: ParameterSweep,
     bench_params: ParameterSweep,
+    link_vars: list[tuple[str, str]],
     workload_var: WorkloadVariable,
     workload_iters: int,
-    output_dir: Path,
+    experiment_dir: Path,
     num_runs: int,
     dry_run: bool,
-    link_vars: list[tuple[str, str]],
 ):
     if any(bench_comb.has_param(workload_var) for bench_comb in bench_params):
         raise ValueError(
@@ -223,7 +222,7 @@ def explore_combs_workloads(
             server_ready_timeout=server_ready_timeout,
             serve_comb=serve_comb,
             bench_params=bench_params,
-            output_dir=output_dir,
+            experiment_dir=experiment_dir,
             dry_run=dry_run,
         ) as server:
             for bench_comb in bench_params:
@@ -232,12 +231,12 @@ def explore_combs_workloads(
                     bench_cmd,
                     serve_comb=serve_comb,
                     bench_comb=bench_comb,
+                    link_vars=link_vars,
                     workload_var=workload_var,
                     workload_iters=workload_iters,
-                    output_dir=output_dir,
+                    experiment_dir=experiment_dir,
                     num_runs=num_runs,
                     dry_run=dry_run,
-                    link_vars=link_vars,
                 )
 
                 if comb_data is not None:
@@ -247,7 +246,7 @@ def explore_combs_workloads(
         return None
 
     combined_df = pd.DataFrame.from_records(all_data)
-    combined_df.to_csv(output_dir / "summary.csv")
+    combined_df.to_csv(experiment_dir / "summary.csv")
 
     return combined_df
 
@@ -298,13 +297,9 @@ class SweepServeWorkloadArgs(SweepServeArgs):
 
 
 def run_main(args: SweepServeWorkloadArgs):
-    timestamp = args.resume or datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = args.output_dir / timestamp
+    experiment_dir = args.resolve_experiment_dir()
 
-    if args.resume and not output_dir.exists():
-        raise ValueError(f"Cannot resume from non-existent directory ({output_dir})")
-
-    try:
+    with args.run_ctx(experiment_dir):
         return explore_combs_workloads(
             serve_cmd=args.serve_cmd,
             bench_cmd=args.bench_cmd,
@@ -313,18 +308,13 @@ def run_main(args: SweepServeWorkloadArgs):
             server_ready_timeout=args.server_ready_timeout,
             serve_params=args.serve_params,
             bench_params=args.bench_params,
+            link_vars=args.link_vars,
             workload_var=args.workload_var,
             workload_iters=args.workload_iters,
-            output_dir=output_dir,
+            experiment_dir=experiment_dir,
             num_runs=args.num_runs,
             dry_run=args.dry_run,
-            link_vars=args.link_vars,
         )
-    except BaseException as exc:
-        raise RuntimeError(
-            f"The script was terminated early. Use `--resume {timestamp}` "
-            f"to continue the script from its last checkpoint."
-        ) from exc
 
 
 def main(args: argparse.Namespace):
