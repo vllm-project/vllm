@@ -421,14 +421,6 @@ class EngineCore:
         if self._scheduler_paused:
             return {}, False
 
-        # Auto-stop profiling from previous step's max_steps trigger.
-        # Must happen BEFORE execute_model so the decode step is excluded
-        # from the trace, but AFTER the device has flushed trace data
-        # from the previous (profiled) step.
-        if self._profiling_stop_pending:
-            self._profiling_stop_pending = False
-            self.model_executor.profile(False)
-
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
@@ -561,6 +553,10 @@ class EngineCore:
             scheduler_output, model_output
         )
 
+        # Auto-stop profiling after max_steps (e.g. prefill-only trace)
+        if scheduler_output.total_num_scheduled_tokens > 0:
+            self._maybe_auto_stop_profile()
+
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
@@ -617,17 +613,17 @@ class EngineCore:
         return None
 
     def _maybe_auto_stop_profile(self):
-        """Mark profiling for auto-stop after max_steps engine steps.
+        """Auto-stop profiling after max_steps engine steps.
 
-        Sets _profiling_stop_pending which is checked at the beginning
-        of the next step() call.  This gives the TPU device time to
-        flush trace data between the last profiled step and stop_trace.
+        Stops tracing immediately after the profiled step's output is
+        processed (future.result() has returned, so device computation
+        is complete and trace events are ready to flush).
         """
         if self._profiling_steps_remaining is not None:
             self._profiling_steps_remaining -= 1
             if self._profiling_steps_remaining <= 0:
                 self._profiling_steps_remaining = None
-                self._profiling_stop_pending = True
+                self.model_executor.profile(False)
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to

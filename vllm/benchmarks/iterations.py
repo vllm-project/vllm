@@ -744,8 +744,9 @@ async def run_benchmark(
             #   traces when called while the engine is sleeping
             # - DP>1 deadlocks with sleep/wake
             if config.profile and config.mode == "prefill" and trace_prefix:
-                # Start profiling
-                params = {"prefix": trace_prefix, "delay": 0}
+                # Start profiling with max_steps=1 to auto-stop after
+                # the prefill engine step, excluding the decode step.
+                params = {"prefix": trace_prefix, "delay": 0, "max_steps": 1}
                 for attempt in range(3):
                     trace_started = await call_debug_endpoint(
                         session, rotator, "/debug/profile/start", params)
