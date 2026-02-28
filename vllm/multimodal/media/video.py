@@ -40,7 +40,6 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         video_loader_backend = (
             kwargs.pop("video_backend", None) or envs.VLLM_VIDEO_LOADER_BACKEND
         )
-        self.keep_video_bytes = kwargs.pop("keep_video_bytes", False)
 
         self.kwargs = kwargs
         self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
@@ -49,9 +48,6 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         video, metadata = self.video_loader.load_bytes(
             data, num_frames=self.num_frames, **self.kwargs
         )
-        if self.keep_video_bytes:
-            metadata = dict(metadata)
-            metadata["original_video_bytes"] = data
         return video, metadata
 
     def load_base64(

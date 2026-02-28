@@ -42,22 +42,25 @@ def extract_audio_from_video_bytes(
             "audio-in-video extraction."
         )
     try:
-        container = av.open(BytesIO(data))
+        with av.open(BytesIO(data)) as container:
+            if not container.streams.audio:
+                raise ValueError("No audio stream found in the video.")
+            stream = container.streams.audio[0]
+            native_sr = stream.rate
+
+            chunks: list[npt.NDArray] = []
+            for frame in container.decode(audio=0):
+                # to_ndarray() returns shape (channels, samples) for planar
+                # formats and (1, samples) for packed formats.
+                arr = frame.to_ndarray()
+                chunks.append(arr.mean(axis=0) if arr.ndim > 1 else arr)
+    except ValueError:
+        raise
     except Exception as e:
         raise ValueError(
             "Invalid or corrupted video data when extracting audio. "
             "Ensure the input is valid video bytes (e.g. a complete MP4)."
         ) from e
-    stream = container.streams.audio[0]
-    native_sr = stream.rate
-
-    chunks: list[npt.NDArray] = []
-    for frame in container.decode(audio=0):
-        # to_ndarray() returns shape (channels, samples) for planar
-        # formats and (1, samples) for packed formats.
-        arr = frame.to_ndarray()
-        chunks.append(arr.mean(axis=0) if arr.ndim > 1 else arr)
-    container.close()
 
     if not chunks:
         raise ValueError("No audio found in the video.")
