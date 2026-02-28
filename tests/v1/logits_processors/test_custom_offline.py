@@ -42,6 +42,11 @@ sampling_params_list = [
 ]
 
 
+@pytest.fixture(autouse=True, scope="function")
+def set_seed():
+    set_random_seed(40)
+
+
 def _run_test(kwargs: dict, logitproc_loaded: bool) -> None:
     """Compare `LLM` instance initialized with specified `kwargs` against
     reference `LLM` instance.
@@ -133,8 +138,6 @@ def test_custom_logitsprocs(monkeypatch, logitproc_source: CustomLogitprocSource
     """
 
     # Test that logitproc info is passed to workers
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
-    set_random_seed(40)
 
     # Choose LLM args based on logitproc source
     if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_NONE:
@@ -192,8 +195,6 @@ def test_custom_logitsprocs_req(monkeypatch):
     """
 
     # Test that logitproc info is passed to workers
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
-    set_random_seed(40)
     _run_test(
         {"logits_processors": [WrappedPerReqLogitsProcessor]}, logitproc_loaded=True
     )
@@ -236,7 +237,6 @@ def test_rejects_custom_logitsprocs(
                         logitproc from
     """
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    set_random_seed(40)
 
     test_params: dict[str, dict[str, Any]] = {
         "pooling": {
