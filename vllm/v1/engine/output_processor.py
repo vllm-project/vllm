@@ -70,10 +70,12 @@ class RequestOutputCollector:
             # This ensures that request outputs with different request indexes
             # (if n > 1) do not override each other.
             self.output.add(output, aggregate=self.aggregate)
+            self.ready.set()
         elif isinstance(self.output, PoolingRequestOutput) and isinstance(
             output, PoolingRequestOutput
         ):
             self.output = output
+            self.ready.set()
 
     async def get(self) -> RequestOutput | PoolingRequestOutput:
         """Get operation blocks on put event."""

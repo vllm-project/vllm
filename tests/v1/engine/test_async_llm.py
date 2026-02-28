@@ -149,6 +149,64 @@ async def test_load(
         assert not engine.output_processor.has_unfinished_requests()
 
 
+@pytest.mark.asyncio
+async def test_concurrent_generate_no_empty_output():
+    """Test that concurrent generate() calls never produce empty outputs.
+
+    Regression test for a bug where concurrent requests could result in
+    empty responses due to race conditions in the output processing.
+    """
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        NUM_REQUESTS = 100
+        NUM_EXPECTED_TOKENS = 10
+
+        async def generate_and_validate(request_id: str):
+            sampling_params = SamplingParams(
+                max_tokens=NUM_EXPECTED_TOKENS,
+                ignore_eos=True,
+                output_kind=RequestOutputKind.FINAL_ONLY,
+                temperature=0.5,
+                seed=33,
+            )
+            final_output = None
+            async for out in engine.generate(
+                request_id=request_id,
+                prompt=TEXT_PROMPT,
+                sampling_params=sampling_params,
+            ):
+                final_output = out
+
+            assert final_output is not None, f"{request_id}: got no output at all"
+            assert len(final_output.outputs) > 0, f"{request_id}: outputs list is empty"
+            assert len(final_output.outputs[0].text) > 0, (
+                f"{request_id}: output text is empty"
+            )
+            assert len(final_output.outputs[0].token_ids) == NUM_EXPECTED_TOKENS, (
+                f"{request_id}: expected {NUM_EXPECTED_TOKENS} tokens, "
+                f"got {len(final_output.outputs[0].token_ids)}"
+            )
+            return request_id
+
+        # Launch all requests concurrently
+        tasks = [
+            asyncio.create_task(generate_and_validate(f"request-{i}"))
+            for i in range(NUM_REQUESTS)
+        ]
+
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for task in pending:
+            task.cancel()
+        # Re-raise any exceptions
+        for task in done:
+            await task
+
+        assert not engine.output_processor.has_unfinished_requests()
+
+
 @pytest.mark.parametrize(
     "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
 )
