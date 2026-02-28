@@ -729,6 +729,18 @@ class SamplingParams(
         )
         from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
 
+        if (
+            self.structured_outputs.whitespace_pattern is not None
+            and backend != "auto"
+            and backend != "outlines"
+        ):
+            logger.warning(
+                "whitespace_pattern is only fully supported by the "
+                "'outlines' backend. The '%s' backend will approximate "
+                "or ignore this setting.",
+                backend,
+            )
+
         if backend.startswith("xgrammar"):
             # xgrammar with no fallback
             validate_xgrammar_grammar(self)
@@ -763,6 +775,16 @@ class SamplingParams(
             # will satisfy the most use cases without having to worry about
             # this setting. We include fallback behavior here, but not with any
             # other setting where a specific backend was specified.
+
+            # When whitespace_pattern is set, prefer outlines as it's the
+            # only backend with native custom whitespace pattern support.
+            if self.structured_outputs.whitespace_pattern is not None:
+                validate_structured_output_request_outlines(self)
+                self.structured_outputs._backend = "outlines"
+                self.structured_outputs._backend_was_auto = True
+                self.structured_outputs.__post_init__()
+                return
+
             try:
                 validate_xgrammar_grammar(self)
                 self.structured_outputs._backend = "xgrammar"

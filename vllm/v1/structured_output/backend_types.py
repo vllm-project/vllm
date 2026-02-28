@@ -25,7 +25,7 @@ class StructuredOutputOptions(enum.Enum):
     STRUCTURAL_TAG = enum.auto()
 
 
-StructuredOutputKey = tuple[StructuredOutputOptions, str]
+StructuredOutputKey = tuple[StructuredOutputOptions, str, str | None]
 
 
 class StructuredOutputGrammar(ABC):
@@ -105,7 +105,10 @@ class StructuredOutputBackend(ABC):
 
     @abstractmethod
     def compile_grammar(
-        self, request_type: StructuredOutputOptions, grammar_spec: str
+        self,
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        whitespace_pattern: str | None = None,
     ) -> StructuredOutputGrammar:
         """
         Compiles a grammar specification into a structured output grammar.
@@ -114,6 +117,9 @@ class StructuredOutputBackend(ABC):
             request_type (StructuredOutputOptions): The type of structured
                 output request.
             grammar_spec (str): The grammar specification to compile.
+            whitespace_pattern (str | None): Optional regex pattern to
+                control whitespace in JSON output. Only natively supported
+                by the outlines backend.
 
         Returns:
             StructuredOutputGrammar: The compiled structured output grammar.

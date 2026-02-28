@@ -66,10 +66,18 @@ class OutlinesBackend(StructuredOutputBackend):
         return index
 
     def compile_grammar(
-        self, request_type: StructuredOutputOptions, grammar_spec: str
+        self,
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        whitespace_pattern: str | None = None,
     ) -> StructuredOutputGrammar:
         if request_type == StructuredOutputOptions.JSON:
-            regex = json_schema.build_regex_from_schema(grammar_spec)
+            if whitespace_pattern is not None:
+                regex = json_schema.build_regex_from_schema(
+                    grammar_spec, whitespace_pattern
+                )
+            else:
+                regex = json_schema.build_regex_from_schema(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
             regex = grammar_spec
         elif request_type == StructuredOutputOptions.CHOICE:
@@ -186,7 +194,12 @@ def validate_structured_output_request_outlines(params: SamplingParams):
                 raise ValueError(
                     f"Error serializing structured outputs jsonschema: {e}"
                 ) from e
-        pattern = json_schema.build_regex_from_schema(schema)
+        if so_params.whitespace_pattern is not None:
+            pattern = json_schema.build_regex_from_schema(
+                schema, so_params.whitespace_pattern
+            )
+        else:
+            pattern = json_schema.build_regex_from_schema(schema)
         validate_regex_is_buildable(pattern)
     elif so_params.choice:
         choices = [regex_escape(str(choice)) for choice in so_params.choice]
