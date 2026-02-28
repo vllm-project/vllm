@@ -623,6 +623,7 @@ class EngineCoreSentinel(BaseSentinel):
     def poll_and_report_fault_events(self):
         try:
             engine_exception = self.fault_signal_q.get_nowait()
+            self.engine_running = False
             if isinstance(engine_exception, EngineLoopPausedError):
                 self.logger("Engine paused", level="info")
             else:
@@ -633,15 +634,11 @@ class EngineCoreSentinel(BaseSentinel):
                     "".join(traceback.format_tb(engine_exception.__traceback__)),
                     level="error",
                 )
-                self._report_exception_to_client_sentinel(engine_exception)
-            self.engine_running = False
+                msg = FaultInfo.from_exception(engine_exception, self.engine_index)
+                msg_bytes = msgspec.msgpack.encode(msg)
+                self.engine_fault_socket.send_multipart([b"", msg_bytes])
         except queue.Empty:
             pass
-
-    def _report_exception_to_client_sentinel(self, exception: Exception) -> None:
-        msg = FaultInfo.from_exception(exception, self.engine_index)
-        msg_bytes = msgspec.msgpack.encode(msg)
-        self.engine_fault_socket.send_multipart([b"", msg_bytes])
 
     def pause(self, timeout: int = 1, **kwargs) -> bool:
         """
@@ -649,7 +646,7 @@ class EngineCoreSentinel(BaseSentinel):
         """
         self.logger("Start pausing EngineCore", level="info")
         soft_pause = kwargs.get("soft_pause", False)
-        start_time = time.monotonic()
+        deadline = time.monotonic() + timeout
         # Clear the flag to signal busy loop should pause
         self.busy_loop_active.clear()
         success, _ = self._execute_command_on_downstreams(
@@ -662,21 +659,16 @@ class EngineCoreSentinel(BaseSentinel):
             # Put a sentinel (empty request) to unblock the busy loop
             # if it's blocked on input_queue.get()
             self.engine_input_q.put((EngineCoreRequestType.PAUSE, None))
-            elapsed = time.monotonic() - start_time
+            remaining_timeout = max(0, deadline - time.monotonic())
             if success:
-                remaining_timeout = max(0, timeout - elapsed)
                 try:
                     # Wait for engine to acknowledge the pause via fault_signal_q
                     exception = self.fault_signal_q.get(timeout=remaining_timeout)
                     self.fault_signal_q.put(exception)
-                    success = True
                     self.engine_running = False
                 except queue.Empty:
                     # Timeout waiting for pause acknowledgment
                     success = False
-        else:
-            # already paused
-            success = True
         return success
 
     def retry(self, timeout: int = 1, **kwargs) -> bool:
@@ -688,7 +680,7 @@ class EngineCoreSentinel(BaseSentinel):
         if self.engine_running:
             return True
         new_stateless_dp_group_port = kwargs.get("new_stateless_dp_group_port")
-        start_time = time.monotonic()
+        deadline = time.monotonic() + timeout
         identities = self._get_target_worker_identity()
         success, _ = self._execute_command_on_downstreams(
             "retry", identities, timeout=timeout
@@ -697,11 +689,10 @@ class EngineCoreSentinel(BaseSentinel):
             return success
 
         if self.dp_size > 1:
-            # If the Gloo communication times out
+            # If the Gloo communication times out,
             # the data parallel group (dp_group) needs to be reinitialized
-            command = "reinit_dp_group_on_fault_tolerance"
             reinit_request = FaultToleranceRequest(
-                instruction=command,
+                instruction="reinit_dp_group_on_fault_tolerance",
                 request_id=str(uuid.uuid4()),
                 params={"new_stateless_dp_group_port": new_stateless_dp_group_port},
             )
@@ -710,11 +701,9 @@ class EngineCoreSentinel(BaseSentinel):
             self.cmd_q.put(None)
 
         # Ensure busy loop has been recovered.
-        elapsed = time.monotonic() - start_time
-        remaining_timeout = max(0, timeout - elapsed)
-        success = self.busy_loop_active.wait(timeout=remaining_timeout)
-        self.engine_running = success
-        return success
+        remaining_timeout = max(0, deadline - time.monotonic())
+        self.engine_running = self.busy_loop_active.wait(timeout=remaining_timeout)
+        return self.engine_running
 
     def _get_target_worker_identity(self):
         identities = set()
