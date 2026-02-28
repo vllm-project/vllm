@@ -40,7 +40,6 @@ import torch
 import torch.distributed
 import torch.distributed._functional_collectives as funcol
 import torch.distributed._symmetric_memory
-import torch.nn.functional as F
 from torch.distributed import Backend, ProcessGroup
 
 import vllm.envs as envs
@@ -50,7 +49,6 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_distributed_init_method
 from vllm.utils.system_utils import suppress_stdout
 from vllm.utils.torch_utils import (
@@ -145,48 +143,11 @@ def reduce_scatter(
     return group._reduce_scatter_out_place(tensor, dim)
 
 
-def reduce_scatter_with_padding(
-    tensor: torch.Tensor, dim: int, world_size: int, group_name: str
-) -> torch.Tensor:
-    """Runtime-safe wrapper around reduce_scatter for non-divisible dim sizes.
-
-    This keeps communication semantics on the existing reduce_scatter path while
-    handling odd sequence lengths that appear in range-compiled graphs.
-    """
-    assert group_name in _groups, f"Group {group_name} is not found."
-    group = _groups[group_name]()
-    if group is None:
-        raise ValueError(f"Group {group_name} is destroyed.")
-
-    if dim < 0:
-        dim += tensor.dim()
-    assert 0 <= dim < tensor.dim(), (
-        f"Invalid dim ({dim}) for input tensor with shape {tensor.size()}"
-    )
-
-    remainder = tensor.shape[dim] % world_size
-    if remainder != 0:
-        pad_len = world_size - remainder
-        pad_width = [0] * (2 * tensor.dim())
-        pad_width[2 * (tensor.dim() - dim) - 1] = pad_len
-        tensor = F.pad(tensor, tuple(pad_width))
-
-    return group._reduce_scatter_out_place(tensor, dim)
-
-
 def reduce_scatter_fake(
     tensor: torch.Tensor, dim: int, world_size: int, group_name: str
 ) -> torch.Tensor:
     new_shape = list(tensor.shape)
     new_shape[dim] = tensor.shape[dim] // world_size
-    return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
-
-
-def reduce_scatter_with_padding_fake(
-    tensor: torch.Tensor, dim: int, world_size: int, group_name: str
-) -> torch.Tensor:
-    new_shape = list(tensor.shape)
-    new_shape[dim] = cdiv(tensor.shape[dim], world_size)
     return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
 
 
@@ -302,12 +263,6 @@ direct_register_custom_op(
     op_name="reduce_scatter",
     op_func=reduce_scatter,
     fake_impl=reduce_scatter_fake,
-)
-
-direct_register_custom_op(
-    op_name="reduce_scatter_with_padding",
-    op_func=reduce_scatter_with_padding,
-    fake_impl=reduce_scatter_with_padding_fake,
 )
 
 direct_register_custom_op(

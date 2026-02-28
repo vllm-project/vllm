@@ -208,15 +208,17 @@ def is_residual_scattered_for_sp(
 ) -> bool:
     """Check if the residual tensor is scattered for sequence parallelism.
 
-    The residual tensor is scattered across tensor parallel ranks when sequence
-    parallelism and tensor parallelism is enabled.
+    The residual tensor is scattered across tensor parallel ranks when either
+    sequence parallelism (`enable_sp`) or sequence-parallel MoE
+    (`enable_sp_moe`) is enabled with tensor parallelism.
 
     This follows the same logic as SequenceParallelismPass.is_applicable_for_range():
     - In full-graph compilation mode (no splitting ops or using inductor graph
       partition), SP is always applied
     - Otherwise, SP is only applied for specific shapes in compile_sizes
     """
-    if not vllm_config.compilation_config.pass_config.enable_sp:
+    pass_config = vllm_config.compilation_config.pass_config
+    if not (pass_config.enable_sp or pass_config.enable_sp_moe):
         return False
 
     tp = vllm_config.parallel_config.tensor_parallel_size

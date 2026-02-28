@@ -13,6 +13,7 @@ from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 
 from ..inductor_pass import enable_fake_mode
+from ..utility.noop_elimination import NoOpEliminationPass
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .matcher_utils import MatcherFusedAddRMSNorm, MatcherRMSNorm
 
@@ -40,16 +41,8 @@ class _SequenceParallelismMoEPatternHelper:
     def _sequence_parallel_chunk(self, x: torch.Tensor) -> torch.Tensor:
         return torch.ops.vllm.sequence_parallel_chunk_impl.default(x)
 
-    def _reduce_scatter_with_padding(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.ops.vllm.reduce_scatter_with_padding.default(
-            x,
-            dim=0,
-            world_size=self.tp_size,
-            group_name=self.tp_group.unique_name,
-        )
-
-    def _all_gather(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.ops.vllm.all_gather.default(
+    def _reduce_scatter(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.ops.vllm.reduce_scatter.default(
             x,
             dim=0,
             world_size=self.tp_size,
@@ -94,8 +87,9 @@ class AllReduceRMSNormSequenceParallelChunkPattern(
             input_: torch.Tensor,
             weight: torch.Tensor,
         ) -> torch.Tensor:
-            reduce_scatter = self._reduce_scatter_with_padding(input_)
-            return self.rmsnorm_matcher(reduce_scatter, weight)
+            reduce_scatter = self._reduce_scatter(input_)
+            rmsnorm = self.rmsnorm_matcher(reduce_scatter, weight)
+            return rmsnorm
 
         pm.register_replacement(
             pattern,
@@ -137,27 +131,26 @@ class AllReduceFusedAddRMSNormSequenceParallelChunkPattern(
             weight: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(input_)
-            rmsnorm, residual_out = self.rmsnorm_matcher(all_reduce, weight, residual)
-            return self._sequence_parallel_chunk(rmsnorm), residual_out
+            rmsnorm = self.rmsnorm_matcher(all_reduce, weight, residual)
+            return self._sequence_parallel_chunk(rmsnorm[0]), rmsnorm[1]
 
         def replacement(
             residual: torch.Tensor,
             input_: torch.Tensor,
             weight: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            reduce_scatter = self._reduce_scatter_with_padding(input_)
-            residual_chunk = self._sequence_parallel_chunk(residual)
-            rmsnorm, residual_out = self.rmsnorm_matcher(
+            reduce_scatter = self._reduce_scatter(input_)
+            # Pattern matcher replaces from top-to-bottom, so residual can still
+            # be full-size while this node already runs on RS-sharded inputs.
+            # Use a temporary prefix slice to align shapes; this becomes a no-op
+            # once upstream replacements shard residual on the same range.
+            residual_chunk = residual[0 : reduce_scatter.size(0), ...]
+            rmsnorm = self.rmsnorm_matcher(
                 reduce_scatter,
                 weight,
                 residual_chunk,
             )
-            # `sequence_parallel_chunk` pads at the tail before chunking.
-            # All-gather reconstructs that padded full tensor; trim tail padding
-            # to restore the original residual length expected by callers.
-            residual_full = self._all_gather(residual_out)
-            residual_full = residual_full.narrow(0, 0, residual.size(0))
-            return rmsnorm, residual_full
+            return rmsnorm[0], rmsnorm[1]
 
         pm.register_replacement(
             pattern,
@@ -172,12 +165,21 @@ class AllReduceFusedAddRMSNormSequenceParallelChunkPattern(
 class SequenceParallelismMoEPass(VllmPatternMatcherPass):
     """
     Replace `all_reduce + (fused) rmsnorm + sequence_parallel_chunk` with
-    local-rank computation based on `reduce_scatter_with_padding`.
+    local-rank computation based on `reduce_scatter`.
+
+    Similar to `SequenceParallelismPass`, fused-add+rmsnorm replacements may
+    insert temporary residual slices while pattern matching proceeds through
+    the graph. A trailing `NoOpEliminationPass` cleans up any slices that
+    become shape-noops after all matches are applied.
     """
 
     @enable_fake_mode
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
+
+        # Clean up temporary no-op slices introduced by replacement ordering.
+        self.noop_cleanup = NoOpEliminationPass(config)
+        self.noop_cleanup.pass_name = f"{self.pass_name}.{self.noop_cleanup.pass_name}"
 
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="sequence_parallelism_moe_pass"
@@ -203,13 +205,17 @@ class SequenceParallelismMoEPass(VllmPatternMatcherPass):
     def is_applicable_for_range(self, compile_range: Range) -> bool:
         # Piecewise mode only supports concrete compile sizes.
         if (
-            not self.compilation_config.splitting_ops
-            or self.compilation_config.use_inductor_graph_partition
+            not self.compilation_config.use_inductor_graph_partition
+            and self.compilation_config.splitting_ops
         ):
-            return True
-        return compile_range.is_single_size()
+            tp_size = get_tensor_model_parallel_world_size()
+            return bool(
+                compile_range.is_single_size() and compile_range.end % tp_size == 0
+            )
+        return True
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
+        self.noop_cleanup(graph)

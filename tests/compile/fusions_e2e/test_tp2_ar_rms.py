@@ -69,6 +69,7 @@ def test_tp2_ar_rms_fp8_fusions(
             fuse_attn_quant=True,
             enable_qk_norm_rope_fusion=True,
             fuse_allreduce_rms=True,
+            enable_sp_moe=True,
         ),
     )
 
@@ -127,6 +128,7 @@ def test_tp2_ar_rms_fp4_fusions(
             fuse_act_quant=True,
             fuse_attn_quant=True,
             fuse_allreduce_rms=True,
+            enable_sp_moe=True,
         ),
     )
 
@@ -180,6 +182,7 @@ def test_tp2_ar_rms_fusions(
         pass_config=PassConfig(
             enable_qk_norm_rope_fusion=True,
             fuse_allreduce_rms=True,
+            enable_sp_moe=True,
         ),
     )
 

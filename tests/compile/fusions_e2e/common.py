@@ -20,6 +20,7 @@ class Matches(NamedTuple):
     # distributed
     ar_rms_fusion: int = 0
     sequence_parallel: int = 0
+    sequence_parallel_moe: int = 0
     async_tp: int = 0
 
 
@@ -95,6 +96,9 @@ FUSION_LOG_PATTERNS: dict[str, re.Pattern] = {
     ),
     "sequence_parallel": re.compile(
         r"sequence_parallelism.py:\d+] Replaced (\d+) patterns"
+    ),
+    "sequence_parallel_moe": re.compile(
+        r"sequence_parallelism_moe.py:\d+] Replaced (\d+) patterns"
     ),
     "async_tp": re.compile(r"collective_fusion.py:\d+] Replaced (\d+) patterns"),
 }
