@@ -1442,6 +1442,78 @@ def test_allocate_with_lookahead():
     assert len(blocks.get_block_ids()[0]) == 2
 
 
+def test_allocate_slots_early_return_sliding_window():
+    """Regression: num_output_tokens > 0 skips remove_skipped_blocks on
+    first decode step, leaking blocks outside the sliding window."""
+    block_size = 4
+    sliding_window = 8
+    num_blocks = 20
+
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(size=100, shared_by=["layer1"]),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer1"],
+                new_sliding_window_spec(
+                    block_size=block_size,
+                    sliding_window=sliding_window,
+                ),
+            ),
+        ],
+    )
+
+    mgr = KVCacheManager(
+        kv_cache_config=config,
+        max_model_len=100,
+        hash_block_size=block_size,
+        enable_caching=True,
+    )
+    req = make_request(
+        request_id="0",
+        prompt_token_ids=list(range(13)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+
+    # Prefill: 13 tokens, 4 blocks allocated (+1 null block internal to pool)
+    blocks = mgr.allocate_slots(req, num_new_tokens=13)
+    assert blocks is not None
+    free_after_prefill = mgr.block_pool.get_num_free_blocks()
+
+    req.num_computed_tokens = 13
+    req.append_output_token_ids(100)  # num_output_tokens = 1
+
+    # First decode: num_output_tokens=1, num_blocks_to_allocate=0.
+    # Must not early return — remove_skipped_blocks needs to free 1 block.
+    blocks = mgr.allocate_slots(req, num_new_tokens=1)
+    assert blocks is not None
+    free_after_decode1 = mgr.block_pool.get_num_free_blocks()
+    assert free_after_decode1 == free_after_prefill + 1
+
+    req.num_computed_tokens = 14
+    req.append_output_token_ids(101)  # num_output_tokens = 2
+
+    # Second decode: early return is correct, no change in free blocks.
+    blocks = mgr.allocate_slots(req, num_new_tokens=1)
+    assert blocks is not None
+    assert mgr.block_pool.get_num_free_blocks() == free_after_decode1
+
+    # Block boundary crossing: 17 tokens needs 5 blocks, have 4.
+    # Must not early return — needs to allocate a real block.
+    req.num_computed_tokens = 15
+    req.append_output_token_ids(102)
+    mgr.allocate_slots(req, num_new_tokens=1)  # 16 tokens, still 4 blocks
+
+    req.num_computed_tokens = 16
+    req.append_output_token_ids(103)
+    blocks = mgr.allocate_slots(req, num_new_tokens=1)  # 17 tokens, need 5
+    assert blocks is not None
+    assert len(blocks.get_block_ids()[0]) > 0
+
+
 def test_get_kv_cache_config_one_worker():
     # pass max_model_len to pass check_enough_kv_cache_memory
     model_config = ModelConfig(max_model_len=16)
