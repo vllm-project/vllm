@@ -108,6 +108,16 @@ class OpenCVVideoBackendMixin:
             break
         return api_pref
 
+    @classmethod
+    def open_video_capture(cls, data: bytes) -> "cv2.VideoCapture":
+        import cv2
+
+        backend = cls.get_cv2_video_api()
+        cap = cv2.VideoCapture(BytesIO(data), backend, [])
+        if not cap.isOpened():
+            raise ValueError("Could not open video stream")
+        return cap
+
     @staticmethod
     def get_video_metadata(cap: "cv2.VideoCapture") -> VideoSourceMetadata:
         import cv2
@@ -245,7 +255,7 @@ class OpenCVVideoBackendMixin:
         return frames, valid_frame_indices, recovered_map
 
     @classmethod
-    def _read_frames(
+    def _read_frames_no_recovery(
         cls,
         cap,
         frame_indices: set[int],
@@ -321,7 +331,7 @@ class OpenCVVideoBackendMixin:
                 )
         else:
             frame_idx_set = set(frame_idx)
-            frames, valid_frame_indices = cls._read_frames(
+            frames, valid_frame_indices = cls._read_frames_no_recovery(
                 cap, frame_idx_set, max(frame_idx)
             )
         valid_num_frames = len(valid_frame_indices)
@@ -391,12 +401,7 @@ class OpenCVVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         Returns:
             Tuple of (frames_array, metadata_dict)
         """
-        import cv2
-
-        backend = OpenCVVideoBackendMixin.get_cv2_video_api()
-        cap = cv2.VideoCapture(BytesIO(data), backend, [])
-        if not cap.isOpened():
-            raise ValueError("Could not open video stream")
+        cap = OpenCVVideoBackendMixin.open_video_capture(data)
 
         source = OpenCVVideoBackendMixin.get_video_metadata(cap)
         target = VideoTargetMetadata(
@@ -503,12 +508,7 @@ class OpenCVDynamicVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         Returns:
             Tuple of (frames_array, metadata_dict)
         """
-        import cv2
-
-        backend = cls().get_cv2_video_api()
-        cap = cv2.VideoCapture(BytesIO(data), backend, [])
-        if not cap.isOpened():
-            raise ValueError("Could not open video stream")
+        cap = OpenCVVideoBackendMixin.open_video_capture(data)
 
         orig_source = OpenCVVideoBackendMixin.get_video_metadata(cap)
         max_frame_idx = orig_source.total_frames_num - 1
@@ -791,14 +791,9 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         frame_recovery: bool = False,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
-        import cv2
+        cap = OpenCVVideoBackendMixin.open_video_capture(data)
 
-        backend = cls().get_cv2_video_api()
-        cap = cv2.VideoCapture(BytesIO(data), backend, [])
-        if not cap.isOpened():
-            raise ValueError("Could not open video stream")
-
-        source = cls.get_video_metadata(cap)
+        source = OpenCVVideoBackendMixin.get_video_metadata(cap)
         target = VideoTargetMetadata(
             num_frames=num_frames,
             fps=sampling_fps,
@@ -921,12 +916,7 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         Returns:
             Tuple of (frames_array, metadata_dict)
         """
-        import cv2
-
-        backend = cls().get_cv2_video_api()
-        cap = cv2.VideoCapture(BytesIO(data), backend, [])
-        if not cap.isOpened():
-            raise ValueError("Could not open video stream")
+        cap = OpenCVVideoBackendMixin.open_video_capture(data)
 
         source = OpenCVVideoBackendMixin.get_video_metadata(cap)
 
