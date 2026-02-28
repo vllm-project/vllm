@@ -145,8 +145,8 @@ steps:
 
 - label: Async Engine, Inputs, Utils, Worker, Config (CPU) # 26.6m
   timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_1
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
   optional: true
   no_gpu: true
   source_file_dependencies:
@@ -178,8 +178,8 @@ steps:
 
 - label: Python-only Installation # 6.3m
   timeout_in_minutes: 13
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_1
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
   grade: Blocking
   optional: true
   source_file_dependencies:
@@ -477,10 +477,10 @@ steps:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
 
 
-- label: V1 e2e + engine # 1h 33m
+- label: V1 e2e + engine # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   grade: Blocking
   optional: true
   source_file_dependencies:
@@ -488,8 +488,33 @@ steps:
   - tests/v1
   commands:
   - pytest -v -s v1/e2e
-  - pytest -v -s v1/engine/test_preprocess_error_handling.py
-  - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+  - pytest -v -s v1/engine
+
+
+- label: V1 e2e (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_2
+  optional: true
+  grade: Blocking
+  source_file_dependencies:
+  - vllm/
+  - tests/v1
+  commands:
+  - pytest -v -s v1/e2e/test_spec_decode.py -k "tensor_parallelism"
+
+
+- label: V1 e2e (4 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_4
+  optional: true
+  grade: Blocking
+  source_file_dependencies:
+  - vllm/
+  - tests/v1
+  commands:
+  - pytest -v -s v1/e2e/test_spec_decode.py -k "eagle_correctness_heavy"
 
 
 - label: Entrypoints V1 # 25.7m
@@ -617,8 +642,8 @@ steps:
 
 - label: Platform Tests (CUDA) # 5.0m
   timeout_in_minutes: 9
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_1
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
   grade: Blocking
   source_file_dependencies:
   - vllm/
@@ -1150,7 +1175,7 @@ steps:
 
 - label: Transformers Nightly Models # 50.9m
   timeout_in_minutes: 102
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi325_1
   optional: true
   working_dir: "/vllm-workspace/"
@@ -1911,15 +1936,41 @@ steps:
 - label: V1 e2e + engine # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  agent_pool: mi355_8
+  agent_pool: mi355_1
+  grade: Blocking
   optional: true
   source_file_dependencies:
   - vllm/
   - tests/v1
   commands:
   - pytest -v -s v1/e2e
-  - pytest -v -s v1/engine/test_preprocess_error_handling.py
-  - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+  - pytest -v -s v1/engine
+
+
+- label: V1 e2e (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_2
+  optional: true
+  grade: Blocking
+  source_file_dependencies:
+  - vllm/
+  - tests/v1
+  commands:
+  - pytest -v -s v1/e2e/test_spec_decode.py -k "tensor_parallelism"
+
+
+- label: V1 e2e (4 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_4
+  optional: true
+  grade: Blocking
+  source_file_dependencies:
+  - vllm/
+  - tests/v1
+  commands:
+  - pytest -v -s v1/e2e/test_spec_decode.py -k "eagle_correctness_heavy"
 
 
 - label: Entrypoints V1 # TBD
