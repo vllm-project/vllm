@@ -22,6 +22,7 @@ from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.plugins.io_processors.interface import IOProcessor
+from vllm.renderers import BaseRenderer
 
 from .types import DataModuleConfig, ImagePrompt, ImageRequestOutput
 
@@ -218,8 +219,8 @@ def load_image(
 class PrithviMultimodalDataProcessor(IOProcessor[ImagePrompt, ImageRequestOutput]):
     indices = [0, 1, 2, 3, 4, 5]
 
-    def __init__(self, vllm_config: VllmConfig):
-        super().__init__(vllm_config)
+    def __init__(self, vllm_config: VllmConfig, renderer: BaseRenderer):
+        super().__init__(vllm_config, renderer)
 
         self.datamodule = Sen1Floods11NonGeoDataModule(
             data_root=datamodule_config["data_root"],
