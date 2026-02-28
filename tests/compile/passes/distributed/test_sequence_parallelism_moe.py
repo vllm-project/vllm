@@ -175,11 +175,7 @@ def sequence_parallelism_moe_pass_on_test_model(
         if with_residual:
             compiled_output = compiled_model(hidden_states, residual)
             torch.testing.assert_close(compiled_output[0], eager_output[0])
-            # Residual is temporarily prefix-sliced in this isolated graph; in
-            # full model graphs upstream replacements make this slice a no-op.
-            torch.testing.assert_close(
-                compiled_output[1], eager_output[1][: seq_len // world_size]
-            )
+            torch.testing.assert_close(compiled_output[1], eager_output[1])
         else:
             compiled_output = compiled_model(hidden_states)
             torch.testing.assert_close(compiled_output, eager_output)
@@ -196,9 +192,13 @@ def sequence_parallelism_moe_pass_on_test_model(
         assert (
             backend.op_count(torch.ops.vllm.reduce_scatter.default, before=False) == 1
         )
-        assert backend.op_count(torch.ops.vllm.all_gather.default, before=False) == 0
+        expected_all_gather_after = 1 if with_residual else 0
+        assert (
+            backend.op_count(torch.ops.vllm.all_gather.default, before=False)
+            == expected_all_gather_after
+        )
         assert backend.op_count(torch.ops.vllm.all_reduce.default, before=False) == 0
-        expected_chunk_after = 0
+        expected_chunk_after = 1 if with_residual else 0
         assert (
             backend.op_count(
                 torch.ops.vllm.sequence_parallel_chunk_impl.default, before=False

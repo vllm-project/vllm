@@ -49,6 +49,14 @@ class _SequenceParallelismMoEPatternHelper:
             group_name=self.tp_group.unique_name,
         )
 
+    def _all_gather(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.ops.vllm.all_gather.default(
+            x,
+            dim=0,
+            world_size=self.tp_size,
+            group_name=self.tp_group.unique_name,
+        )
+
 
 class AllReduceRMSNormSequenceParallelChunkPattern(
     _SequenceParallelismMoEPatternHelper
@@ -88,8 +96,7 @@ class AllReduceRMSNormSequenceParallelChunkPattern(
             weight: torch.Tensor,
         ) -> torch.Tensor:
             reduce_scatter = self._reduce_scatter(input_)
-            rmsnorm = self.rmsnorm_matcher(reduce_scatter, weight)
-            return rmsnorm
+            return self.rmsnorm_matcher(reduce_scatter, weight)
 
         pm.register_replacement(
             pattern,
@@ -140,17 +147,18 @@ class AllReduceFusedAddRMSNormSequenceParallelChunkPattern(
             weight: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             reduce_scatter = self._reduce_scatter(input_)
-            # Pattern matcher replaces from top-to-bottom, so residual can still
-            # be full-size while this node already runs on RS-sharded inputs.
-            # Use a temporary prefix slice to align shapes; this becomes a no-op
-            # once upstream replacements shard residual on the same range.
-            residual_chunk = residual[0 : reduce_scatter.size(0), ...]
+            residual_chunk = self._sequence_parallel_chunk(residual)
             rmsnorm = self.rmsnorm_matcher(
                 reduce_scatter,
                 weight,
                 residual_chunk,
             )
-            return rmsnorm[0], rmsnorm[1]
+            # `sequence_parallel_chunk` pads at the tail before chunking.
+            # All-gather reconstructs that padded full tensor; trim tail padding
+            # to restore the original residual length expected by callers.
+            residual_full = self._all_gather(rmsnorm[1])
+            residual_full = residual_full.narrow(0, 0, residual.size(0))
+            return rmsnorm[0], residual_full
 
         pm.register_replacement(
             pattern,
