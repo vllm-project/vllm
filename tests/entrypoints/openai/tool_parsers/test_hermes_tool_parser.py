@@ -458,3 +458,65 @@ def test_hermes_parser_non_streaming_tool_call_invalid_json(
 
     assert tool_call is not None
     assert not tool_call.tools_called
+
+
+def test_hermes_parser_streaming_parameterless_tool(
+    qwen_tokenizer: TokenizerLike,
+    hermes_parser: Hermes2ProToolParser,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """Test streaming tool call with empty arguments {} (issue #28806).
+
+    Parameterless tools have empty arguments, and the parser should
+    correctly stream "{}" instead of dropping it.
+    """
+    text = """<tool_call>
+{"name": "switch_led_on", "arguments": {}}
+</tool_call>"""
+    tokens = qwen_tokenizer.encode(text)
+    previous_text = ""
+    delta_messages = []
+    for token in tokens:
+        text = qwen_tokenizer.decode([token])
+        current_text = previous_text + text
+        delta = hermes_parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=any_chat_request,
+        )
+        previous_text = current_text
+        if delta is not None:
+            delta_messages.append(delta)
+
+    # Should have at least one delta with tool call info
+    assert len(delta_messages) > 0
+    assert delta_messages[0].tool_calls[0].function.name == "switch_led_on"
+
+    # The key assertion: empty arguments should be streamed as "{}"
+    tool_call_args = "".join(
+        delta.tool_calls[0].function.arguments or "" for delta in delta_messages
+    )
+    assert tool_call_args == "{}"
+
+
+def test_hermes_parser_non_streaming_parameterless_tool(
+    hermes_parser: Hermes2ProToolParser,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """Test non-streaming tool call with empty arguments {} (issue #28806)."""
+    text = """<tool_call>
+{"name": "switch_led_on", "arguments": {}}
+</tool_call>"""
+    tool_call = hermes_parser.extract_tool_calls(
+        model_output=text,
+        request=any_chat_request,
+    )
+
+    assert tool_call is not None
+    assert tool_call.tools_called
+    assert tool_call.tool_calls[0].function.name == "switch_led_on"
+    assert tool_call.tool_calls[0].function.arguments == "{}"
