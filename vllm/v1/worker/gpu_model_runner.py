@@ -755,6 +755,7 @@ class GPUModelRunner(
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
+        self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
         self.layerwise_nvtx_hooks_registered = False
 
     def update_max_model_len(self, max_model_len: int) -> None:
@@ -848,6 +849,16 @@ class GPUModelRunner(
             pin_memory=self.pin_memory,
             with_numpy=numpy,
         )
+
+    def _get_mamba_copy_bufs(self) -> mamba_utils.MambaCopyBuffers:
+        if self._mamba_copy_bufs is None:
+            self._mamba_copy_bufs = mamba_utils.MambaCopyBuffers.create(
+                self.max_num_reqs,
+                self.kv_cache_config,
+                self.model.get_mamba_state_copy_func(),
+                self._make_buffer,
+            )
+        return self._mamba_copy_bufs
 
     def _init_model_kwargs(self):
         model_kwargs = dict[str, Any]()
@@ -1211,6 +1222,7 @@ class GPUModelRunner(
                 self.mamba_state_idx,
                 self.compilation_config.static_forward_context,
                 self.model.get_mamba_state_copy_func(),
+                self._get_mamba_copy_bufs(),
             )
 
     def _update_streaming_request(
@@ -2288,7 +2300,7 @@ class GPUModelRunner(
         )
         # Dispatch for the decoder portion of the model.
         _, batch_desc = self.cudagraph_dispatcher.dispatch(
-            num_logits, disable_full=True
+            num_logits, invalid_modes={CUDAGraphMode.FULL}
         )
         num_logits_padded = batch_desc.num_tokens
         logits_indices_padded = self.kv_sharing_fast_prefill_logits_indices[
@@ -3162,20 +3174,19 @@ class GPUModelRunner(
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        dispatch_cudagraph = (
-            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
+
+        def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None):
+            return self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
-                disable_full=disable_full,
                 num_active_loras=num_active_loras,
+                valid_modes={CUDAGraphMode.NONE} if force_eager else valid_modes,
+                invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
             )
-            if not force_eager
-            else (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
-        )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-            num_tokens_padded, use_cascade_attn or has_encoder_output
+            num_tokens_padded, disable_full=use_cascade_attn or has_encoder_output
         )
         num_tokens_padded = batch_descriptor.num_tokens
         if self.compilation_config.pass_config.enable_sp:
@@ -3192,20 +3203,11 @@ class GPUModelRunner(
         # across ranks
         should_ubatch, num_tokens_across_dp = False, None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
-            # Disable DP padding when running eager to avoid excessive padding when
-            # running prefills. This lets us set cudagraph_mode="NONE" on the prefiller
-            # in a P/D setup and still use CUDA graphs (enabled by this padding) on the
-            # decoder.
-            allow_dp_padding = (
-                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            )
-
             should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
                 coordinate_batch_across_dp(
                     num_tokens_unpadded=num_tokens,
                     parallel_config=self.parallel_config,
                     allow_microbatching=allow_microbatching,
-                    allow_dp_padding=allow_dp_padding,
                     num_tokens_padded=num_tokens_padded,
                     uniform_decode=uniform_decode,
                     num_scheduled_tokens_per_request=num_scheduled_tokens_np,
@@ -3220,7 +3222,7 @@ class GPUModelRunner(
                 # Re-dispatch with DP padding so we have the correct batch_descriptor
                 cudagraph_mode, batch_descriptor = dispatch_cudagraph(
                     num_tokens_padded,
-                    disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value,
+                    valid_modes={CUDAGraphMode(synced_cudagraph_mode)},
                 )
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
@@ -3505,6 +3507,7 @@ class GPUModelRunner(
                     self.requests,
                     self.compilation_config.static_forward_context,
                     self.model.get_mamba_state_copy_func(),
+                    self._get_mamba_copy_bufs(),
                 )
 
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -4711,7 +4714,7 @@ class GPUModelRunner(
 
         assert (
             cudagraph_runtime_mode is None
-            or cudagraph_runtime_mode.valid_runtime_modes()
+            or cudagraph_runtime_mode.is_valid_runtime_mode()
         )
 
         # If cudagraph_mode.decode_mode() == FULL and
@@ -5323,7 +5326,7 @@ class GPUModelRunner(
     ):
         assert (
             cudagraph_runtime_mode != CUDAGraphMode.NONE
-            and cudagraph_runtime_mode.valid_runtime_modes()
+            and cudagraph_runtime_mode.is_valid_runtime_mode()
         ), f"Invalid cudagraph runtime mode: {cudagraph_runtime_mode}"
 
         if not batch_descriptors:
@@ -5997,6 +6000,7 @@ class GPUModelRunner(
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        self._mamba_copy_bufs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
