@@ -339,3 +339,8 @@ class StructuredOutputManager:
     def clear_backend(self) -> None:
         if self.backend is not None:
             self.backend.destroy()
+            self.backend = None
+        if executor := getattr(self, "executor", None):
+            executor.shutdown(wait=False, cancel_futures=True)
+        if executor := getattr(self, "executor_for_fillmask", None):
+            executor.shutdown(wait=False, cancel_futures=True)

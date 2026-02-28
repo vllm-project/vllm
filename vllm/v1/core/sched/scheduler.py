@@ -1917,6 +1917,9 @@ class Scheduler(SchedulerInterface):
         return spec_decoding_stats
 
     def shutdown(self) -> None:
+        # Clear all requests to release per-request resources (e.g.
+        # xgrammar nanobind objects) before interpreter shutdown.
+        self.requests.clear()
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
         if self.connector is not None:
