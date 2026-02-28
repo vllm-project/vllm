@@ -116,6 +116,32 @@ class TestCheckInterleavedAudioVideo:
             is_video, is_audio, is_video.sum().item(), is_audio.sum().item()
         )
 
+    def test_batched_non_interleaved_no_false_positive(self):
+        """
+        Regression test for https://github.com/vllm-project/vllm/issues/35394.
+
+        5 identical non-interleaved mixed-modality requests batched together:
+        each has [audio][image][video] in separate blocks with text between them.
+        Across the batch, audio from request N falls between video blocks of
+        request N and request N+1, causing the global ranges to overlap.
+        check_interleaved_audio_video must return False (not a false positive).
+        """
+        # Build one request: [text][audio*5][text][image*4][text][video*6][text]
+        single_ids, _ = make_token_seq(5, 4, 6)
+        # Batch 5 identical requests (separated by text tokens to simulate padding)
+        sep = torch.tensor([TEXT_TOKEN_ID] * 3)
+        batched_ids = torch.cat([single_ids, sep] * 5)
+        is_multimodal = (
+            (batched_ids == AUDIO_TOKEN_ID)
+            | (batched_ids == IMAGE_TOKEN_ID)
+            | (batched_ids == VIDEO_TOKEN_ID)
+        )
+        is_video = is_multimodal & (batched_ids == VIDEO_TOKEN_ID)
+        is_audio = is_multimodal & (batched_ids == AUDIO_TOKEN_ID)
+        assert not check_interleaved_audio_video(
+            is_video, is_audio, is_video.sum().item(), is_audio.sum().item()
+        ), "Batched non-interleaved requests should not be detected as interleaved"
+
 
 # ---------------------------------------------------------------------------
 # Tests for embed_input_ids via a minimal mock

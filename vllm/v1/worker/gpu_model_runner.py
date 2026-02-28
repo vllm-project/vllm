@@ -115,7 +115,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
-    MultipleOf,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
@@ -195,6 +194,7 @@ from .utils import (
     AttentionGroup,
     add_kv_sharing_layers_to_kv_cache_groups,
     bind_kv_cache,
+    prepare_kernel_block_sizes,
     sanity_check_mm_encoder_outputs,
 )
 
@@ -794,6 +794,7 @@ class GPUModelRunner(
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
+        self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
         self.layerwise_nvtx_hooks_registered = False
 
     def update_max_model_len(self, max_model_len: int) -> None:
@@ -887,6 +888,16 @@ class GPUModelRunner(
             pin_memory=self.pin_memory,
             with_numpy=numpy,
         )
+
+    def _get_mamba_copy_bufs(self) -> mamba_utils.MambaCopyBuffers:
+        if self._mamba_copy_bufs is None:
+            self._mamba_copy_bufs = mamba_utils.MambaCopyBuffers.create(
+                self.max_num_reqs,
+                self.kv_cache_config,
+                self.model.get_mamba_state_copy_func(),
+                self._make_buffer,
+            )
+        return self._mamba_copy_bufs
 
     def _init_model_kwargs(self):
         model_kwargs = dict[str, Any]()
@@ -1300,6 +1311,7 @@ class GPUModelRunner(
                 self.mamba_state_idx,
                 self.compilation_config.static_forward_context,
                 self.model.get_mamba_state_copy_func(),
+                self._get_mamba_copy_bufs(),
             )
 
     def _update_streaming_request(
@@ -2372,7 +2384,7 @@ class GPUModelRunner(
         )
         # Dispatch for the decoder portion of the model.
         _, batch_desc = self.cudagraph_dispatcher.dispatch(
-            num_logits, disable_full=True
+            num_logits, invalid_modes={CUDAGraphMode.FULL}
         )
         num_logits_padded = batch_desc.num_tokens
         logits_indices_padded = self.kv_sharing_fast_prefill_logits_indices[
@@ -3246,20 +3258,19 @@ class GPUModelRunner(
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        dispatch_cudagraph = (
-            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
+
+        def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None):
+            return self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
-                disable_full=disable_full,
                 num_active_loras=num_active_loras,
+                valid_modes={CUDAGraphMode.NONE} if force_eager else valid_modes,
+                invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
             )
-            if not force_eager
-            else (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
-        )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-            num_tokens_padded, use_cascade_attn or has_encoder_output
+            num_tokens_padded, disable_full=use_cascade_attn or has_encoder_output
         )
         num_tokens_padded = batch_descriptor.num_tokens
         if self.compilation_config.pass_config.enable_sp:
@@ -3276,20 +3287,11 @@ class GPUModelRunner(
         # across ranks
         should_ubatch, num_tokens_across_dp = False, None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
-            # Disable DP padding when running eager to avoid excessive padding when
-            # running prefills. This lets us set cudagraph_mode="NONE" on the prefiller
-            # in a P/D setup and still use CUDA graphs (enabled by this padding) on the
-            # decoder.
-            allow_dp_padding = (
-                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            )
-
             should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
                 coordinate_batch_across_dp(
                     num_tokens_unpadded=num_tokens,
                     parallel_config=self.parallel_config,
                     allow_microbatching=allow_microbatching,
-                    allow_dp_padding=allow_dp_padding,
                     num_tokens_padded=num_tokens_padded,
                     uniform_decode=uniform_decode,
                     num_scheduled_tokens_per_request=num_scheduled_tokens_np,
@@ -3304,7 +3306,7 @@ class GPUModelRunner(
                 # Re-dispatch with DP padding so we have the correct batch_descriptor
                 cudagraph_mode, batch_descriptor = dispatch_cudagraph(
                     num_tokens_padded,
-                    disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value,
+                    valid_modes={CUDAGraphMode(synced_cudagraph_mode)},
                 )
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
@@ -3606,6 +3608,7 @@ class GPUModelRunner(
                     self.requests,
                     self.compilation_config.static_forward_context,
                     self.model.get_mamba_state_copy_func(),
+                    self._get_mamba_copy_bufs(),
                 )
 
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -4888,7 +4891,7 @@ class GPUModelRunner(
 
         assert (
             cudagraph_runtime_mode is None
-            or cudagraph_runtime_mode.valid_runtime_modes()
+            or cudagraph_runtime_mode.is_valid_runtime_mode()
         )
 
         # If cudagraph_mode.decode_mode() == FULL and
@@ -5500,7 +5503,7 @@ class GPUModelRunner(
     ):
         assert (
             cudagraph_runtime_mode != CUDAGraphMode.NONE
-            and cudagraph_runtime_mode.valid_runtime_modes()
+            and cudagraph_runtime_mode.is_valid_runtime_mode()
         ), f"Invalid cudagraph runtime mode: {cudagraph_runtime_mode}"
 
         if not batch_descriptors:
@@ -5855,78 +5858,6 @@ class GPUModelRunner(
             return
         self.reorder_batch_threshold = reduce(min_none_high, reorder_batch_thresholds)  # type: ignore[assignment]
 
-    @staticmethod
-    def select_common_block_size(
-        kv_manager_block_size: int, attn_groups: list[AttentionGroup]
-    ) -> int:
-        """
-        Select a block size that is supported by all backends and is a factor of
-        kv_manager_block_size.
-
-        If kv_manager_block_size is supported by all backends, return it directly.
-        Otherwise, return the max supported size.
-
-        Args:
-            kv_manager_block_size: Block size of KV cache
-            attn_groups: List of attention groups
-
-        Returns:
-            The selected block size
-
-        Raises:
-            ValueError: If no valid block size found
-        """
-
-        def block_size_is_supported(
-            backends: list[type[AttentionBackend]], block_size: int
-        ) -> bool:
-            """
-            Check if the block size is supported by all backends.
-            """
-            for backend in backends:
-                is_supported = False
-                for supported_size in backend.get_supported_kernel_block_sizes():
-                    if isinstance(supported_size, int):
-                        if block_size == supported_size:
-                            is_supported = True
-                    elif isinstance(supported_size, MultipleOf):
-                        if block_size % supported_size.base == 0:
-                            is_supported = True
-                    else:
-                        raise ValueError(f"Unknown supported size: {supported_size}")
-                if not is_supported:
-                    return False
-            return True
-
-        backends = [group.backend for group in attn_groups]
-
-        # Case 1: if the block_size of kv cache manager is supported by all backends,
-        # return it directly
-        if block_size_is_supported(backends, kv_manager_block_size):
-            return kv_manager_block_size
-
-        # Case 2: otherwise, the block_size must be an `int`-format supported size of
-        # at least one backend. Iterate over all `int`-format supported sizes in
-        # descending order and return the first one that is supported by all backends.
-        # Simple proof:
-        # If the supported size b is in MultipleOf(x_i) format for all attention
-        # backends i, and b a factor of kv_manager_block_size, then
-        # kv_manager_block_size also satisfies MultipleOf(x_i) for all i. We will
-        # return kv_manager_block_size in case 1.
-        all_int_supported_sizes = set(
-            supported_size
-            for backend in backends
-            for supported_size in backend.get_supported_kernel_block_sizes()
-            if isinstance(supported_size, int)
-        )
-
-        for supported_size in sorted(all_int_supported_sizes, reverse=True):
-            if kv_manager_block_size % supported_size != 0:
-                continue
-            if block_size_is_supported(backends, supported_size):
-                return supported_size
-        raise ValueError(f"No common block size for {kv_manager_block_size}. ")
-
     def may_reinitialize_input_batch(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
     ) -> None:
@@ -6022,49 +5953,6 @@ class GPUModelRunner(
             return
         for attn_groups in self.attn_groups:
             yield from attn_groups
-
-    def _prepare_kernel_block_sizes(self, kv_cache_config: KVCacheConfig) -> list[int]:
-        """
-        Generate kernel_block_sizes that matches each block_size.
-
-        For attention backends that support virtual block splitting,
-        use the supported block sizes from the backend.
-        For other backends (like Mamba), use the same block size (no splitting).
-
-        Args:
-            kv_cache_config: The KV cache configuration.
-
-        Returns:
-            list[int]: List of kernel block sizes for each cache group.
-        """
-        kernel_block_sizes = []
-        for kv_cache_gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                # All layers in the UniformTypeKVCacheSpecs have the same type,
-                # Pick an arbitrary one to dispatch.
-                kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
-            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
-                continue
-            elif isinstance(kv_cache_spec, AttentionSpec):
-                # This is an attention backend that supports virtual
-                # block splitting. Get the supported block sizes from
-                # all backends in the group.
-                attn_groups = self.attn_groups[kv_cache_gid]
-                kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
-                selected_kernel_size = self.select_common_block_size(
-                    kv_manager_block_size, attn_groups
-                )
-                kernel_block_sizes.append(selected_kernel_size)
-            elif isinstance(kv_cache_spec, MambaSpec):
-                # This is likely Mamba or other non-attention cache,
-                # no splitting.
-                kernel_block_sizes.append(kv_cache_spec.block_size)
-            else:
-                raise NotImplementedError(
-                    f"unknown kv cache spec {kv_cache_group.kv_cache_spec}"
-                )
-        return kernel_block_sizes
 
     def _reshape_kv_cache_tensors(
         self,
@@ -6289,6 +6177,7 @@ class GPUModelRunner(
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        self._mamba_copy_bufs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
@@ -6297,7 +6186,9 @@ class GPUModelRunner(
         # backends for that group only supports block_size 64, we will return
         # kernel_block_size 64 and split the 256-token-block to 4 blocks with 64
         # tokens each.
-        kernel_block_sizes = self._prepare_kernel_block_sizes(kv_cache_config)
+        kernel_block_sizes = prepare_kernel_block_sizes(
+            kv_cache_config, self.attn_groups
+        )
 
         # create metadata builders
         self.initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
