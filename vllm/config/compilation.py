@@ -8,7 +8,8 @@ from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import Field, TypeAdapter, field_validator
+from pydantic import Field, TypeAdapter, field_validator, model_validator
+from typing_extensions import Self
 
 import vllm.envs as envs
 from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
@@ -474,6 +475,12 @@ class CompilationConfig:
     on selected platforms. Disabled by default until more models
     are supported/tested to work."""
 
+    vllm_enable_compile_cache: bool = True
+    """Enable compile cache. When enabled, vLLM caches compiled graphs to
+    speed up subsequent runs. Set to False to disable caching for debugging
+    compilation issues or suspected cache corruption. Defaults to True.
+    Can be overridden by VLLM_DISABLE_COMPILE_CACHE environment variable."""
+
     # Inductor capture
     compile_sizes: list[int | str] | None = None
     """Sizes to compile for inductor. In addition
@@ -784,6 +791,15 @@ class CompilationConfig:
                 f"got: {value}"
             )
         return value
+
+    @model_validator(mode="after")
+    def handle_env_var_override(self) -> Self:
+        """Allow VLLM_DISABLE_COMPILE_CACHE env var to override config."""
+        import vllm.envs as envs
+
+        if envs.VLLM_DISABLE_COMPILE_CACHE:
+            self.vllm_enable_compile_cache = False
+        return self
 
     @field_validator(
         "level",

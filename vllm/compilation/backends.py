@@ -341,7 +341,7 @@ class CompilerManager:
         assert compiled_graph is not None, "Failed to compile the graph"
 
         # store the artifact in the cache
-        if is_compile_cache_enabled(additional_inductor_config) and handle is not None:
+        if is_compile_cache_enabled(compilation_config) and handle is not None:
             self.cache[(compile_range, graph_index, self.compiler.name)] = handle
             compilation_counter.num_cache_entries_updated += 1
             self.is_cache_updated = True
@@ -907,8 +907,8 @@ class VllmBackend:
         os.makedirs(local_cache_dir, exist_ok=True)
         self.compilation_config.local_cache_dir = local_cache_dir
 
-        # Honors opt-outs such as CompilationMode.NONE or VLLM_DISABLE_COMPILE_CACHE.
-        disable_cache = not is_compile_cache_enabled(self.inductor_config)
+        # Honors opt-outs such as CompilationMode.NONE or disabled cache.
+        disable_cache = not is_compile_cache_enabled(self.compilation_config)
 
         if disable_cache:
             logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")

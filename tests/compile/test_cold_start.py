@@ -14,12 +14,10 @@ def test_moe_compilation_cold_start(monkeypatch, use_fresh_inductor_cache):
     # I'm not sure if this is going to affect the numbers
     monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "0")
 
-    # Force cold compilation
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-
     compilation_config = CompilationConfig(
         mode=CompilationMode.VLLM_COMPILE,
         cudagraph_mode=CUDAGraphMode.NONE,  # make the model loading faster
+        vllm_enable_compile_cache=False,  # force cold compilation
     )
 
     counters.clear()

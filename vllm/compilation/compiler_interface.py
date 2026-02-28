@@ -14,7 +14,7 @@ import torch.fx as fx
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
-from vllm.config import VllmConfig
+from vllm.config import CompilationConfig, VllmConfig
 from vllm.config.utils import Range
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
@@ -168,8 +168,21 @@ def get_inductor_factors() -> list[Any]:
 
 
 def is_compile_cache_enabled(
-    vllm_additional_inductor_config: dict[str, Any],
+    vllm_additional_inductor_config_or_compilation_config: CompilationConfig
+    | dict[str, Any],
+    vllm_enable_compile_cache: bool = True,
 ) -> bool:
+    if isinstance(
+        vllm_additional_inductor_config_or_compilation_config, CompilationConfig
+    ):
+        compilation_config = vllm_additional_inductor_config_or_compilation_config
+        vllm_additional_inductor_config = compilation_config.inductor_compile_config
+        vllm_enable_compile_cache = compilation_config.vllm_enable_compile_cache
+    else:
+        vllm_additional_inductor_config = (
+            vllm_additional_inductor_config_or_compilation_config
+        )
+
     vllm_inductor_config_disable_cache = vllm_additional_inductor_config.get(
         "force_disable_caches", False
     )
@@ -178,7 +191,7 @@ def is_compile_cache_enabled(
     # with torch.compiler.config.force_disable_caches when minimum PyTorch
     # version reaches 2.10
     return (
-        not envs.VLLM_DISABLE_COMPILE_CACHE
+        vllm_enable_compile_cache
         and not torch._inductor.config.force_disable_caches
         and not vllm_inductor_config_disable_cache
     )
@@ -253,6 +266,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
     ) -> None:
         self.cache_dir = cache_dir
+        self.disable_cache = disable_cache
 
     def compile(
         self,
@@ -336,7 +350,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
             _, cache_info = compiled_artifact._artifacts
             return len(cache_info.aot_autograd_artifacts) == 1
 
-        if is_compile_cache_enabled(compiler_config):
+        if is_compile_cache_enabled(compiler_config, not self.disable_cache):
             if not is_saveable_2_10(compiled_graph):
                 raise RuntimeError(
                     "The compiled artifact is not serializable. This usually means "
@@ -346,6 +360,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
                     "filing a bug report, "
                     "or suppressing this error by "
                     "disabling vLLM's compilation cache via "
+                    "CompilationConfig(vllm_enable_compile_cache=False) or "
                     "VLLM_DISABLE_COMPILE_CACHE=1 "
                     "(this will greatly increase vLLM server warm start times)."
                 )
@@ -403,6 +418,7 @@ class InductorAdaptor(CompilerInterface):
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
     ) -> None:
         self.cache_dir = cache_dir
+        self.disable_cache = disable_cache
         self.prefix = prefix
         self.base_cache_dir = cache_dir[: -len(prefix)] if prefix else cache_dir
         if disable_cache:
@@ -563,7 +579,7 @@ class InductorAdaptor(CompilerInterface):
             )
 
         # Turn off the checks if we disable the compilation cache.
-        if is_compile_cache_enabled(compiler_config):
+        if is_compile_cache_enabled(compiler_config, not self.disable_cache):
             if hash_str is None:
                 raise RuntimeError(
                     "vLLM failed to compile the model. The most "
