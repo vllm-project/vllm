@@ -1432,6 +1432,10 @@ class Scheduler(SchedulerInterface):
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
 
+        # save scheduler stats before removing requests
+        num_running_reqs = len(self.running)
+        num_waiting_reqs = len(self.waiting)
+
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
             self.running = remove_all(self.running, stopped_running_reqs)
@@ -1498,7 +1502,12 @@ class Scheduler(SchedulerInterface):
 
         if (
             stats := self.make_stats(
-                spec_decoding_stats, kv_connector_stats, cudagraph_stats, perf_stats
+                num_running_reqs,
+                num_waiting_reqs,
+                spec_decoding_stats,
+                kv_connector_stats,
+                cudagraph_stats,
+                perf_stats,
             )
         ) is not None:
             # Return stats to only one of the front-ends.
@@ -1853,6 +1862,8 @@ class Scheduler(SchedulerInterface):
 
     def make_stats(
         self,
+        num_running_reqs: int | None = None,
+        num_waiting_reqs: int | None = None,
         spec_decoding_stats: SpecDecodingStats | None = None,
         kv_connector_stats: KVConnectorStats | None = None,
         cudagraph_stats: CUDAGraphStat | None = None,
@@ -1875,9 +1886,17 @@ class Scheduler(SchedulerInterface):
         connector_stats_payload = (
             kv_connector_stats.data if kv_connector_stats else None
         )
+
+        num_running_reqs = (
+            num_running_reqs if num_running_reqs is not None else len(self.running)
+        )
+        num_waiting_reqs = (
+            num_waiting_reqs if num_waiting_reqs is not None else len(self.waiting)
+        )
+
         return SchedulerStats(
-            num_running_reqs=len(self.running),
-            num_waiting_reqs=len(self.waiting),
+            num_running_reqs=num_running_reqs,
+            num_waiting_reqs=num_waiting_reqs,
             kv_cache_usage=self.kv_cache_manager.usage,
             encoder_cache_usage=self._get_encoder_cache_usage(),
             prefix_cache_stats=prefix_cache_stats,
