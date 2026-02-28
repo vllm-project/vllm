@@ -31,6 +31,7 @@ from tempfile import NamedTemporaryFile
 from typing import Any, cast
 
 import numpy as np
+from huggingface_hub import snapshot_download
 from PIL import Image
 from typing_extensions import deprecated
 
@@ -2694,6 +2695,9 @@ class MMVUDataset(HuggingFaceDataset):
         if parser_fn is None:
             raise ValueError(f"Unsupported dataset path: {self.hf_name}")
 
+        remote_path = f"https://huggingface.co/datasets/{self.hf_name}/resolve/main"
+        local_path_root = snapshot_download(self.hf_name, repo_type="dataset")
+
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
 
         sampled_requests = []
@@ -2702,7 +2706,9 @@ class MMVUDataset(HuggingFaceDataset):
                 break
 
             prompt = parser_fn(item)
-            mm_content = process_video(item["video"])
+            mm_content = process_video(
+                item["video"].replace(remote_path, local_path_root)
+            )
             prompt_len = len(tokenizer.encode(prompt))
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
