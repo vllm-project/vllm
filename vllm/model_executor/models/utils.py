@@ -5,6 +5,7 @@ import itertools
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Literal, Protocol, overload
 
 import torch
@@ -808,15 +809,28 @@ def sequence_parallel_chunk(x: torch.Tensor) -> torch.Tensor:
     return torch.ops.vllm.sequence_parallel_chunk_impl(x)
 
 
+@lru_cache(maxsize=4096)
+def _cached_sp_split_and_offsets(
+    num_tokens: int,
+    tp_size: int,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    base = num_tokens // tp_size
+    remainder = num_tokens % tp_size
+    split_sizes = [base + (1 if rank < remainder else 0) for rank in range(tp_size)]
+    offsets = [0]
+    for size in split_sizes[:-1]:
+        offsets.append(offsets[-1] + size)
+    return tuple(split_sizes), tuple(offsets)
+
+
 def sequence_parallel_split_sizes(num_tokens: int) -> list[int]:
     tp_size = get_tensor_model_parallel_world_size()
     if not envs.VLLM_ENABLE_SP_RAGGED:
         # Legacy behavior pads to equal chunk sizes.
         return [cdiv(num_tokens, tp_size)] * tp_size
 
-    base = num_tokens // tp_size
-    remainder = num_tokens % tp_size
-    return [base + (1 if rank < remainder else 0) for rank in range(tp_size)]
+    split_sizes, _ = _cached_sp_split_and_offsets(num_tokens, tp_size)
+    return list(split_sizes)
 
 
 def sequence_parallel_chunk_impl(x: torch.Tensor) -> torch.Tensor:
@@ -837,9 +851,8 @@ def sequence_parallel_chunk_impl(x: torch.Tensor) -> torch.Tensor:
         start = tp_rank * chunk
         return torch.narrow(y, 0, start, chunk)
 
-    split_sizes = sequence_parallel_split_sizes(seq_len)
-    start = sum(split_sizes[:tp_rank])
-    return torch.narrow(x, 0, start, split_sizes[tp_rank])
+    split_sizes, offsets = _cached_sp_split_and_offsets(seq_len, tp_size)
+    return torch.narrow(x, 0, offsets[tp_rank], split_sizes[tp_rank])
 
 
 def sequence_parallel_chunk_impl_fake(x: torch.Tensor) -> torch.Tensor:

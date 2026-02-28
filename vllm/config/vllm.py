@@ -1235,8 +1235,22 @@ class VllmConfig:
 
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         if envs.VLLM_ENABLE_SP_RAGGED:
-            # Ragged SP supports non-TP-multiple token counts.
-            return possible_sizes
+            # Keep TP-divisible sizes unchanged (fast path), and lightly bucket
+            # TP-indivisible sizes to reduce graph-shape churn.
+            tp_size = self.parallel_config.tensor_parallel_size
+            bucket_size = min(4, max(1, tp_size // 2))
+            if bucket_size <= 1:
+                return possible_sizes
+
+            max_size = max(possible_sizes) if possible_sizes else 0
+            bucketed = []
+            for size in possible_sizes:
+                if size % tp_size == 0:
+                    bucketed.append(size)
+                    continue
+                rounded = ((size + bucket_size - 1) // bucket_size) * bucket_size
+                bucketed.append(size if rounded > max_size else rounded)
+            return sorted(set(bucketed))
 
         # remove the sizes that not multiple of tp_size when
         # enable sequence parallelism

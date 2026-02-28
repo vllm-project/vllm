@@ -2777,12 +2777,24 @@ class GPUModelRunner(
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        if (
-            self.compilation_config.pass_config.enable_sp
-            and tp_size > 1
-            and not envs.VLLM_ENABLE_SP_RAGGED
-        ):
+        if not self.compilation_config.pass_config.enable_sp or tp_size <= 1:
+            return num_scheduled_tokens
+
+        if not envs.VLLM_ENABLE_SP_RAGGED:
             return round_up(num_scheduled_tokens, tp_size)
+
+        # Keep the equal-split fast path untouched.
+        if num_scheduled_tokens % tp_size == 0:
+            return num_scheduled_tokens
+
+        # Mild bucketing for ragged SP compute path:
+        # - TP=8 -> bucket=4
+        # - TP=4 -> bucket=2
+        # - TP<=2 -> bucket=1 (disabled)
+        bucket_size = min(4, max(1, tp_size // 2))
+        if bucket_size > 1:
+            return round_up(num_scheduled_tokens, bucket_size)
+
         return num_scheduled_tokens
 
     def _prepare_mm_inputs(

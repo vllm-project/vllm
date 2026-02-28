@@ -145,19 +145,6 @@ def _compute_balanced_split_sizes(total: int, world_size: int) -> list[int]:
     return [base + (1 if rank < remainder else 0) for rank in range(world_size)]
 
 
-def _all_gather_local_sizes(
-    tensor: torch.Tensor,
-    dim: int,
-    group: "GroupCoordinator",
-) -> list[int]:
-    local_size = torch.tensor(
-        [tensor.shape[dim]], dtype=torch.int64, device=tensor.device
-    )
-    gathered_sizes = [torch.empty_like(local_size) for _ in range(group.world_size)]
-    torch.distributed.all_gather(gathered_sizes, local_size, group=group.device_group)
-    return [int(x.item()) for x in gathered_sizes]
-
-
 def reduce_scatter(
     tensor: torch.Tensor, dim: int, world_size: int, group_name: str
 ) -> torch.Tensor:
@@ -197,10 +184,6 @@ def all_gather(
     if group is None:
         raise ValueError(f"Group {group_name} is destroyed.")
     dim = _normalize_dim(dim, tensor.dim())
-    if envs.VLLM_ENABLE_SP_RAGGED and dim == 0:
-        sizes = _all_gather_local_sizes(tensor, dim, group)
-        if any(size != sizes[0] for size in sizes):
-            return group.all_gatherv(tensor, dim=dim, sizes=sizes)
     return group._all_gather_out_place(tensor, dim)
 
 
@@ -638,7 +621,13 @@ class GroupCoordinator:
         dim = _normalize_dim(dim, input_.dim())
 
         if envs.VLLM_ENABLE_SP_RAGGED and sizes is not None:
-            return self.all_gatherv(input_, dim=dim, sizes=sizes)
+            if len(sizes) != world_size:
+                raise ValueError(
+                    f"all_gather sizes length ({len(sizes)}) must match "
+                    f"world_size ({world_size})"
+                )
+            if any(size != sizes[0] for size in sizes):
+                return self.all_gatherv(input_, dim=dim, sizes=sizes)
 
         if self.use_custom_op_call:
             return torch.ops.vllm.all_gather(
@@ -678,7 +667,13 @@ class GroupCoordinator:
         dim = _normalize_dim(dim, input_.dim())
 
         if envs.VLLM_ENABLE_SP_RAGGED and sizes is not None:
-            return self.reduce_scatterv(input_, dim=dim, sizes=sizes)
+            if len(sizes) != world_size:
+                raise ValueError(
+                    f"reduce_scatter sizes length ({len(sizes)}) must match "
+                    f"world_size ({world_size})"
+                )
+            if any(size != sizes[0] for size in sizes):
+                return self.reduce_scatterv(input_, dim=dim, sizes=sizes)
 
         if self.use_custom_op_call:
             return torch.ops.vllm.reduce_scatter(

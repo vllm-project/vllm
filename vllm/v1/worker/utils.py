@@ -3,6 +3,7 @@
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 import torch
 
@@ -374,6 +375,17 @@ def get_local_tokens_for_sp(
         assert num_input_tokens % tensor_parallel_size == 0
         return num_input_tokens // tensor_parallel_size
 
+    return _cached_local_tokens_for_sp(
+        num_input_tokens, tensor_parallel_size, tensor_parallel_rank
+    )
+
+
+@lru_cache(maxsize=8192)
+def _cached_local_tokens_for_sp(
+    num_input_tokens: int,
+    tensor_parallel_size: int,
+    tensor_parallel_rank: int,
+) -> int:
     base = num_input_tokens // tensor_parallel_size
     remainder = num_input_tokens % tensor_parallel_size
     return base + (1 if tensor_parallel_rank < remainder else 0)
