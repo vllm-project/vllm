@@ -93,8 +93,7 @@ class ModelState:
         inputs_embeds = self.encoder_runner.get_inputs_embeds(
             self.model, input_batch.input_ids, mm_embeds, is_mm_embed
         )
-        inputs_embeds = inputs_embeds[: input_batch.num_tokens_after_padding]
-        return inputs_embeds
+        return inputs_embeds[: input_batch.num_tokens_after_padding]
 
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState

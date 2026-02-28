@@ -128,15 +128,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
 
-        # Multimodal
-        self.mm_registry = MULTIMODAL_REGISTRY
-        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
-            self.model_config
-        )
-        self.encoder_cache = None
-        if self.supports_mm_inputs:
-            self.encoder_cache = EncoderCache()
-
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.output_copy_stream = torch.cuda.Stream(self.device)
         self.output_copy_event = torch.cuda.Event()
@@ -156,6 +147,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_dcp = self.dcp_size > 1
         self.dcp_rank = get_dcp_group().rank_in_group if self.use_dcp else 0
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
+
+        # Multimodal
+        self.mm_registry = MULTIMODAL_REGISTRY
+        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
+            self.model_config
+        )
+        self.encoder_cache = None
+        if self.supports_mm_inputs and self.is_first_pp_rank:
+            self.encoder_cache = EncoderCache()
 
         self.speculator = None
         self.num_speculative_steps = 0
