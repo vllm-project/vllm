@@ -159,12 +159,6 @@ def legacy_routing(
         logits = torch.softmax(logits, dim=-1)
     sparse_logits = topk(logits, n_expts_act, apply_softmax=not sm_first)
     n_expts_tot = logits.shape[-1]
-    if use_legacy_triton_kernels:
-        from triton_kernels.routing import routing_from_bitmatrix
-
-        return routing_from_bitmatrix(
-            sparse_logits.mask, sparse_logits.vals, sparse_logits.indx, n_expts_tot, n_expts_act
-        )
     dispatch_indx = sparse_logits.mask_metadata.row_sorted_indx
     combine_indx = sparse_logits.mask_metadata.col_sorted_indx
     ragged_batch_metadata = make_ragged_tensor_metadata(
@@ -182,6 +176,7 @@ def legacy_routing(
     gather_idx = GatherIndx(combine_indx, dispatch_indx)
     scatter_idx = ScatterIndx(dispatch_indx, combine_indx)
     return routing_data, gather_idx, scatter_idx
+
 
 def triton_kernel_moe_forward(
     hidden_states: torch.Tensor,
