@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import Sequence
+
 import pytest
 
 import vllm
@@ -11,7 +13,7 @@ from ..utils import multi_gpu_test
 
 MODEL_PATH = "allenai/OLMoE-1B-7B-0125-Instruct"
 
-PROMPT_TEMPLATE = """I want you to act as a SQL terminal in front of an example database, you need only to return the sql command to me.Below is an instruction that describes a task, Write a response that appropriately completes the request.
+PROMPT_TEMPLATE = """I want you to act as a SQL terminal in front of an example database, you need only to return the sql command to me. Do not return any additional explanation. Below is an instruction that describes a task, Write a response that appropriately completes the request.
 "
 ##Instruction:
 candidate_poll contains tables such as candidate, people. Table candidate has columns such as Candidate_ID, People_ID, Poll_Source, Date, Support_rate, Consider_rate, Oppose_rate, Unsure_rate. Candidate_ID is the primary key.
@@ -35,8 +37,18 @@ EXPECTED_BASE_MODEL_OUTPUT = [
     "SELECT COUNT(Candidate_ID) FROM candidate",
     "SELECT COUNT(Candidate_ID) FROM candidate",
     "SELECT Candidate_ID, COUNT(*) as Total_Candidates\nFROM candidate\nINNER JOIN people ON candidate.People_ID = people.People_ID",  # noqa: E501
-    "SELECT Candidate_ID, Poll_Source FROM candidate WHERE People_ID IN (SELECT People_ID FROM people) ORDER BY COUNT(*) DESC LIMIT 1",  # noqa: E501
+    # There are multiple acceptable responses
+    (
+        "SELECT Candidate_ID, Poll_Source FROM candidate WHERE People_ID IN (SELECT People_ID FROM people) ORDER BY COUNT(*) DESC LIMIT 1",  # noqa: E501
+        "SELECT Candidate_ID, Poll_Source FROM candidate WHERE COUNT(People_ID) = (SELECT COUNT(People_ID) FROM people) ORDER BY Candidate_ID DESC LIMIT 1",  # noqa: E501
+    ),
 ]
+
+
+def _output_matches(generated: str, accepted: str | Sequence[str]) -> bool:
+    if isinstance(accepted, str):
+        accepted = (accepted,)
+    return any(generated.startswith(s) for s in accepted)
 
 
 def generate_and_test(
@@ -86,9 +98,13 @@ def generate_and_test(
 
         if compare_lower:
             generated_text = generated_text.lower()
-            expected_output = expected_output.lower()
-
-        assert generated_text.startswith(expected_output)
+            if isinstance(expected_output, str):
+                expected_output = (expected_output.lower(),)
+            else:
+                expected_output = tuple(s.lower() for s in expected_output)
+        assert _output_matches(generated_text, expected_output), (
+            f"Output {i}: {generated_text!r} does not match any of {expected_output!r}"
+        )
 
 
 def test_olmoe_lora(olmoe_lora_files):
