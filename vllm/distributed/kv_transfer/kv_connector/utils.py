@@ -496,7 +496,6 @@ def get_current_attn_backend(vllm_config: VllmConfig):
             head_size=vllm_config.model_config.get_head_size(),
             dtype=vllm_config.model_config.dtype,
             kv_cache_dtype=vllm_config.cache_config.cache_dtype,
-            block_size=vllm_config.cache_config.block_size,
             use_mla=vllm_config.model_config.use_mla,
         )
     return backend

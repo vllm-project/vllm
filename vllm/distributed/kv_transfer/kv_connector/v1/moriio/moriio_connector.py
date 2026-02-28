@@ -726,7 +726,6 @@ class MoRIIOConnectorWorker:
             self.model_config.get_head_size(),
             self.model_config.dtype,
             self.cache_config.cache_dtype,
-            self.block_size,
             use_mla=self.use_mla,
         )
 

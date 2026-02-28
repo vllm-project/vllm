@@ -429,7 +429,11 @@ class SpecDecodeBaseProposer:
             common_attn_metadata=common_attn_metadata, draft_index=0
         )
         # FIXME: support hybrid kv for draft model (remove separate indexer)
-        if self.draft_indexer_metadata_builder:
+        if self.indexer_layer_names:
+            if self.draft_indexer_metadata_builder is None:
+                self.draft_indexer_metadata_builder = (
+                    self._get_draft_indexer_metadata_builder()
+                )
             draft_indexer_metadata = (
                 self.draft_indexer_metadata_builder.build_for_drafting(
                     common_attn_metadata=common_attn_metadata,
@@ -1304,27 +1308,16 @@ class SpecDecodeBaseProposer:
             ).keys()
             - target_attn_layer_names
         )
-        indexer_layers = get_layers_from_vllm_config(
-            self.vllm_config, DeepseekV32IndexerCache
+        draft_indexer_layer_names = (
+            get_layers_from_vllm_config(
+                self.vllm_config, DeepseekV32IndexerCache
+            ).keys()
+            - target_indexer_layer_names
         )
-        draft_indexer_layer_names = indexer_layers.keys() - target_indexer_layer_names
         self.attn_layer_names = list(draft_attn_layer_names - draft_indexer_layer_names)
         self.indexer_layer_names = list(draft_indexer_layer_names)
 
-        if self.indexer_layer_names:
-            first_layer = self.indexer_layer_names[0]
-            self.draft_indexer_metadata_builder = (
-                indexer_layers[first_layer]
-                .get_attn_backend()
-                .get_builder_cls()(
-                    indexer_layers[first_layer].get_kv_cache_spec(self.vllm_config),
-                    self.indexer_layer_names,
-                    self.vllm_config,
-                    self.device,
-                )
-            )
-        else:
-            self.draft_indexer_metadata_builder = None
+        self.draft_indexer_metadata_builder = None
 
         if self.supports_mm_inputs:
             # Even if the target model is multimodal, we can also use
@@ -1616,6 +1609,24 @@ class SpecDecodeBaseProposer:
 
         assert builder is not None, (
             "Failed to find attention metadata builder for EAGLE layers."
+        )
+        return builder
+
+    def _get_draft_indexer_metadata_builder(self) -> AttentionMetadataBuilder:
+        """Find and return the metadata builder for draft indexer layers."""
+        builder = None
+        chosen_layer = self.indexer_layer_names[0]
+
+        for kv_cache_group in self.runner.attn_groups:
+            for attn_group in kv_cache_group:
+                if chosen_layer in attn_group.layer_names:
+                    builder = attn_group.get_metadata_builder()
+                    break
+            if builder is not None:
+                break
+
+        assert builder is not None, (
+            "Failed to find attention metadata builder for draft indexer layers."
         )
         return builder
 

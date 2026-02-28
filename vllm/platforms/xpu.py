@@ -162,7 +162,7 @@ class XPUPlatform(Platform):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         # in V1(or with chunked prefill) block_size is 64
-        if cache_config and cache_config.block_size is None:
+        if cache_config and not cache_config.user_specified_block_size:
             cache_config.block_size = 64
 
         # lazy import to avoid circular import
@@ -220,6 +220,12 @@ class XPUPlatform(Platform):
                 vllm_config.model_config.max_model_len,
                 vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
+
+    @classmethod
+    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        # TODO: XPU still sets block_size in check_and_update_config.
+        # Move that logic here so block_size is chosen by the backend.
+        pass
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:

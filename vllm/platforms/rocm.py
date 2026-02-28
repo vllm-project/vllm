@@ -556,7 +556,7 @@ class RocmPlatform(Platform):
                 )
                 compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-        if cache_config and cache_config.block_size is None:
+        if cache_config and not cache_config.user_specified_block_size:
             if (
                 envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION and envs.VLLM_ROCM_USE_AITER
                 # NOTE: This block has been deprecated
@@ -575,6 +575,12 @@ class RocmPlatform(Platform):
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
+
+    @classmethod
+    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        # TODO: ROCm still sets block_size in check_and_update_config.
+        # Move that logic here so block_size is chosen by the backend.
+        pass
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:

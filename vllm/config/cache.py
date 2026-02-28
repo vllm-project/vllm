@@ -3,9 +3,9 @@
 
 import math
 from dataclasses import field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import Field, SkipValidation, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -19,7 +19,6 @@ else:
 
 logger = init_logger(__name__)
 
-BlockSize = Literal[1, 8, 16, 32, 64, 128, 256]
 CacheDType = Literal[
     "auto",
     "bfloat16",
@@ -39,13 +38,19 @@ KVOffloadingBackend = Literal["native", "lmcache"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: SkipValidation[BlockSize] = None  # type: ignore[assignment]
-    """Size of a contiguous cache block in number of tokens. On CUDA devices,
-    only block sizes up to 32 are supported.
+    DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
+    _BLOCK_SIZE_UNSET: ClassVar[int] = -1
 
-    This config has no static default. If left unspecified by the user, it will
-    be set in `Platform.check_and_update_config()` based on the current
-    platform."""
+    block_size: int = Field(default=_BLOCK_SIZE_UNSET)
+    """Size of a contiguous cache block in number of tokens.
+
+    Defaults to DEFAULT_BLOCK_SIZE and may be overridden by the platform
+    or attention backend."""
+    user_specified_block_size: bool = Field(default=False, init=False)
+    """Whether the user explicitly set --block-size. When True, platform
+    and backend auto-selection will not override block_size.
+    Automatically set when block_size is provided in the constructor
+    or assigned after construction."""
     gpu_memory_utilization: float = Field(default=0.9, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
@@ -199,6 +204,7 @@ class CacheConfig:
             "prefix_caching_hash_algo",
             "cpu_kvcache_space_bytes",
             "mamba_page_size_padded",
+            "user_specified_block_size",
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
@@ -215,6 +221,20 @@ class CacheConfig:
         # convert cache_config to dict(key: str, value: str) for prometheus
         # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
+
+    @model_validator(mode="after")
+    def _detect_user_specified_block_size(self) -> "CacheConfig":
+        if self.block_size == self._BLOCK_SIZE_UNSET:
+            object.__setattr__(self, "block_size", self.DEFAULT_BLOCK_SIZE)
+        else:
+            object.__setattr__(self, "user_specified_block_size", True)
+        object.__setattr__(self, "_init_complete", True)
+        return self
+
+    def __setattr__(self, name: str, value: object) -> None:
+        super().__setattr__(name, value)
+        if name == "block_size" and getattr(self, "_init_complete", False):
+            super().__setattr__("user_specified_block_size", True)
 
     @field_validator("cache_dtype", mode="after")
     @classmethod
