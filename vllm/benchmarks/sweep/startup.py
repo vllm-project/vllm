@@ -266,7 +266,7 @@ class SweepStartupArgs:
     num_runs: int
     show_stdout: bool
     dry_run: bool
-    resume: str | None
+    resume: bool
 
     parser_name: ClassVar[str] = "startup"
     parser_help: ClassVar[str] = (
