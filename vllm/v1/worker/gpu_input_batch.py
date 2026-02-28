@@ -129,6 +129,8 @@ class InputBatch:
         self.req_prompt_embeds: dict[int, torch.Tensor] = {}
         self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
+        # Task ID for task-expert routing (per-request), -1 means not set
+        self.task_id_cpu = np.full(max_num_reqs, -1, dtype=np.int32)
         self.num_computed_tokens_cpu_tensor = torch.zeros(
             (max_num_reqs,),
             device="cpu",
@@ -340,6 +342,14 @@ class InputBatch:
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         self.block_table.add_row(request.block_ids, req_index)
+
+        # Extract task_id from extra_args (-1 means not set)
+        task_id = -1
+        if (request.sampling_params
+            and request.sampling_params.extra_args
+            and "task_id" in request.sampling_params.extra_args):
+            task_id = request.sampling_params.extra_args["task_id"]
+        self.task_id_cpu[req_index] = task_id
 
         if sampling_params := request.sampling_params:
             if sampling_params.sampling_type == SamplingType.GREEDY:
