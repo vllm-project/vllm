@@ -548,6 +548,15 @@ class EngineArgs:
         ObservabilityConfig.enable_logging_iteration_details
     )
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
+    histogram_buckets_ttft: list[float] | None = (
+        ObservabilityConfig.histogram_buckets_ttft
+    )
+    histogram_buckets_itl: list[float] | None = (
+        ObservabilityConfig.histogram_buckets_itl
+    )
+    histogram_buckets_request_latency: list[float] | None = (
+        ObservabilityConfig.histogram_buckets_request_latency
+    )
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
@@ -1147,6 +1156,36 @@ class EngineArgs:
         observability_group.add_argument(
             "--enable-logging-iteration-details",
             **observability_kwargs["enable_logging_iteration_details"],
+        )
+        observability_group.add_argument(
+            "--histogram-buckets-ttft",
+            nargs="+",
+            type=float,
+            default=None,
+            help="Custom Prometheus histogram buckets for time-to-first-token "
+            "(TTFT) metrics. Specify as space-separated float boundaries "
+            "in seconds. Example: --histogram-buckets-ttft 0.01 0.05 0.1 "
+            "0.5 1.0 5.0",
+        )
+        observability_group.add_argument(
+            "--histogram-buckets-itl",
+            nargs="+",
+            type=float,
+            default=None,
+            help="Custom Prometheus histogram buckets for inter-token latency "
+            "(ITL) metrics. Specify as space-separated float boundaries "
+            "in seconds. Example: --histogram-buckets-itl 0.01 0.05 0.1 "
+            "0.5 1.0",
+        )
+        observability_group.add_argument(
+            "--histogram-buckets-request-latency",
+            nargs="+",
+            type=float,
+            default=None,
+            help="Custom Prometheus histogram buckets for request latency "
+            "metrics (e2e, queue, inference, prefill, decode). Specify as "
+            "space-separated float boundaries in seconds. Example: "
+            "--histogram-buckets-request-latency 0.5 1.0 5.0 10.0 30.0 60.0",
         )
 
         # Scheduler arguments
@@ -1852,6 +1891,9 @@ class EngineArgs:
             enable_mfu_metrics=self.enable_mfu_metrics,
             enable_mm_processor_stats=self.enable_mm_processor_stats,
             enable_logging_iteration_details=self.enable_logging_iteration_details,
+            histogram_buckets_ttft=self.histogram_buckets_ttft,
+            histogram_buckets_itl=self.histogram_buckets_itl,
+            histogram_buckets_request_latency=self.histogram_buckets_request_latency,
         )
 
         # Compilation config overrides
