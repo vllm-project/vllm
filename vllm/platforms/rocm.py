@@ -336,6 +336,7 @@ class RocmPlatform(Platform):
         "petit_nvfp4",
         "torchao",
         "bitsandbytes",
+        "experts_int8",
     ]
 
     @classmethod
