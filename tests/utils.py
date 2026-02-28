@@ -42,11 +42,9 @@ from vllm.distributed import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_fp8_linear_kernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+from vllm.model_executor.kernels.linear import (
     FP8ScaledMMLinearKernel,
+    init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -1330,6 +1328,57 @@ def multi_gpu_test(*, num_gpus: int):
             func = mark(func)
 
         return func
+
+    return wrapper
+
+
+def gpu_tier_mark(*, min_gpus: int = 1, max_gpus: int | None = None):
+    """
+    Mark a test to only run when the GPU count falls within [min_gpus, max_gpus].
+
+    Examples:
+        @gpu_tier_mark(min_gpus=2)          # only on multi-GPU
+        @gpu_tier_mark(max_gpus=1)          # only on single-GPU
+        @gpu_tier_mark(min_gpus=2, max_gpus=4)  # 2-4 GPUs only
+    """
+    gpu_count = cuda_device_count_stateless()
+    marks = []
+
+    if min_gpus > 1:
+        marks.append(pytest.mark.distributed(num_gpus=min_gpus))
+
+    reasons = []
+    if gpu_count < min_gpus:
+        reasons.append(f"Need at least {min_gpus} GPUs (have {gpu_count})")
+    if max_gpus is not None and gpu_count > max_gpus:
+        reasons.append(f"Need at most {max_gpus} GPUs (have {gpu_count})")
+
+    if reasons:
+        marks.append(pytest.mark.skipif(True, reason="; ".join(reasons)))
+
+    return marks
+
+
+def single_gpu_only(f=None):
+    """Skip this test when running in a multi-GPU environment."""
+    marks = gpu_tier_mark(max_gpus=1)
+
+    def wrapper(func):
+        for mark in reversed(marks):
+            func = mark(func)
+        return func
+
+    return wrapper(f) if f is not None else wrapper
+
+
+def multi_gpu_only(*, num_gpus: int = 2):
+    """Skip this test when running on fewer than num_gpus GPUs."""
+    marks = gpu_tier_mark(min_gpus=num_gpus)
+
+    def wrapper(f):
+        for mark in reversed(marks):
+            f = mark(f)
+        return f
 
     return wrapper
 
