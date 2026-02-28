@@ -42,7 +42,13 @@ class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
     model: str | None = None
-    prompt: list[int] | list[list[int]] | str | list[str] | None = None
+    prompt: (
+        list[Annotated[int, Field(ge=0)]]
+        | list[list[Annotated[int, Field(ge=0)]]]
+        | str
+        | list[str]
+        | None
+    ) = None
     echo: bool | None = False
     frequency_penalty: float | None = 0.0
     logit_bias: dict[str, float] | None = None
@@ -253,7 +259,7 @@ class CompletionRequest(OpenAIBaseModel):
                 structured_outputs_kwargs["json"] = json_schema.json_schema
             elif response_format.type == "structural_tag":
                 structural_tag = response_format
-                assert structural_tag is not None and isinstance(
+                assert isinstance(
                     structural_tag,
                     (
                         LegacyStructuralTagResponseFormat,
@@ -296,7 +302,6 @@ class CompletionRequest(OpenAIBaseModel):
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
@@ -309,13 +314,49 @@ class CompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def validate_response_format(cls, data):
+        response_format = data.get("response_format")
+        if response_format is None:
+            return data
+
+        rf_type = (
+            response_format.get("type")
+            if isinstance(response_format, dict)
+            else getattr(response_format, "type", None)
+        )
+
+        if rf_type == "json_schema":
+            json_schema = (
+                response_format.get("json_schema")
+                if isinstance(response_format, dict)
+                else getattr(response_format, "json_schema", None)
+            )
+            if json_schema is None:
+                raise VLLMValidationError(
+                    "When response_format type is 'json_schema', the "
+                    "'json_schema' field must be provided.",
+                    parameter="response_format",
+                )
+
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def check_structured_outputs_count(cls, data):
         if data.get("structured_outputs", None) is None:
             return data
 
         structured_outputs_kwargs = data["structured_outputs"]
+        # structured_outputs may arrive as a dict (from JSON/raw kwargs) or
+        # as a StructuredOutputsParams dataclass instance.
+        is_dataclass = isinstance(structured_outputs_kwargs, StructuredOutputsParams)
         count = sum(
-            structured_outputs_kwargs.get(k) is not None
+            (
+                getattr(structured_outputs_kwargs, k, None)
+                if is_dataclass
+                else structured_outputs_kwargs.get(k)
+            )
+            is not None
             for k in ("json", "regex", "choice")
         )
         if count > 1:
