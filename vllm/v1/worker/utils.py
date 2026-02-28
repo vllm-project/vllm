@@ -217,8 +217,7 @@ def is_residual_scattered_for_sp(
       partition), SP is always applied
     - Otherwise, SP is only applied for specific shapes in compile_sizes
     """
-    pass_config = vllm_config.compilation_config.pass_config
-    if not (pass_config.enable_sp or pass_config.enable_sp_moe):
+    if vllm_config.compilation_config.pass_config.enable_sp:
         return False
 
     tp = vllm_config.parallel_config.tensor_parallel_size
