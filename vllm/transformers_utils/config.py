@@ -82,7 +82,6 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
     funaudiochat="FunAudioChatConfig",
-    glm_ocr="GlmOcrConfig",
     hunyuan_vl="HunYuanVLConfig",
     isaac="IsaacConfig",
     kimi_linear="KimiLinearConfig",
