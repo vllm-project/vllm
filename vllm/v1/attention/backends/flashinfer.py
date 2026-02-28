@@ -377,7 +377,9 @@ class FlashInferBackend(AttentionBackend):
         from vllm.platforms import current_platform
 
         capability = current_platform.get_device_capability()
-        if capability is not None and capability.major == 10:
+        if capability is not None and current_platform.is_blackwell_capability(
+            capability
+        ):
             return "HND"
         return None
 
@@ -633,7 +635,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.paged_kv_indices = self._make_buffer(max_num_pages)
         self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
 
-        if self.head_dim == 256 and current_platform.is_device_capability_family(100):
+        if self.head_dim == 256 and current_platform.is_blackwell_class():
             # https://github.com/flashinfer-ai/flashinfer/issues/1993 reports that
             # head size 256 and block size 16 is not supported on blackwell.
             assert kv_cache_spec.block_size != 16, (
