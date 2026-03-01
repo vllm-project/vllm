@@ -34,6 +34,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -87,7 +88,13 @@ class Glm4MoeLiteMultiTokenPredictorLayer(nn.Module):
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        self.eh_proj = ReplicatedLinear(
+            config.hidden_size * 2,
+            config.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "eh_proj"),
+        )
 
         self.device = current_platform.device_type
 
@@ -127,7 +134,7 @@ class Glm4MoeLiteMultiTokenPredictorLayer(nn.Module):
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
-        hidden_states = self.eh_proj(
+        hidden_states, _ = self.eh_proj(
             torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
         )
 

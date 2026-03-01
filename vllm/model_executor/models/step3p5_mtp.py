@@ -9,6 +9,7 @@ from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -51,7 +52,13 @@ class Step3p5AMultiTokenPredictorLayer(nn.Module):
         quant_config = vllm_config.quant_config
         self.enorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.hnorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        self.eh_proj = ReplicatedLinear(
+            config.hidden_size * 2,
+            config.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "eh_proj"),
+        )
         self.shared_head = SharedHead(config=config, quant_config=quant_config)
         self.mtp_block = Step3p5DecoderLayer(
             vllm_config,
@@ -70,7 +77,7 @@ class Step3p5AMultiTokenPredictorLayer(nn.Module):
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
-        hidden_states = self.eh_proj(
+        hidden_states, _ = self.eh_proj(
             torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
         )
 
