@@ -270,6 +270,34 @@ async def test_completion_render_no_generation(client):
 
 
 @pytest.mark.asyncio
+async def test_chat_completion_render_with_sampling_params(client):
+    """Verify sampling params are correctly returned by /render."""
+    response = await client.post(
+        "/v1/chat/completions/render",
+        json={
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "Test sampling params"}],
+            "temperature": 0.123,
+            "top_p": 0.456,
+            "frequency_penalty": 1.1,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert "sampling_params" in data
+    sampling_params = data["sampling_params"]
+
+    assert sampling_params.get("temperature") == 0.123
+    assert sampling_params.get("top_p") == 0.456
+    assert sampling_params.get("frequency_penalty") == 1.1
+
+    # Check that internal fields are not present
+    assert "_all_stop_token_ids" not in sampling_params
+
+
+@pytest.mark.asyncio
 async def test_chat_completion_render_with_base64_image_url(
     vision_client,
     local_asset_server,
