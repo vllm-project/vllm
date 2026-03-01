@@ -128,12 +128,6 @@ class AudioFlamingo3Encoder(Qwen2AudioEncoder):
         super().__init__(config)
         self.avg_pooler = nn.AvgPool1d(kernel_size=2, stride=2)
         # self.layer_norm is already initialized in super().__init__
-        # Keep a dummy freqs parameter for MusicFlamingo checkpoints.
-        self.pos_emb = nn.Module()
-        freqs = torch.empty(getattr(config, "num_mel_bins", 128))
-        self.pos_emb.register_parameter(
-            "freqs", nn.Parameter(freqs, requires_grad=False)
-        )
 
     def forward(
         self,
