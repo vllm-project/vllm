@@ -314,10 +314,7 @@ messages = [
 outputs = llm.chat(messages, sampling_params=sampling_params)
 
 for output in outputs:
-    reasoning = output.outputs[0].reasoning
-    content = output.outputs[0].text
-    print("reasoning:", reasoning)
-    print("content:", content)
+    print("text:", output.outputs[0].text)
 ```
 
 ## Limitations
