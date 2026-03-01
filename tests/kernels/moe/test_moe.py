@@ -346,14 +346,16 @@ def test_fused_moe(
         expert_map: torch.Tensor | None = None,
     ) -> torch.Tensor:
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
-        return m_fused_moe_fn(
+        return m_fused_moe_fn.apply(
             a,
             w1,
             w2,
             topk_weights,
             topk_ids,
+            activation=MoEActivation.SILU,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
+            apply_router_weight_on_input=False,
         )
 
     fused_moe_fn = functools.partial(fused_moe, renormalize=False)
@@ -500,14 +502,16 @@ def test_naive_block_assignment_moe(
         expert_map: torch.Tensor | None = None,
     ) -> torch.Tensor:
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
-        return m_fused_moe_fn(
+        return m_fused_moe_fn.apply(
             a,
             w1,
             w2,
             topk_weights,
             topk_ids,
+            activation=MoEActivation.SILU,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
+            apply_router_weight_on_input=False,
         )
 
     fused_moe_fn = functools.partial(fused_moe, renormalize=False)

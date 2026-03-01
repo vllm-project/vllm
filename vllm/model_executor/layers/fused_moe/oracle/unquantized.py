@@ -19,7 +19,7 @@ from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
     is_supported_config_trtllm_bf16,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEPModular,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
@@ -209,7 +209,7 @@ def make_unquantized_moe_kernel(
     backend: UnquantizedMoeBackend,
     quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
-) -> mk.FusedMoEModularKernel | None:
+) -> mk.FusedMoEKernel | None:
     if backend in UNSUPPORTED_BACKEND:
         return None
 
@@ -218,8 +218,8 @@ def make_unquantized_moe_kernel(
             FlashInferExperts,
         )
 
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+        kernel = mk.FusedMoEKernel(
+            MoEPrepareAndFinalizeNoDPEPModular(),
             FlashInferExperts(
                 moe_config=moe_config,
                 quant_config=quant_config,
@@ -232,8 +232,8 @@ def make_unquantized_moe_kernel(
             AiterExperts,
         )
 
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+        kernel = mk.FusedMoEKernel(
+            MoEPrepareAndFinalizeNoDPEPModular(),
             AiterExperts(
                 moe_config=moe_config,
                 quant_config=quant_config,
@@ -243,8 +243,8 @@ def make_unquantized_moe_kernel(
     elif backend == UnquantizedMoeBackend.TRITON:
         from vllm.model_executor.layers.fused_moe import TritonExperts
 
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+        kernel = mk.FusedMoEKernel(
+            MoEPrepareAndFinalizeNoDPEPModular(),
             TritonExperts(
                 moe_config=moe_config,
                 quant_config=quant_config,
@@ -254,8 +254,8 @@ def make_unquantized_moe_kernel(
     elif backend == UnquantizedMoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe import XPUExperts
 
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+        kernel = mk.FusedMoEKernel(
+            MoEPrepareAndFinalizeNoDPEPModular(),
             XPUExperts(
                 moe_config=moe_config,
                 quant_config=quant_config,

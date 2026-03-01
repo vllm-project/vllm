@@ -19,7 +19,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     nvfp4_w4a16_moe_quant_config,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
-    is_supported_config_trtllm,
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -67,39 +66,46 @@ def is_global_sf_supported_for_nvfp4_backend(backend: NvFp4MoeBackend) -> bool:
 
 def backend_to_kernel_cls(
     backend: NvFp4MoeBackend,
-) -> type[mk.FusedMoEPermuteExpertsUnpermute]:
+) -> list[type[mk.FusedMoEExperts]]:
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-        raise NotImplementedError(
-            "FLASHINFER_TRTLLM doesn't support Modular Kernel Interface"
+        from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+            TrtLlmNvFp4ExpertsModular,
+            TrtLlmNvFp4ExpertsMonolithic,
         )
+
+        # NOTE: prefer Monolthic > Modular, so return Monolithic first.
+        return [
+            TrtLlmNvFp4ExpertsMonolithic,
+            TrtLlmNvFp4ExpertsModular,
+        ]
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
         from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
             FlashInferExperts,
         )
 
-        return FlashInferExperts
+        return [FlashInferExperts]
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
         from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
             FlashInferCuteDSLExperts,
         )
 
-        return FlashInferCuteDSLExperts
+        return [FlashInferCuteDSLExperts]
 
     elif backend == NvFp4MoeBackend.VLLM_CUTLASS:
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             CutlassExpertsFp4,
         )
 
-        return CutlassExpertsFp4
+        return [CutlassExpertsFp4]
 
     elif backend == NvFp4MoeBackend.MARLIN:
         from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
             MarlinExperts,
         )
 
-        return MarlinExperts
+        return [MarlinExperts]
     else:
         raise ValueError(f"Unknown NvFP4 MoE backend: {backend.value}")
 
@@ -125,7 +131,7 @@ def select_nvfp4_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
-) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute] | None]:
+) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
     """
     Select the primary NvFP4 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
@@ -175,29 +181,21 @@ def select_nvfp4_moe_backend(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute]]:
-        k_cls = backend_to_kernel_cls(backend)
-        supported, reason = k_cls.is_supported_config(
-            k_cls, config, weight_key, activation_key, activation_format
-        )
-        if supported:
-            logger.info_once(_make_log_backend(backend))
-            return backend, k_cls
+    ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
+        for k_cls in backend_to_kernel_cls(backend):
+            supported, reason = k_cls.is_supported_config(
+                k_cls, config, weight_key, activation_key, activation_format
+            )
+            if supported:
+                logger.info_once(_make_log_backend(backend))
+                return backend, k_cls
+
         raise ValueError(_make_log_unsupported(backend, reason))
 
     # Handle explicit moe_backend from user.
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_nvfp4_backend(runner_backend)
-        if requested_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-            supported, reason = is_supported_config_trtllm(
-                config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(requested_backend))
-                return requested_backend, None
-            raise ValueError(_make_log_unsupported(requested_backend, reason))
-
         return _return_or_raise(
             requested_backend, config, weight_key, activation_key, activation_format
         )
@@ -210,36 +208,14 @@ def select_nvfp4_moe_backend(
 
         elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
             # If user is explicit about backend, validate it.
-            fi_backend = get_flashinfer_moe_backend()
-
-            if fi_backend == FlashinferMoeBackend.TENSORRT_LLM:
-                backend = NvFp4MoeBackend.FLASHINFER_TRTLLM
-                supported, reason = is_supported_config_trtllm(
-                    config, weight_key, activation_key, activation_format
-                )
-                if supported:
-                    logger.info_once(_make_log_backend(backend))
-                    return backend, None
-                else:
-                    raise ValueError(_make_log_unsupported(backend, reason))
-            else:
-                backend = fi_2_vllm_backend_map[fi_backend]
-                return _return_or_raise(
-                    backend, config, weight_key, activation_key, activation_format
-                )
+            backend = fi_2_vllm_backend_map[get_flashinfer_moe_backend()]
+            return _return_or_raise(
+                backend, config, weight_key, activation_key, activation_format
+            )
         else:
             # If the user is not explicit about the backend, try each.
             for backend in FLASHINFER_NVFP4_MOE_BACKENDS:
-                if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-                    k_cls = None
-                    supported, reason = is_supported_config_trtllm(
-                        config,
-                        weight_key,
-                        activation_key,
-                        activation_format,
-                    )
-                else:
-                    k_cls = backend_to_kernel_cls(backend)
+                for k_cls in backend_to_kernel_cls(backend):
                     supported, reason = k_cls.is_supported_config(
                         k_cls,
                         config,
@@ -247,13 +223,13 @@ def select_nvfp4_moe_backend(
                         activation_key,
                         activation_format,
                     )
-                if supported:
-                    logger.info_once(_make_log_backend(backend), scope="local")
-                    return backend, None
-                else:
-                    logger.debug_once(
-                        _make_log_unsupported(backend, reason), scope="local"
-                    )
+                    if supported:
+                        logger.info_once(_make_log_backend(backend), scope="local")
+                        return backend, k_cls
+                    else:
+                        logger.debug_once(
+                            _make_log_unsupported(backend, reason), scope="local"
+                        )
 
             raise NotImplementedError(
                 "Found VLLM_USE_FLASHINFER_MOE_FP4=1, but no "
@@ -268,16 +244,7 @@ def select_nvfp4_moe_backend(
 
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
-        if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-            k_cls = None  # type: ignore[assignment]
-            supported, reason = is_supported_config_trtllm(
-                config,
-                weight_key,
-                activation_key,
-                activation_format,
-            )
-        else:
-            k_cls = backend_to_kernel_cls(backend)
+        for k_cls in backend_to_kernel_cls(backend):
             supported, reason = k_cls.is_supported_config(
                 k_cls,
                 config,
@@ -286,11 +253,11 @@ def select_nvfp4_moe_backend(
                 activation_format,
             )
 
-        if supported:
-            logger.info_once(_make_log_backend(backend), scope="local")
-            return backend, k_cls
-        else:
-            logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+            if supported:
+                logger.info_once(_make_log_backend(backend), scope="local")
+                return backend, k_cls
+            else:
+                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
 
     raise NotImplementedError(
         "No NvFp4 MoE backend supports the deployment configuration."
@@ -398,12 +365,8 @@ def make_nvfp4_moe_quant_config(
     w2_scale_2: torch.Tensor,
     a13_scale: torch.Tensor,
     a2_scale: torch.Tensor,
-) -> FusedMoEQuantConfig | None:
-    UNSUPPORTED = [NvFp4MoeBackend.FLASHINFER_TRTLLM]
-    if backend in UNSUPPORTED:
-        return None
-
-    elif backend == NvFp4MoeBackend.MARLIN:
+) -> FusedMoEQuantConfig:
+    if backend == NvFp4MoeBackend.MARLIN:
         return nvfp4_w4a16_moe_quant_config(
             g1_alphas=w13_scale_2,
             g2_alphas=w2_scale_2,
@@ -420,22 +383,27 @@ def make_nvfp4_moe_quant_config(
         a2_gscale=(1.0 / a2_scale),
         w1_scale=w13_scale,
         w2_scale=w2_scale,
+        # NOTE(rob): this is a hack until the MoE kernels
+        # create their own quant configs. TRTLLM kernel
+        # does not accept swizzled input quant scales.
+        is_nvfp4_scale_swizzled=(backend != NvFp4MoeBackend.FLASHINFER_TRTLLM),
     )
 
 
 def make_nvfp4_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
-    experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
+    experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     shared_experts: torch.nn.Module | None = None,
-) -> mk.FusedMoEModularKernel:
+) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
         quant_config=moe_quant_config,
         routing_tables=routing_tables,
         allow_new_interface=True,
+        use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
     )
     assert prepare_finalize is not None
 
@@ -460,7 +428,7 @@ def make_nvfp4_moe_kernel(
     # NOTE(rob): we only want the mk to control the shared_expert
     # if using all2all (for SBO). bnell is making this explict in
     # the new MoE runner class.
-    kernel = mk.FusedMoEModularKernel(
+    kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
         shared_experts=(

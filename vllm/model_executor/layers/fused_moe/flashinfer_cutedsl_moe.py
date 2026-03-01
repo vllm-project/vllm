@@ -30,7 +30,7 @@ from vllm.utils.flashinfer import (
 logger = init_logger(__name__)
 
 
-class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,

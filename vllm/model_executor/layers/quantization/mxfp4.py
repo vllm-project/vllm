@@ -266,7 +266,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         )
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         # Initialized in process_weights_after_loading for CUTLASS/SM90 backends
-        self.moe_mk: mk.FusedMoEModularKernel | None = None
+        self.moe_kernel: mk.FusedMoEKernel | None = None
 
     def create_weights(
         self,
@@ -440,7 +440,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
             assert prepare_finalize is not None
 
-            self.moe_mk = mk.FusedMoEModularKernel(
+            self.moe_kernel = mk.FusedMoEKernel(
                 prepare_finalize,
                 MarlinExperts(
                     self.moe,
@@ -789,7 +789,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
             assert prepare_finalize is not None
 
-            self.moe_mk = mk.FusedMoEModularKernel(
+            self.moe_kernel = mk.FusedMoEKernel(
                 prepare_finalize,
                 FlashInferExperts(
                     moe_config=self.moe,
@@ -954,9 +954,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def select_gemm_impl(
         self,
-        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
+        prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
         layer: torch.nn.Module,
-    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+    ) -> mk.FusedMoEExpertsModular:
         if (
             prepare_finalize.activation_format
             == mk.FusedMoEActivationFormat.BatchedExperts
@@ -1043,8 +1043,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             or self.mxfp4_backend == Mxfp4Backend.MARLIN
         )
 
-        assert self.moe_mk is not None
-        return self.moe_mk(
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,

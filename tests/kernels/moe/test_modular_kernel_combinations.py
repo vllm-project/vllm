@@ -168,7 +168,6 @@ FUSED_MOE_CHUNK_SIZEs = [None, 16]
 def is_nyi_config(config: Config) -> bool:
     # We know these configs to be legitimate. but still fail.
     info = expert_info(config.fused_experts_type)
-
     if info.needs_matching_quant:
         # The triton kernels expect both per-act-token-quant and
         # per-out-ch-quant or neither.
@@ -259,7 +258,7 @@ def test_modular_kernel_combinations_multigpu(
     dtype: torch.dtype,
     quant_config: TestMoEQuantConfig | None,
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
-    fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
+    fused_experts_type: mk.FusedMoEExperts,
     chunk_size: int | None,
     world_size: int,
     pytestconfig,
@@ -301,7 +300,7 @@ def test_modular_kernel_combinations_singlegpu(
     dtype: torch.dtype,
     quant_config: TestMoEQuantConfig | None,
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
-    fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
+    fused_experts_type: mk.FusedMoEExperts,
     chunk_size: int | None,
     world_size: int,
     pytestconfig,

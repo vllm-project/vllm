@@ -64,7 +64,7 @@ if current_platform.is_cuda_alike():
 
         # TODO(bowen): When using `FusedMoEModularKernel`, this
         # can be done in a more unified way, since
-        # `FusedMoEPrepareAndFinalize` will return the expert
+        # `FusedMoEPrepareAndFinalizeModular` will return the expert
         # token count, in some cases directly from the kernel.
         # However, now there are many code paths not using
         # the modular kernel, e.g. calling `fused_experts`,

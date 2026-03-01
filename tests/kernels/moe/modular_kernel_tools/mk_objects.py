@@ -20,7 +20,7 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     NaiveBatchedExperts,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEPModular,
 )
 from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
@@ -71,12 +71,14 @@ class ExpertInfo:
     needs_aiter: bool = False
 
 
-PREPARE_FINALIZE_INFO: dict[mk.FusedMoEPrepareAndFinalize, PrepareFinalizeInfo] = {}
-EXPERT_INFO: dict[mk.FusedMoEPermuteExpertsUnpermute, ExpertInfo] = {}
-MK_ALL_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalize] = []
-MK_MULTI_GPU_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalize] = []
-MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalize] = []
-MK_FUSED_EXPERT_TYPES: list[mk.FusedMoEPermuteExpertsUnpermute] = []
+PREPARE_FINALIZE_INFO: dict[
+    mk.FusedMoEPrepareAndFinalizeModular, PrepareFinalizeInfo
+] = {}
+EXPERT_INFO: dict[mk.FusedMoEExpertsModular, ExpertInfo] = {}
+MK_ALL_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalizeModular] = []
+MK_MULTI_GPU_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalizeModular] = []
+MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalizeModular] = []
+MK_FUSED_EXPERT_TYPES: list[mk.FusedMoEExpertsModular] = []
 
 standard_format = mk.FusedMoEActivationFormat.Standard
 batched_format = mk.FusedMoEActivationFormat.BatchedExperts
@@ -162,7 +164,7 @@ def expert_info(kind) -> ExpertInfo:
 
 
 register_prepare_and_finalize(
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEPModular,
     standard_format,
     common_float_types,
     blocked_quantization_support=True,
@@ -239,14 +241,14 @@ if has_mori():
 
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
     from vllm.model_executor.layers.fused_moe.flashinfer_a2a_prepare_finalize import (  # noqa: E501
-        FlashInferCutlassMoEPrepareAndFinalize,
+        FlashInferA2APrepareAndFinalize,
     )
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )
 
     register_prepare_and_finalize(
-        FlashInferCutlassMoEPrepareAndFinalize,
+        FlashInferA2APrepareAndFinalize,
         standard_format,
         nvfp4_types + fp8_types,
         blocked_quantization_support=True,
@@ -430,12 +432,12 @@ def make_cutlass_strides(
 
 
 def make_fused_experts(
-    fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
+    fused_experts_type: mk.FusedMoEExpertsModular,
     moe: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig,
     num_dispatchers: int,
     N: int,
-) -> mk.FusedMoEPermuteExpertsUnpermute:
+) -> mk.FusedMoEExpertsModular:
     if (
         fused_experts_type.activation_format()
         == mk.FusedMoEActivationFormat.BatchedExperts
