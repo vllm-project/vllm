@@ -8,6 +8,9 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.attention.kv_transfer_utils import (
+    maybe_transfer_kv_layer,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     fp8_mqa_logits,
@@ -31,9 +34,10 @@ elif current_platform.is_xpu():
 logger = init_logger(__name__)
 
 
+@maybe_transfer_kv_layer
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
-    k_cache_prefix: str,
+    layer_name: str,
     kv_cache: torch.Tensor,
     q_fp8: torch.Tensor,
     k: torch.Tensor,
@@ -59,7 +63,7 @@ def sparse_attn_indexer(
         )
         return sparse_attn_indexer_fake(
             hidden_states,
-            k_cache_prefix,
+            layer_name,
             kv_cache,
             q_fp8,
             k,
@@ -72,7 +76,7 @@ def sparse_attn_indexer(
             total_seq_lens,
             topk_indices_buffer,
         )
-    attn_metadata = attn_metadata[k_cache_prefix]
+    attn_metadata = attn_metadata[layer_name]
     assert isinstance(attn_metadata, DeepseekV32IndexerMetadata)
     slot_mapping = attn_metadata.slot_mapping
     has_decode = attn_metadata.num_decodes > 0
@@ -241,7 +245,7 @@ def sparse_attn_indexer(
 
 def sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
-    k_cache_prefix: str,
+    layer_name: str,
     kv_cache: torch.Tensor,
     q_fp8: torch.Tensor,
     k: torch.Tensor,
