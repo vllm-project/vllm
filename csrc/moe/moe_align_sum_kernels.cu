@@ -24,10 +24,6 @@ __global__ void batched_moe_align_block_size_kernel(
     int32_t const block_size, int32_t const* __restrict__ batch_num_tokens,
     int32_t* __restrict__ sorted_ids, int32_t* __restrict__ block_ids,
     int32_t* __restrict__ num_tokens_post_pad) {
-  // TODO(varun): This is a naive implementation. Could be optimized.
-
-  size_t const batch_id = threadIdx.x;
-  size_t const stride = blockDim.x * gridDim.x;
   int32_t const num_blocks_per_batch =
       CEILDIV(max_tokens_per_batch, block_size);
   int32_t const sorted_ids_size =
@@ -35,44 +31,71 @@ __global__ void batched_moe_align_block_size_kernel(
   int32_t const block_ids_size = sorted_ids_size / block_size;
   int32_t const SENTINEL =
       num_batches * max_tokens_per_batch;  // To denote invalid entries.
-  // Intialize sorted_ids
-  for (size_t i = threadIdx.x; i < sorted_ids_size; i += stride) {
+
+  // Phase 1: Initialize output arrays. All threads cooperate via stride loop.
+  for (int32_t i = threadIdx.x; i < sorted_ids_size; i += blockDim.x) {
     sorted_ids[i] = SENTINEL;
   }
-  // Intialize expert_ids with -1
-  for (size_t i = threadIdx.x; i < block_ids_size; i += stride) {
+  for (int32_t i = threadIdx.x; i < block_ids_size; i += blockDim.x) {
     block_ids[i] = -1;
   }
 
+  __syncthreads();
+
+  // Phase 2: Each thread reads its batch's token count.
   int32_t b_num_tokens = 0;
-  if (batch_id < num_batches) {
-    b_num_tokens = batch_num_tokens[batch_id];
+  if (threadIdx.x < num_batches) {
+    b_num_tokens = batch_num_tokens[threadIdx.x];
   }
   int32_t const ceil_b_num_tokens =
       CEILDIV(b_num_tokens, block_size) * block_size;
 
-  // Compute prefix sum over token counts per expert
+  // Phase 3: Prefix sum over padded token counts.
   using BlockScan = cub::BlockScan<int32_t, 1024>;
   __shared__ typename BlockScan::TempStorage temp_storage;
-  int cumsum_val;
+  int32_t cumsum_val;
   BlockScan(temp_storage).ExclusiveSum(ceil_b_num_tokens, cumsum_val);
   __syncthreads();
 
-  bool const is_last_batch = batch_id == (num_batches - 1);
-  if (is_last_batch) {
+  // Phase 3.5: Store per-batch results to shared memory so all threads
+  // can participate in the cooperative writes below.
+  __shared__ int32_t s_cumsum[1024];
+  __shared__ int32_t s_num_tokens[1024];
+  __shared__ int32_t s_ceil_b_num_tokens[1024];
+
+  if (threadIdx.x < num_batches) {
+    s_cumsum[threadIdx.x] = cumsum_val;
+    s_num_tokens[threadIdx.x] = b_num_tokens;
+    s_ceil_b_num_tokens[threadIdx.x] = ceil_b_num_tokens;
+  }
+
+  if (threadIdx.x == num_batches - 1) {
     *num_tokens_post_pad = cumsum_val + ceil_b_num_tokens;
   }
 
-  if (batch_id < num_batches) {
-    int32_t const batch_offset = batch_id * max_tokens_per_batch;
-    for (size_t i = 0; i < b_num_tokens; ++i) {
-      sorted_ids[cumsum_val + i] = batch_offset + i;
-    }
+  __syncthreads();
 
-    int32_t const block_start = cumsum_val / block_size;
-    int32_t const num_blocks = ceil_b_num_tokens / block_size;
-    for (size_t i = 0; i < num_blocks; ++i) {
-      block_ids[block_start + i] = batch_id;
+  // Phase 4: Write sorted_ids. All 1024 threads cooperate on each batch,
+  // dividing the writes evenly instead of one thread doing them all serially.
+  for (int32_t batch = 0; batch < num_batches; ++batch) {
+    int32_t const batch_offset = batch * max_tokens_per_batch;
+    int32_t const batch_cumsum = s_cumsum[batch];
+    int32_t const batch_tokens = s_num_tokens[batch];
+
+    for (int32_t i = threadIdx.x; i < batch_tokens; i += blockDim.x) {
+      sorted_ids[batch_cumsum + i] = batch_offset + i;
+    }
+  }
+
+  // Phase 5: Write block_ids. Same cooperative approach.
+  for (int32_t batch = 0; batch < num_batches; ++batch) {
+    int32_t const batch_cumsum = s_cumsum[batch];
+    int32_t const ceil_tokens = s_ceil_b_num_tokens[batch];
+    int32_t const block_start = batch_cumsum / block_size;
+    int32_t const n_blocks = ceil_tokens / block_size;
+
+    for (int32_t i = threadIdx.x; i < n_blocks; i += blockDim.x) {
+      block_ids[block_start + i] = batch;
     }
   }
 }
