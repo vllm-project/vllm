@@ -25,7 +25,7 @@ class DirectImportChecker(ast.NodeVisitor):
                 self.errors.append(
                     f"{self.filename}:{node.lineno}: "
                     f"Direct import of vllm.envs_impl._variables is not allowed. "
-                    f"Use 'import vllm.envs as envs' instead."
+                    f"Use 'import vllm.envs_impl as envs' instead."
                 )
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
@@ -36,7 +36,7 @@ class DirectImportChecker(ast.NodeVisitor):
             self.errors.append(
                 f"{self.filename}:{node.lineno}: "
                 f"Direct import from vllm.envs_impl._variables is not allowed. "
-                f"Use 'import vllm.envs as envs' instead."
+                f"Use 'import vllm.envs_impl as envs' instead."
             )
 
         if node.level > 0:
@@ -46,7 +46,7 @@ class DirectImportChecker(ast.NodeVisitor):
                 self.errors.append(
                     f"{self.filename}:{node.lineno}: "
                     f"Relative import from _variables is not allowed. "
-                    f"Use 'import vllm.envs as envs' instead."
+                    f"Use 'import vllm.envs_impl as envs' instead."
                 )
             if node.module is None or node.module == "":
                 for alias in node.names:
@@ -54,7 +54,7 @@ class DirectImportChecker(ast.NodeVisitor):
                         self.errors.append(
                             f"{self.filename}:{node.lineno}: "
                             f"Relative import of _variables is not allowed. "
-                            f"Use 'import vllm.envs as envs' instead."
+                            f"Use 'import vllm.envs_impl as envs' instead."
                         )
 
 
@@ -223,7 +223,7 @@ def check_env_var_list_sync(repo_root: Path, variables_file: Path) -> list[str]:
     declared_vars = _get_declared_variables(variables_file)
 
     sys.path.insert(0, str(repo_root))
-    envs_module = importlib.import_module("vllm.envs")
+    envs_module = importlib.import_module("vllm.envs_impl")
     exposed_vars = set(envs_module.__dir__())
 
     missing_in_variables = sorted(exposed_vars - declared_vars)
@@ -231,12 +231,12 @@ def check_env_var_list_sync(repo_root: Path, variables_file: Path) -> list[str]:
 
     if missing_in_variables:
         errors.append(
-            "_variables.py is missing env vars defined in vllm.envs: "
+            "_variables.py is missing env vars defined in vllm.envs_impl: "
             f"{', '.join(missing_in_variables)}"
         )
     if extra_in_variables:
         errors.append(
-            "_variables.py has env vars not exposed by vllm.envs: "
+            "_variables.py has env vars not exposed by vllm.envs_impl: "
             f"{', '.join(extra_in_variables)}"
         )
 
@@ -282,7 +282,7 @@ def main() -> int:
         print("   ✓ All variables have valid type annotations")
 
     # Check 3: Env var list sync
-    print("\n3. Checking env var list sync with vllm.envs...")
+    print("\n3. Checking env var list sync with vllm.envs_impl...")
     sync_errors = check_env_var_list_sync(script_dir.parent, variables_file)
     if sync_errors:
         all_errors.extend(sync_errors)
