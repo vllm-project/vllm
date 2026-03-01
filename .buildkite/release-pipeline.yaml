@@ -711,3 +711,21 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
       S3_BUCKET: "vllm-wheels"
+
+  - label: "Publish nightly ROCm image to DockerHub"
+    depends_on:
+      - build-rocm-release-image
+    if: build.env("NIGHTLY") == "1"
+    agents:
+      queue: small_cpu_queue_postmerge
+    commands:
+      - "bash .buildkite/scripts/push-nightly-builds-rocm.sh"
+      # Clean up old nightly builds (keep only last 14)
+      - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-openai-rocm"
+    plugins:
+      - docker-login#v3.0.0:
+          username: vllmbot
+          password-env: DOCKERHUB_TOKEN
+    env:
+      DOCKER_BUILDKIT: "1"
+      DOCKERHUB_USERNAME: "vllmbot"
