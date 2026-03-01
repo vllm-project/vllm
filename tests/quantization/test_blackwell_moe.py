@@ -244,6 +244,13 @@ def test_nemotron_fp8_moe_flashinfer_latency(monkeypatch: pytest.MonkeyPatch):
     )
 
 
+@pytest.mark.skip(
+    reason=(
+        "FP8 MoE backend TRITON does not support the "
+        "deployment configuration since kernel does not support "
+        "no act_and_mul MLP layer."
+    )
+)
 def test_nemotron_fp8_moe_vllm_triton(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
