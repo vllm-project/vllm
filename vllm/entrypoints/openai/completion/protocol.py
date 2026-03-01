@@ -415,8 +415,8 @@ class CompletionRequest(OpenAIBaseModel):
         )
 
         if prompt_is_empty and embeds_is_empty:
-            raise ValueError(
-                "Either prompt or prompt_embeds must be provided and non-empty."
+            raise VLLMValidationError(
+                "Either prompt or prompt_embeds must be provided and non-empty.",
             )
 
         return data
@@ -427,8 +427,10 @@ class CompletionRequest(OpenAIBaseModel):
         if data.get("cache_salt") is not None and (
             not isinstance(data["cache_salt"], str) or not data["cache_salt"]
         ):
-            raise ValueError(
-                "Parameter 'cache_salt' must be a non-empty string if provided."
+            raise VLLMValidationError(
+                "Parameter 'cache_salt' must be a non-empty string if provided.",
+                parameter="cache_salt",
+                value=data.get("cache_salt"),
             )
         return data
 

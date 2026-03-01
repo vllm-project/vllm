@@ -596,9 +596,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
         )
         # you can only use one kind of constraints for structured outputs
         if count > 1:
-            raise ValueError(
-                "You can only use one kind of constraints for structured "
-                "outputs ('json', 'regex' or 'choice')."
+            raise VLLMValidationError(
+                "You can only use one kind of constraints "
+                "for structured outputs "
+                "('json', 'regex' or 'choice').",
+                parameter="structured_outputs",
             )
         # you can only either use structured outputs or tools, not both
         if count > 1 and data.get("tool_choice", "none") not in (
@@ -606,9 +608,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "auto",
             "required",
         ):
-            raise ValueError(
-                "You can only either use constraints for structured outputs "
-                "or tools, not both."
+            raise VLLMValidationError(
+                "You can only either use constraints for "
+                "structured outputs or tools, not both.",
+                parameter="structured_outputs",
             )
         return data
 
@@ -628,17 +631,24 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if "tool_choice" in data and data["tool_choice"] is not None:
             # ensure that if "tool choice" is specified, tools are present
             if "tools" not in data or data["tools"] is None:
-                raise ValueError("When using `tool_choice`, `tools` must be set.")
+                raise VLLMValidationError(
+                    "When using `tool_choice`, `tools` must be set.",
+                    parameter="tool_choice",
+                    value=data.get("tool_choice"),
+                )
 
             # make sure that tool choice is either a named tool
             # OR that it's set to "auto" or "required"
             if data["tool_choice"] not in ["auto", "required"] and not isinstance(
                 data["tool_choice"], dict
             ):
-                raise ValueError(
-                    f"Invalid value for `tool_choice`: {data['tool_choice']}! "
-                    'Only named tools, "none", "auto" or "required" '
-                    "are supported."
+                raise VLLMValidationError(
+                    "Invalid value for `tool_choice`: "
+                    f"{data['tool_choice']}! "
+                    'Only named tools, "none", "auto" '
+                    'or "required" are supported.',
+                    parameter="tool_choice",
+                    value=data.get("tool_choice"),
                 )
 
             # if tool_choice is "required" but the "tools" list is empty,
@@ -663,29 +673,42 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 valid_tool = False
                 function = data["tool_choice"].get("function")
                 if not isinstance(function, dict):
-                    raise ValueError(
-                        f"Invalid value for `function`: `{function}` in "
-                        f"`tool_choice`! {correct_usage_message}"
+                    raise VLLMValidationError(
+                        "Invalid value for `function`: "
+                        f"`{function}` in `tool_choice`! "
+                        f"{correct_usage_message}",
+                        parameter="tool_choice",
+                        value=data.get("tool_choice"),
                     )
                 if "name" not in function:
-                    raise ValueError(
-                        f"Expected field `name` in `function` in "
-                        f"`tool_choice`! {correct_usage_message}"
+                    raise VLLMValidationError(
+                        "Expected field `name` in `function`"
+                        f" in `tool_choice`! "
+                        f"{correct_usage_message}",
+                        parameter="tool_choice",
+                        value=data.get("tool_choice"),
                     )
                 function_name = function["name"]
                 if not isinstance(function_name, str) or len(function_name) == 0:
-                    raise ValueError(
-                        f"Invalid `name` in `function`: `{function_name}`"
-                        f" in `tool_choice`! {correct_usage_message}"
+                    raise VLLMValidationError(
+                        "Invalid `name` in `function`: "
+                        f"`{function_name}` in "
+                        f"`tool_choice`! "
+                        f"{correct_usage_message}",
+                        parameter="tool_choice",
+                        value=data.get("tool_choice"),
                     )
                 for tool in data["tools"]:
                     if tool["function"]["name"] == function_name:
                         valid_tool = True
                         break
                 if not valid_tool:
-                    raise ValueError(
-                        "The tool specified in `tool_choice` does not match any"
-                        " of the specified `tools`"
+                    raise VLLMValidationError(
+                        "The tool specified in `tool_choice` "
+                        "does not match any of the "
+                        "specified `tools`.",
+                        parameter="tool_choice",
+                        value=data.get("tool_choice"),
                     )
         return data
 
@@ -693,9 +716,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_generation_prompt(cls, data):
         if data.get("continue_final_message") and data.get("add_generation_prompt"):
-            raise ValueError(
-                "Cannot set both `continue_final_message` and "
-                "`add_generation_prompt` to True."
+            raise VLLMValidationError(
+                "Cannot set both `continue_final_message` "
+                "and `add_generation_prompt` to True.",
             )
         return data
 
@@ -705,8 +728,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if data.get("cache_salt") is not None and (
             not isinstance(data["cache_salt"], str) or not data["cache_salt"]
         ):
-            raise ValueError(
-                "Parameter 'cache_salt' must be a non-empty string if provided."
+            raise VLLMValidationError(
+                "Parameter 'cache_salt' must be a non-empty string if provided.",
+                parameter="cache_salt",
+                value=data.get("cache_salt"),
             )
         return data
 
