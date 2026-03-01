@@ -47,10 +47,6 @@ def can_initialize(
         "256",
         "--load-format",
         "dummy",
-        # FIXME: OOM at 0.8 with 4 layer model - needs investigation.
-        # This happens while capturing CUDAGraphs.
-        "--gpu-memory-utilization",
-        "0.80",
         "--trust-remote-code",
         "--limit-mm-per-prompt",
         json.dumps({"image": 0}),
@@ -82,7 +78,7 @@ def can_initialize(
 def test_llama4_fp8_tensor_moe_vllm_triton(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
-        hf_overrides=HF_OVERRIDE_TEXT,
+        hf_overrides=HF_OVERRIDE_MM,
         extra_args=["--moe-backend=triton"],
     )
 
@@ -90,7 +86,7 @@ def test_llama4_fp8_tensor_moe_vllm_triton(monkeypatch: pytest.MonkeyPatch):
 def test_llama4_fp8_tensor_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
-        hf_overrides=HF_OVERRIDE_TEXT,
+        hf_overrides=HF_OVERRIDE_MM,
         extra_args=["--moe-backend=flashinfer_cutlass"],
     )
 
