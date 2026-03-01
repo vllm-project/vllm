@@ -157,7 +157,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 m_fused_moe_fn.fused_experts, (MarlinExperts, UnfusedOAITritonExperts)
             )
         else:
-            assert isinstance(m_fused_moe_fn.fused_experts, TritonExperts)
+            # MarlinExperts used for NVFP4 (see select_nvfp4_moe_backend)
+            assert isinstance(
+                m_fused_moe_fn.fused_experts, (TritonExperts, MarlinExperts)
+            )
 
         def fwd_decorator(layer, func):
             def wrapper(*args, **kwargs):
