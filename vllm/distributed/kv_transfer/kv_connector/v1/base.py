@@ -25,8 +25,8 @@ The class provides the following primitives:
 
     Worker-side: runs in each worker, loads/saves KV cache to/from
     the Connector based on the metadata.
-        handle_preemptions() - called if there are preempted requests,
-            before their blocks are overwritten
+        handle_preemptions() - called for handling preempted requests
+            or request evicted blocks before they are overwritten
 
         start_load_kv() - starts loading all KVs (maybe async)
         wait_for_layer_load() - blocks until layer i load is done
@@ -265,9 +265,9 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
-    def handle_preemptions(self, preempted_req_ids: set[str]):
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata):
         """
-        Handle preempted requests BEFORE their blocks are overwritten.
+        Handle preempted requests or evicted blocks BEFORE they are overwritten.
         Needed for connectors which use async saves (e.g., OffloadingConnector)
         """
         return
