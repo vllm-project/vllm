@@ -364,18 +364,18 @@ async def upload_data(output_url: str, data_or_file: str, from_file: bool) -> No
                     with open(data_or_file, "rb") as file:
                         async with session.put(output_url, data=file) as response:
                             if response.status != 200:
-                                raise Exception(
+                                raise RuntimeError(
                                     f"Failed to upload file.\n"
                                     f"Status: {response.status}\n"
-                                    f"Response: {response.text()}"
+                                    f"Response: {await response.text()}"
                                 )
                 else:
                     async with session.put(output_url, data=data_or_file) as response:
                         if response.status != 200:
-                            raise Exception(
+                            raise RuntimeError(
                                 f"Failed to upload data.\n"
                                 f"Status: {response.status}\n"
-                                f"Response: {response.text()}"
+                                f"Response: {await response.text()}"
                             )
 
         except Exception as e:
@@ -388,7 +388,7 @@ async def upload_data(output_url: str, data_or_file: str, from_file: bool) -> No
                 )
                 await asyncio.sleep(delay)
             else:
-                raise Exception(
+                raise RuntimeError(
                     f"Failed to upload data (attempt {attempt}). Error message: {str(e)}."  # noqa: E501
                 ) from e
 
@@ -465,7 +465,7 @@ async def download_bytes_from_url(url: str) -> bytes:
             session.get(url) as resp,
         ):
             if resp.status != 200:
-                raise Exception(
+                raise RuntimeError(
                     f"Failed to download data from URL: {url}. Status: {resp.status}"
                 )
             return await resp.read()
