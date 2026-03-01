@@ -98,7 +98,11 @@ def binary2tensor(
 
     # np.frombuffer on a bytes object returns a read-only array. Suppress the
     # PyTorch warning about non-writable tensors since we never mutate this
-    # tensor after construction.
+    # tensor after construction. The warning is only raised if the array is
+    # not writable; np.byteswap() already returns a writable array.
+    if np_array.flags.writeable:
+        return torch.from_numpy(np_array).view(dtype_info.torch_dtype)
+
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
