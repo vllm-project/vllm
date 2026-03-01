@@ -645,16 +645,17 @@ ARG PYTORCH_NIGHTLY
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
+    WHEEL="$(ls dist/*.whl)" && \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing torch nightly..." \
         && uv pip install --system $(cat torch_lib_versions.txt | xargs) --pre \
         --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
         && echo "Installing vLLM..." \
-        && uv pip install --system dist/*.whl --verbose \
+        && uv pip install --system "${WHEEL}[otel]" --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
         echo "Installing vLLM..." \
-        && uv pip install --system dist/*.whl --verbose \
+        && uv pip install --system "${WHEEL}[otel]" --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 

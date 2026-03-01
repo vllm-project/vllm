@@ -222,7 +222,7 @@ WORKDIR /vllm-workspace
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
-    uv pip install dist/*.whl
+    WHEEL="$(ls dist/*.whl)" && uv pip install "${WHEEL}[otel]"
 
 # Add labels to document build configuration
 LABEL org.opencontainers.image.title="vLLM CPU"
