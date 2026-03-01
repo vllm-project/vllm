@@ -19,6 +19,7 @@ from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
@@ -268,6 +269,10 @@ class OffloadingManager(ABC):
     def reset_cache(self) -> None:
         """Evict all tracked blocks and reset internal state."""
         return
+
+    def get_stats(self) -> "KVConnectorStats | None":
+        """Return manager-specific KV connector stats, if any."""
+        return None
 
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources."""

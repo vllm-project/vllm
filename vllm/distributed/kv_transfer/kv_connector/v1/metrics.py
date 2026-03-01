@@ -49,6 +49,10 @@ class KVConnectorStats:
         """Return True if the stats are empty."""
         raise NotImplementedError
 
+    def set_gauge(self, gauge_name: str, gauge_value: int | float) -> None:
+        """Set a scalar gauge value on the stats payload."""
+        self.data.setdefault("gauges", {})[gauge_name] = gauge_value
+
 
 class KVConnectorLogging:
     def __init__(self, kv_transfer_config: KVTransferConfig | None):
