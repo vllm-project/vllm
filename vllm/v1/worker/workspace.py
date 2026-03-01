@@ -152,7 +152,7 @@ class WorkspaceManager:
                 return "unknown"
 
             if self._locked:
-                raise AssertionError(
+                raise RuntimeError(
                     f"Workspace is locked but allocation from '{get_caller_info()}' "
                     f"requires {required_bytes / _MB:.2f} MB, current size is "
                     f"{current_size / _MB:.2f} MB. "
