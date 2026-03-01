@@ -503,7 +503,7 @@ def _fused_moe_lora_shrink(
         top_k_num,
         lora_ids,
         adapter_enabled,
-        lora_a_stacked[0].shape[0],
+        lora_a_stacked[0].shape[0] + 1,  # +1 for base-model slot
         qcurr_hidden_states.stride(0),
         qcurr_hidden_states.stride(1),
         w1_lora_a_stacked.stride(0),
@@ -639,7 +639,7 @@ def _fused_moe_lora_expand(
         top_k_num,
         lora_ids,
         adapter_enabled,
-        lora_b_stacked[0].shape[0],
+        lora_b_stacked[0].shape[0] + 1,  # +1 for base-model slot
         a_intermediate_cache1.stride(0),
         a_intermediate_cache1.stride(1),
         w1_lora_b_stacked.stride(0),
