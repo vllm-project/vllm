@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import shutil
+
 import pytest
+import torch
+from safetensors.torch import load_file, save_file
 
 import vllm
 from vllm.lora.request import LoRARequest
@@ -120,6 +124,41 @@ def test_olmoe_lora_mixed(olmoe_lora_files):
     )
 
     generate_and_test(llm, olmoe_lora_files, lora_id=[1, None, 3, None])
+
+
+def test_olmoe_lora_mixed_random(olmoe_lora_files, tmp_path):
+    # Create a dummy LoRA with random weights based on the real one
+    random_lora_path = tmp_path / "random_lora"
+    shutil.copytree(olmoe_lora_files, random_lora_path)
+
+    weights_path = random_lora_path / "adapter_model.safetensors"
+    weights = load_file(str(weights_path))
+    random_weights = {k: torch.randn_like(v) for k, v in weights.items()}
+    save_file(random_weights, str(weights_path))
+
+    llm = vllm.LLM(
+        MODEL_PATH,
+        max_model_len=1024,
+        enable_lora=True,
+        max_loras=4,
+        enforce_eager=True,
+        trust_remote_code=True,
+        enable_chunked_prefill=True,
+    )
+
+    prompts = [
+        PROMPT_TEMPLATE.format(context="How many candidates are there?"),
+        PROMPT_TEMPLATE.format(context="Count the number of candidates."),
+    ]
+
+    lora_requests = [
+        LoRARequest("real", 1, olmoe_lora_files),
+        LoRARequest("random", 2, str(random_lora_path)),
+    ]
+
+    sampling_params = vllm.SamplingParams(temperature=0, max_tokens=64)
+    outputs = llm.generate(prompts, sampling_params, lora_request=lora_requests)
+    assert outputs[0].outputs[0].text.strip().startswith(EXPECTED_LORA_OUTPUT[0])
 
 
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
