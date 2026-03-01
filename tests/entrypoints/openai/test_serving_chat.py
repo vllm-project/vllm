@@ -974,19 +974,20 @@ async def test_serving_chat_interleave_override_request_field(monkeypatch):
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_chat = _build_serving_chat(mock_engine)
     serving_chat.chat_completion_full_generator = AsyncMock(return_value=MagicMock())
-    parse_messages_spy = MagicMock(
+    parse_messages_spy = AsyncMock(
         return_value=(
             [{"role": "user", "content": "test"}],
-            asyncio.sleep(0, result=None),
+            None,
             None,
         )
     )
 
     monkeypatch.setattr(
-        "vllm.entrypoints.openai.engine.serving.parse_chat_messages_futures",
+        "vllm.renderers.hf.parse_chat_messages_async",
         parse_messages_spy,
     )
 
@@ -998,8 +999,9 @@ async def test_serving_chat_interleave_override_request_field(monkeypatch):
 
     await serving_chat.create_chat_completion(request)
 
-    parse_messages_spy.assert_called_once()
-    assert parse_messages_spy.call_args.kwargs["interleave_mm_strings"] is True
+    parse_messages_spy.assert_awaited_once()
+    assert parse_messages_spy.await_args is not None
+    assert parse_messages_spy.await_args.kwargs["interleave_mm_strings"] is True
 
 
 @pytest.mark.asyncio

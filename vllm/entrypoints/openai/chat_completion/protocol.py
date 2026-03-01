@@ -363,6 +363,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     reasoning_effort=self.reasoning_effort,
                 ),
             ),
+            interleave_mm_strings=self.interleave_mm_strings,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
