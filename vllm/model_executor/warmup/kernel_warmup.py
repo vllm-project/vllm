@@ -36,7 +36,6 @@ def kernel_warmup(worker: "Worker"):
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
 
-    model = worker.get_model()
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune
     )
@@ -77,9 +76,6 @@ def kernel_warmup(worker: "Worker"):
             force_attention=True,
             create_mixed_batch=True,
         )
-
-
-_is_fi_autotuning: bool = False
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
