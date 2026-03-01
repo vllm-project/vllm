@@ -174,11 +174,9 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
 
     # For batch invariance, disable custom all-reduce to ensure deterministic
     # all-reduce operations (custom all-reduce may not be deterministic)
-    from vllm.model_executor.layers.batch_invariant import (
-        vllm_is_batch_invariant,
-    )
+    import vllm.envs as envs
 
-    disable_custom_ar = vllm_is_batch_invariant()
+    disable_custom_ar = envs.VLLM_BATCH_INVARIANT
 
     if disable_custom_ar:
         print(f"\n{'=' * 80}")
@@ -677,11 +675,9 @@ def test_decode_logprobs_match_prefill_logprobs(
     model_name = resolve_model_name(backend)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
-    from vllm.model_executor.layers.batch_invariant import (
-        vllm_is_batch_invariant,
-    )
+    import vllm.envs as envs
 
-    disable_custom_ar = vllm_is_batch_invariant()
+    disable_custom_ar = envs.VLLM_BATCH_INVARIANT
 
     if disable_custom_ar:
         print(f"\n{'=' * 80}")

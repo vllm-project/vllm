@@ -17,9 +17,6 @@ from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -294,7 +291,7 @@ class Fp8LinearMethod(LinearMethodBase):
         # Disable marlin for rocm
         if current_platform.is_rocm() or current_platform.is_xpu():
             self.use_marlin = False
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             self.use_marlin = False
 
         self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
@@ -458,7 +455,7 @@ class Fp8LinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         # if batch invariant mode is enabled, prefer DeepGEMM FP8 path
         # we will use BF16 dequant when DeepGEMM is not supported.
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             if self.block_quant:
                 assert self.weight_block_size is not None
                 return self.w8a8_block_fp8_linear.apply(

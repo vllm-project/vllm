@@ -23,9 +23,6 @@ from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -504,7 +501,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         ) = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
 
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             self.decode_fixed_split_size = 2048
             self.prefill_fixed_split_size = 4096
             self.disable_split_kv = True
@@ -698,7 +695,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
             buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
-            if vllm_is_batch_invariant():
+            if envs.VLLM_BATCH_INVARIANT:
                 buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
             self._workspace_buffer = torch.zeros(
                 buffer_size, dtype=torch.uint8, device=self.device

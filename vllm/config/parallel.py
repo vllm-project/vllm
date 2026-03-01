@@ -13,9 +13,6 @@ from typing_extensions import Self
 import vllm.envs as envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_ports_list
 from vllm.utils.torch_utils import cuda_device_count_stateless
@@ -798,7 +795,7 @@ class ParallelConfig:
         from vllm.v1.executor import Executor
 
         # Enable batch invariance settings if requested
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             self.disable_custom_all_reduce = True
 
         if (

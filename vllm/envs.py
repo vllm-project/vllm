@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     VLLM_TARGET_DEVICE: str = "cuda"
     VLLM_MAIN_CUDA_VERSION: str = "12.9"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
+    VLLM_BATCH_INVARIANT: bool = False
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -278,9 +279,6 @@ def disable_compile_cache() -> bool:
 
 
 def use_aot_compile() -> bool:
-    from vllm.model_executor.layers.batch_invariant import (
-        vllm_is_batch_invariant,
-    )
     from vllm.utils.torch_utils import is_torch_equal_or_newer
 
     default_value = (
@@ -290,7 +288,7 @@ def use_aot_compile() -> bool:
     )
 
     return (
-        not vllm_is_batch_invariant()
+        not bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0")))
         and os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
     )
 
@@ -486,6 +484,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         ["highest", "high", "medium"],
         case_sensitive=False,
     ),
+    # Enable batch-invariant mode: deterministic results regardless of
+    # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
+    "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
