@@ -1,0 +1,13 @@
+{{ (messages|selectattr('role', 'equalto', 'system')|list|last).content|trim if (messages|selectattr('role', 'equalto', 'system')|list) else '' }}
+
+{%- for message in messages -%}
+    {%- if message['role'] == 'user' -%}
+        {{- '<reserved_106>' + message['content'] -}}
+    {%- elif message['role'] == 'assistant' -%}
+        {{- '<reserved_107>' + message['content'] -}}
+    {%- endif -%}
+{%- endfor -%}
+
+{%- if add_generation_prompt and messages[-1]['role'] != 'assistant' -%}
+    {{- '<reserved_107>' -}}
+{% endif %}

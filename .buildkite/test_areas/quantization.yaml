@@ -1,0 +1,46 @@
+group: Quantization
+depends_on: 
+  - image-build
+steps:
+- label: Quantization
+  timeout_in_minutes: 90
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - tests/quantization
+  commands:
+  # temporary install here since we need nightly, will move to requirements/test.in
+  # after torchao 0.12 release, and pin a working version of torchao nightly here
+
+  # since torchao nightly is only compatible with torch nightly currently
+  # https://github.com/pytorch/ao/issues/2919, we'll have to skip new torchao tests for now
+  # we can only upgrade after this is resolved
+  # TODO(jerryzh168): resolve the above comment
+  - uv pip install --system torchao==0.14.1 --index-url https://download.pytorch.org/whl/cu129
+  - uv pip install --system conch-triton-kernels
+  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
+
+- label: Quantized MoE Test (B200)
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/"
+  device: b200
+  source_file_dependencies:
+  - tests/quantization/test_blackwell_moe.py
+  - vllm/model_executor/models/deepseek_v2.py
+  - vllm/model_executor/models/gpt_oss.py
+  - vllm/model_executor/models/llama4.py
+  - vllm/model_executor/layers/fused_moe
+  - vllm/model_executor/layers/quantization/compressed_tensors
+  - vllm/model_executor/layers/quantization/modelopt.py
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/v1/attention/backends/flashinfer.py
+  commands:
+    - pytest -s -v tests/quantization/test_blackwell_moe.py
+
+- label: Quantized Models Test
+  timeout_in_minutes: 60
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization
+  - tests/models/quantization
+  commands:
+    - pytest -v -s models/quantization

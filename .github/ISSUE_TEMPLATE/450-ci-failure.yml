@@ -1,0 +1,69 @@
+name: 🧪 CI failure report
+description: Report a failing test.
+title: "[CI Failure]: "
+labels: ["ci-failure"]
+
+body:
+- type: markdown
+  attributes:
+    value: >
+      #### Include the name of the failing Buildkite step and test file in the title.
+- type: input
+  attributes:
+    label: Name of failing test
+    description: |
+      Paste in the fully-qualified name of the failing test from the logs.
+    placeholder: |
+      `path/to/test_file.py::test_name[params]`
+  validations:
+    required: true
+- type: checkboxes
+  attributes:
+    label: Basic information
+    description: Select all items that apply to the failing test.
+    options:
+      - label: Flaky test
+      - label: Can reproduce locally
+      - label: Caused by external libraries (e.g. bug in `transformers`)
+- type: textarea
+  attributes:
+    label: 🧪 Describe the failing test
+    description: |
+      Please provide a clear and concise description of the failing test.
+    placeholder: |
+      A clear and concise description of the failing test.
+  
+      ```
+      The error message you got, with the full traceback and the error logs with [dump_input.py:##] if present.
+      ```
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: 📝 History of failing test
+    description: |
+      Since when did the test start to fail?
+      You can look up its history via [Buildkite Test Suites](https://buildkite.com/organizations/vllm/analytics/suites/ci-1/tests?branch=main).
+
+      If you have time, identify the PR that caused the test to fail on main. You can do so via the following methods:
+
+      - Use Buildkite Test Suites to find the PR where the test failure first occurred, and reproduce the failure locally.
+
+      - Run [`git bisect`](https://git-scm.com/docs/git-bisect) locally.
+
+      - Manually unblock Buildkite steps for suspected PRs on main and check the results. (authorized users only)
+    placeholder: |
+      Approximate timeline and/or problematic PRs
+
+      A link to the Buildkite analytics of the failing test (if available)
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: CC List.
+    description: >
+      The list of people you want to CC. Usually, this includes those who worked on the PR that failed the test.
+- type: markdown
+  attributes:
+    value: >
+      Thanks for reporting 🙏!

@@ -1,0 +1,22 @@
+# Read the Docs configuration file
+# See https://docs.readthedocs.io/en/stable/config-file/v2.html for details
+
+version: 2
+
+build:
+  os: ubuntu-22.04
+  tools:
+    python: "3.12"
+  jobs:
+    post_checkout:
+      - git fetch origin main --unshallow --no-tags --filter=blob:none || true
+    pre_create_environment:
+      - pip install uv
+    create_environment:
+      - uv venv $READTHEDOCS_VIRTUALENV_PATH
+    install:
+      - uv pip install --python $READTHEDOCS_VIRTUALENV_PATH/bin/python --no-cache-dir -r requirements/docs.txt 
+
+mkdocs:
+  configuration: mkdocs.yaml
+  fail_on_warning: true

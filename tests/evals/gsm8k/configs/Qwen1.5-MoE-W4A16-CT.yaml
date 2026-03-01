@@ -1,0 +1,5 @@
+model_name: "nm-testing/Qwen1.5-MoE-A2.7B-Chat-quantized.w4a16"
+accuracy_threshold: 0.45
+num_questions: 1319
+num_fewshot: 5
+server_args: "--enforce-eager --max-model-len 4096"

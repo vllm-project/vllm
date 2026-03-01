@@ -1,0 +1,19 @@
+{
+    "type": "object",
+    "properties": {
+      "name": { "type": "string" },
+      "email": { "type": "string" },
+      "street": { "type": "string" },
+      "city": { "type": "string" },
+      "state": { "type": "string" },
+      "zip": { "type": "string" },
+      "phone": { "type": "string" },
+      "website": { "type": "string" },
+      "company": { "type": "string" },
+      "age": { "type": "integer" }
+    },
+    "required": [
+      "name",
+      "email"
+    ]
+}

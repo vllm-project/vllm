@@ -1,0 +1,66 @@
+{# System message #}
+{{- "<|im_start|>system\n" }}
+{%- if messages[0]['role'] == 'system' %}
+    {%- set system_message = messages[0]['content'] | trim %}
+    {%- set messages = messages[1:] %}
+    {{- system_message + "\n" }}
+{%- else %}
+    {%- set system_message = "You are a helpful assistant. You are developed by Salesforce xLAM team." %}
+    {% set format_instruction %}You have access to a set of tools. When using tools, make calls in a single JSON array: 
+
+[{"name": "tool_call_name", "arguments": {"arg1": "value1", "arg2": "value2"}}, ... (additional parallel tool calls as needed)]
+
+If no tool is suitable, state that explicitly. If the user's input lacks required parameters, ask for clarification. Do not interpret or respond until tool results are returned. Once they are available, process them or make additional calls if needed. For tasks that don't require tools, such as casual conversation or general advice, respond directly in plain text. The available tools are:{% endset %}
+    {{- system_message + "\n" }}
+    {%- if tools is not none %}
+        {{- format_instruction + "\n\n" }}
+    {%- endif %}
+{%- endif %}
+
+{%- if tools is not none %}
+    {%- for func in tools %}
+        {{- func | tojson(indent=4) }}
+        {{- "\n\n" }}
+    {%- endfor %}
+{%- endif %}
+{{- "<|im_end|>\n" }}
+{%- for message in messages %}
+    {%- if message['role'] == 'tool' %}
+        {{- "<|im_start|>tool\n" }}
+        {%- if message.content is defined and message.content.content is defined %}
+            {%- set content = message.content.content %}
+        {%- else %}
+            {%- set content = message.content %}
+        {%- endif %}
+        {%- if content is mapping or content is iterable and content is not string %}
+            {{- content | tojson }}
+        {%- else %}
+            {{- content }}
+        {%- endif %}
+        {{- "<|im_end|>\n" }}
+    {%- elif 'tool_calls' in message %}
+        {{- "<|im_start|>assistant\n" }}
+        {%- if message['tool_calls'] %}
+            {{- "[" }}
+            {%- for tool_call in message.tool_calls %}
+                {%- set out = tool_call.function | tojson %}
+                {{- out }}
+                {%- if not loop.last %}
+                    {{- ", " }}
+                {%- endif %}
+            {%- endfor %}
+            {{- "]"}}
+        {%- elif message['content'] %}
+            {{- message['content'] | trim }}
+        {%- else %}
+            {{- "[]\n" }}
+        {%- endif %}
+        {{- "<|im_end|>\n" }}
+    {%- else %}
+        {{- "<|im_start|>" + message['role'] + "\n" + message['content'] | trim + "<|im_end|>\n" }}
+    {%- endif %}
+{%- endfor %}
+
+{%- if add_generation_prompt %}
+    {{- "<|im_start|>assistant\n" }}
+{%- endif %}
