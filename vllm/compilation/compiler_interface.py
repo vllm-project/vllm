@@ -184,6 +184,47 @@ def is_compile_cache_enabled(
     )
 
 
+def _patch_standalone_compile_atomic_save() -> None:
+    """Backport of pytorch/pytorch#162432 for torch < 2.10.0.
+
+    Patches CompiledArtifact.save() to use write_atomic for binary format,
+    preventing corrupt cache files when multiple processes compile
+    concurrently.
+    """
+    from torch._inductor.codecache import write_atomic
+    from torch._inductor.standalone_compile import CompiledArtifact as cls
+
+    if getattr(cls.save, "_vllm_patched", False):
+        return
+
+    original_save = cls.save
+
+    def _save(
+        self: Any, *, path: str, format: Literal["binary", "unpacked"] = "binary"
+    ) -> None:
+        if format != "binary":
+            return original_save(self, path=path, format=format)
+        from torch._dynamo.utils import dynamo_timed
+        from torch._inductor.codecache import torch_key
+        from torch.utils._appending_byte_serializer import BytesWriter
+
+        with dynamo_timed("CompiledArtifact.save"):
+            assert self._artifacts is not None
+            artifact_bytes, cache_info = self._artifacts
+            assert len(cache_info.aot_autograd_artifacts) == 1, cache_info
+            key = cache_info.aot_autograd_artifacts[0]
+            assert not os.path.isdir(path)
+            writer = BytesWriter()
+            writer.write_bytes(torch_key())
+            writer.write_str(key)
+            writer.write_bytes(artifact_bytes)
+            write_atomic(path, writer.to_bytes())
+
+    _save._vllm_patched = True  # type: ignore[attr-defined]
+    cls.save = _save  # type: ignore[assignment]
+    logger.debug("Patched %s.save for atomic writes (torch < 2.10)", cls.__name__)
+
+
 class InductorStandaloneAdaptor(CompilerInterface):
     """
     The adaptor for the Inductor compiler.
@@ -197,6 +238,8 @@ class InductorStandaloneAdaptor(CompilerInterface):
     name = "inductor_standalone"
 
     def __init__(self, save_format: Literal["binary", "unpacked"]) -> None:
+        if not is_torch_equal_or_newer("2.10.0"):
+            _patch_standalone_compile_atomic_save()
         self.save_format = save_format
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
@@ -233,7 +276,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
 
         from torch._inductor import standalone_compile
 
-        supports_aot = is_torch_equal_or_newer("2.10.0.dev")
+        supports_aot = is_torch_equal_or_newer("2.10.0")
 
         if not supports_aot and envs.VLLM_USE_MEGA_AOT_ARTIFACT:
             logger.error(
@@ -257,7 +300,20 @@ class InductorStandaloneAdaptor(CompilerInterface):
         if use_aot:
             compile_kwargs["aot"] = True  # type: ignore[assignment]
 
-        compiled_graph = standalone_compile(graph, example_inputs, **compile_kwargs)
+        # Inductor's pre-grad passes don't do anything for vLLM.
+        # The pre-grad passes get run even on cache-hit and negatively impact
+        # vllm cold compile times by O(1s)
+        # Can remove this after the following issue gets fixed
+        # https://github.com/pytorch/pytorch/issues/174502
+        if envs.VLLM_ENABLE_PREGRAD_PASSES:
+            ctx: Any = contextlib.nullcontext()
+        else:
+            ctx = patch(
+                "torch._inductor.compile_fx._recursive_pre_grad_passes",
+                lambda gm, _: gm,
+            )
+        with ctx:
+            compiled_graph = standalone_compile(graph, example_inputs, **compile_kwargs)
 
         if use_aot:
             from torch._inductor.standalone_compile import AOTCompiledArtifact
@@ -273,7 +329,26 @@ class InductorStandaloneAdaptor(CompilerInterface):
         assert key is not None
         path = os.path.join(self.cache_dir, key)
 
+        def is_saveable_2_10(compiled_artifact):
+            # can just use compiled_artifact.is_saveable in 2.11
+            if compiled_artifact._artifacts is None:
+                return False
+            _, cache_info = compiled_artifact._artifacts
+            return len(cache_info.aot_autograd_artifacts) == 1
+
         if is_compile_cache_enabled(compiler_config):
+            if not is_saveable_2_10(compiled_graph):
+                raise RuntimeError(
+                    "The compiled artifact is not serializable. This usually means "
+                    "that the model code has something that is not serializable "
+                    "by torch.compile in it. You can fix this by either "
+                    "figuring out what is not serializable and rewriting it, "
+                    "filing a bug report, "
+                    "or suppressing this error by "
+                    "disabling vLLM's compilation cache via "
+                    "VLLM_DISABLE_COMPILE_CACHE=1 "
+                    "(this will greatly increase vLLM server warm start times)."
+                )
             compiled_graph.save(path=path, format=self.save_format)
             compilation_counter.num_compiled_artifacts_saved += 1
         return compiled_graph, (key, path)

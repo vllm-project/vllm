@@ -11,10 +11,10 @@ from torch import fx
 from torch._ops import OpOverload
 from torch.fx._utils import lazy_format_graph_code
 
-from vllm.compilation.fx_utils import find_op_nodes
-from vllm.compilation.inductor_pass import InductorPass
-from vllm.compilation.pass_manager import with_pattern_match_debug
-from vllm.compilation.vllm_inductor_pass import VllmInductorPass
+from vllm.compilation.passes.fx_utils import find_op_nodes
+from vllm.compilation.passes.inductor_pass import InductorPass
+from vllm.compilation.passes.pass_manager import with_pattern_match_debug
+from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 

@@ -102,12 +102,19 @@ class MultiModalHasher:
                         "data": tensor_obj.numpy(),
                     },
                 )
+
             return cls.iter_item_to_bytes("tensor", tensor_obj.numpy())
+
         if isinstance(obj, np.ndarray):
-            # If the array is non-contiguous, we need to copy it first
-            arr_data = (
-                obj.view(np.uint8).data if obj.flags.c_contiguous else obj.tobytes()
-            )
+            if obj.ndim == 0:
+                arr_data = obj.item()
+            elif obj.flags.c_contiguous:
+                # Not valid for 0-D arrays
+                arr_data = obj.view(np.uint8).data
+            else:
+                # If the array is non-contiguous, we need to copy it first
+                arr_data = obj.tobytes()
+
             return cls.iter_item_to_bytes(
                 "ndarray",
                 {
@@ -116,6 +123,7 @@ class MultiModalHasher:
                     "data": arr_data,
                 },
             )
+
         logger.warning(
             "No serialization method found for %s. Falling back to pickle.", type(obj)
         )
@@ -147,7 +155,7 @@ class MultiModalHasher:
         hasher_factory = _get_hasher_factory(envs.VLLM_MM_HASHER_ALGORITHM)
         hasher = hasher_factory()
 
-        for k, v in kwargs.items():
+        for k, v in sorted(kwargs.items(), key=lambda kv: kv[0]):
             for bytes_ in cls.iter_item_to_bytes(k, v):
                 hasher.update(bytes_)
 

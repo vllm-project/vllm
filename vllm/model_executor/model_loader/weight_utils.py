@@ -19,6 +19,7 @@ from typing import IO, Any
 import filelock
 import huggingface_hub.constants
 import numpy as np
+import regex as re
 import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load, load_file, safe_open, save_file
@@ -35,6 +36,7 @@ from vllm.model_executor.layers.quantization import (
     get_quantization_config,
 )
 from vllm.platforms import current_platform
+from vllm.tracing import instrument
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -78,7 +80,18 @@ def enable_hf_transfer():
             pass
 
 
-enable_hf_transfer()
+def enable_xet_high_performance():
+    """automatically activates xet high performance mode"""
+    if "HF_XET_HIGH_PERFORMANCE" not in os.environ:
+        huggingface_hub.constants.HF_XET_HIGH_PERFORMANCE = True
+
+
+if hasattr(huggingface_hub.constants, "HF_XET_HIGH_PERFORMANCE"):
+    # Transformers v5
+    enable_xet_high_performance()
+else:
+    # Transformers v4
+    enable_hf_transfer()
 
 
 class DisabledTqdm(tqdm):
@@ -141,6 +154,15 @@ def atomic_writer(
         # Clean up the temporary file if it still exists.
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+def _natural_sort_key(filepath: str) -> list:
+    """Natural sort key for filenames with numeric components, such as
+    model-00001-of-00005.safetensors -> ['model-', 1, '-of-', 5, '.safetensors']"""
+    return [
+        int(s) if s.isdigit() else s
+        for s in re.split(r"(\d+)", os.path.basename(filepath))
+    ]
 
 
 def maybe_download_from_modelscope(
@@ -250,6 +272,7 @@ def get_quant_config(
     if (
         hf_quant_config is not None
         and hf_quant_config.get("quant_method") == "compressed-tensors"
+        and "config_groups" in hf_quant_config
     ):
         if hf_text_config is not None:
             n_heads = getattr(hf_text_config, "num_attention_heads", None)
@@ -264,7 +287,17 @@ def get_quant_config(
         )
 
     if hf_quant_config is not None:
-        return quant_cls.from_config(hf_quant_config)
+        # For modelopt_mixed, config.json's quantization_config may or may
+        # not contain the per-layer quantized_layers map.  Newer checkpoints
+        # embed it directly; older ones keep it only in hf_quant_config.json.
+        # If it is missing, fall through to the file-based loading path.
+        if (
+            model_config.quantization == "modelopt_mixed"
+            and "quantized_layers" not in hf_quant_config
+        ):
+            pass  # fall through to file-based loading below
+        else:
+            return quant_cls.from_config(hf_quant_config)
 
     # if hf_quant_config is None, we will try to get config from
     # hf_overrides
@@ -342,8 +375,8 @@ def get_quant_config(
 
         if model_config.quantization == "bitsandbytes":
             config["adapter_name_or_path"] = model_config.model
-        elif model_config.quantization == "modelopt":
-            if config["producer"]["name"] == "modelopt":
+        elif model_config.quantization in ("modelopt", "modelopt_mixed"):
+            if config.get("producer", {}).get("name") == "modelopt":
                 return quant_cls.from_config(config)
             else:
                 raise ValueError(
@@ -433,6 +466,7 @@ def download_gguf(
     return local_files[0]
 
 
+@instrument(span_name="Download weights - HF")
 def download_weights_from_hf(
     model_name_or_path: str,
     cache_dir: str | None,
@@ -682,9 +716,8 @@ def safetensors_weights_iterator(
         loading_desc += " (eager)"
 
     leftover_state_dict: dict[str, torch.Tensor] = {}
-
     for st_file in tqdm(
-        hf_weights_files,
+        sorted(hf_weights_files, key=_natural_sort_key),
         desc=loading_desc,
         disable=not enable_tqdm(use_tqdm_on_load),
         bar_format=_BAR_FORMAT,
@@ -790,8 +823,8 @@ def runai_safetensors_weights_iterator(
         yield from tensor_iter
 
 
-def _init_loader(
-    pg: torch.distributed.ProcessGroup,
+def _init_fastsafetensors_loader(
+    pg: "torch.distributed.ProcessGroup",
     device: torch.device,
     f_list: list[str],
     *,
@@ -814,13 +847,17 @@ def fastsafetensors_weights_iterator(
     else:
         pg = SingleGroup()
 
-    device = torch.device(f"cuda:{pg.rank()}")
+    device = torch.device(f"cuda:{current_platform.current_device()}")
+    hf_weights_files = sorted(hf_weights_files, key=_natural_sort_key)
     weight_files_sub_lists = [
         hf_weights_files[i : i + pg.size()]
         for i in range(0, len(hf_weights_files), pg.size())
     ]
 
-    nogds = False
+    # Use nogds=True for TP > 1 to avoid cuFileDriverOpen() which
+    # initializes the GDS DMA subsystem for all visible GPUs, creating
+    # unwanted CUDA contexts on every device.
+    nogds = pg.size() > 1
 
     for f_list in tqdm(
         weight_files_sub_lists,
@@ -828,7 +865,7 @@ def fastsafetensors_weights_iterator(
         disable=not enable_tqdm(use_tqdm_on_load),
         bar_format=_BAR_FORMAT,
     ):
-        loader = _init_loader(pg, device, f_list, nogds=nogds)
+        loader = _init_fastsafetensors_loader(pg, device, f_list, nogds=nogds)
         try:
             try:
                 fb = loader.copy_files_to_device()
@@ -842,7 +879,7 @@ def fastsafetensors_weights_iterator(
                     "GDS not enabled, setting `nogds=True`.\n"
                     "For more information, see: https://github.com/foundation-model-stack/fastsafetensors?tab=readme-ov-file#basic-api-usages"
                 )
-                loader = _init_loader(pg, device, f_list, nogds=nogds)
+                loader = _init_fastsafetensors_loader(pg, device, f_list, nogds=nogds)
                 fb = loader.copy_files_to_device()
 
             try:
@@ -1076,16 +1113,20 @@ def initialize_dummy_weights(
     is fixed, the random values generated by this function only depends on
     the parameter's number of elements and its data type.
     """
-    # TODO(future PR): make the check below more generic as more online
-    # quant backends are added
-    is_fp8_py_quant = model_config.quantization == "fp8"
+
+    # Check if any module uses online quantization with meta device weights.
+    # If so, we'll skip initializing params on meta device since they'll be
+    # handled in `process_weights_after_loading`.
+    def uses_meta_device(module: torch.nn.Module) -> bool:
+        quant_method = getattr(module, "quant_method", None)
+        return getattr(quant_method, "uses_meta_device", False)
+
+    has_online_quant = any(uses_meta_device(m) for m in model.modules())
 
     for param in model.state_dict().values():
-        if is_fp8_py_quant and param.device == torch.device("meta"):
-            # for fp8.py's online quantization, dummy weight init will happen
-            # in `process_weights_after_loading`.
-            # TODO(future PR): consider refactoring dummy model init to compose
-            # better with online quantization
+        if has_online_quant and param.device == torch.device("meta"):
+            # For online quantization, weights are created on meta device and
+            # dummy weight init will happen in `process_weights_after_loading`.
             continue
 
         initialize_single_dummy_weight(param, low, high, seed)

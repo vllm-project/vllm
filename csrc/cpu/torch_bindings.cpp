@@ -4,6 +4,10 @@
 
 #include <torch/library.h>
 
+// Note: overwrite the external defination for sharing same name between
+// libraries use different ISAs.
+#define TORCH_EXTENSION_NAME _C
+
 std::string init_cpu_threads_env(const std::string& cpu_ids);
 
 void release_dnnl_matmul_handler(int64_t handler);
@@ -119,8 +123,8 @@ void cpu_fused_moe(torch::Tensor& output, const torch::Tensor& input,
                    const std::optional<torch::Tensor>& w13_bias,
                    const std::optional<torch::Tensor>& w2_bias,
                    const torch::Tensor& topk_weights,
-                   const torch::Tensor& topk_id, const std::string& act,
-                   const std::string& isa);
+                   const torch::Tensor& topk_id, const bool skip_weighted,
+                   const std::string& act, const std::string& isa);
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
@@ -320,22 +324,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "cpu_fused_moe(Tensor(a0!) output, Tensor input, Tensor w13, Tensor w2, "
       "Tensor? w13_bias, Tensor? w2_bias, Tensor topk_weights, Tensor topk_id, "
+      "bool skip_weighted, "
       "str act, str isa) -> ()");
   ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
 #endif
-}
-
-TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _utils), utils) {
-  // CPU utils
-  utils.def("init_cpu_threads_env(str cpu_ids) -> str", &init_cpu_threads_env);
-}
-
-TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cpu), cpu_ops) {
-  cpu_ops.def(
+  ops.def("init_cpu_threads_env(str cpu_ids) -> str", &init_cpu_threads_env);
+  ops.def(
       "mla_decode_kvcache("
       "   Tensor! out, Tensor query, Tensor kv_cache,"
       "   float scale, Tensor block_tables, Tensor seq_lens) -> ()");
-  cpu_ops.impl("mla_decode_kvcache", torch::kCPU, &mla_decode_kvcache);
+  ops.impl("mla_decode_kvcache", torch::kCPU, &mla_decode_kvcache);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

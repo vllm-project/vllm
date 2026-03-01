@@ -28,6 +28,8 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     tokenizer_len = len(tokenizer)
 
     max_token_id = max(tokenizer_vocab.values())
+    max_chars_per_token = max(len(tok) for tok in tokenizer_vocab)
+
     # Some tokenizers (e.g., QwenTokenizer) have special tokens that
     # are added and included in the implementation of the vocab_size
     # property, but not in get_vocab(); if there is an implementation
@@ -48,6 +50,10 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
         @property
         def max_token_id(self) -> int:
             return max_token_id
+
+        @property
+        def max_chars_per_token(self) -> int:
+            return max_chars_per_token
 
         def get_vocab(self) -> dict[str, int]:
             return tokenizer_vocab

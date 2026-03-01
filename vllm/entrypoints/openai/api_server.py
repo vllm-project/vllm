@@ -8,6 +8,7 @@ import os
 import signal
 import socket
 import tempfile
+import warnings
 from argparse import Namespace
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -50,6 +51,7 @@ from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tool_parsers import ToolParserManager
+from vllm.tracing import instrument
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import is_valid_ipv6_address
@@ -60,6 +62,8 @@ prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
 logger = init_logger("vllm.entrypoints.openai.api_server")
+
+_FALLBACK_SUPPORTED_TASKS: tuple[SupportedTask, ...] = ("generate",)
 
 
 @asynccontextmanager
@@ -151,7 +155,19 @@ async def build_async_engine_client_from_engine_args(
             async_llm.shutdown()
 
 
-def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> FastAPI:
+def build_app(
+    args: Namespace, supported_tasks: tuple["SupportedTask", ...] | None = None
+) -> FastAPI:
+    if supported_tasks is None:
+        warnings.warn(
+            "The 'supported_tasks' parameter was not provided to "
+            "build_app and will be required in a future version. "
+            "Defaulting to ('generate',).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        supported_tasks = _FALLBACK_SUPPORTED_TASKS
+
     if args.disable_fastapi_docs:
         app = FastAPI(
             openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan
@@ -161,10 +177,6 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
     else:
         app = FastAPI(lifespan=lifespan)
     app.state.args = args
-
-    from vllm.entrypoints.openai.basic.api_router import register_basic_api_routers
-
-    register_basic_api_routers(app)
 
     from vllm.entrypoints.serve import register_vllm_serve_api_routers
 
@@ -189,12 +201,30 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
 
         register_generate_api_routers(app)
 
-    if "transcription" in supported_tasks:
-        from vllm.entrypoints.openai.translations.api_router import (
-            attach_router as register_translations_api_router,
+        from vllm.entrypoints.serve.disagg.api_router import (
+            attach_router as attach_disagg_router,
         )
 
-        register_translations_api_router(app)
+        attach_disagg_router(app)
+
+        from vllm.entrypoints.serve.rlhf.api_router import (
+            attach_router as attach_rlhf_router,
+        )
+
+        attach_rlhf_router(app)
+
+        from vllm.entrypoints.serve.elastic_ep.api_router import (
+            attach_router as elastic_ep_attach_router,
+        )
+
+        elastic_ep_attach_router(app)
+
+    if "transcription" in supported_tasks:
+        from vllm.entrypoints.openai.speech_to_text.api_router import (
+            attach_router as register_speech_to_text_api_router,
+        )
+
+        register_speech_to_text_api_router(app)
 
     if "realtime" in supported_tasks:
         from vllm.entrypoints.openai.realtime.api_router import (
@@ -262,9 +292,18 @@ async def init_app_state(
     engine_client: EngineClient,
     state: State,
     args: Namespace,
-    supported_tasks: tuple["SupportedTask", ...],
+    supported_tasks: tuple["SupportedTask", ...] | None = None,
 ) -> None:
     vllm_config = engine_client.vllm_config
+    if supported_tasks is None:
+        warnings.warn(
+            "The 'supported_tasks' parameter was not provided to "
+            "init_app_state and will be required in a future version. "
+            "Please pass 'supported_tasks' explicitly.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        supported_tasks = _FALLBACK_SUPPORTED_TASKS
 
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
@@ -318,7 +357,7 @@ async def init_app_state(
         )
 
     if "transcription" in supported_tasks:
-        from vllm.entrypoints.openai.translations.api_router import (
+        from vllm.entrypoints.openai.speech_to_text.api_router import (
             init_transcription_state,
         )
 
@@ -377,6 +416,7 @@ def validate_api_server_args(args):
         )
 
 
+@instrument(span_name="API server setup")
 def setup_server(args):
     """Validate API server args, set up signal handler, create socket
     ready to serve."""
