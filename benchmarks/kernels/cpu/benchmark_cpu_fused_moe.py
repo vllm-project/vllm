@@ -7,6 +7,7 @@ import time
 import numpy as np
 import torch
 
+from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.torch_utils import set_random_seed
 
@@ -24,7 +25,7 @@ except (ImportError, AttributeError) as e:
     sys.exit(1)
 
 # ISA selection following test_cpu_fused_moe.py pattern
-ISA_CHOICES = ["amx", "vec"] if torch._C._cpu._is_amx_tile_supported() else ["vec"]
+ISA_CHOICES = ["amx", "vec"] if current_platform.is_amx_tile_supported() else ["vec"]
 
 
 @torch.inference_mode()
