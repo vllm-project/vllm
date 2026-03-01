@@ -68,7 +68,7 @@ class GraniteToolParser(ToolParser):
             raw_function_calls = json.loads(stripped)
             if not isinstance(raw_function_calls, list):
                 raise ValueError(
-                    f"Expected dict or list, got {type(raw_function_calls)}"
+                    f"Expected list, got {type(raw_function_calls)}"
                 )
 
             logger.debug("Extracted %d tool calls", len(raw_function_calls))
