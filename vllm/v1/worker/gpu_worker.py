@@ -257,6 +257,11 @@ class Worker(WorkerBase):
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)
 
+            if envs.VLLM_TRITON_CACHE_KERNEL_LAUNCHES:
+                from vllm.triton_utils.cache import patch_triton_kernel_launches
+
+                patch_triton_kernel_launches()
+
             # Initialize the distributed environment BEFORE taking
             # memory snapshot
             # This ensures NCCL buffers are allocated before we measure
