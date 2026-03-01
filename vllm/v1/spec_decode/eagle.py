@@ -884,11 +884,18 @@ class SpecDecodeBaseProposer:
         """
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
+        num_computed_tokens_cpu = gpu_input_batch.num_computed_tokens_cpu_tensor[
+            :num_reqs
+        ]
+        query_lens_cpu = (
+            common_attn_metadata.query_start_loc_cpu[1 : num_reqs + 1]
+            - common_attn_metadata.query_start_loc_cpu[:num_reqs]
+        )
+        seq_lens_cpu = num_computed_tokens_cpu + query_lens_cpu
+        seq_lens_list = seq_lens_cpu.tolist()
         self.backup_next_token_ids.np[:num_reqs] = np.array(
             [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(
-                    common_attn_metadata.seq_lens_cpu[i].item()
-                )
+                requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i])
                 for i in range(num_reqs)
             ],
             dtype=np.int32,
@@ -973,7 +980,7 @@ class SpecDecodeBaseProposer:
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             max_query_len=new_query_len_per_req.max().item(),
-            max_seq_len=common_attn_metadata.seq_lens_cpu.max().item(),
+            max_seq_len=common_attn_metadata.max_seq_len,
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[:total_num_tokens],
             causal=True,

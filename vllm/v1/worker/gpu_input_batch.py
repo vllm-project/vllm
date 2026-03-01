@@ -207,7 +207,7 @@ class InputBatch:
 
         # Speculative decoding
         self.num_accepted_tokens_cpu_tensor = torch.ones(
-            (max_num_reqs,), dtype=torch.int64, device="cpu", pin_memory=pin_memory
+            (max_num_reqs,), dtype=torch.int32, device="cpu", pin_memory=pin_memory
         )
         self.num_accepted_tokens_cpu = self.num_accepted_tokens_cpu_tensor.numpy()
 
@@ -965,13 +965,15 @@ class InputBatch:
                 continue
             num_sampled_ids = len(new_ids) if new_ids[-1] != -1 else new_ids.index(-1)
             # Also account for case where there may be a smaller number of
-            # output placeholders (tokens can be discarded after a kv-load failure).
+            # output placeholders (tokens can be discarded after kv-load
+            # failure) or a larger number (async spec decode adds optimistic
+            # placeholders that may exceed the actual acceptance count).
             first_placeholder = req_output_token_ids.index(-1)
             num_placeholders = len(req_output_token_ids) - first_placeholder
             num_to_replace = min(num_sampled_ids, num_placeholders)
             del new_ids[num_to_replace:]
-            end_index = first_placeholder + num_to_replace
-            req_output_token_ids[first_placeholder:end_index] = new_ids
+            req_output_token_ids[first_placeholder:] = new_ids
+            # ^ Implicitly deletes entries beyond (first_placeholder + num_to_replace)
 
     def update_async_spec_token_ids(self, draft_token_ids: list[list[int]]) -> None:
         """
