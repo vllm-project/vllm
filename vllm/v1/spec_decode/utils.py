@@ -18,22 +18,30 @@ def eagle_step_slot_mapping_metadata_kernel(
     block_table_stride,  # stride for block_table dim 1
     seq_lens_ptr,  # [batch_size] - read and write
     out_clamped_positions_ptr,  # [batch_size] (output)
-    out_slot_mapping_ptr,  # [batch_size] (output)
+    out_slot_mapping_ptr,  # [input_batch_size] (output)
     block_size: tl.constexpr,
     max_model_len: tl.constexpr,
     n_blocks_per_req: tl.constexpr,
     PAD_ID: tl.constexpr,
+    batch_size,
 ):
     """
     Fused kernel for EAGLE autoregressive step: updates positions, slot mapping,
     and sequence lengths in a single kernel to reduce launch overhead.
 
-    Each thread handles one request in the batch. Computes:
+    Launched with input_batch_size threads. Threads with req_idx >= batch_size
+    are cudagraph padding slots and only write PADDING_SLOT_ID.
+
+    Each real thread handles one request in the batch. Computes:
     - new_position = position + 1, clamped if exceeds max_model_len
     - slot_mapping from block table lookup
     - seq_lens += 1, or 1 if position exceeds max
     """
     req_idx = tl.program_id(0)
+
+    if req_idx >= batch_size:
+        tl.store(out_slot_mapping_ptr + req_idx, PAD_ID)
+        return
 
     # Load current position and increment
     position = tl.load(positions_ptr + req_idx)
@@ -71,10 +79,14 @@ def eagle_step_update_slot_mapping_and_metadata(
     max_model_len: int,
     out_clamped_positions: torch.Tensor,
     out_slot_mapping: torch.Tensor,
+    input_batch_size: int | None = None,
 ) -> None:
     """
     Fused update of slot mapping and metadata for one EAGLE autoregressive step.
     Updates seq_lens in place. Writes to out_clamped_positions and out_slot_mapping.
+
+    When input_batch_size > batch_size, threads beyond batch_size write
+    PADDING_SLOT_ID to out_slot_mapping for cudagraph padding.
 
     Args:
         positions_1d: [batch_size] current positions (use positions[0] for M-RoPE)
@@ -83,12 +95,16 @@ def eagle_step_update_slot_mapping_and_metadata(
         block_size: KV cache block size
         max_model_len: max model length for clamping
         out_clamped_positions: [batch_size] output buffer for clamped positions
-        out_slot_mapping: [batch_size] output buffer for slot mapping
+        out_slot_mapping: [input_batch_size] output buffer for slot mapping
+        input_batch_size: total batch size including cudagraph padding;
+            defaults to batch_size (no padding)
     """
     batch_size = positions_1d.shape[0]
+    if input_batch_size is None:
+        input_batch_size = batch_size
     n_blocks_per_req = block_table_tensor.shape[1]
 
-    eagle_step_slot_mapping_metadata_kernel[(batch_size,)](
+    eagle_step_slot_mapping_metadata_kernel[(input_batch_size,)](
         positions_1d,
         block_table_tensor,
         block_table_tensor.stride(0),
@@ -99,6 +115,7 @@ def eagle_step_update_slot_mapping_and_metadata(
         max_model_len=max_model_len,
         n_blocks_per_req=n_blocks_per_req,
         PAD_ID=PADDING_SLOT_ID,
+        batch_size=batch_size,
     )
 
 

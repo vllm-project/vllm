@@ -587,14 +587,9 @@ class SpecDecodeBaseProposer:
                 block_size=block_size,
                 max_model_len=self.max_model_len,
                 out_clamped_positions=out_pos,
-                out_slot_mapping=self._slot_mapping_buffer[:batch_size],
+                out_slot_mapping=self._slot_mapping_buffer[:input_batch_size],
+                input_batch_size=input_batch_size,
             )
-            # Pad slot mapping for the cudagraph padding range so that
-            # _get_slot_mapping doesn't need to be called later.
-            if input_batch_size > batch_size:
-                self._slot_mapping_buffer[batch_size:input_batch_size].fill_(
-                    PADDING_SLOT_ID
-                )
             common_attn_metadata.slot_mapping = self._slot_mapping_buffer[:batch_size]
             if self.uses_mrope:
                 self.mrope_positions[1:, :batch_size] = self.mrope_positions[
