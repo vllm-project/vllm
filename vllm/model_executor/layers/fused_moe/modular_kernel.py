@@ -652,8 +652,12 @@ class FusedMoEExperts(ABC):
     #
 
     @property
-    def quant_dtype(self) -> torch.dtype | None:
+    def quant_dtype(self) -> torch.dtype | str | None:
         return self.quant_config.quant_dtype
+
+    @property
+    def weight_quant_dtype(self) -> torch.dtype | str | None:
+        return self.quant_config.weight_quant_dtype
 
     @property
     def block_shape(self) -> list[int] | None:
@@ -1329,9 +1333,9 @@ class FusedMoEKernelModularImpl:
         # This happens when none of the tokens from the all2all reach this
         # EP rank. Also, note that this is only relevant for CUDAGraph
         # incompatible all2all kernels like the DeepEP high-throughput
-        # kernels. CUDAGraph compatible all2all kernels like the pplx
-        # kernels and the DeepEP low-latency kernels are always batched
-        # and can never run into the tensor.numel() == 0 case.
+        # kernels. CUDAGraph compatible all2all kernels like the DeepEP
+        # low-latency kernels are always batched and can never run into
+        # the tensor.numel() == 0 case.
         if M_full == 0:
             assert num_chunks == 0
             workspace13 = None

@@ -87,8 +87,12 @@ class CUDAGraphMode(enum.Enum):
     def separate_routine(self) -> bool:
         return isinstance(self.value, tuple)
 
-    def valid_runtime_modes(self) -> bool:
-        return self in [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]
+    @classmethod
+    def valid_runtime_modes(cls) -> frozenset["CUDAGraphMode"]:
+        return frozenset({cls.NONE, cls.PIECEWISE, cls.FULL})
+
+    def is_valid_runtime_mode(self) -> bool:
+        return self in CUDAGraphMode.valid_runtime_modes()
 
     def __str__(self) -> str:
         return self.name
@@ -118,11 +122,15 @@ class PassConfig:
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
     enable_sp: bool = Field(default=None)
-    """Enable sequence parallelism."""
+    """Enable sequence parallelism. Requires TP>1. Automatically disabled
+    if the model's hidden_size is too small for SP to be beneficial
+    (threshold is device-capability dependent)."""
     fuse_gemm_comms: bool = Field(default=None)
     """Enable async TP."""
     fuse_allreduce_rms: bool = Field(default=None)
     """Enable flashinfer allreduce fusion."""
+    enable_qk_norm_rope_fusion: bool = False
+    """Enable fused Q/K RMSNorm + RoPE pass."""
 
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = Field(default=None)
@@ -153,8 +161,11 @@ class PassConfig:
                 8: 1,  # 1MB
             },
         }, where key is the device capability"""
-    enable_qk_norm_rope_fusion: bool = False
-    """Enable fused Q/K RMSNorm + RoPE pass."""
+    sp_min_token_num: int | None = None
+    """The minimum number of tokens above which vllm should use
+    sequence parallelism. Specified as an integer token count.
+    Unspecified will fallback to default values which are compute
+    capability and world size dependent."""
 
     # TODO(luka) better pass enabling system.
 
@@ -834,23 +845,20 @@ class CompilationConfig:
                 func if isinstance(func, InductorPass) else CallableInductorPass(func)
             )
 
-        if self.pass_config.enable_qk_norm_rope_fusion:
+        if (
+            self.pass_config.enable_qk_norm_rope_fusion
+            and "+rotary_embedding" not in self.custom_ops
+        ):
             # TODO(zhuhaoran): support rope native forward match and remove this.
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
             self.custom_ops.append("+rotary_embedding")
-        if self.pass_config.fuse_rope_kvcache:
-            from vllm._aiter_ops import rocm_aiter_ops
-
-            if rocm_aiter_ops.is_triton_rotary_embed_enabled():
-                logger.warning(
-                    "Cannot use VLLM_ROCM_USE_AITER_TRITON_ROPE with "
-                    "fuse_rope_kvcache. Disabling fuse_rope_kvcache."
-                )
-                self.pass_config.fuse_rope_kvcache = False
-            else:
-                # TODO(Rohan138): support rope native forward match and remove this.
-                # Linked issue: https://github.com/vllm-project/vllm/issues/28042
-                self.custom_ops.append("+rotary_embedding")
+        if (
+            self.pass_config.fuse_rope_kvcache
+            and "+rotary_embedding" not in self.custom_ops
+        ):
+            # TODO(Rohan138): support rope native forward match and remove this.
+            # Linked issue: https://github.com/vllm-project/vllm/issues/28042
+            self.custom_ops.append("+rotary_embedding")
 
         if (
             is_torch_equal_or_newer("2.9.0.dev")
@@ -1041,7 +1049,7 @@ class CompilationConfig:
                 "are optimized for prefill and are incompatible with CUDA Graphs. "
                 "In order to use CUDA Graphs for decode-optimized workloads, "
                 "use --all2all-backend with another option, such as "
-                "deepep_low_latency, pplx, or allgather_reducescatter."
+                "deepep_low_latency or allgather_reducescatter."
             )
             self.cudagraph_mode = CUDAGraphMode.NONE
 

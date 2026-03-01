@@ -83,7 +83,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     ):
         if envs.VLLM_TUNED_CONFIG_FOLDER:
             hidden_size = layer.hidden_size
-            intermediate_size = layer.intermediate_size_per_partition
+            intermediate_size = (
+                self.w2_lora_a_stacked[0].shape[-1]
+                if op_prefix == "w2"
+                else self.w13_lora_b_stacked[0].shape[-2]
+            )
             shrink_config = get_lora_op_configs(
                 op_type=f"fused_moe_lora_{op_prefix}_shrink",
                 max_loras=num_loras,
@@ -133,15 +137,19 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         if getattr(self.base_layer.quant_method, "supports_internal_mk", False):
             # Use the existing modular kernel from the quant method
             m_fused_moe_fn = self.base_layer.quant_method.moe_kernel
+            # Don't let the kernel own shared experts so the runner can
+            # overlap them with routed experts via a separate CUDA stream.
+            m_fused_moe_fn.shared_experts = None
         else:
-            # Create a new modular kernel via select_gemm_impl
+            # Create a new modular kernel via select_gemm_impl.
+            # Don't pass shared_experts to the kernel so the runner can
+            # overlap them with routed experts via a separate CUDA stream.
             prepare_finalize = MoEPrepareAndFinalizeNoDPEPModular()
             m_fused_moe_fn = FusedMoEKernel(
                 prepare_finalize,
                 self.base_layer.quant_method.select_gemm_impl(
                     prepare_finalize, self.base_layer
                 ),
-                self.base_layer.shared_experts,
             )
 
         if quant_config.use_mxfp4_w4a16:
