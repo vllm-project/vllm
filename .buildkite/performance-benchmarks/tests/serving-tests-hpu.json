@@ -78,5 +78,84 @@
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
             "num_prompts": 200
         }
+    },
+    {
+        "test_name": "serving_deepseek_r1",
+        "qps_list": [1, 4, 16, "inf"],
+        "server_environment_variables": {
+            "PT_HPU_LAZY_MODE": 1,
+            "PT_HPU_ENABLE_LAZY_COLLECTIVES": 1,
+            "VLLM_CONTIGUOUS_PA": 1,
+            "VLLM_DEFRAG": 1
+        },
+        "server_parameters": {
+            "model": "deepseek-ai/DeepSeek-R1",
+            "tensor_parallel_size": 8,
+            "swap_space": 16,
+            "disable_log_stats": "",
+            "load_format": "dummy",
+            "max-model-len": 2048,
+            "max-num-seqs": 200,
+            "async-scheduling": "",
+            "dtype": "bfloat16"
+        },
+        "client_parameters": {
+            "model": "deepseek-ai/DeepSeek-R1",
+            "backend": "vllm",
+            "dataset_name": "sharegpt",
+            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num_prompts": 200
+        }
+    },
+    {
+        "test_name": "serving_llama4_maverick_17b128e_instruct_fp8",
+        "qps_list": [1, 4, 16, "inf"],
+        "server_environment_variables": {
+            "PT_HPU_LAZY_MODE": 1,
+            "PT_HPU_ENABLE_LAZY_COLLECTIVES": 1,
+            "VLLM_CONTIGUOUS_PA": 1,
+            "VLLM_DEFRAG": 1
+        },
+        "server_parameters": {
+            "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+            "tensor_parallel_size": 8,
+            "disable_log_stats": "",
+            "max-model-len": 2048,
+            "max-num-seqs": 128,
+            "async-scheduling": "",
+            "enable_expert_parallel": "",
+            "max-num-batched-tokens": 4096
+        },
+        "client_parameters": {
+            "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+            "backend": "vllm",
+            "dataset_name": "sharegpt",
+            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num_prompts": 200
+        }
+    },
+    {
+        "test_name": "serving_qwen3_8b",
+        "qps_list": [1, 4, 10, "inf"],
+        "server_environment_variables": {
+            "PT_HPU_LAZY_MODE": 1,
+            "PT_HPU_ENABLE_LAZY_COLLECTIVES": 1,
+            "VLLM_CONTIGUOUS_PA": 1,
+            "VLLM_DEFRAG": 1
+        },
+        "server_parameters": {
+            "model": "Qwen/Qwen-3-8B",
+            "tensor_parallel_size": 1,
+            "dtype": "bfloat16",
+            "disable_log_stats": "",
+            "async-scheduling": ""
+        },
+        "client_parameters": {
+            "model": "Qwen/Qwen-3-8B",
+            "backend": "vllm",
+            "dataset_name": "sharegpt",
+            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num_prompts": 200
+        }
     }
 ]
