@@ -36,6 +36,19 @@ from vllm.model_executor.layers.fla.ops import (
 from vllm.model_executor.layers.fla.ops import (
     fused_recurrent_gated_delta_rule,
 )
+
+# Try to import FlashInfer GDN decode and MTP kernels
+try:
+    from flashinfer.gdn_decode import (
+        gated_delta_rule_decode_pretranspose,
+        gated_delta_rule_mtp,
+    )
+
+    _FLASHINFER_GDN_DECODE_AVAILABLE = True
+except ImportError:
+    _FLASHINFER_GDN_DECODE_AVAILABLE = False
+    gated_delta_rule_decode_pretranspose = None
+    gated_delta_rule_mtp = None
 from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import (
@@ -121,6 +134,10 @@ def fi_chunk_gated_delta_rule(
         chunk_gated_delta_rule as chunk_gated_delta_rule_fi,
     )
 
+    logger.info_once(
+        "[GDN-FI] Prefill kernel active: flashinfer.gdn_prefill.chunk_gated_delta_rule"
+    )
+
     if use_qk_l2norm_in_kernel:
         q = l2norm_fwd(q)
         k = l2norm_fwd(k)
@@ -149,13 +166,260 @@ def fi_chunk_gated_delta_rule(
     return output.unsqueeze(0), final_state
 
 
+@CustomOp.register("gdn_decode_gated_delta_rule")
+class GDNDecodeStep(CustomOp):
+    def __init__(self) -> None:
+        super().__init__()
+        self.use_flashinfer = (
+            _FLASHINFER_GDN_DECODE_AVAILABLE
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability(90)
+        )
+        self._forward_method = (
+            self.forward_cuda if self.use_flashinfer else self.forward_native
+        )
+
+    def forward_cuda(
+        self,
+        query_non_spec: torch.Tensor,
+        key_non_spec: torch.Tensor,
+        value_non_spec: torch.Tensor,
+        g_non_spec: torch.Tensor,
+        beta_non_spec: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        ssm_state: torch.Tensor,
+        non_spec_state_indices_tensor: torch.Tensor,
+        non_spec_query_start_loc: torch.Tensor,
+        num_decodes: int,
+        non_spec_token_indx: torch.Tensor | None,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        use_qk_l2norm_in_kernel: bool = True,
+    ) -> torch.Tensor:
+        # query_non_spec shape is [1, B, ...] in decode path.
+        B = query_non_spec.shape[1]
+        q_4d = query_non_spec.transpose(0, 1).contiguous()
+        k_4d = key_non_spec.transpose(0, 1).contiguous()
+        v_4d = value_non_spec.transpose(0, 1).contiguous()
+
+        if non_spec_token_indx is None:
+            a_non_spec = a
+            b_non_spec = b
+        else:
+            a_non_spec = a.index_select(0, non_spec_token_indx)
+            b_non_spec = b.index_select(0, non_spec_token_indx)
+        a_4d = a_non_spec[:B].unsqueeze(1).contiguous()
+        b_4d = b_non_spec[:B].unsqueeze(1).contiguous()
+
+        state_batch = ssm_state[non_spec_state_indices_tensor[:B]].contiguous()
+        output, updated_state = gated_delta_rule_decode_pretranspose(
+            q=q_4d,
+            k=k_4d,
+            v=v_4d,
+            state=state_batch.to(torch.float32),
+            A_log=A_log.float(),
+            a=a_4d,
+            dt_bias=dt_bias.float(),
+            b=b_4d,
+            use_qk_l2norm=use_qk_l2norm_in_kernel,
+        )
+
+        ssm_state[non_spec_state_indices_tensor[:B]] = updated_state.to(ssm_state.dtype)
+        return output.squeeze(1).unsqueeze(0)
+
+    def forward_native(
+        self,
+        query_non_spec: torch.Tensor,
+        key_non_spec: torch.Tensor,
+        value_non_spec: torch.Tensor,
+        g_non_spec: torch.Tensor,
+        beta_non_spec: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        ssm_state: torch.Tensor,
+        non_spec_state_indices_tensor: torch.Tensor,
+        non_spec_query_start_loc: torch.Tensor,
+        num_decodes: int,
+        non_spec_token_indx: torch.Tensor | None,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        use_qk_l2norm_in_kernel: bool = True,
+    ) -> torch.Tensor:
+        del a, b, non_spec_token_indx, A_log, dt_bias
+        output, _ = fused_recurrent_gated_delta_rule(
+            q=query_non_spec,
+            k=key_non_spec,
+            v=value_non_spec,
+            g=g_non_spec,
+            beta=beta_non_spec,
+            initial_state=ssm_state,
+            inplace_final_state=True,
+            cu_seqlens=non_spec_query_start_loc[: num_decodes + 1],
+            ssm_state_indices=non_spec_state_indices_tensor,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+        return output
+
+
+@CustomOp.register("gdn_spec_decode_gated_delta_rule")
+class GDNSpecDecode(CustomOp):
+    def __init__(self) -> None:
+        super().__init__()
+        self.use_flashinfer = (
+            _FLASHINFER_GDN_DECODE_AVAILABLE
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability(90)
+        )
+        self._forward_method = (
+            self.forward_cuda if self.use_flashinfer else self.forward_native
+        )
+
+    def forward_cuda(
+        self,
+        query_spec: torch.Tensor,
+        key_spec: torch.Tensor,
+        value_spec: torch.Tensor,
+        g_spec: torch.Tensor,
+        beta_spec: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        ssm_state: torch.Tensor,
+        spec_state_indices_tensor: torch.Tensor,
+        num_accepted_tokens: torch.Tensor,
+        spec_query_start_loc: torch.Tensor,
+        num_spec_decodes: int,
+        spec_token_indx: torch.Tensor | None,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        use_qk_l2norm_in_kernel: bool = True,
+    ) -> torch.Tensor:
+        B = num_spec_decodes
+        T = spec_state_indices_tensor.shape[1]
+        num_spec_tokens = query_spec.shape[1]
+        use_flashinfer_mtp = T > 1 and num_spec_tokens == B * T
+        if not use_flashinfer_mtp:
+            return self.forward_native(
+                query_spec,
+                key_spec,
+                value_spec,
+                g_spec,
+                beta_spec,
+                a,
+                b,
+                ssm_state,
+                spec_state_indices_tensor,
+                num_accepted_tokens,
+                spec_query_start_loc,
+                num_spec_decodes,
+                spec_token_indx,
+                A_log,
+                dt_bias,
+                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            )
+
+        q_4d = query_spec.squeeze(0).reshape(
+            B, T, query_spec.shape[2], query_spec.shape[3]
+        )
+        k_4d = key_spec.squeeze(0).reshape(B, T, key_spec.shape[2], key_spec.shape[3])
+        v_4d = value_spec.squeeze(0).reshape(
+            B, T, value_spec.shape[2], value_spec.shape[3]
+        )
+        if spec_token_indx is None:
+            a_spec = a
+            b_spec = b
+        else:
+            a_spec = a.index_select(0, spec_token_indx)
+            b_spec = b.index_select(0, spec_token_indx)
+        a_4d = a_spec.reshape(B, T, a_spec.shape[-1])
+        b_4d = b_spec.reshape(B, T, b_spec.shape[-1])
+
+        accepted_idx = (num_accepted_tokens[:B].to(torch.long) - 1).clamp_(
+            min=0, max=T - 1
+        )
+        initial_state_indices = (
+            spec_state_indices_tensor[:B]
+            .gather(1, accepted_idx.unsqueeze(1))
+            .squeeze(1)
+        )
+
+        intermediate_states_buffer = torch.empty(
+            (B, T, v_4d.shape[2], v_4d.shape[3], q_4d.shape[3]),
+            dtype=torch.float32,
+            device=ssm_state.device,
+        )
+        output, _ = gated_delta_rule_mtp(
+            q=q_4d.contiguous(),
+            k=k_4d.contiguous(),
+            v=v_4d.contiguous(),
+            initial_state=ssm_state.to(torch.float32).contiguous(),
+            initial_state_indices=initial_state_indices,
+            A_log=A_log.float(),
+            a=a_4d.contiguous(),
+            dt_bias=dt_bias.float(),
+            b=b_4d.contiguous(),
+            intermediate_states_buffer=intermediate_states_buffer,
+            disable_state_update=True,
+            use_qk_l2norm=use_qk_l2norm_in_kernel,
+        )
+
+        step_state_indices = spec_state_indices_tensor[:B, :T].to(torch.long)
+        valid = step_state_indices >= 0
+        safe_state_indices = torch.where(
+            valid, step_state_indices, initial_state_indices[:, None]
+        )
+        step_states = intermediate_states_buffer[:, :T].to(ssm_state.dtype)
+        current_states = ssm_state[safe_state_indices]
+        step_states = torch.where(
+            valid[..., None, None, None], step_states, current_states
+        )
+        ssm_state[safe_state_indices] = step_states
+        return output.reshape(1, B * T, -1, output.shape[-1])
+
+    def forward_native(
+        self,
+        query_spec: torch.Tensor,
+        key_spec: torch.Tensor,
+        value_spec: torch.Tensor,
+        g_spec: torch.Tensor,
+        beta_spec: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        ssm_state: torch.Tensor,
+        spec_state_indices_tensor: torch.Tensor,
+        num_accepted_tokens: torch.Tensor,
+        spec_query_start_loc: torch.Tensor,
+        num_spec_decodes: int,
+        spec_token_indx: torch.Tensor | None,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        use_qk_l2norm_in_kernel: bool = True,
+    ) -> torch.Tensor:
+        del a, b, spec_token_indx, A_log, dt_bias
+        output, _ = fused_recurrent_gated_delta_rule(
+            q=query_spec,
+            k=key_spec,
+            v=value_spec,
+            g=g_spec,
+            beta=beta_spec,
+            initial_state=ssm_state,
+            inplace_final_state=True,
+            cu_seqlens=spec_query_start_loc[: num_spec_decodes + 1],
+            ssm_state_indices=spec_state_indices_tensor,
+            num_accepted_tokens=num_accepted_tokens,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+        return output
+
+
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
         super().__init__()
         if current_platform.is_cuda() and current_platform.is_device_capability(90):
             logger.info_once(
-                "Using FlashInfer GDN prefill kernel on CUDA compute capability 90"
+                "Using FlashInfer GDN prefill/decode/MTP kernels on CUDA "
+                "compute capability 90"
             )
             self._forward_method = self.forward_cuda
         else:
@@ -475,6 +739,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         )
 
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+        self.decode_step = GDNDecodeStep()
+        self.spec_decode = GDNSpecDecode()
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -751,24 +1017,28 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             beta_non_spec = beta
 
         # 2. Recurrent attention
-
-        # 2.1: Process the multi-query part
+        # 2.1: Process the multi-query part (speculative decoding)
         if spec_sequence_masks is not None:
-            core_attn_out_spec, last_recurrent_state = fused_recurrent_gated_delta_rule(
-                q=query_spec,
-                k=key_spec,
-                v=value_spec,
-                g=g_spec,
-                beta=beta_spec,
-                initial_state=ssm_state,
-                inplace_final_state=True,
-                cu_seqlens=spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
-                ssm_state_indices=spec_state_indices_tensor,
+            core_attn_out_spec = self.spec_decode(
+                query_spec=query_spec,
+                key_spec=key_spec,
+                value_spec=value_spec,
+                g_spec=g_spec,
+                beta_spec=beta_spec,
+                a=a,
+                b=b,
+                ssm_state=ssm_state,
+                spec_state_indices_tensor=spec_state_indices_tensor,
                 num_accepted_tokens=num_accepted_tokens,
+                spec_query_start_loc=spec_query_start_loc,
+                num_spec_decodes=attn_metadata.num_spec_decodes,
+                spec_token_indx=spec_token_indx,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
                 use_qk_l2norm_in_kernel=True,
             )
         else:
-            core_attn_out_spec, last_recurrent_state = None, None
+            core_attn_out_spec = None
 
         # 2.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
@@ -793,24 +1063,25 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 ssm_state.dtype
             )
         elif attn_metadata.num_decodes > 0:
-            core_attn_out_non_spec, last_recurrent_state = (
-                fused_recurrent_gated_delta_rule(
-                    q=query_non_spec,
-                    k=key_non_spec,
-                    v=value_non_spec,
-                    g=g_non_spec,
-                    beta=beta_non_spec,
-                    initial_state=ssm_state,
-                    inplace_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc[
-                        : attn_metadata.num_decodes + 1
-                    ],
-                    ssm_state_indices=non_spec_state_indices_tensor,
-                    use_qk_l2norm_in_kernel=True,
-                )
+            core_attn_out_non_spec = self.decode_step(
+                query_non_spec=query_non_spec,
+                key_non_spec=key_non_spec,
+                value_non_spec=value_non_spec,
+                g_non_spec=g_non_spec,
+                beta_non_spec=beta_non_spec,
+                a=a,
+                b=b,
+                ssm_state=ssm_state,
+                non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+                non_spec_query_start_loc=non_spec_query_start_loc,
+                num_decodes=attn_metadata.num_decodes,
+                non_spec_token_indx=non_spec_token_indx,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                use_qk_l2norm_in_kernel=True,
             )
         else:
-            core_attn_out_non_spec, last_recurrent_state = None, None
+            core_attn_out_non_spec = None
 
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
