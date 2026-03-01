@@ -146,6 +146,88 @@ async def test_bge_m3_api_server_sparse_embedding_corner_case(
     assert embeddings[0][2673] == pytest.approx(0.26710861921310425, rel=0.01)
 
 
+# ── embed_sparse task: server-side aggregation ──
+# Returns vocab-sized sparse vectors directly usable by vector databases,
+# without requiring a separate /tokenize call + client-side aggregation.
+
+
+async def aggregated_sparse_embeddings(
+    client: openai.AsyncOpenAI, sentences: list[str]
+) -> list[dict[int, float]]:
+    """Call embed_sparse task which returns vocab-sized sparse vectors."""
+    result = await client.post(
+        "../pooling",
+        body={"model": MODEL_NAME, "input": sentences, "task": "embed_sparse"},
+        cast_to=httpx.Response,
+    )
+    all_embeddings = [data["data"] for data in result.json()["data"]]
+
+    ret = []
+    for emb in all_embeddings:
+        # Convert dense vocab-sized vector to sparse dict {token_id: weight}
+        sparse_dict = {i: v for i, v in enumerate(emb) if v > 0.0}
+        ret.append(sparse_dict)
+    return ret
+
+
+@pytest.mark.asyncio
+async def test_bge_m3_embed_sparse_matches_token_classify(
+    client: openai.AsyncOpenAI,
+):
+    """Verify embed_sparse produces identical results to token_classify +
+    client-side aggregation."""
+    # Get sparse embeddings via both methods
+    tc_embeddings = await sparse_embeddings(client, sentences_1)
+    agg_embeddings = await aggregated_sparse_embeddings(client, sentences_1)
+
+    for tc_dict, agg_dict in zip(tc_embeddings, agg_embeddings):
+        # Same token IDs should be present
+        assert set(tc_dict.keys()) == set(agg_dict.keys()), (
+            f"Token ID mismatch: "
+            f"token_classify={sorted(tc_dict.keys())}, "
+            f"embed_sparse={sorted(agg_dict.keys())}"
+        )
+        # Same weights
+        for token_id in tc_dict:
+            assert tc_dict[token_id] == pytest.approx(agg_dict[token_id], rel=0.01), (
+                f"Weight mismatch for token {token_id}"
+            )
+
+
+@pytest.mark.asyncio
+async def test_bge_m3_embed_sparse_lexical_scores(
+    client: openai.AsyncOpenAI,
+):
+    """Verify embed_sparse produces correct lexical matching scores."""
+    embeddings_1 = await aggregated_sparse_embeddings(client, sentences_1)
+    embeddings_2 = await aggregated_sparse_embeddings(client, sentences_2)
+
+    lexical_scores_1_0_x_2_0 = compute_lexical_matching_score(
+        embeddings_1[0], embeddings_2[0]
+    )
+    assert lexical_scores_1_0_x_2_0 == pytest.approx(
+        lexical_score_reference[0], rel=0.01
+    )
+
+    lexical_scores_1_0_x_1_1 = compute_lexical_matching_score(
+        embeddings_1[0], embeddings_1[1]
+    )
+    assert lexical_scores_1_0_x_1_1 == pytest.approx(
+        lexical_score_reference[1], rel=0.01
+    )
+
+
+@pytest.mark.asyncio
+async def test_bge_m3_embed_sparse_corner_case(
+    client: openai.AsyncOpenAI,
+):
+    """Verify embed_sparse works for short inputs."""
+    embeddings = await aggregated_sparse_embeddings(client, ["Hi"])
+    assert len(embeddings) == 1
+    assert 2673 in embeddings[0]
+    assert embeddings[0][2673] == pytest.approx(0.26710861921310425, rel=0.01)
+
+
 # https://github.com/FlagOpen/FlagEmbedding/blob/6fd176266f2382878bcc69cd656cff425d52f49b/FlagEmbedding/inference/embedder/encoder_only/m3.py#L163
 def colbert_score(q_reps: torch.Tensor, p_reps: torch.Tensor) -> torch.Tensor:
     token_scores = torch.einsum("in,jn->ij", q_reps, p_reps)

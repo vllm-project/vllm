@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Iterable
+from collections.abc import Iterable, Set
 
 import torch
 from torch import nn
@@ -13,6 +13,7 @@ from vllm.model_executor.layers.pooler import (
     BOSEOSFilter,
     DispatchPooler,
     Pooler,
+    PoolingParamsUpdate,
 )
 from vllm.model_executor.layers.pooler.seqwise import (
     pooler_for_embed,
@@ -38,6 +39,8 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.tasks import PoolingTask
+from vllm.v1.pool.metadata import PoolingMetadata
 
 from .bert_with_rope import BertWithRope, JinaRobertaModel
 from .interfaces import SupportsCrossEncoding
@@ -178,6 +181,75 @@ def filter_secondary_weights(
     )
 
 
+class BgeM3SparsePooler(Pooler):
+    """BGE-M3 sparse pooling with vocabulary-level aggregation.
+
+    Computes lexical weights from the BGE-M3 paper (arXiv:2402.03216):
+        w_t = max_{i: token[i]=t} ReLU(sparse_linear(H[i]))
+
+    Unlike the ``token_classify`` task which returns raw per-position scores,
+    this pooler aggregates scores by token ID using ``scatter_reduce`` with
+    max pooling, producing a vocabulary-sized sparse vector that can be
+    directly used with sparse vector databases (Qdrant, Milvus, Vespa, etc.).
+
+    This follows the same pattern as :class:`SPLADESparsePooler` in
+    ``bert.py``, adapted for BGE-M3's architecture where ``sparse_linear``
+    maps hidden states to a single scalar per position (rather than SPLADE's
+    MLM head which maps to vocab-sized logits).
+    """
+
+    def __init__(
+        self,
+        sparse_linear: nn.Module,
+        vocab_size: int,
+        special_token_ids: list[int],
+    ):
+        super().__init__()
+        self.sparse_linear = sparse_linear
+        self.vocab_size = vocab_size
+        self.special_token_ids = special_token_ids
+
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return {"embed_sparse"}
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return PoolingParamsUpdate(requires_token_ids=True)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> list[torch.Tensor]:
+        lens = pooling_metadata.prompt_lens.tolist()
+        token_ids = pooling_metadata.prompt_token_ids
+        assert token_ids is not None
+        B = len(lens)
+
+        offset = 0
+        pooled_list: list[torch.Tensor] = []
+
+        for i in range(B):
+            L = int(lens[i])
+            hs = hidden_states[offset : offset + L]  # [L, hidden_size]
+
+            # Per-position sparse weights: ReLU(sparse_linear(H))
+            weights = torch.relu(self.sparse_linear(hs)).squeeze(-1)  # [L]
+
+            # Aggregate by token_id via max pooling (scatter_reduce)
+            sparse_vec = hs.new_zeros(self.vocab_size)
+            ids = token_ids[i, :L].to(device=hs.device)  # [L]
+            sparse_vec.scatter_reduce_(0, ids, weights, reduce="amax")
+
+            # Zero out special tokens (CLS, EOS, PAD, UNK)
+            if self.special_token_ids:
+                sparse_vec[self.special_token_ids] = 0.0
+
+            pooled_list.append(sparse_vec)
+            offset += L
+
+        return pooled_list
+
+
 class BgeM3EmbeddingModel(RobertaEmbeddingModel):
     """A model that extends RobertaEmbeddingModel with sparse embeddings.
 
@@ -186,12 +258,15 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
     """
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        self.hidden_size = vllm_config.model_config.hf_config.hidden_size
+        hf_config = vllm_config.model_config.hf_config
+        self.hidden_size = hf_config.hidden_size
+        self.vocab_size = hf_config.vocab_size
 
         model_config = vllm_config.model_config
         self.head_dtype = model_config.head_dtype
-        self.bos_token_id = model_config.hf_config.bos_token_id
-        self.eos_token_id = model_config.hf_config.eos_token_id
+        self.bos_token_id = hf_config.bos_token_id
+        self.eos_token_id = hf_config.eos_token_id
+        self.pad_token_id = getattr(hf_config, "pad_token_id", 1)
 
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.secondary_weight_prefixes = ["sparse_linear.", "colbert_linear."]
@@ -217,9 +292,25 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
             self.hidden_size, self.hidden_size, dtype=self.head_dtype
         )
 
+        # Collect special token IDs to zero out in sparse vectors
+        special_token_ids = [
+            tid
+            for tid in [
+                self.bos_token_id,
+                self.eos_token_id,
+                self.pad_token_id,
+            ]
+            if tid is not None and tid >= 0
+        ]
+
         return DispatchPooler(
             {
                 "embed": pooler_for_embed(pooler_config),
+                "embed_sparse": BgeM3SparsePooler(
+                    sparse_linear=self.sparse_linear,
+                    vocab_size=self.vocab_size,
+                    special_token_ids=special_token_ids,
+                ),
                 "token_embed": BOSEOSFilter(
                     pooler_for_token_embed(pooler_config, self.colbert_linear),
                     self.bos_token_id,
