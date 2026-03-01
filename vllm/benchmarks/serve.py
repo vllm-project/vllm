@@ -99,6 +99,11 @@ class SpecDecodeMetrics:
     num_draft_tokens: int
     num_accepted_tokens: int
     accepted_per_pos: dict[int, int]
+    # DSL (Dynamic Speculative Length) metrics
+    dsl_total_proposals: int = 0
+    dsl_early_exits: int = 0
+    dsl_tokens_generated: int = 0
+    dsl_tokens_requested: int = 0
 
 
 async def fetch_spec_decode_metrics(
@@ -119,6 +124,10 @@ async def fetch_spec_decode_metrics(
             num_draft_tokens = 0
             num_accepted_tokens = 0
             accepted_per_pos: dict[int, int] = {}
+            dsl_total_proposals = 0
+            dsl_early_exits = 0
+            dsl_tokens_generated = 0
+            dsl_tokens_requested = 0
             found_spec_decode = False
 
             for line in text.split("\n"):
@@ -147,6 +156,21 @@ async def fetch_spec_decode_metrics(
                                     )
                             elif "num_accepted_tokens" in line:
                                 num_accepted_tokens += int(float(parts[-1]))
+                
+                # Fetch DSL metrics
+                if line.startswith("vllm:dsl"):
+                    found_spec_decode = True
+                    parts = line.split()
+                    if parts:
+                        with contextlib.suppress(ValueError):
+                            if "dsl_total_proposals" in line:
+                                dsl_total_proposals += int(float(parts[-1]))
+                            elif "dsl_early_exits" in line:
+                                dsl_early_exits += int(float(parts[-1]))
+                            elif "dsl_tokens_generated" in line:
+                                dsl_tokens_generated += int(float(parts[-1]))
+                            elif "dsl_tokens_requested" in line:
+                                dsl_tokens_requested += int(float(parts[-1]))
 
             if not found_spec_decode:
                 return None
@@ -156,6 +180,10 @@ async def fetch_spec_decode_metrics(
                 num_draft_tokens=num_draft_tokens,
                 num_accepted_tokens=num_accepted_tokens,
                 accepted_per_pos=accepted_per_pos,
+                dsl_total_proposals=dsl_total_proposals,
+                dsl_early_exits=dsl_early_exits,
+                dsl_tokens_generated=dsl_tokens_generated,
+                dsl_tokens_requested=dsl_tokens_requested,
             )
     except (aiohttp.ClientError, asyncio.TimeoutError):
         return None
@@ -888,6 +916,25 @@ async def benchmark(
             acceptance_length = (
                 1 + delta_accepted / delta_drafts if delta_drafts > 0 else 0.0
             )
+            
+            # Calculate DSL metrics delta
+            delta_dsl_proposals = (
+                spec_decode_metrics_after.dsl_total_proposals
+                - spec_decode_metrics_before.dsl_total_proposals
+            )
+            delta_dsl_exits = (
+                spec_decode_metrics_after.dsl_early_exits
+                - spec_decode_metrics_before.dsl_early_exits
+            )
+            delta_dsl_generated = (
+                spec_decode_metrics_after.dsl_tokens_generated
+                - spec_decode_metrics_before.dsl_tokens_generated
+            )
+            delta_dsl_requested = (
+                spec_decode_metrics_after.dsl_tokens_requested
+                - spec_decode_metrics_before.dsl_tokens_requested
+            )
+            
             spec_decode_stats = {
                 "num_drafts": delta_drafts,
                 "draft_tokens": delta_draft_tokens,
@@ -895,6 +942,10 @@ async def benchmark(
                 "acceptance_rate": acceptance_rate,
                 "acceptance_length": acceptance_length,
                 "per_position_acceptance_rates": per_pos_rates,
+                "dsl_total_proposals": delta_dsl_proposals,
+                "dsl_early_exits": delta_dsl_exits,
+                "dsl_tokens_generated": delta_dsl_generated,
+                "dsl_tokens_requested": delta_dsl_requested,
             }
 
     if task_type == TaskType.GENERATION:
@@ -1014,6 +1065,13 @@ async def benchmark(
         result["spec_decode_per_position_acceptance_rates"] = spec_decode_stats.get(
             "per_position_acceptance_rates", []
         )
+        # Add DSL metrics if available
+        dsl_proposals = spec_decode_stats.get("dsl_total_proposals", 0)
+        if dsl_proposals > 0:
+            result["dsl_total_proposals"] = dsl_proposals
+            result["dsl_early_exits"] = spec_decode_stats.get("dsl_early_exits", 0)
+            result["dsl_tokens_generated"] = spec_decode_stats.get("dsl_tokens_generated", 0)
+            result["dsl_tokens_requested"] = spec_decode_stats.get("dsl_tokens_requested", 0)
 
     def process_one_metric(
         # E.g., "ttft"
@@ -1088,6 +1146,26 @@ async def benchmark(
             print("Per-position acceptance (%):")
             for i, rate in enumerate(per_pos):
                 print("{:<40} {:<10.2f}".format(f"  Position {i}:", rate * 100))
+        
+        # Display DSL metrics if available
+        dsl_proposals = spec_decode_stats.get("dsl_total_proposals", 0)
+        if dsl_proposals > 0:
+            dsl_exits = spec_decode_stats.get("dsl_early_exits", 0)
+            dsl_generated = spec_decode_stats.get("dsl_tokens_generated", 0)
+            dsl_requested = spec_decode_stats.get("dsl_tokens_requested", 0)
+            
+            early_exit_rate = (dsl_exits / dsl_proposals * 100) if dsl_proposals > 0 else 0.0
+            avg_tokens_gen = dsl_generated / dsl_proposals if dsl_proposals > 0 else 0.0
+            avg_tokens_req = dsl_requested / dsl_proposals if dsl_proposals > 0 else 0.0
+            efficiency = (dsl_generated / dsl_requested * 100) if dsl_requested > 0 else 0.0
+            
+            print("{s:{c}^{n}}".format(s="DSL (Dynamic Speculative Length)", n=50, c="-"))
+            print("{:<40} {:<10}".format("Total proposals:", dsl_proposals))
+            print("{:<40} {:<10}".format("Early exits:", dsl_exits))
+            print("{:<40} {:<10.1f}".format("Early exit rate (%):", early_exit_rate))
+            print("{:<40} {:<10.1f}".format("Avg tokens generated:", avg_tokens_gen))
+            print("{:<40} {:<10.1f}".format("Avg tokens requested:", avg_tokens_req))
+            print("{:<40} {:<10.1f}".format("Token efficiency (%):", efficiency))
 
     print("=" * 50)
 

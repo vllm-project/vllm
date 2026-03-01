@@ -3,6 +3,7 @@
 from unittest import TestCase
 
 from vllm.v1.outputs import LogprobsLists
+from vllm.v1.outputs import ModelRunnerOutput
 
 
 class TestLogprobsLists(TestCase):
@@ -97,3 +98,28 @@ class TestLogprobsLists(TestCase):
         assert len(sliced.logprob_token_ids) == 9  # All tokens
         assert sliced.logprob_token_ids == self.logprobsLists.logprob_token_ids
         assert sliced.cu_num_generated_tokens is None
+
+
+class TestModelRunnerOutputDSL(TestCase):
+    def test_dsl_fields_default_to_zero(self):
+        output = ModelRunnerOutput(req_ids=["r1"], req_id_to_index={"r1": 0})
+
+        assert output.dsl_total_proposals == 0
+        assert output.dsl_early_exits == 0
+        assert output.dsl_tokens_generated == 0
+        assert output.dsl_tokens_requested == 0
+
+    def test_dsl_fields_can_be_set(self):
+        output = ModelRunnerOutput(
+            req_ids=["r1"],
+            req_id_to_index={"r1": 0},
+            dsl_total_proposals=12,
+            dsl_early_exits=3,
+            dsl_tokens_generated=40,
+            dsl_tokens_requested=60,
+        )
+
+        assert output.dsl_total_proposals == 12
+        assert output.dsl_early_exits == 3
+        assert output.dsl_tokens_generated == 40
+        assert output.dsl_tokens_requested == 60

@@ -66,6 +66,21 @@ class SpeculativeConfig:
     num_speculative_tokens: int = Field(default=None, gt=0)
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
+    draft_confidence_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
+    """Dynamic Speculative Length (DSL) confidence threshold for early exit.
+    
+    When enabled (> 0), stops generating additional speculative tokens if the
+    draft model's confidence (softmax probability) for any token falls below
+    this threshold. This saves computation when predictions are uncertain.
+    
+    Typical values:
+    - 0.0: Disabled (always generate all speculative tokens)
+    - 0.1-0.3: Aggressive (exit often, lower latency, may reduce acceptance)
+    - 0.4-0.6: Balanced (moderate early exits)
+    - 0.7-0.9: Conservative (rare exits, similar to disabled)
+    
+    Recommended: Start with 0.2-0.3 and tune based on acceptance rate metrics.
+    Must be in range [0.0, 1.0]."""
     model: str | None = None
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
@@ -713,6 +728,13 @@ class SpeculativeConfig:
                 f"than zero ({self.num_speculative_tokens})."
             )
 
+        # Note: threshold = 0.0 is valid and disables DSL early exit
+        if self.draft_confidence_threshold < 0:
+            raise ValueError(
+                "Expected draft_confidence_threshold to be >= 0 "
+                f"({self.draft_confidence_threshold}). Set to 0.0 to disable "
+                "confidence-based early exit."
+            )
         if self.draft_model_config:
             self.draft_model_config.verify_with_parallel_config(
                 self.draft_parallel_config

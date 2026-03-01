@@ -195,6 +195,12 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
+    # DSL (Dynamic Speculative Length) metrics from proposer
+    dsl_total_proposals: int = 0
+    dsl_early_exits: int = 0
+    dsl_tokens_generated: int = 0
+    dsl_tokens_requested: int = 0
+
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):

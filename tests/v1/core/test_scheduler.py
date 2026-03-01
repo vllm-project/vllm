@@ -944,6 +944,56 @@ def test_spec_decoding_stats_empty_output():
     assert scheduler_stats is None or scheduler_stats.spec_decoding_stats is None
 
 
+def test_schedule_spec_decoding_dsl_metrics_propagation():
+    """DSL metrics from ModelRunnerOutput should be forwarded to scheduler stats."""
+    scheduler = create_scheduler(num_speculative_tokens=2)
+    request = create_requests(num_requests=1, num_tokens=1)[0]
+    req_id = request.request_id
+    scheduler.add_request(request)
+
+    # Step 1: prefill + first sampled token.
+    output = scheduler.schedule()
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[req_id],
+        req_id_to_index={req_id: 0},
+        sampled_token_ids=[[0]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_runner_output)
+
+    # Provide draft tokens so next step produces spec_decoding_stats.
+    scheduler.update_draft_token_ids(DraftTokenIds([req_id], [[1, 2]]))
+
+    # Step 2: validate speculative tokens and include DSL counters.
+    output = scheduler.schedule()
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[req_id],
+        req_id_to_index={req_id: 0},
+        sampled_token_ids=[[1, 2, 3]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        dsl_total_proposals=7,
+        dsl_early_exits=2,
+        dsl_tokens_generated=11,
+        dsl_tokens_requested=15,
+    )
+    engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
+
+    assert engine_core_outputs
+    scheduler_stats = engine_core_outputs[0].scheduler_stats
+    assert scheduler_stats is not None
+    assert scheduler_stats.spec_decoding_stats is not None
+
+    stats = scheduler_stats.spec_decoding_stats
+    assert stats.dsl_total_proposals == 7
+    assert stats.dsl_early_exits == 2
+    assert stats.dsl_tokens_generated == 11
+    assert stats.dsl_tokens_requested == 15
+
+
 def test_no_spec_tokens_scheduled_for_prefill_chunks():
     """Test that draft tokens are ignored for prefill chunk requests.
 
