@@ -165,8 +165,10 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
         token_ids=token_ids,
         sampling_params=sampling_params,
         model=request.model,
-        stream=False,
-        stream_options=request.stream_options,
+        # Preserve stream intent on the returned token-in request. The /render
+        # HTTP response itself is always non-streamed JSON.
+        stream=bool(request.stream),
+        stream_options=request.stream_options if request.stream else None,
         cache_salt=request.cache_salt,
         priority=request.priority,
     )
