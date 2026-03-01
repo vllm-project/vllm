@@ -892,6 +892,13 @@ class OpenAIServingChat(OpenAIServing):
                             )
                         )
                         harmony_tools_streamed[i] |= tools_streamed_flag
+                        # Ensure no content leaks when tool calls are present
+                        # in harmony path. Per OpenAI spec, tool call deltas
+                        # must not contain content.
+                        if tools_streamed_flag and delta_message:
+                            delta_message.content = None
+                            delta_message.reasoning = None
+                            delta_message.reasoning_content = None
                     # handle streaming deltas for tools with named tool_choice
                     elif tool_choice_function_name:
                         # When encountering think end id in prompt_token_ids
@@ -975,6 +982,7 @@ class OpenAIServingChat(OpenAIServing):
                                 ]
                             )
                             tools_streamed[i] = True
+                            self._clear_non_tool_call_fields(delta_message)
 
                     elif request.tool_choice == "required":
                         assert previous_texts is not None
@@ -1030,6 +1038,7 @@ class OpenAIServingChat(OpenAIServing):
                             ):
                                 history_tool_call_cnt += 1
                                 tools_streamed[i] = True
+                                self._clear_non_tool_call_fields(delta_message)
 
                     # handle streaming deltas for tools with "auto" tool choice
                     # and reasoning parser
@@ -1099,6 +1108,7 @@ class OpenAIServingChat(OpenAIServing):
                             )
                             if delta_message and delta_message.tool_calls:
                                 tools_streamed[i] = True
+                                self._clear_non_tool_call_fields(delta_message)
                     # when only tool calls
                     elif tool_choice_auto:
                         assert tool_parser is not None
@@ -1113,6 +1123,7 @@ class OpenAIServingChat(OpenAIServing):
                         )
                         if delta_message and delta_message.tool_calls:
                             tools_streamed[i] = True
+                            self._clear_non_tool_call_fields(delta_message)
 
                     # when only reasoning
                     elif reasoning_parser:
@@ -1285,6 +1296,18 @@ class OpenAIServingChat(OpenAIServing):
                             finish_reason_ = (
                                 output.finish_reason if output.finish_reason else "stop"
                             )
+
+                        # When finish_reason is "tool_calls", ensure no content
+                        # or reasoning fields leak into the final delta.
+                        # Per OpenAI spec, tool call responses must only contain
+                        # tool_calls and finish_reason, never content.
+                        if finish_reason_ == "tool_calls":
+                            if delta_message is None:
+                                # Create empty delta message if none exists
+                                delta_message = DeltaMessage()
+                            else:
+                                self._clear_non_tool_call_fields(delta_message)
+
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
                             delta=delta_message,
@@ -1865,6 +1888,18 @@ class OpenAIServingChat(OpenAIServing):
                 )
 
         return ChatCompletionLogProbs(content=logprobs_content)
+
+    def _clear_non_tool_call_fields(self, delta_message: DeltaMessage) -> None:
+        """
+        Clear content and reasoning fields from a delta message.
+
+        Per OpenAI spec, tool call deltas must not contain content or reasoning
+        fields. This prevents leakage from reasoning buffers or speculative
+        decoding when tool calls are present.
+        """
+        delta_message.content = None
+        delta_message.reasoning = None
+        delta_message.reasoning_content = None
 
     def _should_stream_with_auto_tool_parsing(self, request: ChatCompletionRequest):
         """
