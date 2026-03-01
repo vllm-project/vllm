@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-import warnings
 from collections.abc import Mapping
 from typing import Any, Literal
 
@@ -114,16 +113,6 @@ class InputProcessor:
         supported_tasks: tuple[SupportedTask, ...],
     ) -> None:
         """Raise `ValueError` if SamplingParams or PoolingParams is not valid."""
-        if params.truncate_prompt_tokens is not None:
-            params_type = type(params).__name__
-            warnings.warn(
-                f"The `truncate_prompt_tokens` parameter in `{params_type}` "
-                "is deprecated and will be removed in v0.17. "
-                "Please pass it via `tokenization_kwargs` instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         if isinstance(params, SamplingParams):
             supported_generation_tasks = [
                 task for task in supported_tasks if task in GENERATION_TASKS
