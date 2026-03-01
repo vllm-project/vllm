@@ -28,15 +28,7 @@ from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
 )
 from vllm.utils.math_utils import round_up
 
-
-def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
-    """Fold weights to adjacent locations for Triton MoE kernel layout."""
-    shape = w.shape
-    n = shape[-1]
-    first = w[..., : n // 2]
-    second = w[..., n // 2 :]
-    stacked = torch.stack((first, second), dim=-1)
-    return stacked.reshape(shape)
+from .utils import shuffle_weight
 
 
 def deshuffle(w: torch.Tensor):
