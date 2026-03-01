@@ -681,7 +681,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             assert fp8_metadata.prefill is not None
             for chunk in fp8_metadata.prefill.chunks:
                 chunk_workspace = self.prefill_bf16_workspace[: chunk.chunk_tot_seqlen]
-                ops.cp_gather_and_upconvert_fp8_kv_cache(
+                ops.gather_and_dequant_cache_fp8_ds_mla(
                     kv_c_and_k_pe_cache,
                     chunk_workspace,
                     chunk.block_table,

@@ -794,7 +794,7 @@ def test_swap_blocks_mla(
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def test_gather_and_maybe_dequant_cache_mla(
+def test_gather_cache_token_major_mode(
     kv_lora_rank,
     qk_rope_head_dim,
     block_size,
@@ -812,9 +812,9 @@ def test_gather_and_maybe_dequant_cache_mla(
     )
     _fill_mla_cache(src_cache, kv_cache_dtype=kv_cache_dtype)
 
-    seq_len_tensor = torch.randint(
-        max_seq_len, max_seq_len + 1, (batch_size,), device=device
-    )
+    seq_len_tensor = torch.randint(0, max_seq_len + 1, (batch_size,), device=device)
+    if seq_len_tensor.sum() == 0:
+        seq_len_tensor[0] = 1
 
     total_tokens = seq_len_tensor.sum()
     cu_seq_lens = torch.empty((batch_size + 1), dtype=torch.int32, device=device)
@@ -822,7 +822,6 @@ def test_gather_and_maybe_dequant_cache_mla(
     cu_seq_lens[1:] = seq_len_tensor.cumsum(dim=0).to(dtype=torch.int32)
     token_to_seq = torch.arange(0, batch_size, dtype=torch.int32, device=device)
     token_to_seq = torch.repeat_interleave(token_to_seq, seq_len_tensor)
-    print("seq_len_tensor", seq_len_tensor)
 
     tot_blocks_tensor = (seq_len_tensor + block_size - 1) // block_size
     block_table = torch.empty(
@@ -866,7 +865,7 @@ def test_gather_and_maybe_dequant_cache_mla(
     expected = torch.cat(expected_batches, dim=0)
 
     opcheck(
-        torch.ops._C_cache_ops.gather_and_maybe_dequant_cache,
+        torch.ops._C_cache_ops.gather_cache,
         (
             src_cache,
             dst,
@@ -874,6 +873,7 @@ def test_gather_and_maybe_dequant_cache_mla(
             cu_seq_lens,
             token_to_seq,
             total_tokens,
+            -1,
             kv_cache_dtype,
             scale,
             None,
@@ -881,16 +881,17 @@ def test_gather_and_maybe_dequant_cache_mla(
         test_utils=DEFAULT_OPCHECK_TEST_UTILS,
     )
 
-    ops.gather_and_maybe_dequant_cache(
-        src_cache,
-        dst,
-        block_table,
-        cu_seq_lens,
-        token_to_seq,
-        total_tokens,
-        kv_cache_dtype,
-        scale,
-        None,
+    ops.gather_cache(
+        src_cache=src_cache,
+        dst=dst,
+        block_table=block_table,
+        cu_seq_lens=cu_seq_lens,
+        token_to_seq=token_to_seq,
+        num_tokens=total_tokens,
+        batch_size=-1,
+        kv_cache_dtype=kv_cache_dtype,
+        scale=scale,
+        seq_starts=None,
     )
     torch.testing.assert_close(dst, expected)
 
@@ -902,12 +903,10 @@ def test_gather_and_maybe_dequant_cache_mla(
 @pytest.mark.parametrize("max_seq_len", [512])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("dtype", [torch.float32])
-@pytest.mark.parametrize(
-    "kv_cache_dtype", ["auto"]
-)  # You can also test "fp8" if needed.
+@pytest.mark.parametrize("kv_cache_dtype", ["auto"])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def test_cp_gather_cache_mla(
+def test_gather_cache_batch_major_mode(
     kv_lora_rank,
     qk_rope_head_dim,
     block_size,
@@ -925,20 +924,25 @@ def test_cp_gather_cache_mla(
     _fill_mla_cache(src_cache, kv_cache_dtype=kv_cache_dtype)
 
     seq_len_tensor = torch.randint(0, max_seq_len + 1, (batch_size,), device=device)
+    seq_starts = torch.randint(
+        0, max_seq_len + 1, (batch_size,), dtype=torch.int32, device=device
+    )
 
     total_tokens = seq_len_tensor.sum()
     cu_seq_lens = torch.empty((batch_size + 1), dtype=torch.int32, device=device)
     cu_seq_lens[0] = 0
     cu_seq_lens[1:] = seq_len_tensor.cumsum(dim=0).to(dtype=torch.int32)
-    print("seq_len_tensor", seq_len_tensor)
 
-    tot_blocks_tensor = (seq_len_tensor + block_size - 1) // block_size
+    max_needed_blocks = int(
+        ((seq_starts + seq_len_tensor + block_size - 1) // block_size).max().item()
+    )
     block_table = torch.empty(
         (batch_size, num_blocks), dtype=torch.int32, device=device
     )
 
     for b in range(batch_size):
         perm = torch.randperm(num_blocks, device=device)
+        assert max_needed_blocks <= num_blocks
         block_table[b, :] = perm
 
     dst = torch.zeros((total_tokens, entry_size), dtype=src_cache.dtype, device=device)
@@ -948,26 +952,44 @@ def test_cp_gather_cache_mla(
         s = seq_len_tensor[b]
         if s == 0:
             continue
-        tot = tot_blocks_tensor[b]
-        blocks = block_table[b, :tot].tolist()
-
-        gathered_rows = []
-        for i in range(tot - 1):
-            gathered_rows.append(src_cache[blocks[i]])
-        remaining = s - (tot - 1) * block_size
-        gathered_rows.append(src_cache[blocks[-1], :remaining, :])
-
-        batch_expected = torch.cat(gathered_rows, dim=0)
+        start = int(seq_starts[b].item())
+        s_int = int(s.item())
+        token_positions = torch.arange(start, start + s_int, device=device)
+        block_ids = block_table[b, token_positions // block_size]
+        slots = token_positions % block_size
+        batch_expected = src_cache[block_ids, slots]
         expected_batches.append(batch_expected)
     expected = torch.cat(expected_batches, dim=0)
 
     opcheck(
-        torch.ops._C_cache_ops.cp_gather_cache,
-        (src_cache, dst, block_table, cu_seq_lens, batch_size, None),
+        torch.ops._C_cache_ops.gather_cache,
+        (
+            src_cache,
+            dst,
+            block_table,
+            cu_seq_lens,
+            None,
+            0,
+            batch_size,
+            "auto",
+            None,
+            seq_starts,
+        ),
         test_utils=DEFAULT_OPCHECK_TEST_UTILS,
     )
 
-    ops.cp_gather_cache(src_cache, dst, block_table, cu_seq_lens, batch_size)
+    ops.gather_cache(
+        src_cache=src_cache,
+        dst=dst,
+        block_table=block_table,
+        cu_seq_lens=cu_seq_lens,
+        token_to_seq=None,
+        num_tokens=0,
+        batch_size=batch_size,
+        kv_cache_dtype="auto",
+        scale=None,
+        seq_starts=seq_starts,
+    )
     torch.testing.assert_close(dst, expected)
 
 

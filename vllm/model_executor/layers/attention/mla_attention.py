@@ -1629,9 +1629,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
                 if self.aot_schedule:
                     # align max_context_chunk to page_size by rounding down,
-                    # currently the `gather_and_maybe_dequant_cache` kernel
-                    # cannot handle `context_chunk_starts` that are not aligned
-                    # to page_size
+                    # currently the token-major gather path cannot handle
+                    # `context_chunk_starts` that are not aligned to page_size
                     max_context_chunk = round_down(max_context_chunk, self.page_size)
 
                 assert max_context_chunk > 0
@@ -1693,7 +1692,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     # Note(hc): The above max_context_chunk already enforces
                     # block_size alignment, DCP just need the block_size can
                     # be divisible by dcp_world_size, because DCP use
-                    # cp_gather_cache which not require `cp_chunk_starts`
+                    # batch-major gather path which does not require
+                    # `cp_chunk_starts`
                     # aligned to page_size.
                     assert max_context_chunk % self.dcp_world_size == 0
                     padded_local_max_context_chunk_across_ranks = (
@@ -2334,28 +2334,26 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
-            if not use_fp8_prefill:
-                ops.gather_and_maybe_dequant_cache(
-                    src_cache=kv_c_and_k_pe_cache,
-                    dst=workspace,
-                    block_table=prefill_metadata.block_table,
-                    cu_seq_lens=prefill_metadata.chunked_context.cu_seq_lens[i],
-                    token_to_seq=prefill_metadata.chunked_context.token_to_seq[i],
-                    num_tokens=prefill_metadata.chunked_context.chunk_total_token[i],
-                    kv_cache_dtype=self.kv_cache_dtype,
-                    scale=k_scale,
-                    seq_starts=prefill_metadata.chunked_context.starts[i],
-                )
-            else:
-                # FP8 path: gather cache without dequantization
-                ops.cp_gather_cache(
-                    src_cache=kv_c_and_k_pe_cache,
-                    dst=workspace,
-                    block_table=prefill_metadata.block_table,
-                    cu_seq_lens=prefill_metadata.chunked_context.cu_seq_lens[i],
-                    batch_size=attn_metadata.num_prefills,
-                    seq_starts=prefill_metadata.chunked_context.starts[i],
-                )
+            ops.gather_cache(
+                src_cache=kv_c_and_k_pe_cache,
+                dst=workspace,
+                block_table=prefill_metadata.block_table,
+                cu_seq_lens=prefill_metadata.chunked_context.cu_seq_lens[i],
+                token_to_seq=(
+                    None
+                    if use_fp8_prefill
+                    else prefill_metadata.chunked_context.token_to_seq[i]
+                ),
+                num_tokens=(
+                    0
+                    if use_fp8_prefill
+                    else prefill_metadata.chunked_context.chunk_total_token[i]
+                ),
+                batch_size=(attn_metadata.num_prefills if use_fp8_prefill else -1),
+                kv_cache_dtype=("auto" if use_fp8_prefill else self.kv_cache_dtype),
+                scale=None if use_fp8_prefill else k_scale,
+                seq_starts=prefill_metadata.chunked_context.starts[i],
+            )
 
             # Extract kv_c_normed from workspace
             kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
@@ -2431,14 +2429,18 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
-            ops.cp_gather_cache(
+            ops.gather_cache(
                 src_cache=kv_c_and_k_pe_cache,
                 dst=workspace,
                 block_table=prefill_metadata.block_table,
                 cu_seq_lens=prefill_metadata.chunked_context.padded_local_cu_seq_lens[
                     i
                 ],
+                token_to_seq=None,
+                num_tokens=0,
                 batch_size=attn_metadata.num_prefills,
+                kv_cache_dtype="auto",
+                scale=None,
                 seq_starts=prefill_metadata.chunked_context.starts[i],
             )
             # workspace
