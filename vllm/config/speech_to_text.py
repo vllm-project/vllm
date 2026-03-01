@@ -31,6 +31,16 @@ class SpeechToTextConfig:
     window to minimize cutting through speech. Default 1600 samples ≈ 100ms
     at 16kHz. If None, no chunking will be done."""
 
+    default_sampling_params: dict[str, float | int] | None = None
+    """Optional default sampling parameters for speech-to-text requests.
+    These values are only used when the request omits the corresponding fields.
+    """
+
+    skip_reading_prefix_cache: bool = False
+    """Whether to skip reading from the prefix cache for transcription.
+    This can be used by specific models that are sensitive to cache reuse.
+    """
+
     @property
     def allow_audio_chunking(self) -> bool:
         return (

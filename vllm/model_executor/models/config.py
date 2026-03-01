@@ -4,6 +4,7 @@ from copy import deepcopy
 from math import lcm
 from typing import TYPE_CHECKING
 
+from vllm.config import CompilationMode, CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
@@ -412,6 +413,28 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 cache_config.mamba_block_size = model_config.max_model_len
 
 
+class KimiAudioForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """Disable compilation paths that degrade Kimi-Audio ASR quality."""
+        compilation_config = vllm_config.compilation_config
+        compilation_config.mode = CompilationMode.NONE
+        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        logger.info(
+            "Disabling torch.compile and cudagraphs for Kimi-Audio to preserve "
+            "ASR quality."
+        )
+
+        mm_config = vllm_config.model_config.multimodal_config
+        if mm_config is not None:
+            if not mm_config.enable_mm_embeds:
+                mm_config.enable_mm_embeds = True
+                logger.info("Enabling mm embeds by default for Kimi-Audio.")
+            if not mm_config.skip_mm_profiling:
+                mm_config.skip_mm_profiling = True
+                logger.info("Skipping mm profiling by default for Kimi-Audio.")
+
+
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -666,6 +689,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
+    "MoonshotKimiaForCausalLM": KimiAudioForCausalLMConfig,
     "MambaForCausalLM": MambaModelConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
     "FalconMambaForCausalLM": MambaModelConfig,
