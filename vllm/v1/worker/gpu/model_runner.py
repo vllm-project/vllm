@@ -173,6 +173,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
+        self.uniform_decode_query_len = 1 + self.num_speculative_steps
 
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
@@ -306,6 +307,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.attn_backends, self.attn_groups = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
+        # compilation_config.cudagraph_mode is adjusted in init_attn_backend
+        cudagraph_mode = self.compilation_config.cudagraph_mode
+        assert cudagraph_mode is not None
+        if (
+            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and cudagraph_mode.separate_routine()
+            and self.uniform_decode_query_len > 1
+        ):
+            self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
+                self.uniform_decode_query_len,
+                self.parallel_config.tensor_parallel_size,
+            )
+
+        # Set cudagraph manager mode and sizes from the resolved config
+        self.cudagraph_manager.set_cudagraph_mode_and_sizes()
+        if self.speculator is not None:
+            self.speculator.cudagraph_manager.set_cudagraph_mode_and_sizes()
+
         check_attention_cp_compatibility(self.vllm_config)
         if self.speculator is not None:
             # HACK(woosuk)

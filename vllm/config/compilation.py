@@ -26,6 +26,7 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.attention.backend import AttentionCGSupport
 else:
     VllmConfig = object
 
@@ -1141,6 +1142,110 @@ class CompilationConfig:
 
         assert "none" in self.custom_ops
         return f"+{op}" in self.custom_ops
+
+    def resolve_cudagraph_mode(
+        self,
+        min_cg_support: "AttentionCGSupport",
+        min_cg_backend_name: str | None,
+        uniform_decode_query_len: int = 1,
+    ) -> CUDAGraphMode:
+        from vllm.v1.attention.backend import AttentionCGSupport
+
+        cudagraph_mode = self.cudagraph_mode
+        if cudagraph_mode is None or cudagraph_mode == CUDAGraphMode.NONE:
+            self.cudagraph_mode = CUDAGraphMode.NONE
+            return CUDAGraphMode.NONE
+
+        # Check cudagraph for mixed batch is supported
+        if (
+            cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL
+            and min_cg_support != AttentionCGSupport.ALWAYS
+        ):
+            msg = (
+                f"CUDAGraphMode.{cudagraph_mode.name} is not supported "
+                f"with {min_cg_backend_name} backend (support: "
+                f"{min_cg_support})"
+            )
+            if min_cg_support == AttentionCGSupport.NEVER:
+                # if not supported any full cudagraphs, just raise it.
+                msg += (
+                    "; please try cudagraph_mode=PIECEWISE, and "
+                    "make sure compilation mode is VLLM_COMPILE"
+                )
+                raise ValueError(msg)
+
+            # attempt to resolve the full cudagraph related mode
+            if self.splitting_ops_contain_attention():
+                msg += "; setting cudagraph_mode=FULL_AND_PIECEWISE"
+                cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+            else:
+                msg += "; setting cudagraph_mode=FULL_DECODE_ONLY"
+                cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+            logger.warning(msg)
+
+        # check that if we are doing decode full-cudagraphs it is supported
+        if (
+            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and min_cg_support == AttentionCGSupport.NEVER
+        ):
+            msg = (
+                f"CUDAGraphMode.{cudagraph_mode.name} is not supported "
+                f"with {min_cg_backend_name} backend (support: "
+                f"{min_cg_support})"
+            )
+            if self.mode == CompilationMode.VLLM_COMPILE and (
+                self.splitting_ops_contain_attention()
+                or self.use_inductor_graph_partition
+            ):
+                msg += (
+                    "; setting cudagraph_mode=PIECEWISE because "
+                    "attention is compiled piecewise"
+                )
+                cudagraph_mode = CUDAGraphMode.PIECEWISE
+            else:
+                msg += (
+                    "; setting cudagraph_mode=NONE because "
+                    "attention is not compiled piecewise"
+                )
+                cudagraph_mode = CUDAGraphMode.NONE
+            logger.warning(msg)
+
+        # check that if we are doing spec-decode + decode full-cudagraphs it is
+        # supported
+        if (
+            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and uniform_decode_query_len > 1
+            and min_cg_support.value < AttentionCGSupport.UNIFORM_BATCH.value
+        ):
+            msg = (
+                f"CUDAGraphMode.{cudagraph_mode.name} is not supported"
+                f" with spec-decode for attention backend "
+                f"{min_cg_backend_name} (support: {min_cg_support})"
+            )
+            if self.splitting_ops_contain_attention():
+                msg += "; setting cudagraph_mode=PIECEWISE"
+                cudagraph_mode = CUDAGraphMode.PIECEWISE
+            else:
+                msg += "; setting cudagraph_mode=NONE"
+                cudagraph_mode = CUDAGraphMode.NONE
+            logger.warning(msg)
+
+        # double check that we can support full cudagraph if they are requested
+        # even after automatic downgrades
+        if (
+            cudagraph_mode.has_full_cudagraphs()
+            and min_cg_support == AttentionCGSupport.NEVER
+        ):
+            raise ValueError(
+                f"CUDAGraphMode.{cudagraph_mode.name} is not "
+                f"supported with {min_cg_backend_name} backend ("
+                f"support:{min_cg_support}) "
+                "; please try cudagraph_mode=PIECEWISE, "
+                "and make sure compilation mode is VLLM_COMPILE"
+            )
+
+        self.cudagraph_mode = cudagraph_mode
+        return cudagraph_mode
 
     def adjust_cudagraph_sizes_for_spec_decode(
         self, uniform_decode_query_len: int, tensor_parallel_size: int
