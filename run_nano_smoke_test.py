@@ -8,17 +8,6 @@ Usage:
 Or run specific tests with pytest:
     pytest tests/models/multimodal/processing/test_nano_nemotron_vl_smoke.py -v -s --no-skip
 """
-# # ==== START === Setup for attach-helper ====
-# import os
-# import sys
-# try:
-#     sys.path.insert(0, os.environ["ATTACH_HELPER_INSTALLATION_PATH"])
-#     from attach_helper import debugging_setup
-#     debugging_setup()
-# except Exception as e:
-#     print(f"Error setting up attach-helper: {e}")
-#     pass
-# # ==== END === Setup for attach-helper ====
 import sys
 import os
 
@@ -28,11 +17,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 if __name__ == "__main__":
     from tests.models.multimodal.processing.test_nano_nemotron_vl_smoke import (
         test_nano_nemotron_vl_basic_image_preprocessing,
-        test_nano_nemotron_vl_fast_preprocessing,
+        test_nano_nemotron_vl_preprocessing,
         test_nano_nemotron_vl_multiple_images,
-        test_nano_nemotron_vl_preprocessing_comparison,
-        test_compare_image_preprocessing_modes,
-        test_compare_video_preprocessing_modes,
+        test_nano_nemotron_vl_preprocessing_timing,
+        test_image_preprocessing_resolutions,
+        test_video_preprocessing_resolutions,
         MODEL_PATHS,
     )
     
@@ -53,32 +42,29 @@ if __name__ == "__main__":
             print("\n[Test 1/6] Basic image preprocessing...")
             test_nano_nemotron_vl_basic_image_preprocessing(model_type, model_path)
             
-            print("\n[Test 2/6] Fast preprocessing mode...")
-            test_nano_nemotron_vl_fast_preprocessing(model_type, model_path)
+            print("\n[Test 2/6] Preprocessing pipeline...")
+            test_nano_nemotron_vl_preprocessing(model_type, model_path)
             
             print("\n[Test 3/6] Multiple images...")
             test_nano_nemotron_vl_multiple_images(model_type, model_path)
             
-            print("\n[Test 4/6] Standard preprocessing (timing)...")
-            test_nano_nemotron_vl_preprocessing_comparison(model_type, model_path, fast_preprocess=False)
+            print("\n[Test 4/6] Preprocessing timing...")
+            test_nano_nemotron_vl_preprocessing_timing(model_type, model_path)
             
-            print("\n[Test 5/6] Fast preprocessing (timing)...")
-            test_nano_nemotron_vl_preprocessing_comparison(model_type, model_path, fast_preprocess=True)
+            print("\n[Test 5/6] Image preprocessing at multiple resolutions...")
+            test_image_preprocessing_resolutions(model_type, model_path)
             
-            print("\n[Test 5/6] Detailed IMAGE comparison (Standard vs Fast)...")
-            test_compare_image_preprocessing_modes(model_type, model_path)
+            print("\n[Test 6/6] Video preprocessing at multiple resolutions...")
+            test_video_preprocessing_resolutions(model_type, model_path)
             
-            print("\n[Test 6/6] Detailed VIDEO comparison (Standard vs Fast)...")
-            test_compare_video_preprocessing_modes(model_type, model_path)
-            
-            print(f"\n✓ All tests passed for {model_type.upper()} model!")
+            print(f"\nAll tests passed for {model_type.upper()} model!")
         
         print("\n" + "=" * 80)
-        print("✓ All smoke tests passed for all models!")
+        print("All smoke tests passed for all models!")
         print("=" * 80)
         
     except Exception as e:
-        print(f"\n✗ Test failed with error: {e}")
+        print(f"\nTest failed with error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
