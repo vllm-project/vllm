@@ -7,11 +7,11 @@ import torch
 from torch.nn import functional as F
 
 from vllm import _custom_ops as ops
-from vllm.platforms import current_platform
 from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.layer_utils import replace_parameter
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 _CPU_MOE_LAYER_CACHE = {}
