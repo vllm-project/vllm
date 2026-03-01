@@ -277,6 +277,10 @@ class FrontendArgs(BaseFrontendArgs):
     Enable offline FastAPI documentation for air-gapped environments.
     Uses vendored static assets bundled with vLLM.
     """
+    use_gpu_for_pooling_score: bool = False
+    """If set, run pooling score MaxSim on GPU in the API server process.
+    Can significantly improve late-interaction scoring performance.
+    https://github.com/vllm-project/vllm/pull/35330"""
 
     @classmethod
     def _customize_cli_kwargs(
