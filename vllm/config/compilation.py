@@ -667,6 +667,10 @@ class CompilationConfig:
         "vllm::unified_attention_with_output",
         "vllm::unified_mla_attention",
         "vllm::unified_mla_attention_with_output",
+        "vllm::mla_attention_decode",
+        "vllm::mla_attention_prefill_with_output",
+        "vllm::mla_write_kv_cache",
+        "vllm::mla_split_batch",
         "vllm::mamba_mixer2",
         "vllm::mamba_mixer",
         "vllm::short_conv",
@@ -869,8 +873,18 @@ class CompilationConfig:
         ):
             # use horizontal fusion, which is useful for fusing qk-norm and
             # qk-rope when query and key have different shapes.
-            self.inductor_compile_config["combo_kernels"] = True
-            self.inductor_compile_config["benchmark_combo_kernel"] = True
+            if envs.VLLM_MLA_EXPOSED_SPLIT:
+                logger.warning_once(
+                    "Disabling combo kernels for MLA exposed split: "
+                    "combo kernels require concrete size hints, but the "
+                    "decode/prefill split is data-dependent."
+                )
+                self.inductor_compile_config["combo_kernels"] = False
+                self.inductor_compile_config["benchmark_combo_kernel"] = False
+            else:
+                self.inductor_compile_config["combo_kernels"] = True
+                # Keep benchmarking enabled so combo kernels can be tuned.
+                self.inductor_compile_config["benchmark_combo_kernel"] = True
 
         if self.use_inductor_graph_partition and not is_torch_equal_or_newer(
             "2.9.0.dev"
