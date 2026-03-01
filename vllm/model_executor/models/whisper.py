@@ -831,15 +831,29 @@ class WhisperForConditionalGeneration(
         task_type: Literal["transcribe", "translate"],
         request_prompt: str,
         to_language: str | None,
+        decoder_prefix: str | None = None,
+        custom_task_tokens: list[str] | None = None,
     ) -> PromptType:
         if language is None:
             raise ValueError(
                 "Language must be specified when creating the Whisper prompt"
             )
 
-        decoder_text = (
-            f"<|prev|>{request_prompt}" if request_prompt else ""
-        ) + f"<|startoftranscript|><|{language}|><|{task_type}|><|notimestamps|>"
+        # Build prompt conditioning (style guidance via <|prev|>)
+        decoder_text = f"<|prev|>{request_prompt}" if request_prompt else ""
+
+        # Build task token sequence
+        decoder_text += f"<|startoftranscript|><|{language}|><|{task_type}|>"
+
+        # Insert custom task tokens before <|notimestamps|>
+        if custom_task_tokens:
+            decoder_text += "".join(custom_task_tokens)
+
+        decoder_text += "<|notimestamps|>"
+
+        # Append decoder prefix (forces continuation from this text)
+        if decoder_prefix:
+            decoder_text += decoder_prefix
 
         return ExplicitEncoderDecoderPrompt(
             encoder_prompt=TextPrompt(

@@ -359,6 +359,8 @@ class OpenAISpeechToText(OpenAIServing):
                 task_type=self.task_type,
                 request_prompt=request.prompt,
                 to_language=to_language,
+                decoder_prefix=getattr(request, "decoder_prefix", None),
+                custom_task_tokens=getattr(request, "custom_task_tokens", None),
             )
 
             parsed_prompt: DictPrompt
