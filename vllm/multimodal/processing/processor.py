@@ -17,7 +17,7 @@ from typing import (
 
 import regex as re
 import torch
-from typing_extensions import TypeVar, assert_never, deprecated
+from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -995,16 +995,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             )
 
         self.data_parser = self.info.get_data_parser()
-
-    @property
-    @deprecated("Will be removed in v0.17. Use `info.supported_mm_limits` instead.")
-    def supported_mm_limits(self):
-        return self.info.supported_mm_limits
-
-    @property
-    @deprecated("Will be removed in v0.17. Use `info.allowed_mm_limits` instead.")
-    def allowed_mm_limits(self):
-        return self.info.allowed_mm_limits
 
     def __call__(
         self,
