@@ -618,6 +618,10 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        # Ernie45-VL conditionally executes text/vision MoE branches, which
+        # breaks fast_moe_cold_start's assumption that all MoE layers execute
+        # in initialization order during each forward pass.
+        vllm_config.compilation_config.fast_moe_cold_start = False
         self.model = Ernie4_5_VLMoeModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
