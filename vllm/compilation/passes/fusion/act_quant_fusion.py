@@ -184,18 +184,24 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
     """
     Fusion for SiluMul+BlockQuant (FP8 dynamic per-group) Pattern.
     Supports group_size 128 and 64 via QuantKey.
+    Parameterized on is_scale_transposed for different scale layouts.
     """
 
-    def __init__(self, quant_key: QuantKey) -> None:
+    def __init__(self, quant_key: QuantKey, is_scale_transposed: bool = False) -> None:
         super().__init__(quant_key)
-        self.quant_matcher = MatcherQuantFP8(quant_key)
+        self.quant_matcher = MatcherQuantFP8(
+            quant_key, has_col_major_scales=is_scale_transposed
+        )
         self.group_size = quant_key.scale.group_shape[1]
+        self.is_scale_transposed = is_scale_transposed
 
     def get_inputs(self) -> list[torch.Tensor]:
         # Dynamic block quant has no external scale input
         return self.silu_and_mul_matcher.inputs()
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
+        is_scale_transposed = self.is_scale_transposed
+
         def pattern(
             input: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -211,11 +217,18 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
             result = torch.empty(
                 output_shape, device=input.device, dtype=self.quant_dtype
             )
-            scale = torch.empty(
-                (input.shape[0], d // self.group_size),
-                device=input.device,
-                dtype=torch.float32,
-            )
+            if is_scale_transposed:
+                scale = torch.empty(
+                    (d // self.group_size, input.shape[0]),
+                    device=input.device,
+                    dtype=torch.float32,
+                ).permute(-1, -2)
+            else:
+                scale = torch.empty(
+                    (input.shape[0], d // self.group_size),
+                    device=input.device,
+                    dtype=torch.float32,
+                )
             at = auto_functionalized(
                 self.FUSED_OP,
                 out=result,
@@ -223,7 +236,7 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
                 scales=scale,
                 group_size=self.group_size,
                 scale_ub=None,
-                is_scale_transposed=False,
+                is_scale_transposed=is_scale_transposed,
             )
             return at[1], at[2]
 
@@ -258,8 +271,11 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
 
         if current_platform.is_cuda():
             for quant_key in [kFp8Dynamic128Sym, kFp8Dynamic64Sym]:
-                pattern_silu_mul_block = SiluMulBlockQuantPattern(quant_key)
-                pattern_silu_mul_block.register(self.patterns)
+                for is_scale_transposed in [False, True]:
+                    pattern_silu_mul_block = SiluMulBlockQuantPattern(
+                        quant_key, is_scale_transposed=is_scale_transposed
+                    )
+                    pattern_silu_mul_block.register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 

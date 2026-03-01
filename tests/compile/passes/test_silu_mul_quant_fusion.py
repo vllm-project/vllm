@@ -205,6 +205,46 @@ class TestSiluMulBlockQuantModel(torch.nn.Module):
         return [FUSED_OPS[self.quant_key]]
 
 
+class TestSiluMulBlockQuantTransposedModel(torch.nn.Module):
+    quant_key = kFp8Dynamic128Sym
+
+    def __init__(self, hidden_size: int, **kwargs):
+        super().__init__()
+        self.silu_and_mul = SiluAndMul()
+        self.quant_fp8 = QuantFP8(
+            static=False,
+            group_shape=GroupShape(1, 128),
+            column_major_scales=True,
+            compile_native=False,
+        )
+
+        self.enable_silu_mul_custom_op = self.silu_and_mul.enabled()
+        self.enable_quant_fp8_custom_op = self.quant_fp8.enabled()
+
+    def forward(self, x):
+        y = self.silu_and_mul(x)
+        out, scale = self.quant_fp8(y)
+        # Dequantize — scale is logically [num_tokens, num_groups]
+        # (physically transposed but permuted back by QuantFP8)
+        group_size = self.quant_key.scale.group_shape[1]
+        scale_expanded = scale.repeat_interleave(group_size, dim=1)
+        dequant = out.to(dtype=torch.float32) * scale_expanded
+        return (dequant,)
+
+    def ops_in_model_before(self):
+        return [
+            SILU_MUL_OP if self.enable_silu_mul_custom_op else torch.ops.aten.mul,
+            (
+                QUANT_OPS[self.quant_key]
+                if self.enable_quant_fp8_custom_op
+                else torch.ops.aten.reciprocal
+            ),
+        ]
+
+    def ops_in_model_after(self):
+        return [FUSED_OPS[self.quant_key]]
+
+
 ROCM_KERNELS = [ROCmFP8ScaledMMLinearKernel, PerTensorTorchFP8ScaledMMLinearKernel]
 CUDA_KERNELS = [
     FlashInferFP8ScaledMMLinearKernel,
@@ -225,6 +265,7 @@ TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
         (TestSiluMulNvfp4QuantModel, False, None),
         (TestSiluMulGroupFp8QuantModel, False, None),
         (TestSiluMulBlockQuantModel, True, None),
+        (TestSiluMulBlockQuantTransposedModel, True, None),
     ],
 )
 @pytest.mark.skipif(
@@ -239,6 +280,7 @@ def test_fusion_silu_and_mul_quant(
         | TestSiluMulNvfp4QuantModel
         | TestSiluMulGroupFp8QuantModel
         | TestSiluMulBlockQuantModel
+        | TestSiluMulBlockQuantTransposedModel
     ],
     enable_silu_mul_custom_op: bool,
     enable_quant_fp8_custom_op: bool,
@@ -249,6 +291,11 @@ def test_fusion_silu_and_mul_quant(
     if model_class is TestSiluMulGroupFp8QuantModel and not IS_AITER_FOUND:
         pytest.skip("AITER is not supported on this GPU.")
     if model_class is TestSiluMulBlockQuantModel and not enable_silu_mul_custom_op:
+        pytest.skip("Block quant fusion requires silu_and_mul custom op")
+    if (
+        model_class is TestSiluMulBlockQuantTransposedModel
+        and not enable_silu_mul_custom_op
+    ):
         pytest.skip("Block quant fusion requires silu_and_mul custom op")
 
     torch.set_default_device("cuda")
@@ -297,7 +344,11 @@ def test_fusion_silu_and_mul_quant(
             atol, rtol = 1e-3, 1e-3
         elif model_class == TestSiluMulNvfp4QuantModel:
             atol, rtol = 1e-1, 1e-1
-        elif model_class in (TestSiluMulGroupFp8QuantModel, TestSiluMulBlockQuantModel):
+        elif model_class in (
+            TestSiluMulGroupFp8QuantModel,
+            TestSiluMulBlockQuantModel,
+            TestSiluMulBlockQuantTransposedModel,
+        ):
             atol, rtol = 5e-2, 5e-2
 
         torch.testing.assert_close(
