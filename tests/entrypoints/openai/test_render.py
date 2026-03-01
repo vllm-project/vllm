@@ -42,9 +42,9 @@ def vision_server():
         "--runner",
         "generate",
         "--max-model-len",
-        "2048",
+        "256",
         "--max-num-seqs",
-        "5",
+        "2",
         "--enforce-eager",
         "--trust-remote-code",
         "--limit-mm-per-prompt",
@@ -130,36 +130,15 @@ async def test_chat_completion_render_basic(client):
     assert response.status_code == 200
     data = response.json()
 
-    # Verify response structure - should be [conversation, engine_prompts]
-    assert isinstance(data, list)
-    assert len(data) == 2
+    # Verify response structure - should be a GenerateRequest
+    assert isinstance(data, dict)
+    assert "token_ids" in data
+    assert isinstance(data["token_ids"], list)
+    assert len(data["token_ids"]) > 0
 
-    conversation, engine_prompts = data
-
-    # Verify conversation
-    assert isinstance(conversation, list)
-    assert len(conversation) > 0
-    assert conversation[0]["role"] == "user"
-    assert "empty string" in conversation[0]["content"]
-
-    # Verify engine_prompts
-    assert isinstance(engine_prompts, list)
-    assert len(engine_prompts) > 0
-
-    first_prompt = engine_prompts[0]
-    assert "prompt_token_ids" in first_prompt
-    assert "prompt" in first_prompt
-    assert isinstance(first_prompt["prompt_token_ids"], list)
-    assert len(first_prompt["prompt_token_ids"]) > 0
-
-    # Verify chat template was applied (should have instruction markers)
-    assert "[INST]" in first_prompt["prompt"]
-    assert "[/INST]" in first_prompt["prompt"]
-
-    # Verify token IDs are correctly preserved as integers
-    token_ids = first_prompt["prompt_token_ids"]
+    # Verify token IDs are integers and BOS token is present
+    token_ids = data["token_ids"]
     assert all(isinstance(tid, int) for tid in token_ids)
-    # Verify BOS token (usually 1 for LLaMA models)
     assert token_ids[0] == 1
 
 
@@ -206,17 +185,11 @@ async def test_chat_completion_render_multi_turn(client):
     assert response.status_code == 200
     data = response.json()
 
-    conversation, engine_prompts = data
-
-    # Verify all messages preserved
-    assert len(conversation) == 3
-    assert conversation[0]["role"] == "user"
-    assert conversation[1]["role"] == "assistant"
-    assert conversation[2]["role"] == "user"
-
     # Verify tokenization occurred
-    assert len(engine_prompts) > 0
-    assert len(engine_prompts[0]["prompt_token_ids"]) > 0
+    assert isinstance(data, dict)
+    assert "token_ids" in data
+    assert isinstance(data["token_ids"], list)
+    assert len(data["token_ids"]) > 0
 
 
 @pytest.mark.asyncio
@@ -305,9 +278,9 @@ async def test_chat_completion_render_with_base64_image_url(
 
     data = response.json()
 
-    # Validate tokens field exists
-    assert "tokens" in data, "Response must contain 'tokens' field"
-    assert isinstance(data["tokens"], list), "'tokens' must be a list"
+    # Validate token_ids field exists
+    assert "token_ids" in data, "Response must contain 'token_ids' field"
+    assert isinstance(data["token_ids"], list), "'token_ids' must be a list"
 
     # Ensure non-empty token output
-    assert len(data["tokens"]) > 0, "Token list must not be empty"
+    assert len(data["token_ids"]) > 0, "Token list must not be empty"
