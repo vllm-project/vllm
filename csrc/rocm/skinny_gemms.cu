@@ -1154,10 +1154,6 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
       (in_bias.has_value() && in_bias->numel() > 0 && in_bias->dim() == 2)
           ? in_bias->size(0)
           : 1;
-  auto By_in =
-      (in_bias.has_value() && in_bias->numel() > 0 && in_bias->dim() == 2)
-          ? in_bias->size(0)
-          : 1;
 
   // Bias indexing: BIAS[(m+i)%Bx + (n%By)*M]. Kernel uses stride M for the n
   // dimension. If By > 1 (2D bias [By,Bx]), PyTorch row stride is Bx so we
