@@ -524,6 +524,16 @@ class OpenAIServingChat(OpenAIServing):
                     break
         return updated_delta, passed_zero
 
+    @staticmethod
+    def _prompt_ends_reasoning(
+        reasoning_parser: ReasoningParser,
+        prompt_token_ids: GenericSequence[int] | None,
+    ) -> bool:
+        if not prompt_token_ids:
+            return False
+        prompt_tail_token_ids = as_list(prompt_token_ids)[-1:]
+        return reasoning_parser.is_reasoning_end(prompt_tail_token_ids)
+
     def extract_tool_call_required_streaming(
         self,
         previous_text: str,
@@ -812,8 +822,9 @@ class OpenAIServingChat(OpenAIServing):
                     ):
                         # only check once per choice, because prompt_token_ids
                         # are the same for all deltas in that choice
-                        prompt_is_reasoning_end_arr[i] = (
-                            reasoning_parser.is_reasoning_end(res.prompt_token_ids)
+                        prompt_is_reasoning_end_arr[i] = self._prompt_ends_reasoning(
+                            reasoning_parser,
+                            res.prompt_token_ids,
                         )
                     if finish_reason_sent[i]:
                         continue

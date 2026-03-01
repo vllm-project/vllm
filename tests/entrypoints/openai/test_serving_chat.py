@@ -1872,3 +1872,34 @@ class TestCreateRemainingArgsDelta:
         assert tc.type == "function"
         assert tc.function.name is None
         assert tc.function.arguments == '{"data": "value"}'
+
+
+class TestPromptEndsReasoning:
+    class _DummyReasoningParser:
+        def __init__(self, end_token_id: int):
+            self.end_token_id = end_token_id
+
+        def is_reasoning_end(self, input_ids: list[int]) -> bool:
+            return self.end_token_id in input_ids
+
+    def test_only_checks_prompt_tail(self):
+        parser = self._DummyReasoningParser(end_token_id=99)
+
+        assert not OpenAIServingChat._prompt_ends_reasoning(
+            parser,
+            [1, 99, 2],
+        )
+
+    def test_prompt_tail_end_token_returns_true(self):
+        parser = self._DummyReasoningParser(end_token_id=99)
+
+        assert OpenAIServingChat._prompt_ends_reasoning(
+            parser,
+            [1, 2, 99],
+        )
+
+    def test_empty_prompt_tokens_returns_false(self):
+        parser = self._DummyReasoningParser(end_token_id=99)
+
+        assert not OpenAIServingChat._prompt_ends_reasoning(parser, [])
+        assert not OpenAIServingChat._prompt_ends_reasoning(parser, None)
