@@ -4,7 +4,11 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 import torch
-from torch._higher_order_ops import auto_functionalized
+
+try:
+    from torch._higher_order_ops import auto_functionalized
+except ImportError:
+    auto_functionalized = None
 from torch._ops import OpOverload
 
 from vllm._aiter_ops import rocm_aiter_ops
