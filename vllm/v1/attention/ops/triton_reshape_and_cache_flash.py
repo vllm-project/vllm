@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import get_args
+
 import torch
 
+from vllm.config.cache import CacheDType
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -145,7 +148,7 @@ def triton_reshape_and_cache_flash(
     block_stride = key_cache.stride()[0]
     page_stride = key_cache.stride()[1]
 
-    assert kv_cache_dtype == "auto" or kv_cache_dtype.startswith("fp8"), (
+    assert kv_cache_dtype in get_args(CacheDType), (
         f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
     )
     kv_cache_torch_dtype = (
@@ -323,7 +326,7 @@ def triton_reshape_and_cache_flash_diffkv(
     block_stride = kv_cache.stride()[0]
     page_stride = kv_cache.stride()[1]
 
-    assert kv_cache_dtype == "auto" or kv_cache_dtype.startswith("fp8"), (
+    assert kv_cache_dtype in get_args(CacheDType), (
         f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
     )
     kv_cache_torch_dtype = (

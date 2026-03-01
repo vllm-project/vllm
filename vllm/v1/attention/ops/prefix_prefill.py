@@ -8,6 +8,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backend import is_quantized_kv_cache
 
 # Static kernels parameters
 BASE_BLOCK = 128 if current_platform.has_device_capability(80) else 64
@@ -682,7 +683,7 @@ def context_attention_fwd(
     if (
         k_cache.dtype == torch.uint8
         or v_cache.dtype == torch.uint8
-        and kv_cache_dtype == "auto"
+        and not is_quantized_kv_cache(kv_cache_dtype)
     ):
         raise ValueError(
             "kv_cache_dtype='auto' unsupported for\

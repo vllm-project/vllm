@@ -43,6 +43,13 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_ds_mla": torch.uint8,
 }
 
+TORCH_DTYPE_TO_STR_DTYPE = {
+    torch.half: "float16",
+    torch.float16: "float16",
+    torch.bfloat16: "bfloat16",
+    torch.float32: "float32",
+}
+
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
     torch.float16: np.float16,
     torch.float32: np.float32,
@@ -325,21 +332,26 @@ def resolve_kv_cache_dtype_string(
     kv_cache_dtype: str, model_config: ModelConfig
 ) -> str:
     """Resolve 'auto' kv_cache_dtype to the actual string value from model config.
-    Returns the resolved cache_dtype string.
+
+    Returns the resolved cache_dtype string:
+    - If kv_cache_dtype != "auto": returns unchanged
+    - If model has FP8 KV cache config: returns the FP8 dtype string
+    - Otherwise: returns the model dtype via TORCH_DTYPE_TO_STR_DTYPE mapping
     """
     if kv_cache_dtype != "auto":
         return kv_cache_dtype
 
+    # Check for FP8 KV cache in quantization config
     hf_cfg = getattr(model_config, "hf_config", None)
     if hf_cfg is not None:
         quant_cfg = getattr(hf_cfg, "quantization_config", None)
-        if quant_cfg is not None:
+        if quant_cfg is not None and isinstance(quant_cfg, dict):
             kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
-            if kv_algo_str is not None:
+            if kv_algo_str is not None and kv_algo_str != "auto":
                 return kv_algo_str
 
-    # Default to auto (will be handled by downstream code)
-    return "auto"
+    # Return model's dtype as a string
+    return TORCH_DTYPE_TO_STR_DTYPE[model_config.dtype]
 
 
 def kv_cache_dtype_str_to_dtype(

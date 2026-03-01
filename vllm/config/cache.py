@@ -23,6 +23,8 @@ BlockSize = Literal[1, 8, 16, 32, 64, 128, 256]
 CacheDType = Literal[
     "auto",
     "bfloat16",
+    "float16",
+    "float32",
     "fp8",
     "fp8_e4m3",
     "fp8_e5m2",
