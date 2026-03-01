@@ -254,7 +254,7 @@ class GroupedTopKRouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
+        eplb_state: EplbLayerState | None,
         num_expert_group: int,
         topk_group: int,
         renormalize: bool = True,
@@ -262,14 +262,12 @@ class GroupedTopKRouter(BaseRouter):
         routed_scaling_factor: float = 1.0,
         e_score_correction_bias: torch.Tensor | None = None,
         num_fused_shared_experts: int = 0,
-        enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
         self.num_expert_group = num_expert_group
@@ -318,7 +316,7 @@ class GroupedTopKRouter(BaseRouter):
                 if self.routed_scaling_factor != 1.0:
                     topk_weights *= self.routed_scaling_factor
             else:
-                topk_weights, topk_ids, token_expert_indices = fused_topk(
+                topk_weights, topk_ids, _ = fused_topk(
                     hidden_states=hidden_states,
                     gating_output=router_logits,
                     topk=self.top_k,

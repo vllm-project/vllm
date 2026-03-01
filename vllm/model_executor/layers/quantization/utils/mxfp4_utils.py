@@ -15,7 +15,9 @@ from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_
 logger = init_logger(__name__)
 
 
-def _swizzle_mxfp4(quant_tensor, scale, num_warps):
+def swizzle_mxfp4(
+    quant_tensor: torch.Tensor, scale: torch.Tensor, num_warps: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel"""
     assert has_triton_kernels()
     import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
@@ -80,20 +82,17 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
     return quant_tensor, InFlexData(), scale
 
 
-def _can_support_mxfp4(
+def can_support_mxfp4(
     use_grouped_topk: bool = False,
     topk_group: int | None = None,
     num_expert_group: int | None = None,
-    expert_map: torch.Tensor | None = None,
     custom_routing_function: Callable | None = None,
     e_score_correction_bias: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
     scoring_func: str = "softmax",
     activation: MoEActivation = MoEActivation.SWIGLUOAI,
-    expert_load_view: torch.Tensor | None = None,
-    logical_to_physical_map: torch.Tensor | None = None,
-    logical_replica_count: torch.Tensor | None = None,
-):
+    eplb_enabled: bool = False,
+) -> bool:
     return not (
         use_grouped_topk
         or topk_group
@@ -103,9 +102,7 @@ def _can_support_mxfp4(
         or apply_router_weight_on_input
         or scoring_func != "softmax"
         or activation != MoEActivation.SWIGLUOAI
-        or expert_load_view
-        or logical_to_physical_map
-        or logical_replica_count
+        or eplb_enabled
     )
 
 

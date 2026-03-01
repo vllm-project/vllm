@@ -48,9 +48,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    _can_support_mxfp4,
-    _swizzle_mxfp4,
+    can_support_mxfp4,
     get_padding_alignment,
+    swizzle_mxfp4,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import set_weight_attrs
@@ -875,10 +875,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 num_warps = 4 if envs.VLLM_MOE_DP_CHUNK_SIZE <= 512 else 8
             else:
                 num_warps = 8
-            w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
+            w13_weight, w13_flex, w13_scale = swizzle_mxfp4(
                 layer.w13_weight, layer.w13_weight_scale, num_warps
             )
-            w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
+            w2_weight, w2_flex, w2_scale = swizzle_mxfp4(
                 layer.w2_weight, layer.w2_weight_scale, num_warps
             )
 
@@ -1020,19 +1020,16 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         if layer.enable_eplb:
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
-        assert _can_support_mxfp4(
+        assert can_support_mxfp4(
             layer.use_grouped_topk,
             layer.topk_group,
             layer.num_expert_group,
-            layer.expert_map,
             layer.custom_routing_function,
             layer.e_score_correction_bias,
             layer.apply_router_weight_on_input,
             layer.scoring_func,
             layer.activation,
-            layer.eplb_state.expert_load_view,
-            layer.eplb_state.logical_to_physical_map,
-            layer.eplb_state.logical_replica_count,
+            layer.enable_eplb,
         ), "MXFP4 are not supported with this configuration."
 
         assert (
@@ -1066,19 +1063,16 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         if layer.enable_eplb:
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
-        assert _can_support_mxfp4(
+        assert can_support_mxfp4(
             layer.use_grouped_topk,
             layer.topk_group,
             layer.num_expert_group,
-            layer.expert_map,
             layer.custom_routing_function,
             layer.e_score_correction_bias,
             layer.apply_router_weight_on_input,
             layer.scoring_func,
             layer.activation,
-            layer.eplb_state.expert_load_view,
-            layer.eplb_state.logical_to_physical_map,
-            layer.eplb_state.logical_replica_count,
+            layer.enable_eplb,
         ), "MXFP4 are not supported with this configuration."
 
         if (

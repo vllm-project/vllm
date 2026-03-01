@@ -5,7 +5,7 @@ from collections.abc import Callable
 import torch
 
 import vllm.envs as envs
-from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.distributed.eplb.eplb_state import EplbLayerState, UninitializedEplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.custom_routing_router import (
     CustomRoutingRouter,
@@ -26,7 +26,7 @@ from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import
     RoutingSimulatorRouter,
 )
 
-EMPTY_EPLB_STATE: EplbLayerState = EplbLayerState()
+EMPTY_EPLB_STATE: EplbLayerState = UninitializedEplbLayerState()
 
 
 def create_fused_moe_router(
@@ -46,9 +46,7 @@ def create_fused_moe_router(
     e_score_correction_bias: torch.Tensor | None = None,
     # custom routing paramaters
     custom_routing_function: Callable | None = None,
-    # eplb parameters
-    enable_eplb: bool = False,
-    eplb_state: EplbLayerState = EMPTY_EPLB_STATE,
+    eplb_state: EplbLayerState | None = None,
 ) -> FusedMoERouter:
     """
     Factory function to create the appropriate FusedMoERouter subclass based on
@@ -96,7 +94,6 @@ def create_fused_moe_router(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
 
@@ -118,7 +115,6 @@ def create_fused_moe_router(
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
         if (
@@ -141,7 +137,6 @@ def create_fused_moe_router(
             eplb_state=eplb_state,
             custom_routing_function=custom_routing_function,
             renormalize=renormalize,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
 
@@ -154,7 +149,6 @@ def create_fused_moe_router(
             scoring_func=scoring_func,
             renormalize=renormalize,
             routed_scaling_factor=routed_scaling_factor,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
 
@@ -164,6 +158,5 @@ def create_fused_moe_router(
         eplb_state=eplb_state,
         renormalize=renormalize,
         scoring_func=scoring_func,
-        enable_eplb=enable_eplb,
         indices_type_getter=indices_type_getter,
     )
