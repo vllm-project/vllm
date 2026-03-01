@@ -2021,6 +2021,8 @@ def selective_scan_fwd(
     block_idx_first_scheduled_token: torch.Tensor | None = None,
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
+    cu_chunk_seqlen: torch.Tensor | None = None,
+    last_chunk_indices: torch.Tensor | None = None,
 ):
     torch.ops._C.selective_scan_fwd(
         u,
@@ -2041,6 +2043,8 @@ def selective_scan_fwd(
         block_idx_first_scheduled_token,
         block_idx_last_scheduled_token,
         initial_state_idx,
+        cu_chunk_seqlen,
+        last_chunk_indices,
     )
 
 
