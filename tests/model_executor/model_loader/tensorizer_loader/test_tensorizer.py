@@ -235,6 +235,8 @@ def test_tensorizer_with_tp_path_without_template(vllm_runner, capfd):
 def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(
     vllm_runner, tmp_path
 ):
+    # Use deterministic decoding to avoid flaky output divergence with TP.
+    sampling_params = SamplingParams(temperature=0, seed=0)
     model_ref = "EleutherAI/pythia-1.4b"
     # record outputs from un-sharded un-tensorized model
     with vllm_runner(
