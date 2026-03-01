@@ -51,9 +51,12 @@ from transformers.video_utils import VideoMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, parallel_state
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
+from vllm.model_executor.layers.attention.mm_encoder_attention import (
+    MMEncoderAttention,
+)
 from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -92,7 +95,6 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import round_up
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -244,6 +246,7 @@ class Qwen3_VisionBlock(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
         x = x + self.attn(
             self.norm1(x),
@@ -251,6 +254,7 @@ class Qwen3_VisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
 
         x = x + self.mlp(self.norm2(x))
@@ -331,6 +335,13 @@ class Qwen3_VisionTransformer(nn.Module):
             else []
         )
         self.num_grid_per_side = int(self.num_position_embeddings**0.5)
+
+        use_data_parallel = is_vit_use_data_parallel()
+        self.tp_size = (
+            1
+            if use_data_parallel
+            else parallel_state.get_tensor_model_parallel_world_size()
+        )
 
         # NOTE: This is used for creating empty tensor for all_gather for
         # DP ViT. Here out_hidden_size is enlarged due to deepstack
@@ -513,19 +524,6 @@ class Qwen3_VisionTransformer(nn.Module):
 
         return torch.cat(outputs, dim=0)
 
-    def compute_attn_mask_seqlen(
-        self,
-        cu_seqlens: torch.Tensor,
-    ) -> torch.Tensor:
-        max_seqlen = torch.zeros([], device=cu_seqlens.device)
-        if self.attn_backend in (
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.ROCM_AITER_FA,
-            AttentionBackendEnum.TRITON_ATTN,
-        ):
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-        return max_seqlen
-
     def forward(
         self,
         x: torch.Tensor,
@@ -549,11 +547,26 @@ class Qwen3_VisionTransformer(nn.Module):
             axis=0, dtype=np.int32
         )
         cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
-        cu_seqlens = torch.from_numpy(cu_seqlens)
-
+        sequence_lengths = MMEncoderAttention.maybe_compute_sequence_lengths(
+            self.attn_backend, cu_seqlens
+        )
+        if sequence_lengths is not None:
+            sequence_lengths = torch.from_numpy(sequence_lengths).to(
+                self.device, non_blocking=True
+            )
+        max_seqlen = torch.tensor(
+            MMEncoderAttention.compute_max_seqlen(self.attn_backend, cu_seqlens),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+            self.attn_backend,
+            cu_seqlens,
+            self.hidden_size,
+            self.tp_size,
+        )
+        cu_seqlens = torch.from_numpy(cu_seqlens).to(self.device, non_blocking=True)
         hidden_states = hidden_states.unsqueeze(1)
-        max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
-        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
 
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
@@ -563,6 +576,7 @@ class Qwen3_VisionTransformer(nn.Module):
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen,
+                sequence_lengths=sequence_lengths,
             )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_merger_idx = self.deepstack_visual_indexes.index(layer_num)
@@ -647,7 +661,13 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         temporal_patch_size = vision_config.temporal_patch_size
 
         mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
-        size = mm_kwargs.get("size", image_processor.size)
+        size = image_processor.size
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+        if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+            size = size | {"shortest_edge": override_min_pixels}
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            size = size | {"longest_edge": override_max_pixels}
 
         if do_resize:
             if is_video:
@@ -703,11 +723,18 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> int:
         video_processor = self.get_video_processor()
-        video_max_pixels = video_processor.size["longest_edge"]
+
+        mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+        video_size = mm_kwargs.get("size", video_processor.size)
+        temporal_patch_size = mm_kwargs.get(
+            "temporal_patch_size", video_processor.temporal_patch_size
+        )
+
         # video_max_pixels contains the temporal compression factor,
         # so we divide by 2 to get the maximum number of image pixels.
+        video_max_pixels = video_size["longest_edge"]
         target_width, target_height = self.get_image_size_with_most_features(
-            max_pixels=video_max_pixels // video_processor.temporal_patch_size
+            max_pixels=video_max_pixels // temporal_patch_size
         )
         num_video_soft_tokens = self.get_num_video_tokens(
             image_width=target_width,
@@ -789,19 +816,15 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
 
-        mm_processor_kwargs = mm_processor_kwargs or {}
         target_image_width, target_image_height = (
-            self.info.get_image_size_with_most_features(
-                max_pixels=mm_processor_kwargs.get("max_pixels", None),
-            )
+            self.info.get_image_size_with_most_features()
         )
 
         # treat videos as special images
@@ -826,13 +849,20 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
                 target_num_frames = min(target_num_frames, num_frames_override)
         target_num_frames = max(target_num_frames, 2)
 
-        video_processor = self.info.get_video_processor(**(mm_processor_kwargs or {}))
-        video_max_pixels = video_processor.size["longest_edge"]
+        video_processor = self.info.get_video_processor()
+
+        mm_kwargs = self.info.ctx.get_merged_mm_kwargs({})
+        video_size = mm_kwargs.get("size", video_processor.size)
+        temporal_patch_size = mm_kwargs.get(
+            "temporal_patch_size", video_processor.temporal_patch_size
+        )
+
         # video_max_pixels contains the temporal compression factor,
         # so we divide by 2 to get the maximum number of image pixels.
+        video_max_pixels = video_size["longest_edge"]
         target_video_width, target_video_height = (
             self.info.get_image_size_with_most_features(
-                max_pixels=video_max_pixels // video_processor.temporal_patch_size
+                max_pixels=video_max_pixels // temporal_patch_size
             )
         )
         target_video_size, _ = self.info._get_vision_info(

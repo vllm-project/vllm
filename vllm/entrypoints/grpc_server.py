@@ -153,6 +153,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 if request.HasField("kv_transfer_params")
                 else None,
             )
+            tokenization_kwargs = self._tokenization_kwargs_from_proto(
+                request.sampling_params
+            )
 
             # Extract logprobs configuration
             num_logprobs = sampling_params.logprobs
@@ -165,6 +168,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 prompt=prompt,
                 sampling_params=sampling_params,
                 request_id=request_id,
+                tokenization_kwargs=tokenization_kwargs,
             ):
                 # For streaming, send chunks for EACH completion output (n outputs)
                 if request.stream:
@@ -431,9 +435,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             seed=params.seed if params.HasField("seed") else None,
             include_stop_str_in_output=params.include_stop_str_in_output,
             logit_bias=dict(params.logit_bias) if params.logit_bias else None,
-            truncate_prompt_tokens=params.truncate_prompt_tokens
-            if params.HasField("truncate_prompt_tokens")
-            else None,
             structured_outputs=structured_outputs,
             extra_args=extra_args,
             # detokenize must be True if stop strings are used
@@ -533,6 +534,14 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             )
 
         return proto if proto.token_ids else None
+
+    @staticmethod
+    def _tokenization_kwargs_from_proto(
+        params: vllm_engine_pb2.SamplingParams,
+    ) -> dict[str, int] | None:
+        if params.HasField("truncate_prompt_tokens"):
+            return {"truncate_prompt_tokens": params.truncate_prompt_tokens}
+        return None
 
     @staticmethod
     def _chunk_response(
