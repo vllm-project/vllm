@@ -143,11 +143,6 @@ class DefaultModelState(ModelState):
     ) -> dict[str, Any]:
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
-        encoder_seq_lens_by_kv_group = self.get_encoder_seq_lens_by_kv_group(
-            attn_groups=attn_groups,
-            num_reqs=input_batch.num_reqs,
-            req_ids=input_batch.req_ids,
-        )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=input_batch.num_reqs,
@@ -161,7 +156,6 @@ class DefaultModelState(ModelState):
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
-            encoder_seq_lens_by_kv_group=encoder_seq_lens_by_kv_group,
         )
         return attn_metadata
 
