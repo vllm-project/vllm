@@ -367,7 +367,7 @@ async def upload_data(output_url: str, data_or_file: str, from_file: bool) -> No
                                 raise RuntimeError(
                                     f"Failed to upload file.\n"
                                     f"Status: {response.status}\n"
-                                    f"Response: {response.text()}"
+                                    f"Response: {await response.text()}"
                                 )
                 else:
                     async with session.put(output_url, data=data_or_file) as response:
@@ -375,7 +375,7 @@ async def upload_data(output_url: str, data_or_file: str, from_file: bool) -> No
                             raise RuntimeError(
                                 f"Failed to upload data.\n"
                                 f"Status: {response.status}\n"
-                                f"Response: {response.text()}"
+                                f"Response: {await response.text()}"
                             )
 
         except Exception as e:
