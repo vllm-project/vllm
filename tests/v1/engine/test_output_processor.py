@@ -1331,8 +1331,65 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
         )
         output_processor.add_request(request, None, queue=queue)
 
-    for request in requests:
-        if abort_by == "internal":
-            output_processor.abort_requests([request.request_id], internal=True)
-        else:
-            output_processor.abort_requests([request.external_req_id], internal=False)
+    # Test aborting a single request
+    iteration_stats = IterationStats()
+    request_ids_to_abort = output_processor.abort_requests(
+        [
+            (
+                requests[0].request_id
+                if abort_by == "internal"
+                else requests[0].external_req_id
+            )
+        ],
+        internal=abort_by == "internal",
+        iteration_stats=iteration_stats,
+    )
+    assert isinstance(request_ids_to_abort, list)
+    assert len(request_ids_to_abort) == 1
+    assert request_ids_to_abort[0] == requests[0].request_id
+    # Verify stats were updated
+    assert len(iteration_stats.finished_requests) == 1
+    assert iteration_stats.finished_requests[0].finish_reason == FinishReason.ABORT
+    assert iteration_stats.finished_requests[0].num_prompt_tokens == len(
+        requests[0].prompt_token_ids
+    )
+
+    # Test aborting multiple requests
+    remaining_requests = [req for req in requests[1:3]]
+    expected_prompt_token_counts = {
+        len(req.prompt_token_ids) for req in remaining_requests
+    }
+    iteration_stats = IterationStats()
+    request_ids_to_abort = output_processor.abort_requests(
+        [
+            req.request_id if abort_by == "internal" else req.external_req_id
+            for req in remaining_requests
+        ],
+        internal=abort_by == "internal",
+        iteration_stats=iteration_stats,
+    )
+    assert len(request_ids_to_abort) == 2
+    assert set(request_ids_to_abort) == set(
+        [req.request_id for req in remaining_requests]
+    )
+    # Verify stats were updated for both requests
+    assert len(iteration_stats.finished_requests) == 2
+    finished_prompt_token_counts = {
+        finished_req.num_prompt_tokens
+        for finished_req in iteration_stats.finished_requests
+    }
+    for finished_req in iteration_stats.finished_requests:
+        assert finished_req.finish_reason == FinishReason.ABORT
+    # Verify that the prompt token counts match the aborted requests
+    assert finished_prompt_token_counts == expected_prompt_token_counts
+
+    # Test aborting non-existent request (should return empty list)
+    iteration_stats = IterationStats()
+    request_ids_to_abort = output_processor.abort_requests(
+        ["non-existent-request"],
+        internal=abort_by == "internal",
+        iteration_stats=iteration_stats,
+    )
+    assert len(request_ids_to_abort) == 0
+    # Verify no stats were added for non-existent request
+    assert len(iteration_stats.finished_requests) == 0
