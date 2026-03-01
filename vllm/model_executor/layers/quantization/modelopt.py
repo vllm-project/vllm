@@ -126,6 +126,7 @@ class ModelOptKVCacheMethod(BaseKVCacheMethod):
 
 class ModelOptQuantConfigBase(QuantizationConfig):
     LinearMethodCls: type = LinearMethodBase
+    LMHeadMethodCls: type = LinearMethodBase
     FusedMoEMethodCls: type = FusedMoEMethodBase
     KVCacheMethodCls: type = BaseKVCacheMethod
 
@@ -205,6 +206,14 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             quant_method = self.FusedMoEMethodCls(
                 quant_config=self, moe_config=layer.moe_config
             )
+            if getattr(quant_method, "backend", "") == "marlin":
+                quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+            return quant_method
+        elif isinstance(layer, ParallelLMHead):
+            # NVFP4-quantized lm_head: use LMHead-specific method that
+            # provides a compatible weight_loader for
+            # VocabParallelEmbedding-based layers.
+            quant_method = self.LMHeadMethodCls(self)
             if getattr(quant_method, "backend", "") == "marlin":
                 quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
             return quant_method
@@ -1374,6 +1383,81 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
 
 
+class ModelOptNvFp4LMHeadMethod(ModelOptNvFp4LinearMethod):
+    """NVFP4 method for ParallelLMHead (extends VocabParallelEmbedding).
+
+    ParallelLMHead passes ``VocabParallelEmbedding.weight_loader`` to
+    ``create_weights``, but that loader doesn't handle NVFP4 packed uint8
+    weights or ``PerTensorScaleParameter`` scalars.  We override
+    ``create_weights`` to supply a compatible weight_loader that handles
+    vocab-parallel sharding for NVFP4 parameters.
+    """
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        # Build a weight_loader that works with NVFP4 packed parameters
+        # on a VocabParallelEmbedding-based layer.
+        embedding = layer  # layer is the ParallelLMHead instance
+
+        def _nvfp4_lm_head_weight_loader(
+            param: torch.Tensor,
+            loaded_weight: torch.Tensor,
+        ):
+            output_dim = getattr(param, "output_dim", None)
+            if output_dim is None:
+                # Scalar parameters (input_scale, weight_scale_2).
+                # Checkpoint stores a scalar; parameter is 1-element
+                # tensor.
+                if param.data.dim() == 1 and loaded_weight.dim() == 0:
+                    param.data[0] = loaded_weight.item()
+                else:
+                    param.data.copy_(loaded_weight)
+                return
+
+            # Sharded parameters (weight, weight_scale): use the
+            # VocabParallelEmbedding shard indices for the output dim.
+            tp_size = embedding.tp_size
+            if tp_size == 1:
+                param.data.copy_(loaded_weight)
+            else:
+                start = embedding.shard_indices.org_vocab_start_index
+                end = embedding.shard_indices.org_vocab_end_index
+                shard_size = end - start
+                input_dim = getattr(param, "input_dim", None)
+                if input_dim is not None and input_dim == output_dim:
+                    raise NotImplementedError(
+                        "Packed dim == output dim not supported for NVFP4 LM head"
+                    )
+                loaded_weight = loaded_weight.narrow(output_dim, start, shard_size)
+                param.data[: loaded_weight.shape[0]].copy_(loaded_weight)
+                param.data[loaded_weight.shape[0] :].fill_(0)
+
+        extra_weight_attrs["weight_loader"] = _nvfp4_lm_head_weight_loader
+
+        # LinearBase sets params_dtype; VocabParallelEmbedding doesn't.
+        # Marlin's prepare_fp4_layer_for_marlin needs it for scale dtype.
+        if not hasattr(layer, "params_dtype"):
+            layer.params_dtype = params_dtype
+
+        super().create_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+
+
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     """
     MoE Method for FP4 Quantization.
@@ -1661,6 +1745,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
 
 ModelOptNvFp4Config.LinearMethodCls = ModelOptNvFp4LinearMethod
+ModelOptNvFp4Config.LMHeadMethodCls = ModelOptNvFp4LMHeadMethod
 ModelOptNvFp4Config.FusedMoEMethodCls = ModelOptNvFp4FusedMoE
 ModelOptNvFp4Config.KVCacheMethodCls = ModelOptKVCacheMethod
 
