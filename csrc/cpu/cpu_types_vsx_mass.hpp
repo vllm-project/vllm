@@ -306,7 +306,7 @@ static inline int bind_to_numa_node(int node) {
   }
 
   numa_bitmask_setbit(mask, node);
-  int ret = set_mempolicy(MPOL_BIND, mask->maskp, mask->size);
+  int ret = set_mempolicy(MPOL_BIND, mask->maskp, mask->size + 1);
   numa_free_nodemask(mask);
 
   return ret;
@@ -334,7 +334,7 @@ static inline int interleave_numa_nodes(int node1, int node2) {
 
   numa_bitmask_setbit(mask, node1);
   numa_bitmask_setbit(mask, node2);
-  int ret = set_mempolicy(MPOL_INTERLEAVE, mask->maskp, mask->size);
+  int ret = set_mempolicy(MPOL_INTERLEAVE, mask->maskp, mask->size + 1);
   numa_free_nodemask(mask);
 
   return ret;
