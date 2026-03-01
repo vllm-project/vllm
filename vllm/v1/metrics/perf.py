@@ -27,6 +27,7 @@ from vllm.utils.torch_utils import (
     get_kv_cache_torch_dtype,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.metrics.utils import create_metric_per_engine
 
 logger = init_logger(__name__)
 
@@ -1267,7 +1268,9 @@ class PerfMetricsProm:
             ),
             labelnames=labelnames,
         )
-        self.counter_flops = make_per_engine(counter_flops, per_engine_labelvalues)
+        self.counter_flops = create_metric_per_engine(
+            counter_flops, per_engine_labelvalues
+        )
 
         counter_read_bytes = self._counter_cls(
             name="vllm:estimated_read_bytes_per_gpu_total",
@@ -1277,7 +1280,7 @@ class PerfMetricsProm:
             ),
             labelnames=labelnames,
         )
-        self.counter_read_bytes = make_per_engine(
+        self.counter_read_bytes = create_metric_per_engine(
             counter_read_bytes, per_engine_labelvalues
         )
 
@@ -1289,7 +1292,7 @@ class PerfMetricsProm:
             ),
             labelnames=labelnames,
         )
-        self.counter_write_bytes = make_per_engine(
+        self.counter_write_bytes = create_metric_per_engine(
             counter_write_bytes, per_engine_labelvalues
         )
 
@@ -1303,16 +1306,6 @@ class PerfMetricsProm:
         self.counter_flops[engine_idx].inc(perf_stats.num_flops_per_gpu)
         self.counter_read_bytes[engine_idx].inc(perf_stats.num_read_bytes_per_gpu)
         self.counter_write_bytes[engine_idx].inc(perf_stats.num_write_bytes_per_gpu)
-
-
-def make_per_engine(
-    counter: prometheus_client.Counter, per_engine_labelvalues: dict[int, list[object]]
-):
-    """Create a counter for each label value."""
-    return {
-        idx: counter.labels(*labelvalues)
-        for idx, labelvalues in per_engine_labelvalues.items()
-    }
 
 
 ## util functions
