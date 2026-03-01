@@ -1190,6 +1190,8 @@ torchaudio==2.10.0+cu129
     #   -r requirements/test.in
     #   encodec
     #   vocos
+torchcodec==0.10.0
+    # via -r requirements/test.in
 torchgeo==0.7.0
     # via terratorch
 torchmetrics==1.7.4

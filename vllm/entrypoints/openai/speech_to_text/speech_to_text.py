@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import io
 import math
 import time
 import zlib
@@ -36,6 +35,7 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranslationSegment,
     TranslationStreamResponse,
 )
+from vllm.entrypoints.openai.speech_to_text.utils import load_audio_bytes
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import ProcessorInputs
@@ -314,10 +314,12 @@ class OpenAISpeechToText(OpenAIServing):
                 value=len(audio_data) / 1024**2,
             )
 
-        with io.BytesIO(audio_data) as bytes_:
-            # NOTE resample to model SR here for efficiency. This is also a
-            # pre-requisite for chunking, as it assumes Whisper SR.
-            y, sr = librosa.load(bytes_, sr=self.asr_config.sample_rate)
+        # Decode audio bytes.  For container formats (MP4, M4A, WebM) that
+        # soundfile cannot detect from a BytesIO stream, _load_audio_bytes
+        # transparently falls back to ffmpeg via an in-memory fd.
+        # NOTE resample to model SR here for efficiency. This is also a
+        # pre-requisite for chunking, as it assumes Whisper SR.
+        y, sr = load_audio_bytes(audio_data, sr=self.asr_config.sample_rate)
 
         duration = librosa.get_duration(y=y, sr=sr)
         do_split_audio = (
