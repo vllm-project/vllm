@@ -883,7 +883,13 @@ class VllmConfig:
                     self.compilation_config.pass_config.enable_sp = False
                     self.compilation_config.pass_config.fuse_gemm_comms = False
 
-        if self.compilation_config.fast_moe_cold_start is None:
+        from vllm.utils.torch_utils import HAS_OPAQUE_TYPE
+
+        if HAS_OPAQUE_TYPE:
+            # On torch >= 2.11 the hoisted OpaqueObject approach supersedes
+            # fast_moe_cold_start, so force it off.
+            self.compilation_config.fast_moe_cold_start = False
+        elif self.compilation_config.fast_moe_cold_start is None:
             # resolve default behavior: try to be as safe as possible
             # this config is unsafe if any spec decoding draft model has a MOE.
             # We'll conservatively turn it off if we see spec decoding.
