@@ -723,30 +723,24 @@ async def run_benchmark(
 
             # For prefill mode with profiling: use prefill_only scheduling
             # to prevent any decode steps from running while profiling.
-            # Flow: sleep -> prefill_only=true -> queue requests -> wake
-            # -> start profile -> prefill runs (traced) -> poll until
-            # all prefilled -> stop profile -> prefill_only=false ->
-            # decode runs (not traced) -> responses arrive.
             #
-            # For DP>1, skip sleep/wake (deadlocks because requests go
-            # to one engine while DP requires lockstep execution).
-            # Instead, just profile normally — trace includes both
-            # prefill and 1 decode step.
-            # For prefill mode with profiling:
-            # Start profiling, send requests, wait for completion, stop.
-            # The trace includes both prefill and 1 decode step
-            # (max_tokens=1 means 1 output token). The decode step is
-            # trivially short (~6ms) vs prefill (~2000ms) and uses a
-            # different JIT hash, so it's easily identifiable.
+            # Flow:
+            #   1. profile/start → begin tracing
+            #   2. prefill_only=true → scheduler only runs prefills
+            #   3. Send requests (don't await — responses won't come
+            #      until decode runs)
+            #   4. Poll batch_info until num_waiting=0 → all prefilled
+            #   5. profile/stop → trace contains only prefill ops
+            #   6. prefill_only=false → decode resumes
+            #   7. Await responses → requests complete normally
             #
-            # We don't use sleep/wake+prefill_only here because:
-            # - On TPU, jax.profiler.start_trace() produces empty device
-            #   traces when called while the engine is sleeping
-            # - DP>1 deadlocks with sleep/wake
+            # This guarantees clean prefill traces because decode cannot
+            # execute while prefill_only=true. The profile/stop has
+            # natural latency (network round trips) so device trace data
+            # has time to flush.
             if config.profile and config.mode == "prefill" and trace_prefix:
-                # Start profiling with max_steps=1 to auto-stop after
-                # the prefill engine step, excluding the decode step.
-                params = {"prefix": trace_prefix, "delay": 0, "max_steps": 1}
+                # 1. Start profiling
+                params = {"prefix": trace_prefix, "delay": 0}
                 for attempt in range(3):
                     trace_started = await call_debug_endpoint(
                         session, rotator, "/debug/profile/start", params)
@@ -758,21 +752,87 @@ async def run_benchmark(
                         trace_prefix, attempt + 1)
                     await asyncio.sleep(2.0)
 
-            (
-                elapsed_ms,
-                prompt_tokens,
-                completion_tokens,
-                decode_trace_started,
-            ) = await run_single_iteration(
-                session,
-                config,
-                rotator,
-                benchmark_prompt,
-                global_batch_size,
-                num_tokens_to_generate,
-                trace_prefix=trace_prefix if config.mode == "decode" else None,
-                use_sleep_wake=use_sleep_wake,
-            )
+                # 2. Enable prefill-only scheduling
+                await call_debug_endpoint(
+                    session, rotator, "/debug/prefill_only",
+                    {"enabled": "true"})
+
+                # 3. Send requests (don't await yet)
+                request_body = {
+                    "model": config.model,
+                    "prompt": benchmark_prompt,
+                    "max_tokens": 1,
+                    "stream": False,
+                }
+                prefill_tasks = []
+                for _ in range(global_batch_size):
+                    endpoint = rotator.next()
+                    task = asyncio.ensure_future(
+                        session.post(
+                            f"{endpoint}/v1/completions",
+                            json=request_body))
+                    prefill_tasks.append(task)
+
+                # 4. Wait for all prefills to complete
+                prefill_start = time.perf_counter()
+                await wait_for_batch_ready(
+                    session, rotator, global_batch_size, timeout_s=300.0)
+                prefill_elapsed_ms = (
+                    time.perf_counter() - prefill_start) * 1000
+
+                # 5. Stop profiling — trace has only prefill ops
+                if trace_started:
+                    # Small delay to let device trace data flush
+                    await asyncio.sleep(1.0)
+                    for endpoint in rotator.all():
+                        try:
+                            await session.post(
+                                f"{endpoint}/debug/profile/stop")
+                        except Exception as e:
+                            logger.warning(
+                                "Failed to stop profiling on %s: %s",
+                                endpoint, e)
+
+                # 6. Disable prefill-only — decode resumes
+                await call_debug_endpoint(
+                    session, rotator, "/debug/prefill_only",
+                    {"enabled": "false"})
+
+                # 7. Await responses (decode runs now)
+                responses = await asyncio.gather(*prefill_tasks)
+                total_prompt_tokens = 0
+                total_completion_tokens = 0
+                for resp in responses:
+                    try:
+                        data = await resp.json()
+                        pt, ct = count_tokens(data)
+                        total_prompt_tokens += pt
+                        total_completion_tokens += ct
+                    except Exception:
+                        pass
+
+                elapsed_ms = prefill_elapsed_ms
+                prompt_tokens = total_prompt_tokens
+                completion_tokens = total_completion_tokens
+
+            else:
+                # Non-profiled prefill or decode mode: use run_single_iteration
+                decode_trace_started = False
+                (
+                    elapsed_ms,
+                    prompt_tokens,
+                    completion_tokens,
+                    decode_trace_started,
+                ) = await run_single_iteration(
+                    session,
+                    config,
+                    rotator,
+                    benchmark_prompt,
+                    global_batch_size,
+                    num_tokens_to_generate,
+                    trace_prefix=trace_prefix if config.mode == "decode" else None,
+                    use_sleep_wake=use_sleep_wake,
+                )
 
             # For decode mode, trace_started comes from run_single_iteration
             # (profiling starts after batch ramp-up inside that function).
@@ -780,9 +840,10 @@ async def run_benchmark(
                 trace_started = True
                 trace_prefixes.append(trace_prefix)
 
-            # Stop profiling only if start succeeded
+            # Stop profiling only if start succeeded.
+            # Skip for profiled prefill — already stopped above.
             server_elapsed_ms = None
-            if trace_started:
+            if trace_started and not (config.profile and config.mode == "prefill"):
                 for endpoint in rotator.all():
                     try:
                         resp = await session.post(
