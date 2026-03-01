@@ -19,19 +19,13 @@ class LongcatFlashToolParser(Hermes2ProToolParser):
             re.DOTALL,
         )
 
-        self.tool_call_start_token_ids = self.model_tokenizer.encode(
-            self.tool_call_start_token, add_special_tokens=False
-        )
-        self.tool_call_end_token_ids = self.model_tokenizer.encode(
-            self.tool_call_end_token, add_special_tokens=False
-        )
+        self.tool_call_start_token_ids = self._cached_encode(self.tool_call_start_token)
+        self.tool_call_end_token_ids = self._cached_encode(self.tool_call_end_token)
 
         self.tool_call_start_token_array = [
-            self.model_tokenizer.decode([token_id])
-            for token_id in self.tool_call_start_token_ids
+            self._cached_decode(token_id) for token_id in self.tool_call_start_token_ids
         ]
 
         self.tool_call_end_token_array = [
-            self.model_tokenizer.decode([token_id])
-            for token_id in self.tool_call_end_token_ids
+            self._cached_decode(token_id) for token_id in self.tool_call_end_token_ids
         ]
