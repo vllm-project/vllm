@@ -277,6 +277,11 @@ class FrontendArgs(BaseFrontendArgs):
     Enable offline FastAPI documentation for air-gapped environments.
     Uses vendored static assets bundled with vLLM.
     """
+    enable_dashboard: bool = False
+    """
+    Enable the vLLM web dashboard at /dashboard for monitoring and testing.
+    Provides server info, metrics display, and a chat interface for testing.
+    """
 
     @classmethod
     def _customize_cli_kwargs(
