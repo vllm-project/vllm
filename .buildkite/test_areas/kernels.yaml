@@ -139,6 +139,7 @@ steps:
   commands:
     - pytest -v -s kernels/moe/test_cutlass_moe.py
     - pytest -v -s kernels/moe/test_flashinfer.py
+    - pytest -v -s quantization/test_hopper_moe.py
     - pytest -v -s kernels/moe/test_gpt_oss_triton_kernels.py
     - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
     - pytest -v -s kernels/moe/test_moe.py

@@ -129,8 +129,8 @@ def test_deepseek_fp8_block_moe_deep_gemm(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.mark.skip(
     reason=(
-        "Known issue: lack of kernel support. "
-        "Expected failure: assert self.block_quant is None"
+        "FP8 block-scale MoE requires exact SM 9.0 (H100). "
+        "Covered by tests/quantization/test_hopper_moe.py instead."
     )
 )
 def test_deepseek_fp8_block_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
@@ -192,6 +192,12 @@ def test_gptoss_eager(monkeypatch: pytest.MonkeyPatch):
 
 
 ## Qwen3 Next ##
+
+
+def test_qwen3_next_bf16_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP16", "1")
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "throughput")
+    can_initialize("Qwen/Qwen3-Next-80B-A3B-Instruct", hf_overrides=HF_OVERRIDE_TEXT)
 
 
 def test_qwen3_next_bf16_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
