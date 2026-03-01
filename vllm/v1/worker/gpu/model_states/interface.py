@@ -9,7 +9,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
@@ -61,5 +61,19 @@ class ModelState(ABC):
         slot_mappings: torch.Tensor,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def prepare_dummy_attn(
+        self,
+        num_reqs: int,
+        num_tokens: int,
+        input_buffers: InputBuffers,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        uniform_decode_query_len: int = 0,
     ) -> dict[str, Any]:
         raise NotImplementedError

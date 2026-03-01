@@ -17,6 +17,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -26,7 +27,6 @@ class EagleCudaGraphManager:
         self.scheduler_config = vllm_config.scheduler_config
         self.device = device
 
-        self.max_model_len = vllm_config.model_config.max_model_len
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.dp_size = vllm_config.parallel_config.data_parallel_size
@@ -59,6 +59,7 @@ class EagleCudaGraphManager:
         num_tokens: int,
         capture_cg_mode: CUDAGraphMode,
         generate_fn: Callable,
+        model_state: ModelState,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
@@ -78,9 +79,8 @@ class EagleCudaGraphManager:
             num_tokens,
             input_buffers,
             block_tables,
-            None,
+            model_state,
             attn_groups,
-            self.max_model_len,
             kv_cache_config,
             uniform_decode_query_len=1,
         )
@@ -159,6 +159,7 @@ class EagleCudaGraphManager:
     def capture(
         self,
         generate_fn: Callable,
+        model_state: ModelState,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
@@ -174,6 +175,7 @@ class EagleCudaGraphManager:
             capture_cudagraph_mode=self.cudagraph_mode,
             desc=f"Capturing eagle CUDA graphs ({self.cudagraph_mode.name})",
             generate_fn=generate_fn,
+            model_state=model_state,
             input_buffers=input_buffers,
             block_tables=block_tables,
             attn_groups=attn_groups,

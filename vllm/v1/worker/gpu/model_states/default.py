@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -9,7 +10,7 @@ from vllm.config import VllmConfig
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
-from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
@@ -155,5 +156,41 @@ class DefaultModelState(ModelState):
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+        )
+        return attn_metadata
+
+    def prepare_dummy_attn(
+        self,
+        num_reqs: int,
+        num_tokens: int,
+        input_buffers: InputBuffers,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        uniform_decode_query_len: int = 0,
+    ) -> dict[str, Any]:
+        if uniform_decode_query_len > 0:
+            num_tokens_per_req = uniform_decode_query_len
+        else:
+            num_tokens_per_req = num_tokens // num_reqs
+        num_scheduled_tokens = np.full(num_reqs, num_tokens_per_req, dtype=np.int32)
+        num_scheduled_tokens[-1] += num_tokens % num_reqs
+
+        input_batch = InputBatch.make_dummy(
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
+            input_buffers=input_buffers,
+            device=input_buffers.device,
+            num_scheduled_tokens=num_scheduled_tokens,
+            req_ids=[f"capture_req_{i}" for i in range(num_reqs)],
+            include_dcp_local_seq_lens=True,
+        )
+        attn_metadata = self.prepare_attn(
+            input_batch=input_batch,
+            block_tables=block_tables,
+            slot_mappings=slot_mappings,
+            attn_groups=attn_groups,
+            kv_cache_config=kv_cache_config,
         )
         return attn_metadata

@@ -3,7 +3,6 @@
 from collections.abc import Callable
 from typing import Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 from tqdm import tqdm
@@ -15,10 +14,7 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import (
-    build_attn_metadata,
-    build_slot_mappings_by_layer,
-)
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
@@ -38,7 +34,6 @@ class CudaGraphManager:
         self.use_aux_hidden_state_outputs = use_aux_hidden_state_outputs
         self.device = device
 
-        self.max_model_len = vllm_config.model_config.max_model_len
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.dp_size = vllm_config.parallel_config.data_parallel_size
@@ -127,7 +122,6 @@ class CudaGraphManager:
             block_tables,
             model_state,
             attn_groups,
-            self.max_model_len,
             kv_cache_config,
             uniform_decode_query_len=(
                 self.uniform_decode_query_len if uniform_decode else 0
@@ -396,61 +390,24 @@ def prepare_inputs_to_capture(
     num_tokens: int,
     input_buffers: InputBuffers,
     block_tables: BlockTables,
-    model_state: ModelState | None,
+    model_state: ModelState,
     attn_groups: list[list[AttentionGroup]],
-    max_model_len: int,
     kv_cache_config: KVCacheConfig,
     uniform_decode_query_len: int = 0,
 ) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
-    if uniform_decode_query_len > 0:
-        num_tokens_per_req = uniform_decode_query_len
-    else:
-        num_tokens_per_req = num_tokens // num_reqs
-
-    query_start_loc_np = np.arange(num_reqs + 1, dtype=np.int32) * num_tokens_per_req
-    query_start_loc_np[-1] = num_tokens
-    query_start_loc_cpu = torch.from_numpy(query_start_loc_np)
-    input_buffers.query_start_loc[: num_reqs + 1] = query_start_loc_cpu
-    input_buffers.query_start_loc[num_reqs + 1 :] = num_tokens
-    query_start_loc = input_buffers.query_start_loc[: num_reqs + 1]
-
-    # HACK(woosuk): For faster warmup, we set seq_lens (GPU) to num_tokens
-    # rather than max_model_len.
-    input_buffers.seq_lens[:num_reqs] = num_tokens
-    input_buffers.seq_lens[num_reqs:] = 0
-
-    input_buffers.dcp_local_seq_lens[:num_reqs] = num_tokens
-    input_buffers.dcp_local_seq_lens[num_reqs:] = 0
-
-    input_block_tables = [x[:num_reqs] for x in block_tables.input_block_tables]
+    input_block_tables = tuple(x[:num_reqs] for x in block_tables.input_block_tables)
     slot_mappings = block_tables.slot_mappings[:, :num_tokens]
     slot_mappings_by_layer = build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
     )
-    encoder_seq_lens_by_kv_group = None
-    if model_state is not None and hasattr(
-        model_state, "get_encoder_seq_lens_by_kv_group"
-    ):
-        encoder_seq_lens_by_kv_group = model_state.get_encoder_seq_lens_by_kv_group(
-            attn_groups=attn_groups,
-            num_reqs=num_reqs,
-            req_ids=None,
-            for_cudagraph_capture=True,
-        )
-
-    attn_metadata = build_attn_metadata(
-        attn_groups=attn_groups,
+    attn_metadata = model_state.prepare_dummy_attn(
         num_reqs=num_reqs,
         num_tokens=num_tokens,
-        query_start_loc_gpu=query_start_loc,
-        query_start_loc_cpu=query_start_loc_cpu,
-        max_query_len=num_tokens_per_req,
-        seq_lens=input_buffers.seq_lens,
-        max_seq_len=max_model_len,
+        input_buffers=input_buffers,
         block_tables=input_block_tables,
         slot_mappings=slot_mappings,
+        attn_groups=attn_groups,
         kv_cache_config=kv_cache_config,
-        dcp_local_seq_lens=input_buffers.dcp_local_seq_lens,
-        encoder_seq_lens_by_kv_group=encoder_seq_lens_by_kv_group,
+        uniform_decode_query_len=uniform_decode_query_len,
     )
     return attn_metadata, slot_mappings_by_layer

@@ -10,7 +10,7 @@ from vllm.config import VllmConfig
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
-from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -133,18 +133,18 @@ class WhisperModelState(ModelState):
         self,
         num_reqs: int,
         req_ids: list[str] | None,
-        for_cudagraph_capture: bool,
     ) -> tuple[torch.Tensor, np.ndarray]:
         encoder_seq_lens_cpu = self.encoder_seq_lens_cpu[:num_reqs]
         encoder_seq_lens_cpu.fill(0)
 
-        if for_cudagraph_capture:
+        if req_ids is None:
             encoder_seq_lens_cpu[:] = self.max_capture_encoder_len
-        elif req_ids is not None:
+        else:
             for req_index, req_id in enumerate(req_ids):
                 mm_features = self.encoder_cache.mm_features.get(req_id)
-                if not mm_features:
-                    continue
+                assert mm_features is not None, (
+                    f"Missing multimodal features for request {req_id}."
+                )
                 encoder_seq_lens_cpu[req_index] = sum(
                     feature.mm_position.length for feature in mm_features
                 )
@@ -159,12 +159,10 @@ class WhisperModelState(ModelState):
         attn_groups: list[list[AttentionGroup]],
         num_reqs: int,
         req_ids: list[str] | None,
-        for_cudagraph_capture: bool = False,
     ) -> dict[int, tuple[torch.Tensor, np.ndarray]]:
         encoder_seq_lens, encoder_seq_lens_cpu = self._get_encoder_seq_lens(
             num_reqs=num_reqs,
             req_ids=req_ids,
-            for_cudagraph_capture=for_cudagraph_capture,
         )
         seq_lens_by_group: dict[int, tuple[torch.Tensor, np.ndarray]] = {}
         for kv_cache_group_idx, groups in enumerate(attn_groups):
@@ -178,3 +176,56 @@ class WhisperModelState(ModelState):
                     encoder_seq_lens_cpu,
                 )
         return seq_lens_by_group
+
+    def prepare_dummy_attn(
+        self,
+        num_reqs: int,
+        num_tokens: int,
+        input_buffers: InputBuffers,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        uniform_decode_query_len: int = 0,
+    ) -> dict[str, Any]:
+        if uniform_decode_query_len > 0:
+            num_tokens_per_req = uniform_decode_query_len
+        else:
+            num_tokens_per_req = num_tokens // num_reqs
+        num_scheduled_tokens = np.full(num_reqs, num_tokens_per_req, dtype=np.int32)
+        num_scheduled_tokens[-1] += num_tokens % num_reqs
+
+        input_batch = InputBatch.make_dummy(
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
+            input_buffers=input_buffers,
+            device=input_buffers.device,
+            num_scheduled_tokens=num_scheduled_tokens,
+            req_ids=[f"capture_req_{i}" for i in range(num_reqs)],
+            include_dcp_local_seq_lens=True,
+        )
+        # Dummy capture requests have no mm_features in encoder_cache.
+        # Use representative encoder lengths for cross-attention metadata.
+        query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
+        max_query_len = input_batch.num_scheduled_tokens.max().item()
+        encoder_seq_lens_by_kv_group = self.get_encoder_seq_lens_by_kv_group(
+            attn_groups=attn_groups,
+            num_reqs=input_batch.num_reqs,
+            req_ids=None,
+        )
+        attn_metadata = build_attn_metadata(
+            attn_groups=attn_groups,
+            num_reqs=input_batch.num_reqs,
+            num_tokens=input_batch.num_tokens,
+            query_start_loc_gpu=input_batch.query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            max_query_len=max_query_len,
+            seq_lens=input_batch.seq_lens,
+            max_seq_len=self.max_model_len,
+            block_tables=block_tables,
+            slot_mappings=slot_mappings,
+            kv_cache_config=kv_cache_config,
+            dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            encoder_seq_lens_by_kv_group=encoder_seq_lens_by_kv_group,
+        )
+        return attn_metadata
