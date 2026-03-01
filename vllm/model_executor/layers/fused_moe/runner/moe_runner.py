@@ -4,8 +4,10 @@ from abc import ABC, abstractmethod
 
 import torch
 
+from vllm.model_executor.custom_op import PluggableLayer
 
-class MoERunner(ABC):
+
+class MoERunner(PluggableLayer, ABC):
     """
     Abstract base class for Mixture of Experts (MoE) runners.
 
