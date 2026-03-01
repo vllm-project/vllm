@@ -154,9 +154,7 @@ class FilteredOffloadingManager(OffloadingManager):
         return self._backing.complete_load(block_hashes)
 
     def get_stats(self) -> dict[str, Any]:
-        stats = self._backing.get_stats()
-        stats["stores_skipped"] = self.stores_skipped
-        return stats
+        return {**self._backing.get_stats(), "stores_skipped": self.stores_skipped}
 
     def complete_store(
         self, block_hashes: Iterable[BlockHash], success: bool = True

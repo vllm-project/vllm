@@ -87,9 +87,13 @@ class CPUOffloadingSpec(OffloadingSpec):
 
             store_threshold = int(self.extra_config.get("store_threshold", 0))
             if store_threshold > 1:
+                max_tracker_size = int(
+                    self.extra_config.get("max_tracker_size", 64_000)
+                )
                 self._manager = FilteredOffloadingManager(
                     backing=self._manager,
                     store_threshold=store_threshold,
+                    max_tracker_size=max_tracker_size,
                 )
         return self._manager
 
