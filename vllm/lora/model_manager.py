@@ -538,14 +538,38 @@ class LoRAModelManager:
                 model.loras[module_name] = lora
         return model
 
-    def _match_target_modules(self, module_name: str):
-        return any(
+    def _match_target_modules(self, module_name: str) -> bool:
+        """Check if a module should have LoRA applied.
+
+        This method first checks if the module is in vLLM's supported LoRA
+        modules, then applies deployment-time restrictions based on
+        LoRAConfig.target_modules.
+
+        Args:
+            module_name: Full dot-separated module name (e.g.,
+                "model.layers.0.self_attn.o_proj")
+
+        Returns:
+            True if LoRA should be applied to this module, False otherwise.
+        """
+        # First check if module is in vLLM's supported LoRA modules
+        is_supported = any(
             re.match(
                 r".*\.{target_module}$".format(target_module=target_module), module_name
             )
             or target_module == module_name
             for target_module in self.supported_lora_modules
         )
+        if not is_supported:
+            return False
+
+        # Apply deployment-time restrictions from config
+        if self.lora_config.target_modules is None:
+            return True
+
+        # Restrict to allowed suffixes (e.g. only o_proj)
+        module_suffix = module_name.split(".")[-1]
+        return module_suffix in set(self.lora_config.target_modules)
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
         """

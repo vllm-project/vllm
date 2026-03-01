@@ -711,3 +711,157 @@ def test_packed_loras(default_vllm_config, dist_init, dummy_model_gate_up, devic
     torch.testing.assert_close(
         packed_lora1.lora_b[1], model_lora_clone1.get_lora("up_proj").lora_b
     )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_target_modules_config(default_vllm_config, dist_init, dummy_model, device):
+    """Test that target_modules config restricts which modules get LoRA applied."""
+    model = dummy_model
+
+    # Test with target_modules restricting to only dense1
+    _manager = LoRAModelManager(
+        model,
+        2,
+        2,
+        2,
+        LoRAConfig(
+            max_lora_rank=8,
+            max_cpu_loras=2,
+            max_loras=2,
+            lora_dtype=DEFAULT_DTYPE,
+            target_modules=["dense1"],
+        ),
+        device=device,
+    )
+
+    # Only dense1 modules should be replaced with LoRA layers
+    assert isinstance(model.get_submodule("dense1"), ColumnParallelLinearWithLoRA)
+    assert isinstance(
+        model.get_submodule("layer1.dense1"), ColumnParallelLinearWithLoRA
+    )
+    # dense2 should NOT be replaced (not in target_modules)
+    assert not isinstance(model.get_submodule("dense2"), RowParallelLinearWithLoRA)
+    assert not isinstance(
+        model.get_submodule("layer1.dense2"), RowParallelLinearWithLoRA
+    )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_target_modules_multiple(default_vllm_config, dist_init, dummy_model, device):
+    """Test that multiple target_modules work correctly."""
+    model = dummy_model
+
+    # Test with multiple target_modules
+    _manager = LoRAModelManager(
+        model,
+        2,
+        2,
+        2,
+        LoRAConfig(
+            max_lora_rank=8,
+            max_cpu_loras=2,
+            max_loras=2,
+            lora_dtype=DEFAULT_DTYPE,
+            target_modules=["dense1", "dense2"],
+        ),
+        device=device,
+    )
+
+    # Both dense1 and dense2 modules should be replaced with LoRA layers
+    assert isinstance(model.get_submodule("dense1"), ColumnParallelLinearWithLoRA)
+    assert isinstance(
+        model.get_submodule("layer1.dense1"), ColumnParallelLinearWithLoRA
+    )
+    assert isinstance(model.get_submodule("dense2"), RowParallelLinearWithLoRA)
+    assert isinstance(model.get_submodule("layer1.dense2"), RowParallelLinearWithLoRA)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_target_modules_none_uses_all(
+    default_vllm_config, dist_init, dummy_model, device
+):
+    """Test that target_modules=None uses all supported modules."""
+    model = dummy_model
+
+    # Test with target_modules=None (default behavior)
+    _manager = LoRAModelManager(
+        model,
+        2,
+        2,
+        2,
+        LoRAConfig(
+            max_lora_rank=8,
+            max_cpu_loras=2,
+            max_loras=2,
+            lora_dtype=DEFAULT_DTYPE,
+            target_modules=None,
+        ),
+        device=device,
+    )
+
+    # All supported modules should be replaced with LoRA layers
+    assert isinstance(model.get_submodule("dense1"), ColumnParallelLinearWithLoRA)
+    assert isinstance(
+        model.get_submodule("layer1.dense1"), ColumnParallelLinearWithLoRA
+    )
+    assert isinstance(model.get_submodule("dense2"), RowParallelLinearWithLoRA)
+    assert isinstance(model.get_submodule("layer1.dense2"), RowParallelLinearWithLoRA)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_load_adapter_warns_on_unsupported_modules(
+    default_vllm_config, dist_init, dummy_model_gate_up, device, tmp_path
+):
+    """Test that _load_adapter warns when a LoRA adapter contains modules
+    not in the model's supported LoRA target modules."""
+    from unittest.mock import patch
+
+    import vllm.lora.worker_manager as wm_module
+
+    lora_config = LoRAConfig(
+        max_lora_rank=8, max_cpu_loras=4, max_loras=4, lora_dtype=DEFAULT_DTYPE
+    )
+
+    dummy_lora_files = f"{tmp_path}/lora_adapter"
+    os.makedirs(dummy_lora_files, exist_ok=True)
+    create_peft_lora(
+        dummy_model_gate_up,
+        save_dir=dummy_lora_files,
+        target_modules=["layer1.dense1", "dense2"],
+        lora_dtype=DEFAULT_DTYPE,
+    )
+
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config, lora_config=lora_config)
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = 2
+
+    worker_manager = WorkerLoRAManager(vllm_config, device, EMBEDDING_MODULES)
+    worker_manager.vocab_size = dummy_model_gate_up.unpadded_vocab_size
+    worker_manager.create_lora_manager(dummy_model_gate_up)
+
+    # Patch from_local_checkpoint to inject an unsupported module
+    original_from_checkpoint = LoRAModel.from_local_checkpoint
+
+    def patched_from_checkpoint(*args, **kwargs):
+        lora = original_from_checkpoint(*args, **kwargs)
+        lora.loras["unsupported_module"] = LoRALayerWeights(
+            module_name="unsupported_module",
+            rank=8,
+            lora_alpha=16,
+            lora_a=torch.randn(8, 10),
+            lora_b=torch.randn(10, 8),
+        )
+        return lora
+
+    lora_request = LoRARequest("test", 1, dummy_lora_files)
+    with (
+        patch.object(LoRAModel, "from_local_checkpoint", patched_from_checkpoint),
+        patch.object(wm_module.logger, "warning_once") as mock_warning,
+    ):
+        worker_manager._load_adapter(lora_request)
+        warning_args = mock_warning.call_args_list
+        found = any("unsupported_module" in str(call) for call in warning_args)
+        assert found, (
+            f"Expected warning about 'unsupported_module', got: {warning_args}"
+        )
