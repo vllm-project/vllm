@@ -22,8 +22,11 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.petit_utils import (
+    apply_petit_mxfp4_linear,
     apply_petit_nvfp4_linear,
+    prepare_mxfp4_layer_for_petit,
     prepare_nvfp4_layer_for_petit,
+    verify_petit_mxfp4_supported,
     verify_petit_nvfp4_supported,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
@@ -172,6 +175,18 @@ class PetitNvFp4Config(QuantizationConfig):
             return PetitFp8KVCacheMethod(self)
         return None
 
+    def get_cache_scale(self, name: str) -> str | None:
+        """Map checkpoint attention output scales to vLLM attention scales."""
+        if name.endswith(".output_scale") and ".k_proj" in name:
+            return name.replace(".k_proj.output_scale", ".attn.k_scale")
+        if name.endswith(".output_scale") and ".v_proj" in name:
+            return name.replace(".v_proj.output_scale", ".attn.v_scale")
+        if name.endswith(".output_scale") and ".q_proj" in name:
+            return name.replace(".q_proj.output_scale", ".attn.q_scale")
+        if name.endswith("self_attn.prob_output_scale"):
+            return name.replace(".prob_output_scale", ".attn.prob_scale")
+        return None
+
     def get_scaled_act_names(self) -> list[str]:
         return []
 
@@ -193,7 +208,7 @@ class PetitFp8KVCacheMethod(BaseKVCacheMethod):
     Supports loading kv-cache scaling factors from FP8 checkpoints.
     """
 
-    def __init__(self, quant_config: PetitNvFp4Config):
+    def __init__(self, quant_config: QuantizationConfig):
         super().__init__(quant_config)
 
 
@@ -309,6 +324,258 @@ class PetitNvFp4LinearMethod(LinearMethodBase):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return apply_petit_nvfp4_linear(
+            input=x,
+            weight=layer.weight,
+            weight_scale=layer.weight_scale,
+            weight_scale_2=layer.weight_scale_2,
+            size_n=layer.output_size_per_partition,
+            size_k=layer.input_size_per_partition,
+            bias=bias,
+        )
+
+
+class PetitMxFp4Config(QuantizationConfig):
+    """Config class for Petit MXFP4."""
+
+    def __init__(
+        self,
+        group_size: int | None = None,
+        exclude_modules: list[str] | None = None,
+    ) -> None:
+        self._check_hardware_support()
+        self.group_size = group_size
+        self.exclude_modules = exclude_modules
+
+    def _check_hardware_support(self) -> None:
+        if current_platform.is_cuda():
+            raise ValueError(
+                "The 'petit' quantization backend is designed for AMD GPUs "
+                "and is not supported on the CUDA platform."
+            )
+
+    @classmethod
+    def get_name(cls) -> QuantizationMethods:
+        return "petit_mxfp4"
+
+    @classmethod
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
+        return [torch.bfloat16, torch.half]
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 90
+
+    @classmethod
+    def get_config_filenames(cls) -> list[str]:
+        return ["hf_quant_config.json"]
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> "PetitMxFp4Config":
+        if isinstance(config.get("quantization"), dict):
+            qc = config["quantization"]
+        elif "quant_algo" in config:
+            qc = config
+        else:
+            qc = cls.get_from_keys(config, ["quantization"])
+
+        quant_method_raw = qc.get("quant_algo") or qc.get("quant_method")
+        if not isinstance(quant_method_raw, str) or not quant_method_raw:
+            raise ValueError(
+                "Missing or invalid 'quant_algo'/'quant_method' in quantization config."
+            )
+        quant_method = quant_method_raw.upper()
+
+        group_size_raw = qc.get("group_size")
+        if group_size_raw is None:
+            group_size = None
+        elif isinstance(group_size_raw, int):
+            group_size = group_size_raw
+        else:
+            raise ValueError(
+                "Invalid 'group_size' (must be int) in hf_quant_config.json."
+            )
+
+        verify_petit_mxfp4_supported(quant_method, group_size)
+
+        exclude_raw = qc.get("exclude_modules", [])
+        if exclude_raw is None:
+            exclude_modules: list[str] = []
+        elif isinstance(exclude_raw, list) and all(
+            isinstance(x, str) for x in exclude_raw
+        ):
+            exclude_modules = exclude_raw
+        else:
+            raise ValueError("'exclude_modules' must be a list[str] (or omitted).")
+
+        return cls(
+            group_size=group_size,
+            exclude_modules=exclude_modules,
+        )
+
+    @classmethod
+    def override_quantization_method(
+        cls, hf_quant_cfg, user_quant
+    ) -> QuantizationMethods | None:
+        del user_quant
+        if not current_platform.is_rocm():
+            return None
+
+        # Petit MXFP4 expects a nested "quantization" block with
+        # quant_algo/group_size metadata. Avoid overriding generic
+        # "quant_method=mxfp4" checkpoints (e.g., GPT-OSS) that use a
+        # different execution path.
+        if isinstance(hf_quant_cfg.get("quantization"), dict):
+            qc = hf_quant_cfg["quantization"]
+        elif "quant_algo" in hf_quant_cfg:
+            qc = hf_quant_cfg
+        else:
+            return None
+
+        algo = (qc.get("quant_algo") or qc.get("quant_method") or "").upper()
+        if algo == "MXFP4":
+            return cls.get_name()
+        return None
+
+    def is_layer_excluded(self, prefix: str, exclude_modules: list[str]) -> bool:
+        for pattern in exclude_modules:
+            regex_str = pattern.replace(".", r"\.").replace("*", r".*")
+            if re.fullmatch(regex_str, prefix):
+                return True
+        return False
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> "QuantizeMethodBase | None":
+        exclude = self.require_exclude_modules()
+
+        if isinstance(layer, LinearBase):
+            if is_layer_skipped(prefix, exclude) or self.is_layer_excluded(
+                prefix, exclude
+            ):
+                return UnquantizedLinearMethod()
+            return PetitMxFp4LinearMethod(self)
+        elif isinstance(layer, Attention):
+            return PetitFp8KVCacheMethod(self)
+        return None
+
+    def get_cache_scale(self, name: str) -> str | None:
+        """Map checkpoint attention output scales to vLLM attention scales."""
+        if name.endswith(".output_scale") and ".k_proj" in name:
+            return name.replace(".k_proj.output_scale", ".attn.k_scale")
+        if name.endswith(".output_scale") and ".v_proj" in name:
+            return name.replace(".v_proj.output_scale", ".attn.v_scale")
+        if name.endswith(".output_scale") and ".q_proj" in name:
+            return name.replace(".q_proj.output_scale", ".attn.q_scale")
+        if name.endswith("self_attn.prob_output_scale"):
+            return name.replace(".prob_output_scale", ".attn.prob_scale")
+        return None
+
+    def get_scaled_act_names(self) -> list[str]:
+        return []
+
+    def require_group_size(self) -> int:
+        if self.group_size is None:
+            logger.warning("group_size not set; defaulting to 32 for MXFP4.")
+            return 32
+        return self.group_size
+
+    def require_exclude_modules(self) -> list[str]:
+        return list(self.exclude_modules or [])
+
+
+class PetitMxFp4LinearMethod(LinearMethodBase):
+    """Linear method for MXFP4."""
+
+    def __init__(self, quant_config: PetitMxFp4Config):
+        self.quant_config = quant_config
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        del input_size, output_size, params_dtype
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+
+        if input_size_per_partition % 32 != 0:
+            raise ValueError(
+                "Unsupported model when in features size is not multiple of 32"
+            )
+
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition // 2,
+                dtype=torch.uint8,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight", weight)
+
+        group_size = self.quant_config.require_group_size()
+        weight_scale = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition // group_size,
+                dtype=torch.uint8,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight_scale", weight_scale)
+
+        # MXFP4 checkpoints commonly only provide per-block scales. Keep an
+        # optional global scale parameter initialized to 1.0 so kernels receive
+        # a neutral scale when no checkpoint tensor is present.
+        weight_scale_2 = PerTensorScaleParameter(
+            data=torch.ones(len(output_partition_sizes), dtype=torch.float32),
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight_scale_2", weight_scale_2)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        prepare_mxfp4_layer_for_petit(layer)
+        weight_scale_2 = layer.weight_scale_2.flatten().to(torch.float32)
+        if weight_scale_2.numel() == 0:
+            raise ValueError(
+                "Invalid MXFP4 checkpoint: 'weight_scale_2' must be non-empty."
+            )
+
+        global_scale = weight_scale_2.max()
+        if weight_scale_2.numel() > 1 and not torch.isclose(
+            weight_scale_2.min(), global_scale
+        ):
+            logger.warning_once(
+                "MXFP4 fused layers provide multiple weight_scale_2 values. "
+                "Petit kernels currently support one global scale per GEMM, "
+                "so vLLM falls back to max(weight_scale_2), which may impact "
+                "numerical accuracy."
+            )
+
+        layer.weight_scale_2 = Parameter(
+            global_scale.reshape(1).to(layer.weight.device), requires_grad=False
+        )
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return apply_petit_mxfp4_linear(
             input=x,
             weight=layer.weight,
             weight_scale=layer.weight_scale,
