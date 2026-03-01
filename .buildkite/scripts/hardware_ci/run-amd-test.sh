@@ -351,7 +351,6 @@ wait_for_clean_gpus
 # --- Pull test image ---
 echo "--- Pulling container"
 image_name="rocm/vllm-ci:${BUILDKITE_COMMIT}"
-container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 docker pull "${image_name}"
 
 remove_docker_container() {
