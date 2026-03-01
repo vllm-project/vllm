@@ -64,6 +64,7 @@ from vllm.config.cache import (
     KVOffloadingBackend,
     MambaCacheMode,
     MambaDType,
+    MambaNumAttnPages,
     PrefixCachingHashAlgo,
 )
 from vllm.config.device import Device
@@ -571,6 +572,7 @@ class EngineArgs:
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+    mamba_num_attn_pages: MambaNumAttnPages = CacheConfig.mamba_num_attn_pages
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
@@ -969,6 +971,9 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
+        )
+        cache_group.add_argument(
+            "--mamba-num-attn-pages", **cache_kwargs["mamba_num_attn_pages"]
         )
         cache_group.add_argument(
             "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
@@ -1474,6 +1479,7 @@ class EngineArgs:
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
             mamba_cache_mode=self.mamba_cache_mode,
+            mamba_num_attn_pages=self.mamba_num_attn_pages,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )

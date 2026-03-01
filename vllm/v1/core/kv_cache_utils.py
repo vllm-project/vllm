@@ -765,8 +765,11 @@ def create_kv_cache_group_specs(
             kv_cache_spec[layer_name] for layer_name in layer_names_one_group
         ]
         merged_layer_spec = layer_specs[0].merge(layer_specs)
+        group_size = len(layer_names_one_group)
+        if isinstance(merged_layer_spec, FullAttentionSpec):
+            group_size = cdiv(group_size, merged_layer_spec.group_size)
         kv_cache_groups.append(
-            KVCacheGroupSpec(layer_names_one_group, merged_layer_spec)
+            KVCacheGroupSpec(layer_names_one_group, merged_layer_spec, group_size)
         )
     return kv_cache_groups
 
@@ -803,7 +806,7 @@ def get_max_concurrency_for_kv_cache_config(
     Get the maximum concurrency for the given KV cache configuration.
     """
     num_layer_per_group = max(
-        len(group.layer_names) for group in kv_cache_config.kv_cache_groups
+        group.group_size for group in kv_cache_config.kv_cache_groups
     )
     max_memory_usage_per_request = num_layer_per_group * max_memory_usage_bytes(
         vllm_config, (group.kv_cache_spec for group in kv_cache_config.kv_cache_groups)
@@ -1025,6 +1028,22 @@ def _get_kv_cache_groups_uniform_page_size(
     for layer_name, layer_spec in kv_cache_spec.items():
         same_type_layers[layer_spec].append(layer_name)
 
+    attn_group_size = next(
+        (
+            kv_spec.group_size
+            for kv_spec in same_type_layers
+            if isinstance(kv_spec, FullAttentionSpec)
+        ),
+        1,
+    )
+    same_type_num_layers: dict[KVCacheSpec, int] = {}
+    for kv_spec, layers in same_type_layers.items():
+        num_layers = len(layers)
+        # For FullAttn, group `attn_group_size` layers to 1 page
+        if isinstance(kv_spec, FullAttentionSpec):
+            num_layers = cdiv(num_layers, attn_group_size)
+        same_type_num_layers[kv_spec] = num_layers
+
     # Split each group into smaller groups, to make the number of layers in each
     # group identical. Add padding to the last group of each type if necessary.
     # E.g., (full.0, full.1), (sw.0, sw.1, sw.2)
@@ -1037,9 +1056,9 @@ def _get_kv_cache_groups_uniform_page_size(
     # is the minimum number of layers among all attention types. Need a better
     # strategy if we want to support more complex patterns (e.g., 20 full + 30
     # sw, where the group size should be 10).
-    min_num_layers = min([len(layers) for layers in same_type_layers.values()])
+    min_num_layers = min([num_layers for num_layers in same_type_num_layers.values()])
     group_size = min_num_layers
-    max_num_layers = max([len(layers) for layers in same_type_layers.values()])
+    max_num_layers = max([num_layers for num_layers in same_type_num_layers.values()])
     if max_num_layers < min_num_layers * 1.25:
         # If the number of layers is not much larger than the minimum number of layers,
         # use the maximum number of layers as the group size to avoid too many padding
@@ -1048,7 +1067,7 @@ def _get_kv_cache_groups_uniform_page_size(
         # magic number to avoid too many padding layers.
         group_size = max_num_layers
     grouped_layers = []
-    for layers in same_type_layers.values():
+    for kv_spec, layers in same_type_layers.items():
         num_padding_layers = group_size - len(layers) % group_size
         if num_padding_layers != group_size:
             logger.warning(
@@ -1056,7 +1075,7 @@ def _get_kv_cache_groups_uniform_page_size(
                 num_padding_layers,
                 num_padding_layers / len(layers) * 100,
             )
-        num_groups = cdiv(len(layers), group_size)
+        num_groups = cdiv(same_type_num_layers[kv_spec], group_size)
         # In PP case, say if we have
         # - stage 0: full.0, sw.0, sw.1
         # - stage 1: full.1, sw.2, sw.3
@@ -1068,8 +1087,22 @@ def _get_kv_cache_groups_uniform_page_size(
         # the same and will cause memory waste.
         # To avoid this, we assign layers[i::num_groups] to the i-th group
         # instead of layers[i * group_size: (i + 1) * group_size]
-        for i in range(num_groups):
-            grouped_layers.append(layers[i::num_groups])
+        if isinstance(kv_spec, FullAttentionSpec) and attn_group_size > 1:
+            stride = num_groups * attn_group_size
+            for i in range(num_groups):
+                attn_group_layers = []
+                for start in range(0, len(layers), stride):
+                    attn_group_layers.extend(
+                        layers[
+                            i * attn_group_size + start : (i + 1) * attn_group_size
+                            + start
+                        ]
+                    )
+                grouped_layers.append(attn_group_layers)
+        else:
+            for i in range(num_groups):
+                grouped_layers.append(layers[i::num_groups])
+
     return create_kv_cache_group_specs(kv_cache_spec, grouped_layers)
 
 
@@ -1126,7 +1159,7 @@ def get_kv_cache_config_from_groups(
         # (sw.1, padding) will be: (group_size = 2)
         # full.0, sw.0, sw.1: share a Tensor with size=available_memory//2
         # full.1, sw.2: share another Tensor with size=available_memory//2
-        group_size = max(len(group.layer_names) for group in kv_cache_groups)
+        group_size = max(group.group_size for group in kv_cache_groups)
 
         page_size = get_uniform_page_size(
             [group.kv_cache_spec for group in kv_cache_groups]
@@ -1139,8 +1172,19 @@ def get_kv_cache_config_from_groups(
         for i in range(group_size):
             shared_by = []
             for j in range(len(kv_cache_groups)):
-                if i < len(kv_cache_groups[j].layer_names):
-                    shared_by.append(kv_cache_groups[j].layer_names[i])
+                num_layers = len(kv_cache_groups[j].layer_names)
+                kv_cache_spec = kv_cache_groups[j].kv_cache_spec
+                if (
+                    isinstance(kv_cache_spec, FullAttentionSpec)
+                    and (attn_group_size := kv_cache_spec.group_size) > 1
+                ):
+                    for k in range(attn_group_size):
+                        idx = i * attn_group_size + k
+                        if idx < num_layers:
+                            shared_by.append(kv_cache_groups[j].layer_names[idx])
+                else:
+                    if i < num_layers:
+                        shared_by.append(kv_cache_groups[j].layer_names[i])
             kv_cache_tensors.append(
                 KVCacheTensor(size=page_size * num_blocks, shared_by=shared_by)
             )
@@ -1350,7 +1394,7 @@ def _max_memory_usage_bytes_from_groups(
 
     # General case: group_size pools, each shared by one layer per group
     # Memory = group_size * page_size * blocks_for_max_len
-    group_size = max(len(group.layer_names) for group in kv_cache_groups)
+    group_size = max(group.group_size for group in kv_cache_groups)
     page_size = get_uniform_page_size(
         [group.kv_cache_spec for group in kv_cache_groups]
     )
@@ -1494,7 +1538,9 @@ def _project_kv_cache_groups_to_worker(
                     for layer_name in worker_layer_names
                 },
             )
-        projected_groups.append(KVCacheGroupSpec(worker_layer_names, group_spec))
+        projected_groups.append(
+            KVCacheGroupSpec(worker_layer_names, group_spec, group.group_size)
+        )
     return projected_groups
 
 
