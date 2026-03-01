@@ -3,13 +3,19 @@
 
 """Tests for the /render endpoints that expose prompt preprocessing."""
 
+import json
+
 import httpx
 import pytest
 import pytest_asyncio
 
+from vllm.multimodal.utils import encode_image_url
+from vllm.platforms import current_platform
+
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+VISION_MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
 
 
 @pytest.fixture(scope="module")
@@ -24,6 +30,46 @@ def server():
 async def client(server):
     async with httpx.AsyncClient(
         base_url=server.url_for(""), timeout=30.0
+    ) as http_client:
+        yield http_client
+
+
+@pytest.fixture(scope="module")
+def vision_server():
+    """Vision-capable server used for multimodal /render tests."""
+
+    args = [
+        "--runner",
+        "generate",
+        "--max-model-len",
+        "2048",
+        "--max-num-seqs",
+        "5",
+        "--enforce-eager",
+        "--trust-remote-code",
+        "--limit-mm-per-prompt",
+        json.dumps({"image": 1}),
+    ]
+
+    # ROCm: Increase timeouts to handle potential network delays and slower
+    # image processing.
+    env_overrides: dict[str, str] = {}
+    if current_platform.is_rocm():
+        env_overrides = {
+            "VLLM_VIDEO_FETCH_TIMEOUT": "120",
+            "VLLM_ENGINE_ITERATION_TIMEOUT_S": "300",
+        }
+
+    with RemoteOpenAIServer(
+        VISION_MODEL_NAME, args, env_dict=env_overrides
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def vision_client(vision_server):
+    async with httpx.AsyncClient(
+        base_url=vision_server.url_for(""), timeout=60.0
     ) as http_client:
         yield http_client
 
@@ -115,6 +161,48 @@ async def test_chat_completion_render_basic(client):
     assert all(isinstance(tid, int) for tid in token_ids)
     # Verify BOS token (usually 1 for LLaMA models)
     assert token_ids[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_render_with_base64_image_url(
+    vision_client,
+    local_asset_server,
+):
+    """Render a multimodal chat request and verify tokens are returned."""
+
+    image = local_asset_server.get_image_asset("RGBA_comp.png")
+    data_url = encode_image_url(image, format="PNG")
+
+    assert data_url.startswith("data:image/")
+    assert ";base64," in data_url
+
+    response = await vision_client.post(
+        "/v1/chat/completions/render",
+        json={
+            "model": VISION_MODEL_NAME,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                        {"type": "text", "text": "What's in this image?"},
+                    ],
+                }
+            ],
+        },
+    )
+
+    # Expect successful render response
+    assert response.status_code == 200
+
+    data = response.json()
+
+    # Validate tokens field exists
+    assert "tokens" in data, "Response must contain 'tokens' field"
+    assert isinstance(data["tokens"], list), "'tokens' must be a list"
+
+    # Ensure non-empty token output
+    assert len(data["tokens"]) > 0, "Token list must not be empty"
 
 
 @pytest.mark.asyncio
