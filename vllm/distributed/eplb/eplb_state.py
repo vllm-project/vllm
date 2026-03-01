@@ -1088,13 +1088,21 @@ class EplbState:
         return eplb_state
 
 
-@dataclass
-class EplbLayerState:
+@dataclass(frozen=True)
+class InitializedEplbLayerState:
     """Runtime EPLB data stored in the MoE layer."""
 
-    expert_load_view: torch.Tensor | None = None
-    logical_to_physical_map: torch.Tensor | None = None
-    logical_replica_count: torch.Tensor | None = None
+    expert_load_view: torch.Tensor
+    logical_to_physical_map: torch.Tensor
+    logical_replica_count: torch.Tensor
+
+
+@dataclass(frozen=True)
+class UninitializedEplbLayerState:
+    pass
+
+
+EplbLayerState = InitializedEplbLayerState | UninitializedEplbLayerState
 
 
 def _node_count_with_rank_mapping(

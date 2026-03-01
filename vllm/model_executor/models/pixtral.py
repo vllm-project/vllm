@@ -73,6 +73,7 @@ from .interfaces import (
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
+    is_mixture_of_experts,
 )
 from .module_mapping import MultiModelKeys
 from .utils import StageMissingLayer, init_vllm_registered_model, maybe_prefix
@@ -410,6 +411,119 @@ class PixtralForConditionalGeneration(
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
+        )
+
+        # Track whether the language model is MoE so we can proxy its
+        # attributes via @property (see below).
+        self._is_moe = is_mixture_of_experts(self.language_model)
+
+    @property
+    def num_moe_layers(self) -> int:  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.num_moe_layers
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute 'num_moe_layers'"
+        )
+
+    @property
+    def num_expert_groups(self) -> int:  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.num_expert_groups
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute "
+            "'num_expert_groups'"
+        )
+
+    @property
+    def num_logical_experts(self) -> int:  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.num_logical_experts
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute "
+            "'num_logical_experts'"
+        )
+
+    @property
+    def num_physical_experts(self) -> int:  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.num_physical_experts
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute "
+            "'num_physical_experts'"
+        )
+
+    @property
+    def num_local_physical_experts(self) -> int:  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.num_local_physical_experts
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute "
+            "'num_local_physical_experts'"
+        )
+
+    @property
+    def num_routed_experts(self) -> int:  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.num_routed_experts
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute "
+            "'num_routed_experts'"
+        )
+
+    @property
+    def num_shared_experts(self) -> int:  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.num_shared_experts
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute "
+            "'num_shared_experts'"
+        )
+
+    @property
+    def num_redundant_experts(self) -> int:  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.num_redundant_experts
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute "
+            "'num_redundant_experts'"
+        )
+
+    @property
+    def moe_layers(self):  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.moe_layers
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute 'moe_layers'"
+        )
+
+    @property
+    def expert_weights(self):  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.expert_weights
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute 'expert_weights'"
+        )
+
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        self.language_model.set_eplb_state(
+            expert_load_view,
+            logical_to_physical_map,
+            logical_replica_count,
+        )
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        self.language_model.update_physical_experts_metadata(
+            num_physical_experts=num_physical_experts,
+            num_local_physical_experts=num_local_physical_experts,
         )
 
     def _parse_and_validate_image_input(

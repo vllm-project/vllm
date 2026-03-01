@@ -5,7 +5,7 @@ from collections.abc import Callable
 import pytest
 import torch
 
-from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.distributed.eplb.eplb_state import EplbLayerState, InitializedEplbLayerState
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
@@ -17,9 +17,11 @@ TOP_KS = [2, 4, 6]
 NUM_EXPERTS = [8, 16, 64]
 
 
-def setup_eplb_state(enable_eplb: bool, global_num_experts: int) -> EplbLayerState:
+def setup_eplb_state(
+    enable_eplb: bool, global_num_experts: int
+) -> EplbLayerState | None:
     if not enable_eplb:
-        return EplbLayerState()
+        return None
 
     # Initialize EPLB state with proper tensors for testing
     # For testing purposes, we use a simple 1:1 mapping (no redundant experts)
@@ -40,7 +42,7 @@ def setup_eplb_state(enable_eplb: bool, global_num_experts: int) -> EplbLayerSta
         global_num_experts, dtype=torch.int64, device="cuda"
     )
 
-    return EplbLayerState(
+    return InitializedEplbLayerState(
         expert_load_view=expert_load_view,
         logical_to_physical_map=logical_to_physical_map,
         logical_replica_count=logical_replica_count,
@@ -274,7 +276,6 @@ def test_fused_topk(
         top_k=top_k,
         global_num_experts=global_num_experts,
         renormalize=renormalize,
-        enable_eplb=enable_eplb,
         eplb_state=eplb_state,
     )
 
@@ -325,7 +326,6 @@ def test_fused_topk_bias(
         top_k=top_k,
         global_num_experts=global_num_experts,
         renormalize=renormalize,
-        enable_eplb=enable_eplb,
         eplb_state=eplb_state,
     )
 
@@ -394,7 +394,6 @@ def test_grouped_topk(
         top_k=top_k,
         global_num_experts=global_num_experts,
         renormalize=renormalize,
-        enable_eplb=enable_eplb,
         eplb_state=eplb_state,
     )
 
@@ -444,7 +443,6 @@ def test_custom(
         global_num_experts=global_num_experts,
         custom_routing_function=custom_routing_function,
         renormalize=renormalize,
-        enable_eplb=enable_eplb,
         eplb_state=eplb_state,
     )
 

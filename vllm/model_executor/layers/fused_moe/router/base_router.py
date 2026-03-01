@@ -5,11 +5,14 @@ from collections.abc import Callable
 
 import torch
 
-from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.distributed.eplb.eplb_state import EplbLayerState, InitializedEplbLayerState
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
 from vllm.platforms import current_platform
+
+logger = init_logger(__name__)
 
 if current_platform.is_cuda_alike():
 
@@ -109,8 +112,7 @@ class BaseRouter(FusedMoERouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
-        enable_eplb: bool = False,
+        eplb_state: EplbLayerState | None,
         # TODO(bnell): Once the MK is constructed at layer init time, we
         # can make this a plain value instead of a callback.
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
@@ -125,7 +127,6 @@ class BaseRouter(FusedMoERouter):
         self.top_k = top_k
         self.global_num_experts = global_num_experts
         self.eplb_state = eplb_state
-        self.enable_eplb = enable_eplb
         self.indices_type_getter = indices_type_getter
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
 
@@ -133,19 +134,35 @@ class BaseRouter(FusedMoERouter):
         """Set a capture callback for logical routed expert IDs."""
         self.capture_fn = capture_fn
 
+    def _check_eplb_initialized(self) -> InitializedEplbLayerState | None:
+        """Returns initialized EPLB state if EPLB is enabled and initialized,
+        otherwise returns None."""
+        if self.eplb_state is not None and isinstance(
+            self.eplb_state, InitializedEplbLayerState
+        ):
+            return self.eplb_state
+        return None
+
     def _validate_eplb_state(self) -> None:
         """Validate that EPLB state is properly initialized if EPLB is enabled."""
-        if self.enable_eplb:
-            if self.eplb_state.expert_load_view is None:
-                raise ValueError("enable_eplb=True requires expert_load_view != None")
-            if self.eplb_state.logical_to_physical_map is None:
-                raise ValueError(
-                    "enable_eplb=True requires logical_to_physical_map != None"
-                )
-            if self.eplb_state.logical_replica_count is None:
-                raise ValueError(
-                    "enable_eplb=True requires logical_replica_count != None"
-                )
+        if self._check_eplb_initialized() is None:
+            logger.warning_once(
+                "enable_eplb=True but EPLB state is not yet initialized. "
+                "EPLB mapping will be skipped until set_eplb_state() is "
+                "called. This is expected during compilation/profiling."
+            )
+
+    def initialize_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        self.eplb_state = InitializedEplbLayerState(
+            expert_load_view=expert_load_view,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count,
+        )
 
     def _get_indices_type(self) -> torch.dtype | None:
         """Get the desired indices dtype from the getter function."""
@@ -155,15 +172,13 @@ class BaseRouter(FusedMoERouter):
 
     def _apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
         """Apply EPLB mapping to convert logical expert IDs to physical expert IDs."""
-        if self.enable_eplb:
-            assert self.eplb_state.expert_load_view is not None
-            assert self.eplb_state.logical_to_physical_map is not None
-            assert self.eplb_state.logical_replica_count is not None
+        if (initialized_eplb_state := self._check_eplb_initialized()) is not None:
+            assert isinstance(initialized_eplb_state, InitializedEplbLayerState)
             return eplb_map_to_physical_and_record(
                 topk_ids=topk_ids,
-                expert_load_view=self.eplb_state.expert_load_view,
-                logical_to_physical_map=self.eplb_state.logical_to_physical_map,
-                logical_replica_count=self.eplb_state.logical_replica_count,
+                expert_load_view=initialized_eplb_state.expert_load_view,
+                logical_to_physical_map=initialized_eplb_state.logical_to_physical_map,
+                logical_replica_count=initialized_eplb_state.logical_replica_count,
             )
         return topk_ids
 
