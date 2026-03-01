@@ -109,7 +109,7 @@ class Scheduler(SchedulerInterface):
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events
         )
-
+        self.max_waiting_queue_length = self.scheduler_config.max_waiting_queue_length
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
@@ -161,7 +161,7 @@ class Scheduler(SchedulerInterface):
         # Priority queues for requests.
         self.waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
-
+        self.rejected: list[Request] = []
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
         # requests so that they can free the cached states for those requests.
@@ -1443,21 +1443,24 @@ class Scheduler(SchedulerInterface):
             requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
             self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
             for request in requests:
-                outputs[request.client_index].append(
-                    EngineCoreOutput(
-                        request_id=request.request_id,
-                        new_token_ids=[],
-                        finish_reason=request.get_finished_reason(),
-                        events=request.take_events(),
-                        trace_headers=request.trace_headers,
-                        num_cached_tokens=request.num_cached_tokens,
-                    )
+                self._append_failed_or_rejected_output(
+                    outputs,
+                    request,
+                    failed_kv=True,
                 )
 
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
-
+        # Handle rejected requests.
+        if self.rejected:
+            # Create EngineCoreOutputs for all rejected requests.
+            for request in self.rejected:
+                self._append_failed_or_rejected_output(
+                    outputs,
+                    request,
+                )
+            self.rejected.clear()
         # collect KV cache events from KV cache manager
         events = self.kv_cache_manager.take_events()
 
@@ -1509,6 +1512,30 @@ class Scheduler(SchedulerInterface):
             eco.scheduler_stats = stats
 
         return engine_core_outputs
+
+    def _append_failed_or_rejected_output(
+        self,
+        outputs: dict[int, list[EngineCoreOutput]],
+        request: "Request",
+        failed_kv: bool = False,
+    ) -> None:
+        """
+        Appends an EngineCoreOutput for a failed KV load or rejected request.
+        If failed_kv is True, omits stop_reason (not available for failed KV loads).
+        """
+        output = EngineCoreOutput(
+            request_id=request.request_id,
+            new_token_ids=[],
+            finish_reason=request.get_finished_reason(),
+            events=request.take_events(),
+            trace_headers=request.trace_headers,
+        )
+        if failed_kv:
+            output.num_cached_tokens = request.num_cached_tokens
+        else:
+            output.stop_reason = request.stop_reason
+
+        outputs[request.client_index].append(output)
 
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
@@ -1659,6 +1686,12 @@ class Scheduler(SchedulerInterface):
         return len(self.running), len(self.waiting)
 
     def add_request(self, request: Request) -> None:
+        if len(self.waiting) >= self.max_waiting_queue_length:
+            request.status = RequestStatus.FINISHED_REJECTED
+            self.rejected.append(request)
+            if self.log_stats:
+                request.record_event(EngineCoreEventType.REJECTED)
+            return
         existing = self.requests.get(request.request_id)
         if existing is not None:
             update = StreamingUpdate.from_request(request)
