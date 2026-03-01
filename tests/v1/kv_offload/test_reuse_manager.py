@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Unit tests for BlockReuseTracker and StoreReusedOffloadingManager.
+Unit tests for BlockReuseTracker and FilteredOffloadingManager.
 
 The production classes are loaded directly from
 vllm/v1/kv_offload/reuse_manager.py via importlib so tests always run
@@ -42,8 +42,8 @@ if TYPE_CHECKING:
 
         def check(self, block_hash: Any) -> bool: ...
 
-    class StoreReusedOffloadingManager:  # pragma: no cover
-        """Mypy-only stub for reuse_manager.StoreReusedOffloadingManager."""
+    class FilteredOffloadingManager:  # pragma: no cover
+        """Mypy-only stub for reuse_manager.FilteredOffloadingManager."""
 
         _backing: Any
         _tracker: BlockReuseTracker
@@ -149,8 +149,8 @@ _spec.loader.exec_module(_mod)  # type: ignore[union-attr]
 
 if not TYPE_CHECKING:
     BlockReuseTracker = _mod.BlockReuseTracker  # type: ignore[assignment,misc]
-    StoreReusedOffloadingManager = (  # type: ignore[assignment,misc]
-        _mod.StoreReusedOffloadingManager
+    FilteredOffloadingManager = (  # type: ignore[assignment,misc]
+        _mod.FilteredOffloadingManager
     )
 
 
@@ -260,16 +260,16 @@ class TestBlockReuseTrackerLRUEviction:
 
 
 # ---------------------------------------------------------------------------
-# Tests: StoreReusedOffloadingManager
+# Tests: FilteredOffloadingManager
 # ---------------------------------------------------------------------------
 
 
-class TestStoreReusedOffloadingManager:
+class TestFilteredOffloadingManager:
     def _make_manager(
         self, threshold: int = 2, max_size: int = 100
-    ) -> tuple[StoreReusedOffloadingManager, Any]:
+    ) -> tuple[FilteredOffloadingManager, Any]:
         backing = make_mock_backing()
-        mgr = StoreReusedOffloadingManager(
+        mgr = FilteredOffloadingManager(
             backing=backing,
             store_threshold=threshold,
             max_tracker_size=max_size,

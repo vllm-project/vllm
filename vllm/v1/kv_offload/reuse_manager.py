@@ -4,7 +4,7 @@
 Reuse-frequency gating for CPU KV-cache offload stores.
 
 BlockReuseTracker — O(1) LRU-bounded frequency counter.
-StoreReusedOffloadingManager — OffloadingManager decorator that skips
+FilteredOffloadingManager — OffloadingManager decorator that skips
     storing blocks that have not yet been seen enough times.
 """
 
@@ -53,7 +53,7 @@ class BlockReuseTracker:
     def record(self, block_hash: BlockHash) -> None:
         """Record that *block_hash* has been seen.
 
-        Should be called from :meth:`StoreReusedOffloadingManager.lookup`
+        Should be called from :meth:`FilteredOffloadingManager.lookup`
         for each block hash in the lookup sequence.
         """
         if block_hash in self.counts:
@@ -69,13 +69,13 @@ class BlockReuseTracker:
         times and is therefore worth storing to CPU.
 
         Should be called from
-        :meth:`StoreReusedOffloadingManager.prepare_store` *before* calling
+        :meth:`FilteredOffloadingManager.prepare_store` *before* calling
         the backing manager's ``prepare_store``.
         """
         return self.counts.get(block_hash, 0) >= self.store_threshold
 
 
-class StoreReusedOffloadingManager(OffloadingManager):
+class FilteredOffloadingManager(OffloadingManager):
     """An :class:`OffloadingManager` decorator that skips storing blocks
     whose reuse frequency is below *store_threshold*.
 
