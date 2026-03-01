@@ -3,7 +3,6 @@
 from typing import Any
 
 import msgspec
-
 from pydantic import BaseModel, Field, field_serializer
 
 from vllm.config import ModelConfig

@@ -144,9 +144,7 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
 
     if request.use_beam_search:
         err = handler.create_error_response(
-            ValueError(
-                "Beam search is not supported by the token-in render endpoint"
-            )
+            ValueError("Beam search is not supported by the token-in render endpoint")
         )
         return JSONResponse(content=err.model_dump(), status_code=err.error.code)
 

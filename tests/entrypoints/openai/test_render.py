@@ -3,14 +3,11 @@
 
 """Tests for the /render endpoints that expose prompt preprocessing."""
 
-import json
-
 import httpx
 import pytest
 import pytest_asyncio
 
 from vllm.multimodal.utils import encode_image_url
-from vllm.platforms import current_platform
 
 from ...utils import RemoteOpenAIServer
 
@@ -37,32 +34,18 @@ async def client(server):
 @pytest.fixture(scope="module")
 def vision_server():
     """Vision-capable server used for multimodal /render tests."""
-
-    args = [
-        "--runner",
-        "generate",
-        "--max-model-len",
+    args: list[str] = [
+        "--max_model_len",
         "256",
         "--max-num-seqs",
         "2",
-        "--enforce-eager",
-        "--trust-remote-code",
-        "--limit-mm-per-prompt",
-        json.dumps({"image": 1}),
+        "--limit-mm-per-prompt.image",
+        "1",
+        "--limit-mm-per-prompt.video",
+        "0",
     ]
 
-    # ROCm: Increase timeouts to handle potential network delays and slower
-    # image processing.
-    env_overrides: dict[str, str] = {}
-    if current_platform.is_rocm():
-        env_overrides = {
-            "VLLM_VIDEO_FETCH_TIMEOUT": "120",
-            "VLLM_ENGINE_ITERATION_TIMEOUT_S": "300",
-        }
-
-    with RemoteOpenAIServer(
-        VISION_MODEL_NAME, args, env_dict=env_overrides
-    ) as remote_server:
+    with RemoteOpenAIServer(VISION_MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -215,9 +198,7 @@ async def test_chat_completion_render_with_stream_true(client):
     )
 
     assert response.status_code == 200
-    assert response.headers.get("content-type", "").startswith(
-        "application/json"
-    )
+    assert response.headers.get("content-type", "").startswith("application/json")
 
     data = response.json()
     assert isinstance(data, dict)
@@ -283,6 +264,7 @@ async def test_completion_render_no_generation(client):
     assert response.status_code == 200
     # Render should be fast (< 1 second) since no generation
     assert elapsed < 1.0
+
 
 @pytest.mark.asyncio
 async def test_chat_completion_render_with_base64_image_url(
