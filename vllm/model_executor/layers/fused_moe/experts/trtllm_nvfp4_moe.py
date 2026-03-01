@@ -167,8 +167,12 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             torch.bfloat16
         ).view(torch.int16)
 
-        # Determine activation type
-        activation_type = activation_to_flashinfer_int(activation)
+        # trtllm_fp4_block_scale_routed_moe does not support autotuning
+        # so skip this kernel during dummy run for autotuning.
+        import vllm.utils.flashinfer as fi_utils
+
+        if fi_utils._is_fi_autotuning:
+            return hidden_states
 
         # Invoke kernel.
         flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
@@ -200,7 +204,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             routed_scaling_factor=None,
             routing_method_type=1,
             do_finalize=True,
-            activation_type=activation_type,
+            activation_type=activation_to_flashinfer_int(activation),
             output=output,
         )
 
