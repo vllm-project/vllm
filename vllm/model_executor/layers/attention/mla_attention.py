@@ -950,7 +950,10 @@ def dynamic_per_batched_tensor_quant(
 logger = init_logger(__name__)
 
 
-@CustomOp.register("mla_decode_concat_quant_fp8")
+@CustomOp.register(
+    "mla_decode_concat_quant_fp8",
+    dynamic_arg_dims={"decode_ql_nope": 0, "decode_q_pe": 0},
+)
 class _DecodeConcatQuantFP8(QuantFP8):
     """
     QuantFP8 variant that concatenates decode_ql_nope and decode_q_pe before

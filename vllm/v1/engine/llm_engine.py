@@ -199,10 +199,6 @@ class LLMEngine:
             self.should_execute_dummy_batch = True
         return aggregated_has_unfinished
 
-    @classmethod
-    def validate_outputs(cls, outputs, output_type):
-        return outputs
-
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         if not hasattr(self, "_supported_tasks"):
             # Cache the result
@@ -234,10 +230,16 @@ class LLMEngine:
 
         # Process raw inputs into the request.
         if isinstance(prompt, EngineCoreRequest):
+            logger.warning_once(
+                "Passing EngineCoreRequest to LLMEngine.generate() and .add_requests() "
+                "is deprecated and will be removed in v0.18. You should instead pass "
+                "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
+            )
+
             request = prompt
             if request_id != request.request_id:
                 logger.warning_once(
-                    "AsyncLLM.add_request() was passed a request_id parameter that "
+                    "LLMEngine.add_request() was passed a request_id parameter that "
                     "does not match the EngineCoreRequest.request_id attribute. The "
                     "latter will be used, and the former will be ignored."
                 )

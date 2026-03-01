@@ -19,11 +19,17 @@ from .utils import sanitize_filename
 
 try:
     import matplotlib.pyplot as plt
-    import pandas as pd
-    import seaborn as sns
 except ImportError:
     plt = PlaceholderModule("matplotlib").placeholder_attr("pyplot")
+
+try:
+    import pandas as pd
+except ImportError:
     pd = PlaceholderModule("pandas")
+
+try:
+    import seaborn as sns
+except ImportError:
     seaborn = PlaceholderModule("seaborn")
 
 
@@ -340,7 +346,45 @@ def _plot_fig(
         else "(All)"
     )
 
-    g = sns.FacetGrid(df, row="row_group", col="col_group", height=fig_height)
+    if len(curve_by) <= 3:
+        hue, style, size, *_ = (*curve_by, None, None, None)
+
+        g = sns.relplot(
+            df,
+            x=var_x,
+            y=var_y,
+            hue=hue,
+            style=style,
+            size=size,
+            markers=True,
+            errorbar="sd" if error_bars else None,
+            kind="line",
+            row="row_group",
+            col="col_group",
+            height=fig_height,
+        )
+    else:
+        df["curve_group"] = (
+            pd.concat(
+                [k + "=" + df[k].astype(str) for k in curve_by],
+                axis=1,
+            ).agg("\n".join, axis=1)
+            if curve_by
+            else "(All)"
+        )
+
+        g = sns.relplot(
+            df,
+            x=var_x,
+            y=var_y,
+            hue="curve_group",
+            markers=True,
+            errorbar="sd" if error_bars else None,
+            kind="line",
+            row="row_group",
+            col="col_group",
+            height=fig_height,
+        )
 
     if row_by and col_by:
         g.set_titles("{row_name}\n{col_name}")
@@ -355,42 +399,6 @@ def _plot_fig(
         g.set(xscale=scale_x)
     if scale_y:
         g.set(yscale=scale_y)
-
-    if len(curve_by) <= 3:
-        hue, style, size, *_ = (*curve_by, None, None, None)
-
-        g.map_dataframe(
-            sns.lineplot,
-            x=var_x,
-            y=var_y,
-            hue=hue,
-            style=style,
-            size=size,
-            markers=True,
-            errorbar="sd" if error_bars else None,
-        )
-
-        g.add_legend(title=hue)
-    else:
-        df["curve_group"] = (
-            pd.concat(
-                [k + "=" + df[k].astype(str) for k in curve_by],
-                axis=1,
-            ).agg("\n".join, axis=1)
-            if curve_by
-            else "(All)"
-        )
-
-        g.map_dataframe(
-            sns.lineplot,
-            x=var_x,
-            y=var_y,
-            hue="curve_group",
-            markers=True,
-            errorbar="sd" if error_bars else None,
-        )
-
-        g.add_legend()
 
     g.savefig(fig_path, dpi=fig_dpi)
     plt.close(g.figure)
