@@ -59,49 +59,51 @@ class InputMutationEliminationPass(VllmInductorPass):
 
         for node in graph.nodes:
             # 1. Find aten.copy_ operations
-            if is_func(node, torch.ops.aten.copy_.default):
-                dst = node.args[0]
-                src = node.args[1]
+            if not is_func(node, torch.ops.aten.copy_.default):
+                continue
 
-                # 2. Check if dst is a graph input parameter (op code is 'placeholder')
-                if isinstance(dst, torch.fx.Node) and dst.op == "placeholder":
-                    # Get shapes from metadata
-                    dst_val = dst.meta.get("val")
-                    src_val = src.meta.get("val")
+            dst = node.args[0]
+            src = node.args[1]
 
-                    dst_shape = dst_val.shape if dst_val is not None else None
-                    src_shape = src_val.shape if src_val is not None else None
+            # 2. Check if dst is a graph input parameter (op code is 'placeholder')
+            if isinstance(dst, torch.fx.Node) and dst.op == "placeholder":
+                # Get shapes from metadata
+                dst_val = dst.meta.get("val")
+                src_val = src.meta.get("val")
 
-                    # 3. Only remove if shapes are indeed different
-                    if dst_shape is not None and src_shape is not None:
-                        if dst_shape != src_shape:
-                            logger.debug(
-                                "Found input mutation copy_ "
-                                "(Shape Mismatch): %s (%s) <- %s (%s)",
-                                dst.name,
-                                dst_shape,
-                                src.name,
-                                src_shape,
-                            )
-                            node.replace_all_uses_with(src)
-                            graph.erase_node(node)
-                            count += 1
-                        else:
-                            # Shapes look the same at the metadata level,
-                            # skipping elimination.
-                            logger.debug(
-                                "Skipping copy_ elimination for %s <- %s "
-                                "because metadata shapes match: %s",
-                                dst.name,
-                                src.name,
-                                dst_shape,
-                            )
-                    else:
+                dst_shape = dst_val.shape if dst_val is not None else None
+                src_shape = src_val.shape if src_val is not None else None
+
+                # 3. Only remove if shapes are indeed different
+                if dst_shape is not None and src_shape is not None:
+                    if dst_shape != src_shape:
                         logger.debug(
-                            "Metadata missing for %s or %s, Skipping...",
+                            "Found input mutation copy_ "
+                            "(Shape Mismatch): %s (%s) <- %s (%s)",
+                            dst.name,
+                            dst_shape,
+                            src.name,
+                            src_shape,
+                        )
+                        node.replace_all_uses_with(src)
+                        graph.erase_node(node)
+                        count += 1
+                    else:
+                        # Shapes look the same at the metadata level,
+                        # skipping elimination.
+                        logger.debug(
+                            "Skipping copy_ elimination for %s <- %s "
+                            "because metadata shapes match: %s",
                             dst.name,
                             src.name,
+                            dst_shape,
                         )
+                else:
+                    logger.debug(
+                        "Metadata missing for %s or %s, Skipping...",
+                        dst.name,
+                        src.name,
+                    )
 
         if count > 0:
             logger.debug(
