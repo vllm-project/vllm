@@ -179,7 +179,7 @@ def create_and_prepopulate_kv_cache(
         block_table[i, :num_blocks_for_seq] = inv_perm[start:end]
         start_block_idx += num_blocks_for_seq
 
-        # Create a realistic slot mapping that corresponds to the block table
+    # Create a realistic slot mapping that corresponds to the block table
     for i in range(batch_size):
         token_offsets = torch.arange(int(query_lens[i])) + int(context_lens[i])
         block_indices = token_offsets // block_size
