@@ -7,6 +7,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
@@ -29,6 +30,9 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_BLOCK_SIZE,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -1200,3 +1204,125 @@ def cutlass_moe_w4a8_fp8(
         expert_map=expert_map,
         apply_router_weight_on_input=apply_router_weight_on_input,
     )
+
+
+def vllm_cutlass_moe_mxfp8_impl(
+    layer: FusedMoE,
+    x: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    m_tokens = x.shape[0]
+    topk = topk_ids.shape[1]
+    out_dtype = x.dtype
+    num_experts = layer.local_num_experts
+    k_hidden = layer.hidden_size
+    n_intermediate = layer.intermediate_size_per_partition
+    device = x.device
+
+    if layer.apply_router_weight_on_input:
+        assert topk == 1, "apply_router_weight_on_input is only supported for topk=1"
+        x = x * topk_weights.to(out_dtype)
+
+    expert_offsets = torch.empty((num_experts + 1), dtype=torch.int32, device=device)
+    blockscale_offsets = torch.empty(
+        (num_experts + 1), dtype=torch.int32, device=device
+    )
+    problem_sizes1 = torch.empty((num_experts, 3), dtype=torch.int32, device=device)
+    problem_sizes2 = torch.empty((num_experts, 3), dtype=torch.int32, device=device)
+    a_map = torch.empty((topk_ids.numel(),), dtype=torch.int32, device=device)
+    c_map = torch.empty((topk_ids.numel(),), dtype=torch.int32, device=device)
+
+    ops.get_cutlass_moe_mm_data(
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        a_map,
+        c_map,
+        num_experts,
+        n_intermediate,
+        k_hidden,
+        blockscale_offsets,
+    )
+
+    rep_a = ops.shuffle_rows(x, a_map)
+    rep_a_q = torch.empty_like(rep_a, dtype=torch.float8_e4m3fn)
+
+    # max_blockscale_rows = int(blockscale_offsets[-1].item())
+    # Capture-safe upper bound for total blockscale rows:
+    # sum_e align128(tokens_for_expert_e) <=
+    # total_tokens + (align-1) * min(num_experts, total_tokens).
+    # Avoid reading GPU values (e.g. blockscale_offsets[-1].item()) during
+    # CUDA graph capture.
+    total_tokens = m_tokens * topk
+    nonzero_experts_ub = min(num_experts, total_tokens)
+    max_blockscale_rows = (
+        (total_tokens + (128 - 1) * nonzero_experts_ub + 127) // 128
+    ) * 128
+    rep_a1_scales = torch.empty(
+        (max_blockscale_rows, k_hidden // MXFP8_BLOCK_SIZE),
+        dtype=torch.uint8,
+        device=device,
+    )
+    ops.mxfp8_experts_quant(
+        rep_a,
+        problem_sizes1,
+        expert_offsets[:-1],
+        blockscale_offsets[:-1],
+        rep_a_q,
+        rep_a1_scales,
+    )
+
+    c1 = torch.empty(
+        (m_tokens * topk, 2 * n_intermediate), device=device, dtype=out_dtype
+    )
+    # Kernel expects B and B scales in column-major layout.
+    # Keep transposed view strides; do not call contiguous() here.
+    ops.cutlass_mxfp8_grouped_mm(
+        rep_a_q,
+        layer.w13_weight.transpose(1, 2),
+        rep_a1_scales,
+        layer.w13_weight_scale.transpose(1, 2),
+        c1,
+        problem_sizes1,
+        expert_offsets[:-1],
+        blockscale_offsets[:-1],
+    )
+
+    intermediate = torch.empty(
+        (m_tokens * topk, n_intermediate), device=device, dtype=out_dtype
+    )
+    apply_moe_activation(layer.activation, intermediate, c1)
+
+    intermediate_q = torch.empty_like(intermediate, dtype=torch.float8_e4m3fn)
+    rep_a2_scales = torch.empty(
+        (max_blockscale_rows, n_intermediate // MXFP8_BLOCK_SIZE),
+        dtype=torch.uint8,
+        device=device,
+    )
+    ops.mxfp8_experts_quant(
+        intermediate,
+        problem_sizes2,
+        expert_offsets[:-1],
+        blockscale_offsets[:-1],
+        intermediate_q,
+        rep_a2_scales,
+    )
+
+    c2 = torch.empty((m_tokens * topk, k_hidden), device=device, dtype=out_dtype)
+    ops.cutlass_mxfp8_grouped_mm(
+        intermediate_q,
+        layer.w2_weight.transpose(1, 2),
+        rep_a2_scales,
+        layer.w2_weight_scale.transpose(1, 2),
+        c2,
+        problem_sizes2,
+        expert_offsets[:-1],
+        blockscale_offsets[:-1],
+    )
+
+    c2 = ops.shuffle_rows(c2, c_map).view(m_tokens, topk, k_hidden)
+    if layer.apply_router_weight_on_input:
+        return c2.sum(dim=1)
+    return (c2 * topk_weights.view(m_tokens, topk, 1).to(out_dtype)).sum(dim=1)
