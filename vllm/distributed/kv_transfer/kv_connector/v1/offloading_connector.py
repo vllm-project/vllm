@@ -144,9 +144,21 @@ class OffloadingConnector(KVConnectorBase_V1):
         return self.connector_scheduler.take_events()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        if self.connector_worker is None:
-            return None  # We only emit stats from the worker-side
-        return self.connector_worker.get_kv_connector_stats()
+        stats: KVConnectorStats | None = None
+        if self.connector_worker is not None:
+            stats = self.connector_worker.get_kv_connector_stats()
+
+        if self.connector_scheduler is not None:
+            mgr_stats_data = self.connector_scheduler.manager.get_stats()
+            if mgr_stats_data:
+                mgr_stats = self.build_kv_connector_stats(mgr_stats_data)
+                if mgr_stats is not None:
+                    if stats is not None:
+                        stats = stats.aggregate(mgr_stats)
+                    else:
+                        stats = mgr_stats
+
+        return stats
 
     @classmethod
     def build_kv_connector_stats(

@@ -30,17 +30,18 @@ class OffloadingConnectorStats(KVConnectorStats):
             self.reset()
 
     def reset(self):
-        self.data: dict[str, list[OffloadingOperationMetrics]] = {}
+        self.data: dict[str, Any] = {"transfers": {}, "gauges": {}}
 
-    def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+    def aggregate(self, other: "KVConnectorStats") -> "KVConnectorStats":
         if not other.is_empty():
-            for k, v in other.data.items():
-                if k not in self.data:
-                    self.data[k] = v
+            # Merge transfer ops: extend per-transfer-type lists.
+            for transfer_type, ops in other.data.get("transfers", {}).items():
+                if transfer_type not in self.data["transfers"]:
+                    self.data["transfers"][transfer_type] = ops
                 else:
-                    accumulator = self.data[k]
-                    assert isinstance(accumulator, list)
-                    accumulator.extend(v)
+                    self.data["transfers"][transfer_type].extend(ops)
+            # Merge gauges: last value wins (gauges are snapshots, not deltas).
+            self.data["gauges"].update(other.data.get("gauges", {}))
         return self
 
     def reduce(self) -> dict[str, int | float]:
@@ -51,7 +52,7 @@ class OffloadingConnectorStats(KVConnectorStats):
         stats for the last time interval.
         """
         return_dict: dict[str, int | float] = {}
-        for transfer_type, ops_list in self.data.items():
+        for transfer_type, ops_list in self.data.get("transfers", {}).items():
             assert isinstance(ops_list, list)
             total_bytes = 0
             total_time = 0.0
@@ -61,19 +62,21 @@ class OffloadingConnectorStats(KVConnectorStats):
                 total_time += op["op_time"]
             return_dict[f"{transfer_type}_total_bytes"] = total_bytes
             return_dict[f"{transfer_type}_total_time"] = total_time
+        # Include gauges directly (snapshot values).
+        return_dict.update(self.data.get("gauges", {}))
         return return_dict
 
     def is_empty(self) -> bool:
-        return not self.data
+        return not self.data.get("transfers") and not self.data.get("gauges")
 
     def record_transfer(self, num_bytes: int, time: float, transfer_type: TransferType):
         src, dst = transfer_type
         transfer_type_key = src + "_to_" + dst
         op = OffloadingOperationMetrics(num_bytes, time)
-        if transfer_type_key in self.data:
-            self.data[transfer_type_key].append(op)
+        if transfer_type_key in self.data["transfers"]:
+            self.data["transfers"][transfer_type_key].append(op)
         else:
-            self.data[transfer_type_key] = [op]
+            self.data["transfers"][transfer_type_key] = [op]
 
 
 class OffloadPromMetrics(KVConnectorPromMetrics):
@@ -123,13 +126,15 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         """
-        Observe transfer statistics from the new data structure.
-        transfer_stats_data is expected to be a dict where:
-        - keys are transfer type strings (e.g., "cpu_to_gpu", "gpu_to_cpu")
-        - values are lists of OffloadingOperationMetrics objects
+        Observe transfer statistics.
+
+        transfer_stats_data is expected to be a dict with a ``"transfers"`` key
+        mapping transfer-type strings to lists of OffloadingOperationMetrics,
+        and an optional ``"gauges"`` key (currently not emitted as Prometheus
+        metrics here).
         """
 
-        for transfer_type, ops in transfer_stats_data.items():
+        for transfer_type, ops in transfer_stats_data.get("transfers", {}).items():
             # Cache:
             if (engine_idx, transfer_type) not in self.histogram_transfer_size:
                 self.histogram_transfer_size[(engine_idx, transfer_type)] = (

@@ -9,6 +9,7 @@ FilterReusedOffloadingManager — OffloadingManager decorator that skips
 
 from collections import OrderedDict
 from collections.abc import Iterable
+from typing import Any
 
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_offload.abstract import (
@@ -60,6 +61,7 @@ class FilterReusedOffloadingManager(OffloadingManager):
         self.max_tracker_size = max_tracker_size
         # Ordered so we can evict the LRU entry in O(1).
         self.counts: OrderedDict[BlockHash, int] = OrderedDict()
+        self.stores_skipped: int = 0
 
     # ------------------------------------------------------------------
     # Intercepted methods
@@ -92,6 +94,8 @@ class FilterReusedOffloadingManager(OffloadingManager):
             bh for bh in block_hashes if self.counts.get(bh, 0) >= self.store_threshold
         ]
 
+        self.stores_skipped += len(block_hashes) - len(eligible)
+
         # Delegate to the backing manager with only the eligible hashes.
         # Passing an empty list is intentional and safe — both
         # LRUOffloadingManager and ARCOffloadingManager handle it correctly,
@@ -110,6 +114,11 @@ class FilterReusedOffloadingManager(OffloadingManager):
 
     def complete_load(self, block_hashes: Iterable[BlockHash]) -> None:
         return self._backing.complete_load(block_hashes)
+
+    def get_stats(self) -> dict[str, Any]:
+        stats = self._backing.get_stats()
+        stats["stores_skipped"] = self.stores_skipped
+        return stats
 
     def complete_store(
         self, block_hashes: Iterable[BlockHash], success: bool = True
