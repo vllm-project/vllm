@@ -5,11 +5,9 @@ from collections.abc import Callable
 import torch
 
 import vllm._custom_ops as ops
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
@@ -122,7 +120,7 @@ def fused_topk_bias(
     ) + e_score_correction_bias.unsqueeze(0)
 
     # For batch invariance, use sorted=True to ensure deterministic expert selection
-    use_sorted = vllm_is_batch_invariant()
+    use_sorted = envs.VLLM_BATCH_INVARIANT
     topk_indices = torch.topk(scores_for_choice, k=topk, dim=-1, sorted=use_sorted)[1]
     topk_weights = scores.gather(1, topk_indices)
     if renormalize:

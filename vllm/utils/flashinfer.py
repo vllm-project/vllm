@@ -19,9 +19,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -280,7 +277,7 @@ def supports_trtllm_attention() -> bool:
     NVIDIA artifactory is accessible, and batch-invariant mode is not enabled.
     """
     # Batch-invariant mode disables TRTLLM attention
-    if vllm_is_batch_invariant():
+    if envs.VLLM_BATCH_INVARIANT:
         return False
 
     # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
