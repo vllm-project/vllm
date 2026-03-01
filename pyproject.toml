@@ -114,6 +114,8 @@ markers = [
     "split: run this test as part of a split",
     "distributed: run this test only in distributed GPU tests",
     "optional: optional tests that are automatically skipped, include --optional to run them",
+    "benchmark: marks a test as a benchmark",
+    "forked: marks a test as a fork",
 ]
 
 [tool.ty.src]

@@ -32,7 +32,7 @@ from vllm.model_executor.layers.quantization.mxfp4 import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import _swizzle_mxfp4
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import swizzle_mxfp4
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
     OCP_MX_Scheme,
@@ -1072,10 +1072,10 @@ class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):
         else:
             num_warps = 8
 
-        w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
+        w13_weight, w13_flex, w13_scale = swizzle_mxfp4(
             layer.w13_weight, layer.w13_weight_scale, num_warps
         )
-        w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
+        w2_weight, w2_flex, w2_scale = swizzle_mxfp4(
             layer.w2_weight, layer.w2_weight_scale, num_warps
         )
 
