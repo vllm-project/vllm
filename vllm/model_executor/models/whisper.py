@@ -17,6 +17,7 @@ from transformers import (
 )
 from transformers.models.whisper.modeling_whisper import sinusoids
 
+from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -86,6 +87,11 @@ class WhisperPosEmbedType(enum.Enum):
     LEARNED = "learned"
 
 
+def should_torch_compile_encoder(vllm_config: VllmConfig) -> bool:
+    """Callable to be passed to `@support_torch_compile`'s `enable_if` argument."""
+    return vllm_config.compilation_config.compile_mm_encoder
+
+
 class WhisperAudioInputs(TensorSchema):
     """
     Dimensions:
@@ -102,6 +108,9 @@ class WhisperAudioInputs(TensorSchema):
 
 class WhisperEncoderAttention(MMEncoderAttention):
     """Multi-headed attention for Whisper encoder with 2D tensor support."""
+
+    def __init__(self, num_heads: int, head_size: int, scale: float, num_kv_heads: int):
+        super().__init__(num_heads, head_size, scale, num_kv_heads)
 
     def forward(
         self,
@@ -344,7 +353,12 @@ class WhisperMLP(nn.Module):
 
 
 class WhisperEncoderLayer(nn.Module):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ):
         super().__init__()
         config = vllm_config.model_config.hf_config
         sliding_window = getattr(config, "sliding_window", None)
@@ -384,7 +398,9 @@ class WhisperEncoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        hidden_states = cast_overflow_tensors(hidden_states)
+        # Not compatible with torch.compile
+        if not torch.compiler.is_compiling():
+            hidden_states = cast_overflow_tensors(hidden_states)
 
         return hidden_states
 
@@ -448,6 +464,11 @@ class WhisperDecoderLayer(nn.Module):
         return hidden_states
 
 
+@support_torch_compile(
+    dynamic_arg_dims={"input_features": 0},
+    enable_if=should_torch_compile_encoder,
+    mark_unbacked_dims={"input_features": 0},
+)
 class WhisperEncoder(nn.Module):
     def __init__(
         self, *, vllm_config: VllmConfig, prefix: str = "", init_in_fp32: bool = False
@@ -470,7 +491,8 @@ class WhisperEncoder(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.encoder_layers,
             lambda prefix: WhisperEncoderLayer(
-                vllm_config=vllm_config, prefix=f"{prefix}.layers"
+                vllm_config=vllm_config,
+                prefix=f"{prefix}.layers",
             ),
             prefix=f"{prefix}.layers",
         )
@@ -501,25 +523,14 @@ class WhisperEncoder(nn.Module):
     def forward(
         self, input_features: torch.Tensor | list[torch.Tensor]
     ) -> torch.Tensor:
-        hidden_states = []
-        input_is_batched = False
-        for features in input_features:
-            embeds = nn.functional.gelu(self.conv1(features))
-            embeds = nn.functional.gelu(self.conv2(embeds))
+        embeds = nn.functional.gelu(self.conv1(input_features))
+        embeds = nn.functional.gelu(self.conv2(embeds))
+        embeds = embeds.transpose(-1, -2)
 
-            embeds = embeds.transpose(-1, -2)
-            embeds = (embeds + self.embed_positions.weight[: embeds.size(-2), :]).to(
-                embeds.dtype
-            )
-
-            hidden_states.append(embeds)
-            input_is_batched = embeds.ndim > 2
         # Input to MHA must be B x T x D
-        if input_is_batched:
-            # Models using WhisperEncoder may handle batching internally.
-            hidden_states = torch.cat(hidden_states)
-        else:
-            hidden_states = torch.stack(hidden_states, dim=0)
+        hidden_states = (embeds + self.embed_positions.weight[: embeds.size(-2), :]).to(
+            embeds.dtype
+        )
 
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states)
@@ -580,9 +591,10 @@ class WhisperDecoder(nn.Module):
 class WhisperModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.encoder = WhisperEncoder(
-            vllm_config=vllm_config, prefix=f"{prefix}.encoder"
-        )
+        with set_model_tag("WhisperEncoder", is_encoder=True):
+            self.encoder = WhisperEncoder(
+                vllm_config=vllm_config, prefix=f"{prefix}.encoder"
+            )
         self.decoder = WhisperDecoder(
             vllm_config=vllm_config, prefix=f"{prefix}.decoder"
         )
@@ -603,7 +615,7 @@ class WhisperModel(nn.Module):
 
     def get_encoder_outputs(
         self,
-        input_features: torch.Tensor | list[torch.Tensor] | None,
+        input_features: torch.Tensor | None,
     ) -> torch.Tensor | None:
         if input_features is None:
             return None
@@ -1005,7 +1017,6 @@ class WhisperForConditionalGeneration(
 
         if input_features is not None:
             input_features = json_map_leaves(lambda x: x.to(self.dtype), input_features)
-
         return WhisperAudioInputs(input_features=input_features)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:

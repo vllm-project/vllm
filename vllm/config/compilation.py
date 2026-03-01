@@ -25,7 +25,7 @@ from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 else:
     VllmConfig = object
 
@@ -903,6 +903,12 @@ class CompilationConfig:
 
         if self.backend == "":
             self.backend = current_platform.get_compile_backend()
+
+    def verify_with_model_config(self, model_config: "ModelConfig") -> None:
+        if model_config.is_encoder_decoder:
+            # Does not yet support encoder-decoder models.
+            self.inductor_compile_config["combo_kernels"] = False
+            self.inductor_compile_config["benchmark_combo_kernel"] = False
 
     def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
         """

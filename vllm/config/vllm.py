@@ -665,6 +665,7 @@ class VllmConfig:
         if self.model_config is not None:
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
+            self.compilation_config.verify_with_model_config(self.model_config)
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
 
@@ -955,14 +956,19 @@ class VllmConfig:
         if (
             self.model_config
             and self.model_config.architecture == "WhisperForConditionalGeneration"
-            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
         ):
-            logger.warning(
-                "Whisper is known to have issues with "
-                "forked workers. If startup is hanging, "
-                "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
-                "to 'spawn'."
-            )
+            if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn":
+                logger.warning(
+                    "Whisper is known to have issues with "
+                    "forked workers. If startup is hanging, "
+                    "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
+                    "to 'spawn'."
+                )
+            if self.optimization_level > OptimizationLevel.O0:
+                self.compilation_config.compile_mm_encoder = True
+                logger.info(
+                    "Enabling encoder compilation for Whisper for better performance."
+                )
 
         if (
             self.kv_events_config is not None
