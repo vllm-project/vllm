@@ -28,6 +28,9 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.utils import (
+    split_decodes_and_prefills,
+)
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
@@ -61,7 +64,10 @@ class TritonAttentionMetadata:
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
 
+    num_prefills: int
+    num_decodes: int
     seq_threshold_3D: int
+    split_launch: bool
     num_par_softmax_segments: int
     softmax_segm_output: torch.Tensor
     softmax_segm_max: torch.Tensor
@@ -115,7 +121,7 @@ class TritonAttentionMetadata:
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    reorder_batch_threshold: int = 1
 
     def __init__(
         self,
@@ -144,6 +150,12 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 CUDAGraphMode.FULL,
             )
         )
+
+        # Check if CUDA Graphs are enabled for prefill.
+        self.prefill_cudagraph_enabled = (
+            self.vllm_config.compilation_config.cudagraph_mode in (CUDAGraphMode.FULL,)
+        )
+        self.split_launch = self.prefill_cudagraph_enabled
 
         # The launch grid for the 2D kernel is defined as (num_q_blocks, num_heads_kv).
         # A lower bound for num_q_blocks is the number of sequences.
@@ -189,6 +201,31 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             device=device,
         )
 
+    @classmethod
+    def get_cudagraph_support(
+        cls: type["TritonAttentionMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        # Check if CUDA Graphs are enabled for prefill.
+        prefill_cudagraph_enabled = vllm_config.compilation_config.cudagraph_mode in (
+            CUDAGraphMode.FULL,
+        )
+
+        # Determine number of speculative tokens.
+        speculative_config = vllm_config.speculative_config
+        num_spec_tokens = (
+            speculative_config.num_speculative_tokens
+            if speculative_config is not None
+            else 0
+        )
+
+        # Select the appropriate CUDA graph support mode.
+        if prefill_cudagraph_enabled and (num_spec_tokens > 0):
+            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+        else:
+            return AttentionCGSupport.ALWAYS
+
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> TritonAttentionMetadata:
@@ -213,6 +250,14 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
+
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+            split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=self.reorder_batch_threshold,
+                require_uniform=True,
+            )
+        )
 
         use_cascade = common_prefix_len > 0
 
@@ -245,7 +290,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
+            num_prefills=num_prefills,
+            num_decodes=num_decodes,
             seq_threshold_3D=self.seq_threshold_3D,
+            split_launch=self.split_launch,
             num_par_softmax_segments=self.num_par_softmax_segments,
             softmax_segm_output=self.softmax_segm_output,
             softmax_segm_max=self.softmax_segm_max,
@@ -479,7 +527,10 @@ class TritonAttentionImpl(AttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
+        num_prefills = attn_metadata.num_prefills
+        num_decodes = attn_metadata.num_decodes
         seq_threshold_3D = attn_metadata.seq_threshold_3D
+        split_launch = attn_metadata.split_launch
         num_par_softmax_segments = attn_metadata.num_par_softmax_segments
         softmax_segm_output = attn_metadata.softmax_segm_output
         softmax_segm_max = attn_metadata.softmax_segm_max
@@ -507,7 +558,10 @@ class TritonAttentionImpl(AttentionImpl):
             q_descale=None,  # Not supported
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
+            num_prefills=num_prefills,
+            num_decodes=num_decodes,
             seq_threshold_3D=seq_threshold_3D,
+            split_launch=split_launch,
             num_par_softmax_segments=num_par_softmax_segments,
             softmax_segm_output=softmax_segm_output,
             softmax_segm_max=softmax_segm_max,
