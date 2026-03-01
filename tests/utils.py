@@ -934,7 +934,7 @@ def init_test_distributed_environment(
     tp_size: int,
     pp_size: int,
     rank: int,
-    distributed_init_port: str,
+    distributed_init_port: str | None = None,
     local_rank: int = -1,
 ) -> None:
     # Note: This function is often called from Ray worker processes, so we
@@ -946,7 +946,10 @@ def init_test_distributed_environment(
         set_current_vllm_config,
     )
 
-    distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+    if distributed_init_port:
+        distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+    else:
+        distributed_init_method = "env://"
 
     if get_current_vllm_config_or_none() is not None:
         # Config already set, use it directly
