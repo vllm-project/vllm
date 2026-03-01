@@ -260,7 +260,12 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             if self._logprobs_tensors_cpu is not None:
                 logprobs_lists = self._logprobs_tensors_cpu.tolists()
         else:
-            valid_sampled_token_ids, logprobs_lists = RejectionSampler.parse_output(
+            (
+                valid_sampled_token_ids,
+                logprobs_lists,
+                _,
+                _,
+            ) = RejectionSampler.parse_output(
                 self.sampled_token_ids_cpu,
                 self.vocab_size,
                 self._invalid_req_indices,
@@ -2970,6 +2975,8 @@ class GPUModelRunner(
         list[str],
         dict[str, int],
         list[int],
+        list[list[bool]] | None,
+        list[dict[str, Any]] | None,
     ]:
         num_nans_in_logits = {}
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
@@ -2994,6 +3001,8 @@ class GPUModelRunner(
         logprobs_tensors = sampler_output.logprobs_tensors
         invalid_req_indices = []
         logprobs_lists = None
+        sd_source_masks: list[list[bool]] | None = None
+        sd_stats_list: list[dict] | None = None
         if not self.use_async_scheduling:
             # Get the valid generated tokens.
             max_gen_len = sampled_token_ids.shape[-1]
@@ -3008,11 +3017,17 @@ class GPUModelRunner(
                     logprobs_lists = logprobs_tensors.tolists()
             else:
                 # Includes spec decode tokens.
-                valid_sampled_token_ids, logprobs_lists = RejectionSampler.parse_output(
+                (
+                    valid_sampled_token_ids,
+                    logprobs_lists,
+                    sd_source_masks,
+                    sd_stats_list,
+                ) = RejectionSampler.parse_output(
                     sampled_token_ids,
                     self.input_batch.vocab_size,
                     discard_sampled_tokens_req_indices,
                     logprobs_tensors=logprobs_tensors,
+                    spec_decode_metadata=spec_decode_metadata,
                 )
         else:
             valid_sampled_token_ids = []
@@ -3079,6 +3094,8 @@ class GPUModelRunner(
             req_ids_output_copy,
             req_id_to_index_output_copy,
             invalid_req_indices,
+            sd_source_masks,
+            sd_stats_list,
         )
 
     @contextmanager
@@ -3819,6 +3836,8 @@ class GPUModelRunner(
                 req_ids_output_copy,
                 req_id_to_index_output_copy,
                 invalid_req_indices,
+                sd_source_masks,
+                sd_stats_list,
             ) = self._bookkeeping_sync(
                 scheduler_output,
                 sampler_output,
@@ -3862,6 +3881,8 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                sd_source_masks=sd_source_masks,
+                sd_stats_list=sd_stats_list,
             )
 
         if not self.use_async_scheduling:

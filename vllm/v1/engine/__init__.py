@@ -156,6 +156,10 @@ class EngineCoreOutput(
     request_id: str
     new_token_ids: list[int]
 
+    # Speculative decoding: source mask and stats for this step's new_token_ids.
+    sd_source_mask: list[bool] | None = None
+    sd_stats: dict[str, Any] | None = None
+
     new_logprobs: LogprobsLists | None = None
     new_prompt_logprobs_tensors: LogprobsTensors | None = None
 
