@@ -4,13 +4,47 @@ import os
 
 import numpy as np
 import torch
-from numba import get_num_threads, jit, njit, prange, set_num_threads
+
+try:
+    from numba import get_num_threads, jit, njit, prange
+    from numba import set_num_threads as numba_set_num_threads
+
+    NUMBA_AVAILABLE = True
+except ImportError as e:
+    NUMBA_AVAILABLE = False
+    _numba_import_error = str(e)
+
+    # Provide stubs so the module can be imported
+    def jit(*args, **kwargs):
+        def decorator(func):
+            return func
+
+        return decorator
+
+    njit = jit
+    prange = range
+
+    def numba_set_num_threads(n):
+        pass
+
+    def get_num_threads():
+        return 1
+
+    def set_num_threads(n):
+        pass
+
 
 from vllm.config import VllmConfig
 
 
 class NgramProposer:
     def __init__(self, vllm_config: VllmConfig):
+        if not NUMBA_AVAILABLE:
+            raise ImportError(
+                f"numba is required for ngram speculative decoding but "
+                f"could not be imported: {_numba_import_error}"
+            )
+
         assert vllm_config.speculative_config is not None
         assert vllm_config.speculative_config.prompt_lookup_min is not None
         assert vllm_config.speculative_config.prompt_lookup_max is not None

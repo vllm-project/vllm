@@ -4,6 +4,16 @@
 
 #include <torch/library.h>
 
+// POWER8 compatibility: PyTorch < 2.4 on POWER8 doesn't support some
+// advanced op schema syntax (Tensor?, SymInt, Tensor[], Tensor!?)
+// This guard allows building with reduced functionality on older PyTorch.
+#if defined(__POWER8_VECTOR__) && !defined(__POWER9_VECTOR__)
+  #if !defined(TORCH_VERSION_MAJOR) || (TORCH_VERSION_MAJOR < 2) || \
+      (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR < 4)
+    #define VLLM_POWER8_COMPAT
+  #endif
+#endif
+
 // Note: overwrite the external defination for sharing same name between
 // libraries use different ISAs.
 #define TORCH_EXTENSION_NAME _C
@@ -179,11 +189,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
+#ifndef VLLM_POWER8_COMPAT
   ops.def(
       "rotary_embedding(Tensor positions, Tensor! query,"
       "                 Tensor!? key, int head_size,"
       "                 Tensor cos_sin_cache, bool is_neox) -> ()");
   ops.impl("rotary_embedding", torch::kCPU, &rotary_embedding);
+#endif
 
   // Quantization
 #if defined(__AVX512F__) || (defined(__aarch64__) && !defined(__APPLE__)) || \
@@ -199,10 +211,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       &create_onednn_mm_handler);
 
   // oneDNN GEMM
+  #ifndef VLLM_POWER8_COMPAT
   ops.def(
       "onednn_mm(Tensor! c, Tensor a, Tensor? bias, "
       "Tensor handler_tensor) -> ()");
   ops.impl("onednn_mm", torch::kCPU, &onednn_mm);
+  #endif
 
   // Check if oneDNN was built with ACL backend
   ops.def("is_onednn_acl_supported() -> bool", &is_onednn_acl_supported);
@@ -215,23 +229,29 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       &create_onednn_scaled_mm_handler);
 
   // oneDNN scaled_mm for W8A8 with static per-tensor activation quantization
+  #ifndef VLLM_POWER8_COMPAT
   ops.def(
       "onednn_scaled_mm(Tensor! c, Tensor a, Tensor a_scales, Tensor? azp, "
       "Tensor? azp_adj, Tensor? bias, Tensor handler_tensor) -> ()");
   ops.impl("onednn_scaled_mm", torch::kCPU, &onednn_scaled_mm);
+  #endif
 
   // Compute int8 quantized tensor for given scaling factor.
+  #ifndef VLLM_POWER8_COMPAT
   ops.def(
       "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale,"
       "Tensor? azp) -> ()");
   ops.impl("static_scaled_int8_quant", torch::kCPU, &static_scaled_int8_quant);
+  #endif
 
   // Compute int8 quantized tensor and scaling factor
+  #ifndef VLLM_POWER8_COMPAT
   ops.def(
       "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale, "
       "Tensor!? azp) -> ()");
   ops.impl("dynamic_scaled_int8_quant", torch::kCPU,
            &dynamic_scaled_int8_quant);
+  #endif
 #endif
 
 // SHM CCL
@@ -243,30 +263,37 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("join_shm_manager(int handle, str name) -> str", &join_shm_manager);
   ops.def("shm_allreduce(int handle, Tensor! data) -> ()");
   ops.impl("shm_allreduce", torch::kCPU, &shm_allreduce);
+  #ifndef VLLM_POWER8_COMPAT
   ops.def(
       "shm_gather(int handle, Tensor data, Tensor[](a!)? outputs, int dst) -> "
       "()");
   ops.impl("shm_gather", torch::kCPU, &shm_gather);
+  #endif
   ops.def(
       "shm_all_gather(int handle, Tensor data, Tensor! output) -> "
       "()");
   ops.impl("shm_all_gather", torch::kCPU, &shm_all_gather);
+  #ifndef VLLM_POWER8_COMPAT
   ops.def(
       "shm_send_tensor_list(int handle, Tensor[](a) tensor_list, int dst) -> "
       "()");
   ops.impl("shm_send_tensor_list", torch::kCPU, &shm_send_tensor_list);
   ops.def("shm_recv_tensor_list(int handle, int src) -> Tensor[](a)",
           &shm_recv_tensor_list);
+  #endif
 #endif  // #if defined(__AVX512F__) || defined(__aarch64__)
 
   // sgl-kernels
 #if defined(__AVX512BF16__) && defined(__AVX512F__) && defined(__AVX512VNNI__)
+  #ifndef VLLM_POWER8_COMPAT
   ops.def(
       "weight_packed_linear(Tensor(a0!) mat1, Tensor(a1!) mat2, Tensor(a2!)? "
       "bias, bool is_vnni) -> Tensor");
   ops.impl("weight_packed_linear", torch::kCPU, &weight_packed_linear);
+  #endif
   ops.def("convert_weight_packed(Tensor! weight) -> Tensor");
   ops.impl("convert_weight_packed", torch::kCPU, &convert_weight_packed);
+  #ifndef VLLM_POWER8_COMPAT
   ops.def(
       "fused_experts_cpu(Tensor! hidden_states, Tensor w1, Tensor w2, Tensor "
       "topk_weights, Tensor topk_ids, bool inplace, bool use_int8_w8a8, bool "
@@ -274,11 +301,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "block_size, Tensor? a1_scale, Tensor? a2_scale, bool is_vnni) -> "
       "Tensor");
   ops.impl("fused_experts_cpu", torch::kCPU, &fused_experts_cpu);
+  #endif
+  #ifndef VLLM_POWER8_COMPAT
   ops.def(
       "int8_scaled_mm_with_quant(Tensor mat1, Tensor mat2, Tensor scales2, "
       "Tensor? bias, ScalarType out_dtype, bool is_vnni) -> Tensor");
   ops.impl("int8_scaled_mm_with_quant", torch::kCPU,
            &int8_scaled_mm_with_quant);
+  #endif
 #endif
 
   // CPU attention kernels
@@ -293,6 +323,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "key_cache, Tensor(a3!) value_cache, Tensor slot_mapping, str "
       "isa) -> ()",
       &cpu_attn_reshape_and_cache);
+#ifndef VLLM_POWER8_COMPAT
   ops.def(
       "cpu_attention_with_kv_cache(Tensor query, Tensor key_cache, Tensor "
       "value_cache, Tensor(a3!) output, Tensor query_start_loc, Tensor "
@@ -300,6 +331,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "sliding_window_left, SymInt sliding_window_right, Tensor block_table, "
       "float softcap, Tensor scheduler_metadata, Tensor? s_aux) -> ()",
       &cpu_attention_with_kv_cache);
+#endif
 
   // placeholders
   ops.def("static_scaled_fp8_quant() -> ()", placeholder_op);
@@ -308,11 +340,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // WNA16
 #if defined(__AVX512F__)
+  #ifndef VLLM_POWER8_COMPAT
   ops.def(
       "cpu_gemm_wna16(Tensor input, Tensor q_weight, Tensor(a2!) output, "
       "Tensor scales, Tensor? zeros, Tensor? g_idx, Tensor? bias, SymInt "
       "pack_factor, str isa_hint) -> ()");
   ops.impl("cpu_gemm_wna16", torch::kCPU, &cpu_gemm_wna16);
+  #endif
 #endif
 
   // fused moe
@@ -321,12 +355,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "prepack_moe_weight(Tensor weight, Tensor(a1!) packed_weight, str isa) "
       "-> ()");
   ops.impl("prepack_moe_weight", torch::kCPU, &prepack_moe_weight);
+  #ifndef VLLM_POWER8_COMPAT
   ops.def(
       "cpu_fused_moe(Tensor(a0!) output, Tensor input, Tensor w13, Tensor w2, "
       "Tensor? w13_bias, Tensor? w2_bias, Tensor topk_weights, Tensor topk_id, "
       "bool skip_weighted, "
       "str act, str isa) -> ()");
   ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
+  #endif
 #endif
   ops.def("init_cpu_threads_env(str cpu_ids) -> str", &init_cpu_threads_env);
   ops.def(
