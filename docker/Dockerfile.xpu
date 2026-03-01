@@ -128,20 +128,15 @@ RUN apt-get update && apt-get install -y \
     wget \
     curl \
     git \
-    build-essential 
-
-RUN apt-get install -y \
+    build-essential \
     autoconf \
     automake \
     libtool \
-    pkg-config
-
-RUN apt-get update && apt-get install -y \
+    pkg-config \
     rdma-core \
     libibverbs-dev \
     ibverbs-utils \
     libibverbs1 \
-    ibverbs-providers \
     librdmacm-dev \
     librdmacm1 \
     libibumad-dev \
@@ -156,17 +151,16 @@ RUN apt-get update && apt-get install -y \
     ibverbs-providers \
     librdmacm1t64
 
-RUN git clone https://github.com/openucx/ucx /tmp/ucx_source && \
+ENV PKG_CONFIG_PATH=/tmp/ucx_install/lib/pkgconfig:${PKG_CONFIG_PATH}
+ENV LD_LIBRARY_PATH=/tmp/ucx_install/lib:${LD_LIBRARY_PATH}
+RUN --mount=type=cache,target=/root/.cache/uv \
+    git clone https://github.com/openucx/ucx /tmp/ucx_source && \
     cd /tmp/ucx_source && git checkout "${UCX_VERSION}" && \
     bash autogen.sh && \
     ./configure --prefix=/tmp/ucx_install --with-ze=yes --enable-examples --enable-mt && \
     make CFLAGS="-Wno-error=incompatible-pointer-types" -j8 && make install && \
     git clone https://github.com/ai-dynamo/nixl /tmp/nixl_source && \
-    cd /tmp/nixl_source && git checkout "${NIXL_VERSION}"
-
-ENV PKG_CONFIG_PATH=/tmp/ucx_install/lib/pkgconfig:${PKG_CONFIG_PATH}
-
-RUN --mount=type=cache,target=/root/.cache/uv \
+    cd /tmp/nixl_source && git checkout "${NIXL_VERSION}" && \
     cd /tmp/nixl_source && \
     uv pip install --upgrade meson pybind11 patchelf && \
     uv pip install -r requirements.txt && \
