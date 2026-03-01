@@ -669,6 +669,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("per_token_group_fp8_quant_packed", torch::kCUDA,
            &per_token_group_quant_8bit_packed);
 
+  // Fused SiLU+mul + per-token-group FP8 quantization with UE8M0-packed
+  // scales for DeepGEMM. Input: [mn, 2*N], output: [mn, N] in FP8.
+  ops.def(
+      "silu_and_mul_fp8_quant_packed(Tensor input, Tensor! output_q, "
+      "Tensor! output_s_packed, int group_size, float eps, float fp8_min, "
+      "float fp8_max) -> ()");
+  ops.impl("silu_and_mul_fp8_quant_packed", torch::kCUDA,
+           &silu_mul_per_token_group_quant_fp8_packed);
+
   // Compute per-token-group INT8 quantized tensor and scaling factor.
   ops.def(
       "per_token_group_quant_int8(Tensor input, Tensor! output_q, Tensor! "

@@ -234,6 +234,57 @@ void per_token_group_quant_8bit(const torch::Tensor& input,
 #undef LAUNCH_KERNEL
 }
 
+// Fused SiLU+mul with group-scale computation.
+// Reads gate[group_size] and up[group_size], computes SiLU(gate)*up,
+// stores results to smem_group, and returns the UE8M0 group scale.
+template <typename T>
+__device__ __forceinline__ float ComputeGroupScaleSiluMul(
+    const T* __restrict__ gate_input, const T* __restrict__ up_input,
+    T* __restrict__ smem_group, const int group_size, const int lane_id,
+    const int threads_per_group, const float eps, const float max_8bit) {
+  float local_absmax = eps;
+
+  constexpr int vec_size = 16 / sizeof(T);
+  using vec_t = vllm::vec_n_t<T, vec_size>;
+
+  int num_vecs = group_size / vec_size;
+  auto* gate_vecs = reinterpret_cast<const vec_t*>(gate_input);
+  auto* up_vecs = reinterpret_cast<const vec_t*>(up_input);
+  auto* smem_vecs = reinterpret_cast<vec_t*>(smem_group);
+
+  for (int vi = lane_id; vi < num_vecs; vi += threads_per_group) {
+    vec_t gate_vec = gate_vecs[vi];
+    vec_t up_vec = up_vecs[vi];
+    vec_t out_vec;
+#pragma unroll
+    for (int j = 0; j < vec_size; j++) {
+      float g = static_cast<float>(gate_vec.val[j]);
+      float u = static_cast<float>(up_vec.val[j]);
+      float silu = g / (1.0f + expf(-g));
+      float result = silu * u;
+      out_vec.val[j] = static_cast<T>(result);
+      local_absmax = fmaxf(local_absmax, fabsf(result));
+    }
+    smem_vecs[vi] = out_vec;
+  }
+
+  int tail_start = num_vecs * vec_size;
+  for (int i = lane_id + tail_start; i < group_size; i += threads_per_group) {
+    float g = static_cast<float>(gate_input[i]);
+    float u = static_cast<float>(up_input[i]);
+    float silu = g / (1.0f + expf(-g));
+    float result = silu * u;
+    smem_group[i] = static_cast<T>(result);
+    local_absmax = fmaxf(local_absmax, fabsf(result));
+  }
+
+  local_absmax = GroupReduceMax(local_absmax);
+
+  float y_s = local_absmax / max_8bit;
+  y_s = exp2f(ceilf(log2f(fmaxf(fabsf(y_s), 1e-10f))));
+  return y_s;
+}
+
 template <typename T, typename DST_DTYPE>
 __global__ void per_token_group_quant_8bit_packed_kernel(
     const T* __restrict__ input, void* __restrict__ output_q,
@@ -374,6 +425,142 @@ void per_token_group_quant_8bit_packed(const torch::Tensor& input,
       }));
 
 #undef LAUNCH_PACKED_KERNEL
+}
+
+// Fused SiLU+mul + per-token-group FP8 quantization with UE8M0-packed
+// scales for DeepGEMM. Input: [mn, 2*N], output: [mn, N] in FP8.
+template <typename T, typename DST_DTYPE>
+__global__ void silu_mul_per_token_group_quant_8bit_packed_kernel(
+    const T* __restrict__ input, void* __restrict__ output_q,
+    unsigned int* __restrict__ output_s_packed, const int group_size,
+    const int num_groups, const int groups_per_block, const int groups_per_row,
+    const int mn, const int tma_aligned_mn, const int output_cols,
+    const float eps, const float min_8bit, const float max_8bit) {
+  const int threads_per_group = 16;
+  const int64_t local_group_id = threadIdx.x / threads_per_group;
+  const int lane_id = threadIdx.x % threads_per_group;
+
+  const int64_t block_group_id = blockIdx.x * groups_per_block;
+  const int64_t global_group_id = block_group_id + local_group_id;
+  if (global_group_id >= num_groups) {
+    return;
+  }
+
+  const int sf_k_idx = static_cast<int>(global_group_id % groups_per_row);
+  const int mn_idx = static_cast<int>(global_group_id / groups_per_row);
+
+  const int input_cols = output_cols * 2;
+  const T* gate_input =
+      input + static_cast<int64_t>(mn_idx) * input_cols + sf_k_idx * group_size;
+  const T* up_input = gate_input + output_cols;
+
+  const int64_t output_offset = global_group_id * group_size;
+  DST_DTYPE* group_output = static_cast<DST_DTYPE*>(output_q) + output_offset;
+
+  extern __shared__ __align__(16) char smem_raw[];
+  T* smem = reinterpret_cast<T*>(smem_raw);
+  T* smem_group = smem + local_group_id * group_size;
+
+  const float y_s =
+      ComputeGroupScaleSiluMul<T>(gate_input, up_input, smem_group, group_size,
+                                  lane_id, threads_per_group, eps, max_8bit);
+
+  if (lane_id == 0) {
+    if (mn_idx < mn) {
+      const int sf_k_pack_idx = sf_k_idx / 4;
+      const int pos = sf_k_idx % 4;
+      const unsigned int bits = __float_as_uint(y_s);
+      const unsigned int exponent = (bits >> 23u) & 0xffu;
+      const unsigned int contrib = exponent << (pos * 8u);
+      const int out_idx = sf_k_pack_idx * tma_aligned_mn + mn_idx;
+      atomicOr(output_s_packed + out_idx, contrib);
+    }
+  }
+
+  __syncthreads();
+
+  QuantizeGroup<T, DST_DTYPE>(smem_group, group_output, group_size, lane_id,
+                              threads_per_group, y_s, min_8bit, max_8bit);
+}
+
+void silu_mul_per_token_group_quant_fp8_packed(const torch::Tensor& input,
+                                               torch::Tensor& output_q,
+                                               torch::Tensor& output_s_packed,
+                                               int64_t group_size, double eps,
+                                               double min_8bit,
+                                               double max_8bit) {
+  TORCH_CHECK(input.is_contiguous());
+  TORCH_CHECK(output_q.is_contiguous());
+  TORCH_CHECK(input.dim() >= 2);
+
+  const int64_t input_cols = input.size(-1);
+  const int64_t output_cols = input_cols / 2;
+  TORCH_CHECK(input_cols % 2 == 0,
+              "Input last dim must be even for silu_and_mul.");
+  TORCH_CHECK(output_cols % group_size == 0, "Output columns (", output_cols,
+              ") must be divisible by group_size (", group_size, ").");
+
+  const int64_t mn = input.numel() / input_cols;
+  const int64_t groups_per_row = output_cols / group_size;
+  const int64_t num_groups = mn * groups_per_row;
+
+  TORCH_CHECK(output_s_packed.dim() == 2,
+              "output_s_packed must be 2D, got dim=", output_s_packed.dim(),
+              ".");
+
+  const int64_t k_num_packed_sfk = (groups_per_row + 3) / 4;
+  const int64_t tma_aligned_mn = ((mn + 3) / 4) * 4;
+
+  TORCH_CHECK(output_s_packed.scalar_type() == at::ScalarType::Int,
+              "output_s_packed must have dtype int32 for UE8M0-packed scales.");
+  TORCH_CHECK(output_s_packed.size(0) == mn &&
+                  output_s_packed.size(1) == k_num_packed_sfk,
+              "output_s_packed shape must be [", mn, ", ", k_num_packed_sfk,
+              "], but got [", output_s_packed.size(0), ", ",
+              output_s_packed.size(1), "].");
+
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  constexpr int THREADS_PER_GROUP = 16;
+
+  const int groups_per_block = GetGroupsPerBlock(num_groups);
+
+  auto dst_type = output_q.scalar_type();
+  const int num_blocks = num_groups / groups_per_block;
+  const int num_threads = groups_per_block * THREADS_PER_GROUP;
+
+  output_s_packed.zero_();
+
+#define LAUNCH_SILU_MUL_PACKED_KERNEL(T, DST_DTYPE)                       \
+  do {                                                                    \
+    dim3 grid(num_blocks);                                                \
+    dim3 block(num_threads);                                              \
+    size_t smem_bytes =                                                   \
+        static_cast<size_t>(groups_per_block) * group_size * sizeof(T);   \
+    silu_mul_per_token_group_quant_8bit_packed_kernel<T, DST_DTYPE>       \
+        <<<grid, block, smem_bytes, stream>>>(                            \
+            static_cast<const T*>(input.data_ptr()), output_q.data_ptr(), \
+            reinterpret_cast<unsigned int*>(output_s_packed.data_ptr()),  \
+            static_cast<int>(group_size), static_cast<int>(num_groups),   \
+            groups_per_block, static_cast<int>(groups_per_row),           \
+            static_cast<int>(mn), static_cast<int>(tma_aligned_mn),       \
+            static_cast<int>(output_cols), static_cast<float>(eps),       \
+            static_cast<float>(min_8bit), static_cast<float>(max_8bit));  \
+  } while (0)
+
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "silu_mul_per_token_group_quant_fp8_packed", ([&] {
+        if (dst_type == at::ScalarType::Float8_e4m3fn) {
+          LAUNCH_SILU_MUL_PACKED_KERNEL(scalar_t, __nv_fp8_e4m3);
+        } else {
+          TORCH_CHECK(
+              false,
+              "silu_mul_per_token_group_quant_fp8_packed only supports FP8 "
+              "outputs.");
+        }
+      }));
+
+#undef LAUNCH_SILU_MUL_PACKED_KERNEL
 }
 
 void per_token_group_quant_fp8(const torch::Tensor& input,
