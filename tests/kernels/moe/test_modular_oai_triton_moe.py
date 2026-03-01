@@ -33,7 +33,6 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularK
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
-from vllm.model_executor.layers.utils import shuffle_weight
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -46,6 +45,16 @@ MNK = [
     (2, 2880, 2880),
     (16, 2880, 2880),
 ]
+
+
+def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
+    """Fold weights to adjacent locations for Triton MoE kernel layout."""
+    shape = w.shape
+    n = shape[-1]
+    first = w[..., : n // 2]
+    second = w[..., n // 2 :]
+    stacked = torch.stack((first, second), dim=-1)
+    return stacked.reshape(shape)
 
 
 def unshuffle_weight(w: torch.Tensor):
