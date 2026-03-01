@@ -5,11 +5,11 @@ import torch
 from nvfp4_utils import (
     FLOAT4_E2M1_MAX,
     FLOAT8_E4M3_MAX,
-    convert_swizzled_to_linear,
     dequantize_nvfp4_to_dtype,
 )
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.utils import convert_swizzled_to_linear
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,

@@ -21,6 +21,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_isa_hint,
     is_layer_skipped,
     pack_cols,
     unpack_cols,
@@ -232,7 +233,7 @@ class CPUAWQLinearMethod(LinearMethodBase):
         pack_factor = int(self.quant_config.pack_factor)
         input_size, packed_output_size = packed_weight.size()
         output_size = packed_output_size * pack_factor
-        isa_hint = _get_isa_hint(layer.scales.dtype)
+        isa_hint = get_isa_hint(layer.scales.dtype)
         layer.isa_hint = isa_hint
 
         interleave_map = (0, 4, 1, 5, 2, 6, 3, 7)
@@ -289,11 +290,3 @@ class CPUAWQLinearMethod(LinearMethodBase):
             isa_hint=layer.isa_hint,
         )
         return x
-
-
-def _get_isa_hint(dtype: torch.dtype) -> str:
-    supports_amx = torch._C._cpu._is_amx_tile_supported()
-    if supports_amx and dtype in (torch.bfloat16,):
-        return "amx"
-    else:
-        return "vec"
