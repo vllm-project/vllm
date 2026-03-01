@@ -5,8 +5,10 @@ import os
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 import vllm.envs as envs
+import vllm.envs_impl as envs_impl
 from vllm.envs import (
     disable_envs_cache,
     enable_envs_cache,
@@ -405,94 +407,102 @@ class TestEnvSetWithChoices:
             assert env_func() == {"option1", "option2"}
 
 
+# ── envs_impl-specific tests ────────────────────────────────────────────────────
+# The tests below target vllm.envs_impl (the new implementation).
+# envs_impl uses pydantic TypeAdapter for coercion, so error types differ from
+# the old vllm.envs (which used bool(int(x))).
+
+
 class TestVllmConfigureLogging:
-    """Test cases for VLLM_CONFIGURE_LOGGING environment variable."""
+    """Test VLLM_CONFIGURE_LOGGING via vllm.envs_impl."""
 
     def test_configure_logging_defaults_to_true(self):
-        """Test that VLLM_CONFIGURE_LOGGING defaults to True when not set."""
-        # Ensure the env var is not set
         with patch.dict(os.environ, {}, clear=False):
             if "VLLM_CONFIGURE_LOGGING" in os.environ:
                 del os.environ["VLLM_CONFIGURE_LOGGING"]
-
-            # Clear cache if it exists
-            if hasattr(envs.__getattr__, "cache_clear"):
-                envs.__getattr__.cache_clear()
-
-            result = envs.VLLM_CONFIGURE_LOGGING
+            if hasattr(envs_impl.__getattr__, "cache_clear"):
+                envs_impl.__getattr__.cache_clear()
+            result = envs_impl.VLLM_CONFIGURE_LOGGING
             assert result is True
             assert isinstance(result, bool)
 
     def test_configure_logging_with_zero_string(self):
-        """Test that VLLM_CONFIGURE_LOGGING='0' evaluates to False."""
         with patch.dict(os.environ, {"VLLM_CONFIGURE_LOGGING": "0"}):
-            # Clear cache if it exists
-            if hasattr(envs.__getattr__, "cache_clear"):
-                envs.__getattr__.cache_clear()
-
-            result = envs.VLLM_CONFIGURE_LOGGING
+            if hasattr(envs_impl.__getattr__, "cache_clear"):
+                envs_impl.__getattr__.cache_clear()
+            result = envs_impl.VLLM_CONFIGURE_LOGGING
             assert result is False
             assert isinstance(result, bool)
 
     def test_configure_logging_with_one_string(self):
-        """Test that VLLM_CONFIGURE_LOGGING='1' evaluates to True."""
         with patch.dict(os.environ, {"VLLM_CONFIGURE_LOGGING": "1"}):
-            # Clear cache if it exists
-            if hasattr(envs.__getattr__, "cache_clear"):
-                envs.__getattr__.cache_clear()
-
-            result = envs.VLLM_CONFIGURE_LOGGING
+            if hasattr(envs_impl.__getattr__, "cache_clear"):
+                envs_impl.__getattr__.cache_clear()
+            result = envs_impl.VLLM_CONFIGURE_LOGGING
             assert result is True
             assert isinstance(result, bool)
 
     def test_configure_logging_with_invalid_value_raises_error(self):
-        """Test that invalid VLLM_CONFIGURE_LOGGING value raises ValueError."""
+        # pydantic raises ValidationError (not ValueError) for invalid bool strings
         with patch.dict(os.environ, {"VLLM_CONFIGURE_LOGGING": "invalid"}):
-            # Clear cache if it exists
-            if hasattr(envs.__getattr__, "cache_clear"):
-                envs.__getattr__.cache_clear()
-
-            with pytest.raises(ValueError, match="invalid literal for int"):
-                _ = envs.VLLM_CONFIGURE_LOGGING
+            if hasattr(envs_impl.__getattr__, "cache_clear"):
+                envs_impl.__getattr__.cache_clear()
+            with pytest.raises(ValidationError):
+                _ = envs_impl.VLLM_CONFIGURE_LOGGING
 
 
 def test_basic_access_types(monkeypatch: pytest.MonkeyPatch):
-    """Test default values and types for various environment variables."""
+    """Test default values and types via vllm.envs_impl."""
+    monkeypatch.delenv("VLLM_HOST_IP", raising=False)
+    monkeypatch.delenv("VLLM_PORT", raising=False)
     monkeypatch.delenv("LOCAL_RANK", raising=False)
     monkeypatch.delenv("VLLM_USE_MODELSCOPE", raising=False)
 
-    assert isinstance(envs.LOCAL_RANK, int)
-    assert envs.LOCAL_RANK == 0
+    assert isinstance(envs_impl.VLLM_HOST_IP, str)
+    assert envs_impl.VLLM_HOST_IP == ""
 
-    assert isinstance(envs.VLLM_USE_MODELSCOPE, bool)
-    assert not envs.VLLM_USE_MODELSCOPE
+    assert envs_impl.VLLM_PORT is None
+
+    assert isinstance(envs_impl.LOCAL_RANK, int)
+    assert envs_impl.LOCAL_RANK == 0
+
+    assert isinstance(envs_impl.VLLM_USE_MODELSCOPE, bool)
+    assert not envs_impl.VLLM_USE_MODELSCOPE
 
 
 def test_env_var_parsing(monkeypatch: pytest.MonkeyPatch):
-    """Test that environment variables are parsed to the correct types."""
+    """Test that vllm.envs_impl parses env vars to the correct types."""
+    monkeypatch.setenv("VLLM_HOST_IP", "192.168.1.1")
+    monkeypatch.setenv("VLLM_PORT", "8000")
     monkeypatch.setenv("LOCAL_RANK", "5")
     monkeypatch.setenv("VLLM_USE_MODELSCOPE", "1")
 
-    assert isinstance(envs.LOCAL_RANK, int)
-    assert envs.LOCAL_RANK == 5
+    assert isinstance(envs_impl.VLLM_HOST_IP, str)
+    assert envs_impl.VLLM_HOST_IP == "192.168.1.1"
 
-    assert isinstance(envs.VLLM_USE_MODELSCOPE, bool)
-    assert envs.VLLM_USE_MODELSCOPE
+    assert isinstance(envs_impl.VLLM_PORT, int)
+    assert envs_impl.VLLM_PORT == 8000
+
+    assert isinstance(envs_impl.LOCAL_RANK, int)
+    assert envs_impl.LOCAL_RANK == 5
+
+    assert isinstance(envs_impl.VLLM_USE_MODELSCOPE, bool)
+    assert envs_impl.VLLM_USE_MODELSCOPE
 
 
 def test_lazy_defaults(monkeypatch: pytest.MonkeyPatch):
-    """Test that lazy defaults are resolved correctly."""
+    """Test that callable default_factory values are resolved lazily."""
     monkeypatch.delenv("VLLM_CACHE_ROOT", raising=False)
 
-    cache_root = envs.VLLM_CACHE_ROOT
+    cache_root = envs_impl.VLLM_CACHE_ROOT
     assert isinstance(cache_root, str)
     assert "vllm" in cache_root
 
 
 def test_is_set(monkeypatch: pytest.MonkeyPatch):
-    """Test the is_set() function."""
+    """Test envs_impl.is_set() — works for any name, not just registered vars."""
     monkeypatch.delenv("VLLM_TEST_VAR_123", raising=False)
-    assert not envs.is_set("VLLM_TEST_VAR_123")
+    assert not envs_impl.is_set("VLLM_TEST_VAR_123")
 
     monkeypatch.setenv("VLLM_TEST_VAR_123", "test")
-    assert envs.is_set("VLLM_TEST_VAR_123")
+    assert envs_impl.is_set("VLLM_TEST_VAR_123")
