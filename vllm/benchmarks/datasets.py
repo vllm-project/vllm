@@ -444,6 +444,55 @@ def gen_prompt_decode_to_target_len(
 # -----------------------------------------------------------------------------
 
 
+def get_sampling_params(
+    rng: np.random.Generator,
+    num_requests: int,
+    range_ratio: float,
+    input_len: int,
+    output_len: int,
+    tokenizer: TokenizerLike,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Get the sampling parameters for the dataset.
+    """
+    # Enforce range_ratio < 1
+    if not (0.0 <= range_ratio < 1.0):
+        raise ValueError("range_ratio must be in [0, 1).")
+    num_special_tokens = int(tokenizer.num_special_tokens_to_add())
+    real_input_len = max(0, int(input_len) - num_special_tokens)
+    # Bounds use floor for low and ceil for high
+    input_low = math.floor(real_input_len * (1 - range_ratio))
+    input_high = math.ceil(real_input_len * (1 + range_ratio))
+    output_low = math.floor(output_len * (1 - range_ratio))
+    output_high = math.ceil(output_len * (1 + range_ratio))
+    # Ensure the lower bound for output length is at least 1 to
+    # prevent sampling 0 tokens.
+    output_low = max(output_low, 1)
+    output_high = max(output_high, 1)
+
+    if input_low > input_high:
+        raise ValueError(
+            f"Invalid input sampling interval: low={input_low} > high={input_high}"
+        )
+    if output_low > output_high:
+        raise ValueError(
+            f"Invalid output sampling interval: low={output_low} > high={output_high}"
+        )
+
+    logger.info(
+        "Sampling input_len from [%s, %s] and output_len from [%s, %s]",
+        input_low,
+        input_high,
+        output_low,
+        output_high,
+    )
+
+    input_lens = rng.integers(input_low, input_high + 1, size=num_requests)
+    output_lens = rng.integers(output_low, output_high + 1, size=num_requests)
+    offsets = rng.integers(0, tokenizer.vocab_size, size=num_requests)
+    return input_lens, output_lens, offsets
+
+
 class RandomDataset(BenchmarkDataset):
     """
     Synthetic text-only dataset for serving/throughput benchmarks.
@@ -500,8 +549,8 @@ class RandomDataset(BenchmarkDataset):
                 "* (1 - range_ratio) >= 1."
             )
 
-        input_lens, output_lens, offsets = self.get_sampling_params(
-            num_requests, range_ratio, input_len, output_len, tokenizer
+        input_lens, output_lens, offsets = get_sampling_params(
+            self._rng, num_requests, range_ratio, input_len, output_len, tokenizer
         )
 
         vocab_size = tokenizer.vocab_size
@@ -512,7 +561,7 @@ class RandomDataset(BenchmarkDataset):
         # Generate prefix once
         prefix_token_ids = self.get_prefix(tokenizer, allowed_tokens, prefix_len)
 
-        requests = []
+        requests: list[SampleRequest] = []
         token_mismatch_total = 0
         for i in range(num_requests):
             prompt, total_input_len, token_mismatch = self.generate_token_sequence(  # noqa: E501
@@ -596,55 +645,6 @@ class RandomDataset(BenchmarkDataset):
             )
         return adjusted_tokens
 
-    def get_sampling_params(
-        self,
-        num_requests: int,
-        range_ratio: float,
-        input_len: int,
-        output_len: int,
-        tokenizer: TokenizerLike,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Get the sampling parameters for the dataset.
-        """
-        # Enforce range_ratio < 1
-        if not (0.0 <= range_ratio < 1.0):
-            raise ValueError("range_ratio must be in [0, 1).")
-        num_special_tokens = int(tokenizer.num_special_tokens_to_add())
-        real_input_len = max(0, int(input_len) - num_special_tokens)
-        # Bounds use floor for low and ceil for high
-        input_low = math.floor(real_input_len * (1 - range_ratio))
-        input_high = math.ceil(real_input_len * (1 + range_ratio))
-        output_low = math.floor(output_len * (1 - range_ratio))
-        output_high = math.ceil(output_len * (1 + range_ratio))
-        # Ensure the lower bound for output length is at least 1 to
-        # prevent sampling 0 tokens.
-        output_low = max(output_low, 1)
-        output_high = max(output_high, 1)
-
-        if input_low > input_high:
-            raise ValueError(
-                f"Invalid input sampling interval: low={input_low} > high={input_high}"
-            )
-        if output_low > output_high:
-            raise ValueError(
-                "Invalid output sampling interval: "
-                f"low={output_low} > high={output_high}"
-            )
-
-        logger.info(
-            "Sampling input_len from [%s, %s] and output_len from [%s, %s]",
-            input_low,
-            input_high,
-            output_low,
-            output_high,
-        )
-
-        input_lens = self._rng.integers(input_low, input_high + 1, size=num_requests)
-        output_lens = self._rng.integers(output_low, output_high + 1, size=num_requests)
-        offsets = self._rng.integers(0, tokenizer.vocab_size, size=num_requests)
-        return input_lens, output_lens, offsets
-
     def generate_token_sequence(
         self,
         *,
@@ -724,8 +724,8 @@ class RandomDatasetForReranking(RandomDataset):
 
         query_len_param = (input_len // 2) - n_sep_tokens if is_reranker else input_len
 
-        query_lens, _, query_offsets = self.get_sampling_params(
-            1, range_ratio, query_len_param, 0, tokenizer
+        query_lens, _, query_offsets = get_sampling_params(
+            self._rng, 1, range_ratio, query_len_param, 0, tokenizer
         )
 
         query_len = int(query_lens[0])
@@ -738,8 +738,8 @@ class RandomDatasetForReranking(RandomDataset):
         else:
             doc_len_param = input_len - query_len - n_sep_tokens
 
-        doc_lens, _, doc_offsets = self.get_sampling_params(
-            num_requests, range_ratio, doc_len_param, 0, tokenizer
+        doc_lens, _, doc_offsets = get_sampling_params(
+            self._rng, num_requests, range_ratio, doc_len_param, 0, tokenizer
         )
 
         vocab_size = tokenizer.vocab_size
@@ -811,7 +811,7 @@ class RandomDatasetForReranking(RandomDataset):
 # -----------------------------------------------------------------------------
 
 
-class TxtSlicesDataset(BenchmarkDataset):
+class TxtSlicesDataset(RandomDataset):
     """
     Implements the TxtSlices dataset. Takes a URL or file path to a text file,
     tokenizes the entire content, and generates sample requests by randomly
@@ -832,7 +832,7 @@ class TxtSlicesDataset(BenchmarkDataset):
         if len(self.text) == 0:
             raise ValueError("The text file is empty and cannot be sampled from.")
 
-        self.rng = random.Random(self.random_seed)
+        self._rng = np.random.default_rng(self.random_seed)
 
     @staticmethod
     def load_data(dataset_path: str) -> str:
@@ -855,11 +855,10 @@ class TxtSlicesDataset(BenchmarkDataset):
         tokenizer: TokenizerLike,
         token_ids: tuple[int, ...],
         input_len: int,
+        start_pos: int,
+        output_len: int,
     ) -> str:
         num_available_tokens = len(token_ids)
-
-        # Randomly select a start position
-        start_pos = self.rng.randint(0, num_available_tokens - 1)
 
         # Extract tokens with cycling if necessary
         prompt_token_ids = tuple(
@@ -877,18 +876,37 @@ class TxtSlicesDataset(BenchmarkDataset):
         no_oversample: bool = False,
         input_len: int = 1024,
         output_len: int = 128,
+        range_ratio: float = RandomDataset.DEFAULT_RANGE_RATIO,
         **kwargs,
     ) -> list[SampleRequest]:
         # Tokenize the entire text content
         token_ids = self.get_token_ids(tokenizer)
-        num_special_tokens = int(tokenizer.num_special_tokens_to_add())
-        non_special_length = input_len - num_special_tokens
 
+        # Get the sampling parameters for input length and output length.
+        # We don't need the offsets.
+        input_lens, output_lens, _ = get_sampling_params(
+            self._rng,
+            num_requests,
+            range_ratio,
+            input_len,
+            output_len,
+            tokenizer,
+        )
+        # Additionally, get the starting positions in the input text.
+        start_positions = self._rng.integers(0, len(token_ids), size=num_requests)
+
+        # Put it all together.
         return [
             SampleRequest(
-                prompt=self.generate_prompt(tokenizer, token_ids, non_special_length),
-                prompt_len=input_len,
-                expected_output_len=output_len,
+                prompt=self.generate_prompt(
+                    tokenizer,
+                    token_ids,
+                    int(input_lens[i]),
+                    int(start_positions[i]),
+                    int(output_lens[i]),
+                ),
+                prompt_len=int(input_lens[i]),
+                expected_output_len=int(output_lens[i]),
                 request_id=request_id_prefix + str(i),
             )
             for i in range(num_requests)
@@ -1220,8 +1238,8 @@ class RandomMultiModalDataset(RandomDataset):
                 "batchsize > 1 is not supported for RandomMultiModalDataset."
             )
         # Get the sampling parameters for the dataset
-        input_lens, output_lens, offsets = self.get_sampling_params(
-            num_requests, range_ratio, input_len, output_len, tokenizer
+        input_lens, output_lens, offsets = get_sampling_params(
+            self._rng, num_requests, range_ratio, input_len, output_len, tokenizer
         )
 
         (
@@ -2112,6 +2130,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 num_requests=args.num_prompts,
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
+                range_ratio=args.random_range_ratio,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
             ),
