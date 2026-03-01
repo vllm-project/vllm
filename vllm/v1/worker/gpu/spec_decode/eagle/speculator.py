@@ -16,6 +16,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     build_slot_mappings_by_layer,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
@@ -199,6 +200,8 @@ class EagleSpeculator:
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
+        # [data_parallel_size]
+        num_tokens_across_dp: torch.Tensor | None,
     ) -> torch.Tensor:
         # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
         # number of rejected tokens, we maintain the size of eagle's input_ids and
@@ -232,7 +235,7 @@ class EagleSpeculator:
             num_tokens,
             attn_metadata,
             slot_mappings,
-            num_tokens_across_dp=None,  # FIXME
+            num_tokens_across_dp=num_tokens_across_dp,
         )
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
@@ -314,12 +317,16 @@ class EagleSpeculator:
         slot_mappings_by_layer = build_slot_mappings_by_layer(
             slot_mappings, self.kv_cache_config
         )
+        num_decode_tokens_across_dp = make_num_tokens_across_dp(
+            self.vllm_config.parallel_config.data_parallel_size,
+            num_tokens_padded,
+        )
         self.generate_draft(
             num_reqs,
             num_tokens_padded,
             attn_metadata,
             slot_mappings_by_layer,
-            num_tokens_across_dp=None,  # FIXME
+            num_tokens_across_dp=num_decode_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_mode,
         )
         return self.draft_tokens[:num_reqs]

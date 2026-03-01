@@ -264,7 +264,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         prepare_communication_buffer_for_model(self.model)
         if self.speculator is not None:
-            prepare_communication_buffer_for_model(self.speculator)
+            prepare_communication_buffer_for_model(self.speculator.model)
 
         # Initialize the components that require the model.
         self.model_state = init_model_state(
@@ -367,7 +367,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return None, None
 
         assert self.execute_model_state is not None
-        input_batch, _, _, _, hidden_states, _, _ = self.execute_model_state
+        input_batch, _, _, _, hidden_states, _, _, _ = self.execute_model_state
         self.execute_model_state = None
         assert hidden_states is not None  # Last PP rank always has hidden_states
         sample_hidden_states = hidden_states[input_batch.logits_indices]
@@ -965,6 +965,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states,
             aux_hidden_states,
             kv_connector_output,
+            num_tokens_across_dp,
         )
 
         if not self.is_last_pp_rank:
@@ -991,6 +992,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states,
             aux_hidden_states,
             kv_connector_output,
+            num_tokens_across_dp,
         ) = self.execute_model_state
         self.execute_model_state = None
 
@@ -1064,6 +1066,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.req_states.next_prefill_tokens,
                 self.sampler.sampling_states.temperature.gpu,
                 self.sampler.sampling_states.seeds.gpu,
+                num_tokens_across_dp,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
