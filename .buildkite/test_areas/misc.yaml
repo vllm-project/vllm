@@ -9,6 +9,7 @@ steps:
     - tests/v1
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     # split the test to avoid interference
     - pytest -v -s -m 'not cpu_test' v1/core
     - pytest -v -s v1/executor

@@ -976,6 +976,11 @@ if _is_cuda():
     ):
         # FA3 requires CUDA 12.3 or later
         ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
+    # FA4 CuteDSL - Python-only component for FA4's cute DSL support
+    # Optional since this doesn't produce a .so file, just copies Python files
+    ext_modules.append(
+        CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa4_cutedsl_C", optional=True)
+    )
     if envs.VLLM_USE_PRECOMPILED or (
         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.9")
     ):
