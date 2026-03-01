@@ -11,7 +11,7 @@
 import dataclasses
 import gc
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -25,6 +25,7 @@ logger = init_logger(__name__)
 
 
 cumem_available = False
+libcudart: Any = None
 try:
     from vllm.cumem_allocator import (
         init_module,
@@ -41,7 +42,6 @@ except ModuleNotFoundError:
     init_module = None
     python_create_and_map = None
     python_unmap_and_release = None
-    CudaRTLibrary = None
     lib_name = None
     libcudart = None
 
@@ -65,7 +65,8 @@ def unmap_and_release(allocation_handle: HandleType) -> None:
 
 
 def get_pluggable_allocator(
-    python_malloc_fn: Callable[[int], int], python_free_func: Callable[[int, int], None]
+    python_malloc_fn: Callable[[HandleType], None],
+    python_free_func: Callable[[int], HandleType],
 ) -> torch.cuda.memory.CUDAPluggableAllocator:
     init_module(python_malloc_fn, python_free_func)
     new_alloc = torch.cuda.memory.CUDAPluggableAllocator(
@@ -76,8 +77,11 @@ def get_pluggable_allocator(
 
 @contextmanager
 def use_memory_pool_with_allocator(
-    python_malloc_fn: Callable[[int], int], python_free_func: Callable[[int, int], None]
-) -> None:
+    python_malloc_fn: Callable[[HandleType], None],
+    python_free_func: Callable[[int], HandleType],
+) -> Iterator[
+    tuple[torch.cuda.memory.MemPool, torch.cuda.memory.CUDAPluggableAllocator]
+]:
     new_alloc = get_pluggable_allocator(python_malloc_fn, python_free_func)
     mem_pool = torch.cuda.memory.MemPool(new_alloc._allocator)
     with torch.cuda.memory.use_mem_pool(mem_pool):
@@ -109,7 +113,7 @@ class CuMemAllocator:
     not work as expected.
     """
 
-    instance: "CuMemAllocator" = None
+    instance: "CuMemAllocator | None" = None
     default_tag: str = "default"
 
     @staticmethod
