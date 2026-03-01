@@ -527,6 +527,12 @@ class EngineArgs:
     reasoning_parser_plugin: str | None = None
 
     speculative_config: dict[str, Any] | None = None
+    """JSON object configuring speculative decoding. Key parameters include:
+    method (speculation method, e.g. 'eagle', 'draft_model', 'ngram',
+    'suffix'), model (draft model name/path), and num_speculative_tokens
+    (number of tokens to speculate per step). See
+    https://docs.vllm.ai/en/latest/features/speculative_decoding/configuration/
+    for the full list of accepted keys."""
 
     show_hidden_metrics_for_version: str | None = (
         ObservabilityConfig.show_hidden_metrics_for_version

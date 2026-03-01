@@ -14,6 +14,8 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [N-Gram](n_gram.md)
 - [Suffix Decoding](suffix.md)
 
+For a complete list of all `--speculative-config` keys and their accepted values, see the [Configuration Reference](configuration.md).
+
 ## Lossless guarantees of Speculative Decoding
 
 In vLLM, speculative decoding aims to enhance inference efficiency while maintaining accuracy. This section addresses the lossless guarantees of
