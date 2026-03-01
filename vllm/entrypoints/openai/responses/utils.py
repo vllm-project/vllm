@@ -217,6 +217,47 @@ def _construct_single_message_from_response_item(
             content=item.get("output"),
             tool_call_id=item.get("call_id"),
         )
+    elif isinstance(item, dict) and item.get("type") == "reasoning":
+        # Dict-form reasoning item (e.g. from TypedDict union parsing).
+        # Pydantic may leave Iterable fields as ValidatorIterator objects,
+        # so materialise them with list() before indexing.
+        reasoning_content = ""
+        content = item.get("content")
+        summary = item.get("summary")
+        if content:
+            content = list(content)
+            if len(content) >= 1:
+                text = content[0]
+                reasoning_content = (
+                    text.get("text", "") if isinstance(text, dict) else text
+                )
+        elif summary:
+            summary = list(summary)
+            if len(summary) >= 1:
+                s = summary[0]
+                reasoning_content = s.get("text", "") if isinstance(s, dict) else s
+        return {
+            "role": "assistant",
+            "reasoning": reasoning_content,
+        }
+    elif isinstance(item, dict) and item.get("role") == "assistant":
+        # Dict-form assistant message (e.g. from TypedDict union parsing).
+        content = item.get("content")
+        if content and not isinstance(content, str):
+            content = list(content)
+            if len(content) >= 1:
+                first = content[0]
+                text = first.get("text", "") if isinstance(first, dict) else first
+            else:
+                text = ""
+        elif isinstance(content, str):
+            text = content
+        else:
+            text = ""
+        return {
+            "role": "assistant",
+            "content": text,
+        }
     return item  # type: ignore
 
 
