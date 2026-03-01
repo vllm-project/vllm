@@ -50,7 +50,7 @@ def with_retry(
             time.sleep(retry_delay)
             retry_delay *= 2
 
-    raise AssertionError("Should not be reached")
+    raise RuntimeError("Should not be reached")
 
 
 # @cache doesn't cache exceptions

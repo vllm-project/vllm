@@ -46,7 +46,7 @@ def get_layer_from_name(layer_name: str) -> torch.nn.Module:
         assert all_moe_layers is not None
         moe_layer_index = forward_context.moe_layer_index
         if moe_layer_index >= len(all_moe_layers):
-            raise AssertionError(
+            raise RuntimeError(
                 "We expected the number of MOE layers in `all_moe_layers` "
                 "to be equal to the number of "
                 "{vllm.moe_forward, vllm.moe_forward_shared} calls."

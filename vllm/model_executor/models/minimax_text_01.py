@@ -866,7 +866,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                 elif "down_proj" in name:
                     weight_loader(param, loaded_weight)
                 else:
-                    raise AssertionError("MLP weight not in [gate_up_proj, down_proj]")
+                    raise ValueError("MLP weight not in [gate_up_proj, down_proj]")
             loaded_params.add(name)
             return
 

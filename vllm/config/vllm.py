@@ -1710,7 +1710,7 @@ def get_cached_compilation_config():
 
 def get_current_vllm_config() -> VllmConfig:
     if _current_vllm_config is None:
-        raise AssertionError(
+        raise RuntimeError(
             "Current vLLM config is not set. This typically means "
             "get_current_vllm_config() was called outside of a "
             "set_current_vllm_config() context, or a CustomOp was instantiated "

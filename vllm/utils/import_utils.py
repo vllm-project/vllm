@@ -314,7 +314,7 @@ class PlaceholderModule(_PlaceholderBase):
 
             raise exc
 
-        raise AssertionError(
+        raise RuntimeError(
             "PlaceholderModule should not be used "
             "when the original module can be imported"
         )
@@ -334,7 +334,7 @@ class _PlaceholderModuleAttr(_PlaceholderBase):
     def __getattr__(self, key: str) -> Never:
         getattr(self.__module, f"{self.__attr_path}.{key}")
 
-        raise AssertionError(
+        raise RuntimeError(
             "PlaceholderModule should not be used "
             "when the original module can be imported"
         )
