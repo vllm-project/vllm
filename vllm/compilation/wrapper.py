@@ -193,7 +193,9 @@ class TorchCompileWithNoGuardsWrapper:
             )
 
         if envs.VLLM_USE_BYTECODE_HOOK and mode != CompilationMode.STOCK_TORCH_COMPILE:
-            torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
+            self._bytecode_hook_handle = (
+                torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
+            )
             self._compiled_bytecode: CodeType | None = None
 
     def aot_compile(self, *args: Any, **kwargs: Any) -> Any:
@@ -299,6 +301,12 @@ class TorchCompileWithNoGuardsWrapper:
                 f"(please search for the usage of the function `update`):\n{src}"
             )
             raise RuntimeError(msg)
+
+    def cleanup(self) -> None:
+        """Remove the bytecode hook registered by this instance."""
+        handle = getattr(self, "_bytecode_hook_handle", None)
+        if handle is not None:
+            handle.remove()
 
     @contextmanager
     def _dispatch_to_compiled_code(self) -> Generator[None, None, None]:
