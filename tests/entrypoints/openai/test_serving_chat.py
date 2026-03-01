@@ -967,6 +967,44 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
 
 
 @pytest.mark.asyncio
+async def test_serving_chat_interleave_override_request_field(monkeypatch):
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+    serving_chat.chat_completion_full_generator = AsyncMock(return_value=MagicMock())
+    parse_messages_spy = AsyncMock(
+        return_value=(
+            [{"role": "user", "content": "test"}],
+            None,
+            None,
+        )
+    )
+
+    monkeypatch.setattr(
+        "vllm.renderers.hf.parse_chat_messages_async",
+        parse_messages_spy,
+    )
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "test"}],
+        interleave_mm_strings=True,
+    )
+
+    await serving_chat.create_chat_completion(request)
+
+    parse_messages_spy.assert_awaited_once()
+    assert parse_messages_spy.await_args is not None
+    assert parse_messages_spy.await_args.kwargs["interleave_mm_strings"] is True
+
+
+@pytest.mark.asyncio
 async def test_serving_chat_data_parallel_rank_extraction():
     """Test that data_parallel_rank is properly extracted from header and
     passed to engine."""

@@ -52,6 +52,9 @@ class ChatParams:
     chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
     """The kwargs to pass to the chat template."""
 
+    interleave_mm_strings: bool | None = None
+    """Request-level override for multimodal string interleaving."""
+
     def with_defaults(self, default_chat_template_kwargs: dict[str, Any] | None):
         if not default_chat_template_kwargs:
             return self
@@ -63,6 +66,7 @@ class ChatParams:
                 default_chat_template_kwargs,
                 self.chat_template_kwargs,
             ),
+            interleave_mm_strings=self.interleave_mm_strings,
         )
 
     def get_apply_chat_template_kwargs(self) -> dict[str, Any]:
