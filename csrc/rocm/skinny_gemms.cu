@@ -1118,6 +1118,12 @@ int mindiv(int N, int div1, int div2) {
 torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
                        const std::optional<at::Tensor>& in_bias,
                        const int64_t CuCount) {
+  TORCH_CHECK(in_a.dtype() == in_b.dtype(),
+              "in_a and in_b must have the same dtype");
+  TORCH_CHECK(in_a.dtype() == torch::kFloat16 ||
+              in_a.dtype() == torch::kBFloat16);
+  TORCH_CHECK(in_a.size(1) % 8 == 0, "k % 8 == 0");
+
   auto M_in = in_a.size(0);
   auto K_in = in_a.size(1);
   auto N_in = in_b.size(0);
@@ -1132,10 +1138,10 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
                    ? in_bias->size(0)
                    : 1;
 
-  TORCH_CHECK(in_a.dtype() == in_b.dtype());
-  TORCH_CHECK(K_in % 8 == 0, "k % 8 == 0");
-  TORCH_CHECK(in_a.dtype() == torch::kFloat16 ||
-              in_a.dtype() == torch::kBFloat16);
+  TORCH_CHECK(Bx_in >= 1 && (Bx_in == 1 || M_in % Bx_in == 0),
+              "bias Bx must be 1 or divide M");
+  TORCH_CHECK(By_in >= 1 && (By_in == 1 || N_in % By_in == 0),
+              "bias By must be 1 or divide N");
 
   auto out_c = torch::empty(
       {N_in, M_in},
