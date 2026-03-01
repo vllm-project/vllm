@@ -901,6 +901,15 @@ steps:
   commands:
     - pytest -v -s models/test_utils.py models/test_vision.py
 
+- label: Model strategy test
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi325_1
+  source_file_dependencies:
+  - vllm/
+  - tests/models/nightly/llama.py
+  commands:
+    - pytest -v -s models/nightly/llama.py
+
 - label: Language Models Tests (Standard)
   timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction]

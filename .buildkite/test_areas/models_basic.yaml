@@ -55,6 +55,15 @@ steps:
   commands:
     - pytest -v -s models/test_utils.py models/test_vision.py
 
+
+- label: Model strategy test
+  device: b200
+  source_file_dependencies: []
+  commands:
+    - pytest -v -s models/nightly/gptoss.py
+    - pytest -v -s models/nightly/guidellm/gptoss_gllm.py
+
+
 - label: Transformers Nightly Models
   working_dir: "/vllm-workspace/"
   optional: true
