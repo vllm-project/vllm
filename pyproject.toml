@@ -117,12 +117,10 @@ markers = [
 ]
 
 [tool.ty.src]
-root = "./vllm"
 respect-ignore-files = true
 
 [tool.ty.environment]
 python = "./.venv"
-extra-paths = ["."]
 
 [tool.typos.files]
 # these files may be written in non english words
