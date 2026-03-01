@@ -22,7 +22,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
-from vllm.v1.worker.gpu.model_states import ModelState
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -89,7 +89,6 @@ class CudaGraphManager:
         model: nn.Module,
         model_state: ModelState,
         input_buffers: InputBuffers,
-        inputs_embeds: torch.Tensor | None,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
@@ -116,9 +115,6 @@ class CudaGraphManager:
         model_inputs = {
             "input_ids": input_buffers.input_ids[:num_tokens],
             "positions": input_buffers.positions[:num_tokens],
-            "inputs_embeds": (
-                inputs_embeds[:num_tokens] if inputs_embeds is not None else None
-            ),
             # NOTE: Values returned by `prepare_dummy_inputs` will override the
             # default values above.
             **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
@@ -255,7 +251,6 @@ class CudaGraphManager:
         model: nn.Module,
         model_state: ModelState,
         input_buffers: InputBuffers,
-        inputs_embeds: torch.Tensor | None,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
@@ -267,7 +262,6 @@ class CudaGraphManager:
             model=model,
             model_state=model_state,
             input_buffers=input_buffers,
-            inputs_embeds=inputs_embeds,
             block_tables=block_tables,
             attn_groups=attn_groups,
             kv_cache_config=kv_cache_config,
@@ -426,8 +420,8 @@ def prepare_inputs_to_capture(
     input_buffers.dcp_local_seq_lens[:num_reqs] = num_tokens
     input_buffers.dcp_local_seq_lens[num_reqs:] = 0
 
-    input_block_tables = [x[:num_reqs] for x in block_tables.input_block_tables]
-    slot_mappings = block_tables.slot_mappings[:, :num_tokens]
+    input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
+    slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
     )
