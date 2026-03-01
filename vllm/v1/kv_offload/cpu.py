@@ -71,11 +71,11 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
 
             if self.eviction_policy == "lru":
-                self._manager = LRUOffloadingManager(
+                backing: OffloadingManager = LRUOffloadingManager(
                     backend=backend, enable_events=enable_events
                 )
             elif self.eviction_policy == "arc":
-                self._manager = ARCOffloadingManager(
+                backing = ARCOffloadingManager(
                     backend=backend, enable_events=enable_events
                 )
             else:
@@ -83,6 +83,26 @@ class CPUOffloadingSpec(OffloadingSpec):
                     f"Unknown eviction policy: {self.eviction_policy}. "
                     f"Supported policies: lru, arc"
                 )
+
+            # Strategy A (P0): wrap the backing manager with a reuse-frequency
+            # gate so that first-time blocks are not stored to CPU.
+            # store_threshold=1 passes all stores through (disabled).
+            store_threshold = int(self.extra_config.get("store_threshold", 2))
+            if store_threshold > 1:
+                from vllm.v1.kv_offload.reuse_manager import (
+                    StoreReusedOffloadingManager,
+                )
+
+                self._manager = StoreReusedOffloadingManager(
+                    backing=backing,
+                    store_threshold=store_threshold,
+                    max_tracker_size=int(
+                        self.extra_config.get("reuse_tracker_max_size", 64_000)
+                    ),
+                )
+            else:
+                self._manager = backing
+
         return self._manager
 
     def get_handlers(
