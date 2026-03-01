@@ -6,7 +6,7 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools-scm>=8.0",
-    # "torch == 2.10.0",  # Disabled for ppc64le compatibility
+    "torch == 2.10.0",  # ppc64le: build from source with matching version
     "wheel",
     "jinja2",
     "grpcio-tools==1.78.0",

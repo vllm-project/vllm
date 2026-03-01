@@ -72,11 +72,12 @@ else()
 endif()
 
 # POWER8/ppc64le CPU-only build path: Skip CUDA/GPU entirely
-# For CPU builds, we get torch paths without importing torch (avoids NumPy ABI issues)
-# The Caffe2Config.cmake must be patched to disable CUDA (set if(1) to if(0) at line 77)
+# On ppc64le, importing torch during cmake triggers NumPy ABI issues, so we
+# locate torch via site-packages without importing it. This workaround is
+# specific to ppc64le and does NOT affect x86 or ARM CPU builds.
 #
-if (VLLM_TARGET_DEVICE STREQUAL "cpu")
-    message(STATUS "CPU-only build requested, skipping GPU configuration")
+if (VLLM_TARGET_DEVICE STREQUAL "cpu" AND CMAKE_SYSTEM_PROCESSOR MATCHES "ppc64")
+    message(STATUS "ppc64le CPU-only build: locating torch without import (NumPy ABI workaround)")
 
     # Get torch site-packages path without importing torch (avoids NumPy ABI issues)
     execute_process(

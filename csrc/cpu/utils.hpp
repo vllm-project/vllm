@@ -56,10 +56,10 @@ struct Counter {
 inline int64_t get_available_l2_size() {
   static int64_t size = []() {
 #if defined(__powerpc64__) || defined(__ppc64__)
-  // POWER8 S824: 512KB L2 cache per core (well-known constant)
-  auto l2_cache_size = static_cast<size_t>(512 * 1024);
+    // POWER8 S824: 512KB L2 cache per core (well-known constant)
+    auto l2_cache_size = static_cast<size_t>(512 * 1024);
 #else
-  auto l2_cache_size = at::cpu::L2_cache_size();
+    auto l2_cache_size = at::cpu::L2_cache_size();
 #endif
     return l2_cache_size >> 1;  // use 50% of L2 cache
   }();

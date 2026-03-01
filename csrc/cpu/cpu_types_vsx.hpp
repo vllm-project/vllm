@@ -10,13 +10,19 @@
 // POWER8 compatibility: vec_xst_len is a POWER9+ intrinsic (ISA 3.0)
 // On POWER8, we provide a memcpy-based fallback
 #if defined(__POWER8_VECTOR__) && !defined(__POWER9_VECTOR__)
-#include <cstring>
-static inline void vec_xst_len_compat(__vector unsigned char v, unsigned char* addr, size_t len) {
-    union { __vector unsigned char vec; unsigned char bytes[16]; } u;
-    u.vec = v;
-    memcpy(addr, u.bytes, len);
+  #include <cstring>
+static inline void vec_xst_len_compat(__vector unsigned char v,
+                                      unsigned char* addr, size_t len) {
+  union {
+    __vector unsigned char vec;
+    unsigned char bytes[16];
+  } u;
+  u.vec = v;
+  memcpy(addr, u.bytes, len);
 }
-#define vec_xst_len(v, addr, len) vec_xst_len_compat((__vector unsigned char)(v), (unsigned char*)(addr), (len))
+  #define vec_xst_len(v, addr, len)                                         \
+    vec_xst_len_compat((__vector unsigned char)(v), (unsigned char*)(addr), \
+                       (len))
 #endif
 
 namespace vec_op {
