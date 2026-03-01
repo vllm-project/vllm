@@ -23,6 +23,7 @@ from vllm.v1.attention.backends.fa_utils import (
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 
 if is_flash_attn_varlen_func_available():
@@ -609,6 +610,13 @@ class FlashAttentionImpl(AttentionImpl):
 
         self.supports_quant_query_input = True
 
+        parallel_config = get_current_vllm_config().parallel_config
+        dcp_a2a = (
+            parallel_config.decode_context_parallel_size > 1
+            and parallel_config.dcp_comm_backend == "a2a"
+        )
+        self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -857,8 +865,8 @@ class FlashAttentionImpl(AttentionImpl):
             v_descale=v_descale,
             num_splits=attn_metadata.max_num_splits,
         )
-        # FA returns LSE in shape [ H, B ] but cp_lse_ag_out_rs wants [ B, H ]
-        context_attn_out_cor, context_lse_cor = cp_lse_ag_out_rs(
+        # FA returns LSE in shape [ H, B ] but DCP combine wants [ B, H ]
+        context_attn_out_cor, context_lse_cor = self.dcp_combine(
             context_attn_out,
             context_lse.transpose(0, 1),
             get_dcp_group(),

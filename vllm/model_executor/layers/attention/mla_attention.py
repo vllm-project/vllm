@@ -204,7 +204,10 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
+from vllm.distributed.parallel_state import (
+    get_dcp_group,
+    is_global_first_rank,
+)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -253,6 +256,7 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
@@ -392,6 +396,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         ]
 
         self.use_sparse = use_sparse
+
+        parallel_config = get_current_vllm_config().parallel_config
+        self.dcp_a2a = (
+            parallel_config.decode_context_parallel_size > 1
+            and parallel_config.dcp_comm_backend == "a2a"
+        )
 
         # Initialize q/k/v range constants.
         self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
@@ -637,12 +647,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
-                attn_out = cp_lse_ag_out_rs(
-                    attn_out,
-                    lse,
-                    get_dcp_group(),
-                    is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
-                )
+                if self.dcp_a2a:
+                    attn_out = dcp_a2a_lse_reduce(
+                        attn_out,
+                        lse,
+                        get_dcp_group(),
+                        is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
+                    )
+                else:
+                    attn_out = cp_lse_ag_out_rs(
+                        attn_out,
+                        lse,
+                        get_dcp_group(),
+                        is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
+                    )
 
             # v_up projection
             self._v_up_proj(attn_out, out=mqa_output_slice)
