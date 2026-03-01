@@ -118,7 +118,43 @@ class RemoteOpenAIServer:
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         if env_dict is not None:
             env.update(env_dict)
-        serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
+
+        debugpy_port = env.get("VLLM_TEST_DEBUGPY_PORT")
+        if debugpy_port is not None and debugpy_port != "":
+            try:
+                debugpy_port_int = int(debugpy_port)
+            except ValueError as exc:
+                raise ValueError(
+                    "VLLM_TEST_DEBUGPY_PORT must be an integer"
+                ) from exc
+
+            debugpy_host = env.get("VLLM_TEST_DEBUGPY_HOST", "0.0.0.0")
+            wait_for_client_raw = env.get(
+                "VLLM_TEST_DEBUGPY_WAIT_FOR_CLIENT", "0"
+            ).strip().lower()
+            wait_for_client = wait_for_client_raw not in ("0", "false", "no", "")
+
+            serve_cmd = [
+                sys.executable,
+                "-m",
+                "debugpy",
+                "--listen",
+                f"{debugpy_host}:{debugpy_port_int}",
+            ]
+            if wait_for_client:
+                serve_cmd.append("--wait-for-client")
+
+            # Use the module entrypoint rather than the console script so it runs
+            # under the same interpreter as the test process.
+            serve_cmd += [
+                "-m",
+                "vllm.entrypoints.cli.main",
+                "serve",
+                model,
+                *vllm_serve_args,
+            ]
+        else:
+            serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
         print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
         print(f"Environment variables: {env}")
         self.proc: subprocess.Popen = subprocess.Popen(
