@@ -424,7 +424,25 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
+        positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Store positions so forward_impl can access them for
+        # fused RoPE+quant without changing custom op signatures.
+        self._positions = positions
+
+        # Apply RoPE here if rotary_emb is available on the impl.
+        # The PR moved RoPE from mla.py into the attention layer to enable
+        # fused RoPE+quant in the impl. When the fused path is active,
+        # skip upfront RoPE -- it will be applied per-path in forward_impl.
+        rotary_emb = getattr(self.impl, "rotary_emb", None)
+        use_fused = getattr(self.impl, "use_fused_rope_quant", False)
+        if rotary_emb is not None and positions is not None and not use_fused:
+            q_nope, q_pe = q.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
+            q_pe, k_pe = rotary_emb(positions, q_pe, k_pe)
+            q = torch.cat([q_nope, q_pe], dim=-1)
+
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
 
@@ -511,6 +529,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
 
+        # Check if fused RoPE+FP8 quant path should be used.
+        # When active, RoPE was NOT applied upfront in forward(), so we
+        # must apply it per-path (prefill vs decode) below.
+        positions = self._positions
+        if positions is not None:
+            positions = positions[: attn_metadata.num_actual_tokens]
+
+        use_fused = (
+            fp8_attention
+            and getattr(self.impl, "use_fused_rope_quant", False)
+            and getattr(self.impl, "rotary_emb", None) is not None
+            and positions is not None
+        )
+
         num_actual_toks = attn_metadata.num_actual_tokens
 
         # Inputs and outputs may be padded for CUDA graphs
@@ -520,19 +552,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
 
-        # write the latent and rope to kv cache
-        if kv_cache.numel() > 0:
-            ops.concat_and_cache_mla(
-                k_c_normed,
-                k_pe.squeeze(1),
-                kv_cache,
-                attn_metadata.slot_mapping.flatten(),
-                kv_cache_dtype=self.kv_cache_dtype,
-                scale=self._k_scale,
-            )
+        if not use_fused:
+            # Original path: RoPE was applied upfront, write ALL tokens
+            if kv_cache.numel() > 0:
+                ops.concat_and_cache_mla(
+                    k_c_normed,
+                    k_pe.squeeze(1),
+                    kv_cache,
+                    attn_metadata.slot_mapping.flatten(),
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    scale=self._k_scale,
+                )
 
-        if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
-            kv_cache = kv_cache.view(current_platform.fp8_dtype())
+            if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
+                kv_cache = kv_cache.view(current_platform.fp8_dtype())
+        # When use_fused: cache writes happen per-section below
+        # (prefill after normal RoPE, decode after fused RoPE+quant)
 
         # Sparse MLA impls only support forward_mqa (decode-style attention)
         is_sparse_impl = isinstance(self.impl, SparseMLAAttentionImpl)
@@ -550,15 +585,52 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_mha_tokens = q.size(0) - num_mqa_tokens
 
         if num_mha_tokens > 0:
-            self.impl.forward_mha(
-                q[num_mqa_tokens:],
-                k_c_normed[num_mqa_tokens:],
-                k_pe[num_mqa_tokens:],
-                kv_cache,
-                attn_metadata,
-                self._k_scale,
-                output=output[num_mqa_tokens:],
-            )
+            if use_fused:
+                # Fused path: RoPE was NOT applied upfront, apply to
+                # prefill tokens here and write to cache separately.
+                prefill_q = q[num_mqa_tokens:]
+                prefill_k_pe = k_pe[num_mqa_tokens:]
+                prefill_positions = positions[num_mqa_tokens:]
+
+                prefill_q_nope = prefill_q[..., : self.qk_nope_head_dim]
+                prefill_q_pe = prefill_q[..., self.qk_nope_head_dim :]
+                prefill_q_pe, prefill_k_pe = self.impl.rotary_emb(
+                    prefill_positions, prefill_q_pe, prefill_k_pe
+                )
+                prefill_q = torch.cat([prefill_q_nope, prefill_q_pe], dim=-1)
+
+                # Write prefill tokens to cache (after RoPE)
+                if kv_cache.numel() > 0:
+                    ops.concat_and_cache_mla(
+                        k_c_normed[num_mqa_tokens:],
+                        prefill_k_pe.squeeze(1),
+                        kv_cache,
+                        attn_metadata.slot_mapping[num_mqa_tokens:].flatten(),
+                        kv_cache_dtype=self.kv_cache_dtype,
+                        scale=self._k_scale,
+                    )
+
+                kv_cache_prefill = kv_cache.view(current_platform.fp8_dtype())
+
+                self.impl.forward_mha(
+                    prefill_q,
+                    k_c_normed[num_mqa_tokens:],
+                    prefill_k_pe,
+                    kv_cache_prefill,
+                    attn_metadata,
+                    self._k_scale,
+                    output=output[num_mqa_tokens:],
+                )
+            else:
+                self.impl.forward_mha(
+                    q[num_mqa_tokens:],
+                    k_c_normed[num_mqa_tokens:],
+                    k_pe[num_mqa_tokens:],
+                    kv_cache,
+                    attn_metadata,
+                    self._k_scale,
+                    output=output[num_mqa_tokens:],
+                )
 
         if num_mqa_tokens > 0:
             mqa_q = q[:num_mqa_tokens]
@@ -615,7 +687,38 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Convert from (N, B, L) to (B, N, L)
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
-            if fp8_attention and self.impl.supports_quant_query_input:
+            if use_fused:
+                # Fused RoPE + FP8 quant path: applies RoPE and FP8
+                # quantization to Q and K in a single kernel call.
+                decode_k_c = k_c_normed[:num_mqa_tokens]
+                decode_k_pe = k_pe[:num_mqa_tokens]
+                decode_positions = positions[:num_mqa_tokens]
+
+                mqa_q, decode_k_c_out, decode_k_pe_out = self.impl._fused_rope_quant(
+                    mqa_ql_nope,
+                    mqa_q_pe,
+                    decode_k_c,
+                    decode_k_pe.squeeze(1),
+                    decode_positions,
+                    self._q_scale_float,
+                    self._k_scale_float,
+                )
+
+                # Write decode tokens to cache (K has RoPE from fused
+                # kernel, stored as FP8)
+                if kv_cache.numel() > 0:
+                    ops.concat_and_cache_mla(
+                        decode_k_c_out,
+                        decode_k_pe_out,
+                        kv_cache,
+                        attn_metadata.slot_mapping[:num_mqa_tokens].flatten(),
+                        kv_cache_dtype=self.kv_cache_dtype,
+                        scale=self._k_scale,
+                    )
+
+                kv_cache = kv_cache.view(current_platform.fp8_dtype())
+
+            elif fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
                 assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
                 mqa_q = self._decode_concat_quant_fp8_op(
@@ -1948,6 +2051,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         kv_b_proj: ColumnParallelLinear,
         indexer: object | None = None,
         q_pad_num_heads: int | None = None,
+        rotary_emb: torch.nn.Module | None = None,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported for MLA")
@@ -1968,6 +2072,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
         self.supports_quant_query_input = True
+        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
+        self.rotary_emb = rotary_emb
 
         # Use flashinfer's optimized concat_mla_k kernel when available.
         # The kernel is optimized for DeepSeek V3 dimensions:
@@ -2583,6 +2689,41 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         else:
             output_prefill = output_prefill[..., : v.shape[-1]].flatten(start_dim=-2)
             output.copy_(output_prefill)
+
+    def _fused_rope_quant(
+        self,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        k_nope: torch.Tensor,
+        k_pe: torch.Tensor,
+        positions: torch.Tensor,
+        q_scale: float,
+        k_scale: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Fused RoPE + FP8 quantization for Q and K.
+
+        This method should be overridden by subclasses that support
+        fused RoPE+quant (e.g., FlashInferMLAImpl).
+
+        Args:
+            ql_nope: Projected q_nope. Shape: [B, N, L] where L = kv_lora_rank.
+            q_pe: Raw q_pe (no RoPE yet). Shape: [B, N, R] where R = qk_rope_head_dim.
+            k_nope: k_c_normed (latent). Shape: [B, L] (2D, no head dim).
+            k_pe: Raw k_pe (no RoPE yet). Shape: [B, R] (2D, squeezed by caller).
+            positions: Position indices. Shape: [B]
+            q_scale: Scale for FP8 quantization of Q (host float).
+            k_scale: Scale for FP8 quantization of K (host float).
+
+        Returns:
+            tuple of:
+            - q_out: FP8 quantized Q with RoPE applied. Shape: [B, N, L+R]
+            - k_nope_out: FP8 quantized k_nope. Shape: [B, L]
+            - k_pe_out: FP8 quantized k_pe with RoPE. Shape: [B, R]
+        """
+        raise NotImplementedError(
+            "Fused RoPE+quant not implemented for this backend. "
+            "Set use_fused_rope_quant=False or use a backend that supports it."
+        )
 
     @abstractmethod
     def forward_mqa(
