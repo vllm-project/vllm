@@ -9,6 +9,8 @@
 
 import copy
 import math
+import os
+import time
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
@@ -16,11 +18,14 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
+import cv2
 import einops
+import numpy as np
 import numpy.typing as npt
 import regex as re
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision.transforms as T
 from PIL import Image
 from transformers import BatchFeature, PretrainedConfig, TensorType
@@ -97,6 +102,7 @@ IMG_CONTEXT = "<image>"
 # Profiling
 # MAX_FRAMES = 16
 DEFAULT_NUM_TILES = 12
+FAST_PREPROCESS = int(os.getenv("VLLM_NANO_NEMOTRON_VL_FAST_PREPROCESS", 0)) == 1
 
 
 class NanoNemotronVLImagePixelInputs(TensorSchema):
@@ -183,7 +189,8 @@ NanoNemotronVLVideoInputs: TypeAlias = (
 
 
 def dynamic_preprocess(
-    image, *, image_size=512, max_num_tiles=12, use_thumbnail=True, idx=0
+    image, *, image_size=512, max_num_tiles=12, use_thumbnail=True, idx=0,
+    fast_preprocess=FAST_PREPROCESS
 ):
     orig_width, orig_height = image.size
 
@@ -196,35 +203,71 @@ def dynamic_preprocess(
         image_size=image_size,
         use_thumbnail=False,
     )
-    # resize the image
-    resized_img = image.resize((target_width, target_height))
-    processed_images = []
-    for i in range(blocks):
-        box = (
-            (i % (target_width // image_size)) * image_size,
-            (i // (target_width // image_size)) * image_size,
-            ((i % (target_width // image_size)) + 1) * image_size,
-            ((i // (target_width // image_size)) + 1) * image_size,
-        )
-        # split the image
-        split_img = resized_img.crop(box)
-        processed_images.append(split_img)
-    assert len(processed_images) == blocks
-    if use_thumbnail and len(processed_images) != 1:
-        thumbnail_img = image.resize((image_size, image_size))
-        processed_images.append(thumbnail_img)
 
-    processed_images = [
-        img.convert("RGB") if img.mode != "RGB" else img for img in processed_images
-    ]
-    processed_images = [
-        T.Resize((image_size, image_size), interpolation=T.InterpolationMode.BICUBIC)(
-            img
+    if fast_preprocess:
+        image = np.asarray(
+            image.convert("RGB") if image.mode != "RGB"
+            else image, dtype=np.uint8
         )
-        for img in processed_images
-    ]
-    processed_images = [T.ToTensor()(img) for img in processed_images]
-    return processed_images
+
+        image = torch.from_numpy(image).unsqueeze(0)  # (1, H, W, 3)
+        image = image.permute(0, 3, 1, 2)  # (1, 3, H, W)
+
+        resized_img = torch.nn.functional.interpolate(
+            image,
+            size=(target_height, target_width),
+            mode='bicubic',
+            align_corners=False,
+            antialias=True
+        )
+        B, C, H, W = resized_img.shape
+        hp, wp = H // image_size, W // image_size
+        patches = resized_img.reshape(B, C, hp, image_size, wp, image_size) \
+        .permute(0, 2, 4, 1, 3, 5) \
+        .reshape(B * hp * wp, C, image_size, image_size) / 255.0
+
+        if use_thumbnail and patches.shape[0] > 1:
+            thumb = torch.nn.functional.interpolate(
+                image,
+                size=(image_size, image_size),
+                mode='bicubic',
+                align_corners=False,
+                antialias=True
+            ) / 255.0
+            patches = torch.cat([patches, thumb], dim=0)
+
+        return list(patches)
+    else:
+        # resize the image
+        resized_img = image.resize((target_width, target_height))
+        processed_images = []
+        for i in range(blocks):
+            box = (
+                (i % (target_width // image_size)) * image_size,
+                (i // (target_width // image_size)) * image_size,
+                ((i % (target_width // image_size)) + 1) * image_size,
+                ((i // (target_width // image_size)) + 1) * image_size,
+            )
+            # split the image
+            split_img = resized_img.crop(box)
+            processed_images.append(split_img)
+        assert len(processed_images) == blocks
+        if use_thumbnail and len(processed_images) != 1:
+            thumbnail_img = image.resize((image_size, image_size))
+            processed_images.append(thumbnail_img)
+
+        processed_images = [
+            img.convert("RGB") if img.mode != "RGB" else img for img in processed_images
+        ]
+        processed_images = [
+            T.Resize((image_size, image_size),
+            interpolation=T.InterpolationMode.BICUBIC)(
+                img
+            )
+            for img in processed_images
+        ]
+        processed_images = [T.ToTensor()(img) for img in processed_images]
+        return processed_images
 
 
 def image_to_pixel_values(
@@ -234,6 +277,7 @@ def image_to_pixel_values(
     max_num: int,
     use_thumbnail: bool,
     idx: int,
+    fast_preprocess: bool = FAST_PREPROCESS,
 ) -> torch.Tensor:
     images = dynamic_preprocess(
         image,
@@ -241,6 +285,7 @@ def image_to_pixel_values(
         max_num_tiles=max_num,
         use_thumbnail=use_thumbnail,
         idx=idx,
+        fast_preprocess=fast_preprocess,
     )
 
     pixel_values = torch.stack(images)
@@ -253,25 +298,75 @@ def video_to_pixel_values(
     input_size: int,
     max_num_tiles: int = 1,
     use_thumbnail: bool,
+    fast_preprocess: bool = FAST_PREPROCESS,
 ) -> torch.Tensor:
+    """Convert video frames to pixel values tensor.
+
+    This function supports two modes:
+    1. Original per-frame preprocessing (default): Calls dynamic_preprocess
+       for each frame
+    2. Optimized batched preprocessing: Uses torch batched resize operations
+
+    The batched mode is significantly faster for videos with many frames,
+    enabled by setting fast_preprocess=True.
+    """
     assert max_num_tiles == 1, "Video modality always uses one tile"
 
-    # Convert each frame to a single resized tile tensor consistent
-    # with image path
-    frames_tensors: list[torch.Tensor] = []
-    for frame in video:
-        pil_frame = dynamic_preprocess(
-            Image.fromarray(frame, mode="RGB"),
-            image_size=input_size,
-            max_num_tiles=max_num_tiles,
-            use_thumbnail=use_thumbnail,
-            idx=0,
-        )
-        # dynamic_preprocess returns tensors already; take the single tile
-        assert len(pil_frame) >= 1
-        frames_tensors.append(pil_frame[-1])
+    start_time = time.time()
 
-    return torch.stack(frames_tensors)
+    # perf tweak in case we don't need to resize the video;
+    # 'non-fast' mode was benchmarked actually faster in some cases
+    fast_preprocess &= (video.shape[2] != input_size or video.shape[1] != input_size)
+
+    if fast_preprocess:
+        # Optimized batched version using torch operations
+        # video shape: (num_frames, height, width, 3)
+
+        # Convert numpy array to torch tensor:
+        # (num_frames, H, W, C) -> (num_frames, C, H, W)
+        video_tensor = torch.from_numpy(video)  # (F, H, W, 3)
+        video_tensor = video_tensor.permute(0, 3, 1, 2)  # (F, 3, H, W)
+
+        # Batched resize using torch.nn.functional.interpolate
+        video_tensor = torch.nn.functional.interpolate(
+            video_tensor,
+            size=(input_size, input_size),
+            mode='bicubic',
+            align_corners=False,
+            antialias=True
+        )
+
+        video_tensor = video_tensor / 255.0
+
+        elapsed = time.time() - start_time
+        print(f"[TIMER] video_to_pixel_values (BATCHED) processed "
+              f"{len(video)} frames in {elapsed:.4f}s "
+              f"({elapsed/len(video)*1000:.2f}ms/frame)")
+
+        return video_tensor
+    else:
+        frames_tensors: list[torch.Tensor] = []
+        for frame in video:
+            pil_frame = dynamic_preprocess(
+                Image.fromarray(frame, mode="RGB"),
+                image_size=input_size,
+                max_num_tiles=max_num_tiles,
+                use_thumbnail=use_thumbnail,
+                idx=0,
+                fast_preprocess=fast_preprocess,
+            )
+            # dynamic_preprocess returns tensors already; take the single tile
+            assert len(pil_frame) >= 1
+            frames_tensors.append(pil_frame[-1])
+
+        result = torch.stack(frames_tensors)
+
+        elapsed = time.time() - start_time
+        print(f"[TIMER] video_to_pixel_values (PER-FRAME) processed "
+              f"{len(video)} frames in {elapsed:.4f}s "
+              f"({elapsed/len(video)*1000:.2f}ms/frame)")
+
+        return result
 
 
 def input_conditioner(x, norm_mean, norm_std):
@@ -306,6 +401,7 @@ class DynamicResolutionImageTiler:
         norm_std: Sequence[float],
         factor_max: float = 1.0,
         use_thumbnail: bool = False,
+        fast_preprocess: bool = FAST_PREPROCESS,
     ) -> None:
         assert use_thumbnail is False, "use_thumbnail is not supported"
         self._patch_size: int = patch_size
@@ -315,12 +411,6 @@ class DynamicResolutionImageTiler:
         self._factor_max = factor_max
         self.norm_mean = torch.tensor(norm_mean).reshape(3, 1, 1)
         self.norm_std = torch.tensor(norm_std).reshape(3, 1, 1)
-        self._transform = T.Compose(
-            [
-                T.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
-                T.ToTensor(),
-            ]
-        )
         assert downsample_ratio < 1
         reduction_factor = 1 / downsample_ratio
         assert reduction_factor == 2.0
@@ -328,6 +418,7 @@ class DynamicResolutionImageTiler:
             self.PIXEL_SHUFFLE + self.CONV_MERGING
         )
         assert self._downsample_ratio == 2
+        self.fast_preprocess = fast_preprocess
 
     def _get_num_embeddings(self, width: int, height: int) -> int:
         num_patches = (width // self._patch_size) * (height // self._patch_size)
@@ -410,15 +501,36 @@ class DynamicResolutionImageTiler:
         patch_size: tuple[int, int]
 
     def apply_params(self, params: DynamicResolutionParams) -> list[torch.Tensor]:
-        resized_img = params.media.resize(
-            (
-                params.patch_size[0] * self._patch_size,
-                params.patch_size[1] * self._patch_size,
-            )
+        target_size = (
+            params.patch_size[0] * self._patch_size,
+            params.patch_size[1] * self._patch_size
         )
-        processed_images = [resized_img]
+        if self.fast_preprocess:
+            image = np.asarray(
+                params.media.convert("RGB") if params.media.mode != "RGB"
+                else params.media, dtype=np.uint8
+            )
+            resized_img = torch.nn.functional.interpolate(
+                torch.from_numpy(image).unsqueeze(0).permute(0, 3, 1, 2),
+                size=(target_size[1], target_size[0]),
+                mode='bicubic',
+                align_corners=False,
+                antialias=True
+            ) / 255.0
+            return list(resized_img)
+        else:
+            resized_img = params.media.resize(
+                target_size
+            )
+            return [self._build_transform()(resized_img)]
 
-        return [self._transform(img) for img in processed_images]
+    def _build_transform(self) -> T.Compose:
+        transforms = [T.ToTensor()]
+        if not self.fast_preprocess:
+            transforms.insert(0, T.Lambda(
+                lambda img: img.convert("RGB") if img.mode != "RGB" else img)
+            )
+        return T.Compose(transforms)
 
     def process_media(
         self,
@@ -628,13 +740,14 @@ class BaseNanoNemotronVLProcessor(ABC):
         *args,
         max_model_len: int,
         max_num_tiles: int | None = None,
+        fast_preprocess: bool = FAST_PREPROCESS,
         **kwargs,
     ) -> None:
         super().__init__()
 
         self.config = config
         self.tokenizer = tokenizer
-
+        self.fast_preprocess = fast_preprocess
         self.max_num_tiles = max_num_tiles or DEFAULT_NUM_TILES
         image_size: int = config.force_image_size
         patch_size: int = config.patch_size
@@ -708,6 +821,7 @@ class BaseNanoNemotronVLProcessor(ABC):
                 max_num=max_num_tiles,
                 use_thumbnail=self.use_thumbnail,
                 idx=idx,
+                fast_preprocess=self.fast_preprocess,
             )
             for idx, image in enumerate(images)
         ]
@@ -722,7 +836,10 @@ class BaseNanoNemotronVLProcessor(ABC):
             image_inputs = {}
             return text, image_inputs
 
+        start_time = time.time()
+
         if tiler := self.dynamic_tiler:
+            tiler.fast_preprocess = self.fast_preprocess
             sans_images = text[0].replace("<image>", "")
             text_prompt_length = len(
                 self.tokenizer(sans_images, add_special_tokens=False).input_ids
@@ -742,7 +859,7 @@ class BaseNanoNemotronVLProcessor(ABC):
                 "imgs_sizes": imgs_sizes,
                 "num_tokens_per_image": num_tokens_per_image,
             }
-        else:
+        else:  # TODO(nbagrov): when using tiles - make efficient
             pixel_values_lst = self._images_to_pixel_values_lst(images, max_num_tiles)
             image_num_patches = torch.tensor([len(item) for item in pixel_values_lst])
             pixel_values_flat = input_conditioner(
@@ -772,6 +889,10 @@ class BaseNanoNemotronVLProcessor(ABC):
             image_repl = self.get_image_repl(feature_size, num_patches)
             parts[i] = parts[i].replace("<image>", image_repl.full)
         text = ["".join(parts)]
+
+        elapsed_time = time.time() - start_time
+        print(f"[TIMER] _preprocess_image ({self.fast_preprocess=}) took {elapsed_time:.4f} seconds")
+
         return text, image_inputs
 
     def _make_batch_input(self, input_item: Any | list[Any] | None = None):
@@ -808,12 +929,14 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         max_num_tiles: int | None = None,
         video_token: str | None = None,
         video_pruning_rate: float | None = None,
+        fast_preprocess: bool = FAST_PREPROCESS,
     ) -> None:
         super().__init__(
             config=config,
             tokenizer=tokenizer,
             max_model_len=max_model_len,
             max_num_tiles=max_num_tiles,
+            fast_preprocess=fast_preprocess,
         )
         # add extra video token for video processing
         self.video_token = video_token
@@ -854,6 +977,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
                 input_size=self.image_size,
                 max_num_tiles=max_num_tiles,
                 use_thumbnail=self.use_thumbnail,
+                fast_preprocess=self.fast_preprocess,
             )
             for video in videos
         ]
@@ -864,6 +988,8 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         videos: list[tuple[npt.NDArray, dict[str, Any]]],
         max_num_tiles: int,
     ):
+        start_time = time.time()
+
         if len(videos) == 0 or not self.supports_video:
             video_inputs = {}
         else:
@@ -886,14 +1012,14 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             frames_indices_lst = [
                 metadata["frames_indices"] for metadata in video_metadata_lst
             ]
-
+            video_num_patches = torch.tensor(
+                [len(item) for item in pixel_values_lst_video]
+            )
             video_inputs = {
                 "pixel_values_flat_video": input_conditioner(
                     torch.cat(pixel_values_lst_video), self.norm_mean, self.norm_std
                 ),
-                "video_num_patches": torch.tensor(
-                    [len(item) for item in pixel_values_lst_video]
-                ),
+                "video_num_patches": video_num_patches,
                 "frames_indices": frames_indices_lst,
                 "frame_duration_ms": torch.tensor(frame_duration_ms_lst),
             }
@@ -949,6 +1075,10 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
                     video_repl.full, skip_special_tokens=False
                 )
                 text = [t.replace("<video>", video_repl_text, 1) for t in text]
+
+        elapsed_time = time.time() - start_time
+        print(f"[TIMER] _preprocess_video ({self.fast_preprocess=}) took {elapsed_time:.4f} seconds")
+
         return text, video_inputs
 
     def __call__(
@@ -1516,7 +1646,7 @@ class NemotronH_Nano_VL_V2(
         self.video_pruning_rate = multimodal_config.video_pruning_rate
 
         with self._mark_language_model(vllm_config):
-            self.language_model = init_vllm_registered_model(
+            self.language_model = language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
@@ -1545,7 +1675,7 @@ class NemotronH_Nano_VL_V2(
                 ReLUSquaredActivation(),
                 nn.Linear(vision_projection_hidden_size, llm_hidden_size, bias=False),
             )
-            self.mlp1 = mlp1.to(self.language_model.config.dtype)
+            self.mlp1 = mlp1.to(language_model.config.dtype)
 
         self.config = config
         self.model_config = vllm_config.model_config
