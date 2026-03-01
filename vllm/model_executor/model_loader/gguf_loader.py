@@ -98,6 +98,10 @@ class GGUFModelLoader(BaseModelLoader):
             # Gemma3 models use "gemma3_text" in HuggingFace but
             # "gemma3" in GGUF architecture naming
             model_type = "gemma3"
+        if model_type in ("qwen3_vl", "qwen3_vl_moe"):
+            # Qwen3VL/Qwen3VLMoe use underscores in HuggingFace model_type
+            # but no underscores in GGUF architecture naming
+            model_type = model_type.replace("_", "")
         if model_type in ("deepseek_v3", "deepseek_v2"):
             model_type = "deepseek2"
             # GGUF layer map assumes that we will have a merged expert weights
@@ -121,11 +125,11 @@ class GGUFModelLoader(BaseModelLoader):
                         r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
                     )
                 )
-        if model_type in ("qwen2_moe", "qwen3_moe"):
+        if model_type in ("qwen2_moe", "qwen3_moe", "qwen3vlmoe"):
             model_type = model_type.replace("_", "")
             # GGUF layer map assumes that we will have a merged expert weights
             # so we need to map them manually
-            for idx in range(config.num_hidden_layers):
+            for idx in range(text_config.num_hidden_layers):
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = (
                     f"model.layers.{idx}.mlp.experts.0.down_proj.weight"
                 )
@@ -142,11 +146,29 @@ class GGUFModelLoader(BaseModelLoader):
                     )
                 )
 
+        # Fallback for architectures not yet released in gguf-py on PyPI.
+        # These become no-ops once gguf-py is updated with the new arches.
+        _GGUF_ARCH_FALLBACKS: dict[str, str] = {
+            "qwen3vl": "qwen3",
+            "qwen3vlmoe": "qwen3moe",
+        }
+
         arch = None
         for key, value in gguf.MODEL_ARCH_NAMES.items():
             if value == model_type:
                 arch = key
                 break
+        if arch is None and model_type in _GGUF_ARCH_FALLBACKS:
+            fallback = _GGUF_ARCH_FALLBACKS[model_type]
+            logger.info(
+                "GGUF arch '%s' not found in gguf-py, falling back to '%s'",
+                model_type,
+                fallback,
+            )
+            for key, value in gguf.MODEL_ARCH_NAMES.items():
+                if value == fallback:
+                    arch = key
+                    break
         if arch is None:
             raise RuntimeError(f"Unknown gguf model_type: {model_type}")
         text_num_layers = text_config.num_hidden_layers
@@ -154,7 +176,11 @@ class GGUFModelLoader(BaseModelLoader):
 
         if is_multimodal:
             mm_proj_arch = gguf.MODEL_ARCH.MMPROJ
-            vision_num_layers = config.vision_config.num_hidden_layers
+            vision_num_layers = getattr(
+                config.vision_config,
+                "num_hidden_layers",
+                getattr(config.vision_config, "depth", 0),
+            )
             vision_name_map = gguf.get_tensor_name_map(mm_proj_arch, vision_num_layers)
         else:
             vision_name_map = None
