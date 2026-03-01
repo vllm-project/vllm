@@ -235,27 +235,6 @@ class VideoLoader:
 VIDEO_LOADER_REGISTRY = ExtensionManager()
 
 
-@VIDEO_LOADER_REGISTRY.register("identity")
-class IdentityVideoLoader(VideoLoader):
-    """IdentityVideoLoader returns raw video bytes without decoding.
-
-    This allows the model processor to handle video decoding and
-    is required for models like Kimi-K2.5 that need custom video chunk splitting.
-
-    NOTE: This is temporary for Kimi-K2.5 testing. Remember to change back
-    to opencv before release if needed.
-    """
-
-    @classmethod
-    def load_bytes(
-        cls,
-        data: bytes,
-        num_frames: int = -1,
-        **kwargs: Any,
-    ) -> tuple[Any, Any]:
-        return data, None
-
-
 @VIDEO_LOADER_REGISTRY.register("opencv")
 class OpenCVVideoBackend(VideoLoader):
     def get_cv2_video_api(self):
@@ -768,3 +747,90 @@ class Molmo2VideoBackend(VideoLoader):
             **kwargs,
         )
         return out
+
+
+@VIDEO_LOADER_REGISTRY.register("openpangu")
+class OpenCVDynamicOpenPanguVideoBackend(OpenCVVideoBackend):
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = 32,
+        fps: int = 1,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        """
+        Load video frames with dynamic sampling based on duration.
+        Assume that total_num_frames = 10 and fps = 1.
+        The timestamp of frame 0 is 0.0.
+        The timestamp of frame 1 is 1.0.…
+        The timestamp of frame 9 (the last frame) should be 9.0, that is,
+        (total_frames_num – 1) / original_fps.
+
+        Args:
+            data: Raw video bytes
+            num_frames: Not used in dynamic backend
+            fps: Target FPS for sampling (default: 1)
+
+        Returns:
+            Tuple of (frames_array, metadata_dict)
+        """
+        import cv2
+
+        backend = cls().get_cv2_video_api()
+        cap = cv2.VideoCapture(BytesIO(data), backend, [])
+        if not cap.isOpened():
+            raise ValueError("Could not open video stream")
+
+        total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        original_fps = float(cap.get(cv2.CAP_PROP_FPS))
+        # The timestamp of the rightmost frame, cannot be used to calculate frame 0.
+        if total_frames_num >= 1 and original_fps > 0:
+            total_duration = (total_frames_num - 1) / original_fps
+        else:
+            total_duration = 0
+
+        # `fps` is the FPS parameter passed in for sampling,
+        # -1 indicates that sampling can be performed directly without FPS limitation.
+        if fps > 0:
+            # Num_frames is the maximum number of frames to sample.
+            # If fewer frames are sampled at this sample_fps, the update duration will be longer. # noqa: E501
+            if num_frames >= int(total_duration * fps) + 1:
+                num_frames = int(total_duration * fps) + 1
+                # Under the new maximum frame rate, the video duration of the rightmost frame, # noqa: E501
+                # cannot be calculated for frame 0.
+                total_duration = min(total_duration, (num_frames - 1) / fps)
+        elif fps != -1:
+            raise ValueError(
+                f"requires dataset fps is -1 or greater than 0 but got {fps}"
+            )
+
+        sample_frame_timestamps = np.linspace(
+            0, total_duration, num_frames, dtype=float
+        )
+        frames_indices = [
+            min(total_frames_num - 1, round(t * original_fps))
+            for t in sample_frame_timestamps
+        ]
+
+        frames, valid_frame_indices, recovered_map = cls._read_frames_with_recovery(
+            cap, frames_indices, total_frames_num
+        )
+
+        if recovered_map:
+            logger.info(
+                "Frame recovery: %d frames recovered using forward scan.",
+                len(recovered_map),
+            )
+
+        metadata = {
+            "total_num_frames": total_frames_num,
+            "fps": original_fps,
+            "duration": total_duration,
+            "video_backend": "opencv_dynamic_openpangu",
+            "frames_indices": valid_frame_indices,
+            "do_sample_frames": False,
+        }
+        return frames, metadata

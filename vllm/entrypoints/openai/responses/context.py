@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import replace
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Final, Union
 
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
@@ -43,7 +43,6 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.entrypoints.openai.responses.utils import construct_tool_dicts
 from vllm.outputs import RequestOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.renderers import RendererLike
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.utils import random_uuid
@@ -183,7 +182,6 @@ class SimpleContext(ConversationContext):
         self.all_turn_metrics = []
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
-        self.output_messages: list[ResponseRawMessageAndToken] = []
 
     def append_output(self, output) -> None:
         self.last_output = output
@@ -209,12 +207,22 @@ class SimpleContext(ConversationContext):
                     tokens=output_prompt_token_ids,
                 )
             )
-        self.output_messages.append(
+
+    @property
+    def output_messages(self) -> list[ResponseRawMessageAndToken]:
+        """Return consolidated output as a single message.
+
+        In streaming mode, text and tokens are accumulated across many deltas.
+        This property returns them as a single entry rather than one per delta.
+        """
+        if not self._accumulated_text and not self._accumulated_token_ids:
+            return []
+        return [
             ResponseRawMessageAndToken(
-                message=delta_output.text,
-                tokens=delta_output.token_ids,
+                message=self._accumulated_text,
+                tokens=list(self._accumulated_token_ids),
             )
-        )
+        ]
 
     @property
     def final_output(self) -> RequestOutput | None:
@@ -261,7 +269,7 @@ class ParsableContext(ConversationContext):
         self,
         *,
         response_messages: list[ResponseInputOutputItem],
-        renderer: RendererLike,
+        tokenizer: TokenizerLike,
         reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser] | None,
         request: ResponsesRequest,
         available_tools: list[str] | None,
@@ -272,7 +280,6 @@ class ParsableContext(ConversationContext):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
-        # TODO: num_reasoning_tokens is not implemented yet.
         self.num_reasoning_tokens = 0
         # not implemented yet for ParsableContext
         self.all_turn_metrics: list[TurnMetrics] = []
@@ -280,7 +287,6 @@ class ParsableContext(ConversationContext):
         if reasoning_parser_cls is None:
             raise ValueError("reasoning_parser_cls must be provided.")
 
-        tokenizer = renderer.get_tokenizer()
         self.parser = get_responses_parser_for_simple_context(
             tokenizer=tokenizer,
             reasoning_parser_cls=reasoning_parser_cls,
@@ -290,8 +296,6 @@ class ParsableContext(ConversationContext):
         )
         self.tool_parser_cls = tool_parser_cls
         self.request = request
-        self.renderer = renderer
-        self.tokenizer = tokenizer
 
         self.available_tools = available_tools or []
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
@@ -299,16 +303,19 @@ class ParsableContext(ConversationContext):
 
         self.tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
         self.chat_template = chat_template
-        self.chat_template_content_format = chat_template_content_format
+        self.chat_template_content_format: Final = chat_template_content_format
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.output_messages: list[ResponseRawMessageAndToken] = []
+        self._accumulated_token_ids: list[int] = []
 
     def append_output(self, output: RequestOutput) -> None:
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         self.parser.process(output.outputs[0])
+        output_token_ids = output.outputs[0].token_ids or []
+        self._accumulated_token_ids.extend(output_token_ids)
 
         # only store if enable_response_messages is True, save memory
         if self.request.enable_response_messages:
@@ -339,17 +346,17 @@ class ParsableContext(ConversationContext):
         self.parser.response_messages.extend(output)
 
     def need_builtin_tool_call(self) -> bool:
-        """Return true if the last message is a MCP tool call"""
+        """Return true if the last message is a builtin tool call
+        that the request has enabled."""
         last_message = self.parser.response_messages[-1]
-        # TODO(qandrew): figure out which tools are MCP tools
-        if last_message.type == "function_call":  # noqa: SIM102
-            if last_message.name in (
-                "code_interpreter",
-                "python",
-                "web_search_preview",
-            ) or last_message.name.startswith("container"):
-                return True
-
+        if last_message.type != "function_call":
+            return False
+        if last_message.name in ("code_interpreter", "python"):
+            return "python" in self.available_tools
+        if last_message.name == "web_search_preview":
+            return "browser" in self.available_tools
+        if last_message.name.startswith("container"):
+            return "container" in self.available_tools
         return False
 
     async def call_python_tool(
@@ -533,8 +540,12 @@ class HarmonyContext(ConversationContext):
         self.first_tok_of_message = True  # For streaming support
 
     def _update_num_reasoning_tokens(self):
-        # Count all analysis and commentary channels as reasoning tokens
-        if self.parser.current_channel in {"analysis", "commentary"}:
+        channel = self.parser.current_channel
+        if channel == "analysis":
+            self.num_reasoning_tokens += 1
+        elif channel == "commentary" and self.parser.current_recipient is not None:
+            # Tool interactions (python/browser/container) are hidden.
+            # Preambles (recipient=None) are visible user text.
             self.num_reasoning_tokens += 1
 
     def append_output(self, output: RequestOutput) -> None:
@@ -658,11 +669,15 @@ class HarmonyContext(ConversationContext):
     def need_builtin_tool_call(self) -> bool:
         last_msg = self.messages[-1]
         recipient = last_msg.recipient
-        return recipient is not None and (
-            recipient.startswith("browser.")
-            or recipient.startswith("python")
-            or recipient.startswith("container.")
-        )
+        if recipient is None:
+            return False
+        if recipient.startswith("browser."):
+            return "browser" in self.available_tools
+        if recipient.startswith("python"):
+            return "python" in self.available_tools
+        if recipient.startswith("container."):
+            return "container" in self.available_tools
+        return False
 
     async def call_tool(self) -> list[Message]:
         if not self.messages:

@@ -5,7 +5,6 @@
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import json
 import time
-from dataclasses import replace
 from typing import Annotated, Any, ClassVar, Literal
 
 import torch
@@ -13,29 +12,30 @@ from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
 )
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
-from pydantic import (
-    Field,
-    model_validator,
-)
+from pydantic import Field, model_validator
 
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.config import ModelConfig
+from vllm.config.utils import replace
+from vllm.entrypoints.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     DeltaMessage,
     FunctionCall,
     FunctionDefinition,
     LegacyStructuralTagResponseFormat,
-    LogitsProcessors,
     OpenAIBaseModel,
     StreamOptions,
     StructuralTagResponseFormat,
     ToolCall,
     UsageInfo,
-    get_logits_processors,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import (
     BeamSearchParams,
     RequestOutputKind,
@@ -61,14 +61,6 @@ class ChatMessage(OpenAIBaseModel):
 
     # vLLM-specific fields that are not in OpenAI spec
     reasoning: str | None = None
-    reasoning_content: str | None = None
-    """Deprecated: use `reasoning` instead."""
-
-    @model_validator(mode="after")
-    def handle_deprecated_reasoning_content(self):
-        """Copy reasoning to reasoning_content for backward compatibility."""
-        self.reasoning_content = self.reasoning
-        return self
 
 
 class ChatCompletionLogProb(OpenAIBaseModel):
@@ -299,19 +291,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
-    logits_processors: LogitsProcessors | None = Field(
-        default=None,
-        description=(
-            "A list of either qualified names of logits processors, or "
-            "constructor objects, to apply when sampling. A constructor is "
-            "a JSON object with a required 'qualname' field specifying the "
-            "qualified name of the processor class/factory, and optional "
-            "'args' and 'kwargs' fields containing positional and keyword "
-            "arguments. For example: {'qualname': "
-            "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
-            "{'param': 'value'}}."
-        ),
-    )
+
     return_tokens_as_token_ids: bool | None = Field(
         default=None,
         description=(
@@ -330,6 +310,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "need to map generated text back to input tokens."
         ),
     )
+
     cache_salt: str | None = Field(
         default=None,
         description=(
@@ -341,6 +322,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "to 256 bit)."
         ),
     )
+
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
@@ -355,6 +337,43 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
 
     # --8<-- [end:chat-completion-extra-params]
+
+    def build_chat_params(
+        self,
+        default_template: str | None,
+        default_template_content_format: ChatTemplateContentFormatOption,
+    ) -> ChatParams:
+        return ChatParams(
+            chat_template=self.chat_template or default_template,
+            chat_template_content_format=default_template_content_format,
+            chat_template_kwargs=merge_kwargs(
+                self.chat_template_kwargs,
+                dict(
+                    add_generation_prompt=self.add_generation_prompt,
+                    continue_final_message=self.continue_final_message,
+                    documents=self.documents,
+                    reasoning_effort=self.reasoning_effort,
+                ),
+            ),
+        )
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        if self.max_completion_tokens is not None:
+            max_output_tokens: int | None = self.max_completion_tokens
+            max_output_tokens_param = "max_completion_tokens"
+        else:
+            max_output_tokens = self.max_tokens
+            max_output_tokens_param = "max_tokens"
+
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=max_output_tokens or 0,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            add_special_tokens=self.add_special_tokens,
+            needs_detokenization=bool(self.echo and not self.return_token_ids),
+            max_total_tokens_param="max_model_len",
+            max_output_tokens_param=max_output_tokens_param,
+        )
 
     # Default sampling parameters for chat completion requests
     _DEFAULT_SAMPLING_PARAMS: dict = {
@@ -386,7 +405,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
     def to_sampling_params(
         self,
         max_tokens: int,
-        logits_processor_pattern: str | None,
         default_sampling_params: dict,
     ) -> SamplingParams:
         # Default parameters
@@ -471,11 +489,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             min_tokens=self.min_tokens,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
-            logits_processors=get_logits_processors(
-                self.logits_processors, logits_processor_pattern
-            ),
             include_stop_str_in_output=self.include_stop_str_in_output,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
@@ -486,6 +500,34 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_response_format(cls, data):
+        response_format = data.get("response_format")
+        if response_format is None:
+            return data
+
+        rf_type = (
+            response_format.get("type")
+            if isinstance(response_format, dict)
+            else getattr(response_format, "type", None)
+        )
+
+        if rf_type == "json_schema":
+            json_schema = (
+                response_format.get("json_schema")
+                if isinstance(response_format, dict)
+                else getattr(response_format, "json_schema", None)
+            )
+            if json_schema is None:
+                raise VLLMValidationError(
+                    "When response_format type is 'json_schema', the "
+                    "'json_schema' field must be provided.",
+                    parameter="response_format",
+                )
+
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -540,8 +582,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
             return data
 
         structured_outputs_kwargs = data["structured_outputs"]
+        # structured_outputs may arrive as a dict (from JSON/raw kwargs) or
+        # as a StructuredOutputsParams dataclass instance.
+        is_dataclass = isinstance(structured_outputs_kwargs, StructuredOutputsParams)
         count = sum(
-            structured_outputs_kwargs.get(k) is not None
+            (
+                getattr(structured_outputs_kwargs, k, None)
+                if is_dataclass
+                else structured_outputs_kwargs.get(k)
+            )
+            is not None
             for k in ("json", "regex", "choice")
         )
         # you can only use one kind of constraints for structured outputs
@@ -658,4 +708,53 @@ class ChatCompletionRequest(OpenAIBaseModel):
             raise ValueError(
                 "Parameter 'cache_salt' must be a non-empty string if provided."
             )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_system_message_content_type(cls, data):
+        """Warn if system messages contain non-text content.
+
+        According to OpenAI API spec, system messages can only be of type
+        'text'. We log a warning instead of rejecting to avoid breaking
+        users who intentionally send multimodal system messages.
+        See: https://platform.openai.com/docs/api-reference/chat/create#chat_create-messages-system_message
+        """
+        if not isinstance(data, dict):
+            return data
+        messages = data.get("messages", [])
+        for msg in messages:
+            # Check if this is a system message
+            if isinstance(msg, dict) and msg.get("role") == "system":
+                content = msg.get("content")
+
+                # If content is a list (multimodal format)
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict):
+                            part_type = part.get("type")
+                            # Infer type when 'type' field is not explicit
+                            if part_type is None:
+                                if "image_url" in part or "image_pil" in part:
+                                    part_type = "image_url"
+                                elif "image_embeds" in part:
+                                    part_type = "image_embeds"
+                                elif "audio_url" in part:
+                                    part_type = "audio_url"
+                                elif "input_audio" in part:
+                                    part_type = "input_audio"
+                                elif "audio_embeds" in part:
+                                    part_type = "audio_embeds"
+                                elif "video_url" in part:
+                                    part_type = "video_url"
+
+                            # Warn about non-text content in system messages
+                            if part_type and part_type != "text":
+                                logger.warning_once(
+                                    "System messages should only contain text "
+                                    "content according to the OpenAI API spec. "
+                                    "Found content type: '%s'.",
+                                    part_type,
+                                )
+
         return data

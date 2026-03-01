@@ -8,7 +8,7 @@ clean_docker_tag() {
 }
 
 print_usage_and_exit() {
-    echo "Usage: $0 <registry> <repo> <commit> <branch> <vllm_use_precompiled> <vllm_merge_base_commit> <cache_from> <cache_to>"
+    echo "Usage: $0 <registry> <repo> <commit> <branch> <image_tag> [<image_tag_latest>]"
     exit 1
 }
 
@@ -142,11 +142,16 @@ resolve_parent_commit() {
 
 print_bake_config() {
     echo "--- :page_facing_up: Resolved bake configuration"
-    BAKE_CONFIG_FILE="bake-config-build-${BUILDKITE_BUILD_NUMBER:-local}.json"
-    docker buildx bake -f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}" --print "${TARGET}" | tee "${BAKE_CONFIG_FILE}" || true
+    # Write to a temp directory to avoid polluting the repo root (which is the
+    # Docker build context). Files left in the repo root get COPY'd into the
+    # image and can cause duplicate artifact uploads from downstream steps.
+    local bake_tmp
+    bake_tmp="$(mktemp -d)"
+    BAKE_CONFIG_FILE="${bake_tmp}/bake-config-build-${BUILDKITE_BUILD_NUMBER:-local}.json"
+    docker buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" --print "${TARGET}" | tee "${BAKE_CONFIG_FILE}" || true
     echo "Saved bake config to ${BAKE_CONFIG_FILE}"
     echo "--- :arrow_down: Uploading bake config to Buildkite"
-    buildkite-agent artifact upload "${BAKE_CONFIG_FILE}"
+    (cd "$(dirname "${BAKE_CONFIG_FILE}")" && buildkite-agent artifact upload "$(basename "${BAKE_CONFIG_FILE}")")
 }
 
 #################################
@@ -154,7 +159,7 @@ print_bake_config() {
 #################################
 print_instance_info
 
-if [[ $# -lt 7 ]]; then
+if [[ $# -lt 5 ]]; then
     print_usage_and_exit
 fi
 
@@ -163,16 +168,14 @@ REGISTRY=$1
 REPO=$2
 BUILDKITE_COMMIT=$3
 BRANCH=$4
-VLLM_USE_PRECOMPILED=$5
-VLLM_MERGE_BASE_COMMIT=$6
-IMAGE_TAG=$7
-IMAGE_TAG_LATEST=${8:-} # only used for main branch, optional
+IMAGE_TAG=$5
+IMAGE_TAG_LATEST=${6:-} # only used for main branch, optional
 
 # build config
 TARGET="test-ci"
-CI_HCL_URL="${CI_HCL_URL:-https://raw.githubusercontent.com/vllm-project/ci-infra/main/docker/ci.hcl}"
-VLLM_BAKE_FILE="${VLLM_BAKE_FILE:-docker/docker-bake.hcl}"
+VLLM_BAKE_FILE_PATH="${VLLM_BAKE_FILE_PATH:-docker/docker-bake.hcl}"
 BUILDER_NAME="${BUILDER_NAME:-vllm-builder}"
+CI_HCL_URL="${CI_HCL_URL:-https://raw.githubusercontent.com/vllm-project/ci-infra/main/docker/ci.hcl}"
 CI_HCL_PATH="/tmp/ci.hcl"
 BUILDKIT_SOCKET="/run/buildkit/buildkitd.sock"
 
@@ -180,9 +183,8 @@ prepare_cache_tags
 ecr_login
 
 # Environment info (for docs and human readers)
-#   CI_HCL_URL          - URL to ci.hcl (default: from ci-infra main branch)
 #   VLLM_CI_BRANCH      - ci-infra branch to use (default: main)
-#   VLLM_BAKE_FILE      - Path to vLLM's bake file (default: docker/docker-bake.hcl)
+#   VLLM_BAKE_FILE_PATH      - Path to vLLM's bake file (default: docker/docker-bake.hcl)
 #   BUILDER_NAME        - Name for buildx builder (default: vllm-builder)
 #
 # Build configuration (exported as environment variables for bake):
@@ -194,8 +196,6 @@ export CACHE_FROM
 export CACHE_FROM_BASE_BRANCH
 export CACHE_FROM_MAIN
 export CACHE_TO
-export VLLM_USE_PRECOMPILED
-export VLLM_MERGE_BASE_COMMIT
 
 # print args
 echo "--- :mag: Arguments"
@@ -203,18 +203,15 @@ echo "REGISTRY: ${REGISTRY}"
 echo "REPO: ${REPO}"
 echo "BUILDKITE_COMMIT: ${BUILDKITE_COMMIT}"
 echo "BRANCH: ${BRANCH}"
-echo "VLLM_USE_PRECOMPILED: ${VLLM_USE_PRECOMPILED}"
-echo "VLLM_MERGE_BASE_COMMIT: ${VLLM_MERGE_BASE_COMMIT}"
 echo "IMAGE_TAG: ${IMAGE_TAG}"
 echo "IMAGE_TAG_LATEST: ${IMAGE_TAG_LATEST}"
 
 # print build configuration
 echo "--- :mag: Build configuration"
 echo "TARGET: ${TARGET}"
-echo "CI HCL URL: ${CI_HCL_URL}"
-echo "vLLM bake file: ${VLLM_BAKE_FILE}"
+echo "vLLM bake file: ${VLLM_BAKE_FILE_PATH}"
 echo "BUILDER_NAME: ${BUILDER_NAME}"
-echo "CI_HCL_PATH: ${CI_HCL_PATH}"
+echo "CI_HCL_URL: ${CI_HCL_URL}"
 echo "BUILDKIT_SOCKET: ${BUILDKIT_SOCKET}"
 
 echo "--- :mag: Cache tags"
@@ -227,11 +224,11 @@ check_and_skip_if_image_exists
 
 echo "--- :docker: Setting up Docker buildx bake"
 echo "Target: ${TARGET}"
-echo "CI HCL URL: ${CI_HCL_URL}"
-echo "vLLM bake file: ${VLLM_BAKE_FILE}"
+echo "vLLM bake file: ${VLLM_BAKE_FILE_PATH}"
+echo "CI HCL path: ${CI_HCL_PATH}"
 
-if [[ ! -f "${VLLM_BAKE_FILE}" ]]; then
-    echo "Error: vLLM bake file not found at ${VLLM_BAKE_FILE}"
+if [[ ! -f "${VLLM_BAKE_FILE_PATH}" ]]; then
+    echo "Error: vLLM bake file not found at ${VLLM_BAKE_FILE_PATH}"
     echo "Make sure you're running from the vLLM repository root"
     exit 1
 fi
@@ -240,15 +237,19 @@ echo "--- :arrow_down: Downloading ci.hcl"
 curl -sSfL -o "${CI_HCL_PATH}" "${CI_HCL_URL}"
 echo "Downloaded to ${CI_HCL_PATH}"
 
+if [[ ! -f "${CI_HCL_PATH}" ]]; then
+    echo "Error: ci.hcl not found at ${CI_HCL_PATH}"
+    exit 1
+fi
+
 setup_buildx_builder
 
-# Compute parent commit for cache fallback (if not already set)
 resolve_parent_commit
 export PARENT_COMMIT
 
 print_bake_config
 
 echo "--- :docker: Building ${TARGET}"
-docker --debug buildx bake -f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}" --progress plain "${TARGET}"
+docker --debug buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" --progress plain "${TARGET}"
 
 echo "--- :white_check_mark: Build complete"

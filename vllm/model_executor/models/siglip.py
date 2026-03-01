@@ -42,16 +42,21 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalInputs,
     MultiModalKwargsItems,
-    MultiModalUUIDDict,
 )
-from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import (
+    ImageProcessorItems,
+    ImageSize,
+    MultiModalDataItems,
+)
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    ProcessorInputs,
     PromptIndexTargets,
     PromptReplacement,
     PromptUpdate,
+    TimingContext,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -154,13 +159,13 @@ class SiglipDummyInputsBuilder(BaseDummyInputsBuilder[SiglipProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = self.info.get_image_size_with_most_features()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -186,35 +191,34 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
 
     def apply(
         self,
-        prompt: str | list[int],
-        mm_data: MultiModalDataDict,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object] | None = None,
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> MultiModalInputs:
-        if prompt and mm_data:
-            raise ValueError(
-                "Siglip accepts text-only or image-only inputs, not both! "
-                "Image-only inputs means passing an image with an empty text "
-                "prompt."
-            )
+        if inputs.mm_data_items:
+            if isinstance(inputs.prompt, str):
+                if len(inputs.prompt) > 0:
+                    raise ValueError(
+                        "SigLIP accepts text-only or image-only inputs, not both! "
+                        "You must pass an image with an empty text prompt."
+                    )
+            else:
+                special_tokens = self.info.get_tokenizer().all_special_ids
+                if all(tok in special_tokens for tok in inputs.prompt):
+                    inputs.prompt = []
+                else:
+                    raise ValueError(
+                        "SigLIP accepts text-only or image-only inputs, not both! "
+                        "You must pass an image with an empty token prompt."
+                    )
 
-        if mm_data:
             # For multi-modal data, the prompt after processing should
-            # only contain the image token
-            tokenization_kwargs = {
-                **(tokenization_kwargs or {}),
+            # only contain the dummy image tokens
+            inputs.tokenization_kwargs = {
+                **inputs.tokenization_kwargs,
                 "add_special_tokens": False,
             }
 
-        return super().apply(
-            prompt=prompt,
-            mm_data=mm_data,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        return super().apply(inputs, timing_ctx)
 
     def _hf_processor_applies_updates(
         self,

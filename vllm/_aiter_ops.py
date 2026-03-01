@@ -8,13 +8,16 @@ from torch._ops import OpOverload
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
 )
 
-_FP8_DTYPE = current_platform.fp8_dtype()
+# fp8_dtype is not cached.
+# on ROCm the fp8_dtype always calls is_fp8_fnuz
+# which is a host op, so we cache it once here.
+FP8_DTYPE = current_platform.fp8_dtype()
 
 
 def is_aiter_found() -> bool:
@@ -31,6 +34,21 @@ IS_AITER_FOUND = is_aiter_found()
 
 
 def is_aiter_found_and_supported() -> bool:
+    """Check if AITER library is available and platform supports it.
+
+    Checks: platform (ROCm), device arch (gfx9), and library existence.
+    Does NOT check environment variables - that's handled by rocm_aiter_ops.is_enabled().
+
+    This function determines if aiter CAN be used, not if it SHOULD be used.
+
+    Separation of concerns:
+    - This function: Can aiter work on this system? (platform + library availability)
+    - rocm_aiter_ops.is_enabled(): Should aiter be used by default? (adds env var check)
+    - Backend selection: Can explicitly request aiter regardless of env var
+
+    This allows explicit backend selection via attention_config to work even when
+    VLLM_ROCM_USE_AITER=0, while preventing unwanted JIT warnings for auto-discovery.
+    """
     if current_platform.is_rocm() and IS_AITER_FOUND:
         from vllm.platforms.rocm import on_gfx9
 
@@ -40,29 +58,17 @@ def is_aiter_found_and_supported() -> bool:
 
 def if_aiter_supported(func: Callable) -> Callable:
     """Decorator that only executes the function if
-    ROCm AITER package is supported on gfx9 archs.
+    ROCm AITER package is supported and enabled on gfx9 archs.
     """
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        # checks the platform, device arch and aiter library existence.
-
         if is_aiter_found_and_supported():
             return func(*args, **kwargs)
 
         return None
 
     return wrapper
-
-
-# Can't use dtypes.fp8 directly inside an op
-# because it returns wrong result on gfx942.
-# This is a workaround to get the correct FP8 dtype.
-# This might because that the get_gfx() is wrapped as a custom op.
-if is_aiter_found_and_supported():
-    from aiter import dtypes
-
-    AITER_FP8_DTYPE = dtypes.fp8
 
 
 def _rocm_aiter_fused_moe_impl(
@@ -81,6 +87,10 @@ def _rocm_aiter_fused_moe_impl(
     a2_scale: torch.Tensor | None = None,
     num_local_tokens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = None,
+    hidden_pad: int = 0,
+    intermediate_pad: int = 0,
+    bias1: torch.Tensor | None = None,
+    bias2: torch.Tensor | None = None,
 ) -> torch.Tensor:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
@@ -104,6 +114,10 @@ def _rocm_aiter_fused_moe_impl(
         a2_scale,
         num_local_tokens=num_local_tokens,
         dtype=output_dtype,
+        hidden_pad=hidden_pad,
+        intermediate_pad=intermediate_pad,
+        bias1=bias1,
+        bias2=bias2,
     )
 
 
@@ -301,6 +315,28 @@ def _rocm_aiter_grouped_topk_fake(
     pass
 
 
+def _rocm_aiter_fused_topk_impl(
+    x: torch.Tensor,
+    router_logits: torch.Tensor,
+    top_k: int,
+    gate_up: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.fused_moe import fused_topk
+
+    # fused_topk returns (topk_weights, topk_indices)
+    return fused_topk(x, router_logits, top_k, gate_up)
+
+
+def _rocm_aiter_fused_topk_fake(
+    x: torch.Tensor,
+    router_logits: torch.Tensor,
+    top_k: int,
+    gate_up: bool,
+) -> None:
+    # tuple[torch.Tensor, torch.Tensor]:
+    pass
+
+
 # Cache whether aiter supports FP8 MLA parameters
 _AITER_MLA_SUPPORTS_FP8: bool | None = None
 
@@ -349,7 +385,7 @@ def _rocm_aiter_mla_decode_fwd_impl(
 ) -> None:
     from aiter.mla import mla_decode_fwd
 
-    kwargs = {
+    kwargs: dict[str, float | torch.Tensor | None] = {
         "sm_scale": sm_scale,
         "logit_cap": logit_cap,
     }
@@ -531,7 +567,7 @@ def _rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     import aiter as rocm_aiter
 
-    assert quant_dtype in [torch.int8, _FP8_DTYPE]
+    assert quant_dtype in [torch.int8, FP8_DTYPE]
 
     y_scale = torch.empty(x.shape[0], 1, dtype=torch.float32, device=x.device)
     out = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
@@ -573,7 +609,7 @@ def _rocm_aiter_rmsnorm_fused_dynamic_quant_impl(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     import aiter as rocm_aiter
 
-    assert quant_dtype in [torch.int8, _FP8_DTYPE]
+    assert quant_dtype in [torch.int8, FP8_DTYPE]
 
     y_scale = torch.empty(x.shape[0], 1, dtype=torch.float32, device=x.device)
     out = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
@@ -622,10 +658,10 @@ def _rocm_aiter_per_token_quant_impl(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter.ops.quant import dynamic_per_token_scaled_quant
 
-    assert quant_dtype in [torch.int8, _FP8_DTYPE]
+    assert quant_dtype in [torch.int8, FP8_DTYPE]
 
     out_shape = x.shape
-    out = torch.empty(x.shape, dtype=_FP8_DTYPE, device=x.device)
+    out = torch.empty(x.shape, dtype=FP8_DTYPE, device=x.device)
     if scale is None:
         scale = torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device)
     dynamic_per_token_scaled_quant(
@@ -645,7 +681,7 @@ def _rocm_aiter_per_token_quant_fake(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     out_shape = x.shape
     return (
-        torch.empty(x.shape, dtype=_FP8_DTYPE, device=x.device),
+        torch.empty(x.shape, dtype=FP8_DTYPE, device=x.device),
         torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device),
     )
 
@@ -667,7 +703,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
         None,
         None,
         group_size=group_size,
-        dtype_quant=AITER_FP8_DTYPE,
+        dtype_quant=FP8_DTYPE,
         res1=residual,
     )
     return (
@@ -687,7 +723,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
     M, N = x.shape
     scale_shape = (M, (N + group_size - 1) // group_size)
     return (
-        torch.empty_like(x, dtype=AITER_FP8_DTYPE, device=x.device),
+        torch.empty_like(x, dtype=FP8_DTYPE, device=x.device),
         torch.empty_like(residual, device=residual.device),
         torch.empty(scale_shape, dtype=torch.float32, device=x.device),
     )
@@ -709,7 +745,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
         None,
         None,
         group_size=group_size,
-        dtype_quant=AITER_FP8_DTYPE,
+        dtype_quant=FP8_DTYPE,
         res1=None,
     )
     return (x_quant, x_quant_scales)
@@ -724,7 +760,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
     M, N = x.shape
     scale_shape = (M, (N + group_size - 1) // group_size)
     return (
-        torch.empty_like(x, dtype=AITER_FP8_DTYPE, device=x.device),
+        torch.empty_like(x, dtype=FP8_DTYPE, device=x.device),
         torch.empty(scale_shape, dtype=torch.float32, device=x.device),
     )
 
@@ -737,7 +773,7 @@ def _rocm_aiter_group_fp8_quant_impl(
     from aiter import QuantType, get_hip_quant
 
     aiter_per1x128_quant = get_hip_quant(QuantType.per_1x128)
-    return aiter_per1x128_quant(x.contiguous(), quant_dtype=AITER_FP8_DTYPE)
+    return aiter_per1x128_quant(x.contiguous(), quant_dtype=FP8_DTYPE)
 
 
 def _rocm_aiter_group_fp8_quant_fake(
@@ -745,7 +781,7 @@ def _rocm_aiter_group_fp8_quant_fake(
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = x.shape
-    x_fp8 = torch.empty((M, N), dtype=AITER_FP8_DTYPE, device=x.device)
+    x_fp8 = torch.empty((M, N), dtype=FP8_DTYPE, device=x.device)
     out_bs = torch.empty(
         (
             M,
@@ -767,7 +803,7 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
         x,
         activation="silu",
         group_size=group_size,
-        dtype_quant=AITER_FP8_DTYPE,
+        dtype_quant=FP8_DTYPE,
     )
 
 
@@ -778,7 +814,7 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
     M, N = x.shape
     assert N % 2 == 0
     N_half = N // 2
-    x_fp8 = torch.empty((M, N_half), dtype=AITER_FP8_DTYPE, device=x.device)
+    x_fp8 = torch.empty((M, N_half), dtype=FP8_DTYPE, device=x.device)
     out_bs = torch.empty(
         (
             M,
@@ -788,6 +824,94 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
         device=x.device,
     )
     return x_fp8, out_bs
+
+
+def _rocm_aiter_triton_add_rmsnorm_pad_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    residual: torch.Tensor,
+    x_pad_to_multiple: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.fused_add_rmsnorm_pad import fused_add_rmsnorm_pad
+
+    return fused_add_rmsnorm_pad(
+        x,
+        weight,
+        variance_epsilon,
+        residual,
+        x_pad_to_multiple=x_pad_to_multiple,
+    )
+
+
+def _rocm_aiter_triton_add_rmsnorm_pad_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    residual: torch.Tensor,
+    x_pad_to_multiple: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    if x_pad_to_multiple > 0:
+        N_out = (N + x_pad_to_multiple - 1) // x_pad_to_multiple * x_pad_to_multiple
+    else:
+        N_out = N
+    out = torch.empty((M, N_out), dtype=x.dtype, device=x.device)
+    residual_out = torch.empty_like(residual)
+    return out, residual_out
+
+
+def _triton_rotary_embedding_impl(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+    offsets: torch.Tensor | None = None,
+) -> None:
+    # Modifies query and key in-place
+    from aiter.ops.triton.rope.rope import (
+        rope_cached_thd_positions_offsets_2c_fwd_inplace,
+    )
+
+    num_tokens = positions.numel()
+    cos, sin = cos_sin_cache.chunk(2, dim=-1)
+    query_shape = query.shape
+    key_shape = key.shape
+    rotate_style = 0 if is_neox else 1
+    rotary_dim = head_size
+
+    query = query.view(num_tokens, -1, head_size)
+    key = key.view(num_tokens, -1, head_size)
+    query_ = query[..., :rotary_dim]
+    key_ = key[..., :rotary_dim]
+    positions = positions.view(*query.shape[:1])
+    rope_cached_thd_positions_offsets_2c_fwd_inplace(
+        query_,
+        key_,
+        cos,
+        sin,
+        positions,
+        offsets,
+        rotate_style,
+        reuse_freqs_front_part=True,
+        nope_first=False,
+    )
+    query = query.view(query_shape)
+    key = key.view(key_shape)
+
+
+def _triton_rotary_embedding_fake(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox_style: bool,
+    offsets: torch.Tensor | None = None,
+) -> None:
+    return
 
 
 # Global flag to ensure ops are registered only once
@@ -900,6 +1024,70 @@ class rocm_aiter_ops:
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
+    @staticmethod
+    def get_aiter_activation_type(activation_str: str):
+        """
+        Given an activation type as a string, returns the corresponding aiter ActivationType enum.
+        Supported activation types: "no", "none", "silu", "gelu", "swiglu".
+        Returns None if the mapping fails.
+
+        Args:
+            activation_str (str): Activation type as string.
+
+        Returns:
+            Aiter ActivationType enum value, or None if not found.
+        """
+        # Import only locally, since aiter may not always be available.
+        try:
+            from aiter import ActivationType
+        except ImportError:
+            return None
+
+        if not isinstance(activation_str, str):
+            return None
+
+        name = activation_str.strip().lower()
+        mapping = {
+            "none": ActivationType.No,
+            "no": ActivationType.No,
+            "silu": ActivationType.Silu,
+            "gelu": ActivationType.Gelu,
+            "swiglu": ActivationType.Swiglu,
+        }
+        return mapping.get(name)
+
+    @staticmethod
+    def get_aiter_quant_type(quant_type_str: str):
+        """
+        Given a quantization type as a string, returns the corresponding aiter QuantType enum.
+        Supported quantization types: "no", "per_tensor", "per_token", "per_1x32", "per_1x128", "per_128x128".
+        Returns None if the mapping fails.
+
+        Args:
+            quant_type_str (str): Quantization type as string.
+
+        Returns:
+            Aiter QuantType enum value, or None if not found.
+        """
+        try:
+            from aiter import QuantType
+        except ImportError:
+            return None
+
+        if not isinstance(quant_type_str, str):
+            return None
+
+        name = quant_type_str.strip().lower()
+        mapping = {
+            "no": QuantType.No,
+            "per_tensor": QuantType.per_Tensor,
+            "per_token": QuantType.per_Token,
+            "per_1x32": QuantType.per_1x32,
+            "per_1x128": QuantType.per_1x128,
+            "per_128x128": QuantType.per_128x128,
+        }
+        return mapping.get(name)
+
     @classmethod
     @if_aiter_supported
     def is_enabled(cls) -> bool:
@@ -943,7 +1131,7 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_shuffle_kv_cache_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._SHUFFLE_KV_CACHE_ENABLED
+        return cls._SHUFFLE_KV_CACHE_ENABLED
 
     @classmethod
     @if_aiter_supported
@@ -958,12 +1146,16 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_fp4bmm_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._FP4BMM_ENABLED
+        from vllm.platforms.rocm import on_gfx950
+
+        return cls._AITER_ENABLED and cls._FP4BMM_ENABLED and on_gfx950()
 
     @classmethod
     @if_aiter_supported
     def is_asm_fp4_gemm_dynamic_quant_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM
+        from vllm.platforms.rocm import on_gfx950
+
+        return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM and on_gfx950()
 
     @classmethod
     @if_aiter_supported
@@ -980,12 +1172,6 @@ class rocm_aiter_ops:
     def register_ops_once() -> None:
         global _OPS_REGISTERED
         if not _OPS_REGISTERED:
-            tags = (
-                tuple()
-                if is_torch_equal_or_newer("2.7.0")
-                else (torch.Tag.needs_fixed_stride_order,)
-            )
-
             # register all the custom ops here
             direct_register_custom_op(
                 op_name="rocm_aiter_asm_moe_tkw1",
@@ -1036,11 +1222,18 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_fused_topk",
+                op_func=_rocm_aiter_fused_topk_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_fused_topk_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_mla_decode_fwd",
                 op_func=_rocm_aiter_mla_decode_fwd_impl,
                 mutates_args=["o"],
                 fake_impl=_rocm_aiter_mla_decode_fwd_fake,
-                tags=tags,
             )
 
             direct_register_custom_op(
@@ -1109,6 +1302,13 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_triton_add_rmsnorm_pad",
+                op_func=_rocm_aiter_triton_add_rmsnorm_pad_impl,
+                fake_impl=_rocm_aiter_triton_add_rmsnorm_pad_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_group_fp8_quant",
                 op_func=_rocm_aiter_group_fp8_quant_impl,
                 fake_impl=_rocm_aiter_group_fp8_quant_fake,
@@ -1135,6 +1335,14 @@ class rocm_aiter_ops:
                 mutates_args=["topk_indices_buffer"],
                 fake_impl=rocm_aiter_sparse_attn_indexer_fake,
                 dispatch_key=current_platform.dispatch_key,
+            )
+
+            # Register rocm aiter rotary embedding custom op
+            direct_register_custom_op(
+                op_name="rocm_aiter_triton_rotary_embedding",
+                op_func=_triton_rotary_embedding_impl,
+                mutates_args=["query", "key"],  # These tensors are modified in-place
+                fake_impl=_triton_rotary_embedding_fake,
             )
 
             _OPS_REGISTERED = True
@@ -1174,6 +1382,14 @@ class rocm_aiter_ops:
     @staticmethod
     def get_act_mul_fused_fp8_group_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
+
+    @staticmethod
+    def get_triton_add_rmsnorm_pad_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_triton_add_rmsnorm_pad.default
+
+    @staticmethod
+    def get_triton_rotary_embedding_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default
 
     @staticmethod
     def rms_norm(
@@ -1246,6 +1462,10 @@ class rocm_aiter_ops:
         a2_scale: torch.Tensor | None = None,
         num_local_tokens: torch.Tensor | None = None,
         output_dtype: torch.dtype | None = None,
+        hidden_pad: int = 0,
+        intermediate_pad: int = 0,
+        bias1: torch.Tensor | None = None,
+        bias2: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -1263,6 +1483,10 @@ class rocm_aiter_ops:
             a2_scale,
             num_local_tokens,
             output_dtype,
+            hidden_pad,
+            intermediate_pad,
+            bias1,
+            bias2,
         )
 
     @staticmethod
@@ -1368,6 +1592,15 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    def fused_topk(
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        gate_up: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.ops.vllm.rocm_aiter_fused_topk(x, router_logits, top_k, gate_up)
+
+    @staticmethod
     def mla_decode_fwd(
         q: torch.Tensor,
         kv_buffer: torch.Tensor,
@@ -1438,40 +1671,43 @@ class rocm_aiter_ops:
         return y
 
     @staticmethod
-    def triton_rotary_embed(
-        positions: torch.Tensor,
+    def triton_rope_and_cache(
         query: torch.Tensor,
         key: torch.Tensor,
+        value: torch.Tensor,
+        positions: torch.Tensor,
         cos_sin_cache: torch.Tensor,
-        head_size: int,
-        rotary_dim: int,
-        is_neox_style: bool,
+        is_neox: bool,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
+        flash_layout: bool,
+        apply_scale: bool,
     ):
-        from aiter.ops.triton.rope import rope_cached_thd_positions_2c_fwd_inplace
+        from aiter.ops.triton.fused_kv_cache import fused_qk_rope_reshape_and_cache
 
-        num_tokens = positions.numel()
         cos, sin = cos_sin_cache.chunk(2, dim=-1)
-        query_shape = query.shape
-        key_shape = key.shape
-        rotate_style = 0 if is_neox_style else 1
-
-        query = query.view(num_tokens, -1, head_size)
-        key = key.view(num_tokens, -1, head_size)
-        query_ = query[..., :rotary_dim]
-        key_ = key[..., :rotary_dim]
-        positions = positions.view(*query.shape[:1])
-        rope_cached_thd_positions_2c_fwd_inplace(
-            query_,
-            key_,
+        fused_qk_rope_reshape_and_cache(
+            query,
+            key,
+            value,
+            key_cache,
+            value_cache,
+            layer_slot_mapping,
+            positions,
             cos,
             sin,
-            positions,
-            rotate_style,
-            reuse_freqs_front_part=True,
-            nope_first=False,
+            k_scale,
+            v_scale,
+            is_neox,
+            flash_layout=flash_layout,
+            apply_scale=apply_scale,
+            q_out=query,
+            k_out=key,
+            output_zeros=False,
         )
-        query = query.view(query_shape)
-        key = key.view(key_shape)
 
     @staticmethod
     def batched_gemm_a16wfp4(
@@ -1531,7 +1767,7 @@ class rocm_aiter_ops:
     def group_fp8_quant(
         input_2d: torch.Tensor,
         group_size: int = 128,
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         assert group_size == 128, "Group size must be 128"
         return torch.ops.vllm.rocm_aiter_group_fp8_quant(input_2d, group_size)
 
@@ -1585,6 +1821,47 @@ class rocm_aiter_ops:
         return shuffle_weight(tensor, layout=layout)
 
     @staticmethod
+    def shuffle_weight_a16w4(
+        tensor: "torch.Tensor",
+        nLane: int,
+        gate_up: bool,
+    ) -> "torch.Tensor":
+        """
+        Shuffles the weight tensor into (A16W4) layout for AITER kernels.
+
+        Args:
+            tensor: The input weight tensor to be shuffled.
+            layout: The block layout to use, defaults to (16, 4).
+
+        Returns:
+            torch.Tensor: The shuffled tensor.
+        """
+        from aiter.ops.shuffle import shuffle_weight_a16w4
+
+        return shuffle_weight_a16w4(tensor, nLane, gate_up)
+
+    @staticmethod
+    def shuffle_scale_a16w4(
+        tensor: "torch.Tensor",
+        num_experts: int,
+        gate_up: bool,
+    ) -> "torch.Tensor":
+        """
+        Shuffles the scale tensor into (A16W4) layout for AITER kernels.
+
+        Args:
+            tensor: The input scale tensor to be shuffled.
+            num_experts: Number of experts, needed for reshaping logic.
+            gate_up: Whether the scale is for w13 (True) or w2 (False).
+
+        Returns:
+            torch.Tensor: The shuffled scale tensor.
+        """
+        from aiter.ops.shuffle import shuffle_scale_a16w4
+
+        return shuffle_scale_a16w4(tensor, num_experts, gate_up)
+
+    @staticmethod
     def shuffle_weights(
         *tensors: torch.Tensor, layout: tuple[int, int] = (16, 16)
     ) -> tuple[torch.Tensor, ...]:
@@ -1606,6 +1883,88 @@ class rocm_aiter_ops:
         from aiter.ops.shuffle import shuffle_weight
 
         return tuple(shuffle_weight(tensor, layout=layout) for tensor in tensors)
+
+    @staticmethod
+    def flash_attn_varlen_func(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        min_seqlen_q: int | None = None,
+        dropout_p: float = 0.0,
+        softmax_scale: float | None = None,
+        causal: bool = False,
+        window_size: tuple[int, int] | None = None,
+        alibi_slopes: torch.Tensor | None = None,
+        return_lse: bool = False,
+        out: torch.Tensor | None = None,
+    ):
+        """
+        Flash attention with variable length sequences.
+
+        This function is NOT wrapped with @is_aiter_supported decorator
+        to allow explicit backend selection via attention_config to work
+        even when VLLM_ROCM_USE_AITER=0.
+
+        Note: This performs lazy import of aiter.flash_attn_varlen_func
+        """
+        from aiter import flash_attn_varlen_func
+
+        return flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            min_seqlen_q=min_seqlen_q,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=window_size,
+            alibi_slopes=alibi_slopes,
+            return_lse=return_lse,
+            out=out,
+        )
+
+    @staticmethod
+    def pa_fwd_asm(
+        Q: torch.Tensor,
+        K: torch.Tensor,
+        V: torch.Tensor,
+        block_tables: torch.Tensor,
+        context_lens: torch.Tensor,
+        block_tables_stride0: int,
+        K_QScale: torch.Tensor,
+        V_QScale: torch.Tensor,
+        out_: torch.Tensor,
+    ):
+        """
+        Paged attention forward pass using assembly kernel.
+
+        This function is NOT wrapped with @is_aiter_supported decorator
+        to allow explicit backend selection via attention_config to work
+        even when VLLM_ROCM_USE_AITER=0.
+
+        Note: This performs lazy import of aiter.pa_fwd_asm
+        """
+        from aiter import pa_fwd_asm
+
+        return pa_fwd_asm(
+            Q=Q,
+            K=K,
+            V=V,
+            block_tables=block_tables,
+            context_lens=context_lens,
+            block_tables_stride0=block_tables_stride0,
+            K_QScale=K_QScale,
+            V_QScale=V_QScale,
+            out_=out_,
+        )
 
 
 rocm_aiter_ops.register_ops_once()

@@ -4,84 +4,63 @@ import numpy as np
 import torch
 
 from vllm.model_executor.models.interfaces import SupportsMultiModal
-from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
+from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
+from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
 
 
 class EncoderRunner:
     def __init__(
         self,
+        model: SupportsMultiModal,
         max_num_tokens: int,
         hidden_size: int,
+        encoder_cache: EncoderCache,
         dtype: torch.dtype,
         device: torch.device,
     ):
+        self.model = model
         self.max_num_tokens = max_num_tokens
         self.hidden_size = hidden_size
+        self.encoder_cache = encoder_cache
         self.dtype = dtype
         self.device = device
 
         self.inputs_embeds = torch.zeros(
-            max_num_tokens,
-            hidden_size,
-            dtype=dtype,
-            device=device,
+            max_num_tokens, hidden_size, dtype=dtype, device=device
         )
-        self.req_id_to_mm_features: dict[str, list[MultiModalFeatureSpec]] = {}
-        self.encoder_cache: dict[str, torch.Tensor] = {}
-
-    def add_request(self, req_id: str, mm_features: list[MultiModalFeatureSpec]):
-        self.req_id_to_mm_features[req_id] = mm_features
-
-    def free_encoder_cache(self, mm_hash: str) -> None:
-        self.encoder_cache.pop(mm_hash, None)
-
-    def remove_request(self, req_id: str) -> None:
-        self.req_id_to_mm_features.pop(req_id, None)
 
     def prepare_mm_inputs(
-        self,
-        scheduled_encoder_inputs: dict[str, list[int]],
-    ) -> tuple[list[str], list[MultiModalKwargsItem]]:
+        self, scheduled_encoder_inputs: dict[str, list[int]]
+    ) -> tuple[list[str], list[tuple[str, MultiModalKwargsItem]]]:
         mm_hashes: list[str] = []
-        mm_kwargs: list[MultiModalKwargsItem] = []
+        mm_kwargs: list[tuple[str, MultiModalKwargsItem]] = []
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
-            mm_features = self.req_id_to_mm_features[req_id]
+            mm_features = self.encoder_cache.mm_features[req_id]
             for mm_input_id in encoder_input_ids:
                 mm_feature = mm_features[mm_input_id]
                 if mm_feature.data is None:
                     continue
                 mm_hashes.append(mm_feature.identifier)
-                mm_kwargs.append(mm_feature.data)
+                mm_kwargs.append((mm_feature.modality, mm_feature.data))
+
         return mm_hashes, mm_kwargs
 
     @torch.inference_mode()
     def execute_mm_encoder(
         self,
-        model: SupportsMultiModal,
-        mm_hashes: list[str],
-        mm_kwargs: list[MultiModalKwargsItem],
+        mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
     ) -> list[torch.Tensor]:
-        if not mm_hashes:
-            return []
-
         encoder_outputs: list[torch.Tensor] = []
         for modality, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
-            mm_kwargs,
-            device=self.device,
-            pin_memory=False,
+            mm_kwargs, device=self.device, pin_memory=False
         ):
-            curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
+            curr_group_outputs = self.model.embed_multimodal(**mm_kwargs_group)
             sanity_check_mm_encoder_outputs(
-                curr_group_outputs,
-                expected_num_items=num_items,
+                curr_group_outputs, expected_num_items=num_items
             )
             encoder_outputs.extend(curr_group_outputs)
-
-        # Cache the encoder outputs by mm_hash
-        for mm_hash, output in zip(mm_hashes, encoder_outputs):
-            self.encoder_cache[mm_hash] = output
         return encoder_outputs
 
     def gather_mm_embeddings(
@@ -98,9 +77,7 @@ class EncoderRunner:
         if all_decode:
             # All decode requests, so no need to gather any embeddings.
             return [], torch.zeros(
-                total_num_scheduled_tokens,
-                dtype=torch.bool,
-                device=self.device,
+                total_num_scheduled_tokens, dtype=torch.bool, device=self.device
             )
 
         query_start = computed_prefill_lens.tolist()
@@ -108,17 +85,14 @@ class EncoderRunner:
 
         mm_embeds: list[torch.Tensor] = []
         is_mm_embed = torch.zeros(
-            total_num_scheduled_tokens,
-            dtype=torch.bool,
-            device="cpu",
-            pin_memory=True,
+            total_num_scheduled_tokens, dtype=torch.bool, device="cpu", pin_memory=True
         )
         for i, req_id in enumerate(req_ids):
             if not is_prefilling[i]:
                 # OPTIMIZATION: Skip decode requests.
                 continue
 
-            mm_features = self.req_id_to_mm_features[req_id]
+            mm_features = self.encoder_cache.mm_features[req_id]
             for mm_feature in mm_features:
                 pos_info = mm_feature.mm_position
                 start_pos = pos_info.offset
@@ -144,7 +118,7 @@ class EncoderRunner:
                     continue
 
                 mm_hash = mm_feature.identifier
-                encoder_output = self.encoder_cache.get(mm_hash, None)
+                encoder_output = self.encoder_cache.encoder_outputs.get(mm_hash, None)
                 assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
 
                 if (is_embed := pos_info.is_embed) is not None:
@@ -166,15 +140,12 @@ class EncoderRunner:
     @torch.inference_mode()
     def get_inputs_embeds(
         self,
-        model: SupportsMultiModal,
         input_ids: torch.Tensor,
         mm_embeds: list[torch.Tensor],
         is_mm_embed: torch.Tensor,
     ) -> torch.Tensor:
-        x = model.embed_input_ids(
-            input_ids,
-            multimodal_embeddings=mm_embeds,
-            is_multimodal=is_mm_embed,
+        x = self.model.embed_input_ids(
+            input_ids, multimodal_embeddings=mm_embeds, is_multimodal=is_mm_embed
         )
         # Copy to the pre-allocated buffer for CUDA graphs.
         self.inputs_embeds[: x.shape[0]] = x

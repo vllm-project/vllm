@@ -4,14 +4,12 @@
 from typing import Any, Literal
 
 from pydantic import field_validator
-from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 @config
-@dataclass
 class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 
@@ -44,6 +42,9 @@ class AttentionConfig:
 
     disable_flashinfer_q_quantization: bool = False
     """If set, when using fp8 kv, do not quantize Q to fp8."""
+
+    use_prefill_query_quantization: bool = False
+    """If set, quantize query for attention in prefill."""
 
     def compute_hash(self) -> str:
         """

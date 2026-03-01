@@ -5,7 +5,7 @@ import enum
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal
 
 import numpy as np
 import torch
@@ -21,7 +21,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs.data import PromptType
+from vllm.inputs.data import ExplicitEncoderDecoderPrompt, PromptType, TextPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (
@@ -55,6 +55,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.renderers import TokenizeParams
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -63,7 +64,11 @@ from vllm.v1.attention.backend import (
     AttentionType,
 )
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+    SupportsTranscription,
+)
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -644,6 +649,21 @@ class WhisperProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> WhisperConfig:
         return self.ctx.get_hf_config(WhisperConfig)
 
+    def get_default_tok_params(self) -> TokenizeParams:
+        # Special tokens should be provided by the user based on the
+        # task and language of their request. Also needed to avoid
+        # appending an EOS token to the prompt which disrupts generation.
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
+
+    def get_data_parser(self):
+        feature_extractor = self.get_feature_extractor()
+
+        return MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            target_channels=self.get_target_channels(),
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     @property
     def skip_prompt_length_check(self) -> bool:
         return True  # Because the encoder prompt is padded
@@ -675,7 +695,7 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
 
@@ -683,27 +703,22 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
         audio_len = feature_extractor.chunk_length * sampling_rate
         num_audios = mm_counts.get("audio", 0)
 
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        audio_overrides = mm_options.get("audio")
 
         return {
             "audio": self._get_dummy_audios(
-                length=audio_len, num_audios=num_audios, overrides=audio_overrides
+                length=audio_len,
+                num_audios=num_audios,
+                overrides=audio_overrides,
             )
         }
 
 
 class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_feature_extractor()
-        return MultiModalDataParser(
-            target_sr=feature_extractor.sampling_rate,
-            target_channels=self.info.get_target_channels(),
-        )
-
     def create_encoder_prompt(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
     ) -> str | list[int]:
         # Strictly speaking, whisper encoder only accept audio features.
         # We create a dummy encoder prompt here which will be padded to
@@ -725,6 +740,14 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
                 **mm_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
             )
+        # The HF WhisperProcessor passes **kwargs to both the tokenizer
+        # and the feature extractor. Text-tokenizer kwargs like
+        # `truncation` and `max_length` must be removed when audio data
+        # is present, otherwise the feature extractor interprets
+        # `max_length` as raw audio samples and truncates the audio.
+        tok_kwargs = {
+            k: v for k, v in tok_kwargs.items() if k not in ("truncation", "max_length")
+        }
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
@@ -764,7 +787,9 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
     dummy_inputs=WhisperDummyInputsBuilder,
 )
 class WhisperForConditionalGeneration(
-    nn.Module, SupportsTranscription, SupportsMultiModal
+    nn.Module,
+    SupportsTranscription,
+    SupportsMultiModal,
 ):
     packed_modules_mapping = {
         "self_attn.qkv_proj": [
@@ -782,20 +807,18 @@ class WhisperForConditionalGeneration(
     # Whisper only supports audio-conditioned generation.
     supports_transcription_only = True
     supports_segment_timestamp = True
+    supports_explicit_language_detection = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     @classmethod
     def validate_language(cls, language: str | None) -> str | None:
         if language is None:
-            # TODO language should be optional and can be guessed.
-            # For now we default to en. See
-            # https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
-            logger.warning(
-                "Defaulting to language='en'. If you wish to transcribe "
-                "audio in a different language, pass the `language` field "
+            logger.debug(
+                "No language specified. Language will be auto-detected "
+                "from audio. To skip detection, pass the `language` field "
                 "in the TranscriptionRequest."
             )
-            language = "en"
+            return None
         return super().validate_language(language)
 
     @classmethod
@@ -813,21 +836,75 @@ class WhisperForConditionalGeneration(
             raise ValueError(
                 "Language must be specified when creating the Whisper prompt"
             )
-        prompt = {
-            "encoder_prompt": {
-                # Whisper does not support encoder prompt.
-                "prompt": "",
-                "multi_modal_data": {
-                    "audio": (audio, stt_config.sample_rate),
-                },
-            },
-            "decoder_prompt": (
-                (f"<|prev|>{request_prompt}" if request_prompt else "")
-                + f"<|startoftranscript|><|{language}|>"
-                + f"<|{task_type}|><|notimestamps|>"
+
+        decoder_text = (
+            f"<|prev|>{request_prompt}" if request_prompt else ""
+        ) + f"<|startoftranscript|><|{language}|><|{task_type}|><|notimestamps|>"
+
+        return ExplicitEncoderDecoderPrompt(
+            encoder_prompt=TextPrompt(
+                prompt="",  # Whisper does not support encoder prompt.
+                multi_modal_data={"audio": (audio, stt_config.sample_rate)},
             ),
-        }
-        return cast(PromptType, prompt)
+            decoder_prompt=TextPrompt(prompt=decoder_text),
+        )
+
+    @classmethod
+    def get_language_token_ids(
+        cls,
+        tokenizer: object,
+    ) -> list[int]:
+        """Return token IDs for all supported language tokens.
+
+        Used with ``SamplingParams.allowed_token_ids`` to constrain
+        language detection to only produce valid language tokens.
+        """
+        token_ids = [
+            tokenizer.convert_tokens_to_ids(f"<|{lang_code}|>")
+            for lang_code in cls.supported_languages
+        ]
+        return token_ids
+
+    @classmethod
+    def get_language_detection_prompt(
+        cls,
+        audio: np.ndarray,
+        stt_config: SpeechToTextConfig,
+    ) -> PromptType:
+        """Return a prompt that elicits a single language token from Whisper.
+
+        Feed only ``<|startoftranscript|>`` as the decoder input so the model
+        predicts the most likely language token (e.g. ``<|de|>``).
+        """
+        return ExplicitEncoderDecoderPrompt(
+            encoder_prompt=TextPrompt(
+                prompt="",
+                multi_modal_data={"audio": (audio, stt_config.sample_rate)},
+            ),
+            decoder_prompt=TextPrompt(prompt="<|startoftranscript|>"),
+        )
+
+    @classmethod
+    def parse_language_detection_output(
+        cls,
+        token_ids: list[int],
+        tokenizer: object,
+    ) -> str | None:
+        """Parse the language token predicted by Whisper.
+
+        Decodes the first token ID and extracts the language code from the
+        ``<|xx|>`` format. Expects a valid language token from constrained generation.
+        """
+
+        decoded = tokenizer.decode(
+            [token_ids[0]],
+            skip_special_tokens=False,
+        )
+        # Whisper language tokens have the form <|xx|>
+        assert decoded.startswith("<|") and decoded.endswith("|>")
+        lang_code = decoded[2:-2]
+        assert lang_code in cls.supported_languages
+        return lang_code
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -951,8 +1028,8 @@ def _create_fake_bias_for_k_proj(
     So that the bias for k_proj in qkv_proj can be initialized with zeros.
     """
     for name, weight in weights:
+        yield name, weight
         if name.endswith(fake_bias_key_name):
             bias = torch.zeros(weight.size(0))
             bias_name = name.replace("weight", "bias")
-            yield from [(name, weight), (bias_name, bias)]
-        yield name, weight
+            yield bias_name, bias

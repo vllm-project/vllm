@@ -234,7 +234,7 @@ class Olmo3ReasoningParser(ReasoningParser):
         # reasoning template.
         reasoning_expr = (
             rf"^(?:{self.think_start})?(?P<reasoning>.*?)"
-            + rf"{self.think_end}(?P<content>.*)$"
+            rf"{self.think_end}(?P<content>.*)$"
         )
         self.reasoning_regex = re.compile(reasoning_expr, re.DOTALL)
 

@@ -134,6 +134,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "step3_tool_parser",
         "Step3ToolParser",
     ),
+    "step3p5": (
+        "step3p5_tool_parser",
+        "Step3p5ToolParser",
+    ),
     "xlam": (
         "xlam_tool_parser",
         "xLAMToolParser",

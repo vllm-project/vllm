@@ -6,7 +6,6 @@ from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field, SkipValidation, field_validator
-from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -37,11 +36,10 @@ KVOffloadingBackend = Literal["native", "lmcache"]
 
 
 @config
-@dataclass
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: SkipValidation[BlockSize] = None  # type: ignore
+    block_size: SkipValidation[BlockSize] = None  # type: ignore[assignment]
     """Size of a contiguous cache block in number of tokens. On CUDA devices,
     only block sizes up to 32 are supported.
 
@@ -102,6 +100,15 @@ class CacheConfig:
     load a 13B model with BF16 weight, which requires at least 26GB GPU memory.
     Note that this requires fast CPU-GPU interconnect, as part of the model is
     loaded from CPU memory to GPU memory on the fly in each model forward pass.
+
+    DEPRECATED: This field is deprecated and will be removed in v0.16.
+    Please use OffloadConfig.uva.cpu_offload_gb instead.
+    """
+    cpu_offload_params: set[str] = Field(default_factory=set)
+    """The set of parameter name segments to target for CPU offloading.
+
+    DEPRECATED: This field is deprecated and will be removed in v0.16.
+    Please use OffloadConfig.uva.cpu_offload_params instead.
     """
     calculate_kv_scales: bool = False
     """This enables dynamic calculation of `k_scale` and `v_scale` when

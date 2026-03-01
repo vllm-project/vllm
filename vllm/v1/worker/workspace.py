@@ -5,7 +5,6 @@ import inspect
 import os
 from itertools import accumulate
 from math import prod
-from typing import Optional
 
 import torch
 
@@ -26,7 +25,7 @@ _MB = 1024**2
 _GiB = 1024**3
 
 # Global workspace manager instance
-_manager: Optional["WorkspaceManager"] = None
+_manager: "WorkspaceManager | None" = None
 
 
 class WorkspaceManager:
@@ -60,6 +59,23 @@ class WorkspaceManager:
         if envs.VLLM_DEBUG_WORKSPACE:
             logger.info(
                 "[WORKSPACE DEBUG] Workspace locked. Current sizes: %s",
+                [
+                    self._workspace_size_bytes(ws) / _MB
+                    for ws in self._current_workspaces
+                    if ws is not None
+                ],
+            )
+
+    def unlock(self) -> None:
+        """Unlock the workspace to allow growth.
+
+        This is used during elastic EP scaling when the workspace size
+        needs to grow due to changes in the number of experts.
+        """
+        self._locked = False
+        if envs.VLLM_DEBUG_WORKSPACE:
+            logger.info(
+                "[WORKSPACE DEBUG] Workspace unlocked. Current sizes: %s",
                 [
                     self._workspace_size_bytes(ws) / _MB
                     for ws in self._current_workspaces
@@ -241,6 +257,17 @@ def lock_workspace() -> None:
         # Now all get_workspace calls must fit in pre-allocated size
     """
     current_workspace_manager().lock()
+
+
+def unlock_workspace() -> None:
+    """Unlock the workspace to allow growth.
+
+    This is used during elastic EP scaling when the workspace size
+    needs to grow due to changes in the number of experts.
+    After scaling operations complete, lock_workspace() should be
+    called again to prevent unexpected allocations.
+    """
+    current_workspace_manager().unlock()
 
 
 def reset_workspace_manager() -> None:

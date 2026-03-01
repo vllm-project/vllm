@@ -1,13 +1,13 @@
 #pragma once
 
-template <typename T, bool CHECK_SKIPPED, bool ALIGN_BLOCK_SIZE>
+template <typename T, bool CHECK_SKIPPED>
 __global__ void expandInputRowsKernel(
     T const* unpermuted_input, T* permuted_output, int* sorted_experts,
     int const* expanded_dest_row_to_expanded_source_row,
     int* expanded_source_row_to_expanded_dest_row, int* permuted_idx,
-    int64_t* expert_first_token_offset, int64_t const num_rows,
+    int64_t const* expert_first_token_offset, int64_t const num_rows,
     int64_t const* num_dest_rows, int64_t const cols, int64_t k,
-    int num_local_experts, int align_block_size) {
+    int num_local_experts) {
   // Reverse permutation map.
   // I do this so that later, we can use the source -> dest map to do the k-way
   // reduction and unpermuting. I need the reverse map for that reduction to
@@ -17,37 +17,6 @@ __global__ void expandInputRowsKernel(
   int64_t const expanded_source_row =
       expanded_dest_row_to_expanded_source_row[expanded_dest_row];
   int expert_id = sorted_experts[expanded_dest_row];
-
-  extern __shared__ int64_t smem_expert_first_token_offset[];
-  if constexpr (ALIGN_BLOCK_SIZE) {
-    // load g2s
-    for (int idx = threadIdx.x; idx < num_local_experts + 1;
-         idx += blockDim.x) {
-      smem_expert_first_token_offset[idx] =
-          __ldg(expert_first_token_offset + idx);
-    }
-    __syncthreads();
-    int lane_idx = threadIdx.x & 31;
-
-    if (lane_idx == 0) {
-      // set token_offset_in_expert = 0 if this expert is not local expert
-      int token_offset_in_expert =
-          expert_id >= num_local_experts
-              ? 0
-              : expanded_dest_row - smem_expert_first_token_offset[expert_id];
-      int64_t accumulate_align_offset = 0;
-#pragma unroll 1
-      for (int eidx = 1; eidx <= min(expert_id, num_local_experts); eidx++) {
-        auto n_token_in_expert = smem_expert_first_token_offset[eidx] -
-                                 smem_expert_first_token_offset[eidx - 1];
-        accumulate_align_offset += (n_token_in_expert + align_block_size - 1) /
-                                   align_block_size * align_block_size;
-      }
-      expanded_dest_row = accumulate_align_offset + token_offset_in_expert;
-    }
-    // lane0 shuffle broadcast align_expanded_dest_row
-    expanded_dest_row = __shfl_sync(0xffffffff, expanded_dest_row, 0);
-  }
 
   if (threadIdx.x == 0) {
     assert(expanded_dest_row <= INT32_MAX);
@@ -88,30 +57,25 @@ void expandInputRowsKernelLauncher(
     T const* unpermuted_input, T* permuted_output, int* sorted_experts,
     int const* expanded_dest_row_to_expanded_source_row,
     int* expanded_source_row_to_expanded_dest_row, int* permuted_idx,
-    int64_t* expert_first_token_offset, int64_t const num_rows,
+    int64_t const* expert_first_token_offset, int64_t const num_rows,
     int64_t const* num_valid_tokens_ptr, int64_t const cols, int const k,
-    int num_local_experts, const int& align_block_size, cudaStream_t stream) {
+    int num_local_experts, cudaStream_t stream) {
   int64_t const blocks = num_rows * k;
   int64_t const threads = 256;
-  using FuncPtr = decltype(&expandInputRowsKernel<T, true, true>);
-  FuncPtr func_map[2][2] = {
-      {&expandInputRowsKernel<T, false, false>,
-       &expandInputRowsKernel<T, false, true>},
-      {&expandInputRowsKernel<T, true, false>,
-       &expandInputRowsKernel<T, true, true>},
+  using FuncPtr = decltype(&expandInputRowsKernel<T, true>);
+  FuncPtr func_map[2] = {
+      &expandInputRowsKernel<T, false>,
+      &expandInputRowsKernel<T, true>,
   };
   bool is_check_skip = num_valid_tokens_ptr != nullptr;
-  bool is_align_block_size = align_block_size != -1;
-  auto func = func_map[is_check_skip][is_align_block_size];
+  auto func = func_map[is_check_skip];
 
-  int64_t smem_size = sizeof(int64_t) * (num_local_experts + 1);
-
-  func<<<blocks, threads, smem_size, stream>>>(
+  func<<<blocks, threads, 0, stream>>>(
       unpermuted_input, permuted_output, sorted_experts,
       expanded_dest_row_to_expanded_source_row,
       expanded_source_row_to_expanded_dest_row, permuted_idx,
       expert_first_token_offset, num_rows, num_valid_tokens_ptr, cols, k,
-      num_local_experts, align_block_size);
+      num_local_experts);
 }
 
 template <class T, class U>

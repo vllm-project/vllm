@@ -3,7 +3,7 @@
 
 from contextlib import suppress
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 from compressed_tensors.config import (
@@ -18,7 +18,6 @@ from compressed_tensors.quantization import (
 )
 from compressed_tensors.transform import TransformConfig
 
-import vllm.envs as envs
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -40,7 +39,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    W4A16SPARSE24_SUPPORTED_BITS,
     WNA16_SUPPORTED_BITS,
     CompressedTensors24,
     CompressedTensorsScheme,
@@ -49,7 +47,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW4A8Int,
     CompressedTensorsW4A16Fp4,
     CompressedTensorsW4A16Mxfp4,
-    CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A16Fp8,
@@ -65,9 +62,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    cutlass_fp4_supported,
-)
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -162,7 +156,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         self,
         layer: torch.nn.Module,
         prefix: str,
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         if isinstance(layer, LinearBase):
             # collect schemes
             quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
@@ -213,18 +207,19 @@ class CompressedTensorsConfig(QuantizationConfig):
         # because Attention quantization on its own is not supported by vLLM.
         # It is coupled with KV-cache quantization, and if scales are present in the
         # checkpoint, they will be used properly.
-        grps_without_attn_quant = {}
-        for k, v in config["config_groups"].items():
-            # e.g. LlamaAttention, Qwen3Attention, etc.
-            if len(v["targets"]) == 1 and v["targets"][0].endswith("Attention"):
-                logger.warning(
-                    "Skipping CompressedTensors config group for %s. Attention quant "
-                    "is coupled with KV-cache quantization in vLLM.",
-                    v["targets"][0],
-                )
-                continue
-            grps_without_attn_quant[k] = v
-        config["config_groups"] = grps_without_attn_quant
+        if "config_groups" in config:
+            grps_without_attn_quant = {}
+            for k, v in config["config_groups"].items():
+                # e.g. LlamaAttention, Qwen3Attention, etc.
+                if len(v["targets"]) == 1 and v["targets"][0].endswith("Attention"):
+                    logger.warning(
+                        "Skipping CompressedTensors config group for %s. Attention "
+                        "quant is coupled with KV-cache quantization in vLLM.",
+                        v["targets"][0],
+                    )
+                    continue
+                grps_without_attn_quant[k] = v
+            config["config_groups"] = grps_without_attn_quant
 
         ignore: list[str] = cast(list[str], config.get("ignore", []))
         quant_format = cast(str, config.get("format"))
@@ -610,43 +605,26 @@ class CompressedTensorsConfig(QuantizationConfig):
                 actorder=weight_quant.actorder,
             )
 
-        if self._is_wNa16_group_channel(weight_quant, input_quant):
-            if (
-                format == CompressionFormat.marlin_24.value
-                and weight_quant.num_bits in W4A16SPARSE24_SUPPORTED_BITS
-            ):
-                assert weight_quant.symmetric
-                return CompressedTensorsW4A16Sparse24(
-                    strategy=weight_quant.strategy,
-                    num_bits=weight_quant.num_bits,
-                    group_size=weight_quant.group_size,
-                )
-            if (
-                format == CompressionFormat.pack_quantized.value
-                and weight_quant.num_bits in WNA16_SUPPORTED_BITS
-            ):
-                return CompressedTensorsWNA16(
-                    num_bits=weight_quant.num_bits,
-                    strategy=weight_quant.strategy,
-                    symmetric=weight_quant.symmetric,
-                    group_size=weight_quant.group_size,
-                    actorder=weight_quant.actorder,
-                    layer_name=layer_name,
-                )
+        if (
+            self._is_wNa16_group_channel(weight_quant, input_quant)
+            and (format == CompressionFormat.pack_quantized.value)
+            and (weight_quant.num_bits in WNA16_SUPPORTED_BITS)
+        ):
+            return CompressedTensorsWNA16(
+                num_bits=weight_quant.num_bits,
+                strategy=weight_quant.strategy,
+                symmetric=weight_quant.symmetric,
+                group_size=weight_quant.group_size,
+                actorder=weight_quant.actorder,
+                layer_name=layer_name,
+            )
 
         act_quant_format = is_activation_quantization_format(format)
         if act_quant_format:
             if self._is_nvfp4_format(weight_quant) and self._is_nvfp4_format(
                 input_quant
             ):
-                if cutlass_fp4_supported() or envs.VLLM_USE_NVFP4_CT_EMULATIONS:
-                    return CompressedTensorsW4A4Fp4()
-                else:
-                    logger.warning_once(
-                        "Current platform does not support cutlass NVFP4."
-                        " Running CompressedTensorsW4A16Fp4."
-                    )
-                    return CompressedTensorsW4A16Fp4(has_input_global_scale=True)
+                return CompressedTensorsW4A4Fp4()
 
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 is_fp8_w8a8_supported = self._check_scheme_supported(
@@ -663,7 +641,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     # note: input_quant will be present for converted models;
                     # will be ignored during inference post loading
                     return CompressedTensorsW8A16Fp8(
-                        strategy=weight_quant.strategy,
+                        weight_quant=weight_quant,
                         is_static_input_scheme=not input_quant.dynamic,
                     )
 
@@ -671,7 +649,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             if self._is_fp8_w8a16(weight_quant, input_quant):
                 is_static_input_scheme = input_quant and not input_quant.dynamic
                 return CompressedTensorsW8A16Fp8(
-                    strategy=weight_quant.strategy,
+                    weight_quant=weight_quant,
                     is_static_input_scheme=is_static_input_scheme,
                 )
 
@@ -703,7 +681,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     def get_scheme(
         self, layer: torch.nn.Module, layer_name: str | None = None
-    ) -> Optional["CompressedTensorsScheme"]:
+    ) -> "CompressedTensorsScheme | None":
         """
         compressed-tensors supports non uniform in the following way:
 
@@ -763,11 +741,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 model_compression_config=model_compression_config,
             )
         elif weight_quant is None:
-            logger.warning_once(
-                "Acceleration for non-quantized schemes is "
-                "not supported by Compressed Tensors. "
-                "Falling back to UnquantizedLinearMethod"
-            )
+            # Falling back to UnquantizedLinearMethod
             return None
 
         else:
@@ -977,11 +951,11 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 f"received num_bits={num_bits}, type={type_}"
             )
 
-        # TODO: delegate validation to compressed-tensors library so that we have a
-        # single source of truth. Right now this is not possible until the next release
-        # of compressed-tensors.
-        strategy = kv_cache_scheme.get("strategy")
-        supported_strategies = ("tensor", "attn_head")
+        strategy = QuantizationStrategy(kv_cache_scheme.get("strategy"))
+        supported_strategies = (
+            QuantizationStrategy.TENSOR,
+            QuantizationStrategy.ATTN_HEAD,
+        )
         if strategy not in supported_strategies:
             raise NotImplementedError(
                 "Invalid strategy for compressed-tensors KV cache. "
@@ -1007,16 +981,11 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
             hasattr(self.quant_config, "kv_cache_scheme")
             and self.quant_config.kv_cache_scheme is not None
         ):
-            strategy = self.quant_config.kv_cache_scheme["strategy"]
-
-        if strategy == "attn_head":
-            assert layer.impl.supports_per_head_quant_scales, (
-                f"Layer {layer.__class__.__name__} with implementation "
-                f"{layer.impl.__class__.__name__} does not support per-head scales."
+            strategy = QuantizationStrategy(
+                self.quant_config.kv_cache_scheme["strategy"]
             )
-            n_scales = int(layer.num_kv_heads)
-        else:
-            n_scales = 1
+
+        n_scales = int(layer.num_kv_heads) if strategy == "attn_head" else 1
 
         layer.k_scale = torch.nn.Parameter(
             torch.ones(n_scales, requires_grad=False, dtype=torch.float32)
@@ -1046,7 +1015,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         # - q_scale is partitioned over query heads.
         # - k/v_scale is partitioned over kv heads when total_kv_heads >= tp_size,
         #   and replicated when total_kv_heads < tp_size.
-        if strategy == "attn_head":
+        if strategy == QuantizationStrategy.ATTN_HEAD:
 
             def _tp_aware_loader(
                 param: torch.Tensor,

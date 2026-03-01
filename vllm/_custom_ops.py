@@ -178,9 +178,7 @@ def mla_decode_kvcache_cpu(
     block_tables: torch.Tensor,
     seq_lens: torch.Tensor,
 ) -> None:
-    torch.ops._C_cpu.mla_decode_kvcache(
-        out, query, kv_cache, scale, block_tables, seq_lens
-    )
+    torch.ops._C.mla_decode_kvcache(out, query, kv_cache, scale, block_tables, seq_lens)
 
 
 # merge attn states ops
@@ -450,21 +448,40 @@ def rms_norm_per_block_quant(
     scale_ub: torch.Tensor | None = None,
     residual: torch.Tensor | None = None,
     is_scale_transposed: bool = False,
+    tma_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert len(group_size) == 2
     output = torch.empty_like(input, dtype=quant_dtype)
     if is_scale_transposed:
-        scales = torch.empty(
-            (input.shape[-1] // group_size[1], input.numel() // input.shape[-1]),
-            device=input.device,
-            dtype=torch.float32,
-        ).transpose(0, 1)
+        if tma_alignment == 0:
+            scales = torch.empty(
+                (input.shape[-1] // group_size[1], input.numel() // input.shape[-1]),
+                device=input.device,
+                dtype=torch.float32,
+            ).transpose(0, 1)
+        else:
+            m = input.shape[-2]
+            sf_k = input.shape[-1] // group_size[1]
+            tma_aligned_m = (m + tma_alignment - 1) // tma_alignment * tma_alignment
+            shape = input.shape[:-2] + (m, sf_k)
+            stride = (
+                (1, tma_aligned_m)
+                if input.dim() == 2
+                else (tma_aligned_m * sf_k, 1, tma_aligned_m)
+            )
+            scales = torch.empty_strided(
+                shape, stride, device=input.device, dtype=torch.float32
+            )
     else:
         scales = torch.empty(
             (input.numel() // input.shape[-1], input.shape[-1] // group_size[1]),
             device=input.device,
             dtype=torch.float32,
         )
+
+    assert tma_alignment in [0, 4], "Expected TMA alignment 0 or 4, but got " + str(
+        tma_alignment
+    )
 
     torch.ops._C.rms_norm_per_block_quant(
         output,
@@ -499,6 +516,23 @@ def awq_dequantize(
     return torch.ops._C.awq_dequantize(qweight, scales, zeros, split_k_iters, thx, thy)
 
 
+if hasattr(torch.ops._C, "awq_dequantize"):
+
+    @register_fake("_C::awq_dequantize")
+    def _awq_dequantize_fake(
+        qweight: torch.Tensor,
+        scales: torch.Tensor,
+        zeros: torch.Tensor,
+        split_k_iters: torch.SymInt,
+        thx: int,
+        thy: int,
+    ) -> torch.Tensor:
+        in_c = qweight.size(0)
+        qout_c = qweight.size(1)
+        out_c = qout_c * 8
+        return torch.empty((in_c, out_c), dtype=scales.dtype, device=scales.device)
+
+
 def awq_gemm(
     input: torch.Tensor,
     qweight: torch.Tensor,
@@ -511,6 +545,24 @@ def awq_gemm(
 
         return awq_gemm_triton(input, qweight, scales, qzeros, split_k_iters)
     return torch.ops._C.awq_gemm(input, qweight, scales, qzeros, split_k_iters)
+
+
+if hasattr(torch.ops._C, "awq_gemm"):
+
+    @register_fake("_C::awq_gemm")
+    def _awq_gemm_fake(
+        input: torch.Tensor,
+        qweight: torch.Tensor,
+        scales: torch.Tensor,
+        qzeros: torch.Tensor,
+        split_k_iters: torch.SymInt,
+    ) -> torch.Tensor:
+        num_in_feats = input.size(0)
+        return torch.empty(
+            (split_k_iters, num_in_feats, qweight.size(1) * 8),
+            dtype=input.dtype,
+            device=input.device,
+        ).sum(0)
 
 
 # gptq
@@ -556,152 +608,6 @@ if hasattr(torch.ops._C, "gptq_gemm"):
 
 def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor, bit: int) -> None:
     torch.ops._C.gptq_shuffle(q_weight, q_perm, bit)
-
-
-# marlin_24
-def gptq_marlin_24_gemm(
-    a: torch.Tensor,
-    b_q_weight: torch.Tensor,
-    b_meta: torch.Tensor,
-    b_scales: torch.Tensor,
-    workspace: torch.Tensor,
-    b_q_type: ScalarType,
-    size_m: int,
-    size_n: int,
-    size_k: int,
-) -> torch.Tensor:
-    return torch.ops._C.gptq_marlin_24_gemm(
-        a, b_q_weight, b_meta, b_scales, workspace, b_q_type.id, size_m, size_n, size_k
-    )
-
-
-if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
-
-    @register_fake("_C::gptq_marlin_24_gemm")
-    def _gptq_marlin_24_gemm_fake(
-        a: torch.Tensor,
-        b_q_weight: torch.Tensor,
-        b_meta: torch.Tensor,
-        b_scales: torch.Tensor,
-        workspace: torch.Tensor,
-        b_q_type: ScalarType,
-        size_m: torch.SymInt,
-        size_n: torch.SymInt,
-        size_k: torch.SymInt,
-    ) -> torch.Tensor:
-        return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
-
-    @register_fake("_C::marlin_gemm")
-    def _marlin_gemm_fake(
-        a: torch.Tensor,
-        c: torch.Tensor | None,
-        b_q_weight: torch.Tensor,
-        b_bias: torch.Tensor | None,
-        b_scales: torch.Tensor,
-        a_scales: torch.Tensor | None,
-        global_scale: torch.Tensor | None,
-        b_zeros: torch.Tensor | None,
-        g_idx: torch.Tensor | None,
-        perm: torch.Tensor | None,
-        workspace: torch.Tensor,
-        b_q_type_id: int,
-        size_m: torch.SymInt,
-        size_n: torch.SymInt,
-        size_k: torch.SymInt,
-        is_k_full: bool = True,
-        use_atomic_add: bool = False,
-        use_fp32_reduce: bool = False,
-        is_zp_float: bool = False,
-    ) -> torch.Tensor:
-        dtype = a.dtype
-        if dtype not in [torch.half, torch.bfloat16]:
-            dtype = b_scales.dtype
-        return torch.empty((size_m, size_n), device=a.device, dtype=dtype)
-
-    @register_fake("_C::awq_dequantize")
-    def _awq_dequantize_fake(
-        qweight: torch.Tensor,
-        scales: torch.Tensor,
-        zeros: torch.Tensor,
-        split_k_iters: torch.SymInt,
-        thx: int,
-        thy: int,
-    ) -> torch.Tensor:
-        in_c = qweight.size(0)
-        qout_c = qweight.size(1)
-        out_c = qout_c * 8
-        return torch.empty((in_c, out_c), dtype=scales.dtype, device=scales.device)
-
-    @register_fake("_C::awq_gemm")
-    def _awq_gemm_fake(
-        input: torch.Tensor,
-        qweight: torch.Tensor,
-        scales: torch.Tensor,
-        qzeros: torch.Tensor,
-        split_k_iters: torch.SymInt,
-    ) -> torch.Tensor:
-        num_in_feats = input.size(0)
-        return torch.empty(
-            (split_k_iters, num_in_feats, qweight.size(1) * 8),
-            dtype=input.dtype,
-            device=input.device,
-        ).sum(0)
-
-    @register_fake("_C::machete_mm")
-    def machete_mm_fake(
-        a: torch.Tensor,
-        # b_q Should be the tensor returned by machete_prepack_B
-        b_q: torch.Tensor,
-        b_type: ScalarType,
-        out_type: torch.dtype | None = None,
-        b_group_scales: torch.Tensor | None = None,
-        b_group_zeros: torch.Tensor | None = None,
-        b_group_size: int | None = None,
-        b_channel_scales: torch.Tensor | None = None,
-        a_token_scales: torch.Tensor | None = None,
-        schedule: str | None = None,
-    ) -> torch.Tensor:
-        m = a.size(0)
-        n = b_q.size(1)
-        return torch.empty((m, n), device=a.device, dtype=a.dtype)
-
-    @register_fake("_C::machete_prepack_B")
-    def machete_prepack_B_fake(
-        b_q_weight: torch.Tensor,
-        a_type: torch.dtype,
-        b_type: ScalarType,
-        group_scales_type: torch.dtype | None,
-    ) -> torch.Tensor:
-        return torch.empty_like(b_q_weight, memory_format=torch.contiguous_format)
-
-    @register_fake("_C::cutlass_w4a8_mm")
-    def cutlass_w4a8_mm_fake(
-        a: torch.Tensor,
-        # b_q Should be the tensor returned by cutlass_encode_and_reorder_int4b
-        b_q: torch.Tensor,
-        b_group_scales: torch.Tensor,
-        b_group_size: int,
-        b_channel_scales: torch.Tensor,
-        a_token_scales: torch.Tensor,
-        out_type: torch.dtype | None = None,
-        maybe_schedule: str | None = None,
-    ) -> torch.Tensor:
-        m = a.size(0)
-        n = b_q.size(1)
-        out_dtype = out_type if out_type is not None else torch.bfloat16
-        return torch.empty((m, n), device=a.device, dtype=out_dtype)
-
-    @register_fake("_C::cutlass_pack_scale_fp8")
-    def cutlass_pack_scale_fp8_fake(scales: torch.Tensor) -> torch.Tensor:
-        return torch.empty_like(scales, memory_format=torch.contiguous_format)
-
-    @register_fake("_C::cutlass_encode_and_reorder_int4b")
-    def cutlass_encode_and_reorder_int4b_fake(b: torch.Tensor) -> torch.Tensor:
-        return torch.empty_like(b, memory_format=torch.contiguous_format)
-
-    @register_fake("_C::cutlass_encode_and_reorder_int4b_grouped")
-    def cutlass_encode_and_reorder_int4b_grouped_fake(b: torch.Tensor) -> torch.Tensor:
-        return torch.empty_like(b, memory_format=torch.contiguous_format)
 
 
 if hasattr(torch.ops._C, "allspark_w8a16_gemm"):
@@ -900,6 +806,8 @@ def cutlass_sparse_scaled_mm_supported(cuda_device_capability: int) -> bool:
 
 
 def cutlass_group_gemm_supported(cuda_device_capability: int) -> bool:
+    if cuda_device_capability < 90 or cuda_device_capability >= 110:
+        return False
     try:
         return torch.ops._C.cutlass_group_gemm_supported(cuda_device_capability)
     except AttributeError:
@@ -1078,7 +986,7 @@ def shuffle_rows(input_tensor: torch.Tensor, dst2src_map: torch.Tensor):
     return output_tensor
 
 
-def get_cutlass_pplx_moe_mm_data(
+def get_cutlass_batched_moe_mm_data(
     expert_offsets: torch.Tensor,
     problem_sizes1: torch.Tensor,
     problem_sizes2: torch.Tensor,
@@ -1101,7 +1009,7 @@ def get_cutlass_pplx_moe_mm_data(
                                       multiplication in two grouped MMs used in
                                       the fused MoE operation.
     """
-    return torch.ops._C.get_cutlass_pplx_moe_mm_data(
+    return torch.ops._C.get_cutlass_batched_moe_mm_data(
         expert_offsets,
         problem_sizes1,
         problem_sizes2,
@@ -1356,6 +1264,36 @@ def marlin_gemm(
     )
 
 
+if hasattr(torch.ops._C, "marlin_gemm"):
+
+    @register_fake("_C::marlin_gemm")
+    def _marlin_gemm_fake(
+        a: torch.Tensor,
+        c: torch.Tensor | None,
+        b_q_weight: torch.Tensor,
+        b_bias: torch.Tensor | None,
+        b_scales: torch.Tensor,
+        a_scales: torch.Tensor | None,
+        global_scale: torch.Tensor | None,
+        b_zeros: torch.Tensor | None,
+        g_idx: torch.Tensor | None,
+        perm: torch.Tensor | None,
+        workspace: torch.Tensor,
+        b_q_type_id: int,
+        size_m: torch.SymInt,
+        size_n: torch.SymInt,
+        size_k: torch.SymInt,
+        is_k_full: bool = True,
+        use_atomic_add: bool = False,
+        use_fp32_reduce: bool = False,
+        is_zp_float: bool = False,
+    ) -> torch.Tensor:
+        dtype = a.dtype
+        if dtype not in [torch.half, torch.bfloat16]:
+            dtype = b_scales.dtype
+        return torch.empty((size_m, size_n), device=a.device, dtype=dtype)
+
+
 # machete
 def machete_supported_schedules(
     a_type: torch.dtype,
@@ -1404,6 +1342,27 @@ def machete_mm(
     )
 
 
+if hasattr(torch.ops._C, "machete_mm"):
+
+    @register_fake("_C::machete_mm")
+    def machete_mm_fake(
+        a: torch.Tensor,
+        # b_q Should be the tensor returned by machete_prepack_B
+        b_q: torch.Tensor,
+        b_type: ScalarType,
+        out_type: torch.dtype | None = None,
+        b_group_scales: torch.Tensor | None = None,
+        b_group_zeros: torch.Tensor | None = None,
+        b_group_size: int | None = None,
+        b_channel_scales: torch.Tensor | None = None,
+        a_token_scales: torch.Tensor | None = None,
+        schedule: str | None = None,
+    ) -> torch.Tensor:
+        m = a.size(0)
+        n = b_q.size(1)
+        return torch.empty((m, n), device=a.device, dtype=a.dtype)
+
+
 def machete_prepack_B(
     b_q_weight: torch.Tensor,
     a_type: torch.dtype,
@@ -1413,6 +1372,18 @@ def machete_prepack_B(
     return torch.ops._C.machete_prepack_B(
         b_q_weight, a_type, b_type.id, group_scales_type
     )
+
+
+if hasattr(torch.ops._C, "machete_prepack_B"):
+
+    @register_fake("_C::machete_prepack_B")
+    def machete_prepack_B_fake(
+        b_q_weight: torch.Tensor,
+        a_type: torch.dtype,
+        b_type: ScalarType,
+        group_scales_type: torch.dtype | None,
+    ) -> torch.Tensor:
+        return torch.empty_like(b_q_weight, memory_format=torch.contiguous_format)
 
 
 # CUTLASS W4A8
@@ -1439,12 +1410,46 @@ def cutlass_w4a8_mm(
     )
 
 
+if hasattr(torch.ops._C, "cutlass_w4a8_mm"):
+
+    @register_fake("_C::cutlass_w4a8_mm")
+    def cutlass_w4a8_mm_fake(
+        a: torch.Tensor,
+        # b_q Should be the tensor returned by cutlass_encode_and_reorder_int4b
+        b_q: torch.Tensor,
+        b_group_scales: torch.Tensor,
+        b_group_size: int,
+        b_channel_scales: torch.Tensor,
+        a_token_scales: torch.Tensor,
+        out_type: torch.dtype | None = None,
+        maybe_schedule: str | None = None,
+    ) -> torch.Tensor:
+        m = a.size(0)
+        n = b_q.size(1)
+        out_dtype = out_type if out_type is not None else torch.bfloat16
+        return torch.empty((m, n), device=a.device, dtype=out_dtype)
+
+
 def cutlass_pack_scale_fp8(scales: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.cutlass_pack_scale_fp8(scales)
 
 
+if hasattr(torch.ops._C, "cutlass_pack_scale_fp8"):
+
+    @register_fake("_C::cutlass_pack_scale_fp8")
+    def cutlass_pack_scale_fp8_fake(scales: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(scales, memory_format=torch.contiguous_format)
+
+
 def cutlass_encode_and_reorder_int4b(b: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.cutlass_encode_and_reorder_int4b(b)
+
+
+if hasattr(torch.ops._C, "cutlass_encode_and_reorder_int4b"):
+
+    @register_fake("_C::cutlass_encode_and_reorder_int4b")
+    def cutlass_encode_and_reorder_int4b_fake(b: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(b, memory_format=torch.contiguous_format)
 
 
 def cutlass_w4a8_moe_mm(
@@ -1519,15 +1524,22 @@ def cutlass_encode_and_reorder_int4b_grouped(
     return torch.ops._C.cutlass_encode_and_reorder_int4b_grouped(b_tensors)
 
 
+if hasattr(torch.ops._C, "cutlass_encode_and_reorder_int4b_grouped"):
+
+    @register_fake("_C::cutlass_encode_and_reorder_int4b_grouped")
+    def cutlass_encode_and_reorder_int4b_grouped_fake(b: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(b, memory_format=torch.contiguous_format)
+
+
+def permute_cols(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
+    return torch.ops._C.permute_cols(a, perm)
+
+
 if hasattr(torch.ops._C, "permute_cols"):
 
     @register_fake("_C::permute_cols")
     def _permute_cols_fake(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
         return torch.empty_like(a)
-
-
-def permute_cols(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
-    return torch.ops._C.permute_cols(a, perm)
 
 
 # fp4
@@ -2009,6 +2021,8 @@ def selective_scan_fwd(
     block_idx_first_scheduled_token: torch.Tensor | None = None,
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
+    cu_chunk_seqlen: torch.Tensor | None = None,
+    last_chunk_indices: torch.Tensor | None = None,
 ):
     torch.ops._C.selective_scan_fwd(
         u,
@@ -2029,38 +2043,25 @@ def selective_scan_fwd(
         block_idx_first_scheduled_token,
         block_idx_last_scheduled_token,
         initial_state_idx,
+        cu_chunk_seqlen,
+        last_chunk_indices,
     )
-
-
-# NOTE: The wvSplitK kernel (and all of the kernels in skinny_gemms.cu)
-# are unable to properly handle non-contiguous
-# tensors.  It might be a good TODO(rasmith) to augment these kernels
-# to be able to handle non-contiguous kernels for better performance.
-def rocm_enforce_contiguous_skinny_gemm_inputs(
-    a: torch.Tensor, b: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    a = a.contiguous()  # no-op if already contiguous, else clone
-    b = b.contiguous()  # no-op if already contiguous, else clone
-    return a, b
 
 
 # ROCm skinny gemms
 def LLMM1(a: torch.Tensor, b: torch.Tensor, rows_per_block: int) -> torch.Tensor:
-    a, b = rocm_enforce_contiguous_skinny_gemm_inputs(a, b)
     return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
 
 
 def wvSplitK(
     a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
 ) -> torch.Tensor:
-    a, b = rocm_enforce_contiguous_skinny_gemm_inputs(a, b)
     return torch.ops._rocm_C.wvSplitK(a, b, bias, cu_count)
 
 
 def wvSplitKrc(
     a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
 ) -> torch.Tensor:
-    a, b = rocm_enforce_contiguous_skinny_gemm_inputs(a, b)
     return torch.ops._rocm_C.wvSplitKrc(a, b, bias, cu_count)
 
 
@@ -2073,7 +2074,6 @@ def wvSplitKQ(
     cu_count: int,
     bias: torch.Tensor = None,
 ) -> torch.Tensor:
-    a, b = rocm_enforce_contiguous_skinny_gemm_inputs(a, b)
     out = torch.empty((b.shape[0], a.shape[0]), dtype=out_dtype, device=b.device)
     torch.ops._rocm_C.wvSplitKQ(a, b, bias, out, scale_a, scale_b, cu_count)
     return out
@@ -2190,6 +2190,38 @@ def moe_wna16_gemm(
         BLOCK_SIZE_K,
         bit,
     )
+
+
+def router_gemm_bf16_fp32(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """bf16 x bf16 -> fp32 GEMM via cuBLAS. weight shape: (N, K)."""
+    return torch.ops._moe_C.router_gemm_bf16_fp32(input, weight)
+
+
+if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "router_gemm_bf16_fp32"):
+
+    @register_fake("_moe_C::router_gemm_bf16_fp32")
+    def router_gemm_bf16_fp32_fake(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.empty(
+            input.shape[0], weight.shape[0], dtype=torch.float32, device=input.device
+        )
+
+
+def dsv3_router_gemm(
+    hidden_states: torch.Tensor,
+    router_weight: torch.Tensor,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    output = torch.empty(
+        hidden_states.shape[0],
+        router_weight.shape[0],
+        device=hidden_states.device,
+        dtype=output_dtype,
+    )
+    torch.ops._moe_C.dsv3_router_gemm(output, hidden_states, router_weight)
+    return output
 
 
 def topk_softmax(
@@ -2791,6 +2823,24 @@ def sm100_cutlass_mla_get_workspace_size(
     )
 
 
+def dsv3_fused_a_gemm(
+    output: torch.Tensor,
+    mat_a: torch.Tensor,
+    mat_b: torch.Tensor,
+) -> None:
+    """DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
+
+    Computes output = mat_a @ mat_b.T where:
+      mat_a: [num_tokens, 7168] row-major bf16 (hidden states)
+      mat_b: [7168, 2112] column-major bf16 (weight transposed)
+      output: [num_tokens, 2112] row-major bf16
+
+    Optimized for the DeepSeek V2/V3 QKV A-projection at small batch sizes.
+    Requires SM 9.0+ (Hopper).
+    """
+    torch.ops._C.dsv3_fused_a_gemm(output, mat_a, mat_b)
+
+
 if hasattr(torch.ops._C, "weight_packed_linear"):
 
     @register_fake("_C::weight_packed_linear")
@@ -3099,6 +3149,7 @@ def cpu_fused_moe(
     topk_ids: torch.Tensor,
     act: str,
     isa: str,
+    skip_weighted: bool = False,
 ) -> torch.Tensor:
     output = torch.empty_like(input)
     torch.ops._C.cpu_fused_moe(
@@ -3110,6 +3161,7 @@ def cpu_fused_moe(
         w2_bias,
         topk_weights,
         topk_ids,
+        skip_weighted,
         act,
         isa,
     )

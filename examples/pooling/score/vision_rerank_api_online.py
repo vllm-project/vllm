@@ -18,48 +18,37 @@ e.g.
 """
 
 import argparse
-import base64
-import json
+import pprint
 
 import requests
 
-
-def encode_base64_content_from_url(content_url: str) -> dict[str, str]:
-    """Encode a content retrieved from a remote url to base64 format."""
-
-    with requests.get(content_url, headers=headers) as response:
-        response.raise_for_status()
-        result = base64.b64encode(response.content).decode("utf-8")
-
-    return {"url": f"data:image/jpeg;base64,{result}"}
-
-
-headers = {"accept": "application/json", "Content-Type": "application/json"}
+from vllm.multimodal.utils import encode_image_url, fetch_image
 
 query = "A woman playing with her dog on a beach at sunset."
-documents = {
-    "content": [
-        {
-            "type": "text",
-            "text": (
-                "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, "
-                "as the dog offers its paw in a heartwarming display of companionship and trust."
-            ),
-        },
-        {
-            "type": "image_url",
-            "image_url": {
-                "url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
-            },
-        },
-        {
-            "type": "image_url",
-            "image_url": encode_base64_content_from_url(
-                "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
-            ),
-        },
-    ]
-}
+document = (
+    "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, "
+    "as the dog offers its paw in a heartwarming display of companionship and trust."
+)
+image_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
+video_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"
+documents = [
+    {
+        "type": "text",
+        "text": document,
+    },
+    {
+        "type": "image_url",
+        "image_url": {"url": image_url},
+    },
+    {
+        "type": "image_url",
+        "image_url": {"url": encode_image_url(fetch_image(image_url))},
+    },
+    {
+        "type": "video_url",
+        "video_url": {"url": video_url},
+    },
+]
 
 
 def parse_args():
@@ -74,23 +63,68 @@ def main(args):
     models_url = base_url + "/v1/models"
     rerank_url = base_url + "/rerank"
 
-    response = requests.get(models_url, headers=headers)
+    response = requests.get(models_url)
     model = response.json()["data"][0]["id"]
 
-    data = {
+    print("Query: string & Document: list of string")
+    prompt = {"model": model, "query": query, "documents": [document]}
+    response = requests.post(rerank_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: string & Document: text")
+    prompt = {"model": model, "query": query, "documents": {"content": [documents[0]]}}
+    response = requests.post(rerank_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: string & Document: image url")
+    prompt = {
         "model": model,
         "query": query,
-        "documents": documents,
+        "documents": {"content": [documents[1]]},
     }
-    response = requests.post(rerank_url, headers=headers, json=data)
+    response = requests.post(rerank_url, json=prompt)
+    pprint.pprint(response.json())
 
-    # Check the response
-    if response.status_code == 200:
-        print("Request successful!")
-        print(json.dumps(response.json(), indent=2))
-    else:
-        print(f"Request failed with status code: {response.status_code}")
-        print(response.text)
+    print("Query: string & Document: image base64")
+    prompt = {
+        "model": model,
+        "query": query,
+        "documents": {"content": [documents[2]]},
+    }
+    response = requests.post(rerank_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: string & Document: video url")
+    prompt = {
+        "model": model,
+        "query": query,
+        "documents": {"content": [documents[3]]},
+    }
+    response = requests.post(rerank_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: string & Document: text + image url")
+    prompt = {
+        "model": model,
+        "query": query,
+        "documents": {"content": [documents[0], documents[1]]},
+    }
+    response = requests.post(rerank_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: string & Document: list")
+    prompt = {
+        "model": model,
+        "query": query,
+        "documents": [
+            document,
+            {"content": [documents[0]]},
+            {"content": [documents[1]]},
+            {"content": [documents[0], documents[1]]},
+        ],
+    }
+    response = requests.post(rerank_url, json=prompt)
+    pprint.pprint(response.json())
 
 
 if __name__ == "__main__":

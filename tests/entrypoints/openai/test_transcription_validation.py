@@ -20,7 +20,9 @@ MISTRAL_FORMAT_ARGS = [
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", ["mistralai/Voxtral-Mini-3B-2507"])
+@pytest.mark.parametrize(
+    "model_name", ["mistralai/Voxtral-Mini-3B-2507", "Qwen/Qwen3-ASR-0.6B"]
+)
 async def test_basic_audio(mary_had_lamb, model_name, rocm_aiter_fa_attention):
     server_args = ["--enforce-eager"]
 
@@ -42,7 +44,7 @@ async def test_basic_audio(mary_had_lamb, model_name, rocm_aiter_fa_attention):
         out = json.loads(transcription)
         out_text = out["text"]
         out_usage = out["usage"]
-        assert "Mary had a little lamb," in out_text
+        assert "Mary had a little lamb" in out_text
         assert out_usage["seconds"] == 16, out_usage["seconds"]
 
 
@@ -89,10 +91,12 @@ async def test_basic_audio_with_lora(mary_had_lamb, rocm_aiter_fa_attention):
 
 
 @pytest.mark.asyncio
-async def test_basic_audio_gemma(foscolo, rocm_aiter_fa_attention):
+@pytest.mark.parametrize(
+    "model_name", ["google/gemma-3n-E2B-it", "Qwen/Qwen3-ASR-0.6B"]
+)
+async def test_basic_audio_foscolo(foscolo, rocm_aiter_fa_attention, model_name):
     # Gemma accuracy on some of the audio samples we use is particularly bad,
     # hence we use a different one here. WER is evaluated separately.
-    model_name = "google/gemma-3n-E2B-it"
     server_args = ["--enforce-eager"]
 
     add_attention_backend(server_args, rocm_aiter_fa_attention)
@@ -109,4 +113,4 @@ async def test_basic_audio_gemma(foscolo, rocm_aiter_fa_attention):
             temperature=0.0,
         )
         out = json.loads(transcription)["text"]
-        assert "da cui vergine nacque Venere" in out
+        assert "ove il mio corpo fanciulletto giacque" in out

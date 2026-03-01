@@ -92,7 +92,7 @@ def apply_fp4_marlin_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
-    weight_scale_2: torch.Tensor | None,
+    weight_global_scale: torch.Tensor | None,
     workspace: torch.Tensor,
     size_n: int,
     size_k: int,
@@ -112,7 +112,7 @@ def apply_fp4_marlin_linear(
 
     inputs = reshaped_x
     a_scales = None
-    is_nvfp4 = weight_scale_2 is not None
+    is_nvfp4 = weight_global_scale is not None
     if input_dtype is not None and input_dtype.itemsize == 1:
         if is_nvfp4:
             raise RuntimeError("NVFP4 weight + INT8/FP8 activation is not supported.")
@@ -128,7 +128,7 @@ def apply_fp4_marlin_linear(
         b_bias=bias,
         b_scales=weight_scale,
         a_scales=a_scales,
-        global_scale=weight_scale_2,
+        global_scale=weight_global_scale,
         b_zeros=None,
         g_idx=None,
         perm=None,
@@ -154,7 +154,7 @@ def prepare_fp4_layer_for_marlin(
         "performance for compute-heavy workloads."
     )
 
-    is_nvfp4 = hasattr(layer, "weight_scale_2")
+    is_nvfp4 = hasattr(layer, "weight_global_scale")
     if input_dtype is not None and input_dtype.itemsize == 1:
         if is_nvfp4:
             raise RuntimeError("NVFP4 weight + INT8/FP8 activation is not supported.")
@@ -210,9 +210,11 @@ def prepare_fp4_layer_for_marlin(
         weight_scale = nvfp4_marlin_process_scales(weight_scale)
         layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
 
-        weight_scale_2 = layer.weight_scale_2.to(param_dtype)
-        weight_scale_2 = nvfp4_marlin_process_global_scale(weight_scale_2)
-        layer.weight_scale_2 = torch.nn.Parameter(weight_scale_2, requires_grad=False)
+        weight_global_scale = layer.weight_global_scale.to(param_dtype)
+        weight_global_scale = nvfp4_marlin_process_global_scale(weight_global_scale)
+        layer.weight_global_scale = torch.nn.Parameter(
+            weight_global_scale, requires_grad=False
+        )
     else:
         weight_scale = mxfp4_marlin_process_scales(
             weight_scale, input_dtype=input_dtype

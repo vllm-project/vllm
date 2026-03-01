@@ -25,7 +25,7 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
+from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     PromptReplacement,
@@ -53,6 +53,12 @@ from .utils import (
 
 
 class OpenCUAProcessingInfo(Qwen2VLProcessingInfo):
+    def get_data_parser(self):
+        return Qwen2VLMultiModalDataParser(
+            self.get_hf_config().vision_config.spatial_merge_size,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_hf_config(self):
         return self.ctx.get_hf_config()
 
@@ -125,11 +131,6 @@ class OpenCUAProcessor(Qwen2VLProcessor):
 
 
 class OpenCUAMultiModalProcessor(BaseMultiModalProcessor[OpenCUAProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return Qwen2VLMultiModalDataParser(
-            self.info.get_hf_config().vision_config.spatial_merge_size
-        )
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,

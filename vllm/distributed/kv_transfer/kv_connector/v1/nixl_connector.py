@@ -14,7 +14,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 import numpy as np
@@ -306,18 +306,24 @@ class NixlConnector(KVConnectorBase_V1):
             "FLASH_ATTN",
             "FLASHINFER",
         ):
-            # For now there is no benefit to run cross layers when backend
-            # does not support on HND
+            return False
+
+        # For now there is no benefit to run cross layers when backend
+        # does not support on HND
+        if get_kv_cache_layout() != "HND":
             return False
 
         extra_config = self.kv_transfer_config.kv_connector_extra_config
-        return bool(str(extra_config.get("enable_cross_layers_blocks", "False")))
+        return (
+            str(extra_config.get("enable_cross_layers_blocks", "False")).lower()
+            == "true"
+        )
 
     def __init__(
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: Optional["KVCacheConfig"] = None,
+        kv_cache_config: "KVCacheConfig | None" = None,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
@@ -325,7 +331,6 @@ class NixlConnector(KVConnectorBase_V1):
         assert vllm_config.kv_transfer_config.engine_id is not None
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
         self.kv_transfer_config = vllm_config.kv_transfer_config
-
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: NixlConnectorScheduler | None = (
                 NixlConnectorScheduler(vllm_config, self.engine_id)
@@ -921,6 +926,21 @@ class NixlConnectorWorker:
         else:
             self.use_host_buffer = self.kv_buffer_device == "cpu"
 
+        # reserve different cores for start_load_kv() from model_forward()
+        if self.device_type == "cpu":
+            numa_core_list = current_platform.discover_numa_topology()
+            # setup one last core in each numa for kv transfer.
+            rsv_cores_for_kv = [
+                max(each_numa_core_list) for each_numa_core_list in numa_core_list
+            ]
+
+            if rsv_cores_for_kv:
+                if not hasattr(os, "sched_setaffinity"):
+                    raise NotImplementedError(
+                        "os.sched_setaffinity is not available on this platform"
+                    )
+                os.sched_setaffinity(0, rsv_cores_for_kv)
+
         # support for oot platform which can't register nixl memory
         # type based on kv_buffer_device
         nixl_memory_type = current_platform.get_nixl_memory_type()
@@ -1349,6 +1369,9 @@ class NixlConnectorWorker:
                 if base_addr in seen_base_addresses:
                     continue
 
+                logger.debug(
+                    "Registering layer %s with cache shape: %s", layer_name, cache.shape
+                )
                 kernel_block_size = cache.shape[self.kv_topo.block_size_position]
                 if self.block_size != kernel_block_size:
                     logger.info_once(
@@ -1731,10 +1754,8 @@ class NixlConnectorWorker:
         """
         remote_engine_id = nixl_agent_meta.engine_id
 
-        assert (
-            self._tp_size[remote_engine_id] == remote_tp_size
-            and self.kv_topo is not None
-        )
+        assert self._tp_size[remote_engine_id] == remote_tp_size
+        assert self.kv_topo is not None
 
         tp_ratio = self.kv_topo.tp_ratio_from_engine_id(remote_engine_id)
         block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(
@@ -2215,6 +2236,10 @@ class NixlConnectorWorker:
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
     ):
+        """
+        Post a READ point-to-point xfer request from a single local worker to
+        a single remote worker.
+        """
         assert self.kv_topo is not None
         block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(dst_engine_id)
         if block_size_ratio > 1:
@@ -2313,15 +2338,15 @@ class NixlConnectorWorker:
 
                 # Get descs ids for the layer.
                 layer_local_desc_ids = self._get_block_descs_ids(
-                    dst_engine_id,
+                    self.engine_id,
                     layer_local_block_ids,
                     layer_idx,
+                    block_size_ratio=block_size_ratio,
                 )
                 layer_remote_desc_ids = self._get_block_descs_ids(
-                    self.engine_id,
+                    dst_engine_id,
                     layer_remote_block_ids,
                     layer_idx,
-                    block_size_ratio=block_size_ratio,
                 )
 
                 local_descs_list.append(layer_local_desc_ids)
@@ -2481,6 +2506,9 @@ class NixlConnectorWorker:
 
     def shutdown(self):
         """Shutdown the connector worker."""
+        if not hasattr(self, "_handshake_initiation_executor"):
+            # error happens during init, no need to shutdown
+            return
         self._handshake_initiation_executor.shutdown(wait=False)
         for handles in self._recving_transfers.values():
             for handle in handles:

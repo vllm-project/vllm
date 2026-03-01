@@ -143,6 +143,7 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
 
     # Create processing info
     info = Qwen3OmniMoeThinkerProcessingInfo(mock_ctx)
+    info._get_expected_hidden_size = lambda: 100
     info.get_hf_config = Mock(return_value=mock_qwen3_omni_config)
     info.get_hf_processor = Mock(return_value=mock_processor)
     info.get_tokenizer = Mock(return_value=mock_tokenizer)

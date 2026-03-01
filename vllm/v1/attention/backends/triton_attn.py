@@ -7,6 +7,7 @@ from typing import ClassVar
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -21,6 +22,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionImpl,
+    AttentionLayer,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
@@ -271,6 +273,8 @@ class TritonAttentionBackend(AttentionBackend):
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(16)]
 
+    forward_includes_kv_cache_update: bool = False
+
     @staticmethod
     def get_name() -> str:
         return "TRITON_ATTN"
@@ -461,31 +465,6 @@ class TritonAttentionImpl(AttentionImpl):
 
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(1)
-
-        if (
-            self.kv_sharing_target_layer_name is None
-            and key is not None
-            and value is not None
-        ):
-            # Reshape the input keys and values and store them in the cache.
-            # Skip this if sharing KV cache with an earlier attention layer.
-            if self.kv_cache_dtype.startswith("fp8"):
-                key_cache = key_cache.view(self.fp8_dtype)
-                value_cache = value_cache.view(self.fp8_dtype)
-                # triton kernel does not support uint8 kv_cache
-                #  (because some explicit casts (e.g. float8_e4m3fnuz)
-                #   are not supported)
-            triton_reshape_and_cache_flash(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
-
         if self.kv_cache_dtype.startswith("fp8"):
             if key_cache.dtype != self.fp8_dtype:
                 key_cache = key_cache.view(self.fp8_dtype)
@@ -585,3 +564,75 @@ class TritonAttentionImpl(AttentionImpl):
             sliding_window_k=self.sliding_window[1],
         )
         return output
+
+    def do_kv_cache_update(
+        self,
+        layer: AttentionLayer,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ):
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            # For encoder attention,
+            # we use direct Q, K, V tensors without caching
+            return
+        # For decoder and cross-attention, use KV cache as before
+        key_cache, value_cache = kv_cache.unbind(1)
+
+        # Reshape the input keys and values and store them in the cache.
+        if self.kv_cache_dtype.startswith("fp8"):
+            key_cache = key_cache.view(self.fp8_dtype)
+            value_cache = value_cache.view(self.fp8_dtype)
+            # triton kernel does not support uint8 kv_cache
+            #  (because some explicit casts (e.g. float8_e4m3fnuz)
+            #   are not supported)
+        triton_reshape_and_cache_flash(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
+        )
+
+    def fused_rope_kvcache_supported(self):
+        return rocm_aiter_ops.is_enabled()
+
+    def do_rope_and_kv_cache_update(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        key_cache, value_cache = kv_cache.unbind(1)
+        flash_layout = True
+
+        is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+        if is_fp8_kv_cache:
+            key_cache = key_cache.view(self.fp8_dtype)
+            value_cache = value_cache.view(self.fp8_dtype)
+
+        rocm_aiter_ops.triton_rope_and_cache(
+            query,
+            key,
+            value,
+            positions,
+            cos_sin_cache,
+            is_neox,
+            key_cache,
+            value_cache,
+            layer_slot_mapping,
+            layer._k_scale,
+            layer._v_scale,
+            flash_layout,
+            is_fp8_kv_cache,
+        )
