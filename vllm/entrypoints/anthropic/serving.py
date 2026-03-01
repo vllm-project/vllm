@@ -7,7 +7,6 @@
 
 import json
 import logging
-import time
 import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -153,7 +152,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                     elif block.type == "tool_use":
                         # Convert tool use to function call format
                         tool_call = {
-                            "id": block.id or f"call_{int(time.time())}",
+                            "id": block.id or f"call_{uuid.uuid4().hex[:24]}",
                             "type": "function",
                             "function": {
                                 "name": block.name or "",
