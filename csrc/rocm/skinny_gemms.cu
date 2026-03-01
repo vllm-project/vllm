@@ -1138,14 +1138,17 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   auto N_in = in_b.size(0);
   auto Kap_in = in_a.stride(0);
   auto Kbp_in = in_b.stride(0);
-  auto Bx_in =
-      (in_bias.has_value() && in_bias->numel() > 0)
-          ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
-          : 1;
-  auto By_in = (in_bias.has_value() && in_bias->numel() > 0 &&
-                in_bias->sizes().size() == 2)
-                   ? in_bias->size(0)
+  auto Bx_in = (in_bias.has_value() && in_bias->numel() > 0)
+                   ? (in_bias->dim() == 2) ? in_bias->size(1) : in_bias->size(0)
                    : 1;
+  auto By_in =
+      (in_bias.has_value() && in_bias->numel() > 0 && in_bias->dim() == 2)
+          ? in_bias->size(0)
+          : 1;
+  auto By_in =
+      (in_bias.has_value() && in_bias->numel() > 0 && in_bias->dim() == 2)
+          ? in_bias->size(0)
+          : 1;
 
   if (in_bias.has_value() && in_bias->numel() > 0) {
     TORCH_CHECK(in_bias->dtype() == in_a.dtype(),
@@ -1642,14 +1645,13 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   auto M_in = in_a.size(0);
   auto N_in = in_b.size(0);
   auto K_in = in_a.size(1);
-  auto Bx_in =
-      (in_bias.has_value() && in_bias->numel() > 0)
-          ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
-          : 1;
-  auto By_in = (in_bias.has_value() && in_bias->numel() > 0 &&
-                in_bias->sizes().size() == 2)
-                   ? in_bias->size(0)
+  auto Bx_in = (in_bias.has_value() && in_bias->numel() > 0)
+                   ? (in_bias->dim() == 2) ? in_bias->size(1) : in_bias->size(0)
                    : 1;
+  auto By_in =
+      (in_bias.has_value() && in_bias->numel() > 0 && in_bias->dim() == 2)
+          ? in_bias->size(0)
+          : 1;
 
   TORCH_CHECK(in_a.dtype() == in_b.dtype());
   TORCH_CHECK(K_in % 8 == 0, "k % 8 == 0");
@@ -2037,14 +2039,13 @@ void wvSplitKQ(const at::Tensor& in_b, const at::Tensor& in_a,
   auto N_in = in_a.size(0);
   auto Kap_in = in_a.stride(0);
   auto Kbp_in = in_b.stride(0);
-  auto Bx_in =
-      (in_bias.has_value() && in_bias->numel() > 0)
-          ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
-          : 1;
-  auto By_in = (in_bias.has_value() && in_bias->numel() > 0 &&
-                in_bias->sizes().size() == 2)
-                   ? in_bias->size(0)
+  auto Bx_in = (in_bias.has_value() && in_bias->numel() > 0)
+                   ? (in_bias->dim() == 2) ? in_bias->size(1) : in_bias->size(0)
                    : 1;
+  auto By_in =
+      (in_bias.has_value() && in_bias->numel() > 0 && in_bias->dim() == 2)
+          ? in_bias->size(0)
+          : 1;
 
   TORCH_CHECK(K_in % 16 == 0, "k % 16 == 0");
   TORCH_CHECK(in_a.dtype() == in_b.dtype() && in_a.dtype() == kFp8Type);
