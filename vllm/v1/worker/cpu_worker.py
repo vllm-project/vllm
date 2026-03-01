@@ -213,10 +213,16 @@ class CPUWorker(Worker):
         )
         return ",".join([str(x.id) for x in logical_cpu_list])
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        num_steps: int | None = None,
+        delay_steps: int | None = None,
+    ):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         if is_start:
-            self.profiler.start()
+            self.profiler.start(num_steps=num_steps, delay_steps=delay_steps)
         else:
             self.profiler.stop()
