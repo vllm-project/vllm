@@ -6,7 +6,7 @@ import random
 import pytest
 import torch
 
-from tests.utils import multi_gpu_test
+from tests.utils import ensure_current_vllm_config, multi_gpu_test
 from vllm import _custom_ops as ops
 from vllm.distributed import (
     init_distributed_environment,
@@ -633,7 +633,8 @@ def use_fused_moe_lora_kernel_tensor_parallel(
         local_rank=local_rank,
         distributed_init_method=init_method,
     )
-    initialize_model_parallel(world_size, 1)
+    with ensure_current_vllm_config():
+        initialize_model_parallel(world_size, 1)
     tp_size = get_tensor_model_parallel_world_size()
 
     input_dim = K if column_parallel else N
