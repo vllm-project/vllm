@@ -497,9 +497,18 @@ class PydanticMsgspecMixin:
             else:
                 # No default, so Pydantic will treat it as required
                 fields[name] = core_schema.typed_dict_field(field_schema)
-        return core_schema.no_info_after_validator_function(
+        typed_dict_then_convert = core_schema.no_info_after_validator_function(
             cls._validate_msgspec,
             core_schema.typed_dict_schema(fields),
+        )
+
+        # Accept either an already-constructed msgspec.Struct instance or a
+        # JSON/dict-like payload.
+        return core_schema.union_schema(
+            [
+                core_schema.is_instance_schema(source_type),
+                typed_dict_then_convert,
+            ]
         )
 
     @classmethod

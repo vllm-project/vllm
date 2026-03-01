@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from pydantic import BaseModel, Field
+import msgspec
+from pydantic import BaseModel, Field, field_serializer
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionLogProbs
@@ -35,6 +36,24 @@ class GenerateRequest(BaseModel):
 
     sampling_params: SamplingParams
     """The sampling parameters for the model."""
+
+    @field_serializer("sampling_params")
+    def _serialize_sampling_params(self, sampling_params: SamplingParams):
+        raw = msgspec.structs.asdict(sampling_params)
+        if not isinstance(raw, dict):
+            return raw
+
+        # Strip internal/private fields from API output.
+        internal_keys = {
+            "output_text_buffer_length",
+            "skip_clone",
+            "skip_reading_prefix_cache",
+        }
+        for key in list(raw.keys()):
+            if key.startswith("_") or key in internal_keys:
+                raw.pop(key, None)
+
+        return msgspec.to_builtins(raw)
 
     model: str | None = None
 
