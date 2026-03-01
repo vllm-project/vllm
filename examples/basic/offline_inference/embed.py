@@ -5,6 +5,7 @@ from argparse import Namespace
 
 from vllm import LLM, EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.print_utils import print_embeddings
 
 
 def parse_args():
@@ -12,11 +13,9 @@ def parse_args():
     parser = EngineArgs.add_cli_args(parser)
     # Set example specific arguments
     parser.set_defaults(
-        model="internlm/internlm2-1_8b-reward",
+        model="intfloat/e5-small",
         runner="pooling",
         enforce_eager=True,
-        max_model_len=1024,
-        trust_remote_code=True,
     )
     return parser.parse_args()
 
@@ -31,20 +30,18 @@ def main(args: Namespace):
     ]
 
     # Create an LLM.
-    # You should pass runner="pooling" for reward models
+    # You should pass runner="pooling" for embedding models
     llm = LLM(**vars(args))
 
-    # Generate rewards. The output is a list of PoolingRequestOutput.
-    outputs = llm.reward(prompts)
+    # Generate embedding. The output is a list of EmbeddingRequestOutputs.
+    outputs = llm.embed(prompts)
 
     # Print the outputs.
     print("\nGenerated Outputs:\n" + "-" * 60)
     for prompt, output in zip(prompts, outputs):
-        rewards = output.outputs.data
-        rewards_trimmed = (
-            (str(rewards[:16])[:-1] + ", ...]") if len(rewards) > 16 else rewards
-        )
-        print(f"Prompt: {prompt!r} \nReward: {rewards_trimmed} (size={len(rewards)})")
+        embeds = output.outputs.embedding
+        print(f"Prompt: {prompt!r}")
+        print_embeddings(embeds)
         print("-" * 60)
 
 

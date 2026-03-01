@@ -95,7 +95,7 @@ steps:
   - vllm/platforms/cuda.py
   commands:
     - nvidia-smi
-    - python3 examples/offline_inference/basic/chat.py
+    - python3 examples/basic/offline_inference/chat.py
     # Attention
     # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
     - pytest -v -s tests/kernels/attention/test_attention_selector.py

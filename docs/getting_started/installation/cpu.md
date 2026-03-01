@@ -253,7 +253,7 @@ ON_CPU=1 SERVING_JSON=serving-tests-cpu-text.json DRY_RUN=1 MODEL_FILTER=meta-ll
 
     # On this platform, it is recommended to only bind openMP threads on logical CPU cores 0-7 or 8-15
     $ export VLLM_CPU_OMP_THREADS_BIND=0-7
-    $ python examples/offline_inference/basic/basic.py
+    $ python examples/basic/offline_inference/basic.py
     ```
 
 - When deploying vLLM CPU backend on a multi-socket machine with NUMA and enable tensor parallel or pipeline parallel, each NUMA node is treated as a TP/PP rank. So be aware to set CPU cores of a single rank on the same NUMA node to avoid cross NUMA node memory access.
