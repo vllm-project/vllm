@@ -1066,14 +1066,69 @@ class FusedMoE(CustomOp):
         return_success: bool = False,
     ) -> bool | None:
         if self.quant_config and self.quant_config.get_name() == "mxfp4":
-            # (FIXME) for gpt-oss all experts are combined
-            if "bias" in weight_name:
-                dim1 = loaded_weight.shape[1]
-                param.data[:, :dim1].copy_(loaded_weight)
+            # Guard: reject non-uint8 weights (e.g. BF16 from unquantized
+            # checkpoints).  Bias params are always BF16 — skip those.
+            if "bias" not in weight_name and loaded_weight.dtype != torch.uint8:
+                raise ValueError(
+                    f"MXFP4 quantization expects pre-quantized uint8 "
+                    f"weights, but got dtype={loaded_weight.dtype} for "
+                    f"'{weight_name}'. This typically means a BF16/FP16 "
+                    f"checkpoint was loaded with --quantization mxfp4. "
+                    f"MXFP4 does not yet support online quantization of "
+                    f"unquantized checkpoints. Please use a checkpoint "
+                    f"that is already quantized to MXFP4 format."
+                )
+
+            if loaded_weight.dim() >= 3:
+                # Combined format (gpt-oss): all experts pre-stacked,
+                # already TP-sharded by the model's weight loader.
+                if "bias" in weight_name:
+                    param.data[:, : loaded_weight.shape[1]].copy_(loaded_weight)
+                else:
+                    param.data[
+                        :, : loaded_weight.shape[1], : loaded_weight.shape[2]
+                    ].copy_(loaded_weight)
+                return True if return_success else None
+
+            # Per-expert 2-D weight/scale from standard checkpoints.
+            # MXFP4's create_weights() pads param dims for kernel
+            # alignment, so shard sizes must come from loaded_weight
+            # (unpadded) rather than from expert_data (padded).
+            if shard_id not in ("w1", "w2", "w3"):
+                raise ValueError(
+                    f"shard_id must be ['w1','w2','w3'] but got {shard_id}."
+                )
+
+            expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
+            if expert_id == -1:
+                return False if return_success else None
+
+            expert_data = param.data[expert_id]
+            shard_dim = 0 if shard_id in ("w1", "w3") else 1
+
+            # TP-shard (w2 bias is row-parallel, not sharded).
+            if not (shard_id == "w2" and "bias" in weight_name):
+                shard_size = loaded_weight.shape[shard_dim] // self.tp_size
+                loaded_weight = loaded_weight.narrow(
+                    shard_dim, shard_size * self.tp_rank, shard_size
+                )
+
+            # Select destination within the merged w13 parameter.
+            if shard_id in ("w1", "w3"):
+                half = expert_data.shape[0] // 2
+                offset = 0 if shard_id == "w1" else half
+                dst = expert_data.narrow(0, offset, loaded_weight.shape[0])
             else:
-                dim1 = loaded_weight.shape[1]
-                dim2 = loaded_weight.shape[2]
-                param.data[:, :dim1, :dim2].copy_(loaded_weight)
+                dst = expert_data
+
+            # Padding-aware copy.
+            if loaded_weight.dim() == 1:
+                dst[: loaded_weight.shape[0]].copy_(loaded_weight)
+            else:
+                dst[: loaded_weight.shape[0], : loaded_weight.shape[1]].copy_(
+                    loaded_weight
+                )
+
             return True if return_success else None
 
         quant_method_name = self.quant_method.__class__.__name__
