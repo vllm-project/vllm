@@ -293,6 +293,16 @@ class RocmPlatform(Platform):
                     if rocm_aiter_ops.is_mla_enabled() or block_size == 1
                     else AttentionBackendEnum.TRITON_MLA
                 )
+            if (
+                selected_backend == AttentionBackendEnum.TRITON_MLA
+                and kv_cache_dtype
+                and kv_cache_dtype.startswith("fp8")
+            ):
+                logger.warning(
+                    "TritonMLA does not support FP8 KV cache. "
+                    "Falling back to AITER MLA backend."
+                )
+                selected_backend = AttentionBackendEnum.ROCM_AITER_MLA
             if selected_backend == AttentionBackendEnum.TRITON_MLA:
                 if block_size != 1:
                     logger.info_once("Using Triton MLA backend.")
