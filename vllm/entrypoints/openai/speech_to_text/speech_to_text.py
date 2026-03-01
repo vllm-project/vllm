@@ -4,6 +4,7 @@ import asyncio
 import io
 import math
 import time
+import warnings
 import zlib
 from collections.abc import AsyncGenerator, Callable
 from functools import cached_property
@@ -297,7 +298,7 @@ class OpenAISpeechToText(OpenAIServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
-    ) -> tuple[list[ProcessorInputs], float]:
+    ) -> tuple[list[ProcessorInputs], float, list[float]]:
         # Validate request
         language = self.model_cls.validate_language(request.language)
         # Skip to_language validation to avoid extra logging for Whisper.
@@ -348,7 +349,15 @@ class OpenAISpeechToText(OpenAIServing):
             request.language = language
 
         parsed_prompts: list[DictPrompt] = []
+        # Track the actual start time of each chunk based on its sample
+        # length. When audio is split at low-energy points the chunks may
+        # be shorter than max_audio_clip_s, so using a fixed offset would
+        # cause timestamps to drift.
+        chunk_start_times: list[float] = []
+        cumulative_samples = 0
         for chunk in chunks:
+            chunk_start_times.append(float(cumulative_samples) / float(sr))
+            cumulative_samples += chunk.shape[-1]
             # The model has control over the construction, as long as it
             # returns a valid PromptType.
             prompt = self.model_cls.get_generation_prompt(
@@ -372,7 +381,7 @@ class OpenAISpeechToText(OpenAIServing):
 
         engine_prompts = await self.renderer.render_cmpl_async(parsed_prompts)
 
-        return engine_prompts, duration
+        return engine_prompts, duration, chunk_start_times
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -505,7 +514,11 @@ class OpenAISpeechToText(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
 
-            engine_prompts, duration_s = await self._preprocess_speech_to_text(
+            (
+                engine_prompts,
+                duration_s,
+                chunk_start_times,
+            ) = await self._preprocess_speech_to_text(
                 request=request,
                 audio_data=audio_data,
                 request_id=request_id,
@@ -583,13 +596,18 @@ class OpenAISpeechToText(OpenAIServing):
             text = ""
             chunk_size_in_s = self.asr_config.max_audio_clip_s
             if chunk_size_in_s is None:
+                warnings.warn(
+                    "Setting max_audio_clip_s=None is deprecated and will be "
+                    "removed in a future release. Audio chunking will be "
+                    "enabled by default for long audio files.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
                 assert len(list_result_generator) == 1, (
                     "`max_audio_clip_s` is set to None, audio cannot be chunked"
                 )
             for idx, result_generator in enumerate(list_result_generator):
-                start_time = (
-                    float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
-                )
+                start_time = chunk_start_times[idx]
                 async for op in result_generator:
                     if request.response_format == "verbose_json":
                         assert op.outputs[0].logprobs
