@@ -164,48 +164,6 @@ async def test_chat_completion_render_basic(client):
 
 
 @pytest.mark.asyncio
-async def test_chat_completion_render_with_base64_image_url(
-    vision_client,
-    local_asset_server,
-):
-    """Render a multimodal chat request and verify tokens are returned."""
-
-    image = local_asset_server.get_image_asset("RGBA_comp.png")
-    data_url = encode_image_url(image, format="PNG")
-
-    assert data_url.startswith("data:image/")
-    assert ";base64," in data_url
-
-    response = await vision_client.post(
-        "/v1/chat/completions/render",
-        json={
-            "model": VISION_MODEL_NAME,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                        {"type": "text", "text": "What's in this image?"},
-                    ],
-                }
-            ],
-        },
-    )
-
-    # Expect successful render response
-    assert response.status_code == 200
-
-    data = response.json()
-
-    # Validate tokens field exists
-    assert "tokens" in data, "Response must contain 'tokens' field"
-    assert isinstance(data["tokens"], list), "'tokens' must be a list"
-
-    # Ensure non-empty token output
-    assert len(data["tokens"]) > 0, "Token list must not be empty"
-
-
-@pytest.mark.asyncio
 async def test_completion_render_multiple_prompts(client):
     """Test completion render with multiple prompts."""
     response = await client.post(
@@ -312,3 +270,44 @@ async def test_completion_render_no_generation(client):
     assert response.status_code == 200
     # Render should be fast (< 1 second) since no generation
     assert elapsed < 1.0
+
+@pytest.mark.asyncio
+async def test_chat_completion_render_with_base64_image_url(
+    vision_client,
+    local_asset_server,
+):
+    """Render a multimodal chat request and verify tokens are returned."""
+
+    image = local_asset_server.get_image_asset("RGBA_comp.png")
+    data_url = encode_image_url(image, format="PNG")
+
+    assert data_url.startswith("data:image/")
+    assert ";base64," in data_url
+
+    response = await vision_client.post(
+        "/v1/chat/completions/render",
+        json={
+            "model": VISION_MODEL_NAME,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                        {"type": "text", "text": "What's in this image?"},
+                    ],
+                }
+            ],
+        },
+    )
+
+    # Expect successful render response
+    assert response.status_code == 200
+
+    data = response.json()
+
+    # Validate tokens field exists
+    assert "tokens" in data, "Response must contain 'tokens' field"
+    assert isinstance(data["tokens"], list), "'tokens' must be a list"
+
+    # Ensure non-empty token output
+    assert len(data["tokens"]) > 0, "Token list must not be empty"
