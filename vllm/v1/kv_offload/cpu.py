@@ -13,6 +13,7 @@ from vllm.v1.kv_offload.arc_manager import ARCOffloadingManager
 from vllm.v1.kv_offload.backends.cpu import CPUBackend
 from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
+from vllm.v1.kv_offload.reuse_manager import FilteredOffloadingManager
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandlers
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
@@ -82,6 +83,17 @@ class CPUOffloadingSpec(OffloadingSpec):
                 raise ValueError(
                     f"Unknown eviction policy: {self.eviction_policy}. "
                     f"Supported policies: lru, arc"
+                )
+
+            store_threshold = int(self.extra_config.get("store_threshold", 0))
+            if store_threshold > 1:
+                max_tracker_size = int(
+                    self.extra_config.get("max_tracker_size", 64_000)
+                )
+                self._manager = FilteredOffloadingManager(
+                    backing=self._manager,
+                    store_threshold=store_threshold,
+                    max_tracker_size=max_tracker_size,
                 )
         return self._manager
 

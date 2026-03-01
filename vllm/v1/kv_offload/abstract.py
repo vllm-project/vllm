@@ -30,6 +30,7 @@ The class provides the following primitives:
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 from vllm.v1.core.kv_cache_utils import BlockHash
 
@@ -161,3 +162,9 @@ class OffloadingManager(ABC):
             New OffloadingEvents collected since the last call.
         """
         return ()
+
+    def get_stats(self) -> dict[str, Any]:
+        """
+        Return stats from the manager for telemetry.
+        """
+        return {}
