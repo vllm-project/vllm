@@ -128,6 +128,66 @@ def test_no_tuple_inputs_with_multiple_consumers():
     assert torch.allclose(output_original, output_split), "Output mismatch after split"
 
 
+def test_torch_size_moved_to_consumer_subgraph():
+    """
+    Test that torch.Size-producing nodes are moved to the consumer's subgraph
+    to prevent torch.Size values from crossing subgraph boundaries.
+    AoTAutograd cannot handle torch.Size as submodule input/output (TreeSpec
+    mismatch: Size vs tuple). See https://github.com/vllm-project/vllm/issues/31043
+    """
+
+    def model_fn(x: torch.Tensor) -> torch.Tensor:
+        a = torch.abs(x)  # Will be marked as torch.Size producer, should move
+        b = torch.neg(x)  # Stays in pre-split subgraph
+        y = torch.relu(b)  # Split point
+        return y + a  # abs result consumed here (post-split)
+
+    x = torch.randn(4, 3)
+    gm = make_fx(model_fn)(x)
+
+    # Inject torch.Size into abs node's meta to simulate the real-world pattern
+    # where .shape produces a torch.Size that crosses subgraph boundaries.
+    for node in gm.graph.nodes:
+        if node.op == "call_function" and node.target == torch.ops.aten.abs.default:
+            node.meta["val"] = torch.Size([4, 3])
+            break
+
+    split_ops = ["aten::relu"]
+    split_gm, split_items = split_graph(gm, split_ops)
+
+    # Should be 3 submodules: pre-split, relu (splitting op), post-split
+    assert len(split_items) == 3, f"Expected 3 submodules, got {len(split_items)}"
+
+    # The abs node should NOT be in the pre-split submodule (submod_0).
+    # It should have been moved to the post-split submodule (submod_2)
+    # because its meta["val"] is torch.Size and its only consumer is there.
+    pre_split = split_items[0].graph
+    pre_split_ops = [
+        node.target for node in pre_split.graph.nodes if node.op == "call_function"
+    ]
+    assert torch.ops.aten.abs.default not in pre_split_ops, (
+        "abs (torch.Size producer) should have been moved out of pre-split "
+        "subgraph to the consumer's subgraph"
+    )
+
+    post_split = split_items[2].graph
+    post_split_ops = [
+        node.target for node in post_split.graph.nodes if node.op == "call_function"
+    ]
+    assert torch.ops.aten.abs.default in post_split_ops, (
+        "abs (torch.Size producer) should have been moved to post-split "
+        "subgraph where its consumer lives"
+    )
+
+    # Verify output correctness
+    new_x = torch.randn(4, 3)
+    output_original = gm(new_x)
+    output_split = split_gm(new_x)
+    assert torch.allclose(output_original, output_split), (
+        "Output mismatch after split with torch.Size reassignment"
+    )
+
+
 def test_consecutive_ops_in_split():
     """
     Test that consecutive splitting operations are grouped into the same subgraph
