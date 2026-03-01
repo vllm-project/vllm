@@ -291,6 +291,16 @@ For Qwen2.5, the chat template in tokenizer_config.json has already included sup
 
 Flags: `--tool-call-parser hermes`
 
+### Qwen2.5-Coder Models (`qwen2_5_coder`)
+
+Qwen2.5-Coder models do not follow the Hermes format. This parser uses `<tools>` tags instead.
+
+Supported models:
+
+* `Qwen/Qwen2.5-Coder-*-Instruct` (use with [examples/tool_chat_template_qwen2_5_coder.jinja](../../examples/tool_chat_template_qwen2_5_coder.jinja))
+
+Flags: `--tool-call-parser qwen2_5_coder --chat-template examples/tool_chat_template_qwen2_5_coder.jinja`
+
 ### MiniMax Models (`minimax_m1`)
 
 Supported models:
