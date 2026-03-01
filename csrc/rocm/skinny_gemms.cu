@@ -1145,20 +1145,23 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   auto Kap_in = in_a.stride(0);
   auto Kbp_in = in_b.stride(0);
 
+  //----------------------------------------------------
   // determine bias dimensions based on the bias tensor shape
-  // critically, we swap the dimensions of the bias tensor if it is 2D
+  // critically, for a 1D tensor we treat it as a 2D tensor with a single row
+  // to ensure we can have coalesced memory access
+  //----------------------------------------------------
+
+  // determine the column dimension of the bias matrix
   auto Bx_in = (in_bias.has_value() && in_bias->numel() > 0)
                    ? (in_bias->dim() == 2) ? in_bias->size(1) : in_bias->size(0)
                    : 1;
+
+  // determine the row dimension of the bias matrix
   auto By_in =
       (in_bias.has_value() && in_bias->numel() > 0 && in_bias->dim() == 2)
           ? in_bias->size(0)
           : 1;
 
-  // Bias indexing: BIAS[(m+i)%Bx + (n%By)*M]. Kernel uses stride M for the n
-  // dimension. If By > 1 (2D bias [By,Bx]), PyTorch row stride is Bx so we
-  // require Bx == M. If By == 1 (1D bias), only (m+i)%Bx is used so Bx may be 1
-  // or divide M.
   TORCH_CHECK(
       Bx_in >= 1 && (By_in == 1 ? (M_in % Bx_in == 0) : (Bx_in == M_in)),
       "bias Bx must be M if By > 1, or divide M if By is 1");
