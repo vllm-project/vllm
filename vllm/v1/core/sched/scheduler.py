@@ -32,6 +32,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -2079,30 +2080,51 @@ class Scheduler(SchedulerInterface):
             is_affected = False
             marked_invalid_block = False
             req_id = request.request_id
-            # TODO (davidb): add support for hybrid memory allocator
-            (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
+
             # We iterate only over blocks that may contain externally computed
             # tokens
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                # Async loading. If num_computed_tokens is set it implies we
-                # already processed some block failures for it in a prior step
-                req_num_computed_tokens = (
-                    request.num_computed_tokens
-                    if req_id in self.failed_recving_kv_req_ids
-                    else len(req_block_ids) * self.block_size
-                )
+                # Async loading. num_computed_tokens does not include new tokens
+                req_num_computed_tokens = request.num_computed_tokens
             else:
                 # Sync loading. num_computed_tokens includes new tokens
                 req_num_computed_tokens = request.num_cached_tokens
 
-            req_num_computed_blocks = (
-                req_num_computed_tokens + self.block_size - 1
-            ) // self.block_size
-            for idx, block_id in zip(range(req_num_computed_blocks), req_block_ids):
+            block_sizes = (
+                kv_cache_group.kv_cache_spec.block_size
+                for kv_cache_group in self.kv_cache_config.kv_cache_groups
+            )
+
+            req_block_ids = itertools.chain.from_iterable(
+                group_block_ids[: cdiv(req_num_computed_tokens, block_size)]
+                for group_block_ids, block_size in zip(
+                    self.kv_cache_manager.get_block_ids(req_id), block_sizes
+                )
+            )
+
+            for idx, block_id in enumerate(req_block_ids):
                 if block_id not in invalid_block_ids:
                     continue
 
                 is_affected = True
+
+                if len(self.kv_cache_config.kv_cache_groups) > 1:
+                    # We have more than one KV cache group.
+                    # This means that not all layers are full attention,
+                    # but instead some layers are sliding window attention or SSM.
+                    # This means the entire request has to be re-computed.
+                    total_affected_tokens += request.num_computed_tokens
+                    request.num_computed_tokens = 0
+                    request.num_external_computed_tokens = 0
+                    marked_invalid_block = True
+                    if evict_blocks:
+                        # evict the entire request
+                        blocks_to_evict.update(
+                            itertools.chain.from_iterable(
+                                self.kv_cache_manager.get_block_ids(req_id)
+                            )
+                        )
+                    break
 
                 if block_id in marked_invalid_block_ids:
                     # This invalid block is shared with a previous request
@@ -2130,7 +2152,9 @@ class Scheduler(SchedulerInterface):
                 request.num_external_computed_tokens -= num_affected_tokens
                 # collect invalid block and all downstream dependent blocks
                 if evict_blocks:
-                    blocks_to_evict.update(req_block_ids[idx:])
+                    blocks_to_evict.update(
+                        self.kv_cache_manager.get_block_ids(req_id)[0][idx:]
+                    )
 
             if is_affected:
                 if not marked_invalid_block:
