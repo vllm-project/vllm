@@ -71,3 +71,6 @@ perceptron # required for isaac test
 # Newer versions of datasets require torchcoded, that makes the tests fail in CI because of a missing library.
 # Older versions are in conflict with teerratorch requirements.
 datasets>=3.3.0,<=3.6.0
+
+openpyxl # required for perf comparison excel report
+plotly # required for perf comparison html report
