@@ -3,7 +3,6 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -63,15 +62,4 @@ class ModelState(ABC):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
     ) -> dict[str, Any]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_encoder_seq_lens_by_kv_group(
-        self,
-        attn_groups: list[list[AttentionGroup]],
-        num_reqs: int,
-        req_ids: list[str] | None,
-        for_cudagraph_capture: bool = False,
-    ) -> dict[int, tuple[torch.Tensor, np.ndarray]]:
-        """Return encoder seq-lens keyed by kv-cache group index."""
         raise NotImplementedError

@@ -427,8 +427,10 @@ def prepare_inputs_to_capture(
     slot_mappings_by_layer = build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
     )
-    encoder_seq_lens_by_kv_group = {}
-    if model_state is not None:
+    encoder_seq_lens_by_kv_group = None
+    if model_state is not None and hasattr(
+        model_state, "get_encoder_seq_lens_by_kv_group"
+    ):
         encoder_seq_lens_by_kv_group = model_state.get_encoder_seq_lens_by_kv_group(
             attn_groups=attn_groups,
             num_reqs=num_reqs,

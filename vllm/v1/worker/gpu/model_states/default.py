@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -158,12 +157,3 @@ class DefaultModelState(ModelState):
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
         )
         return attn_metadata
-
-    def get_encoder_seq_lens_by_kv_group(
-        self,
-        attn_groups: list[list[AttentionGroup]],
-        num_reqs: int,
-        req_ids: list[str] | None,
-        for_cudagraph_capture: bool = False,
-    ) -> dict[int, tuple[torch.Tensor, np.ndarray]]:
-        return {}
