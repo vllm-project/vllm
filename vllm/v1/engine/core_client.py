@@ -812,8 +812,9 @@ class SyncMPClient(MPClient):
             self.input_socket.send_multipart(msg, copy=False)
             return
 
-        tracker = self.input_socket.send_multipart(msg, copy=False, track=True)
-        self.add_pending_message(tracker, request)
+        # Use copy=True for messages with tensor buffers to prevent
+        # unbounded CPU memory growth. See async _send_input_message.
+        self.input_socket.send_multipart(msg, copy=True)
 
     def call_utility(self, method: str, *args) -> Any:
         call_id = uuid.uuid1().int >> 64
@@ -1014,32 +1015,29 @@ class AsyncMPClient(MPClient):
             engine = self.core_engine
 
         message = (request_type.value, *self.encoder.encode(request))
-        return self._send_input_message(message, engine, request)
+        return self._send_input_message(message, engine)
 
     def _send_input_message(
-        self, message: tuple[bytestr, ...], engine: EngineIdentity, objects: Any
+        self,
+        message: tuple[bytestr, ...],
+        engine: EngineIdentity,
+        objects: Any = None,
     ) -> Awaitable[Any]:
-        """
-        objects is a reference to retain until zmq is finished with the
-        buffers, in case they were extracted from tensors in the request.
-        """
         self.ensure_alive()
         self.free_pending_messages()
 
         msg = (engine,) + message
-        if not objects or len(msg) <= 3:
+        if len(msg) <= 3:
             # No auxiliary buffers => no tensor backing buffers in request.
             return self.input_socket.send_multipart(msg, copy=False)
 
-        future: asyncio.Future[zmq.MessageTracker]
-        future = self.input_socket.send_multipart(msg, copy=False, track=True)
-
-        def add_pending(f: asyncio.Future[zmq.MessageTracker]):
-            with contextlib.suppress(BaseException):
-                self.add_pending_message(f.result(), objects)
-
-        future.add_done_callback(add_pending)
-        return future
+        # Messages with auxiliary tensor buffers: use copy=True so ZMQ
+        # copies data into its internal buffers, allowing immediate release
+        # of Python-side tensor storage. This prevents unbounded CPU memory
+        # growth from accumulating tensor references in pending_messages
+        # under sustained multimodal workloads (e.g. continuous image
+        # requests where each request carries multi-MB tensor data).
+        return self.input_socket.send_multipart(msg, copy=True)
 
     async def call_utility_async(self, method: str, *args) -> Any:
         return await self._call_utility_async(method, *args, engine=self.core_engine)
