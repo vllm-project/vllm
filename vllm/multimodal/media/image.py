@@ -15,6 +15,11 @@ from .base import MediaIO, MediaWithBytes
 
 
 class ImageMediaIO(MediaIO[Image.Image]):
+    """Configuration values can be user-provided either by --media-io-kwargs or
+    by the runtime API field "media_io_kwargs". Ensure proper validation and
+    error handling.
+    """
+
     def __init__(self, image_mode: str = "RGB", **kwargs) -> None:
         super().__init__()
 
@@ -88,6 +93,13 @@ class ImageMediaIO(MediaIO[Image.Image]):
 
 
 class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
+    """Image embedding MediaIO implementation.
+
+    Configuration values can be user-provided either by --media-io-kwargs or
+    by the runtime API field "media_io_kwargs". Ensure proper validation and
+    error handling.
+    """
+
     def __init__(self) -> None:
         super().__init__()
 

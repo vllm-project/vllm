@@ -998,7 +998,11 @@ class OpenAIServing:
             tok_params,
             prompt_extras={
                 k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
+                for k in (
+                    "media_io_kwargs",
+                    "mm_processor_kwargs",
+                    "cache_salt",
+                )
                 if (v := getattr(request, k, None)) is not None
             },
         )

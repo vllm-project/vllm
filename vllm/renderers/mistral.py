@@ -84,12 +84,15 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
+        *,
+        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
             self.model_config,
             content_format="string",
+            media_io_kwargs=media_io_kwargs,
         )
 
         prompt_raw = safe_apply_chat_template(
@@ -110,12 +113,15 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
+        *,
+        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
             self.model_config,
             content_format="string",
+            media_io_kwargs=media_io_kwargs,
         )
 
         prompt_raw = await self._apply_chat_template_async(
