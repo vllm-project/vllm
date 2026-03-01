@@ -203,7 +203,10 @@ WIKITEXT_ACCURACY_CONFIGS = [
 ]
 
 
-@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available")
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
 @pytest.mark.parametrize("config", WIKITEXT_ACCURACY_CONFIGS)
 @pytest.mark.parametrize("tp_size", [1, 2])
 def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
@@ -234,7 +237,10 @@ def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
 
 
 @pytest.mark.parametrize("config", GSM8K_ACCURACY_CONFIGS)
-@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available")
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
 @pytest.mark.skipif(
     not HF_HUB_AMD_ORG_ACCESS,
     reason="Read access to huggingface.co/amd is required for this test.",
@@ -264,7 +270,10 @@ def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
     ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
 
-@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available")
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
 @pytest.mark.parametrize("float_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("scalings", [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
 def test_mxfp4_fused_qdq_match_quark(float_dtype: torch.dtype, scalings: list[int]):
@@ -292,7 +301,10 @@ def test_mxfp4_fused_qdq_match_quark(float_dtype: torch.dtype, scalings: list[in
         )
 
 
-@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available")
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
 @pytest.mark.parametrize("float_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("scalings", [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
 def test_mxfp4_dequant_kernel_match_quark(
