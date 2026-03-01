@@ -193,7 +193,7 @@ def get_lora_op_configs(
     num_slices: int,
     add_inputs: bool | None = None,
     moe_intermediate_size: int | None = None,
-) -> dict[str, int | None]:
+) -> dict[str, int | bool | None]:
     # Add support for fused_moe_lora ops
     assert op_type in [
         "shrink",

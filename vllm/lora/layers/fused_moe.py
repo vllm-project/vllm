@@ -57,7 +57,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
         self._inject_lora_into_fused_moe()
 
-    def _normalize_keys(self, config: dict[str, int | None]) -> dict[str, int | None]:
+    def _normalize_keys(
+        self, config: dict[str, int | bool | None]
+    ) -> dict[str, int | bool | None]:
         normalized_config = {}
         for key, value in config.items():
             if key.islower():
@@ -69,6 +71,34 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 normalized_key = key
             normalized_config[normalized_key] = value
         return normalized_config
+
+    @staticmethod
+    def _resolve_naive_block_assignment(
+        shrink_config: dict[str, int | bool | None],
+        expand_config: dict[str, int | bool | None],
+        expert_map,
+        num_tokens: int,
+        top_k: int,
+        local_num_experts: int,
+        max_loras: int,
+    ) -> bool:
+        """Extract and resolve naive_block_assignment from configs.
+
+        If both configs specify it, AND them together.
+        Otherwise fall back to the sparsity heuristic.
+        """
+        shrink_naive = shrink_config.get("naive_block_assignment")
+        expand_naive = expand_config.get("naive_block_assignment")
+
+        if shrink_naive is not None and expand_naive is not None:
+            return bool(shrink_naive and expand_naive)
+
+        # Fall back to heuristic
+        SPARSITY_FACTOR = 8
+        return (
+            expert_map is None
+            and num_tokens * top_k * SPARSITY_FACTOR <= local_num_experts * max_loras
+        )
 
     def _get_lora_moe_configs(
         self,
@@ -204,13 +234,14 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     config_dtype=config_dtype,
                 )
 
-                # SPARSITY_FACTOR is a heuristic margin ensuring tokens * top_k
-                # activates only a small fraction of total experts * loras.
-                SPARSITY_FACTOR = 8
-                naive_block_assignment = (
-                    expert_map is None
-                    and num_tokens * top_k * SPARSITY_FACTOR
-                    <= self.base_layer.local_num_experts * self.max_loras
+                naive_block_assignment = self._resolve_naive_block_assignment(
+                    shrink_config,
+                    expand_config,
+                    expert_map,
+                    num_tokens,
+                    top_k,
+                    self.base_layer.local_num_experts,
+                    self.max_loras,
                 )
 
                 # get the block size of m from customized config or default config
@@ -294,7 +325,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     top_k=top_k,
                     config_dtype=config_dtype,
                 )
-
                 sorted_token_ids_lora = moe_state_dict["sorted_token_ids_lora"]
                 expert_ids_lora = moe_state_dict["expert_ids_lora"]
                 num_tokens_post_padded_lora = moe_state_dict[
