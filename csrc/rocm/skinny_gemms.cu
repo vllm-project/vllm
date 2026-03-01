@@ -1144,6 +1144,9 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   auto N_in = in_b.size(0);
   auto Kap_in = in_a.stride(0);
   auto Kbp_in = in_b.stride(0);
+
+  // determine bias dimensions based on the bias tensor shape
+  // critically, we swap the dimensions of the bias tensor if it is 2D
   auto Bx_in = (in_bias.has_value() && in_bias->numel() > 0)
                    ? (in_bias->dim() == 2) ? in_bias->size(1) : in_bias->size(0)
                    : 1;
