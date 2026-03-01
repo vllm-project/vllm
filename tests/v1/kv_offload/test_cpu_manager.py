@@ -99,7 +99,8 @@ def test_cpu_manager():
     )
 
     # lookup [1, 2] -> not ready
-    assert cpu_manager.lookup(to_hashes([1, 2])) == 0
+    assert cpu_manager.maximal_prefix_lookup(to_hashes([1, 2])) == 0
+    assert cpu_manager.sliding_window_lookup(to_hashes([1, 2]), 1) == 0
 
     # no events so far
     assert list(cpu_manager.take_events()) == []
@@ -111,9 +112,13 @@ def test_cpu_manager():
     )
 
     # lookup [1, 2]
-    assert cpu_manager.lookup(to_hashes([1])) == 1
-    assert cpu_manager.lookup(to_hashes([1, 2])) == 2
-    assert cpu_manager.lookup(to_hashes([1, 2, 3])) == 2
+    assert cpu_manager.maximal_prefix_lookup(to_hashes([1])) == 1
+    assert cpu_manager.maximal_prefix_lookup(to_hashes([1, 2])) == 2
+    assert cpu_manager.maximal_prefix_lookup(to_hashes([1, 2, 3])) == 2
+    assert cpu_manager.sliding_window_lookup(to_hashes([1, 2, 3]), 1) == 2
+    assert cpu_manager.sliding_window_lookup(to_hashes([1, 2, 3]), 2) == 2
+    assert cpu_manager.sliding_window_lookup(to_hashes([1, 2, 3]), 3) == 2
+    assert cpu_manager.sliding_window_lookup(to_hashes([3, 1, 2]), 2) == 3
 
     # prepare store [2, 3, 4, 5] -> evicts [1]
     prepare_store_output = cpu_manager.prepare_store(to_hashes([2, 3, 4, 5]))
@@ -136,6 +141,19 @@ def test_cpu_manager():
 
     # complete store [2, 3, 4, 5]
     cpu_manager.complete_store(to_hashes([2, 3, 4, 5]))
+
+    # lookup (now that we have [2, 3, 4, 5])
+    assert cpu_manager.maximal_prefix_lookup(to_hashes([1])) == 0
+    assert cpu_manager.sliding_window_lookup(to_hashes([1]), 1) == 0
+    assert cpu_manager.sliding_window_lookup(to_hashes([1, 2]), 2) == 0
+    assert cpu_manager.sliding_window_lookup(to_hashes([1, 2]), 1) == 2
+    assert cpu_manager.sliding_window_lookup(to_hashes([1, 2, 3]), 1) == 3
+    assert cpu_manager.sliding_window_lookup(to_hashes([1, 2, 3]), 2) == 3
+    assert cpu_manager.sliding_window_lookup(to_hashes([1, 2, 3]), 3) == 0
+    assert cpu_manager.sliding_window_lookup(to_hashes([1, 2, 3, 0, 4]), 2) == 3
+    assert cpu_manager.sliding_window_lookup(to_hashes([1, 2, 3, 0, 4]), 1) == 5
+    assert cpu_manager.sliding_window_lookup(to_hashes([2, 1, 3, 4, 5]), 3) == 5
+    assert cpu_manager.sliding_window_lookup(to_hashes([2, 1, 3, 4, 5]), 4) == 1
 
     # prepare load [2, 3]
     prepare_load_output = cpu_manager.prepare_load(to_hashes([2, 3]))
@@ -179,8 +197,8 @@ def test_cpu_manager():
     cpu_manager.complete_store(to_hashes([7, 9]), success=False)
 
     # assert [7] is still stored, but [9] is not
-    assert cpu_manager.lookup(to_hashes([7])) == 1
-    assert cpu_manager.lookup(to_hashes([9])) == 0
+    assert cpu_manager.maximal_prefix_lookup(to_hashes([7])) == 1
+    assert cpu_manager.maximal_prefix_lookup(to_hashes([9])) == 0
 
     verify_events(
         cpu_manager.take_events(),
@@ -212,7 +230,7 @@ def test_arc_manager_basic():
     )
 
     # lookup [1, 2] -> not ready
-    assert arc_manager.lookup(to_hashes([1, 2])) == 0
+    assert arc_manager.maximal_prefix_lookup(to_hashes([1, 2])) == 0
 
     # no events so far
     assert list(arc_manager.take_events()) == []
@@ -224,9 +242,9 @@ def test_arc_manager_basic():
     )
 
     # lookup [1, 2]
-    assert arc_manager.lookup(to_hashes([1])) == 1
-    assert arc_manager.lookup(to_hashes([1, 2])) == 2
-    assert arc_manager.lookup(to_hashes([1, 2, 3])) == 2
+    assert arc_manager.maximal_prefix_lookup(to_hashes([1])) == 1
+    assert arc_manager.maximal_prefix_lookup(to_hashes([1, 2])) == 2
+    assert arc_manager.maximal_prefix_lookup(to_hashes([1, 2, 3])) == 2
 
     # blocks should be in T1 (recent)
     assert len(arc_manager.t1) == 2
@@ -447,7 +465,7 @@ def test_arc_manager_failed_store():
     arc_manager.complete_store(to_hashes([5]), success=False)
 
     # block 5 should not be in cache
-    assert arc_manager.lookup(to_hashes([5])) == 0
+    assert arc_manager.maximal_prefix_lookup(to_hashes([5])) == 0
     # block 5 should not be in T1 or T2
     assert to_hashes([5])[0] not in arc_manager.t1
     assert to_hashes([5])[0] not in arc_manager.t2
@@ -489,8 +507,8 @@ def test_arc_manager_full_scenario():
     arc_manager.complete_store(to_hashes([6]))
 
     # verify blocks 2, 3 (in T2) are still present
-    assert arc_manager.lookup(to_hashes([2])) == 1
-    assert arc_manager.lookup(to_hashes([3])) == 1
+    assert arc_manager.maximal_prefix_lookup(to_hashes([2])) == 1
+    assert arc_manager.maximal_prefix_lookup(to_hashes([3])) == 1
 
     # verify events
     events = list(arc_manager.take_events())

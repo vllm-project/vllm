@@ -106,7 +106,7 @@ class MockOffloadingSpec(OffloadingSpec):
         super().__init__(vllm_config, kv_cache_config)
 
         self.manager = MagicMock(spec=OffloadingManager)
-        self.manager.lookup.return_value = 0
+        self.manager.maximal_prefix_lookup.return_value = 0
         self.manager.prepare_load = lambda block_hashes: (
             MockLoadStoreSpec(block_hashes)
         )
@@ -544,7 +544,7 @@ def test_offloading_connector(request_runner):
         lambda block_hashes: generate_store_output([])
     )
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
-    runner.manager.lookup.assert_not_called()
+    runner.manager.maximal_prefix_lookup.assert_not_called()
 
     # single block lookup with no hits
     runner.new_request(token_ids=[1] * offloaded_block_size)
@@ -552,8 +552,8 @@ def test_offloading_connector(request_runner):
         lambda block_hashes: generate_store_output([])
     )
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
-    runner.manager.lookup.assert_called()
-    assert len(list(runner.manager.lookup.call_args.args[0])) == 1
+    runner.manager.maximal_prefix_lookup.assert_called()
+    assert len(list(runner.manager.maximal_prefix_lookup.call_args.args[0])) == 1
 
     # single block lookup with a hit
     runner.scheduler.reset_prefix_cache()
@@ -561,7 +561,7 @@ def test_offloading_connector(request_runner):
     runner.manager.prepare_store.side_effect = (
         lambda block_hashes: generate_store_output([])
     )
-    runner.manager.lookup.return_value = 1
+    runner.manager.maximal_prefix_lookup.return_value = 1
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID], expected_loaded_gpu_block_indexes=(0, 1, 2)
     )
@@ -573,7 +573,7 @@ def test_offloading_connector(request_runner):
     runner.manager.prepare_store.side_effect = (
         lambda block_hashes: generate_store_output([])
     )
-    runner.manager.lookup.return_value = 1
+    runner.manager.maximal_prefix_lookup.return_value = 1
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID], expected_loaded_gpu_block_indexes=(3, 4, 5)
     )
@@ -659,7 +659,7 @@ def test_request_preemption(request_runner):
 
     # request should now return from preemption
     # re-load [0, ..., 8] from the CPU and store [9, 10, 11]
-    runner.manager.lookup.return_value = 3
+    runner.manager.maximal_prefix_lookup.return_value = 3
     runner.manager.prepare_store.side_effect = (
         lambda block_hashes: generate_store_output(block_hashes)
     )
@@ -698,7 +698,7 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner):
     # start a request to load the first block, but don't complete
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * offloaded_block_size)
-    runner.manager.lookup.return_value = 1
+    runner.manager.maximal_prefix_lookup.return_value = 1
     runner.run(
         decoded_tokens=[],
         complete_transfers=False,
@@ -710,7 +710,7 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner):
 
     # start a new request to load the same first block
     runner.new_request(token_ids=[0] * offloaded_block_size)
-    runner.manager.lookup.return_value = 1
+    runner.manager.maximal_prefix_lookup.return_value = 1
     runner.run(
         decoded_tokens=[],
         complete_transfers=False,
@@ -756,7 +756,7 @@ def test_abort_loading_requests(request_runner):
     # start a request to load the first block, but don't complete
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * offloaded_block_size)
-    runner.manager.lookup.return_value = 1
+    runner.manager.maximal_prefix_lookup.return_value = 1
     runner.run(
         decoded_tokens=[],
         complete_transfers=False,
