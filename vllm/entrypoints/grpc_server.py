@@ -19,6 +19,8 @@ Example:
 
 import argparse
 import asyncio
+import functools
+import io
 import signal
 import sys
 import time
@@ -27,13 +29,15 @@ from collections.abc import AsyncGenerator
 import grpc
 import uvloop
 from grpc_reflection.v1alpha import reflection
+from PIL import Image
 
 from vllm import SamplingParams, TextPrompt, TokensPrompt
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.utils import log_version_and_model
 from vllm.grpc import vllm_engine_pb2, vllm_engine_pb2_grpc
 from vllm.logger import init_logger
-from vllm.outputs import RequestOutput
+from vllm.logprobs import PromptLogprobs, SampleLogprobs
+from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -76,6 +80,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """
         Handle streaming generation requests.
 
+        Supports n>1 by sending separate chunk/complete messages for each output index.
+        When streaming with n>1, chunks for different indices are interleaved.
+
         Args:
             request: The GenerateRequest protobuf
             context: gRPC context
@@ -84,11 +91,21 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             GenerateResponse protobuf messages (streaming)
         """
         request_id = request.request_id
-        logger.debug("Generate request %s received.", request_id)
+        input_type = request.WhichOneof("input")
+        has_mm = request.HasField("mm_inputs") and bool(request.mm_inputs.image_data)
+        num_images = len(request.mm_inputs.image_data) if has_mm else 0
+        logger.info(
+            "Generate request %s: input_type=%s, stream=%s, multimodal=%s (images=%d)",
+            request_id,
+            input_type,
+            request.stream,
+            has_mm,
+            num_images,
+        )
 
         try:
             # Extract tokenized input
-            if request.WhichOneof("input") == "tokenized":
+            if input_type == "tokenized":
                 prompt: TokensPrompt = {
                     "prompt_token_ids": list(request.tokenized.input_ids)
                 }
@@ -97,13 +114,55 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             else:
                 prompt: TextPrompt = {"prompt": request.text}
 
+            # Extract multimodal inputs (images)
+            if has_mm:
+                prompt["multi_modal_data"] = self._parse_mm_inputs(request.mm_inputs)
+
+            # Process inputs via Renderer for tokenized path (preferred),
+            # fall back to InputPreprocessor for text path (needs tokenization)
+            renderer = self.async_llm.input_processor.input_preprocessor.renderer
+            if input_type == "tokenized":
+                prompt = renderer.process_for_engine(prompt, arrival_time=time.time())
+            else:
+                prompt = self.async_llm.input_processor.input_preprocessor.preprocess(
+                    prompt
+                )
+
+            # Validate kv_transfer_params if present
+            if request.HasField("kv_transfer_params"):
+                remote_host = request.kv_transfer_params.remote_host
+                remote_port = request.kv_transfer_params.remote_port
+                if not remote_host or remote_port == 0:
+                    await context.abort(
+                        grpc.StatusCode.INVALID_ARGUMENT,
+                        "Invalid kv_transfer_params: "
+                        "remote_host and remote_port must be set.",
+                    )
+                logger.info(
+                    "Request %s: kv_transfer_params={remote_host=%s, remote_port=%d}",
+                    request_id,
+                    remote_host,
+                    remote_port,
+                )
+
             # Build sampling params with detokenize=False
             sampling_params = self._sampling_params_from_proto(
-                request.sampling_params, stream=request.stream
+                request.sampling_params,
+                stream=request.stream,
+                kv_transfer_params=request.kv_transfer_params
+                if request.HasField("kv_transfer_params")
+                else None,
             )
             tokenization_kwargs = self._tokenization_kwargs_from_proto(
                 request.sampling_params
             )
+
+            # Extract logprobs configuration
+            num_logprobs = sampling_params.logprobs
+            num_prompt_logprobs = sampling_params.prompt_logprobs
+
+            # Track which indices have sent their first chunk
+            seen_indices: set[int] = set()
 
             async for output in self.async_llm.generate(
                 prompt=prompt,
@@ -111,14 +170,40 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 request_id=request_id,
                 tokenization_kwargs=tokenization_kwargs,
             ):
-                # Convert vLLM output to protobuf
-                # For streaming, always send chunks
+                # For streaming, send chunks for EACH completion output (n outputs)
                 if request.stream:
-                    yield self._chunk_response(output)
+                    for completion in output.outputs:
+                        idx = completion.index
+                        is_first = idx not in seen_indices
+                        seen_indices.add(idx)
 
-                # Send complete response when finished
-                if output.finished:
-                    yield self._complete_response(output)
+                        # Send chunk with delta data (Rust accumulates for vLLM)
+                        yield self._chunk_response(
+                            output,
+                            completion=completion,
+                            num_logprobs=num_logprobs,
+                            num_prompt_logprobs=num_prompt_logprobs,
+                            is_first_chunk=is_first,
+                        )
+
+                        # Send Complete when sequence finishes (n>1 support)
+                        if completion.finish_reason:
+                            yield self._complete_response(
+                                output,
+                                completion=completion,
+                                num_logprobs=num_logprobs,
+                                num_prompt_logprobs=num_prompt_logprobs,
+                            )
+
+                # For non-streaming, send complete response when finished
+                if output.finished and not request.stream:
+                    for completion in output.outputs:
+                        yield self._complete_response(
+                            output,
+                            completion=completion,
+                            num_logprobs=num_logprobs,
+                            num_prompt_logprobs=num_prompt_logprobs,
+                        )
 
         except ValueError as e:
             # Invalid request error (equiv to 400).
@@ -167,7 +252,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         is_healthy = not self.async_llm.errored
         message = "Health" if is_healthy else "Engine is not alive"
 
-        logger.debug("HealthCheck request: healthy=%s, message=%s", is_healthy, message)
+        logger.info("HealthCheck request: healthy=%s, message=%s", is_healthy, message)
 
         return vllm_engine_pb2.HealthCheckResponse(healthy=is_healthy, message=message)
 
@@ -187,7 +272,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             AbortResponse protobuf
         """
         request_ids = request.request_ids
-        logger.debug("Abort requests: %s", request_ids)
+        logger.info("Abort requests: %s", request_ids)
 
         await self.async_llm.abort(request_ids)
         return vllm_engine_pb2.AbortResponse()
@@ -234,19 +319,46 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """
         num_requests = self.async_llm.output_processor.get_num_unfinished_requests()
 
+        # Get KV transfer config if available
+        kv_connector = ""
+        kv_role = ""
+        kv_transfer_config = self.async_llm.vllm_config.kv_transfer_config
+        if kv_transfer_config is not None:
+            kv_connector = kv_transfer_config.kv_connector or ""
+            kv_role = kv_transfer_config.kv_role or ""
+
         return vllm_engine_pb2.GetServerInfoResponse(
             active_requests=num_requests,
             is_paused=False,  # TODO
             last_receive_timestamp=time.time(),  # TODO looks wrong?
             uptime_seconds=time.time() - self.start_time,
             server_type="vllm-grpc",
+            kv_connector=kv_connector,
+            kv_role=kv_role,
         )
 
     # ========== Helper methods ==========
 
     @staticmethod
+    def _parse_mm_inputs(mm_proto) -> dict:
+        """Convert raw image bytes from proto to vLLM multi_modal_data dict.
+
+        Args:
+            mm_proto: MultimodalInputs protobuf with image_data (raw JPEG/PNG bytes)
+
+        Returns:
+            Dict with "image" key mapping to list of PIL Images
+        """
+        images = [
+            Image.open(io.BytesIO(img_bytes)) for img_bytes in mm_proto.image_data
+        ]
+        return {"image": images}
+
+    @staticmethod
     def _sampling_params_from_proto(
-        params: vllm_engine_pb2.SamplingParams, stream: bool = True
+        params: vllm_engine_pb2.SamplingParams,
+        stream: bool = True,
+        kv_transfer_params: vllm_engine_pb2.KvTransferParams | None = None,
     ) -> SamplingParams:
         """
         Convert protobuf SamplingParams to vLLM SamplingParams.
@@ -254,6 +366,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         Args:
             params: Protobuf SamplingParams message
             stream: Whether streaming is enabled
+            kv_transfer_params: KV transfer params proto for Mooncake PD
 
         Returns:
             vLLM SamplingParams with detokenize=False and structured_outputs
@@ -285,6 +398,16 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                     choice=list(params.choice.choices)
                 )
 
+        # Build extra_args for kv_transfer_params (Mooncake PD)
+        extra_args = None
+        if kv_transfer_params:
+            extra_args = {
+                "kv_transfer_params": {
+                    "remote_host": kv_transfer_params.remote_host,
+                    "remote_port": kv_transfer_params.remote_port,
+                }
+            }
+
         # Create SamplingParams
         # output_kind=DELTA: Return only new tokens in each chunk (for streaming)
         return SamplingParams(
@@ -313,12 +436,104 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             include_stop_str_in_output=params.include_stop_str_in_output,
             logit_bias=dict(params.logit_bias) if params.logit_bias else None,
             structured_outputs=structured_outputs,
+            extra_args=extra_args,
             # detokenize must be True if stop strings are used
             detokenize=bool(stop),
             output_kind=RequestOutputKind.DELTA
             if stream
             else RequestOutputKind.FINAL_ONLY,
         )
+
+    @staticmethod
+    def _build_top_logprobs(
+        logprob_entry: dict,
+        num_top_logprobs: int | None,
+    ) -> vllm_engine_pb2.TopLogProbs:
+        """Build TopLogProbs proto from a logprob entry dict."""
+        top = vllm_engine_pb2.TopLogProbs()
+        if num_top_logprobs and logprob_entry:
+            sorted_entries = sorted(
+                logprob_entry.items(),
+                key=lambda x: x[1].logprob,
+                reverse=True,
+            )
+            for tid, lp in functools.islice(sorted_entries, num_top_logprobs):
+                top.token_ids.append(tid)
+                top.values.append(lp.logprob)
+        return top
+
+    @staticmethod
+    def _build_output_logprobs(
+        logprobs: SampleLogprobs | None,
+        token_ids: list[int],
+        num_top_logprobs: int | None,
+    ) -> vllm_engine_pb2.OutputLogProbs | None:
+        """
+        Convert vLLM SampleLogprobs to proto OutputLogProbs.
+
+        Args:
+            logprobs: vLLM logprobs (list of dict[int, Logprob])
+            token_ids: Token IDs for each position
+            num_top_logprobs: Number of top logprobs to include
+
+        Returns:
+            OutputLogProbs proto or None
+        """
+        if not logprobs:
+            return None
+
+        proto = vllm_engine_pb2.OutputLogProbs()
+
+        for token_id, logprob_entry in zip(token_ids, logprobs):
+            if logprob := logprob_entry.get(token_id):
+                proto.token_logprobs.append(logprob.logprob)
+                proto.token_ids.append(token_id)
+
+                if num_top_logprobs:
+                    proto.top_logprobs.append(
+                        VllmEngineServicer._build_top_logprobs(
+                            logprob_entry, num_top_logprobs
+                        )
+                    )
+
+        return proto if proto.token_ids else None
+
+    @staticmethod
+    def _build_input_logprobs(
+        prompt_logprobs: PromptLogprobs | None,
+        prompt_token_ids: list[int],
+        num_top_logprobs: int | None,
+    ) -> vllm_engine_pb2.InputLogProbs | None:
+        """
+        Convert vLLM PromptLogprobs to proto InputLogProbs.
+
+        Args:
+            prompt_logprobs: vLLM prompt logprobs (list of dict[int, Logprob] | None)
+            prompt_token_ids: Prompt token IDs
+            num_top_logprobs: Number of top logprobs to include
+
+        Returns:
+            InputLogProbs proto or None
+        """
+        if not prompt_logprobs:
+            return None
+
+        proto = vllm_engine_pb2.InputLogProbs()
+
+        for token_id, logprob_entry in zip(prompt_token_ids, prompt_logprobs):
+            token_logprob = vllm_engine_pb2.InputTokenLogProb()
+
+            # First token has no logprob (None)
+            if logprob_entry is not None and token_id in logprob_entry:
+                token_logprob.value = logprob_entry[token_id].logprob
+
+            proto.token_logprobs.append(token_logprob)
+            proto.token_ids.append(token_id)
+            proto.top_logprobs.append(
+                VllmEngineServicer._build_top_logprobs(logprob_entry, num_top_logprobs)
+            )
+
+        return proto if proto.token_ids else None
 
     @staticmethod
     def _tokenization_kwargs_from_proto(
@@ -329,19 +544,35 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         return None
 
     @staticmethod
-    def _chunk_response(output: RequestOutput) -> vllm_engine_pb2.GenerateResponse:
+    def _chunk_response(
+        output: RequestOutput,
+        completion: "CompletionOutput | None" = None,
+        num_logprobs: int | None = None,
+        num_prompt_logprobs: int | None = None,
+        is_first_chunk: bool = False,
+    ) -> vllm_engine_pb2.GenerateResponse:
         """
         Build a streaming chunk response from vLLM output.
         When output_kind=DELTA, vLLM returns only new tokens automatically.
 
+        Note: This sends DELTA logprobs (only for new tokens in this chunk).
+        The Rust side is responsible for accumulating if needed.
+
         Args:
             output: vLLM RequestOutput (with delta tokens when output_kind=DELTA)
+            completion: Specific CompletionOutput to use (for n>1 support).
+                       If None, uses output.outputs[0] for backwards compatibility.
+            num_logprobs: Number of top logprobs for output tokens
+            num_prompt_logprobs: Number of top logprobs for prompt tokens
+            is_first_chunk: Whether this is the first chunk for this index
+                           (include input_logprobs only on first chunk)
 
         Returns:
             GenerateResponse with chunk field set
         """
-        # Get the completion output (first one if n > 1)
-        completion = output.outputs[0] if output.outputs else None
+        # Use provided completion or fall back to first output
+        if completion is None:
+            completion = output.outputs[0] if output.outputs else None
 
         if completion is None:
             # Empty chunk
@@ -351,7 +582,22 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                     prompt_tokens=0,
                     completion_tokens=0,
                     cached_tokens=0,
+                    index=0,
                 ),
+            )
+
+        # Build output logprobs for this chunk's tokens (delta, not cumulative)
+        output_logprobs = VllmEngineServicer._build_output_logprobs(
+            completion.logprobs, completion.token_ids, num_logprobs
+        )
+
+        # Build input logprobs only on first chunk for this index
+        input_logprobs = None
+        if is_first_chunk:
+            input_logprobs = VllmEngineServicer._build_input_logprobs(
+                output.prompt_logprobs,
+                output.prompt_token_ids,
+                num_prompt_logprobs,
             )
 
         # When output_kind=DELTA, completion.token_ids contains only new tokens
@@ -365,22 +611,38 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 else 0,
                 completion_tokens=len(completion.token_ids),  # Delta count
                 cached_tokens=output.num_cached_tokens,
+                output_logprobs=output_logprobs,
+                input_logprobs=input_logprobs,
+                index=completion.index,
             ),
         )
 
     @staticmethod
-    def _complete_response(output: RequestOutput) -> vllm_engine_pb2.GenerateResponse:
+    def _complete_response(
+        output: RequestOutput,
+        completion: "CompletionOutput | None" = None,
+        num_logprobs: int | None = None,
+        num_prompt_logprobs: int | None = None,
+    ) -> vllm_engine_pb2.GenerateResponse:
         """
         Build a final completion response from vLLM output.
 
+        For non-streaming (FINAL_ONLY): completion has all tokens and logprobs.
+        For streaming (DELTA): completion has last delta; Rust accumulates.
+
         Args:
             output: vLLM RequestOutput (finished=True)
+            completion: Specific CompletionOutput to use (for n>1 support).
+                       If None, uses output.outputs[0] for backwards compatibility.
+            num_logprobs: Number of top logprobs for output tokens
+            num_prompt_logprobs: Number of top logprobs for prompt tokens
 
         Returns:
             GenerateResponse with complete field set
         """
-        # Get the completion output (first one if n > 1)
-        completion = output.outputs[0] if output.outputs else None
+        # Use provided completion or fall back to first output
+        if completion is None:
+            completion = output.outputs[0] if output.outputs else None
 
         if completion is None:
             # Empty completion
@@ -391,7 +653,30 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                     prompt_tokens=0,
                     completion_tokens=0,
                     cached_tokens=0,
+                    index=0,
                 ),
+            )
+
+        # Build output logprobs from completion's data
+        # For non-streaming: this has all logprobs
+        # For streaming: this has only last delta (Rust accumulates from chunks)
+        output_logprobs = VllmEngineServicer._build_output_logprobs(
+            completion.logprobs, completion.token_ids, num_logprobs
+        )
+
+        # Build input logprobs
+        input_logprobs = VllmEngineServicer._build_input_logprobs(
+            output.prompt_logprobs,
+            output.prompt_token_ids,
+            num_prompt_logprobs,
+        )
+
+        # Build kv_transfer_params if present (Mooncake PD)
+        kv_transfer_params = None
+        if output.kv_transfer_params:
+            kv_transfer_params = vllm_engine_pb2.KvTransferParams(
+                remote_host=output.kv_transfer_params.get("remote_host", ""),
+                remote_port=output.kv_transfer_params.get("remote_port", 0),
             )
 
         # Build complete response
@@ -407,6 +692,10 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 else 0,
                 completion_tokens=len(completion.token_ids),
                 cached_tokens=output.num_cached_tokens,
+                output_logprobs=output_logprobs,
+                input_logprobs=input_logprobs,
+                index=completion.index,
+                kv_transfer_params=kv_transfer_params,
             ),
         )
 
