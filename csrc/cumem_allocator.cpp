@@ -109,7 +109,9 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
 
 #ifndef USE_ROCM
   int flag = 0;
-  CUresult rdma_res = cuDeviceGetAttribute(&flag, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device);
+  CUresult rdma_res = cuDeviceGetAttribute(
+      &flag, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED,
+      device);
   if (rdma_res != CUDA_SUCCESS && rdma_res != CUDA_ERROR_INVALID_VALUE) {
     CUDA_CHECK(rdma_res);
   }
@@ -117,7 +119,8 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
     prop.allocFlags.gpuDirectRDMACapable = 1;
   }
   int fab_flag = 0;
-  CUresult fab_res = cuDeviceGetAttribute(&fab_flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device);
+  CUresult fab_res = cuDeviceGetAttribute(
+      &fab_flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device);
   if (fab_res != CUDA_SUCCESS && fab_res != CUDA_ERROR_INVALID_VALUE) {
     CUDA_CHECK(fab_res);
   }
