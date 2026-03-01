@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
+from vllm.compilation.backends import make_compiler
+from vllm.compilation.compiler_interface import CompilerInterface
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.passes.utility.fix_functionalization import (
     FixFunctionalizationPass,
@@ -83,6 +85,34 @@ def test_custom_op():
 
     with pytest.raises(ValueError, match="Invalid syntax '"):
         _ = CompilationConfig(custom_ops=["quant_fp8"])
+
+
+def test_make_compiler_custom_backend_uses_compilation_backend():
+    class DummyCompiler(CompilerInterface):
+        name = "dummy"
+
+    captured: dict[str, str] = {}
+
+    def fake_resolve_obj_by_qualname(qualname: str):
+        captured["qualname"] = qualname
+        return DummyCompiler
+
+    compilation_config = CompilationConfig(backend="my_compiler.MyCompiler")
+
+    with (
+        patch(
+            "vllm.compilation.backends.resolve_obj_by_qualname",
+            side_effect=fake_resolve_obj_by_qualname,
+        ),
+        patch(
+            "vllm.compilation.backends.current_platform.get_compile_backend",
+            return_value="inductor",
+        ),
+    ):
+        compiler = make_compiler(compilation_config)
+
+    assert isinstance(compiler, DummyCompiler)
+    assert captured["qualname"] == "my_compiler.MyCompiler"
 
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
