@@ -4,8 +4,7 @@
 Unit tests for Helion kernel registration.
 
 Tests ConfiguredHelionKernel, HelionKernelWrapper, and PresetConfigSearch
-including config picker registration, custom autotuner integration, and
-PyTorch op registration.
+including config picker registration and custom autotuner integration.
 """
 
 from unittest.mock import Mock, patch
@@ -25,6 +24,7 @@ import helion
 
 from vllm.kernels.helion.config_manager import ConfigManager
 from vllm.kernels.helion.register import (
+    _HOP_AVAILABLE,
     ConfiguredHelionKernel,
     HelionKernelWrapper,
     get_kernel_by_name,
@@ -451,9 +451,51 @@ class TestHelionKernelWrapper:
         ):
             wrapper.get_configured_op()
 
-    def test_get_configured_op_returns_cached_op(self, sample_kernel, sample_configs):
-        """Test get_configured_op returns cached op when already registered."""
+    def test_get_configured_op_returns_cached_kernel(
+        self, sample_kernel, sample_configs
+    ):
+        """Test get_configured_op returns cached ConfiguredHelionKernel."""
 
+        def fake_impl(*args, **kwargs):
+            return torch.zeros_like(args[0])
+
+        def default_picker(args, config_keys):
+            return "default"
+
+        wrapper = HelionKernelWrapper(
+            raw_kernel_func=sample_kernel,
+            op_name="test_kernel",
+            fake_impl=fake_impl,
+        )
+        wrapper._config_picker = default_picker
+
+        mock_config_manager = Mock(spec=ConfigManager)
+        mock_config_manager.get_platform_configs = Mock(return_value=sample_configs)
+
+        with (
+            patch(
+                "vllm.kernels.helion.config_manager.ConfigManager.get_instance",
+                return_value=mock_config_manager,
+            ),
+            patch(
+                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                return_value="nvidia_h200",
+            ),
+            patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
+        ):
+            mock_decorated = Mock()
+            mock_kernel.return_value = Mock(return_value=mock_decorated)
+
+            result1 = wrapper.get_configured_op()
+            result2 = wrapper.get_configured_op()
+            assert result1 is result2
+
+    @pytest.mark.skipif(
+        _HOP_AVAILABLE, reason="CustomOp path not used when HOP available"
+    )
+    def test_get_or_register_custom_op_returns_cached_op(
+        self, sample_kernel, sample_configs
+    ):
         def fake_impl(*args, **kwargs):
             return torch.zeros_like(args[0])
 
@@ -488,12 +530,15 @@ class TestHelionKernelWrapper:
         ):
             mock_decorated = Mock()
             mock_kernel.return_value = Mock(return_value=mock_decorated)
-            result = wrapper.get_configured_op()
+            result = wrapper._get_or_register_custom_op()
             assert result is existing_op
 
-    def test_get_configured_op_registers_new_op(self, sample_kernel, sample_configs):
-        """Test get_configured_op creates and registers new op."""
-
+    @pytest.mark.skipif(
+        _HOP_AVAILABLE, reason="CustomOp path not used when HOP available"
+    )
+    def test_get_or_register_custom_op_registers_new_op(
+        self, sample_kernel, sample_configs
+    ):
         def fake_impl(*args, **kwargs):
             return torch.zeros_like(args[0])
 
@@ -542,11 +587,10 @@ class TestHelionKernelWrapper:
         ):
             mock_decorated = Mock()
             mock_kernel.return_value = Mock(return_value=mock_decorated)
-            result = wrapper.get_configured_op()
+            result = wrapper._get_or_register_custom_op()
 
             mock_register.assert_called_once()
             assert result is new_op
-            # Check that op_func is the decorated kernel, not ConfiguredHelionKernel
             assert mock_register.call_args[1]["op_func"] is mock_decorated
 
 
@@ -554,10 +598,18 @@ class TestKernelRegistry:
     """Test suite for kernel registry functionality."""
 
     def setup_method(self):
-        """Clear the registry before each test."""
+        """Save and clear the registry before each test."""
+        from vllm.kernels.helion.register import _REGISTERED_KERNELS
+
+        self._saved_registry = dict(_REGISTERED_KERNELS)
+        _REGISTERED_KERNELS.clear()
+
+    def teardown_method(self):
+        """Restore the registry after each test."""
         from vllm.kernels.helion.register import _REGISTERED_KERNELS
 
         _REGISTERED_KERNELS.clear()
+        _REGISTERED_KERNELS.update(self._saved_registry)
 
     def test_get_registered_kernels_returns_copy(self):
         """Test get_registered_kernels returns copy of registry."""

@@ -926,6 +926,21 @@ class NixlConnectorWorker:
         else:
             self.use_host_buffer = self.kv_buffer_device == "cpu"
 
+        # reserve different cores for start_load_kv() from model_forward()
+        if self.device_type == "cpu":
+            numa_core_list = current_platform.discover_numa_topology()
+            # setup one last core in each numa for kv transfer.
+            rsv_cores_for_kv = [
+                max(each_numa_core_list) for each_numa_core_list in numa_core_list
+            ]
+
+            if rsv_cores_for_kv:
+                if not hasattr(os, "sched_setaffinity"):
+                    raise NotImplementedError(
+                        "os.sched_setaffinity is not available on this platform"
+                    )
+                os.sched_setaffinity(0, rsv_cores_for_kv)
+
         # support for oot platform which can't register nixl memory
         # type based on kv_buffer_device
         nixl_memory_type = current_platform.get_nixl_memory_type()
@@ -2491,6 +2506,9 @@ class NixlConnectorWorker:
 
     def shutdown(self):
         """Shutdown the connector worker."""
+        if not hasattr(self, "_handshake_initiation_executor"):
+            # error happens during init, no need to shutdown
+            return
         self._handshake_initiation_executor.shutdown(wait=False)
         for handles in self._recving_transfers.values():
             for handle in handles:

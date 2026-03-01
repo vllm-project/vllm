@@ -5,10 +5,11 @@ import queue
 import signal
 import threading
 import time
-from collections import deque
+from collections import defaultdict, deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
+from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
 from typing import Any, TypeVar, cast
@@ -16,6 +17,7 @@ from typing import Any, TypeVar, cast
 import msgspec
 import zmq
 
+import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.envs import enable_envs_cache
@@ -40,14 +42,17 @@ from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
 )
-from vllm.v1.core.sched.interface import SchedulerInterface
+from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.engine import (
+    EEP_NOTIFICATION_CALL_ID,
+    EEPNotificationType,
     EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     EngineCoreRequestType,
     FinishReason,
+    PauseMode,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
@@ -70,7 +75,6 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
-POLLING_TIMEOUT_S = 2.5
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
@@ -108,6 +112,9 @@ class EngineCore:
             self.model_executor.register_failure_callback(executor_fail_callback)
 
         self.available_gpu_memory_for_kv_cache = -1
+
+        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            self._eep_scale_up_before_kv_init()
 
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(
@@ -210,8 +217,7 @@ class EngineCore:
 
         self.aborts_queue = queue.Queue[list[str]]()
 
-        # Pause state for "keep" mode - freezes requests in queue.
-        self._scheduler_paused = False
+        self._idle_state_callbacks: list[Callable] = []
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -233,12 +239,10 @@ class EngineCore:
 
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:
-            if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1":
-                dp_group = getattr(self, "dp_group", None)
-                assert dp_group is not None
-                self.available_gpu_memory_for_kv_cache = (
-                    ParallelConfig.sync_kv_cache_memory_size(dp_group, -1)
-                )
+            if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+                # NOTE(yongji): should already be set
+                # during _eep_scale_up_before_kv_init
+                assert self.available_gpu_memory_for_kv_cache > 0
                 available_gpu_memory = [self.available_gpu_memory_for_kv_cache] * len(
                     kv_cache_specs
                 )
@@ -326,20 +330,6 @@ class EngineCore:
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
-    def pause_scheduler(self) -> None:
-        """Pause the scheduler, keeping requests frozen in queue.
-
-        Requests are kept frozen in queue and can be resumed later.
-        """
-        self._scheduler_paused = True
-
-    def resume_scheduler(self) -> None:
-        """Resume the scheduler after a pause.
-
-        Resumes processing of frozen requests in the queue.
-        """
-        self._scheduler_paused = False
-
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
         """Execute the model and log detailed info on failure."""
@@ -393,10 +383,6 @@ class EngineCore:
         was executed.
         """
 
-        # If paused, don't schedule any work.
-        if self._scheduler_paused:
-            return {}, False
-
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
@@ -447,9 +433,6 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
-        # If paused, don't schedule any work.
-        if self._scheduler_paused:
-            return {}, False
 
         batch_queue = self.batch_queue
         assert batch_queue is not None
@@ -568,8 +551,8 @@ class EngineCore:
         if self.scheduler:
             self.scheduler.shutdown()
 
-    def profile(self, is_start: bool = True):
-        self.model_executor.profile(is_start)
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+        self.model_executor.profile(is_start, profile_prefix)
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
@@ -613,14 +596,107 @@ class EngineCore:
         # Reset the GPU model runner's encoder cache (physical storage)
         self.model_executor.reset_encoder_cache()
 
-    def sleep(self, level: int = 1):
-        self.model_executor.sleep(level)
+    def _reset_caches(self, reset_running_requests=True) -> None:
+        self.reset_prefix_cache(reset_running_requests=reset_running_requests)
+        self.reset_mm_cache()
+        self.reset_encoder_cache()
+
+    def pause_scheduler(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> Future | None:
+        """Pause generation; behavior depends on mode.
+
+        All pause modes queue new adds -- "abort" and "keep" skip step();
+        "wait" allows step() so in-flight requests can drain.
+
+        - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
+          outputs to be sent (when running with output_queue), optionally
+          clear caches, then complete the returned Future.
+        - ``wait``: Set PAUSED_NEW (queue adds, keep stepping); when drained,
+          optionally clear caches, then complete the returned Future.
+        - ``keep``: Set PAUSED_ALL; return a Future that completes when the
+          output queue is empty.
+        """
+        if mode not in ("keep", "abort", "wait"):
+            raise ValueError(f"Invalid pause mode: {mode}")
+        if mode == "wait":
+            raise ValueError("'wait' mode can't be used in inproc-engine mode")
+
+        if mode == "abort":
+            self.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+
+        pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
+        self.scheduler.set_pause_state(pause_state)
+        if clear_cache:
+            self._reset_caches()
+
+        return None
+
+    def resume_scheduler(self) -> None:
+        """Resume the scheduler and flush any requests queued while paused."""
+        self.scheduler.set_pause_state(PauseState.UNPAUSED)
+
+    def is_scheduler_paused(self) -> bool:
+        """Return whether the scheduler is in any pause state."""
+        return self.scheduler.pause_state != PauseState.UNPAUSED
+
+    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None | Future:
+        """Put the engine to sleep at the specified level.
+
+        Args:
+            level: Sleep level.
+                - Level 0: Pause scheduling only. Requests are still accepted
+                           but not processed. No GPU memory changes.
+                - Level 1: Offload model weights to CPU, discard KV cache.
+                - Level 2: Discard all GPU memory.
+            mode: Pause mode - how to deal with any existing requests, see
+                documentation of pause_scheduler method.
+        """
+
+        # Pause scheduler before sleeping.
+        clear_prefix_cache = level >= 1
+        pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
+        if level < 1:
+            return pause_future
+
+        # Level 1+: Delegate to executor for GPU memory management
+        model_executor = self.model_executor
+        if pause_future is None:
+            model_executor.sleep(level)
+            return None
+
+        future = Future[Any]()
+
+        def pause_complete(f: Future):
+            try:
+                f.result()  # propagate any exception
+                future.set_result(model_executor.sleep(level))
+            except Exception as e:
+                future.set_exception(e)
+
+        logger.info("Waiting for in-flight requests to complete before sleeping...")
+        pause_future.add_done_callback(pause_complete)
+        return future
 
     def wake_up(self, tags: list[str] | None = None):
-        self.model_executor.wake_up(tags)
+        """Wake up the engine from sleep.
+
+        Args:
+            tags: Tags to wake up. Use ["scheduling"] for level 0 wake up.
+        """
+        if tags is not None and "scheduling" in tags:
+            # Remove "scheduling" from tags if there are other tags to process.
+            tags = [t for t in tags if t != "scheduling"]
+
+        if tags is None or tags:
+            self.model_executor.wake_up(tags)
+
+        # Resume scheduling (applies to all levels)
+        self.resume_scheduler()
 
     def is_sleeping(self) -> bool:
-        return self.model_executor.is_sleeping
+        """Check if engine is sleeping at any level."""
+        return self.is_scheduler_paused() or self.model_executor.is_sleeping
 
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
@@ -680,11 +756,22 @@ class EngineCore:
             self.structured_output_manager.grammar_init(req)
         return req, request.current_wave
 
+    def _eep_scale_up_before_kv_init(self):
+        raise NotImplementedError
+
+    def _eep_send_engine_core_notification(
+        self,
+        notification_type: EEPNotificationType,
+        vllm_config: VllmConfig | None = None,
+    ):
+        raise NotImplementedError
+
 
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
     ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
+    addresses: EngineZmqAddresses
 
     @instrument(span_name="EngineCoreProc init")
     def __init__(
@@ -735,6 +822,13 @@ class EngineCoreProc(EngineCore):
             # and "hybrid" LB modes.
             self.publish_dp_lb_stats = internal_dp_balancing
 
+            self.addresses = addresses
+            self.process_input_queue_block = True
+            if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+                self._eep_send_engine_core_notification(
+                    EEPNotificationType.NEW_CORE_ENGINES_INIT_READY,
+                    vllm_config=vllm_config,
+                )
             self._init_data_parallel(vllm_config)
 
             super().__init__(
@@ -1015,6 +1109,14 @@ class EngineCoreProc(EngineCore):
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
 
+    def has_work(self) -> bool:
+        """Returns true if the engine should be stepped."""
+        return (
+            self.engines_running
+            or self.scheduler.has_requests()
+            or bool(self.batch_queue)
+        )
+
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
@@ -1029,12 +1131,9 @@ class EngineCoreProc(EngineCore):
         """Exits when an engine step needs to be performed."""
 
         waited = False
-        while (
-            not self.engines_running
-            and not self.scheduler.has_requests()
-            and not self.batch_queue
-            and not self._scheduler_paused
-        ):
+        while not self.has_work():
+            # Notify callbacks waiting for engine to become idle.
+            self._notify_idle_state_callbacks()
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
                 with self.aborts_queue.mutex:
@@ -1042,8 +1141,14 @@ class EngineCoreProc(EngineCore):
                 if logger.isEnabledFor(DEBUG):
                     logger.debug("EngineCore waiting for work.")
                     waited = True
-            req = self.input_queue.get()
-            self._handle_client_request(*req)
+            block = self.process_input_queue_block
+            try:
+                req = self.input_queue.get(block=block)
+                self._handle_client_request(*req)
+            except queue.Empty:
+                break
+            if not block:
+                break
 
         if waited:
             logger.debug("EngineCore loop active.")
@@ -1073,6 +1178,11 @@ class EngineCoreProc(EngineCore):
 
         return model_executed
 
+    def _notify_idle_state_callbacks(self) -> None:
+        while self._idle_state_callbacks:
+            callback = self._idle_state_callbacks.pop()
+            callback(self)
+
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
     ) -> None:
@@ -1086,24 +1196,39 @@ class EngineCoreProc(EngineCore):
         elif request_type == EngineCoreRequestType.UTILITY:
             client_idx, call_id, method_name, args = request
             output = UtilityOutput(call_id)
-            try:
-                method = getattr(self, method_name)
-                result = method(*self._convert_msgspec_args(method, args))
-                output.result = UtilityResult(result)
-            except BaseException as e:
-                logger.exception("Invocation of %s method failed", method_name)
-                output.failure_message = (
-                    f"Call to {method_name} method failed: {str(e)}"
-                )
-            self.output_queue.put_nowait(
-                (client_idx, EngineCoreOutputs(utility_output=output))
+            # Lazily look-up utility method so that failure will be handled/returned.
+            get_result = lambda: (method := getattr(self, method_name)) and method(
+                *self._convert_msgspec_args(method, args)
             )
+            enqueue_output = lambda out: self.output_queue.put_nowait(
+                (client_idx, EngineCoreOutputs(utility_output=out))
+            )
+            self._invoke_utility_method(method_name, get_result, output, enqueue_output)
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
         else:
             logger.error(
                 "Unrecognized input request type encountered: %s", request_type
             )
+
+    @staticmethod
+    def _invoke_utility_method(
+        name: str, get_result: Callable, output: UtilityOutput, enqueue_output: Callable
+    ):
+        try:
+            result = get_result()
+            if isinstance(result, Future):
+                # Defer utility output handling until future completion.
+                callback = lambda future: EngineCoreProc._invoke_utility_method(
+                    name, future.result, output, enqueue_output
+                )
+                result.add_done_callback(callback)
+                return
+            output.result = UtilityResult(result)
+        except Exception as e:
+            logger.exception("Invocation of %s method failed", name)
+            output.failure_message = f"Call to {name} method failed: {str(e)}"
+        enqueue_output(output)
 
     @staticmethod
     def _convert_msgspec_args(method, args):
@@ -1193,6 +1318,11 @@ class EngineCoreProc(EngineCore):
                 for input_socket, _ in poller.poll():
                     # (RequestType, RequestData)
                     type_frame, *data_frames = input_socket.recv_multipart(copy=False)
+                    # NOTE(yongji): ignore READY message sent by DP coordinator
+                    # that is used to notify newly started engines
+                    if type_frame.buffer == b"READY":
+                        assert input_socket == coord_socket
+                        continue
                     request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
                     # Deserialize the request data.
@@ -1311,6 +1441,62 @@ class EngineCoreProc(EngineCore):
             )
         )
 
+    def pause_scheduler(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> Future | None:
+        """Pause generation; behavior depends on mode.
+
+        All pause modes queue new adds -- "abort" and "keep" skip step();
+        "wait" allows step() so in-flight requests can drain.
+
+        - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
+          outputs to be sent (when running with output_queue), optionally
+          clear caches, then complete the returned Future.
+        - ``wait``: Set PAUSED_NEW (queue adds, keep stepping); when drained,
+          optionally clear caches, then complete the returned Future.
+        - ``keep``: Set PAUSED_ALL; return a Future that completes when the
+          output queue is empty.
+        """
+        if mode not in ("keep", "abort", "wait"):
+            raise ValueError(f"Invalid pause mode: {mode}")
+
+        def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
+            if clear_cache:
+                engine._reset_caches()
+            future.set_result(None)
+
+        if mode == "abort":
+            aborted_reqs = self.scheduler.finish_requests(
+                None, RequestStatus.FINISHED_ABORTED
+            )
+            self._send_abort_outputs(aborted_reqs)
+
+        pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
+        self.scheduler.set_pause_state(pause_state)
+        if not self.has_work():
+            if clear_cache:
+                self._reset_caches()
+            return None
+
+        future = Future[Any]()
+        self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
+        return future
+
+    def _send_abort_outputs(self, aborted_reqs: list[tuple[str, int]]) -> None:
+        # TODO(nick) this will be moved inside the scheduler
+        if aborted_reqs:
+            # Map client_index to list of request_ids that belong to that client.
+            by_client = defaultdict[int, set[str]](set)
+            for req_id, client_index in aborted_reqs:
+                by_client[client_index].add(req_id)
+            for client_index, req_ids in by_client.items():
+                outputs = [
+                    EngineCoreOutput(req_id, [], finish_reason=FinishReason.ABORT)
+                    for req_id in req_ids
+                ]
+                eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
+                self.output_queue.put_nowait((client_index, eco))
+
 
 class DPEngineCoreProc(EngineCoreProc):
     """ZMQ-wrapper for running EngineCore in background process
@@ -1335,6 +1521,10 @@ class DPEngineCoreProc(EngineCoreProc):
         self.current_wave = 0
         self.last_counts = (0, 0)
 
+        from vllm.distributed.elastic_ep.elastic_state import ElasticEPScalingState
+
+        self.eep_scaling_state: ElasticEPScalingState | None = None
+
         # Initialize the engine.
         dp_rank = vllm_config.parallel_config.data_parallel_rank
         super().__init__(
@@ -1358,7 +1548,9 @@ class DPEngineCoreProc(EngineCoreProc):
         assert 0 <= local_dp_rank <= dp_rank < dp_size
 
         self.dp_rank = dp_rank
-        self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
+        self.dp_group, self.dp_store = (
+            vllm_config.parallel_config.stateless_init_dp_group(return_store=True)
+        )
 
     def shutdown(self):
         super().shutdown()
@@ -1366,6 +1558,7 @@ class DPEngineCoreProc(EngineCoreProc):
             stateless_destroy_torch_distributed_process_group(dp_group)
 
     def add_request(self, request: Request, request_wave: int = 0):
+        super().add_request(request, request_wave)
         if self.has_coordinator and request_wave != self.current_wave:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
@@ -1376,7 +1569,13 @@ class DPEngineCoreProc(EngineCoreProc):
                     (-1, EngineCoreOutputs(start_wave=self.current_wave))
                 )
 
-        super().add_request(request, request_wave)
+    def resume_scheduler(self):
+        super().resume_scheduler()
+        if not self.engines_running and self.scheduler.has_unfinished_requests():
+            # Wake up other DP engines.
+            self.output_queue.put_nowait(
+                (-1, EngineCoreOutputs(start_wave=self.current_wave))
+            )
 
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
@@ -1414,7 +1613,12 @@ class DPEngineCoreProc(EngineCoreProc):
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
 
-            # 2) Step the engine core.
+            if self.eep_scaling_state is not None:
+                _ = self.eep_scaling_state.progress()
+                if self.eep_scaling_state.is_complete():
+                    self.process_input_queue_block = True
+                    self.eep_scaling_state = None
+
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
 
@@ -1464,54 +1668,129 @@ class DPEngineCoreProc(EngineCoreProc):
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:
-        stateless_destroy_torch_distributed_process_group(self.dp_group)
-        self.shutdown()
+        from copy import deepcopy
 
-        parallel_config = self.vllm_config.parallel_config
-        old_dp_size = parallel_config.data_parallel_size
-        parallel_config.data_parallel_size = reconfig_request.new_data_parallel_size
-        if reconfig_request.new_data_parallel_rank != -1:
-            parallel_config.data_parallel_rank = reconfig_request.new_data_parallel_rank
-        # local rank specifies device visibility, it should not be changed
-        assert (
-            reconfig_request.new_data_parallel_rank_local
-            == ReconfigureRankType.KEEP_CURRENT_RANK
-        )
-        parallel_config.data_parallel_master_ip = (
-            reconfig_request.new_data_parallel_master_ip
-        )
-        parallel_config.data_parallel_master_port = (
-            reconfig_request.new_data_parallel_master_port
-        )
-        if reconfig_request.new_data_parallel_rank != -2:
-            self.dp_rank = parallel_config.data_parallel_rank
-            self.dp_group = parallel_config.stateless_init_dp_group()
-        reconfig_request.new_data_parallel_master_port = (
-            parallel_config.data_parallel_master_port
-        )
+        from vllm.distributed.elastic_ep.elastic_state import ElasticEPScalingState
 
-        self.model_executor.reinitialize_distributed(reconfig_request)
-        if reconfig_request.new_data_parallel_size > old_dp_size:
-            assert self.available_gpu_memory_for_kv_cache > 0
-            # pass available_gpu_memory_for_kv_cache from existing
-            # engine-cores to new engine-cores so they can directly
-            # use it in _initialize_kv_caches() rather than profiling.
-            ParallelConfig.sync_kv_cache_memory_size(
-                self.dp_group, self.available_gpu_memory_for_kv_cache
-            )
-            # NOTE(yongji): newly joined workers require dummy_run even
-            # CUDA graph is not used
-            self.model_executor.collective_rpc("compile_or_warm_up_model")
+        new_parallel_config = deepcopy(self.vllm_config.parallel_config)
+        old_dp_size = new_parallel_config.data_parallel_size
+        new_parallel_config.data_parallel_size = reconfig_request.new_data_parallel_size
         if (
             reconfig_request.new_data_parallel_rank
-            == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
+            != ReconfigureRankType.KEEP_CURRENT_RANK
         ):
-            self.shutdown()
-            logger.info("DPEngineCoreProc %s shutdown", self.dp_rank)
-        else:
-            logger.info(
-                "Distributed environment reinitialized for DP rank %s", self.dp_rank
+            new_parallel_config.data_parallel_rank = (
+                reconfig_request.new_data_parallel_rank
             )
+        new_parallel_config.data_parallel_master_ip = (
+            reconfig_request.new_data_parallel_master_ip
+        )
+        new_parallel_config.data_parallel_master_port = (
+            reconfig_request.new_data_parallel_master_port
+        )
+        new_parallel_config._data_parallel_master_port_list = (
+            reconfig_request.new_data_parallel_master_port_list
+        )
+
+        is_scale_down = reconfig_request.new_data_parallel_size < old_dp_size
+        is_shutdown = (
+            reconfig_request.new_data_parallel_rank
+            == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
+        )
+
+        self.eep_scaling_state = ElasticEPScalingState(
+            model_executor=self.model_executor,
+            engine_core=self,
+            vllm_config=self.vllm_config,
+            new_parallel_config=new_parallel_config,
+            worker_type="removing" if is_shutdown else "existing",
+            scale_type="scale_down" if is_scale_down else "scale_up",
+            reconfig_request=reconfig_request,
+        )
+        self.process_input_queue_block = False
+        logger.info(
+            "[Elastic EP] Received reconfiguration request and starting scaling up/down"
+        )
+
+    def _eep_send_engine_core_notification(
+        self,
+        notification_type: EEPNotificationType,
+        vllm_config: VllmConfig | None = None,
+    ):
+        """
+        Send notifications to EngineCoreClient, which can then forward
+        the notifications to other engine core processes. It is used for:
+        1) In scale up: new core engines to notify exisiting core engines
+           that they are ready;
+        2) In scale down: removing core engines to notify EngineCoreClient
+           so EngineCoreClient can release their ray placement groups;
+        3) Both scale up/down: to notify EngineCoreClient that exisiting
+           core engines have already switched to the new parallel setup.
+        """
+        if vllm_config is None:
+            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+        else:
+            dp_rank = vllm_config.parallel_config.data_parallel_rank
+        notification_data = (notification_type.value, dp_rank)
+        outputs = EngineCoreOutputs(
+            utility_output=UtilityOutput(
+                call_id=EEP_NOTIFICATION_CALL_ID,
+                result=UtilityResult(notification_data),
+            )
+        )
+        outputs.engine_index = self.engine_index
+
+        if hasattr(self, "output_thread") and self.output_thread.is_alive():
+            self.output_queue.put_nowait((0, outputs))
+        else:
+            encoder = MsgpackEncoder()
+            with (
+                zmq.Context() as ctx,
+                make_zmq_socket(
+                    ctx, self.addresses.outputs[0], zmq.PUSH, linger=4000
+                ) as socket,
+            ):
+                socket.send_multipart(encoder.encode(outputs))
+
+    def eep_handle_engine_core_notification(
+        self, notification_type: str | EEPNotificationType
+    ):
+        """
+        Handle notification received from EngineCoreClient
+        (forwarded from new core engines).
+        """
+        assert self.eep_scaling_state is not None
+        if isinstance(notification_type, str):
+            notification_type = EEPNotificationType(notification_type)
+        self.eep_scaling_state.handle_notification(notification_type)
+
+    def _eep_scale_up_before_kv_init(self):
+        from vllm.distributed.elastic_ep.elastic_state import ElasticEPScalingState
+
+        self.eep_scaling_state = ElasticEPScalingState(
+            model_executor=self.model_executor,
+            engine_core=self,
+            vllm_config=self.vllm_config,
+            new_parallel_config=self.vllm_config.parallel_config,
+            worker_type="new",
+            scale_type="scale_up",
+            reconfig_request=None,
+        )
+        self.model_executor.collective_rpc("init_device")
+        self.model_executor.collective_rpc("load_model")
+        self._eep_send_engine_core_notification(
+            EEPNotificationType.NEW_CORE_ENGINES_WEIGHTS_INIT_READY
+        )
+        self.model_executor.collective_rpc(
+            "elastic_ep_execute", args=("receive_weights",)
+        )
+        self.available_gpu_memory_for_kv_cache = (
+            ParallelConfig.sync_kv_cache_memory_size(self.dp_group, -1)
+        )
+        self.model_executor.collective_rpc(
+            "elastic_ep_execute", args=("prepare_new_worker",)
+        )
+        self.process_input_queue_block = False
 
 
 class EngineCoreActorMixin:

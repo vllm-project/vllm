@@ -13,8 +13,20 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadataBuilder
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionMetadataBuilder,
+    MultipleOf,
+)
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    EncoderOnlyAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 logger = init_logger(__name__)
 
@@ -57,6 +69,119 @@ class AttentionGroup:
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
         return self.metadata_builders[ubatch_id]
+
+
+def select_common_block_size(
+    kv_manager_block_size: int, attn_groups: list[AttentionGroup]
+) -> int:
+    """
+    Select a block size that is supported by all backends and is a factor of
+    kv_manager_block_size.
+
+    If kv_manager_block_size is supported by all backends, return it directly.
+    Otherwise, return the max supported size.
+
+    Args:
+        kv_manager_block_size: Block size of KV cache.
+        attn_groups: List of attention groups.
+
+    Returns:
+        The selected block size.
+
+    Raises:
+        ValueError: If no valid block size found.
+    """
+
+    def block_size_is_supported(
+        backends: list[type[AttentionBackend]], block_size: int
+    ) -> bool:
+        """Check if the block size is supported by all backends."""
+        for backend in backends:
+            is_supported = False
+            for supported_size in backend.get_supported_kernel_block_sizes():
+                if isinstance(supported_size, int):
+                    if block_size == supported_size:
+                        is_supported = True
+                elif isinstance(supported_size, MultipleOf):
+                    if block_size % supported_size.base == 0:
+                        is_supported = True
+                else:
+                    raise ValueError(f"Unknown supported size: {supported_size}")
+            if not is_supported:
+                return False
+        return True
+
+    backends = [group.backend for group in attn_groups]
+
+    # Case 1: if the block_size of kv cache manager is supported by all backends,
+    # return it directly.
+    if block_size_is_supported(backends, kv_manager_block_size):
+        return kv_manager_block_size
+
+    # Case 2: otherwise, the block_size must be an `int`-format supported size of
+    # at least one backend. Iterate over all `int`-format supported sizes in
+    # descending order and return the first one that is supported by all backends.
+    # Simple proof:
+    # If the supported size b is in MultipleOf(x_i) format for all attention
+    # backends i, and b a factor of kv_manager_block_size, then
+    # kv_manager_block_size also satisfies MultipleOf(x_i) for all i. We will
+    # return kv_manager_block_size in case 1.
+    all_int_supported_sizes = set(
+        supported_size
+        for backend in backends
+        for supported_size in backend.get_supported_kernel_block_sizes()
+        if isinstance(supported_size, int)
+    )
+
+    for supported_size in sorted(all_int_supported_sizes, reverse=True):
+        if kv_manager_block_size % supported_size != 0:
+            continue
+        if block_size_is_supported(backends, supported_size):
+            return supported_size
+    raise ValueError(f"No common block size for {kv_manager_block_size}. ")
+
+
+def prepare_kernel_block_sizes(
+    kv_cache_config: KVCacheConfig, attn_groups: list[list[AttentionGroup]]
+) -> list[int]:
+    """
+    Generate kernel_block_sizes that matches each block_size.
+
+    For attention backends that support virtual block splitting,
+    use the supported block sizes from the backend.
+    For other backends (like Mamba), use the same block size (no splitting).
+
+    Args:
+        kv_cache_config: The KV cache configuration.
+        attn_groups: Attention groups indexed by KV cache group id.
+
+    Returns:
+        List of kernel block sizes for each cache group.
+    """
+    kernel_block_sizes = []
+    for kv_cache_gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+        kv_cache_spec = kv_cache_group.kv_cache_spec
+        if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+            # All layers in the UniformTypeKVCacheSpecs have the same type,
+            # pick an arbitrary one to dispatch.
+            kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
+        if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+            continue
+        if isinstance(kv_cache_spec, AttentionSpec):
+            # This is an attention backend that supports virtual block splitting.
+            kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
+            selected_kernel_size = select_common_block_size(
+                kv_manager_block_size, attn_groups[kv_cache_gid]
+            )
+            kernel_block_sizes.append(selected_kernel_size)
+        elif isinstance(kv_cache_spec, MambaSpec):
+            # This is likely Mamba or other non-attention cache, no splitting.
+            kernel_block_sizes.append(kv_cache_spec.block_size)
+        else:
+            raise NotImplementedError(
+                f"unknown kv cache spec {kv_cache_group.kv_cache_spec}"
+            )
+    return kernel_block_sizes
 
 
 def sanity_check_mm_encoder_outputs(

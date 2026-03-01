@@ -10,8 +10,8 @@ import torch
 import vllm.envs
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.import_utils import LazyLoader
+from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
@@ -38,7 +38,7 @@ class XgrammarBackend(StructuredOutputBackend):
             self.vllm_config.structured_outputs_config.disable_any_whitespace
         )
 
-        if isinstance(self.tokenizer, MistralTokenizer):
+        if is_mistral_tokenizer(self.tokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.
             # refer to https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98
             stop_token_ids = [self.tokenizer.eos_token_id]
@@ -304,17 +304,17 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         else:
             schema = so_params.json
 
+        if has_xgrammar_unsupported_json_features(schema):
+            raise ValueError(
+                "The provided JSON schema contains features not supported by xgrammar."
+            )
+
         try:
             xgr.Grammar.from_json_schema(schema)
         except Exception as err:
             raise ValueError(
                 f"Failed to transform json schema into a grammar: {err}"
             ) from err
-
-        if has_xgrammar_unsupported_json_features(schema):
-            raise ValueError(
-                "The provided JSON schema contains features not supported by xgrammar."
-            )
         return
 
     if so_params.grammar:

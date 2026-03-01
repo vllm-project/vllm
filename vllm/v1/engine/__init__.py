@@ -9,6 +9,7 @@ from typing import Any, Literal
 import msgspec
 import numpy as np
 import torch
+from typing_extensions import deprecated
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -27,6 +28,15 @@ PauseMode = Literal["abort", "wait", "keep"]
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
 FINISH_REASON_STRINGS = ("stop", "length", "abort", "error")
+
+EEP_NOTIFICATION_CALL_ID = -1
+
+
+class EEPNotificationType(enum.Enum):
+    NEW_CORE_ENGINES_INIT_READY = "NEW_CORE_ENGINES_INIT_READY"
+    NEW_CORE_ENGINES_WEIGHTS_INIT_READY = "NEW_CORE_ENGINES_WEIGHTS_INIT_READY"
+    RECONFIGURE_FINISHED = "RECONFIGURE_FINISHED"
+    SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
 
 
 class FinishReason(enum.IntEnum):
@@ -63,7 +73,6 @@ class EngineCoreRequest(
     mm_features: list[MultiModalFeatureSpec] | None
     sampling_params: SamplingParams | None
     pooling_params: PoolingParams | None
-    eos_token_id: int | None
     arrival_time: float
     lora_request: LoRARequest | None
     cache_salt: str | None
@@ -98,6 +107,17 @@ class EngineCoreRequest(
             return self.sampling_params
         assert self.pooling_params is not None
         return self.pooling_params
+
+    @property
+    @deprecated(
+        "EngineCoreRequest.eos_token_id will be removed in v0.18. "
+        "Please use EngineCoreRequest.sampling_params.eos_token_id instead."
+    )
+    def eos_token_id(self) -> int | None:
+        if self.sampling_params is None:
+            return None
+
+        return self.sampling_params.eos_token_id
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -224,6 +244,11 @@ class ReconfigureDistributedRequest(msgspec.Struct):
     new_data_parallel_rank_local: int
     new_data_parallel_master_ip: str
     new_data_parallel_master_port: int
+    new_data_parallel_master_port_list: list[int]
+    new_stateless_world_group_port_list: list[list[int]]
+    new_stateless_dp_group_port_list: list[list[int]]
+    new_stateless_ep_group_port_list: list[list[int]]
+    new_stateless_eplb_group_port_list: list[list[int]]
 
 
 class ReconfigureRankType(enum.IntEnum):
