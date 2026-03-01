@@ -1068,6 +1068,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "model_type": "tarsier2",
         },
     ),
+    "T5Gemma2ForConditionalGeneration": _HfExamplesInfo("google/t5gemma-2-270m-270m"),
     "VoxtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Voxtral-Mini-3B-2507",
         tokenizer_mode="mistral",
