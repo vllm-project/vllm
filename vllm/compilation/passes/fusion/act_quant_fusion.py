@@ -17,6 +17,8 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Dynamic64Sym,
+    kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -42,6 +44,10 @@ silu_and_mul_nvfp4_quant_supported = current_platform.is_cuda() and hasattr(
 )
 if silu_and_mul_nvfp4_quant_supported:
     FUSED_OPS[kNvfp4Dynamic] = torch.ops._C.silu_and_mul_nvfp4_quant.default  # noqa: E501
+
+if current_platform.is_cuda():
+    FUSED_OPS[kFp8Dynamic128Sym] = torch.ops._C.silu_and_mul_per_block_quant.default
+    FUSED_OPS[kFp8Dynamic64Sym] = torch.ops._C.silu_and_mul_per_block_quant.default
 
 
 class ActivationQuantPattern(ABC):
@@ -174,6 +180,70 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
         register_replacement(pattern, replacement, self.get_inputs(), fwd_only, pm_pass)
 
 
+class SiluMulBlockQuantPattern(ActivationQuantPattern):
+    """
+    Fusion for SiluMul+BlockQuant (FP8 dynamic per-group) Pattern.
+    Supports group_size 128 and 64 via QuantKey.
+    Parameterized on is_scale_transposed for different scale layouts.
+    """
+
+    def __init__(self, quant_key: QuantKey, is_scale_transposed: bool = False) -> None:
+        super().__init__(quant_key)
+        self.quant_matcher = MatcherQuantFP8(
+            quant_key, has_col_major_scales=is_scale_transposed
+        )
+        self.group_size = quant_key.scale.group_shape[1]
+        self.is_scale_transposed = is_scale_transposed
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        # Dynamic block quant has no external scale input
+        return self.silu_and_mul_matcher.inputs()
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        is_scale_transposed = self.is_scale_transposed
+
+        def pattern(
+            input: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            silu_out = self.silu_and_mul_matcher(input)
+            quant_out, scale_out = self.quant_matcher(silu_out)
+            return quant_out, scale_out
+
+        def replacement(
+            input: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            d = input.shape[-1] // 2
+            output_shape = input.shape[:-1] + (d,)
+            result = torch.empty(
+                output_shape, device=input.device, dtype=self.quant_dtype
+            )
+            if is_scale_transposed:
+                scale = torch.empty(
+                    (d // self.group_size, input.shape[0]),
+                    device=input.device,
+                    dtype=torch.float32,
+                ).permute(-1, -2)
+            else:
+                scale = torch.empty(
+                    (input.shape[0], d // self.group_size),
+                    device=input.device,
+                    dtype=torch.float32,
+                )
+            at = auto_functionalized(
+                self.FUSED_OP,
+                out=result,
+                input=input,
+                scales=scale,
+                group_size=self.group_size,
+                scale_ub=None,
+                is_scale_transposed=is_scale_transposed,
+            )
+            return at[1], at[2]
+
+        inps = self.get_inputs()
+        register_replacement(pattern, replacement, inps, fwd_only, pm_pass)
+
+
 class ActivationQuantFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses a pre-defined set of custom ops into fused ops.
@@ -199,6 +269,14 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()
             pattern_silu_mul_nvfp4.register(self.patterns)
 
+        if current_platform.is_cuda():
+            for quant_key in [kFp8Dynamic128Sym, kFp8Dynamic64Sym]:
+                for is_scale_transposed in [False, True]:
+                    pattern_silu_mul_block = SiluMulBlockQuantPattern(
+                        quant_key, is_scale_transposed=is_scale_transposed
+                    )
+                    pattern_silu_mul_block.register(self.patterns)
+
         self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
@@ -212,4 +290,5 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             ActivationQuantPattern,
             SiluMulFp8StaticQuantPattern,
             SiluMulNvfp4QuantPattern,
+            SiluMulBlockQuantPattern,
         )
