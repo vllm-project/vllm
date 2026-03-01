@@ -83,7 +83,7 @@ def test_llama4_fp8_tensor_moe_vllm_triton(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
         hf_overrides=HF_OVERRIDE_TEXT,
-        extra_args=["--moe-backend=cutlass"],
+        extra_args=["--moe-backend=triton"],
     )
 
 
