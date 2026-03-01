@@ -155,6 +155,8 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
         handler.default_sampling_params,
     )
 
+    # Prefix matches OpenAI-style Chat Completions IDs (e.g. "chatcmpl-...")
+    # to keep logs/tooling consistent with /v1/chat/completions.
     request_id = f"chatcmpl-{handler._base_request_id(raw_request, request.request_id)}"
 
     # NOTE: 'features' is a placeholder in the RFC. Multimodal inputs are
