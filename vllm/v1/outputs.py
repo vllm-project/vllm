@@ -195,6 +195,10 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
+    # Speculative decoding: per-request source mask and stats for this step.
+    sd_source_masks: list[list[bool]] | None = None
+    sd_stats_list: list[dict] | None = None
+
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):

@@ -1410,6 +1410,13 @@ class Scheduler(SchedulerInterface):
                 or stopped
             ):
                 # Add EngineCoreOutput for this Request.
+                req_index = model_runner_output.req_id_to_index[req_id]
+                sd_source_mask = None
+                sd_stats = None
+                if model_runner_output.sd_source_masks is not None:
+                    sd_source_mask = model_runner_output.sd_source_masks[req_index]
+                if model_runner_output.sd_stats_list is not None:
+                    sd_stats = model_runner_output.sd_stats_list[req_index]
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
@@ -1426,6 +1433,8 @@ class Scheduler(SchedulerInterface):
                         num_external_computed_tokens=request.num_external_computed_tokens,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        sd_source_mask=sd_source_mask,
+                        sd_stats=sd_stats,
                     )
                 )
             else:

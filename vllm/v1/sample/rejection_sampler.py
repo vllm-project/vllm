@@ -220,7 +220,13 @@ class RejectionSampler(nn.Module):
         vocab_size: int,
         discard_req_indices: Sequence[int] = (),
         logprobs_tensors: LogprobsTensors | None = None,
-    ) -> tuple[list[list[int]], LogprobsLists | None]:
+        spec_decode_metadata: SpecDecodeMetadata | None = None,
+    ) -> tuple[
+        list[list[int]],
+        LogprobsLists | None,
+        list[list[bool]] | None,
+        list[dict] | None,
+    ]:
         """Parse the output of the rejection sampler.
         Args:
             output_token_ids: The sampled token IDs in shape
@@ -230,8 +236,12 @@ class RejectionSampler(nn.Module):
             vocab_size: The size of the vocabulary.
             discard_req_indices: Optional row indices to discard tokens in.
             logprobs_tensors: Optional logprobs tensors to filter.
+            spec_decode_metadata: If provided, also compute and return
+                sd_source_mask and sd_stats per request.
         Returns:
-            A list of lists of token IDs.
+            (outputs, output_logprobs, sd_source_masks, sd_stats_list).
+            When spec_decode_metadata is None, sd_source_masks and
+            sd_stats_list are None.
         """
         output_token_ids_np = output_token_ids.cpu().numpy()
         # Create mask for valid tokens.
@@ -249,7 +259,48 @@ class RejectionSampler(nn.Module):
         outputs = [
             row[valid_mask[i]].tolist() for i, row in enumerate(output_token_ids_np)
         ]
-        return outputs, output_logprobs
+
+        sd_source_masks: list[list[bool]] | None = None
+        sd_stats_list: list[dict] | None = None
+        if spec_decode_metadata is not None:
+            batch_size = output_token_ids_np.shape[0]
+            num_draft_tokens = spec_decode_metadata.num_draft_tokens
+            cu_num_draft_tokens = spec_decode_metadata.cu_num_draft_tokens
+            draft_token_ids_np = spec_decode_metadata.draft_token_ids.cpu().numpy()
+            max_spec_plus_1 = output_token_ids_np.shape[1]
+            sd_source_masks = []
+            sd_stats_list = []
+            for i in range(batch_size):
+                mask_row: list[bool] = []
+                num_draft = num_draft_tokens[i]
+                draft_start = int(cu_num_draft_tokens[i - 1].item()) if i > 0 else 0
+                num_accepted_draft = 0
+                num_from_target = 0
+                for j in range(max_spec_plus_1):
+                    if not valid_mask[i, j]:
+                        continue
+                    if j < num_draft:
+                        out_tok = int(output_token_ids_np[i, j])
+                        draft_tok = int(draft_token_ids_np[draft_start + j])
+                        from_draft = out_tok == draft_tok
+                        mask_row.append(from_draft)
+                        if from_draft:
+                            num_accepted_draft += 1
+                        else:
+                            num_from_target += 1
+                    else:
+                        mask_row.append(False)
+                        num_from_target += 1
+                sd_source_masks.append(mask_row)
+                # Per-step stats: num_draft_tokens = draft positions proposed,
+                # num_accepted_tokens = accepted from draft
+                sd_stats_list.append(
+                    {
+                        "num_draft_tokens": num_draft,
+                        "num_accepted_tokens": num_accepted_draft,
+                    }
+                )
+        return outputs, output_logprobs, sd_source_masks, sd_stats_list
 
     def apply_logits_processors(
         self,

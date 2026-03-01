@@ -185,6 +185,10 @@ class RequestState:
             deque() if stream_input else None
         )
 
+        # Speculative decoding: cumulative mask and stats for output tokens.
+        self.sd_source_mask: list[bool] = []
+        self.sd_stats: dict[str, Any] = {}
+
     def apply_streaming_update(self, update: StreamingUpdate) -> None:
         # Apply the update to the request state.
         self.streaming_input = not update.final
@@ -395,6 +399,19 @@ class RequestState:
         if delta and logprobs:
             logprobs = logprobs[-len(token_ids) :]
 
+        # Map accumulated SD stats to API: num_draft_tokens, num_accepted_tokens,
+        # efficiency
+        sd_stats_for_output: dict[str, Any] | None = None
+        if self.sd_stats:
+            num_draft = self.sd_stats.get("num_draft_tokens", 0)
+            num_accepted = self.sd_stats.get("num_accepted_tokens", 0)
+            eff = num_accepted / num_draft if num_draft > 0 else None
+            sd_stats_for_output = {
+                "num_draft_tokens": num_draft,
+                "num_accepted_tokens": num_accepted,
+                "efficiency": eff,
+            }
+
         return CompletionOutput(
             index=self.request_index,
             text=text,
@@ -404,6 +421,8 @@ class RequestState:
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
+            sd_source_mask=self.sd_source_mask if self.sd_source_mask else None,
+            sd_stats=sd_stats_for_output,
         )
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
@@ -619,6 +638,16 @@ class OutputProcessor:
             routed_experts = engine_core_output.routed_experts
             req_state.num_cached_tokens = engine_core_output.num_cached_tokens
             req_state.is_prefilling = False
+
+            # Accumulate speculative decoding data for this request.
+            if engine_core_output.sd_source_mask is not None:
+                req_state.sd_source_mask.extend(engine_core_output.sd_source_mask)
+            if engine_core_output.sd_stats is not None:
+                for k, v in engine_core_output.sd_stats.items():
+                    if isinstance(v, (int, float)):
+                        req_state.sd_stats[k] = req_state.sd_stats.get(k, 0) + v
+                    else:
+                        req_state.sd_stats[k] = v
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None
