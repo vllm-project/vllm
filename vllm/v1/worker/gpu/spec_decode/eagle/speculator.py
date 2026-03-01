@@ -16,10 +16,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     build_slot_mappings_by_layer,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.dp_utils import (
-    get_cudagraph_and_dp_padding,
-    make_num_tokens_across_dp,
-)
+from vllm.v1.worker.gpu.dp_utils import get_cudagraph_and_dp_padding
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
@@ -240,10 +237,6 @@ class EagleSpeculator:
 
         # Prefill: Run the eagle speculator with eager mode.
         # TODO(woosuk): Support CUDA graph for prefill.
-        if num_tokens_across_dp is None:
-            num_tokens_across_dp = make_num_tokens_across_dp(
-                self.dp_size, num_tokens, self.dp_rank, need_all_reduce=True
-            )
         last_hidden_states, hidden_states = self.run_model(
             num_tokens,
             attn_metadata,

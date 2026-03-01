@@ -6,18 +6,10 @@ import torch.distributed as dist
 from vllm.distributed.parallel_state import get_dp_group
 
 
-def make_num_tokens_across_dp(
-    dp_size: int, num_tokens: int, dp_rank: int = 0, need_all_reduce: bool = False
-) -> torch.Tensor | None:
+def make_num_tokens_across_dp(dp_size: int, num_tokens: int) -> torch.Tensor | None:
     if dp_size == 1:
         return None
-
-    if not need_all_reduce:
-        return torch.full((dp_size,), num_tokens, dtype=torch.int32, device="cpu")
-    tensor = torch.zeros(dp_size, dtype=torch.int32, device="cpu")
-    tensor[dp_rank] = num_tokens
-    dist.all_reduce(tensor, group=get_dp_group().cpu_group)
-    return tensor
+    return torch.full((dp_size,), num_tokens, dtype=torch.int32, device="cpu")
 
 
 def get_batch_metadata_across_dp(
