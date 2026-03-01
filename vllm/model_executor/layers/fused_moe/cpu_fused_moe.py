@@ -7,6 +7,7 @@ import torch
 from torch.nn import functional as F
 
 from vllm import _custom_ops as ops
+from vllm.platforms import current_platform
 from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -280,10 +281,7 @@ class CPUFusedMOE:
         if not (w13_output_size % 32 == 0 and w2_output_size % 32 == 0):
             return False, "none"
 
-        if hasattr(torch._C._cpu, "_is_amx_tile_supported"):
-            supports_amx = torch._C._cpu._is_amx_tile_supported()
-        else:
-            supports_amx = False
+        supports_amx = current_platform.is_amx_tile_supported()
 
         if (
             supports_amx

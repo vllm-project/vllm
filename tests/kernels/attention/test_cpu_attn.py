@@ -48,7 +48,7 @@ def get_attn_isa(
     else:
         if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
             return "neon"
-        elif hasattr(torch._C._cpu, '_is_amx_tile_supported') and torch._C._cpu._is_amx_tile_supported():
+        elif current_platform.is_amx_tile_supported():
             return "amx"
         else:
             return "vec"
@@ -401,7 +401,7 @@ def test_varlen_with_paged_kv_normal_vec(
 @pytest.mark.parametrize("use_sink", [False])
 @pytest.mark.parametrize("isa", ["amx"])
 @pytest.mark.skipif(
-    not (hasattr(torch._C._cpu, '_is_amx_tile_supported') and torch._C._cpu._is_amx_tile_supported()), reason="no AMX support."
+    not current_platform.is_amx_tile_supported(), reason="no AMX support."
 )
 def test_varlen_with_paged_kv_normal_amx(
     seq_lens: list[tuple[int, int]],

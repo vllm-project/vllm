@@ -22,7 +22,7 @@ INTERMEDIATE_DIM = [128, 2880]
 BATCH_SIZE = [1, 64, 256]
 ACT = [MoEActivation.SILU, MoEActivation.SWIGLUOAI]
 USE_BIAS = [True, False]
-ISA = ["amx", "vec"] if hasattr(torch._C._cpu, '_is_amx_tile_supported') and torch._C._cpu._is_amx_tile_supported() else ["vec"]
+ISA = ["amx", "vec"] if current_platform.is_amx_tile_supported() else ["vec"]
 DTYPE = [torch.bfloat16]
 
 
