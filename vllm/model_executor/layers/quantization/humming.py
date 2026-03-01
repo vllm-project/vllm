@@ -44,6 +44,7 @@ from vllm.model_executor.layers.quantization.utils.humming_moe_utils import (
 from vllm.model_executor.layers.quantization.utils.humming_weight_utils import (
     WEIGHT_CONVERTER_MAP,
 )
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 
 
@@ -209,6 +210,7 @@ class HummingLayerQuantizationConfig(QuantizationConfig):
         weight_scale_group_size_k: int,
         has_dynamic_zp: bool,
         has_global_scale: bool,
+        is_online_quantization: bool,
     ) -> None:
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
@@ -221,6 +223,7 @@ class HummingLayerQuantizationConfig(QuantizationConfig):
         self.weight_scale_group_size_k = weight_scale_group_size_k
         self.has_dynamic_zp = has_dynamic_zp
         self.has_global_scale = has_global_scale
+        self.is_online_quantization = is_online_quantization
 
     @classmethod
     def from_config(cls, config):
@@ -236,6 +239,7 @@ class HummingLayerQuantizationConfig(QuantizationConfig):
             weight_scale_group_size_k=config.get("weight_scale_group_size_k", 0),
             has_dynamic_zp=config.get("has_dynamic_zp", False),
             has_global_scale=config.get("has_global_scale", False),
+            is_online_quantization=config.get("is_online_quantization", False),
         )
 
     @classmethod
@@ -367,6 +371,7 @@ class HummingConfig(QuantizationConfig):
             )
             if weight_config is not None:
                 weight_config["ckpt_quant_method"] = None
+                weight_config["is_online_quantization"] = True
 
         if weight_config is not None:
             config = weight_config.copy()
@@ -414,11 +419,16 @@ class HummingLinearMethod(LinearMethodBase):
     ):
         f16_dtype = dtypes.DataType.from_torch_dtype(params_dtype)
         output_size_per_partition = sum(output_partition_sizes)
+        layer.is_fallback = False
         layer.logical_widths = output_partition_sizes
         layer.output_size = output_size
         layer.input_size_per_partition = input_size_per_partition
+        layer.output_partition_sizes = output_partition_sizes
+        layer.input_size = input_size
+        layer.output_size = output_size
         layer.output_size_per_partition = output_size_per_partition
         layer.orig_dtype = params_dtype
+        layer.extra_weight_attrs = extra_weight_attrs
 
         group_size = self.quant_config.weight_scale_group_size_k
         assert input_size_per_partition % group_size == 0
@@ -454,7 +464,7 @@ class HummingLinearMethod(LinearMethodBase):
 
     def process_params(self, layer: torch.nn.Module):
         weight_loader = self.get_weight_loader(layer)
-        names = ["weight", "weight_scale", "zero_point", "global_scale", "bias"]
+        names = ["weight", "weight_scale", "zero_point", "global_scale"]
         unused_names = list(self.weight_converter.unused_names)
 
         for name in names:
@@ -468,13 +478,11 @@ class HummingLinearMethod(LinearMethodBase):
             if name == param.ckpt_name:
                 continue
 
-            buffer = torch.nn.Buffer(param.data)
-
-            # rename param name (layer_name -> ckpt_name) for weight loading
-            setattr(layer, param.ckpt_name, param)
-            # convert from a Parameter to a Buffer to avoid conflicts with ckpt_name
-            delattr(layer, param.param_name)
-            setattr(layer, param.param_name, buffer)
+            param_new = torch.nn.Parameter(param.data, requires_grad=False)
+            param_new.param_name = param.param_name
+            param_new.ckpt_name = param.ckpt_name
+            set_weight_attrs(param_new, {"weight_loader": weight_loader})
+            setattr(layer, param.ckpt_name, param_new)
 
         # set unused names to empty tensors and empty weight_loaders
         # to avoid loading errors
@@ -494,6 +502,53 @@ class HummingLinearMethod(LinearMethodBase):
             set_weight_attrs(param, {"weight_loader": empty_weight_loader})
             setattr(layer, ckpt_name, param)
 
+    def may_fallback_to_unquantized(
+        self,
+        layer: torch.nn.Module,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+    ):
+        # a trick to identity and fallback layers that were initialized as quantized
+        # but contain non-quantized weights (often due to missing layer_name
+        # in the ignore list).
+        unquantized_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+        full_shape_n = layer.output_size
+        full_shape_k = layer.input_size
+        is_fallback = (
+            param.param_name == "weight"
+            and loaded_weight.dtype in unquantized_dtypes
+            and not self.quant_config.is_online_quantization
+            and loaded_weight.shape == (full_shape_n, full_shape_k)
+        )
+
+        if not is_fallback:
+            assert not layer.is_fallback
+            return
+
+        layer.is_fallback = True
+
+        # remove all param
+        for name, param in list(layer.named_parameters()):
+            if name == "bias":
+                continue
+            delattr(layer, name)
+
+        # create_weights with UnquantizedLinearMethod
+        self.__class__ = UnquantizedLinearMethod
+        self.create_weights(
+            layer=layer,
+            input_size_per_partition=layer.input_size_per_partition,
+            output_partition_sizes=layer.output_partition_sizes,
+            input_size=layer.input_size,
+            output_size=layer.output_size,
+            params_dtype=layer.orig_dtype,
+            **layer.extra_weight_attrs,
+        )
+
+        weight_loader = getattr(layer.weight, "weight_loader", default_weight_loader)
+        weight_loader(layer.weight, loaded_weight)
+        layer.weight.data = layer.weight.data.to(param.device)
+
     def get_weight_loader(self, layer: torch.nn.Module):
         shard_id_map = {"q": 0, "k": 1, "v": 2}
 
@@ -510,6 +565,11 @@ class HummingLinearMethod(LinearMethodBase):
             if isinstance(shard_id, int):
                 shape_n = layer.logical_widths[shard_id]
             shape_k = self.meta.shape_k - self.meta.pad_shape_k
+
+            self.may_fallback_to_unquantized(layer, param, loaded_weight)
+            if layer.is_fallback:
+                return
+
             shape_n, shape_k = get_full_shape_nk(layer, shape_n, shape_k)
             data = self.weight_converter.convert(
                 loaded_weight,
