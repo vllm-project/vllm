@@ -1075,7 +1075,7 @@ def extract_speech_token(
             # if audio.shape[0] > 1:
             #     audio = audio[:1]
             audio = audio[0]
-            audio = audio.cpu().numpy()
+            audio = audio.to(torch.float32).cpu().numpy()
             time_step = 0
             while time_step * 16000 < audio.shape[0]:
                 audio_segment = audio[time_step * 16000 : (time_step + 30) * 16000]
@@ -1126,6 +1126,7 @@ class Glm4Tokenizer(nn.Module):
         self.feature_extractor = None
 
     def tokenize(self, speech=None, audio_path=None, sr=16000):
+        assert self.tokenizer_path is not None, "Glm4Tokenizer path must be provided"
         if self.whisper_model is None:
             self.whisper_model = WhisperVQEncoder.from_pretrained(
                 self.tokenizer_path

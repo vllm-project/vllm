@@ -389,10 +389,12 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
             residual = None
         else:
             assert intermediate_tensors is not None
-            hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
-            mimo_hidden_states = intermediate_tensors.get("mimo_hidden_states")
-            mimo_residual = intermediate_tensors.get("mimo_residual")
+            it_dict = intermediate_tensors.tensors
+            # use get to avoid KeyError for missing attributes in PP
+            hidden_states = it_dict.get("hidden_states")
+            residual = it_dict.get("residual")
+            mimo_hidden_states = it_dict.get("mimo_hidden_states")
+            mimo_residual = it_dict.get("mimo_residual")
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]

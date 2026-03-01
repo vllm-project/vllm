@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Collection, Set
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, List, Union
 
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
@@ -89,13 +89,7 @@ class TikTokenTokenizer(PreTrainedTokenizer):
 
     @property
     def pad_id(self) -> int:
-        """Expose pad_id for KimiAudioProcessor compatibility."""
-        # Kimi-Audio uses kimia_assistant_msg_start as pad token
-        return self.special_tokens.get("<|im_kimia_assistant_msg_start|>", 151666)
-
-    @property
-    def pad_token_id(self) -> int:
-        return self.pad_id
+        return self.tokenizer.pad_id
 
     @property
     def max_token_id(self) -> int:
@@ -149,22 +143,29 @@ class TikTokenTokenizer(PreTrainedTokenizer):
     def encode(
         self,
         s: str,
+        add_special_tokens: bool = True,
         *,
-        bos: bool,
-        eos: bool,
+        bos: bool = None,
+        eos: bool = None,
         allowed_special: Literal["all"] | Set[str] = set(),
         disallowed_special: Literal["all"] | Collection[str] = (),
     ) -> list[int]:
-        return self.tokenizer.encode(s, bos=bos, eos=eos)
+        final_bos = bos if bos is not None else add_special_tokens
+        final_eos = eos if eos is not None else add_special_tokens
+        
+        return self.tokenizer.encode(s, bos=final_bos, eos=final_eos)
 
     def decode(self, ids: list[int] | int, **kwargs) -> str:
+        # NOTE: TikToken is not support for these kwargs 
+        kwargs.pop("skip_special_tokens", None) 
+        kwargs.pop("clean_up_tokenization_spaces", None)
         assert self.kimia_token_offset, (
             "kimia_token_offset must be set for TikTokenTokenizer."
         )
         if isinstance(ids, int):
             ids = [ids]
         token_ids = [t for t in ids if t < self.kimia_token_offset]
-        return self.tokenizer.decode(token_ids, **kwargs)
+        return self.tokenizer.decode(token_ids)
 
     def _get_bytes_to_id_map(self) -> dict[bytes, int]:
         _bytes_to_id = getattr(self, "_bytes_to_id", None)
@@ -182,51 +183,48 @@ class TikTokenTokenizer(PreTrainedTokenizer):
 
         return self._bytes_to_id
 
-    def convert_tokens_to_string(self, tokens: list[str]) -> str:
-        special_tokens = set(self.all_special_tokens)
-
-        tokens = [t for t in tokens if t not in special_tokens]
-        if not tokens:
-            return ""
-
-        has_bytes = any(isinstance(t, bytes) for t in tokens)
-        if not has_bytes:
-            return "".join(tokens)
-
-        bytes_to_id: dict[bytes, int] = self._get_bytes_to_id_map()
-        decoded_strs: list[str] = []
-        fallback_ids: list[int] = []
-
-        for t in tokens:
-            if isinstance(t, bytes):
-                try:
-                    decoded_strs.append(t.decode("utf-8"))
-                except UnicodeDecodeError:
-                    # we convert the bytes to ids and decode them
-                    fallback_id = bytes_to_id.get(t)
-                    if fallback_id is not None:
-                        fallback_ids.append(fallback_id)
-            else:
-                decoded_strs.append(t)
-
-        if fallback_ids:
-            return self.model.decode(fallback_ids)
-
-        return "".join(decoded_strs)
-
     def convert_ids_to_tokens(
         self,
-        ids: list[int],
+        ids: Union[int, List[int]],
         skip_special_tokens: bool = False,
-    ) -> list[str]:
-        if isinstance(ids, int):
+    ) -> Union[str, bytes, List[Union[str, bytes]]]:
+        is_single = isinstance(ids, int)
+        if is_single:
             ids = [ids]
 
         tokens = []
         for token_id in ids:
-            if skip_special_tokens and token_id in self.all_special_ids:
+            if skip_special_tokens and token_id in self.special_tokens.values():
                 continue
-            token = self.inv_vocab.get(token_id, "[UNK]")
-            tokens.append(token)
 
-        return tokens[0] if len(tokens) == 1 else tokens
+            try:
+                raw_bytes = self.model.decode_single_token_bytes(token_id)
+                tokens.append(raw_bytes)
+            except KeyError:
+                token_str = self.inv_vocab.get(token_id, "[UNK]")
+                tokens.append(token_str)
+
+        return tokens[0] if is_single else tokens
+
+    def convert_tokens_to_string(self, tokens: List[Union[str, bytes]]) -> str:
+        special_token_strs = set(self.special_tokens.keys())
+        
+        byte_array = bytearray()
+        string_parts = []
+
+        for t in tokens:
+            if isinstance(t, str) and t in special_token_strs:
+                continue
+
+            if isinstance(t, bytes):
+                byte_array.extend(t)
+            elif isinstance(t, str):
+                if byte_array:
+                    string_parts.append(byte_array.decode("utf-8", errors="replace"))
+                    byte_array.clear()
+                string_parts.append(t)
+
+        if byte_array:
+            string_parts.append(byte_array.decode("utf-8", errors="replace"))
+
+        return "".join(string_parts)

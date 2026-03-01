@@ -3,11 +3,10 @@
 # adapted from https://github.com/MoonshotAI/Kimi-Audio/tree/master/kimia_infer/api/prompt_manager.py
 import os
 import contextlib
-from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cache
 from subprocess import CalledProcessError, run
-from typing import cast
+from typing import cast, Union
 
 import numpy as np
 import torch
@@ -19,7 +18,6 @@ from transformers.models.whisper.modeling_whisper import WhisperModel
 from transformers.tokenization_utils_base import TextInput
 
 from vllm.logger import init_logger
-from vllm.multimodal.inputs import NestedTensors
 
 logger = init_logger(__name__)
 
@@ -30,8 +28,6 @@ N_MELS = 120
 HOP_LENGTH = 160
 CHUNK_LENGTH = 30
 N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE  # 480000 samples in a 30-second chunk
-
-AUDIO_TYPE = np.ndarray | torch.Tensor
 
 
 def load_audio(file: str, sr: int = SAMPLE_RATE):
@@ -317,8 +313,8 @@ class KimiAContent:
         self.audio_token_loss_mask: list[int] = audio_token_loss_mask or []
         self.text_token_loss_mask: list[int] = text_token_loss_mask or []
 
-        # Storage audio paths for audio waveform extraction in later __call__().
-        self.continuous_feature: list[str] = []
+        # Storage raw audio datas(or audio path) for audio waveform extraction in MoonshotKimiaForCausalLM.
+        self.continuous_feature: list[Union[np.ndarray, str]] = []
 
     def audio_append(
         self,
@@ -460,53 +456,31 @@ class KimiAudioProcessor:
         self,
         kimia_text_audiodelaytokens=5,
         kimia_token_offset=152064,
-        text_tokenizer=None,
+        tokenizer=None,
         audio_tokenizer=None,
         chat_template=None,
     ):
-        self.text_tokenizer = text_tokenizer
+        self.text_tokenizer = tokenizer
         self.audio_tokenizer = audio_tokenizer
-        logger.info("Audio tokenizer: %s", audio_tokenizer)
         self.chat_template = chat_template
         # Delay extra_tokens initialization for dummy input creation
         self._extra_tokens = None
         self.kimia_text_audiodelaytokens = kimia_text_audiodelaytokens
         self.kimia_token_offset = kimia_token_offset
         self._whisper_config = None
-        # Make sure no conflict with text tokenizer
-        if text_tokenizer is not None:
-            # Will trigger lazy initialization through property
-            self.pad_token_id = self.extra_tokens.kimia_text_blank
+        if tokenizer is not None:
             self.audio_placeholder_id = self.text_tokenizer.vocab_size + 10
         else:
-            # Use default values for dummy input creation
-            self.pad_token_id = 151666
             self.audio_placeholder_id = 152074  # default vocab_size + 10
 
     @property
     def extra_tokens(self) -> ExtraTokens:
         """Lazy initialization of extra_tokens to support dummy input creation."""
         if self._extra_tokens is None:
-            if self.text_tokenizer is not None:
-                self._extra_tokens = instantiate_extra_tokens(self.text_tokenizer)
-            else:
-                # Return default ExtraTokens for dummy input creation
-                # These are typical values based on the Kimi-Audio tokenizer
-                self._extra_tokens = ExtraTokens(
-                    msg_end=151643,  # <|im_msg_end|>
-                    user_msg_start=151644,  # <|im_user_msg_start|>
-                    assistant_msg_start=151645,  # <|im_assistant_msg_start|>
-                    media_begin=151656,  # <|im_media_begin|>
-                    media_end=151658,  # <|im_media_end|>
-                    kimia_text_blank=151661,  # <|im_kimia_text_blank|>
-                    kimia_text_eos=151662,  # <|im_kimia_text_eos|>
-                    kimia_user_msg_start=151665,  # <|im_kimia_user_msg_start|>
-                    # <|im_kimia_assistant_msg_start|>
-                    kimia_assistant_msg_start=151666,
-                    kimia_speech_ct_id=151670,  # <|im_kimia_speech_ct_id|>
-                    kimia_speech_ctd_id=151671,  # <|im_kimia_speech_ctd_id|>
-                    pad=151666,  # default pad token
-                )
+            assert self.text_tokenizer is not None, ("text_tokenizer must be set to"
+            "instantiate extra_tokens.")
+            self._extra_tokens = instantiate_extra_tokens(self.text_tokenizer)
+
         return self._extra_tokens
 
     def _tokenize_text(self, text: str) -> list[int]:
@@ -517,17 +491,14 @@ class KimiAudioProcessor:
         else:
             return self.text_tokenizer(text, add_special_tokens=False)["input_ids"]
 
-    def _get_audio_path(self, audio_path: str) -> str:
+    def _tokenize_audio(self, audio_data: np.ndarray | str) -> list[int]:
         """
-        Return the audio path without loading the actual data.
-        Audio loading will be deferred to worker process to avoid fork issues
-        with librosa and other audio libraries.
-        """
-        return audio_path
+        Convert the audio data into a sequence of placeholder tokens.
 
-    def _tokenize_audio(self, audio_path: str) -> list[int]:
-        # handle audio placeholder here, using sequence
-        # with same length as actual audio tensor
+        No actual audio encoding is performed here, but rather generation corresponding 
+        to the audio length. Dummy tokens are used to maintain sequence length alignment.
+        The actual audio feature extraction is handled solely by the forward in model.
+        """
         if self.audio_tokenizer is None:
             raise ValueError(
                 "audio_tokenizer is None, you must explicitly specify the path."
@@ -536,11 +507,11 @@ class KimiAudioProcessor:
         if self._whisper_config is None:
             self._whisper_config = AutoConfig.from_pretrained(self.audio_tokenizer)
 
-        count = self.get_num_audio_tokens(audio_path, self._whisper_config)
+        count = self.get_num_audio_tokens_from_data(audio_data, self._whisper_config)
         wav_tokens = torch.full(
             (count,), self.audio_placeholder_id, dtype=torch.long, device="cpu"
         )
-        wav_tokens = wav_tokens.cpu().tolist()
+        wav_tokens = wav_tokens.tolist()
         return wav_tokens
 
     def _calculate_num_tokens_from_length(
@@ -567,13 +538,13 @@ class KimiAudioProcessor:
 
         return total_tokens
 
-    def get_num_audio_tokens(
-        self, audio_path: str, model_config, hop_length=160
+    def get_num_audio_tokens_from_data(
+        self, audio_input: np.ndarray | str, model_config, hop_length=160
     ) -> int:
-        import soundfile as sf
+        if isinstance(audio_input, str):
+            audio_input = load_audio(audio_input)
 
-        audio_info = sf.info(audio_path)
-        audio_length = int(audio_info.frames)
+        audio_length = audio_input.shape[0]
         return self._calculate_num_tokens_from_length(
             audio_length, model_config, hop_length
         )
@@ -624,31 +595,28 @@ class KimiAudioProcessor:
                 )
 
         elif message["message_type"] == "audio":
-            # Only support audio_path for input
-            if "content" not in message:
-                raise ValueError("Expected 'content' key in message")
-
-            audio_path = message["content"]
-            if not isinstance(audio_path, str):
-                raise ValueError("Expected 'content' to be a string")
-
-            # Don't load audio data here to avoid librosa fork issues
-            # Just use the path and create placeholder tokens
-            speech_tokens = self._tokenize_audio(audio_path)
+            if "audio_tokens" in message:
+                audio_arrays: np.ndarray = message["audio_tokens"]
+                audio_path = audio_arrays
+                audio_data = self._tokenize_audio(audio_arrays)
+            else:
+                audio_path: str = message["content"]
+                audio_data = self._tokenize_audio(audio_path)
 
             kimia_content_msg.audio_append(self.extra_tokens.media_begin)
             kimia_content_msg.audio_extend(
-                speech_tokens,
+                audio_data,
                 is_continuous=True,
                 audio_token_loss_mask=has_loss,
             )
             kimia_content_msg.audio_append(
                 self.extra_tokens.media_end, audio_token_loss_mask=has_loss
             )  # EOS for audio stream
-            kimia_content_msg.text_extend(
-                [self.extra_tokens.kimia_text_blank] * (len(speech_tokens) + 2)
-            )
 
+            # A audio placeholder and two kimia_text_blank at the end and begin
+            kimia_content_msg.text_append(self.extra_tokens.kimia_text_blank)
+            kimia_content_msg.text_append(self.audio_placeholder_id)
+            kimia_content_msg.text_append(self.extra_tokens.kimia_text_blank)
             if has_ct_token:
                 if output_type == "text":
                     kimia_content_msg.audio_append(self.extra_tokens.kimia_speech_ct_id)
@@ -663,10 +631,10 @@ class KimiAudioProcessor:
             if extract_whisper_feature:
                 kimia_content_msg.continuous_feature.append(audio_path)
 
-        # TODO: Support this branch as official library does in future.
+        # TODO(HelloWorldU): Support this branch as official library does in future.
         elif message["message_type"] == "audio-text":
-            audio_path, text = message["content"]
-            speech_tokens = self._tokenize_audio(audio_path)
+            audio_data, text = message["content"]
+            speech_tokens = self._tokenize_audio(audio_data)
             text_tokens = self._tokenize_text(text)
 
             kimia_content_msg.audio_extend(
@@ -690,36 +658,46 @@ class KimiAudioProcessor:
             )
             kimia_content_msg.text_append(self.extra_tokens.kimia_text_blank)
 
-        assert kimia_content_msg.is_valid(), (
-            f"kimia_content_msg is not valid: {kimia_content_msg}"
-        )
+        # NOTE: KimiAudio is a dual-track architecture. In vLLM, we use a single 
+        # placeholder in text-stream to represent the entire audio sequence length. 
+        # We skip the strict length check here because alignment is handled 
+        # at the embedding level during model forward pass.
+        # assert kimia_content_msg.is_valid(), (
+        #     f"kimia_content_msg is not valid: {kimia_content_msg}"
+        # )
 
         return kimia_content_msg
 
     def handle_prompt(self, messages: KimiAContent) -> dict:
         audio_input_ids, text_input_ids, is_continuous_mask, _, _ = messages.to_tensor()
-        audio_paths: list[str] = messages.continuous_feature
+        audio_contents: list[Union[np.ndarray, str]] = messages.continuous_feature
 
-        # Construct text prompt ids, mm_data and kwargs
-        # Pass audio paths (not loaded data) to avoid fork issues
-        text_input_ids = text_input_ids.cpu().tolist()[0]  # Remove batch dimension
-        # mm_data = audio_paths
-        
         # NOTE: vLLM's MultiModalDataParser requires raw audio data (numpy/tensor)
         # to perform validation and resampling. Passing paths directly causes 
         # assertion errors. We load the audio here to satisfy the parser.
-        mm_data = []
-        for path in audio_paths:
-            audio_array = load_audio(path)
-            tensor_data = torch.from_numpy(audio_array)
-            mm_data.append(tensor_data)
+        mm_data: list[torch.Tensor] = []
+        for content in audio_contents:
+            if isinstance(content, str):
+                content = load_audio(content)  # np.ndarray
+            
+            if isinstance(content, np.ndarray):
+                tensor = torch.from_numpy(content).float()
+            elif isinstance(content, torch.Tensor):
+                tensor = content.float() if content.dtype != torch.float32 else content
+            else:
+                raise TypeError(f"Unsupported audio content type: {type(content)}")
+            
+            mm_data.append(tensor)
 
+        # shape: [batch, seq_len]
         per_request_kwargs = dict(
-            audio_input_ids=audio_input_ids.cpu().tolist(),
-            is_continuous_mask=is_continuous_mask.cpu().tolist(),
-            audio_waveforms=audio_paths,
+            audio_input_ids=audio_input_ids,
+            is_continuous_mask=is_continuous_mask,
+            audio_waveforms=mm_data,
         )
 
+        # Convert to list[int] for expected vLLM format
+        text_input_ids = text_input_ids.squeeze(0).tolist()        
         return {
             "prompt_token_ids": text_input_ids,
             "multi_modal_data": {"audio": mm_data},
@@ -799,252 +777,103 @@ class KimiAudioProcessor:
     def __call__(
         self,
         text: TextInput | list[TextInput] | None = None,
-        audio: str | list[str] | AUDIO_TYPE | list[AUDIO_TYPE] | None = None, # type: ignore
-        audio_input_ids=None,
-        is_continuous_mask=None,
-        audio_waveforms=None,
-        tokenizer=None,
+        audio: Union[np.ndarray, list[np.ndarray]] = None,
         **kwargs,
     ) -> BatchFeature:
         """
-        This method implements the core 'Dual-Track' synchronization logic
-        required by the Kimia architecture, ensuring that text and audio token
-        streams are perfectly aligned before entering the Transformer.
+        Wrapper for get_prompt().
 
-        Key Architectural Constraints:
-        1. Parallel Streams: Every text token MUST have a corresponding audio
-           token (discrete ID or Blank ID).
-           Constraint: len(input_ids) == len(audio_input_ids) == len(mask).
-        2. Concatenation Mode: Unlike typical batched multimodal models, multiple
-           audios are merged into a single sequence [1, total_len] per prompt,
-           matching the official KimiAContent.merge() behavior.
-        3. Deferred Processing:
-           - Whisper: 'audio_waveforms' takes over the role of raw features.
-             It stores either paths (metadata) or raw float32 arrays.
-           - Audio Tokenizer: Discrete tokenization is deferred to the
-             model's 'replacement' stage.
+        When called via vLLM's string-prompt path, ``text`` will contain
+        ``<|AUDIO|>`` markers that indicate where each audio clip belongs.
+        We split on these markers and build the proper dual-stream
+        ``kimia_messages`` list.
 
         Args:
-            text: Raw prompt text.
-            audio: Raw audio waveforms (np.ndarray) for profiling or direct usage.
-            audio_input_ids: Pre-tokenized audio IDs.
-            is_continuous_mask: Continuous mask for audio tokens.
-            audio_waveforms: Raw audio waveforms (np.ndarray) for profiling or direct usage.
-            tokenizer: Audio tokenizer for encoding audio waveforms.
+            text: Raw prompt text (may contain ``<|AUDIO|>`` markers).
+            audio: Raw audio waveforms (np.ndarray) for each audio clip.
 
         Returns:
-            BatchFeature: A dictionary-like object containing synchronized
-            tensors (input_ids, audio_input_ids) and metadata (waveforms, masks)
-            and audio_tokenizer path if available.
+            BatchFeature with synchronized tensors for the dual-stream.
         """
-        # Extract return_tensors parameter (like Qwen2-Audio does)
-        return_tensors = kwargs.pop("return_tensors", None)
+        return_tensor = kwargs.get("return_tensor", None)
 
-        text_input_ids = kwargs.get("prompt_token_ids")
-        if "audio_tokenizer" in kwargs:
-            self.audio_tokenizer = kwargs["audio_tokenizer"]
-        self.text_tokenizer = tokenizer or self.text_tokenizer
+        if text is None:
+            raise ValueError("You need to specify `text` input to process.")
+        elif isinstance(text, list):
+            text = text[0] if len(text) > 0 else ""
+        elif not isinstance(text, str):
+            text = str(text)
 
-        audio_tokens = None
-        new_audios = audio if audio is not None else []
-        if not isinstance(new_audios, list):
-            new_audios = [new_audios]
+        if isinstance(audio, np.ndarray):
+            audio = [audio]
+        elif audio is None:
+            audio = []
 
-        # Manual tokenization (get_prompt() usage)
-        # If audio_input_ids is provided, use it along with other kwargs
-        if audio_input_ids is not None:
-            # Load audio from paths if needed (fork already happened)
-            if audio_waveforms and isinstance(audio_waveforms[0], str):
-                loaded_audios = []
-                for audio_path in audio_waveforms:
-                    # load_audio returns numpy array
-                    audio_data = load_audio(audio_path)
-                    # Convert to tensor immediately
-                    loaded_audios.append(torch.from_numpy(audio_data))
-                audio_waveforms = loaded_audios
-            
-            if not isinstance(audio_input_ids, list):
-                audio_input_ids = [audio_input_ids]
+        audio_queue = list(audio)
+        kimia_messages = []
 
-            num_placeholders = len(audio_input_ids)
+        if not text:
+            # Empty text – audio-only (e.g. dummy / profiling inputs)
+            for a in audio_queue:
+                kimia_messages.append({
+                    "role": "user",
+                    "message_type": "audio",
+                    "content": a,
+                })
+        elif "<|AUDIO|>" in text:
+            # Text with <|AUDIO|> markers – interleave text and audio
+            parts = text.split("<|AUDIO|>")
+            audio_idx = 0
+            for i, part in enumerate(parts):
+                part_stripped = part.strip()
+                if part_stripped:
+                    kimia_messages.append({
+                        "role": "user",
+                        "message_type": "text",
+                        "content": part_stripped,
+                    })
+                # Each split boundary consumes one audio item
+                if i < len(parts) - 1 and audio_idx < len(audio_queue):
+                    kimia_messages.append({
+                        "role": "user",
+                        "message_type": "audio",
+                        "content": audio_queue[audio_idx],
+                    })
+                    audio_idx += 1
+        else:
+            # Non-empty text without <|AUDIO|> – text message, then any
+            # remaining audio items (this branch also handles edge cases
+            # like profiling with text but no markers).
+            kimia_messages.append({
+                "role": "user",
+                "message_type": "text",
+                "content": text,
+            })
+            for a in audio_queue:
+                kimia_messages.append({
+                    "role": "user",
+                    "message_type": "audio",
+                    "content": a,
+                })
 
-            assert isinstance(audio_input_ids, list)
-            # Support multiple audios in concatenation mode (removed len==1 assertion)
-            # Concatenate all audio sequences into a single sequence
-            if len(audio_input_ids) == 1:
-                # Single audio: wrap in batch dimension [1, seq_len]
-                audio_tokens = torch.tensor([audio_input_ids[0]], dtype=torch.long)
-            else:
-                # Multiple audios: concatenate into single sequence [1, total_len]
-                concatenated = []
-                for audio_seq in audio_input_ids:
-                    concatenated.extend(audio_seq)
-                audio_tokens = torch.tensor([concatenated], dtype=torch.long)
-
-            if text_input_ids is None:
-                text_input_ids = [self._tokenize_text(text)] # type: ignore
-            text_tokens = torch.tensor(text_input_ids, dtype=torch.long)
-
-            # Manually add placeholders in text tokens to get throught the logic in
-            # find_mm_placeholders(), this would be replaced in _get_prompt_updates().
-            if num_placeholders > 0:
-                placeholder_id = self.extra_tokens.kimia_text_blank
-                # Inject placeholders at the end of text stream
-                dummy_tokens = torch.full(
-                    (1, num_placeholders), placeholder_id, dtype=torch.long
-                )
-                text_tokens = torch.cat([text_tokens, dummy_tokens], dim=1)
-
-            # Build result: separate tensor-convertible fields from metadata
-            tensor_data = {"input_ids": text_tokens, "audio_input_ids": audio_tokens}
-
-            # Create BatchFeature with tensor-convertible data only
-            result = BatchFeature(data=tensor_data, tensor_type=return_tensors)
-
-            # NOTE: Use None instead of empty list to avoid json_reduce_leaves() errors
-            result["is_continuous_mask"] = (
-                is_continuous_mask if is_continuous_mask else None
-            )
-
-            # NOTE: Convert numpy waveforms to Tensors for serialization 
-            # compatibility. This applies to both manual and automatic paths 
-            # as they both populate audio_waveforms
-            if audio_waveforms:
-                new_waveforms = []
-                for i, wf in enumerate(audio_waveforms):
-                    if isinstance(wf, np.ndarray):
-                        new_waveforms.append(torch.from_numpy(wf))
-                    else:
-                        new_waveforms.append(wf)
-                audio_waveforms = new_waveforms
-
-            result["audio_waveforms"] = audio_waveforms if audio_waveforms else None
-
-            # Optional: audio_tokenizer (string path)
-            if self.audio_tokenizer is not None:
-                result["audio_tokenizer"] = self.audio_tokenizer
-
-            return result
-
-        # Automatic generation (profiling/standard usage)
-        # Generate dummy audio_input_ids from audio parameter
-        if audio is not None:
-            if not isinstance(audio, list):
-                audio = [audio]
-            new_audios = audio
-
-            # Realize concatenation mode to follow the official implementation's
-            # KimiAContent.merge() pattern
-            concatenated_audio_ids = []
-            concatenated_mask = []
-            processed_audios = []
-
-            for new_audio in new_audios:
-                # Load audio if it's a file path
-                if isinstance(new_audio, str):
-                    new_audio = load_audio(new_audio)
-
-                # Ensure audio is numpy array
-                if not isinstance(new_audio, np.ndarray):
-                    new_audio = np.array(new_audio)
-
-                # Calculate tokens using Whisper's actual downsampling
-                if new_audio.dtype == np.floating and len(new_audio) > 0:
-                    # Load Whisper config if needed
-                    if self._whisper_config is None and self.audio_tokenizer:
-                        with contextlib.suppress(Exception):
-                            self._whisper_config = AutoConfig.from_pretrained(
-                                self.audio_tokenizer
-                            )
-
-                    if self._whisper_config is not None:
-                        # Use the same calculation method as get_num_audio_tokens()
-                        audio_len = self._calculate_num_tokens_from_length(
-                            audio_length=len(new_audio),
-                            model_config=self._whisper_config,
-                            hop_length=160,
-                        )
-                    else:
-                        # Fallback: simple estimation if config unavailable
-                        audio_len = len(new_audio) // 320
-                else:
-                    audio_len = 50  # Default for dummy/non-audio data
-
-                # Create placeholder sequence:
-                # [media_begin] + placeholders + [media_end]
-                media_begin = self.extra_tokens.media_begin
-                media_end = self.extra_tokens.media_end
-                placeholders = [self.audio_placeholder_id] * audio_len
-
-                audio_seq = [media_begin] + placeholders + [media_end]
-                mask = [False] + [True] * audio_len + [False]
-
-                # Concatenate (extend, not append) 
-                # following official KimiAContent.merge()
-                concatenated_audio_ids.extend(audio_seq)
-                concatenated_mask.extend(mask)
-
-                # Keep audio features as separate items in a list
-                processed_audios.append(new_audio)
-
-            # Create [1, total_len] tensor (batch_size=1, concatenated sequence)
-            audio_tokens = torch.tensor([concatenated_audio_ids], dtype=torch.long)
-            is_continuous_mask = [
-                concatenated_mask
-            ]  # list of list, shape [1, total_len]
-            audio_waveforms = processed_audios
-
-        # Construct dummy text input to match the only multi modal data input
-        if text_input_ids is None:
-            text_input_ids = [self._tokenize_text(text) * (len(new_audios) + 2)] # type: ignore
-        text_tokens = torch.tensor(text_input_ids, dtype=torch.long)
-
-        # NOTE: We now rely on vLLM's PromptInsertion to inject placeholders
-        # at the end of the prompt (see model_executor/models/kimi_audio.py).
-        # So we DO NOT inject placeholders here anymore to avoid double injection
-        # or conflicts.
-        if audio_tokens is None:
-            # Text-only scenario: fill audio_input_ids with kimia_text_blank
-            # to match text_tokens length (following official implementation)
-            batch_size = text_tokens.shape[0]
-            seq_len = text_tokens.shape[1]
-            blank_id = self.extra_tokens.kimia_text_blank
-            audio_tokens = torch.full((batch_size, seq_len), blank_id, dtype=torch.long)
-            is_continuous_mask = [[False] * seq_len for _ in range(batch_size)]
-            audio_waveforms = None  # No audio data in text-only scenario
-
-        # Build result: separate tensor-convertible fields from metadata
-        tensor_data = {"input_ids": text_tokens, "audio_input_ids": audio_tokens}
-
-        # Create BatchFeature with tensor-convertible data only
-        result = BatchFeature(data=tensor_data, tensor_type=return_tensors)
-
-        # NOTE: Use None instead of empty list to avoid json_reduce_leaves() errors
-        result["is_continuous_mask"] = (
-            is_continuous_mask if is_continuous_mask else None
+        prompt_data = self.get_prompt(
+            kimia_messages,
+            output_type="text",
         )
 
-        # NOTE: Convert numpy waveforms to Tensors for serialization 
-        # compatibility. This applies to both manual and automatic paths as 
-        # they both populate audio_waveforms
-        if audio_waveforms:
-            new_waveforms = []
-            for i, wf in enumerate(audio_waveforms):
-                if isinstance(wf, np.ndarray):
-                    # NOTE: Ensure dtype is not float32 to avoid serialization issues
-                    # Convert to Tensor directly
-                    new_waveforms.append(torch.from_numpy(wf))
-                else:
-                    new_waveforms.append(wf)
-            audio_waveforms = new_waveforms
-            
-            result["audio_waveforms"] = audio_waveforms if audio_waveforms else None
+        text_input_ids: list[int] = prompt_data["prompt_token_ids"]
+        mm_kwargs = prompt_data["mm_processor_kwargs"]
 
-        # Optional: audio_tokenizer (string path)
-        if self.audio_tokenizer is not None:
-            result["audio_tokenizer"] = self.audio_tokenizer
+        text_input_ids = torch.tensor([text_input_ids], dtype=torch.long)
+        inputs = {
+            "input_ids": text_input_ids,
+            "audio_input_ids": mm_kwargs["audio_input_ids"],
+            "is_continuous_mask": mm_kwargs["is_continuous_mask"],
+            "audio_waveforms": (mm_kwargs["audio_waveforms"]
+                                if mm_kwargs["audio_waveforms"] else []),
+        }
 
-        return result
+        return BatchFeature(data=inputs, tensor_type=return_tensor)
 
 
 AutoProcessor.register("KimiAudioProcessor", KimiAudioProcessor)
