@@ -21,7 +21,7 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri, list_safetenso
 class RunaiModelStreamerLoader(BaseModelLoader):
     """
     Model loader that can load safetensors
-    files from local FS or S3 bucket.
+    files from local FS, S3, GCS, or Azure Blob Storage.
     """
 
     def __init__(self, load_config: LoadConfig):

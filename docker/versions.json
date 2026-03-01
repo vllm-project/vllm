@@ -83,7 +83,7 @@
       "default": ">=1.0.17"
     },
     "RUNAI_MODEL_STREAMER_VERSION": {
-      "default": ">=0.15.3"
+      "default": ">=0.15.6"
     }
   }
 }

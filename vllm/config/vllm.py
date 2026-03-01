@@ -1577,8 +1577,9 @@ class VllmConfig:
                 "runai_streamer_sharded",
             ):
                 raise ValueError(
-                    f"To load a model from S3, 'load_format' "
-                    f"must be 'runai_streamer' or 'runai_streamer_sharded', "
+                    f"To load a model from object storage (S3/GCS/Azure), "
+                    f"'load_format' must be 'runai_streamer' or "
+                    f"'runai_streamer_sharded', "
                     f"but got '{self.load_config.load_format}'. "
                     f"Model: {self.model_config.model}"
                 )

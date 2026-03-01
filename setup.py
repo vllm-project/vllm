@@ -1045,7 +1045,7 @@ setup(
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.2.2"],
-        "runai": ["runai-model-streamer[s3,gcs] >= 0.15.3"],
+        "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.6"],
         "audio": [
             "librosa",
             "scipy",
