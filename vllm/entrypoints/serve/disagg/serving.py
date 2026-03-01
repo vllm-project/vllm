@@ -4,6 +4,7 @@
 
 import asyncio
 import time
+from collections import defaultdict
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
 
@@ -24,13 +25,21 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing, clamp_prompt_logprobs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item
 from vllm.entrypoints.serve.disagg.protocol import (
     GenerateRequest,
     GenerateResponse,
     GenerateResponseChoice,
 )
+from vllm.inputs.data import ProcessorInputs
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.multimodal.inputs import (
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+    PlaceholderRange,
+    mm_inputs,
+)
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils.collection_utils import as_list
@@ -98,13 +107,41 @@ class ServingTokens(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        engine_prompts = await self._preprocess_completion(
-            request,
-            prompt_input=request.token_ids,
-            prompt_embeds=None,
-        )
-        assert len(engine_prompts) == 1
-        engine_prompt = engine_prompts[0]
+        engine_prompt: ProcessorInputs
+        if request.features is not None and len(request.features) > 0:
+            # Multimodal: build MultiModalInputs directly from metadata.
+            # When kwargs_data is present, tensors are deserialized directly.
+            # When kwargs_data is None, data is looked up from cache.
+            mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = defaultdict(list)
+            mm_hashes: dict[str, list[str]] = defaultdict(list)
+            mm_placeholders: dict[str, list[PlaceholderRange]] = defaultdict(list)
+
+            for feat in request.features:
+                if feat.kwargs_data is not None:
+                    item = decode_mm_kwargs_item(feat.kwargs_data)
+                    mm_kwargs[feat.modality].append(item)
+                else:
+                    mm_kwargs[feat.modality].append(None)
+                mm_hashes[feat.modality].append(feat.mm_hash)
+                mm_placeholders[feat.modality].append(
+                    PlaceholderRange(offset=feat.offset, length=feat.length)
+                )
+
+            engine_prompt = mm_inputs(
+                prompt_token_ids=request.token_ids,
+                mm_kwargs=MultiModalKwargsItems(mm_kwargs),
+                mm_hashes=mm_hashes,
+                mm_placeholders=mm_placeholders,
+                cache_salt=request.cache_salt,
+            )
+        else:
+            engine_prompts = await self._preprocess_completion(
+                request,
+                prompt_input=request.token_ids,
+                prompt_embeds=None,
+            )
+            assert len(engine_prompts) == 1
+            engine_prompt = engine_prompts[0]
 
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
