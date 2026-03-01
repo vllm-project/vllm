@@ -486,9 +486,7 @@ class MaskMetadata:
 
 class RadioParallelAttention(InternParallelAttention):
     def forward(
-        self,
-        x: torch.Tensor,
-        mask_meta: MaskMetadata | None = None,
+        self, x: torch.Tensor, mask_meta: MaskMetadata | None = None
     ) -> torch.Tensor:
         qkv, _ = self.qkv(x)
         q, k, v = qkv.chunk(3, dim=-1)
