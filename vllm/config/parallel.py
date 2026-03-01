@@ -325,6 +325,15 @@ class ParallelConfig:
         should only be set by API server scale-out.
     """
 
+    _renderer_gpu_allocation: list[str] | None = None
+    """
+    The GPU allocated to the renderer of each API process.
+
+    Note:
+        This is an internal config that is only valid for and
+        should only be set internally.
+    """
+
     @field_validator("disable_nccl_for_dp_synchronization", mode="wrap")
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:

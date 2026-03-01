@@ -108,6 +108,43 @@ def encode_video_url(
     return f"data:{mimetype};base64,{video_b64}"
 
 
+def allocate_gpu_mm_processors(
+    mm_processor_device: str,
+    mm_processor_count: int,
+    *,
+    available_device_count: int,
+    engine_device_count: int,
+) -> list[str]:
+    """
+    Allocate each processor to a GPU that is not being used by EngineCore,
+    if possible.
+
+    Returns:
+        The device to allocate for each multi-modal processor.
+    """
+    device_type, *rest = mm_processor_device.rsplit(":", 1)
+    if len(rest) == 0:
+        # Try to run each processor on a different GPU, preferably those
+        # that are not used by vLLM engine
+        if available_device_count > engine_device_count:
+            remaining_count = available_device_count - engine_device_count
+            processor_gpu_idxs = [
+                engine_device_count + server_idx % remaining_count
+                for server_idx in range(mm_processor_count)
+            ]
+        else:
+            processor_gpu_idxs = [
+                server_idx % available_device_count
+                for server_idx in range(mm_processor_count)
+            ]
+    else:
+        # Already targeted a specific GPU
+        (device_idx,) = map(int, rest)
+        processor_gpu_idxs = [device_idx] * mm_processor_count
+
+    return [f"{device_type}:{gpu_idx}" for gpu_idx in processor_gpu_idxs]
+
+
 def argsort_mm_positions(
     mm_positions: MultiModalPlaceholderDict,
 ) -> list[tuple[str, int]]:
