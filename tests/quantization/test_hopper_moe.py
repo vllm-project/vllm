@@ -80,17 +80,18 @@ def can_initialize(
 
 
 def test_llama4_fp8_tensor_moe_vllm_triton(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "0")
     can_initialize(
-        "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8", hf_overrides=HF_OVERRIDE_MM
+        "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=["--moe-backend=cutlass"],
     )
 
 
 def test_llama4_fp8_tensor_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "1")
-    monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "throughput")
     can_initialize(
-        "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8", hf_overrides=HF_OVERRIDE_MM
+        "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=["--moe-backend=flashinfer_cutlass"],
     )
 
 
@@ -98,37 +99,38 @@ def test_llama4_fp8_tensor_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatc
 
 
 def test_deepseek_fp8_block_moe_deep_gemm(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1")
-    can_initialize("deepseek-ai/DeepSeek-V3.1", hf_overrides=HF_OVERRIDE_TEXT)
+    can_initialize(
+        "deepseek-ai/DeepSeek-V3.1",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=["--moe-backend=deep_gemm"],
+    )
 
 
 def test_deepseek_fp8_block_moe_vllm_triton(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "0")
-    monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "0")
-    can_initialize("deepseek-ai/DeepSeek-V3.1", hf_overrides=HF_OVERRIDE_TEXT)
+    can_initialize(
+        "deepseek-ai/DeepSeek-V3.1",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=["--moe-backend=tritont"],
+    )
 
 
 ## Qwen3 Next ##
 
 
-def test_qwen3_next_bf16_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP16", "1")
-    can_initialize("Qwen/Qwen3-Next-80B-A3B-Instruct", hf_overrides=HF_OVERRIDE_TEXT)
+def test_qwen3_next_bf16_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
+    can_initialize(
+        "Qwen/Qwen3-Next-80B-A3B-Instruct",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=["--moe-backend=flashinfer_cutlass"],
+    )
 
 
 ## NemoTron ##
 
 
-def test_nemotron_fp8_moe_flashinfer_throughput(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "1")
-    monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "throughput")
+def test_nemotron_fp8_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
-        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8", hf_overrides=HF_OVERRIDE_TEXT
-    )
-
-
-def test_nemotron_fp8_moe_vllm_triton(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "0")
-    can_initialize(
-        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8", hf_overrides=HF_OVERRIDE_TEXT
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=["--moe-backend=flashinfer_cutlass"],
     )
