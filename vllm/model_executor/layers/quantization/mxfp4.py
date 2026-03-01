@@ -1001,6 +1001,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     @property
     def is_monolithic(self) -> bool:
+        if self.moe.is_lora_enabled:
+            return False
         return (
             self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
             or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
