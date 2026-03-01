@@ -614,6 +614,7 @@ class RadioInternVisionModel(nn.Module):
         hidden_states = self.patch_generator(x, imgs_sizes=imgs_sizes)
         mask_meta = None
         if imgs_sizes is not None:
+            assert len(imgs_sizes) > 0
             # Dynamic resolution: process each image as an independent sequence.
             mask_meta = self.inter_image_mask_metadata(
                 imgs_sizes, device=hidden_states.device
