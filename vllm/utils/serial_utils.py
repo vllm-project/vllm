@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import io
 import sys
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal, get_args
@@ -95,4 +96,13 @@ def binary2tensor(
     if endianness != "native" and endianness != sys_byteorder:
         np_array = np_array.byteswap()
 
-    return torch.from_numpy(np_array).view(dtype_info.torch_dtype)
+    # np.frombuffer on a bytes object returns a read-only array. Suppress the
+    # PyTorch warning about non-writable tensors since we never mutate this
+    # tensor after construction.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="The given NumPy array is not writable",
+            category=UserWarning,
+        )
+        return torch.from_numpy(np_array).view(dtype_info.torch_dtype)
