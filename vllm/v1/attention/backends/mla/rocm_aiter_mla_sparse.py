@@ -77,6 +77,7 @@ def fetch_id_to_ragged_triton(
 
 class ROCMAiterMLASparseBackend(AttentionBackend):
     accept_output_buffer: bool = True
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
 
     @staticmethod
     def get_name() -> str:
@@ -105,12 +106,21 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
         return (num_blocks, block_size, head_size)
 
     @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.bfloat16]
-
-    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [576]
+
+    @classmethod
+    def is_mla(cls) -> bool:
+        return True
+
+    @classmethod
+    def is_sparse(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_block_size(cls, block_size: int | None) -> bool:
+        # The only supported block_size is 1
+        return block_size is None or block_size == 1
 
 
 @dataclass

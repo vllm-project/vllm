@@ -12,6 +12,8 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
+from vllm.platforms.rocm import on_mi3xx
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.backend import (
@@ -765,6 +767,13 @@ class AiterFlashAttentionBackend(AttentionBackend):
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
+
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        # DeviceCapability is currently created using torch.cuda.get_device_capability()
+        # which is known to be buggy on rocm systems. on_mi3xx uses amd-smi which is
+        # more reliable.
+        return on_mi3xx()
 
 
 class AiterFlashAttentionImpl(AttentionImpl):
