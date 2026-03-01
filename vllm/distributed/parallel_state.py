@@ -1439,6 +1439,7 @@ def init_distributed_environment(
         # local rank not set, this usually happens in single-node
         # setting, where we can use rank as local rank
         local_rank = envs.LOCAL_RANK if distributed_init_method == "env://" else rank
+
     global _WORLD, _NODE_COUNT, _INNER_DP_WORLD
     if enable_elastic_ep:
         _init_elastic_ep_world(config, local_rank, backend, rank, world_size)
