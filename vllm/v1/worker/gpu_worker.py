@@ -189,6 +189,13 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
+        # Reset attention metadata builders' cached state
+        # (e.g. FlashInfer wrappers that reference kv_cache-tagged memory).
+        if tags is None or "kv_cache" in tags:
+            for builder in self._iter_attn_metadata_builders():
+                if hasattr(builder, "reset_for_sleep_mode"):
+                    builder.reset_for_sleep_mode()
+
         # If the KV cache has just been woken up,
         # the internal state of cache_engine must be reset,
         # especially the FP8 scaling factor.
@@ -198,6 +205,13 @@ class Worker(WorkerBase):
             and hasattr(self.model_runner, "init_fp8_kv_scales")
         ):
             self.model_runner.init_fp8_kv_scales()
+
+    def _iter_attn_metadata_builders(self):
+        runner = self.model_runner
+        if hasattr(runner, "attn_groups"):
+            for group_list in runner.attn_groups:
+                for group in group_list:
+                    yield from group.metadata_builders
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if self.vllm_config.model_config.enable_sleep_mode:
