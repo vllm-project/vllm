@@ -355,12 +355,12 @@ class Glm4MoeModelToolParser(ToolParser):
                     self._buffer = self._buffer[val_end + len(self.arg_val_end) :]
                     self._pending_key = None
 
-                    frag = self._append_arg_fragment(
+                    frag_or_none = self._append_arg_fragment(
                         key=key,
                         raw_val=raw_val,
                     )
-                    if frag:
-                        return self._emit_tool_args_delta(frag)
+                    if frag_or_none:
+                        return self._emit_tool_args_delta(frag_or_none)
                     continue
 
             # Parse next arg or close
@@ -368,7 +368,7 @@ class Glm4MoeModelToolParser(ToolParser):
             key_pos = self._buffer.find(self.arg_key_start)
             if end_pos != -1 and (key_pos == -1 or end_pos < key_pos):
                 self._buffer = self._buffer[end_pos + len(self.tool_call_end_token) :]
-                frag = self._close_args_if_needed()
+                frag_or_none = self._close_args_if_needed()
                 # Finalize prev_tool_call_arr with complete parsed arguments
                 if self._current_tool_name:
                     try:
@@ -387,7 +387,9 @@ class Glm4MoeModelToolParser(ToolParser):
                             e,
                         )
                 self._finish_tool_call()
-                return self._emit_tool_args_delta(frag) if frag else None
+                return (
+                    self._emit_tool_args_delta(frag_or_none) if frag_or_none else None
+                )
 
             if key_pos == -1:
                 return None

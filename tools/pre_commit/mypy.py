@@ -43,7 +43,6 @@ EXCLUDE = [
     "vllm/config",
     "vllm/device_allocator",
     "vllm/reasoning",
-    "vllm/tool_parser",
 ]
 
 

@@ -68,7 +68,7 @@ class ToolParser:
                 # tool_choice: "Forced Function" or "required" will override
                 # structured output json settings to make tool calling work correctly
                 request.structured_outputs = StructuredOutputsParams(
-                    json=json_schema_from_tool
+                    json=json_schema_from_tool  # type: ignore[call-arg]
                 )
                 request.response_format = None
             if isinstance(request, ResponsesRequest):
@@ -219,7 +219,7 @@ class ToolParserManager:
         name: str | list[str] | None = None,
         force: bool = True,
         module: type[ToolParser] | None = None,
-    ) -> type[ToolParser] | Callable[[type[ToolParser]], type[ToolParser]]:
+    ) -> Callable[[type[ToolParser]], type[ToolParser]]:
         """
         Register module immediately or lazily (as a decorator).
 
@@ -237,7 +237,7 @@ class ToolParserManager:
         # Immediate registration
         if module is not None:
             cls._register_module(module=module, module_name=name, force=force)
-            return module
+            return module  # type: ignore[return-value]
 
         # Decorator usage
         def _decorator(obj: type[ToolParser]) -> type[ToolParser]:
