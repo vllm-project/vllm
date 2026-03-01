@@ -15,6 +15,7 @@ class RequestState:
         num_speculative_steps: int,
         vocab_size: int,
         device: torch.device,
+        cache_draft_logits: bool,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -70,6 +71,19 @@ class RequestState:
             dtype=torch.int64,
             device=device,
         )
+        # Draft token logits.
+        self.draft_logits: torch.Tensor | None = (
+            torch.zeros(
+                self.max_num_reqs,
+                self.num_speculative_steps,
+                self.vocab_size,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            if cache_draft_logits
+            else None
+        )
+
         self.next_prefill_tokens = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=device
         )

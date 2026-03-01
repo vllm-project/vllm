@@ -88,7 +88,10 @@ from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
-from vllm.v1.worker.gpu.spec_decode.rejection_sample import rejection_sample
+from vllm.v1.worker.gpu.spec_decode.rejection_sample import (
+    probabilistic_rejection_sample,
+    strict_rejection_sample,
+)
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
@@ -174,6 +177,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
+        self.use_strict_rejection_sampling = (
+            self.speculative_config.rejection_sample_method == "strict"
+        )
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -181,6 +187,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
+            cache_draft_logits=not self.use_strict_rejection_sampling,
         )
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
@@ -194,6 +201,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_states=self.req_states,
             logprobs_mode=self.model_config.logprobs_mode,
             num_speculative_tokens=self.num_speculative_steps + 1,
+            return_processed_logits=not self.use_strict_rejection_sampling,
         )
         self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
 
@@ -735,7 +743,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 grammar_output.grammar_bitmask,
             )
 
-        # Sample tokens and compute logprobs (if needed).
         sampler_output = self.sampler(
             logits,
             input_batch.expanded_idx_mapping,
@@ -745,7 +752,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_ids,
             input_batch.expanded_local_pos,
         )
-
         if input_batch.num_draft_tokens == 0:
             # No draft tokens (common case).
             num_sampled = torch.ones(
@@ -753,13 +759,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         else:
             # Rejection sampling for spec decoding.
-            sampled_tokens, num_sampled = rejection_sample(
-                sampler_output.sampled_token_ids,
-                input_ids,
-                input_batch.cu_num_logits,
-                self.num_speculative_steps,
-            )
-            sampler_output.sampled_token_ids = sampled_tokens
+            if self.use_strict_rejection_sampling:
+                sampled_token_ids, num_sampled = strict_rejection_sample(
+                    sampler_output.sampled_token_ids.view(-1),
+                    input_ids,
+                    input_batch.cu_num_logits,
+                    self.num_speculative_steps,
+                )
+            else:
+                assert self.req_states.draft_logits is not None
+                draft_logits = self.req_states.draft_logits[input_batch.idx_mapping]
+                sampled_token_ids, num_sampled = probabilistic_rejection_sample(
+                    sampler_output.sampled_token_ids.view(-1),
+                    input_ids,
+                    sampler_output.processed_logits.to(draft_logits.dtype),
+                    draft_logits,
+                    input_batch.cu_num_logits,
+                    self.num_speculative_steps,
+                    input_batch.index_mapping,
+                    self.sampler.sampling_states.temperature.gpu,
+                    self.sampler.sampling_states.seeds.gpu,
+                )
+            sampler_output.sampled_token_ids = sampled_token_ids
 
         # Get the number of sampled and rejected tokens.
         # For chunked prefills, num_sampled and num_rejected are both 0.
@@ -1064,6 +1085,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.req_states.next_prefill_tokens,
                 self.sampler.sampling_states.temperature.gpu,
                 self.sampler.sampling_states.seeds.gpu,
+                self.req_states.draft_logits,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
