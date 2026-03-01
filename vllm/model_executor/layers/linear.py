@@ -702,6 +702,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 param.data[loaded_shard_id].copy_(loaded_weight)
                 param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
             else:
+                param.weight_type = loaded_weight.item()
                 param.shard_weight_type = {
                     i: loaded_weight.item() for i, _ in enumerate(self.output_sizes)
                 }
@@ -709,15 +710,38 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         if is_gguf_weight:
             output_dim = getattr(param, "output_dim", None)
-            shard_size = loaded_weight.size(output_dim) // self.tp_size
-            start_idx = self.tp_rank * shard_size
 
             if loaded_shard_id is not None:
+                if output_dim is None:
+                    raise ValueError("GGUF shard loading requires an output dimension.")
+                shard_size = loaded_weight.size(output_dim) // self.tp_size
+                start_idx = self.tp_rank * shard_size
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
                 param.shard_id.append(loaded_shard_id)
                 param.shard_id_map[loaded_shard_id] = len(param.data_container)
                 param.data_container.append(loaded_weight)
                 return
+
+            # Fused GGUF tensors can be loaded as a single shard-less weight.
+            # Materialize and load directly so runtime won't touch an
+            # UninitializedParameter.
+            if isinstance(param, UninitializedParameter):
+                final_shape = list(loaded_weight.shape)
+                if output_dim is not None:
+                    shard_size = final_shape[output_dim] // self.tp_size
+                    assert final_shape[output_dim] % self.tp_size == 0
+                    final_shape[output_dim] = shard_size
+                param.materialize(final_shape, dtype=loaded_weight.dtype)
+
+            param_data = param.data
+            if output_dim is not None:
+                shard_size = loaded_weight.size(output_dim) // self.tp_size
+                start_idx = self.tp_rank * shard_size
+                loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+
+            assert param_data.shape == loaded_weight.shape
+            param_data.copy_(loaded_weight)
+            return
 
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
