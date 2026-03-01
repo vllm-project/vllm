@@ -35,14 +35,17 @@ async def client(server):
 def vision_server():
     """Vision-capable server used for multimodal /render tests."""
     args: list[str] = [
+        "--runner",
+        "generate",
         "--max_model_len",
         "256",
         "--max-num-seqs",
         "2",
         "--limit-mm-per-prompt.image",
-        "1",
+        "2",
         "--limit-mm-per-prompt.video",
         "0",
+        "--enforce-eager",
     ]
 
     with RemoteOpenAIServer(VISION_MODEL_NAME, args) as remote_server:
