@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.model_executor.offloader.base import get_offloader
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
@@ -21,6 +22,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -28,13 +30,11 @@ class CudaGraphManager:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        uses_mrope: bool,
         use_aux_hidden_state_outputs: bool,
         device: torch.device,
     ):
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
-        self.uses_mrope = uses_mrope
         self.use_aux_hidden_state_outputs = use_aux_hidden_state_outputs
         self.device = device
 
@@ -92,9 +92,8 @@ class CudaGraphManager:
         num_tokens: int,
         capture_cg_mode: CUDAGraphMode,
         model: nn.Module,
+        model_state: ModelState,
         input_buffers: InputBuffers,
-        mrope_positions: torch.Tensor | None,
-        inputs_embeds: torch.Tensor | None,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
@@ -117,13 +116,15 @@ class CudaGraphManager:
             )
         else:
             num_reqs = min(num_tokens, self.max_num_reqs)
-        input_ids = input_buffers.input_ids[:num_tokens]
-        positions = input_buffers.positions[:num_tokens]
-        if self.uses_mrope:
-            assert mrope_positions is not None
-            positions = mrope_positions[:, :num_tokens]
-        if inputs_embeds is not None:
-            inputs_embeds = inputs_embeds[:num_tokens]
+
+        model_inputs = {
+            "input_ids": input_buffers.input_ids[:num_tokens],
+            "positions": input_buffers.positions[:num_tokens],
+            # NOTE: Values returned by `prepare_dummy_inputs` will override the
+            # default values above.
+            **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
+        }
+
         attn_metadata, slot_mappings = prepare_inputs_to_capture(
             num_reqs,
             num_tokens,
@@ -147,11 +148,7 @@ class CudaGraphManager:
             num_tokens_across_dp=num_tokens_across_dp,
             slot_mapping=slot_mappings,
         ):
-            model_output = model(
-                input_ids=input_ids,
-                positions=positions,
-                inputs_embeds=inputs_embeds,
-            )
+            model_output = model(**model_inputs)
             if self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = model_output
             else:
@@ -168,9 +165,7 @@ class CudaGraphManager:
             num_tokens=num_tokens,
             num_reqs=num_reqs,
             model=model,
-            input_ids=input_ids,
-            positions=positions,
-            inputs_embeds=inputs_embeds,
+            model_inputs=model_inputs,
             num_tokens_across_dp=num_tokens_across_dp,
             attn_metadata=attn_metadata,
             slot_mappings=slot_mappings,
@@ -182,9 +177,7 @@ class CudaGraphManager:
         num_tokens: int,
         num_reqs: int,
         model: nn.Module,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        inputs_embeds: torch.Tensor | None,
+        model_inputs: dict[str, torch.Tensor | None],
         num_tokens_across_dp: torch.Tensor,
         attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor] | None,
@@ -194,6 +187,11 @@ class CudaGraphManager:
         # Capture the graph.
         assert num_tokens not in self.graphs
         graph = torch.cuda.CUDAGraph()
+
+        # Sync offloader's copy stream before capture.
+        # Ensure any pre-capture prefetches from offloader are complete.
+        get_offloader().sync_prev_onload()
+
         with (
             set_forward_context(
                 attn_metadata=attn_metadata,
@@ -205,11 +203,13 @@ class CudaGraphManager:
             ),
             torch.cuda.graph(graph, self.pool),
         ):
-            model_output = model(
-                input_ids=input_ids,
-                positions=positions,
-                inputs_embeds=inputs_embeds,
-            )
+            model_output = model(**model_inputs)
+
+            # Join offloader's copy stream after forward to avoid unjoined
+            # stream error. The last layer's start_prefetch forks copy_stream,
+            # but wait_prefetch only happens in the next forward pass.
+            get_offloader().join_after_forward()
+
             if self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = model_output
             else:
@@ -229,9 +229,7 @@ class CudaGraphManager:
         num_tokens: int,
         num_reqs: int,
         model: nn.Module,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        inputs_embeds: torch.Tensor | None,
+        model_inputs: dict[str, torch.Tensor | None],
         num_tokens_across_dp: torch.Tensor,
         attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor] | None,
@@ -250,19 +248,14 @@ class CudaGraphManager:
             batch_descriptor=batch_descriptor,
             slot_mapping=slot_mappings,
         ):
-            model(
-                input_ids=input_ids,
-                positions=positions,
-                inputs_embeds=inputs_embeds,
-            )
+            model(**model_inputs)
 
     @torch.inference_mode()
     def capture(
         self,
         model: nn.Module,
+        model_state: ModelState,
         input_buffers: InputBuffers,
-        mrope_positions: torch.Tensor | None,
-        inputs_embeds: torch.Tensor | None,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
@@ -272,9 +265,8 @@ class CudaGraphManager:
             device=self.device,
             capture_fn=self.capture_graph,
             model=model,
+            model_state=model_state,
             input_buffers=input_buffers,
-            mrope_positions=mrope_positions,
-            inputs_embeds=inputs_embeds,
             block_tables=block_tables,
             attn_groups=attn_groups,
             kv_cache_config=kv_cache_config,
@@ -334,6 +326,13 @@ class CudaGraphManager:
         self, num_tokens: int
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         assert num_tokens in self.graphs, f"No cudagraph for {num_tokens} tokens"
+        # Sync offloader before replay - needed when transitioning from
+        # eager/piecewise to full cudagraph (e.g., prefill → decode).
+        # The previous eager iteration's start_prefetch may have queued
+        # H2D copies on copy_stream that the graph's captured events
+        # cannot see. Without this, replay could overwrite static buffers
+        # while those copies are still in flight.
+        get_offloader().sync_prev_onload()
         self.graphs[num_tokens].replay()
         assert self.hidden_states is not None
         hidden_states = self.hidden_states[:num_tokens]
