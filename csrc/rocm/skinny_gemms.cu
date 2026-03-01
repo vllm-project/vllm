@@ -1134,7 +1134,8 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
                 "bfloat16); got ",
                 in_bias->scalar_type());
   }
-  TORCH_CHECK(in_a.size(1) % 8 == 0, "k % 8 == 0");
+  TORCH_CHECK(in_a.size(1) % 8 == 0,
+              "K dimension (inner) must be a multiple of 8");
   TORCH_CHECK(in_a.size(1) == in_b.size(1),
               "K dimension (inner) must match: in_a has ", in_a.size(1),
               ", in_b has ", in_b.size(1));

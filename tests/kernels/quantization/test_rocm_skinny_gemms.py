@@ -273,7 +273,9 @@ def test_rocm_wvsplitk_invalid_k_not_div8():
     cu_count = num_compute_units()
     A = torch.rand(1, 10, dtype=torch.float16, device="cuda")
     B = torch.rand(16, 10, dtype=torch.float16, device="cuda")
-    with pytest.raises(RuntimeError, match="k % 8"):
+    with pytest.raises(
+        RuntimeError, match="K dimension (inner) must be a multiple of 8"
+    ):
         ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count)
 
 
