@@ -266,6 +266,104 @@ class EncoderCacheManager:
         return freed
 
 
+def _get_max_num_batched_encoder_embeds_info(
+    scheduler_config: "SchedulerConfig",
+    max_tokens_per_mm_item: int,
+) -> tuple[str, int]:
+    origin = "max_num_batched_encoder_embeds"
+    value = scheduler_config.max_num_batched_encoder_embeds
+
+    if value is None:
+        origin = "max_num_batched_tokens"
+        value = scheduler_config.max_num_batched_tokens
+
+    if value < max_tokens_per_mm_item:
+        origin = "max_tokens_per_mm_item"
+        value = max_tokens_per_mm_item
+
+    return origin, value
+
+
+def _set_max_num_batched_encoder_embeds(
+    scheduler_config: "SchedulerConfig",
+    origin: str,
+    value: int,
+) -> int:
+    if scheduler_config.max_num_batched_encoder_embeds is None:
+        logger.info_once(
+            "Defaulting max_num_batched_encoder_embeds to %s=%d.",
+            origin,
+            value,
+            scope="local",
+        )
+    elif value != scheduler_config.max_num_batched_encoder_embeds:
+        logger.warning_once(
+            "Overriding max_num_batched_encoder_embeds=%d with %s=%d "
+            "to ensure that the largest multimodal item can still be scheduled. "
+            "You can silence this warning by setting a larger value of "
+            "max_num_batched_encoder_embeds.",
+            scheduler_config.max_num_batched_encoder_embeds,
+            origin,
+            value,
+            scope="local",
+        )
+
+    scheduler_config.max_num_batched_encoder_embeds = value
+
+    return value
+
+
+def _get_encoder_cache_size_info(
+    scheduler_config: "SchedulerConfig",
+    max_tokens_per_mm_item: int,
+) -> tuple[str, int]:
+    origin = "encoder_cache_size"
+    value = scheduler_config.encoder_cache_size
+
+    max_num_batched_encoder_embeds = scheduler_config.max_num_batched_encoder_embeds
+    if max_num_batched_encoder_embeds is None:
+        max_num_batched_encoder_embeds = scheduler_config.max_num_batched_tokens
+
+    if value is None:
+        origin = "max_num_batched_encoder_embeds"
+        value = max_num_batched_encoder_embeds
+
+    if value < max_tokens_per_mm_item:
+        origin = "max_tokens_per_mm_item"
+        value = max_tokens_per_mm_item
+
+    return origin, value
+
+
+def _set_encoder_cache_size(
+    scheduler_config: "SchedulerConfig",
+    origin: str,
+    value: int,
+) -> int:
+    if scheduler_config.encoder_cache_size is None:
+        logger.info_once(
+            "Defaulting encoder_cache_size to %s=%d.",
+            origin,
+            value,
+            scope="local",
+        )
+    elif value != scheduler_config.encoder_cache_size:
+        logger.warning_once(
+            "Overriding encoder_cache_size=%d with %s=%d "
+            "to ensure that the largest multimodal item can still be scheduled. "
+            "You can silence this warning by setting a larger value of "
+            "encoder_cache_size.",
+            scheduler_config.encoder_cache_size,
+            origin,
+            value,
+            scope="local",
+        )
+
+    scheduler_config.encoder_cache_size = value
+
+    return value
+
+
 def compute_mm_encoder_budget(
     scheduler_config: "SchedulerConfig",
     mm_max_toks_per_item: Mapping[str, int],
@@ -283,6 +381,10 @@ def compute_mm_encoder_budget(
             from the input sequence.
         - Space budget for encoder cache size, measured in number of tokens
             from the input sequence.
+
+    Note:
+        This may update `scheduler_config.max_num_batched_encoder_embeds` and
+        `scheduler_config.encoder_cache_size` in place with new values.
     """
 
     if not mm_max_toks_per_item:
@@ -294,26 +396,41 @@ def compute_mm_encoder_budget(
         return 0, 0
 
     max_tokens_per_mm_item = max(mm_max_toks_per_item.values())
+    max_num_batched_tokens = scheduler_config.max_num_batched_tokens
 
     if (
         scheduler_config.disable_chunked_mm_input
-        and max_tokens_per_mm_item > scheduler_config.max_num_batched_tokens
+        and max_tokens_per_mm_item > max_num_batched_tokens
     ):
         raise ValueError(
-            "Chunked MM input disabled but max_tokens_per_mm_item "
-            f"({max_tokens_per_mm_item}) is larger than max_num_batched_tokens"
-            f" ({scheduler_config.max_num_batched_tokens}). Please increase "
-            "max_num_batched_tokens."
+            f"Chunked MM input disabled but {max_tokens_per_mm_item=} "
+            f"is larger than {max_num_batched_tokens=}. "
+            "Please increase max_num_batched_tokens."
         )
 
-    encoder_compute_budget = max(
-        scheduler_config.max_num_encoder_input_tokens, max_tokens_per_mm_item
+    max_num_batched_encoder_embeds_info = _get_max_num_batched_encoder_embeds_info(
+        scheduler_config, max_tokens_per_mm_item
     )
-    encoder_cache_size = max(
-        scheduler_config.encoder_cache_size, max_tokens_per_mm_item
+    encoder_cache_size_info = _get_encoder_cache_size_info(
+        scheduler_config, max_tokens_per_mm_item
     )
 
-    return encoder_compute_budget, encoder_cache_size
+    max_num_batched_encoder_embeds = _set_max_num_batched_encoder_embeds(
+        scheduler_config, *max_num_batched_encoder_embeds_info
+    )
+    encoder_cache_size = _set_encoder_cache_size(
+        scheduler_config, *encoder_cache_size_info
+    )
+
+    if encoder_cache_size < max_num_batched_encoder_embeds:
+        raise ValueError(
+            f"{encoder_cache_size=} cannot be less than "
+            f"{max_num_batched_encoder_embeds=} because this effectively limits "
+            "max_num_batched_encoder_embeds to the same value. "
+            "Please increase encoder_cache_size."
+        )
+
+    return max_num_batched_encoder_embeds, encoder_cache_size
 
 
 # NOTE (NickLucche): Temporary implementation for encoder-decoder models that only

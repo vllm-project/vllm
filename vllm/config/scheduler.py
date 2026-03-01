@@ -91,19 +91,48 @@ class SchedulerConfig:
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
 
-    # TODO (ywang96): Make this configurable.
-    max_num_encoder_input_tokens: int = Field(init=False)
-    """Multimodal encoder compute budget, only used in V1.
+    max_num_batched_encoder_embeds: int | None = None
+    """Maximum number of encoder embeddings to be processed in a single iteration.
 
-    NOTE: This is not currently configurable. It will be overridden by
-    max_num_batched_tokens in case max multimodal embedding size is larger."""
+    Defaults to `max_num_batched_tokens`. This will be overridden by the
+    maximum possible multimodal embedding count of the model if it is larger,
+    ensuring that a multimodal item will be eventually scheduled regardless of
+    its embedding count (an item is only scheduled if there is sufficient
+    compute budget to process it).
 
-    # TODO (ywang96): Make this configurable.
-    encoder_cache_size: int = Field(init=False)
-    """Multimodal encoder cache size, only used in V1.
+    If this is set to less than `max_num_batched_tokens`, text inputs from
+    lower-priority requests may be scheduled before multimodal inputs in the current
+    request if the compute budget for the encoder has been exhausted but there is
+    still compute budget remaining for the decoder.
 
-    NOTE: This is not currently configurable. It will be overridden by
-    max_num_batched_tokens in case max multimodal embedding size is larger."""
+    There is generally no benefit of increasing this past `max_num_batched_tokens`
+    as the encoder is only scheduled to run on a multimodal item if the decoder
+    is also scheduled to run on the corresponding embeddings, and thus
+    `max_num_batched_tokens` becomes the limiting factor; we only allow this
+    to ensure that the largest multimodal item can still be scheduled (see above).
+ 
+    Note that the number of encoder embeddings might be smaller than the
+    number of input tokens used to represent the multimodal input; see
+    [vllm.v1.core.encoder_cache_manager.EncoderCacheManager][] for more details.
+    """
+
+    encoder_cache_size: int | None = None
+    """Maximum number of encoder embeddings that can be stored in the encoder cache;
+    it must be no smaller than `max_num_batched_encoder_embeds`.
+
+    Defaults to `max_num_batched_encoder_embeds`. This will be overridden by the
+    maximum possible multimodal embedding count of the model if it is larger,
+    ensuring that a multimodal item will be eventually scheduled regardless of
+    its embedding count (an item is only scheduled if there is sufficient
+    cache budget to at least temporarily store its embeddings for decoder execution).
+
+    Increasing this enables more encoder embeddings to be reused across requests,
+    but doing so also leads to a corresponding increase in memory usage.
+
+    Note that the number of encoder embeddings might be smaller than the
+    number of input tokens used to represent the multimodal input; see
+    [vllm.v1.core.encoder_cache_manager.EncoderCacheManager][] for more details.
+    """
 
     policy: SchedulerPolicy = "fcfs"
     """The scheduling policy to use:\n
@@ -114,11 +143,12 @@ class SchedulerConfig:
 
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
-    partially schedule a multimodal item. Only used in V1
+    partially schedule a multimodal item.
+
     This ensures that if a request has a mixed prompt
-    (like text tokens TTTT followed by image tokens IIIIIIIIII) where only
-    some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
-    it will be scheduled as TTTT in one step and IIIIIIIIII in the next."""
+    (like text tokens `TTTT` followed by image tokens `IIIIIIIIII`) where only
+    some image tokens can be scheduled (like `TTTTIIIII`, leaving `IIIII`),
+    it will be scheduled as `TTTT` in one step and `IIIIIIIIII` in the next."""
 
     # scheduler class or path. "vllm.v1.core.sched.scheduler.Scheduler"
     # (default) or "mod.custom_class".
@@ -223,9 +253,6 @@ class SchedulerConfig:
                 "Encoder-decoder models do not support chunked prefill nor"
                 " prefix caching; disabling both."
             )
-
-        self.max_num_encoder_input_tokens = self.max_num_batched_tokens
-        self.encoder_cache_size = self.max_num_batched_tokens
 
         if self.enable_chunked_prefill:
             logger.info(

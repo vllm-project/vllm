@@ -196,7 +196,7 @@ class Scheduler(SchedulerInterface):
                 "multimodal interface with at most one modality."
             )
 
-        self.max_num_encoder_input_tokens = (
+        self.encoder_compute_budget = (
             mm_budget.encoder_compute_budget if mm_budget else 0
         )
         encoder_cache_size = mm_budget.encoder_cache_size if mm_budget else 0
@@ -345,7 +345,7 @@ class Scheduler(SchedulerInterface):
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
-        encoder_compute_budget = self.max_num_encoder_input_tokens
+        encoder_compute_budget = self.encoder_compute_budget
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
