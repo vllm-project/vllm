@@ -271,6 +271,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
+    interleave_mm_strings: bool | None = Field(
+        default=None,
+        description=(
+            "Request-level override for multimodal string interleaving when "
+            "chat template content format is string. If unset, the "
+            "server/model default is used."
+        ),
+    )
     structured_outputs: StructuredOutputsParams | None = Field(
         default=None,
         description="Additional kwargs for structured outputs",
