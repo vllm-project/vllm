@@ -1452,57 +1452,65 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w13_weight_shape", w13_weight_shape)
         set_weight_attrs(w13_weight_shape, extra_weight_attrs)
 
-        w13_g_idx = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w13_weight_g_idx", w13_g_idx)
-        set_weight_attrs(w13_g_idx, extra_weight_attrs)
+        # Only register g_idx parameters when actorder is enabled.
+        # When actorder is null/falsy, the checkpoint does not contain these
+        # tensors, and registering them as nn.Parameter causes
+        # DefaultModelLoader.track_weights_loading() to raise ValueError
+        # for uninitialized weights. See #35303.
+        if self.actorder:
+            w13_g_idx = torch.nn.Parameter(
+                torch.empty(
+                    num_experts,
+                    hidden_size,
+                    dtype=torch.int32,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_weight_g_idx", w13_g_idx)
+            set_weight_attrs(w13_g_idx, extra_weight_attrs)
 
-        w2_g_idx = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                intermediate_size_per_partition,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_weight_g_idx", w2_g_idx)
-        set_weight_attrs(w2_g_idx, extra_weight_attrs)
+            w2_g_idx = torch.nn.Parameter(
+                torch.empty(
+                    num_experts,
+                    intermediate_size_per_partition,
+                    dtype=torch.int32,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_weight_g_idx", w2_g_idx)
+            set_weight_attrs(w2_g_idx, extra_weight_attrs)
 
-        w13_g_idx_sort_indices = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w13_g_idx_sort_indices", w13_g_idx_sort_indices)
-        set_weight_attrs(w13_g_idx_sort_indices, extra_weight_attrs)
+            w13_g_idx_sort_indices = torch.nn.Parameter(
+                torch.empty(
+                    num_experts,
+                    hidden_size,
+                    dtype=torch.int32,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_g_idx_sort_indices", w13_g_idx_sort_indices)
+            set_weight_attrs(w13_g_idx_sort_indices, extra_weight_attrs)
 
-        w2_g_idx_sort_indices = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                intermediate_size_per_partition,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_g_idx_sort_indices", w2_g_idx_sort_indices)
-        set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
+            w2_g_idx_sort_indices = torch.nn.Parameter(
+                torch.empty(
+                    num_experts,
+                    intermediate_size_per_partition,
+                    dtype=torch.int32,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_g_idx_sort_indices", w2_g_idx_sort_indices)
+            set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
 
         layer.a13_scale = None
         layer.a2_scale = None
         layer.marlin_state = GPTQMarlinState.REPACK
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        num_experts = layer.w13_weight_g_idx.shape[0]
-        device = layer.w13_weight_g_idx.device
+        # Use w13_weight_packed (always present) instead of w13_weight_g_idx
+        # which may not exist when actorder is null. See #35303.
+        num_experts = layer.w13_weight_packed.shape[0]
+        device = layer.w13_weight_packed.device
         if self.kernel_backend == "Flashinfer":
             dict_weights_mxint4 = prepare_static_weights_for_trtllm_mxint4_moe(
                 layer.w13_weight_packed,
@@ -1562,21 +1570,19 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
 
         else:
-            layer.w13_weight_g_idx = torch.nn.Parameter(
-                torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-                requires_grad=False,
+            # When actorder is null, assign g_idx as plain tensors (not
+            # nn.Parameter) since they are not real model weights.
+            layer.w13_weight_g_idx = torch.empty(
+                (num_experts, 0), dtype=torch.int32, device=device
             )
-            layer.w2_weight_g_idx = torch.nn.Parameter(
-                torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-                requires_grad=False,
+            layer.w2_weight_g_idx = torch.empty(
+                (num_experts, 0), dtype=torch.int32, device=device
             )
-            layer.w13_g_idx_sort_indices = torch.nn.Parameter(
-                torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-                requires_grad=False,
+            layer.w13_g_idx_sort_indices = torch.empty(
+                (num_experts, 0), dtype=torch.int32, device=device
             )
-            layer.w2_g_idx_sort_indices = torch.nn.Parameter(
-                torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-                requires_grad=False,
+            layer.w2_g_idx_sort_indices = torch.empty(
+                (num_experts, 0), dtype=torch.int32, device=device
             )
 
         marlin_w13_qweight = ops.gptq_marlin_moe_repack(
