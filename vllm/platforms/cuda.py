@@ -574,6 +574,10 @@ class CudaPlatformBase(Platform):
         return True
 
     @classmethod
+    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+        return bool(torch.cuda.get_device_properties(device_id).is_integrated)
+
+    @classmethod
     def num_compute_units(cls, device_id=0):
         return torch.cuda.get_device_properties(device_id).multi_processor_count
 
