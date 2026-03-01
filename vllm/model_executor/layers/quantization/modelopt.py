@@ -92,6 +92,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
+    VocabParallelEmbedding,
 )
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
@@ -225,6 +226,10 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             if getattr(quant_method, "backend", "") == "marlin":
                 quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
             return quant_method
+        elif isinstance(layer, VocabParallelEmbedding) and getattr(
+            self, "nvfp4_embed", False
+        ):
+            return ModelOptNvFp4EmbeddingMethod(self)
 
         return None
 
@@ -1026,9 +1031,11 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         kv_cache_quant_algo: str | None,
         exclude_modules: list[str],
         group_size: int = 16,
+        nvfp4_embed: bool = False,
     ) -> None:
         super().__init__(exclude_modules)
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
+        self.nvfp4_embed = nvfp4_embed
         if is_checkpoint_nvfp4_serialized:
             logger.warning(
                 "Detected ModelOpt NVFP4 checkpoint. Please note that"
@@ -1087,11 +1094,18 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
                     f"hf_quant_config.json: {missing_fields}"
                 )
 
+        nvfp4_embed = False
+        if "quantization" in original_config:
+            nvfp4_embed = original_config["quantization"].get("nvfp4_embed", False)
+        else:
+            nvfp4_embed = original_config.get("nvfp4_embed", False)
+
         return cls(
             is_checkpoint_nvfp4_serialized,
             kv_cache_quant_method,
             exclude_modules,
             group_size,
+            nvfp4_embed,
         )
 
 
@@ -1292,6 +1306,187 @@ class ModelOptNvFp4LMHeadMethod(ModelOptNvFp4LinearMethod):
             params_dtype,
             **extra_weight_attrs,
         )
+
+
+class ModelOptNvFp4EmbeddingMethod(QuantizeMethodBase):
+    """NVFP4 method for VocabParallelEmbedding (embed_tokens).
+
+    Stores embedding weights in NVFP4 packed format to save VRAM.
+    For a 131072-vocab x 5120-dim embedding, this reduces storage from
+    1280 MB (BF16) to ~360 MB (NVFP4), freeing VRAM for more KV cache.
+
+    Weights are stored as:
+      weight: [vocab, hidden/2] uint8 (two FP4 E2M1 values per byte)
+      weight_scale: [vocab, hidden/group_size] float8_e4m3fn
+      input_scale: scalar float32 (global scale)
+      weight_scale_2: scalar float32 (global scale)
+
+    Dequantization happens per-row during embedding lookup via an FP4
+    E2M1 lookup table, avoiding any GEMM kernel dependency.
+
+    To produce an NVFP4 embedding checkpoint, quantize ``embed_tokens``
+    offline (e.g. with ``convert_embed_nvfp4.py``) and set
+    ``"nvfp4_embed": true`` in ``hf_quant_config.json``.
+    """
+
+    # FP4 E2M1 lookup table: maps 4-bit index to float value.
+    # Bits [2:0] = magnitude (0..7), bit [3] = sign.
+    FP4_E2M1_LUT = [
+        0.0,
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0,
+        6.0,  # positive
+        0.0,
+        -0.5,
+        -1.0,
+        -1.5,
+        -2.0,
+        -3.0,
+        -4.0,
+        -6.0,  # negative
+    ]
+
+    def __init__(self, quant_config: "ModelOptNvFp4Config") -> None:
+        self.quant_config = quant_config
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        embedding = layer  # layer is the VocabParallelEmbedding instance
+        output_size_per_partition = sum(output_partition_sizes)
+        group_size = self.quant_config.group_size
+
+        def _nvfp4_embed_weight_loader(
+            param: torch.Tensor,
+            loaded_weight: torch.Tensor,
+        ):
+            output_dim = getattr(param, "output_dim", None)
+            if output_dim is None:
+                # Scalar parameters (input_scale, weight_scale_2)
+                if param.data.dim() == 1 and loaded_weight.dim() == 0:
+                    param.data[0] = loaded_weight.item()
+                else:
+                    param.data.copy_(loaded_weight)
+                return
+
+            tp_size = embedding.tp_size
+            if tp_size == 1:
+                param.data.copy_(loaded_weight)
+            else:
+                start = embedding.shard_indices.org_vocab_start_index
+                end = embedding.shard_indices.org_vocab_end_index
+                shard_size = end - start
+                loaded_weight = loaded_weight.narrow(output_dim, start, shard_size)
+                param.data[: loaded_weight.shape[0]].copy_(loaded_weight)
+                param.data[loaded_weight.shape[0] :].fill_(0)
+
+        # Packed NVFP4 weight: [vocab, hidden/2] uint8
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition // 2,
+                dtype=torch.uint8,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=_nvfp4_embed_weight_loader,
+        )
+        layer.register_parameter("weight", weight)
+
+        # Per-group scale: [vocab, hidden/group_size] float8_e4m3fn
+        weight_scale = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition // group_size,
+                dtype=torch.float8_e4m3fn,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=_nvfp4_embed_weight_loader,
+        )
+        layer.register_parameter("weight_scale", weight_scale)
+
+        # Global scales (scalars)
+        input_scale = PerTensorScaleParameter(
+            data=torch.empty(1, dtype=torch.float32),
+            weight_loader=_nvfp4_embed_weight_loader,
+        )
+        layer.register_parameter("input_scale", input_scale)
+
+        weight_scale_2 = PerTensorScaleParameter(
+            data=torch.empty(1, dtype=torch.float32),
+            weight_loader=_nvfp4_embed_weight_loader,
+        )
+        layer.register_parameter("weight_scale_2", weight_scale_2)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Merge the two global scales into a single factor
+        input_gs = layer.input_scale.max().to(torch.float32)
+        weight_gs = layer.weight_scale_2.max().to(torch.float32)
+        layer.global_scale = Parameter(input_gs * weight_gs, requires_grad=False)
+        del layer.input_scale, layer.weight_scale_2
+
+        # Build FP4 E2M1 lookup table on the correct device
+        layer.fp4_lut = torch.tensor(
+            self.FP4_E2M1_LUT,
+            dtype=torch.bfloat16,
+            device=layer.weight.device,
+        )
+
+    def embedding(
+        self,
+        layer: torch.nn.Module,
+        input_: torch.Tensor,
+    ) -> torch.Tensor:
+        """NVFP4 embedding lookup with per-row dequantization."""
+        group_size = self.quant_config.group_size
+        packed = layer.weight  # [vocab, hidden/2] uint8
+        scales = layer.weight_scale  # [vocab, hidden/group_size] fp8
+        global_scale = layer.global_scale  # scalar
+        fp4_lut = layer.fp4_lut  # [16] bf16
+
+        # 1. Index into packed arrays by token IDs
+        ids = input_.long()
+        packed_rows = packed[ids]  # [..., hidden/2] uint8
+        scale_rows = scales[ids]  # [..., hidden/group_size] fp8
+
+        # 2. Unpack uint8 -> two FP4 indices (low nibble first)
+        low = (packed_rows & 0x0F).long()  # [..., hidden/2]
+        high = (packed_rows >> 4).long()  # [..., hidden/2]
+        unpacked = torch.stack([low, high], dim=-1)  # [..., hidden/2, 2]
+        orig_shape = list(ids.shape) + [packed.shape[-1] * 2]
+        unpacked = unpacked.reshape(orig_shape)  # [..., hidden]
+
+        # 3. FP4 -> float via lookup table
+        dequant = fp4_lut[unpacked]  # [..., hidden] bf16
+
+        # 4. Apply per-group scale and global scale
+        scale_rows_bf16 = scale_rows.to(torch.bfloat16)
+        scale_rows_expanded = scale_rows_bf16.repeat_interleave(
+            group_size, dim=-1
+        )  # [..., hidden]
+        dequant = dequant * scale_rows_expanded * global_scale.to(torch.bfloat16)
+
+        return dequant
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError("NVFP4 embedding does not support linear apply")
 
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
