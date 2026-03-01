@@ -1,0 +1,42 @@
+{
+  "name": "vLLM (python-only, precompiled)",
+  "build": {
+    "dockerfile": "./Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspaces/vllm",
+  "remoteUser": "vscode",
+  "containerEnv": {
+    "VLLM_TARGET_DEVICE": "cpu",
+    "VLLM_USE_PRECOMPILED": "1",
+    "VLLM_PRECOMPILED_WHEEL_VARIANT": "cpu",
+    "PIP_EXTRA_INDEX_URL": "https://download.pytorch.org/whl/cpu",
+    "UV_EXTRA_INDEX_URL": "https://download.pytorch.org/whl/cpu",
+    "UV_INDEX_STRATEGY": "unsafe-best-match",
+    "UV_LINK_MODE": "copy"
+  },
+  "mounts": [
+      "source=${localEnv:USERPROFILE}\\.cache,target=/home/vscode/.cache,type=bind"
+  ],
+  "forwardPorts": [
+    5678
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/home/vscode/.venv/bin/python",
+        "python.testing.pytestEnabled": true,
+        "python.testing.unittestEnabled": false,
+        "python.testing.pytestArgs": [
+          "tests"
+        ],
+        "python.analysis.typeCheckingMode": "basic"
+      }
+    }
+  },
+  "postCreateCommand": "uv pip install --python /home/vscode/.venv/bin/python -e . -e tests/vllm_test_utils"
+}
