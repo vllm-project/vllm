@@ -539,26 +539,48 @@ class Qwen3ASRForConditionalGeneration(
         request_prompt: str,
         to_language: str | None,
     ) -> PromptType:
-        """Get the generation prompt to be used for transcription requests."""
+        """Get the generation prompt to be used for transcription requests.
+
+        When ``language`` is provided, the assistant turn is prefilled
+        with ``language {lang}<asr_text>`` to skip language auto-detection.
+
+        When ``request_prompt`` is provided it is appended after the
+        assistant turn prefix so that the model continues from previous
+        transcription context.
+        """
+        processor = cached_processor_from_config(model_config)
         tokenizer = cached_tokenizer_from_config(model_config)
-        audio_placeholder = cls.get_placeholder_str("audio", 0)
 
         if task_type not in ("transcribe", "translate"):
             raise ValueError(
                 f"Unsupported task_type '{task_type}'. "
                 "Supported task types are 'transcribe' and 'translate'."
             )
-        full_lang_name_to = cls.supported_languages.get(to_language, to_language)
-        if to_language is None:
-            prompt = (
-                f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
-                f"<|im_start|>assistant\n"
-            )
-        else:
-            prompt = (
-                f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
-                f"<|im_start|>assistant\nlanguage {full_lang_name_to}{_ASR_TEXT_TAG}"
-            )
+
+        messages = [
+            {
+                "role": "user",
+                "content": [{"type": "audio", "audio": ""}],
+            },
+        ]
+        prompt = processor.apply_chat_template(
+            messages, add_generation_prompt=True, tokenize=False
+        )
+
+        if language is not None:
+            full_lang_name = cls.supported_languages.get(language, language)
+            prompt += f"language {full_lang_name}{_ASR_TEXT_TAG}"
+
+        if request_prompt:
+            if language is not None:
+                # The prompt already ends with "language {lang}<asr_text>",
+                # so strip the model-output prefix from request_prompt.
+                prompt += cls.post_process_output(request_prompt)
+            else:
+                # Auto-detect mode: request_prompt must carry the full
+                # model-output prefix, e.g.
+                # "language English<asr_text>previously transcribed text"
+                prompt += request_prompt
 
         prompt_token_ids = tokenizer.encode(prompt)
 
