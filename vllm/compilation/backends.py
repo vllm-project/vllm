@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
-import contextvars
 import dataclasses
 import hashlib
 import json
@@ -19,6 +18,7 @@ from typing import Any
 import torch
 import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
+from torch._dynamo.utils import dynamo_timed
 from torch._logging._internal import trace_structured
 
 import vllm.envs as envs
@@ -614,21 +614,6 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
 model_tag: str = "backbone"
 model_is_encoder: bool = False
 
-_on_compilation_complete_callback: contextvars.ContextVar[Callable[[], None] | None] = (
-    contextvars.ContextVar("on_compilation_complete_callback", default=None)
-)
-
-
-@contextmanager
-def set_on_compilation_complete(
-    callback: Callable[[], None],
-) -> Generator[None, None, None]:
-    token = _on_compilation_complete_callback.set(callback)
-    try:
-        yield
-    finally:
-        _on_compilation_complete_callback.reset(token)
-
 
 @contextmanager
 def set_model_tag(tag: str, is_encoder: bool = False) -> Generator[None, None, None]:
@@ -846,6 +831,7 @@ class VllmBackend:
             ),
         )
 
+    @dynamo_timed("vllm_backend")
     def __call__(self, graph: fx.GraphModule, example_inputs: Sequence[Any]) -> Any:
         from .caching import (
             VllmSerializableFunction,
@@ -1040,6 +1026,31 @@ class VllmBackend:
         PiecewiseCompileInterpreter(
             self.split_gm, submod_names_to_compile, self.vllm_config, self
         ).run(*fake_args)
+
+        # Compile all ranges for all piecewise backends up front so that
+        # compilation is complete before the callable is returned.
+        from .piecewise_backend import PiecewiseBackend
+
+        for name, _ in self.split_gm.named_children():
+            child = getattr(self.split_gm, name)
+            # unwrap cudagraph wrapper if present
+            pw_backend = child.runnable if hasattr(child, "runnable") else child
+            if isinstance(pw_backend, PiecewiseBackend):
+                pw_backend.compile_all_ranges()
+
+        # All compilation is done. Save the cache and end monitoring.
+        from .monitor import end_monitoring_torch_compile
+
+        time_before_saving = time.perf_counter()
+        self.compiler_manager.save_to_file()
+        elapsed = time.perf_counter() - time_before_saving
+        if elapsed > 1:
+            logger.info_once(
+                "Saved compiler manager cache in %.2f seconds.",
+                elapsed,
+                scope="local",
+            )
+        end_monitoring_torch_compile(self.vllm_config)
 
         from torch._guards import detect_fake_mode
 
