@@ -1239,7 +1239,7 @@ class OpenAIServingResponses(OpenAIServing):
             if prev_status not in ("queued", "in_progress"):
                 return self.create_error_response(
                     err_type="invalid_request_error",
-                    message="Cannot cancel a synchronous response.",
+                    message=f"Cannot cancel response with status '{prev_status}'.",
                     param="response_id",
                 )
 
@@ -1252,7 +1252,7 @@ class OpenAIServingResponses(OpenAIServing):
             try:
                 await task
             except asyncio.CancelledError:
-                logger.exception("Background task for %s was cancelled", response_id)
+                logger.debug("Background task for %s was cancelled", response_id)
         return response
 
     def _make_not_found_error(self, response_id: str) -> ErrorResponse:
