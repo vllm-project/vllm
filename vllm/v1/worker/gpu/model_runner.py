@@ -833,6 +833,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     draft_logits,
                     input_batch.cu_num_logits,
                     self.num_speculative_steps,
+                    input_batch.index_mapping,
+                    self.sampler.sampling_states.temperature.gpu,
+                    self.sampler.sampling_states.seeds.gpu,
                 )
             sampler_output.sampled_token_ids = sampled_token_ids
 

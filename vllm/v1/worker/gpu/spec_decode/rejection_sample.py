@@ -3,6 +3,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 
 
 @triton.jit
@@ -76,44 +77,41 @@ def _probabilistic_rejection_sample_kernel(
     sampled_ptr,
     sampled_stride,
     num_sampled_ptr,
-    resampled_ptr,
     target_sampled_ptr,
     draft_sampled_ptr,
     target_probs_ptr,
     draft_probs_ptr,
+    num_speculative_steps,
     vocab_size,
     rand_ptr,
     cu_num_logits_ptr,
 ):
     req_idx = tl.program_id(0)
-    logits_start_idx = tl.load(cu_num_logits_ptr + req_idx)
-    start_idx = logits_start_idx - req_idx
-    num_draft_tokens = tl.load(cu_num_logits_ptr + req_idx + 1) - logits_start_idx - 1
+    start_idx = tl.load(cu_num_logits_ptr + req_idx)
+    num_tokens = tl.load(cu_num_logits_ptr + req_idx + 1) - start_idx
 
     num_sampled = 0
     rejected = False
-    for i in range(num_draft_tokens):
+    for i in range(num_tokens - 1):
         if not rejected:
-            draft_sampled = tl.load(draft_sampled_ptr + logits_start_idx + i + 1)
-            resampled = tl.load(resampled_ptr + start_idx + i)
+            draft_sampled = tl.load(draft_sampled_ptr + start_idx + i + 1)
             target_prob = tl.load(
                 target_probs_ptr + (start_idx + i) * vocab_size + draft_sampled
             )
             draft_prob = tl.load(
-                draft_probs_ptr + (start_idx + i) * vocab_size + draft_sampled
+                draft_probs_ptr + (req_idx * num_speculative_steps + i) * vocab_size + draft_sampled
             )
             r = tl.load(rand_ptr + start_idx + i)
             accept_prob = tl.minimum(1.0, target_prob / draft_prob)
             rejected |= (draft_prob <= 0) | (r > accept_prob)
-            sampled_token = tl.where(rejected, resampled, draft_sampled)
-            tl.store(sampled_ptr + req_idx * sampled_stride + i, sampled_token)
+            tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
             num_sampled += 1
     if not rejected:
         # All draft tokens were accepted. Append the bonus token sampled from the
         # target model.
-        bonus_sampled = tl.load(target_sampled_ptr + logits_start_idx + num_draft_tokens)
+        bonus_sampled = tl.load(target_sampled_ptr + start_idx + num_tokens - 1)
         tl.store(
-            sampled_ptr + req_idx * sampled_stride + num_draft_tokens, bonus_sampled
+            sampled_ptr + req_idx * sampled_stride + num_tokens - 1, bonus_sampled
         )
         num_sampled += 1
     tl.store(num_sampled_ptr + req_idx, num_sampled)
@@ -131,37 +129,29 @@ def probabilistic_rejection_sample(
     # [num_reqs + 1]
     cu_num_logits: torch.Tensor,
     num_speculative_steps: int,
+    # [num_reqs]
+    idx_mapping: torch.Tensor,
+    # [num_reqs]
+    temperature: torch.Tensor,
+    # [num_reqs]
+    seeds: torch.Tensor,
+
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
     device = target_sampled.device
+    req_idxs = torch.arange(num_reqs, device=device)
 
-    # Compute target probs.
-    mask = torch.ones(num_logits, dtype=torch.bool, device=device)
-    bonus_token_indices = cu_num_logits[1:] - 1
-    mask[bonus_token_indices] = False
-    target_probs = torch.softmax(target_logits[mask], dim=-1)
+    # Compute target and draft probs.
+    target_probs = torch.softmax(target_logits, dim=-1)
+    draft_probs = torch.softmax(draft_logits, dim=-1)
 
-    # Compute draft probs.
-    num_draft_tokens = bonus_token_indices - cu_num_logits[:-1]
-    mask = torch.arange(num_speculative_steps, device=device).unsqueeze(
-        0
-    ) < num_draft_tokens.unsqueeze(1)
-    draft_probs = torch.softmax(draft_logits[mask], dim=-1)
-
-    # Compute distribution to resample from after draft token rejection.
-    resample_probs = torch.clamp(target_probs - draft_probs, min=0.0)
-    norms = resample_probs.sum(dim=-1, keepdim=True)
-    resample_probs = torch.where(norms > 1e-8, resample_probs / norms, target_probs)
-    resampled = torch.multinomial(resample_probs, num_samples=1).squeeze(-1)
-
-    # [num_draft_tokens]
+    # [num_logits]
     rand = torch.rand(
-        num_logits - num_reqs,
+        num_logits,
         dtype=draft_probs.dtype,
         device=device,
     )
-
     # [num_reqs, num_speculative_steps + 1]
     sampled = torch.empty(
         num_reqs,
@@ -179,14 +169,34 @@ def probabilistic_rejection_sample(
         sampled,
         sampled.stride(0),
         num_sampled,
-        resampled,
         target_sampled,
         draft_sampled,
         target_probs,
         draft_probs,
+        num_speculative_steps,
         vocab_size,
         rand,
         cu_num_logits,
         num_warps=1,
     )
+
+    # Get indices of the first rejected draft token.
+    rejected_draft_steps = torch.clamp(num_sampled - 1, max=num_speculative_steps - 1)
+    rejected_logit_idxs = cu_num_logits[:-1] + rejected_draft_steps
+    # Resample from adjusted distribution.
+    resample_probs = torch.clamp(
+        target_probs[rejected_logit_idxs] - draft_probs[req_idxs, rejected_draft_steps],
+        min=0.0
+    )
+    resampled = gumbel_sample(
+        torch.log(resample_probs),
+        idx_mapping,
+        temperature,
+        seeds,
+        num_sampled,
+        apply_temperature=False,
+    )
+    # Only set the non-bonus tokens.
+    resample_mask = num_sampled <= num_speculative_steps
+    sampled[resample_mask, rejected_draft_steps[resample_mask]] = resampled[resample_mask]
     return sampled, num_sampled
