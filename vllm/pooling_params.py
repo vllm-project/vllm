@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import deepcopy
-from typing import Annotated, Any
+from typing import Any
 
 import msgspec
 
@@ -19,10 +19,6 @@ class PoolingParams(
     """API parameters for pooling models.
 
     Attributes:
-        truncate_prompt_tokens: Controls prompt truncation.
-            Set to -1 to use the model's default truncation size.
-            Set to k to keep only the last k tokens (left truncation).
-            Set to None to disable truncation.
         use_activation: Whether to apply activation function to the pooler outputs.
             `None` uses the pooler's default, which is `True` in most cases.
         dimensions: Reduce the dimensions of embeddings
@@ -30,7 +26,6 @@ class PoolingParams(
     """
 
     # --8<-- [start:common-pooling-params]
-    truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None
     use_activation: bool | None = None
     # --8<-- [end:common-pooling-params]
 
@@ -198,7 +193,6 @@ class PoolingParams(
             f"returned_token_ids={self.returned_token_ids}, "
             f"requires_token_ids={self.requires_token_ids}, "
             f"skip_reading_prefix_cache={self.skip_reading_prefix_cache}, "
-            f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"extra_kwargs={self.extra_kwargs})"
         )
 
