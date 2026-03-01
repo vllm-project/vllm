@@ -106,7 +106,7 @@ def test_deepseek_fp8_block_moe_vllm_triton(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "deepseek-ai/DeepSeek-V3.1",
         hf_overrides=HF_OVERRIDE_TEXT,
-        extra_args=["--moe-backend=tritont"],
+        extra_args=["--moe-backend=triton"],
     )
 
 
