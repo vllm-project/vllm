@@ -16,7 +16,6 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
-    has_flashinfer_cutedsl_grouped_gemm_nt_masked,
     has_flashinfer_cutlass_fused_moe,
 )
 
@@ -41,16 +40,6 @@ def is_flashinfer_fp4_cutlass_moe_available() -> bool:
         and has_flashinfer_cutlass_fused_moe()
         and current_platform.is_cuda()
         and current_platform.has_device_capability(100)
-    )
-
-
-def is_flashinfer_fp4_cutedsl_moe_available() -> bool:
-    """Return ``True`` when FlashInfer CUTEDSL NV-FP4 kernels can be used."""
-    return (
-        envs.VLLM_USE_FLASHINFER_MOE_FP4
-        and has_flashinfer_cutedsl_grouped_gemm_nt_masked()
-        and current_platform.is_cuda()
-        and current_platform.is_device_capability_family(100)
     )
 
 
