@@ -230,7 +230,7 @@ def test_rocm_wvsplitk_kernel(
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 def test_rocm_wvsplitk_invalid_in_a_not_2d():
     """wvSplitK requires in_a (weight) to be 2D."""
-    cu_count = get_cu_count()
+    cu_count = num_compute_units()
     A = torch.rand(1, 16, dtype=torch.float16, device="cuda")
     B_1d = torch.rand(16, dtype=torch.float16, device="cuda")
     with pytest.raises(RuntimeError, match="in_a must be 2D"):
@@ -240,7 +240,7 @@ def test_rocm_wvsplitk_invalid_in_a_not_2d():
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 def test_rocm_wvsplitk_invalid_in_b_not_2d():
     """wvSplitK requires in_b (activations) to be 2D."""
-    cu_count = get_cu_count()
+    cu_count = num_compute_units()
     A_1d = torch.rand(16, dtype=torch.float16, device="cuda")
     B = torch.rand(16, 16, dtype=torch.float16, device="cuda")
     with pytest.raises(RuntimeError, match="in_b must be 2D"):
@@ -250,7 +250,7 @@ def test_rocm_wvsplitk_invalid_in_b_not_2d():
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 def test_rocm_wvsplitk_invalid_dtype_mismatch():
     """wvSplitK rejects A and B with different dtypes."""
-    cu_count = get_cu_count()
+    cu_count = num_compute_units()
     A = torch.rand(1, 16, dtype=torch.float16, device="cuda")
     B = torch.rand(16, 16, dtype=torch.bfloat16, device="cuda")
     with pytest.raises(RuntimeError, match="same dtype"):
@@ -260,7 +260,7 @@ def test_rocm_wvsplitk_invalid_dtype_mismatch():
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 def test_rocm_wvsplitk_invalid_dtype_float32():
     """wvSplitK rejects float32; only fp16 and bf16 are supported."""
-    cu_count = get_cu_count()
+    cu_count = num_compute_units()
     A = torch.rand(1, 16, dtype=torch.float32, device="cuda")
     B = torch.rand(16, 16, dtype=torch.float32, device="cuda")
     with pytest.raises(RuntimeError):
@@ -270,7 +270,7 @@ def test_rocm_wvsplitk_invalid_dtype_float32():
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 def test_rocm_wvsplitk_invalid_k_not_div8():
     """wvSplitK requires K % 8 == 0 for vectorized loads."""
-    cu_count = get_cu_count()
+    cu_count = num_compute_units()
     A = torch.rand(1, 10, dtype=torch.float16, device="cuda")
     B = torch.rand(16, 10, dtype=torch.float16, device="cuda")
     with pytest.raises(RuntimeError, match="k % 8"):
@@ -280,7 +280,7 @@ def test_rocm_wvsplitk_invalid_k_not_div8():
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 def test_rocm_wvsplitk_invalid_k_dimension_mismatch():
     """K dimension (inner) of in_a and in_b must match for correct matmul."""
-    cu_count = get_cu_count()
+    cu_count = num_compute_units()
     A = torch.rand(1, 16, dtype=torch.float16, device="cuda")
     B = torch.rand(16, 24, dtype=torch.float16, device="cuda")
     with pytest.raises(RuntimeError, match="K dimension.*must match"):
@@ -290,7 +290,7 @@ def test_rocm_wvsplitk_invalid_k_dimension_mismatch():
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 def test_rocm_wvsplitk_invalid_bias_bx_does_not_divide_m():
     """1D bias: Bx must be 1 or divide M for (m % Bx) indexing."""
-    cu_count = get_cu_count()
+    cu_count = num_compute_units()
     A = torch.rand(1, 16, dtype=torch.float16, device="cuda")
     B = torch.rand(16, 16, dtype=torch.float16, device="cuda")
     BIAS = torch.rand(7, dtype=torch.float16, device="cuda")
@@ -301,7 +301,7 @@ def test_rocm_wvsplitk_invalid_bias_bx_does_not_divide_m():
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 def test_rocm_wvsplitk_invalid_bias_2d_bx_must_equal_m():
     """2D bias (By > 1): Bx must equal M because kernel uses stride M."""
-    cu_count = get_cu_count()
+    cu_count = num_compute_units()
     A = torch.rand(2, 16, dtype=torch.float16, device="cuda")
     B = torch.rand(16, 16, dtype=torch.float16, device="cuda")
     BIAS = torch.rand(2, 8, dtype=torch.float16, device="cuda")
@@ -312,7 +312,7 @@ def test_rocm_wvsplitk_invalid_bias_2d_bx_must_equal_m():
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 def test_rocm_wvsplitk_invalid_bias_by_does_not_divide_n():
     """Bias By must be 1 or divide N for (n % By) indexing."""
-    cu_count = get_cu_count()
+    cu_count = num_compute_units()
     A = torch.rand(4, 16, dtype=torch.float16, device="cuda")
     B = torch.rand(16, 16, dtype=torch.float16, device="cuda")
     BIAS = torch.rand(3, 16, dtype=torch.float16, device="cuda")
@@ -323,7 +323,7 @@ def test_rocm_wvsplitk_invalid_bias_by_does_not_divide_n():
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 def test_rocm_wvsplitk_invalid_bias_dtype_mismatch():
     """Bias must have the same dtype as inputs to avoid unsafe reinterpret_cast."""
-    cu_count = get_cu_count()
+    cu_count = num_compute_units()
     A = torch.rand(1, 16, dtype=torch.float16, device="cuda")
     B = torch.rand(16, 16, dtype=torch.float16, device="cuda")
     BIAS = torch.rand(16, dtype=torch.bfloat16, device="cuda")
