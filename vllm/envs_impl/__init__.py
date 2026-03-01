@@ -47,7 +47,7 @@ def __getattr__(name: str) -> Any:
         if field.default is not PydanticUndefined:
             return field.default
         if field.default_factory is not None:
-            return field.default_factory()
+            return field.default_factory()  # type: ignore[call-arg]
         raise ValueError(f"Env var {name!r} has no default value")  # shouldn't happen
 
     return _adapters[name].validate_python(env_value)
