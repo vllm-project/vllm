@@ -201,3 +201,9 @@ KVConnectorFactory.register_connector(
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_connector",
     "MooncakeConnector",
 )
+
+KVConnectorFactory.register_connector(
+    "SwapConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.swap_connector",
+    "SwapConnector",
+)
