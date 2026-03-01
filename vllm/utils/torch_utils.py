@@ -740,6 +740,41 @@ def is_torch_equal(target: str) -> bool:
         return Version(importlib.metadata.version("torch")) == Version(target)
 
 
+HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
+
+if HAS_OPAQUE_TYPE:
+    from torch._opaque_base import OpaqueBase
+else:
+    OpaqueBase = object  # type: ignore[misc, assignment]
+
+
+class ModuleName(OpaqueBase):  # type: ignore[misc]
+    """Wraps a module name string for use as a torch opaque type.
+
+    When torch >= 2.11, this is registered as a hoisted value-type opaque
+    object so that torch.compile lifts it as a graph input instead of baking
+    it as a constant.  This avoids per-layer recompilation for MOE ops.
+    """
+
+    def __init__(self, value: str):
+        self.value = value
+
+    def __eq__(self, other):
+        return isinstance(other, ModuleName) and self.value == other.value
+
+    def __hash__(self):
+        return hash(self.value)
+
+    def __fx_repr__(self):
+        return (f"ModuleName({self.value!r})", {ModuleName})
+
+
+if HAS_OPAQUE_TYPE:
+    from torch._library.opaque_object import register_opaque_type
+
+    register_opaque_type(ModuleName, typ="value", hoist=True)
+
+
 # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
 def supports_xccl() -> bool:
     return torch.distributed.is_xccl_available()
