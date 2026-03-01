@@ -471,8 +471,10 @@ class CpuPlatform(Platform):
 
     @classmethod
     def is_avx512_supported(cls) -> bool:
-        return hasattr(torch._C._cpu, '_is_avx512_supported') \
+        return (
+            hasattr(torch._C._cpu, "_is_avx512_supported")
             and torch._C._cpu._is_avx512_supported()
+        )
 
     @classmethod
     def is_avx512_bf16_supported(cls) -> bool:
@@ -481,8 +483,10 @@ class CpuPlatform(Platform):
 
     @classmethod
     def is_amx_tile_supported(cls) -> bool:
-        return hasattr(torch._C._cpu, '_is_amx_tile_supported') \
+        return (
+            hasattr(torch._C._cpu, "_is_amx_tile_supported")
             and torch._C._cpu._is_amx_tile_supported()
+        )
 
     @classmethod
     def import_kernels(cls) -> None:
