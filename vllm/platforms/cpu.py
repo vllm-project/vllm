@@ -478,8 +478,10 @@ class CpuPlatform(Platform):
             # successfully. So ignore the exception for now, until we find
             # a solution.
             ignored_msg = "dynamic module does not define module export function"
-            if torch.cpu._is_avx512_supported():
-                if torch.cpu._is_avx512_bf16_supported():
+            if hasattr(torch._C._cpu, '_is_avx512_supported') \
+                    and torch.cpu._is_avx512_supported():
+                if hasattr(torch._C._cpu, '_is_avx512_bf16_supported') \
+                        and torch.cpu._is_avx512_bf16_supported():
                     try:
                         import vllm._C  # noqa: F401
                     except ImportError as e:
