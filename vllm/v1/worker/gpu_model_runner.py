@@ -575,7 +575,13 @@ class GPUModelRunner(
             ),
             # We currently don't know whether a particular custom logits processor
             # uses output token ids so we set this conservatively.
-            logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
+            # ThinkingTokenBudgetLogitsProcessor also needs output token ids to
+            # correctly track think start/end token sequences in async scheduling.
+            logitsprocs_need_output_token_ids=bool(custom_logitsprocs)
+            or (
+                self.vllm_config.reasoning_config is not None
+                and self.vllm_config.reasoning_config.is_thinking_enabled
+            ),
             is_pooling_model=self.is_pooling_model,
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
         )
