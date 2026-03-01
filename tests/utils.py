@@ -123,6 +123,7 @@ class RemoteOpenAIServer:
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         if env_dict is not None:
             env.update(env_dict)
+
         serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
         print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
         print(f"Environment variables: {env}")
