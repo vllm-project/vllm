@@ -560,19 +560,22 @@ def test_streaming_empty_tool_call(glm4_moe_tool_parser, mock_request):
     assert glm4_moe_tool_parser.current_tool_id == -1
 
 
-def test_streaming_prev_tool_call_arr_finalization(glm4_moe_tool_parser, mock_request):
+def test_streaming_prev_tool_call_arr_updates(glm4_moe_tool_parser, mock_request):
     """Test that prev_tool_call_arr contains parsed dict after tool call."""
     _reset_streaming_state(glm4_moe_tool_parser)
 
     # Stream a complete tool call
+    name_only = {"name": "get_weather", "arguments": {}}
+    name_and_args = {"name": "get_weather", "arguments": {"city": "Beijing"}}
     chunks = [
-        "<tool_call>get_weather\n",
-        "<arg_key>city</arg_key>",
-        "<arg_value>Beijing</arg_value>",
-        "</tool_call>",
+        # Delta, expected streamed_args_for_tool, expected prev_tool_call_arr
+        ("<tool_call>get_weather\n", "", name_only),
+        ("<arg_key>city</arg_key>", "", name_only),
+        ("<arg_value>Beijing</arg_value>", '{"city": "Beijing"', name_and_args),
+        ("</tool_call>", '{"city": "Beijing"}', name_and_args),
     ]
 
-    for chunk in chunks:
+    for chunk, exp_streamed, exp_prev_tc in chunks:
         glm4_moe_tool_parser.extract_tool_calls_streaming(
             previous_text="",
             current_text="",
@@ -582,6 +585,8 @@ def test_streaming_prev_tool_call_arr_finalization(glm4_moe_tool_parser, mock_re
             delta_token_ids=[],
             request=mock_request,
         )
+        assert glm4_moe_tool_parser.streamed_args_for_tool[0] == exp_streamed
+        assert glm4_moe_tool_parser.prev_tool_call_arr[0] == exp_prev_tc
 
     # After the tool call completes, prev_tool_call_arr should have parsed dict
     assert len(glm4_moe_tool_parser.prev_tool_call_arr) == 1
@@ -591,6 +596,12 @@ def test_streaming_prev_tool_call_arr_finalization(glm4_moe_tool_parser, mock_re
     args = tool_entry.get("arguments")
     assert isinstance(args, dict), f"Expected dict, got {type(args)}"
     assert args.get("city") == "Beijing"
+
+    # Test equivalence of prev_tool_call_arr and streamed_args_for_tool
+    # Simulates logic in chat_completion/serving.py:chat_completion_stream_generator
+    tool_call_json = json.dumps(tool_entry.get("arguments", {}))
+    streamed_content = glm4_moe_tool_parser.streamed_args_for_tool[0]
+    assert tool_call_json.startswith(streamed_content)
 
 
 def test_streaming_multiple_tool_calls_sequential(glm4_moe_tool_parser, mock_request):
