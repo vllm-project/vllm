@@ -280,7 +280,8 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
     ],
 )
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="The tests are skipped on non-CUDA platform."
+    not current_platform.is_cuda_alike(),
+    reason="The tests are skipped on non-CUDA/ROCm platform.",
 )
 def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
     model, strategy, group, pack_factor, symmetric, has_g_idx = wNa16_args
