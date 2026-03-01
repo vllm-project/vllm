@@ -42,6 +42,57 @@ def register_generate_api_routers(app: FastAPI):
     register_anthropic_api_router(app)
 
 
+def _check_chat_template_available(
+    engine_client: "EngineClient",
+    chat_template: str | None,
+) -> bool:
+    """
+    Check if a chat template can be resolved for this model.
+
+    Returns:
+        True if chat template is available, False otherwise.
+    """
+    if engine_client.renderer.tokenizer is None:
+        # If tokenizer is not initialized, chat template is not available.
+        return False
+
+    from vllm.entrypoints.logger import init_logger
+    from vllm.renderers.hf import resolve_chat_template
+
+    logger = init_logger(__name__)
+    model_name = engine_client.model_config.model
+
+    try:
+        resolved = resolve_chat_template(
+            tokenizer=engine_client.renderer.tokenizer,
+            chat_template=chat_template,
+            tools=None,
+            model_config=engine_client.model_config,
+        )
+
+        if resolved is not None:
+            return True
+
+        # Normal case: base models without chat templates
+        logger.info(
+            "No chat template found for model %s. "
+            "The /v1/chat/completions endpoint will be disabled. "
+            "Use /v1/completions for this model, or provide a chat template "
+            "via --chat-template to enable chat completions.",
+            model_name,
+        )
+        return False
+
+    except Exception:
+        # Unexpected errors during template resolution
+        logger.exception(
+            "Error checking chat template availability for model %s. "
+            "The /v1/chat/completions endpoint will be disabled.",
+            model_name,
+        )
+        return False
+
+
 async def init_generate_state(
     engine_client: "EngineClient",
     state: "State",
@@ -70,14 +121,18 @@ async def init_generate_state(
         await tool_server.add_tool_server(args.tool_server)
     else:
         tool_server = None
-    resolved_chat_template = load_chat_template(args.chat_template)
+    loaded_chat_template = load_chat_template(args.chat_template)
 
+    # Check if chat template is available before creating chat endpoint
+    chat_template_available = _check_chat_template_available(
+        engine_client, loaded_chat_template
+    )
     state.openai_serving_responses = (
         OpenAIServingResponses(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            chat_template=resolved_chat_template,
+            chat_template=loaded_chat_template,
             chat_template_content_format=args.chat_template_content_format,
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_auto_tools=args.enable_auto_tool_choice,
@@ -98,7 +153,7 @@ async def init_generate_state(
             state.openai_serving_models,
             args.response_role,
             request_logger=request_logger,
-            chat_template=resolved_chat_template,
+            chat_template=loaded_chat_template,
             chat_template_content_format=args.chat_template_content_format,
             default_chat_template_kwargs=args.default_chat_template_kwargs,
             trust_request_chat_template=args.trust_request_chat_template,
@@ -113,7 +168,7 @@ async def init_generate_state(
             enable_log_deltas=args.enable_log_deltas,
             log_error_stack=args.log_error_stack,
         )
-        if "generate" in supported_tasks
+        if "generate" in supported_tasks and chat_template_available
         else None
     )
     # Warm up chat template processing to avoid first-request latency
@@ -138,7 +193,7 @@ async def init_generate_state(
             state.openai_serving_models,
             args.response_role,
             request_logger=request_logger,
-            chat_template=resolved_chat_template,
+            chat_template=loaded_chat_template,
             chat_template_content_format=args.chat_template_content_format,
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_auto_tools=args.enable_auto_tool_choice,
