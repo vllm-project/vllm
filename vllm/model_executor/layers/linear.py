@@ -240,6 +240,7 @@ class LinearBase(PluggableLayer):
         self,
         input_size: int,
         output_size: int,
+        bias: bool = False,
         skip_bias_add: bool = False,
         params_dtype: torch.dtype | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -253,6 +254,7 @@ class LinearBase(PluggableLayer):
         # Keep input parameters
         self.input_size = input_size
         self.output_size = output_size
+        self.has_bias = bias
         self.skip_bias_add = skip_bias_add
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -318,6 +320,7 @@ class ReplicatedLinear(LinearBase):
         super().__init__(
             input_size,
             output_size,
+            bias,
             skip_bias_add,
             params_dtype,
             quant_config,
@@ -338,19 +341,20 @@ class ReplicatedLinear(LinearBase):
             weight_loader=self.weight_loader,
         )
 
-        if bias:
-            self.bias = Parameter(
-                torch.empty(self.output_size, dtype=self.params_dtype)
-            )
-            set_weight_attrs(
-                self.bias,
-                {
-                    "output_dim": 0,
-                    "weight_loader": self.weight_loader,
-                },
-            )
-        else:
-            self.register_parameter("bias", None)
+        if not hasattr(self, "bias"):
+            if bias:
+                self.bias = Parameter(
+                    torch.empty(self.output_size, dtype=self.params_dtype)
+                )
+                set_weight_attrs(
+                    self.bias,
+                    {
+                        "output_dim": 0,
+                        "weight_loader": self.weight_loader,
+                    },
+                )
+            else:
+                self.register_parameter("bias", None)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         # If the weight on disk does not have a shape, give it one
@@ -453,6 +457,7 @@ class ColumnParallelLinear(LinearBase):
         super().__init__(
             input_size,
             output_size,
+            bias,
             skip_bias_add,
             params_dtype,
             quant_config,
@@ -478,19 +483,21 @@ class ColumnParallelLinear(LinearBase):
                 else self.weight_loader
             ),
         )
-        if bias:
-            self.bias = Parameter(
-                torch.empty(self.output_size_per_partition, dtype=params_dtype)
-            )
-            set_weight_attrs(
-                self.bias,
-                {
-                    "output_dim": 0,
-                    "weight_loader": self.weight_loader,
-                },
-            )
-        else:
-            self.register_parameter("bias", None)
+
+        if not hasattr(self, "bias"):
+            if bias:
+                self.bias = Parameter(
+                    torch.empty(self.output_size_per_partition, dtype=params_dtype)
+                )
+                set_weight_attrs(
+                    self.bias,
+                    {
+                        "output_dim": 0,
+                        "weight_loader": self.weight_loader,
+                    },
+                )
+            else:
+                self.register_parameter("bias", None)
         self.update_param_tp_status()
 
     def _maybe_allow_fp8_block_shape_mismatch(self) -> None:
@@ -1392,6 +1399,7 @@ class RowParallelLinear(LinearBase):
         super().__init__(
             input_size,
             output_size,
+            bias,
             skip_bias_add,
             params_dtype,
             quant_config,
@@ -1423,17 +1431,18 @@ class RowParallelLinear(LinearBase):
                 "results can lead to incorrect results"
             )
 
-        if bias:
-            self.bias = Parameter(torch.empty(self.output_size, dtype=params_dtype))
-            set_weight_attrs(
-                self.bias,
-                {
-                    "output_dim": 0,
-                    "weight_loader": self.weight_loader,
-                },
-            )
-        else:
-            self.register_parameter("bias", None)
+        if not hasattr(self, "bias"):
+            if bias:
+                self.bias = Parameter(torch.empty(self.output_size, dtype=params_dtype))
+                set_weight_attrs(
+                    self.bias,
+                    {
+                        "output_dim": 0,
+                        "weight_loader": self.weight_loader,
+                    },
+                )
+            else:
+                self.register_parameter("bias", None)
         self.update_param_tp_status()
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):

@@ -144,6 +144,9 @@ if TYPE_CHECKING:
     VLLM_RAY_EXTRA_ENV_VARS_TO_COPY: str = ""
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_MARLIN_INPUT_DTYPE: Literal["int8", "fp8"] | None = None
+    VLLM_HUMMING_ONLINE_QUANT_CONFIG: dict[str, Any] | None = None
+    VLLM_HUMMING_INPUT_QUANT_CONFIG: dict[str, Any] | None = None
+    VLLM_HUMMING_USE_F16_ACCUM: bool = False
     VLLM_MXFP4_USE_MARLIN: bool | None = None
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
@@ -271,6 +274,15 @@ def maybe_convert_bool(value: str | None) -> bool | None:
     if value is None:
         return None
     return bool(int(value))
+
+
+def maybe_convert_json_str_or_file(value: str | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if os.path.exists(value):
+        with open(value) as f:
+            return json.load(f)
+    return json.loads(value)
 
 
 def disable_compile_cache() -> bool:
@@ -1141,6 +1153,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The activation dtype for marlin kernel
     "VLLM_MARLIN_INPUT_DTYPE": env_with_choices(
         "VLLM_MARLIN_INPUT_DTYPE", None, ["int8", "fp8"]
+    ),
+    # The online quantization dtype for humming kernel
+    "VLLM_HUMMING_ONLINE_QUANT_CONFIG": lambda: maybe_convert_json_str_or_file(
+        os.environ.get("VLLM_HUMMING_ONLINE_QUANT_CONFIG", None)
+    ),
+    # The activation dtype config for humming kernel
+    "VLLM_HUMMING_INPUT_QUANT_CONFIG": lambda: maybe_convert_json_str_or_file(
+        os.environ.get("VLLM_HUMMING_INPUT_QUANT_CONFIG", None)
+    ),
+    # Whether to use fp16 accumulator mma
+    "VLLM_HUMMING_USE_F16_ACCUM": lambda: maybe_convert_bool(
+        os.environ.get("VLLM_HUMMING_USE_F16_ACCUM", "0")
     ),
     # Whether to use DeepEPLL kernels for NVFP4 quantization and dispatch method
     # only supported on Blackwell GPUs and with
