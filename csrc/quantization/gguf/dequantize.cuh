@@ -434,6 +434,42 @@ static __global__ void dequantize_block_iq4_xs(const void * __restrict__ vx, dst
     }
 }
 
+static __device__ __forceinline__ float ggml_cuda_e8m0_to_fp32(uint8_t x) {
+#if CUDART_VERSION >= 12080
+    const nv_bfloat16 e = __nv_cvt_e8m0_to_bf16raw(x);
+    return (float) e;
+#else
+    uint32_t bits;
+    if (x == 0) {
+        bits = 0x00400000;
+    } else {
+        bits = (uint32_t) x << 23;
+    }
+
+    float result;
+    memcpy(&result, &bits, sizeof(float));
+    return result;
+#endif // CUDART_VERSION >= 12050
+}
+
+template<typename dst_t>
+static __global__ void dequantize_block_mxfp4(const void * __restrict__ vx, dst_t * __restrict__ yy) {
+
+    const int64_t i   = blockIdx.x;
+    const block_mxfp4 * x = (const block_mxfp4 *) vx + i*(QK_K/QK_MXFP4);
+
+    const int64_t tid = threadIdx.x;
+    const int64_t il = tid/8; // 0...3
+    const int64_t ib = tid%8; // 0...7
+    dst_t * y = yy + i*QK_K + 32*ib + 4*il;
+    const uint8_t  * q4 = x[ib].qs + 4*il;
+    const float d = ggml_cuda_e8m0_to_fp32(x[ib].e);
+    for (int j = 0; j < 4; ++j) {
+        y[j+ 0] = d * kvalues_mxfp4[q4[j] & 0xf]*0.5f;
+        y[j+16] = d * kvalues_mxfp4[q4[j] >>  4]*0.5f;
+    }
+}
+
 template <int qk, int qr, dequantize_kernel_t dequantize_kernel, typename dst_t>
 static void dequantize_block_cuda(const void * __restrict__ vx, dst_t * __restrict__ y, const int k, cudaStream_t stream) {
     const int num_blocks = (k + 2*CUDA_DEQUANTIZE_BLOCK_SIZE - 1) / (2*CUDA_DEQUANTIZE_BLOCK_SIZE);
@@ -525,6 +561,12 @@ static void dequantize_row_iq4_xs_cuda(const void * vx, dst_t * y, const int k, 
 }
 
 template<typename dst_t>
+static void dequantize_row_mxfp4_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int nb = (k + QK_K - 1) / QK_K;
+    dequantize_block_mxfp4<<<nb, 32, 0, stream>>>(vx, y);
+}
+
+template<typename dst_t>
 static to_cuda_ggml_t<dst_t> ggml_get_to_cuda(int64_t type) {
     switch (type) {
         case 2:
@@ -565,6 +607,8 @@ static to_cuda_ggml_t<dst_t> ggml_get_to_cuda(int64_t type) {
             return dequantize_row_iq4_xs_cuda;
         case 29:
             return dequantize_row_iq1_m_cuda;
+        case 39:
+            return dequantize_row_mxfp4_cuda;
         default:
             return nullptr;
     }
