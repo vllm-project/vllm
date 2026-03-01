@@ -1216,6 +1216,40 @@ MM_PARSER_MAP: dict[
     "video_url": lambda part: _VideoParser(part).get("video_url", {}).get("url", None),
 }
 
+# Fields already consumed by the content part parser. Any field NOT in this
+# set is treated as an extra field and passed through to the chat template
+# when using the OpenAI (wrap_dicts) content format.
+_KNOWN_CONTENT_PART_FIELDS: frozenset[str] = frozenset(
+    {
+        "type",
+        "text",
+        "refusal",
+        "thinking",
+        "input_text",
+        "output_text",
+        "closed",
+        "image_url",
+        "image_pil",
+        "image_embeds",
+        "detail",
+        "audio_url",
+        "input_audio",
+        "audio_embeds",
+        "video_url",
+        "input_image",
+        "uuid",
+    }
+)
+
+
+def _collect_extra_fields(part: dict[str, Any]) -> dict[str, Any]:
+    """Collect fields from a content part that are not consumed by the parser.
+
+    This allows model-specific metadata (e.g., language codes for translation
+    models) to flow through to the chat template.
+    """
+    return {k: v for k, v in part.items() if k not in _KNOWN_CONTENT_PART_FIELDS}
+
 
 def _parse_chat_message_content_mm_part(
     part: ChatCompletionContentPartParam,
@@ -1388,7 +1422,9 @@ def _parse_chat_message_content_part(
     if part_type in ("text", "input_text", "output_text", "refusal", "thinking"):
         str_content = cast(str, content)
         if wrap_dicts:
-            return {"type": "text", "text": str_content}
+            result: dict[str, Any] = {"type": "text", "text": str_content}
+            result.update(_collect_extra_fields(cast(dict[str, Any], part)))
+            return result
         else:
             return str_content
 
@@ -1430,11 +1466,12 @@ def _parse_chat_message_content_part(
     else:
         raise NotImplementedError(f"Unknown part type: {part_type}")
 
-    return (
-        {"type": modality}
-        if wrap_dicts
-        else (MODALITY_PLACEHOLDERS_MAP[modality] if interleave_strings else None)
-    )
+    if wrap_dicts:
+        result = {"type": modality}
+        result.update(_collect_extra_fields(cast(dict[str, Any], part)))
+        return result
+    else:
+        return MODALITY_PLACEHOLDERS_MAP[modality] if interleave_strings else None
 
 
 # No need to validate using Pydantic again

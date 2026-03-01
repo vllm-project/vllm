@@ -2182,6 +2182,93 @@ async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
     _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[audio_uuid])
 
 
+# Extra field passthrough tests
+def test_extra_fields_preserved_in_text_parts(phi3v_model_config):
+    """Test that arbitrary extra fields on content parts are preserved
+    when using openai content format (wrap_dicts=True).
+
+    This enables models like TranslateGemma to receive custom metadata
+    (e.g., language codes) through their bundled chat templates.
+    """
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "V nejhorším případě i k prasknutí čočky.",
+                    "source_lang_code": "cs",
+                    "target_lang_code": "de-DE",
+                    "custom_field": "custom_value",
+                }
+            ],
+        }
+    ]
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        messages,
+        phi3v_model_config,
+        content_format="openai",
+    )
+
+    assert len(conversation) == 1
+    assert conversation[0]["role"] == "user"
+
+    content = conversation[0]["content"]
+    assert isinstance(content, list)
+    assert len(content) == 1
+
+    text_part = content[0]
+    assert text_part["type"] == "text"
+    assert text_part["text"] == "V nejhorším případě i k prasknutí čočky."
+    assert text_part["source_lang_code"] == "cs"
+    assert text_part["target_lang_code"] == "de-DE"
+    assert text_part["custom_field"] == "custom_value"
+
+
+@pytest.mark.asyncio
+async def test_extra_fields_preserved_in_image_parts(
+    phi3v_model_config,
+    image_url,
+):
+    """Test that extra fields are preserved for image content parts."""
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                    "source_lang_code": "en",
+                    "target_lang_code": "es",
+                    "custom_annotation": "translate_this",
+                },
+            ],
+        }
+    ]
+
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        messages,
+        phi3v_model_config,
+        content_format="openai",
+    )
+
+    assert len(conversation) == 1
+    assert conversation[0]["role"] == "user"
+
+    content = conversation[0]["content"]
+    assert isinstance(content, list)
+    assert len(content) == 1
+
+    image_part = content[0]
+    assert image_part["type"] == "image"
+    assert image_part["source_lang_code"] == "en"
+    assert image_part["target_lang_code"] == "es"
+    assert image_part["custom_annotation"] == "translate_this"
+
+    _assert_mm_data_is_image_input(mm_data, 1)
+
+
 def test_parse_chat_messages_image_vision_chunk(
     kimi_k2_5_model_config,
     image_url,

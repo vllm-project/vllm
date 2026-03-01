@@ -336,12 +336,15 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         ) and not getattr(config, "rope_parameters", None):
             config.rope_parameters = {"rope_type": "default"}
         # Patch legacy fields into rope_parameters
-        if rope_theta is not None:
-            config.rope_parameters["rope_theta"] = rope_theta
-        if partial_rotary_factor is not None:
-            config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
-        if ompe is not None:
-            config.rope_parameters["original_max_position_embeddings"] = ompe
+        # Skip for nested rope_parameters (e.g., TranslateGemma) as these
+        # fields should not be added to the top-level nested structure
+        if not is_rope_parameters_nested(getattr(config, "rope_parameters", {})):
+            if rope_theta is not None:
+                config.rope_parameters["rope_theta"] = rope_theta
+            if partial_rotary_factor is not None:
+                config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
+            if ompe is not None:
+                config.rope_parameters["original_max_position_embeddings"] = ompe
     elif rope_theta is not None or getattr(config, "rope_parameters", None):
         # Transformers v5 installed
         # Patch these fields in case they used non-standard names
@@ -350,8 +353,11 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         if partial_rotary_factor is not None:
             config.partial_rotary_factor = partial_rotary_factor
         # Standardize and validate RoPE parameters
-        config.standardize_rope_params()
-        config.validate_rope()
+        # Skip validation for nested rope_parameters (e.g., TranslateGemma)
+        # as vLLM handles validation in patch_rope_parameters_dict()
+        if not is_rope_parameters_nested(getattr(config, "rope_parameters", {})):
+            config.standardize_rope_params()
+            config.validate_rope()
 
     # No RoPE parameters to patch
     if getattr(config, "rope_parameters", None) is None:
