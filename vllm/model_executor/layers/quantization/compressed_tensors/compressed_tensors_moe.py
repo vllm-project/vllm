@@ -34,6 +34,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     int8_w8a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.cpu_fused_moe import select_experts
+from vllm.model_executor.layers.fused_moe.flashinfer_utils import (
+    apply_fi_trtllm_fp8_per_tensor_moe,
+)
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     BatchedMarlinExperts,
     MarlinExperts,
@@ -67,9 +70,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import 
     flashinfer_trtllm_mxint4_moe,
     is_flashinfer_mxint4_moe_available,
     prepare_static_weights_for_trtllm_mxint4_moe,
-)
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    apply_fi_trtllm_fp8_per_tensor_moe,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
