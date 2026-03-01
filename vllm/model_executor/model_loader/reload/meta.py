@@ -104,26 +104,33 @@ def materialize_layer(layer: torch.nn.Module) -> None:
             setattr(layer, name, materialize_meta_tensor(tensor))
 
 
-class MetaCopyCounter(TorchDispatchMode):
+class CopyCounter(TorchDispatchMode):
     """
     Tracks total number of elements modified with `copy_`.
 
     Useful for keeping track of weight loading where underlying weights can be
     arbitrarily transformed (such as with `narrow`) before calling copy.
 
+    Args:
+        device_filter: If provided, only count copies to tensors on this device
+            type (e.g., "meta", "cuda"). If None, count copies to all devices.
+
     Note: Assumes that copy kwargs are not used.
     """
 
-    def __init__(self):
+    def __init__(self, device_filter: str | None = None):
         super().__init__()
         self.copied_numel = 0
+        self.device_filter = device_filter
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         if kwargs is None:
             kwargs = {}
 
-        if func is torch.ops.aten.copy_.default and args[0].device.type == "meta":
-            assert args[0].numel() == args[1].numel()
+        device_matches = (
+            self.device_filter is None or args[0].device.type == self.device_filter
+        )
+        if func is torch.ops.aten.copy_.default and device_matches:
             self.copied_numel += args[0].numel()
 
         return func(*args, **kwargs)
@@ -141,6 +148,6 @@ def get_numel_loaded(
         weight loader
     """
     assert args.arguments["param"].device.type == "meta"
-    with MetaCopyCounter() as counter:
+    with CopyCounter(device_filter="meta") as counter:
         return_value = weight_loader(*args.args, **args.kwargs)
     return counter.copied_numel, return_value

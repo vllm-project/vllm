@@ -49,6 +49,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt8StaticChannelSym,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -1959,21 +1960,25 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         else:
             is_rocm_on_gfx9 = False
 
+        SUPPORTED_W_A: list[tuple[QuantKey | None, QuantKey | None]] = [
+            (None, None),
+            (kInt8StaticChannelSym, None),
+        ]
+
         device_supports_fp8 = is_rocm_on_gfx9 or (
             p.is_cuda() and p.has_device_capability((8, 9))
         )
 
-        if not device_supports_fp8:
-            return (weight_key, activation_key) == (None, None)
-
-        SUPPORTED_W_A = [
-            (None, None),
-            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
-            (kFp8StaticChannelSym, kFp8DynamicTokenSym),
-            (kFp8StaticTensorSym, kFp8DynamicTokenSym),
-            (kFp8StaticTensorSym, kFp8StaticTensorSym),
-            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
-        ]
+        if device_supports_fp8:
+            SUPPORTED_W_A.extend(
+                [
+                    (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+                    (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+                    (kFp8StaticTensorSym, kFp8DynamicTokenSym),
+                    (kFp8StaticTensorSym, kFp8StaticTensorSym),
+                    (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+                ]
+            )
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod

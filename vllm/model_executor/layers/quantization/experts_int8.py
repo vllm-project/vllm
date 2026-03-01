@@ -4,8 +4,10 @@
 from typing import Any
 
 import torch
+from torch.nn import Module
 
-from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEConfig,
@@ -15,13 +17,22 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     int8_w8a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
+)
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.layers.quantization.utils.moe_online_weight_quantizer import (
+    MoeOnlineQuantizer,
+    MoeOnlineWeightQuantizer,
+)
+
+logger = init_logger(__name__)
 
 
 class ExpertsInt8Config(QuantizationConfig):
@@ -60,7 +71,9 @@ class ExpertsInt8Config(QuantizationConfig):
         return None
 
 
-class ExpertsInt8MoEMethod(FusedMoEMethodBase):
+class ExpertsInt8MoEMethod(FusedMoEMethodBase, MoeOnlineQuantizer):
+    uses_meta_device: bool = True
+
     def __init__(
         self,
         quant_config: ExpertsInt8Config,
@@ -68,70 +81,122 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
     ):
         super().__init__(moe)
         self.quant_config = quant_config
+        self.kernel: mk.FusedMoEModularKernel | None = None
+        self.weight_quantizer = MoeOnlineWeightQuantizer(self)
+
+    @property
+    def topk_indices_dtype(self) -> torch.dtype | None:
+        if self.kernel is not None:
+            return self.kernel.prepare_finalize.topk_indices_dtype()
+        return None
+
+    @property
+    def supports_eplb(self) -> bool:
+        return True
+
+    @property
+    def allow_inplace(self) -> bool:
+        return True
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: Module,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        int8_dtype = torch.int8
-
-        assert "weight_loader" in extra_weight_attrs
-        weight_loader = extra_weight_attrs["weight_loader"]
-        wrapped_weight_loader = ExpertsInt8MoEMethod.quantizing_weight_loader(
-            layer, weight_loader
+        self.weight_quantizer.create_weights(
+            layer,
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            params_dtype,
+            **extra_weight_attrs,
         )
-        extra_weight_attrs["weight_loader"] = wrapped_weight_loader
 
-        # Fused gate_up_proj (column parallel)
-        w13_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                2 * intermediate_size_per_partition,
-                hidden_size,
-                dtype=int8_dtype,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w13_weight", w13_weight)
-        set_weight_attrs(w13_weight, extra_weight_attrs)
+    def process_weights_after_loading(self, layer: Module) -> None:
+        self.weight_quantizer.process_weights_after_loading(layer)
 
-        # down_proj (row parallel)
-        w2_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                intermediate_size_per_partition,
-                dtype=int8_dtype,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_weight", w2_weight)
-        set_weight_attrs(w2_weight, extra_weight_attrs)
-
-        w13_scale = torch.nn.Parameter(
+    def create_scale_tensors(
+        self,
+        layer: Module,
+        num_experts: int,
+        intermediate_size_per_partition: int,
+        hidden_size: int,
+    ) -> tuple[torch.nn.Parameter, torch.nn.Parameter]:
+        # WEIGHT_SCALES (per-channel for int8)
+        w13_weight_scale = torch.nn.Parameter(
             torch.zeros(
                 num_experts, 2 * intermediate_size_per_partition, dtype=torch.float32
             ),
             requires_grad=False,
         )
-        layer.register_parameter("w13_scale", w13_scale)
-
-        w2_scale = torch.nn.Parameter(
+        w2_weight_scale = torch.nn.Parameter(
             torch.zeros(num_experts, hidden_size, dtype=torch.float32),
             requires_grad=False,
         )
-        layer.register_parameter("w2_scale", w2_scale)
+        return w13_weight_scale, w2_weight_scale
 
-    def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
-    ) -> FusedMoEQuantConfig | None:
+    def get_quantized_dtype(self) -> torch.dtype:
+        return torch.int8
+
+    def quantize_expert(
+        self, weight: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        vmax = torch.iinfo(torch.int8).max
+        channel_max = torch.max(torch.abs(weight), dim=1)[0]
+        scales = channel_max / vmax
+        scales = torch.where(scales == 0, torch.ones_like(scales), scales)
+        int8_weight = (
+            torch.round(weight / scales.unsqueeze(1)).clamp(-vmax, vmax).to(torch.int8)
+        )
+        return int8_weight, scales
+
+    def setup_kernel(
+        self,
+        layer: Module,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+    ) -> None:
+        layer.w13_weight = torch.nn.Parameter(w13, requires_grad=False)
+        layer.w2_weight = torch.nn.Parameter(w2, requires_grad=False)
+        layer.w13_weight_scale = torch.nn.Parameter(w13_scale, requires_grad=False)
+        layer.w2_weight_scale = torch.nn.Parameter(w2_scale, requires_grad=False)
+
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+
+        if self.moe_quant_config:
+            prepare_finalize = MoEPrepareAndFinalizeNoEP()
+            experts = TritonExperts(
+                moe_config=self.moe,
+                quant_config=self.moe_quant_config,
+            )
+
+            self.kernel = mk.FusedMoEModularKernel(
+                prepare_finalize,
+                experts,
+                shared_experts=None,
+                moe_parallel_config=self.moe.moe_parallel_config,
+                inplace=not self.moe.disable_inplace,
+            )
+
+            logger.debug_once(
+                "Selected %s for %s",
+                type(experts).__name__,
+                type(self).__name__,
+                scope="global",
+            )
+
+    def get_fused_moe_quant_config(self, layer: Module) -> FusedMoEQuantConfig | None:
         return int8_w8a16_moe_quant_config(
-            w1_scale=layer.w13_scale, w2_scale=layer.w2_scale, w1_zp=None, w2_zp=None
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            w1_zp=None,
+            w2_zp=None,
         )
 
     def apply(
@@ -142,63 +207,17 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        from vllm.model_executor.layers.fused_moe import fused_experts
-
-        return fused_experts(
+        assert self.kernel is not None, (
+            "Kernel not initialized. Ensure weights are loaded before calling apply()."
+        )
+        return self.kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=not self.moe.disable_inplace,
+            topk_weights,
+            topk_ids,
             activation=layer.activation,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
-            quant_config=self.moe_quant_config,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
         )
-
-    @staticmethod
-    def quantizing_weight_loader(layer, weight_loader):
-        def quantize_and_call_weight_loader(
-            param: torch.nn.Parameter,
-            loaded_weight: torch.Tensor,
-            weight_name: str,
-            shard_id: int,
-            expert_id: int,
-        ):
-            tp_rank = get_tensor_model_parallel_rank()
-            shard_size = layer.intermediate_size_per_partition
-            shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
-            device = get_tp_group().device
-            loaded_weight = loaded_weight.to(device)
-            # w1, gate_proj case: Load into first shard of w13.
-            if shard_id == "w1":
-                scales = quantize_in_place_and_get_scales(loaded_weight[shard, :])
-                layer.w13_scale.data[expert_id, 0:shard_size].copy_(scales[:, 0])
-            # w3, up_proj case: Load into second shard of w13.
-            elif shard_id == "w3":
-                scales = quantize_in_place_and_get_scales(loaded_weight[shard, :])
-                layer.w13_scale.data[expert_id, shard_size : 2 * shard_size].copy_(
-                    scales[:, 0]
-                )
-            # w2, down_proj case: Load into only shard of w2.
-            elif shard_id == "w2":
-                scales = quantize_in_place_and_get_scales(loaded_weight[:, shard])
-                layer.w2_scale.data[expert_id, :].copy_(scales[:, 0])
-            else:
-                raise ValueError(f"Shard id must be in [0,1,2] but got {shard_id}")
-            weight_loader(param, loaded_weight, weight_name, shard_id, expert_id)
-
-        return quantize_and_call_weight_loader
-
-
-def quantize_in_place_and_get_scales(weight: torch.Tensor) -> torch.Tensor:
-    vmax = torch.iinfo(torch.int8).max
-    scales = torch.max(torch.abs(weight), dim=1, keepdim=True)[0] / vmax
-
-    weight.div_(scales)
-    weight.round_()
-    weight.clamp_(-vmax, vmax)
-
-    return scales
