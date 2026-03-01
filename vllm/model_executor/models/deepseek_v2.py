@@ -1231,6 +1231,19 @@ class DeepseekV2MixtureOfExperts(MixtureOfExperts):
             moe.n_redundant_experts = self.num_redundant_experts
             moe.experts.update_expert_map()
 
+def _remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
+    
+    replace_scale_names = [
+        "fa_q.scale", "fa_k.scale", "fa_v.scale", "fa_q.offset",
+        "fa_k.offset", "fa_v.offset"
+    ]
+    for scale_name in replace_scale_names:
+        if name.endswith(scale_name):
+            remap_name = name.replace(scale_name, f"mla_attn.mla_attn.{scale_name}")
+            if remap_name in params_dict:
+                return remap_name
+            else:
+                return remap_name.replace("mla_attn", "attn")
 
 class DeepseekV2ForCausalLM(
     nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle
@@ -1535,7 +1548,7 @@ class DeepseekV2ForCausalLM(
                             continue
 
                         # Remapping the name of FP8 kv-scale.
-                        name = maybe_remap_kv_scale_name(name, params_dict)
+                        name = _remap_kv_scale_name(name, params_dict)
                         if name is None:
                             continue
 
@@ -1549,6 +1562,20 @@ class DeepseekV2ForCausalLM(
                         weight_loader(param, loaded_weight)
             if name is not None and not is_fusion_moe_shared_experts_layer:
                 loaded_params.add(name)
+            if self.quant_config.is_enable_fa_quant():
+                fa_quant_layers = {
+                    param.split(".fa_q.scale")[0]
+                    for param in loaded_params if "fa_q.scale" in param
+                }
+                modules_dict = dict(self.named_modules())
+                for module_name, module in modules_dict.items():
+                    if isinstance(module, Attention):
+                        if module_name in fa_quant_layers:
+                            module.dtype = torch.int8
+                            # Due to the existence of the fallback layer, new attributes are added to distinguish
+                            setattr(module, "fa_quant_layer", True)
+                        else:
+                            setattr(module, "fa_quant_layer", False)
 
         return loaded_params
 
