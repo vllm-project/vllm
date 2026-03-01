@@ -62,6 +62,46 @@ void scaled_fp4_quant(torch::Tensor& output, torch::Tensor const& input,
   TORCH_CHECK_NOT_IMPLEMENTED(false, "No compiled nvfp4 quantization kernel");
 }
 
+// Functional variant: allocates output and output_scale, returns them
+std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_func(
+    torch::Tensor const& input, torch::Tensor const& input_sf,
+    bool is_sf_swizzled_layout) {
+  int64_t n = input.size(-1);
+  int64_t m = input.numel() / n;
+  int64_t block_size = 16;
+  auto device = input.device();
+
+  // Two fp4 values packed into a uint8
+  auto output = torch::empty(
+      {m, n / 2}, torch::TensorOptions().device(device).dtype(torch::kUInt8));
+
+  torch::Tensor output_sf;
+  if (is_sf_swizzled_layout) {
+    auto round_up = [](int64_t x, int64_t y) { return (x + y - 1) / y * y; };
+    int64_t rounded_m = round_up(m, 128);
+    int64_t scale_n = n / block_size;
+    int64_t rounded_n = round_up(scale_n, 4);
+    output_sf = torch::empty(
+        {rounded_m, rounded_n / 4},
+        torch::TensorOptions().device(device).dtype(torch::kInt32));
+  } else {
+    output_sf = torch::empty(
+        {m, n / block_size},
+        torch::TensorOptions().device(device).dtype(torch::kUInt8));
+  }
+
+  scaled_fp4_quant(output, input, output_sf, input_sf, is_sf_swizzled_layout);
+  return {output, output_sf};
+}
+
+// Out variant with PyTorch standard signature: (input, ..., *, out, out_scale)
+void scaled_fp4_quant_out(torch::Tensor const& input,
+                          torch::Tensor const& input_sf,
+                          bool is_sf_swizzled_layout, torch::Tensor& output,
+                          torch::Tensor& output_sf) {
+  scaled_fp4_quant(output, input, output_sf, input_sf, is_sf_swizzled_layout);
+}
+
 void scaled_fp4_experts_quant(
     torch::Tensor& output, torch::Tensor& output_scale,
     torch::Tensor const& input, torch::Tensor const& input_global_scale,

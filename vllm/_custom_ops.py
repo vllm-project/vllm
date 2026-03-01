@@ -29,6 +29,53 @@ else:
         from torch.library import impl_abstract as register_fake
 
 
+# scaled_fp4_quant functional and out variant (PyTorch standard convention)
+# Enables torch.compile decompose_functional_to_out pass
+if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "scaled_fp4_quant"):
+
+    @register_fake("_C::scaled_fp4_quant")
+    def _scaled_fp4_quant_fake(
+        input: torch.Tensor,
+        input_scale: torch.Tensor,
+        is_sf_swizzled_layout: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        n = input.shape[-1]
+        m = input.numel() // n
+        block_size = 16
+        output = torch.empty((m, n // 2), dtype=torch.uint8, device=input.device)
+        if is_sf_swizzled_layout:
+            round_up = lambda x, y: (x + y - 1) // y * y
+            rounded_m = round_up(m, 128)
+            scale_n = n // block_size
+            rounded_n = round_up(scale_n, 4)
+            output_scale = torch.empty(
+                (rounded_m, rounded_n // 4),
+                dtype=torch.int32,
+                device=input.device,
+            )
+        else:
+            output_scale = torch.empty(
+                (m, n // block_size),
+                dtype=torch.uint8,
+                device=input.device,
+            )
+        return (output, output_scale)
+
+    @register_fake("_C::scaled_fp4_quant.out")
+    def _scaled_fp4_quant_out_fake(
+        input: torch.Tensor,
+        input_scale: torch.Tensor,
+        is_sf_swizzled_layout: bool,
+        *,
+        output: torch.Tensor,
+        output_scale: torch.Tensor,
+    ) -> None:
+        return None
+
+    # Tag the out variant so PyTorch's to_out_variant() can discover it
+    torch.ops._C.scaled_fp4_quant.out._tags.append(torch.Tag.out_variant)
+
+
 # page attention ops
 def paged_attention_v1(
     out: torch.Tensor,
@@ -1574,7 +1621,6 @@ def scaled_fp4_quant(
     input = input.reshape(other_dims, input.shape[-1])
     m, n = input.shape
     block_size = 16
-    device = input.device
 
     assert n % block_size == 0, f"last dim has to be multiple of 16, but got {n}."
     assert input.dtype in (torch.float16, torch.bfloat16), (
@@ -1588,26 +1634,9 @@ def scaled_fp4_quant(
             input, input_global_scale
         )
     else:
-        # Two fp4 values will be packed into an uint8.
-        output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
-        if is_sf_swizzled_layout:
-            # We use the rounded values to store the swizzled values. Due to the
-            # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
-            # So, we first pad the scales to multiples of 128 and 4. Then, the scales
-            # (in float8_e4m3fn) are packed into an int32 for every 4 values. More:
-            # https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
-            round_up = lambda x, y: (x + y - 1) // y * y
-            rounded_m = round_up(m, 128)
-            scale_n = n // block_size
-            rounded_n = round_up(scale_n, 4)
-            output_scale = torch.empty(
-                (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
-            )
-        else:
-            output_scale = torch.empty((m, n // 16), device=device, dtype=torch.uint8)
-
-        torch.ops._C.scaled_fp4_quant(
-            output, input, output_scale, input_global_scale, is_sf_swizzled_layout
+        # Use functional variant (allocates output internally)
+        output, output_scale = torch.ops._C.scaled_fp4_quant(
+            input, input_global_scale, is_sf_swizzled_layout
         )
 
     output_scale = output_scale.view(torch.float8_e4m3fn)

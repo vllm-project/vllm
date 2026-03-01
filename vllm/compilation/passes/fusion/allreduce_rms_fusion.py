@@ -541,46 +541,48 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
 
     def get_inputs(self) -> list[torch.Tensor]:
         input = torch.empty([1, 16, 16], device=self.device, dtype=self.dtype)
-        quant_result = torch.empty((16, 8), device=self.device, dtype=torch.uint8)
         input_global_scale = torch.empty(
             [1, 1], device=self.device, dtype=torch.float32
         )
         weight = torch.empty([16], device=self.device, dtype=self.dtype)
-        output_scale = torch.empty([128, 4], device=self.device, dtype=torch.int32)
 
-        return [input, quant_result, weight, input_global_scale, output_scale]
+        return [input, weight, input_global_scale]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
             input: torch.Tensor,
-            quant_result: torch.Tensor,
             weight: torch.Tensor,
             input_global_scale: torch.Tensor,
-            output_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             all_reduce = tensor_model_parallel_all_reduce(input)
             rms = self.rmsnorm_matcher(all_reduce, weight)
-            quant_out_tuple = auto_functionalized(
-                STATIC_FP4_QUANT_OP,
-                output=quant_result,
-                input=rms,
-                output_scale=output_scale,
-                input_scale=input_global_scale,
-                is_sf_swizzled_layout=True,
-            )
+            # Functional variant returns [output, output_scale]
+            quant_out = STATIC_FP4_QUANT_OP(rms, input_global_scale, True)
 
             # quant_out, allreduce_output, output_scale
-            return quant_out_tuple[1], all_reduce, quant_out_tuple[2]
+            return quant_out[0], all_reduce, quant_out[1]
 
         def replacement(
             input: torch.Tensor,
-            quant_result: torch.Tensor,
             weight: torch.Tensor,
             input_global_scale: torch.Tensor,
-            output_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             residual = torch.zeros_like(input)
             result_rms = torch.empty_like(input)
+            n = input.shape[-1]
+            m = input.numel() // n
+            quant_result = torch.empty(
+                (m, n // 2), device=input.device, dtype=torch.uint8
+            )
+            round_up = lambda x, y: (x + y - 1) // y * y
+            rounded_m = round_up(m, 128)
+            scale_n = n // 16
+            rounded_n = round_up(scale_n, 4)
+            output_scale = torch.empty(
+                (rounded_m, rounded_n // 4),
+                device=input.device,
+                dtype=torch.int32,
+            )
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
                 flashinfer_trtllm_fused_allreduce_norm,
@@ -632,52 +634,52 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
 
         residual = torch.empty([16, 16], device=self.device, dtype=self.dtype)
         weight = torch.empty([16, 16], device=self.device, dtype=self.dtype)
-        quant_result = torch.empty((16, 8), device=self.device, dtype=torch.uint8)
         input_global_scale = torch.empty(
             [1, 1], device=self.device, dtype=torch.float32
         )
-        output_scale = torch.empty([128, 4], device=self.device, dtype=torch.int32)
 
         return [
-            quant_result,
             residual,
             input,
-            output_scale,
             weight,
             input_global_scale,
         ]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
-            quant_result: torch.Tensor,
             residual: torch.Tensor,
             input: torch.Tensor,
-            output_scale: torch.Tensor,
             weight: torch.Tensor,
             input_global_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
             rms, residual = self.rmsnorm_matcher(allreduce_output, weight, residual)
-            quant_out_tuple = auto_functionalized(
-                STATIC_FP4_QUANT_OP,
-                output=quant_result,
-                input=rms,
-                output_scale=output_scale,
-                input_scale=input_global_scale,
-                is_sf_swizzled_layout=True,
-            )
+            # Functional variant returns [output, output_scale]
+            quant_out = STATIC_FP4_QUANT_OP(rms, input_global_scale, True)
 
             # quant_out, allreduce_output, output_scale
-            return quant_out_tuple[1], residual, quant_out_tuple[2]
+            return quant_out[0], residual, quant_out[1]
 
         def replacement(
-            quant_result: torch.Tensor,
             residual: torch.Tensor,
             input: torch.Tensor,
-            output_scale: torch.Tensor,
             weight: torch.Tensor,
             input_global_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            n = input.shape[-1]
+            m = input.numel() // n
+            quant_result = torch.empty(
+                (m, n // 2), device=input.device, dtype=torch.uint8
+            )
+            round_up = lambda x, y: (x + y - 1) // y * y
+            rounded_m = round_up(m, 128)
+            scale_n = n // 16
+            rounded_n = round_up(scale_n, 4)
+            output_scale = torch.empty(
+                (rounded_m, rounded_n // 4),
+                device=input.device,
+                dtype=torch.int32,
+            )
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
                 flashinfer_trtllm_fused_allreduce_norm,
