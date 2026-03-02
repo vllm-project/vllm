@@ -1146,7 +1146,11 @@ class CompilationConfig:
         self, uniform_decode_query_len: int, tensor_parallel_size: int
     ):
         multiple_of = uniform_decode_query_len
-        if tensor_parallel_size > 1 and self.pass_config.enable_sp:
+        if (
+            tensor_parallel_size > 1
+            and self.pass_config.enable_sp
+            and not envs.VLLM_ENABLE_SP_RAGGED
+        ):
             multiple_of = max(uniform_decode_query_len, tensor_parallel_size)
             if (
                 multiple_of % uniform_decode_query_len != 0

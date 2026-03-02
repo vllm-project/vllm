@@ -3,9 +3,11 @@
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -349,9 +351,9 @@ def is_residual_scattered_for_sp(
     if tp == 1:
         return False
 
-    # When sequence parallelism is enabled, we always pad num_input_tokens
-    # to be a multiple of tensor_parallel_size (tp) earlier.
-    assert num_input_tokens % tp == 0
+    # Legacy SP assumes equal token splits across TP ranks.
+    if not envs.VLLM_ENABLE_SP_RAGGED:
+        assert num_input_tokens % tp == 0
 
     if (
         not vllm_config.compilation_config.splitting_ops
@@ -362,3 +364,28 @@ def is_residual_scattered_for_sp(
     if compile_sizes is None:
         return False
     return num_input_tokens in compile_sizes
+
+
+def get_local_tokens_for_sp(
+    num_input_tokens: int,
+    tensor_parallel_size: int,
+    tensor_parallel_rank: int,
+) -> int:
+    if not envs.VLLM_ENABLE_SP_RAGGED:
+        assert num_input_tokens % tensor_parallel_size == 0
+        return num_input_tokens // tensor_parallel_size
+
+    return _cached_local_tokens_for_sp(
+        num_input_tokens, tensor_parallel_size, tensor_parallel_rank
+    )
+
+
+@lru_cache(maxsize=8192)
+def _cached_local_tokens_for_sp(
+    num_input_tokens: int,
+    tensor_parallel_size: int,
+    tensor_parallel_rank: int,
+) -> int:
+    base = num_input_tokens // tensor_parallel_size
+    remainder = num_input_tokens % tensor_parallel_size
+    return base + (1 if tensor_parallel_rank < remainder else 0)
