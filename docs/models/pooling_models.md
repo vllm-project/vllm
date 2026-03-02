@@ -101,22 +101,7 @@ print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 
 A code example can be found here: [examples/offline_inference/basic/embed.py](../../examples/offline_inference/basic/embed.py)
 
-### `LLM.classify`
-
-The [classify][vllm.LLM.classify] method outputs a probability vector for each prompt.
-It is primarily designed for classification models.
-
-```python
-from vllm import LLM
-
-llm = LLM(model="jason9693/Qwen2.5-1.5B-apeach", runner="pooling")
-(output,) = llm.classify("Hello, my name is")
-
-probs = output.outputs.probs
-print(f"Class Probabilities: {probs!r} (size={len(probs)})")
-```
-
-A code example can be found here: [examples/offline_inference/basic/classify.py](../../examples/offline_inference/basic/classify.py)
+### [`LLM.classify`](./pooling/classify.md#offline-inference)
 
 ### `LLM.score`
 
