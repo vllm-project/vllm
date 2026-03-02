@@ -6174,14 +6174,10 @@ class GPUModelRunner(
         # backends for that group only supports block_size 64, we will return
         # kernel_block_size 64 and split the 256-token-block to 4 blocks with 64
         # tokens each.
-<<<<<<< Updated upstream
         kernel_block_sizes = prepare_kernel_block_sizes(
             kv_cache_config, self.attn_groups
         )
-=======
-        kernel_block_sizes = self._prepare_kernel_block_sizes(kv_cache_config)
         self._kernel_block_sizes = kernel_block_sizes
->>>>>>> Stashed changes
 
         # create metadata builders
         self.initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
