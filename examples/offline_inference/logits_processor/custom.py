@@ -33,7 +33,7 @@ Output:    ' in the hands of the people.\n\nThe future of AI is in the'
 ------------------------------------------------------------
 """
 
-from typing import Optional
+from typing import Any
 
 import torch
 
@@ -50,24 +50,36 @@ from vllm.v1.sample.logits_processor.builtin import process_dict_updates
 class DummyLogitsProcessor(LogitsProcessor):
     """Fake logit processor to support unit testing and examples"""
 
+    @classmethod
+    def validate_params(cls, params: SamplingParams):
+        target_token: Any | None = params.extra_args and params.extra_args.get(
+            "target_token"
+        )
+        if target_token is not None and not isinstance(target_token, int):
+            raise ValueError(
+                f"target_token value {target_token} {type(target_token)} is not int"
+            )
+
     def __init__(
         self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool
     ):
         self.req_info: dict[int, int] = {}
 
     def is_argmax_invariant(self) -> bool:
-        """Never impacts greedy sampling"""
         return False
 
-    def update_state(self, batch_update: Optional[BatchUpdate]):
+    def update_state(self, batch_update: BatchUpdate | None):
+        def extract_extra_arg(params: SamplingParams) -> int | None:
+            self.validate_params(params)
+            return params.extra_args and params.extra_args.get("target_token")
+
         process_dict_updates(
             self.req_info,
             batch_update,
             # This function returns the LP's per-request state based on the
             # request details, or None if this LP does not apply to the
             # request.
-            lambda params, _, __: params.extra_args
-            and (params.extra_args.get("target_token")),
+            lambda params, _, __: extract_extra_arg(params),
         )
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
@@ -75,13 +87,12 @@ class DummyLogitsProcessor(LogitsProcessor):
             return logits
 
         # Save target values before modification
-        rows_list = list(self.req_info.keys())
         cols = torch.tensor(
-            [self.req_info[i] for i in rows_list],
-            dtype=torch.long,
-            device=logits.device,
+            list(self.req_info.values()), dtype=torch.long, device=logits.device
         )
-        rows = torch.tensor(rows_list, dtype=torch.long, device=logits.device)
+        rows = torch.tensor(
+            list(self.req_info.keys()), dtype=torch.long, device=logits.device
+        )
         values_to_keep = logits[rows, cols].clone()
 
         # Mask all but target tokens

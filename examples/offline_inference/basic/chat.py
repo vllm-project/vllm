@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm import LLM, EngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.outputs import RequestOutput
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def create_parser():
@@ -44,12 +45,12 @@ def main(args: dict):
     if top_k is not None:
         sampling_params.top_k = top_k
 
-    def print_outputs(outputs):
+    def print_outputs(outputs: list[RequestOutput], prompts: list):
+        assert len(outputs) == len(prompts)
         print("\nGenerated Outputs:\n" + "-" * 80)
-        for output in outputs:
-            prompt = output.prompt
+        for i, output in enumerate(outputs):
             generated_text = output.outputs[0].text
-            print(f"Prompt: {prompt!r}\n")
+            print(f"Prompt: {prompts[i]!r}\n")
             print(f"Generated text: {generated_text!r}")
             print("-" * 80)
 
@@ -66,14 +67,19 @@ def main(args: dict):
         },
     ]
     outputs = llm.chat(conversation, sampling_params, use_tqdm=False)
-    print_outputs(outputs)
+    print_outputs(
+        outputs,
+        [
+            conversation,
+        ],
+    )
 
     # You can run batch inference with llm.chat API
     conversations = [conversation for _ in range(10)]
 
     # We turn on tqdm progress bar to verify it's indeed running batch inference
     outputs = llm.chat(conversations, sampling_params, use_tqdm=True)
-    print_outputs(outputs)
+    print_outputs(outputs, conversations)
 
     # A chat template can be optionally supplied.
     # If not, the model will use its default chat template.
@@ -87,6 +93,7 @@ def main(args: dict):
             use_tqdm=False,
             chat_template=chat_template,
         )
+        print_outputs(outputs, conversations)
 
 
 if __name__ == "__main__":

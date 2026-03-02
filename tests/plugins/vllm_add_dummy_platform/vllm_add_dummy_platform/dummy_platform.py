@@ -8,7 +8,6 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
-from vllm import envs
 
 
 class DummyPlatform(Platform):
@@ -19,12 +18,18 @@ class DummyPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        if envs.VLLM_USE_V1:
-            compilation_config = vllm_config.compilation_config
-            # Activate custom ops for v1.
-            compilation_config.custom_ops = ["all"]
+        vllm_config.compilation_config.custom_ops = ["all"]
 
-    def get_attn_backend_cls(self, backend_name, head_size, dtype,
-                             kv_cache_dtype, block_size, use_v1, use_mla,
-                             has_sink):
+    def get_attn_backend_cls(
+        self,
+        backend_name,
+        head_size,
+        dtype,
+        kv_cache_dtype,
+        block_size,
+        use_mla,
+        has_sink,
+        use_sparse,
+        use_mm_prefix,
+    ):
         return "vllm_add_dummy_platform.dummy_attention_backend.DummyAttentionBackend"  # noqa E501

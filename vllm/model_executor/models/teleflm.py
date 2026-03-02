@@ -28,12 +28,14 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.models.llama import (LlamaDecoderLayer,
-                                              LlamaForCausalLM, LlamaModel)
+from vllm.model_executor.models.llama import (
+    LlamaDecoderLayer,
+    LlamaForCausalLM,
+    LlamaModel,
+)
 
 
 class TeleFLMModel(LlamaModel):
-
     def __init__(
         self,
         *,
@@ -41,9 +43,7 @@ class TeleFLMModel(LlamaModel):
         prefix: str = "",
         layer_type: type[nn.Module] = LlamaDecoderLayer,
     ):
-        super().__init__(vllm_config=vllm_config,
-                         prefix=prefix,
-                         layer_type=layer_type)
+        super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
         """
         This implementation is based on the µScaling paper presented at  
         the ICLR 2025 Workshop:  
@@ -57,7 +57,7 @@ class TeleFLMModel(LlamaModel):
         if self.use_mup:
             self.input_mult = self.config.input_mult
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         embedding = self.embed_tokens(input_ids)
         if self.use_mup:
             embedding = embedding * self.input_mult
@@ -65,7 +65,6 @@ class TeleFLMModel(LlamaModel):
 
 
 class TeleFLMForCausalLM(LlamaForCausalLM):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         # mup
@@ -74,6 +73,6 @@ class TeleFLMForCausalLM(LlamaForCausalLM):
             self.mup_scale_factor = self.config.mup_scale_factor
             self.output_mult = self.config.output_mult / self.mup_scale_factor
             logit_scale = self.output_mult
-            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    self.config.vocab_size,
-                                                    logit_scale)
+            self.logits_processor = LogitsProcessor(
+                self.config.vocab_size, scale=logit_scale
+            )

@@ -6,29 +6,40 @@ vLLM supports the generation of structured outputs using
 This document shows you some examples of the different options that are
 available to generate structured outputs.
 
+!!! warning
+    If you are still using the following deprecated API fields which were removed in v0.12.0, please update your code to use `structured_outputs` as demonstrated in the rest of this document:
+
+    - `guided_json` -> `{"structured_outputs": {"json": ...}}` or `StructuredOutputsParams(json=...)`
+    - `guided_regex` -> `{"structured_outputs": {"regex": ...}}` or `StructuredOutputsParams(regex=...)`
+    - `guided_choice` -> `{"structured_outputs": {"choice": ...}}` or `StructuredOutputsParams(choice=...)`
+    - `guided_grammar` -> `{"structured_outputs": {"grammar": ...}}` or `StructuredOutputsParams(grammar=...)`
+    - `guided_whitespace_pattern` -> `{"structured_outputs": {"whitespace_pattern": ...}}` or `StructuredOutputsParams(whitespace_pattern=...)`
+    - `structural_tag` -> `{"structured_outputs": {"structural_tag": ...}}` or `StructuredOutputsParams(structural_tag=...)`
+    - `guided_decoding_backend` -> Remove this field from your request
+
 ## Online Serving (OpenAI API)
 
 You can generate structured outputs using the OpenAI's [Completions](https://platform.openai.com/docs/api-reference/completions) and [Chat](https://platform.openai.com/docs/api-reference/chat) API.
 
 The following parameters are supported, which must be added as extra parameters:
 
-- `guided_choice`: the output will be exactly one of the choices.
-- `guided_regex`: the output will follow the regex pattern.
-- `guided_json`: the output will follow the JSON schema.
-- `guided_grammar`: the output will follow the context free grammar.
+- `choice`: the output will be exactly one of the choices.
+- `regex`: the output will follow the regex pattern.
+- `json`: the output will follow the JSON schema.
+- `grammar`: the output will follow the context free grammar.
 - `structural_tag`: Follow a JSON schema within a set of specified tags within the generated text.
 
 You can see the complete list of supported parameters on the [OpenAI-Compatible Server](../serving/openai_compatible_server.md) page.
 
 Structured outputs are supported by default in the OpenAI-Compatible Server. You
 may choose to specify the backend to use by setting the
-`--guided-decoding-backend` flag to `vllm serve`. The default backend is `auto`,
+`--structured-outputs-config.backend` flag to `vllm serve`. The default backend is `auto`,
 which will try to choose an appropriate backend based on the details of the
 request. You may also choose a specific backend, along with
 some options. A full set of options is available in the `vllm serve --help`
 text.
 
-Now let´s see an example for each of the cases, starting with the `guided_choice`, as it´s the easiest one:
+Now let's see an example for each of the cases, starting with the `choice`, as it's the easiest one:
 
 ??? code
 
@@ -45,12 +56,12 @@ Now let´s see an example for each of the cases, starting with the `guided_choic
         messages=[
             {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
         ],
-        extra_body={"guided_choice": ["positive", "negative"]},
+        extra_body={"structured_outputs": {"choice": ["positive", "negative"]}},
     )
     print(completion.choices[0].message.content)
     ```
 
-The next example shows how to use the `guided_regex`. The idea is to generate an email address, given a simple regex template:
+The next example shows how to use the `regex`. The supported regex syntax depends on the structured output backend. For example, `xgrammar`, `guidance`, and `outlines` use Rust-style regex, while `lm-format-enforcer` uses Python's `re` module. The idea is to generate an email address, given a simple regex template:
 
 ??? code
 
@@ -63,18 +74,18 @@ The next example shows how to use the `guided_regex`. The idea is to generate an
                 "content": "Generate an example email address for Alan Turing, who works in Enigma. End in .com and new line. Example result: alan.turing@enigma.com\n",
             }
         ],
-        extra_body={"guided_regex": r"\w+@\w+\.com\n", "stop": ["\n"]},
+        extra_body={"structured_outputs": {"regex": r"\w+@\w+\.com\n"}, "stop": ["\n"]},
     )
     print(completion.choices[0].message.content)
     ```
 
 One of the most relevant features in structured text generation is the option to generate a valid JSON with pre-defined fields and formats.
-For this we can use the `guided_json` parameter in two different ways:
+For this we can use the `json` parameter in two different ways:
 
 - Using directly a [JSON Schema](https://json-schema.org/)
 - Defining a [Pydantic model](https://docs.pydantic.dev/latest/) and then extracting the JSON Schema from it (which is normally an easier option).
 
-The next example shows how to use the `guided_json` parameter with a Pydantic model:
+The next example shows how to use the `response_format` parameter with a Pydantic model:
 
 ??? code
 
@@ -115,12 +126,12 @@ The next example shows how to use the `guided_json` parameter with a Pydantic mo
     ```
 
 !!! tip
-    While not strictly necessary, normally it´s better to indicate in the prompt the
+    While not strictly necessary, normally it's better to indicate in the prompt the
     JSON schema and how the fields should be populated. This can improve the
     results notably in most cases.
 
-Finally we have the `guided_grammar` option, which is probably the most
-difficult to use, but it´s really powerful. It allows us to define complete
+Finally we have the `grammar` option, which is probably the most
+difficult to use, but it's really powerful. It allows us to define complete
 languages like SQL queries. It works by using a context free EBNF grammar.
 As an example, we can use to define a specific format of simplified SQL queries:
 
@@ -149,7 +160,7 @@ As an example, we can use to define a specific format of simplified SQL queries:
                 "content": "Generate an SQL query to show the 'username' and 'email' from the 'users' table.",
             }
         ],
-        extra_body={"guided_grammar": simplified_sql_grammar},
+        extra_body={"structured_outputs": {"grammar": simplified_sql_grammar}},
     )
     print(completion.choices[0].message.content)
     ```
@@ -193,7 +204,7 @@ Note that you can use reasoning with any provided structured outputs feature. Th
             }
         },
     )
-    print("reasoning_content: ", completion.choices[0].message.reasoning_content)
+    print("reasoning: ", completion.choices[0].message.reasoning)
     print("content: ", completion.choices[0].message.content)
     ```
 
@@ -287,13 +298,13 @@ Step #2: explanation="Next, let's isolate 'x' by dividing both sides of the equa
 Answer: x = -29/8
 ```
 
-An example of using `structural_tag` can be found here: <gh-file:examples/online_serving/structured_outputs>
+An example of using `structural_tag` can be found here: [examples/online_serving/structured_outputs](../../examples/online_serving/structured_outputs)
 
 ## Offline Inference
 
 Offline inference allows for the same types of structured outputs.
-To use it, we´ll need to configure the guided decoding using the class `GuidedDecodingParams` inside `SamplingParams`.
-The main available options inside `GuidedDecodingParams` are:
+To use it, we'll need to configure the structured outputs using the class `StructuredOutputsParams` inside `SamplingParams`.
+The main available options inside `StructuredOutputsParams` are:
 
 - `json`
 - `regex`
@@ -309,12 +320,12 @@ shown below:
 
     ```python
     from vllm import LLM, SamplingParams
-    from vllm.sampling_params import GuidedDecodingParams
+    from vllm.sampling_params import StructuredOutputsParams
 
     llm = LLM(model="HuggingFaceTB/SmolLM2-1.7B-Instruct")
 
-    guided_decoding_params = GuidedDecodingParams(choice=["Positive", "Negative"])
-    sampling_params = SamplingParams(guided_decoding=guided_decoding_params)
+    structured_outputs_params = StructuredOutputsParams(choice=["Positive", "Negative"])
+    sampling_params = SamplingParams(structured_outputs=structured_outputs_params)
     outputs = llm.generate(
         prompts="Classify this sentiment: vLLM is wonderful!",
         sampling_params=sampling_params,

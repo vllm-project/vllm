@@ -4,13 +4,13 @@ Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine le
 
 * **Upstream vLLM compatibility** – It wraps around upstream vLLM without modifying its code.
 * **Ease of use** – Simplified deployment via Helm charts and observability through Grafana dashboards.
-* **High performance** – Optimized for LLM workloads with features like multi-model support, model-aware and prefix-aware routing, fast vLLM bootstrapping, and KV cache offloading with [LMCache](https://github.com/LMCache/LMCache), among others.
+* **High performance** – Optimized for LLM workloads with features like multimodel support, model-aware and prefix-aware routing, fast vLLM bootstrapping, and KV cache offloading with [LMCache](https://github.com/LMCache/LMCache), among others.
 
 If you are new to Kubernetes, don't worry: in the vLLM production stack [repo](https://github.com/vllm-project/production-stack), we provide a step-by-step [guide](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) and a [short video](https://www.youtube.com/watch?v=EsTJbQtzj0g) to set up everything and get started in **4 minutes**!
 
 ## Pre-requisite
 
-Ensure that you have a running Kubernetes environment with GPU (you can follow [this tutorial](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) to install a Kubernetes environment on a bare-medal GPU machine).
+Ensure that you have a running Kubernetes environment with GPU (you can follow [this tutorial](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) to install a Kubernetes environment on a bare-metal GPU machine).
 
 ## Deployment using vLLM production stack
 
@@ -55,7 +55,7 @@ sudo kubectl port-forward svc/vllm-router-service 30080:80
 And then you can send out a query to the OpenAI-compatible API to check the available models:
 
 ```bash
-curl -o- http://localhost:30080/models
+curl -o- http://localhost:30080/v1/models
 ```
 
 ??? console "Output"
@@ -78,7 +78,7 @@ curl -o- http://localhost:30080/models
 To send an actual chatting request, you can issue a curl request to the OpenAI `/completion` endpoint:
 
 ```bash
-curl -X POST http://localhost:30080/completions \
+curl -X POST http://localhost:30080/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "facebook/opt-125m",

@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional, Union
+from typing import Any
 
 import msgspec
 import zmq
 from msgspec.msgpack import Decoder
 
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.kv_cache_utils import ExternalBlockHash
 
 
 #
@@ -24,17 +24,29 @@ class KVCacheEvent(
 
 
 class BlockStored(KVCacheEvent):
-    block_hashes: list[BlockHash]
-    parent_block_hash: Optional[BlockHash]
+    block_hashes: list[ExternalBlockHash]
+    parent_block_hash: ExternalBlockHash | None
     token_ids: list[int]
     block_size: int
-    lora_id: Optional[int]
-    medium: Optional[str]
+
+    lora_id: int | None
+    """Deprecated: use `lora_name` for KV block key hash.
+    Retained for backward compatibility.
+    """
+
+    medium: str | None
+    lora_name: str | None
+
+    extra_keys: list[tuple[Any, ...] | None] | None = None
+    """Extra keys used in block hash computation, one entry per block in
+    block_hashes. Each entry contains MM identifiers, LoRA name, cache_salt,
+    prompt embeddings data, etc. for that specific block.
+    """
 
 
 class BlockRemoved(KVCacheEvent):
-    block_hashes: list[BlockHash]
-    medium: Optional[str]
+    block_hashes: list[ExternalBlockHash]
+    medium: str | None
 
 
 class AllBlocksCleared(KVCacheEvent):
@@ -42,7 +54,7 @@ class AllBlocksCleared(KVCacheEvent):
 
 
 class KVEventBatch(EventBatch):
-    events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
+    events: list[BlockStored | BlockRemoved | AllBlocksCleared]
 
 
 def process_event(event_batch):

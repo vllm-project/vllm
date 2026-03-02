@@ -2,13 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Union
 
+from vllm.inputs import TokenInputs, token_inputs
 from vllm.logprobs import Logprob
 from vllm.lora.request import LoRARequest
-
-if TYPE_CHECKING:
-    from vllm.multimodal import MultiModalDataDict
+from vllm.multimodal.inputs import MultiModalInputs, mm_inputs
 
 
 @dataclass
@@ -18,16 +16,39 @@ class BeamSearchSequence:
     The text field is optional and will only be filled when the sequence is
     about to be returned to the user.
     """
+
+    orig_prompt: TokenInputs | MultiModalInputs
+
     # The tokens include the prompt.
     tokens: list[int]
     logprobs: list[dict[int, Logprob]]
-    lora_request: Optional[LoRARequest] = None
+    lora_request: LoRARequest | None = None
     cum_logprob: float = 0.0
-    text: Optional[str] = None
-    finish_reason: Optional[str] = None
-    stop_reason: Union[int, str, None] = None
-    multi_modal_data: Optional["MultiModalDataDict"] = None
-    mm_processor_kwargs: Optional[dict[str, Any]] = None
+    text: str | None = None
+    finish_reason: str | None = None
+    stop_reason: int | str | None = None
+
+    def get_prompt(self):
+        prompt = self.orig_prompt
+
+        prompt_text = prompt.get("prompt")
+        cache_salt = prompt.get("cache_salt")
+
+        if prompt["type"] == "token":
+            return token_inputs(
+                self.tokens,
+                prompt=prompt_text,
+                cache_salt=cache_salt,
+            )
+
+        return mm_inputs(
+            prompt_token_ids=self.tokens,
+            mm_kwargs=prompt["mm_kwargs"],
+            mm_hashes=prompt["mm_hashes"],
+            mm_placeholders=prompt["mm_placeholders"],
+            prompt=prompt_text,
+            cache_salt=cache_salt,
+        )
 
 
 @dataclass
@@ -36,21 +57,22 @@ class BeamSearchOutput:
     It contains the list of the best beam search sequences.
     The length of the list is equal to the beam width.
     """
+
     sequences: list[BeamSearchSequence]
 
 
 class BeamSearchInstance:
-
     def __init__(
         self,
-        prompt_tokens: list[int],
-        lora_request: Optional[LoRARequest] = None,
-        logprobs: Optional[list[dict[int, Logprob]]] = None,
+        prompt: TokenInputs | MultiModalInputs,
+        lora_request: LoRARequest | None = None,
+        logprobs: list[dict[int, Logprob]] | None = None,
         **kwargs,
     ):
         self.beams: list[BeamSearchSequence] = [
             BeamSearchSequence(
-                tokens=prompt_tokens,
+                orig_prompt=prompt,
+                tokens=prompt["prompt_token_ids"],
                 logprobs=[] if logprobs is None else list(logprobs),
                 lora_request=lora_request,
                 **kwargs,
@@ -79,9 +101,9 @@ def get_beam_search_score(
 
 
 def create_sort_beams_key_function(eos_token_id: int, length_penalty: float):
-
     def sort_beams_key(x: BeamSearchSequence) -> float:
-        return get_beam_search_score(x.tokens, x.cum_logprob, eos_token_id,
-                                     length_penalty)
+        return get_beam_search_score(
+            x.tokens, x.cum_logprob, eos_token_id, length_penalty
+        )
 
     return sort_beams_key

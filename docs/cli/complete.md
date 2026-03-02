@@ -1,5 +1,5 @@
 # vllm complete
 
-## Options
+## Arguments
 
---8<-- "docs/argparse/complete.md"
+--8<-- "docs/generated/argparse/complete.inc.md"

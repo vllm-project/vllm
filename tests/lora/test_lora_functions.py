@@ -3,37 +3,40 @@
 """
 Script to test add_lora, remove_lora, pin_lora, list_loras functions.
 """
+
 import pytest
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
-from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.openai.api_server import (
-    build_async_engine_client_from_engine_args)
+    build_async_engine_client_from_engine_args,
+)
 from vllm.lora.request import LoRARequest
+from vllm.v1.engine.llm_engine import LLMEngine
 
-MODEL_PATH = "meta-llama/Llama-2-7b-hf"
-LORA_MODULE_PATH = "yard1/llama-2-7b-sql-lora-test"
+MODEL_PATH = "Qwen/Qwen3-0.6B"
+LORA_MODULE_PATH = "charent/self_cognition_Alice"
 LORA_RANK = 8
 
 
 def make_lora_request(lora_id: int):
-    return LoRARequest(lora_name=f"{lora_id}",
-                       lora_int_id=lora_id,
-                       lora_path=LORA_MODULE_PATH)
+    return LoRARequest(
+        lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=LORA_MODULE_PATH
+    )
 
 
 def test_lora_functions_sync():
-
     max_loras = 4
     # Create engine in eager-mode. Due to high max_loras, the CI can
     # OOM during cuda-graph capture.
-    engine_args = EngineArgs(model=MODEL_PATH,
-                             enable_lora=True,
-                             max_loras=max_loras,
-                             max_lora_rank=LORA_RANK,
-                             max_model_len=128,
-                             gpu_memory_utilization=0.8,
-                             enforce_eager=True)
+    engine_args = EngineArgs(
+        model=MODEL_PATH,
+        enable_lora=True,
+        max_loras=max_loras,
+        max_lora_rank=LORA_RANK,
+        max_model_len=128,
+        gpu_memory_utilization=0.8,
+        enforce_eager=True,
+    )
 
     llm = LLMEngine.from_engine_args(engine_args)
 
@@ -70,15 +73,16 @@ def test_lora_functions_sync():
 
 @pytest.mark.asyncio
 async def test_lora_functions_async():
-
     max_loras = 4
-    engine_args = AsyncEngineArgs(model=MODEL_PATH,
-                                  enable_lora=True,
-                                  max_loras=max_loras,
-                                  max_lora_rank=LORA_RANK,
-                                  max_model_len=128,
-                                  gpu_memory_utilization=0.8,
-                                  enforce_eager=True)
+    engine_args = AsyncEngineArgs(
+        model=MODEL_PATH,
+        enable_lora=True,
+        max_loras=max_loras,
+        max_lora_rank=LORA_RANK,
+        max_model_len=128,
+        gpu_memory_utilization=0.8,
+        enforce_eager=True,
+    )
 
     async def run_check(fn, args, expected: list):
         await fn(args)
