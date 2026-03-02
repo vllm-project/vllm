@@ -58,6 +58,10 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
     # mappings here when it supported by some attention backend
     # (for example supports nvfp4).
     "fp8": "fp8_e4m3",
+    "fp8_e4m3": "fp8_e4m3",
+    "fp8_e5m2": "fp8_e5m2",
+    "fp8_inc": "fp8_inc",
+    "fp8_ds_mla": "fp8_ds_mla",
 }
 
 T = TypeVar("T")
@@ -266,49 +270,52 @@ def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
     Returns None if no kv_cache_quant_algo is specified.
     Returns "auto" if the value is not recognized/supported.
     """
-    # Mapping from model config values to vLLM cache_dtype strings
+    # Some checkpoints (including ModelOpt variants) may not set quant_method
+    # consistently, so inspect kv-cache fields directly.
+    quantization_inner = quant_cfg.get("quantization", quant_cfg)
+    kv_algo = (
+        quantization_inner.get("kv_cache_scheme")
+        or quant_cfg.get("kv_cache_scheme")
+        or quantization_inner.get("kv_cache_quant_algo")
+        or quant_cfg.get("kv_cache_quant_algo")
+    )
 
-    quant_method = quant_cfg.get("quant_method", "")
-    if quant_method.startswith("modelopt"):
-        quantization_inner = quant_cfg.get("quantization", quant_cfg)
-        # Check if quant config is specified and use kv cache quant algo
-        kv_algo = (
-            quantization_inner.get("kv_cache_scheme")
-            or quant_cfg.get("kv_cache_scheme")
-            or quantization_inner.get("kv_cache_quant_algo")
-            or quant_cfg.get("kv_cache_quant_algo")
+    if kv_algo is None:
+        return None
+
+    if isinstance(kv_algo, dict):
+        if (
+            kv_algo.get("dynamic") is False
+            and kv_algo.get("num_bits") == 8
+            and kv_algo.get("type") == "float"
+        ):
+            kv_algo = "fp8"
+        else:
+            # Unknown/unsupported format - return "auto" as safe fallback
+            logger.warning(
+                "WARNING: Unknown kv_cache_quant_algo '%s' in model "
+                "config. Supported values: %s. Falling back to 'auto'.",
+                f"{kv_algo}",
+                list(MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP.keys()),
+            )
+            return "auto"
+
+    if isinstance(kv_algo, str):
+        kv_algo_lower = kv_algo.lower()
+
+        # Try to map to vLLM's standard format.
+        if kv_algo_lower in MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP:
+            return MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP[kv_algo_lower]
+
+        # Unknown/unsupported format - return "auto" as safe fallback.
+        logger.warning(
+            "WARNING: Unknown kv_cache_quant_algo '%s' in model "
+            "config. Supported values: %s. Falling back to 'auto'.",
+            kv_algo,
+            list(MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP.keys()),
         )
-        if isinstance(kv_algo, dict):
-            if (
-                kv_algo.get("dynamic") is False
-                and kv_algo.get("num_bits") == 8
-                and kv_algo.get("type") == "float"
-            ):
-                kv_algo = "fp8"
-            else:
-                # Unknown/unsupported format - return "auto" as safe fallback
-                logger.warning(
-                    "WARNING: Unknown kv_cache_quant_algo '%s' in model "
-                    "config. Supported values: %s. Falling back to 'auto'.",
-                    f"{kv_algo}",
-                    list(MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP.keys()),
-                )
-                return "auto"
-        if isinstance(kv_algo, str):
-            kv_algo_lower = kv_algo.lower()
+        return "auto"
 
-            # Try to map to vLLM's standard format
-            if kv_algo_lower in MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP:
-                return MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP[kv_algo_lower]
-            else:
-                # Unknown/unsupported format - return "auto" as safe fallback
-                logger.warning(
-                    "WARNING: Unknown kv_cache_quant_algo '%s' in model "
-                    "config. Supported values: %s. Falling back to 'auto'.",
-                    kv_algo,
-                    list(MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP.keys()),
-                )
-                return "auto"
     return None
 
 

@@ -554,7 +554,14 @@ __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
         TORCH_CHECK(false, "Unsupported input type of kv cache: ", SRC_DTYPE); \
       }                                                                        \
     } else {                                                                   \
-      if (KV_DTYPE == "fp8" || KV_DTYPE == "fp8_e4m3") {                       \
+      if (KV_DTYPE == "bfloat16") {                                            \
+        if (SRC_DTYPE == at::ScalarType::BFloat16) {                           \
+          FN(__nv_bfloat16, __nv_bfloat16, vllm::Fp8KVCacheDataType::kAuto);   \
+        } else {                                                               \
+          TORCH_CHECK(false,                                                   \
+                      "Unsupported input type of kv cache: ", SRC_DTYPE);      \
+        }                                                                      \
+      } else if (KV_DTYPE == "fp8" || KV_DTYPE == "fp8_e4m3") {                \
         if (SRC_DTYPE == at::ScalarType::Float) {                              \
           FN(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);              \
         } else if (SRC_DTYPE == at::ScalarType::Half) {                        \
