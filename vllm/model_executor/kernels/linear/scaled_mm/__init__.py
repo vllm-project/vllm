@@ -30,7 +30,6 @@ from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
-    ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
     TritonInt8ScaledMMLinearKernel,
@@ -41,7 +40,6 @@ __all__ = [
     "FP8ScaledMMLinearLayerConfig",
     "Int8ScaledMMLinearKernel",
     "Int8ScaledMMLinearLayerConfig",
-    "ScaledMMLinearKernel",
     "ScaledMMLinearLayerConfig",
     "AiterInt8ScaledMMLinearKernel",
     "CPUInt8ScaledMMLinearKernel",
