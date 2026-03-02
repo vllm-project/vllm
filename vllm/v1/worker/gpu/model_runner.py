@@ -127,6 +127,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.max_model_len = self.model_config.max_model_len
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
+        self.is_encoder_decoder = self.model_config.is_encoder_decoder
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.output_copy_stream = torch.cuda.Stream(self.device)
@@ -157,6 +158,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.supports_mm_inputs and self.is_first_pp_rank:
             self.encoder_cache = EncoderCache()
 
+        # Speculative decoding.
         self.speculator = None
         self.num_speculative_steps = 0
         self.use_aux_hidden_state_outputs = False
@@ -170,10 +172,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.use_aux_hidden_state_outputs = True
                 if self.pp_size > 1:
                     raise ValueError("EAGLE3 with pipeline parallel is not supported.")
-
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
+        # General request states.
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -291,17 +293,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_group.kv_cache_spec.block_size
             for kv_cache_group in kv_cache_config.kv_cache_groups
         ]
+
         block_table_max_model_len = self.max_model_len
-        if self.model_config.is_encoder_decoder:
+        if self.is_encoder_decoder:
             # Cross-attention block tables need to index encoder tokens
             # (e.g., Whisper ~1500), which can exceed decoder max_model_len.
             block_table_max_model_len = max(
                 block_table_max_model_len,
-                getattr(
-                    self.model_config.hf_config,
-                    "max_source_positions",
-                    block_table_max_model_len,
-                ),
+                getattr(self.model_config.hf_config, "max_source_positions", 0),
             )
 
         self.block_tables = BlockTables(
@@ -889,14 +888,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings = None
             # FIXME(woosuk): Fix warmup for LoRA.
 
-        # Encoder-decoder models should run eager/non-compiled when encoder
-        # inputs are scheduled, because this step updates cross-attention cache
-        # with dynamic encoder outputs.
-        has_encoder_input = (
-            self.model_config.is_encoder_decoder
-            and len(scheduler_output.scheduled_encoder_inputs) > 0
-        )
-        if has_encoder_input:
+        skip_compiled = False
+        if self.is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
+            # Encoder-decoder models should run eager/non-compiled when encoder
+            # inputs are scheduled, because this step updates cross-attention cache
+            # with dynamic encoder outputs.
+            skip_compiled = True
             cudagraph_runtime_mode = CUDAGraphMode.NONE
 
         attn_metadata = None
@@ -968,7 +965,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens_across_dp=num_tokens_across_dp,
                 batch_descriptor=batch_descriptor,
                 slot_mapping=slot_mappings_by_layer,
-                skip_compiled=has_encoder_input,
+                skip_compiled=skip_compiled,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
                 model_output = self.model(**model_inputs)
