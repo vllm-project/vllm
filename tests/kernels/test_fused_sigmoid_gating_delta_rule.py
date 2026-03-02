@@ -54,12 +54,12 @@ def test_fused_sigmoid_gating_delta_rule_update_non_spec(
     key = key.view(1, num_tokens, num_k_heads, head_k_dim)
     value = value.view(1, num_tokens, num_v_heads, head_v_dim)
 
-    A_log = torch.rand(num_v_heads // tp_size, dtype=torch.float32)
-    dt_bias = torch.rand(num_v_heads // tp_size, dtype=torch.bfloat16)
+    A_log = torch.rand(num_v_heads // tp_size, dtype=dtype)
+    dt_bias = torch.rand(num_v_heads // tp_size, dtype=dtype)
     a = torch.rand(num_tokens, num_v_heads, dtype=dtype)
     b = torch.rand(num_tokens, num_v_heads, dtype=dtype)
     ssm_state = torch.rand(
-        total_entries, num_v_heads, head_k_dim, head_v_dim, dtype=torch.float32
+        total_entries, num_v_heads, head_k_dim, head_v_dim, dtype=dtype
     )
     state_indices = torch.randperm(total_entries, dtype=torch.int32)[:num_tokens]
     cu_seqlens = torch.arange(0, num_tokens + 1, dtype=torch.int32)
