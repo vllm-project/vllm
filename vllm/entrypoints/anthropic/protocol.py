@@ -175,3 +175,33 @@ class AnthropicMessagesResponse(BaseModel):
     def model_post_init(self, __context):
         if not self.id:
             self.id = f"msg_{int(time.time() * 1000)}"
+
+
+class AnthropicContextManagement(BaseModel):
+    """Context management information for token counting."""
+
+    original_input_tokens: int
+
+
+class AnthropicCountTokensRequest(BaseModel):
+    """Anthropic messages.count_tokens request"""
+
+    model: str
+    messages: list[AnthropicMessage]
+    system: str | list[AnthropicContentBlock] | None = None
+    tool_choice: AnthropicToolChoice | None = None
+    tools: list[AnthropicTool] | None = None
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, v):
+        if not v:
+            raise ValueError("Model is required")
+        return v
+
+
+class AnthropicCountTokensResponse(BaseModel):
+    """Anthropic messages.count_tokens response"""
+
+    input_tokens: int
+    context_management: AnthropicContextManagement | None = None
