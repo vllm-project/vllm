@@ -498,7 +498,9 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
 - Multi-vector retrieval: [examples/pooling/token_embed/colqwen3_token_embed_online.py](../../examples/pooling/token_embed/colqwen3_token_embed_online.py)
 - Reranking (text + multi-modal): [examples/pooling/score/colqwen3_rerank_online.py](../../examples/pooling/score/colqwen3_rerank_online.py)
 
-### Llama Nemotron Multimodal Embedding Models
+### Llama Nemotron Multimodal
+
+#### Embedding Model
 
 Llama Nemotron VL Embedding models combine the bidirectional Llama embedding backbone
 (from `nvidia/llama-nemotron-embed-1b-v2`) with SigLIP as the vision encoder to produce
@@ -559,7 +561,7 @@ curl -s http://localhost:8000/v1/embeddings -H "Content-Type: application/json" 
 }'
 ```
 
-### Llama Nemotron Multimodal Reranker Models
+#### Reranker Model
 
 Llama Nemotron VL reranker models combine the same bidirectional Llama + SigLIP
 backbone with a sequence-classification head for cross-encoder scoring and reranking.
