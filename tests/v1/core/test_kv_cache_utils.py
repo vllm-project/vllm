@@ -2162,7 +2162,6 @@ def test_get_kv_cache_configs_with_mamba():
         vllm_config, [hybrid_kv_cache_specs], [available_memory_hybrid]
     )[0]
 
-    print(kv_cache_config_hybrid)
     assert kv_cache_config_hybrid == KVCacheConfig(
         num_blocks=20,
         kv_cache_tensors=[
@@ -2175,6 +2174,48 @@ def test_get_kv_cache_configs_with_mamba():
             KVCacheGroupSpec(["layer_1"], new_mamba_spec()),
             KVCacheGroupSpec(
                 ["layer_2", "layer_3"],
+                new_kv_cache_spec(head_size=32, group_size=2),
+                group_size=1,
+            ),
+        ],
+    )
+
+    # Test 4: 2 mamba + 5 full (with 3 padding full)
+    hybrid_kv_cache_specs = {
+        "layer_1": new_mamba_spec(),
+        "layer_2": new_mamba_spec(),
+        "layer_3": new_kv_cache_spec(head_size=32, group_size=2),
+        "layer_4": new_kv_cache_spec(head_size=32, group_size=2),
+        "layer_5": new_kv_cache_spec(head_size=32, group_size=2),
+        "layer_6": new_kv_cache_spec(head_size=32, group_size=2),
+        "layer_7": new_kv_cache_spec(head_size=32, group_size=2),
+    }
+    available_memory_hybrid = expected_page_size * 2 * 10
+    kv_cache_config_hybrid = get_kv_cache_configs(
+        vllm_config, [hybrid_kv_cache_specs], [available_memory_hybrid]
+    )[0]
+
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=expected_page_size * 10,
+                shared_by=["layer_1", "layer_3", "layer_4", "layer_5", "layer_6"],
+            ),
+            KVCacheTensor(
+                size=expected_page_size * 10,
+                shared_by=["layer_2", "layer_7"],
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1", "layer_2"], new_mamba_spec()),
+            KVCacheGroupSpec(
+                ["layer_3", "layer_4", "layer_7"],
+                new_kv_cache_spec(head_size=32, group_size=2),
+                group_size=2,
+            ),
+            KVCacheGroupSpec(
+                ["layer_5", "layer_6"],
                 new_kv_cache_spec(head_size=32, group_size=2),
                 group_size=1,
             ),
