@@ -1108,7 +1108,7 @@ class OpenAIServingResponses(OpenAIServing):
                 prev_outputs = []
             for response_msg in request.input:
                 new_msg = response_input_to_harmony(response_msg, prev_outputs)
-                if new_msg.author.role != "system":
+                if new_msg is not None and new_msg.author.role != "system":
                     messages.append(new_msg)
 
                 # User passes in a tool call request and its output. We need
