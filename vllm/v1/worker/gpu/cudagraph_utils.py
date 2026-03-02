@@ -131,6 +131,7 @@ class CudaGraphManager:
             uniform_decode_query_len=(
                 self.uniform_decode_query_len if uniform_decode else 0
             ),
+            skip_attn=(capture_cg_mode == CUDAGraphMode.PIECEWISE),
         )
         num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
 
@@ -399,7 +400,8 @@ def prepare_inputs_to_capture(
     max_model_len: int,
     kv_cache_config: KVCacheConfig,
     uniform_decode_query_len: int = 0,
-) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+    skip_attn: bool = False,
+) -> tuple[dict[str, Any] | None, dict[str, torch.Tensor]]:
     if uniform_decode_query_len > 0:
         num_tokens_per_req = uniform_decode_query_len
     else:
@@ -426,18 +428,21 @@ def prepare_inputs_to_capture(
         slot_mappings, kv_cache_config
     )
 
-    attn_metadata = build_attn_metadata(
-        attn_groups=attn_groups,
-        num_reqs=num_reqs,
-        num_tokens=num_tokens,
-        query_start_loc_gpu=query_start_loc,
-        query_start_loc_cpu=query_start_loc_cpu,
-        max_query_len=num_tokens_per_req,
-        seq_lens=input_buffers.seq_lens,
-        max_seq_len=max_model_len,
-        block_tables=input_block_tables,
-        slot_mappings=slot_mappings,
-        kv_cache_config=kv_cache_config,
-        dcp_local_seq_lens=input_buffers.dcp_local_seq_lens,
-    )
+    attn_metadata = None
+    if not skip_attn:
+        attn_metadata = build_attn_metadata(
+            attn_groups=attn_groups,
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
+            query_start_loc_gpu=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            max_query_len=num_tokens_per_req,
+            seq_lens=input_buffers.seq_lens,
+            max_seq_len=max_model_len,
+            block_tables=input_block_tables,
+            slot_mappings=slot_mappings,
+            kv_cache_config=kv_cache_config,
+            dcp_local_seq_lens=input_buffers.dcp_local_seq_lens,
+            for_cudagraph_capture=True,
+        )
     return attn_metadata, slot_mappings_by_layer

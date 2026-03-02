@@ -1186,6 +1186,11 @@ class VllmConfig:
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
 
         if self.cache_config.mamba_cache_mode == "align":
+            # TODO: support align mamba cache mode for model runner v2
+            assert not envs.VLLM_USE_V2_MODEL_RUNNER, (
+                "Model Runner V2 has not yet supported mamba_cache_mode='align'. "
+                "Use mamba_cache_mode='all' or disable prefix caching."
+            )
             assert (
                 self.cache_config.block_size
                 <= self.scheduler_config.max_num_batched_tokens

@@ -110,10 +110,11 @@ class EagleCudaGraphManager:
         num_reqs: int,
         num_tokens: int,
         generate_fn: Callable,
-        attn_metadata: dict[str, Any],
+        attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor],
         num_tokens_across_dp: torch.Tensor,
     ) -> None:
+        assert attn_metadata is not None
         assert num_tokens not in self.graphs
         graph = torch.cuda.CUDAGraph()
 
@@ -141,7 +142,7 @@ class EagleCudaGraphManager:
         num_reqs: int,
         num_tokens: int,
         generate_fn: Callable,
-        attn_metadata: dict[str, Any],
+        attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor],
         num_tokens_across_dp: torch.Tensor,
     ) -> None:
