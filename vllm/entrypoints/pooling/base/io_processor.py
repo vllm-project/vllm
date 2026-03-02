@@ -3,7 +3,7 @@
 
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Final, TypeAlias
+from typing import Any, Final
 
 from vllm import PoolingRequestOutput, PromptType, TokensPrompt
 from vllm.config import ModelConfig
@@ -13,29 +13,14 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
 )
 from vllm.entrypoints.openai.engine.serving import RendererChatRequest, RendererRequest
+from vllm.entrypoints.pooling.base.typing import AnyPoolingRequest
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
-    ClassificationResponse,
-)
-from vllm.entrypoints.pooling.embed.protocol import (
-    EmbeddingBytesResponse,
-    EmbeddingChatRequest,
-    EmbeddingCompletionRequest,
-    EmbeddingResponse,
-)
-from vllm.entrypoints.pooling.pooling.protocol import (
-    IOProcessorRequest,
-    PoolingChatRequest,
-    PoolingCompletionRequest,
-    PoolingResponse,
 )
 from vllm.entrypoints.pooling.score.protocol import (
-    RerankRequest,
     ScoreDataRequest,
     ScoreQueriesDocumentsRequest,
-    ScoreRequest,
-    ScoreResponse,
     ScoreTextRequest,
 )
 from vllm.exceptions import VLLMValidationError
@@ -46,30 +31,6 @@ from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
-
-PoolingCompletionLikeRequest: TypeAlias = (
-    EmbeddingCompletionRequest
-    | ClassificationCompletionRequest
-    | RerankRequest
-    | ScoreRequest
-    | PoolingCompletionRequest
-)
-
-PoolingChatLikeRequest: TypeAlias = (
-    EmbeddingChatRequest | ClassificationChatRequest | PoolingChatRequest
-)
-
-AnyPoolingRequest: TypeAlias = (
-    PoolingCompletionLikeRequest | PoolingChatLikeRequest | IOProcessorRequest
-)
-
-AnyPoolingResponse: TypeAlias = (
-    ClassificationResponse
-    | EmbeddingResponse
-    | EmbeddingBytesResponse
-    | PoolingResponse
-    | ScoreResponse
-)
 
 
 class PoolingIOProcessor:

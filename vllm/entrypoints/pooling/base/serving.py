@@ -38,7 +38,8 @@ from vllm.tracing import (
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import merge_async_iterators
 
-from .io_processor import AnyPoolingRequest, AnyPoolingResponse, PoolingIOProcessor
+from .io_processor import PoolingIOProcessor
+from .typing import AnyPoolingRequest, AnyPoolingResponse
 
 PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
 
