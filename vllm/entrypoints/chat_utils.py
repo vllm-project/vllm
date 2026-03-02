@@ -461,10 +461,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     maximum per prompt.
     """
 
-    def __init__(
-        self,
-        model_config: ModelConfig,
-    ):
+    def __init__(self, model_config: ModelConfig):
         super().__init__()
 
         self._model_config = model_config
@@ -1016,9 +1013,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
     async def _video_with_uuid_async(self, video_url: str | None, uuid: str | None):
         video = (
-            await self._connector.fetch_video_async(video_url=video_url)
-            if video_url
-            else None
+            await self._connector.fetch_video_async(video_url) if video_url else None
         )
         return video, uuid
 
