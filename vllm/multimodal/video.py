@@ -441,7 +441,6 @@ class NemotronVLVideoBackend(OpenCVVideoBackend):
         fps: int = -1,
         max_duration: int = 300,
         frame_recovery: bool = False,
-        keep_video_bytes: bool = False,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         frames, metadata = OpenCVVideoBackend.load_bytes(
@@ -452,9 +451,10 @@ class NemotronVLVideoBackend(OpenCVVideoBackend):
             frame_recovery=frame_recovery,
             **kwargs,
         )
-        if keep_video_bytes:
-            metadata = dict(metadata)
-            metadata["original_video_bytes"] = data
+        
+        metadata = dict(metadata)
+        metadata["original_video_bytes"] = data
+
         return frames, metadata
 
 
