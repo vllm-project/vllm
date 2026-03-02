@@ -1629,6 +1629,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # the actual model is served but different names may be used in requests.
     "VLLM_SKIP_MODEL_VALIDATION": lambda: (
         os.getenv("VLLM_SKIP_MODEL_VALIDATION", "0").strip().lower() in ("1", "true")
+    ),
     # Whether it is a scale up launch engine for elastic EP,
     # Should only be set by EngineCoreClient.
     "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": lambda: bool(
