@@ -359,13 +359,18 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 device=topk_ids.device,
             )
             max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
-            # Expert ids must be set default to -1 to prevent a blank block
-            expert_ids = torch.empty(
+            # Zero-initialize expert_ids and num_tokens_post_pad so that
+            # inactive LoRA adapters (whose C++ kernel blocks exit early
+            # without writing) have safe default values.  This is critical
+            # when EP is active because the post-hoc expert_map[expert_ids]
+            # remap touches every element — uninitialized garbage values
+            # would cause an out-of-bounds access.
+            expert_ids = torch.zeros(
                 (max_loras * max_num_m_blocks,),
                 dtype=torch.int32,
                 device=topk_ids.device,
             )
-            num_tokens_post_pad = torch.empty(
+            num_tokens_post_pad = torch.zeros(
                 (max_loras), dtype=torch.int32, device=topk_ids.device
             )
 

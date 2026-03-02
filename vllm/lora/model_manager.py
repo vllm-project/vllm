@@ -516,12 +516,17 @@ class LoRAModelManager:
                 replacements = self.packed_modules_mapping[parts[-1]]
                 subloras: list[LoRALayerWeights | None] = []
                 for i, r in enumerate(replacements):
+                    # When EP is active, replacements has
+                    # global_num_experts * 3 entries but stacked buffers
+                    # are sized for local_num_experts * 3. Cap the index
+                    # since all entries share the same shape.
+                    idx = i % len(module.lora_a_stacked)
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name + "." + r,
-                        module.lora_a_stacked[i].shape[-1],
-                        module.lora_b_stacked[i].shape[-2],
+                        module.lora_a_stacked[idx].shape[-1],
+                        module.lora_b_stacked[idx].shape[-2],
                         rank,
-                        module.lora_a_stacked[i].dtype,
+                        module.lora_a_stacked[idx].dtype,
                         "cpu",
                     )
                     subloras.append(lora)

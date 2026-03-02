@@ -46,9 +46,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         super().__init__()
         self.base_layer = base_layer
 
-        assert not self.base_layer.use_ep, (
-            "EP support for Fused MoE LoRA is not implemented yet."
-        )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.device = _get_lora_device(base_layer)
@@ -133,6 +130,13 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         self.base_layer.ensure_moe_quant_config_init()
         quant_config = self.base_layer.quant_method.moe_quant_config
+
+        if not getattr(self.base_layer.quant_method, "supports_internal_mk",
+                       False):
+            # The quant method hasn't built its modular kernel yet (e.g.
+            # UnquantizedFusedMoEMethod).  Trigger the init so that it
+            # picks an EP-aware prepare/finalize when EP is active.
+            self.base_layer.maybe_init_modular_kernel()
 
         if getattr(self.base_layer.quant_method, "supports_internal_mk", False):
             # Use the existing modular kernel from the quant method
@@ -223,7 +227,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     curr_topk_ids,
                     num_tokens,
                     shrink_config["BLOCK_SIZE_M"],
-                    self.base_layer.local_num_experts,
+                    self.base_layer.global_num_experts,
                     self.max_loras,
                     self.adapter_enabled,
                     expert_map,
@@ -515,6 +519,18 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         return w2_lora_b[:, start_idx:end_idx, :]
 
+    def _get_local_expert_indices(self) -> torch.Tensor | None:
+        """Get global indices of this rank's local experts, ordered by
+        local ID. Returns None when EP is not active."""
+        expert_map = getattr(self.base_layer, '_expert_map', None)
+        if expert_map is None:
+            return None
+        # expert_map: (global_num_experts,) mapping global -> local (or -1)
+        mask = expert_map >= 0
+        global_indices = mask.nonzero(as_tuple=True)[0]
+        local_ids = expert_map[global_indices]
+        return global_indices[local_ids.argsort()].cpu()
+
     def reset_lora(self, index: int):
         """Resets the lora weights at index back to 0."""
         for pos in range(self._w13_slices):
@@ -545,6 +561,18 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
+
+        # When EP is active, LoRA weights are loaded for all global experts
+        # but storage is sized for local experts only — filter here.
+        local_expert_indices = self._get_local_expert_indices()
+        if local_expert_indices is not None:
+            w1_lora_a = w1_lora_a[local_expert_indices]
+            w1_lora_b = w1_lora_b[local_expert_indices]
+            w2_lora_a = w2_lora_a[local_expert_indices]
+            w2_lora_b = w2_lora_b[local_expert_indices]
+            w3_lora_a = w3_lora_a[local_expert_indices]
+            w3_lora_b = w3_lora_b[local_expert_indices]
+
         assert (
             num_experts
             == w1_lora_a.shape[0]
@@ -719,6 +747,15 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
 
         w13_lora_a, w2_lora_a = lora_a
         w13_lora_b, w2_lora_b = lora_b
+
+        # When EP is active, LoRA weights are loaded for all global experts
+        # but storage is sized for local experts only — filter here.
+        local_expert_indices = self._get_local_expert_indices()
+        if local_expert_indices is not None:
+            w13_lora_a = w13_lora_a[local_expert_indices]
+            w13_lora_b = w13_lora_b[local_expert_indices]
+            w2_lora_a = w2_lora_a[local_expert_indices]
+            w2_lora_b = w2_lora_b[local_expert_indices]
 
         sliced_w13_lora_a = self._slice_w13_a(w13_lora_a)
         sliced_w13_lora_b = self._slice_w13_b(w13_lora_b)

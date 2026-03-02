@@ -551,6 +551,241 @@ def test_fused_moe_lora_kernel_naive_block_assignment(
     torch.testing.assert_close(output, output_ref, atol=1e-2, rtol=1e-2)
 
 
+def use_fused_moe_lora_kernel_ep(
+    topk_ids,
+    topk_weights,
+    token_lora_mapping,
+    max_lora_rank,
+    top_k_num,
+    lora_ids,
+    lora_a_stacked,
+    lora_b_stacked,
+    hidden_states,
+    output,
+    max_loras,
+    global_num_experts,
+    expert_map,
+    block_size,
+):
+    """
+    Test helper for expert-parallel path: passes expert_map to the C++ op
+    so that tokens routed to non-local experts are dropped and expert_ids
+    contain local IDs.
+    """
+    max_num_tokens_padded = topk_ids.numel() + global_num_experts * (
+        block_size - 1
+    )
+    max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
+    max_num_m_blocks = CEILDIV(max_num_tokens_padded, block_size)
+
+    sorted_token_ids = torch.empty(
+        (max_loras * max_num_tokens_padded,),
+        dtype=torch.int32,
+    )
+    expert_ids = torch.empty(
+        (max_loras * max_num_m_blocks,), dtype=torch.int32
+    )
+    num_tokens_post_padded = torch.empty((max_loras,), dtype=torch.int32)
+    adapter_enabled = torch.ones(max_loras + 1, dtype=torch.int32)
+
+    ops.moe_lora_align_block_size(
+        topk_ids,
+        token_lora_mapping,
+        global_num_experts,
+        block_size,
+        max_loras,
+        max_num_tokens_padded,
+        max_num_m_blocks,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        adapter_enabled,
+        lora_ids,
+    )
+    expert_ids = expert_map[expert_ids]
+
+    config = {
+        "BLOCK_SIZE_M": block_size,
+        "BLOCK_SIZE_N": 32,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "NUM_WARPS": 4,
+        "NUM_STAGES": 3,
+        "SPLIT_K": 1,
+    }
+
+    expert_ids = expert_ids.view(max_loras, -1)
+    sorted_token_ids = sorted_token_ids.view(max_loras, -1)
+    num_active_loras = torch.tensor(
+        [max_loras + 1], dtype=torch.int32, device="cpu"
+    )
+
+    fused_moe_lora(
+        output,
+        hidden_states,
+        lora_a_stacked,
+        lora_b_stacked,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        token_lora_mapping,
+        max_lora_rank,
+        top_k_num,
+        lora_ids,
+        num_active_loras,
+        adapter_enabled,
+        config["BLOCK_SIZE_M"],
+        config["BLOCK_SIZE_N"],
+        config["BLOCK_SIZE_K"],
+        config["GROUP_SIZE_M"],
+        config["NUM_WARPS"],
+        config["NUM_STAGES"],
+        config["SPLIT_K"],
+        config["BLOCK_SIZE_M"],
+        config["BLOCK_SIZE_N"],
+        config["BLOCK_SIZE_K"],
+        config["GROUP_SIZE_M"],
+        config["NUM_WARPS"],
+        config["NUM_STAGES"],
+        config["SPLIT_K"],
+        False,
+    )
+
+
+def use_torch_ep(
+    hidden_states,
+    token_lora_mapping,
+    topk_ids,
+    lora_a_stacked,
+    lora_b_stacked,
+    top_k_num,
+    expert_map,
+):
+    """
+    Reference implementation that only processes local experts.
+    Non-local experts (expert_map == -1) contribute zero.
+    lora_{a,b}_stacked are indexed by LOCAL expert id.
+    """
+    outputs = []
+    for i in range(hidden_states.shape[0]):
+        lora_idx = token_lora_mapping[i]
+        expert_ids = topk_ids[i]
+        tensors = []
+        for k in range(top_k_num):
+            global_eid = expert_ids[k].item()
+            local_eid = expert_map[global_eid].item()
+            if local_eid == -1:
+                tensors.append(
+                    torch.zeros(
+                        lora_b_stacked[0].shape[2],
+                        dtype=hidden_states.dtype,
+                        device=hidden_states.device,
+                    )
+                )
+            else:
+                lora_a = lora_a_stacked[0][lora_idx][local_eid]
+                lora_b = lora_b_stacked[0][lora_idx][local_eid]
+                tensors.append(hidden_states[i] @ lora_a.T @ lora_b.T)
+        outputs.append(torch.stack(tensors, dim=0))
+    return torch.stack(outputs, dim=0)
+
+
+@pytest.mark.parametrize("num_tokens", [100])
+@pytest.mark.parametrize("top_k_num", [6])
+@pytest.mark.parametrize("global_num_experts", [64])
+@pytest.mark.parametrize("ep_size", [2, 4])
+@pytest.mark.parametrize("max_loras", [4])
+@pytest.mark.parametrize("N", [1408])
+@pytest.mark.parametrize("K", [2048])
+@pytest.mark.parametrize("max_lora_rank", [16, 32])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("seed", SEED)
+def test_fused_moe_lora_kernel_expert_parallel(
+    num_tokens,
+    top_k_num,
+    global_num_experts,
+    ep_size,
+    max_loras,
+    N,
+    K,
+    max_lora_rank,
+    block_size,
+    dtype,
+    device,
+    seed,
+):
+    """
+    Test the expert-parallel (EP) path of the fused MoE LoRA kernel.
+    An expert_map is created that assigns a subset of global experts to local,
+    and the test verifies that only local experts contribute to the output.
+    """
+    torch.set_default_device(device)
+    set_random_seed(seed)
+
+    # Simulate EP rank 0: first chunk of experts is local
+    local_num_experts = global_num_experts // ep_size
+    expert_map = torch.full(
+        (global_num_experts,), -1, dtype=torch.int32
+    )
+    expert_map[:local_num_experts] = torch.arange(
+        local_num_experts, dtype=torch.int32
+    )
+
+    num_sequences = 10
+    # topk_ids contain GLOBAL expert ids
+    topk_ids, topk_weights, token_lora_mapping, lora_ids = sample_data(
+        num_tokens, num_sequences, max_loras, global_num_experts, top_k_num
+    )
+
+    # LoRA weights sized for LOCAL experts only
+    lora_a_stacked = [
+        torch.rand(
+            (max_loras, local_num_experts, max_lora_rank, K),
+            dtype=dtype,
+        )
+    ]
+    lora_b_stacked = [
+        torch.rand(
+            (max_loras, local_num_experts, N, max_lora_rank),
+            dtype=dtype,
+        )
+    ]
+    hidden_states = torch.rand((num_tokens, K), dtype=dtype)
+
+    output = torch.zeros((num_tokens, top_k_num, N), dtype=dtype)
+    use_fused_moe_lora_kernel_ep(
+        topk_ids,
+        topk_weights,
+        token_lora_mapping,
+        max_lora_rank,
+        top_k_num,
+        lora_ids,
+        lora_a_stacked,
+        lora_b_stacked,
+        hidden_states,
+        output,
+        max_loras,
+        global_num_experts,
+        expert_map,
+        block_size,
+    )
+
+    output_ref = use_torch_ep(
+        hidden_states,
+        token_lora_mapping,
+        topk_ids,
+        lora_a_stacked,
+        lora_b_stacked,
+        top_k_num,
+        expert_map,
+    )
+
+    torch.testing.assert_close(output, output_ref, atol=1e-2, rtol=1e-2)
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("num_tokens", [100])
 @pytest.mark.parametrize("top_k_num", [6])
