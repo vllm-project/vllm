@@ -1115,12 +1115,17 @@ def _step_until_done(
         all_finished = all_done
 
 
+def _num_waiting_requests(scheduler: Scheduler) -> int:
+    remote_waiting = getattr(scheduler, "waiting_for_remote_kvs", None)
+    return len(scheduler.waiting) + (len(remote_waiting) if remote_waiting else 0)
+
+
 def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
     """Cycle requests through a KV transfer cyle."""
 
     # Requests should first transition to WAITING_FOR_REMOTE_KVS
     output = scheduler.schedule()
-    assert len(scheduler.waiting) == len(req_ids)
+    assert _num_waiting_requests(scheduler) == len(req_ids)
     assert len(scheduler.running) == 0
     assert len(output.scheduled_new_reqs) == 0
     for req in scheduler.requests.values():
@@ -1139,7 +1144,7 @@ def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
 
     # Simulate KV transfer completion using KVConnectorOutput.finished_recving
     output = scheduler.schedule()
-    assert len(scheduler.waiting) == len(req_ids)
+    assert _num_waiting_requests(scheduler) == len(req_ids)
     assert len(scheduler.running) == 0
 
     MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
@@ -1546,7 +1551,7 @@ def test_kv_connector_handles_preemption(is_async, use_ec_connector, ec_role):
     # All can be scheduled - 1st token.
     output = scheduler.schedule()
     if is_async:
-        assert len(scheduler.waiting) == 2
+        assert _num_waiting_requests(scheduler) == 2
         assert scheduler.running == []
         _step_until_kv_transfer_finished(scheduler, req_ids)
         output = scheduler.schedule()
@@ -3614,6 +3619,9 @@ def test_prepend_skipped_requests_order():
     # simulate first 2 waiting requests are waiting for remote KVs
     for req in expected_waiting_reqs[:2]:
         req.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.waiting.remove_requests(expected_waiting_reqs[:2])
+    for req in expected_waiting_reqs[:2]:
+        scheduler.waiting_for_remote_kvs.add_request(req)
 
     # schedule step
     # expect the first 2 waiting to be skipped, the third running,
@@ -3624,7 +3632,8 @@ def test_prepend_skipped_requests_order():
     expected_waiting_reqs.pop(2)
 
     # verify waiting order is preserved
-    assert list(scheduler.waiting) == expected_waiting_reqs
+    waiting_reqs = list(scheduler.waiting_for_remote_kvs) + list(scheduler.waiting)
+    assert waiting_reqs == expected_waiting_reqs
 
 
 def test_abort_request_waiting_for_remote_kvs():
