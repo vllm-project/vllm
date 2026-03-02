@@ -180,6 +180,10 @@ class BlockPool:
 
         self.metrics_collector = metrics_collector
 
+        # Block IDs allocated since the last drain. The worker uses these
+        # to zero the corresponding GPU memory before the blocks are used.
+        self.new_block_ids: list[int] = []
+
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
     ) -> list[KVCacheBlock] | None:
@@ -347,7 +351,14 @@ class BlockPool:
                 block.ref_cnt += 1
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
+        self.new_block_ids.extend(block.block_id for block in ret)
         return ret
+
+    def take_new_block_ids(self) -> list[int]:
+        """Drain and return block IDs allocated since the last call."""
+        ids = self.new_block_ids
+        self.new_block_ids = []
+        return ids
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """

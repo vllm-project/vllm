@@ -871,6 +871,8 @@ class Scheduler(SchedulerInterface):
         self.prev_step_scheduled_req_ids.clear()
         self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
+        new_block_ids_to_zero = self.kv_cache_manager.take_new_block_ids() or None
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -886,6 +888,7 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            new_block_ids_to_zero=new_block_ids_to_zero,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:

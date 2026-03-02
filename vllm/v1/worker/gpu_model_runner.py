@@ -99,6 +99,7 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
+from vllm.triton_utils import tl, triton
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
@@ -370,6 +371,45 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
+
+
+@triton.jit
+def _zero_kv_blocks_kernel(
+    raw_ptr,
+    seg_offsets_ptr,
+    block_ids_ptr,
+    n_blocks,
+    N_SEGS: tl.constexpr,
+    PAGE_SIZE_EL: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Zero KV cache blocks across all segments in a single launch.
+
+    Each segment is a contiguous region of one block's data.  For backends
+    where blocks are outermost (block_dim=0) there is one segment per
+    buffer.  For backends where K/V is outermost (block_dim=1) there are
+    two segments per buffer (one for K, one for V).
+
+    Programs are mapped as (block_index, seg_index, chunk_index).
+    """
+    pid = tl.program_id(0)
+    chunks = PAGE_SIZE_EL // BLOCK_SIZE
+    work_per_block = N_SEGS * chunks
+    block_index = pid // work_per_block
+    if block_index >= n_blocks:
+        return
+    remainder = pid % work_per_block
+    seg_index = remainder // chunks
+    chunk_index = remainder % chunks
+    block_id = tl.load(block_ids_ptr + block_index)
+    seg_offset = tl.load(seg_offsets_ptr + seg_index)
+    base = (
+        seg_offset
+        + block_id.to(tl.int64) * PAGE_SIZE_EL
+        + chunk_index.to(tl.int64) * BLOCK_SIZE
+    )
+    cols = tl.arange(0, BLOCK_SIZE).to(tl.int64)
+    tl.store(raw_ptr + base + cols, tl.zeros([BLOCK_SIZE], dtype=tl.int32))
 
 
 class GPUModelRunner(
@@ -921,6 +961,130 @@ class GPUModelRunner(
                 decode_threshold=self.reorder_batch_threshold,
             )
 
+    def _init_kv_zero_meta(self) -> None:
+        """One-time precomputation for _zero_block_ids.
+
+        Builds a segment-offset table for the Triton zeroing kernel.
+        A "segment" is one contiguous slice of a block's data inside the
+        raw buffer.  The block dimension and segment layout are derived
+        from get_kv_cache_shape (via sentinel) and the tensor's strides.
+
+        Only AttentionSpec layers are processed; Mamba layers are skipped.
+        """
+        from itertools import product as iprod
+
+        from vllm.v1.kv_cache_interface import AttentionSpec
+
+        kernel_block_sizes = self._kernel_block_sizes
+
+        seen_ptrs: set[int] = set()
+        first_storage: torch.UntypedStorage | None = None
+        base_ptr = 0
+        seg_offsets: list[int] = []
+        seg_size_el: int | None = None
+
+        for group in self._kv_cache_spec_attn_group_iterator():
+            spec = group.kv_cache_spec
+            if not isinstance(spec, AttentionSpec):
+                continue
+            if group.kv_cache_group_id >= len(kernel_block_sizes):
+                continue
+            kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
+            _S = 1234567
+            shape = group.backend.get_kv_cache_shape(
+                _S,
+                kernel_bs,
+                spec.num_kv_heads,
+                spec.head_size,
+                cache_dtype_str=self.cache_config.cache_dtype,
+            )
+            block_dim = shape.index(_S)
+
+            for layer_name in group.layer_names:
+                if layer_name in self.runner_only_attn_layers:
+                    continue
+                kv = self.compilation_config.static_forward_context[
+                    layer_name
+                ].kv_cache[0]
+                if isinstance(kv, list):
+                    continue
+                dp = kv.data_ptr()
+                if dp in seen_ptrs:
+                    continue
+                seen_ptrs.add(dp)
+                if first_storage is None:
+                    first_storage = kv.untyped_storage()
+                    base_ptr = dp
+
+                el = kv.element_size()
+                cur_bytes = kv.stride(block_dim) * el
+                assert cur_bytes % 4 == 0
+                cur_el = cur_bytes // 4
+                if seg_size_el is None:
+                    seg_size_el = cur_el
+                else:
+                    assert seg_size_el == cur_el, (
+                        f"Non-uniform segment sizes: {seg_size_el} vs {cur_el}"
+                    )
+
+                buf_base = dp - base_ptr
+                outer_strides = [kv.stride(d) * el for d in range(block_dim)]
+                for outer in iprod(*(range(kv.shape[d]) for d in range(block_dim))):
+                    off = buf_base + sum(i * s for i, s in zip(outer, outer_strides))
+                    assert off % 4 == 0
+                    seg_offsets.append(off // 4)
+
+        if not seg_offsets or first_storage is None or seg_size_el is None:
+            self._kv_zero_meta = None
+            return
+
+        alignment = seg_size_el & (-seg_size_el)
+        blk_size = min(alignment, 1024)
+        self._kv_zero_id_cap = 8192
+        self._kv_zero_ids_pinned = torch.empty(
+            self._kv_zero_id_cap, dtype=torch.int64, pin_memory=True
+        )
+        self._kv_zero_ids_gpu = torch.empty(
+            self._kv_zero_id_cap, dtype=torch.int64, device=self.device
+        )
+        self._kv_zero_raw_i32 = torch.tensor(
+            [], dtype=torch.int32, device=self.device
+        ).set_(first_storage)
+        self._kv_zero_meta = (
+            torch.tensor(seg_offsets, dtype=torch.int64, device=self.device),
+            seg_size_el,
+            blk_size,
+            len(seg_offsets),
+        )
+
+    def _zero_block_ids(self, block_ids: list[int]) -> None:
+        """Zero the KV cache memory for the given block IDs."""
+        if not block_ids or self._kv_zero_meta is None:
+            return
+        seg_offsets, page_size_el, blk_size, n_segs = self._kv_zero_meta
+        n_blocks = len(block_ids)
+        if n_blocks > self._kv_zero_id_cap:
+            self._kv_zero_id_cap = n_blocks * 2
+            self._kv_zero_ids_pinned = torch.empty(
+                self._kv_zero_id_cap, dtype=torch.int64, pin_memory=True
+            )
+            self._kv_zero_ids_gpu = torch.empty(
+                self._kv_zero_id_cap, dtype=torch.int64, device=self.device
+            )
+        self._kv_zero_ids_pinned[:n_blocks].numpy()[:] = block_ids
+        idx = self._kv_zero_ids_gpu[:n_blocks]
+        idx.copy_(self._kv_zero_ids_pinned[:n_blocks], non_blocking=True)
+        grid = (n_blocks * n_segs * (page_size_el // blk_size),)
+        _zero_kv_blocks_kernel[grid](
+            self._kv_zero_raw_i32,
+            seg_offsets,
+            idx,
+            n_blocks,
+            N_SEGS=n_segs,
+            PAGE_SIZE_EL=page_size_el,
+            BLOCK_SIZE=blk_size,
+        )
+
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
         """Initialize attributes from torch.cuda.get_device_properties"""
@@ -953,6 +1117,11 @@ class GPUModelRunner(
         # and handling the second as a new request.
         for req_id in scheduler_output.finished_req_ids:
             self.input_batch.remove_request(req_id)
+
+        # Zero GPU memory for freshly allocated cache blocks to prevent
+        # stale NaN/data from corrupting attention or SSM computation.
+        if scheduler_output.new_block_ids_to_zero:
+            self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
 
         # Free the cached encoder outputs.
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
@@ -6011,6 +6180,7 @@ class GPUModelRunner(
         kernel_block_sizes = prepare_kernel_block_sizes(
             kv_cache_config, self.attn_groups
         )
+        self._kernel_block_sizes = kernel_block_sizes
 
         # create metadata builders
         self.initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
@@ -6020,6 +6190,8 @@ class GPUModelRunner(
         kv_caches = self.initialize_kv_cache_tensors(
             kv_cache_config, kernel_block_sizes
         )
+
+        self._init_kv_zero_meta()
 
         if self.speculative_config and (
             self.speculative_config.use_eagle()
