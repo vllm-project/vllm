@@ -525,7 +525,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
                 w13, w13_scale, w2, w2_scale, is_act_and_mul, min_alignment
             )
         )
-        layer.intermediate_size_per_partition = padded_intermediate
+        layer.moe_config.intermediate_size_per_partition = padded_intermediate
 
         w13, w13_scale, w2, w2_scale = prepare_static_weights_for_trtllm_fp4_moe(
             w13,

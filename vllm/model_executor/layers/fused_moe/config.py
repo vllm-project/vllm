@@ -1136,7 +1136,9 @@ class FusedMoEConfig:
     num_experts: int
     experts_per_token: int
     hidden_dim: int
+    hidden_dim_unpadded: int
     intermediate_size_per_partition: int
+    intermediate_size_per_partition_unpadded: int
     num_local_experts: int
     num_logical_experts: int
     activation: MoEActivation
