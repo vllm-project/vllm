@@ -18,7 +18,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
-from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
 from ..utility.noop_elimination import NoOpEliminationPass
@@ -213,9 +212,6 @@ class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             pm.fwd_only,
             pm_pass,
         )
-
-
-FP8_DTYPE = current_platform.fp8_dtype()
 
 
 class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
