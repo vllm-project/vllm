@@ -1,6 +1,7 @@
 /.venv
 /build
 dist
+.deps
 vllm/*.so
 
 # Byte-compiled / optimized / DLL files
