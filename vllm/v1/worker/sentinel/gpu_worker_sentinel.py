@@ -16,7 +16,7 @@ from vllm.distributed import (
     get_tp_group,
 )
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
-from vllm.v1.fault_tolerance.sentinel import BaseSentinel
+from vllm.v1.fault_tolerance import BaseSentinel
 
 
 class WorkerSentinel(BaseSentinel):
