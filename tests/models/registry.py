@@ -194,6 +194,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "ArcticForCausalLM": _HfExamplesInfo(
         "Snowflake/snowflake-arctic-instruct", trust_remote_code=True
     ),
+    "AXK1ForCausalLM": _HfExamplesInfo("skt/A.X-K1", trust_remote_code=True),
     "BaiChuanForCausalLM": _HfExamplesInfo(
         "baichuan-inc/Baichuan-7B", trust_remote_code=True
     ),
@@ -1004,24 +1005,20 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         min_transformers_version="4.57",
     ),
     "Qwen3_5ForConditionalGeneration": _HfExamplesInfo(
-        "Qwen/Qwen3.5-9B-Instruct",
+        "Qwen/Qwen3.5-0.8B",
         max_model_len=4096,
-        min_transformers_version="5.1.0",
     ),
     "Qwen3_5MoeForConditionalGeneration": _HfExamplesInfo(
-        "Qwen/Qwen3.5-35B-A3B-Instruct",
+        "Qwen/Qwen3.5-35B-A3B",
         max_model_len=4096,
-        min_transformers_version="5.1.0",
     ),
     "Qwen3_5MTP": _HfExamplesInfo(
-        "Qwen/Qwen3.5-9B-Instruct",
-        speculative_model="Qwen/Qwen3.5-9B-Instruct",
-        min_transformers_version="5.1.0",
+        "Qwen/Qwen3.5-0.8B",
+        speculative_model="Qwen/Qwen3.5-0.8B",
     ),
     "Qwen3_5MoeMTP": _HfExamplesInfo(
-        "Qwen/Qwen3.5-35B-A3B-Instruct",
-        speculative_model="Qwen/Qwen3.5-35B-A3B-Instruct",
-        min_transformers_version="5.1.0",
+        "Qwen/Qwen3.5-35B-A3B",
+        speculative_model="Qwen/Qwen3.5-35B-A3B",
     ),
     "Qwen3OmniMoeForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-Omni-30B-A3B-Instruct",
