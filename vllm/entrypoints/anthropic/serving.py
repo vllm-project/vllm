@@ -212,9 +212,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             content_parts.append({"type": "text", "text": block.text})
         elif block.type == "image" and block.source:
             image_url = cls._convert_image_source_to_url(block.source)
-            content_parts.append(
-                {"type": "image_url", "image_url": {"url": image_url}}
-            )
+            content_parts.append({"type": "image_url", "image_url": {"url": image_url}})
         elif block.type == "thinking" and block.thinking is not None:
             reasoning_parts.append(block.thinking)
         elif block.type == "tool_use":
@@ -223,9 +221,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             cls._convert_tool_result_block(block, role, openai_messages, content_parts)
 
     @classmethod
-    def _convert_tool_use_block(
-        cls, block, tool_calls: list[dict[str, Any]]
-    ) -> None:
+    def _convert_tool_use_block(cls, block, tool_calls: list[dict[str, Any]]) -> None:
         """Convert tool_use block to OpenAI function call format"""
         tool_call = {
             "id": block.id or f"call_{int(time.time())}",
