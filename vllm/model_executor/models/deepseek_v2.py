@@ -724,7 +724,8 @@ def _min_latency_fused_qkv_a_proj_impl(
 ) -> torch.Tensor:
     """
     Dynamically run min-latency gemm if num_tokens <= 16.
-    This must be wrapped in a custom op because torch.compile.
+    This must be wrapped in a custom op because our torch.compile integration
+    does not support runtime dispatching on num_tokens.
     """
     num_tokens = input_.shape[0]
     if 0 < num_tokens <= 16:
