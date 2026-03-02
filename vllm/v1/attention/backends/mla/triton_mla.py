@@ -19,7 +19,6 @@ from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 
@@ -31,6 +30,8 @@ class TritonMLABackend(MLACommonBackend):
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "bfloat16",
+        "fp8",
+        "fp8_e4m3",
     ]
 
     @staticmethod
@@ -93,10 +94,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "TritonMLAImpl"
             )
 
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError(
-                "TritonMLA V1 with FP8 KV cache not yet supported"
-            )
+        # FP8 KV cache is supported via pre-dequantization before the
+        # Triton kernel call (see forward_mqa).
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
@@ -120,13 +119,26 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
+        # Determine compute dtype — Triton kernels need BF16/FP16, not FP8.
+        compute_dtype = torch.bfloat16
+
         if self.kv_cache_dtype.startswith("fp8"):
-            raise NotImplementedError("FP8 Triton MLA not yet supported")
+            # Dequantize FP8 cache to BF16 before Triton kernel.
+            k_scale = layer._k_scale.float() if hasattr(layer, "_k_scale") else 1.0
+            kv_c_and_k_pe_cache = (kv_c_and_k_pe_cache.float() * k_scale).to(
+                compute_dtype
+            )
 
         if type(q) is tuple:
             q = torch.cat(q, dim=-1)
 
         assert isinstance(q, torch.Tensor)
+
+        # Query may have been quantized to FP8 by the caller — dequantize.
+        if q.dtype.is_floating_point and q.element_size() == 1:
+            q_scale = layer._q_scale.float() if hasattr(layer, "_q_scale") else 1.0
+            q = (q.float() * q_scale).to(compute_dtype)
+
         B = q.shape[0]
         q_num_heads = q.shape[1]
         o = torch.zeros(
