@@ -96,6 +96,7 @@ class CompressedTensorsW4A16Mxfp4(CompressedTensorsScheme):
     ) -> torch.Tensor:
         return apply_fp4_marlin_linear(
             input=x,
+            stability_scale_factor=layer.stability_scale_factor,
             weight=layer.weight,
             weight_scale=layer.weight_scale,
             weight_global_scale=None,
