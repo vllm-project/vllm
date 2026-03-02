@@ -331,10 +331,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
-            "Additional request parameters with (list of) string or "
-            "numeric values, used by custom extensions."
+            "Additional request parameters used by custom extensions. "
+            "Mapped to SamplingParams.extra_args."
         ),
     )
+
+    harmony_tool_config: dict[str, Any] | None = Field(default=None, exclude=True)
 
     # --8<-- [end:chat-completion-extra-params]
 
@@ -466,7 +468,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     else replace(self.structured_outputs, **structured_outputs_kwargs)
                 )
 
-        extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
+        extra_args: dict[str, Any] = dict(self.vllm_xargs) if self.vllm_xargs else {}
+        if self.harmony_tool_config:
+            extra_args["harmony_tool_required"] = self.harmony_tool_config
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params

@@ -13,7 +13,9 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.parser.harmony_utils import parse_output_into_messages
+from vllm.entrypoints.openai.parser.harmony_utils import (
+    parse_output_into_messages,
+)
 from vllm.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
@@ -26,10 +28,61 @@ else:
 
 logger = init_logger(__name__)
 
+# Harmony special token names
+HARMONY_END_TOKEN = "<|end|>"
+HARMONY_START_TOKEN = "<|start|>"
+HARMONY_CHANNEL_TOKEN = "<|channel|>"
+
 
 class OpenAIToolParser(ToolParser):
+    """Tool parser for GPT-OSS Harmony models."""
+
     def __init__(self, tokenizer: "TokenizerLike"):
         super().__init__(tokenizer)
+        # Cache token IDs for tool_choice=required
+        self._trigger_pattern: list[int] | None = None
+        self._forced_sequence: list[int] | None = None
+        self._init_harmony_tokens()
+
+    def _init_harmony_tokens(self) -> None:
+        """Initialize Harmony token sequences from vocabulary."""
+        try:
+            vocab = self.vocab
+
+            # Trigger pattern: <|end|><|start|>assistant<|channel|>
+            end_id = vocab.get(HARMONY_END_TOKEN)
+            start_id = vocab.get(HARMONY_START_TOKEN)
+            channel_id = vocab.get(HARMONY_CHANNEL_TOKEN)
+            assistant_ids = self.model_tokenizer.encode(
+                "assistant", add_special_tokens=False
+            )
+
+            if (
+                end_id is not None
+                and start_id is not None
+                and channel_id is not None
+                and len(assistant_ids) == 1
+            ):
+                self._trigger_pattern = [
+                    end_id,
+                    start_id,
+                    assistant_ids[0],
+                    channel_id,
+                ]
+
+            # Forced sequence: "commentary to="
+            forced_ids = self.model_tokenizer.encode(
+                "commentary to=", add_special_tokens=False
+            )
+            if forced_ids:
+                self._forced_sequence = forced_ids
+
+        except (AttributeError, TypeError, KeyError) as e:
+            logger.warning(
+                "Failed to initialize Harmony tokens: %s. "
+                "tool_choice='required' may not work correctly.",
+                e,
+            )
 
     def extract_tool_calls(
         self,
@@ -39,7 +92,8 @@ class OpenAIToolParser(ToolParser):
     ) -> ExtractedToolCallInformation:
         if token_ids is None:
             raise NotImplementedError(
-                "OpenAIToolParser requires token IDs and does not support text-based extraction."  # noqa: E501
+                "OpenAIToolParser requires token IDs and does not support "
+                "text-based extraction."
             )
 
         parser = parse_output_into_messages(token_ids)
@@ -81,7 +135,7 @@ class OpenAIToolParser(ToolParser):
                 elif msg.channel == "commentary" and not msg.recipient:
                     commentary_content = msg_text
 
-        # Extract partial content from the parser state if the generation was truncated
+        # Extract partial content from the parser state if truncated
         if parser.current_content:
             if parser.current_channel == "final":
                 final_content = parser.current_content
@@ -94,9 +148,28 @@ class OpenAIToolParser(ToolParser):
             tools_called=len(tool_calls) > 0,
             tool_calls=tool_calls,
             # prefer final content over commentary content if both are present
-            # commentary content is tool call preambles meant to be shown to the user
             content=final_content or commentary_content,
         )
+
+    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        """Adjust request for Harmony format tool_choice='required'."""
+        request = super().adjust_request(request)
+
+        if request.tool_choice == "required" and request.tools:
+            if self._trigger_pattern and self._forced_sequence:
+                request.harmony_tool_config = {
+                    "trigger_pattern": self._trigger_pattern,
+                    "forced_sequence": self._forced_sequence,
+                }
+                # Disable structured_outputs; enforcement is via LogitsProcessor
+                request.structured_outputs = None
+            else:
+                logger.warning(
+                    "Harmony tokens not initialized. "
+                    "tool_choice='required' will not be enforced."
+                )
+
+        return request
 
     def extract_tool_calls_streaming(
         self,
@@ -108,6 +181,4 @@ class OpenAIToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        raise NotImplementedError(
-            "Not being used, manual parsing in serving_chat.py"  # noqa: E501
-        )
+        raise NotImplementedError("Not being used, manual parsing in serving_chat.py")
