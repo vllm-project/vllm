@@ -269,6 +269,7 @@ class CudaGraphManager:
                 cudagraph_sizes=self.cudagraph_sizes,
                 capture_cudagraph_mode=mixed_mode,
                 desc=f"Capturing CUDA graphs (mixed, {mixed_mode.name})",
+                uniform_decode=False,
                 **common_kwargs,
             )
 
@@ -280,6 +281,7 @@ class CudaGraphManager:
                 cudagraph_sizes=self.uniform_decode_cudagraph_sizes,
                 capture_cudagraph_mode=CUDAGraphMode.FULL,
                 desc="Capturing CUDA graphs (decode, FULL)",
+                uniform_decode=True,
                 **common_kwargs,
             )
 
