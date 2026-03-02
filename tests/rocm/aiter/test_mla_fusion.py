@@ -24,13 +24,10 @@ from tests.models.utils import check_logprobs_close
 from vllm.platforms import current_platform
 
 # Mark all tests as ROCm-specific
-pytestmark = [
-    pytest.mark.rocm,
-    pytest.mark.skipif(
-        not current_platform.is_rocm(),
-        reason="MLA fusion only available on ROCm/AMD GPUs",
-    ),
-]
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MLA fusion only available on ROCm/AMD GPUs",
+)
 
 
 # =============================================================================
@@ -321,7 +318,7 @@ def test_fp8_vs_baseline(vllm_runner, example_prompts):
         assert len(fp8_text) > 5
 
 
-@pytest.mark.slow  # Mark as slow since it loads models multiple times
+@pytest.mark.slow_test  # Mark as slow since it loads models multiple times
 def test_different_batch_sizes(vllm_runner):
     """Test fusion works with different batch sizes."""
     model = "deepseek-ai/DeepSeek-V2-Lite"
