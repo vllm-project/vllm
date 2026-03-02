@@ -53,6 +53,23 @@ class Sampler:
         self.logit_bias_state.apply_staged_writes()
         self.bad_words_state.apply_staged_writes()
 
+    def _needs_logits_processing(self, idx_mapping_np: np.ndarray) -> bool:
+        return (
+            np.any(self.logit_bias_state.use_logit_bias[idx_mapping_np])
+            or np.any(self.penalties_state.use_penalty[idx_mapping_np])
+            or np.any(self.bad_words_state.num_bad_words.np[idx_mapping_np] > 0)
+            or not np.all(
+                (self.sampling_states.temperature.np[idx_mapping_np] == 0.0)
+                | (self.sampling_states.temperature.np[idx_mapping_np] == 1.0)
+            )
+            or np.any(self.sampling_states.min_p.np[idx_mapping_np] != 0.0)
+            or np.any(
+                self.sampling_states.top_k.np[idx_mapping_np]
+                != self.sampling_states.vocab_size
+            )
+            or np.any(self.sampling_states.top_p.np[idx_mapping_np] != 1.0)
+        )
+
     def __call__(
         self,
         logits: torch.Tensor,
@@ -107,41 +124,44 @@ class Sampler:
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Copy logits to a new FP32 tensor.
-        logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
+        if self._needs_logits_processing(idx_mapping_np):
+            # Copy logits to a new FP32 tensor.
+            logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
-        # Apply logit bias (e.g., allowed_token_ids, min_tokens) in place.
-        self.logit_bias_state.apply_logit_bias(logits, idx_mapping, idx_mapping_np, pos)
+            # Apply logit bias (e.g., allowed_token_ids, min_tokens) in place.
+            self.logit_bias_state.apply_logit_bias(
+                logits, idx_mapping, idx_mapping_np, pos
+            )
 
-        # Apply penalties in place.
-        self.penalties_state.apply_penalties(
-            logits,
-            idx_mapping,
-            idx_mapping_np,
-            input_ids,
-            expanded_local_pos,
-            self.num_speculative_tokens,
-        )
+            # Apply penalties in place.
+            self.penalties_state.apply_penalties(
+                logits,
+                idx_mapping,
+                idx_mapping_np,
+                input_ids,
+                expanded_local_pos,
+                self.num_speculative_tokens,
+            )
 
-        # Apply bad words masking in place.
-        self.bad_words_state.apply_bad_words(
-            logits,
-            idx_mapping,
-            idx_mapping_np,
-            input_ids,
-            expanded_local_pos,
-        )
+            # Apply bad words masking in place.
+            self.bad_words_state.apply_bad_words(
+                logits,
+                idx_mapping,
+                idx_mapping_np,
+                input_ids,
+                expanded_local_pos,
+            )
 
-        # Apply temperature in place.
-        self.sampling_states.apply_temperature(logits, idx_mapping, idx_mapping_np)
+            # Apply temperature in place.
+            self.sampling_states.apply_temperature(logits, idx_mapping, idx_mapping_np)
 
-        # Apply min_p in place.
-        self.sampling_states.apply_min_p(logits, idx_mapping, idx_mapping_np)
+            # Apply min_p in place.
+            self.sampling_states.apply_min_p(logits, idx_mapping, idx_mapping_np)
 
-        # Apply top_k and/or top_p. This might or might not return a new tensor.
-        logits = self.sampling_states.apply_top_k_top_p(
-            logits, idx_mapping, idx_mapping_np
-        )
+            # Apply top_k and/or top_p. This might or might not return a new tensor.
+            logits = self.sampling_states.apply_top_k_top_p(
+                logits, idx_mapping, idx_mapping_np
+            )
 
         # Sample the next token.
         sampled = gumbel_sample(
