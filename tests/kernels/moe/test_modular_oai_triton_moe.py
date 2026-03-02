@@ -33,11 +33,10 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularK
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
-from vllm.model_executor.layers.utils import shuffle_weight
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
-from .utils import make_dummy_moe_config
+from .utils import make_dummy_moe_config, shuffle_weight
 
 MNK = [
     (1, 512, 384),
