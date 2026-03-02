@@ -16,7 +16,6 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalInputs,
     MultiModalKwargsItems,
-    MultiModalUUIDDict,
 )
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
@@ -27,11 +26,14 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    ProcessorInputs,
     PromptIndexTargets,
     PromptInsertion,
     PromptUpdate,
     PromptUpdateDetails,
+    TimingContext,
 )
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -102,6 +104,9 @@ class PaliGemmaProcessingInfo(BaseProcessingInfo):
     def get_vision_encoder_info(self):
         return get_vision_encoder_info(self.get_hf_config())
 
+    def get_default_tok_params(self) -> TokenizeParams:
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
 
@@ -127,7 +132,7 @@ class PaliGemmaDummyInputsBuilder(BaseDummyInputsBuilder[PaliGemmaProcessingInfo
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.vision_config
@@ -135,7 +140,7 @@ class PaliGemmaDummyInputsBuilder(BaseDummyInputsBuilder[PaliGemmaProcessingInfo
 
         num_images = mm_counts.get("image", 0)
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -224,19 +229,10 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
 
     def apply(
         self,
-        prompt: str | list[int],
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object] | None = None,
-        mm_uuids: MultiModalUUIDDict | None = None,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> MultiModalInputs:
-        mm_inputs = super().apply(
-            prompt,
-            mm_items,
-            hf_processor_mm_kwargs,
-            tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        mm_inputs = super().apply(inputs, timing_ctx)
         prompt_token_ids = mm_inputs["prompt_token_ids"]
 
         tokenizer = self.info.get_tokenizer()

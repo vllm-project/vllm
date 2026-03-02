@@ -351,11 +351,8 @@ class Phi3VProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: ProcessorMixin | None = None,
+        processor: ProcessorMixin,
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         return processor.calc_num_image_tokens_from_image_size(  # type: ignore
             width=image_width,
             height=image_height,
@@ -379,13 +376,13 @@ class Phi3VDummyInputsBuilder(BaseDummyInputsBuilder[Phi3VProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = self.info.get_image_size_with_most_features()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(

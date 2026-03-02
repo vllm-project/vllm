@@ -391,6 +391,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
         }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
@@ -919,6 +920,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
         }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
@@ -1169,7 +1171,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             return x
 
         # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
-        feature_extractor = self.info.get_feature_extractor()
+        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
         hop_length = feature_extractor.hop_length
         if audios:
             # NOTE: Qwen3-Omni processor accept "audio"
@@ -1902,14 +1904,16 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 num_audio,
             )
 
-        # Default: standard merge (no interleaving)
-        inputs_embeds = _merge_multimodal_embeddings(
-            inputs_embeds=inputs_embeds,
+        # Default: standard merge (no interleaving), same as parent class.
+        # multimodal_embeddings may have been updated above (deepstack
+        # main-scale). Use super() to stay consistent with the parent
+        # implementation and avoid issues seen in Qwen2.5-Omni (#34506).
+        return super().embed_input_ids(
+            input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
         )
-
-        return inputs_embeds
 
     def forward(
         self,
