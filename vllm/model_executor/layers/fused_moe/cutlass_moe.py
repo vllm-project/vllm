@@ -166,7 +166,7 @@ def run_cutlass_moe_fp8(
         problem_sizes1 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
         problem_sizes2 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
 
-        ops.get_cutlass_pplx_moe_mm_data(
+        ops.get_cutlass_batched_moe_mm_data(
             expert_offsets,
             problem_sizes1,
             problem_sizes2,
@@ -690,10 +690,14 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
+        # SILU uses a fused silu+mul+fp4_quant kernel path.
+        # Other gated activations use the generic apply_moe_activation()
+        # fallback + separate fp4 quantization in run_cutlass_moe_fp4().
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUSTEP,
         ]
 
     @staticmethod

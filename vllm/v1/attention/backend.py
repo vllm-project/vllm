@@ -188,6 +188,10 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_per_head_quant_scales(cls) -> bool:
+        return False
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """Check if backend supports a given attention type.
 
@@ -225,6 +229,7 @@ class AttentionBackend(ABC):
         has_sink: bool,
         use_sparse: bool,
         use_mm_prefix: bool,
+        use_per_head_quant_scales: bool,
         device_capability: "DeviceCapability",
         attn_type: str,
     ) -> list[str]:
@@ -253,6 +258,8 @@ class AttentionBackend(ABC):
                 invalid_reasons.append("sparse not supported")
             else:
                 invalid_reasons.append("non-sparse not supported")
+        if use_per_head_quant_scales and not cls.supports_per_head_quant_scales():
+            invalid_reasons.append("per-head quant scales not supported")
         if not cls.supports_compute_capability(device_capability):
             invalid_reasons.append("compute capability not supported")
         if not cls.supports_attn_type(attn_type):
@@ -635,7 +642,6 @@ class AttentionImplBase(ABC, Generic[T]):
     # TODO add support to more backends:
     # https://github.com/vllm-project/vllm/issues/25584
     supports_quant_query_input: bool = False
-    supports_per_head_quant_scales: bool = False
 
     dcp_world_size: int
     dcp_rank: int
@@ -722,6 +728,33 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         :return: is fusion supported for this type of quantization
         """
         return False
+
+    def fused_rope_kvcache_supported(self):
+        """
+        Does this attention implementation support RoPE+KVCache fusion.
+        This is used by the RopeKVCacheFusionPass to only fuse the RoPE ops
+        with the KV cache update for implementations that support it.
+        """
+        return False
+
+    def do_rope_and_kv_cache_update(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        """
+        If `fused_rope_kvcache_supported` returns True, this method will be called
+        by torch.ops.vllm.fused_rope_and_unified_kv_cache_update
+        to perform the inplace RoPE and KV cache update.
+        """
+        raise NotImplementedError
 
 
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):

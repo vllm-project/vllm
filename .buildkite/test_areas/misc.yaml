@@ -8,6 +8,7 @@ steps:
     - vllm/
     - tests/v1
   commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     # split the test to avoid interference
     - pytest -v -s -m 'not cpu_test' v1/core
     - pytest -v -s v1/executor
@@ -15,6 +16,7 @@ steps:
     - pytest -v -s v1/sample
     - pytest -v -s v1/logits_processors
     - pytest -v -s v1/worker
+    # TODO: create another `optional` test group for slow tests
     - pytest -v -s -m 'not slow_test' v1/spec_decode
     - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'not cpu_test' v1/metrics
@@ -23,6 +25,11 @@ steps:
     - pytest -v -s v1/test_outputs.py
     # Integration test for streaming correctness (requires special branch, already installed in the test image).
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: V1 Others (CPU)
   depends_on:
@@ -99,9 +106,11 @@ steps:
   timeout_in_minutes: 50
   source_file_dependencies:
   - vllm/
+  - tests/detokenizer
   - tests/multimodal
   - tests/utils_
   commands:
+  - pytest -v -s detokenizer
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
 
@@ -114,6 +123,7 @@ steps:
   - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/test_pooling_params.py
+  - tests/test_ray_env.py
   - tests/multimodal
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
@@ -127,6 +137,7 @@ steps:
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pooling_params.py
+  - pytest -v -s test_ray_env.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
   - pytest -v -s tokenizers_
