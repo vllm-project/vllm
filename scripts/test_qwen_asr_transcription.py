@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Test Qwen3-ASR prompt parameter support via v1/audio/transcriptions.
 
@@ -10,7 +12,6 @@ Reproduces the test from PR #35415:
 import argparse
 import difflib
 import sys
-import textwrap
 
 import requests
 
@@ -20,6 +21,7 @@ LOCAL_AUDIO = "/tmp/mary_had_lamb.ogg"
 
 def download_audio():
     import os
+
     if os.path.exists(LOCAL_AUDIO):
         return
     print(f"Downloading {AUDIO_URL} ...")
@@ -46,10 +48,10 @@ def transcribe(base_url: str, model: str, prompt: str | None = None) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Test Qwen3-ASR prompt support")
-    parser.add_argument("--base-url", default="http://localhost:8000",
-                        help="vLLM server base URL")
-    parser.add_argument("--model", default="Qwen/Qwen3-ASR-0.6B",
-                        help="Model name")
+    parser.add_argument(
+        "--base-url", default="http://localhost:8000", help="vLLM server base URL"
+    )
+    parser.add_argument("--model", default="Qwen/Qwen3-ASR-0.6B", help="Model name")
     args = parser.parse_args()
 
     download_audio()
@@ -59,7 +61,7 @@ def main():
     print(f"Result: {no_prompt}")
 
     prompt_text = "Listen for the words phonograph and fleece"
-    print(f"\n--- Test 2: Transcription WITH prompt ---")
+    print("\n--- Test 2: Transcription WITH prompt ---")
     print(f"Prompt used: '{prompt_text}'")
     with_prompt = transcribe(args.base_url, args.model, prompt=prompt_text)
     print(f"Result: {with_prompt}")
@@ -82,8 +84,11 @@ def main():
 
     print("\n--- Unified diff ---")
     for line in difflib.unified_diff(
-        [no_prompt], [with_prompt],
-        fromfile="no_prompt", tofile="with_prompt", lineterm=""
+        [no_prompt],
+        [with_prompt],
+        fromfile="no_prompt",
+        tofile="with_prompt",
+        lineterm="",
     ):
         print(line)
 
