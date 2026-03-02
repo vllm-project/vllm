@@ -2190,7 +2190,7 @@ class NixlConnectorWorker:
         # Use .get() here as the metadata cleanup is handled by get_finished()
         # TODO (NickLucche) handle failed transfer for HMA.
         if (meta := self._recving_metadata.get(req_id)) and not self._is_hma_required:
-            self._invalid_block_ids.update(meta.local_block_ids)
+            self._invalid_block_ids.update(meta.local_block_ids[0])
         self.nixl_wrapper.release_xfer_handle(handle)
         self.xfer_stats.record_failed_transfer()
 
@@ -2448,7 +2448,7 @@ class NixlConnectorWorker:
             if (
                 meta := self._recving_metadata.get(request_id)
             ) and not self._is_hma_required:
-                self._invalid_block_ids.update(meta.local_block_ids)
+                self._invalid_block_ids.update(meta.local_block_ids[0])
             self.xfer_stats.record_failed_transfer()
             if handle is not None:
                 self.nixl_wrapper.release_xfer_handle(handle)
