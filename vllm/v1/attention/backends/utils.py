@@ -525,9 +525,11 @@ def split_decodes_and_prefills(
     else:
         is_new_request = (seq_lens == query_lens) & (query_lens > 0)
 
-    if max_query_len <= decode_threshold and (
-        not require_uniform or decode_threshold <= 1
-    ) and not torch.any(is_new_request):
+    if (
+        max_query_len <= decode_threshold
+        and (not require_uniform or decode_threshold <= 1)
+        and not torch.any(is_new_request)
+    ):
         return num_reqs, 0, num_tokens, 0
     if query_lens[0].item() > decode_threshold or is_new_request[0].item():
         # first request is not decode, so no decode requests
