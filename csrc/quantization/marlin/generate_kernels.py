@@ -15,11 +15,11 @@ SUPPORT_SM80 = False
 for arch in sys.argv[1].split(","):
     arch = arch[: arch.index(".") + 2].replace(".", "")
     arch = int(arch)
-    # only SM89 and SM120 fully support
-    # mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32.
+    # SM89 and the SM12x family (SM120 RTX 5090, SM121 DGX Spark GB10)
+    # fully support mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32.
     # SM90 and SM100 can use this PTX, but it’s simulated
     # with FP16 MMA, so it cannot achieve any acceleration.
-    if arch in [89, 120]:
+    if arch == 89 or arch >= 120:
         SUPPORT_FP8 = True
     if arch >= 80:
         SUPPORT_SM80 = True
