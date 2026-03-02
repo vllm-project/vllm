@@ -166,6 +166,7 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_allreduce_rms": False,
             "fuse_attn_quant": False,
             "enable_sp": False,
+            "enable_sp_moe": False,
             "fuse_gemm_comms": False,
             "fuse_act_padding": False,
             "fuse_rope_kvcache": False,
@@ -185,6 +186,7 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_allreduce_rms": False,
             "fuse_attn_quant": False,
             "enable_sp": False,
+            "enable_sp_moe": False,
             "fuse_gemm_comms": False,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
@@ -204,6 +206,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_allreduce_rms": enable_allreduce_rms_fusion,
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
+            "enable_sp_moe": False,
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
@@ -223,6 +226,7 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_allreduce_rms": enable_allreduce_rms_fusion,
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
+            "enable_sp_moe": False,
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
@@ -853,6 +857,22 @@ class VllmConfig:
         # and requires it to be enabled.
         if self.compilation_config.pass_config.fuse_gemm_comms:
             self.compilation_config.pass_config.enable_sp = True
+        if (
+            self.compilation_config.pass_config.enable_sp_moe
+            and self.parallel_config.tensor_parallel_size == 1
+        ):
+            logger.warning("MoE sequence parallelism requires TP>1, disabling")
+            self.compilation_config.pass_config.enable_sp_moe = False
+        elif (
+            self.compilation_config.pass_config.enable_sp_moe
+            and not self.parallel_config.use_sequence_parallel_moe
+        ):
+            logger.warning(
+                "MoE sequence parallelism pass requires "
+                "EP enabled with a supported all2all backend, TP>1, and DP>1; "
+                "disabling enable_sp_moe."
+            )
+            self.compilation_config.pass_config.enable_sp_moe = False
         if self.compilation_config.pass_config.enable_sp:
             if self.parallel_config.tensor_parallel_size == 1:
                 logger.warning("Sequence Parallelism requires TP>1, disabling")
