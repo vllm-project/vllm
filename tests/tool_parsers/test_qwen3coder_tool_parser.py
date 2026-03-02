@@ -976,3 +976,127 @@ fahrenheit
     assert args["city"] == "Dallas"
     assert args["state"] == "TX"
     assert args["unit"] == "fahrenheit"
+
+
+def test_streaming_opening_brace_always_emitted_first_issue_35266(
+    qwen3_tool_parser,
+):
+    """Regression test for #35266.
+
+    When the first <parameter=> tag arrives in the same streaming delta as
+    the function header (i.e. chunk boundary falls inside the function tag),
+    the parser MUST emit '{' as the very first arguments fragment.
+
+    Root cause: the original code gated '{' emission on
+    `self.parameter_prefix not in delta_text`, then unconditionally set
+    json_started=True via a separate fallback even when '{' was never emitted.
+    This caused the first parameter fragment (e.g. '"command": "..."') to be
+    streamed WITHOUT a preceding '{', producing invalid JSON.
+
+    This test calls extract_tool_calls_streaming directly with hand-crafted
+    chunk boundaries (bypassing the tokenizer) to pin the exact failure mode.
+    """
+    bash_tool = ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "bash",
+            "description": "Run a bash command",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+                "required": ["command"],
+            },
+        },
+    )
+    request = ChatCompletionRequest(
+        model=MODEL,
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[bash_tool],
+    )
+
+    # To trigger the pre-fix bug we need the opening-brace logic to fire on
+    # a delta whose text contains '<parameter='.  The state machine works as
+    # follows:
+    #
+    #   chunk 1 '<tool_call>'          -> sees tool_call_start_token, sets
+    #                                     is_tool_call_started=True, returns None
+    #   chunk 2 '<function=bash>'      -> accumulates to full header in tool_text,
+    #                                     emits header DeltaMessage, sets
+    #                                     in_function=True, json_started=False
+    #   chunk 3 '<parameter=...>'      -> delta_text contains '<parameter=',
+    #                                     json_started=False  **<-- bug trigger**
+    #                                     old code: gate `parameter_prefix not in
+    #                                     delta_text` → False → skip '{', but
+    #                                     still set json_started=True via fallback
+    #                                     fixed code: unconditionally emit '{'
+    #   chunk 4 '</function>'          -> '{' already emitted; processes parameter,
+    #                                     appends '}' inline (function closed)
+    #   chunk 5 '</tool_call>'         -> state cleanup, returns None
+    #
+    # If '<tool_call>' and '<function=bash>' arrive in the same chunk (as in
+    # the original 4-chunk split), the parser returns None on that chunk
+    # (tool_call_start_token triggers an early return before the header logic),
+    # and the header is only emitted on the *next* chunk whose delta_text is
+    # '<parameter=...>'. The following chunk is then '</function>', which does
+    # NOT contain '<parameter=' -- so the old gate would have passed and the
+    # bug would not have been triggered, making the test a false negative.
+    chunks = [
+        "<tool_call>",
+        "<function=bash>",
+        "<parameter=command>echo hi</parameter>",  # bug trigger: <parameter= in delta
+        "</function>",
+        "</tool_call>",
+    ]
+
+    prev = ""
+    all_arg_fragments: list[str] = []
+
+    for chunk in chunks:
+        current = prev + chunk
+        dm = qwen3_tool_parser.extract_tool_calls_streaming(
+            previous_text=prev,
+            current_text=current,
+            delta_text=chunk,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+        if (
+            dm
+            and dm.tool_calls
+            and dm.tool_calls[0].function
+            and dm.tool_calls[0].function.arguments is not None
+        ):
+            frag = dm.tool_calls[0].function.arguments
+            if frag:  # skip empty-string header sentinel
+                all_arg_fragments.append(frag)
+        prev = current
+
+    assert all_arg_fragments, "No arguments fragments were emitted at all"
+
+    # Core invariant: '{' must be the very first arguments fragment emitted.
+    assert all_arg_fragments[0] == "{", (
+        f"First arguments fragment must be '{{' but got {all_arg_fragments[0]!r}. "
+        f"Full fragment list: {all_arg_fragments}. "
+        "This means the opening brace was skipped, breaking JSON validity."
+    )
+
+    # The concatenated stream must be parseable as valid JSON.
+    concatenated = "".join(all_arg_fragments)
+    try:
+        parsed = json.loads(concatenated)
+    except json.JSONDecodeError as exc:
+        pytest.fail(
+            f"Concatenated arguments are not valid JSON: {exc!r}\n"
+            f"Value: {concatenated!r}\n"
+            f"Fragments: {all_arg_fragments}"
+        )
+
+    # The parsed result must contain the actual parameter value.
+    assert parsed.get("command") == "echo hi", (
+        f"Expected arguments to contain command='echo hi', got: {parsed}"
+    )

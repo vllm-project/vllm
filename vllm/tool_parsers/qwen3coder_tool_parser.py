@@ -239,6 +239,37 @@ class Qwen3CoderToolParser(ToolParser):
                 )
             return param_value
 
+    def _update_final_tool_arguments(self, tool_text: str) -> None:
+        """Parse the fully accumulated tool_text and update prev_tool_call_arr
+        with the final, correctly-typed arguments. Called once when the
+        function body is closed during streaming.
+        """
+        func_start_pos = tool_text.find(self.tool_call_prefix) + len(
+            self.tool_call_prefix
+        )
+        func_content_end = tool_text.find(self.function_end_token, func_start_pos)
+        if func_content_end == -1:
+            return
+        func_content = tool_text[func_start_pos:func_content_end]
+        try:
+            parsed_tool = self._parse_xml_function_call(
+                func_content,
+                self.streaming_request.tools if self.streaming_request else None,
+            )
+            if not parsed_tool:
+                return
+            for i, tool in enumerate(self.prev_tool_call_arr):
+                if tool.get("name") == parsed_tool.function.name:
+                    self.prev_tool_call_arr[i]["arguments"] = (
+                        parsed_tool.function.arguments
+                    )
+                    break
+        except Exception:
+            logger.warning(
+                "Failed to parse and update final arguments during streaming.",
+                exc_info=True,
+            )
+
     def _parse_xml_function_call(
         self, function_call_str: str, tools: list[ChatCompletionToolsParam] | None
     ) -> ToolCall | None:
@@ -511,8 +542,15 @@ class Qwen3CoderToolParser(ToolParser):
 
         # We've sent header, now handle function body
         if self.in_function:
-            # Send opening brace if not sent yet
-            if not self.json_started and self.parameter_prefix not in delta_text:
+            # Always emit the opening brace exactly once, before any parameter
+            # fragments, regardless of what else is in delta_text.
+            # Previously this was gated on `self.parameter_prefix not in
+            # delta_text`, which caused `{` to be skipped when the first
+            # parameter arrived in the same delta as the function header.
+            # A separate fallback then set json_started=True without emitting
+            # `{`, producing invalid JSON (missing opening brace). Fix: make
+            # emission unconditional and remove the fallback. See #35266.
+            if not self.json_started:
                 self.json_started = True
                 return DeltaMessage(
                     tool_calls=[
@@ -523,42 +561,33 @@ class Qwen3CoderToolParser(ToolParser):
                     ]
                 )
 
-            # Make sure json_started is set if we're processing parameters
-            if not self.json_started:
-                self.json_started = True
+            # Look for parameters.
+            # IMPORTANT: parameter extraction must happen BEFORE the
+            # function_end_token check so that parameters accumulated in
+            # tool_text are never skipped when `</function>` arrives in
+            # the same delta as the last parameter.  The closing `}`
+            # is only emitted once every pending parameter has been
+            # streamed out.  See #35266.
+            param_starts = []
+            idx = 0
+            while True:
+                idx = tool_text.find(self.parameter_prefix, idx)
+                if idx == -1:
+                    break
+                param_starts.append(idx)
+                idx += len(self.parameter_prefix)
 
-            # Check for function end in accumulated text
-            if not self.json_closed and self.function_end_token in tool_text:
+            # Check for function end in accumulated text, but only after
+            # all parameters have been emitted as streaming deltas.
+            if (
+                not self.json_closed
+                and self.function_end_token in tool_text
+                and self.param_count >= len(param_starts)
+            ):
                 # Close JSON
                 self.json_closed = True
 
-                # Extract complete tool call to update
-                # prev_tool_call_arr with final arguments
-                # Find the function content
-                func_start = tool_text.find(self.tool_call_prefix) + len(
-                    self.tool_call_prefix
-                )
-                func_content_end = tool_text.find(self.function_end_token, func_start)
-                if func_content_end != -1:
-                    func_content = tool_text[func_start:func_content_end]
-                    # Parse to get the complete arguments
-                    try:
-                        parsed_tool = self._parse_xml_function_call(
-                            func_content,
-                            self.streaming_request.tools
-                            if self.streaming_request
-                            else None,
-                        )
-                        if parsed_tool:
-                            # Update existing entry in
-                            # prev_tool_call_arr with complete args
-                            for i, tool in enumerate(self.prev_tool_call_arr):
-                                if tool.get("name") == parsed_tool.function.name:
-                                    args = parsed_tool.function.arguments
-                                    self.prev_tool_call_arr[i]["arguments"] = args
-                                    break
-                    except Exception:
-                        pass  # Ignore parsing errors during streaming
+                self._update_final_tool_arguments(tool_text)
 
                 result = DeltaMessage(
                     tool_calls=[
@@ -575,17 +604,6 @@ class Qwen3CoderToolParser(ToolParser):
                 self.accumulated_params = {}
 
                 return result
-
-            # Look for parameters
-            # Find all parameter starts
-            param_starts = []
-            idx = 0
-            while True:
-                idx = tool_text.find(self.parameter_prefix, idx)
-                if idx == -1:
-                    break
-                param_starts.append(idx)
-                idx += len(self.parameter_prefix)
 
             # Check if we should start a new parameter
             if (
@@ -675,6 +693,24 @@ class Qwen3CoderToolParser(ToolParser):
                             )
 
                         self.param_count += 1
+
+                        # If the function is already closed in the accumulated
+                        # text AND this was the last parameter, append `}` now
+                        # so the stream is never left open.  Without this, the
+                        # closing brace would require an additional streaming
+                        # call that may never arrive (e.g. when `</function>`
+                        # and `</tool_call>` arrive in the same final delta or
+                        # when `</tool_call>` is the last token).  See #35266.
+                        if (
+                            self.function_end_token in tool_text
+                            and self.param_count >= len(param_starts)
+                            and not self.json_closed
+                        ):
+                            json_fragment += "}"
+                            self.json_closed = True
+                            self._update_final_tool_arguments(tool_text)
+                            self.in_function = False
+                            self.accumulated_params = {}
 
                         return DeltaMessage(
                             tool_calls=[
