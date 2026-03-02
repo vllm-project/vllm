@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -46,11 +46,11 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._is_reasoning_end_from_ids(input_ids)
 
-    def is_reasoning_end_streaming(
-        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+    def is_reasoning_end_streaming(  # type: ignore[override]
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
     ) -> bool:
         # Only examine newly generated tokens; they may contain multiple ids.
-        return self._is_reasoning_end_from_ids(list(delta_ids))
+        return self._is_reasoning_end_from_ids(delta_ids)
 
     def _is_reasoning_end_from_ids(self, input_ids: Sequence[int]) -> bool:
         # Scan backwards to find the last special token, <think> or </think>.
