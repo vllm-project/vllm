@@ -32,6 +32,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
         enable_thinking = bool(chat_kwargs.get("enable_thinking", False))
         thinking = thinking or enable_thinking
 
+        self._parser: ReasoningParser
         if thinking:
             self._parser = DeepSeekR1ReasoningParser(tokenizer, *args, **kwargs)
         else:

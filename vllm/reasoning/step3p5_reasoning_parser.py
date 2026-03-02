@@ -50,7 +50,7 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
         # Only examine newly generated tokens; they may contain multiple ids.
-        return self._is_reasoning_end_from_ids(delta_ids)
+        return self._is_reasoning_end_from_ids(list(delta_ids))
 
     def _is_reasoning_end_from_ids(self, input_ids: Sequence[int]) -> bool:
         # Scan backwards to find the last special token, <think> or </think>.

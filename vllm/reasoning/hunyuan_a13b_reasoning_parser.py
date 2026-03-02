@@ -65,8 +65,8 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         self.fast_think_ids = [14023, 771, 1363, 524, 27963, 397, 27, 9399, 397]
 
         # when state change, send out all the buffered text in last state
-        self.buffered_text = []
-        self.buffered_ids = []
+        self.buffered_text: list[str] = []
+        self.buffered_ids: list[int] = []
 
         self.current_state = "reasoning"
         self.all_states = ["reasoning", "response"]
@@ -76,7 +76,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         # this sequence only for the think start, it has two way to start.
         self.expected_sequence_side = self.think_start_ids_fast
         self.sequence_index = 0
-        self.token_buffer = []
+        self.token_buffer: list[int] = []
         self.text_buffer = ""
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:

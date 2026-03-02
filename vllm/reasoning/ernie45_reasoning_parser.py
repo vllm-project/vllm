@@ -46,19 +46,11 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
                 "constructor during construction."
             )
 
-        self.start_token_id = self.vocab.get(self.start_token)
-        self.end_token_id = self.vocab.get(self.end_token)
         self.response_start_token_id = self.vocab.get(self.response_start_token)
         self.response_end_token_id = self.vocab.get(self.response_end_token)
         self.newline_token_id = self.vocab.get(self.newline_token)
 
         self.parser_token_ids = [self.end_token_id, self.response_end_token_id]
-
-        if self.start_token_id is None or self.end_token_id is None:
-            raise RuntimeError(
-                "Ernie45 reasoning parser could not locate think start/end "
-                "tokens in the tokenizer!"
-            )
 
     def extract_reasoning_streaming(
         self,

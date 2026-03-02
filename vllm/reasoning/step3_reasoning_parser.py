@@ -37,12 +37,13 @@ class Step3ReasoningParser(ReasoningParser):
                 "constructor during construction."
             )
 
-        self.think_end_token_id = self.vocab.get(self.think_end_token)
-        if self.think_end_token_id is None:
+        think_end_token_id = self.vocab.get(self.think_end_token)
+        if think_end_token_id is None:
             raise RuntimeError(
                 "Step3 reasoning parser could not locate think end "
                 "token in the tokenizer!"
             )
+        self.think_end_token_id: int = think_end_token_id
 
     def extract_reasoning_streaming(
         self,
@@ -94,10 +95,9 @@ class Step3ReasoningParser(ReasoningParser):
             reasoning = model_output[:end_index]
 
             # Content after </think> token
-            content = model_output[end_index + len(self.think_end_token) :]
-
-            if len(content) == 0:
-                content = None
+            content: str | None = (
+                model_output[end_index + len(self.think_end_token) :] or None
+            )
 
             return reasoning, content
 

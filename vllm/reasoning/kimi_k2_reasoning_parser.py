@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 from transformers import PreTrainedTokenizerBase
 
@@ -39,6 +39,7 @@ class KimiK2ReasoningParser(ReasoningParser):
         thinking = bool(chat_kwargs.get("thinking", True))
 
         # If thinking is not enabled, use identity parser to fall through
+        self._identity_parser: IdentityReasoningParser | None
         if not thinking:
             self._identity_parser = IdentityReasoningParser(tokenizer, *args, **kwargs)
         else:
@@ -74,7 +75,7 @@ class KimiK2ReasoningParser(ReasoningParser):
         1. The end token (</think>)
         2. The tool section start token (<|tool_calls_section_begin|>)
         """
-        if self._is_identity_mode():
+        if self._identity_parser is not None:
             return self._identity_parser.is_reasoning_end(input_ids)
 
         start_token_id = self._start_token_id
@@ -95,29 +96,32 @@ class KimiK2ReasoningParser(ReasoningParser):
         return False
 
     def is_reasoning_end_streaming(
-        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
         """
         Check if the reasoning content ends in the input_ids on a decode step.
         """
-        if self._is_identity_mode():
+        if self._identity_parser is not None:
             return self._identity_parser.is_reasoning_end_streaming(
                 input_ids, delta_ids
             )
 
+        # Materialize for multiple membership checks
+        delta_ids_tuple = tuple(delta_ids)
+
         # Check for explicit end token or implicit tool section start in delta
-        if self._end_token_id in delta_ids:
+        if self._end_token_id in delta_ids_tuple:
             return True
         return (
             self._tool_section_start_token_id is not None
-            and self._tool_section_start_token_id in delta_ids
+            and self._tool_section_start_token_id in delta_ids_tuple
         )
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
         Extract content token ids from the input_ids.
         """
-        if self._is_identity_mode():
+        if self._identity_parser is not None:
             return self._identity_parser.extract_content_ids(input_ids)
 
         if self._end_token_id in input_ids:
@@ -150,7 +154,7 @@ class KimiK2ReasoningParser(ReasoningParser):
         """
         Extract reasoning content from the model output.
         """
-        if self._is_identity_mode():
+        if self._identity_parser is not None:
             return self._identity_parser.extract_reasoning(model_output, request)
 
         # thinking does not require a think start token but consume it if present
@@ -189,7 +193,7 @@ class KimiK2ReasoningParser(ReasoningParser):
         """
         Extract reasoning content from a delta message during streaming.
         """
-        if self._is_identity_mode():
+        if self._identity_parser is not None:
             return self._identity_parser.extract_reasoning_streaming(
                 previous_text,
                 current_text,

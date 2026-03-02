@@ -243,7 +243,7 @@ class Olmo3ReasoningParser(ReasoningParser):
         )
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        text = self.model_tokenizer.decode(input_ids)
+        text = self.model_tokenizer.decode(list(input_ids))
         return self.think_end in text
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
