@@ -46,7 +46,7 @@ class CacheConfig:
 
     Defaults to DEFAULT_BLOCK_SIZE and may be overridden by the platform
     or attention backend."""
-    user_specified_block_size: bool = Field(default=False, init=False)
+    user_specified_block_size: bool = field(default=False, init=False)
     """Whether the user explicitly set --block-size. When True, platform
     and backend auto-selection will not override block_size.
     Automatically set when block_size is provided in the constructor
