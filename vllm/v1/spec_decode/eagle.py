@@ -26,6 +26,7 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
+from vllm.triton_utils.importing import HAS_TRITON
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -40,7 +41,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import (
-    HAS_TRITON,
     PADDING_SLOT_ID,
     compute_new_slot_mapping,
     copy_and_expand_eagle_inputs_kernel,
@@ -720,7 +720,7 @@ class SpecDecodeBaseProposer:
             if num_rejected_tokens_gpu is not None:
                 query_end_loc = query_end_loc - num_rejected_tokens_gpu
 
-            if HAS_TRITON and self.device.type == "cuda":
+            if HAS_TRITON:
                 copy_and_expand_eagle_inputs_kernel[grid](
                     # (Padded) Inputs from the target model
                     target_token_ids_ptr=target_token_ids,
@@ -921,7 +921,7 @@ class SpecDecodeBaseProposer:
         # Kernel grid: one program per request (row)
         grid = (batch_size,)
 
-        if HAS_TRITON and device.type == "cuda":
+        if HAS_TRITON:
             # Find the next power of 2 for block sizes
             BLOCK_SIZE_TOKENS = next_power_of_2(num_tokens)
             eagle_prepare_next_token_padded_kernel[grid](
@@ -975,7 +975,7 @@ class SpecDecodeBaseProposer:
         )
 
         grid = (num_reqs,)
-        if HAS_TRITON and device.type == "cuda":
+        if HAS_TRITON:
             eagle_prepare_inputs_padded_kernel[grid](
                 spec_decode_metadata.cu_num_draft_tokens,
                 valid_sampled_tokens_count,
