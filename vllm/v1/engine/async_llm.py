@@ -890,7 +890,7 @@ class AsyncLLM(EngineClient):
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
-        self.renderer.clear_mm_cache()
+        await self.renderer.clear_mm_cache_async()
         await self.engine_core.reset_mm_cache_async()
 
     async def reset_prefix_cache(

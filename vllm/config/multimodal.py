@@ -172,6 +172,14 @@ class MultiModalConfig:
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
     """
+    async_mm_input_processing: bool = False
+    """If enabled, offloads multimodal input preprocessing to a background
+    thread pool to avoid blocking the asyncio event loop.
+
+    This improves frontend liveness under high concurrency with multimodal
+    requests, preventing connection timeouts caused by CPU-bound HuggingFace
+    processor operations. May introduce a small throughput overhead (~4%)
+    due to thread context switching."""
 
     @field_validator("limit_per_prompt", mode="before")
     @classmethod

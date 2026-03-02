@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from vllm.config import VllmConfig
@@ -75,9 +74,8 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
     ) -> None:
         super().__init__(config, tokenizer)
 
-        self._apply_chat_template_executor = ThreadPoolExecutor(max_workers=1)
         self._apply_chat_template_async = make_async(
-            safe_apply_chat_template, executor=self._apply_chat_template_executor
+            safe_apply_chat_template, executor=self._executor
         )
 
     def render_messages(

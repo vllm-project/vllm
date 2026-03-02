@@ -30,6 +30,7 @@ from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.hf import CachedHfTokenizer, HfTokenizer
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
+from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
 
 from .base import BaseRenderer
@@ -617,6 +618,10 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             config.model_config.hf_config, "use_unified_vision_chunk", False
         )
 
+        self._apply_chat_template_async = make_async(
+            safe_apply_chat_template, executor=self._executor
+        )
+
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
@@ -691,7 +696,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             ),
         )
 
-        prompt_raw = safe_apply_chat_template(
+        prompt_raw = await self._apply_chat_template_async(
             model_config,
             tokenizer,
             conversation,

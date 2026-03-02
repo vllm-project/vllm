@@ -307,6 +307,7 @@ class ModelConfig:
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
+    async_mm_input_processing: InitVar[bool | None] = None
 
     def compute_hash(self) -> str:
         """
@@ -427,6 +428,7 @@ class ModelConfig:
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
+        async_mm_input_processing: bool | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
@@ -593,6 +595,7 @@ class ModelConfig:
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
+                async_mm_input_processing=async_mm_input_processing,
             )
 
             mm_config_kwargs = {
