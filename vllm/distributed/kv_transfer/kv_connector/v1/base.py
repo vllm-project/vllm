@@ -543,6 +543,28 @@ class KVConnectorBase_V1(ABC):
             )
         return None
 
+    @classmethod
+    def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
+        """
+        Check if this connector requires PIECEWISE CUDA graph mode.
+
+        Connectors that use asynchronous layer-by-layer operations
+        (wait_for_layer_load/save_kv_layer) should override this method
+        to return True when those operations are enabled. These operations
+        cannot be captured in CUDA graphs and will be skipped during replay,
+        causing data races. PIECEWISE mode allows Python code to execute
+        between graph pieces, ensuring proper synchronization.
+
+        Args:
+            extra_config: The kv_connector_extra_config dict from
+                KVTransferConfig.
+
+        Returns:
+            True if this connector requires PIECEWISE CUDA graph mode,
+            False otherwise.
+        """
+        return False
+
     def get_finished_count(self) -> int | None:
         """
         Get the count of requests expected to complete send/receive operations
