@@ -232,8 +232,8 @@ class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
         d_k = d_model // n_head
         self.scale = 1.0 / (d_k**0.5)
         self.linear_pos = nn.Linear(d_model, n_head * d_k, bias=False)
-        self.pos_bias_u = nn.Parameter(torch.Tensor(n_head, d_k).cuda())
-        self.pos_bias_v = nn.Parameter(torch.Tensor(n_head, d_k).cuda())
+        self.pos_bias_u = nn.Parameter(torch.empty([n_head, d_k]))
+        self.pos_bias_v = nn.Parameter(torch.empty([n_head, d_k]))
         torch.nn.init.xavier_uniform_(self.pos_bias_u)
         torch.nn.init.xavier_uniform_(self.pos_bias_v)
 
