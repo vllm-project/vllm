@@ -14,7 +14,6 @@ from fastapi import Request
 from pydantic import ConfigDict
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
-from typing_extensions import assert_never
 
 from vllm import (
     PoolingParams,
@@ -27,7 +26,7 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse, OpenAIBaseModel
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.exceptions import create_error_response
 from vllm.inputs import ProcessorInputs
@@ -113,15 +112,14 @@ class PoolingServing:
         self,
         request: AnyPoolingRequest,
         raw_request: Request,
-    ):
-        generator: AnyPoolingResponse | ErrorResponse
+    ) -> JSONResponse:
         try:
             model_name = self.models.model_name()
             request_id = (
                 f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
             )
 
-            await self._check_model(request, raw_request)
+            await self._check_model(request)
 
             ctx = PoolingServeContext(
                 request=request,
@@ -135,18 +133,14 @@ class PoolingServing:
             await self._preprocess(ctx)
             await self._prepare_generators(ctx)
             await self._collect_batch(ctx)
-            generator = await self._build_response(ctx)
+            response = await self._build_response(ctx)
+            return JSONResponse(content=response.model_dump())
         except Exception as e:
-            generator = self.create_error_response(e)
-
-        if isinstance(generator, ErrorResponse):
+            error_response = self.create_error_response(e)
             return JSONResponse(
-                content=generator.model_dump(), status_code=generator.error.code
+                content=error_response.model_dump(),
+                status_code=error_response.error.code,
             )
-        elif isinstance(generator, OpenAIBaseModel):
-            return JSONResponse(content=generator.model_dump())
-
-        assert_never(generator)
 
     async def _preprocess(
         self,
@@ -172,7 +166,9 @@ class PoolingServing:
         self,
         ctx: PoolingServeContext,
     ):
-        """Schedule the request and get the result generator."""
+        if ctx.engine_prompts is None:
+            raise ValueError("Engine prompts not available")
+
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
         trace_headers = (
@@ -209,8 +205,12 @@ class PoolingServing:
     async def _collect_batch(
         self,
         ctx: PoolingServeContext,
-    ) -> ErrorResponse | None:
-        """Collect batch results from the result generator."""
+    ):
+        if ctx.engine_prompts is None:
+            raise ValueError("Engine prompts not available")
+
+        if ctx.result_generator is None:
+            raise ValueError("Result generator not available")
 
         num_prompts = len(ctx.engine_prompts)
         final_res_batch: list[PoolingRequestOutput | None]
@@ -250,7 +250,6 @@ class PoolingServing:
     async def _check_model(
         self,
         request: AnyPoolingRequest,
-        raw_request: Request,
     ) -> ErrorResponse | None:
         if self._is_model_supported(request.model):
             return None
