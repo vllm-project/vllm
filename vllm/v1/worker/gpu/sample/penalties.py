@@ -85,7 +85,6 @@ class PenaltiesState:
         idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
         input_ids: torch.Tensor,
-        expanded_local_pos: torch.Tensor,
         num_speculative_tokens: int,
     ) -> None:
         if not np.any(self.use_penalty[idx_mapping_np]):
@@ -96,7 +95,6 @@ class PenaltiesState:
             logits,
             idx_mapping,
             input_ids,
-            expanded_local_pos,
             self.repetition_penalty.gpu,
             self.frequency_penalty.gpu,
             self.presence_penalty.gpu,
@@ -112,7 +110,6 @@ def _penalties_kernel(
     logits_stride,
     idx_mapping_ptr,
     token_ids_ptr,
-    expanded_local_pos_ptr,
     repetition_penalty_ptr,
     frequency_penalty_ptr,
     presence_penalty_ptr,
@@ -150,8 +147,14 @@ def _penalties_kernel(
         other=0,
     )
 
-    # Compute cumulative draft_counts from previous positions in this request
-    pos = tl.load(expanded_local_pos_ptr + token_idx)
+    # Derive local position within this request's logit group by scanning
+    # backwards in expanded_idx_mapping. Since req_state_idx is unique per
+    # active request, a change in value marks the request boundary.
+    pos = 0
+    for i in tl.static_range(MAX_SPEC_LEN):
+        check_idx = token_idx - i - 1
+        prev_req = tl.load(idx_mapping_ptr + check_idx, mask=check_idx >= 0, other=-1)
+        pos += (prev_req == req_state_idx).to(tl.int32)
     start_idx = token_idx - pos
     draft_counts = tl.zeros((BLOCK_SIZE,), dtype=tl.int32)
     for prev_pos in tl.static_range(MAX_SPEC_LEN):
@@ -193,7 +196,6 @@ def apply_penalties(
     logits: torch.Tensor,
     idx_mapping: torch.Tensor,
     token_ids: torch.Tensor,
-    expanded_local_pos: torch.Tensor,
     repetition_penalty: torch.Tensor,
     frequency_penalty: torch.Tensor,
     presence_penalty: torch.Tensor,
@@ -209,7 +211,6 @@ def apply_penalties(
         logits.stride(0),
         idx_mapping,
         token_ids,
-        expanded_local_pos,
         repetition_penalty,
         frequency_penalty,
         presence_penalty,
