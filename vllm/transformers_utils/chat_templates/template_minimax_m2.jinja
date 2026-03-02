@@ -1,0 +1,56 @@
+{#- Custom tool chat template for MiniMax M2 models. -#}
+{#- This template uses tojson filter to properly escape special characters -#}
+{#- (like parentheses) in tool parameter descriptions that would otherwise -#}
+{#- cause the default HuggingFace template to crash. -#}
+{#- See: https://github.com/vllm-project/vllm/issues/32827 -#}
+{{ '<begin_of_document>' -}}
+{%- if custom_tools is defined %}
+    {%- set tools = custom_tools %}
+{%- endif %}
+{%- if not tools is defined %}
+    {%- set tools = none %}
+{%- endif %}
+
+{#- Tools configuration - use tojson to properly escape special characters in descriptions #}
+{%- if tools is not none %}
+{{ '<beginning_of_sentence>system tool_setting=tools\nYou are provided with these tools:\n<tools>\n' -}}
+{%- for tool in tools %}
+{{ tool | tojson ~ '\n' -}}
+{%- endfor %}
+{{ '</tools>\n\nIf you need to call tools, please respond with <minimax:tool_call></minimax:tool_call> XML tags containing tool invocations.\nFor each tool call, use:\n<invoke name=\"function_name\">\n<parameter name=\"param_name\">value</parameter>\n</invoke>\n<end_of_sentence>' -}}
+{%- endif %}
+
+{#- Process messages #}
+{%- for message in messages %}
+{%- if message['role'] == 'system' %}
+{{ '<beginning_of_sentence>system\n' + message['content'] + '<end_of_sentence>' -}}
+{%- elif message['role'] == 'user' %}
+{{ '<beginning_of_sentence>user\n' + message['content'] + '<end_of_sentence>' -}}
+{%- elif message['role'] == 'assistant' %}
+{%- if message.get('tool_calls') %}
+{{ '<beginning_of_sentence>assistant\n<minimax:tool_call>' -}}
+{%- for tool_call in message['tool_calls'] %}
+{{ '\n<invoke name=\"' + tool_call['function']['name'] + '\">' -}}
+{%- if tool_call['function']['arguments'] is string %}
+{%- set args = tool_call['function']['arguments'] | tojson | fromjson %}
+{%- else %}
+{%- set args = tool_call['function']['arguments'] %}
+{%- endif %}
+{%- for key, value in args.items() %}
+{{ '\n<parameter name=\"' + key + '\">\n' + (value | tojson if value is not string else value) + '\n</parameter>' -}}
+{%- endfor %}
+{{ '\n</invoke>' -}}
+{%- endfor %}
+{{ '\n</minimax:tool_call><end_of_sentence>' -}}
+{%- else %}
+{{ '<beginning_of_sentence>assistant\n' + message['content'] + '<end_of_sentence>' -}}
+{%- endif %}
+{%- elif message['role'] == 'tool' %}
+{{ '<beginning_of_sentence>tool\n' + message['content'] + '<end_of_sentence>' -}}
+{%- endif %}
+{%- endfor %}
+
+{#- Generation prompt #}
+{%- if add_generation_prompt %}
+{{ '<beginning_of_sentence>assistant\n' -}}
+{%- endif %}
