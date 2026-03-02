@@ -325,7 +325,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.kv_cache_config,
                 self.attn_groups,
                 self.block_tables,
-                self.model_state,
             )
 
         self.kv_caches: list[torch.Tensor] = []

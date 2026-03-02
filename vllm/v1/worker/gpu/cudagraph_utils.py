@@ -35,6 +35,7 @@ class CudaGraphManager:
         self.use_aux_hidden_state_outputs = use_aux_hidden_state_outputs
         self.device = device
 
+        self.max_model_len = vllm_config.model_config.max_model_len
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.dp_size = vllm_config.parallel_config.data_parallel_size
