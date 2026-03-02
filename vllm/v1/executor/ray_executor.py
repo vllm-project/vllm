@@ -100,7 +100,7 @@ class RayDistributedExecutor(Executor):
 
         self.uses_sampler = self.vllm_config.model_config.runner_type != "pooling" and (
             self.vllm_config.ec_transfer_config is None
-            or not self.vllm_config.ec_transfer_config.is_ec_producer
+            or self.vllm_config.ec_transfer_config.is_ec_consumer
         )
 
         self.scheduler_output: SchedulerOutput | None = None

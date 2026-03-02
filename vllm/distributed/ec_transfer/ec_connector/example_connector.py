@@ -141,8 +141,9 @@ class ECExampleConnector(ECConnectorBase):
         Update ECConnector state after encoder cache allocation.
         """
         mm_hash = request.mm_features[index].identifier
+        if not self.has_cache_item(mm_hash):
+            return
         num_encoder_token = request.get_num_encoder_embeds(index)
-        # Insert mm_hash only if this block has not been recorded yet.
         self._mm_datas_need_loads[mm_hash] = num_encoder_token
 
     def build_connector_meta(
