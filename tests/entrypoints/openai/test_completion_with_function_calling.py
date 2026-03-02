@@ -9,11 +9,27 @@ import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 
+from vllm.platforms import current_platform
+
 # downloading lora to test lora requests
 from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "Qwen/Qwen3-0.6B"
+
+# ROCm: disable skinny GEMM to avoid non-deterministic results from
+# atomic reductions in wvSplitKrc kernel.
+# See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
+ROCM_ENV_OVERRIDES = (
+    {"VLLM_ROCM_USE_SKINNY_GEMM": "0"} if current_platform.is_rocm() else {}
+)
+# ROCm: disable prefix caching and eliminate batch variance to reduce
+# test flakiness.
+ROCM_EXTRA_ARGS = (
+    ["--no-enable-prefix-caching", "--max-num-seqs", "1"]
+    if current_platform.is_rocm()
+    else []
+)
 
 tools = [
     {
@@ -139,9 +155,11 @@ def server():
         "qwen3",
         "--gpu-memory-utilization",
         "0.4",
-    ]
+    ] + ROCM_EXTRA_ARGS
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(
+        MODEL_NAME, args, env_dict=ROCM_ENV_OVERRIDES
+    ) as remote_server:
         yield remote_server
 
 
@@ -226,12 +244,13 @@ def k2_server():
         "qwen3",
         "--gpu-memory-utilization",
         "0.4",
-    ]
+    ] + ROCM_EXTRA_ARGS
     # hack to test kimi_k2 tool use tool_id format.
     # avoid error in is_deepseek_mla check by setting kv_lora_rank=null
     with RemoteOpenAIServer(
         MODEL_NAME,
         args,
+        env_dict=ROCM_ENV_OVERRIDES,
         override_hf_configs={"model_type": "kimi_k2", "kv_lora_rank": None},
     ) as remote_server:
         yield remote_server
