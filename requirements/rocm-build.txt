@@ -1,10 +1,10 @@
 # Common dependencies
 -r common.txt
 
---extra-index-url https://download.pytorch.org/whl/rocm7.1
-torch==2.10.0
-torchvision==0.25.0
-torchaudio==2.10.0
+--extra-index-url https://download.pytorch.org/whl/test/rocm7.1
+torch==2.11.0
+torchvision==0.26.0
+torchaudio==2.11.0
 triton==3.6.0
 cmake>=3.26.1,<4
 packaging>=24.2

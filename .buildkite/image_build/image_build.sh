@@ -159,6 +159,12 @@ print_bake_config() {
 #################################
 print_instance_info
 
+if [[ -n "${VLLM_PIN_IMAGE:-}" ]]; then
+    echo "--- Using pinned image: ${VLLM_PIN_IMAGE}"
+    echo "Skipping build (VLLM_PIN_IMAGE is set)"
+    exit 0
+fi
+
 if [[ $# -lt 5 ]]; then
     print_usage_and_exit
 fi

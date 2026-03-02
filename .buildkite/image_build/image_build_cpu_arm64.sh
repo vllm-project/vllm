@@ -1,6 +1,12 @@
 #!/bin/bash
 set -e
 
+if [[ -n "${VLLM_PIN_IMAGE:-}" ]]; then
+    echo "--- Using pinned image: ${VLLM_PIN_IMAGE}"
+    echo "Skipping build (VLLM_PIN_IMAGE is set)"
+    exit 0
+fi
+
 if [[ $# -lt 3 ]]; then
   echo "Usage: $0 <registry> <repo> <commit>"
   exit 1

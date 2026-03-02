@@ -22,7 +22,7 @@
 #   docker buildx bake -f docker/docker-bake.hcl -f docker/versions.json
 # =============================================================================
 
-ARG CUDA_VERSION=12.9.1
+ARG CUDA_VERSION=13.0.0
 ARG PYTHON_VERSION=3.12
 
 # By parameterizing the base images, we allow third-party to use their own
@@ -36,9 +36,9 @@ ARG PYTHON_VERSION=3.12
 # compatibility with other Linux OSes. The main reason for this is that the
 # glibc version is baked into the distro, and binaries built with one glibc
 # version are not backwards compatible with OSes that use an earlier version.
-ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
+ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 # Using cuda base image with minimal dependencies necessary for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
-ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu22.04
+ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 
 # By parameterizing the Deadsnakes repository URL, we allow third-party to use
 # their own mirror. When doing so, we don't benefit from the transparent
@@ -72,7 +72,7 @@ ARG UV_INDEX_URL=${PIP_INDEX_URL}
 ARG UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 
 # PyTorch provides its own indexes for standard and nightly builds
-ARG PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
+ARG PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl/test
 
 # PIP supports multiple authentication schemes, including keyring
 # By parameterizing the PIP_KEYRING_PROVIDER variable and setting it to
@@ -539,17 +539,21 @@ RUN apt-get update -y \
 # Install CUDA development tools for runtime JIT compilation
 # (FlashInfer, DeepGEMM, EP kernels all require compilation at runtime)
 RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
+    CUDA_VERSION_SHORT=$(echo $CUDA_VERSION | cut -d. -f1,2) && \
     apt-get update -y && \
-    apt-get install -y --no-install-recommends \
+    apt-get install -y --no-install-recommends --allow-change-held-packages \
         cuda-nvcc-${CUDA_VERSION_DASH} \
         cuda-cudart-${CUDA_VERSION_DASH} \
         cuda-nvrtc-${CUDA_VERSION_DASH} \
         cuda-cuobjdump-${CUDA_VERSION_DASH} \
         libcurand-dev-${CUDA_VERSION_DASH} \
-        libcublas-${CUDA_VERSION_DASH} \
-        # Fixes nccl_allocator requiring nccl.h at runtime
-        # https://github.com/vllm-project/vllm/blob/1336a1ea244fa8bfd7e72751cabbdb5b68a0c11a/vllm/distributed/device_communicators/pynccl_allocator.py#L22
-        libnccl-dev && \
+        libcublas-${CUDA_VERSION_DASH} && \
+    # Fixes nccl_allocator requiring nccl.h at runtime
+    # https://github.com/vllm-project/vllm/blob/1336a1ea244fa8bfd7e72751cabbdb5b68a0c11a/vllm/distributed/device_communicators/pynccl_allocator.py#L22
+    # NCCL packages don't use the cuda-MAJOR-MINOR naming convention,
+    # so we pin the version to match our CUDA version
+    NCCL_VER=$(apt-cache madison libnccl-dev | grep "+cuda${CUDA_VERSION_SHORT}" | head -1 | awk -F'|' '{gsub(/^ +| +$/, "", $2); print $2}') && \
+    apt-get install -y --no-install-recommends --allow-change-held-packages libnccl-dev=${NCCL_VER} libnccl2=${NCCL_VER} && \
     rm -rf /var/lib/apt/lists/*
 
 # Install uv for faster pip installs
@@ -576,7 +580,7 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r /tmp/requirements-cuda.txt \
+    uv pip install --system --prerelease=allow -r /tmp/requirements-cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
@@ -677,7 +681,7 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 # Install EP kernels wheels (DeepEP) that have been built in the `build` stage
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system ep_kernels/dist/*.whl --verbose \
+    uv pip install --prerelease=allow --system ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
@@ -795,7 +799,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
             # if the above fails, install from source
             apt-get update -y && \
-            apt-get install -y --no-install-recommends ${BUILD_PKGS} && \
+            apt-get install -y --no-install-recommends --allow-change-held-packages ${BUILD_PKGS} && \
             uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation && \
             apt-get purge -y ${BUILD_PKGS} && \
             # clean up -dev packages, keep runtime libraries
