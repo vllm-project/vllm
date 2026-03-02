@@ -3,7 +3,7 @@
 """
 KV cache helper for store.
 """
-from vllm.v1.kv_cache_interface import MambaSpec
+
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -16,12 +16,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-    from vllm.v1.kv_cache_interface import KVCacheConfig
-    from vllm.v1.kv_cache_interface import KVCacheSpec
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -394,16 +394,6 @@ class TpKVTopology:
             # stride_order to retrieve physical position of block_size
             kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
 
-        # In the default non-cross layers layout the block_size position
-        # is logical while in the cross layers case it is the physical
-        # position. This matches the shape of the actual kv cache tensors
-        # passed at register_kv_caches()/register_cross_layers_kv_cache()
-        # FIXME likely interesented in FA layers
-        # block_size_position = kv_cache_shape.index(_MOCK_BLOCK_SIZE)
-
-        # assert block_size_position is not None
-        # self._block_size_position = -(len(kv_cache_shape) - block_size_position)
-
     @property
     def is_kv_layout_blocks_first(self) -> bool:
         return self._is_kv_layout_blocks_first
@@ -426,11 +416,6 @@ class TpKVTopology:
     @property
     def cross_layers_blocks(self) -> bool:
         return self._cross_layers_blocks
-
-    @property
-    def block_size_position(self) -> int:
-        # return self._block_size_position
-        return -2 if self.is_mla else -3
 
     def tp_ratio(
         self,
@@ -521,10 +506,12 @@ class TpKVTopology:
         remote_tp_size = self.remote_tp_size[remote_engine_id]
         return self.get_target_remote_ranks(remote_tp_size)
 
-    def get_transfer_cache_regions(self, cache: torch.Tensor, layer_spec: "KVCacheSpec") -> list[torch.Tensor] | torch.Tensor:
+    def get_transfer_cache_regions(
+        self, cache: torch.Tensor, layer_spec: "KVCacheSpec"
+    ) -> list[torch.Tensor] | torch.Tensor:
         # TODO docs
         if isinstance(layer_spec, MambaSpec):
-            # Register the whole kv cache shared tensor, including SSM/Conv. This is 
+            # Register the whole kv cache shared tensor, including SSM/Conv. This is
             # similar to FI with the difference that SSM/Conv have different sizes
             ssm, conv = cache
             return [ssm]
@@ -537,29 +524,52 @@ class TpKVTopology:
             #  Stride is already adjusted by manager. Shape's not.
             # swap [2<>num_blocks, block_size, num_kv_heads, head_size] to match FI
             cache = cache.transpose(0, 1)
-            
+
         # Regular case: backends like FA register K/V in separate regions
         return cache if self.split_k_and_v else [cache]
 
 
-def get_current_attn_backend(vllm_config: VllmConfig):
-    layer_type = cast(type[Any], AttentionLayerBase)
-    layers = get_layers_from_vllm_config(vllm_config, layer_type, None)
-    if layers:
-        backend = next(iter(layers.values())).get_attn_backend()
-    else:
-        # Fallback for tests, when static_forward_context is empty.
-        logger.debug(
-            "No layers found in the vLLM config. "
-            "Falling back to default attention backend."
-        )
-        from vllm.v1.attention.selector import get_attn_backend
+def get_current_attn_backends(
+    vllm_config: VllmConfig, layer_names: list[str] | None = None
+) -> list[type[AttentionBackend]]:
+    """Get all distinct attention backends for the given layers.
 
-        backend = get_attn_backend(
+    Args:
+        vllm_config: The current vLLM configuration.
+        layer_names: Optional list of layer names to scope the lookup.
+            When None, all attention layers are considered.
+
+    Returns:
+        Deduplicated list of attention backend classes.
+    """
+    layer_type = cast(type[Any], AttentionLayerBase)
+    layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
+    if layers:
+        seen: dict[str, type[AttentionBackend]] = {}
+        for layer in layers.values():
+            backend = layer.get_attn_backend()
+            seen[backend.full_cls_name()] = backend
+        return list(seen.values())
+
+    # Fallback for tests, when static_forward_context is empty.
+    logger.debug(
+        "No layers found in the vLLM config. Falling back to default attention backend."
+    )
+    from vllm.v1.attention.selector import get_attn_backend
+
+    return [
+        get_attn_backend(
             head_size=vllm_config.model_config.get_head_size(),
             dtype=vllm_config.model_config.dtype,
             kv_cache_dtype=vllm_config.cache_config.cache_dtype,
             block_size=vllm_config.cache_config.block_size,
             use_mla=vllm_config.model_config.use_mla,
         )
-    return backend
+    ]
+
+
+def get_current_attn_backend(
+    vllm_config: VllmConfig, layer_names: list[str] | None = None
+) -> type[AttentionBackend]:
+    """Get the first attention backend for the given layers."""
+    return get_current_attn_backends(vllm_config, layer_names)[0]
