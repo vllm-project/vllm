@@ -203,7 +203,13 @@ from tqdm import tqdm
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    VllmConfig,
+    get_current_vllm_config,
+    get_current_vllm_config_or_none,
+)
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     is_global_first_rank,
@@ -397,10 +403,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         self.use_sparse = use_sparse
 
-        parallel_config = get_current_vllm_config().parallel_config
+        vllm_config = get_current_vllm_config_or_none()
         self.dcp_a2a = (
-            parallel_config.decode_context_parallel_size > 1
-            and parallel_config.dcp_comm_backend == "a2a"
+            vllm_config is not None
+            and vllm_config.parallel_config.decode_context_parallel_size > 1
+            and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
 
         # Initialize q/k/v range constants.

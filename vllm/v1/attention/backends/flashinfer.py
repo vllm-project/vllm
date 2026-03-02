@@ -20,7 +20,11 @@ from flashinfer.utils import FP4Tensor
 from typing_extensions import override
 
 from vllm import envs
-from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
+from vllm.config import (
+    CUDAGraphMode,
+    VllmConfig,
+    get_current_vllm_config_or_none,
+)
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
@@ -1220,23 +1224,21 @@ class FlashInferImpl(AttentionImpl):
             self.sinks = sinks
 
         self.support_trtllm_attn = can_use_trtllm_attention(num_heads, num_kv_heads)
-        vllm_config = get_current_vllm_config()
+        vllm_config = get_current_vllm_config_or_none()
         self.supports_quant_query_input = (
             self.support_trtllm_attn
+            and vllm_config is not None
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
         )
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
 
-        try:
-            parallel_config = vllm_config.parallel_config
-            dcp_a2a = (
-                parallel_config.decode_context_parallel_size > 1
-                and parallel_config.dcp_comm_backend == "a2a"
-            )
-        except AttributeError:
-            dcp_a2a = False
+        dcp_a2a = (
+            vllm_config is not None
+            and vllm_config.parallel_config.decode_context_parallel_size > 1
+            and vllm_config.parallel_config.dcp_comm_backend == "a2a"
+        )
         if dcp_a2a:
             self.dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
         else:

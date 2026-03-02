@@ -33,7 +33,12 @@ if is_flash_attn_varlen_func_available():
         get_scheduler_metadata,
         reshape_and_cache_flash,
     )
-from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config,
+    get_current_vllm_config_or_none,
+    get_layers_from_vllm_config,
+)
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
@@ -610,10 +615,11 @@ class FlashAttentionImpl(AttentionImpl):
 
         self.supports_quant_query_input = True
 
-        parallel_config = get_current_vllm_config().parallel_config
+        vllm_config = get_current_vllm_config_or_none()
         dcp_a2a = (
-            parallel_config.decode_context_parallel_size > 1
-            and parallel_config.dcp_comm_backend == "a2a"
+            vllm_config is not None
+            and vllm_config.parallel_config.decode_context_parallel_size > 1
+            and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
         self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
 
