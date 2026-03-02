@@ -24,7 +24,7 @@ from .utils import (
     "hma_enabled,expected_sw_sizes",
     [
         # HMA enabled: FullAttentionSpec (0) + SlidingWindowSpec (2048/16=128)
-        (True, [0, 128]),
+        (True, [0, 128 + 1]),
         # HMA disabled: only FullAttentionSpec (0)
         (False, [0]),
     ],
@@ -138,7 +138,8 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
         outputs = llm.generate(["hi" * 1401], sampling_params)
         kv_params = outputs[0].kv_transfer_params
 
-        expected_num_remote_blocks = sw_size // block_size
+        # +1 to account for overlapping window across blocks.
+        expected_num_remote_blocks = sw_size // block_size + 1
         remote_block_ids = kv_params["remote_block_ids"]
         assert (
             len(remote_block_ids[0])
