@@ -4,7 +4,7 @@ absl-py==2.1.0
     # via
     #   rouge-score
     #   tensorboard
-accelerate==1.0.1
+accelerate==1.1.0
     # via peft
 aenum==3.1.16
     # via lightly
@@ -121,6 +121,7 @@ click==8.1.7
     #   ray
     #   schemathesis
     #   typer
+    #   typer-slim
     #   uvicorn
     #   wandb
 click-plugins==1.1.1.2
@@ -220,7 +221,6 @@ filelock==3.16.1
     #   huggingface-hub
     #   ray
     #   torch
-    #   transformers
     #   virtualenv
 fiona==1.10.1
     # via torchgeo
@@ -306,7 +306,7 @@ h5py==3.13.0
     # via terratorch
 harfile==0.3.0
     # via schemathesis
-hf-xet==1.1.7
+hf-xet==1.2.0
     # via huggingface-hub
 hiredis==3.0.0
     # via tensorizer
@@ -320,9 +320,10 @@ httpx==0.27.2
     # via
     #   -r requirements/test.in
     #   diffusers
+    #   huggingface-hub
     #   perceptron
     #   schemathesis
-huggingface-hub==0.36.2
+huggingface-hub==1.4.1
     # via
     #   accelerate
     #   datasets
@@ -707,7 +708,7 @@ pathvalidate==3.2.1
     # via pytablewriter
 patsy==1.0.1
     # via statsmodels
-peft==0.16.0
+peft==0.18.1
     # via -r requirements/test.in
 perceptron==0.1.4
     # via -r requirements/test.in
@@ -945,7 +946,6 @@ requests==2.32.3
     #   google-api-core
     #   google-cloud-storage
     #   gpt-oss
-    #   huggingface-hub
     #   lightly
     #   lm-eval
     #   mistral-common
@@ -957,7 +957,6 @@ requests==2.32.3
     #   starlette-testclient
     #   tacoreader
     #   tiktoken
-    #   transformers
     #   wandb
 responses==0.25.3
     # via genai-perf
@@ -1054,6 +1053,7 @@ shapely==2.1.1
     #   torchgeo
 shellingham==1.5.4
     # via
+    #   huggingface-hub
     #   perceptron
     #   typer
 six==1.16.0
@@ -1152,7 +1152,7 @@ timm==1.0.17
     #   segmentation-models-pytorch
     #   terratorch
     #   torchgeo
-tokenizers==0.22.0
+tokenizers==0.22.2
     # via
     #   -r requirements/test.in
     #   transformers
@@ -1227,7 +1227,7 @@ tqdm==4.67.3
     #   tacoreader
     #   terratorch
     #   transformers
-transformers==4.57.5
+transformers @ git+https://github.com/huggingface/transformers.git@710cfdb0af09542df087e1aaca8059fadcd8f364
     # via
     #   -r requirements/test.in
     #   genai-perf
@@ -1249,6 +1249,9 @@ typer==0.15.2
     # via
     #   fastsafetensors
     #   perceptron
+    #   transformers
+typer-slim==0.20.0
+    # via huggingface-hub
 types-python-dateutil==2.9.0.20241206
     # via arrow
 typeshed-client==2.8.2
@@ -1282,6 +1285,7 @@ typing-extensions==4.15.0
     #   torch
     #   torchgeo
     #   typer
+    #   typer-slim
     #   typeshed-client
     #   typing-inspection
     #   wandb
