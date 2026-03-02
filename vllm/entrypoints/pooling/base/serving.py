@@ -142,25 +142,26 @@ class PoolingServing:
                 status_code=error_response.error.code,
             )
 
+    def create_error_response(
+        self,
+        message: str | Exception,
+        err_type: str | None = "BadRequestError",
+        status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+        param: str | None = None,
+    ) -> ErrorResponse:
+        return create_error_response(
+            message=message,
+            err_type=err_type,
+            status_code=status_code,
+            param=param,
+            log_error_stack=self.log_error_stack,
+        )
+
     async def _preprocess(
         self,
         ctx: PoolingServeContext,
     ):
         ctx.engine_prompts = await self.io_processor.pre_process(ctx.request)
-
-    async def _get_trace_headers(
-        self,
-        headers: Headers,
-    ) -> Mapping[str, str] | None:
-        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
-
-        if is_tracing_enabled:
-            return extract_trace_headers(headers)
-
-        if contains_trace_headers(headers):
-            log_tracing_disabled_warning()
-
-        return None
 
     async def _prepare_generators(
         self,
@@ -222,7 +223,7 @@ class PoolingServing:
         if None in final_res_batch:
             raise ValueError("Failed to generate results for all prompts")
 
-        ctx.final_res_batch = final_res_batch
+        ctx.final_res_batch = [res for res in final_res_batch if res is not None]
 
     async def _build_response(
         self,
@@ -283,20 +284,19 @@ class PoolingServing:
             )
         return None
 
-    def create_error_response(
+    async def _get_trace_headers(
         self,
-        message: str | Exception,
-        err_type: str | None = "BadRequestError",
-        status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
-        param: str | None = None,
-    ) -> ErrorResponse:
-        return create_error_response(
-            message=message,
-            err_type=err_type,
-            status_code=status_code,
-            param=param,
-            log_error_stack=self.log_error_stack,
-        )
+        headers: Headers,
+    ) -> Mapping[str, str] | None:
+        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
+
+        if is_tracing_enabled:
+            return extract_trace_headers(headers)
+
+        if contains_trace_headers(headers):
+            log_tracing_disabled_warning()
+
+        return None
 
     def _maybe_get_adapters(
         self,

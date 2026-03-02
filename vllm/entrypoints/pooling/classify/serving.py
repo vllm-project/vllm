@@ -9,8 +9,7 @@ from vllm import ClassificationOutput
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
-from vllm.entrypoints.openai.engine.serving import ServeContext
-from vllm.entrypoints.pooling.base.serving import PoolingServing
+from vllm.entrypoints.pooling.base.serving import PoolingServeContext, PoolingServing
 from vllm.logger import init_logger
 from vllm.renderers import BaseRenderer
 
@@ -24,7 +23,7 @@ from .protocol import (
 logger = init_logger(__name__)
 
 
-ClassificationServeContext: TypeAlias = ServeContext[ClassificationRequest]
+ClassificationServeContext: TypeAlias = PoolingServeContext[ClassificationRequest]
 
 
 class ServingClassification(PoolingServing):
