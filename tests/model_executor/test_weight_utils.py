@@ -140,6 +140,34 @@ class TestMaybeRemapKvScaleName:
         )
         assert result == "model.layers.0.self_attn.attn.v_scale"
 
+    def test_qwen3_vl_moe_qkv_proj_k_scale(self):
+        """Qwen3-VL-MoE uses the same fused qkv_proj naming as Qwen3-MoE.
+        Regression test for qwen3_vl_moe.py fix (same bug as #25047)."""
+        result = maybe_remap_kv_scale_name(
+            "model.layers.0.self_attn.qkv_proj.k_scale", self.PARAMS_DICT
+        )
+        assert result == "model.layers.0.self_attn.attn.k_scale"
+
+    def test_qwen3_vl_moe_qkv_proj_v_scale(self):
+        """Qwen3-VL-MoE uses the same fused qkv_proj naming as Qwen3-MoE.
+        Regression test for qwen3_vl_moe.py fix (same bug as #25047)."""
+        result = maybe_remap_kv_scale_name(
+            "model.layers.0.self_attn.qkv_proj.v_scale", self.PARAMS_DICT
+        )
+        assert result == "model.layers.0.self_attn.attn.v_scale"
+
+    def test_nvfp4_weight_scale_not_remapped(self):
+        """NVFP4 weight_scale should not be touched by remap (not a kv scale)."""
+        name = "model.layers.0.self_attn.k_proj.weight_scale"
+        result = maybe_remap_kv_scale_name(name, self.PARAMS_DICT)
+        assert result == name
+
+    def test_nvfp4_input_scale_not_remapped(self):
+        """NVFP4 input_scale should not be touched by remap (not a kv scale)."""
+        name = "model.layers.0.self_attn.k_proj.input_scale"
+        result = maybe_remap_kv_scale_name(name, self.PARAMS_DICT)
+        assert result == name
+
     def test_missing_target_returns_none(self):
         """If remapped name not in params_dict, return None."""
         empty_params: dict[str, None] = {}
