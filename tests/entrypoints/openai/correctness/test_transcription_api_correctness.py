@@ -158,16 +158,11 @@ def run_evaluation(
 # NOTE: Expected WER measured with equivalent hf.transformers args:
 # whisper-large-v3 + esb-datasets-earnings22-validation-tiny-filtered.
 @pytest.mark.parametrize(
-    "model_config", [("openai/whisper-large-v3", "auto", 12.744980)]
-)
-@pytest.mark.parametrize(
     "model_config",
     [
-        (
-            "/host/engines/vllm/audio/2b-release",
-            "cohere_asr",
-            11.73,
-        )
+        ("openai/whisper-large-v3", "auto", 12.744980),
+        # TODO (ekagra): add final model ckpt here
+        ("/host/engines/vllm/audio/2b-release", "cohere_asr", 11.73),
     ],
 )
 # Original dataset is 20GB+ in size, hence we use a pre-filtered slice.
