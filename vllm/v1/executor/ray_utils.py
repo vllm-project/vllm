@@ -16,6 +16,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.network_utils import get_ip
 from vllm.v1.outputs import AsyncModelRunnerOutput
+from vllm.v1.serial_utils import run_method
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 if TYPE_CHECKING:
@@ -49,6 +50,29 @@ try:
             # The flag indicates is set_device is called on
             # that thread.
             self.compiled_dag_cuda_device_set = False
+
+        def adjust_rank(self, rank_mapping: dict[int, int]) -> None:
+            """
+            Adjust the rpc_rank based on the given mapping.
+            It is only used during the initialization of the executor,
+            to adjust the rpc_rank of workers after we create all workers.
+            """
+            if self.rpc_rank in rank_mapping:
+                self.rpc_rank = rank_mapping[self.rpc_rank]
+
+        def execute_method(self, method: str | bytes, *args, **kwargs):
+            try:
+                return run_method(self, method, args, kwargs)
+            except Exception as e:
+                # if the driver worker also execute methods,
+                # exceptions in the rest worker may cause deadlock in rpc
+                # see https://github.com/vllm-project/vllm/issues/3455
+                msg = (
+                    f"Error executing method {method!r}. "
+                    "This might cause deadlock in distributed execution."
+                )
+                logger.exception(msg)
+                raise e
 
         def get_node_ip(self) -> str:
             return get_ip()
