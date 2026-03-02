@@ -1146,15 +1146,30 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         layer.register_parameter("weight", weight)
 
         # Input Global Scale
+        # Initialize to float32.min instead of torch.empty (uninitialized).
+        # For MergedColumnParallelLinear with N output partitions, only
+        # slots 0 and N-1 are loaded from checkpoint; middle slots stay
+        # at their initial value.  process_weights_after_loading takes
+        # max() across all slots — uninitialized values can be >= BF16 max
+        # (~3.39e38), causing the max to overflow to +inf in BF16, which
+        # propagates through GEMM outputs.
         input_global_scale = PerTensorScaleParameter(
-            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+            data=torch.full(
+                (len(output_partition_sizes),),
+                torch.finfo(torch.float32).min,
+                dtype=torch.float32,
+            ),
             weight_loader=weight_loader,
         )
         layer.register_parameter("input_scale", input_global_scale)
 
-        # Weight Global Scale
+        # Weight Global Scale (same initialization rationale as above)
         weight_global_scale = PerTensorScaleParameter(
-            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+            data=torch.full(
+                (len(output_partition_sizes),),
+                torch.finfo(torch.float32).min,
+                dtype=torch.float32,
+            ),
             weight_loader=weight_loader,
         )
         layer.register_parameter("weight_scale_2", weight_global_scale)
