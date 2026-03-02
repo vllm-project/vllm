@@ -4858,6 +4858,10 @@ class GPUModelRunner(
 
                 cum_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
                 self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
+                # Pad query_start_loc beyond num_reqs to be non-decreasing,
+                # matching execute_model behavior. Required when
+                # num_reqs_padded > num_reqs (e.g. FULL cudagraphs with DP).
+                self.query_start_loc.np[num_reqs + 1 :].fill(cum_num_tokens[-1])
                 self.query_start_loc.copy_to_gpu()
 
                 pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
