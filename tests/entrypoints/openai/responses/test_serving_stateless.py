@@ -139,12 +139,18 @@ class TestProtocolValidation:
 class TestStateCarrierHelpers:
     def test_build_and_extract_roundtrip(self):
         from openai.types.responses.response_reasoning_item import ResponseReasoningItem
+
         from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 
         serving = _make_minimal_serving()
-        messages = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
 
-        carrier = OpenAIServingResponses._build_state_carrier(serving, messages, "test_req_id_12345")
+        carrier = OpenAIServingResponses._build_state_carrier(
+            serving, messages, "test_req_id_12345"
+        )
 
         assert isinstance(carrier, ResponseReasoningItem)
         assert carrier.type == "reasoning"
@@ -154,24 +160,33 @@ class TestStateCarrierHelpers:
         mock_response = MagicMock()
         mock_response.output = [carrier]
 
-        recovered = OpenAIServingResponses._extract_state_from_response(serving, mock_response)
+        recovered = OpenAIServingResponses._extract_state_from_response(
+            serving, mock_response
+        )
         assert recovered == messages
 
     def test_extract_returns_none_when_no_carrier(self):
         from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
         from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 
         serving = _make_minimal_serving()
 
         text = ResponseOutputText(type="output_text", text="hi", annotations=[])
         msg = ResponseOutputMessage(
-            id="msg_1", type="message", role="assistant",
-            content=[text], status="completed",
+            id="msg_1",
+            type="message",
+            role="assistant",
+            content=[text],
+            status="completed",
         )
         mock_response = MagicMock()
         mock_response.output = [msg]
 
-        assert OpenAIServingResponses._extract_state_from_response(serving, mock_response) is None
+        assert (
+            OpenAIServingResponses._extract_state_from_response(serving, mock_response)
+            is None
+        )
 
     def test_extract_raises_on_tampered_carrier(self):
         from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
@@ -282,14 +297,62 @@ class TestStorelessErrorPaths:
         # Build a previous response whose output has NO state carrier item.
         text = ResponseOutputText(type="output_text", text="Hello!", annotations=[])
         msg = ResponseOutputMessage(
-            id="msg_1", type="message", role="assistant",
-            content=[text], status="completed",
+            id="msg_1",
+            type="message",
+            role="assistant",
+            content=[text],
+            status="completed",
         )
-        prev_resp = ResponsesResponse.model_construct(
-            id="resp_old", output=[msg]
-        )
+        prev_resp = ResponsesResponse.model_construct(id="resp_old", output=[msg])
 
         serving = _make_minimal_serving(enable_store=False)
+        serving.engine_client = MagicMock()
+        serving.engine_client.errored = False
+
+        req = ResponsesRequest(
+            model="test",
+            input="What is my name?",
+            store=False,
+            previous_response=prev_resp,
+        )
+
+        result = await OpenAIServingResponses.create_responses(serving, req)
+
+        assert isinstance(result, ErrorResponse)
+        assert result.error.code == HTTPStatus.BAD_REQUEST
+        assert "state carrier" in result.error.message
+
+    @pytest.mark.asyncio
+    async def test_previous_response_without_carrier_store_enabled_returns_400(self):
+        """previous_response with no state carrier returns 400 even when store is on.
+
+        Regression for Codex P1: the original guard was gated on
+        `not self.enable_store`, so with store=True and a carrierless
+        previous_response the code fell through to msg_store[prev_response.id]
+        which raised KeyError → 500.  previous_response always means stateless
+        path; carrier absence is always a client error.
+        """
+        from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+        from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+        from vllm.entrypoints.openai.responses.protocol import (
+            ResponsesRequest,
+            ResponsesResponse,
+        )
+        from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
+
+        text = ResponseOutputText(type="output_text", text="Hello!", annotations=[])
+        msg = ResponseOutputMessage(
+            id="msg_1",
+            type="message",
+            role="assistant",
+            content=[text],
+            status="completed",
+        )
+        prev_resp = ResponsesResponse.model_construct(id="resp_old", output=[msg])
+
+        # store is ENABLED — this is the case the original guard missed
+        serving = _make_minimal_serving(enable_store=True)
         serving.engine_client = MagicMock()
         serving.engine_client.errored = False
 
@@ -341,18 +404,27 @@ class TestUtilsStateCarrierSkipping:
     def test_construct_chat_messages_skips_state_carrier(self):
         from openai.types.responses import ResponseOutputMessage, ResponseOutputText
         from openai.types.responses.response_reasoning_item import ResponseReasoningItem
+
         from vllm.entrypoints.openai.responses.state import serialize_state
-        from vllm.entrypoints.openai.responses.utils import construct_chat_messages_with_tool_call
+        from vllm.entrypoints.openai.responses.utils import (
+            construct_chat_messages_with_tool_call,
+        )
 
         blob = serialize_state([{"role": "user", "content": "prev"}])
         carrier = ResponseReasoningItem(
-            id="rs_state_abc", type="reasoning", summary=[],
-            status="completed", encrypted_content=blob,
+            id="rs_state_abc",
+            type="reasoning",
+            summary=[],
+            status="completed",
+            encrypted_content=blob,
         )
         text = ResponseOutputText(type="output_text", text="Hello!", annotations=[])
         msg = ResponseOutputMessage(
-            id="msg_1", type="message", role="assistant",
-            content=[text], status="completed",
+            id="msg_1",
+            type="message",
+            role="assistant",
+            content=[text],
+            status="completed",
         )
 
         result = construct_chat_messages_with_tool_call([carrier, msg])
@@ -363,22 +435,33 @@ class TestUtilsStateCarrierSkipping:
 
     def test_single_message_from_state_carrier_is_none(self):
         from openai.types.responses.response_reasoning_item import ResponseReasoningItem
+
         from vllm.entrypoints.openai.responses.state import serialize_state
-        from vllm.entrypoints.openai.responses.utils import _construct_single_message_from_response_item
+        from vllm.entrypoints.openai.responses.utils import (
+            _construct_single_message_from_response_item,
+        )
 
         blob = serialize_state([{"role": "user", "content": "hi"}])
         carrier = ResponseReasoningItem(
-            id="rs_state_xyz", type="reasoning", summary=[],
-            status="completed", encrypted_content=blob,
+            id="rs_state_xyz",
+            type="reasoning",
+            summary=[],
+            status="completed",
+            encrypted_content=blob,
         )
         assert _construct_single_message_from_response_item(carrier) is None
 
     def test_external_encrypted_content_still_raises(self):
         from openai.types.responses.response_reasoning_item import ResponseReasoningItem
-        from vllm.entrypoints.openai.responses.utils import _construct_single_message_from_response_item
+
+        from vllm.entrypoints.openai.responses.utils import (
+            _construct_single_message_from_response_item,
+        )
 
         external = ResponseReasoningItem(
-            id="rs_ext", type="reasoning", summary=[],
+            id="rs_ext",
+            type="reasoning",
+            summary=[],
             status="completed",
             encrypted_content="opaque-blob-not-from-vllm",
         )
