@@ -751,7 +751,28 @@ class SpeculativeConfig:
         ):
             target_vocab_size = self.target_model_config.get_vocab_size()
             draft_vocab_size = self.draft_model_config.get_vocab_size()
-            if target_vocab_size != draft_vocab_size:
+            # Temporary workaround: only raise when the draft vocab is LARGER
+            # than the target vocab, which would cause out-of-bounds indexing
+            # during verification (draft token IDs exceed target logits size).
+            #
+            # Draft vocab SMALLER than target is safe in practice: draft tokens
+            # are always valid target IDs, so verification never goes out of
+            # bounds.  The trade-off is a slightly lower acceptance rate because
+            # tokens that only exist in the target vocab (IDs >= draft_vocab_size)
+            # can never be drafted.
+            #
+            # Example: Qwen3-0.6B (vocab=151936) as draft for
+            #          Qwen2.5-VL-32B-Instruct (vocab=152064) works fine with
+            #          this relaxed check.
+            #
+            # TODO: Implement lossless heterogeneous-vocab support via the TLI
+            # (Token-Level Intersection) algorithm from ICML 2025 "Lossless
+            # Speculative Decoding for Heterogeneous Vocabularies", as proposed
+            # in SGLang PR #16290 (https://github.com/sgl-project/sglang/pull/16290).
+            # That approach masks draft logits to the vocab intersection and maps
+            # draft token IDs to target vocab space during verification, making
+            # the output distribution mathematically identical to the target.
+            if target_vocab_size < draft_vocab_size:
                 raise ValueError(
                     f"Target and draft model should have the same vocabulary size. "
                     f"Target model vocab_size={target_vocab_size}. "
