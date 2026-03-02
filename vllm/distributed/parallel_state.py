@@ -339,20 +339,25 @@ class GroupCoordinator:
 
         self_device_group = None
         self_cpu_group = None
-        for ranks in group_ranks:
+        for i, ranks in enumerate(group_ranks):
+            print(f"[GroupCoordinator] rank={self.rank} creating device_group {i} with ranks={ranks}, backend={torch_distributed_backend}", flush=True)
             device_group = torch.distributed.new_group(
                 ranks, backend=torch_distributed_backend
             )
+            print(f"[GroupCoordinator] rank={self.rank} created device_group {i}", flush=True)
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
+            print(f"[GroupCoordinator] rank={self.rank} creating cpu_group {i} with ranks={ranks}", flush=True)
             with suppress_stdout():
                 cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+            print(f"[GroupCoordinator] rank={self.rank} created cpu_group {i}", flush=True)
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
                 self.rank_in_group = ranks.index(self.rank)
                 self_device_group = device_group
                 self_cpu_group = cpu_group
+        print(f"[GroupCoordinator] rank={self.rank} finished all groups", flush=True)
 
         assert self_cpu_group is not None
         assert self_device_group is not None
