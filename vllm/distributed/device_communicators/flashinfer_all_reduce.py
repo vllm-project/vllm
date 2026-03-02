@@ -30,6 +30,8 @@ _fi_ar_workspace = None
 # Extra workspace for quant fusion patterns (only supported by trtllm backend)
 # Only created if primary workspace is not already trtllm
 _fi_ar_quant_workspace = None
+# Track whether atexit handler has been registered to avoid double registration
+_fi_ar_atexit_registered = False
 
 
 def get_fi_ar_workspace():
@@ -60,6 +62,7 @@ def initialize_fi_ar_workspace(
     create the workspace.
     """
     global _fi_ar_workspace
+    global _fi_ar_atexit_registered
     if _fi_ar_workspace is not None:
         return
 
@@ -88,7 +91,11 @@ def initialize_fi_ar_workspace(
     # Register cleanup to avoid unclean shutdown during Python interpreter
     # finalization. The atexit handler runs before sys.meta_path is cleared,
     # preventing ImportError in AllReduceFusionWorkspace.__del__.
-    atexit.register(destroy_fi_ar_workspace)
+    # Guard registration with a module-level flag to avoid double-registration
+    # if workspace is destroyed and re-initialized.
+    if not _fi_ar_atexit_registered:
+        atexit.register(destroy_fi_ar_workspace)
+        _fi_ar_atexit_registered = True
 
 
 def initialize_fi_ar_quant_workspace(
@@ -140,6 +147,7 @@ def initialize_fi_ar_quant_workspace(
 def destroy_fi_ar_workspace():
     global _fi_ar_workspace
     global _fi_ar_quant_workspace
+    global _fi_ar_atexit_registered
     if (
         _fi_ar_quant_workspace is not None
         and _fi_ar_quant_workspace is not _fi_ar_workspace
@@ -149,6 +157,7 @@ def destroy_fi_ar_workspace():
     if _fi_ar_workspace is not None:
         _fi_ar_workspace.destroy()
         _fi_ar_workspace = None
+    _fi_ar_atexit_registered = False
 
 
 class FlashInferAllReduce:
