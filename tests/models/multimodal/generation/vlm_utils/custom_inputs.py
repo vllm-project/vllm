@@ -154,3 +154,82 @@ def video_with_metadata_glm4_1v():
             video_data=video_input,
         )
     ]
+
+
+def moondream3_skill_inputs():
+    """Builds inputs for Moondream3 testing query and caption skills.
+
+    Point and detect are also supported via extra_args={"moondream3_task":
+    "detect"} but require separate test infrastructure (see
+    test_moondream3.py).
+    """
+    stop_sign = IMAGE_ASSETS[0].pil_image
+    cherry_blossom = IMAGE_ASSETS[1].pil_image
+
+    # Test different skills with appropriate prompts
+    prompts = [
+        # Query skill - question answering
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>What is shown in this image?<|md_reserved_2|>",  # noqa: E501
+        # Caption skill - uses dedicated caption template format
+        "<|endoftext|><image><|md_reserved_0|>describe<|md_reserved_1|>normal<|md_reserved_2|>",  # noqa: E501
+        # Query skill - specific question
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>What colors do you see?<|md_reserved_2|>",  # noqa: E501
+    ]
+
+    images = [
+        stop_sign,
+        cherry_blossom,
+        stop_sign,
+    ]
+
+    return [
+        PromptWithMultiModalInput(
+            prompts=prompts,
+            image_data=images,
+        )
+    ]
+
+
+def moondream3_multi_size_inputs():
+    """Builds inputs for Moondream3 with various image sizes.
+
+    Tests the multi-crop tiling functionality with different
+    image sizes and aspect ratios.
+    """
+    stop_sign = IMAGE_ASSETS[0].pil_image
+    cherry_blossom = IMAGE_ASSETS[1].pil_image
+
+    # Create images of different sizes to test multi-crop tiling
+    small_image = stop_sign.resize((200, 200))
+    medium_image = stop_sign  # Original size
+    large_image = cherry_blossom.resize((1200, 800))
+    tall_image = stop_sign.resize((300, 900))
+    wide_image = cherry_blossom.resize((1000, 300))
+
+    prompts = [
+        # Small image (should use 1x1 tiling)
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>Describe this small image.<|md_reserved_2|>",  # noqa: E501
+        # Medium image
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>What do you see?<|md_reserved_2|>",  # noqa: E501
+        # Large image (should use multi-crop)
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>Describe this large image.<|md_reserved_2|>",  # noqa: E501
+        # Tall image (different aspect ratio)
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>Describe this tall image.<|md_reserved_2|>",  # noqa: E501
+        # Wide image (different aspect ratio)
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>Describe this wide image.<|md_reserved_2|>",  # noqa: E501
+    ]
+
+    images = [
+        small_image,
+        medium_image,
+        large_image,
+        tall_image,
+        wide_image,
+    ]
+
+    return [
+        PromptWithMultiModalInput(
+            prompts=prompts,
+            image_data=images,
+        )
+    ]

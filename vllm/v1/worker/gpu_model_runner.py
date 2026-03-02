@@ -65,8 +65,11 @@ from vllm.model_executor.model_loader.reload import (
 )
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
+    NoOpPerRequestStateAdapter,
+    PerRequestStateAdapter,
     SupportsMRoPE,
     SupportsMultiModal,
+    SupportsPerRequestState,
     SupportsXDRoPE,
     is_mixture_of_experts,
     supports_eagle3,
@@ -438,6 +441,10 @@ class GPUModelRunner(
 
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
         self.is_mm_prefix_lm = self.model_config.is_mm_prefix_lm
+        self.mm_prefix_lm_left_padding = self.model_config.mm_prefix_lm_left_padding
+        self.per_request_state_adapter: PerRequestStateAdapter = (
+            NoOpPerRequestStateAdapter()
+        )
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -931,6 +938,11 @@ class GPUModelRunner(
     def _sync_device(self) -> None:
         torch.cuda.synchronize()
 
+    def _maybe_init_per_request_state_adapter(self, model: nn.Module) -> None:
+        if not isinstance(model, SupportsPerRequestState):
+            return
+        self.per_request_state_adapter = model.get_per_request_state_adapter()
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
         output.
@@ -945,6 +957,12 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+
+        # Let models clean up per-request state.
+        self.per_request_state_adapter.on_requests_finished(
+            scheduler_output.finished_req_ids,
+        )
+
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -1025,6 +1043,12 @@ class GPUModelRunner(
                 lora_request=new_req_data.lora_request,
             )
             self.requests[req_id] = req_state
+
+            # Let models register per-request custom decode state.
+            self.per_request_state_adapter.on_new_request(
+                req_id=req_id,
+                sampling_params=sampling_params,
+            )
 
             if sampling_params and sampling_params.prompt_logprobs is not None:
                 self.num_prompt_logprobs[req_id] = (
@@ -1953,7 +1977,9 @@ class GPUModelRunner(
                 for mm_feature in req_state.mm_features:
                     pos_info = mm_feature.mm_position
                     img_doc_range = pos_info.extract_embeds_range()
-                    image_doc_ranges.extend(img_doc_range)
+                    for start, end in img_doc_range:
+                        padded_start = max(0, start - self.mm_prefix_lm_left_padding)
+                        image_doc_ranges.append((padded_start, end))
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 req_doc_ranges[req_idx] = image_doc_ranges
 
@@ -3585,11 +3611,19 @@ class GPUModelRunner(
             self.model_config.is_encoder_decoder and num_encoder_reqs > 0
         )
 
+        step_req_ids = self.input_batch.req_ids[:num_reqs]
+
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         # When spec decode is enabled, delay clearing connector metadata
         # until after draft model runs in sample_tokens.
         clear_kv_metadata = self.speculative_config is None
+        self.per_request_state_adapter.on_before_model_forward(
+            req_ids=step_req_ids,
+            logits_indices=logits_indices,
+            device=self.device,
+        )
+
         with (
             set_forward_context(
                 attn_metadata,
@@ -3643,6 +3677,10 @@ class GPUModelRunner(
                     )
 
                 sample_hidden_states = hidden_states[logits_indices]
+
+                self.per_request_state_adapter.on_before_compute_logits(
+                    req_ids=step_req_ids,
+                )
                 logits = self.model.compute_logits(sample_hidden_states)
             else:
                 # Rare case.
@@ -3662,6 +3700,9 @@ class GPUModelRunner(
                     )
                     logits = None
                 else:
+                    self.per_request_state_adapter.on_before_compute_logits(
+                        req_ids=step_req_ids,
+                    )
                     logits = self.model.compute_logits(sample_hidden_states)
 
                 model_output_broadcast_data: dict[str, Any] = {}
@@ -3736,6 +3777,11 @@ class GPUModelRunner(
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+
+        self.per_request_state_adapter.on_after_sample(
+            req_ids=self.input_batch.req_ids[: self.input_batch.num_reqs],
+            sampled_token_ids=sampler_output.sampled_token_ids,
+        )
 
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output
@@ -3850,6 +3896,12 @@ class GPUModelRunner(
                 else:
                     logger.error("RoutedExpertsCapturer not initialized.")
 
+            per_request_extra_output = (
+                self.per_request_state_adapter.get_per_request_extra_output(
+                    req_ids=req_ids_output_copy,
+                )
+            )
+
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
                 req_id_to_index=req_id_to_index_output_copy,
@@ -3862,6 +3914,9 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                model_extra_output=(
+                    per_request_extra_output if per_request_extra_output else None
+                ),
             )
 
         if not self.use_async_scheduling:
@@ -4218,10 +4273,14 @@ class GPUModelRunner(
                 self.model = model_loader.load_model(
                     vllm_config=self.vllm_config, model_config=self.model_config
                 )
+                self._maybe_init_per_request_state_adapter(self.model)
                 if self.lora_config:
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
                     )
+                    # LoRA wrapping can replace the model object, so re-read the
+                    # adapter from the wrapped module.
+                    self._maybe_init_per_request_state_adapter(self.model)
                 if hasattr(self, "drafter"):
                     logger.info_once("Loading drafter model...")
                     self.drafter.load_model(self.model)

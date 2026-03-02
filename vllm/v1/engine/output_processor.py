@@ -644,6 +644,18 @@ class OutputProcessor:
                 kv_transfer_params,
                 routed_experts,
             ):
+                # Allow model-specific final text override.
+                _extra = engine_core_output.model_extra_output
+                text_override = _extra.get("text_override") if _extra else None
+                if (
+                    isinstance(text_override, str)
+                    and finish_reason is not None
+                    and isinstance(request_output, RequestOutput)
+                    and request_output.outputs
+                ):
+                    for comp_output in request_output.outputs:
+                        comp_output.text = text_override
+
                 if req_state.streaming_input:
                     request_output.finished = False
 

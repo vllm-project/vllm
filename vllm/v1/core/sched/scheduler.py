@@ -1268,6 +1268,7 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        per_request_extra_output = model_runner_output.model_extra_output
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
@@ -1410,6 +1411,11 @@ class Scheduler(SchedulerInterface):
                 or stopped
             ):
                 # Add EngineCoreOutput for this Request.
+                req_extra = (
+                    per_request_extra_output.get(req_id)
+                    if per_request_extra_output
+                    else None
+                )
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
@@ -1426,6 +1432,7 @@ class Scheduler(SchedulerInterface):
                         num_external_computed_tokens=request.num_external_computed_tokens,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        model_extra_output=req_extra,
                     )
                 )
             else:

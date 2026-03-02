@@ -375,6 +375,13 @@ class HfRunner:
         model_kwargs = model_kwargs if model_kwargs is not None else {}
         model_kwargs.setdefault("dtype", dtype)
 
+        # Allow overriding tokenizer/processor initialization for models
+        # whose repos do not ship standard assets (e.g. moondream3 stores its
+        # tokenizer in a separate repo and uses a custom processor patch).
+        hf_tokenizer_name = model_kwargs.pop("hf_tokenizer_name", None)
+        hf_processor = model_kwargs.pop("hf_processor", None)
+        skip_processor_init = model_kwargs.pop("skip_processor_init", False)
+
         if is_sentence_transformer:
             # Lazy init required for AMD CI
             from sentence_transformers import SentenceTransformer
@@ -422,7 +429,7 @@ class HfRunner:
         if not skip_tokenizer_init:
             self.tokenizer: "PreTrainedTokenizer | PreTrainedTokenizerFast" = (
                 AutoTokenizer.from_pretrained(
-                    model_name,
+                    hf_tokenizer_name or model_name,
                     trust_remote_code=trust_remote_code,
                 )
             )
@@ -431,11 +438,20 @@ class HfRunner:
         # it will call torch.cuda.device_count()
         from transformers import AutoProcessor
 
-        self.processor = AutoProcessor.from_pretrained(
-            model_name,
-            trust_remote_code=trust_remote_code,
-        )
+        if skip_processor_init:
+            self.processor = None
+        elif hf_processor is not None:
+            self.processor = hf_processor
+        else:
+            self.processor = AutoProcessor.from_pretrained(
+                model_name,
+                trust_remote_code=trust_remote_code,
+            )
         if skip_tokenizer_init:
+            if self.processor is None:
+                raise ValueError(
+                    "skip_tokenizer_init=True requires processor initialization."
+                )
             self.tokenizer = self.processor.tokenizer
 
     def get_inputs(
@@ -458,6 +474,12 @@ class HfRunner:
         all_inputs: list[BatchFeature | BatchEncoding | dict[str, torch.Tensor]] = []
         for i, prompt in enumerate(prompts):
             if isinstance(prompt, str):
+                if self.processor is None:
+                    raise RuntimeError(
+                        "HfRunner.processor is not initialized. "
+                        "Use skip_processor_init only with a patch_hf_runner "
+                        "that sets hf_model.processor before generation."
+                    )
                 # Create a copy to avoid modifying the original dict
                 processor_kwargs = (
                     tokenization_kwargs.copy()
@@ -555,6 +577,10 @@ class HfRunner:
                 use_cache=True,
                 **kwargs,
             )
+            if self.processor is None:
+                raise RuntimeError(
+                    "HfRunner.processor is not initialized; cannot decode output."
+                )
             output_str = self.processor.batch_decode(
                 output_ids,
                 skip_special_tokens=True,

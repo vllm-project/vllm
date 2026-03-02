@@ -13,6 +13,7 @@ from collections.abc import (
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,
+    Any,
     ClassVar,
     Literal,
     Protocol,
@@ -62,6 +63,88 @@ The output embeddings must be one of the following formats:
     each input multimodal data item (e.g, image).
 - A single 3D tensor, with the batch dimension grouping the 2D tensors.
 """
+
+
+PerRequestStateExtraOutput: TypeAlias = dict[str, dict[str, Any]]
+
+
+class PerRequestStateAdapter(Protocol):
+    """Typed callbacks for per-request mutable decode state.
+
+    The split callbacks preserve execution ordering across forward, logits
+    computation, and post-sampling state transitions.
+    """
+
+    def on_new_request(
+        self, *, req_id: str, sampling_params: object | None
+    ) -> None: ...
+
+    def on_requests_finished(self, req_ids: Iterable[str]) -> None: ...
+
+    def on_before_model_forward(
+        self,
+        *,
+        req_ids: list[str],
+        logits_indices: torch.Tensor,
+        device: torch.device,
+    ) -> None: ...
+
+    def on_before_compute_logits(self, *, req_ids: list[str]) -> None: ...
+
+    def on_after_sample(
+        self,
+        *,
+        req_ids: list[str],
+        sampled_token_ids: torch.Tensor,
+    ) -> None: ...
+
+    def get_per_request_extra_output(
+        self,
+        *,
+        req_ids: list[str],
+    ) -> PerRequestStateExtraOutput | None: ...
+
+
+class NoOpPerRequestStateAdapter:
+    """Default adapter used by models without per-request state logic."""
+
+    def on_new_request(self, *, req_id: str, sampling_params: object | None) -> None:
+        pass
+
+    def on_requests_finished(self, req_ids: Iterable[str]) -> None:
+        pass
+
+    def on_before_model_forward(
+        self,
+        *,
+        req_ids: list[str],
+        logits_indices: torch.Tensor,
+        device: torch.device,
+    ) -> None:
+        pass
+
+    def on_before_compute_logits(self, *, req_ids: list[str]) -> None:
+        pass
+
+    def on_after_sample(
+        self,
+        *,
+        req_ids: list[str],
+        sampled_token_ids: torch.Tensor,
+    ) -> None:
+        pass
+
+    def get_per_request_extra_output(
+        self,
+        *,
+        req_ids: list[str],
+    ) -> PerRequestStateExtraOutput | None:
+        return None
+
+
+@runtime_checkable
+class SupportsPerRequestState(Protocol):
+    def get_per_request_state_adapter(self) -> PerRequestStateAdapter: ...
 
 
 def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:

@@ -22,6 +22,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
@@ -138,6 +139,48 @@ def test_incremental_detokenization(
 
     assert output_processor.get_num_unfinished_requests() == 0
     assert not output_processor.has_unfinished_requests()
+
+
+def test_model_text_override(dummy_test_vectors):
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+
+    request = EngineCoreRequest(
+        request_id="request-override-int",
+        external_req_id="request-override",
+        prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            skip_special_tokens=False,
+            spaces_between_special_tokens=False,
+            output_kind=RequestOutputKind.DELTA,
+            stop=[],
+            include_stop_str_in_output=False,
+        ),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, dummy_test_vectors.prompt_strings[0])
+
+    first_token = dummy_test_vectors.generation_tokens[0][0]
+    override_text = '{"points": [{"x": 0.5, "y": 0.5}]}'
+    outputs = [
+        EngineCoreOutput(
+            request_id=request.request_id,
+            new_token_ids=[first_token],
+            finish_reason=FinishReason.LENGTH,
+            model_extra_output={"text_override": override_text},
+        )
+    ]
+    processed_outputs = output_processor.process_outputs(outputs)
+
+    assert len(processed_outputs.reqs_to_abort) == 0
+    assert len(processed_outputs.request_outputs) == 1
+    request_output = processed_outputs.request_outputs[0]
+    assert isinstance(request_output, RequestOutput)
+    assert request_output.outputs[0].text == override_text
 
 
 def _validate_logprobs(
