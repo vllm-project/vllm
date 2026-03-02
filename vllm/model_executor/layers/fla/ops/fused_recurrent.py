@@ -97,9 +97,9 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 
     mask_k = o_k < K
     mask_v = o_v < V
-    mask_h = mask_k[:, None] & mask_v[None, :]
+    mask_h = mask_v[:, None] & mask_k[None, :]
 
-    b_h = tl.zeros([BK, BV], dtype=tl.float32)
+    b_h = tl.zeros([BV, BK], dtype=tl.float32)
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
             if IS_SPEC_DECODING:
@@ -115,8 +115,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
                 return
             p_h0 = h0 + state_idx * stride_init_state_token
         else:
-            p_h0 = h0 + bos * HV * K * V
-        p_h0 = p_h0 + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+            p_h0 = h0 + bos * HV * V * K
+        p_h0 = p_h0 + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
     for i_t in range(0, T):
@@ -128,24 +128,24 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
             b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
         b_q = b_q * scale
-        # [BK, BV]
+        # [BV, BK]
         if not IS_KDA:
             b_g = tl.load(p_g).to(tl.float32)
             b_h *= exp(b_g)
         else:
             b_gk = tl.load(p_gk).to(tl.float32)
-            b_h *= exp(b_gk[:, None])
+            b_h *= exp(b_gk[None, :])
         # [BV]
-        b_v -= tl.sum(b_h * b_k[:, None], 0)
+        b_v -= tl.sum(b_h * b_k[None, :], 1)
         if IS_BETA_HEADWISE:
             b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
         else:
             b_beta = tl.load(p_beta).to(tl.float32)
         b_v *= b_beta
-        # [BK, BV]
-        b_h += b_k[:, None] * b_v[None, :]
+        # [BV, BK]
+        b_h += b_v[:, None] * b_k[None, :]
         # [BV]
-        b_o = tl.sum(b_h * b_q[:, None], 0)
+        b_o = tl.sum(b_h * b_q[None, :], 1)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
         # keep the states for multi-query tokens
@@ -157,11 +157,11 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             # Only store if state index is valid (not PAD_SLOT_ID)
             if final_state_idx >= 0:
                 p_ht = ht + final_state_idx * stride_final_state_token
-                p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+                p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
                 tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
         else:
             p_ht = ht + (bos + i_t) * stride_final_state_token
-            p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+            p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
             tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
         p_q += H * K
@@ -202,7 +202,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     if inplace_final_state:
         final_state = initial_state
     else:
-        final_state = q.new_empty(T, HV, K, V, dtype=initial_state.dtype)
+        final_state = q.new_empty(T, HV, V, K, dtype=initial_state.dtype)
 
     stride_init_state_token = initial_state.stride(0)
     stride_final_state_token = final_state.stride(0)
@@ -318,7 +318,7 @@ def fused_recurrent_gated_delta_rule(
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
-            Initial state of shape `[N, HV, K, V]` for `N` input sequences.
+            Initial state of shape `[N, HV, V, K]` for `N` input sequences.
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
         inplace_final_state: bool:
@@ -336,7 +336,7 @@ def fused_recurrent_gated_delta_rule(
         o (torch.Tensor):
             Outputs of shape `[B, T, HV, V]`.
         final_state (torch.Tensor):
-            Final state of shape `[N, HV, K, V]`.
+            Final state of shape `[N, HV, V, K]`.
 
     Examples::
         >>> import torch
@@ -350,7 +350,7 @@ def fused_recurrent_gated_delta_rule(
         >>> v = torch.randn(B, T, HV, V, device='cuda')
         >>> g = F.logsigmoid(torch.rand(B, T, HV, device='cuda'))
         >>> beta = torch.rand(B, T, HV, device='cuda').sigmoid()
-        >>> h0 = torch.randn(B, HV, K, V, device='cuda')
+        >>> h0 = torch.randn(B, HV, V, K, device='cuda')
         >>> o, ht = fused_gated_recurrent_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,

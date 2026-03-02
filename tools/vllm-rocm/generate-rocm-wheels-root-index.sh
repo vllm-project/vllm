@@ -190,7 +190,7 @@ echo ""
 # List what would be uploaded
 echo "Files to upload:"
 find "$WORK_DIR/output" -name "*.html" -type f | while read -r file; do
-    rel_path="${file#$WORK_DIR/output/}"
+    rel_path="${file#"$WORK_DIR"/output/}"
     echo "  rocm/$rel_path"
 done
 echo ""

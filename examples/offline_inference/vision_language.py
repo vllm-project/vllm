@@ -842,6 +842,40 @@ def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Intern-S1-Pro
+def run_interns1_pro(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "internlm/Intern-S1-Pro"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+        enforce_eager=True,
+        tensor_parallel_size=4,
+    )
+
+    if modality == "image":
+        placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    elif modality == "video":
+        placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"{placeholder}\n{question}"}]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # InternVL
 def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "OpenGVLab/InternVL3-2B"
@@ -2130,6 +2164,7 @@ model_example_map = {
     "hyperclovax_seed_vision": run_hyperclovax_seed_vision,
     "idefics3": run_idefics3,
     "interns1": run_interns1,
+    "interns1_pro": run_interns1_pro,
     "internvl_chat": run_internvl,
     "kanana_v": run_kanana_v,
     "keye_vl": run_keye_vl,

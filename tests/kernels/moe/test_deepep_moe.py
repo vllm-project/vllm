@@ -15,6 +15,7 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
@@ -179,7 +180,11 @@ def make_modular_kernel(
             quant_config=quant_config,
         )
 
-    mk = FusedMoEModularKernel(prepare_finalize=a2a, fused_experts=fused_experts)
+    mk = FusedMoEModularKernel(
+        prepare_finalize=a2a,
+        fused_experts=fused_experts,
+        inplace=False,
+    )
     return mk
 
 
@@ -256,8 +261,7 @@ def deep_ep_moe_impl(
             w2=w2,
             topk_weights=topk_weights_chunk,
             topk_ids=topk_chunk,
-            inplace=False,
-            activation="silu",
+            activation=MoEActivation.SILU,
             global_num_experts=num_experts,
             expert_map=build_expert_map(),
             apply_router_weight_on_input=False,

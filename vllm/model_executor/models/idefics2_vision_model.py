@@ -163,7 +163,10 @@ class Idefics2VisionAttention(nn.Module):
         )
         # Use unified MMEncoderAttention with Flash Attention support
         self.attn = MMEncoderAttention(
-            self.num_heads_per_partition, self.head_dim, self.scale
+            self.num_heads_per_partition,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
         )
 
     def forward(

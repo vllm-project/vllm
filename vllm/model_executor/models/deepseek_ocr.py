@@ -52,7 +52,6 @@ from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
     CROP_MODE,
-    IMAGE_SIZE,
     DeepseekOCRProcessor,
     count_tiles,
 )
@@ -66,6 +65,7 @@ from .deepencoder import DeepCLIPVisionTransformer, build_sam_vit_b
 from .deepseek_vl2 import MlpProjector
 
 # The image token id may be various
+IMAGE_SIZE = 640
 _IMAGE_TOKEN = "<image>"
 
 
@@ -190,7 +190,15 @@ class DeepseekOCRProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(DeepseekVLV2Config)
 
     def get_hf_processor(self, **kwargs: object):
-        return self.ctx.get_hf_processor(DeepseekOCRProcessor, **kwargs)
+        v1_processor_config = dict(
+            image_size=IMAGE_SIZE,
+            base_size=BASE_SIZE,
+            crop_mode=CROP_MODE,
+            strategy="v1",
+        )
+        return self.ctx.get_hf_processor(
+            DeepseekOCRProcessor, **{**kwargs, **v1_processor_config}
+        )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
@@ -247,7 +255,7 @@ class DeepseekOCRDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekOCRProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -439,7 +447,16 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
         if pixel_values is None or torch.sum(pixel_values).item() == 0:
             return None
 
-        base_size = self.vision_config.image_size
+        # Use actual tensor spatial dim instead of hardcoded
+        # vision_config.image_size (1024). The vision encoders (SAM & CLIP)
+        # support arbitrary resolutions via pos-encoding interpolation,
+        # so Tiny/Small/Base/Large variants all work with the same weights.
+        base_size = pixel_values.shape[-1]
+        if images_crop is not None and images_crop.numel() > 0:
+            image_size = images_crop.shape[-1]
+        else:
+            image_size = base_size
+
         return DeepseekOCRImagePixelInputs(
             type="pixel_values",
             data=pixel_values,
@@ -447,6 +464,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
             images_spatial_crop=images_spatial_crop,
             resolve_bindings={
                 "base_size": base_size,
+                "image_size": image_size,
             },
         )
 

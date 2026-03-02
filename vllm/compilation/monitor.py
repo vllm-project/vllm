@@ -14,7 +14,7 @@ torch_compile_start_time: float = 0.0
 
 def start_monitoring_torch_compile(vllm_config: VllmConfig) -> None:
     global torch_compile_start_time
-    torch_compile_start_time = time.time()
+    torch_compile_start_time = time.perf_counter()
 
     compilation_config: CompilationConfig = vllm_config.compilation_config
     path = vllm_config.compile_debug_dump_path()
@@ -30,10 +30,11 @@ def start_monitoring_torch_compile(vllm_config: VllmConfig) -> None:
 
 def end_monitoring_torch_compile(vllm_config: VllmConfig) -> None:
     compilation_config: CompilationConfig = vllm_config.compilation_config
+    total_compile_time: float = time.perf_counter() - torch_compile_start_time
     if compilation_config.mode == CompilationMode.VLLM_COMPILE:
         logger.info_once(
             "torch.compile takes %.2f s in total",
-            compilation_config.compilation_time,
+            total_compile_time,
             scope="local",
         )
         global context_manager

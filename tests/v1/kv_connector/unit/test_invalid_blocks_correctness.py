@@ -281,6 +281,17 @@ def test_sync_fail_invalid_blocks_evicted(fail_scheduler: Scheduler):
         f"(hash should be None), but hash is still {block.block_hash}"
     )
 
+    # Verify connector prefix cache stats:
+    # - queries = num_prompt_tokens (total tokens not in local cache)
+    # - hits = num_external_computed_tokens (tokens loaded externally)
+    assert engine_outputs.scheduler_stats is not None
+    stats = engine_outputs.scheduler_stats
+    assert stats.connector_prefix_cache_stats is not None
+    conn_stats = stats.connector_prefix_cache_stats
+    assert conn_stats.requests == 1
+    assert conn_stats.queries == num_prompt_tokens
+    assert conn_stats.hits == num_external_computed_tokens
+
 
 def test_async_recompute_blocks_not_cached_when_invalid(
     recompute_scheduler: Scheduler,
@@ -364,7 +375,9 @@ def test_async_recompute_blocks_not_cached_when_invalid(
     with patch.object(
         recompute_scheduler.kv_cache_manager, "evict_blocks", evict_blocks_spy
     ):
-        recompute_scheduler.update_from_output(scheduler_output, model_runner_output)
+        outputs = recompute_scheduler.update_from_output(
+            scheduler_output, model_runner_output
+        )
 
     # verify evict_blocks was NOT called (async blocks excluded from eviction)
     assert len(evict_blocks_calls) == 0, (
@@ -385,6 +398,19 @@ def test_async_recompute_blocks_not_cached_when_invalid(
         f"Async loading blocks shouldn't be cached or evicted. "
         f"Block {invalid_block_id} hash should be None but is {block.block_hash}"
     )
+
+    # Verify connector prefix cache stats:
+    # - queries = num_prompt_tokens (total tokens not in local cache)
+    # - hits = num_external_computed_tokens (tokens loaded externally)
+    assert len(outputs) == 1
+    engine_outputs = next(iter(outputs.values()))
+    assert engine_outputs.scheduler_stats is not None
+    stats = engine_outputs.scheduler_stats
+    assert stats.connector_prefix_cache_stats is not None
+    conn_stats = stats.connector_prefix_cache_stats
+    assert conn_stats.requests == 1
+    assert conn_stats.queries == num_prompt_tokens
+    assert conn_stats.hits == num_external_computed_tokens
 
     # now simulate async transfer completing
     model_runner_output_2 = create_model_runner_output(
