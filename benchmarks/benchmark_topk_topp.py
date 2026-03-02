@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Benchmark comparing Triton vs PyTorch sort-based top-k/top-p implementations.
+Benchmark comparing top-k/top-p implementations.
 
 Compares:
 - apply_top_k_top_p_triton (Triton binary search)
-- apply_top_k_top_p (PyTorch sort-based)
+- apply_top_k_top_p_pytorch (PyTorch sort-based baseline)
+- apply_top_k_top_p_pytorch (PyTorch scalar top-k fast path when applicable)
 
 Scenarios:
 - top_k only (whole batch, partial batch)
@@ -111,6 +112,7 @@ def benchmark_function(
     logits: torch.Tensor,
     k: torch.Tensor | None,
     p: torch.Tensor | None,
+    k_scalar: int | None = None,
     warmup_iters: int = 5,
     benchmark_iters: int = 20,
 ) -> tuple[float, int]:
@@ -122,7 +124,10 @@ def benchmark_function(
     # Warmup
     for _ in range(warmup_iters):
         logits_copy = logits.clone()
-        func(logits_copy, k, p)
+        if k_scalar is None:
+            func(logits_copy, k, p)
+        else:
+            func(logits_copy, k, p, k_scalar=k_scalar)
     torch.cuda.synchronize()
 
     # Reset memory stats before benchmark
@@ -137,7 +142,10 @@ def benchmark_function(
     for i in range(benchmark_iters):
         logits_copy = logits.clone()
         start_events[i].record()
-        func(logits_copy, k, p)
+        if k_scalar is None:
+            func(logits_copy, k, p)
+        else:
+            func(logits_copy, k, p, k_scalar=k_scalar)
         end_events[i].record()
 
     torch.cuda.synchronize()
@@ -152,6 +160,18 @@ def benchmark_function(
     _, peak_memory = measure_memory()
 
     return avg_time, peak_memory
+
+
+def get_uniform_top_k_scalar(
+    k_values: torch.Tensor | None, p_values: torch.Tensor | None
+) -> int | None:
+    """Return scalar k when top-k-only with a uniform value across the batch."""
+    if p_values is not None or k_values is None or k_values.numel() == 0:
+        return None
+    first_k = int(k_values[0].item())
+    if torch.all(k_values == first_k):
+        return first_k
+    return None
 
 
 def create_benchmark_configs(
@@ -294,7 +314,7 @@ def run_benchmark(
     results = []
 
     print("=" * 100)
-    print("Top-k/Top-p Benchmark: Triton vs PyTorch Sort-based")
+    print("Top-k/Top-p Benchmark: Triton vs PyTorch")
     print("=" * 100)
     print()
 
@@ -312,20 +332,42 @@ def run_benchmark(
             logits,
             config.k_values,
             config.p_values,
-            warmup_iters,
-            benchmark_iters,
+            warmup_iters=warmup_iters,
+            benchmark_iters=benchmark_iters,
         )
 
-        # Benchmark PyTorch
+        # Benchmark PyTorch baseline (sort-based)
         reset_memory_stats()
         pytorch_time, pytorch_mem = benchmark_function(
             apply_top_k_top_p_pytorch,
             logits,
             config.k_values,
             config.p_values,
-            warmup_iters,
-            benchmark_iters,
+            warmup_iters=warmup_iters,
+            benchmark_iters=benchmark_iters,
         )
+
+        # Benchmark PyTorch scalar top-k fast path when applicable.
+        k_scalar = get_uniform_top_k_scalar(config.k_values, config.p_values)
+        pytorch_scalar_time = None
+        pytorch_scalar_mem = None
+        scalar_gain = None
+        if k_scalar is not None:
+            reset_memory_stats()
+            pytorch_scalar_time, pytorch_scalar_mem = benchmark_function(
+                apply_top_k_top_p_pytorch,
+                logits,
+                config.k_values,
+                config.p_values,
+                k_scalar=k_scalar,
+                warmup_iters=warmup_iters,
+                benchmark_iters=benchmark_iters,
+            )
+            scalar_gain = (
+                pytorch_time / pytorch_scalar_time
+                if pytorch_scalar_time > 0
+                else float("inf")
+            )
 
         speedup = pytorch_time / triton_time if triton_time > 0 else float("inf")
         mem_ratio = pytorch_mem / triton_mem if triton_mem > 0 else float("inf")
@@ -338,12 +380,25 @@ def run_benchmark(
             "pytorch_mem": pytorch_mem,
             "speedup": speedup,
             "mem_ratio": mem_ratio,
+            "k_scalar": k_scalar,
+            "pytorch_scalar_time_ms": pytorch_scalar_time,
+            "pytorch_scalar_mem": pytorch_scalar_mem,
+            "scalar_gain": scalar_gain,
         }
         results.append(result)
 
         if verbose:
             print(f"  Triton:  {triton_time:.3f} ms, {format_memory(triton_mem)}")
             print(f"  PyTorch: {pytorch_time:.3f} ms, {format_memory(pytorch_mem)}")
+            if pytorch_scalar_time is not None and pytorch_scalar_mem is not None:
+                print(
+                    "  PyTorch (scalar-k): "
+                    f"{pytorch_scalar_time:.3f} ms, "
+                    f"{format_memory(pytorch_scalar_mem)}"
+                )
+                print(f"  Scalar gain over PyTorch baseline: {scalar_gain:.2f}x")
+            else:
+                print("  PyTorch (scalar-k): n/a (non-uniform k or top-p active)")
             print(f"  Speedup: {speedup:.2f}x, Memory ratio: {mem_ratio:.2f}x")
             print()
 
@@ -357,19 +412,20 @@ def run_benchmark(
 def print_summary_table(results: list[dict]):
     """Print a summary table of results."""
     print()
-    print("=" * 130)
+    print("=" * 175)
     print("SUMMARY TABLE")
-    print("=" * 130)
+    print("=" * 175)
     print()
 
     # Header
     header = (
         f"{'Scenario':<40} {'Batch':>6} {'Vocab':>7} {'Ops%':>6} "
-        f"{'Triton (ms)':>12} {'PyTorch (ms)':>13} {'Speedup':>8} "
-        f"{'Tri Mem':>10} {'Pyt Mem':>10}"
+        f"{'Triton (ms)':>12} {'PyTorch (ms)':>13} "
+        f"{'Pyt Scalar (ms)':>16} {'Scalar Gain':>12} {'Speedup':>8} "
+        f"{'Tri Mem':>10} {'Pyt Mem':>10} {'PytSc Mem':>10}"
     )
     print(header)
-    print("-" * 130)
+    print("-" * 175)
 
     # Group by scenario type
     current_vocab = None
@@ -379,25 +435,33 @@ def print_summary_table(results: list[dict]):
         # Add separator between vocab sizes
         if current_vocab != config.vocab_size:
             if current_vocab is not None:
-                print("-" * 130)
+                print("-" * 175)
             current_vocab = config.vocab_size
 
         scenario = config.name.split("_b")[0]  # Extract scenario name
+        scalar_time = result["pytorch_scalar_time_ms"]
+        scalar_time_str = f"{scalar_time:.3f}" if scalar_time is not None else "n/a"
+        scalar_gain = result["scalar_gain"]
+        scalar_gain_str = f"{scalar_gain:.2f}x" if scalar_gain is not None else "n/a"
+        scalar_mem = result["pytorch_scalar_mem"]
+        scalar_mem_str = format_memory(scalar_mem) if scalar_mem is not None else "n/a"
         print(
             f"{scenario:<40} {config.batch_size:>6} {config.vocab_size:>7} "
             f"{config.ops_pct:>5.0f}% "
             f"{result['triton_time_ms']:>12.3f} {result['pytorch_time_ms']:>13.3f} "
+            f"{scalar_time_str:>16} {scalar_gain_str:>12} "
             f"{result['speedup']:>7.2f}x "
             f"{format_memory(result['triton_mem']):>10} "
-            f"{format_memory(result['pytorch_mem']):>10}"
+            f"{format_memory(result['pytorch_mem']):>10} "
+            f"{scalar_mem_str:>10}"
         )
 
-    print("=" * 130)
+    print("=" * 175)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Benchmark Triton vs PyTorch sort-based top-k/top-p implementations"
+        description="Benchmark Triton vs PyTorch top-k/top-p implementations"
     )
     parser.add_argument(
         "--batch-sizes",

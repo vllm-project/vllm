@@ -5,7 +5,10 @@ import torch
 from torch import Generator
 
 from vllm.platforms import current_platform
-from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
+from vllm.v1.sample.ops.topk_topp_sampler import (
+    apply_top_k_only_scalar,
+    apply_top_k_top_p_pytorch,
+)
 
 CUDA_DEVICE = "cuda" if current_platform.is_cuda() else None
 DEVICE = current_platform.device_type
@@ -47,6 +50,27 @@ def test_topk_impl_equivalence():
     result2 = apply_top_k_top_p_pytorch(logits=logits.clone(), k=k, p=no_op_top_p)
 
     assert torch.allclose(result1, result2)
+
+
+def test_topk_scalar_impl_equivalence():
+    torch.set_default_device(DEVICE)
+    generator = Generator(device=DEVICE).manual_seed(34)
+
+    logits = torch.rand((BATCH_SIZE, VOCAB_SIZE), generator=generator)
+    k_scalar = 16
+    k = torch.full((BATCH_SIZE,), k_scalar, dtype=torch.int32)
+
+    result_tensor_k = apply_top_k_top_p_pytorch(logits=logits.clone(), k=k, p=None)
+    result_scalar_k = apply_top_k_top_p_pytorch(
+        logits=logits.clone(),
+        k=k,
+        p=None,
+        k_scalar=k_scalar,
+    )
+    result_scalar_only = apply_top_k_only_scalar(logits=logits.clone(), k=k_scalar)
+
+    assert torch.allclose(result_tensor_k, result_scalar_k)
+    assert torch.allclose(result_tensor_k, result_scalar_only)
 
 
 @pytest.mark.skip(
