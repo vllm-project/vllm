@@ -18,6 +18,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionImpl,
+    AttentionLayer,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
@@ -1283,7 +1284,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
     def do_kv_cache_update(
         self,
-        layer: Attention,
+        layer: AttentionLayer,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
@@ -1345,7 +1346,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
     def do_rope_and_kv_cache_update(
         self,
-        layer: Attention,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
