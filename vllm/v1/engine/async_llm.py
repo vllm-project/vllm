@@ -1106,6 +1106,7 @@ class AsyncRenderer(RendererClient):
         self.renderer = renderer_from_config(vllm_config)
         self.io_processor = get_io_processor(
             vllm_config,
+            self.renderer,
             self.model_config.io_processor_plugin,
         )
         self.input_processor = InputProcessor(vllm_config, self.renderer)
