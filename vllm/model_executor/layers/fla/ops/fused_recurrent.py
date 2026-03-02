@@ -314,7 +314,9 @@ def fused_recurrent_gated_delta_rule_packed_decode_fwd(
     - initial_state: [S, HV, V, K], updated in-place using `ssm_state_indices`.
     """
     if mixed_qkv.ndim != 2:
-        raise ValueError(f"`mixed_qkv` must be a 2D tensor (got ndim={mixed_qkv.ndim}).")
+        raise ValueError(
+            f"`mixed_qkv` must be a 2D tensor (got ndim={mixed_qkv.ndim})."
+        )
     if mixed_qkv.stride(-1) != 1:
         raise ValueError("`mixed_qkv` must be contiguous in the last dim.")
     if a.ndim != 2 or b.ndim != 2:
@@ -385,17 +387,23 @@ def fused_recurrent_gated_delta_rule_packed_decode_fwd(
     qkv_dim = mixed_qkv.shape[1]
     qk_dim = qkv_dim - HV * V
     if qk_dim <= 0 or qk_dim % 2 != 0:
-        raise ValueError(f"Invalid packed `mixed_qkv` last dim={qkv_dim} for HV={HV}, V={V}.")
+        raise ValueError(
+            f"Invalid packed `mixed_qkv` last dim={qkv_dim} for HV={HV}, V={V}."
+        )
     q_dim = qk_dim // 2
     if q_dim % K != 0:
         raise ValueError(f"Invalid packed Q size {q_dim}: must be divisible by K={K}.")
     H = q_dim // K
     if H <= 0 or HV % H != 0:
-        raise ValueError(f"Invalid head config inferred from mixed_qkv: H={H}, HV={HV}.")
+        raise ValueError(
+            f"Invalid head config inferred from mixed_qkv: H={H}, HV={HV}."
+        )
 
     BK = triton.next_power_of_2(K)
     if triton.cdiv(K, BK) != 1:
-        raise ValueError(f"Packed decode kernel only supports NK=1 (got K={K}, BK={BK}).")
+        raise ValueError(
+            f"Packed decode kernel only supports NK=1 (got K={K}, BK={BK})."
+        )
 
     BV = min(triton.next_power_of_2(V), 32)
     num_stages = 3
