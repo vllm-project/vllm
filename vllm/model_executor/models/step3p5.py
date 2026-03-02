@@ -742,7 +742,7 @@ class Step3p5Model(nn.Module):
                 if replaced_name not in params_dict:
                     continue
                 param = params_dict[replaced_name]
-                weight_loader = param.weight_loader
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
                 loaded_params.add(replaced_name)
                 break
@@ -761,7 +761,9 @@ class Step3p5Model(nn.Module):
                     if replaced_name not in params_dict:
                         continue
                     param = params_dict[replaced_name]
-                    weight_loader = param.weight_loader
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     moe_expert_num = self.moe_num_experts
                     # Per-tensor global scales (e.g. weight_global_scale)
                     # have shape [1] in compressed-tensors NVFP4 checkpoints.

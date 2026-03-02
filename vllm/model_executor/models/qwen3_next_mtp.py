@@ -176,7 +176,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
                 if name not in params_dict:
                     continue
                 param = params_dict[name]
-                weight_loader = param.weight_loader
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
@@ -194,7 +194,9 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
                     ) and name not in params_dict:
                         continue
                     param = params_dict[name]
-                    weight_loader = param.weight_loader
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     weight_loader(
                         param,
                         loaded_weight,

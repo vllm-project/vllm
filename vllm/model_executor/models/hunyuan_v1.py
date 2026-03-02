@@ -800,7 +800,7 @@ class HunYuanModel(nn.Module):
                     continue
 
                 param = params_dict[name]
-                weight_loader = param.weight_loader
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
                 loaded_params.add(name)
                 is_found = True
@@ -829,7 +829,7 @@ class HunYuanModel(nn.Module):
                 units = loaded_weight.shape[0] // den
 
                 param = params_dict[name]
-                weight_loader = param.weight_loader
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 offset = 0
                 for shard_id, num in split_param:
                     new_offset = offset + num * units
@@ -865,7 +865,8 @@ class HunYuanModel(nn.Module):
                     # here since otherwise we may skip experts with other
                     # available replicas.
                     weight_loader = typing.cast(
-                        Callable[..., bool], param.weight_loader
+                        Callable[..., bool],
+                        getattr(param, "weight_loader", default_weight_loader),
                     )
                     success = weight_loader(
                         param,

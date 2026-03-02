@@ -156,7 +156,10 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         num_experts: int,
     ) -> bool:
         param = params_dict[name]
-        weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
+        weight_loader = typing.cast(
+            Callable[..., bool],
+            getattr(param, "weight_loader", default_weight_loader),
+        )
         loaded_local_expert = False
         for expert_id in range(num_experts):
             curr_expert_weight = loaded_weight[expert_id]
@@ -230,7 +233,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
                 if name not in params_dict:
                     continue
                 param = params_dict[name]
-                weight_loader = param.weight_loader
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
@@ -284,7 +287,9 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
                         ) and name_mapped not in params_dict:
                             continue
                         param = params_dict[name_mapped]
-                        weight_loader = param.weight_loader
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
                         success = weight_loader(
                             param,
                             loaded_weight,
