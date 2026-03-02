@@ -20,17 +20,13 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
-from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.attention.backend import (
-    AttentionMetadataBuilder,
-    CommonAttentionMetadata,
-)
+from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.tree_attn import (
     TreeAttentionMetadata,
@@ -38,7 +34,7 @@ from vllm.v1.attention.backends.tree_attn import (
 )
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -53,6 +49,7 @@ from vllm.v1.spec_decode.utils import (
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
 
@@ -113,10 +110,8 @@ class SpecDecodeBaseProposer:
             vllm_config.model_config
         )
 
-        self.attn_metadata_builder: AttentionMetadataBuilder | None = None
-        self.draft_indexer_metadata_builder: AttentionMetadataBuilder | None = None
-        self.attn_layer_names: list[str] = []
-        self.indexer_layer_names: list[str] = []
+        self.draft_attn_groups: list[AttentionGroup] = []
+        self.kv_cache_gid: int = -1
         self.eagle3_use_aux_hidden_state: bool = (
             self._get_eagle3_use_aux_hidden_state_from_config()
         )
@@ -353,7 +348,7 @@ class SpecDecodeBaseProposer:
                 self._slot_mapping_buffer[num_actual:num_tokens].fill_(PADDING_SLOT_ID)
 
         view = self._slot_mapping_buffer[:num_tokens]
-        return {name: view for name in self.attn_layer_names + self.indexer_layer_names}
+        return {name: view for name in self._draft_attn_layer_names}
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
         """Initialize cudagraph dispatcher keys for eagle.
@@ -420,33 +415,13 @@ class SpecDecodeBaseProposer:
 
         assert self.runner is not None
 
-        if self.attn_metadata_builder is None:
-            attn_metadata_builder = self._get_attention_metadata_builder()
-        else:
-            attn_metadata_builder = self.attn_metadata_builder
-
-        attn_metadata = attn_metadata_builder.build_for_drafting(
-            common_attn_metadata=common_attn_metadata, draft_index=0
-        )
-        # FIXME: support hybrid kv for draft model (remove separate indexer)
-        if self.draft_indexer_metadata_builder:
-            draft_indexer_metadata = (
-                self.draft_indexer_metadata_builder.build_for_drafting(
-                    common_attn_metadata=common_attn_metadata,
-                    draft_index=0,
-                )
+        per_layer_attn_metadata: dict[str, object] = {}
+        for attn_group in self.draft_attn_groups:
+            attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
+                common_attn_metadata=common_attn_metadata, draft_index=0
             )
-        else:
-            draft_indexer_metadata = None
-        # At this moment, we assume all eagle layers belong to the same KV
-        # cache group, thus using the same attention metadata.
-        per_layer_attn_metadata = {}
-        for layer_name in self.attn_layer_names:
-            per_layer_attn_metadata[layer_name] = attn_metadata
-
-        for layer_name in self.indexer_layer_names:
-            assert draft_indexer_metadata is not None
-            per_layer_attn_metadata[layer_name] = draft_indexer_metadata
+            for layer_name in attn_group.layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
 
         cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
             self._determine_batch_execution_and_padding(num_tokens)
@@ -613,7 +588,8 @@ class SpecDecodeBaseProposer:
                 common_attn_metadata._num_computed_tokens_cpu += 1
 
             # Compute the slot mapping.
-            block_size = attn_metadata_builder.kv_cache_spec.block_size
+            # Use the first draft attention group's kv_cache_spec for block_size
+            block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
             if self.uses_mrope:
                 # all dimensions of positions are the same
                 block_numbers = clamped_positions[0] // block_size
@@ -639,11 +615,13 @@ class SpecDecodeBaseProposer:
             )
 
             # Rebuild attention metadata
-            attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
-                common_attn_metadata=common_attn_metadata, draft_index=token_index + 1
-            )
-            for layer_name in self.attn_layer_names:
-                per_layer_attn_metadata[layer_name] = attn_metadata
+            for attn_group in self.draft_attn_groups:
+                attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
+                    common_attn_metadata=common_attn_metadata,
+                    draft_index=token_index + 1,
+                )
+                for layer_name in attn_group.layer_names:
+                    per_layer_attn_metadata[layer_name] = attn_metadata
 
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
@@ -805,18 +783,17 @@ class SpecDecodeBaseProposer:
             # 2.
             # Recompute the slot mapping based on the new positions and
             # rejection mask.
-            builder = (
-                self._get_attention_metadata_builder()
-                if self.attn_metadata_builder is None
-                else self.attn_metadata_builder
-            )
+            # Use the first draft attention group's kv_cache_spec for block_size
+            # (all draft layers share the same kv-cache group)
+            assert len(self.draft_attn_groups) > 0
+            block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
             new_slot_mapping = compute_new_slot_mapping(
                 cad=cad,
                 new_positions=self.positions[:total_num_output_tokens],
                 is_rejected_token_mask=self.is_rejected_token_mask[
                     :total_num_output_tokens
                 ],
-                block_size=builder.kv_cache_spec.block_size,
+                block_size=block_size,
                 num_new_tokens=self.net_num_new_slots_per_request,
                 max_model_len=self.max_model_len,
             )
@@ -1078,9 +1055,9 @@ class SpecDecodeBaseProposer:
                 common_attn_metadata=common_attn_metadata, draft_index=level + 1
             )
 
-            # Apply new attention metadata to all layers.
+            # Apply new attention metadata to all draft layers.
             per_layer_attn_metadata = {}
-            for layer_name in self.attn_layer_names:
+            for layer_name in self._draft_attn_layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
 
             # Consider max model length.
@@ -1288,43 +1265,17 @@ class SpecDecodeBaseProposer:
                 AttentionLayerBase,  # type: ignore[type-abstract]
             ).keys()
         )
-        # FIXME: support hybrid kv for draft model
-        target_indexer_layer_names = set(
-            get_layers_from_vllm_config(
-                self.vllm_config, DeepseekV32IndexerCache
-            ).keys()
-        )
 
         self.model = self._get_model()
 
-        draft_attn_layer_names = (
-            get_layers_from_vllm_config(
-                self.vllm_config,
-                AttentionLayerBase,  # type: ignore[type-abstract]
-            ).keys()
-            - target_attn_layer_names
+        # Find draft layers (attention layers added by draft model)
+        all_attn_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
         )
-        indexer_layers = get_layers_from_vllm_config(
-            self.vllm_config, DeepseekV32IndexerCache
+        self._draft_attn_layer_names = (
+            set(all_attn_layers.keys()) - target_attn_layer_names
         )
-        draft_indexer_layer_names = indexer_layers.keys() - target_indexer_layer_names
-        self.attn_layer_names = list(draft_attn_layer_names - draft_indexer_layer_names)
-        self.indexer_layer_names = list(draft_indexer_layer_names)
-
-        if self.indexer_layer_names:
-            first_layer = self.indexer_layer_names[0]
-            self.draft_indexer_metadata_builder = (
-                indexer_layers[first_layer]
-                .get_attn_backend()
-                .get_builder_cls()(
-                    indexer_layers[first_layer].get_kv_cache_spec(self.vllm_config),
-                    self.indexer_layer_names,
-                    self.vllm_config,
-                    self.device,
-                )
-            )
-        else:
-            self.draft_indexer_metadata_builder = None
 
         if self.supports_mm_inputs:
             # Even if the target model is multimodal, we can also use
@@ -1562,9 +1513,9 @@ class SpecDecodeBaseProposer:
 
             # Make sure to use EAGLE's own buffer during cudagraph capture.
             if (
-                self.attn_layer_names
+                self._draft_attn_layer_names
                 and slot_mappings is not None
-                and self.attn_layer_names[0] in slot_mappings
+                and next(iter(self._draft_attn_layer_names)) in slot_mappings
             ):
                 slot_mapping_dict = self._get_slot_mapping(num_input_tokens)
             else:
@@ -1593,31 +1544,6 @@ class SpecDecodeBaseProposer:
                 if self.pass_hidden_states_to_model:
                     kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
                 self.model(**kwargs)
-
-    def _get_attention_metadata_builder(self) -> AttentionMetadataBuilder:
-        """Find and return the attention metadata builders for EAGLE layers.
-
-        Returns:
-            The metadata builders for EAGLE layers.
-
-        Raises:
-            AssertionError: If no metadata builders are found for EAGLE layers.
-        """
-        builder = None
-        chosen_layer = self.attn_layer_names[0]
-
-        for kv_cache_group in self.runner.attn_groups:
-            for attn_group in kv_cache_group:
-                if chosen_layer in attn_group.layer_names:
-                    builder = attn_group.get_metadata_builder()
-                    break
-            if builder is not None:
-                break
-
-        assert builder is not None, (
-            "Failed to find attention metadata builder for EAGLE layers."
-        )
-        return builder
 
     def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
         """
@@ -1651,12 +1577,54 @@ class SpecDecodeBaseProposer:
                 set(
                     [
                         kv_cache_groups[layer_name]
-                        for layer_name in self.attn_layer_names
+                        for layer_name in self._draft_attn_layer_names
                     ]
                 )
             )
             == 1
         ), "All drafting layers should belong to the same kv cache group"
+
+    def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
+        """
+        Initialize AttentionGroups for draft layers using kv_cache_config.
+        Called from the model runner's initialize_kv_cache.
+        """
+        all_attn_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        )
+
+        # Find which kv_cache_group the draft layers belong to
+        self.validate_same_kv_cache_group(kv_cache_config)
+        kv_cache_spec = None
+        for gid, group in enumerate(kv_cache_config.kv_cache_groups):
+            if self._draft_attn_layer_names & set(group.layer_names):
+                self.kv_cache_gid = gid
+                kv_cache_spec = group.kv_cache_spec
+                break
+
+        attention_groups: dict[str, AttentionGroup] = {}
+        if kv_cache_spec is not None:
+            for layer_name in self._draft_attn_layer_names:
+                attn_backend = all_attn_layers[layer_name].get_attn_backend()
+                backend_key = attn_backend.full_cls_name()
+                if backend_key not in attention_groups:
+                    layer_kv_cache_spec = kv_cache_spec
+                    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                        layer_kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
+
+                    attn_group = AttentionGroup(
+                        backend=attn_backend,
+                        layer_names=[layer_name],
+                        kv_cache_spec=layer_kv_cache_spec,
+                        kv_cache_group_id=self.kv_cache_gid,
+                    )
+                    attn_group.create_metadata_builders(self.vllm_config, self.device)
+                    attention_groups[backend_key] = attn_group
+                else:
+                    attention_groups[backend_key].layer_names.append(layer_name)
+
+        self.draft_attn_groups = list(attention_groups.values())
 
     def _determine_batch_execution_and_padding(
         self,
