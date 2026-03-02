@@ -210,6 +210,19 @@ steps:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
     - CROSS_LAYERS_BLOCKS=True bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
+- label: NixlConnector PD + Spec Decode acceptance (2 GPUs)
+  timeout_in_minutes: 30
+  device: a100
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/v1/worker/kv_connector_model_runner_mixin.py
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - bash v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh
+
 - label: Pipeline + Context Parallelism (4 GPUs)
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
