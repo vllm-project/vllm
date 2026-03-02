@@ -21,15 +21,23 @@ from vllm.outputs import (
 from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import (
+    NORMAL_TRACE,
+    TOKEN_LEVEL_TRACE,
     SpanAttributes,
     SpanKind,
     extract_trace_context,
     instrument_manual,
 )
 from vllm.utils import length_from_prompt_token_ids_or_embeds
-from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
+from vllm.v1.engine import (
+    EngineCoreOutput,
+    EngineCoreRequest,
+    FinishReason,
+    get_event_name,
+)
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
+from vllm.v1.engine.observable_context import ObservableContext
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
     IterationStats,
@@ -139,6 +147,7 @@ class RequestState:
         prompt_token_ids: list[int] | None,
         prompt_embeds: torch.Tensor | None,
         logprobs_processor: LogprobsProcessor | None,
+        observable_context: ObservableContext,
         detokenizer: IncrementalDetokenizer | None,
         max_tokens_param: int | None,
         arrival_time: float,
@@ -164,6 +173,7 @@ class RequestState:
             self.prompt_token_ids, self.prompt_embeds
         )
         self.logprobs_processor = logprobs_processor
+        self.observable_context = observable_context
         self.detokenizer = detokenizer
         self.max_tokens_param = max_tokens_param
         self.top_p = top_p
@@ -254,6 +264,7 @@ class RequestState:
             prompt_token_ids=request.prompt_token_ids,
             prompt_embeds=request.prompt_embeds,
             logprobs_processor=logprobs_processor,
+            observable_context=ObservableContext.from_new_request(),
             detokenizer=detokenizer,
             max_tokens_param=max_tokens_param,
             top_p=top_p,
@@ -654,6 +665,10 @@ class OutputProcessor:
                     # LLMEngine: return list of RequestOutputs.
                     request_outputs.append(request_output)
 
+            # Handle observable info, if enhanced trace is enabled.
+            if req_state.observable_context:
+                req_state.observable_context.update_from_output(engine_core_output)
+
             # Free completed requests.
             if finish_reason is not None:
                 if req_state.streaming_input:
@@ -736,6 +751,7 @@ class OutputProcessor:
             SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE: decode_time,
             SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE: inference_time,
             SpanAttributes.GEN_AI_REQUEST_ID: req_state.external_req_id,
+            SpanAttributes.GEN_AI_USAGE_CACHED_TOKENS: req_state.num_cached_tokens,
         }
 
         # Add optional request parameters
@@ -752,12 +768,39 @@ class OutputProcessor:
         if req_state.n:
             attributes[SpanAttributes.GEN_AI_REQUEST_N] = req_state.n
 
+        # Build events list for token level tracing
+        events: list[dict[str, Any]] = []
+        if req_state.observable_context and req_state.observable_context.not_empty:
+            attributes[SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL] = TOKEN_LEVEL_TRACE
+            ob_context = req_state.observable_context
+
+            for event in ob_context.engine_core_events:
+                events.append(
+                    {
+                        "name": get_event_name(event.type),
+                        "timestamp": int(event.wall_clock_timestamp * 1e9),
+                        "attributes": event.attributes,
+                    }
+                )
+
+            for event_ in ob_context.token_related_events:
+                events.append(
+                    {
+                        "name": event_.name,
+                        "timestamp": int(event_.timestamp * 1e9),
+                        "attributes": event_.attributes,
+                    }
+                )
+        else:
+            attributes[SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL] = NORMAL_TRACE
+
         instrument_manual(
             span_name="llm_request",
             start_time=arrival_time_ns,
             attributes=attributes,
             context=trace_context,
             kind=SpanKind.SERVER,
+            events=events if events else None,
         )
 
     def _update_stats_from_output(

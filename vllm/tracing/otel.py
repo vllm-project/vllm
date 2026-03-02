@@ -187,8 +187,19 @@ def manual_instrument_otel(
     attributes: dict[str, Any] | None = None,
     context: Context | None = None,
     kind: Any = None,  # SpanKind, but typed as Any for when OTEL unavailable
+    events: list[dict[str, Any]] | None = None,
 ):
-    """Manually create and end a span with explicit timestamps."""
+    """Manually create and end a span with explicit timestamps.
+
+    Args:
+        span_name: Name of the span to create.
+        start_time: Start time in nanoseconds since epoch.
+        end_time: Optional end time in nanoseconds. If None, ends immediately.
+        attributes: Dict of span attributes.
+        context: Optional trace context (e.g., from extract_trace_context).
+        kind: Optional SpanKind (e.g., SpanKind.SERVER).
+        events: List of event dicts with 'name', 'timestamp', and 'attributes' keys.
+    """
     if not _IS_OTEL_AVAILABLE:
         return
 
@@ -207,6 +218,13 @@ def manual_instrument_otel(
     span = tracer.start_span(**span_kwargs)
     if attributes:
         span.set_attributes(attributes)
+    if events:
+        for event in events:
+            span.add_event(
+                name=event["name"],
+                timestamp=event.get("timestamp"),
+                attributes=event.get("attributes"),
+            )
     if end_time is not None:
         span.end(end_time=end_time)
     else:
