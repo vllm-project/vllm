@@ -27,6 +27,7 @@ class EagleCudaGraphManager:
         self.scheduler_config = vllm_config.scheduler_config
         self.device = device
 
+        self.max_model_len = vllm_config.model_config.max_model_len
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.dp_size = vllm_config.parallel_config.data_parallel_size
