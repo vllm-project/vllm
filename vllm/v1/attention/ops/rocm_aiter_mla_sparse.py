@@ -304,7 +304,7 @@ def rocm_fp8_paged_mqa_logits(
     """
 
     if rocm_aiter_ops.is_enabled():
-        from aiter.ops.triton.attention.fp8_paged_mqa_logits import (
+        from aiter.ops.triton.attention.pa_mqa_logits import (
             deepgemm_fp8_paged_mqa_logits_stage1,
         )
 
