@@ -2082,3 +2082,121 @@ def test_unify_hybrid_kv_cache_specs():
 
     with pytest.raises(ValueError):
         kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+
+
+def test_drafter_layers_dedicated_group():
+    """Test that drafter (drafter) layers get their own KV cache group
+    in hybrid attention models, preventing scatter across target groups.
+
+    Regression test for the case where adding EAGLE drafter layers to a
+    hybrid model (e.g., 12 sliding + 12 full) pushes the full attention
+    count past the 1.25x grouping threshold, causing drafter layers to be
+    split across multiple groups.
+    """
+    from unittest.mock import MagicMock
+
+    from vllm.v1.core.kv_cache_utils import (
+        _get_kv_cache_groups_uniform_page_size,
+        _identify_drafter_layers,
+    )
+
+    # --- Test _identify_drafter_layers ---
+
+    # Mock vllm_config with 24 target layers and spec decode enabled
+    mock_config = MagicMock()
+    mock_config.speculative_config = MagicMock()
+    mock_config.model_config.get_total_num_hidden_layers.return_value = 24
+
+    # Layer names: 24 target + 4 drafter (global indices 24-27)
+    layer_names = [f"model.layers.{i}.self_attn.attn" for i in range(28)]
+    drafter_layers_result = _identify_drafter_layers(mock_config, layer_names)
+    assert drafter_layers_result is not None
+    assert drafter_layers_result == {
+        "model.layers.24.self_attn.attn",
+        "model.layers.25.self_attn.attn",
+        "model.layers.26.self_attn.attn",
+        "model.layers.27.self_attn.attn",
+    }
+
+    # No spec config -> returns None
+    mock_config_no_spec = MagicMock()
+    mock_config_no_spec.speculative_config = None
+    assert _identify_drafter_layers(mock_config_no_spec, layer_names) is None
+
+    # --- Test grouping: 12 sliding + 12 full + 4 drafter (all full) ---
+    # Without fix: 16 full > 12 * 1.25 = 15, splits into 2 groups,
+    # drafter layers scattered. With fix: drafter separated first.
+
+    kv_cache_spec = {}
+    # 12 sliding attention layers (even indices 0-22)
+    for i in range(0, 24, 2):
+        kv_cache_spec[f"model.layers.{i}.self_attn.attn"] = new_sliding_window_spec()
+    # 12 full attention layers (odd indices 1-23)
+    for i in range(1, 24, 2):
+        kv_cache_spec[f"model.layers.{i}.self_attn.attn"] = new_kv_cache_spec()
+    # 4 drafter layers (indices 24-27, full attention)
+    for i in range(24, 28):
+        kv_cache_spec[f"model.layers.{i}.self_attn.attn"] = new_kv_cache_spec()
+
+    drafter_layers = {f"model.layers.{i}.self_attn.attn" for i in range(24, 28)}
+
+    groups = _get_kv_cache_groups_uniform_page_size(kv_cache_spec, drafter_layers)
+
+    # Find which group contains all drafter layers
+    drafter_group_ids = set()
+    for gid, group in enumerate(groups):
+        for name in group.layer_names:
+            if name in drafter_layers:
+                drafter_group_ids.add(gid)
+
+    # All drafter layers must be in exactly one group
+    assert len(drafter_group_ids) == 1, (
+        f"Drafter layers scattered across {len(drafter_group_ids)} groups: "
+        f"{drafter_group_ids}"
+    )
+
+    # The drafter group should contain exactly the 4 drafter layers
+    drafter_gid = drafter_group_ids.pop()
+    drafter_group = groups[drafter_gid]
+    assert set(drafter_group.layer_names) == drafter_layers
+
+    # --- Test no-regression: 18 sliding + 18 full + 4 drafter ---
+    # This case already works without the fix (22 < 18*1.25=22.5),
+    # but should still work with drafter separation.
+
+    kv_cache_spec_big = {}
+    for i in range(0, 36, 2):
+        kv_cache_spec_big[f"model.layers.{i}.self_attn.attn"] = (
+            new_sliding_window_spec()
+        )
+    for i in range(1, 36, 2):
+        kv_cache_spec_big[f"model.layers.{i}.self_attn.attn"] = new_kv_cache_spec()
+    for i in range(36, 40):
+        kv_cache_spec_big[f"model.layers.{i}.self_attn.attn"] = new_kv_cache_spec()
+
+    drafter_layers_big = {f"model.layers.{i}.self_attn.attn" for i in range(36, 40)}
+
+    groups_big = _get_kv_cache_groups_uniform_page_size(
+        kv_cache_spec_big, drafter_layers_big
+    )
+
+    drafter_group_ids_big = set()
+    for gid, group in enumerate(groups_big):
+        for name in group.layer_names:
+            if name in drafter_layers_big:
+                drafter_group_ids_big.add(gid)
+    assert len(drafter_group_ids_big) == 1
+
+    # --- Test without drafter_layers (None) -> unchanged behavior ---
+    groups_no_spec = _get_kv_cache_groups_uniform_page_size(kv_cache_spec, None)
+    # Without drafter separation, 16 full layers should be split
+    # into 2 groups (16 > 12*1.25=15), so drafter layers get scattered
+    drafter_group_ids_no_spec = set()
+    for gid, group in enumerate(groups_no_spec):
+        for name in group.layer_names:
+            if name in drafter_layers:
+                drafter_group_ids_no_spec.add(gid)
+    # This confirms the bug: without the fix, drafter layers are in >1 group
+    assert len(drafter_group_ids_no_spec) > 1, (
+        "Expected drafter layers to be scattered without the fix"
+    )
