@@ -104,11 +104,23 @@ try:
                 scheduler_output, intermediate_tensors
             )
             if self._is_intermediate_tensors(output):
+                if (
+                    self.worker.model_runner.supports_mm_inputs
+                    and get_pp_group().is_first_rank
+                ):
+                    # Strip mm_features before Ray forwards it to the next PP Stage.
+                    # PP Stage>0 only needs the intermediate tensors,
+                    # not preprocessed multimodal data.
+
+                    # scheduled_new_reqs is a required field of SchedulerOutput,
+                    # so accessing it directly will raise AttributeError if missing.
+                    for req in scheduler_output.scheduled_new_reqs:
+                        req.mm_features = []
                 return scheduler_output, grammar_output, output
 
             if isinstance(output, AsyncModelRunnerOutput):
                 output = output.get_output()
-            if not get_pp_group().is_last_rank:
+            if not self._is_last_rank():
                 # Case where there are no scheduled requests
                 # but may still be finished requests.
                 assert not output or not output.req_ids
@@ -127,6 +139,9 @@ try:
 
         def _is_intermediate_tensors(self, output) -> bool:
             return isinstance(output, IntermediateTensors)
+
+        def _is_last_rank(self) -> bool:
+            return get_pp_group().is_last_rank
 
     ray_import_err = None
 

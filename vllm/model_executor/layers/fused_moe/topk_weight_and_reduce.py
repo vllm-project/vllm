@@ -14,10 +14,11 @@ class TopKWeightAndReduceDelegate(mk.TopKWeightAndReduce):
     implementation does not perform weight application and reduction
     but cannot address the needs of all the compatible PrepareAndFinalize
     implementations.
-    For example, BatchedTritonExperts is compatible with both
-    PplxPrepareAndFinalize and BatchedPrepareAndFinalize. PplxPrepareAndFinalize
-    does the weight-application + reduction as part of the pplx combine kernel.
-    But the BatchedPrepareAndFinalize needs an implementation. To facilitate
+    For example, BatchedTritonExperts is compatible with both batched
+    PrepareAndFinalize implementations like DeepEPLLPrepareAndFinalize and
+    BatchedPrepareAndFinalize. Some PrepareAndFinalize implementations do
+    the weight-application + reduction as part of the combine kernel, while
+    BatchedPrepareAndFinalize needs an explicit implementation. To facilitate
     this case, the BatchedTritonExperts could use TopKWeightAndReduceDelegate
     so the PrepareAndFinalize implementations could choose how to
     weight + reduce.
