@@ -14,7 +14,7 @@ vllm bench serve \
     --result-filename tp_pp.json \
     --save-result \
     --endpoint /v1/completions
-kill -s SIGTERM $server_pid &
+kill -s SIGTERM $server_pid; wait $server_pid || true
 failed_req=$(jq '.failed' ./test_results/tp_pp.json)
 if [ "$failed_req" -ne 0 ]; then
   echo "Some requests were failed!"
@@ -34,7 +34,7 @@ vllm bench serve \
     --result-filename dp_pp.json \
     --save-result \
     --endpoint /v1/completions
-kill -s SIGTERM $server_pid &
+kill -s SIGTERM $server_pid; wait $server_pid || true
 failed_req=$(jq '.failed' ./test_results/dp_pp.json)
 if [ "$failed_req" -ne 0 ]; then
   echo "Some requests were failed!"
