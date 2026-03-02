@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Mistral adaptation of the LLaMA architecture."""
 
+import os
 from collections.abc import Iterable
 
 import torch
@@ -24,9 +25,12 @@ from vllm.model_executor.models.llama import (
     LlamaModel,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils import init_logger
 from vllm.v1.attention.backend import AttentionType
 
 from .utils import AutoWeightsLoader
+
+logger = init_logger(__name__)
 
 
 class MistralMLP(nn.Module):
@@ -281,10 +285,30 @@ class MistralForCausalLM(LlamaForCausalLM):
             self,
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(
+        loaded = loader.load_weights(
             self.maybe_remap_mistral(name, loaded_weight)
             for name, loaded_weight in weights
         )
+
+        # Compress lm_head to FP8 to save VRAM on large-vocab models.
+        # Enabled by VLLM_FP8_LM_HEAD=1 env var.
+        if (
+            os.environ.get("VLLM_FP8_LM_HEAD")
+            and not self.config.tie_word_embeddings
+            and hasattr(self.lm_head, "weight")
+            and self.lm_head.weight.dtype != torch.float8_e4m3fn
+        ):
+            saved_mb = self.lm_head.weight.numel() / 1024**2
+            self.lm_head.weight = torch.nn.Parameter(
+                self.lm_head.weight.data.to(torch.float8_e4m3fn),
+                requires_grad=False,
+            )
+            logger.info(
+                "Compressed lm_head to float8_e4m3fn (saved %.0f MB VRAM)",
+                saved_mb,
+            )
+
+        return loaded
 
     def maybe_remap_mistral(
         self,
