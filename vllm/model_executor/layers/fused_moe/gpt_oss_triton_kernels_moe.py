@@ -94,7 +94,7 @@ def pack_bitmatrix(
     div = indices // 32
     rem = indices % 32
     one = tl.cast(1, tl.uint32)
-    zero = tl.cast(0, tl.uint32) 
+    zero = tl.cast(0, tl.uint32)
 
     # Iterate through all the relevant bitmatrix columns.
     for i in range(bm_cols):
@@ -102,11 +102,17 @@ def pack_bitmatrix(
         offs = tl.arange(0, BLOCK_SIZE_K // 32) + i * (BLOCK_SIZE_K // 32)
         # All topks that need to go into this column has the correct bit set.
         # Other bits are 0. x is a 2D tensor.
-        is_valid_expert = (div[:, :, None] == offs[None, None, :]) & (indices[:, :, None] >= 0)
+        is_valid_expert = (div[:, :, None] == offs[None, None, :]) & (
+            indices[:, :, None] >= 0
+        )
         x = tl.where(is_valid_expert, (one << rem)[:, :, None], zero)
         # Reduce x to get a single int32_t bitpack.
         y = tl.reduce_or(x, axis=1)
-        bitmatrix_ptrs = bitmatrix + offsets_m[:, None] * bm_row_stride + offs[None, :] * bm_col_stride
+        bitmatrix_ptrs = (
+            bitmatrix
+            + offsets_m[:, None] * bm_row_stride
+            + offs[None, :] * bm_col_stride
+        )
         tl.store(bitmatrix_ptrs, y, mask=offsets_m[:, None] < n_rows)
 
 
@@ -509,7 +515,11 @@ def make_routing_data(
     BLOCK_SIZE_K = 32
 
     bm_cols = triton.cdiv(num_local_experts, 32)  # n_bitpacks
-    bitmatrix = torch.zeros((bm_cols, triton.cdiv(n_rows, 32) * 32), dtype=torch.uint32, device=topk_ids.device)
+    bitmatrix = torch.zeros(
+        (bm_cols, triton.cdiv(n_rows, 32) * 32),
+        dtype=torch.uint32,
+        device=topk_ids.device,
+    )
     bitmatrix = torch.transpose(bitmatrix, 0, 1)[:n_rows]
 
     grid = (triton.cdiv(n_rows, BLOCK_SIZE_M),)
