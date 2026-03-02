@@ -174,6 +174,10 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         if defer_input_quant:
             return a1, None, None, None, None
 
+        # For emulation, a13 / a2 QDQ is handled later on.
+        if quant_config._a1.emulation:
+            return a1, None, None, None, None
+
         input_sf = (
             quant_config.a1_gscale
             if quant_config.use_nvfp4_w4a4

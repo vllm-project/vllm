@@ -977,6 +977,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 w2_scale=layer.w2_weight_scale,
                 w1_bias=layer.w13_bias,
                 w2_bias=layer.w2_bias,
+                emulation=self.emulate,
             )
         elif self.ocp_mx_scheme == "w_mxfp4_a_fp8":
             return mxfp4_w4a8_moe_quant_config(
@@ -987,6 +988,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 w1_bias=layer.w13_bias,
                 w2_bias=layer.w2_bias,
                 block_shape=None,
+                emulation=self.emulate,
             )
         elif self.ocp_mx_scheme in ["w_mxfp6_e3m2_a_fp8", "w_mxfp6_e2m3_a_fp8"]:
             raise NotImplementedError(
@@ -1004,6 +1006,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 a1_scale=None,
                 a2_scale=None,
                 block_shape=None,
+                emulation=self.emulate,
             )
 
     def apply(

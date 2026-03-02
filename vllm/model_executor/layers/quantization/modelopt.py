@@ -73,6 +73,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     swizzle_mxfp8_scale,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    NvFp4LinearBackend,
     apply_nvfp4_linear,
     convert_to_nvfp4_linear_kernel_format,
     select_nvfp4_linear_backend,
@@ -1099,6 +1100,10 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         self.marlin_input_dtype = None
         self.backend = select_nvfp4_linear_backend()
 
+        self.swizzle = None
+        if self.backend == NvFp4LinearBackend.EMULATION:
+            self.swizzle = False
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -1178,7 +1183,24 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         input_global_scale = layer.input_scale.max().to(torch.float32)
         layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
         del layer.input_scale
+
+        if (
+            torch.unique(layer.input_scale).numel() != 1
+            or torch.unique(layer.weight_scale_2).numel() != 1
+        ):
+            logger.warning_once(
+                "In NVFP4 linear, the global scale for input or weight are different"
+                " for parallel layers (e.g. q_proj, k_proj, v_proj). This "
+                " will likely results in reduce accuracy. Please verify the model"
+                " accuracy. Consider using a checkpoint with a shared global NVFP4"
+                " scale for parallel layers."
+            )
+
         weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
+
+        if self.backend == NvFp4LinearBackend.EMULATION:
+            weight_global_scale = 1 / weight_global_scale
+
         layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
         del layer.weight_scale_2
 
@@ -1204,6 +1226,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer=layer,
             x=x,
             bias=bias,
+            swizzle=self.swizzle,
         )
 
 
@@ -1410,6 +1433,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             a2_scale=layer.w2_input_scale,
             is_act_and_mul=self.moe.is_act_and_mul,
         )
+
+        if self.nvfp4_backend == NvFp4MoeBackend.EMULATION:
+            w13_scale_2 = 1.0 / w13_scale_2
+            w2_scale_2 = 1.0 / w2_scale_2
 
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)

@@ -42,6 +42,7 @@ class NvFp4MoeBackend(Enum):
     FLASHINFER_CUTEDSL = "FLASHINFER_CUTEDSL"
     VLLM_CUTLASS = "VLLM_CUTLASS"
     MARLIN = "MARLIN"
+    EMULATION = "emulation"
 
 
 FLASHINFER_NVFP4_MOE_BACKENDS = [
@@ -100,6 +101,12 @@ def backend_to_kernel_cls(
         )
 
         return MarlinExperts
+    elif backend == NvFp4MoeBackend.EMULATION:
+        from vllm.model_executor.layers.fused_moe.quantization_emulation_moe import (
+            QuantEmulationExperts,
+        )
+
+        return QuantEmulationExperts
     else:
         raise ValueError(f"Unknown NvFP4 MoE backend: {backend.value}")
 
@@ -138,6 +145,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
+        NvFp4MoeBackend.EMULATION,
     ]
 
     # NOTE(rob): this is kind of a hack. We need to peak into
@@ -267,6 +275,7 @@ def select_nvfp4_moe_backend(
         )
 
     # Select kernels in order of backend.
+    unsupported_reasons = {}
     for backend in AVAILABLE_BACKENDS:
         if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
             k_cls = None  # type: ignore[assignment]
@@ -290,11 +299,17 @@ def select_nvfp4_moe_backend(
             logger.info_once(_make_log_backend(backend), scope="local")
             return backend, k_cls
         else:
+            unsupported_reasons[backend] = reason
             logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
 
-    raise NotImplementedError(
-        "No NvFp4 MoE backend supports the deployment configuration."
+    message = (
+        "No NvFp4 MoE backend supports the deployment configuration. Reasons:\n"
+        + "\n".join(
+            f"{backend_name}: {reason}"
+            for backend_name, reason in unsupported_reasons.items()
+        )
     )
+    raise NotImplementedError(message)
 
 
 def convert_to_nvfp4_moe_kernel_format(
@@ -365,6 +380,8 @@ def convert_to_nvfp4_moe_kernel_format(
             w2_scale_2=w2_scale_2,
             is_act_and_mul=is_act_and_mul,
         )
+    elif nvfp4_backend == NvFp4MoeBackend.EMULATION:
+        pass
     else:
         raise ValueError(f"Unknown NvFp4 backend for MoE: {nvfp4_backend}")
 
@@ -409,6 +426,16 @@ def make_nvfp4_moe_quant_config(
             g2_alphas=w2_scale_2,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
+        )
+    elif backend == NvFp4MoeBackend.EMULATION:
+        return nvfp4_moe_quant_config(
+            g1_alphas=w13_scale_2,
+            g2_alphas=w2_scale_2,
+            a1_gscale=a13_scale,
+            a2_gscale=a2_scale,
+            w1_scale=w13_scale,
+            w2_scale=w2_scale,
+            emulation=True,
         )
 
     g1_alphas = a13_scale * w13_scale_2

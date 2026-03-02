@@ -1380,6 +1380,7 @@ def inplace_fused_experts(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    emulation: bool = False,
 ) -> None:
     fused_experts_impl(
         hidden_states,
@@ -1407,6 +1408,7 @@ def inplace_fused_experts(
         block_shape,
         w1_bias,
         w2_bias,
+        emulation=emulation,
     )
 
 
@@ -1472,6 +1474,7 @@ def outplace_fused_experts(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    emulation: bool = False,
 ) -> torch.Tensor:
     return fused_experts_impl(
         hidden_states,
@@ -1499,6 +1502,7 @@ def outplace_fused_experts(
         block_shape,
         w1_bias,
         w2_bias,
+        emulation,
     )
 
 
@@ -1600,6 +1604,7 @@ def fused_experts(
         block_shape=quant_config.block_shape,
         w1_bias=quant_config.w1_bias,
         w2_bias=quant_config.w2_bias,
+        emulation=quant_config._a1.emulation,
     )
 
 
@@ -1659,6 +1664,7 @@ def fused_experts_impl(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    emulation: bool = False,
 ) -> torch.Tensor:
     # Convert string activation to enum for internal use
     activation_enum = MoEActivation.from_str(activation)
@@ -1819,6 +1825,7 @@ def fused_experts_impl(
             per_act_token_quant=per_channel_quant,
             block_shape=block_shape,
             ocp_mx_scheme=ocp_mx_scheme,
+            emulation=emulation,
         )
 
         # SPARSITY_FACTOR is a heuristic margin ensuring tokens_in_chunk * top_k
@@ -1887,6 +1894,7 @@ def fused_experts_impl(
             per_act_token_quant=per_channel_quant,
             block_shape=block_shape,
             ocp_mx_scheme=ocp_mx_scheme,
+            emulation=emulation,
         )
 
         if expert_map is not None:

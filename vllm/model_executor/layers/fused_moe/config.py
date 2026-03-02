@@ -185,6 +185,9 @@ class FusedMoEQuantDesc:
     # Biases for GPT triton MoE
     bias: torch.Tensor | None = None
 
+    # Emulation flag: if True we should use QDQ (activations) or DQ (weights).
+    emulation: bool = False
+
 
 # TODO(bnell): have subclasses for specific moe methods?
 # e.g. for specific arguments bias, precision, etc.
@@ -475,6 +478,7 @@ class FusedMoEQuantConfig:
         w1_zp: torch.Tensor | None = None,
         w2_zp: torch.Tensor | None = None,
         weight_dtype: torch.dtype | str | None = None,
+        emulation: bool = False,
     ) -> "FusedMoEQuantConfig":
         """
         General builder function for a FusedMoEQuantConfig.
@@ -528,13 +532,37 @@ class FusedMoEQuantConfig:
             quant_dtype, per_act_token_quant, per_out_ch_quant, block_shape
         )
         quant_config = FusedMoEQuantConfig(
-            _a1=FusedMoEQuantDesc(quant_dtype, a_shape, a1_scale, a1_gscale),
-            _a2=FusedMoEQuantDesc(quant_dtype, a_shape, a2_scale, a2_gscale),
+            _a1=FusedMoEQuantDesc(
+                quant_dtype,
+                a_shape,
+                a1_scale,
+                a1_gscale,
+                emulation=emulation,
+            ),
+            _a2=FusedMoEQuantDesc(
+                quant_dtype,
+                a_shape,
+                a2_scale,
+                a2_gscale,
+                emulation=emulation,
+            ),
             _w1=FusedMoEQuantDesc(
-                weight_dtype, w_shape, w1_scale, g1_alphas, w1_zp, w1_bias
+                weight_dtype,
+                w_shape,
+                w1_scale,
+                g1_alphas,
+                w1_zp,
+                w1_bias,
+                emulation=emulation,
             ),
             _w2=FusedMoEQuantDesc(
-                weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
+                weight_dtype,
+                w_shape,
+                w2_scale,
+                g2_alphas,
+                w2_zp,
+                w2_bias,
+                emulation=emulation,
             ),
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
@@ -708,6 +736,7 @@ def ocp_mx_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
+    emulation: bool = False,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for mxfp4 activations and mxfp4 weights.
@@ -725,6 +754,7 @@ def ocp_mx_moe_quant_config(
         per_act_token_quant=False,
         per_out_ch_quant=False,
         block_shape=block_shape,
+        emulation=emulation,
     )
 
 
@@ -737,6 +767,7 @@ def nvfp4_moe_quant_config(
     w2_scale: torch.Tensor,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    emulation: bool = False,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for mxfp4 activations and nvp4 weights.
@@ -754,6 +785,7 @@ def nvfp4_moe_quant_config(
         per_act_token_quant=False,
         per_out_ch_quant=False,
         block_shape=None,
+        emulation=emulation,
     )
 
 
