@@ -26,34 +26,21 @@ from vllm.config import (
     PassConfig,
     VllmConfig,
 )
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (  # noqa: E501
-    _KernelT,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
+from vllm.model_executor.kernels.linear import (
     AiterFp8BlockScaledMMKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.cuda import (
+    ChannelWiseTorchFP8ScaledMMLinearKernel,
     CudaFp8BlockScaledMMKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
     CutlassFp8BlockScaledMMKernel,
     CutlassFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.flashinfer import (
+    DeepGemmFp8BlockScaledMMKernel,
     FlashInferFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
-    ChannelWiseTorchFP8ScaledMMLinearKernel,
     PerTensorTorchFP8ScaledMMLinearKernel,
-    RowWiseTorchFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
+    RowWiseTorchFP8ScaledMMLinearKernel,
     TritonFp8BlockScaledMMKernel,
+    _KernelT,
 )
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
@@ -87,8 +74,9 @@ CUDA_KERNEL_GROUPSHAPE_COMBINATIONS = [
     (CudaFp8BlockScaledMMKernel, GroupShape(1, 128)),
     (CudaFp8BlockScaledMMKernel, GroupShape(1, 64)),
     (CutlassFp8BlockScaledMMKernel, GroupShape(1, 128)),
-    (CutlassFp8BlockScaledMMKernel, GroupShape(1, 64)),
+    (DeepGemmFp8BlockScaledMMKernel, GroupShape(1, 128)),
     (TritonFp8BlockScaledMMKernel, GroupShape(1, 128)),
+    (TritonFp8BlockScaledMMKernel, GroupShape(1, 64)),
 ]
 
 # ROCm kernels
@@ -101,6 +89,7 @@ ROCM_KERNEL_GROUPSHAPE_COMBINATIONS = [
     (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
     # Blockwise group shapes (no kernel abstraction)
     (TritonFp8BlockScaledMMKernel, GroupShape(1, 128)),
+    (TritonFp8BlockScaledMMKernel, GroupShape(1, 64)),
 ]
 
 KERNEL_GROUPSHAPE_COMBINATIONS = (
@@ -178,7 +167,7 @@ class TestModel(torch.nn.Module):
 
         # Enable aiter quantization if requested
         for layer in self.fp8_linear_layers:
-            layer.kernel.input_quant_op.use_aiter = use_aiter_quant
+            layer.kernel.quant_fp8.use_aiter = use_aiter_quant
 
         self.enable_quant_fp8_custom_op = self.fp8_linear_layers[
             0

@@ -26,22 +26,14 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
+from vllm.model_executor.kernels.linear import (
     CutlassFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.flashinfer import (
     FlashInferFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
+    FP8ScaledMMLinearKernel,
     PerTensorTorchFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    FP8ScaledMMLinearKernel,
-)
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
@@ -167,7 +159,7 @@ class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
 
     def forward(self, x):
         y = self.silu_and_mul(x)
-        x2 = self.w8a8_block_fp8_linear.apply(y, self.w, self.wscale)
+        x2 = self.w8a8_block_fp8_linear(y, self.w, self.wscale)
         return x2
 
     def ops_in_model_before(self):

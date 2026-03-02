@@ -42,7 +42,7 @@ from vllm.distributed import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+from vllm.model_executor.kernels.linear import (
     _KernelT,
     init_fp8_linear_kernel,
 )
@@ -1579,7 +1579,7 @@ class TestFP8Layer(torch.nn.Module):
         )
 
     def is_quant_fp8_enabled(self) -> bool:
-        return self.kernel.input_quant_op.enabled()
+        return self.kernel.quant_fp8.enabled()
 
     def forward(
         self, y: torch.Tensor, bias: torch.Tensor | None = None

@@ -9,6 +9,9 @@ from torch.nn.parameter import Parameter
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import (
+    init_fp8_linear_kernel,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -44,9 +47,6 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
@@ -603,13 +603,14 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
+        block_n, block_k = self._WEIGHT_BLOCK_SIZE
         self.weight_block_size = list(self._WEIGHT_BLOCK_SIZE)
 
         activation_quant_key = create_fp8_quant_key(
-            static=False, group_shape=GroupShape(1, self.weight_block_size[0])
+            static=False, group_shape=GroupShape(1, block_k)
         )
         weight_quant_key = create_fp8_quant_key(
-            static=True, group_shape=GroupShape(*self.weight_block_size)
+            static=True, group_shape=GroupShape(block_n, block_k)
         )
         self.w8a8_block_fp8_linear = init_fp8_linear_kernel(
             weight_quant_key=weight_quant_key,

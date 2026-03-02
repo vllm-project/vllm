@@ -4,7 +4,11 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
@@ -81,12 +85,34 @@ class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
-        self.input_quant_op = QuantFP8(
+        # flashinfer does not require input fp8 op.
+        # since flashinfer for block_scaled_mm
+        # is used dynamically with deepgemm.
+        # the quant_fp8 is instantiated indentical to
+        # deepgemm input quant.
+        self.quant_fp8 = QuantFP8(
             static=act_scale_descriptor.static,
             group_shape=act_scale_descriptor.group_shape,
             num_token_padding=self.get_output_padding(),
             use_ue8m0=is_deep_gemm_e8m0_used(),
+            tma_aligned_scales=envs.VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES,
+            column_major_scales=True,
         )
+
+    @classmethod
+    def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
+        can_implement_base, reason = super().can_implement(config)
+        if not can_implement_base:
+            return can_implement_base, reason
+
+        act_quant_desc = config.activation_quant_key.scale
+        if act_quant_desc.group_shape != GroupShape(1, 128):
+            return (
+                False,
+                "Supports only dynamic per token group activation "
+                "quantization with group_shape=(1,128).",
+            )
+        return True, None
 
     @classmethod
     def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMLinearKernel"]]:
@@ -194,6 +220,11 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
 
     base_type: type[FlashInferFp8BlockScaledMMKernel] = FlashInferFp8BlockScaledMMKernel
     fallback_type: type[DeepGemmFp8BlockScaledMMKernel] = DeepGemmFp8BlockScaledMMKernel
+
+    def __init__(self, config: FP8ScaledMMLinearLayerConfig):
+        super().__init__(config)
+        # Only DeepGemmFp8BlockScaledMMKernel has separate input quant op.
+        self.quant_fp8 = self.fallback.quant_fp8
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         # deepgemm might require post processing.

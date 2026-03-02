@@ -122,7 +122,9 @@ def _w8a8_triton_block_scaled_mm_func(
     block_size: list[int],
     output_dtype: torch.dtype,
 ) -> torch.Tensor:
-    from ...utils.fp8_utils import w8a8_triton_block_scaled_mm
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        w8a8_triton_block_scaled_mm,
+    )
 
     return w8a8_triton_block_scaled_mm(
         qx, weight, x_scale, weight_scale, block_size, output_dtype

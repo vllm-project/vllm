@@ -161,11 +161,11 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             return can_implement_base, reason
 
         act_quant_desc = config.activation_quant_key.scale
-        if act_quant_desc.group_shape != GroupShape(1, 12):
+        if act_quant_desc.group_shape != GroupShape(1, 128):
             return (
                 False,
                 "Supports only dynamic per token group activation "
-                "quantization with group_shape=(1,12).",
+                "quantization with group_shape=(1,128).",
             )
         return True, None
 
@@ -203,7 +203,7 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
         )
 
-        q_input, input_scale = self.input_quant_op(
+        q_input, input_scale = self.quant_fp8(
             input_2d, input_scale, scale_up, use_triton=use_triton
         )
 

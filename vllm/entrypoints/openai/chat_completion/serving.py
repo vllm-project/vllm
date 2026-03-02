@@ -75,16 +75,12 @@ from vllm.parser import ParserManager
 from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.mistral import (
-    MistralTokenizer,
-    maybe_serialize_tool_calls,
-    truncate_tool_call_ids,
-    validate_request_params,
-)
 from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.tool_parsers.utils import partial_json_loads
 from vllm.utils.collection_utils import as_list
+from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.utils.mistral import mt as _mt
 
 logger = init_logger(__name__)
 
@@ -244,18 +240,18 @@ class OpenAIServingChat(OpenAIServing):
 
             tool_parser = self.tool_parser
 
-            if isinstance(tokenizer, MistralTokenizer):
+            if is_mistral_tokenizer(tokenizer):
                 # because of issues with pydantic we need to potentially
                 # re-serialize the tool_calls field of the request
                 # for more info: see comment in `maybe_serialize_tool_calls`
-                maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
-                truncate_tool_call_ids(request)  # type: ignore[arg-type]
-                validate_request_params(request)
+                _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
+                _mt.truncate_tool_call_ids(request)  # type: ignore[arg-type]
+                _mt.validate_request_params(request)
 
             # Check if tool parsing is unavailable (common condition)
             tool_parsing_unavailable = (
                 tool_parser is None
-                and not isinstance(tokenizer, MistralTokenizer)
+                and not is_mistral_tokenizer(tokenizer)
                 and not self.use_harmony
             )
 
@@ -639,8 +635,6 @@ class OpenAIServingChat(OpenAIServing):
         request_metadata: RequestResponseMetadata,
         reasoning_parser: ReasoningParser | None = None,
     ) -> AsyncGenerator[str, None]:
-        from vllm.tokenizers.mistral import MistralTokenizer
-
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
         first_iteration = True
@@ -955,7 +949,7 @@ class OpenAIServingChat(OpenAIServing):
                                 )
                             else:
                                 # Generate ID based on tokenizer type
-                                if isinstance(tokenizer, MistralTokenizer):
+                                if is_mistral_tokenizer(tokenizer):
                                     tool_call_id = MistralToolCall.generate_random_id()
                                 else:
                                     tool_call_id = make_tool_call_id(
@@ -1516,7 +1510,7 @@ class OpenAIServingChat(OpenAIServing):
                 tool_parser_cls=self.tool_parser,
             )
             tool_call_class = (
-                MistralToolCall if isinstance(tokenizer, MistralTokenizer) else ToolCall
+                MistralToolCall if is_mistral_tokenizer(tokenizer) else ToolCall
             )
             if self.use_harmony:
                 # Harmony models already have parsed content and tool_calls
@@ -1951,7 +1945,7 @@ class OpenAIServingChat(OpenAIServing):
         # because of issues with pydantic we need to potentially
         # re-serialize the tool_calls field of the request
         # for more info: see comment in `maybe_serialize_tool_calls`
-        maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
+        _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
 
         # Add system message.
         # NOTE: In Chat Completion API, browsing is enabled by default

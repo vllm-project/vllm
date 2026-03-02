@@ -3,7 +3,14 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    deepgemm_post_process_fp8_weight_block,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+)
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -14,7 +21,6 @@ from vllm.utils.deep_gemm import (
 )
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from ...utils.fp8_utils import deepgemm_post_process_fp8_weight_block
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
@@ -27,10 +33,12 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         self.use_deep_gemm_e8m0 = is_deep_gemm_e8m0_used()
         act_scale_descriptor = config.activation_quant_key.scale
         self.is_deep_gemm_supported = is_deep_gemm_supported()
-        self.input_quant_op = QuantFP8(
+        self.quant_fp8 = QuantFP8(
             static=False,
             group_shape=act_scale_descriptor.group_shape,
             use_ue8m0=is_deep_gemm_e8m0_used(),
+            tma_aligned_scales=envs.VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES,
+            column_major_scales=True,
         )
 
     @classmethod
@@ -46,14 +54,34 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             return False, "DeepGEMM is only supported on cuda platform"
         if not is_deep_gemm_supported():
             return False, "Currently, only Hopper and Blackwell GPUs are supported."
+        return True, None
+
+    @classmethod
+    def can_implement(cls, config):
+        can_implement_base, reason = super().can_implement(config)
+        if not can_implement_base:
+            return can_implement_base, reason
+        if config.out_dtype != torch.bfloat16:
+            return (False, "Supports only output dtype of bfloat16")
+
+        act_quant_desc = config.activation_quant_key.scale
+        if act_quant_desc.group_shape != GroupShape(1, 128):
+            return (
+                False,
+                "Supports only dynamic per token group activation "
+                "quantization with group_shape=(1,128).",
+            )
 
         return True, None
 
     def process_weights_after_loading(self, layer):
         super().process_weights_after_loading(layer)
         params = self._get_layer_params(layer)
+        assert layer.weight_block_size is not None
 
-        if should_use_deepgemm_for_fp8_linear(self.config.out_dtype, params.weight):
+        if self.is_deep_gemm_supported and should_use_deepgemm_for_fp8_linear(
+            layer.orig_dtype, params.weight
+        ):
             weight_scale_invs = params.weight_scale_inv
             scale_attr = (
                 params.WEIGHT_SCALE_INV
@@ -65,10 +93,7 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 ws=weight_scale_invs
                 if weight_scale_invs is not None
                 else params.weight_scale,
-                quant_block_shape=(
-                    self.weight_group_shape.row,
-                    self.weight_group_shape.col,
-                ),
+                quant_block_shape=tuple(layer.weight_block_size),
                 use_e8m0=is_deep_gemm_e8m0_used(),
             )
             replace_parameter(layer, params.WEIGHT, dg_weight)

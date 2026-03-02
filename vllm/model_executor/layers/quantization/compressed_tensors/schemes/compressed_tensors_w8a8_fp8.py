@@ -9,17 +9,16 @@ from torch.nn import Parameter
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import (
+    init_fp8_linear_kernel,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
-    maybe_post_process_fp8_weight_block,
     process_fp8_weight_channel_strategy,
     process_fp8_weight_tensor_strategy,
     validate_fp8_block_shape,
@@ -166,7 +165,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             assert self.is_static_input_scheme is False
             self.fp8_linear.process_weights_after_loading(layer)
 
-            input_scale = None
+            layer.input_scale = None
+            # fp8_linear.process_weights_after_loading applies the post process
+            # and reassigns the weight and weight_scale buffers to layer attributes.
+            return
 
         else:
             raise ValueError(
@@ -185,8 +187,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
         else:
             layer.input_scale = None
-        if self.strategy == QuantizationStrategy.BLOCK:
-            maybe_post_process_fp8_weight_block(layer)
 
     def apply_weights(
         self,
