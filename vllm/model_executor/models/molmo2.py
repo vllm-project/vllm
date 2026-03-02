@@ -2082,8 +2082,7 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -2094,7 +2093,7 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
         if num_images > 0:
             target_width, target_height = self.info.get_image_size_with_most_features()
 
-            image_overrides = mm_options.get("image") if mm_options else None
+            image_overrides = mm_options.get("image")
 
             dummy_images = self._get_dummy_images(
                 width=target_width,
@@ -2110,7 +2109,7 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
                 seq_len, mm_counts
             )
 
-            video_overrides = mm_options.get("video") if mm_options else None
+            video_overrides = mm_options.get("video")
 
             if video_overrides:
                 assert isinstance(video_overrides, VideoDummyOptions)

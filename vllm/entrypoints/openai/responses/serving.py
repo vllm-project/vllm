@@ -8,7 +8,6 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
-from dataclasses import replace
 from http import HTTPStatus
 from typing import Final
 
@@ -40,6 +39,7 @@ from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import TypeAdapter
 
 from vllm import envs
+from vllm.config.utils import replace
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -58,15 +58,11 @@ from vllm.entrypoints.openai.engine.serving import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
-    construct_harmony_previous_input_messages,
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
     get_system_message,
     get_user_message,
     has_custom_tools,
-    parse_output_message,
-    parse_remaining_state,
-    parse_response_input,
     render_for_completion,
 )
 from vllm.entrypoints.openai.responses.context import (
@@ -76,6 +72,12 @@ from vllm.entrypoints.openai.responses.context import (
     SimpleContext,
     StreamingHarmonyContext,
 )
+from vllm.entrypoints.openai.responses.harmony import (
+    construct_harmony_previous_input_messages,
+    harmony_to_response_output,
+    parser_state_to_response_output,
+    response_input_to_harmony,
+)
 from vllm.entrypoints.openai.responses.protocol import (
     InputTokensDetails,
     OutputTokensDetails,
@@ -83,13 +85,15 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseCreatedEvent,
     ResponseInProgressEvent,
     ResponseInputOutputMessage,
+    ResponseReasoningPartAddedEvent,
+    ResponseReasoningPartDoneEvent,
     ResponsesRequest,
     ResponsesResponse,
     ResponseUsage,
     StreamingResponsesResponse,
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
-    HarmonyStreamingState,
+    StreamingState,
     emit_content_delta_events,
     emit_previous_item_done_events,
     emit_tool_action_events,
@@ -954,9 +958,9 @@ class OpenAIServingResponses(OpenAIServing):
         output_items: list[ResponseOutputItem] = []
         num_init_messages = context.num_init_messages
         for msg in context.messages[num_init_messages:]:
-            output_items.extend(parse_output_message(msg))
+            output_items.extend(harmony_to_response_output(msg))
         # Handle the generation stopped in the middle (if any).
-        last_items = parse_remaining_state(context.parser)
+        last_items = parser_state_to_response_output(context.parser)
         if last_items:
             output_items.extend(last_items)
         return output_items
@@ -1103,13 +1107,13 @@ class OpenAIServingResponses(OpenAIServing):
             else:
                 prev_outputs = []
             for response_msg in request.input:
-                new_msg = parse_response_input(response_msg, prev_outputs)
+                new_msg = response_input_to_harmony(response_msg, prev_outputs)
                 if new_msg.author.role != "system":
                     messages.append(new_msg)
 
                 # User passes in a tool call request and its output. We need
-                # to add the tool call request to prev_outputs so that the
-                # parse_response_input can find the tool call request when
+                # to add the tool call request to prev_outputs so that
+                # response_input_to_harmony can find the tool call request when
                 # parsing the tool call output.
                 if isinstance(response_msg, ResponseFunctionToolCall):
                     prev_outputs.append(response_msg)
@@ -1337,6 +1341,19 @@ class OpenAIServingResponses(OpenAIServing):
                                 ),
                             )
                         )
+                        yield _increment_sequence_number_and_return(
+                            ResponseReasoningPartAddedEvent(
+                                type="response.reasoning_part.added",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                                content_index=current_content_index,
+                                part=ResponseReasoningTextContent(
+                                    text="",
+                                    type="reasoning_text",
+                                ),
+                            )
+                        )
                     else:
                         yield _increment_sequence_number_and_return(
                             ResponseOutputItemAddedEvent(
@@ -1352,22 +1369,21 @@ class OpenAIServingResponses(OpenAIServing):
                                 ),
                             )
                         )
-                    yield _increment_sequence_number_and_return(
-                        ResponseContentPartAddedEvent(
-                            type="response.content_part.added",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item_id=current_item_id,
-                            content_index=current_content_index,
-                            part=ResponseOutputText(
-                                type="output_text",
-                                text="",
-                                annotations=[],
-                                logprobs=[],
-                            ),
+                        yield _increment_sequence_number_and_return(
+                            ResponseContentPartAddedEvent(
+                                type="response.content_part.added",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                                content_index=current_content_index,
+                                part=ResponseOutputText(
+                                    type="output_text",
+                                    text="",
+                                    annotations=[],
+                                    logprobs=[],
+                                ),
+                            )
                         )
-                    )
-                    current_content_index += 1
                     first_delta_sent = True
                 # todo(kebe7jun) tool call support
 
@@ -1395,6 +1411,19 @@ class OpenAIServingResponses(OpenAIServing):
                             text=reason_content,
                         )
                     )
+                    yield _increment_sequence_number_and_return(
+                        ResponseReasoningPartDoneEvent(
+                            type="response.reasoning_part.done",
+                            sequence_number=-1,
+                            item_id=current_item_id,
+                            output_index=current_output_index,
+                            content_index=current_content_index,
+                            part=ResponseReasoningTextContent(
+                                text=reason_content,
+                                type="reasoning_text",
+                            ),
+                        )
+                    )
                     current_content_index = 0
                     reasoning_item = ResponseReasoningItem(
                         type="reasoning",
@@ -1416,6 +1445,8 @@ class OpenAIServingResponses(OpenAIServing):
                             item=reasoning_item,
                         )
                     )
+                    current_output_index += 1
+                    current_item_id = str(uuid.uuid4())
                     yield _increment_sequence_number_and_return(
                         ResponseOutputItemAddedEvent(
                             type="response.output_item.added",
@@ -1430,8 +1461,6 @@ class OpenAIServingResponses(OpenAIServing):
                             ),
                         )
                     )
-                    current_output_index += 1
-                    current_item_id = str(uuid.uuid4())
                     yield _increment_sequence_number_and_return(
                         ResponseContentPartAddedEvent(
                             type="response.content_part.added",
@@ -1447,7 +1476,6 @@ class OpenAIServingResponses(OpenAIServing):
                             ),
                         )
                     )
-                    current_content_index += 1
                     # reset previous delta messages
                     previous_delta_messages = []
 
@@ -1483,7 +1511,6 @@ class OpenAIServingResponses(OpenAIServing):
                             ),
                         )
                     )
-                current_content_index += 1
 
                 previous_delta_messages.append(delta_message)
         if previous_delta_messages:
@@ -1503,7 +1530,19 @@ class OpenAIServingResponses(OpenAIServing):
                         text=reason_content,
                     )
                 )
-                current_content_index += 1
+                yield _increment_sequence_number_and_return(
+                    ResponseReasoningPartDoneEvent(
+                        type="response.reasoning_part.done",
+                        sequence_number=-1,
+                        item_id=current_item_id,
+                        output_index=current_output_index,
+                        content_index=current_content_index,
+                        part=ResponseReasoningTextContent(
+                            text=reason_content,
+                            type="reasoning_text",
+                        ),
+                    )
+                )
                 reasoning_item = ResponseReasoningItem(
                     type="reasoning",
                     content=[
@@ -1541,7 +1580,6 @@ class OpenAIServingResponses(OpenAIServing):
                         item_id=current_item_id,
                     )
                 )
-                current_content_index += 1
                 part = ResponseOutputText(
                     text=final_content,
                     type="output_text",
@@ -1557,7 +1595,6 @@ class OpenAIServingResponses(OpenAIServing):
                         part=part,
                     )
                 )
-                current_content_index += 1
                 item = ResponseOutputMessage(
                     type="message",
                     role="assistant",
@@ -1591,7 +1628,7 @@ class OpenAIServingResponses(OpenAIServing):
             [StreamingResponsesResponse], StreamingResponsesResponse
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        state = HarmonyStreamingState()
+        state = StreamingState()
 
         async for ctx in result_generator:
             assert isinstance(ctx, StreamingHarmonyContext)
