@@ -77,6 +77,7 @@ class MockKVBProj:
         self.qk_nope_head_dim = qk_nope_head_dim
         self.v_head_dim = v_head_dim
         self.out_dim = qk_nope_head_dim + v_head_dim
+        self.weight = torch.empty(0, dtype=torch.bfloat16)
 
     def __call__(self, x: torch.Tensor) -> tuple[torch.Tensor]:
         """
