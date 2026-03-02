@@ -65,7 +65,8 @@ class PPTestSettings:
             distributed_backends=["mp", "ray"],
             runner=runner,
             test_options=PPTestOptions(
-                multi_node_only=multi_node_only, load_format=load_format
+                multi_node_only=multi_node_only,
+                load_format=load_format,
             ),
         )
 
@@ -310,7 +311,6 @@ def _compare_tp(
         )
     if max_num_seqs:
         common_args.extend(["--max-num-seqs", f"{max_num_seqs}"])
-
     if distributed_backend == "ray":
         # Test Ray Compiled Graph for all the tests
         pp_env = {

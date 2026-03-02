@@ -2,16 +2,16 @@
   "_comment": "Auto-generated from Dockerfile ARGs. Do not edit manually. Run: python tools/generate_versions_json.py",
   "variable": {
     "CUDA_VERSION": {
-      "default": "12.9.1"
+      "default": "13.0.0"
     },
     "PYTHON_VERSION": {
       "default": "3.12"
     },
     "BUILD_BASE_IMAGE": {
-      "default": "nvidia/cuda:12.9.1-devel-ubuntu20.04"
+      "default": "nvidia/cuda:13.0.0-devel-ubuntu22.04"
     },
     "FINAL_BASE_IMAGE": {
-      "default": "nvidia/cuda:12.9.1-base-ubuntu22.04"
+      "default": "nvidia/cuda:13.0.0-base-ubuntu22.04"
     },
     "GET_PIP_URL": {
       "default": "https://bootstrap.pypa.io/get-pip.py"
@@ -29,7 +29,7 @@
       "default": "false"
     },
     "TORCH_CUDA_ARCH_LIST": {
-      "default": "7.0 7.5 8.0 8.9 9.0 10.0 12.0"
+      "default": "7.5 8.0 8.9 9.0 10.0 12.0"
     },
     "MAX_JOBS": {
       "default": "2"
