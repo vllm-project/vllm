@@ -18,6 +18,19 @@ from vllm.v1.request import Request
 logger = init_logger(__name__)
 
 
+@dataclass(frozen=True)
+class _AllocationParams:
+    """
+    Params for KV block allocation
+    """
+
+    new_computed_block_list: tuple[Sequence[KVCacheBlock], ...]
+    num_local_computed_tokens: int
+    total_computed_tokens: int
+    num_tokens_main_model: int
+    num_tokens_need_slot: int
+
+
 @dataclass
 class KVCacheBlocks:
     """
@@ -203,6 +216,47 @@ class KVCacheManager:
 
         return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
 
+    def _prepare_allocation_params(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        num_new_computed_tokens: int = 0,
+        new_computed_blocks: KVCacheBlocks | None = None,
+        num_lookahead_tokens: int = 0,
+        num_external_computed_tokens: int = 0,
+        num_encoder_tokens: int = 0,
+    ) -> _AllocationParams:
+        """Compute shared parameters for block allocation.
+
+        Used by both allocate_slots and get_num_blocks_required so that the
+        block requirement calculation is maintained in a single place.
+        """
+        if new_computed_blocks is not None:
+            new_computed_block_list = new_computed_blocks.blocks
+        else:
+            new_computed_block_list = self.empty_kv_cache_blocks.blocks
+
+        num_local_computed_tokens = (
+            request.num_computed_tokens + num_new_computed_tokens
+        )
+        total_computed_tokens = min(
+            num_local_computed_tokens + num_external_computed_tokens,
+            self.max_model_len,
+        )
+        num_tokens_main_model = total_computed_tokens + num_new_tokens
+        num_tokens_need_slot = min(
+            num_tokens_main_model + num_lookahead_tokens,
+            self.max_model_len,
+        )
+
+        return _AllocationParams(
+            new_computed_block_list=new_computed_block_list,
+            num_local_computed_tokens=num_local_computed_tokens,
+            total_computed_tokens=total_computed_tokens,
+            num_tokens_main_model=num_tokens_main_model,
+            num_tokens_need_slot=num_tokens_need_slot,
+        )
+
     def allocate_slots(
         self,
         request: Request,
@@ -293,24 +347,14 @@ class KVCacheManager:
                 "external computed tokens"
             )
 
-        if new_computed_blocks is not None:
-            new_computed_block_list = new_computed_blocks.blocks
-        else:
-            new_computed_block_list = self.empty_kv_cache_blocks.blocks
-
-        # The number of computed tokens is the number of computed tokens plus
-        # the new prefix caching hits
-        num_local_computed_tokens = (
-            request.num_computed_tokens + num_new_computed_tokens
-        )
-        total_computed_tokens = min(
-            num_local_computed_tokens + num_external_computed_tokens,
-            self.max_model_len,
-        )
-        num_tokens_main_model = total_computed_tokens + num_new_tokens
-        num_tokens_need_slot = min(
-            num_tokens_main_model + num_lookahead_tokens,
-            self.max_model_len,
+        params = self._prepare_allocation_params(
+            request,
+            num_new_tokens,
+            num_new_computed_tokens=num_new_computed_tokens,
+            new_computed_blocks=new_computed_blocks,
+            num_lookahead_tokens=num_lookahead_tokens,
+            num_external_computed_tokens=num_external_computed_tokens,
+            num_encoder_tokens=num_encoder_tokens,
         )
 
         # Free the blocks that are skipped during the attention computation
@@ -320,17 +364,16 @@ class KVCacheManager:
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
         self.coordinator.remove_skipped_blocks(
-            request.request_id, total_computed_tokens
+            request.request_id, params.total_computed_tokens
         )
 
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
-            num_tokens=num_tokens_need_slot,
-            new_computed_blocks=new_computed_block_list,
+            num_tokens=params.num_tokens_need_slot,
+            new_computed_blocks=params.new_computed_block_list,
             num_encoder_tokens=num_encoder_tokens,
-            total_computed_tokens=num_local_computed_tokens
-            + num_external_computed_tokens,
-            num_tokens_main_model=num_tokens_main_model,
+            total_computed_tokens=params.total_computed_tokens,
+            num_tokens_main_model=params.num_tokens_main_model,
         )
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
@@ -338,22 +381,22 @@ class KVCacheManager:
             return None
 
         if (
-            new_computed_block_list is not self.empty_kv_cache_blocks.blocks
+            params.new_computed_block_list is not self.empty_kv_cache_blocks.blocks
             or num_external_computed_tokens > 0
         ):
             # Append the new computed blocks to the request blocks until now to
             # avoid the case where the new blocks cannot be allocated.
             self.coordinator.allocate_new_computed_blocks(
                 request_id=request.request_id,
-                new_computed_blocks=new_computed_block_list,
-                num_local_computed_tokens=num_local_computed_tokens,
+                new_computed_blocks=params.new_computed_block_list,
+                num_local_computed_tokens=params.num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id,
-            num_tokens_need_slot,
-            num_tokens_main_model,
+            params.num_tokens_need_slot,
+            params.num_tokens_main_model,
             num_encoder_tokens,
         )
 
@@ -368,12 +411,56 @@ class KVCacheManager:
         # Therefore, we cap the number at `request.num_tokens`, ensuring only
         # "finalized" tokens are cached.
         num_tokens_to_cache = min(
-            total_computed_tokens + num_new_tokens,
+            params.total_computed_tokens + num_new_tokens,
             request.num_tokens,
         )
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return self.create_kv_cache_blocks(new_blocks)
+
+    def get_num_blocks_required(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        num_new_computed_tokens: int = 0,
+        new_computed_blocks: KVCacheBlocks | None = None,
+        num_lookahead_tokens: int = 0,
+        num_external_computed_tokens: int = 0,
+        num_encoder_tokens: int = 0,
+    ) -> int:
+        """Return the number of blocks that would be needed to schedule this request.
+
+        Uses the same logic as allocate_slots (without allocating or calling
+        remove_skipped_blocks). Call this when allocate_slots has returned None
+        to distinguish permanent failure (required > total capacity) from
+        temporary (not enough free blocks). When required > get_num_total_blocks(),
+        the request can never be satisfied and should be failed so others can run.
+        """
+        params = self._prepare_allocation_params(
+            request,
+            num_new_tokens,
+            num_new_computed_tokens=num_new_computed_tokens,
+            new_computed_blocks=new_computed_blocks,
+            num_lookahead_tokens=num_lookahead_tokens,
+            num_external_computed_tokens=num_external_computed_tokens,
+            num_encoder_tokens=num_encoder_tokens,
+        )
+        return self.coordinator.get_num_blocks_to_allocate(
+            request_id=request.request_id,
+            num_tokens=params.num_tokens_need_slot,
+            new_computed_blocks=params.new_computed_block_list,
+            num_encoder_tokens=num_encoder_tokens,
+            total_computed_tokens=params.total_computed_tokens,
+            num_tokens_main_model=params.num_tokens_main_model,
+        )
+
+    def get_num_total_blocks(self) -> int:
+        """Return the total number of blocks available for KV cache (excluding null).
+
+        A request that needs more than this many blocks can never be scheduled.
+        """
+        # One block is reserved as the null block and is not allocatable.
+        return self.block_pool.num_gpu_blocks - 1
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
