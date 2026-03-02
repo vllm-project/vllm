@@ -238,6 +238,10 @@ def check_cpu_sgl_kernel(n: int, k: int, dtype: torch.dtype) -> bool:
     )
 
 
+def _gemm_not_supported(*args, **kwargs):
+    raise NotImplementedError("GEMM not supported for this layer")
+
+
 def dispatch_cpu_unquantized_gemm(
     layer: torch.nn.Module,
     remove_weight: bool,
@@ -245,6 +249,13 @@ def dispatch_cpu_unquantized_gemm(
     # skip for missing layers
     if layer.weight.is_meta:
         layer.cpu_linear = torch.nn.functional.linear
+        return
+
+    if len(layer.weight.shape) > 2:
+        # This is likely a convolution layer, not a linear layer.
+        # We should not dispatch it as a GEMM.
+        # The convolution will be handled by its own forward pass.
+        layer.cpu_linear = _gemm_not_supported
         return
 
     N, K = layer.weight.size()
@@ -280,9 +291,7 @@ def dispatch_cpu_unquantized_gemm(
             )
 
     # fallback case
-    layer.cpu_linear = lambda x, weight, bias: torch.nn.functional.linear(
-        x, weight, bias
-    )
+    layer.cpu_linear = torch.nn.functional.linear
 
 
 def cpu_unquantized_gemm(
