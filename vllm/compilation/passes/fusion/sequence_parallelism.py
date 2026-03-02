@@ -202,6 +202,11 @@ class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             # once the seqpar pattern with the previous rmsnorm is replaced
             reduce_scatter = self._reduce_scatter(mm_1)
             local_len = reduce_scatter.size(0)
+            # when the preceding VocabParallelEmbedding is excluded
+            # from the FX graph (e.g., passing `inputs_embeds` directly in VLMs),
+            # the FirstAllReduceRMSNorm pattern is never matched. we must
+            # perform a proper TP-aware slice here. simply using `[0:local_len]`
+            # would incorrectly cause all ranks to process rank 0's chunk.
             residual = residual[
                 self.tp_rank * local_len : self.tp_rank * local_len + local_len, ...
             ]
@@ -311,6 +316,11 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             # once the seqpar pattern with the previous rmsnorm is replaced
             reduce_scatter = self._reduce_scatter(mm_1)
             local_len = reduce_scatter.size(0)
+            # when the preceding VocabParallelEmbedding is excluded
+            # from the FX graph (e.g., passing `inputs_embeds` directly in VLMs),
+            # the FirstAllReduceRMSNorm pattern is never matched. we must
+            # perform a proper TP-aware slice here. simply using `[0:local_len]`
+            # would incorrectly cause all ranks to process rank 0's chunk.
             residual = residual[
                 self.tp_rank * local_len : self.tp_rank * local_len + local_len, ...
             ]
@@ -360,16 +370,20 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
     Because the pattern matcher starts at the end of the graph, the replacement
     contains a slice that temporarily conforms the input residual to the correct size.
     After all patterns have been matched, we use a NoOpEliminationPass to clean up
-    what have now become no-op slices.
+    what have now become no-op slices. We also apply an InputMutationEliminationPass to
+    remove shape-mismatched `copy_` nodes. AOT Autograd specifically inserts
+    these epilogues only when in-place operations (e.g., `fused_add_rms_norm`)
+    mutate direct graph inputs  (like `inputs_embeds`). Mutating the original
+    input is unnecessary here, making it safe to eliminate these `copy_` nodes.
 
     Note that an older version of the pass did not need this as it operated only on
-    custom rms_norm and fused_rms_norm_add custom ops which did not complain about
+    custom rms_norm and fused_add_rms_norm custom ops which did not complain about
     mismatched shapes during replacement. So this approach has the same assumption that
     correctness is only maintained if all rms_norm operations are split across ranks.
 
     Correctness-wise, this is approach strictly better than before - before,
     the graph was incorrect semantically and shape-wise during the pass.
-    With this approach there's only semantic incorrectness during the pass.
+    With this approach the graph remains correct in both aspects during the pass.
     Both approaches restore a correct graph once all patterns are matched.
     """
 
