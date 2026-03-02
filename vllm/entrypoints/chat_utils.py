@@ -464,12 +464,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     def __init__(
         self,
         model_config: ModelConfig,
-        mm_processor_kwargs: dict[str, Any] | None = None,
     ):
         super().__init__()
 
         self._model_config = model_config
-        self._mm_processor_kwargs = mm_processor_kwargs or {}
 
         self._items_by_modality = defaultdict[str, list[_T]](list)
         # Track original modality for each vision_chunk item (image or video)
@@ -1529,16 +1527,13 @@ def parse_chat_messages(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
     content_format: ChatTemplateContentFormat,
-    mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
     MultiModalUUIDDict | None,
 ]:
     conversation: list[ConversationMessage] = []
-    mm_tracker = MultiModalItemTracker(
-        model_config, mm_processor_kwargs=mm_processor_kwargs
-    )
+    mm_tracker = MultiModalItemTracker(model_config)
 
     for msg in messages:
         sub_messages = _parse_chat_message_content(
@@ -1565,16 +1560,13 @@ async def parse_chat_messages_async(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
     content_format: ChatTemplateContentFormat,
-    mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
     MultiModalUUIDDict | None,
 ]:
     conversation: list[ConversationMessage] = []
-    mm_tracker = AsyncMultiModalItemTracker(
-        model_config, mm_processor_kwargs=mm_processor_kwargs
-    )
+    mm_tracker = AsyncMultiModalItemTracker(model_config)
 
     for msg in messages:
         sub_messages = _parse_chat_message_content(

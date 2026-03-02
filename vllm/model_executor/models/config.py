@@ -662,6 +662,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteNewModel": GteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
+    "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
@@ -684,5 +685,4 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
-    "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
 }
