@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import mimetypes
-import warnings
 from collections import defaultdict
 from collections.abc import Generator, Sequence
 from itertools import groupby
