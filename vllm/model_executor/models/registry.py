@@ -275,6 +275,10 @@ _EMBEDDING_MODELS = {
 _CROSS_ENCODER_MODELS = {
     "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
     "BertForTokenClassification": ("bert", "BertForTokenClassification"),
+    "Qwen3ASRForcedAlignerForTokenClassification": (
+        "qwen3_asr_forced_aligner",
+        "Qwen3ASRForcedAlignerForTokenClassification",
+    ),
     "GteNewForSequenceClassification": (
         "bert_with_rope",
         "GteNewForSequenceClassification",

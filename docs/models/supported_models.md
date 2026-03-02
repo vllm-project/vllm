@@ -854,6 +854,20 @@ These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) A
     vllm serve Qwen/Qwen3-VL-Reranker-2B --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
     ```
 
+---
+
+#### Token Classification
+
+These models primarily support the [`LLM.encode`](./pooling_models.md#llmencode) API.
+
+| Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
+|--------------|--------|--------|-------------------|----------------------|---------------------------|
+| `Qwen3ASRForcedAlignerForTokenClassification` | Qwen3-ForcedAligner | T + A<sup>+</sup> | `Qwen/Qwen3-ForcedAligner-0.6B` (see note) | | ✅︎ |
+
+!!! note
+    Forced alignment usage requires `--hf-overrides '{"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]}'`.
+    Please refer to [examples/pooling/token_classify/forced_alignment_offline.py](../../examples/pooling/token_classify/forced_alignment_offline.py).
+
 ## Model Support Policy
 
 At vLLM, we are committed to facilitating the integration and support of third-party models within our ecosystem. Our approach is designed to balance the need for robustness and the practical limitations of supporting a wide range of models. Here’s how we manage third-party model support:

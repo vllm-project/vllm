@@ -1043,6 +1043,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         hf_overrides={"architectures": ["Qwen3ASRRealtimeGeneration"]},
         is_available_online=False,
     ),
+    "Qwen3ASRForcedAlignerForTokenClassification": _HfExamplesInfo(
+        "Qwen/Qwen3-ForcedAligner-0.6B",
+        max_model_len=4096,
+        min_transformers_version="4.57",
+        hf_overrides={"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]},
+        is_available_online=False,
+    ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
         "Skywork/Skywork-R1V-38B", trust_remote_code=True
