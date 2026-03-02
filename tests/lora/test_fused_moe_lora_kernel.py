@@ -187,7 +187,8 @@ def use_fused_moe_lora_kernel(
 
     # num_active_loras is the number of active LoRAs
     # (max_loras + 1 to include no-lora case)
-    num_active_loras = max_loras + 1
+    # Stored as CPU tensor to match the kernel API (torch.compile compatibility)
+    num_active_loras = torch.tensor([max_loras + 1], dtype=torch.int32, device="cpu")
 
     fused_moe_lora(
         output,
@@ -399,7 +400,8 @@ def use_fused_moe_lora_kernel_naive(
 
     # num_active_loras is the number of active LoRAs
     # (max_loras + 1 to include no-lora case)
-    num_active_loras = max_loras + 1
+    # Stored as CPU tensor to match the kernel API (torch.compile compatibility)
+    num_active_loras = torch.tensor([max_loras + 1], dtype=torch.int32, device="cpu")
 
     fused_moe_lora(
         output,
