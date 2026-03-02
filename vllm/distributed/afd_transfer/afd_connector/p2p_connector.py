@@ -180,6 +180,12 @@ class P2PAFDConnector(AFDConnectorBase):
             timeout=timedelta(minutes=2),
         )
         logger.info(f"jcz afd_pg initialized world_rank:{self.world_rank}")
+
+        # Synchronize all processes before creating sub groups
+        # This ensures all processes have completed afd_pg initialization
+        torch.distributed.barrier(afd_pg)
+        logger.info(f"jcz after barrier world_rank:{self.world_rank}")
+
         # Construct rank lists for sub groups.
         # Each group contains one attention and one ffn rank.
         ffn_ranks = [i for i in range(ffn_size)]
@@ -198,9 +204,7 @@ class P2PAFDConnector(AFDConnectorBase):
                     ranks.append(attn_ranks[a_idx])
                 sub_group_ranks.append(ranks)
                 logger.info(f"P2P group {f_idx}: {ranks} (F + {self.ratio} A's)")
-            # One group per ubatch (same rank pair for A<->F); one PyNcclCommunicator
-            # per rank, registered at this rank's ubatch index (used by custom op via
-            # get_forward_context().afd_metadata.afd_stage_idx).
+
             logger.info("jcz before self.a2e_group")
             self.a2e_group = init_model_parallel_group(
                 sub_group_ranks,
