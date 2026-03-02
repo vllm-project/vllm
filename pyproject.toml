@@ -132,7 +132,7 @@ extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizer
 ignore-hidden = false
 
 [tool.typos.default]
-extend-ignore-identifiers-re = [".*(UE4M3|ue4m3|UE8M0|ue8m0).*"]
+extend-ignore-identifiers-re = [".*[Uu][Ee][0-9][Mm][0-9].*"]
 
 [tool.typos.default.extend-identifiers]
 bbc5b7ede = "bbc5b7ede"
