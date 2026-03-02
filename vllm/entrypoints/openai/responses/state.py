@@ -46,12 +46,19 @@ def _get_signing_key() -> bytes:
         key_hex = os.environ.get("VLLM_RESPONSES_STATE_SIGNING_KEY", "")
         if key_hex:
             try:
-                _SIGNING_KEY = bytes.fromhex(key_hex)
+                key_bytes = bytes.fromhex(key_hex)
             except ValueError as exc:
                 raise ValueError(
                     "VLLM_RESPONSES_STATE_SIGNING_KEY must be a valid hex "
                     "string (e.g. a 64-char / 32-byte hex key)."
                 ) from exc
+            if len(key_bytes) < 32:
+                raise ValueError(
+                    f"VLLM_RESPONSES_STATE_SIGNING_KEY decoded to only "
+                    f"{len(key_bytes)} byte(s); a minimum of 32 bytes "
+                    f"(64 hex characters) is required for a secure HMAC-SHA256 key."
+                )
+            _SIGNING_KEY = key_bytes
         else:
             _SIGNING_KEY = os.urandom(32)
             logger.warning(
@@ -88,9 +95,7 @@ def serialize_state(messages: list[Any]) -> str:
     payload_b64 = base64.b64encode(
         json.dumps(messages, default=_harmony_serializer).encode()
     ).decode()
-    sig = hmac.new(
-        _get_signing_key(), payload_b64.encode(), hashlib.sha256
-    ).hexdigest()
+    sig = hmac.new(_get_signing_key(), payload_b64.encode(), hashlib.sha256).hexdigest()
     return f"{_FORMAT_VERSION}:{payload_b64}:{sig}"
 
 
