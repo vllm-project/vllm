@@ -59,7 +59,7 @@ from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, SlidingWindowSpec
 from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
@@ -544,12 +544,17 @@ class NixlConnectorScheduler:
             self.use_host_buffer = (
                 vllm_config.kv_transfer_config.kv_buffer_device == "cpu"
             )
-        self._is_hma_enabled = (
+        self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+            # Also handle unlikely SW-only model case instead of checking num_groups>1.
+            and any(
+                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                for g in kv_cache_config.kv_cache_groups
+            )
         )
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
-        if self._is_hma_enabled:
+        if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
             logger.info("Hybrid Memory Allocator is enabled with NIXL")
 
         # Background thread for handling new handshake requests.
@@ -598,8 +603,8 @@ class NixlConnectorScheduler:
         the entire sequence length, and successively cleans up blocks that are outside
         the window prior to the `request_finished_all_groups` hook.
         """
-        if len(block_ids) == 0 or not self._is_hma_enabled:
-            # No blocks to clip eg Full prefix cache hit
+        if len(block_ids) == 0 or not self._is_hma_required:
+            # No blocks to clip eg Full prefix cache hit or not a hybrid model.
             return block_ids
         # NOTE (NickLucche) This logic is currently handled at the connector level
         # because offloading connectors might want to receive the whole sequence even
@@ -946,8 +951,12 @@ class NixlConnectorWorker:
         self.nixl_backends = vllm_config.kv_transfer_config.get_from_extra_config(
             "backends", ["UCX"]
         )
-        self._is_hma_enabled = (
+        self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+            and any(
+                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                for g in kv_cache_config.kv_cache_groups
+            )
         )
         self.kv_cache_config = kv_cache_config
 
@@ -1378,9 +1387,10 @@ class NixlConnectorWorker:
                     error=e,
                     meta=meta,
                 )
-                if req_meta := self._recving_metadata.get(req_id):
-                    for group_block_ids in req_meta.local_block_ids:
-                        self._invalid_block_ids.update(group_block_ids)
+                if (
+                    req_meta := self._recving_metadata.get(req_id)
+                ) and not self._is_hma_required:
+                    self._invalid_block_ids.update(req_meta.local_block_ids[0])
                 self._failed_recv_reqs.add(req_id)
 
         fut.add_done_callback(request_ready)
@@ -1827,7 +1837,7 @@ class NixlConnectorWorker:
         # Num kv_heads > tp_size and P TP > D TP case, not supported
         assert not (tp_ratio < 0 and self.kv_topo.is_kv_replicated(remote_engine_id))
 
-        if self._is_hma_enabled:
+        if self._is_hma_required:
             assert block_size_ratio == 1, (
                 "HMA does not support different remote block size yet"
             )
@@ -1846,7 +1856,7 @@ class NixlConnectorWorker:
                     "Remote is HND and local is NHD, enabled additional permute "
                     "on local device KV."
                 )
-                assert not self._is_hma_enabled, (
+                assert not self._is_hma_required, (
                     "HMA does not support block size post processing"
                 )
                 self.enable_permute_local_kv = True
@@ -2044,7 +2054,7 @@ class NixlConnectorWorker:
             if not self.use_mla and (
                 block_size_ratio > 1 or self.enable_permute_local_kv
             ):
-                assert not self._is_hma_enabled
+                assert not self._is_hma_required
                 block_ids_for_blocksize_post_process[block_size_ratio].append(
                     meta.local_physical_block_ids[0]
                 )
@@ -2178,9 +2188,9 @@ class NixlConnectorWorker:
             handle: The transfer handle.
         """
         # Use .get() here as the metadata cleanup is handled by get_finished()
-        if meta := self._recving_metadata.get(req_id):
-            for group_block_ids in meta.local_block_ids:
-                self._invalid_block_ids.update(group_block_ids)
+        # TODO (NickLucche) handle failed transfer for HMA.
+        if (meta := self._recving_metadata.get(req_id)) and not self._is_hma_required:
+            self._invalid_block_ids.update(meta.local_block_ids)
         self.nixl_wrapper.release_xfer_handle(handle)
         self.xfer_stats.record_failed_transfer()
 
@@ -2320,7 +2330,7 @@ class NixlConnectorWorker:
         block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(dst_engine_id)
         if block_size_ratio > 1:
             # TODO (NickLucche) assume HMA is off. Change to handle multiple KV groups.
-            assert not self._is_hma_enabled
+            assert not self._is_hma_required
             local_block_ids0 = local_block_ids[0] if local_block_ids else []
             remote_block_ids0 = remote_block_ids[0]
             local_block_ids_mapped = self.get_mapped_blocks(
@@ -2435,9 +2445,10 @@ class NixlConnectorWorker:
                 dst_engine_id=dst_engine_id,
                 remote_rank=remote_rank,
             )
-            if meta := self._recving_metadata.get(request_id):
-                for group_block_ids in meta.local_block_ids:
-                    self._invalid_block_ids.update(group_block_ids)
+            if (
+                meta := self._recving_metadata.get(request_id)
+            ) and not self._is_hma_required:
+                self._invalid_block_ids.update(meta.local_block_ids)
             self.xfer_stats.record_failed_transfer()
             if handle is not None:
                 self.nixl_wrapper.release_xfer_handle(handle)
