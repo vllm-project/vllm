@@ -461,10 +461,15 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     maximum per prompt.
     """
 
-    def __init__(self, model_config: ModelConfig):
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+    ):
         super().__init__()
 
         self._model_config = model_config
+        self._mm_processor_kwargs = mm_processor_kwargs or {}
 
         self._items_by_modality = defaultdict[str, list[_T]](list)
         # Track original modality for each vision_chunk item (image or video)
@@ -869,7 +874,14 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url, uuid)
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
-        video = self._connector.fetch_video(video_url=video_url) if video_url else None
+        keep_bytes = bool(self._tracker._mm_processor_kwargs.get("use_audio_in_video"))
+        video = (
+            self._connector.fetch_video(
+                video_url=video_url, keep_video_bytes=keep_bytes
+            )
+            if video_url
+            else None
+        )
 
         placeholder = self._tracker.add("video", (video, uuid))
         self._add_placeholder("video", placeholder)
@@ -1012,8 +1024,13 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url, uuid)
 
     async def _video_with_uuid_async(self, video_url: str | None, uuid: str | None):
+        keep_bytes = bool(self._tracker._mm_processor_kwargs.get("use_audio_in_video"))
         video = (
-            await self._connector.fetch_video_async(video_url) if video_url else None
+            await self._connector.fetch_video_async(
+                video_url=video_url, keep_video_bytes=keep_bytes
+            )
+            if video_url
+            else None
         )
         return video, uuid
 
@@ -1522,13 +1539,16 @@ def parse_chat_messages(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
     content_format: ChatTemplateContentFormat,
+    mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
     MultiModalUUIDDict | None,
 ]:
     conversation: list[ConversationMessage] = []
-    mm_tracker = MultiModalItemTracker(model_config)
+    mm_tracker = MultiModalItemTracker(
+        model_config, mm_processor_kwargs=mm_processor_kwargs
+    )
 
     for msg in messages:
         sub_messages = _parse_chat_message_content(
@@ -1555,13 +1575,16 @@ async def parse_chat_messages_async(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
     content_format: ChatTemplateContentFormat,
+    mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
     MultiModalUUIDDict | None,
 ]:
     conversation: list[ConversationMessage] = []
-    mm_tracker = AsyncMultiModalItemTracker(model_config)
+    mm_tracker = AsyncMultiModalItemTracker(
+        model_config, mm_processor_kwargs=mm_processor_kwargs
+    )
 
     for msg in messages:
         sub_messages = _parse_chat_message_content(

@@ -40,6 +40,7 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         video_loader_backend = (
             kwargs.pop("video_backend", None) or envs.VLLM_VIDEO_LOADER_BACKEND
         )
+
         self.kwargs = kwargs
         self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
 

@@ -283,6 +283,7 @@ class MediaConnector:
         video_url: str,
         *,
         image_mode: str = "RGB",
+        keep_video_bytes: bool = False,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Load video from an HTTP or base64 data URL.
@@ -290,7 +291,13 @@ class MediaConnector:
         image_io = ImageMediaIO(
             image_mode=image_mode, **self.media_io_kwargs.get("image", {})
         )
-        video_io = VideoMediaIO(image_io, **self.media_io_kwargs.get("video", {}))
+
+        video_kwargs = dict(self.media_io_kwargs.get("video", {}))
+        video_kwargs["keep_video_bytes"] = keep_video_bytes or video_kwargs.get(
+            "keep_video_bytes", False
+        )
+
+        video_io = VideoMediaIO(image_io, **video_kwargs)
 
         return self.load_from_url(
             video_url,
@@ -303,6 +310,7 @@ class MediaConnector:
         video_url: str,
         *,
         image_mode: str = "RGB",
+        keep_video_bytes: bool = False,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Asynchronously load video from an HTTP or base64 data URL.
@@ -312,7 +320,13 @@ class MediaConnector:
         image_io = ImageMediaIO(
             image_mode=image_mode, **self.media_io_kwargs.get("image", {})
         )
-        video_io = VideoMediaIO(image_io, **self.media_io_kwargs.get("video", {}))
+
+        video_kwargs = dict(self.media_io_kwargs.get("video", {}))
+        video_kwargs["keep_video_bytes"] = keep_video_bytes or video_kwargs.get(
+            "keep_video_bytes", False
+        )
+
+        video_io = VideoMediaIO(image_io, **video_kwargs)
 
         return await self.load_from_url_async(
             video_url,
