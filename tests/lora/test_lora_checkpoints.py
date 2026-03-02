@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import torch
 import pytest
 
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.model_executor.models.baichuan import BaiChuanBaseForCausalLM
+from vllm.model_executor.models.mistral import MistralForCausalLM
 from vllm.model_executor.models.utils import WeightsMapper
 
 lora_lst = ["baichuan7B", "baichuan7B-zero", "baichuan7B-zero-regex", "chatglm3-6b"]
@@ -128,3 +130,74 @@ def test_lora_weights_mapping(baichuan_lora_files):
     for name in lora_model.loras:
         assert name.startswith(hf_to_vllm_mapper.orig_to_new_prefix["model."])
         assert ".baichuan_layers." in name
+
+
+def test_mistral_lora_format_weights_mapping():
+    """Test that Mistral-format LoRA weight keys are correctly remapped.
+
+    Mistral consolidated checkpoints use different layer names than the
+    HuggingFace / vLLM convention, e.g.:
+      layers.7.attention.wk  ->  model.layers.7.self_attn.k_proj
+      layers.7.feed_forward.w1  ->  model.layers.7.mlp.gate_proj
+
+    MistralForCausalLM.hf_to_vllm_mapper must translate these keys so that
+    LoRA weights saved in the Mistral format can be loaded without manual
+    key renaming.
+    """
+    rank = 8
+    hidden_size = 64
+
+    # Synthetic LoRA tensors using Mistral-format key names (no base_model prefix)
+    mistral_format_tensors: dict[str, torch.Tensor] = {}
+    mistral_keys = [
+        ("layers.0.attention.wq", hidden_size, rank),
+        ("layers.0.attention.wk", hidden_size, rank),
+        ("layers.0.attention.wv", hidden_size, rank),
+        ("layers.0.attention.wo", rank, hidden_size),
+        ("layers.0.feed_forward.w1", hidden_size, rank),
+        ("layers.0.feed_forward.w2", rank, hidden_size),
+        ("layers.0.feed_forward.w3", hidden_size, rank),
+    ]
+    for module_key, out_dim, in_dim in mistral_keys:
+        mistral_format_tensors[f"{module_key}.lora_A.weight"] = torch.zeros(
+            rank, in_dim
+        )
+        mistral_format_tensors[f"{module_key}.lora_B.weight"] = torch.zeros(
+            out_dim, rank
+        )
+
+    peft_helper = PEFTHelper.from_dict(
+        {"r": rank, "lora_alpha": rank, "target_modules": ["wq", "wk", "wv", "wo",
+                                                            "w1", "w2", "w3"]}
+    )
+
+    # expected_lora_modules mirrors what worker_manager builds from the model's
+    # supported_lora_modules + packed_modules_mapping
+    packed_modules_mapping = MistralForCausalLM.packed_modules_mapping
+    supported = ["qkv_proj", "gate_up_proj", "o_proj", "down_proj"]
+    expected_lora_modules: set[str] = set()
+    for mod in supported:
+        if mod in packed_modules_mapping:
+            expected_lora_modules.update(packed_modules_mapping[mod])
+        else:
+            expected_lora_modules.add(mod)
+
+    lora_model = LoRAModel.from_lora_tensors(
+        lora_model_id=1,
+        tensors=mistral_format_tensors,
+        peft_helper=peft_helper,
+        device="cpu",
+        weights_mapper=MistralForCausalLM.hf_to_vllm_mapper,
+    )
+
+    # All loaded module names must use vLLM's naming convention
+    expected_module_names = {
+        "model.layers.0.self_attn.q_proj",
+        "model.layers.0.self_attn.k_proj",
+        "model.layers.0.self_attn.v_proj",
+        "model.layers.0.self_attn.o_proj",
+        "model.layers.0.mlp.gate_proj",
+        "model.layers.0.mlp.down_proj",
+        "model.layers.0.mlp.up_proj",
+    }
+    assert set(lora_model.loras.keys()) == expected_module_names

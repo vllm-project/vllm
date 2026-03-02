@@ -26,7 +26,7 @@ from vllm.model_executor.models.llama import (
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
-from .utils import AutoWeightsLoader
+from .utils import AutoWeightsLoader, WeightsMapper
 
 
 class MistralMLP(nn.Module):
@@ -230,6 +230,29 @@ class MistralModel(LlamaModel):
 class MistralForCausalLM(LlamaForCausalLM):
     # Mistral: We don't support LoRA on the embedding layers.
     embedding_modules: dict[str, str] = {}
+
+    # Maps Mistral-format LoRA weight keys to vLLM's internal naming.
+    # Mistral format uses e.g. `layers.N.attention.wk` while vLLM expects
+    # `model.layers.N.self_attn.k_proj`. This allows loading LoRA checkpoints
+    # saved in the Mistral consolidated format without manual key renaming.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "layers.": "model.layers.",
+        },
+        orig_to_new_substr={
+            ".attention_norm.": ".input_layernorm.",
+            ".ffn_norm.": ".post_attention_layernorm.",
+            ".attention.": ".self_attn.",
+            ".feed_forward.": ".mlp.",
+            ".wq.": ".q_proj.",
+            ".wk.": ".k_proj.",
+            ".wv.": ".v_proj.",
+            ".wo.": ".o_proj.",
+            ".w1.": ".gate_proj.",
+            ".w2.": ".down_proj.",
+            ".w3.": ".up_proj.",
+        },
+    )
 
     # Mistral/Llama models can also be loaded with --load-format mistral
     # from consolidated.safetensors checkpoints
