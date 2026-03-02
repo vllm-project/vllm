@@ -43,7 +43,6 @@ except ModuleNotFoundError:
     python_create_and_map = None
     python_unmap_and_release = None
     lib_name = None
-    libcudart = None
 
 # py_device, py_alignedSize, py_d_mem, py_p_memHandle
 HandleType = tuple[int, int, int, int]
