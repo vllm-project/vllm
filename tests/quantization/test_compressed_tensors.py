@@ -639,9 +639,6 @@ def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
         assert output
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
-)
 @pytest.mark.parametrize(
     "args",
     [
@@ -671,7 +668,7 @@ def test_compressed_tensors_nvfp4(vllm_runner, args):
             assert qkv_proj.scheme.group_size == 16
 
         llm.apply_model(check_model)
-        output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        output = llm.generate_greedy(["Hello my name is"], max_tokens=4)
         print(output)
         assert output
 
