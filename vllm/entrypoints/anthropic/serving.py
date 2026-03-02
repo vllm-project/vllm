@@ -115,17 +115,18 @@ class AnthropicServingMessages(OpenAIServingChat):
         cls, anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest
     ) -> ChatCompletionRequest:
         """Convert Anthropic message format to OpenAI format."""
-        openai_messages = self._convert_system_message(anthropic_request.system)
-        openai_messages.extend(self._convert_messages(anthropic_request.messages))
+        openai_messages = cls._convert_system_message(anthropic_request.system)
+        openai_messages.extend(cls._convert_messages(anthropic_request.messages))
 
-        req = self._create_chat_completion_request(anthropic_request, openai_messages)
-        self._convert_tool_choice(anthropic_request, req)
-        self._convert_tools(anthropic_request, req)
+        req = cls._create_chat_completion_request(anthropic_request, openai_messages)
+        cls._convert_tool_choice(anthropic_request, req)
+        cls._convert_tools(anthropic_request, req)
 
         return req
 
+    @classmethod
     def _convert_system_message(
-        self, system: str | list[AnthropicContentBlock] | None
+        cls, system: str | list[AnthropicContentBlock] | None
     ) -> list[dict[str, Any]]:
         """Convert Anthropic system message to OpenAI format."""
         if not system:
@@ -140,12 +141,13 @@ class AnthropicServingMessages(OpenAIServingChat):
         )
         return [{"role": "system", "content": system_prompt}]
 
-    def _convert_messages(self, messages: list[Any]) -> list[dict[str, Any]]:
+    @classmethod
+    def _convert_messages(cls, messages: list[Any]) -> list[dict[str, Any]]:
         """Convert Anthropic messages to OpenAI format."""
         openai_messages = []
 
         for msg in messages:
-            main_msg, tool_result_msgs = self._convert_single_message(msg)
+            main_msg, tool_result_msgs = cls._convert_single_message(msg)
 
             # Add tool result messages first (for user role tool_result)
             openai_messages.extend(tool_result_msgs)
@@ -156,8 +158,9 @@ class AnthropicServingMessages(OpenAIServingChat):
 
         return openai_messages
 
+    @classmethod
     def _convert_single_message(
-        self, msg: Any
+        cls, msg: Any
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         """Convert a single Anthropic message to OpenAI format.
 
@@ -167,12 +170,14 @@ class AnthropicServingMessages(OpenAIServingChat):
         openai_msg: dict[str, Any] = {"role": msg.role}  # type: ignore
 
         if isinstance(msg.content, str):
+            openai_msg["content"] = msg.content
             return (openai_msg, [])
 
-        return self._convert_content_blocks(msg, openai_msg)
+        return cls._convert_content_blocks(msg, openai_msg)
 
+    @classmethod
     def _convert_content_blocks(
-        self, msg: Any, openai_msg: dict[str, Any]
+        cls, msg: Any, openai_msg: dict[str, Any]
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         """Convert Anthropic content blocks to OpenAI message format.
 
@@ -187,7 +192,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         tool_result_messages: list[dict[str, Any]] = []
 
         for block in msg.content:
-            converted = self._convert_content_block(block, msg.role)
+            converted = cls._convert_content_block(block, msg.role)
             if converted is None:
                 continue
 
@@ -209,14 +214,15 @@ class AnthropicServingMessages(OpenAIServingChat):
             openai_msg["tool_calls"] = tool_calls  # type: ignore
 
         if content_parts:
-            openai_msg["content"] = self._simplify_content(content_parts)
+            openai_msg["content"] = cls._simplify_content(content_parts)
         elif not tool_calls and not reasoning_parts:
             return (None, tool_result_messages)
 
         return (openai_msg, tool_result_messages)
 
+    @classmethod
     def _convert_content_block(
-        self, block: AnthropicContentBlock, msg_role: str
+        cls, block: AnthropicContentBlock, msg_role: str
     ) -> tuple[str, Any] | None:
         """Convert a single Anthropic content block to OpenAI format.
 
@@ -229,7 +235,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             return ("content", {"type": "text", "text": block.text})
 
         if block.type == "image" and block.source:
-            image_url = self._convert_image_source_to_url(block.source)
+            image_url = cls._convert_image_source_to_url(block.source)
             return (
                 "content",
                 {
@@ -253,12 +259,13 @@ class AnthropicServingMessages(OpenAIServingChat):
             return ("tool_call", tool_call)
 
         if block.type == "tool_result":
-            return self._convert_tool_result(block, msg_role)
+            return cls._convert_tool_result(block, msg_role)
 
         return None
 
+    @classmethod
     def _convert_tool_result(
-        self, block: AnthropicContentBlock, msg_role: str
+        cls, block: AnthropicContentBlock, msg_role: str
     ) -> tuple[str, Any] | None:
         """Convert Anthropic tool_result block to OpenAI format."""
         if msg_role == "user":
@@ -279,7 +286,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                         text_parts.append(item.get("text", ""))
                     elif item_type == "image":
                         source = item.get("source", {})
-                        url = self._convert_image_source_to_url(source)
+                        url = cls._convert_image_source_to_url(source)
                         if url:
                             tool_image_urls.append(url)
                 tool_text = "\n".join(text_parts)
@@ -339,8 +346,9 @@ class AnthropicServingMessages(OpenAIServingChat):
 
         return req
 
-    @staticmethod
+    @classmethod
     def _convert_tool_choice(
+        cls,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         req: ChatCompletionRequest,
     ) -> None:
@@ -360,8 +368,9 @@ class AnthropicServingMessages(OpenAIServingChat):
                 }
             )
 
-    @staticmethod
+    @classmethod
     def _convert_tools(
+        cls,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         req: ChatCompletionRequest,
     ) -> None:
