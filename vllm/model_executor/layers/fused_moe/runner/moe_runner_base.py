@@ -243,8 +243,7 @@ class MoERunnerBase(MoERunner):
         routed experts get the transformed [S, moe_latent_size].
 
         TODO: For latent MoE bandwidth optimization, fc2_latent_proj could be
-        moved inside SharedFusedMoE to all-reduce on the smaller latent
-        dimension.
+        moved inside FusedMoE to all-reduce on the smaller latent dimension.
 
         Returns (possibly transformed) hidden states and the input for shared
         experts (or None if there are no shared experts).

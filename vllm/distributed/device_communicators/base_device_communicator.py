@@ -290,10 +290,7 @@ class DeviceCommunicatorBase:
             for module in model.modules()
             # TODO(bnell): Should use isinstance but can't.  Maybe search for
             # presence of quant_method.maybe_init_modular_kernel?
-            if (
-                module.__class__.__name__ == "FusedMoE"
-                or module.__class__.__name__ == "SharedFusedMoE"
-            )
+            if module.__class__.__name__ == "FusedMoE"
         ]
         for module in moe_modules:
             module.maybe_init_modular_kernel()

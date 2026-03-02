@@ -28,7 +28,6 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
-from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -62,7 +61,6 @@ __all__ = [
     "FusedMoEActivationFormat",
     "FusedMoEPrepareAndFinalize",
     "RoutingMethodType",
-    "SharedFusedMoE",
     "activation_without_mul",
     "apply_moe_activation",
     "override_config",

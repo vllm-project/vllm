@@ -35,7 +35,6 @@ from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
-    SharedFusedMoE,
     activation_without_mul,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -212,7 +211,7 @@ class NemotronHMoE(nn.Module):
             self.fc1_latent_proj = None
             self.fc2_latent_proj = None
 
-        self.experts = SharedFusedMoE(
+        self.experts = FusedMoE(
             shared_experts=self.shared_experts,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
@@ -246,7 +245,7 @@ class NemotronHMoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states.to(dtype=torch.float32))
 
-        # SharedFusedMoE handles:
+        # FusedMoE handles:
         #   - shared experts (with original hidden_states)
         #   - routed_input_transform (fc1_latent_proj) for latent MoE
         #   - multistream parallelism between shared and routed experts
@@ -261,7 +260,7 @@ class NemotronHMoE(nn.Module):
         elif self.shared_experts is not None:
             shared_output *= 1.0 / self.routed_scaling_factor
 
-        # TODO: See SharedFusedMoE.apply_routed_input_transform
+        # TODO: See MoERunnerBase.apply_routed_input_transform
         # for bandwidth optimization
         if self.use_latent_moe:
             final_hidden_states, _ = self.fc2_latent_proj(final_hidden_states)

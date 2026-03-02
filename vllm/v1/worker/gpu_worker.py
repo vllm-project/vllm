@@ -878,12 +878,7 @@ class Worker(WorkerBase):
 
         def get_moe_modules(model: torch.nn.Module) -> list[FusedMoE]:
             return [
-                module
-                for module in model.modules()
-                if (
-                    module.__class__.__name__ == "FusedMoE"
-                    or module.__class__.__name__ == "SharedFusedMoE"
-                )
+                module for module in model.modules() if isinstance(module, FusedMoE)
             ]
 
         def update_moe_modules(moe_modules: list[FusedMoE], num_local_experts: int):
