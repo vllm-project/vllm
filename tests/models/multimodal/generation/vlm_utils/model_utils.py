@@ -1226,7 +1226,7 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
        dicts (accepting ``url``, ``path``, or ``base64`` audio) rather than
        the standard ``processor(text=, audio=, sampling_rate=)`` interface.
     2. HfRunner.get_inputs cannot handle multi-audio per prompt because it
-       incorrect unpacking ``[(arr1, sr1), (arr2, sr2)]`` via a ``len == 2`` check.
+       incorrectly unpacks ``[(arr1, sr1), (arr2, sr2)]`` via a ``len == 2`` check.
 
     We override ``get_inputs`` to build conversation dicts and call
     ``apply_chat_template`` directly, bypassing both issues. We also wrap
