@@ -7,6 +7,7 @@ Reproduces the bug described in https://github.com/vllm-project/vllm/issues/3575
 where num_output_placeholders goes negative when a streaming update arrives
 during async scheduling, causing a fatal AssertionError crash.
 """
+
 from collections import deque
 
 import pytest
@@ -144,9 +145,7 @@ def test_streaming_update_placeholder_underflow():
 
     # Step 1: Create and run initial segment to completion.
     # Prompt=4 tokens fits in one schedule step with budget=4.
-    req = _make_resumable_request(
-        "session-0", num_prompt_tokens=4, max_tokens=2
-    )
+    req = _make_resumable_request("session-0", num_prompt_tokens=4, max_tokens=2)
     scheduler.add_request(req)
 
     _run_until_waiting_for_stream(scheduler, "session-0")
@@ -158,9 +157,7 @@ def test_streaming_update_placeholder_underflow():
 
     # Step 2: Submit a streaming update with more tokens than the batch
     # budget. This ensures chunked prefill → is_prefill_chunk=True.
-    segment2 = _make_resumable_request(
-        "session-0", num_prompt_tokens=10, max_tokens=2
-    )
+    segment2 = _make_resumable_request("session-0", num_prompt_tokens=10, max_tokens=2)
     scheduler.add_request(segment2)
     assert req.status == RequestStatus.WAITING
 
@@ -175,9 +172,9 @@ def test_streaming_update_placeholder_underflow():
     # is_prefill_chunk=True and AsyncScheduler skips placeholder increment.
     so = scheduler.schedule()
     assert "session-0" in so.num_scheduled_tokens
-    assert req.is_prefill_chunk, (
-        "Request should be in prefill chunk (not all new tokens scheduled)"
-    )
+    assert (
+        req.is_prefill_chunk
+    ), "Request should be in prefill chunk (not all new tokens scheduled)"
     assert req.num_output_placeholders == 0, (
         f"Bug precondition: placeholders should be 0 because "
         f"AsyncScheduler skipped increment (is_prefill_chunk=True), "
