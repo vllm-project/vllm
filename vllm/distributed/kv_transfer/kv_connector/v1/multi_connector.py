@@ -215,9 +215,13 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        kv_cache_raw_tensors: dict[str, torch.Tensor] | None = None,
+    ):
         for c in self._connectors:
-            c.register_kv_caches(kv_caches)
+            c.register_kv_caches(kv_caches, kv_cache_raw_tensors)
 
     # We must override the base class method here because we need to bind
     # the metadata to each connector in the order of the connectors in the

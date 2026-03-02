@@ -476,6 +476,28 @@ class BlockPool:
 
         return True
 
+    def get_eviction_candidates(self, n: int) -> list[KVCacheBlock]:
+        """Return up to n cached free blocks from the LRU front of the queue.
+
+        These are the blocks most likely to be evicted in the next allocation
+        round.  The oversample factor (2x) tolerates uncached/null blocks
+        scattered near the front.
+
+        Args:
+            n: Desired number of eviction-candidate blocks.
+
+        Returns:
+            A list of up to n free, cached (hashed) blocks in LRU order.
+        """
+        candidates: list[KVCacheBlock] = []
+        # Oversample by 2x to skip uncached/null blocks near the front.
+        for block in self.free_block_queue.peek_front_n(n * 2):
+            if block.block_hash is not None and not block.is_null:
+                candidates.append(block)
+                if len(candidates) >= n:
+                    break
+        return candidates
+
     def get_num_free_blocks(self) -> int:
         """Get the number of free blocks in the pool.
 

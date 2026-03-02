@@ -345,6 +345,28 @@ class FreeKVCacheBlockQueue:
 
         self.num_free_blocks += len(blocks)
 
+    def peek_front_n(self, n: int) -> list[KVCacheBlock]:
+        """Non-destructively return the first n free blocks (LRU candidates).
+
+        Does not remove blocks from the queue or change num_free_blocks.
+
+        Args:
+            n: Maximum number of blocks to return.
+
+        Returns:
+            A list of up to n free blocks starting from the LRU front.
+        """
+        result: list[KVCacheBlock] = []
+        node = self.fake_free_list_head.next_free_block
+        while (
+            node is not None
+            and node is not self.fake_free_list_tail
+            and len(result) < n
+        ):
+            result.append(node)
+            node = node.next_free_block
+        return result
+
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
 

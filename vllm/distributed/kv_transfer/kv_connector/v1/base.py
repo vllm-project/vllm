@@ -254,13 +254,20 @@ class KVConnectorBase_V1(ABC):
         """
         return self._connector_metadata is not None
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        kv_cache_raw_tensors: dict[str, torch.Tensor] | None = None,
+    ):
         """
         Initialize with the KV caches. Useful for pre-registering the
         KV Caches in the KVConnector (e.g. for NIXL).
 
         Args:
-            kv_caches: dictionary of layer names, kv cache
+            kv_caches: dictionary of layer names to reshaped kv cache tensors
+            kv_cache_raw_tensors: optional raw int8 tensors before reshape.
+                Connectors that need backend-agnostic transfers should use
+                these.
         """
         return
 

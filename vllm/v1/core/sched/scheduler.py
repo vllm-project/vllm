@@ -234,6 +234,13 @@ class Scheduler(SchedulerInterface):
             hash_block_size=self.block_size,
             metrics_collector=self.kv_metrics_collector,
         )
+        # Bind GPU block pool to the KV connector. This must happen after
+        # kv_cache_manager is constructed so block_pool is available.
+        if self.connector is not None and hasattr(
+            self.connector, "bind_gpu_block_pool"
+        ):
+            self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
+
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         self.scheduler_reserve_full_isl = (
@@ -2127,7 +2134,11 @@ class Scheduler(SchedulerInterface):
                 self._free_blocks(self.requests[req_id])
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            assert req_id in self.requests
+            if req_id not in self.requests:
+                # Already freed (e.g., SimpleCPUOffload).
+                continue
+            if not self.requests[req_id].is_finished():
+                continue
             self._free_blocks(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(
