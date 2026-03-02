@@ -11,7 +11,7 @@ from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import msgspec
@@ -133,6 +133,7 @@ class CoreEngineProcManager:
             )
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
+        self.shutdown_monitor = False
 
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
@@ -154,12 +155,47 @@ class CoreEngineProcManager:
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown engine core processes with configurable timeout."""
+        self.shutdown_monitor = True
         if self._finalizer.detach() is not None:
             shutdown(self.processes, timeout=timeout)
 
-    def join_first(self):
-        """Wait for any process to exit."""
-        connection.wait(proc.sentinel for proc in self.processes)
+    def monitor_engine_liveness(
+        self,
+        engine_down_callback: Callable[..., None] | None = None,
+    ) -> None:
+        """
+        Monitor engine core process liveness.
+
+        Args:
+            engine_down_callback:
+                Optional callback invoked once for each detected dead process.
+                The callback is called with keyword arguments:
+                    dead_proc: The process that exited.
+                    all_processes: The full list of engine processes.
+        """
+
+        sentinel_to_proc = {proc.sentinel: proc for proc in self.processes}
+        sentinels = set(sentinel_to_proc.keys())
+
+        while sentinels and not self.shutdown_monitor:
+            died_sentinels = connection.wait(sentinels, timeout=1)
+
+            for sentinel in died_sentinels:
+                proc = sentinel_to_proc[cast(int, sentinel)]
+                exitcode = proc.exitcode
+                if exitcode != 0:
+                    logger.error(
+                        "Engine core proc %s died unexpectedly.",
+                        proc.name,
+                    )
+
+                if engine_down_callback is not None:
+                    engine_down_callback(
+                        dead_proc=proc,
+                        all_processes=self.processes,
+                    )
+
+            sentinels -= set(died_sentinels)
 
     def sentinels(self) -> list:
         return [proc.sentinel for proc in self.processes]
@@ -298,6 +334,7 @@ class CoreEngineActorManager:
         self.log_stats = log_stats
         local_engine_count = vllm_config.parallel_config.data_parallel_size_local
         world_size = vllm_config.parallel_config.world_size
+        self.shutdown_monitor = False
 
         if ray.is_initialized():
             logger.info("Ray is already initialized. Skipping Ray initialization.")
@@ -808,9 +845,37 @@ class CoreEngineActorManager:
     def get_run_refs(self):
         return self.run_refs
 
+    def monitor_engine_liveness(
+        self,
+        engine_down_callback: Callable[..., None] | None = None,
+    ) -> None:
+        import ray
+
+        processed_done_refs: set[ray.ObjectRef] = set()
+        while not self.shutdown_monitor:
+            actor_run_refs = set(self.get_run_refs())
+            if not actor_run_refs:
+                logger.info(
+                    "There are no actors to monitor currently. "
+                    "The monitoring function is about to terminate."
+                )
+                break
+
+            refs_to_watch = list(actor_run_refs - processed_done_refs)
+            actor_done_refs, _ = ray.wait(refs_to_watch, timeout=5)
+            for actor_ref in actor_done_refs:
+                logger.error("Engine core actor died: %s", actor_ref)
+                if engine_down_callback is not None:
+                    engine_down_callback(
+                        dead_proc=actor_ref, all_processes=list(actor_run_refs)
+                    )
+
+                processed_done_refs.add(actor_ref)
+
     def shutdown(self, timeout: float | None = None) -> None:
         import ray
 
+        self.shutdown_monitor = True
         for actor in self.local_engine_actors + self.remote_engine_actors:
             ray.kill(actor)
         for pg in self.created_placement_groups:

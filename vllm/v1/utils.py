@@ -249,7 +249,7 @@ def wait_for_completion_or_failure(
         coordinator: The coordinator for data parallel.
     """
 
-    from vllm.v1.engine.utils import CoreEngineActorManager, CoreEngineProcManager
+    import threading
 
     try:
         logger.info("Waiting for API servers to complete ...")
@@ -262,15 +262,31 @@ def wait_for_completion_or_failure(
         if coordinator:
             sentinel_to_proc[coordinator.proc.sentinel] = coordinator.proc
 
-        actor_run_refs = []
-        if isinstance(engine_manager, CoreEngineProcManager):
-            for proc in engine_manager.processes:
-                sentinel_to_proc[proc.sentinel] = proc
-        elif isinstance(engine_manager, CoreEngineActorManager):
-            actor_run_refs = engine_manager.get_run_refs()
+        # start monitor for engine liveness
+        if engine_manager:
+            engine_dead_event = threading.Event()
+            dead_msg: str | None = None
+
+            def engine_down_callback(dead_proc, all_processes: list):
+                nonlocal dead_msg
+                assert engine_manager is not None
+                engine_dead_event.set()
+                dead_engine_index = all_processes.index(dead_proc)
+                dead_msg = f"Engine core process {dead_engine_index} is dead."
+                engine_manager.shutdown_monitor = True
+
+            monitor_thread = threading.Thread(
+                target=engine_manager.monitor_engine_liveness,
+                args=(engine_down_callback,),
+                daemon=True,
+            )
+            monitor_thread.start()
 
         # Check if any process terminates
-        while sentinel_to_proc or actor_run_refs:
+        while sentinel_to_proc:
+            if engine_manager is not None and engine_dead_event.is_set():
+                assert dead_msg is not None
+                raise RuntimeError(dead_msg)
             # Wait for any process to terminate
             ready_sentinels: list[Any] = connection.wait(sentinel_to_proc, timeout=5)
 
@@ -284,11 +300,6 @@ def wait_for_completion_or_failure(
                         f"Process {proc.name} (PID: {proc.pid}) "
                         f"died with exit code {proc.exitcode}"
                     )
-
-            if actor_run_refs:
-                import ray
-
-                _, actor_run_refs = ray.wait(actor_run_refs, timeout=5)
 
     except KeyboardInterrupt:
         logger.info("Received KeyboardInterrupt, shutting down API servers...")
