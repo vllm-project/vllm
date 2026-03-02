@@ -202,6 +202,16 @@ ray.init(runtime_env={"env_vars": ray_env_vars})
 # 1 GPU (via num_gpus=1 in the decorator), ensuring pg_inference gets different GPUs.
 train_model = TrainModel.remote(MODEL_NAME_V2)
 
+rocm_determinism_kwargs = {}
+if current_platform.is_rocm():
+    # ROCm: To minimize non-determinism, we set fixed seed, no prefix caching, and
+    # sequential request processing (max_num_seqs=1).
+    rocm_determinism_kwargs = {
+        "seed": 0,
+        "enable_prefix_caching": False,
+        "max_num_seqs": 1,
+    }
+
 # Build platform-specific LLM kwargs
 llm_kwargs = dict(
     model=MODEL_NAME_V1,
@@ -212,15 +222,7 @@ llm_kwargs = dict(
     gpu_memory_utilization=0.75,
     weight_transfer_config=WeightTransferConfig(backend="nccl"),
 )
-
-if current_platform.is_rocm():
-    # ROCm: To minimize non-determinism, we set fixed seed, no prefix caching, and
-    # sequential request processing (max_num_seqs=1).
-    llm_kwargs.update(
-        seed=0,
-        enable_prefix_caching=False,
-        max_num_seqs=1,
-    )
+llm_kwargs.update(rocm_determinism_kwargs)
 
 # Launch the vLLM inference engine.
 # With data_parallel_backend="ray", vLLM's CoreEngineActorManager creates
@@ -357,13 +359,7 @@ llm_v2_kwargs = dict(
     distributed_executor_backend="ray",
     attention_backend=ATTN_BACKEND,
 )
-
-if current_platform.is_rocm():
-    llm_v2_kwargs.update(
-        seed=0,
-        enable_prefix_caching=False,
-        max_num_seqs=1,
-    )
+llm_v2_kwargs.update(rocm_determinism_kwargs)
 
 llm_v2 = ray.remote(
     num_cpus=0,
