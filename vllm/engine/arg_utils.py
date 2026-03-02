@@ -1809,11 +1809,14 @@ class EngineArgs:
                     "attention_backend and attention_config.backend "
                     "are mutually exclusive"
                 )
-            # Convert string to enum if needed (CLI parsing returns a string)
+            # Convert string to enum if needed (CLI parsing returns a string).
             if isinstance(self.attention_backend, str):
-                attention_config.backend = AttentionBackendEnum[
-                    self.attention_backend.upper()
-                ]
+                # Use automatic selection (same as None/unset) with "auto".
+                attention_config.backend = (
+                    AttentionBackendEnum[self.attention_backend.upper()]
+                    if self.attention_backend.lower() != "auto"
+                    else None
+                )
             else:
                 attention_config.backend = self.attention_backend
 
