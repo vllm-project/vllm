@@ -3,13 +3,19 @@
 
 from collections.abc import Iterable, Sequence
 from itertools import islice
+from typing import TYPE_CHECKING
 
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
+    )
+    from vllm.entrypoints.openai.responses.protocol import (
+        ResponsesRequest,
+    )
+
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
@@ -83,7 +89,7 @@ class Step3ReasoningParser(ReasoningParser):
             return DeltaMessage(reasoning=delta_text)
 
     def extract_reasoning(
-        self, model_output: str, request: ChatCompletionRequest
+        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
     ) -> tuple[str | None, str | None]:
         # Check if the model output contains the </think> token
         if self.think_end_token not in model_output:
