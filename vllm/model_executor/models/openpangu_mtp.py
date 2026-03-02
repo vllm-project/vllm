@@ -145,6 +145,9 @@ class OpenPanguMTP(nn.Module):
             ("gate_up_proj", "up_proj", 1),
             ("fused_qkv_a_proj", "q_a_proj", 0),
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
         ]
 
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
@@ -218,6 +221,10 @@ class OpenPanguMTP(nn.Module):
                     if name.endswith(".bias") and name not in params_dict:
                         continue
 
+                    if name.endswith("e_score_correction_bias"):
+                        name = name.replace(
+                            "e_score_correction_bias", "gate.e_score_correction_bias"
+                        )
                     if (
                         spec_layer != self.model.mtp_start_layer_idx
                         and ".layers" not in name
@@ -230,7 +237,16 @@ class OpenPanguMTP(nn.Module):
                     )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
+
+        self.post_weight_load()
         return loaded_params
+
+    def post_weight_load(self) -> None:
+        for name, module in self.named_modules():
+            if module is self:
+                continue
+            if hasattr(module, "post_weight_load"):
+                module.post_weight_load()
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """
