@@ -217,9 +217,13 @@ class UnquantizedLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        weight = layer.weight
+        # Support FP8 weight storage: cast to compute dtype for GEMM
+        if weight.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            weight = weight.to(x.dtype)
         if vllm_is_batch_invariant() and current_platform.is_cuda_alike():
-            return linear_batch_invariant(x, layer.weight, bias)
-        return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
+            return linear_batch_invariant(x, weight, bias)
+        return dispatch_unquantized_gemm()(layer, x, weight, bias)
 
 
 class LinearBase(PluggableLayer):
