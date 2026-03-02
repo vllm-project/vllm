@@ -308,7 +308,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 #################### CSRC BUILD IMAGE ####################
 
 #################### EXTENSIONS BUILD IMAGE ####################
-# Build DeepGEMM, pplx-kernels, DeepEP - runs in PARALLEL with csrc-build
+# Build DeepGEMM, DeepEP - runs in PARALLEL with csrc-build
 # This stage is independent and doesn't affect csrc cache
 FROM base AS extensions-build
 ARG CUDA_VERSION
@@ -335,10 +335,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Ensure the wheel dir exists so COPY won't fail when DeepGEMM is skipped
 RUN mkdir -p /tmp/deepgemm/dist && touch /tmp/deepgemm/dist/.deepgemm_skipped
 
-# Build pplx-kernels and DeepEP wheels
+# Build DeepEP wheels
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
 # Defaults moved here from tools/ep_kernels/install_python_libraries.sh for centralized version management
-ARG PPLX_COMMIT_HASH=12cecfd
 ARG DEEPEP_COMMIT_HASH=73b6ea4
 ARG NVSHMEM_VER
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -347,7 +346,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     /tmp/install_python_libraries.sh \
         --workspace /tmp/ep_kernels_workspace \
         --mode wheel \
-        ${PPLX_COMMIT_HASH:+--pplx-ref "$PPLX_COMMIT_HASH"} \
         ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} \
         ${NVSHMEM_VER:+--nvshmem-ver "$NVSHMEM_VER"} && \
     find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
@@ -676,7 +674,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
-# Install EP kernels wheels (pplx-kernels and DeepEP) that have been built in the `build` stage
+# Install EP kernels wheels (DeepEP) that have been built in the `build` stage
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system ep_kernels/dist/*.whl --verbose \

@@ -16,6 +16,7 @@ import importlib
 
 _CLASS_TO_MODULE: dict[str, str] = {
     "AfmoeConfig": "vllm.transformers_utils.configs.afmoe",
+    "AXK1Config": "vllm.transformers_utils.configs.AXK1",
     "BagelConfig": "vllm.transformers_utils.configs.bagel",
     "ChatGLMConfig": "vllm.transformers_utils.configs.chatglm",
     "ColModernVBertConfig": "vllm.transformers_utils.configs.colmodernvbert",
@@ -28,8 +29,6 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "FlexOlmoConfig": "vllm.transformers_utils.configs.flex_olmo",
     "FunAudioChatConfig": "vllm.transformers_utils.configs.funaudiochat",
     "FunAudioChatAudioEncoderConfig": "vllm.transformers_utils.configs.funaudiochat",
-    "GlmOcrConfig": "vllm.transformers_utils.configs.glm_ocr",
-    "GlmOcrVisionConfig": "vllm.transformers_utils.configs.glm_ocr",
     "HunYuanVLConfig": "vllm.transformers_utils.configs.hunyuan_vl",
     "HunYuanVLTextConfig": "vllm.transformers_utils.configs.hunyuan_vl",
     "HunYuanVLVisionConfig": "vllm.transformers_utils.configs.hunyuan_vl",
@@ -72,6 +71,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
 
 __all__ = [
     "AfmoeConfig",
+    "AXK1Config",
     "BagelConfig",
     "ChatGLMConfig",
     "ColModernVBertConfig",
@@ -85,8 +85,6 @@ __all__ = [
     "FlexOlmoConfig",
     "FunAudioChatConfig",
     "FunAudioChatAudioEncoderConfig",
-    "GlmOcrConfig",
-    "GlmOcrVisionConfig",
     "HunYuanVLConfig",
     "HunYuanVLTextConfig",
     "HunYuanVLVisionConfig",
