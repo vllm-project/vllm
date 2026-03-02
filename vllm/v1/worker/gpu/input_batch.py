@@ -66,8 +66,6 @@ class InputBatch:
     input_ids: torch.Tensor
     # [num_tokens_after_padding]
     positions: torch.Tensor
-    # [num_tokens_after_padding, hidden_size]
-    inputs_embeds: torch.Tensor | None
 
     # [total_num_logits]
     logits_indices: torch.Tensor
@@ -138,7 +136,6 @@ class InputBatch:
             dcp_local_seq_lens=None,
             input_ids=input_ids,
             positions=positions,
-            inputs_embeds=None,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
@@ -496,6 +493,38 @@ def post_update(
         all_token_ids.stride(0),
         total_len,
         num_warps=1,
+    )
+
+
+@triton.jit
+def _post_update_pool_kernel(
+    idx_mapping_ptr,
+    num_computed_tokens_ptr,
+    query_start_loc_ptr,
+):
+    batch_id = tl.program_id(0)
+    query_start = tl.load(query_start_loc_ptr + batch_id)
+    query_end = tl.load(query_start_loc_ptr + batch_id + 1)
+    query_len = query_end - query_start
+
+    req_state_idx = tl.load(idx_mapping_ptr + batch_id)
+    num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
+    tl.store(num_computed_tokens_ptr + req_state_idx, num_computed + query_len)
+
+
+def post_update_pool(
+    # [num_reqs]
+    idx_mapping: torch.Tensor,
+    # [max_num_reqs]
+    num_computed_tokens: torch.Tensor,
+    # [num_reqs + 1]
+    query_start_loc: torch.Tensor,
+) -> None:
+    num_reqs = idx_mapping.shape[0]
+    _post_update_pool_kernel[(num_reqs,)](
+        idx_mapping,
+        num_computed_tokens,
+        query_start_loc,
     )
 
 

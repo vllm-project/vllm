@@ -243,6 +243,8 @@ if TYPE_CHECKING:
     VLLM_LORA_DISABLE_PDL: bool = False
     VLLM_ENABLE_CUDA_COMPATIBILITY: bool = False
     VLLM_CUDA_COMPATIBILITY_PATH: str | None = None
+    VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
+    VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
 
 
 def get_default_cache_root():
@@ -1617,6 +1619,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CUDA_COMPATIBILITY_PATH": lambda: os.environ.get(
         "VLLM_CUDA_COMPATIBILITY_PATH", None
     ),
+    # Whether it is a scale up launch engine for elastic EP,
+    # Should only be set by EngineCoreClient.
+    "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": lambda: bool(
+        int(os.getenv("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH", "0"))
+    ),
+    # Whether to wait for all requests to drain before sending the
+    # scaling command in elastic EP.
+    "VLLM_ELASTIC_EP_DRAIN_REQUESTS": lambda: bool(
+        int(os.getenv("VLLM_ELASTIC_EP_DRAIN_REQUESTS", "0"))
+    ),
 }
 
 
@@ -1752,10 +1764,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_ENABLE_V1_MULTIPROCESSING",
         "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE",
         "VLLM_CPU_KVCACHE_SPACE",
-        "VLLM_CPU_OMP_THREADS_BIND",
-        "VLLM_CPU_NUM_OF_RESERVED_CPU",
         "VLLM_CPU_MOE_PREPACK",
-        "VLLM_CPU_SGL_KERNEL",
         "VLLM_TEST_FORCE_LOAD_FORMAT",
         "VLLM_ENABLE_CUDA_COMPATIBILITY",
         "VLLM_CUDA_COMPATIBILITY_PATH",
