@@ -536,9 +536,6 @@ class NixlEplbCommunicator(EplbCommunicator):
                             send_per_peer[dst], send_buffer, dst * peer_partition_numel
                         )
 
-            if not recv_transfers:
-                return
-
             # Ensure all packed data is visible in device memory before pulls.
             if self._cuda_stream is not None:
                 self._cuda_stream.synchronize()
@@ -546,6 +543,9 @@ class NixlEplbCommunicator(EplbCommunicator):
                 torch.cuda.current_stream().synchronize()
             # READ is receiver-initiated; synchronize all ranks before transfer.
             torch.distributed.barrier(group=self._cpu_group)
+
+            if not recv_transfers:
+                return
 
             # Phase 2: communicate/unpack for each dtype.
             for (
