@@ -9,6 +9,7 @@ from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
 )
+from vllm.inputs import ProcessorInputs
 from vllm.renderers.inputs import TokPrompt
 
 
@@ -43,7 +44,7 @@ class ClassifyIOProcessor(PoolingIOProcessor):
         self,
         prompts: PromptType | Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
-    ):
+    ) -> Sequence[ProcessorInputs]:
         return self._preprocess_completion_offline(
             prompts=prompts, tokenization_kwargs=tokenization_kwargs
         )

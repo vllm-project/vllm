@@ -39,7 +39,7 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreTextRequest,
 )
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs import SingletonPrompt
+from vllm.inputs import ProcessorInputs, SingletonPrompt
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs import TokPrompt
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
@@ -224,7 +224,7 @@ class PoolingIOProcessor:
         self,
         prompts: PromptType | Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
-    ):
+    ) -> Sequence[ProcessorInputs]:
         renderer = self.renderer
         model_config = self.model_config
 

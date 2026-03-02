@@ -150,6 +150,7 @@ class LLM:
             a tag name, or a commit id.
         tokenizer_revision: The specific tokenizer version to use. It can be a
             branch name, a tag name, or a commit id.
+        chat_template: The chat template to apply.
         seed: The seed to initialize the random number generator for sampling.
         gpu_memory_utilization: The ratio (between 0 and 1) of GPU memory to
             reserve for the model weights, activations, and KV cache. Higher
@@ -1176,7 +1177,7 @@ class LLM:
 
             if pooling_task in self.pooling_io_processor:
                 io_processor = self.pooling_io_processor[pooling_task]
-                prompts_seq = io_processor.pre_process_offline(
+                processor_inputs = io_processor.pre_process_offline(
                     prompts_seq, tokenization_kwargs
                 )
                 seq_lora_requests = self._lora_request_to_seq(
@@ -1185,7 +1186,7 @@ class LLM:
                 seq_priority = self._priority_to_seq(None, len(prompts))
 
                 self._render_and_add_requests(
-                    prompts=prompts_seq,
+                    prompts=processor_inputs,
                     params=params_seq,
                     lora_requests=seq_lora_requests,
                     priorities=seq_priority,
