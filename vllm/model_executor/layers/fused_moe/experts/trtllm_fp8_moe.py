@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import flashinfer
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -177,6 +176,9 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
+        # Delay import for non-CUDA.
+        import flashinfer
+
         assert not apply_router_weight_on_input
         assert activation == MoEActivation.SILU
 
@@ -236,9 +238,12 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
+        # Delay import for non-CUDA.
+        import flashinfer
+        from flashinfer.fused_moe.core import ActivationType
+
         # Confirm supported activation function.
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
-        from flashinfer.fused_moe.core import ActivationType
 
         activation_type = ActivationType(activation_to_flashinfer_int(activation))
 
