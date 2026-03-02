@@ -19,6 +19,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.utils import get_full_attention_group_idx
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
@@ -116,6 +117,7 @@ class Scheduler(SchedulerInterface):
         self.connector = None
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         self.recompute_kv_load_failures = True
+        self._full_attention_group_idx = 0
         if self.vllm_config.kv_transfer_config is not None:
             assert not self.is_encoder_decoder, (
                 "Encoder-decoder models are not currently supported with KV connectors"
@@ -131,6 +133,9 @@ class Scheduler(SchedulerInterface):
                 self.vllm_config.kv_transfer_config.kv_load_failure_policy
             )
             self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
+            self._full_attention_group_idx = get_full_attention_group_idx(
+                kv_cache_config
+            )
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
@@ -1990,8 +1995,11 @@ class Scheduler(SchedulerInterface):
             self.failed_recving_kv_req_ids.remove(request.request_id)
         else:
             # Now that the blocks are ready, actually cache them.
-            (block_ids,) = self.kv_cache_manager.get_block_ids(request.request_id)
-            num_computed_tokens = len(block_ids) * self.block_size
+            block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+            # When connector does not support HMA, a single group is present here
+            num_computed_tokens = (
+                len(block_ids[self._full_attention_group_idx]) * self.block_size
+            )
             # Handle the case where num request tokens less than one block.
             num_computed_tokens = min(num_computed_tokens, request.num_tokens)
             if num_computed_tokens == request.num_tokens:
