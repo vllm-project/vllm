@@ -79,9 +79,6 @@ class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
-    def supports_chunking(self) -> bool:
-        return False
-
     def supports_expert_map(self) -> bool:
         return True
 

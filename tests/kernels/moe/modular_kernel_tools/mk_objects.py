@@ -64,7 +64,6 @@ class ExpertInfo:
     activation_format: mk.FusedMoEActivationFormat
     supported_dtypes: list[torch.dtype | str]
     blocked_quantization_support: bool
-    supports_chunking: bool
     supports_expert_map: bool
     needs_matching_quant: bool = False
     needs_deep_gemm: bool = False
@@ -125,7 +124,6 @@ def register_experts(
     activation_format: mk.FusedMoEActivationFormat,
     supported_dtypes: list[torch.dtype | str],
     blocked_quantization_support: bool,
-    supports_chunking: bool,
     supports_expert_map: bool,
     needs_matching_quant: bool = False,
     needs_deep_gemm: bool = False,
@@ -139,7 +137,6 @@ def register_experts(
         activation_format,
         supported_dtypes,
         blocked_quantization_support,
-        supports_chunking,
         supports_expert_map,
         needs_matching_quant,
         needs_deep_gemm,
@@ -174,7 +171,6 @@ register_experts(
     batched_format,
     common_float_types,
     blocked_quantization_support=True,
-    supports_chunking=False,
     supports_expert_map=False,
     needs_matching_quant=True,
 )
@@ -184,7 +180,6 @@ register_experts(
     standard_format,
     common_float_and_int_types,
     blocked_quantization_support=True,
-    supports_chunking=True,
     supports_expert_map=True,
     needs_matching_quant=True,
 )
@@ -194,7 +189,6 @@ register_experts(
     batched_format,
     common_float_and_int_types,
     blocked_quantization_support=True,
-    supports_chunking=False,
     supports_expert_map=True,
 )
 
@@ -260,7 +254,6 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
         standard_format,
         nvfp4_types + fp8_types,
         blocked_quantization_support=True,
-        supports_chunking=True,
         # Note: this is a hack to get it to run for now
         supports_expert_map=True,
     )
@@ -279,7 +272,6 @@ if has_aiter():
         standard_format,
         fp8_types,
         blocked_quantization_support=True,
-        supports_chunking=True,
         supports_expert_map=True,
         needs_aiter=True,
     )
@@ -292,7 +284,6 @@ if has_deep_gemm() and is_deep_gemm_supported():
         batched_format,
         fp8_types,
         blocked_quantization_support=True,
-        supports_chunking=False,
         supports_expert_map=False,
         needs_matching_quant=False,
         needs_deep_gemm=True,
@@ -302,7 +293,6 @@ if has_deep_gemm() and is_deep_gemm_supported():
         standard_format,
         fp8_types,
         blocked_quantization_support=True,
-        supports_chunking=True,
         supports_expert_map=True,
         needs_matching_quant=False,
         needs_deep_gemm=True,
@@ -312,7 +302,6 @@ if has_deep_gemm() and is_deep_gemm_supported():
         standard_format,
         common_float_and_int_types,
         blocked_quantization_support=True,
-        supports_chunking=True,
         supports_expert_map=True,
         needs_matching_quant=True,
         needs_deep_gemm=True,
@@ -329,7 +318,6 @@ if cutlass_fp8_supported():
         standard_format,
         fp8_types,
         blocked_quantization_support=False,
-        supports_chunking=True,
         supports_expert_map=False,
     )
     register_experts(
@@ -337,7 +325,6 @@ if cutlass_fp8_supported():
         batched_format,
         fp8_types,
         blocked_quantization_support=False,
-        supports_chunking=False,
         supports_expert_map=False,
     )
 else:
@@ -352,7 +339,6 @@ if cutlass_fp4_supported():
         standard_format,
         nvfp4_types,
         blocked_quantization_support=True,
-        supports_chunking=True,
         supports_expert_map=False,
     )
 else:

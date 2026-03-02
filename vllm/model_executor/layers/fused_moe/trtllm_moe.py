@@ -83,9 +83,6 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "This method should not be called."
         )
 
-    def supports_chunking(self) -> bool:
-        return True
-
     def supports_expert_map(self) -> bool:
         return True
 

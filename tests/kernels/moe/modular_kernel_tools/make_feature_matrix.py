@@ -42,12 +42,6 @@ def rank_worker(
 ):
     set_random_seed(pgi.rank)
 
-    # sanity check
-    from vllm import envs
-
-    if config.fused_moe_chunk_size is not None:
-        assert config.fused_moe_chunk_size == envs.VLLM_FUSED_MOE_CHUNK_SIZE
-
     # get weights to this device
     weights.to_current_device()
 
@@ -135,7 +129,6 @@ def make_feature_matrix(csv_file_path: str):
             fused_experts_type=experts_type,
             quant_config=quant_config,
             world_size=2,
-            fused_moe_chunk_size=None,
         )
 
         success = None

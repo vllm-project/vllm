@@ -68,7 +68,6 @@ class Config:
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize
     fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute
 
-    fused_moe_chunk_size: int | None
     world_size: int
 
     torch_trace_dir_path: str | None = None
@@ -89,7 +88,6 @@ class Config:
         s += f" K={self.K}\n"
         s += f" topk={self.topks}\n"
         s += f" dtype={self.dtype}\n"
-        s += f" fused_moe_chunk_size={self.fused_moe_chunk_size}\n"
         s += " Quant:\n"
         if self.quant_config is not None:
             s += f"     q_dtype={self.quant_dtype}\n"
@@ -152,11 +150,6 @@ class Config:
 
         vllm_config.parallel_config.all2all_backend = self.all2all_backend()
 
-        if self.fused_moe_chunk_size is not None:
-            env_dict.update(
-                {"VLLM_FUSED_MOE_CHUNK_SIZE": str(self.fused_moe_chunk_size)}
-            )
-
         return vllm_config, env_dict
 
     def is_fp8_block_quantized(self):
@@ -188,10 +181,6 @@ class Config:
     def is_block_quant_supported(self):
         info = expert_info(self.fused_experts_type)
         return info.blocked_quantization_support
-
-    def is_fe_supports_chunking(self):
-        info = expert_info(self.fused_experts_type)
-        return info.supports_chunking
 
     def supports_expert_map(self):
         info = expert_info(self.fused_experts_type)
@@ -232,10 +221,6 @@ class Config:
         else:
             if not self.is_standard_fused_experts():
                 return False, "Mismatched format."
-
-        use_chunking = self.fused_moe_chunk_size is not None
-        if use_chunking and not self.is_fe_supports_chunking():
-            return False, "Chunking not supported."
 
         # Check quantization sanity
         if (
