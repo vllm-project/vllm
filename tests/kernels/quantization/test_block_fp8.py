@@ -12,8 +12,8 @@ from tests.kernels.quant_utils import (
     native_w8a8_block_matmul,
 )
 from vllm.config import VllmConfig
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    cutlass_scaled_mm,
     per_token_group_quant_fp8,
     w8a8_triton_block_scaled_mm,
 )
