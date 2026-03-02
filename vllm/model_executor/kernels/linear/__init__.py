@@ -51,12 +51,6 @@ from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
 from vllm.model_executor.kernels.linear.mixed_precision.xpu import (
     XPUwNa16LinearKernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
-    AiterBpreshufflePerTokenFp8ScaledMMLinearKernel,
-    AiterCKPerTokenFp8ScaledMMLinearKernel,
-    AiterInt8ScaledMMLinearKernel
-)
-    
 from vllm.model_executor.kernels.linear.scaled_mm import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
@@ -66,6 +60,8 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     ScaledMMLinearLayerConfig,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+    AiterBpreshufflePerTokenFp8ScaledMMLinearKernel,
+    AiterCKPerTokenFp8ScaledMMLinearKernel,
     AiterInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
