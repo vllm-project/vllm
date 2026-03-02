@@ -874,14 +874,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url, uuid)
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
-        keep_bytes = bool(self._tracker._mm_processor_kwargs.get("use_audio_in_video"))
-        video = (
-            self._connector.fetch_video(
-                video_url=video_url, keep_video_bytes=keep_bytes
-            )
-            if video_url
-            else None
-        )
+        video = self._connector.fetch_video(video_url=video_url) if video_url else None
 
         placeholder = self._tracker.add("video", (video, uuid))
         self._add_placeholder("video", placeholder)
@@ -1024,11 +1017,8 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url, uuid)
 
     async def _video_with_uuid_async(self, video_url: str | None, uuid: str | None):
-        keep_bytes = bool(self._tracker._mm_processor_kwargs.get("use_audio_in_video"))
         video = (
-            await self._connector.fetch_video_async(
-                video_url=video_url, keep_video_bytes=keep_bytes
-            )
+            await self._connector.fetch_video_async(video_url=video_url)
             if video_url
             else None
         )
