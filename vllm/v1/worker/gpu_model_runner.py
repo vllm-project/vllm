@@ -590,15 +590,6 @@ class GPUModelRunner(
             self.async_output_copy_stream = torch.cuda.Stream()
             self.prepare_inputs_event = torch.Event()
 
-        # self.cudagraph_batch_sizes sorts in ascending order.
-        if (
-            self.compilation_config.cudagraph_capture_sizes
-            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
-            self.cudagraph_batch_sizes = sorted(
-                self.compilation_config.cudagraph_capture_sizes
-            )
-
         # Cache the device properties.
         self._init_device_properties()
 
@@ -5642,10 +5633,6 @@ class GPUModelRunner(
         ):
             self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
                 self.uniform_decode_query_len, self.parallel_config.tensor_parallel_size
-            )
-            capture_sizes = self.compilation_config.cudagraph_capture_sizes
-            self.cudagraph_batch_sizes = (
-                capture_sizes if capture_sizes is not None else []
             )
 
         # Trigger cudagraph dispatching keys initialization after
