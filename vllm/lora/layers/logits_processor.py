@@ -119,8 +119,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             self.sharded_to_full_mapping_gpu = None
 
     def reset_lora(self, index: int):
-        self.lora_a_stacked[index] = 0
-        self.lora_b_stacked[index] = 0
+        self.lora_a_stacked[index].zero_()
+        self.lora_b_stacked[index].zero_()
 
     def set_lora(
         self,
@@ -190,6 +190,9 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         return logits
 
     def forward(self, *args, **kwargs):
+        # synchronizing lora load
+        self._sync_lora_loads()
+
         return type(self.base_layer).forward(self, *args, **kwargs)
 
     @classmethod

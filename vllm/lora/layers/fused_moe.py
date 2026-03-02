@@ -518,12 +518,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def reset_lora(self, index: int):
         """Resets the lora weights at index back to 0."""
         for pos in range(self._w13_slices):
-            self.w13_lora_a_stacked[pos][index] = 0
-            self.w13_lora_b_stacked[pos][index] = 0
+            self.w13_lora_a_stacked[pos][index].zero_()
+            self.w13_lora_b_stacked[pos][index].zero_()
 
-        self.w2_lora_a_stacked[0][index] = 0
-        self.w2_lora_b_stacked[0][index] = 0
-        self.adapter_enabled[index] = 0
+        self.w2_lora_a_stacked[0][index].zero_()
+        self.w2_lora_b_stacked[0][index].zero_()
+        self.adapter_enabled[index].zero_()
 
     #
 
@@ -539,7 +539,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         assert isinstance(lora_b, list)
 
         self.reset_lora(index)
-        self.adapter_enabled[index] = 1
+        self.adapter_enabled[index].fill_(1)
 
         num_experts = self.w13_lora_a_stacked[0].shape[1]
 
@@ -588,6 +588,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         ].copy_(sliced_w2_lora_b, non_blocking=True)
 
     def forward(self, *args, **kwargs):
+        # synchronizing lora load
+        self._sync_lora_loads()
         return self.base_layer.forward(*args, **kwargs)
 
     def maybe_all_reduce_tensor_model_parallel(self, *args, **kwargs):
@@ -715,7 +717,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         assert len(lora_a) == len(lora_b) == 2
 
         self.reset_lora(index)
-        self.adapter_enabled[index] = 1
+        self.adapter_enabled[index].fill_(1)
 
         w13_lora_a, w2_lora_a = lora_a
         w13_lora_b, w2_lora_b = lora_b
