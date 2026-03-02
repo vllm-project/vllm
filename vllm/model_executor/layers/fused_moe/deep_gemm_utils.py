@@ -190,6 +190,7 @@ def ep_scatter(
     grid = num_experts
 
     assert m_indices.shape[0] % BLOCK_E == 0
+    assert expert_start_loc.shape[0] == num_experts
 
     _fwd_kernel_ep_scatter_1[(grid,)](
         num_recv_tokens_per_expert,
