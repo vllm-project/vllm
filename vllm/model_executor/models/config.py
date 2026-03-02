@@ -334,7 +334,7 @@ class Ernie4_5_VLMoeForConditionalGenerationConfig(VerifyAndUpdateConfig):
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         # Ernie4.5-VL conditionally executes text/vision MoE branches, so
         # fast_moe_cold_start can silently produce incorrect execution order.
-        vllm_config.compilation_config.fast_moe_cold_start = True
+        vllm_config.compilation_config.fast_moe_cold_start = False
 
 
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
