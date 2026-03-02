@@ -370,3 +370,15 @@ def test_system_message_warns_on_video(video_content):
     call_args = str(mock_logger.warning_once.call_args)
     assert "System messages should only contain text" in call_args
     assert "video_url" in call_args
+
+
+def test_json_schema_response_format_missing_schema():
+    """When response_format type is 'json_schema' but the json_schema field
+    is not provided, request construction should raise a validation error
+    so the API returns 400 instead of 500."""
+    with pytest.raises(Exception, match="json_schema.*must be provided"):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hello"}],
+            response_format={"type": "json_schema"},
+        )

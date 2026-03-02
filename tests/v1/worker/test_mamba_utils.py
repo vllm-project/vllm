@@ -62,6 +62,7 @@ def test_resumed_req_ids_cleared_from_mamba_state_idx():
             {},
             {},
             (),
+            MagicMock(),
         )
 
     assert mamba_state_idx == {"keep": 99}
