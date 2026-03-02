@@ -290,6 +290,8 @@ class CoreEngineActorManager:
         else:
             ray.init()
 
+        vllm_config.parallel_config.allocate_elastic_ep_ports()
+
         if placement_groups is not None:
             assert local_dp_ranks is not None, (
                 "local_dp_ranks must be provided if placement_groups is provided"
@@ -597,6 +599,8 @@ class CoreEngineActorManager:
 
             node_ip = node.node_ip
             node_id = node.node_id
+            if device_str not in available_resources[node_id]:
+                continue
             available_gpus = int(available_resources[node_id][device_str])
 
             # Get total GPUs on this node from the node's resources
@@ -786,11 +790,50 @@ class CoreEngineActorManager:
             ray.util.remove_placement_group(pg)
 
 
+def get_engine_zmq_addresses(
+    vllm_config: VllmConfig,
+    num_api_servers: int = 1,
+) -> EngineZmqAddresses:
+    """Allocate ZMQ addresses for engine-client communication."""
+    parallel_config = vllm_config.parallel_config
+    local_engine_count = parallel_config.data_parallel_size_local
+    local_start_index = parallel_config.data_parallel_rank_local
+    dp_size = parallel_config.data_parallel_size
+    host = parallel_config.data_parallel_master_ip
+    local_engines_only = parallel_config.local_engines_only
+
+    # In offline mode there is an LLM instance per DP rank and
+    # one core engine per LLM, see
+    # examples/offline_inference/data_parallel.py.
+    offline_mode = local_start_index is not None
+
+    # client_local_only = True for cases where this front-end
+    # sends requests only to colocated engines.
+    client_local_only = (
+        offline_mode or local_engines_only or (local_engine_count == dp_size)
+    )
+    # NOTE(yongji): handling scaling from intra-node to inter-node
+    if parallel_config.enable_elastic_ep:
+        client_local_only = False
+
+    return EngineZmqAddresses(
+        inputs=[
+            get_engine_client_zmq_addr(client_local_only, host)
+            for _ in range(num_api_servers)
+        ],
+        outputs=[
+            get_engine_client_zmq_addr(client_local_only, host)
+            for _ in range(num_api_servers)
+        ],
+    )
+
+
 @contextlib.contextmanager
 def launch_core_engines(
     vllm_config: VllmConfig,
     executor_class: type[Executor],
     log_stats: bool,
+    addresses: EngineZmqAddresses,
     num_api_servers: int = 1,
 ) -> Iterator[
     tuple[
@@ -809,9 +852,6 @@ def launch_core_engines(
     host = parallel_config.data_parallel_master_ip
     local_engines_only = parallel_config.local_engines_only
 
-    # In offline mode there is an LLM instance per DP rank and
-    # one core engine per LLM, see
-    # examples/offline_inference/data_parallel.py.
     offline_mode = local_start_index is not None
 
     # client_local_only = True for cases where this front-end
@@ -904,6 +944,10 @@ def launch_core_engines(
     # their co-located frontend and also the rank 0 front-end, and hence this
     # will be False.
     handshake_local_only = offline_mode or local_engine_count == dp_size
+
+    # NOTE(yongji): handling scaling from intra-node to inter-node
+    if parallel_config.enable_elastic_ep:
+        handshake_local_only = False
 
     handshake_address = get_engine_client_zmq_addr(
         handshake_local_only, host, parallel_config.data_parallel_rpc_port
