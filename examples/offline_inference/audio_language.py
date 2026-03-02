@@ -201,6 +201,32 @@ def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# KimiAudio
+def run_kimiaudio(question: str, audio_count: int) -> ModelRequestData:
+    model_name = snapshot_download("moonshotai/Kimi-Audio-7B-Instruct")
+    audio_tokenizer_path = snapshot_download("THUDM/glm-4-voice-tokenizer")
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=5,
+        limit_mm_per_prompt={"audio": audio_count},
+        trust_remote_code=True,
+        enforce_eager=True,
+        tokenizer_mode="tiktoken",
+        mm_processor_kwargs={
+            "audio_tokenizer": audio_tokenizer_path,
+        },
+    )
+
+    audio_markers = " ".join(["<|AUDIO|>"] * audio_count)
+    prompt = f"{question}{audio_markers}"
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # MiDashengLM
 def run_midashenglm(question: str, audio_count: int):
     model_name = "mispeech/midashenglm-7b"
@@ -484,6 +510,7 @@ model_example_map = {
     "gemma3n": run_gemma3n,
     "glmasr": run_glmasr,
     "funaudiochat": run_funaudiochat,
+    "kimiaudio": run_kimiaudio,
     "granite_speech": run_granite_speech,
     "midashenglm": run_midashenglm,
     "minicpmo": run_minicpmo,
