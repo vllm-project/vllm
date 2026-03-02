@@ -353,13 +353,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 device=self.device,
             )
 
-        # Execute the model.
-        self.execute_model(
-            dummy_scheduler_output,
-            intermediate_tensors=intermediate_tensors,
-            dummy_run=True,
-            skip_attn_for_dummy_run=skip_attn,
-        )
+        with self.maybe_dummy_run_with_lora(
+            self.lora_config,
+            num_scheduled_tokens=np.array(num_tokens_per_request, dtype=np.int32),
+            num_sampled_tokens=None,
+            remove_lora=True,
+            num_active_loras=self.lora_config.max_loras
+            if self.lora_config is not None
+            else 0,
+        ):
+            # Execute the model.
+            self.execute_model(
+                dummy_scheduler_output,
+                intermediate_tensors=intermediate_tensors,
+                dummy_run=True,
+                skip_attn_for_dummy_run=skip_attn,
+            )
         self.kv_connector.set_disabled(False)
 
         # Non-last PP ranks don't produce output for sampling.
@@ -465,6 +474,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         torch.cuda.empty_cache()
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
+        def _lora_context_before_capture(
+            num_active_loras: int, num_reqs: int, num_tokens: int
+        ) -> None:
+            """Set up LoRA state before each capture. Used when has_lora."""
+            if self.lora_config is None:
+                return
+            num_scheduled = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
+            num_scheduled[-1] += num_tokens % num_reqs
+            with self.maybe_select_dummy_loras(
+                self.lora_config,
+                num_scheduled,
+                num_active_loras=num_active_loras,
+            ):
+                pass
+
         with self.maybe_setup_dummy_loras(self.lora_config):
             self.cudagraph_manager.capture(
                 model=self.model,
@@ -474,6 +498,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 attn_groups=self.attn_groups,
                 kv_cache_config=self.kv_cache_config,
                 has_lora=self.lora_config is not None,
+                lora_capture_hook=(
+                    _lora_context_before_capture
+                    if self.lora_config is not None
+                    else None
+                ),
             )
             if self.speculator is not None:
                 self.speculator.capture_model()
@@ -822,12 +851,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 return empty_output
 
         # Get local cudagraph mode and size.
-        local_cudagraph_mode, local_cudagraph_size = (
-            self.cudagraph_manager.get_cudagraph_runtime_mode(
-                num_reqs=len(scheduler_output.num_scheduled_tokens),
-                num_tokens=scheduler_output.total_num_scheduled_tokens,
-                max_query_len=max(scheduler_output.num_scheduled_tokens.values()),
-            )
+        if self.lora_config and not dummy_run:
+            req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+            active_loras = self.lora_state.get_activate_loras(req_ids)
+            num_active_loras = len(active_loras)
+        elif dummy_run and self.lora_config:
+            # Use max_loras + 1 to match cudagraph capture for has_lora case
+            num_active_loras = self.lora_config.max_loras + 1
+        else:
+            num_active_loras = 0
+        (
+            local_cudagraph_mode,
+            local_cudagraph_size,
+            effective_num_active_loras,
+        ) = self.cudagraph_manager.get_cudagraph_runtime_mode(
+            num_reqs=len(scheduler_output.num_scheduled_tokens),
+            num_tokens=scheduler_output.total_num_scheduled_tokens,
+            max_query_len=max(scheduler_output.num_scheduled_tokens.values()),
+            num_active_loras=num_active_loras,
         )
 
         # DP sync: num_tokens + cudagraph_size + cudagraph_mode
@@ -876,7 +917,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 block_tables = None
                 slot_mappings = None
-            # FIXME(woosuk): Fix warmup for LoRA.
 
         attn_metadata = None
         slot_mappings_by_layer = None
@@ -925,7 +965,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # because they are already copied to the CUDA graph input buffers.
             self.kv_connector.pre_forward(scheduler_output)
             model_output = self.cudagraph_manager.run_fullgraph(
-                input_batch.num_tokens_after_padding
+                input_batch.num_tokens_after_padding,
+                num_active_loras=effective_num_active_loras,
             )
             if self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = model_output
