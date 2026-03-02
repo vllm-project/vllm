@@ -788,13 +788,14 @@ class Worker(WorkerBase):
                     self.profiler = CudaProfilerWrapper(self.profiler_config)
                     logger.debug("Starting CUDA profiler")
                 else:
-                    logger.warning("Unrecognized profiler: %s", profiler_type)
-                    return
-                self.profiler.start()
-            else:
-                # Profiler already initialized. Restart profiling but keep
-                # the original trace name from the first initialization.
-                self.profiler.start()
+                    # Config validation should prevent this code being reached
+                    raise ValueError(
+                        f"Invalid profiler value of {self.profiler_config.profiler}"
+                    )
+
+            # If profiler already initialized, restart profiling but keep
+            # the original trace name from the first initialization.
+            self.profiler.start()
         else:
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")
