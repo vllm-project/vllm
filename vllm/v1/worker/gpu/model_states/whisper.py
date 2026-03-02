@@ -98,7 +98,7 @@ class WhisperModelState(ModelState):
         for_capture: bool = False,
     ) -> dict[str, Any]:
         encoder_seq_lens = self._get_encoder_seq_lens(
-            attn_groups, input_batch.req_ids, for_capture
+            input_batch.req_ids, for_capture, attn_groups
         )
 
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
@@ -122,25 +122,23 @@ class WhisperModelState(ModelState):
 
     def _get_encoder_seq_lens(
         self,
-        attn_groups: list[list[AttentionGroup]],
         req_ids: list[str],
         for_capture: bool,
+        attn_groups: list[list[AttentionGroup]],
     ) -> dict[int, tuple[torch.Tensor, np.ndarray]]:
         num_reqs = len(req_ids)
         encoder_seq_lens_np = np.zeros(num_reqs, dtype=np.int32)
         if not for_capture:
             # During normal execution, use actual encoder lengths.
             for i, req_id in enumerate(req_ids):
-                mm_features = self.encoder_cache.mm_features.get(req_id)
-                assert mm_features is not None, (
-                    f"Missing multimodal features for request {req_id}."
-                )
+                mm_features = self.encoder_cache.mm_features.get(req_id, [])
                 encoder_seq_lens_np[i] = sum(
                     feature.mm_position.length for feature in mm_features
                 )
         else:
-            # During CUDA graph capture, use max possible length.
-            encoder_seq_lens_np[:] = min(self.max_encoder_len, self.max_model_len)
+            # During CUDA graph capture, use max encoder length so max_seqlen_k
+            # is captured with the correct value for cross-attention.
+            encoder_seq_lens_np[:] = self.max_encoder_len
 
         self.encoder_seq_lens_gpu[:num_reqs].copy_(
             torch.from_numpy(encoder_seq_lens_np), non_blocking=True
