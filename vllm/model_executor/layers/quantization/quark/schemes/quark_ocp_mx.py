@@ -59,7 +59,7 @@ try:
         gemm_afp4wfp4,
         gemm_afp4wfp4_preshuffled_weight_scales,
     )
-    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+    from aiter.ops.triton.quant.quant import dynamic_mxfp4_quant
 
     from vllm.utils.torch_utils import direct_register_custom_op
 
