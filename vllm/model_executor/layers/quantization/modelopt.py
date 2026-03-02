@@ -1179,11 +1179,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Rename ModelOpt checkpoint names to standardized names
-        input_global_scale = layer.input_scale.max().to(torch.float32)
-        layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
-        del layer.input_scale
-
         if (
             torch.unique(layer.input_scale).numel() != 1
             or torch.unique(layer.weight_scale_2).numel() != 1
@@ -1195,6 +1190,11 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
                 " accuracy. Consider using a checkpoint with a shared global NVFP4"
                 " scale for parallel layers."
             )
+
+        # Rename ModelOpt checkpoint names to standardized names
+        input_global_scale = layer.input_scale.max().to(torch.float32)
+        layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
+        del layer.input_scale
 
         weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
 

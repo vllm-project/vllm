@@ -94,7 +94,8 @@ if not current_platform.has_device_capability(100):
     TEST_NVFP4_BACKENDS = ["emulation"]
 else:
     TEST_NVFP4_BACKENDS = [
-        "emulationflashinfer-cudnn",
+        "emulation",
+        "flashinfer-cudnn",
         "flashinfer-trtllm",  # the small seq_len ensures trtllm_8x4_layout backend is used
         "flashinfer-cutlass",
     ]
