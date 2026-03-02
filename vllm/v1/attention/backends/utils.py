@@ -16,6 +16,7 @@ import torch
 from typing_extensions import runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
@@ -27,6 +28,7 @@ import vllm.envs as envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout,
 )
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import (
@@ -508,18 +510,48 @@ def split_decodes_and_prefills(
         num_decode_tokens: The number of tokens in the decode requests.
         num_prefill_tokens: The number of tokens in the prefill requests.
     """
-    max_query_len = common_attn_metadata.max_query_len
     num_reqs = common_attn_metadata.num_reqs
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
 
-    if max_query_len <= decode_threshold and (
-        not require_uniform or decode_threshold <= 1
-    ):
-        return num_reqs, 0, num_tokens, 0
+    # For PCP, use global_num_scheduled_tokens for classification since
+    # query_start_loc contains local (partitioned) counts
+    global_scheduled = common_attn_metadata.global_num_scheduled_tokens
+    if global_scheduled is not None:
+        global_query_lens = global_scheduled[:num_reqs].cpu()
+        max_query_len = int(global_query_lens.max().item())
+        # Also get num_computed_tokens to distinguish decode from new prefill
+        num_computed = common_attn_metadata.compute_num_computed_tokens()[
+            :num_reqs
+        ].cpu()
+    else:
+        max_query_len = common_attn_metadata.max_query_len
+        global_query_lens = None
+        num_computed = None
 
-    query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    if query_lens[0].item() > decode_threshold:
+    # For the "all decode" fast path, also need to check num_computed_tokens
+    # (new prefills have num_computed_tokens=0 and should not be classified as decode)
+    all_decode = max_query_len <= decode_threshold and (
+        not require_uniform or decode_threshold <= 1
+    )
+    if all_decode:
+        # With PCP, check if any request is a new prefill (num_computed_tokens=0)
+        if num_computed is not None and torch.any(num_computed == 0):
+            all_decode = False
+        if all_decode:
+            return num_reqs, 0, num_tokens, 0
+
+    # Use global lens if available (PCP), otherwise compute from local query_start_loc
+    if global_query_lens is not None:
+        query_lens = global_query_lens
+    else:
+        query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    # Check if first request is prefill (cannot be decode if query_lens > threshold
+    # OR if it's a new prefill with num_computed_tokens == 0)
+    first_is_prefill = query_lens[0].item() > decode_threshold
+    if num_computed is not None and num_computed[0].item() == 0:
+        first_is_prefill = True
+    if first_is_prefill:
         # first request is not decode, so no decode requests
         return 0, num_reqs, 0, num_tokens
 
@@ -527,17 +559,25 @@ def split_decodes_and_prefills(
         # check if we are in a padded uniform batch; this is used for full-CGs, some
         # requests may have a query length of 0 but since they are padding its fine
         # to treat them as decodes (ensures num_decodes matches the captured size)
+        # Note: skip the total tokens check for PCP since num_tokens is local
         if torch.all((query_lens == query_lens[0]) | (query_lens == 0)):
-            assert num_reqs * query_lens[0] == num_tokens, "tokens not padded correctly"
+            if global_query_lens is None:
+                assert num_reqs * query_lens[0] == num_tokens, (
+                    "tokens not padded correctly"
+                )
             return num_reqs, 0, num_tokens, 0  # all decodes
         is_prefill = query_lens != query_lens[0]
     else:
+        # Prefill = query_lens > threshold OR num_computed_tokens == 0 (new prefill)
         is_prefill = query_lens > decode_threshold
+        if num_computed is not None:
+            is_prefill = is_prefill | (num_computed == 0)
 
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0
 
     first_prefill = is_prefill.int().argmax(dim=-1).item()
+    # Classification is based on query_lens (global for PCP), but assertion should match
     assert torch.all(query_lens[:first_prefill] <= decode_threshold)
     num_decodes = first_prefill
     num_prefills = num_reqs - num_decodes
@@ -789,7 +829,7 @@ def get_dcp_local_seq_lens(
     seq_lens: torch.Tensor,
     dcp_size: int = 1,
     dcp_rank: int | None = None,
-    cp_kv_cache_interleave_size: int = 1,
+    dcp_kv_cache_interleave_size: int = 1,
 ) -> torch.Tensor:
     """While using dcp, kv_cache size stored on each rank may be different,
     use this function to calculate split decode seq_lens of each dcp rank.
@@ -811,18 +851,113 @@ def get_dcp_local_seq_lens(
     )
     base = (
         seq_lens_tiled
-        // cp_kv_cache_interleave_size
+        // dcp_kv_cache_interleave_size
         // dcp_size
-        * cp_kv_cache_interleave_size
+        * dcp_kv_cache_interleave_size
     )
     remainder = seq_lens_tiled - base * dcp_size
     remainder = torch.clip(
-        remainder - rank_offsets * cp_kv_cache_interleave_size,
+        remainder - rank_offsets * dcp_kv_cache_interleave_size,
         0,
-        cp_kv_cache_interleave_size,
+        dcp_kv_cache_interleave_size,
     )
     dcp_local_seq_lens = base + remainder
     return dcp_local_seq_lens.squeeze(1)
+
+
+def pcp_kv_allgather_and_restore(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    num_actual_tokens: int,
+    pcp_allgather_restore_idx: torch.Tensor,
+    pcp_group: GroupCoordinator,
+):
+    """
+    All-gather key and value tensors across PCP ranks and restore the original order.
+    Args:
+        key: key tensor for the current pcp rank.
+        value: value tensor for the current pcp rank.
+        num_actual_tokens: number of actual tokens (Exclude graph padding tokens).
+        pcp_allgather_restore_idx: indices to restore the original order.
+        pcp_group: PCP group coordinator.
+    Returns:
+        key: all-gathered and restored key tensor.
+        value: all-gathered and restored value tensor.
+    """
+    # NOTE(yyj): we must `slice` key and value because pcp_allgather_restore_idx
+    # ignores the padding from CUDA Graph.
+    # TODO(yyj) Batch all-gather operations to reduce launch overhead.
+    # Be careful about the dimensions of key and value.
+    key_across_cp = pcp_group.all_gather(key[:num_actual_tokens].contiguous(), dim=0)
+    value_across_cp = pcp_group.all_gather(
+        value[:num_actual_tokens].contiguous(), dim=0
+    )
+
+    # Reorder kv after pcp allgather.
+    # Note that there are duplicate decoding tokens after allgather.
+    key = torch.index_select(key_across_cp, 0, pcp_allgather_restore_idx)
+    value = torch.index_select(value_across_cp, 0, pcp_allgather_restore_idx)
+
+    return key, value
+
+
+def get_pcp_query_restore_idx(cu_num_tokens: torch.Tensor) -> torch.Tensor:
+    """
+    Get restore index for PCP query splitting.
+
+    When queries are split into head/tail halves for PCP, this returns
+    the argsort index to restore original order after processing.
+
+    Args:
+        cu_num_tokens: cumulative token counts, shape [num_reqs + 1]
+
+    Returns:
+        restore_idx: tensor to reorder concatenated [head, tail] back to original
+    """
+    cu = cu_num_tokens.cpu().numpy()
+    starts, ends = cu[:-1], cu[1:]
+    half_lens = (ends - starts) // 2
+    total = half_lens.sum()
+
+    seq_ids = np.repeat(np.arange(len(half_lens)), half_lens)
+    cu_half = np.concatenate([[0], np.cumsum(half_lens)[:-1]])
+    offsets = np.arange(total) - cu_half[seq_ids]
+
+    head = starts[seq_ids] + offsets
+    tail = (ends - half_lens)[seq_ids] + offsets
+    return torch.from_numpy(np.concatenate([head, tail]).argsort().astype(np.int32))
+
+
+def extend_all_queries_by_1(
+    common_attn_metadata: CommonAttentionMetadata,
+    arange: torch.Tensor,
+    new_slot_mapping: torch.Tensor,
+) -> CommonAttentionMetadata:
+    """
+    Creates a new CommonAttentionMetadata with all query lengths increased by 1.
+    Also all seq lens are increased by 1.
+    This is useful e.g. in speculative decoding with draft models, where we
+    extend each sequence by 1 token.
+    The slot mapping is computed externally, as it requires more information.
+    """
+    cad = common_attn_metadata
+    # query start loc must be increased by [+0, +1, +2, ..., +batch_size]
+    new_query_start_loc = cad.query_start_loc + arange[: len(cad.query_start_loc)]
+    new_query_start_loc_cpu = cad.query_start_loc_cpu + torch.arange(
+        len(cad.query_start_loc_cpu), dtype=torch.int32
+    )
+    new_cad = cad.replace(
+        query_start_loc=new_query_start_loc,
+        query_start_loc_cpu=new_query_start_loc_cpu,
+        seq_lens=cad.seq_lens + 1,
+        # each request is extended by 1 token -> batch_size tokens are added
+        num_actual_tokens=cad.num_actual_tokens + cad.batch_size(),
+        # All query lens increase by 1, so max query len increases by 1
+        max_query_len=cad.max_query_len + 1,
+        max_seq_len=cad.max_seq_len + 1,
+        slot_mapping=new_slot_mapping,
+    )
+    return new_cad
 
 
 def mamba_get_block_table_tensor(
@@ -864,3 +999,220 @@ def mamba_get_block_table_tensor(
         )
         indices_to_gather = (start_indices.unsqueeze(1) + offsets).to(torch.int64)
         return torch.gather(block_table, 1, indices_to_gather)
+
+
+@triton.jit
+def _fused_pcp_qkv_select_kernel(
+    q_ptr,
+    q_stride_B,
+    q_stride_H,
+    k_ptr,
+    k_stride_B,
+    k_stride_H,
+    v_ptr,
+    v_stride_B,
+    v_stride_H,
+    query_start_ptr,
+    out_q_head_ptr,
+    out_q_tail_ptr,
+    out_k_head_ptr,
+    out_k_tail_ptr,
+    out_v_head_ptr,
+    out_v_tail_ptr,
+    pcp_world_size: tl.constexpr,
+    pcp_rank: tl.constexpr,
+    n_head: tl.constexpr,
+    q_head_dim: tl.constexpr,
+    k_head_dim: tl.constexpr,
+    v_head_dim: tl.constexpr,
+    SEQ_BLOCK_SIZE: tl.constexpr,
+    DIM_BLOCK_SIZE: tl.constexpr,
+):
+    req_id = tl.program_id(0) // (2 * pcp_world_size)
+    seq_block_id = tl.program_id(0) % (2 * pcp_world_size)
+    head_id = tl.program_id(1)
+    dim_block_id = tl.program_id(2)
+    dim_off = tl.arange(0, DIM_BLOCK_SIZE) + dim_block_id * DIM_BLOCK_SIZE
+
+    q_start_loc = tl.load(query_start_ptr + req_id)
+    q_end_loc = tl.load(query_start_ptr + req_id + 1)
+    q_select_len = (q_end_loc - q_start_loc) // 2
+
+    # Select Q
+    if seq_block_id < 2:
+        block_q_start_loc = q_start_loc + seq_block_id * q_select_len
+        out_ptr = out_q_head_ptr if seq_block_id == 0 else out_q_tail_ptr
+        for qi in range(tl.cdiv(q_select_len, SEQ_BLOCK_SIZE)):
+            q_offset = tl.arange(0, SEQ_BLOCK_SIZE) + qi * SEQ_BLOCK_SIZE
+            mask = (dim_off[None, :] < q_head_dim) & (q_offset[:, None] < q_select_len)
+            q_src_idx = block_q_start_loc + q_offset[:, None]
+            q_dst_idx = q_start_loc // 2 + q_offset[:, None]
+            q_val = tl.load(
+                q_ptr
+                + q_src_idx * q_stride_B
+                + head_id * q_stride_H
+                + dim_off[None, :],
+                mask=mask,
+            )
+            tl.store(
+                out_ptr
+                + q_dst_idx * n_head * q_head_dim
+                + head_id * q_head_dim
+                + dim_off[None, :],
+                q_val,
+                mask=mask,
+            )
+
+    # Select KV
+    kv_start_loc = q_start_loc * pcp_world_size
+    kv_select_len = q_select_len
+    k_d_mask = dim_off[None, :] < k_head_dim
+    v_d_mask = dim_off[None, :] < v_head_dim
+    block_src_kv_start_loc = kv_start_loc + seq_block_id * kv_select_len
+    block_dst_kv_head_start_loc = (
+        kv_start_loc // 2 // pcp_world_size * (pcp_rank + 1)
+        + seq_block_id * kv_select_len
+    )
+    block_dst_kv_tail_start_loc = (
+        kv_start_loc // 2 // pcp_world_size * (2 * pcp_world_size - pcp_rank)
+        + seq_block_id * kv_select_len
+    )
+    for ki in range(tl.cdiv(kv_select_len, SEQ_BLOCK_SIZE)):
+        kv_offset = tl.arange(0, SEQ_BLOCK_SIZE) + ki * SEQ_BLOCK_SIZE
+        kv_block_mask = kv_offset[:, None] < kv_select_len
+        kv_src_idx = block_src_kv_start_loc + kv_offset[:, None]
+        kv_dst_idx_head = block_dst_kv_head_start_loc + kv_offset[:, None]
+        kv_dst_idx_tail = block_dst_kv_tail_start_loc + kv_offset[:, None]
+        k_val = tl.load(
+            k_ptr + kv_src_idx * k_stride_B + head_id * k_stride_H + dim_off[None, :],
+            mask=k_d_mask & kv_block_mask,
+        )
+        v_val = tl.load(
+            v_ptr + kv_src_idx * v_stride_B + head_id * v_stride_H + dim_off[None, :],
+            mask=v_d_mask & kv_block_mask,
+        )
+        if seq_block_id < pcp_rank + 1:
+            tl.store(
+                out_k_head_ptr
+                + kv_dst_idx_head * n_head * k_head_dim
+                + head_id * k_head_dim
+                + dim_off[None, :],
+                k_val,
+                mask=k_d_mask & kv_block_mask,
+            )
+            tl.store(
+                out_v_head_ptr
+                + kv_dst_idx_head * n_head * v_head_dim
+                + head_id * v_head_dim
+                + dim_off[None, :],
+                v_val,
+                mask=v_d_mask & kv_block_mask,
+            )
+        if seq_block_id < 2 * pcp_world_size - pcp_rank:
+            tl.store(
+                out_k_tail_ptr
+                + kv_dst_idx_tail * n_head * k_head_dim
+                + head_id * k_head_dim
+                + dim_off[None, :],
+                k_val,
+                mask=k_d_mask & kv_block_mask,
+            )
+            tl.store(
+                out_v_tail_ptr
+                + kv_dst_idx_tail * n_head * v_head_dim
+                + head_id * v_head_dim
+                + dim_off[None, :],
+                v_val,
+                mask=v_d_mask & kv_block_mask,
+            )
+
+
+def fused_pcp_qkv_select(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    pcp_world_size: int,
+    pcp_rank: int,
+):
+    """
+    Select the query and kv tensors for PCP. Instead of calling
+    `torch.index_select` multiple times, this function fuses the
+    selection for Q, K, and V into a single kernel to reduce
+    kernel launch overhead.
+    Args:
+        q: query tensor on the current PCP rank.
+        k: key tensor across PCP ranks.
+        v: value tensor across PCP ranks.
+        query_start_loc: start location of each query.
+        pcp_world_size: number of PCP ranks.
+        pcp_rank: rank of the current PCP rank.
+    Returns:
+        q_head: selected query tensor for pcp head.
+        k_head: selected key tensor for pcp head.
+        v_head: selected value tensor for pcp head.
+        q_tail: selected query tensor for pcp tail.
+        k_tail: selected key tensor for pcp tail.
+        v_tail: selected value tensor for pcp tail.
+
+    """
+    q_head = torch.empty(
+        (q.size(0) // 2,) + q.shape[1:], device=q.device, dtype=q.dtype
+    )
+    q_tail = torch.empty_like(q_head)
+    k_head = torch.empty(
+        (q.size(0) // 2 * (pcp_rank + 1),) + k.shape[1:], device=k.device, dtype=k.dtype
+    )
+    v_head = torch.empty(
+        (q.size(0) // 2 * (pcp_rank + 1),) + v.shape[1:], device=v.device, dtype=v.dtype
+    )
+    k_tail = torch.empty(
+        (q.size(0) // 2 * (2 * pcp_world_size - pcp_rank),) + k.shape[1:],
+        device=k.device,
+        dtype=k.dtype,
+    )
+    v_tail = torch.empty(
+        (q.size(0) // 2 * (2 * pcp_world_size - pcp_rank),) + v.shape[1:],
+        device=v.device,
+        dtype=v.dtype,
+    )
+    BS = len(query_start_loc) - 1
+    DIM_BLOCK_SIZE: int = 64
+    SEQ_BLOCK_SIZE: int = 256
+    assert q.shape[1] == k.shape[1] == v.shape[1]
+    n_head = q.shape[1]
+    n_dim_block = (
+        max(q.shape[2], k.shape[2], v.shape[2]) + DIM_BLOCK_SIZE
+    ) // DIM_BLOCK_SIZE
+    grid = (
+        2 * pcp_world_size * BS,
+        n_head,
+        n_dim_block,
+    )
+    _fused_pcp_qkv_select_kernel[grid](
+        q,
+        q.stride(0),
+        q.stride(1),
+        k,
+        k.stride(0),
+        k.stride(1),
+        v,
+        v.stride(0),
+        v.stride(1),
+        query_start_loc,
+        q_head,
+        q_tail,
+        k_head,
+        k_tail,
+        v_head,
+        v_tail,
+        pcp_world_size,
+        pcp_rank,
+        n_head,
+        q.shape[2],
+        k.shape[2],
+        v.shape[2],
+        SEQ_BLOCK_SIZE,
+        DIM_BLOCK_SIZE,
+    )
+    return q_head, k_head, v_head, q_tail, k_tail, v_tail

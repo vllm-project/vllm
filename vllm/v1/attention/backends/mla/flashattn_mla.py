@@ -112,7 +112,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
+        interleave_size = vllm_config.parallel_config.dcp_kv_cache_interleave_size
         super().__init__(
             kv_cache_spec,
             layer_names,
@@ -251,6 +251,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
 
 class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
     can_return_lse_for_decode: bool = True
+    supports_pcp: bool = True
 
     def __init__(
         self,
