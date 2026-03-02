@@ -245,6 +245,7 @@ if TYPE_CHECKING:
     VLLM_CUDA_COMPATIBILITY_PATH: str | None = None
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
+    VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
 
 
 def get_default_cache_root():
@@ -1628,6 +1629,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # scaling command in elastic EP.
     "VLLM_ELASTIC_EP_DRAIN_REQUESTS": lambda: bool(
         int(os.getenv("VLLM_ELASTIC_EP_DRAIN_REQUESTS", "0"))
+    ),
+    # Whether to enable dual cuda streams for LoRA computation
+    "VLLM_LORA_ENABLE_DUAL_STREAM": lambda: bool(
+        int(os.getenv("VLLM_LORA_ENABLE_DUAL_STREAM", "0"))
     ),
 }
 

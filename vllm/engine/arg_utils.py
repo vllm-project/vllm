@@ -1101,6 +1101,10 @@ class EngineArgs:
             "--specialize-active-lora", **lora_kwargs["specialize_active_lora"]
         )
 
+        lora_group.add_argument(
+            "--lora-enable-cuda-stream", **lora_kwargs["lora_enable_cuda_stream"]
+        )
+
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
         observability_group = parser.add_argument_group(
