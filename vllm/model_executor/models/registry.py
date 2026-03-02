@@ -1267,10 +1267,35 @@ def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
         try:
             returned.check_returncode()
         except Exception as e:
-            # wrap raised exception to provide more information
-            raise RuntimeError(
-                f"Error raised in subprocess:\n{returned.stderr.decode()}"
-            ) from e
+            stderr_text = returned.stderr.decode(errors="replace")
+
+            # Check if the subprocess was killed by a signal
+            if returned.returncode < 0:
+                import signal as sig_mod
+
+                sig_num = -returned.returncode
+                try:
+                    sig_name = sig_mod.Signals(sig_num).name
+                except (ValueError, AttributeError):
+                    sig_name = f"signal {sig_num}"
+
+                hint = ""
+                if sig_num == sig_mod.SIGILL:
+                    hint = (
+                        "\nHint: SIGILL typically means the installed "
+                        "vLLM binary was compiled for CPU instructions "
+                        "(e.g., AVX-512) not supported by this machine."
+                        " Consider building vLLM from source or using a"
+                        " compatible wheel."
+                    )
+
+                raise RuntimeError(
+                    f"Subprocess killed by {sig_name} "
+                    f"(return code {returned.returncode}).{hint}"
+                    f"\nstderr:\n{stderr_text}"
+                ) from e
+
+            raise RuntimeError(f"Error raised in subprocess:\n{stderr_text}") from e
 
         with open(output_filepath, "rb") as f:
             return pickle.load(f)
