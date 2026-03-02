@@ -6,6 +6,8 @@ Verifies that:
 - The ZeroExpertRouter is properly created and used as the layer router.
 - A forward pass through FusedMoE with zero experts produces correct output.
 - The output decomposes correctly into real expert + zero expert contributions.
+
+Note: tests generated with Claude.
 """
 
 import pytest
