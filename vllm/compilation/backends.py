@@ -423,6 +423,36 @@ def split_graph(
         else:
             node_to_subgraph_id[node] = subgraph_id
 
+    # Prevent torch.Size values from crossing subgraph boundaries.
+    # AoTAutograd cannot handle torch.Size as submodule input/output
+    # (TreeSpec mismatch: Size vs tuple). If a node produces a torch.Size
+    # and all its consumers are in later subgraphs, move the producer to
+    # the earliest consumer's subgraph so the value stays local.
+    for node in graph.graph.nodes:
+        if node.op in ("output", "placeholder"):
+            continue
+        if node not in node_to_subgraph_id:
+            continue
+
+        val = node.meta.get("val")
+        if val is None:
+            val = node.meta.get("example_value")
+        if not isinstance(val, torch.Size):
+            continue
+
+        producer_subgraph = node_to_subgraph_id[node]
+        consumer_subgraphs = set()
+        for user in node.users:
+            if user.op != "output" and user in node_to_subgraph_id:
+                consumer_subgraphs.add(node_to_subgraph_id[user])
+
+        if not consumer_subgraphs:
+            continue
+
+        # Only move if ALL consumers are in strictly later subgraphs.
+        if all(sg > producer_subgraph for sg in consumer_subgraphs):
+            node_to_subgraph_id[node] = min(consumer_subgraphs)
+
     # `keep_original_order` is important!
     # otherwise pytorch might reorder the nodes and
     # the semantics of the graph will change when we
