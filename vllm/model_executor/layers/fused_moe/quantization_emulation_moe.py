@@ -63,7 +63,7 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
         self.quant_config._w1.scale = None
         self.quant_config._w2.scale = None
 
-        self.quant_dtype = "nvfp4"
+        self.quant_dtype = "nvfp4"  # type: ignore[misc]
         self.emulation = True
 
     @property
