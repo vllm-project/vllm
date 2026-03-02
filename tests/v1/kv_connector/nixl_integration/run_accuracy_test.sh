@@ -170,13 +170,8 @@ run_tests_for_model() {
     if [[ -n "$ENABLE_HMA_VAR" ]]; then
       BASE_CMD="${BASE_CMD} $ENABLE_HMA_VAR"
     fi
-
-    if [ -n "$model_args" ]; then
-      FULL_CMD="$BASE_CMD $model_args"
-    else
-      FULL_CMD="$BASE_CMD"
-    fi
-
+    
+    FULL_CMD="$BASE_CMD"
     eval "$FULL_CMD &"
 
     # Store host and port for proxy configuration
