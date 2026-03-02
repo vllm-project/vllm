@@ -13,7 +13,6 @@ from torch.distributed import (
     P2POp,
     ProcessGroup,
     batch_isend_irecv,
-    get_global_rank,
 )
 
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
@@ -21,6 +20,7 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
     ncclDataTypeEnum,
 )
 from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -85,9 +85,6 @@ class TorchDistributedEplbCommunicator(EplbCommunicator):
         self._ep_group = ep_group
         self._cuda_stream = cuda_stream
         self._p2p_ops: list[P2POp] = []
-        self._rank_to_global = {
-            rank: get_global_rank(ep_group, rank) for rank in range(ep_group.size())
-        }
         self._log_initialized()
 
     def add_send(self, tensor: torch.Tensor, dst_rank: int) -> None:
@@ -95,7 +92,7 @@ class TorchDistributedEplbCommunicator(EplbCommunicator):
             P2POp(
                 torch.distributed.isend,
                 tensor,
-                self._rank_to_global[dst_rank],
+                dst_rank,
                 self._ep_group,
             )
         )
@@ -105,7 +102,7 @@ class TorchDistributedEplbCommunicator(EplbCommunicator):
             P2POp(
                 torch.distributed.irecv,
                 tensor,
-                self._rank_to_global[src_rank],
+                src_rank,
                 self._ep_group,
             )
         )
@@ -133,9 +130,6 @@ class GlooCpuStagedEplbCommunicator(EplbCommunicator):
         self._cpu_group = cpu_group
         self._cuda_stream = cuda_stream
         self._ops: list[tuple[str, torch.Tensor, int]] = []
-        self._rank_to_global = {
-            rank: get_global_rank(cpu_group, rank) for rank in range(cpu_group.size())
-        }
         self._log_initialized()
 
     def add_send(self, tensor: torch.Tensor, dst_rank: int) -> None:
@@ -154,14 +148,13 @@ class GlooCpuStagedEplbCommunicator(EplbCommunicator):
 
             def build_ops() -> None:
                 for op, tensor, peer_rank in self._ops:
-                    peer_global_rank = self._rank_to_global[peer_rank]
                     if op == "send":
                         cpu_tensor = tensor.to(device="cpu", non_blocking=True)
                         p2p_ops.append(
                             P2POp(
                                 torch.distributed.isend,
                                 cpu_tensor,
-                                peer_global_rank,
+                                peer_rank,
                                 self._cpu_group,
                             )
                         )
@@ -171,7 +164,7 @@ class GlooCpuStagedEplbCommunicator(EplbCommunicator):
                         P2POp(
                             torch.distributed.irecv,
                             cpu_tensor,
-                            peer_global_rank,
+                            peer_rank,
                             self._cpu_group,
                         )
                     )
@@ -909,30 +902,7 @@ def create_eplb_communicator(
         else group_coordinator.device_group
     )
 
-    if backend == "nixl":
-        if not nixl_available:
-            raise RuntimeError(
-                "EPLB communicator 'nixl' requested but NIXL is unavailable."
-            )
-        if not (current_platform.is_cuda_alike() and tensor_device_type != "cpu"):
-            raise RuntimeError(
-                "EPLB communicator 'nixl' supports only cuda-like devices "
-                f"(got {tensor_device_type})."
-            )
-        try:
-            return NixlEplbCommunicator(
-                cpu_group=group_coordinator.cpu_group,
-                expert_weights=expert_weights,
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                f"Failed to initialize NixlEplbCommunicator ({exc})."
-            ) from exc
-    if backend == "torch_gloo":
-        return GlooCpuStagedEplbCommunicator(cpu_group=group_coordinator.cpu_group)
-    if backend == "torch_nccl":
-        return TorchDistributedEplbCommunicator(ep_group=torch_group)
-    if backend == "pynccl":
+    def _create_pynccl() -> EplbCommunicator:
         if tensor_device_type == "cpu":
             raise RuntimeError(
                 "EPLB communicator 'pynccl' supports only cuda-like devices "
@@ -967,6 +937,41 @@ def create_eplb_communicator(
             raise RuntimeError(
                 f"Failed to initialize PyNcclEplbCommunicator ({exc})."
             ) from exc
+
+    is_stateless = isinstance(group_coordinator, StatelessGroupCoordinator)
+    if is_stateless:
+        assert backend in ("torch_nccl", "pynccl"), (
+            f"Stateless EPLB requires NCCL/PyNCCL backend (got backend={backend})."
+        )
+        return _create_pynccl()
+
+    if backend == "nixl":
+        if not nixl_available:
+            raise RuntimeError(
+                "EPLB communicator 'nixl' requested but NIXL is unavailable."
+            )
+        if not (current_platform.is_cuda_alike() and tensor_device_type != "cpu"):
+            raise RuntimeError(
+                "EPLB communicator 'nixl' supports only cuda-like devices "
+                f"(got {tensor_device_type})."
+            )
+        try:
+            return NixlEplbCommunicator(
+                cpu_group=group_coordinator.cpu_group,
+                expert_weights=expert_weights,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to initialize NixlEplbCommunicator ({exc})."
+            ) from exc
+    elif backend == "torch_gloo":
+        return GlooCpuStagedEplbCommunicator(
+            cpu_group=group_coordinator.cpu_group,
+        )
+    elif backend == "torch_nccl":
+        return TorchDistributedEplbCommunicator(ep_group=torch_group)
+    elif backend == "pynccl":
+        return _create_pynccl()
     elif backend == "symm_mem":
         if tensor_device_type == "cpu":
             raise RuntimeError(

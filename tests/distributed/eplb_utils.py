@@ -8,6 +8,7 @@ import random
 import torch
 import torch.multiprocessing as mp
 
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
 )
@@ -47,7 +48,11 @@ def set_env_vars_and_device(
     local_rank = os.environ["LOCAL_RANK"]
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
-    init_distributed_environment()
+
+    # Create a minimal vllm config for init_distributed_environment
+    vllm_config = VllmConfig()
+    with set_current_vllm_config(vllm_config):
+        init_distributed_environment()
     atexit.register(_destroy_process_group_if_initialized)
     # Ensure each worker process has the same random seed
     random.seed(42)

@@ -11,7 +11,10 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from torch.distributed import ProcessGroup, all_gather
+from torch.distributed import ProcessGroup, all_gather, get_global_rank
+
+from vllm.distributed.parallel_state import get_ep_group
+from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 
 from .eplb_communicator import EplbCommunicator
 
@@ -242,6 +245,18 @@ def move_to_buffer(
                 for w, b in zip(expert_weights, expert_weights_buffers):
                     b[dst].copy_(w[src_local], non_blocking=True)
 
+    communicator.set_stream(cuda_stream)
+    if isinstance(get_ep_group(), StatelessGroupCoordinator):
+        is_stateless = True
+    else:
+        is_stateless = False
+
+    rank_to_global: dict[int, int] | None = None
+    if not is_stateless:
+        rank_to_global = {
+            rank: get_global_rank(ep_group, rank) for rank in range(ep_group.size())
+        }
+
     # 2. Post sends
     if send_count > 0:
         experts = send_expert_ids[:send_count]
@@ -272,8 +287,9 @@ def move_to_buffer(
             if recver_pos < len(ranks_to_recv):
                 recv_ranks.append(ranks_to_recv[recver_pos])
             for dst in recv_ranks:
+                peer_rank = rank_to_global[dst] if rank_to_global is not None else dst
                 for w in expert_weights:
-                    communicator.add_send(w[src], dst)
+                    communicator.add_send(w[src], peer_rank)
 
     # 3. Post recvs
     if recv_count > 0:
@@ -302,8 +318,9 @@ def move_to_buffer(
                 src = ranks_to_send[recver_pos // num_dst_per_sender]
             else:
                 src = ranks_to_send[recver_pos - remainder_start]
+            peer_rank = rank_to_global[src] if rank_to_global is not None else src
             for b in expert_weights_buffers:
-                communicator.add_recv(b[dst], src)
+                communicator.add_recv(b[dst], peer_rank)
 
     # 4. Execute the P2P operations. The real communication happens here.
     communicator.execute()
