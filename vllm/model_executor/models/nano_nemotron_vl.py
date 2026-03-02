@@ -1422,10 +1422,21 @@ class NanoNemotronVLMultiModalProcessor(
                     sr=target_sr,
                 )
             )
-            del metadata["original_video_bytes"]
+
+        # Create a new VideoProcessorItems with metadata that does not contain
+        # the large video bytes, to avoid modifying the input `mm_items`.
+        new_metadata_list = [
+            {k: v for k, v in meta.items() if k != "original_video_bytes"}
+            for meta in metadata_list
+        ]
+        new_videos = VideoProcessorItems(data=videos.data, metadata=new_metadata_list)
 
         audio_parsed = self.data_parser.parse_mm_data({"audio": audio_items})
-        mm_items = MultiModalDataItems({**mm_items, **audio_parsed})
+
+        # Create a new MultiModalDataItems with the new video and audio items.
+        new_mm_items_dict = {**mm_items, **audio_parsed, "video": new_videos}
+        mm_items = MultiModalDataItems(new_mm_items_dict)
+
         return mm_items, audio_items
 
     def apply(
