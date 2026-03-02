@@ -35,27 +35,17 @@ def create_moe_runner(
     reduce_results: bool,
     enable_dbo: bool,
 ) -> MoERunner:
+    runner = DefaultMoERunner(
+        layer,
+        moe_config,
+        router,
+        routed_input_transform,
+        gate,
+        shared_experts,
+        quant_method,
+        reduce_results,
+        enable_dbo,
+    )
     if moe_config.moe_parallel_config.use_dp_chunking:
-        return ChunkingMoERunner(
-            layer,
-            moe_config,
-            router,
-            routed_input_transform,
-            gate,
-            shared_experts,
-            quant_method,
-            reduce_results,
-            enable_dbo,
-        )
-    else:
-        return DefaultMoERunner(
-            layer,
-            moe_config,
-            router,
-            routed_input_transform,
-            gate,
-            shared_experts,
-            quant_method,
-            reduce_results,
-            enable_dbo,
-        )
+        return ChunkingMoERunner(runner)
+    return runner
