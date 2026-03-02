@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import functools
-import importlib
 
 import torch
 
@@ -403,35 +401,9 @@ def rocm_fp8_mqa_logits(
         Logits tensor of shape [M, N], dtype `torch.float32`.
     """
 
-    # TODO(ganyi): Temporarily workaround, will remove the module check and reference
-    # path after aiter merge this kernel into main
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    @functools.lru_cache
-    def mqa_logits_module():
-        mqa_logits_module_path = None
-        if importlib.util.find_spec("aiter.ops.triton.fp8_mqa_logits") is not None:
-            mqa_logits_module_path = "aiter.ops.triton.fp8_mqa_logits"
-        elif (
-            importlib.util.find_spec("aiter.ops.triton.attention.fp8_mqa_logits")
-            is not None
-        ):
-            mqa_logits_module_path = "aiter.ops.triton.attention.fp8_mqa_logits"
-
-        if mqa_logits_module_path is not None:
-            try:
-                module = importlib.import_module(mqa_logits_module_path)
-                return module
-            except ImportError:
-                return None
-        return None
-
-    aiter_mqa_logits_module = None
     if rocm_aiter_ops.is_enabled():
-        aiter_mqa_logits_module = mqa_logits_module()
+        from aiter.ops.triton.attention.fp8_mqa_logits import fp8_mqa_logits
 
-    if aiter_mqa_logits_module is not None:
-        fp8_mqa_logits = aiter_mqa_logits_module.fp8_mqa_logits
         kv, scale = kv
         return fp8_mqa_logits(q, kv, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
     else:
