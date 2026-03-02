@@ -971,14 +971,10 @@ def unified_attention(
     # function. However, it is recommended to include these assignments in the
     # attention metadata itself, as performing them here may negatively impact
     # performance.
-    if (
-        seq_threshold_3D is None
-        or split_launch is None
-    ):
+    if seq_threshold_3D is None or split_launch is None:
         MIN_LAUNCH_GRID_SIZE_2D = 128
         seq_threshold_3D = MIN_LAUNCH_GRID_SIZE_2D // num_kv_heads
         split_launch = False
-        seq_lens_q = torch.diff(cu_seqlens_q)
 
     # Assigning Q Block dimensions for prefill and decode.
     BLOCK_M_2D_PREFILL = (
