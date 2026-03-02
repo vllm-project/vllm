@@ -1566,37 +1566,43 @@ def test_parse_chat_messages_multiple_images_uncommon_input(
     _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, None])
 
 
+def oai_interleaved_messages(image_url: str):
+    return [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "I need you to compare this image",
+                },
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": "and this one"},
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": "Do they have differences?"},
+            ],
+        }
+    ]
+
+
+RENDERED_INTERLEAVED = [
+    {
+        "role": "user",
+        "content": "I need you to compare this image\n<|image_1|>\nand this one\n<|image_2|>\n"  # noqa: E501
+        "Do they have differences?",
+    }
+]
+
+
 def test_parse_chat_messages_multiple_images_interleave(
     phi3v_model_config_mm_interleaved,
     image_url,
 ):
     conversation, mm_data, mm_uuids = parse_chat_messages(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "I need you to compare this image",
-                    },
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": "and this one"},
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": "Do they have differences?"},
-                ],
-            }
-        ],
+        oai_interleaved_messages(image_url),
         phi3v_model_config_mm_interleaved,
         content_format="string",
     )
-
-    assert conversation == [
-        {
-            "role": "user",
-            "content": "I need you to compare this image\n<|image_1|>\nand this one\n<|image_2|>\n"  # noqa: E501
-            "Do they have differences?",
-        }
-    ]
+    assert conversation == RENDERED_INTERLEAVED
     _assert_mm_data_is_image_input(mm_data, 2)
     _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, None])
 
@@ -1607,32 +1613,28 @@ async def test_parse_chat_messages_multiple_images_interleave_async(
     image_url,
 ):
     conversation, mm_data, mm_uuids = await parse_chat_messages_async(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "I need you to compare this image",
-                    },
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": "and this one"},
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": "Do they have differences?"},
-                ],
-            }
-        ],
+        oai_interleaved_messages(image_url),
         phi3v_model_config_mm_interleaved,
         content_format="string",
     )
+    assert conversation == RENDERED_INTERLEAVED
+    _assert_mm_data_is_image_input(mm_data, 2)
+    _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, None])
 
-    assert conversation == [
-        {
-            "role": "user",
-            "content": "I need you to compare this image\n<|image_1|>\nand this one\n<|image_2|>\n"  # noqa: E501
-            "Do they have differences?",
-        }
-    ]
+
+@pytest.mark.asyncio
+async def test_model_config_interleave_false_request_overrides(
+    phi3v_model_config,
+    image_url,
+):
+    assert phi3v_model_config.interleave_mm_strings is None
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        oai_interleaved_messages(image_url),
+        phi3v_model_config,
+        content_format="string",
+        interleave_mm_strings=True,
+    )
+    assert conversation == RENDERED_INTERLEAVED
     _assert_mm_data_is_image_input(mm_data, 2)
     _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, None])
 
