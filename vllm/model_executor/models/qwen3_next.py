@@ -10,6 +10,7 @@ from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
 
+from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -735,21 +736,32 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
         )
-        if is_uniform_decode and mixed_qkv_non_spec is not None:
+        if (
+            envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
+            and is_uniform_decode
+            and mixed_qkv_non_spec is not None
+        ):
             out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
-            fused_recurrent_gated_delta_rule_packed_decode_fwd(
-                mixed_qkv=mixed_qkv_non_spec,
-                a=a,
-                b=b,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                scale=self.head_k_dim**-0.5,
-                initial_state=ssm_state,
-                out=out_buf,
-                ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
-                use_qk_l2norm_in_kernel=True,
-            )
-            return
+            try:
+                fused_recurrent_gated_delta_rule_packed_decode_fwd(
+                    mixed_qkv=mixed_qkv_non_spec,
+                    a=a,
+                    b=b,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    scale=self.head_k_dim**-0.5,
+                    initial_state=ssm_state,
+                    out=out_buf,
+                    ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
+                    use_qk_l2norm_in_kernel=True,
+                )
+                return
+            except ValueError as exc:
+                logger.warning_once(
+                    "Packed recurrent decode fast path unavailable; falling back "
+                    "to default path: %s",
+                    exc,
+                )
 
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
         query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
