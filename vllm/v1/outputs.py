@@ -163,11 +163,13 @@ class ModelRunnerOutput:
     # req_id -> index
     req_id_to_index: dict[str, int]
 
-    # num_reqs x num_generated_tokens
-    # num_generated_tokens is the number of tokens
-    # generated in the current step. It can be different for
-    # each request due to speculative/jump decoding.
-    sampled_token_ids: list[list[int]] = field(default_factory=list)
+    # [num_reqs, <=max_num_generated_tokens] and [num_reqs]
+    sampled_token_ids_np: np.ndarray | None = None
+    num_generated_tokens: np.ndarray | None = None
+
+    # backward-compatible path for callers that still materialize Python lists.
+    # TODO(wentao): this is expensive and should be removed in the future.
+    sampled_token_ids: list[list[int]] | None = field(default_factory=list)
 
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
