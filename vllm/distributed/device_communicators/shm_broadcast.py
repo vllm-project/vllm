@@ -187,13 +187,14 @@ class SpinCondition:
             events = dict(self.poller.poll(timeout=timeout_ms))
 
             if self.read_cancel_socket in events:
-                # return immediately on cancel
-                return
-
-            if self.local_notify_socket in events:
+                logger.debug("Poller received cancel event")
+            elif self.local_notify_socket in events:
+                logger.debug("Poller received notify event")
                 # Since zmq.CONFLATE is set, there will only be one notification
                 # to read from the socket
                 self.local_notify_socket.recv(flags=zmq.NOBLOCK, copy=False)
+            else:
+                logger.debug("Poller timed out")
 
     def notify(self):
         """Notifies all readers to wake up"""
