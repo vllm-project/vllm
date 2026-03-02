@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import torch
 import pytest
+import torch
 
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.peft_helper import PEFTHelper
@@ -146,41 +146,37 @@ def test_mistral_lora_format_weights_mapping():
     """
     rank = 8
     hidden_size = 64
+    intermediate_size = 256
 
-    # Synthetic LoRA tensors using Mistral-format key names (no base_model prefix)
+    # Synthetic LoRA tensors using Mistral-format key names (no base_model prefix).
+    # Shapes follow the LoRA convention: lora_A=(rank, in_features),
+    # lora_B=(out_features, rank).
     mistral_format_tensors: dict[str, torch.Tensor] = {}
     mistral_keys = [
-        ("layers.0.attention.wq", hidden_size, rank),
-        ("layers.0.attention.wk", hidden_size, rank),
-        ("layers.0.attention.wv", hidden_size, rank),
-        ("layers.0.attention.wo", rank, hidden_size),
-        ("layers.0.feed_forward.w1", hidden_size, rank),
-        ("layers.0.feed_forward.w2", rank, hidden_size),
-        ("layers.0.feed_forward.w3", hidden_size, rank),
+        # (module_key, out_features, in_features)
+        ("layers.0.attention.wq", hidden_size, hidden_size),
+        ("layers.0.attention.wk", hidden_size, hidden_size),
+        ("layers.0.attention.wv", hidden_size, hidden_size),
+        ("layers.0.attention.wo", hidden_size, hidden_size),
+        ("layers.0.feed_forward.w1", intermediate_size, hidden_size),
+        ("layers.0.feed_forward.w2", hidden_size, intermediate_size),
+        ("layers.0.feed_forward.w3", intermediate_size, hidden_size),
     ]
-    for module_key, out_dim, in_dim in mistral_keys:
+    for module_key, out_features, in_features in mistral_keys:
         mistral_format_tensors[f"{module_key}.lora_A.weight"] = torch.zeros(
-            rank, in_dim
+            rank, in_features
         )
         mistral_format_tensors[f"{module_key}.lora_B.weight"] = torch.zeros(
-            out_dim, rank
+            out_features, rank
         )
 
     peft_helper = PEFTHelper.from_dict(
-        {"r": rank, "lora_alpha": rank, "target_modules": ["wq", "wk", "wv", "wo",
-                                                            "w1", "w2", "w3"]}
+        {
+            "r": rank,
+            "lora_alpha": rank,
+            "target_modules": ["wq", "wk", "wv", "wo", "w1", "w2", "w3"],
+        }
     )
-
-    # expected_lora_modules mirrors what worker_manager builds from the model's
-    # supported_lora_modules + packed_modules_mapping
-    packed_modules_mapping = MistralForCausalLM.packed_modules_mapping
-    supported = ["qkv_proj", "gate_up_proj", "o_proj", "down_proj"]
-    expected_lora_modules: set[str] = set()
-    for mod in supported:
-        if mod in packed_modules_mapping:
-            expected_lora_modules.update(packed_modules_mapping[mod])
-        else:
-            expected_lora_modules.add(mod)
 
     lora_model = LoRAModel.from_lora_tensors(
         lora_model_id=1,
@@ -201,3 +197,18 @@ def test_mistral_lora_format_weights_mapping():
         "model.layers.0.mlp.up_proj",
     }
     assert set(lora_model.loras.keys()) == expected_module_names
+
+    # Backward compat: standard PEFT-format keys (after stripping
+    # "base_model.model.") must pass through the mapper unchanged.
+    hf_format_keys = [
+        "model.layers.0.self_attn.q_proj.lora_A.weight",
+        "model.layers.0.self_attn.k_proj.lora_A.weight",
+        "model.layers.0.mlp.gate_proj.lora_A.weight",
+        "model.layers.0.mlp.down_proj.lora_A.weight",
+    ]
+    mapper = MistralForCausalLM.hf_to_vllm_mapper
+    for key in hf_format_keys:
+        assert mapper._map_name(key) == key, (
+            f"hf_to_vllm_mapper must not modify standard HF-format keys, "
+            f"but '{key}' was changed to '{mapper._map_name(key)}'"
+        )
