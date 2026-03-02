@@ -1609,17 +1609,18 @@ class SpecDecodeBaseProposer:
                 attn_backend = all_attn_layers[layer_name].get_attn_backend()
                 backend_key = attn_backend.full_cls_name()
                 if backend_key not in attention_groups:
+                    layer_kv_cache_spec = kv_cache_spec
                     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                        kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
+                        layer_kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
 
-                    group = AttentionGroup(
+                    attn_group = AttentionGroup(
                         backend=attn_backend,
                         layer_names=[layer_name],
-                        kv_cache_spec=kv_cache_spec,
+                        kv_cache_spec=layer_kv_cache_spec,
                         kv_cache_group_id=self.kv_cache_gid,
                     )
-                    group.create_metadata_builders(self.vllm_config, self.device)
-                    attention_groups[backend_key] = group
+                    attn_group.create_metadata_builders(self.vllm_config, self.device)
+                    attention_groups[backend_key] = attn_group
                 else:
                     attention_groups[backend_key].layer_names.append(layer_name)
 
