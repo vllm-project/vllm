@@ -188,6 +188,12 @@ def build_app(
 
     register_models_api_router(app)
 
+    from vllm.entrypoints.openai.nixl_router import (
+        attach_router as attach_nixl_router,
+    )
+
+    attach_nixl_router(app)
+
     from vllm.entrypoints.sagemaker.api_router import (
         attach_router as register_sagemaker_api_router,
     )

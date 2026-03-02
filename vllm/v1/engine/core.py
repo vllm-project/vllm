@@ -576,6 +576,17 @@ class EngineCore:
             reset_running_requests, reset_connector
         )
 
+    def nixl_lease_refresh(self, request_ids: list[str]) -> None:
+        """Refresh the KV block lease for pending remote-prefill requests.
+
+        Called from the P-side OpenAI API server when D workers POST
+        /internal/nixl/lease_refresh. Handled synchronously within the
+        engine loop so no locking is required.
+        """
+        connector = self.scheduler.get_kv_connector()
+        if connector is not None:
+            connector.refresh_lease(request_ids)
+
     def reset_encoder_cache(self) -> None:
         """Reset the encoder cache to invalidate all cached encoder outputs.
 

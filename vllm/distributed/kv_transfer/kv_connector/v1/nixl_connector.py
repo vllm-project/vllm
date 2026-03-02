@@ -256,6 +256,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
+        self.reqs_to_refresh: dict[ReqId, float] = {}  # lease refresh expiry updates
         self.reqs_in_batch: set[ReqId] = set()
         self.reqs_not_processed: set[ReqId] = set()
 
@@ -409,6 +410,15 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         self.connector_scheduler.set_xfer_handshake_metadata(metadata)
 
+    def refresh_lease(self, request_ids: list[str]) -> None:
+        """Refresh the KV block lease for the given requests.
+
+        Called from the P-side EngineCore when D workers POST lease refreshes
+        via /internal/nixl/lease_refresh.
+        """
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.refresh_lease(request_ids)
+
     ############################################################
     # Worker Side Methods
     ############################################################
@@ -539,6 +549,9 @@ class NixlConnectorScheduler:
         self._encoded_xfer_handshake_metadata: dict[int, Any] = {}
         self._stop_event = threading.Event()
 
+        # kv_transfer_params fields for D workers to find this P's HTTP server
+        self.http_port = envs.VLLM_NIXL_HTTP_PORT
+
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
@@ -551,11 +564,28 @@ class NixlConnectorScheduler:
         # remote prefill or aborted.
         self._reqs_not_processed: set[ReqId] = set()
 
+        # P-side: pending lease refresh updates to pass to worker next step
+        self._lease_refreshes: dict[ReqId, float] = {}
+
+        # D-side: requests waiting to be scheduled that need P KV lease refresh
+        # req_id -> (P_host, P_http_port)
+        self._requires_lease_dict: dict[ReqId, tuple[str, int]] = {}
+        self._requires_lease_lock = threading.Lock()
+        self._stop_lease_event = threading.Event()
+        self._lease_refresh_thread = threading.Thread(
+            target=self._lease_refresh_loop,
+            daemon=True,
+            name="nixl-d-lease-refresh",
+        )
+        self._lease_refresh_thread.start()
+
     def shutdown(self):
         self._stop_event.set()
+        self._stop_lease_event.set()
         if self._nixl_handshake_listener_t is not None:
             self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
+        self._lease_refresh_thread.join(timeout=3)
 
     def set_xfer_handshake_metadata(
         self, metadata: dict[int, KVConnectorHandshakeMetadata]
@@ -665,6 +695,20 @@ class NixlConnectorScheduler:
             token_ids = request.prompt_token_ids or []
             count = len(token_ids) - num_computed_tokens
             if count > 0:
+                # Track this request for D-side lease refresh while it is
+                # waiting to be scheduled. Only add once (this may be called
+                # multiple times before scheduling).
+                with self._requires_lease_lock:
+                    if request.request_id not in self._requires_lease_dict:
+                        remote_host = params.get("remote_host", "")
+                        remote_http_port = params.get(
+                            "remote_http_port", envs.VLLM_NIXL_HTTP_PORT
+                        )
+                        if remote_host:
+                            self._requires_lease_dict[request.request_id] = (
+                                remote_host,
+                                remote_http_port,
+                            )
                 return count, True
 
         # No remote prefill for this request.
@@ -725,6 +769,9 @@ class NixlConnectorScheduler:
                 assert num_external_tokens == 0
             # Only trigger 1 KV transfer per request.
             params["do_remote_prefill"] = False
+            # Request is being scheduled — no longer needs D-side lease refresh.
+            with self._requires_lease_lock:
+                self._requires_lease_dict.pop(request.request_id, None)
 
     def build_connector_meta(
         self,
@@ -769,6 +816,7 @@ class NixlConnectorScheduler:
                 self._reqs_need_save.pop(req_id)
 
         meta.reqs_to_send = self._reqs_need_send
+        meta.reqs_to_refresh = self._lease_refreshes
         meta.reqs_in_batch = self._reqs_in_batch
         meta.reqs_not_processed = self._reqs_not_processed
 
@@ -777,6 +825,7 @@ class NixlConnectorScheduler:
         self._reqs_in_batch = set()
         self._reqs_not_processed = set()
         self._reqs_need_send = {}
+        self._lease_refreshes = {}
 
         return meta
 
@@ -847,8 +896,60 @@ class NixlConnectorScheduler:
             remote_request_id=request.request_id,
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
+            remote_http_port=self.http_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
         )
+
+    def refresh_lease(self, request_ids: list[str]) -> None:
+        """Update lease expiry for the given requests.
+
+        Called from P's EngineCore utility handler when D workers POST
+        /internal/nixl/lease_refresh. Runs in the engine loop thread so no
+        locking is required for _lease_refreshes.
+        """
+        new_expiry = time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
+        for req_id in request_ids:
+            self._lease_refreshes[req_id] = new_expiry
+
+    def _lease_refresh_loop(self) -> None:
+        """D-side background thread: periodically POST lease refresh to P."""
+        import json
+        import urllib.request as urlreq
+
+        refresh_interval = max(envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT // 3, 1)
+        while not self._stop_lease_event.wait(timeout=refresh_interval):
+            with self._requires_lease_lock:
+                if not self._requires_lease_dict:
+                    continue
+                snapshot = dict(self._requires_lease_dict)
+
+            # Group by (P_host, P_http_port)
+            groups: dict[tuple[str, int], list[str]] = defaultdict(list)
+            for req_id, endpoint in snapshot.items():
+                groups[endpoint].append(req_id)
+
+            for (host, http_port), req_ids in groups.items():
+                try:
+                    body = json.dumps({"request_ids": req_ids}).encode()
+                    url = f"http://{host}:{http_port}/internal/nixl/lease_refresh"
+                    req = urlreq.Request(url, data=body, method="POST")
+                    req.add_header("Content-Type", "application/json")
+                    with urlreq.urlopen(req, timeout=5) as resp:
+                        if resp.status != 200:
+                            raise RuntimeError(f"HTTP {resp.status}")
+                    logger.debug(
+                        "Refreshed lease for %d request(s) at %s:%d",
+                        len(req_ids),
+                        host,
+                        http_port,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to refresh KV lease with P at %s:%d: %s",
+                        host,
+                        http_port,
+                        e,
+                    )
 
 
 class NixlConnectorWorker:
@@ -1979,17 +2080,18 @@ class NixlConnectorWorker:
         ) in block_ids_for_blocksize_post_process.items():
             self.post_process_device_kv_on_receive(block_size_ratio, block_ids_list)
 
-        # Handle timeout to avoid stranding blocks on remote.
+        # Handle timeout: free P-side KV blocks for requests whose lease expired.
+        # Full scan (not early-break) since lease refreshes may change expiry
+        # order arbitrarily.
         now = time.perf_counter()
-        while self._reqs_to_send:
-            req_id, expires = next(iter(self._reqs_to_send.items()))
-            # Sorted dict, oldest requests are put first so we can exit early.
-            if now < expires:
-                break
+        expired = [
+            req_id for req_id, expires in self._reqs_to_send.items() if now >= expires
+        ]
+        for req_id in expired:
             count = self.consumer_notification_counts_by_req.pop(req_id, 0)
             self.xfer_stats.record_kv_expired_req()
             logger.warning(
-                "Releasing expired KV blocks for request %s which were "
+                "Releasing expired KV blocks for request %s which were not "
                 "retrieved by %d decode worker(s) within %d seconds.",
                 req_id,
                 count,
@@ -2165,6 +2267,16 @@ class NixlConnectorWorker:
         for req_id, expiration_time in metadata.reqs_to_send.items():
             if req_id in self._reqs_to_process:
                 self._reqs_to_send[req_id] = expiration_time
+
+        # Apply lease refresh expiry updates for requests already tracked.
+        for req_id, new_expiry in metadata.reqs_to_refresh.items():
+            if req_id in self._reqs_to_send:
+                self._reqs_to_send[req_id] = new_expiry
+                logger.debug(
+                    "Lease refreshed for request %s, expires in %ds",
+                    req_id,
+                    envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT,
+                )
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.kv_topo is not None

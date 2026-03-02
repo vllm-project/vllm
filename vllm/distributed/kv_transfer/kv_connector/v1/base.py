@@ -592,6 +592,14 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
+    def refresh_lease(self, request_ids: list[str]) -> None:
+        """Refresh the KV lease for the given request IDs. No-op by default.
+
+        Called from the P-side API server when D workers POST
+        /internal/nixl/lease_refresh to extend the KV block hold time.
+        """
+        return
+
     def reset_cache(self) -> bool | None:
         """
         Reset the connector's internal cache.
