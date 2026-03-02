@@ -526,6 +526,7 @@ class VoxtralForConditionalGeneration(
         task_type: Literal["transcribe", "translate"],
         request_prompt: str,
         to_language: str | None,
+        vllm_xargs: dict[str, str | int | float | bool] | None = None,
     ) -> PromptType:
         tokenizer = cached_tokenizer_from_config(model_config)
         audio = Audio(audio, int(stt_config.sample_rate), format="wav")  # lossless

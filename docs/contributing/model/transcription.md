@@ -88,6 +88,7 @@ Return a dict containing `multi_modal_data` with the audio, and either a `prompt
             task_type: Literal["transcribe", "translate"],
             request_prompt: str,
             to_language: str | None,
+            vllm_xargs: dict[str, str | int | float | bool] | None = None,
         ) -> PromptType:
             # Example with a free-form instruction prompt
             task_word = "Transcribe" if task_type == "transcribe" else "Translate"
@@ -125,6 +126,7 @@ Return a dict with separate `encoder_prompt` and `decoder_prompt` entries:
             task_type: Literal["transcribe", "translate"],
             request_prompt: str,
             to_language: str | None,
+            vllm_xargs: dict[str, str | int | float | bool] | None = None,
         ) -> PromptType:
             if language is None:
                 raise ValueError("Language must be specified")

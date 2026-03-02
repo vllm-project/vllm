@@ -1140,6 +1140,7 @@ class GlmAsrForConditionalGeneration(
         task_type: Literal["transcribe", "translate"],
         request_prompt: str,
         to_language: str | None,
+        vllm_xargs: dict[str, str | int | float | bool] | None = None,
     ) -> PromptType:
         """Get the generation prompt to be used for transcription requests."""
         tokenizer = cached_tokenizer_from_config(model_config)
