@@ -15,6 +15,12 @@ from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
+from vllm.v1.worker.gpu.spec_decode.rejection_sample import (
+    rejection_sample as rejection_sample_functional,
+)
+from vllm.v1.worker.gpu.spec_decode.rejection_sample import (
+    sample_recovered_and_bonus_tokens,
+)
 from vllm.v1.worker.gpu.states import RequestState
 
 
@@ -53,7 +59,7 @@ class Sampler:
         self.logit_bias_state.apply_staged_writes()
         self.bad_words_state.apply_staged_writes()
 
-    def __call__(
+    def sample(
         self,
         logits: torch.Tensor,
         idx_mapping: torch.Tensor,
@@ -66,13 +72,21 @@ class Sampler:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.compute_nans else None
-        sampled, processed_logits = self.sample(
+        processed_logits = self._process_logits(
             logits,
             idx_mapping,
             idx_mapping_np,
             pos,
             input_ids,
             expanded_local_pos,
+        )
+        sampled = gumbel_sample(
+            logits,
+            idx_mapping,
+            self.sampling_states.temperature.gpu,
+            self.sampling_states.seeds.gpu,
+            pos,
+            apply_temperature=False,
         )
 
         max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
@@ -87,6 +101,10 @@ class Sampler:
         else:
             logprobs_tensors = None
 
+        # No draft tokens (common case).
+        num_reqs = len(logits)
+        num_sampled = torch.ones(num_reqs, dtype=torch.int32, device=logits.device)
+
         # These are GPU tensors.
         sampler_output = SamplerOutput(
             # The sampled tokens are expanded to 2D tensor with shape
@@ -95,10 +113,75 @@ class Sampler:
             sampled_token_ids=sampled.view(-1, 1),
             logprobs_tensors=logprobs_tensors,
             num_nans=num_nans,
+            num_sampled=num_sampled,
         )
         return sampler_output
 
-    def sample(
+    def rejection_sample(
+        self,
+        logits: torch.Tensor,  # [num_draft_tokens + num_reqs, vocab_size]
+        draft_logits: torch.Tensor,  # [num_draft_tokens + num_reqs]
+        cu_num_logits: torch.Tensor,  # [num_reqs + 1]
+        cu_num_logits_np: np.ndarray,  # [num_reqs + 1]
+        idx_mapping: torch.Tensor,  # [max_num_reqs]
+        expanded_idx_mapping: torch.Tensor,  # [num_draft_tokens + num_reqs]
+        idx_mapping_np: np.ndarray,  # [num_draft_tokens + num_reqs]
+        pos: torch.Tensor,  # [num_draft_tokens + num_reqs]
+        input_ids: torch.Tensor,  # [num_draft_tokens + num_reqs]
+        expanded_local_pos: torch.Tensor,  # [num_draft_tokens + num_reqs]
+        num_speculative_steps: int,
+    ) -> SamplerOutput:
+        # TODO: Check whether functions expect expanded idx_mapping or not
+        processed_logits = self._process_logits(
+            logits,
+            expanded_idx_mapping,
+            idx_mapping_np,
+            pos,
+            input_ids,
+            expanded_local_pos,
+        )
+        processed_probs = torch.softmax(processed_logits, dim=-1)
+        draft_probs = torch.softmax(draft_logits, dim=-1)
+        recovered_ids = sample_recovered_and_bonus_tokens(
+            processed_probs,
+            draft_probs,
+            cu_num_logits,
+            expanded_idx_mapping,
+            self.sampling_states.temperature.gpu,
+            self.sampling_states.seeds.gpu,
+            pos,
+        )
+        sampled, num_sampled = rejection_sample_functional(
+            input_ids,
+            recovered_ids,
+            processed_probs,
+            draft_probs,
+            cu_num_logits,
+            self.sampling_states.seeds.gpu,
+            pos,
+            self.sampling_states.temperature.gpu,
+            num_speculative_steps,
+        )
+        max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
+        if max_num_logprobs != NO_LOGPROBS:
+            expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
+            cu_num_logits_list = cu_num_logits_np.tolist() if expanded_logits else None
+            logprobs_tensors = compute_topk_logprobs(
+                processed_logits, max_num_logprobs, sampled, cu_num_logits_list
+            )
+        else:
+            logprobs_tensors = None
+
+        # These are GPU tensors.
+        sampler_output = SamplerOutput(
+            sampled_token_ids=sampled,
+            logprobs_tensors=logprobs_tensors,
+            num_nans=None,
+            num_sampled=num_sampled,
+        )
+        return sampler_output
+
+    def _process_logits(
         self,
         logits: torch.Tensor,
         idx_mapping: torch.Tensor,
@@ -106,7 +189,7 @@ class Sampler:
         pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         # Copy logits to a new FP32 tensor.
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
@@ -143,13 +226,4 @@ class Sampler:
             logits, idx_mapping, idx_mapping_np
         )
 
-        # Sample the next token.
-        sampled = gumbel_sample(
-            logits,
-            idx_mapping,
-            self.sampling_states.temperature.gpu,
-            self.sampling_states.seeds.gpu,
-            pos,
-            apply_temperature=False,
-        )
-        return sampled, logits
+        return logits

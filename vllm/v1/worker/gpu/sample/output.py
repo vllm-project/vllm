@@ -12,3 +12,4 @@ class SamplerOutput:
     sampled_token_ids: torch.Tensor
     logprobs_tensors: LogprobsTensors | None
     num_nans: torch.Tensor | None
+    num_sampled: torch.Tensor
