@@ -1496,6 +1496,22 @@ class Scheduler(SchedulerInterface):
                     )
             finished_req_ids.clear()
 
+        # Copy DSL metrics from model runner output to spec decoding stats
+        if (
+            spec_decoding_stats is not None
+            and model_runner_output.dsl_total_proposals > 0
+        ):
+            spec_decoding_stats.dsl_total_proposals = (
+                model_runner_output.dsl_total_proposals
+            )
+            spec_decoding_stats.dsl_early_exits = model_runner_output.dsl_early_exits
+            spec_decoding_stats.dsl_tokens_generated = (
+                model_runner_output.dsl_tokens_generated
+            )
+            spec_decoding_stats.dsl_tokens_requested = (
+                model_runner_output.dsl_tokens_requested
+            )
+
         if (
             stats := self.make_stats(
                 spec_decoding_stats, kv_connector_stats, cudagraph_stats, perf_stats

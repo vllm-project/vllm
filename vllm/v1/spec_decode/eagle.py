@@ -78,6 +78,20 @@ class SpecDecodeBaseProposer:
         self.max_model_len = vllm_config.model_config.max_model_len
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
+        self.draft_confidence_threshold = self.speculative_config.draft_confidence_threshold
+
+        # DSL (Dynamic Speculative Length) metrics tracking
+        # These track early exit behavior when draft_confidence_threshold > 0
+        self.dsl_total_proposals = 0  # Total number of proposal calls
+        self.dsl_early_exits = 0  # Times we exited early
+        self.dsl_tokens_generated = 0  # Total draft tokens generated
+        self.dsl_tokens_requested = 0  # Total draft tokens requested
+        
+        # Track last reported values to compute per-step deltas
+        self.dsl_last_reported_proposals = 0
+        self.dsl_last_reported_exits = 0
+        self.dsl_last_reported_generated = 0
+        self.dsl_last_reported_requested = 0
 
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
@@ -378,6 +392,85 @@ class SpecDecodeBaseProposer:
             return self.model.get_top_tokens(hidden_states)
         return self.model.compute_logits(hidden_states).argmax(dim=-1)
 
+    def get_dsl_metrics(self) -> dict[str, float]:
+        """Get Dynamic Speculative Length (DSL) metrics.
+        
+        Returns a dictionary with:
+        - early_exit_rate: Fraction of proposals that exited early (0.0-1.0)
+        - avg_tokens_generated: Average tokens generated per proposal
+        - avg_tokens_requested: Average tokens requested per proposal
+        - efficiency: Ratio of generated/requested tokens (1.0 = no early exits)
+        """
+        if self.dsl_total_proposals == 0:
+            return {
+                "early_exit_rate": 0.0,
+                "avg_tokens_generated": 0.0,
+                "avg_tokens_requested": 0.0,
+                "efficiency": 1.0,
+            }
+        
+        early_exit_rate = self.dsl_early_exits / self.dsl_total_proposals
+        avg_tokens_gen = self.dsl_tokens_generated / self.dsl_total_proposals
+        avg_tokens_req = self.dsl_tokens_requested / self.dsl_total_proposals
+        efficiency = avg_tokens_gen / avg_tokens_req if avg_tokens_req > 0 else 1.0
+        
+        return {
+            "early_exit_rate": early_exit_rate,
+            "avg_tokens_generated": avg_tokens_gen,
+            "avg_tokens_requested": avg_tokens_req,
+            "efficiency": efficiency,
+        }
+    
+    def reset_dsl_metrics(self) -> None:
+        """Reset DSL metrics counters."""
+        self.dsl_total_proposals = 0
+        self.dsl_early_exits = 0
+        self.dsl_tokens_generated = 0
+        self.dsl_tokens_requested = 0
+        self.dsl_last_reported_proposals = 0
+        self.dsl_last_reported_exits = 0
+        self.dsl_last_reported_generated = 0
+        self.dsl_last_reported_requested = 0
+    
+    def get_dsl_metrics_delta(self) -> tuple[int, int, int, int]:
+        """Get DSL metrics delta since last call and update last reported values.
+        
+        Returns (delta_proposals, delta_exits, delta_generated, delta_requested).
+        This is used to report per-step metrics to the scheduler.
+        """
+        delta_proposals = self.dsl_total_proposals - self.dsl_last_reported_proposals
+        delta_exits = self.dsl_early_exits - self.dsl_last_reported_exits
+        delta_generated = self.dsl_tokens_generated - self.dsl_last_reported_generated
+        delta_requested = self.dsl_tokens_requested - self.dsl_last_reported_requested
+        
+        # Update last reported values
+        self.dsl_last_reported_proposals = self.dsl_total_proposals
+        self.dsl_last_reported_exits = self.dsl_early_exits
+        self.dsl_last_reported_generated = self.dsl_tokens_generated
+        self.dsl_last_reported_requested = self.dsl_tokens_requested
+        
+        return (delta_proposals, delta_exits, delta_generated, delta_requested)
+    
+    def log_dsl_metrics(self) -> None:
+        """Log DSL metrics at INFO level."""
+        if self.draft_confidence_threshold <= 0:
+            logger.info("[DSL] Dynamic Speculative Length disabled (threshold=0)")
+            return
+        
+        metrics = self.get_dsl_metrics()
+        if self.dsl_total_proposals == 0:
+            logger.info("[DSL] No proposals yet")
+            return
+        
+        logger.info(
+            f"[DSL] Metrics (threshold={self.draft_confidence_threshold:.3f}): "
+            f"early_exit_rate={metrics['early_exit_rate']:.1%}, "
+            f"avg_tokens={metrics['avg_tokens_generated']:.1f}/"
+            f"{metrics['avg_tokens_requested']:.1f}, "
+            f"efficiency={metrics['efficiency']:.1%}, "
+            f"total_proposals={self.dsl_total_proposals}"
+        )
+
     def propose(
         self,
         # [num_tokens]
@@ -541,6 +634,20 @@ class SpecDecodeBaseProposer:
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
+        
+        # DSL (Dynamic Speculative Length) early exit logic:
+        # When confidence drops below threshold, stop generating more tokens.
+        # This saves computation while maintaining quality.
+        # Policy: Conservative - exits if ANY request in batch is low confidence.
+        # Rationale: Synchronous generation requires all requests to proceed together.
+        dsl_enabled = self.draft_confidence_threshold > 0
+        initial_tokens_requested = self.num_speculative_tokens - 1
+        dsl_did_early_exit = False  # Tracks whether early exit fired this proposal
+        
+        # Update metrics only when DSL is enabled
+        if dsl_enabled:
+            self.dsl_total_proposals += 1
+            self.dsl_tokens_requested += initial_tokens_requested * batch_size
 
         cudagraph_runtime_mode, input_batch_size, batch_size_across_dp = (
             self._determine_batch_execution_and_padding(batch_size)
@@ -685,11 +792,49 @@ class SpecDecodeBaseProposer:
                     last_hidden_states, hidden_states = ret_hidden_states
 
             hidden_states = hidden_states[:batch_size]
-            draft_token_ids = self._greedy_sample(last_hidden_states[:batch_size])
+            sample_hidden_states = last_hidden_states[:batch_size]
+            logits = None
+            if dsl_enabled:
+                logits = self.model.compute_logits(sample_hidden_states)
+                draft_token_ids = logits.argmax(dim=-1)
+            else:
+                draft_token_ids = self._greedy_sample(sample_hidden_states)
+
+            # Always append the token first
             draft_token_ids_list.append(draft_token_ids)
+
+            # Check if we should stop early (DSL early exit)
+            # Only evaluate on tokens before the last one, and only if DSL is enabled
+            if dsl_enabled and (token_index + 1) < (self.num_speculative_tokens - 1):
+                assert logits is not None
+                draft_probs = logits.softmax(dim=-1, dtype=torch.float32)
+                draft_token_ids_probs = draft_probs.gather(1, draft_token_ids.unsqueeze(1)).squeeze(-1)
+                # Mean policy: exit if the average confidence across the batch
+                # falls below the threshold. More robust than 'any' under mixed
+                # workloads — a single low-confidence request does not penalise
+                # high-confidence ones.
+                should_exit_gpu = draft_token_ids_probs.mean() < self.draft_confidence_threshold
+
+                if should_exit_gpu.item():
+                    self.dsl_early_exits += 1
+                    self.dsl_tokens_generated += (token_index + 1) * batch_size
+                    dsl_did_early_exit = True
+
+                    logger.debug(
+                        f"[SpecDecode] Early exit at token {token_index + 1}/{self.num_speculative_tokens - 1}: "
+                        f"confidence below threshold {self.draft_confidence_threshold:.3f}, "
+                        f"generated {token_index + 1} tokens instead of {self.num_speculative_tokens - 1}"
+                    )
+                    break
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
+        
+        # Update token count only on full completion (early exit already counted above)
+        if dsl_enabled and not dsl_did_early_exit:
+            actual_tokens_generated = len(draft_token_ids_list) - 1  # Exclude first token
+            self.dsl_tokens_generated += actual_tokens_generated * batch_size
+        
         return draft_token_ids
 
     def set_inputs_first_pass(
