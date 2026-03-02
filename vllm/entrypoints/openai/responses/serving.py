@@ -399,6 +399,22 @@ class OpenAIServingResponses(OpenAIServing):
         prev_messages_from_state: list | None = None
         if prev_response is not None and request.previous_response is not None:
             prev_messages_from_state = self._extract_state_from_response(prev_response)
+            if prev_messages_from_state is None and not self.enable_store:
+                # The caller passed previous_response but omitted
+                # include=['reasoning.encrypted_content'] on the prior turn,
+                # so no state carrier is present.  With store disabled there is
+                # no fallback — return a clear 400 rather than a KeyError 500.
+                return self.create_error_response(
+                    err_type="invalid_request_error",
+                    message=(
+                        "The provided 'previous_response' does not contain a "
+                        "vLLM state carrier. To use stateless multi-turn, "
+                        "generate the previous response with "
+                        "include=['reasoning.encrypted_content'] and "
+                        "store=false."
+                    ),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                )
 
         try:
             lora_request = self._maybe_get_adapters(request)

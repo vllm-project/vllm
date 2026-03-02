@@ -398,10 +398,22 @@ class ResponsesRequest(OpenAIBaseModel):
                 "'previous_response' (with include=['reasoning.encrypted_content'] "
                 "and store=false) for stateless multi-turn."
             )
-        if self.previous_response is not None and self.store:
-            # Stateless path: store is meaningless (and would cause confusion).
-            # Mirror the silent-disable behavior in create_responses for store=True.
-            self.store = False
+        if self.previous_response is not None:
+            if self.background:
+                # background mode requires store=True to retrieve the response
+                # later, but the stateless path forces store=False.  Raise
+                # explicitly rather than silently producing an unretrievable
+                # background response.
+                raise ValueError(
+                    "'background' mode cannot be used with 'previous_response'. "
+                    "Stateless multi-turn (previous_response + "
+                    "include=['reasoning.encrypted_content']) does not support "
+                    "background responses."
+                )
+            if self.store:
+                # Stateless path: store is meaningless (and would cause
+                # confusion). Mirror the silent-disable in create_responses.
+                self.store = False
         return self
 
     @model_validator(mode="before")

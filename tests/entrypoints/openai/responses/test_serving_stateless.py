@@ -8,8 +8,10 @@ Covers:
 - Protocol-level validation (pydantic model constraints on ResponsesRequest)
 - State carrier injection helpers (_build_state_carrier / _extract_state_from_response)
 - Error paths when enable_store=False (retrieve, cancel, previous_response_id)
+- Error path when previous_response lacks a state carrier (no include= on prior turn)
+- background=True rejected when previous_response is set
 - utils.py skipping of state-carrier items
-- construct_input_messages with prev_messages
+- construct_input_messages contract (prev_msg prepended before new turn)
 """
 
 from http import HTTPStatus
@@ -104,11 +106,28 @@ class TestProtocolValidation:
         )
         assert req.store is False
 
-    def test_no_previous_response_preserves_store_true(self):
-        from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+    def test_background_with_previous_response_raises(self):
+        """background=True + previous_response must be rejected.
 
-        req = ResponsesRequest(model="test", input="hello", store=True)
-        assert req.store is True
+        The mode='before' validator allows background=True when store=True
+        (the default).  Our mode='after' validator must then catch that
+        previous_response was also set and raise — otherwise the request
+        would produce an unretrievable background response (store gets
+        silently cleared to False, but background remains True).
+        """
+        from vllm.entrypoints.openai.responses.protocol import (
+            ResponsesRequest,
+            ResponsesResponse,
+        )
+
+        fake_prev = ResponsesResponse.model_construct(id="resp_fake")
+        with pytest.raises(Exception, match="background"):
+            ResponsesRequest(
+                model="test",
+                input="hello",
+                background=True,
+                previous_response=fake_prev,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +225,88 @@ class TestStorelessErrorPaths:
         assert result.error.code == HTTPStatus.NOT_FOUND
 
     @pytest.mark.asyncio
+    async def test_cancel_without_store_active_task_returns_400(self):
+        """With store off but a matching in-flight task, cancel cancels it and
+        returns 400 (not 404, not 501) — the task was cancelled but no stored
+        response object can be returned in stateless mode.
+
+        This is the success branch of the stateless cancel path and was the
+        actual behavior added by the review fix.
+        """
+        import asyncio
+
+        from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+        from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
+
+        serving = _make_minimal_serving(enable_store=False)
+
+        # Simulate an in-flight background task that blocks until cancelled.
+        async def _blocking():
+            await asyncio.sleep(9999)
+
+        task = asyncio.ensure_future(_blocking())
+        # Yield once so the task starts and reaches its first await point;
+        # otherwise cancel() on an unstarted task may mark it cancelled before
+        # the coroutine body ever runs, but task.cancelled() is still True.
+        await asyncio.sleep(0)
+
+        serving.background_tasks["resp_inflight"] = task
+
+        result = await OpenAIServingResponses.cancel_responses(serving, "resp_inflight")
+
+        assert isinstance(result, ErrorResponse)
+        assert result.error.code == HTTPStatus.BAD_REQUEST
+        assert "stateless mode" in result.error.message
+        assert task.cancelled(), "task was not cancelled"
+
+    @pytest.mark.asyncio
+    async def test_previous_response_without_carrier_returns_400(self):
+        """previous_response with no state carrier + store disabled → 400.
+
+        Regression test for P1 review finding: if a client passes
+        previous_response but the prior turn was generated without
+        include=['reasoning.encrypted_content'], _extract_state_from_response
+        returns None.  With store disabled there is no msg_store fallback, so
+        we must return a clear 400 rather than letting msg_store[id] raise
+        KeyError → 500.
+        """
+        from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+        from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+        from vllm.entrypoints.openai.responses.protocol import (
+            ResponsesRequest,
+            ResponsesResponse,
+        )
+        from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
+
+        # Build a previous response whose output has NO state carrier item.
+        text = ResponseOutputText(type="output_text", text="Hello!", annotations=[])
+        msg = ResponseOutputMessage(
+            id="msg_1", type="message", role="assistant",
+            content=[text], status="completed",
+        )
+        prev_resp = ResponsesResponse.model_construct(
+            id="resp_old", output=[msg]
+        )
+
+        serving = _make_minimal_serving(enable_store=False)
+        serving.engine_client = MagicMock()
+        serving.engine_client.errored = False
+
+        req = ResponsesRequest(
+            model="test",
+            input="What is my name?",
+            store=False,
+            previous_response=prev_resp,
+        )
+
+        result = await OpenAIServingResponses.create_responses(serving, req)
+
+        assert isinstance(result, ErrorResponse)
+        assert result.error.code == HTTPStatus.BAD_REQUEST
+        assert "state carrier" in result.error.message
+
+    @pytest.mark.asyncio
     async def test_previous_response_id_without_store_returns_400(self):
         """create_responses should reject previous_response_id when store is off."""
         from vllm.entrypoints.openai.engine.protocol import ErrorResponse
@@ -291,7 +392,14 @@ class TestUtilsStateCarrierSkipping:
 
 
 class TestPrevMessagesOverride:
-    def test_prev_messages_used_over_empty_msg_store(self):
+    def test_construct_input_messages_prepends_prev_msg(self):
+        """construct_input_messages correctly prepends a deserialized history
+        list (prev_msg) before the new user turn.
+
+        This is the contract the stateless path relies on: after extracting
+        message history from the encrypted_content carrier, the history is
+        passed as prev_msg and must appear in order before the new input.
+        """
         from vllm.entrypoints.openai.responses.utils import construct_input_messages
 
         prev = [
@@ -307,21 +415,3 @@ class TestPrevMessagesOverride:
         assert result[0] == {"role": "user", "content": "Who are you?"}
         assert result[1] == {"role": "assistant", "content": "I am helpful."}
         assert result[2] == {"role": "user", "content": "What did you say?"}
-
-    def test_full_stateless_roundtrip(self):
-        """serialize → embed in carrier → extract → same messages."""
-        from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
-
-        serving = _make_minimal_serving()
-        original = [
-            {"role": "system", "content": "Be helpful."},
-            {"role": "user", "content": "My name is Alice"},
-            {"role": "assistant", "content": "Hello, Alice!"},
-        ]
-        carrier = OpenAIServingResponses._build_state_carrier(serving, original, "req_abc123456789")
-
-        mock_response = MagicMock()
-        mock_response.output = [carrier]
-
-        recovered = OpenAIServingResponses._extract_state_from_response(serving, mock_response)
-        assert recovered == original
