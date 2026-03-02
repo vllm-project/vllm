@@ -1115,27 +1115,59 @@ int mindiv(int N, int div1, int div2) {
   return 0;
 }
 
+// Skinny GEMM C = A @ B + bias with Wave-SplitK: splits work across CUs and
+// reduces partial sums via atomics. Targets small N (e.g. 1–4) for good
+// utilization on AMD GPUs
 torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
                        const std::optional<at::Tensor>& in_bias,
                        const int64_t CuCount) {
+  TORCH_CHECK(in_a.dim() == 2, "in_a must be 2D, got ", in_a.dim(), "D");
+  TORCH_CHECK(in_b.dim() == 2, "in_b must be 2D, got ", in_b.dim(), "D");
+  TORCH_CHECK(in_a.dtype() == in_b.dtype(),
+              "in_a and in_b must have the same dtype");
+  TORCH_CHECK(
+      in_a.dtype() == torch::kFloat16 || in_a.dtype() == torch::kBFloat16,
+      "wvSplitK supports only float16 and bfloat16; got ", in_a.scalar_type());
+  if (in_bias.has_value() && in_bias->numel() > 0) {
+    TORCH_CHECK(in_bias->dtype() == in_a.dtype(),
+                "in_bias must have the same dtype as in_a and in_b (float16 or "
+                "bfloat16); got ",
+                in_bias->scalar_type());
+  }
+  TORCH_CHECK(in_a.size(1) % 8 == 0,
+              "K dimension (inner) must be a multiple of 8");
+  TORCH_CHECK(in_a.size(1) == in_b.size(1),
+              "K dimension (inner) must match: in_a has ", in_a.size(1),
+              ", in_b has ", in_b.size(1));
+
   auto M_in = in_a.size(0);
   auto K_in = in_a.size(1);
   auto N_in = in_b.size(0);
   auto Kap_in = in_a.stride(0);
   auto Kbp_in = in_b.stride(0);
-  auto Bx_in =
-      (in_bias.has_value() && in_bias->numel() > 0)
-          ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
-          : 1;
-  auto By_in = (in_bias.has_value() && in_bias->numel() > 0 &&
-                in_bias->sizes().size() == 2)
-                   ? in_bias->size(0)
+
+  //----------------------------------------------------
+  // determine bias dimensions based on the bias tensor shape
+  // critically, for a 1D tensor we treat it as a 2D tensor with a single row
+  // to ensure we can have coalesced memory access
+  //----------------------------------------------------
+
+  // determine the column dimension of the bias matrix
+  auto Bx_in = (in_bias.has_value() && in_bias->numel() > 0)
+                   ? (in_bias->dim() == 2) ? in_bias->size(1) : in_bias->size(0)
                    : 1;
 
-  TORCH_CHECK(in_a.dtype() == in_b.dtype());
-  TORCH_CHECK(K_in % 8 == 0, "k % 8 == 0");
-  TORCH_CHECK(in_a.dtype() == torch::kFloat16 ||
-              in_a.dtype() == torch::kBFloat16);
+  // determine the row dimension of the bias matrix
+  auto By_in =
+      (in_bias.has_value() && in_bias->numel() > 0 && in_bias->dim() == 2)
+          ? in_bias->size(0)
+          : 1;
+
+  TORCH_CHECK(
+      Bx_in >= 1 && (By_in == 1 ? (M_in % Bx_in == 0) : (Bx_in == M_in)),
+      "bias Bx must be M if By > 1, or divide M if By is 1");
+  TORCH_CHECK(By_in >= 1 && (By_in == 1 || N_in % By_in == 0),
+              "bias By must be 1 or divide N");
 
   auto out_c = torch::empty(
       {N_in, M_in},
@@ -1619,14 +1651,13 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   auto M_in = in_a.size(0);
   auto N_in = in_b.size(0);
   auto K_in = in_a.size(1);
-  auto Bx_in =
-      (in_bias.has_value() && in_bias->numel() > 0)
-          ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
-          : 1;
-  auto By_in = (in_bias.has_value() && in_bias->numel() > 0 &&
-                in_bias->sizes().size() == 2)
-                   ? in_bias->size(0)
+  auto Bx_in = (in_bias.has_value() && in_bias->numel() > 0)
+                   ? (in_bias->dim() == 2) ? in_bias->size(1) : in_bias->size(0)
                    : 1;
+  auto By_in =
+      (in_bias.has_value() && in_bias->numel() > 0 && in_bias->dim() == 2)
+          ? in_bias->size(0)
+          : 1;
 
   TORCH_CHECK(in_a.dtype() == in_b.dtype());
   TORCH_CHECK(K_in % 8 == 0, "k % 8 == 0");
@@ -2014,14 +2045,13 @@ void wvSplitKQ(const at::Tensor& in_b, const at::Tensor& in_a,
   auto N_in = in_a.size(0);
   auto Kap_in = in_a.stride(0);
   auto Kbp_in = in_b.stride(0);
-  auto Bx_in =
-      (in_bias.has_value() && in_bias->numel() > 0)
-          ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
-          : 1;
-  auto By_in = (in_bias.has_value() && in_bias->numel() > 0 &&
-                in_bias->sizes().size() == 2)
-                   ? in_bias->size(0)
+  auto Bx_in = (in_bias.has_value() && in_bias->numel() > 0)
+                   ? (in_bias->dim() == 2) ? in_bias->size(1) : in_bias->size(0)
                    : 1;
+  auto By_in =
+      (in_bias.has_value() && in_bias->numel() > 0 && in_bias->dim() == 2)
+          ? in_bias->size(0)
+          : 1;
 
   TORCH_CHECK(K_in % 16 == 0, "k % 16 == 0");
   TORCH_CHECK(in_a.dtype() == in_b.dtype() && in_a.dtype() == kFp8Type);
