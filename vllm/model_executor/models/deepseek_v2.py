@@ -718,10 +718,14 @@ class Indexer(nn.Module):
         return self.indexer_op(hidden_states, q_fp8, k, weights)
 
 
-def _deepseek_v2_fused_qkv_a_proj_impl(
+def _min_latency_fused_qkv_a_proj_impl(
     input_: torch.Tensor,
     weight: torch.Tensor,
 ) -> torch.Tensor:
+    """
+    Dynamically run min-latency gemm if num_tokens <= 16.
+    This must be wrapped in a custom op because torch.compile.
+    """
     num_tokens = input_.shape[0]
     if 0 < num_tokens <= 16:
         output = torch.empty(
@@ -736,7 +740,7 @@ def _deepseek_v2_fused_qkv_a_proj_impl(
         return torch.nn.functional.linear(input_, weight)
 
 
-def _deepseek_v2_fused_qkv_a_proj_fake(
+def _min_latency_fused_qkv_a_proj_fake(
     input_: torch.Tensor,
     weight: torch.Tensor,
 ) -> torch.Tensor:
@@ -744,10 +748,10 @@ def _deepseek_v2_fused_qkv_a_proj_fake(
 
 
 direct_register_custom_op(
-    op_name="deepseek_v2_fused_qkv_a_proj",
-    op_func=_deepseek_v2_fused_qkv_a_proj_impl,
+    op_name="min_latency_fused_qkv_a_proj",
+    op_func=_min_latency_fused_qkv_a_proj_impl,
     mutates_args=[],
-    fake_impl=_deepseek_v2_fused_qkv_a_proj_fake,
+    fake_impl=_min_latency_fused_qkv_a_proj_fake,
 )
 
 
