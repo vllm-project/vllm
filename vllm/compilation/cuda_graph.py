@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import inspect
 from collections import Counter
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -119,6 +120,67 @@ class CUDAGraphLogging:
         self.reset()
 
 
+def _extract_tensor_addresses(
+    obj: Any, prefix: str = "", visited: set | None = None
+) -> dict[str, int]:
+    """
+    Recursively extract memory addresses of CUDA tensors from nested structures.
+    Uses visited set to prevent infinite recursion, but never adds tensors to visited
+    since views can recreate Python objects pointing to same memory.
+    """
+    if visited is None:
+        visited = set()
+
+    addresses: dict[str, int] = {}
+
+    # Handle tensor before checking visited, since we don't add tensors to visited
+    if isinstance(obj, torch.Tensor):
+        if obj.is_cuda:
+            addresses[prefix] = obj.data_ptr()
+        return addresses
+
+    # Prevent infinite recursion for container objects
+    if id(obj) in visited:
+        return addresses
+
+    visited.add(id(obj))
+
+    try:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                new_prefix = f"{prefix}.{k}" if prefix else str(k)
+                addresses.update(_extract_tensor_addresses(v, new_prefix, visited))
+        elif isinstance(obj, (list, tuple)):
+            for i, v in enumerate(obj):
+                new_prefix = f"{prefix}[{i}]" if prefix else f"[{i}]"
+                addresses.update(_extract_tensor_addresses(v, new_prefix, visited))
+        elif dataclasses.is_dataclass(obj):
+            for field in dataclasses.fields(obj):
+                new_prefix = f"{prefix}.{field.name}" if prefix else field.name
+                try:
+                    v = getattr(obj, field.name)
+                    addresses.update(_extract_tensor_addresses(v, new_prefix, visited))
+                except AttributeError:
+                    pass
+        elif hasattr(obj, "__dict__"):
+            # Use vars(obj) instead of dir() to avoid triggering @property getters
+            try:
+                for k, v in vars(obj).items():
+                    if not k.startswith("_") and not isinstance(
+                        getattr(type(obj), k, None), property
+                    ):
+                        new_prefix = f"{prefix}.{k}" if prefix else k
+                        addresses.update(
+                            _extract_tensor_addresses(v, new_prefix, visited)
+                        )
+            except TypeError:
+                pass
+    finally:
+        pass
+
+    return addresses
+
+
 @dataclasses.dataclass
 class CUDAGraphEntry:
     batch_descriptor: BatchDescriptor
@@ -127,7 +189,7 @@ class CUDAGraphEntry:
 
     # for cudagraph debugging, track the input addresses
     # during capture, and check if they are the same during replay
-    input_addresses: list[int] | None = None
+    input_addresses: dict[str, int] | None = None
 
 
 @dataclasses.dataclass
@@ -205,6 +267,23 @@ class CUDAGraphWrapper:
         # in case we need to access the original runnable.
         return self.runnable
 
+    def _get_inputs_to_extract(
+        self, forward_context: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        try:
+            target_func = getattr(self.runnable, "forward", self.runnable)
+            sig = inspect.signature(target_func)
+            bound_args = sig.bind(*args, **kwargs)
+            bound_args.apply_defaults()
+            inputs_to_extract = dict(bound_args.arguments)
+        except (ValueError, TypeError):
+            inputs_to_extract = {"args": args, "kwargs": kwargs}
+
+        if self.runtime_mode == CUDAGraphMode.FULL:
+            inputs_to_extract["attn_metadata"] = forward_context.attn_metadata
+
+        return inputs_to_extract
+
     def __call__(self, *args: Any, **kwargs: Any) -> Any | None:
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
@@ -245,10 +324,12 @@ class CUDAGraphWrapper:
             # validate that cudagraph capturing is legal at this point.
             validate_cudagraph_capturing_enabled()
 
-            input_addresses = [
-                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
-            ]
-            entry.input_addresses = input_addresses
+            if self.is_debugging_mode:
+                inputs_to_extract = self._get_inputs_to_extract(
+                    forward_context, args, kwargs
+                )
+                entry.input_addresses = _extract_tensor_addresses(inputs_to_extract)
+
             cudagraph = torch.cuda.CUDAGraph()
 
             with ExitStack() as stack:
@@ -307,14 +388,46 @@ class CUDAGraphWrapper:
 
         if self.is_debugging_mode:
             # check if the input addresses are the same
-            new_input_addresses = [
-                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
-            ]
-            assert new_input_addresses == entry.input_addresses, (
-                f"Input addresses for cudagraphs are different "
-                f"during replay. Expected {entry.input_addresses}, "
-                f"got {new_input_addresses}"
+            inputs_to_extract = self._get_inputs_to_extract(
+                forward_context, args, kwargs
             )
+            new_input_addresses = _extract_tensor_addresses(inputs_to_extract)
+
+            if new_input_addresses != entry.input_addresses:
+                # Find the differences
+                old_keys = set(
+                    entry.input_addresses.keys() if entry.input_addresses else []
+                )
+                new_keys = set(new_input_addresses.keys())
+
+                missing_keys = old_keys - new_keys
+                added_keys = new_keys - old_keys
+
+                mismatched_keys = []
+                for k in old_keys.intersection(new_keys):
+                    if (
+                        entry.input_addresses is not None
+                        and entry.input_addresses[k] != new_input_addresses[k]
+                    ):
+                        mismatched_keys.append(
+                            (k, entry.input_addresses[k], new_input_addresses[k])
+                        )
+
+                error_msg = [
+                    "Input addresses for cudagraphs are different during replay."
+                ]
+                if missing_keys:
+                    error_msg.append(f"Missing keys: {missing_keys}")
+                if added_keys:
+                    error_msg.append(f"Added keys: {added_keys}")
+                if mismatched_keys:
+                    error_msg.append(
+                        "Mismatched addresses (key, old_address, new_address):"
+                    )
+                    for k, old_addr, new_addr in mismatched_keys:
+                        error_msg.append(f"  {k}: {old_addr} vs {new_addr}")
+
+                raise AssertionError("\n".join(error_msg))
 
         # Sync offloader before replay - ensures any external dependencies
         # from pre-capture prefetches are satisfied.
