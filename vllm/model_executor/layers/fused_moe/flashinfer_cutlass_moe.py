@@ -4,7 +4,9 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
@@ -17,6 +19,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
+    kMxfp4Static,
+    kMxfp8Dynamic,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
@@ -63,10 +67,18 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(moe_config, quant_config)
-        assert quant_config.quant_dtype in ("nvfp4", torch.float8_e4m3fn, None), (
-            "Only nvfp4, fp8, bfloat16 and"
+
+        assert quant_config.weight_quant_dtype in (
+            "mxfp4",
+            "nvfp4",
+            torch.float8_e4m3fn,
+            None,
+        ), (
+            "Only mxfp4, nvfp4, fp8, bfloat16 and"
             " float16 quantization are currently supported."
         )
+        self.device = moe_config.device
+        self.num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
         self.ep_size = moe_config.moe_parallel_config.ep_size
         self.tp_rank = moe_config.moe_parallel_config.tp_rank
@@ -77,6 +89,28 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # - pass per-block weight scales to the kernel
         # - skip input activation quantization (kernel applies scaling)
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
+        self.max_capture_size = (
+            get_current_vllm_config().compilation_config.max_cudagraph_capture_size
+        )
+
+        if quant_config.weight_quant_dtype == "mxfp4":
+            # This value is used specifically for gpt-oss,
+            # Need to revisit this for other models
+            self.gemm1_alpha = torch.tensor(
+                [1.702] * self.num_experts, dtype=torch.float32, device=self.device
+            )
+            self.gemm1_beta = torch.tensor(
+                [1.0] * self.num_experts, dtype=torch.float32, device=self.device
+            )
+            self.gemm1_clamp_limit = torch.tensor(
+                [7.0] * self.num_experts, dtype=torch.float32, device=self.device
+            )
+            if quant_config.quant_dtype == "mxfp8":
+                self.fake_input_scale = torch.ones(
+                    self.num_experts,
+                    device=self.device,
+                    dtype=torch.float32,
+                )
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -118,20 +152,33 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 ]
                 and p.has_device_capability(90)
             )
-            # fp8 block-scale on 9.0
+            # fp8 block-scale, wmxfp4a16 on 9.0
             or (
-                scheme == (kFp8Static128BlockSym, kFp8Dynamic128Sym)
+                scheme
+                in [
+                    (kMxfp4Static, None),
+                    (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+                ]
                 and p.is_device_capability(90)
             )
-            # nvfp4 on 10.0+
+            # nvfp4, wmxfp4amxfp8 on 10.0+
             or (
-                scheme == (kNvfp4Static, kNvfp4Dynamic) and p.has_device_capability(100)
+                scheme
+                in [
+                    (kMxfp4Static, kMxfp8Dynamic),
+                    (kNvfp4Static, kNvfp4Dynamic),
+                ]
+                and p.has_device_capability(100)
             )
         )
 
     @staticmethod
-    def _supports_activation(activation: str) -> bool:
-        return activation in ["silu", "relu2_no_mul"]
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.RELU2_NO_MUL,
+            MoEActivation.SWIGLUOAI,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -164,7 +211,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
@@ -201,7 +248,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
@@ -214,13 +261,24 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         from flashinfer.fused_moe.core import ActivationType
 
         activation_str_to_value_map = {
-            "silu": ActivationType.Swiglu,  # This is the default
-            "relu2_no_mul": ActivationType.Relu2,
+            MoEActivation.SILU: ActivationType.Swiglu,  # This is the default
+            MoEActivation.SWIGLUOAI: ActivationType.Swiglu,  # gpt-oss alias
+            MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
         }
         assert activation in activation_str_to_value_map, (
             f"{activation=} missing from {activation_str_to_value_map.keys()=}"
         )
 
+        quant_scales = None
+        fc1_expert_weights = None
+        fc2_expert_weights = None
+        fc1_expert_biases = None
+        fc2_expert_biases = None
+        swiglu_alpha = None
+        swiglu_beta = None
+        swiglu_limit = None
+        use_mxfp8_act_scaling = False
+        use_w4_group_scaling = False
         # Select quantization metadata based on FP8 format/path
         if (
             self.quant_dtype == torch.float8_e4m3fn
@@ -255,6 +313,43 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             # FlashInfer API requires weight to be long for nvfp4
             fc1_expert_weights = w1.view(torch.long)
             fc2_expert_weights = w2.view(torch.long)
+        elif self.weight_quant_dtype == "mxfp4":
+            assert self.w1_scale is not None and self.w2_scale is not None
+            assert w1.is_contiguous() and w2.is_contiguous()
+            assert self.gemm1_alpha is not None
+            assert self.gemm1_beta is not None
+            assert self.gemm1_clamp_limit is not None
+            assert topk_ids.is_contiguous()
+
+            fc1_expert_biases = self.w1_bias
+            fc2_expert_biases = self.w2_bias
+            swiglu_alpha = self.gemm1_alpha
+            swiglu_beta = self.gemm1_beta
+            swiglu_limit = self.gemm1_clamp_limit
+
+            if self.quant_dtype == "mxfp8":
+                assert self.fake_input_scale is not None
+                fc1_expert_weights = w1.view(torch.long)
+                fc2_expert_weights = w2.view(torch.long)
+
+                quant_scales = [
+                    self.w1_scale.view(torch.int32),
+                    self.fake_input_scale,
+                    self.w2_scale.view(torch.int32),
+                    self.fake_input_scale,
+                ]
+                use_mxfp8_act_scaling = True
+            else:
+                assert hidden_states.dtype == torch.bfloat16
+                fc1_expert_weights = w1
+                fc2_expert_weights = w2
+                quant_scales = [
+                    self.w1_scale,
+                    self.w2_scale,
+                ]
+                a1q_scale = None
+                use_w4_group_scaling = True
+
         elif self.use_deepseek_fp8_block_scale:
             # FP8 block-scale path: provide block-scale weights, omit a1q_scale
             quant_scales = [
@@ -276,6 +371,12 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             token_final_scales=topk_weights,
             fc1_expert_weights=fc1_expert_weights,
             fc2_expert_weights=fc2_expert_weights,
+            fc1_expert_biases=fc1_expert_biases,
+            fc2_expert_biases=fc2_expert_biases,
+            swiglu_alpha=swiglu_alpha,
+            swiglu_beta=swiglu_beta,
+            swiglu_limit=swiglu_limit,
+            output=output,
             output_dtype=self.out_dtype,
             quant_scales=quant_scales,
             input_sf=a1q_scale,
@@ -283,10 +384,12 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             tp_rank=self.tp_rank,
             ep_size=self.ep_size,
             ep_rank=self.ep_rank,
-            output=output,
             activation_type=activation_str_to_value_map[activation],
             # Informs FlashInfer to use the block-scale decoding path when True
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
+            use_mxfp8_act_scaling=use_mxfp8_act_scaling,
+            use_w4_group_scaling=use_w4_group_scaling,
+            tune_max_num_tokens=max(self.max_capture_size, 1),
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:

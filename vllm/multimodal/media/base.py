@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
@@ -26,7 +26,7 @@ class MediaWithBytes(Generic[_T]):
     """
 
     media: _T
-    original_bytes: bytes
+    original_bytes: bytes = field(repr=False)
 
     def __array__(self, *args, **kwargs) -> np.ndarray:
         """Allow np.array(obj) to return np.array(obj.media)."""

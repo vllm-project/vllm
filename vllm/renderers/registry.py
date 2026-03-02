@@ -7,10 +7,10 @@ from vllm.logger import init_logger
 from vllm.tokenizers.registry import tokenizer_args_from_config
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
-from .protocol import BaseRenderer
+from .base import BaseRenderer
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -55,7 +55,7 @@ class RendererRegistry:
     def load_renderer(
         self,
         renderer_mode: str,
-        config: "ModelConfig",
+        config: "VllmConfig",
         tokenizer_kwargs: dict[str, Any],
     ) -> BaseRenderer:
         renderer_cls = self.load_renderer_cls(renderer_mode)
@@ -71,12 +71,16 @@ RENDERER_REGISTRY = RendererRegistry(
 """The global `RendererRegistry` instance."""
 
 
-def renderer_from_config(config: "ModelConfig", **kwargs):
+def renderer_from_config(config: "VllmConfig", **kwargs):
+    model_config = config.model_config
     tokenizer_mode, tokenizer_name, args, kwargs = tokenizer_args_from_config(
-        config, **kwargs
+        model_config, **kwargs
     )
 
-    if config.tokenizer_mode == "auto" and config.model_impl == "terratorch":
+    if (
+        model_config.tokenizer_mode == "auto"
+        and model_config.model_impl == "terratorch"
+    ):
         renderer_mode = "terratorch"
     else:
         renderer_mode = tokenizer_mode
