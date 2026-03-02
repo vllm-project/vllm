@@ -333,6 +333,13 @@ class PiecewiseBackend:
 
     def __call__(self, *args: Any) -> Any:
         runtime_shape = args[self.sym_shape_indices[0]]
+
+        if runtime_shape == 0:
+            # Empty split subgraphs are valid at runtime (e.g. all-prefill or
+            # all-decode microbatches).
+            assert self.graph is not None, "Eager fallback requires FX graph."
+            return self.graph(*args)
+
         range_entry = self._find_range_for_shape(runtime_shape)
 
         assert range_entry is not None, (
