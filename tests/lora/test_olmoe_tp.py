@@ -10,6 +10,7 @@ from safetensors.torch import load_file, save_file
 
 import vllm
 from vllm.lora.request import LoRARequest
+from vllm.utils.import_utils import has_nvshmem4py
 
 from ..utils import multi_gpu_test
 
@@ -200,3 +201,47 @@ def test_olmoe_lora_tp4(olmoe_lora_files, fully_sharded_loras):
     generate_and_test(
         llm, olmoe_lora_files, lora_id=2, compare_lower=fully_sharded_loras
     )
+
+
+@pytest.mark.skipif(not has_nvshmem4py(), reason="nvshmem4py not installed")
+def test_olmoe_lora_async_loading_sync(olmoe_lora_files, monkeypatch):
+    """Test async LoRA loading synchronization."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA", "1")
+
+        llm = vllm.LLM(
+            MODEL_PATH,
+            max_model_len=1024,
+            enable_lora=True,
+            max_loras=1,
+            max_cpu_loras=4,
+            enforce_eager=True,
+            trust_remote_code=True,
+            enable_chunked_prefill=True,
+        )
+
+        prompts = [
+            PROMPT_TEMPLATE.format(context="How many candidates are there?"),
+            PROMPT_TEMPLATE.format(context="Count the number of candidates."),
+        ]
+
+        sampling_params = vllm.SamplingParams(temperature=0, max_tokens=64)
+
+        # Request with LoRA ID 1 - first load from disk to CPU to GPU
+        lora_request_1 = LoRARequest("1", 1, olmoe_lora_files)
+        outputs_1 = llm.generate(prompts, sampling_params, lora_request=lora_request_1)
+
+        # Request LoRA ID 2 - evict LoRA 1, async load LoRA 2 from CPU
+        lora_request_2 = LoRARequest("2", 2, olmoe_lora_files)
+        outputs_2 = llm.generate(prompts, sampling_params, lora_request=lora_request_2)
+
+        # Switch back to LoRA 1 - evict LoRA 2, async reload from CPU cache
+        outputs_3 = llm.generate(prompts, sampling_params, lora_request=lora_request_1)
+
+        # Verify all outputs match expected LoRA output (not base model)
+        for outputs in [outputs_1, outputs_2, outputs_3]:
+            for i, output in enumerate(outputs):
+                generated_text = output.outputs[0].text.strip()
+                assert generated_text.startswith(EXPECTED_LORA_OUTPUT[i]), (
+                    f"Expected LoRA output but got: {generated_text}"
+                )
