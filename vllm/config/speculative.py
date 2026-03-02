@@ -48,6 +48,7 @@ MTPModelTypes = Literal[
 EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
 SpeculativeMethod = Literal[
     "ngram",
+    "fsm",
     "medusa",
     "mlp_speculator",
     "draft_model",
@@ -120,6 +121,11 @@ class SpeculativeConfig:
     prompt_lookup_min: int | None = Field(default=None, ge=1)
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
+
+    # FSM proposer configuration
+    fsm_path: str | None = None
+    """Path to prebuilt finite-state-machine JSON file when using FSM proposer, required
+    when method is set to fsm."""
 
     # Alternative drafting strategies
     speculative_token_tree: str | None = None
@@ -352,6 +358,8 @@ class SpeculativeConfig:
                 self.model = "ngram"
             elif self.method == "suffix":
                 self.model = "suffix"
+            elif self.method == "fsm":
+                self.model = "fsm"
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
@@ -394,6 +402,12 @@ class SpeculativeConfig:
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "suffix":
             self._validate_suffix_decoding()
+        elif self.method == "fsm":
+            # Validate fsm_path is provided
+            if self.fsm_path is None:
+                raise ValueError("fsm_path must be provided when using the fsm method.")
+            self.draft_model_config = self.target_model_config
+            self.draft_parallel_config = self.target_parallel_config
         else:
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0

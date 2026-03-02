@@ -6,13 +6,14 @@ To train your own draft models for optimized speculative decoding, see [vllm-pro
 
 ## vLLM Speculation Methods
 
-vLLM supports a variety of methods of speculative decoding. Model-based methods such as EAGLE, draft models, and mlp provide the best latency reduction, while simpler methods such as n-gram and and suffix decoding provide modest speedups without increasing workload during peak traffic.
+vLLM supports a variety of methods of speculative decoding. Model-based methods such as EAGLE, draft models, and mlp provide the best latency reduction, while simpler methods such as n-gram, suffix, and FSM decoding provide modest speedups without increasing workload during peak traffic.
 
 - [EAGLE](eagle.md)
 - [Draft Model](draft_model.md)
 - [Multi-Layer Perceptron](mlp.md)
 - [N-Gram](n_gram.md)
 - [Suffix Decoding](suffix.md)
+- [FSM](fsm_spec_decode.md)
 
 ## Lossless guarantees of Speculative Decoding
 
