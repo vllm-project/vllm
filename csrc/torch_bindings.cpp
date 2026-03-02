@@ -450,6 +450,23 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                  Tensor b_scales, Tensor? bias) -> ()");
   ops.impl("cutlass_scaled_mm", torch::kCUDA, &cutlass_scaled_mm);
 
+  // Fused FP8 GEMM + reduce_scatter path for Blackwell AsyncTP.
+  ops.def(
+      "fused_bmm_fp8_reduce_scatter("
+      "    Tensor a,"
+      "    Tensor b,"
+      "    Tensor a_scale,"
+      "    Tensor b_scale,"
+      "    ScalarType out_dtype,"
+      "    int custom_ar_ptr,"
+      "    int reg_buffer,"
+      "    int reg_buffer_sz_bytes,"
+      "    int rank,"
+      "    int world_size"
+      ") -> Tensor");
+  ops.impl("fused_bmm_fp8_reduce_scatter", torch::kCUDA,
+           &fused_bmm_fp8_reduce_scatter);
+
   // CUTLASS w8a8 GEMM, supporting asymmetric per-tensor or per-row/column
   // quantization.
   ops.def(
@@ -833,6 +850,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
       "all_reduce(int fa, Tensor inp, Tensor! out, int reg_buffer, "
       "int reg_buffer_sz_bytes) -> ()");
   custom_ar.impl("all_reduce", torch::kCUDA, &all_reduce);
+  custom_ar.def(
+      "reduce_scatter(int fa, Tensor inp, Tensor! out, int reg_buffer, "
+      "int reg_buffer_sz_bytes) -> ()");
+  custom_ar.impl("reduce_scatter", torch::kCUDA, &reduce_scatter);
 
   custom_ar.def("dispose", &dispose);
   custom_ar.def("meta_size", &meta_size);

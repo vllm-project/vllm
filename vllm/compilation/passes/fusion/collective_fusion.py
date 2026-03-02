@@ -168,6 +168,59 @@ class ScaledMMReduceScatterPattern(BasePattern):
         )
 
 
+class BmmFP8ReduceScatterPattern(BasePattern):
+    def get_inputs(self) -> list[torch.Tensor]:
+        input = torch.empty([16, 16], device=self.device, dtype=FP8_DTYPE)
+        mm_weight = torch.empty([16, 16], device=self.device, dtype=FP8_DTYPE)
+        scale_a = torch.empty([1], device=self.device, dtype=torch.float32)
+        scale_b = torch.empty([1], device=self.device, dtype=torch.float32)
+        return [input, mm_weight, scale_a, scale_b]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            mat2: torch.Tensor,
+            scale_a: torch.Tensor,
+            scale_b: torch.Tensor,
+        ) -> torch.Tensor:
+            bmm = torch.ops.vllm.bmm_fp8.default(
+                input.unsqueeze(0),
+                mat2.unsqueeze(0),
+                scale_a,
+                scale_b,
+                self.dtype,
+                "auto",
+            )
+            mm = bmm.view(input.shape[0], mat2.shape[1])
+            reduce_scatter = torch.ops.vllm.reduce_scatter.default(
+                mm,
+                dim=0,
+                world_size=self.tp_size,
+                group_name=self.tp.unique_name,
+            )
+            return reduce_scatter
+
+        def replacement(
+            input: torch.Tensor,
+            mat2: torch.Tensor,
+            scale_a: torch.Tensor,
+            scale_b: torch.Tensor,
+        ) -> torch.Tensor:
+            return torch.ops.vllm.fused_bmm_fp8_reduce_scatter.default(
+                input,
+                mat2,
+                scale_a,
+                scale_b,
+                self.tp.unique_name,
+                self.tp_size,
+                self.dtype,
+            )
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+
 class AllGatherScaledMMPattern(BasePattern):
     def get_inputs(self) -> list[torch.Tensor]:
         x = torch.empty([8, 16], device=self.device, dtype=FP8_DTYPE)
@@ -389,6 +442,12 @@ class AsyncTPPass(VllmPatternMatcherPass):
         # `scaled_mm` or `cutlass_scaled_mm` with per-token (row-wise) scaling
         # only supports bfloat16 as the output dtype.
         if self.model_dtype == torch.bfloat16:
+            # This fusion is available only when the vllm.bmm_fp8 op exists.
+            if hasattr(torch.ops.vllm, "bmm_fp8"):
+                BmmFP8ReduceScatterPattern(self.model_dtype, self.device).register(
+                    self.patterns
+                )
+
             ScaledMMReduceScatterPattern(self.model_dtype, self.device).register(
                 self.patterns
             )
