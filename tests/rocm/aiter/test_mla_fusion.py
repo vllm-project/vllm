@@ -19,15 +19,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.platforms import current_platform
+
 from tests.models.utils import check_logprobs_close
+from vllm.platforms import current_platform
 
 # Mark all tests as ROCm-specific
 pytestmark = [
     pytest.mark.rocm,
     pytest.mark.skipif(
         not current_platform.is_rocm(),
-        reason="MLA fusion only available on ROCm/AMD GPUs"
+        reason="MLA fusion only available on ROCm/AMD GPUs",
     ),
 ]
 
@@ -35,6 +36,7 @@ pytestmark = [
 # =============================================================================
 # UNIT TESTS - Testing fusion detection and fallback logic
 # =============================================================================
+
 
 class TestFuseRMSNormQuant:
     """Unit tests for _fuse_rmsnorm_quant function."""
@@ -53,8 +55,12 @@ class TestFuseRMSNormQuant:
 
             # Call fusion function
             result = _fuse_rmsnorm_quant(
-                q_c, q_weight, 1e-6,
-                kv_c, kv_weight, 1e-6,
+                q_c,
+                q_weight,
+                1e-6,
+                kv_c,
+                kv_weight,
+                1e-6,
                 dtype_quant=None,
             )
 
@@ -80,8 +86,12 @@ class TestFuseRMSNormQuant:
 
                 # Call with non-FP8 dtype
                 result = _fuse_rmsnorm_quant(
-                    q_c, q_weight, 1e-6,
-                    kv_c, kv_weight, 1e-6,
+                    q_c,
+                    q_weight,
+                    1e-6,
+                    kv_c,
+                    kv_weight,
+                    1e-6,
                     dtype_quant=mock_dtypes.fp4x2,  # Not FP8
                 )
 
@@ -96,38 +106,50 @@ class TestFuseRMSNormQuant:
 
         mock_kernel = MagicMock()
         mock_kernel.return_value = (
-            (torch.randn(1, 128, 512), torch.randn(1, 1, 4)),  # (q_c_quantized, q_c_scale)
+            (
+                torch.randn(1, 128, 512),
+                torch.randn(1, 1, 4),
+            ),  # (q_c_quantized, q_c_scale)
             None,  # unused
             torch.randn(1, 128, 512),  # kv_c_normed
             None,  # unused
         )
 
-        with patch("vllm.model_executor.layers.mla._AITER_AVAILABLE", True):
-            with patch("vllm.model_executor.layers.mla.dtypes", mock_dtypes):
-                with patch("vllm.model_executor.layers.mla.fused_rms_fp8_group_quant", mock_kernel):
-                    from vllm.model_executor.layers.mla import _fuse_rmsnorm_quant
+        with (
+            patch("vllm.model_executor.layers.mla._AITER_AVAILABLE", True),
+            patch("vllm.model_executor.layers.mla.dtypes", mock_dtypes),
+            patch(
+                "vllm.model_executor.layers.mla.fused_rms_fp8_group_quant",
+                mock_kernel,
+            ),
+        ):
+            from vllm.model_executor.layers.mla import _fuse_rmsnorm_quant
 
-                    q_c = torch.randn(1, 128, 512)
-                    q_weight = torch.randn(512)
-                    kv_c = torch.randn(1, 128, 512)
-                    kv_weight = torch.randn(512)
+            q_c = torch.randn(1, 128, 512)
+            q_weight = torch.randn(512)
+            kv_c = torch.randn(1, 128, 512)
+            kv_weight = torch.randn(512)
 
-                    result = _fuse_rmsnorm_quant(
-                        q_c, q_weight, 1e-6,
-                        kv_c, kv_weight, 1e-6,
-                        dtype_quant=mock_dtypes.fp8,
-                        group_size=128,
-                    )
+            result = _fuse_rmsnorm_quant(
+                q_c,
+                q_weight,
+                1e-6,
+                kv_c,
+                kv_weight,
+                1e-6,
+                dtype_quant=mock_dtypes.fp8,
+                group_size=128,
+            )
 
-                    # Kernel should have been called
-                    assert mock_kernel.called
+            # Kernel should have been called
+            assert mock_kernel.called
 
-                    # Result should not be None
-                    assert result != (None, None, None)
-                    q_c_fused, q_c_scale, kv_c_normed = result
-                    assert q_c_fused is not None
-                    assert q_c_scale is not None
-                    assert kv_c_normed is not None
+            # Result should not be None
+            assert result != (None, None, None)
+            q_c_fused, q_c_scale, kv_c_normed = result
+            assert q_c_fused is not None
+            assert q_c_scale is not None
+            assert kv_c_normed is not None
 
     def test_handles_kernel_exception_gracefully(self):
         """Test that exceptions from AITER kernel are caught and return None."""
@@ -138,24 +160,33 @@ class TestFuseRMSNormQuant:
         mock_kernel = MagicMock()
         mock_kernel.side_effect = RuntimeError("Kernel failed")
 
-        with patch("vllm.model_executor.layers.mla._AITER_AVAILABLE", True):
-            with patch("vllm.model_executor.layers.mla.dtypes", mock_dtypes):
-                with patch("vllm.model_executor.layers.mla.fused_rms_fp8_group_quant", mock_kernel):
-                    from vllm.model_executor.layers.mla import _fuse_rmsnorm_quant
+        with (
+            patch("vllm.model_executor.layers.mla._AITER_AVAILABLE", True),
+            patch("vllm.model_executor.layers.mla.dtypes", mock_dtypes),
+            patch(
+                "vllm.model_executor.layers.mla.fused_rms_fp8_group_quant",
+                mock_kernel,
+            ),
+        ):
+            from vllm.model_executor.layers.mla import _fuse_rmsnorm_quant
 
-                    q_c = torch.randn(1, 128, 512)
-                    q_weight = torch.randn(512)
-                    kv_c = torch.randn(1, 128, 512)
-                    kv_weight = torch.randn(512)
+            q_c = torch.randn(1, 128, 512)
+            q_weight = torch.randn(512)
+            kv_c = torch.randn(1, 128, 512)
+            kv_weight = torch.randn(512)
 
-                    # Should not raise, should return (None, None, None)
-                    result = _fuse_rmsnorm_quant(
-                        q_c, q_weight, 1e-6,
-                        kv_c, kv_weight, 1e-6,
-                        dtype_quant=mock_dtypes.fp8,
-                    )
+            # Should not raise, should return (None, None, None)
+            result = _fuse_rmsnorm_quant(
+                q_c,
+                q_weight,
+                1e-6,
+                kv_c,
+                kv_weight,
+                1e-6,
+                dtype_quant=mock_dtypes.fp8,
+            )
 
-                    assert result == (None, None, None)
+            assert result == (None, None, None)
 
 
 class TestMlaFusionDetection:
@@ -164,20 +195,10 @@ class TestMlaFusionDetection:
     @patch("vllm.model_executor.layers.mla._AITER_AVAILABLE", True)
     def test_fusion_enabled_for_fp8_config(self):
         """Test that fusion is enabled when FP8 config is provided."""
-        from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-        from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
-
-        # Create FP8 config
-        fp8_config = Fp8Config()
-
-        # Mock dtypes
-        mock_dtypes = MagicMock()
-        mock_dtypes.fp8 = "fp8"
-
-        with patch("vllm.model_executor.layers.mla.dtypes", mock_dtypes):
-            # Create minimal MLA config (simplified - real test would need all params)
-            # This is a conceptual test - actual implementation needs proper setup
-            pass  # Placeholder - full test needs proper vLLM model setup
+        # Placeholder test - actual implementation needs proper vLLM model setup
+        # Would need to instantiate MultiHeadLatentAttentionWrapper with Fp8Config
+        # and verify self.fuse_qknorm_quant is True
+        pass
 
     @patch("vllm.model_executor.layers.mla._AITER_AVAILABLE", True)
     def test_fusion_disabled_for_non_fp8_config(self):
@@ -192,13 +213,16 @@ class TestMlaFusionDetection:
         pass  # Placeholder
 
 
-@pytest.mark.parametrize("aiter_available,quant_type,expected_fusion", [
-    (True, "fp8", True),
-    (True, "awq", False),
-    (True, None, False),
-    (False, "fp8", False),
-    (False, None, False),
-])
+@pytest.mark.parametrize(
+    "aiter_available,quant_type,expected_fusion",
+    [
+        (True, "fp8", True),
+        (True, "awq", False),
+        (True, None, False),
+        (False, "fp8", False),
+        (False, None, False),
+    ],
+)
 def test_fusion_matrix(aiter_available, quant_type, expected_fusion):
     """Test fusion enabled/disabled across different configurations."""
     # This is a matrix test that checks all combinations
@@ -210,13 +234,19 @@ def test_fusion_matrix(aiter_available, quant_type, expected_fusion):
 # INTEGRATION TESTS - Testing with real DeepSeek models
 # =============================================================================
 
-@pytest.mark.parametrize("model", [
-    "deepseek-ai/DeepSeek-V2-Lite",
-    # Add more DeepSeek models as needed
-])
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "deepseek-ai/DeepSeek-V2-Lite",
+        # Add more DeepSeek models as needed
+    ],
+)
 @pytest.mark.parametrize("quantization", ["fp8", None])
 @pytest.mark.parametrize("max_tokens", [10])
-def test_mla_model_inference(vllm_runner, example_prompts, model, quantization, max_tokens):
+def test_mla_model_inference(
+    vllm_runner, example_prompts, model, quantization, max_tokens
+):
     """Test that DeepSeek models with MLA run successfully."""
     with vllm_runner(
         model,
@@ -239,7 +269,9 @@ def test_mla_model_inference(vllm_runner, example_prompts, model, quantization, 
 def test_fp8_vs_baseline(vllm_runner, example_prompts):
     """Test that FP8 with fusion produces reasonable outputs."""
     import gc
+
     import torch
+
     from vllm.distributed import cleanup_dist_env_and_memory
 
     model = "deepseek-ai/DeepSeek-V2-Lite"
@@ -315,7 +347,7 @@ def test_different_batch_sizes(vllm_runner):
 @pytest.mark.skipif(
     # Skip TP > 1 if not enough GPUs
     current_platform.device_count() < 2,
-    reason="Need 2+ GPUs for tensor parallelism test"
+    reason="Need 2+ GPUs for tensor parallelism test",
 )
 def test_tensor_parallelism(vllm_runner, tensor_parallel_size):
     """Test that fusion works with tensor parallelism."""
@@ -360,9 +392,13 @@ def test_no_crash_on_unsupported_model(vllm_runner):
 # CORRECTNESS TESTS - Verifying numerical accuracy
 # =============================================================================
 
-@pytest.mark.parametrize("model", [
-    "deepseek-ai/DeepSeek-V2-Lite",
-])
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "deepseek-ai/DeepSeek-V2-Lite",
+    ],
+)
 @pytest.mark.parametrize("max_tokens", [10])
 def test_logprobs_match_baseline(vllm_runner, example_prompts, model, max_tokens):
     """
@@ -372,7 +408,9 @@ def test_logprobs_match_baseline(vllm_runner, example_prompts, model, max_tokens
     We use a tolerance to account for numerical differences.
     """
     import gc
+
     import torch
+
     from vllm.distributed import cleanup_dist_env_and_memory
 
     NUM_LOG_PROBS = 5
@@ -421,13 +459,18 @@ def test_logprobs_match_baseline(vllm_runner, example_prompts, model, max_tokens
     )
 
 
-@pytest.mark.parametrize("model", [
-    "deepseek-ai/DeepSeek-V2-Lite",
-])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "deepseek-ai/DeepSeek-V2-Lite",
+    ],
+)
 def test_deterministic_outputs(vllm_runner, model):
     """Test that fusion produces deterministic outputs."""
     import gc
+
     import torch
+
     from vllm.distributed import cleanup_dist_env_and_memory
 
     prompts = ["Hello, how are you?"]
@@ -499,6 +542,7 @@ def test_temperature_sampling(vllm_runner):
     ) as vllm_model:
         # Use temperature sampling
         from vllm import SamplingParams
+
         sampling_params = SamplingParams(temperature=0.8, top_p=0.9, max_tokens=50)
         outputs = vllm_model.generate(prompts, sampling_params)
 
@@ -527,9 +571,12 @@ def test_special_tokens_handling(vllm_runner):
         assert len(output_text) >= 0  # May be empty if EOS hit
 
 
-@pytest.mark.parametrize("model", [
-    "deepseek-ai/DeepSeek-V2-Lite",
-])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "deepseek-ai/DeepSeek-V2-Lite",
+    ],
+)
 def test_no_nans_or_infs(vllm_runner, example_prompts, model):
     """Test that fusion doesn't produce NaN or Inf logprobs."""
     max_tokens = 10
@@ -553,9 +600,13 @@ def test_no_nans_or_infs(vllm_runner, example_prompts, model):
                     if token_logprobs:
                         for logprob_value in token_logprobs.values():
                             # Handle both dict format and Logprob object format
-                            lp = logprob_value.logprob if hasattr(logprob_value, 'logprob') else logprob_value
-                            assert lp != float('inf'), "Found Inf logprob"
-                            assert lp != float('-inf'), "Found -Inf logprob"
+                            lp = (
+                                logprob_value.logprob
+                                if hasattr(logprob_value, "logprob")
+                                else logprob_value
+                            )
+                            assert lp != float("inf"), "Found Inf logprob"
+                            assert lp != float("-inf"), "Found -Inf logprob"
                             assert lp == lp, "Found NaN logprob"
 
 
