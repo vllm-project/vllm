@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euox pipefail
+export VLLM_CPU_CI_ENV=0
 
 echo "--- PP+TP"
 vllm serve meta-llama/Llama-3.2-3B-Instruct -tp=2 -pp=2 &
