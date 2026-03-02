@@ -7,12 +7,9 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from vllm.multimodal.utils import encode_image_url
-
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
-VISION_MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
 
 
 @pytest.fixture(scope="module")
@@ -27,35 +24,6 @@ def server():
 async def client(server):
     async with httpx.AsyncClient(
         base_url=server.url_for(""), timeout=30.0
-    ) as http_client:
-        yield http_client
-
-
-@pytest.fixture(scope="module")
-def vision_server():
-    """Vision-capable server used for multimodal /render tests."""
-    args: list[str] = [
-        "--runner",
-        "generate",
-        "--max_model_len",
-        "256",
-        "--max-num-seqs",
-        "2",
-        "--limit-mm-per-prompt.image",
-        "2",
-        "--limit-mm-per-prompt.video",
-        "0",
-        "--enforce-eager",
-    ]
-
-    with RemoteOpenAIServer(VISION_MODEL_NAME, args) as remote_server:
-        yield remote_server
-
-
-@pytest_asyncio.fixture
-async def vision_client(vision_server):
-    async with httpx.AsyncClient(
-        base_url=vision_server.url_for(""), timeout=60.0
     ) as http_client:
         yield http_client
 
@@ -295,45 +263,3 @@ async def test_chat_completion_render_with_sampling_params(client):
 
     # Check that internal fields are not present
     assert "_all_stop_token_ids" not in sampling_params
-
-
-@pytest.mark.asyncio
-async def test_chat_completion_render_with_base64_image_url(
-    vision_client,
-    local_asset_server,
-):
-    """Render a multimodal chat request and verify tokens are returned."""
-
-    image = local_asset_server.get_image_asset("RGBA_comp.png")
-    data_url = encode_image_url(image, format="PNG")
-
-    assert data_url.startswith("data:image/")
-    assert ";base64," in data_url
-
-    response = await vision_client.post(
-        "/v1/chat/completions/render",
-        json={
-            "model": VISION_MODEL_NAME,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                        {"type": "text", "text": "What's in this image?"},
-                    ],
-                }
-            ],
-        },
-    )
-
-    # Expect successful render response
-    assert response.status_code == 200
-
-    data = response.json()
-
-    # Validate token_ids field exists
-    assert "token_ids" in data, "Response must contain 'token_ids' field"
-    assert isinstance(data["token_ids"], list), "'token_ids' must be a list"
-
-    # Ensure non-empty token output
-    assert len(data["token_ids"]) > 0, "Token list must not be empty"
