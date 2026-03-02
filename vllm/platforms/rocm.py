@@ -231,6 +231,7 @@ def on_mi3xx() -> bool:
 
 
 def on_gfx9() -> bool:
+    # vLLM uses Triton, which requires CDNA2 (MI200+) or newer (gfx90a+)
     return _ON_GFX9
 
 
