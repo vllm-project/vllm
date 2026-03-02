@@ -139,15 +139,13 @@ class P2PAFDConnector(AFDConnectorBase):
         self.e2a_pynccl: PyNcclCommunicator | None = None
         self.a2e_comm_id: int | None = None
         self.e2a_comm_id: int | None = None
+        self.attn_size: int = 0
         self.ffn_size: int = 0
         self.min_size: int = 0
+        self.ratio: int = 1  # attn_size / ffn_size, for asymmetric A/F
         self.dst_list = []
         # Fixed recv buffers for FFN side when graph capturing; key = (stage_idx, size)
         self._recv_attn_buffers: dict[tuple[int, tuple[int, ...]], torch.Tensor] = {}
-        # Fixed recv buffers for ATTN side when graph capturing; key = (stage_idx, size)
-        # This avoids reusing the same tensor for both send source and recv
-        # destination in compiled graphs.
-        self._recv_ffn_buffers: dict[tuple[int, tuple[int, ...]], torch.Tensor] = {}
 
     def close(self) -> None:
         """Close the connector and release resources."""
@@ -164,8 +162,10 @@ class P2PAFDConnector(AFDConnectorBase):
         afd_size = self.config.afd_config.afd_extra_config.get("afd_size")
         role = self.config.afd_config.afd_role
         attn_size, ffn_size = map(int, re.match(r"(\d+)\D+(\d+)", afd_size).groups())
-        self.world_rank = self.rank if role == "ffn" else self.rank + ffn_size
+        self.attn_size = attn_size
         self.ffn_size = ffn_size
+        self.ratio = attn_size // ffn_size
+        self.world_rank = self.rank if role == "ffn" else self.rank + ffn_size
         self.min_size = min(ffn_size, attn_size)
         self.p2p_rank = self.rank + self.min_size if role == "attention" else self.rank
         afd_pg = init_afd_process_group(
@@ -184,21 +184,23 @@ class P2PAFDConnector(AFDConnectorBase):
         # Each group contains one attention and one ffn rank.
         ffn_ranks = [i for i in range(ffn_size)]
         attn_ranks = [i for i in range(ffn_size, ffn_size + attn_size)]
-        assert len(ffn_ranks) == len(attn_ranks), (
-            "ffn_ranks and attn_ranks must have the same length"
+        assert attn_size % ffn_size == 0, (
+            f"attn_size ({attn_size}) must be a multiple of ffn_size ({ffn_size})"
         )
+
         default_pg_switcher = DefaultProcessGroupSwitcher(_get_default_group(), afd_pg)
         with default_pg_switcher:
             sub_group_ranks = []
-            for i in range(len(ffn_ranks)):
-                # ranks = [attn_ranks[i], ffn_ranks[i]]
-                ranks = [ffn_ranks[i], attn_ranks[i]]
+            for f_idx in range(ffn_size):
+                ranks = [ffn_ranks[f_idx]]  # F is rank 0
+                for k in range(self.ratio):
+                    a_idx = f_idx + k * ffn_size
+                    ranks.append(attn_ranks[a_idx])
                 sub_group_ranks.append(ranks)
-            # Create two independent groups:
-            # a2e_group: for attention -> expert/ffn communication (send_attn, recv_attn)
-            # e2a_group: for expert/ffn -> attention communication (send_ffn, recv_ffn)
-            # The communication domain (rank range) is the same, but different group_name
-            # creates independent groups.
+                logger.info(f"P2P group {f_idx}: {ranks} (F + {self.ratio} A's)")
+            # One group per ubatch (same rank pair for A<->F); one PyNcclCommunicator
+            # per rank, registered at this rank's ubatch index (used by custom op via
+            # get_forward_context().afd_metadata.afd_stage_idx).
             logger.info("jcz before self.a2e_group")
             self.a2e_group = init_model_parallel_group(
                 sub_group_ranks,
@@ -387,27 +389,6 @@ class P2PAFDConnector(AFDConnectorBase):
                     dtype=meta.dtype,
                     device=meta.device,
                 )
-        # elif self.config.afd_config.afd_role == "attention" and is_graph_capturing \
-        # elif self.config.afd_config.afd_role == "attention" \
-        #     and not self.config.model_config.enforce_eager:
-        #     for stage_idx in range(num_of_stages):
-        #         meta = self._tensor_metadata_list[stage_idx]
-        #         buffer_key = (stage_idx, tuple(meta.size))
-        #         existing = self._recv_ffn_buffers.get(buffer_key)
-        #         if (
-        #             existing is not None
-        #             and existing.shape == meta.size
-        #             and existing.dtype == meta.dtype
-        #             and existing.device == meta.device
-        #         ):
-        #             continue
-        #         self._recv_ffn_buffers[buffer_key] = torch.empty(
-        #             tuple(meta.size),
-        #             dtype=meta.dtype,
-        #             device=meta.device,
-        #         )
-        # We do not clear _recv_attn_buffers so that replayed graphs still have
-        # valid buffer addresses to write into.
 
     # -------------------------------------------------------------------------
     #                                attn -> ffn
@@ -435,15 +416,6 @@ class P2PAFDConnector(AFDConnectorBase):
         """
         ubatch_idx = get_forward_context().afd_metadata.afd_stage_idx
         src = (self.e2a_group.rank_in_group + 1) % self.e2a_group.world_size
-        # if not self.config.model_config.enforce_eager and self.is_graph_capturing:
-        # if not self.config.model_config.enforce_eager:
-        #     meta = self._tensor_metadata_list[ubatch_idx]
-        #     buffer_key = (ubatch_idx, tuple(meta.size))
-        #     recv_buffer = self._recv_ffn_buffers.get(buffer_key)
-        #     # Prefer fixed preallocated buffer to avoid aliasing with the send
-        #     # source tensor in compiled/fullgraph execution.
-        #     if recv_buffer is not None:
-        #         ref_tensor = recv_buffer
         hidden_states = self._recv_hidden_states(
             src,
             self.e2a_group,
