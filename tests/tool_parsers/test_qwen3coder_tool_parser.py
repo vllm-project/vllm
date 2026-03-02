@@ -1017,18 +1017,38 @@ def test_streaming_opening_brace_always_emitted_first_issue_35266(
         tools=[bash_tool],
     )
 
-    # Reproduce the exact trigger: function header and first <parameter=>
-    # arrive together in the same delta (the condition that skipped '{').
-    # Split </function> and </tool_call> into separate chunks so the parser
-    # gets distinct calls to (a) process the parameter after emitting '{',
-    # and (b) emit '}' once all parameters are done.  This reflects realistic
-    # token-boundary behaviour and is the minimal sequence needed to exercise
-    # the full state machine transition.
+    # To trigger the pre-fix bug we need the opening-brace logic to fire on
+    # a delta whose text contains '<parameter='.  The state machine works as
+    # follows:
+    #
+    #   chunk 1 '<tool_call>'          -> sees tool_call_start_token, sets
+    #                                     is_tool_call_started=True, returns None
+    #   chunk 2 '<function=bash>'      -> accumulates to full header in tool_text,
+    #                                     emits header DeltaMessage, sets
+    #                                     in_function=True, json_started=False
+    #   chunk 3 '<parameter=...>'      -> delta_text contains '<parameter=',
+    #                                     json_started=False  **<-- bug trigger**
+    #                                     old code: gate `parameter_prefix not in
+    #                                     delta_text` → False → skip '{', but
+    #                                     still set json_started=True via fallback
+    #                                     fixed code: unconditionally emit '{'
+    #   chunk 4 '</function>'          -> '{' already emitted; processes parameter,
+    #                                     appends '}' inline (function closed)
+    #   chunk 5 '</tool_call>'         -> state cleanup, returns None
+    #
+    # If '<tool_call>' and '<function=bash>' arrive in the same chunk (as in
+    # the original 4-chunk split), the parser returns None on that chunk
+    # (tool_call_start_token triggers an early return before the header logic),
+    # and the header is only emitted on the *next* chunk whose delta_text is
+    # '<parameter=...>'. The following chunk is then '</function>', which does
+    # NOT contain '<parameter=' -- so the old gate would have passed and the
+    # bug would not have been triggered, making the test a false negative.
     chunks = [
-        "<tool_call><function=bash>",  # header
-        "<parameter=command>echo hi</parameter>",  # first param in same step as header
-        "</function>",  # triggers param emission (not '}' yet)
-        "</tool_call>",  # triggers '}'
+        "<tool_call>",
+        "<function=bash>",
+        "<parameter=command>echo hi</parameter>",  # bug trigger: <parameter= in delta
+        "</function>",
+        "</tool_call>",
     ]
 
     prev = ""
