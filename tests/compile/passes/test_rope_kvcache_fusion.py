@@ -196,6 +196,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
         AttentionBackendEnum.TRITON_ATTN,
         AttentionBackendEnum.ROCM_ATTN,
+        AttentionBackendEnum.ROCM_AITER_FA,
     ],
 )
 @pytest.mark.parametrize("enable_rope_custom_op", [True])  # [True, False])
@@ -253,6 +254,10 @@ def test_rope_kvcache_fusion(
         m.setenv(
             "VLLM_ROCM_USE_AITER_TRITON_ROPE", "1" if enable_aiter_triton_rope else "0"
         )
+        # RoPE+KV cache fusion for ROCM_AITER_FA is only supported when shuffle
+        # KV cache layout is not used.
+        if attn_backend == AttentionBackendEnum.ROCM_AITER_FA:
+            m.setenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "0")
         rocm_aiter_ops.refresh_env_variables()
 
         model = QKRoPEKVCacheTestModel(
