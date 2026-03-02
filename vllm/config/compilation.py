@@ -87,8 +87,12 @@ class CUDAGraphMode(enum.Enum):
     def separate_routine(self) -> bool:
         return isinstance(self.value, tuple)
 
-    def valid_runtime_modes(self) -> bool:
-        return self in [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]
+    @classmethod
+    def valid_runtime_modes(cls) -> frozenset["CUDAGraphMode"]:
+        return frozenset({cls.NONE, cls.PIECEWISE, cls.FULL})
+
+    def is_valid_runtime_mode(self) -> bool:
+        return self in CUDAGraphMode.valid_runtime_modes()
 
     def __str__(self) -> str:
         return self.name
@@ -1003,6 +1007,7 @@ class CompilationConfig:
                 # https://github.com/vllm-project/vllm/issues/33267
                 if not self.use_inductor_graph_partition:
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
+                    self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
             elif len(self.splitting_ops) == 0:
                 if (

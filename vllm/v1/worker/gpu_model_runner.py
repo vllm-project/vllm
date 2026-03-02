@@ -159,6 +159,7 @@ from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
@@ -461,6 +462,8 @@ class GPUModelRunner(
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
 
         self.eplb_state: EplbState | None = None
+        # NOTE(yongji): flag to temporarily disable EPLB during scaling up/down
+        self.eep_eplb_suppressed = False
         """
         State of the expert parallelism load balancer.
 
@@ -493,6 +496,7 @@ class GPUModelRunner(
                 | EagleProposer
                 | DraftModelProposer
                 | MedusaProposer
+                | ExtractHiddenStatesProposer
             )
             if self.speculative_config.method == "ngram":
                 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -516,6 +520,11 @@ class GPUModelRunner(
                 self.drafter = MedusaProposer(
                     vllm_config=self.vllm_config, device=self.device
                 )
+            elif self.speculative_config.method == "extract_hidden_states":
+                self.drafter = ExtractHiddenStatesProposer(
+                    vllm_config=self.vllm_config, device=self.device
+                )
+                self.use_aux_hidden_state_outputs = True
             else:
                 raise ValueError(
                     "Unknown speculative decoding method: "
@@ -2300,7 +2309,7 @@ class GPUModelRunner(
         )
         # Dispatch for the decoder portion of the model.
         _, batch_desc = self.cudagraph_dispatcher.dispatch(
-            num_logits, disable_full=True
+            num_logits, invalid_modes={CUDAGraphMode.FULL}
         )
         num_logits_padded = batch_desc.num_tokens
         logits_indices_padded = self.kv_sharing_fast_prefill_logits_indices[
@@ -2702,7 +2711,7 @@ class GPUModelRunner(
         """
         Step for the EPLB (Expert Parallelism Load Balancing) state.
         """
-        if not self.parallel_config.enable_eplb:
+        if not self.parallel_config.enable_eplb or self.eep_eplb_suppressed:
             return
 
         assert self.eplb_state is not None
@@ -2712,6 +2721,23 @@ class GPUModelRunner(
             is_dummy,
             is_profile,
             log_stats=self.parallel_config.eplb_config.log_balancedness,
+        )
+
+    def setup_eplb_from_mapping(
+        self,
+        expanded_physical_to_logical: torch.Tensor,
+        old_num_physical_experts: int,
+    ) -> None:
+        model = self.get_model()
+        assert is_mixture_of_experts(model)
+
+        self.eplb_state = EplbState.from_mapping(
+            model=model,
+            model_config=self.model_config,
+            device=self.device,
+            parallel_config=self.parallel_config,
+            expanded_physical_to_logical=expanded_physical_to_logical,
+            num_valid_physical_experts=old_num_physical_experts,
         )
 
     def _pool(
@@ -3174,20 +3200,19 @@ class GPUModelRunner(
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        dispatch_cudagraph = (
-            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
+
+        def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None):
+            return self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
-                disable_full=disable_full,
                 num_active_loras=num_active_loras,
+                valid_modes={CUDAGraphMode.NONE} if force_eager else valid_modes,
+                invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
             )
-            if not force_eager
-            else (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
-        )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-            num_tokens_padded, use_cascade_attn or has_encoder_output
+            num_tokens_padded, disable_full=use_cascade_attn or has_encoder_output
         )
         num_tokens_padded = batch_descriptor.num_tokens
         if self.compilation_config.pass_config.enable_sp:
@@ -3204,20 +3229,11 @@ class GPUModelRunner(
         # across ranks
         should_ubatch, num_tokens_across_dp = False, None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
-            # Disable DP padding when running eager to avoid excessive padding when
-            # running prefills. This lets us set cudagraph_mode="NONE" on the prefiller
-            # in a P/D setup and still use CUDA graphs (enabled by this padding) on the
-            # decoder.
-            allow_dp_padding = (
-                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            )
-
             should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
                 coordinate_batch_across_dp(
                     num_tokens_unpadded=num_tokens,
                     parallel_config=self.parallel_config,
                     allow_microbatching=allow_microbatching,
-                    allow_dp_padding=allow_dp_padding,
                     num_tokens_padded=num_tokens_padded,
                     uniform_decode=uniform_decode,
                     num_scheduled_tokens_per_request=num_scheduled_tokens_np,
@@ -3232,7 +3248,7 @@ class GPUModelRunner(
                 # Re-dispatch with DP padding so we have the correct batch_descriptor
                 cudagraph_mode, batch_descriptor = dispatch_cudagraph(
                     num_tokens_padded,
-                    disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value,
+                    valid_modes={CUDAGraphMode(synced_cudagraph_mode)},
                 )
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
@@ -3684,10 +3700,9 @@ class GPUModelRunner(
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
-        kv_connector_output = self.kv_connector_output
-        self.kv_connector_output = None
-
         if self.execute_model_state is None:
+            kv_connector_output = self.kv_connector_output
+            self.kv_connector_output = None
             # receive sampled token ids from the last PP rank.
             if self.use_async_scheduling and get_pp_group().world_size > 1:
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
@@ -3769,12 +3784,17 @@ class GPUModelRunner(
                 <= self.effective_drafter_max_model_len
             )
             use_gpu_toks = (
-                spec_config.use_eagle() or spec_config.uses_draft_model()
+                spec_config.use_eagle()
+                or spec_config.uses_draft_model()
+                or spec_config.uses_extract_hidden_states()
             ) and not spec_config.disable_padded_drafter_batch
             if use_gpu_toks:
                 # EAGLE/DraftModel speculative decoding can use the GPU sampled tokens
                 # as inputs, and does not need to wait for bookkeeping to finish.
-                assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+                assert isinstance(
+                    self.drafter,
+                    EagleProposer | DraftModelProposer | ExtractHiddenStatesProposer,
+                )
                 sampled_token_ids = sampler_output.sampled_token_ids
                 if input_fits_in_drafter:
                     propose_draft_token_ids(sampled_token_ids)
@@ -3832,6 +3852,10 @@ class GPUModelRunner(
 
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
+
+        # self.kv_connector_output may be modified during drafting
+        kv_connector_output = self.kv_connector_output
+        self.kv_connector_output = None
 
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
             if self.model_config.enable_return_routed_experts:
@@ -4059,6 +4083,48 @@ class GPUModelRunner(
                 sampling_metadata=sampling_metadata,
                 slot_mappings=slot_mappings,
             )
+        elif spec_config.uses_extract_hidden_states():
+            assert isinstance(self.drafter, ExtractHiddenStatesProposer)
+            assert isinstance(sampled_token_ids, torch.Tensor), (
+                "sampled_token_ids should be a torch.Tensor for "
+                "extract_hidden_states method."
+            )
+            if not self.use_aux_hidden_state_outputs or aux_hidden_states is None:
+                raise ValueError(
+                    "aux_hidden_states are required when using `extract_hidden_states`"
+                )
+            target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
+
+            draft_token_ids, drafter_kv_connector_output = self.drafter.propose(
+                sampled_token_ids=sampled_token_ids,
+                target_hidden_states=target_hidden_states,
+                common_attn_metadata=common_attn_metadata,
+                scheduler_output=scheduler_output,
+                slot_mappings=slot_mappings,
+            )
+            # Combine KVConnectorOutputs or select the non-empty one
+            if self.kv_connector_output and drafter_kv_connector_output:
+                self.kv_connector_output = KVConnectorOutput.merge(
+                    self.kv_connector_output, drafter_kv_connector_output
+                )
+            else:
+                self.kv_connector_output = (
+                    self.kv_connector_output or drafter_kv_connector_output
+                )
+
+            next_token_ids, valid_sampled_tokens_count = (
+                self.drafter.prepare_next_token_ids_padded(
+                    common_attn_metadata,
+                    sampled_token_ids,
+                    self.requests,
+                    self.input_batch,
+                    self.discard_request_mask.gpu,
+                )
+            )
+            self._copy_valid_sampled_token_count(
+                next_token_ids, valid_sampled_tokens_count
+            )
+
         elif spec_config.use_eagle() or spec_config.uses_draft_model():
             assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
 
@@ -4185,20 +4251,15 @@ class GPUModelRunner(
             setattr(self, config_name, new_config)
 
     @instrument(span_name="Loading (GPU)")
-    def load_model(self, eep_scale_up: bool = False) -> None:
+    def load_model(self, load_dummy_weights: bool = False) -> None:
         """
         Args:
-            eep_scale_up: the model loading is for elastic EP scale up.
+            load_dummy_weights: load dummy weights instead of real weights.
         """
         logger.info_once(
             "Starting to load model %s...",
             self.model_config.model,
             scope="global",
-        )
-        global_expert_loads, old_global_expert_indices_per_model, rank_mapping = (
-            EplbState.get_eep_state(self.parallel_config)
-            if eep_scale_up
-            else (None, None, None)
         )
 
         if self.parallel_config.enable_eplb:
@@ -4208,6 +4269,8 @@ class GPUModelRunner(
         try:
             with DeviceMemoryProfiler() as m:
                 time_before_load = time.perf_counter()
+                if load_dummy_weights:
+                    self.load_config.load_format = "dummy"
                 model_loader = get_model_loader(self.load_config)
                 self.model = model_loader.load_model(
                     vllm_config=self.vllm_config, model_config=self.model_config
@@ -4224,23 +4287,15 @@ class GPUModelRunner(
                         and is_mixture_of_experts(self.drafter.model)
                         and self.parallel_config.enable_eplb
                     ):
+                        assert not self.parallel_config.enable_elastic_ep, (
+                            "Elastic EP is not supported with drafter model."
+                        )
                         spec_config = self.vllm_config.speculative_config
                         assert spec_config is not None
                         assert spec_config.draft_model_config is not None
                         logger.info_once(
                             "EPLB is enabled for drafter model %s.",
                             spec_config.draft_model_config.model,
-                        )
-
-                        global_expert_load = (
-                            global_expert_loads[eplb_models]
-                            if global_expert_loads
-                            else None
-                        )
-                        old_global_expert_indices = (
-                            old_global_expert_indices_per_model[eplb_models]
-                            if old_global_expert_indices_per_model
-                            else None
                         )
                         if self.eplb_state is None:
                             self.eplb_state = EplbState(
@@ -4249,9 +4304,6 @@ class GPUModelRunner(
                         self.eplb_state.add_model(
                             self.drafter.model,
                             spec_config.draft_model_config,
-                            global_expert_load,
-                            old_global_expert_indices,
-                            rank_mapping,
                         )
                         eplb_models += 1
 
@@ -4293,11 +4345,12 @@ class GPUModelRunner(
             time_after_load - time_before_load,
             scope="local",
         )
-        prepare_communication_buffer_for_model(self.model)
-        if (drafter := getattr(self, "drafter", None)) and (
-            drafter_model := getattr(drafter, "model", None)
-        ):
-            prepare_communication_buffer_for_model(drafter_model)
+        if not load_dummy_weights:
+            prepare_communication_buffer_for_model(self.model)
+            if (drafter := getattr(self, "drafter", None)) and (
+                drafter_model := getattr(drafter, "model", None)
+            ):
+                prepare_communication_buffer_for_model(drafter_model)
         mm_config = self.model_config.multimodal_config
         self.is_multimodal_pruning_enabled = (
             supports_multimodal_pruning(self.get_model())
@@ -4305,26 +4358,19 @@ class GPUModelRunner(
             and mm_config.is_multimodal_pruning_enabled()
         )
 
-        if is_mixture_of_experts(self.model) and self.parallel_config.enable_eplb:
+        if (
+            is_mixture_of_experts(self.model)
+            and self.parallel_config.enable_eplb
+            and not load_dummy_weights
+        ):
             logger.info_once("EPLB is enabled for model %s.", self.model_config.model)
-            global_expert_load = (
-                global_expert_loads[eplb_models] if global_expert_loads else None
-            )
-            old_global_expert_indices = (
-                old_global_expert_indices_per_model[eplb_models]
-                if old_global_expert_indices_per_model
-                else None
-            )
             assert self.eplb_state is not None
             self.eplb_state.add_model(
                 self.model,
                 self.model_config,
-                global_expert_load,
-                old_global_expert_indices,
-                rank_mapping,
             )
             if self.eplb_state.is_async:
-                self.eplb_state.start_async_loop(rank_mapping=rank_mapping)
+                self.eplb_state.start_async_loop()
 
         if (
             self.vllm_config.compilation_config.mode
@@ -4724,7 +4770,7 @@ class GPUModelRunner(
 
         assert (
             cudagraph_runtime_mode is None
-            or cudagraph_runtime_mode.valid_runtime_modes()
+            or cudagraph_runtime_mode.is_valid_runtime_mode()
         )
 
         # If cudagraph_mode.decode_mode() == FULL and
@@ -4957,8 +5003,12 @@ class GPUModelRunner(
             if self.speculative_config and (
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_draft_model()
+                or self.speculative_config.uses_extract_hidden_states()
             ):
-                assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+                assert isinstance(
+                    self.drafter,
+                    EagleProposer | DraftModelProposer | ExtractHiddenStatesProposer,
+                )
                 assert self.speculative_config is not None
                 # Eagle currently only supports PIECEWISE cudagraphs.
                 # Therefore only use cudagraphs if the main model uses PIECEWISE
@@ -5336,7 +5386,7 @@ class GPUModelRunner(
     ):
         assert (
             cudagraph_runtime_mode != CUDAGraphMode.NONE
-            and cudagraph_runtime_mode.valid_runtime_modes()
+            and cudagraph_runtime_mode.is_valid_runtime_mode()
         ), f"Invalid cudagraph runtime mode: {cudagraph_runtime_mode}"
 
         if not batch_descriptors:
@@ -5390,6 +5440,7 @@ class GPUModelRunner(
                 # if we want to warm up attention or not. This is
                 # different from the case where `FULL` implies capture
                 # attention while `PIECEWISE` implies no attention.
+
                 dummy_run(
                     num_tokens,
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
@@ -5666,9 +5717,12 @@ class GPUModelRunner(
             cudagraph_mode, self.uniform_decode_query_len
         )
 
-        # Initialize eagle's cudagraph dispatcher if using eagle spec decode.
-        if self.speculative_config and self.speculative_config.use_eagle():
-            assert isinstance(self.drafter, EagleProposer)
+        # Initialize drafter's cudagraph dispatcher if using spec decode.
+        if self.speculative_config and (
+            self.speculative_config.use_eagle()
+            or self.speculative_config.uses_extract_hidden_states()
+        ):
+            assert isinstance(self.drafter, EagleProposer | ExtractHiddenStatesProposer)
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
     def calculate_reorder_batch_threshold(self) -> None:
@@ -6035,8 +6089,12 @@ class GPUModelRunner(
         if self.speculative_config and (
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
+            or self.speculative_config.uses_extract_hidden_states()
         ):
-            assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+            assert isinstance(
+                self.drafter,
+                EagleProposer | DraftModelProposer | ExtractHiddenStatesProposer,
+            )
             # validate all draft model layers belong to the same kv cache
             # group
             self.drafter.validate_same_kv_cache_group(kv_cache_config)
