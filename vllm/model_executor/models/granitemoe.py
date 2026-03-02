@@ -394,7 +394,7 @@ class GraniteMoeModel(nn.Module):
                     if name is None:
                         continue
                 param = params_dict[name]
-                weight_loader = param.weight_loader
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
@@ -411,7 +411,9 @@ class GraniteMoeModel(nn.Module):
                     ) and name not in params_dict:
                         continue
                     param = params_dict[name]
-                    weight_loader = param.weight_loader
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     weight_loader(
                         param,
                         loaded_weight,

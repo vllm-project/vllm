@@ -483,8 +483,7 @@ class Llama4Model(LlamaModel):
                 continue
 
             param = params_dict[full_param_name]
-            weight_loader = param.weight_loader
-
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             if fused:
                 # If the parameter is for w13 together, the corresponding weight
                 # will be a tuple, so we must select the correct weight

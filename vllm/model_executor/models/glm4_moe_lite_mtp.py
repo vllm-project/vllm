@@ -315,7 +315,7 @@ class Glm4MoeLiteMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
                     continue
 
                 param = params_dict[name]
-                weight_loader = param.weight_loader
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
@@ -383,7 +383,8 @@ class Glm4MoeLiteMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
                         # not here since otherwise we may skip experts with
                         # other available replicas.
                         weight_loader = typing.cast(
-                            Callable[..., bool], param.weight_loader
+                            Callable[..., bool],
+                            getattr(param, "weight_loader", default_weight_loader),
                         )
                         success = weight_loader(
                             param,
