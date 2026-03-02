@@ -234,7 +234,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
-    VLLM_USE_V2_MODEL_RUNNER: bool = False
+    VLLM_USE_V2_MODEL_RUNNER: bool = True
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -1584,7 +1584,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Flag to enable v2 model runner.
     "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
-        int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
+        int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "1"))
     ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model
