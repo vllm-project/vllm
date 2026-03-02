@@ -1258,7 +1258,7 @@ class XpuMxfp4MoEMethod(Mxfp4MoEMethod):
             topk_weights=routing_weights,
             topk_ids=selected_experts,
             n_experts_per_token=layer.top_k,
-            activation=layer.activation,
+            activation=layer.activation.value,
             num_experts=layer.local_num_experts,
             is_mxfp4=True,
         )
