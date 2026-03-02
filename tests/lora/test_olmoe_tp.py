@@ -103,7 +103,7 @@ def test_olmoe_lora(olmoe_lora_files):
         max_model_len=1024,
         enable_lora=True,
         max_loras=4,
-        # enforce_eager=True,
+        enforce_eager=True,
         trust_remote_code=True,
         enable_chunked_prefill=True,
     )
