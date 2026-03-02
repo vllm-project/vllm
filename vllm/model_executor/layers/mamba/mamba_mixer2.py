@@ -14,9 +14,10 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import CustomOp, PluggableLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    MergedColumnParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -219,8 +220,8 @@ def mamba_v2_sharded_weight_loader(
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
 # --8<-- [start:mamba_mixer2]
-@CustomOp.register("mamba_mixer2")
-class MambaMixer2(MambaBase, CustomOp):
+@PluggableLayer.register("mamba_mixer2")
+class MambaMixer2(MambaBase, PluggableLayer):
     """
     Compute ∆, A, B, C, and D the state space parameters and compute
     the `contextualized_states`. A, D are input independent
@@ -301,94 +302,127 @@ class MambaMixer2(MambaBase, CustomOp):
         self.groups_ssm_state_size = self.n_groups * self.ssm_state_size
         self.conv_dim = intermediate_size + 2 * self.groups_ssm_state_size
 
-        # Use ColumnParallelLinear with custom weight loaders for both cases:
-        # - When n_groups % tp_size == 0: standard sharding without duplication
-        # - When n_groups == 1: groups are duplicated across TP ranks
-        # The custom weight loader handles both cases correctly.
+        if n_groups % self.tp_size == 0:
+            self.conv1d = MergedColumnParallelLinear(
+                input_size=conv_kernel_size,
+                output_sizes=[
+                    intermediate_size,
+                    self.groups_ssm_state_size,
+                    self.groups_ssm_state_size,
+                ],
+                bias=use_conv_bias,
+                quant_config=None,
+                prefix=f"{prefix}.conv1d",
+            )
 
-        self.conv1d = ColumnParallelLinear(
-            input_size=conv_kernel_size,
-            output_size=self.conv_dim,
-            bias=use_conv_bias,
-            quant_config=None,
-            prefix=f"{prefix}.conv1d",
-        )
-
-        self.in_proj = ColumnParallelLinear(
-            input_size=hidden_size,
-            output_size=intermediate_size + self.conv_dim + self.num_heads,
-            bias=use_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.in_proj",
-        )
-
-        # Configure shard settings for the custom weight loader:
-        # - group_shard_settings handles group duplication when n_groups == 1
-        # - When n_groups % tp_size == 0, extra=0 and duplicate_groups=False
-        group_shard_settings = (
-            self.groups_ssm_state_size,  # expected model size
-            (self.n_groups - n_groups) * self.ssm_state_size,  # extra dims assigned
-            n_groups == 1,  # duplicate groups when n_groups == 1
-        )
-        intermediate_settings = (intermediate_size, 0, False)
-        head_settings = (self.num_heads, 0, False)
-
-        # Apply custom weight loaders for conv1d (bias and weight)
-        delattr(self.conv1d.bias, "weight_loader")
-        set_weight_attrs(
-            self.conv1d.bias,
-            {
-                "weight_loader": mamba_v2_sharded_weight_loader(
-                    [
-                        intermediate_settings,
-                        group_shard_settings,
-                        group_shard_settings,
-                    ],
-                    self.tp_size,
-                    tp_rank,
-                )
-            },
-        )
-
-        delattr(self.conv1d.weight, "weight_loader")
-        set_weight_attrs(
-            self.conv1d.weight,
-            {
-                "weight_loader": mamba_v2_sharded_weight_loader(
-                    [
-                        intermediate_settings,
-                        group_shard_settings,
-                        group_shard_settings,
-                    ],
-                    self.tp_size,
-                    tp_rank,
-                )
-            },
-        )
-
-        # Create the custom weight loader for in_proj
-        mamba_loader = mamba_v2_sharded_weight_loader(
-            [
-                intermediate_settings,  # for gate
-                intermediate_settings,
-                group_shard_settings,
-                group_shard_settings,
-                head_settings,  # for dt
-            ],
-            self.tp_size,
-            tp_rank,
-        )
-
-        # Apply the custom weight loader to in_proj.weight
-        # Works for both non-quantized (Parameter) and quantized
-        # (ModelWeightParameter which extends BasevLLMParameter)
-        if isinstance(self.in_proj.weight, BasevLLMParameter):
-            # For BasevLLMParameter subclasses (quantized layers like FP8)
-            self.in_proj.weight.weight_loader = mamba_loader
+            self.in_proj = MergedColumnParallelLinear(
+                input_size=hidden_size,
+                output_sizes=[
+                    intermediate_size,
+                    intermediate_size,
+                    self.groups_ssm_state_size,
+                    self.groups_ssm_state_size,
+                    self.num_heads,
+                ],
+                bias=use_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj",
+            )
         else:
-            # For standard Parameter (non-quantized layers)
-            delattr(self.in_proj.weight, "weight_loader")
-            set_weight_attrs(self.in_proj.weight, {"weight_loader": mamba_loader})
+            # This is the n_groups == 1 case,
+            # where we need to duplicate groups if TP>1.
+
+            self.conv1d = ColumnParallelLinear(
+                input_size=conv_kernel_size,
+                output_size=self.conv_dim,
+                bias=use_conv_bias,
+                quant_config=None,
+                prefix=f"{prefix}.conv1d",
+            )
+
+            self.in_proj = ColumnParallelLinear(
+                input_size=hidden_size,
+                output_size=intermediate_size + self.conv_dim + self.num_heads,
+                bias=use_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj",
+            )
+
+            # - because in_proj is a concatenation of 3 weights, we
+            #   need to interleave them before sharding
+            # - use the custom weight loader mamba_v2_sharded_weight_loader
+            #   for conv1d.bias, covn1d.weight and in_proj.weight
+            # - need to set these settings, to assign the groups
+            #   to the head shards
+            group_shard_settings = (
+                self.groups_ssm_state_size,  # expected model size
+                (self.n_groups - n_groups) * self.ssm_state_size,  # extra dims assigned
+                n_groups == 1,  # if there was only one group
+            )
+            intermediate_settings = (intermediate_size, 0, False)
+            head_settings = (self.num_heads, 0, False)
+
+            # - the weight already has a "weight_loader" attribute
+            #   which set_weight_attrs will raise if we do not
+            #   delete before trying to override it
+            # - ditto for the other two weights below
+            delattr(self.conv1d.bias, "weight_loader")
+            set_weight_attrs(
+                self.conv1d.bias,
+                {
+                    "weight_loader": mamba_v2_sharded_weight_loader(
+                        [
+                            intermediate_settings,
+                            group_shard_settings,
+                            group_shard_settings,
+                        ],
+                        self.tp_size,
+                        tp_rank,
+                    )
+                },
+            )
+
+            delattr(self.conv1d.weight, "weight_loader")
+            set_weight_attrs(
+                self.conv1d.weight,
+                {
+                    "weight_loader": mamba_v2_sharded_weight_loader(
+                        [
+                            intermediate_settings,
+                            group_shard_settings,
+                            group_shard_settings,
+                        ],
+                        self.tp_size,
+                        tp_rank,
+                    )
+                },
+            )
+
+            # Create the custom weight loader for Mamba sharding with group
+            # replication. This handles the interleaved projections correctly.
+            mamba_loader = mamba_v2_sharded_weight_loader(
+                [
+                    intermediate_settings,  # for gate
+                    intermediate_settings,
+                    group_shard_settings,
+                    group_shard_settings,
+                    head_settings,  # for dt
+                ],
+                self.tp_size,
+                tp_rank,
+            )
+
+            # Apply the custom weight loader to in_proj.weight
+            # Works for both non-quantized (Parameter) and quantized
+            # (ModelWeightParameter which extends BasevLLMParameter)
+            if isinstance(self.in_proj.weight, BasevLLMParameter):
+                # For BasevLLMParameter subclasses (quantized layers like FP8)
+                # These have a weight_loader property that can be directly set
+                self.in_proj.weight.weight_loader = mamba_loader
+            else:
+                # For standard Parameter (non-quantized layers)
+                delattr(self.in_proj.weight, "weight_loader")
+                set_weight_attrs(self.in_proj.weight, {"weight_loader": mamba_loader})
 
         # unsqueeze to fit conv1d weights shape into the linear weights shape.
         # Can't do this in `weight_loader` since it already exists in
@@ -443,7 +477,8 @@ class MambaMixer2(MambaBase, CustomOp):
             dim=-1,
         )
 
-        compilation_config = get_current_vllm_config().compilation_config
+        vllm_config = get_current_vllm_config()
+        compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
@@ -453,6 +488,8 @@ class MambaMixer2(MambaBase, CustomOp):
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
+
+        self.num_spec = vllm_config.num_speculative_tokens
 
         # Pre-compute sizes for forward pass
         self.tped_intermediate_size = self.intermediate_size // self.tp_size
@@ -471,13 +508,6 @@ class MambaMixer2(MambaBase, CustomOp):
 
         # Check if running on Blackwell (SM100+) for kernel tuning
         self.is_blackwell = current_platform.is_device_capability_family(100)
-
-    def forward_native(
-        self,
-        hidden_states: torch.Tensor,
-        mup_vector: torch.Tensor | None = None,
-    ):
-        pass
 
     def forward(
         self,
@@ -549,7 +579,6 @@ class MambaMixer2(MambaBase, CustomOp):
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
             conv_state = self_kv_cache[0].transpose(-1, -2)
             ssm_state = self_kv_cache[1]
-            state_indices_tensor = attn_metadata.state_indices_tensor
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
             chunk_size = attn_metadata.chunk_size
@@ -557,6 +586,12 @@ class MambaMixer2(MambaBase, CustomOp):
             query_start_loc_p = attn_metadata.query_start_loc_p
             cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
             last_chunk_indices_p = attn_metadata.last_chunk_indices_p
+            state_indices_tensor_p = attn_metadata.state_indices_tensor_p
+            state_indices_tensor_d = attn_metadata.state_indices_tensor_d
+            num_accepted_tokens = attn_metadata.num_accepted_tokens
+            query_start_loc_d = attn_metadata.query_start_loc_d
+            num_decodes = attn_metadata.num_decodes
+            num_decode_tokens = attn_metadata.num_decode_tokens
 
         if attn_metadata is None:
             # profile run
@@ -566,29 +601,21 @@ class MambaMixer2(MambaBase, CustomOp):
             hidden_states, _B, _C = self.split_hidden_states_B_C_fn(hidden_states_B_C)
             return hidden_states
 
-        num_prefills = attn_metadata.num_prefills  # request count
-        num_decodes = attn_metadata.num_decode_tokens  # token count (=request)
-        num_prefill_tokens = attn_metadata.num_prefill_tokens  # token count
+        num_prefills = attn_metadata.num_prefills
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
         has_prefill = num_prefills > 0
         has_decode = num_decodes > 0
-        num_actual_tokens = num_prefill_tokens + num_decodes
+        num_actual_tokens = num_prefill_tokens + num_decode_tokens
 
-        # Separate prefill and decode by splitting varlen input
         # Split along token dimension
         hidden_states_B_C_d, hidden_states_B_C_p = torch.split(
             hidden_states_B_C[:num_actual_tokens],
-            [num_decodes, num_prefill_tokens],
+            [num_decode_tokens, num_prefill_tokens],
             dim=0,
         )
         dt_d, dt_p = torch.split(
             dt[:num_actual_tokens],
-            [num_decodes, num_prefill_tokens],
-            dim=0,
-        )
-        # Split along batch dimension
-        state_indices_tensor_d, state_indices_tensor_p = torch.split(
-            state_indices_tensor[:num_actual_tokens],
-            [num_decodes, num_prefills],
+            [num_decode_tokens, num_prefill_tokens],
             dim=0,
         )
 
@@ -615,16 +642,16 @@ class MambaMixer2(MambaBase, CustomOp):
             )
             num_computed_tokens_p = attn_metadata.num_computed_tokens_p
         else:
-            block_idx_last_computed_token_d = None
             block_idx_last_computed_token_p = None
-            block_idx_last_scheduled_token_d = None
             block_idx_last_scheduled_token_p = None
             block_idx_first_scheduled_token_p = None
+            block_idx_last_scheduled_token_d = None
+            block_idx_last_computed_token_d = None
             num_computed_tokens_p = None
 
         preallocated_ssm_out_d, preallocated_ssm_out_p = torch.split(
             output[:num_actual_tokens],
-            [num_decodes, num_prefill_tokens],
+            [num_decode_tokens, num_prefill_tokens],
             dim=0,
         )
 
@@ -682,6 +709,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 )
 
             # NOTE: final output is an in-place update of out tensor
+            assert preallocated_ssm_out_p is not None
             varlen_states = mamba_chunk_scan_combined_varlen(
                 hidden_states_p.view(
                     num_prefill_tokens, self.num_heads // self.tp_size, self.head_dim
@@ -813,6 +841,9 @@ class MambaMixer2(MambaBase, CustomOp):
                 conv_state_indices=state_indices_tensor_d,
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
                 initial_state_idx=block_idx_last_computed_token_d,
+                num_accepted_tokens=num_accepted_tokens,
+                query_start_loc=query_start_loc_d,
+                max_query_len=state_indices_tensor_d.size(-1),
             )
 
             hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(
@@ -835,6 +866,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 -1, self.num_heads // self.tp_size, self.head_dim
             )
 
+            assert preallocated_ssm_out_d is not None
             # - the hidden is reshaped into (bs, num_heads, head_dim)
             # - mamba_cache_params.ssm_state's slots will be selected
             #   using state_indices_tensor_d
@@ -852,7 +884,9 @@ class MambaMixer2(MambaBase, CustomOp):
                 dt_softplus=True,
                 state_batch_indices=state_indices_tensor_d_input,
                 dst_state_batch_indices=state_indices_tensor_d_output,
-                out=preallocated_ssm_out_d.view(num_decodes, -1, self.head_dim),
+                out=preallocated_ssm_out_d.view(num_decode_tokens, -1, self.head_dim),
+                num_accepted_tokens=num_accepted_tokens,
+                cu_seqlens=query_start_loc_d,
                 is_blackwell=self.is_blackwell,
             )
 
@@ -874,6 +908,7 @@ class MambaMixer2(MambaBase, CustomOp):
             head_dim=self.head_dim,
             state_size=self.ssm_state_size,
             conv_kernel=self.conv_kernel_size,
+            num_spec=self.num_spec,
         )
 
     @property

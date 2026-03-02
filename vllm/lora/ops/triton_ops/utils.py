@@ -251,7 +251,7 @@ def get_lora_op_configs(
     else:
         default = {
             "block_m": 64,
-            "block_n": max(64, next_power_of_2(128 // num_slices)),
+            "block_n": 64 if num_slices > 1 else 128,
             "block_k": 16,
             "num_warps": 4,
             "num_ctas": 1,
@@ -316,3 +316,9 @@ def supports_pdl(device: torch.device | None = None) -> bool:
         and current_platform.has_device_capability(90)
         and not envs.VLLM_LORA_DISABLE_PDL
     )
+
+
+@lru_cache
+def supports_tma(device: torch.device | None = None) -> bool:
+    # TMA requires compute capability SM90 or above
+    return current_platform.is_cuda() and current_platform.has_device_capability(90)

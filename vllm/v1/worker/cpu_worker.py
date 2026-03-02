@@ -54,6 +54,7 @@ class CPUWorker(Worker):
     def init_device(self):
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
+        # Under numa binding some cores reserved for kv transfer in nixl_connector.py
         if omp_cpuids == "auto" and platform.system() == "Linux":
             cpu_arch = current_platform.get_cpu_architecture()
             if cpu_arch in (CpuArchEnum.POWERPC, CpuArchEnum.S390X):
@@ -84,7 +85,7 @@ class CPUWorker(Worker):
             self.local_omp_cpuid = omp_cpuids_list[self.rank]
 
         if self.local_omp_cpuid != "nobind":
-            ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
+            ret = torch.ops._C.init_cpu_threads_env(self.local_omp_cpuid)
             if ret:
                 logger.info(ret)
 
@@ -117,11 +118,12 @@ class CPUWorker(Worker):
     def determine_available_memory(self) -> int:
         return self.cache_config.cpu_kvcache_space_bytes or 0
 
-    def compile_or_warm_up_model(self) -> None:
+    def compile_or_warm_up_model(self) -> float:
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
         self.model_runner.warming_up_model()
+        return self.compilation_config.compilation_time
 
     def _get_autobind_cpu_ids(
         self, cpu_selector: Callable[[list[LogicalCPUInfo]], list[LogicalCPUInfo]]
@@ -159,12 +161,21 @@ class CPUWorker(Worker):
                 x for x in logical_cpu_list if x.numa_node == selected_numa_node
             ]
         else:
-            assert len(logical_cpu_list) >= self.parallel_config.world_size
-            logical_cpu_list = sorted(logical_cpu_list, key=lambda x: x.numa_node)
-            sim_cpu_num_per_node = (
-                len(logical_cpu_list) // self.parallel_config.world_size
+            # This is a bit tricky because the internal DP size
+            # is always 1 for non-MoE models
+            world_size_across_dp = (
+                self.parallel_config.world_size
+                * self.parallel_config._api_process_count
             )
-            start_idx = self.local_rank * sim_cpu_num_per_node
+            assert len(logical_cpu_list) >= world_size_across_dp
+            logical_cpu_list = sorted(logical_cpu_list, key=lambda x: x.numa_node)
+            sim_cpu_num_per_node = len(logical_cpu_list) // world_size_across_dp
+            assert self.parallel_config.data_parallel_rank_local is not None
+            start_idx = (
+                self.local_rank
+                + self.parallel_config.world_size
+                * self.parallel_config.data_parallel_rank_local
+            ) * sim_cpu_num_per_node
             logical_cpu_list = logical_cpu_list[
                 start_idx : (start_idx + sim_cpu_num_per_node)
             ]
@@ -202,7 +213,7 @@ class CPUWorker(Worker):
         )
         return ",".join([str(x.id) for x in logical_cpu_list])
 
-    def profile(self, is_start: bool = True):
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         if is_start:
