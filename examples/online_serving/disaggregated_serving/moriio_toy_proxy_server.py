@@ -14,6 +14,10 @@ import regex as re
 import zmq
 from quart import Quart, make_response, request
 
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    MoRIIOConstants,
+)
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 prefill_instances: list[dict] = []
@@ -213,6 +217,8 @@ async def handle_request():
 
         dip, dport = extract_ip_port_fast(decode_instance_endpoint["request_address"])
 
+        transfer_id = f"{MoRIIOConstants.TRANSFER_PREFIX}-{str(uuid.uuid4())}"
+
         req_data_to_prefill = copy.deepcopy(req_data)
         req_data_to_prefill["kv_transfer_params"] = {}
         req_data["kv_transfer_params"] = {}
@@ -222,6 +228,7 @@ async def handle_request():
         req_data_to_prefill["kv_transfer_params"]["remote_tp_size"] = (
             decode_instance_endpoint["tp_size"]
         )
+        req_data_to_prefill["kv_transfer_params"]["transfer_id"] = transfer_id
 
         send_prefill_task = asyncio.create_task(
             send_request_to_prefill(
@@ -267,6 +274,7 @@ async def handle_request():
 
         if selected_prefill_dp_rank is not None:
             req_data["kv_transfer_params"]["remote_dp_rank"] = selected_prefill_dp_rank
+        req_data["kv_transfer_params"]["transfer_id"] = transfer_id
 
         decode_request_task = asyncio.create_task(
             start_decode_request(
