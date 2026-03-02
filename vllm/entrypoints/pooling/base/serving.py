@@ -87,7 +87,7 @@ class PoolingServing:
         self.max_model_len = self.model_config.max_model_len
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
-        self.log_error_stack = True
+        self.log_error_stack = log_error_stack
 
         self.io_processor = self.init_io_processor(
             model_config=models.model_config,
@@ -136,26 +136,11 @@ class PoolingServing:
             response = await self._build_response(ctx)
             return JSONResponse(content=response.model_dump())
         except Exception as e:
-            error_response = self.create_error_response(e)
+            error_response = create_error_response(e)
             return JSONResponse(
                 content=error_response.model_dump(),
                 status_code=error_response.error.code,
             )
-
-    def create_error_response(
-        self,
-        message: str | Exception,
-        err_type: str | None = "BadRequestError",
-        status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
-        param: str | None = None,
-    ) -> ErrorResponse:
-        return create_error_response(
-            message=message,
-            err_type=err_type,
-            status_code=status_code,
-            param=param,
-            log_error_stack=self.log_error_stack,
-        )
 
     async def _preprocess(
         self,
