@@ -251,6 +251,7 @@ def test_triton_unified_attn(
 @pytest.mark.parametrize("soft_cap", [None, 50.0])
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("seq_threshold_3D", SEQ_THRESHOLD_3D_VALUES)
+@pytest.mark.parametrize("split_launch", SPLIT_LAUNCH_VALUES)
 @torch.inference_mode()
 def test_triton_unified_attn_fp16_input_fp8_output(
     seq_lens: list[tuple[int, int]],
@@ -261,6 +262,7 @@ def test_triton_unified_attn_fp16_input_fp8_output(
     soft_cap: float | None,
     num_blocks: int,
     seq_threshold_3D: int,
+    split_launch: bool,
 ) -> None:
     """Test with fp16 input and fp8 output using output_scale."""
     torch.set_default_device("cuda")
@@ -297,6 +299,9 @@ def test_triton_unified_attn_fp16_input_fp8_output(
 
     output_scale = torch.tensor(0.5, dtype=torch.float32)
 
+    num_decodes = num_seqs if max_query_len == 1 else query_lens.count(1)
+    num_prefills = num_seqs - num_decodes
+
     num_par_softmax_segments = 16
     head_size_padded = next_power_of_2(head_size)
     softmax_segm_output = torch.empty(
@@ -329,12 +334,15 @@ def test_triton_unified_attn_fp16_input_fp8_output(
         q_descale=None,
         k_descale=None,
         v_descale=None,
-        output_scale=output_scale,
+        num_prefills=num_prefills,
+        num_decodes=num_decodes,
         seq_threshold_3D=seq_threshold_3D,
+        split_launch=split_launch,
         num_par_softmax_segments=num_par_softmax_segments,
         softmax_segm_output=softmax_segm_output,
         softmax_segm_max=softmax_segm_max,
         softmax_segm_expsum=softmax_segm_expsum,
+        output_scale=output_scale,
     )
 
     ref_output = ref_paged_attn(
