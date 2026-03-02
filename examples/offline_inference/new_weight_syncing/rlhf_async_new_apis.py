@@ -47,12 +47,16 @@ from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLWeightTransferInitInfo,
     NCCLWeightTransferUpdateInfo,
 )
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_ip, get_open_port
 from vllm.v1.executor import Executor
 
 MODEL_NAME_V1 = "Qwen/Qwen3-1.7B-Base"
 MODEL_NAME_V2 = "Qwen/Qwen3-1.7B"
 PAUSE_TOKEN_THRESHOLD = 10
+
+# Select attention backend based on platform
+ATTN_BACKEND = "TRITON_ATTN" if current_platform.is_rocm() else "FLASH_ATTN"
 
 
 class MyLLM(vllm.AsyncLLMEngine):
@@ -116,10 +120,16 @@ class TrainModel:
         from vllm.model_executor.layers.batch_invariant import (
             init_batch_invariance,
         )
+        from vllm.platforms import current_platform
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         # need to init all env vars for batch invariance which affect nccl ops
-        init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
+        attn_backend = (
+            AttentionBackendEnum.TRITON_ATTN
+            if current_platform.is_rocm()
+            else AttentionBackendEnum.FLASH_ATTN
+        )
+        init_batch_invariance(attn_backend)
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name, dtype=torch.bfloat16
@@ -204,7 +214,7 @@ llm = ray.remote(
     enforce_eager=True,
     max_model_len=8192,
     distributed_executor_backend="ray",
-    attention_backend="FLASH_ATTN",
+    attention_backend=ATTN_BACKEND,
     gpu_memory_utilization=0.75,
     weight_transfer_config=WeightTransferConfig(backend="nccl"),
 )
@@ -321,7 +331,7 @@ llm_v2 = ray.remote(
     max_model_len=8192,
     gpu_memory_utilization=0.75,
     distributed_executor_backend="ray",
-    attention_backend="FLASH_ATTN",
+    attention_backend=ATTN_BACKEND,
 )
 
 val_futures = [
