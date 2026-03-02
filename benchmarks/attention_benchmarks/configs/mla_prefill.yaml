@@ -99,7 +99,7 @@ batch_specs:
   - "2q2ks64k"
 
 decode_backends:
-  - cutlass_mla
+  - CUTLASS_MLA
 
 prefill_backends:
   - fa2
