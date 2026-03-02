@@ -1515,6 +1515,28 @@ class EngineArgs:
             self.kv_cache_dtype, model_config
         )
 
+        # Validate that user-provided kv_cache_dtype does not conflict with
+        # checkpoint-specified kv_cache_quant_algo
+        if self.kv_cache_dtype != "auto":
+            from vllm.utils.torch_utils import get_kv_cache_quant_algo_string
+
+            hf_cfg = getattr(model_config, "hf_config", None)
+            if hf_cfg is not None:
+                quant_cfg = getattr(hf_cfg, "quantization_config", None)
+                if quant_cfg is not None:
+                    checkpoint_kv_algo = get_kv_cache_quant_algo_string(
+                        quant_cfg
+                    )
+                    if checkpoint_kv_algo is not None:
+                        raise ValueError(
+                            f"Cannot override --kv-cache-dtype={self.kv_cache_dtype} "
+                            f"when the checkpoint specifies kv_cache_quant_algo="
+                            f"'{checkpoint_kv_algo}'. Remove --kv-cache-dtype to use "
+                            f"the checkpoint's configured dtype, or use "
+                            f"--kv-cache-dtype auto to accept the checkpoint's "
+                            f"quantization configuration."
+                        )
+
         assert self.enable_prefix_caching is not None, (
             "enable_prefix_caching must be set by this point"
         )
