@@ -476,12 +476,12 @@ def test_set_inputs_first_pass_draft_model():
         proposer.max_num_tokens, dtype=torch.bool, device=device
     )
 
-    # Mock the attn_metadata_builder to avoid needing the full model setup
+    # Mock draft_attn_groups to avoid needing the full model setup
     mock_kv_cache_spec = mock.MagicMock()
     mock_kv_cache_spec.block_size = block_size
-    mock_builder = mock.MagicMock()
-    mock_builder.kv_cache_spec = mock_kv_cache_spec
-    proposer.attn_metadata_builder = mock_builder
+    mock_attn_group = mock.MagicMock()
+    mock_attn_group.kv_cache_spec = mock_kv_cache_spec
+    proposer.draft_attn_groups = [mock_attn_group]
 
     # Request 0: query_len=3 (but 1 rejected), Request 1: query_len=2
     batch_spec = BatchSpec(
@@ -616,12 +616,12 @@ def test_set_inputs_first_pass_parallel_drafting():
         proposer.max_num_tokens, dtype=torch.bool, device=device
     )
 
-    # Mock the attn_metadata_builder
+    # Mock draft_attn_groups
     mock_kv_cache_spec = mock.MagicMock()
     mock_kv_cache_spec.block_size = block_size
-    mock_builder = mock.MagicMock()
-    mock_builder.kv_cache_spec = mock_kv_cache_spec
-    proposer.attn_metadata_builder = mock_builder
+    mock_attn_group = mock.MagicMock()
+    mock_attn_group.kv_cache_spec = mock_kv_cache_spec
+    proposer.draft_attn_groups = [mock_attn_group]
 
     # Request 0: query_len=4 (1 rejected), Request 1: query_len=4 (all valid)
     batch_spec = BatchSpec(
@@ -966,15 +966,13 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
         device=device,
     )
 
-    # Mock runner for attention metadata building
+    # Mock runner and draft_attn_groups for attention metadata building
     proposer.runner = mock.MagicMock()
-    proposer.runner.attn_groups.append([mock.MagicMock()])
-    proposer.runner.attn_groups[0][
-        0
-    ].get_metadata_builder.return_value = attn_metadata_builder
-    proposer._get_attention_metadata_builder = mock.MagicMock(
-        return_value=attn_metadata_builder
-    )
+    mock_attn_group = mock.MagicMock()
+    mock_attn_group.get_metadata_builder.return_value = attn_metadata_builder
+    mock_attn_group.layer_names = list(proposer._draft_attn_layer_names)
+    mock_attn_group.kv_cache_spec = attn_metadata_builder.kv_cache_spec
+    proposer.draft_attn_groups = [mock_attn_group]
 
     result = proposer.propose(
         target_token_ids=target_token_ids,
@@ -1102,16 +1100,13 @@ def test_propose_tree(spec_token_tree):
         device=device,
     )
 
-    # Mock runner for attention metadata building.
+    # Mock runner and draft_attn_groups for attention metadata building.
     proposer.runner = mock.MagicMock()
-    proposer.runner.attn_groups.append([mock.MagicMock()])
-    proposer.runner.attn_groups[0][0].metadata_builders = [attn_metadata_builder]
-    proposer.runner.attn_groups[0][
-        0
-    ].get_metadata_builder.return_value = attn_metadata_builder
-    proposer._get_attention_metadata_builder = mock.MagicMock(
-        return_value=attn_metadata_builder
-    )
+    mock_attn_group = mock.MagicMock()
+    mock_attn_group.get_metadata_builder.return_value = attn_metadata_builder
+    mock_attn_group.layer_names = list(proposer._draft_attn_layer_names)
+    mock_attn_group.kv_cache_spec = attn_metadata_builder.kv_cache_spec
+    proposer.draft_attn_groups = [mock_attn_group]
 
     # Setup inputs for the proposer.
     target_token_ids = torch.randint(0, vocab_size, (total_tokens,), device=device)
