@@ -56,10 +56,10 @@ class Sampler:
     def __call__(
         self,
         logits: torch.Tensor,
-        idx_mapping: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
         cu_num_logits_np: np.ndarray,
-        pos: torch.Tensor,
+        expanded_pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
     ) -> SamplerOutput:
@@ -68,9 +68,9 @@ class Sampler:
         num_nans = get_num_nans(logits) if self.compute_nans else None
         sampled, processed_logits = self.sample(
             logits,
-            idx_mapping,
+            expanded_idx_mapping,
             idx_mapping_np,
-            pos,
+            expanded_pos,
             input_ids,
             expanded_local_pos,
         )
@@ -101,9 +101,9 @@ class Sampler:
     def sample(
         self,
         logits: torch.Tensor,
-        idx_mapping: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
-        pos: torch.Tensor,
+        expanded_pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -111,12 +111,14 @@ class Sampler:
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
         # Apply logit bias (e.g., allowed_token_ids, min_tokens) in place.
-        self.logit_bias_state.apply_logit_bias(logits, idx_mapping, idx_mapping_np, pos)
+        self.logit_bias_state.apply_logit_bias(
+            logits, expanded_idx_mapping, idx_mapping_np, expanded_pos
+        )
 
         # Apply penalties in place.
         self.penalties_state.apply_penalties(
             logits,
-            idx_mapping,
+            expanded_idx_mapping,
             idx_mapping_np,
             input_ids,
             expanded_local_pos,
@@ -126,30 +128,32 @@ class Sampler:
         # Apply bad words masking in place.
         self.bad_words_state.apply_bad_words(
             logits,
-            idx_mapping,
+            expanded_idx_mapping,
             idx_mapping_np,
             input_ids,
             expanded_local_pos,
         )
 
         # Apply temperature in place.
-        self.sampling_states.apply_temperature(logits, idx_mapping, idx_mapping_np)
+        self.sampling_states.apply_temperature(
+            logits, expanded_idx_mapping, idx_mapping_np
+        )
 
         # Apply min_p in place.
-        self.sampling_states.apply_min_p(logits, idx_mapping, idx_mapping_np)
+        self.sampling_states.apply_min_p(logits, expanded_idx_mapping, idx_mapping_np)
 
         # Apply top_k and/or top_p. This might or might not return a new tensor.
         logits = self.sampling_states.apply_top_k_top_p(
-            logits, idx_mapping, idx_mapping_np
+            logits, expanded_idx_mapping, idx_mapping_np
         )
 
         # Sample the next token.
         sampled = gumbel_sample(
             logits,
-            idx_mapping,
+            expanded_idx_mapping,
             self.sampling_states.temperature.gpu,
             self.sampling_states.seeds.gpu,
-            pos,
+            expanded_pos,
             apply_temperature=False,
         )
         return sampled, logits
