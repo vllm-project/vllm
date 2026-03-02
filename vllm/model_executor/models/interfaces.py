@@ -11,6 +11,7 @@ from collections.abc import (
     Sequence,
 )
 from contextlib import ExitStack, contextmanager, nullcontext
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     ClassVar,
@@ -54,7 +55,15 @@ else:
 
 logger = init_logger(__name__)
 
-MultiModalEmbeddings: TypeAlias = list[Tensor] | Tensor | tuple[Tensor, ...]
+MultiModalEmbeddingsTensor: TypeAlias = list[Tensor] | Tensor | tuple[Tensor, ...]
+
+
+@dataclass(frozen=True)
+class PackedEmbeddings:
+    embeddings: MultiModalEmbeddingsTensor
+
+
+MultiModalEmbeddings: TypeAlias = MultiModalEmbeddingsTensor | PackedEmbeddings
 """
 The output embeddings must be one of the following formats:
 
@@ -1143,6 +1152,7 @@ class SupportsTranscription(Protocol):
         task_type: Literal["transcribe", "translate"],
         request_prompt: str,
         to_language: str | None,
+        vllm_xargs: dict[str, str | int | float | bool] | None = None,
     ) -> PromptType:
         """Get the prompt for the ASR model.
         The model has control over the construction, as long as it

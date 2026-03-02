@@ -106,7 +106,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     stream_include_usage: bool | None = False
     stream_continuous_usage_stats: bool | None = False
 
-    vllm_xargs: dict[str, str | int | float] | None = Field(
+    vllm_xargs: dict[str, str | int | float | bool] | None = Field(
         default=None,
         description=(
             "Additional request parameters with string or "
@@ -240,6 +240,13 @@ class TranscriptionRequest(OpenAIBaseModel):
                 "Stream options can only be defined when `stream=True`.",
                 parameter=invalid_param,
             )
+
+        # Parse vllm_xargs from JSON string (form data sends it as a string)
+        xargs = data.get("vllm_xargs")
+        if isinstance(xargs, str):
+            import json
+
+            data["vllm_xargs"] = json.loads(xargs)
 
         return data
 

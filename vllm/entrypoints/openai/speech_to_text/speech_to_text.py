@@ -223,6 +223,7 @@ class OpenAISpeechToText(OpenAIServing):
                 task_type=self.task_type,
                 request_prompt="",
                 to_language=None,
+                vllm_xargs={},
             )
             parsed_prompt = parse_model_prompt(self.model_config, dummy_prompt)
 
@@ -359,6 +360,7 @@ class OpenAISpeechToText(OpenAIServing):
                 task_type=self.task_type,
                 request_prompt=request.prompt,
                 to_language=to_language,
+                vllm_xargs=request.vllm_xargs,
             )
 
             parsed_prompt: DictPrompt

@@ -65,6 +65,7 @@ from vllm.model_executor.model_loader.reload import (
 )
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
+    PackedEmbeddings,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsXDRoPE,
@@ -2443,6 +2444,7 @@ class GPUModelRunner(
             pin_memory=self.pin_memory,
         ):
             curr_group_outputs: MultiModalEmbeddings
+            is_packed_outputs = False
 
             # EVS-related change.
             # (ekhvedchenia): Temporary hack to limit peak memory usage when
@@ -2487,15 +2489,23 @@ class GPUModelRunner(
                 # 2. A list or tuple (length: num_items) of tensors,
                 # each of shape (feature_size, hidden_size) in case the feature
                 # size is dynamic depending on the input multimodal items.
-
+                # 3. A PackedEmbeddings instance with embedding in packed form of shape
+                # (feature_size_{1} + ... + feature_size_{num_items}, hidden_size).
                 with self.timed_encoder_operation(
                     should_time, mm_lora_refs, current_item_idx, num_items
                 ):
                     curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
+                    is_packed_outputs = isinstance(curr_group_outputs, PackedEmbeddings)
+                    curr_group_outputs = (
+                        curr_group_outputs.embeddings
+                        if is_packed_outputs
+                        else curr_group_outputs
+                    )
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
                 expected_num_items=num_items,
+                is_packed_outputs=is_packed_outputs,
             )
             encoder_outputs.extend(curr_group_outputs)
 
@@ -5224,9 +5234,19 @@ class GPUModelRunner(
                             **batched_dummy_mm_inputs
                         )
 
+                        is_packed_outputs = isinstance(
+                            dummy_encoder_outputs, PackedEmbeddings
+                        )
+                        dummy_encoder_outputs = (
+                            dummy_encoder_outputs.embeddings
+                            if is_packed_outputs
+                            else dummy_encoder_outputs
+                        )
+
                         sanity_check_mm_encoder_outputs(
                             dummy_encoder_outputs,
                             expected_num_items=max_mm_items_per_batch,
+                            is_packed_outputs=is_packed_outputs,
                         )
                         for i, output in enumerate(dummy_encoder_outputs):
                             self.encoder_cache[f"tmp_{i}"] = output

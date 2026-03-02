@@ -19,7 +19,8 @@ import soundfile
 import torch
 from datasets import load_dataset
 from evaluate import load
-from transformers import AutoTokenizer
+
+from vllm.tokenizers import get_tokenizer
 
 from ....utils import RemoteOpenAIServer
 
@@ -61,11 +62,15 @@ async def bound_transcribe(sem, client, tokenizer, audio, reference):
         return result[:2] + (out, ref)
 
 
-async def process_dataset(model, client, data, concurrent_request):
+async def process_dataset(model, client, data, concurrent_request, tokenizer_mode):
     sem = asyncio.Semaphore(concurrent_request)
 
     # Load tokenizer once outside the loop
-    tokenizer = AutoTokenizer.from_pretrained(model)
+    tokenizer = get_tokenizer(
+        model,
+        tokenizer_mode=tokenizer_mode,
+        trust_remote_code=True,
+    )
 
     # Warmup call as the first `librosa.load` server-side is quite slow.
     audio, sr = data[0]["audio"]["array"], data[0]["audio"]["sampling_rate"]
@@ -124,11 +129,16 @@ def run_evaluation(
     max_concurrent_reqs: int,
     n_examples: int = -1,
     print_metrics: bool = True,
+    tokenizer_mode: str = "auto",
 ):
     if n_examples > 0:
         dataset = dataset.select(range(n_examples))
     start = time.perf_counter()
-    results = asyncio.run(process_dataset(model, client, dataset, max_concurrent_reqs))
+    results = asyncio.run(
+        process_dataset(
+            model, client, dataset, max_concurrent_reqs, tokenizer_mode=tokenizer_mode
+        )
+    )
     end = time.perf_counter()
     total_time = end - start
     print(f"Total Test Time: {total_time:.4f} seconds")
@@ -143,21 +153,38 @@ def run_evaluation(
     return wer_score
 
 
+# REMOVE: EKAGRA: cleanup
 # alternatives "openai/whisper-large-v2", "openai/whisper-large-v3-turbo"..
-@pytest.mark.parametrize("model_name", ["openai/whisper-large-v3"])
+# NOTE: Expected WER measured with equivalent hf.transformers args:
+# whisper-large-v3 + esb-datasets-earnings22-validation-tiny-filtered.
+@pytest.mark.parametrize(
+    "model_config", [("openai/whisper-large-v3", "auto", 12.744980)]
+)
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        (
+            "/host/engines/vllm/audio/2b-release",
+            "cohere_asr",
+            11.73,
+        )
+    ],
+)
 # Original dataset is 20GB+ in size, hence we use a pre-filtered slice.
 @pytest.mark.parametrize(
     "dataset_repo", ["D4nt3/esb-datasets-earnings22-validation-tiny-filtered"]
 )
-# NOTE: Expected WER measured with equivalent hf.transformers args:
-# whisper-large-v3 + esb-datasets-earnings22-validation-tiny-filtered.
-@pytest.mark.parametrize("expected_wer", [12.744980])
 def test_wer_correctness(
-    model_name, dataset_repo, expected_wer, n_examples=-1, max_concurrent_request=None
+    model_config, dataset_repo, n_examples=-1, max_concurrent_request=None
 ):
+    model_name, tokenizer_mode, expected_wer = model_config
     # TODO refactor to use `ASRDataset`
     with RemoteOpenAIServer(
-        model_name, ["--enforce-eager"], max_wait_seconds=480
+        model_name,
+        [
+            "--enforce-eager",
+            f"--tokenizer_mode={tokenizer_mode}",
+        ],
     ) as remote_server:
         dataset = load_hf_dataset(dataset_repo)
 
@@ -167,7 +194,15 @@ def test_wer_correctness(
 
         client = remote_server.get_async_client()
         wer = run_evaluation(
-            model_name, client, dataset, max_concurrent_request, n_examples
+            model_name,
+            client,
+            dataset,
+            max_concurrent_request,
+            n_examples,
+            tokenizer_mode=tokenizer_mode,
         )
+
+        print(f"Expected WER: {expected_wer}, Actual WER: {wer}")
+
         if expected_wer:
             torch.testing.assert_close(wer, expected_wer, atol=1e-1, rtol=1e-2)
