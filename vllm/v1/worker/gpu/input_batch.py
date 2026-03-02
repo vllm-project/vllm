@@ -83,28 +83,18 @@ class InputBatch:
         num_reqs: int,
         num_tokens: int,
         input_buffers: InputBuffers,
-        device: torch.device,
-        num_scheduled_tokens: np.ndarray | None = None,
-        req_ids: list[str] | None = None,
-        include_dcp_local_seq_lens: bool = False,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
-        if req_ids is None:
-            req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
-        else:
-            assert len(req_ids) == num_reqs
+        device = input_buffers.device
+
+        req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
         idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
         idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
-        if num_scheduled_tokens is None:
-            num_scheduled_tokens = np.full(
-                num_reqs, num_tokens // num_reqs, dtype=np.int32
-            )
-            num_scheduled_tokens[-1] += num_tokens % num_reqs
-        else:
-            num_scheduled_tokens = num_scheduled_tokens.astype(np.int32, copy=False)
-            assert num_scheduled_tokens.shape == (num_reqs,)
+
+        num_scheduled_tokens = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
+        num_scheduled_tokens[-1] += num_tokens % num_reqs
         assert int(num_scheduled_tokens.sum()) == num_tokens
 
         # seq_len equals to query_len
@@ -130,17 +120,9 @@ class InputBatch:
         input_ids = input_buffers.input_ids[:num_tokens].zero_()
         positions = input_buffers.positions[:num_tokens].zero_()
 
-        # attn_metadata = defaultdict(lambda: None)
         logits_indices = query_start_loc[1:] - 1
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
         cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-        dcp_local_seq_lens = None
-        if include_dcp_local_seq_lens:
-            input_buffers.dcp_local_seq_lens[:num_reqs].copy_(
-                seq_lens, non_blocking=True
-            )
-            input_buffers.dcp_local_seq_lens[num_reqs:] = 0
-            dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
         return cls(
             req_ids=cast(list[str], req_ids),
             num_reqs=num_reqs,
@@ -155,7 +137,7 @@ class InputBatch:
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
-            dcp_local_seq_lens=dcp_local_seq_lens,
+            dcp_local_seq_lens=None,
             input_ids=input_ids,
             positions=positions,
             logits_indices=logits_indices,

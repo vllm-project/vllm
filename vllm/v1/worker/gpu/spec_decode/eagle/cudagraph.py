@@ -77,12 +77,11 @@ class EagleCudaGraphManager:
         attn_metadata, slot_mappings = prepare_inputs_to_capture(
             num_reqs,
             num_tokens,
+            model_state,
             input_buffers,
             block_tables,
-            model_state,
             attn_groups,
             kv_cache_config,
-            uniform_decode_query_len=1,
         )
         num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
 

@@ -16,8 +16,9 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
-from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -118,14 +119,11 @@ class CudaGraphManager:
         attn_metadata, slot_mappings = prepare_inputs_to_capture(
             num_reqs,
             num_tokens,
+            model_state,
             input_buffers,
             block_tables,
-            model_state,
             attn_groups,
             kv_cache_config,
-            uniform_decode_query_len=(
-                self.uniform_decode_query_len if uniform_decode else 0
-            ),
         )
         num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
 
@@ -388,26 +386,36 @@ def capture_graphs(
 def prepare_inputs_to_capture(
     num_reqs: int,
     num_tokens: int,
+    model_state: ModelState,
     input_buffers: InputBuffers,
     block_tables: BlockTables,
-    model_state: ModelState,
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
-    uniform_decode_query_len: int = 0,
 ) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
-    input_block_tables = tuple(x[:num_reqs] for x in block_tables.input_block_tables)
-    slot_mappings = block_tables.slot_mappings[:, :num_tokens]
+    input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
+    input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
+    slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
     )
-    attn_metadata = model_state.prepare_dummy_attn(
-        num_reqs=num_reqs,
-        num_tokens=num_tokens,
-        input_buffers=input_buffers,
-        block_tables=input_block_tables,
-        slot_mappings=slot_mappings,
-        attn_groups=attn_groups,
-        kv_cache_config=kv_cache_config,
-        uniform_decode_query_len=uniform_decode_query_len,
+
+    # HACK(woosuk): Special handling for DCP.
+    if block_tables.cp_size > 1:
+        prepare_dcp_local_seq_lens(
+            input_buffers.dcp_local_seq_lens,
+            input_batch.seq_lens,
+            num_reqs,
+            block_tables.cp_size,
+            block_tables.cp_rank,
+            block_tables.cp_interleave,
+        )
+        input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
+
+    attn_metadata = model_state.prepare_attn(
+        input_batch,
+        input_block_tables,
+        slot_mappings,
+        attn_groups,
+        kv_cache_config,
     )
     return attn_metadata, slot_mappings_by_layer

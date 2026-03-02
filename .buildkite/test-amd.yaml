@@ -388,9 +388,7 @@ steps:
 - label: V1 Test e2e + engine # 65min
   timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental, amdproduction]
-  # The test uses 4 GPUs, but we schedule it on 8-GPU machines for stability.
-  # See discussion here: https://github.com/vllm-project/vllm/pull/31040
-  agent_pool: mi325_8
+  agent_pool: mi325_1
   optional: true
   # grade: Blocking
   source_file_dependencies:
@@ -401,6 +399,34 @@ steps:
     # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
     - pytest -v -s v1/e2e
     - pytest -v -s v1/engine
+
+- label: V1 Test e2e (2 GPUs) # 65min
+  timeout_in_minutes: 90
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi325_2
+  optional: true
+  # grade: Blocking
+  source_file_dependencies:
+    - vllm/
+    - tests/v1
+  commands:
+    # Only run tests that need exactly 2 GPUs
+    - pytest -v -s v1/e2e/test_spec_decode.py -k "tensor_parallelism"
+
+- label: V1 Test e2e (4 GPUs) # 65min
+  timeout_in_minutes: 90
+  mirror_hardwares: [amdexperimental, amdproduction]
+  # The test uses 4 GPUs, but we schedule it on 8-GPU machines for stability.
+  # See discussion here: https://github.com/vllm-project/vllm/pull/31040
+  agent_pool: mi325_4
+  optional: true
+  # grade: Blocking
+  source_file_dependencies:
+    - vllm/
+    - tests/v1
+  commands:
+    # Only run tests that need 4 GPUs
+    - pytest -v -s v1/e2e/test_spec_decode.py -k "eagle_correctness_heavy"
 
 - label: V1 Test entrypoints # 35min
   timeout_in_minutes: 50
@@ -1544,8 +1570,8 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
-##### H100 test #####
-- label: LM Eval Large Models (H100) # optional
+##### FP8 test #####
+- label: LM Eval Large Models (H100) # optional, still use H100 for consistency
   gpu: h100
   optional: true
   mirror_hardwares: [amdexperimental, amdproduction]
@@ -1557,8 +1583,8 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   commands:
-    - export VLLM_USE_DEEP_GEMM=0  # We found Triton is faster than DeepGEMM for H100
-    - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
+    - export VLLM_USE_DEEP_GEMM=0 
+    - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm.txt --tp-size=4
 
 
 ##### H200 test #####

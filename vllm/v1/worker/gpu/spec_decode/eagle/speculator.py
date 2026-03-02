@@ -77,15 +77,15 @@ class EagleSpeculator:
 
     def set_attn(
         self,
+        model_state: ModelState,
         kv_cache_config: KVCacheConfig,
         attn_groups: list[list[AttentionGroup]],
         block_tables: BlockTables,
-        model_state: ModelState,
     ) -> None:
+        self.model_state = model_state
         self.kv_cache_config = kv_cache_config
         self.attn_groups = attn_groups
         self.block_tables = block_tables
-        self.model_state = model_state
 
     @torch.inference_mode()
     def run_model(
