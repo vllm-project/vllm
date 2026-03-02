@@ -1657,7 +1657,7 @@ class rocm_aiter_ops:
         x_scales: torch.Tensor | None = None,
     ) -> torch.Tensor:
         from aiter.ops.triton.gemm.basic.gemm_afp4wfp4 import gemm_afp4wfp4
-        from aiter.ops.triton.quant import dynamic_mxfp4_quant
+        from aiter.ops.triton.quant.quant import dynamic_mxfp4_quant
 
         if x_scales is None:
             x_q, x_s = dynamic_mxfp4_quant(x)
