@@ -120,6 +120,13 @@ QUANT_ALGOS = [
 KV_CACHE_QUANT_ALGOS = ["FP8"]
 
 
+def is_modelopt_quant_config(
+    quant_config: QuantizationConfig | None,
+) -> bool:
+    """Check if the quantization config originates from ModelOpt."""
+    return isinstance(quant_config, ModelOptQuantConfigBase)
+
+
 class ModelOptFp8KVCacheMethod(BaseKVCacheMethod):
     """
     Supports loading kv-cache scaling factors from FP8 checkpoints.
