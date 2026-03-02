@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import atexit
 
 import torch
 import torch.distributed as dist
@@ -84,6 +85,10 @@ def initialize_fi_ar_workspace(
         hidden_dim,
         dtype,
     )
+    # Register cleanup to avoid unclean shutdown during Python interpreter
+    # finalization. The atexit handler runs before sys.meta_path is cleared,
+    # preventing ImportError in AllReduceFusionWorkspace.__del__.
+    atexit.register(destroy_fi_ar_workspace)
 
 
 def initialize_fi_ar_quant_workspace(
