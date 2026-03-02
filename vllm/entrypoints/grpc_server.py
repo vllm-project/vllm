@@ -20,16 +20,17 @@ Example:
 import argparse
 import asyncio
 import functools
-import io
 import signal
 import sys
 import time
 from collections.abc import AsyncGenerator
 
 import grpc
+import numpy as np
+import torch
 import uvloop
 from grpc_reflection.v1alpha import reflection
-from PIL import Image
+from transformers import BatchFeature
 
 from vllm import SamplingParams, TextPrompt, TokensPrompt
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -37,6 +38,15 @@ from vllm.entrypoints.utils import log_version_and_model
 from vllm.grpc import vllm_engine_pb2, vllm_engine_pb2_grpc
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
+from vllm.multimodal.inputs import (
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+    PlaceholderRange,
+    mm_inputs,
+)
+from vllm.multimodal.inputs import (
+    MultiModalInputs as VllmMultiModalInputs,
+)
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
 from vllm.usage.usage_lib import UsageContext
@@ -45,6 +55,22 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+# Proto dtype string → (numpy dtype, element size in bytes)
+_PROTO_DTYPE_MAP: dict[str, np.dtype] = {
+    "float32": np.dtype("float32"),
+    "int64": np.dtype("int64"),
+    "uint32": np.dtype("uint32"),
+}
+
+
+def _tensor_from_proto(td: vllm_engine_pb2.TensorData) -> torch.Tensor:
+    """Deserialize a TensorData proto message into a torch.Tensor."""
+    np_dtype = _PROTO_DTYPE_MAP.get(td.dtype)
+    if np_dtype is None:
+        raise ValueError(f"Unsupported proto tensor dtype: {td.dtype!r}")
+    arr = np.frombuffer(td.data, dtype=np_dtype).reshape(list(td.shape))
+    return torch.from_numpy(arr.copy())
 
 
 class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
@@ -92,38 +118,36 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """
         request_id = request.request_id
         input_type = request.WhichOneof("input")
-        has_mm = request.HasField("mm_inputs") and bool(request.mm_inputs.image_data)
-        num_images = len(request.mm_inputs.image_data) if has_mm else 0
+        has_preprocessed_mm = request.HasField(
+            "mm_inputs"
+        ) and request.mm_inputs.HasField("pixel_values")
         logger.info(
-            "Generate request %s: input_type=%s, stream=%s, multimodal=%s (images=%d)",
+            "Generate request %s: input_type=%s, stream=%s, preprocessed_mm=%s",
             request_id,
             input_type,
             request.stream,
-            has_mm,
-            num_images,
+            has_preprocessed_mm,
         )
 
         try:
-            # Extract tokenized input
-            if input_type == "tokenized":
+            if has_preprocessed_mm and input_type == "tokenized":
+                # Preprocessed multimodal from Rust router.
+                # Token IDs already have expanded placeholders; tensors are
+                # ready for the model. Bypass the renderer entirely.
+                prompt = self._build_preprocessed_mm_inputs(
+                    request.tokenized, request.mm_inputs
+                )
+                prompt["arrival_time"] = time.time()
+            elif input_type == "tokenized":
                 prompt: TokensPrompt = {
                     "prompt_token_ids": list(request.tokenized.input_ids)
                 }
                 if request.tokenized.original_text:
                     prompt["prompt"] = request.tokenized.original_text
-            else:
-                prompt: TextPrompt = {"prompt": request.text}
-
-            # Extract multimodal inputs (images)
-            if has_mm:
-                prompt["multi_modal_data"] = self._parse_mm_inputs(request.mm_inputs)
-
-            # Process inputs via Renderer for tokenized path (preferred),
-            # fall back to InputPreprocessor for text path (needs tokenization)
-            renderer = self.async_llm.input_processor.input_preprocessor.renderer
-            if input_type == "tokenized":
+                renderer = self.async_llm.input_processor.input_preprocessor.renderer
                 prompt = renderer.process_for_engine(prompt, arrival_time=time.time())
             else:
+                prompt: TextPrompt = {"prompt": request.text}
                 prompt = self.async_llm.input_processor.input_preprocessor.preprocess(
                     prompt
                 )
@@ -339,20 +363,93 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
     # ========== Helper methods ==========
 
-    @staticmethod
-    def _parse_mm_inputs(mm_proto) -> dict:
-        """Convert raw image bytes from proto to vLLM multi_modal_data dict.
+    def _build_preprocessed_mm_inputs(
+        self,
+        tokenized: vllm_engine_pb2.TokenizedInput,
+        mm_proto: vllm_engine_pb2.MultimodalInputs,
+    ) -> VllmMultiModalInputs:
+        """Build vLLM MultiModalInputs from preprocessed proto data.
 
-        Args:
-            mm_proto: MultimodalInputs protobuf with image_data (raw JPEG/PNG bytes)
-
-        Returns:
-            Dict with "image" key mapping to list of PIL Images
+        Bypasses HF processor entirely — pixel values and model-specific
+        tensors were already computed by the Rust router.  Field layouts
+        (batched / flat / shared) are also determined by the router via
+        ``batched_keys`` and ``flat_keys`` proto fields.
         """
-        images = [
-            Image.open(io.BytesIO(img_bytes)) for img_bytes in mm_proto.image_data
-        ]
-        return {"image": images}
+        prompt_token_ids = list(tokenized.input_ids)
+        num_images = len(mm_proto.mm_placeholders)
+
+        # Deserialize all tensors from proto
+        hf_dict: dict[str, torch.Tensor] = {
+            "pixel_values": _tensor_from_proto(mm_proto.pixel_values),
+        }
+        for key, td in mm_proto.model_specific_tensors.items():
+            hf_dict[key] = _tensor_from_proto(td)
+
+        # Cast floating-point tensors to model dtype (e.g. bfloat16).
+        # This mirrors _postprocess_output in multimodal/processing/context.py
+        # which is skipped when bypassing the HF processor.
+        model_dtype = self.async_llm.model_config.dtype
+        for key in hf_dict:
+            if hf_dict[key].is_floating_point():
+                hf_dict[key] = hf_dict[key].to(dtype=model_dtype)
+
+        # Field configs are fully determined by the Rust router.
+        batched = set(mm_proto.batched_keys)
+        flat = dict(mm_proto.flat_keys)
+        fields_config: dict[str, MultiModalFieldConfig] = {}
+        for key in hf_dict:
+            if key in batched:
+                fields_config[key] = MultiModalFieldConfig.batched("image")
+            elif key in flat:
+                sizes = hf_dict[flat[key]].flatten().to(torch.int64)
+                fields_config[key] = MultiModalFieldConfig.flat_from_sizes(
+                    "image", sizes
+                )
+            else:
+                fields_config[key] = MultiModalFieldConfig.shared("image", num_images)
+
+        batch_feature = BatchFeature(hf_dict, tensor_type="pt")
+        mm_kwargs = MultiModalKwargsItems.from_hf_inputs(batch_feature, fields_config)
+
+        # Build mm_hashes: dict[str, list[str]]
+        mm_hashes: dict[str, list[str]] = {}
+        if mm_proto.mm_hashes:
+            mm_hashes["image"] = list(mm_proto.mm_hashes)
+
+        # Build mm_placeholders: dict[str, list[PlaceholderRange]]
+        # When structural tokens (e.g. <|image_start|>, separators) are present
+        # in the placeholder range, we must set is_embed so vLLM only scatters
+        # encoder embeddings into patch-token positions (im_token_id).
+        mm_placeholders: dict[str, list[PlaceholderRange]] = {}
+        if mm_proto.mm_placeholders:
+            im_token_id = (
+                mm_proto.im_token_id if mm_proto.HasField("im_token_id") else None
+            )
+            placeholders = []
+            for p in mm_proto.mm_placeholders:
+                is_embed = None
+                if im_token_id is not None:
+                    token_slice = prompt_token_ids[p.offset : p.offset + p.length]
+                    mask = [t == im_token_id for t in token_slice]
+                    # Only set is_embed when there are non-embed positions,
+                    # otherwise None means "all positions are embeds" which is
+                    # both correct and avoids unnecessary overhead.
+                    if not all(mask):
+                        is_embed = torch.tensor(mask, dtype=torch.bool)
+                placeholders.append(
+                    PlaceholderRange(
+                        offset=p.offset, length=p.length, is_embed=is_embed
+                    )
+                )
+            mm_placeholders["image"] = placeholders
+
+        return mm_inputs(
+            prompt_token_ids=prompt_token_ids,
+            mm_kwargs=mm_kwargs,
+            mm_hashes=mm_hashes,
+            mm_placeholders=mm_placeholders,
+            prompt=tokenized.original_text or None,
+        )
 
     @staticmethod
     def _sampling_params_from_proto(
