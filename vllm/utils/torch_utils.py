@@ -330,16 +330,20 @@ def resolve_kv_cache_dtype_string(
     if kv_cache_dtype != "auto":
         return kv_cache_dtype
 
+    # First, check if the model specifies a KV cache quantization algorithm
     hf_cfg = getattr(model_config, "hf_config", None)
     if hf_cfg is not None:
         quant_cfg = getattr(hf_cfg, "quantization_config", None)
         if quant_cfg is not None:
             kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
-            if kv_algo_str is not None:
+            if kv_algo_str is not None and kv_algo_str != "auto":
                 return kv_algo_str
 
-    # Default to auto (will be handled by downstream code)
-    return "auto"
+    # Fallback to model's default dtype when no quantization is specified
+    # This fixes the case where kv_cache_dtype="auto" was returning "auto"
+    # instead of resolving to the actual model dtype
+    model_dtype = str(model_config.dtype)
+    return model_dtype
 
 
 def kv_cache_dtype_str_to_dtype(
