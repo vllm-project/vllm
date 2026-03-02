@@ -916,7 +916,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     proposer.model = model_mock
 
     # Assign draft attn_layer_names since load_model is not invoked
-    proposer.attn_layer_names = ["layer.0"]
+    proposer._draft_attn_layer_names = {"layer.0"}
 
     # Create input tensors
     batch_spec = BatchSpec(
@@ -961,7 +961,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
 
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
-        layer_names=proposer.attn_layer_names,
+        layer_names=proposer._draft_attn_layer_names,
         vllm_config=proposer.vllm_config,
         device=device,
     )
@@ -1089,7 +1089,7 @@ def test_propose_tree(spec_token_tree):
     proposer.model = model_mock
 
     # Assign draft attn_layer_names since load_model is not invoked
-    proposer.attn_layer_names = ["layer.0"]
+    proposer._draft_attn_layer_names = {"layer.0"}
 
     # Get the tree attention metadata builder.
     attn_metadata_builder_cls, _ = try_get_attention_backend(
@@ -1097,7 +1097,7 @@ def test_propose_tree(spec_token_tree):
     )
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
-        layer_names=proposer.attn_layer_names,
+        layer_names=proposer._draft_attn_layer_names,
         vllm_config=proposer.vllm_config,
         device=device,
     )
