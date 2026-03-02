@@ -155,6 +155,15 @@ class EngineCore:
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
+            # Set model_executor reference for push-based KV transfer
+            # This allows P scheduler to call RPC to P worker when blocks are ready
+            if hasattr(self.scheduler.connector, 'connector_scheduler') and \
+               self.scheduler.connector.connector_scheduler is not None:
+                self.scheduler.connector.connector_scheduler.set_model_executor(
+                    self.model_executor
+                )
+                logger.info("Set model_executor reference for P scheduler push triggers")
+
         self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
         self.mm_receiver_cache = mm_registry.engine_receiver_cache_from_config(
             vllm_config

@@ -443,6 +443,44 @@ class Worker(WorkerBase):
         tp_rank = get_tp_group().rank_in_group
         return {tp_rank: metadata}
 
+    def start_push_kv(
+        self,
+        request_id: str,
+        local_block_ids: list[int],
+        registration_data: dict[str, Any]
+    ) -> None:
+        """
+        RPC method to trigger push-based KV transfer.
+
+        Called by P scheduler when blocks are ready for push to D node.
+        Delegates to the kv_connector's start_push_kv method.
+
+        Args:
+            request_id: Request ID
+            local_block_ids: Local block IDs to push
+            registration_data: Registration data from D node
+        """
+        logger.info(
+            "GPU Worker start_push_kv called for request %s with %d blocks",
+            request_id,
+            len(local_block_ids),
+        )
+
+        if not has_kv_transfer_group():
+            logger.warning("No KV transfer group, cannot start kv push")
+            return
+
+        connector = get_kv_transfer_group()
+        if hasattr(connector, 'start_push_kv'):
+            logger.info("Calling connector.start_push_kv for request %s", request_id)
+            connector.start_push_kv(request_id, local_block_ids, registration_data)
+        else:
+            logger.error(
+                "KV connector does not have start_push_kv method, "
+                "cannot start kv push for request %s",
+                request_id,
+            )
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 

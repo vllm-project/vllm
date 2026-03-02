@@ -171,6 +171,30 @@ class WorkerBase:
         """Get vocabulary size from model configuration."""
         return self.model_config.get_vocab_size()
 
+    def start_push_kv(
+        self,
+        request_id: str,
+        local_block_ids: list[int],
+        registration_data: dict[str, Any]
+    ) -> None:
+        """
+        RPC method to trigger push-based KV transfer.
+
+        Called by P scheduler when blocks are ready for push to D node.
+        This is a default implementation that can be overridden by subclasses.
+
+        Args:
+            request_id: Request ID
+            local_block_ids: Local block IDs to push
+            registration_data: Registration data from D node
+        """
+        # Default implementation for workers that don't support KV transfer
+        logger.warning(
+            "start_push_kv called but not implemented for this worker type. "
+            "Request: %s",
+            request_id,
+        )
+
     def shutdown(self) -> None:
         """Clean up resources held by the worker."""
         return
