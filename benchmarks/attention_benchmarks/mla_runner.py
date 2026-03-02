@@ -864,6 +864,19 @@ def _run_mla_benchmark_batched(
     results = []
 
     with set_current_vllm_config(vllm_config):
+        # Clear cached prefill backend detection functions so they re-evaluate
+        # with the current VllmConfig. These are @functools.cache decorated and
+        # would otherwise return stale results from a previous backend's config.
+        from vllm.model_executor.layers.attention.mla_attention import (
+            use_cudnn_prefill,
+            use_flashinfer_prefill,
+            use_trtllm_ragged_deepseek_prefill,
+        )
+
+        use_flashinfer_prefill.cache_clear()
+        use_cudnn_prefill.cache_clear()
+        use_trtllm_ragged_deepseek_prefill.cache_clear()
+
         # Create backend impl, layer, builder, and indexer (reused across benchmarks)
         impl, layer, builder_instance, indexer = _create_backend_impl(
             backend_cfg,
