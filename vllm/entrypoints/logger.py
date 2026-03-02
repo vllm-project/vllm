@@ -20,12 +20,14 @@ class RequestLogger:
 
         if not logger.isEnabledFor(logging.INFO):
             logger.warning_once(
-                "`--enable-log-requests` is set but log level is higher than INFO. "
+                "`--enable-log-requests` is set but "
+                "the minimum log level is higher than INFO. "
                 "No request information will be logged."
             )
         elif not logger.isEnabledFor(logging.DEBUG):
             logger.info_once(
-                "`--enable-log-requests` is set but log level is higher than DEBUG. "
+                "`--enable-log-requests` is set but "
+                "the minimum log level is higher than DEBUG. "
                 "Only limited information will be logged to minimize overhead. "
                 "To view more details, set `VLLM_LOGGING_LEVEL=DEBUG`."
             )
