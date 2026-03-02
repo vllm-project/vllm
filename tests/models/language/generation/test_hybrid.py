@@ -799,3 +799,58 @@ def test_apc_common_prefix_same_batch(
     outputs = llm.generate(prompts, sampling_params)
     for output in outputs:
         assert "two" in output.outputs[0].text
+
+
+# Test that outputs match whether prefix caching is enabled or not for mamba.
+@pytest.mark.parametrize("model", ["tiiuae/falcon-mamba-7b"])
+def test_same_mamba_output_apc_on_vs_off(
+    vllm_runner,
+    model: str,
+) -> None:
+    prompts = [
+        "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
+        "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
+    ]
+    max_tokens = 20
+    max_model_len = max(len(p) for p in prompts) + max_tokens + 64
+
+    base_kwargs = _get_vllm_runner_params(model, max_model_len)
+    base_kwargs.update(enforce_eager=True, block_size=16, seed=42)
+
+    # No prefix caching
+    kwargs_no_apc = {**base_kwargs, "enable_prefix_caching": False}
+    with vllm_runner(**kwargs_no_apc) as vllm_model:
+        outputs_no_apc, _ = _get_vLLM_output(
+            vllm_runner,
+            kwargs_no_apc,
+            prompts,
+            max_tokens,
+            num_logprobs=-1,
+            vllm_model=vllm_model,
+        )
+    # With prefix caching
+    kwargs_with_apc = {
+        **base_kwargs,
+        "enable_prefix_caching": True,
+        "mamba_block_size": 16,
+    }
+    with vllm_runner(**kwargs_with_apc) as vllm_model:
+        outputs_with_apc, _ = _get_vLLM_output(
+            vllm_runner,
+            kwargs_with_apc,
+            prompts,
+            max_tokens,
+            num_logprobs=-1,
+            vllm_model=vllm_model,
+        )
+    texts_no_apc = [
+        outputs_no_apc[0][i][1].removeprefix(prompts[i]) for i in range(len(prompts))
+    ]
+    texts_with_apc = [
+        outputs_with_apc[0][i][1].removeprefix(prompts[i]) for i in range(len(prompts))
+    ]
+
+    for i in range(len(prompts)):
+        assert texts_no_apc[i] == texts_with_apc[i], (
+            f"Mismatch {i}: {texts_no_apc[i]!r} vs {texts_with_apc[i]!r}"
+        )
