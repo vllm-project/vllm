@@ -1,13 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import tempfile
 from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
 import pytest
 
-from vllm.multimodal.video import VIDEO_LOADER_REGISTRY, VideoLoader
+from vllm.assets.base import get_vllm_public_assets
+from vllm.multimodal.video import (
+    VIDEO_LOADER_REGISTRY,
+    VideoLoader,
+)
+
+from .utils import create_video_from_image
 
 pytestmark = pytest.mark.cpu_test
 
@@ -291,3 +298,77 @@ def test_video_recovery_dynamic_backend(monkeypatch: pytest.MonkeyPatch):
             f"Got {frames_with_recovery.shape[0]} with recovery vs "
             f"{frames_no_recovery.shape[0]} without"
         )
+
+
+@pytest.fixture(scope="session")
+def dummy_video_path():
+    image_path = get_vllm_public_assets(
+        filename="stop_sign.jpg", s3_prefix="vision_model_images"
+    )
+
+    path = tempfile.mkdtemp()
+    video_path = f"{path}/test_RGB_video.mp4"
+    create_video_from_image(image_path, video_path, num_frames=1800, fps=30)
+    return video_path
+
+
+@pytest.mark.parametrize(
+    "backend, kwargs, expected_num_frames",
+    [
+        # opencv: num_frames directly controls count
+        pytest.param("opencv", {"num_frames": 32}, 32, id="opencv-num_frames"),
+        pytest.param("opencv", {"fps": 2}, 120, id="opencv-fps"),
+        pytest.param(
+            "opencv",
+            {"num_frames": 500, "fps": 2},
+            120,
+            id="opencv-num_frames_wins_fps",
+        ),
+        pytest.param(
+            "opencv_dynamic",
+            {"fps": 1, "max_duration": 60},
+            60,
+            id="opencv_dynamic-within_max_duration",
+        ),
+        pytest.param(
+            "opencv_dynamic",
+            {"fps": 2, "max_duration": 30},
+            60,
+            id="opencv_dynamic-exceeds_max_duration",
+        ),
+        pytest.param(
+            "openpangu", {"num_frames": 32, "fps": -1}, 32, id="openpangu-num_frames"
+        ),
+        pytest.param(
+            "molmo2",
+            {"num_frames": 32, "frame_sample_mode": "uniform_last_frame"},
+            32,
+            id="molmo2-uniform_last_frame",
+        ),
+        pytest.param(
+            "molmo2",
+            {"fps": 2, "frame_sample_mode": "fps"},
+            119,
+            id="molmo2-fps",
+        ),
+    ],
+)
+def test_video_loader_frames_sampling(
+    dummy_video_path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    kwargs: dict,
+    expected_num_frames: int,
+):
+    """Test video loader frames sampling functionality."""
+    monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", backend)
+    loader = VIDEO_LOADER_REGISTRY.load(backend)
+
+    with open(dummy_video_path, "rb") as f:
+        long_video_bytes = f.read()
+
+    frames, _ = loader.load_bytes(long_video_bytes, **kwargs)
+
+    assert frames.ndim == 4
+    assert frames.shape[3] == 3  # RGB
+    assert frames.shape[0] == expected_num_frames
