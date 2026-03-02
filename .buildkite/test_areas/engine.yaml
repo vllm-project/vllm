@@ -14,7 +14,7 @@ steps:
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
 
-- label: V1 e2e + engine
+- label: V1 e2e + engine (1 GPU)
   timeout_in_minutes: 45
   source_file_dependencies:
     - vllm/
@@ -36,3 +36,35 @@ steps:
       commands:
       - pytest -v -s v1/e2e
       - pytest -v -s v1/engine
+
+- label: V1 e2e (2 GPUs)
+  timeout_in_minutes: 60 # TODO: Fix timeout after we have more confidence in the test stability
+  optional: true
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/
+    - tests/v1/e2e
+  commands:
+    # Only run tests that need exactly 2 GPUs
+    - pytest -v -s v1/e2e/test_spec_decode.py -k "tensor_parallelism"
+  mirror:
+    amd:
+      device: mi325_2
+      depends_on:
+      - image-build-amd
+
+- label: V1 e2e (4 GPUs)
+  timeout_in_minutes: 60 # TODO: Fix timeout after we have more confidence in the test stability
+  optional: true
+  num_devices: 4
+  source_file_dependencies:
+    - vllm/
+    - tests/v1/e2e
+  commands:
+    # Only run tests that need 4 GPUs
+    - pytest -v -s v1/e2e/test_spec_decode.py -k "eagle_correctness_heavy"
+  mirror:
+    amd:
+      device: mi325_4
+      depends_on:
+      - image-build-amd
