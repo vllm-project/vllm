@@ -972,9 +972,7 @@ class SpecDecodeBaseProposer:
         | list[dict[str, torch.Tensor]]
         | None = None,
     ) -> list[torch.Tensor]:
-        tree_attn_metadata_builder = self.runner.attn_groups[0][
-            0
-        ].get_metadata_builder()
+        tree_attn_metadata_builder = self.draft_attn_groups[0].get_metadata_builder()
         assert isinstance(tree_attn_metadata_builder, TreeAttentionMetadataBuilder)
 
         total_num_drafts = self.cu_drafts_per_level[0]
