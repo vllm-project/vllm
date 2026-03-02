@@ -46,6 +46,13 @@ SystemEnv = namedtuple(
         "nvidia_driver_version",
         "nvidia_gpu_models",
         "cudnn_version",
+        "xpu_available",
+        "xpu_build_version",
+        "intel_gpu_driver_version",
+        "intel_gpu_models",
+        "oneapi_version",
+        "level_zero_version",
+        "sycl_version",
         "pip_version",  # 'pip' or 'pip3'
         "pip_packages",
         "conda_packages",
@@ -277,6 +284,74 @@ def get_rocm_version(run_lambda):
     )
 
 
+def get_xpu_available():
+    if TORCH_AVAILABLE and hasattr(torch, "xpu") and torch.xpu.is_available():
+        return True
+    return False
+
+
+def get_xpu_build_version():
+    if TORCH_AVAILABLE and hasattr(torch.version, "xpu"):
+        return torch.version.xpu
+    return "N/A"
+
+
+def get_intel_gpu_driver_version(run_lambda):
+    if get_platform() == "linux":
+        for pkg in ("libigc2", "libigc1"):
+            version = run_and_parse_first_match(
+                run_lambda,
+                "dpkg-query --show --showformat='${Version}' " + pkg,
+                r"(.+)",
+            )
+            if version is not None:
+                return version
+        return None
+    return None
+
+
+def get_intel_gpu_models():
+    if TORCH_AVAILABLE and hasattr(torch, "xpu") and torch.xpu.is_available():
+        device_count = torch.xpu.device_count()
+        return "\n".join(
+            "GPU {}: {}".format(i, torch.xpu.get_device_name(i))
+            for i in range(device_count)
+        )
+    return None
+
+
+def get_oneapi_version(run_lambda):
+    """Return Intel oneAPI DPC++/C++ Compiler version via icpx."""
+    return run_and_parse_first_match(
+        run_lambda, "icpx --version", r"oneAPI DPC\+\+/C\+\+ Compiler (\S+)"
+    )
+
+
+def get_level_zero_version(run_lambda):
+    """Return Level Zero runtime version."""
+    if get_platform() == "linux":
+        # Try libze1 package first
+        version = run_and_parse_first_match(
+            run_lambda, "dpkg-query --show --showformat='${Version}' libze1", r"(.+)"
+        )
+        if version is not None:
+            return version
+        # Try intel-level-zero-gpu
+        version = run_and_parse_first_match(
+            run_lambda,
+            "dpkg-query --show --showformat='${Version}' intel-level-zero-gpu",
+            r"(.+)",
+        )
+        if version is not None:
+            return version
+    return None
+
+
+def get_sycl_version(run_lambda):
+    """Return SYCL/DPC++ compiler build version."""
+    return run_and_parse_first_match(run_lambda, "icpx --version", r"\((\d[\d.]+)\)")
+
+
 def get_vllm_version():
     from vllm import __version__, __version_tuple__
 
@@ -298,11 +373,12 @@ def get_vllm_version():
 
 
 def summarize_vllm_build_flags():
-    # This could be a static method if the flags are constant, or dynamic if you need to check environment variables, etc.
-    return "CUDA Archs: {}; ROCm: {}".format(
+    flags = "CUDA Archs: {}; ROCm: {}; XPU: {}".format(
         os.environ.get("TORCH_CUDA_ARCH_LIST", "Not Set"),
         "Enabled" if os.environ.get("ROCM_HOME") else "Disabled",
+        "Enabled" if get_xpu_available() else "Disabled",
     )
+    return flags
 
 
 def get_gpu_topo(run_lambda):
@@ -312,6 +388,8 @@ def get_gpu_topo(run_lambda):
         output = run_and_read_all(run_lambda, "nvidia-smi topo -m")
         if output is None:
             output = run_and_read_all(run_lambda, "rocm-smi --showtopo")
+        if output is None:
+            output = run_and_read_all(run_lambda, "xpu-smi topology -m")
 
     return output
 
@@ -574,6 +652,13 @@ def get_env_vars():
         "OMP_",
         "MKL_",
         "NVIDIA",
+        "ZE_",
+        "ONEAPI_",
+        "SYCL_",
+        "NEOReadDebugKeys",
+        "IGC_",
+        "CCL_",
+        "I_MPI_",
     )
     for k, v in os.environ.items():
         if any(term in k.lower() for term in secret_terms):
@@ -637,6 +722,13 @@ def get_env_info():
         nvidia_gpu_models=get_gpu_info(run_lambda),
         nvidia_driver_version=get_nvidia_driver_version(run_lambda),
         cudnn_version=get_cudnn_version(run_lambda),
+        xpu_available=str(get_xpu_available()),
+        xpu_build_version=get_xpu_build_version(),
+        intel_gpu_driver_version=get_intel_gpu_driver_version(run_lambda),
+        intel_gpu_models=get_intel_gpu_models(),
+        oneapi_version=get_oneapi_version(run_lambda),
+        level_zero_version=get_level_zero_version(run_lambda),
+        sycl_version=get_sycl_version(run_lambda),
         hip_compiled_version=hip_compiled_version,
         hip_runtime_version=hip_runtime_version,
         miopen_runtime_version=miopen_runtime_version,
@@ -676,6 +768,7 @@ PyTorch version              : {torch_version}
 Is debug build               : {is_debug_build}
 CUDA used to build PyTorch   : {cuda_compiled_version}
 ROCM used to build PyTorch   : {hip_compiled_version}
+XPU used to build PyTorch    : {xpu_build_version}
 
 ==============================
       Python Environment
@@ -695,6 +788,17 @@ cuDNN version                : {cudnn_version}
 HIP runtime version          : {hip_runtime_version}
 MIOpen runtime version       : {miopen_runtime_version}
 Is XNNPACK available         : {is_xnnpack_available}
+
+==============================
+      Intel XPU / GPU Info
+==============================
+Is XPU available             : {xpu_available}
+XPU build version            : {xpu_build_version}
+Intel GPU driver version     : {intel_gpu_driver_version}
+Intel GPU models             : {intel_gpu_models}
+oneAPI version               : {oneapi_version}
+Level Zero version           : {level_zero_version}
+SYCL version                 : {sycl_version}
 
 ==============================
           CPU Info
@@ -789,6 +893,31 @@ def pretty_str(envinfo):
             mutable_dict[field] = "No CUDA"
         if envinfo.cuda_compiled_version is None:
             mutable_dict["cuda_compiled_version"] = "None"
+
+    # If the machine doesn't have XPU, report XPU fields as 'No XPU'
+    dynamic_xpu_fields = [
+        "intel_gpu_driver_version",
+        "intel_gpu_models",
+        "level_zero_version",
+    ]
+    all_xpu_fields = dynamic_xpu_fields + [
+        "oneapi_version",
+        "sycl_version",
+    ]
+    all_dynamic_xpu_fields_missing = all(
+        mutable_dict[field] is None for field in dynamic_xpu_fields
+    )
+    xpu_available = get_xpu_available()
+    if not xpu_available and all_dynamic_xpu_fields_missing:
+        for field in all_xpu_fields:
+            mutable_dict[field] = "No XPU"
+        if envinfo.xpu_build_version is None or envinfo.xpu_build_version == "N/A":
+            mutable_dict["xpu_build_version"] = "N/A"
+
+    # If intel_gpu_models is multiline, start on the next line
+    mutable_dict["intel_gpu_models"] = maybe_start_on_next_line(
+        mutable_dict.get("intel_gpu_models")
+    )
 
     # Replace True with Yes, False with No
     mutable_dict = replace_bools(mutable_dict)
