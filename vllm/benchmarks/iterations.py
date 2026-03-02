@@ -256,25 +256,58 @@ async def run_compilation_warmup(
     session: aiohttp.ClientSession,
     rotator: EndpointRotator,
     model: str,
+    config: "BenchmarkConfig | None" = None,
+    global_batch_size: int = 1,
 ) -> None:
-    """Send a warmup request to trigger runtime compilation."""
-    endpoint = rotator.all()[0]
-    logger.info("Sending warmup request to trigger compilation...")
+    """Send warmup requests to trigger runtime compilation.
+
+    When config is provided, sends requests matching the actual benchmark
+    parameters (input length, batch size) so that JAX compiles for the
+    exact shapes that will be profiled.  This prevents compilation from
+    happening inside the profiling window and flooding the trace buffer.
+    """
+    if config is not None:
+        max_input_len = max(config.input_lens)
+        max_context_len = max(config.context_lens)
+        prompt_len = max_context_len + max_input_len
+        warmup_prompt = "a " * max(1, prompt_len)
+    else:
+        warmup_prompt = "Hello"
+        global_batch_size = 1
+
+    logger.info(
+        "Sending %d warmup request(s) with ~%d prompt tokens "
+        "to trigger compilation...",
+        global_batch_size,
+        len(warmup_prompt.split()),
+    )
     try:
-        resp = await session.post(
-            f"{endpoint}/v1/completions",
-            json={
-                "model": model,
-                "prompt": "Hello",
-                "max_tokens": 1,
-                "stream": False,
-            },
+        tasks = []
+        for _ in range(global_batch_size):
+            endpoint = rotator.next()
+            task = asyncio.ensure_future(
+                session.post(
+                    f"{endpoint}/v1/completions",
+                    json={
+                        "model": model,
+                        "prompt": warmup_prompt,
+                        "max_tokens": 1,
+                        "stream": False,
+                    },
+                )
+            )
+            tasks.append(task)
+
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
+        success = sum(
+            1 for r in responses
+            if not isinstance(r, Exception) and r.status == 200
         )
-        if resp.status == 200:
-            await resp.json()
-            logger.info("Compilation warmup complete")
-        else:
-            logger.warning("Warmup request failed: HTTP %d", resp.status)
+        for resp in responses:
+            if not isinstance(resp, Exception):
+                await resp.read()
+        logger.info("Compilation warmup complete: %d/%d succeeded",
+                     success, global_batch_size)
     except Exception as e:
         logger.warning("Warmup request failed: %s", e)
 
@@ -574,7 +607,14 @@ async def run_benchmark(
         )
 
         # Warmup: trigger runtime compilation before benchmarking
-        await run_compilation_warmup(session, rotator, config.model)
+        # Send requests matching the largest benchmark shape so that JAX
+        # compiles for the right (batch, seq_len) bucket before profiling.
+        max_batch_per_dp = max(config.batch_sizes)
+        warmup_global_batch = max_batch_per_dp * dp_size
+        await run_compilation_warmup(
+            session, rotator, config.model,
+            config=config, global_batch_size=warmup_global_batch,
+        )
 
         # Sweep all parameter combinations
         param_combos = list(
