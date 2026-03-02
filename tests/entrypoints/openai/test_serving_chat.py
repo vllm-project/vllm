@@ -21,8 +21,8 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     RequestResponseMetadata,
 )
+from vllm.entrypoints.openai.harmony import get_encoding
 from vllm.entrypoints.openai.models.serving import BaseModelPath, OpenAIServingModels
-from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.inputs import TokensPrompt
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer

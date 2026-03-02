@@ -29,8 +29,7 @@ from openai.types.responses.response_reasoning_item import (
 )
 from openai_harmony import Author, Message, Role, StreamableParser, TextContent
 
-from vllm.entrypoints.openai.parser.harmony_utils import (
-    BUILTIN_TOOL_TO_MCP_SERVER_LABEL,
+from vllm.entrypoints.openai.harmony import (
     flatten_chat_text_content,
 )
 from vllm.entrypoints.openai.responses.protocol import (
@@ -41,6 +40,28 @@ from vllm.logger import init_logger
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
+
+# Builtin tools that should be included in the system message when
+# they are available and requested by the user.
+# Tool args are provided by MCP tool descriptions. Output
+# of the tools are stringified.
+BUILTIN_TOOL_TO_MCP_SERVER_LABEL: dict[str, str] = {
+    "python": "code_interpreter",
+    "browser": "web_search_preview",
+    "container": "container",
+}
+
+# Derive MCP_BUILTIN_TOOLS from the canonical mapping
+MCP_BUILTIN_TOOLS: set[str] = set(BUILTIN_TOOL_TO_MCP_SERVER_LABEL.values())
+
+
+def has_custom_tools(tool_types: set[str]) -> bool:
+    """
+    Checks if the given tool types are custom tools
+    (i.e. any tool other than MCP builtin tools)
+    """
+    return not tool_types.issubset(MCP_BUILTIN_TOOLS)
+
 
 # ---------------------------------------------------------------------------
 # 1. Private helpers for input parsing
@@ -110,7 +131,7 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
         content = chat_msg.get("content", "") or ""
         content = flatten_chat_text_content(content)
         # NOTE: .with_recipient("assistant") is required on tool messages
-        # to match parse_chat_input_to_harmony_message behavior and ensure
+        # to match chat_input_to_harmony behavior and ensure
         # proper routing in the Harmony protocol.
         msg = (
             Message.from_author_and_content(Author.new(Role.TOOL, name), content)
