@@ -19,7 +19,7 @@ from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
+    ReplicatedLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -98,7 +98,7 @@ class Conv2dSubsampling(nn.Module):
             nn.ReLU(),
         )
         subsample_idim = ((idim - 1) // 2 - 1) // 2
-        self.out = ColumnParallelLinear(
+        self.out = ReplicatedLinear(
             input_size=out_channels * subsample_idim,
             output_size=d_model,
             bias=True,
@@ -399,13 +399,13 @@ class FireRedASR2Adapter(nn.Module):
     def __init__(self, encoder_dim, llm_dim, downsample_rate=2, prefix: str = ""):
         super().__init__()
         self.ds = downsample_rate
-        self.linear1 = ColumnParallelLinear(
+        self.linear1 = ReplicatedLinear(
             input_size=encoder_dim * downsample_rate,
             output_size=llm_dim,
             bias=True,
         )
         self.relu = _ACTIVATION_REGISTRY["relu"]
-        self.linear2 = ColumnParallelLinear(
+        self.linear2 = ReplicatedLinear(
             input_size=llm_dim,
             output_size=llm_dim,
             bias=True,
