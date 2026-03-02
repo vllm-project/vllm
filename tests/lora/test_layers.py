@@ -469,7 +469,7 @@ def test_lm_head_logits_processor(
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("vocab_size", [512, 32000, 258049, 300000])
+@pytest.mark.parametrize("vocab_size", [258049, 300000])
 @pytest.mark.parametrize("device", DEVICES)
 def test_lm_head_logits_processor_invalid_vocab_size(
     default_vllm_config, dist_init, vocab_size, device
@@ -489,7 +489,7 @@ def test_lm_head_logits_processor_invalid_vocab_size(
         logits_processor, 1024, torch.float16, device, None
     )
 
-    with pytest.raises(ValueError, match="vocab size must be > 32000 and <= 258048"):
+    with pytest.raises(ValueError, match="vocab size must be <= 258048"):
         lora_logits_processor.create_lora_weights(max_loras, lora_config)
 
 

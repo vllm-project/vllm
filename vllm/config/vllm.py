@@ -126,6 +126,9 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
         # tp-dp combination broken:
         # https://github.com/vllm-project/vllm/issues/34458
         and cfg.parallel_config.data_parallel_size == 1
+        # tp-pp combination broken:
+        # https://github.com/vllm-project/vllm/issues/35426
+        and cfg.parallel_config.pipeline_parallel_size == 1
     )
 
 
@@ -809,6 +812,8 @@ class VllmConfig:
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
 
+        current_platform.apply_config_platform_defaults(self)
+
         if self.compilation_config.mode is None:
             if self.optimization_level > OptimizationLevel.O0:
                 self.compilation_config.mode = CompilationMode.VLLM_COMPILE
@@ -853,15 +858,38 @@ class VllmConfig:
                 logger.warning("Sequence Parallelism requires TP>1, disabling")
                 self.compilation_config.pass_config.enable_sp = False
                 self.compilation_config.pass_config.fuse_gemm_comms = False
-
-            elif "-rms_norm" in self.compilation_config.custom_ops:
-                logger.warning(
-                    "RMS norm force disabled, sequence parallelism might break"
-                )
             else:
-                self.compilation_config.custom_ops.append("+rms_norm")
+                # Compute SP threshold early; disable if None (model too
+                # small for SP to be beneficial).
+                pass_config = self.compilation_config.pass_config
+                if pass_config.sp_min_token_num is None:
+                    from vllm.compilation.passes.fusion.sequence_parallelism import (
+                        get_sequence_parallelism_threshold,
+                    )
 
-        if self.compilation_config.fast_moe_cold_start is None:
+                    tp_size = self.parallel_config.tensor_parallel_size
+                    hidden_size = self.model_config.get_hidden_size()
+                    element_size = self.model_config.dtype.itemsize
+                    pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
+                        hidden_size, tp_size, element_size
+                    )
+
+                if pass_config.sp_min_token_num is None:
+                    logger.warning(
+                        "Model hidden_size too small for the SP "
+                        "threshold heuristic, disabling. To force SP, "
+                        "set pass_config.sp_min_token_num manually."
+                    )
+                    self.compilation_config.pass_config.enable_sp = False
+                    self.compilation_config.pass_config.fuse_gemm_comms = False
+
+        from vllm.utils.torch_utils import HAS_OPAQUE_TYPE
+
+        if HAS_OPAQUE_TYPE:
+            # On torch >= 2.11 the hoisted OpaqueObject approach supersedes
+            # fast_moe_cold_start, so force it off.
+            self.compilation_config.fast_moe_cold_start = False
+        elif self.compilation_config.fast_moe_cold_start is None:
             # resolve default behavior: try to be as safe as possible
             # this config is unsafe if any spec decoding draft model has a MOE.
             # We'll conservatively turn it off if we see spec decoding.
@@ -896,6 +924,33 @@ class VllmConfig:
                     self.compilation_config.cudagraph_mode = (
                         CUDAGraphMode.FULL_DECODE_ONLY
                     )
+
+            # Check if KV connector requires PIECEWISE mode for CUDA graphs
+            if (
+                self.kv_transfer_config is not None
+                and self.kv_transfer_config.is_kv_transfer_instance
+                and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            ):
+                # Lazy import to avoid circular dependencies
+                from vllm.distributed.kv_transfer.kv_connector.factory import (
+                    KVConnectorFactory,
+                )
+
+                connector_cls = KVConnectorFactory.get_connector_class(
+                    self.kv_transfer_config
+                )
+                if connector_cls.requires_piecewise_for_cudagraph(
+                    self.kv_transfer_config.kv_connector_extra_config
+                ):
+                    logger.warning_once(
+                        "KV connector %s requires PIECEWISE CUDA graph mode "
+                        "due to layerwise async operations that cannot be "
+                        "captured in CUDA graphs. "
+                        "Overriding cudagraph_mode from %s to PIECEWISE.",
+                        connector_cls.__name__,
+                        self.compilation_config.cudagraph_mode.name,
+                    )
+                    self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:
@@ -1455,6 +1510,36 @@ class VllmConfig:
                         "Max num batched tokens below allreduce-rms fusion threshold, "
                         "allreduce-rms fusion will be enabled for all num_tokens."
                     )
+
+        # Add the compile ranges for sequence parallelism
+        if compilation_config.pass_config.enable_sp:
+            pass_config = compilation_config.pass_config
+
+            # Calculate min_token_num if not explicitly provided
+            # User override works regardless of hidden_size
+            if pass_config.sp_min_token_num is None:
+                from vllm.compilation.passes.fusion.sequence_parallelism import (
+                    get_sequence_parallelism_threshold,
+                )
+
+                tp_size = self.parallel_config.tensor_parallel_size
+                hidden_size = self.model_config.get_hidden_size()
+                element_size = self.model_config.dtype.itemsize
+                pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
+                    hidden_size, tp_size, element_size
+                )
+
+            min_token_num = pass_config.sp_min_token_num
+            max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+            if min_token_num is not None and (
+                max_num_batched_tokens is not None
+                and min_token_num < max_num_batched_tokens
+                and min_token_num > 1
+            ):
+                # Add split point at min_token_num - 1 to ensure SP applies
+                # starting from min_token_num
+                # This creates ranges: [1, min-1] (no SP), [min, max] (SP applies)
+                computed_compile_ranges_split_points.append(min_token_num - 1)
 
         if compilation_config.pass_config.fuse_rope_kvcache:
             max_token_num = (
