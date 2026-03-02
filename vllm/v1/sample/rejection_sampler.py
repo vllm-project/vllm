@@ -9,6 +9,7 @@ import torch.nn as nn
 
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.importing import HAS_TRITON
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -19,24 +20,6 @@ from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 logger = init_logger(__name__)
-
-# Check if Triton is actually available for kernel execution
-try:
-    import importlib.util
-
-    HAS_TRITON = (
-        importlib.util.find_spec("triton.language") is not None
-        and hasattr(triton, "jit")
-        and callable(triton.jit)
-    )
-except (ImportError, AttributeError):
-    HAS_TRITON = False
-
-if not HAS_TRITON:
-    logger.info(
-        "Triton not available. Using PyTorch CPU fallback for "
-        "speculative decoding rejection sampling."
-    )
 
 PLACEHOLDER_TOKEN_ID: tl.constexpr = -1
 GREEDY_TEMPERATURE: tl.constexpr = 0
@@ -410,7 +393,7 @@ def rejection_sample(
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_logits.argmax(dim=-1)
-        if HAS_TRITON and device.type == "cuda":
+        if HAS_TRITON:
             rejection_greedy_sample_kernel[(batch_size,)](
                 output_token_ids,
                 cu_num_draft_tokens,
@@ -459,7 +442,7 @@ def rejection_sample(
     )
 
     # Rejection sampling for random sampling requests.
-    if HAS_TRITON and device.type == "cuda":
+    if HAS_TRITON:
         rejection_random_sample_kernel[(batch_size,)](
             output_token_ids,
             cu_num_draft_tokens,
@@ -577,7 +560,7 @@ def expand_batch_to_tokens(
     batch_size = x.shape[0]
     assert cu_num_tokens.shape[0] == batch_size
     expanded_x = x.new_empty(num_tokens)
-    if HAS_TRITON and x.device.type == "cuda":
+    if HAS_TRITON:
         expand_kernel[(batch_size,)](
             expanded_x,
             x,
@@ -725,29 +708,64 @@ def rejection_greedy_sample_pytorch(
 ):
     """PyTorch implementation of rejection_greedy_sample_kernel."""
     batch_size = cu_num_draft_tokens.shape[0]
+    max_spec_len = output_token_ids.shape[1] - 1
+    device = draft_token_ids.device
 
+    # Compute counts and start indices per request
+    zero = torch.zeros(1, dtype=cu_num_draft_tokens.dtype, device=device)
+    counts = torch.diff(cu_num_draft_tokens, prepend=zero)
+    start_indices = torch.cat([zero, cu_num_draft_tokens[:-1]])
+
+    # Create request indices for each token
+    req_indices = torch.repeat_interleave(
+        torch.arange(batch_size, device=device), counts
+    )
+
+    # Create position indices within each request
+    pos_in_req = (
+        torch.arange(draft_token_ids.shape[0], device=device)
+        - start_indices[req_indices]
+    )
+
+    # Find mismatches (rejections)
+    is_mismatch = draft_token_ids != target_argmax
+
+    # For each request, find the first rejection position
+    # Set mismatches to their position, matches to max_spec_len + 1
+    mismatch_pos = torch.where(is_mismatch, pos_in_req, max_spec_len + 1)
+
+    # Scatter min to find first rejection per request
+    first_reject_pos = torch.full(
+        (batch_size,), max_spec_len + 1, dtype=torch.int64, device=device
+    )
+    first_reject_pos.scatter_reduce_(
+        0, req_indices.long(), mismatch_pos.long(), reduce="amin"
+    )
+
+    # Create output mask: positions < first_reject_pos get target_argmax
+    pos_range = torch.arange(max_spec_len, device=device).unsqueeze(0)
+    valid_mask = pos_range < first_reject_pos.unsqueeze(1)
+    valid_mask = valid_mask & (pos_range < counts.unsqueeze(1))
+
+    # Apply greedy mask if provided
+    if is_greedy is not None:
+        valid_mask = valid_mask & is_greedy.unsqueeze(1)
+
+    # Scatter target_argmax values to output
     for req_idx in range(batch_size):
-        # Check if this request uses greedy sampling
         if is_greedy is not None and not is_greedy[req_idx]:
             continue
+        n = counts[req_idx].item()
+        start = start_indices[req_idx].long().item()
+        first_rej = first_reject_pos[req_idx].item()
 
-        # Get start and end indices for this request
-        start_idx = 0 if req_idx == 0 else cu_num_draft_tokens[req_idx - 1].item()
-        end_idx = cu_num_draft_tokens[req_idx].item()
-        num_draft_tokens = end_idx - start_idx
+        # Copy tokens up to and including the first rejection
+        copy_len = min(n, first_rej + 1)
+        output_token_ids[req_idx, :copy_len] = target_argmax[start : start + copy_len]
 
-        rejected = False
-        for pos in range(num_draft_tokens):
-            if not rejected:
-                draft_token_id = draft_token_ids[start_idx + pos].item()
-                target_argmax_id = target_argmax[start_idx + pos].item()
-                output_token_ids[req_idx, pos] = target_argmax_id
-                if draft_token_id != target_argmax_id:
-                    rejected = True
-
-        if not rejected:
-            # If all tokens are accepted, append the bonus token
-            output_token_ids[req_idx, num_draft_tokens] = bonus_token_ids[req_idx, 0]
+        # Add bonus token if all accepted
+        if first_rej > n - 1:
+            output_token_ids[req_idx, n] = bonus_token_ids[req_idx, 0]
 
 
 def rejection_random_sample_pytorch(
@@ -767,46 +785,74 @@ def rejection_random_sample_pytorch(
         raise ValueError("draft_probs is required when no_draft_probs=False")
 
     batch_size = cu_num_draft_tokens.shape[0]
+    num_tokens = draft_token_ids.shape[0]
+    max_spec_len = output_token_ids.shape[1] - 1
+    device = draft_token_ids.device
 
+    # Compute counts and start indices per request
+    zero = torch.zeros(1, dtype=cu_num_draft_tokens.dtype, device=device)
+    counts = torch.diff(cu_num_draft_tokens, prepend=zero)
+    start_indices = torch.cat([zero, cu_num_draft_tokens[:-1]])
+
+    # Create request indices for each token
+    req_indices = torch.repeat_interleave(
+        torch.arange(batch_size, device=device), counts
+    )[:num_tokens]
+
+    # Create position indices within each request
+    pos_in_req = (
+        torch.arange(num_tokens, device=device) - start_indices[req_indices].long()
+    )
+
+    # Gather draft and target probabilities for the draft tokens
+    token_range = torch.arange(num_tokens, device=device)
+    if no_draft_probs:
+        draft_prob_vals = torch.ones(num_tokens, device=device)
+    else:
+        draft_prob_vals = draft_probs[token_range, draft_token_ids]  # type: ignore
+
+    target_prob_vals = target_probs[token_range, draft_token_ids]
+
+    # Compute acceptance: target_prob / draft_prob >= uniform_prob
+    # Handle division by zero
+    accept_ratio = torch.where(
+        draft_prob_vals > 0,
+        target_prob_vals / draft_prob_vals,
+        torch.zeros_like(target_prob_vals),
+    )
+    is_accepted = accept_ratio >= uniform_probs
+
+    # Find first rejection position per request
+    reject_pos = torch.where(is_accepted, max_spec_len + 1, pos_in_req)
+    first_reject_pos = torch.full(
+        (batch_size,), max_spec_len + 1, dtype=torch.int64, device=device
+    )
+    first_reject_pos.scatter_reduce_(
+        0, req_indices.long(), reject_pos.long(), reduce="amin"
+    )
+
+    # Process each request
     for req_idx in range(batch_size):
         if is_greedy is not None and is_greedy[req_idx]:
             continue
 
-        # Get start and end indices for this request
-        start_idx = 0 if req_idx == 0 else cu_num_draft_tokens[req_idx - 1].item()
-        end_idx = cu_num_draft_tokens[req_idx].item()
-        num_draft_tokens = end_idx - start_idx
+        n = counts[req_idx].item()
+        start = int(start_indices[req_idx].item())
+        first_rej = first_reject_pos[req_idx].item()
 
-        rejected = False
-        for pos in range(num_draft_tokens):
-            if not rejected:
-                draft_token_id = draft_token_ids[start_idx + pos].item()
+        # Copy accepted tokens (draft_token_ids) and first rejected (recovered)
+        for pos in range(min(n, first_rej)):
+            output_token_ids[req_idx, pos] = draft_token_ids[start + pos]
 
-                if no_draft_probs:
-                    draft_prob = 1.0
-                else:
-                    draft_prob = draft_probs[
-                        start_idx + pos,  # type: ignore[index]
-                        draft_token_id,
-                    ].item()
+        # If there was a rejection, add the recovered token
+        if first_rej < n:
+            output_token_ids[req_idx, first_rej] = recovered_token_ids[
+                start + first_rej
+            ]
 
-                target_prob = target_probs[start_idx + pos, draft_token_id].item()
-                uniform_prob = uniform_probs[start_idx + pos].item()
-
-                # Accept if target_prob / draft_prob >= uniform_prob
-                if draft_prob > 0 and target_prob / draft_prob >= uniform_prob:
-                    # Accept
-                    token_id = draft_token_id
-                else:
-                    # Reject - use recovered token
-                    rejected = True
-                    token_id = recovered_token_ids[start_idx + pos].item()
-
-                output_token_ids[req_idx, pos] = token_id
-
-        if not rejected:
-            # If all tokens are accepted, append the bonus token
-            output_token_ids[req_idx, num_draft_tokens] = bonus_token_ids[req_idx, 0]
+        # Add bonus token if all accepted
+        if first_rej >= n:
+            output_token_ids[req_idx, n] = bonus_token_ids[req_idx, 0]
 
 
 def expand_pytorch(
@@ -817,17 +863,16 @@ def expand_pytorch(
     replace_to: int,
 ):
     """PyTorch implementation of expand_kernel."""
-    batch_size = cu_num_tokens.shape[0]
+    # Compute counts per batch from cumulative sum
+    zero = torch.zeros(1, dtype=cu_num_tokens.dtype, device=cu_num_tokens.device)
+    counts = torch.diff(cu_num_tokens, prepend=zero)
 
-    for req_idx in range(batch_size):
-        start_idx = 0 if req_idx == 0 else cu_num_tokens[req_idx - 1].item()
-        end_idx = cu_num_tokens[req_idx].item()
+    # Replace values
+    vals = torch.where(input_val == replace_from, replace_to, input_val)
 
-        src_val = input_val[req_idx].item()
-        if src_val == replace_from:
-            src_val = replace_to
-
-        output[start_idx:end_idx] = src_val
+    # Expand using repeat_interleave
+    total_tokens = cu_num_tokens[-1].item() if len(cu_num_tokens) > 0 else 0
+    output[:total_tokens] = vals.repeat_interleave(counts).to(output.dtype)
 
 
 def sample_recovered_tokens_pytorch(
@@ -836,43 +881,39 @@ def sample_recovered_tokens_pytorch(
     draft_token_ids: torch.Tensor,  # [num_tokens]
     draft_probs: torch.Tensor | None,  # [num_tokens, vocab_size] or None
     target_probs: torch.Tensor,  # [num_tokens, vocab_size]
-    q: torch.Tensor,  # [batch_size, vocab_size]
+    inv_q: torch.Tensor,  # [batch_size, vocab_size] - reciprocal of q
     no_draft_probs: bool = False,
 ):
     """PyTorch implementation of sample_recovered_tokens_kernel."""
     if not no_draft_probs and draft_probs is None:
         raise ValueError("draft_probs is required when no_draft_probs=False")
 
-    batch_size = cu_num_draft_tokens.shape[0]
+    num_tokens = draft_token_ids.shape[0]
+    device = target_probs.device
 
-    eps = torch.tensor(1e-10, device=q.device, dtype=q.dtype)
+    # Map each token position to its request index
+    zero = torch.zeros(1, dtype=cu_num_draft_tokens.dtype, device=device)
+    counts = torch.diff(cu_num_draft_tokens, prepend=zero)
+    req_indices = torch.repeat_interleave(
+        torch.arange(len(counts), device=device), counts
+    )[:num_tokens]
 
-    for req_idx in range(batch_size):
-        start_idx = 0 if req_idx == 0 else cu_num_draft_tokens[req_idx - 1].item()
-        end_idx = cu_num_draft_tokens[req_idx].item()
-        num_draft_tokens = end_idx - start_idx
+    # Gather inv_q values for each token position
+    inv_q_expanded = inv_q[req_indices]  # [num_tokens, vocab_size]
 
-        q_vals = q[req_idx]
-        # Avoid division by zero: set q_vals == 0 to a small value
-        q_vals_safe = torch.where(q_vals > 0, q_vals, eps)
+    if no_draft_probs:
+        # Zero out the draft token probability for each position
+        prob = target_probs.clone()
+        token_indices = torch.arange(num_tokens, device=device)
+        prob[token_indices, draft_token_ids] = 0
+    else:
+        # Compute adjusted probability: max(target - draft, 0)
+        diff = target_probs - draft_probs  # type: ignore[operator]
+        prob = torch.clamp(diff, min=0)
 
-        for pos in range(num_draft_tokens):
-            token_idx = start_idx + pos
-
-            if no_draft_probs:
-                draft_token_id = draft_token_ids[token_idx].item()
-                # Create mask to exclude the draft token
-                prob = target_probs[token_idx].clone()
-                prob[draft_token_id] = 0
-            else:
-                draft_prob = draft_probs[token_idx]  # type: ignore[index]
-                target_prob = target_probs[token_idx]
-                diff = target_prob - draft_prob
-                prob = torch.maximum(diff, torch.zeros_like(target_prob))
-
-            # Gumbel-max trick: argmax(prob / q)
-            recovered_id = torch.argmax(prob / q_vals_safe).item()
-            output_token_ids[token_idx] = recovered_id
+    # Gumbel-max trick: argmax(prob * inv_q) equivalent to argmax(prob / q)
+    recovered_ids = torch.argmax(prob * inv_q_expanded, dim=1)
+    output_token_ids[:num_tokens] = recovered_ids.to(output_token_ids.dtype)
 
 
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
