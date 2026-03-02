@@ -1141,6 +1141,7 @@ class VllmRunner:
 
     def __exit__(self, exc_type, exc_value, traceback):
         del self.llm
+        torch._dynamo.reset()
         cleanup_dist_env_and_memory()
 
 
