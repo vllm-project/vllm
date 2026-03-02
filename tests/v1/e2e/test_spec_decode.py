@@ -244,6 +244,131 @@ def test_suffix_decoding_acceptance(
     cleanup_dist_env_and_memory()
 
 
+def test_fsm_spec_decode(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    """
+    Test FSM speculative decoding with branching paths and wildcard.
+    FSM: "hello world test" then branches to either EOS or wildcard->EOS.
+    Validates deterministic prefix, non-deterministic branching, and wildcard.
+    """
+    import tempfile
+
+    from vllm.custom_fsm import CustomFSM
+
+    test_prompts = [
+        [{"role": "user", "content": "Generate:"}],
+        [{"role": "user", "content": "Output:"}],
+    ]
+
+    # Create LLM to get tokenizer
+    llm = LLM(model=model_name, max_model_len=1024, enforce_eager=True)
+    tokenizer = llm.llm_engine.tokenizer
+
+    # Build FSM from: "hello world test"
+    # After "test": two branches (EOS or wildcard->EOS)
+    seq_tokens = tokenizer.encode("hello world test", add_special_tokens=False)
+
+    # Debug: print token sequence
+    print(f"seq_tokens (hello world test): {seq_tokens}")
+
+    fsm = CustomFSM()
+
+    # Get EOS token
+    eos_token_id = tokenizer.eos_token_id
+    print(f"EOS token ID: {eos_token_id}")
+
+    # State 0 -> hello -> State 1
+    # State 1 -> world -> State 2
+    # State 2 -> test -> State 3
+    # State 3 -> EOS -> State 4 (end)
+    #         -> wildcard -> State 5 -> EOS -> State 6 (end)
+
+    fsm.graph[0] = {seq_tokens[0]: 1}  # hello
+    fsm.graph[1] = {seq_tokens[1]: 2}  # world
+    fsm.graph[2] = {seq_tokens[2]: 3}  # test
+    # Non-deterministic: both EOS and wildcard from state 3
+    fsm.graph[3] = {eos_token_id: 4, -1: 5}  # EOS or wildcard
+    fsm.graph[5] = {eos_token_id: 6}  # EOS after wildcard
+
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        fsm_path = f.name
+    fsm.save(fsm_path)
+
+    del llm
+    torch.cuda.empty_cache()
+    cleanup_dist_env_and_memory()
+
+    # Run with FSM spec decode
+    spec_llm = LLM(
+        model=model_name,
+        max_model_len=1024,
+        enforce_eager=True,
+        disable_log_stats=False,
+        speculative_config={
+            "method": "fsm",
+            "fsm_path": fsm_path,
+            "num_speculative_tokens": 2,
+        },
+    )
+    outputs = spec_llm.chat(test_prompts, sampling_config)
+
+    # Verify generation completed
+    assert len(outputs) == len(test_prompts)
+
+    # Verify outputs follow one of the FSM paths
+    for output in outputs:
+        output_token_ids = output.outputs[0].token_ids
+        assert len(output_token_ids) > 0, "Output is empty"
+
+        # Check if output follows one of the valid FSM paths
+        # Path 1: hello -> world -> test -> EOS
+        # Path 2: hello -> world -> test -> wildcard -> EOS
+
+        # All outputs MUST start with: hello, world, test
+        assert output_token_ids[0] == seq_tokens[0], (
+            f"First token must be 'hello' ({seq_tokens[0]}), got {output_token_ids[0]}"
+        )
+        assert output_token_ids[1] == seq_tokens[1], (
+            f"Second token must be 'world' ({seq_tokens[1]}), got {output_token_ids[1]}"
+        )
+
+        # Third token MUST be "test"
+        assert output_token_ids[2] == seq_tokens[2], (
+            f"Third token must be 'test' ({seq_tokens[2]}), got {output_token_ids[2]}"
+        )
+
+        # Fourth token: either EOS or wildcard (non-deterministic branch)
+        # Path 1: hello, world, test, EOS (4 tokens)
+        # Path 2: hello, world, test, wildcard, EOS (5 tokens)
+        if len(output_token_ids) == 4:
+            # Path 1: direct EOS after test
+            assert output_token_ids[3] == tokenizer.eos_token_id, (
+                f"Path 1: Token 3 must be EOS ({tokenizer.eos_token_id}), "
+                f"got {output_token_ids[3]}"
+            )
+        elif len(output_token_ids) == 5:
+            # Path 2: wildcard then EOS
+            assert output_token_ids[4] == tokenizer.eos_token_id, (
+                f"Path 2: Token 4 must be EOS ({tokenizer.eos_token_id}), "
+                f"got {output_token_ids[4]}"
+            )
+        else:
+            raise AssertionError(f"Expected 4 or 5 tokens, got {len(output_token_ids)}")
+
+    # Verify metrics are collected
+    metrics = spec_llm.get_metrics()
+    metric_names = {m.name for m in metrics}
+    assert "vllm:spec_decode_num_draft_tokens" in metric_names
+    assert "vllm:spec_decode_num_accepted_tokens" in metric_names
+
+    del spec_llm
+    torch.cuda.empty_cache()
+    cleanup_dist_env_and_memory()
+
+
 @pytest.mark.parametrize(
     ["model_path", "expected_accuracy_threshold"],
     [

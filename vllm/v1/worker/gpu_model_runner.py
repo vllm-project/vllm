@@ -159,6 +159,8 @@ from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.spec_decode.fsm_factory import FSMComponentFactory
+from vllm.v1.spec_decode.fsm_proposer import FSMProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
@@ -457,8 +459,14 @@ class GPUModelRunner(
         # Async scheduling
         self.use_async_scheduling = self.scheduler_config.async_scheduling
 
-        # Sampler
-        self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
+        # Sampler - use FSMSampler if FSM method is enabled
+        if self.speculative_config and self.speculative_config.method == "fsm":
+            assert self.speculative_config.fsm_path is not None
+            self.sampler = FSMComponentFactory.create_sampler(
+                self.speculative_config.fsm_path, self.model_config.logprobs_mode
+            )
+        else:
+            self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
 
         self.eplb_state: EplbState | None = None
         # NOTE(yongji): flag to temporarily disable EPLB during scaling up/down
@@ -495,11 +503,14 @@ class GPUModelRunner(
                 | EagleProposer
                 | DraftModelProposer
                 | MedusaProposer
+                | FSMProposer
             )
             if self.speculative_config.method == "ngram":
                 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
                 self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.method == "fsm":
+                self.drafter = FSMComponentFactory.create_proposer(self.vllm_config)
             elif self.speculative_config.uses_draft_model():
                 self.drafter = DraftModelProposer(
                     vllm_config=self.vllm_config,
@@ -523,7 +534,14 @@ class GPUModelRunner(
                     "Unknown speculative decoding method: "
                     f"{self.speculative_config.method}"
                 )
-            self.rejection_sampler = RejectionSampler(self.sampler)
+
+            # Use FSM-specific rejection sampler for FSM method
+            if self.speculative_config.method == "fsm":
+                self.rejection_sampler = FSMComponentFactory.create_rejection_sampler(
+                    self.sampler
+                )
+            else:
+                self.rejection_sampler = RejectionSampler(self.sampler)
 
         self.num_spec_tokens = 0
         if self.speculative_config:
@@ -575,7 +593,11 @@ class GPUModelRunner(
             ),
             # We currently don't know whether a particular custom logits processor
             # uses output token ids so we set this conservatively.
-            logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
+            # Also set to True if FSM is enabled (FSM needs output tokens)
+            logitsprocs_need_output_token_ids=(
+                bool(custom_logitsprocs)
+                or FSMComponentFactory.needs_output_token_ids(self.speculative_config)
+            ),
             is_pooling_model=self.is_pooling_model,
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
         )
@@ -945,6 +967,12 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+
+        # Clean up FSM proposer states for finished requests
+        if self.speculative_config and self.speculative_config.method == "fsm":
+            assert isinstance(self.drafter, FSMProposer)
+            self.drafter.cleanup_finished_requests(scheduler_output.finished_req_ids)
+
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -4032,6 +4060,16 @@ class GPUModelRunner(
             assert isinstance(self.drafter, NgramProposer)
             draft_token_ids = self.drafter.propose(
                 sampled_token_ids,
+                self.input_batch.num_tokens_no_spec,
+                self.input_batch.token_ids_cpu,
+                slot_mappings=slot_mappings,
+            )
+        elif spec_config.method == "fsm":
+            assert isinstance(sampled_token_ids, list)
+            assert isinstance(self.drafter, FSMProposer)
+            draft_token_ids = self.drafter.propose(
+                sampled_token_ids,
+                self.input_batch.req_ids,
                 self.input_batch.num_tokens_no_spec,
                 self.input_batch.token_ids_cpu,
                 slot_mappings=slot_mappings,
