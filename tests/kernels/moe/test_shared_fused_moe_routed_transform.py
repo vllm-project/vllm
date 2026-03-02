@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Tests for SharedFusedMoE with routed_input_transform.
+Tests for FusedMoE with routed_input_transform.
 
-Verifies that applying routed_input_transform inside SharedFusedMoE
+Verifies that applying routed_input_transform inside FusedMoE
 produces the same results as applying the transform manually outside.
 """
 
@@ -13,7 +13,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
@@ -73,9 +73,9 @@ def test_routed_input_transform_inside_vs_outside(
     dist_init,
     workspace_init,
 ):
-    """Compare SharedFusedMoE with transform inside vs manually applying outside.
-    Method A (inside): SharedFusedMoE with routed_input_transform
-    Method B (outside): Manually transform, then SharedFusedMoE without transform
+    """Compare FusedMoE with transform inside vs manually applying outside.
+    Method A (inside): FusedMoE with routed_input_transform
+    Method B (outside): Manually transform, then FusedMoE without transform
     """
     torch.manual_seed(42)
 
@@ -90,8 +90,8 @@ def test_routed_input_transform_inside_vs_outside(
     routed_transform = SimpleLinear(hidden_size, latent_size, dtype)
 
     with set_current_vllm_config(vllm_config):
-        # Method A: SharedFusedMoE WITH routed_input_transform
-        moe_with_transform = SharedFusedMoE(
+        # Method A: FusedMoE WITH routed_input_transform
+        moe_with_transform = FusedMoE(
             shared_experts=shared_experts,
             routed_input_transform=routed_transform,
             num_experts=num_experts,
@@ -107,9 +107,9 @@ def test_routed_input_transform_inside_vs_outside(
             prefix="moe_with_transform",
         )
 
-        # Method B: SharedFusedMoE WITHOUT routed_input_transform
+        # Method B: FusedMoE WITHOUT routed_input_transform
         # Note: shared_experts=None because when transform is done outside,
-        moe_without_transform = SharedFusedMoE(
+        moe_without_transform = FusedMoE(
             shared_experts=None,
             routed_input_transform=None,
             num_experts=num_experts,
