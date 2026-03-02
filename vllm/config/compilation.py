@@ -890,7 +890,7 @@ class CompilationConfig:
                 )
 
         # Currently only eager and inductor backend are supported.
-        # for piecewise compilation. Custom backends are not suppported for
+        # for piecewise compilation. Custom backends are not supported for
         # piecewise compilation. Update when more backends are supported.
         if self.mode == CompilationMode.VLLM_COMPILE and self.backend not in [
             "",

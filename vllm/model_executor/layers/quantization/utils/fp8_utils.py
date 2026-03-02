@@ -255,7 +255,7 @@ def _flashinfer_fp8_blockscale_gemm_impl(
 
     This batch-size-dependent selection is essential for maintaining model accuracy.
     Benchmarks on GSM8K show a significant accuracy gap (88% vs 95%) for DeepSeek-V3.1
-    when using FlashInfer's DeepGEMM on M>=32. The M < 32 strategy fixes the accurracy
+    when using FlashInfer's DeepGEMM on M>=32. The M < 32 strategy fixes the accuracy
     drop.
 
     Args:

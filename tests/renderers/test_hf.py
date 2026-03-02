@@ -206,8 +206,8 @@ def test_resolve_chat_template_kwargs(sample_json_schema, model, expected_kwargs
 
     chat_template_kwargs = {
         # both unused
-        "unsed_kwargs_1": 123,
-        "unsed_kwargs_2": "abc",
+        "unused_kwargs_1": 123,
+        "unused_kwargs_2": "abc",
         # should not appear
         "chat_template": "{% Hello world! %}",
         "tokenize": True,

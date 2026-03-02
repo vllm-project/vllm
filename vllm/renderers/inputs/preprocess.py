@@ -1,5 +1,5 @@
 """
-Schemas and utilites for preprocessing inputs.
+Schemas and utilities for preprocessing inputs.
 """
 
 # SPDX-License-Identifier: Apache-2.0

@@ -575,7 +575,7 @@ Then you obtain the sparse embeddings like this:
 curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
      "model": "BAAI/bge-m3",
      "task": "token_classify",
-     "input": ["What is BGE M3?", "Defination of BM25"]
+     "input": ["What is BGE M3?", "Definition of BM25"]
 }'
 ```
 
@@ -591,7 +591,7 @@ You can obtain the colbert embeddings like this:
 curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
      "model": "BAAI/bge-m3",
      "task": "token_embed",
-     "input": ["What is BGE M3?", "Defination of BM25"]
+     "input": ["What is BGE M3?", "Definition of BM25"]
 }'
 ```
 

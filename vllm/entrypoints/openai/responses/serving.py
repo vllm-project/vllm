@@ -1684,9 +1684,9 @@ class OpenAIServingResponses(OpenAIServing):
                 # TODO: in streaming, we noticed this bug:
                 # https://github.com/vllm-project/vllm/issues/25697
                 await self._initialize_tool_sessions(request, context, exit_stack)
-                processer = self._process_harmony_streaming_events
+                processor = self._process_harmony_streaming_events
             else:
-                processer = self._process_simple_streaming_events
+                processor = self._process_simple_streaming_events
             # TODO Hanchen make sampling params to include the structural tag
 
             initial_response = ResponsesResponse.from_request(
@@ -1714,7 +1714,7 @@ class OpenAIServingResponses(OpenAIServing):
             )
 
             try:
-                async for event_data in processer(
+                async for event_data in processor(
                     request,
                     sampling_params,
                     result_generator,

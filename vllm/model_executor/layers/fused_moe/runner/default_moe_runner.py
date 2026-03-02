@@ -725,7 +725,7 @@ class DefaultMoERunner(MoERunner):
 
                 final_hidden_states = self.quant_method.apply(
                     layer=layer,
-                    x=x,  # The type signture of this is wrong due to the hack.
+                    x=x,  # The type signature of this is wrong due to the hack.
                     topk_weights=topk_weights,
                     topk_ids=topk_ids,
                     shared_experts_input=shared_input,

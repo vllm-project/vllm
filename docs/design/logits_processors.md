@@ -352,7 +352,7 @@ The `BatchUpdate` abstraction models the persistent batch as a list of requests,
         (s, d, UNIDIRECTIONAL or SWAP)
         ```
 
-    * If the Move specifies `UNIDRECTIONAL`:
+    * If the Move specifies `UNIDIRECTIONAL`:
 
         * The request at index `s` is moved to index `d`; index `s` becomes an empty slot
 

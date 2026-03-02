@@ -141,7 +141,7 @@ Every plugin has three parts:
     - triton ops
       Custom way doesn't work for triton ops now.
 
-7. (optional) Implement other plugable modules, such as lora, graph backend, quantization, mamba attention backend, etc.
+7. (optional) Implement other pluggable modules, such as lora, graph backend, quantization, mamba attention backend, etc.
 
 ## Compatibility Guarantee
 

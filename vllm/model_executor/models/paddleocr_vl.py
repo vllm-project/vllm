@@ -486,7 +486,7 @@ class SiglipVisionEmbeddings(nn.Module):
                 )
             (
                 batch_size,
-                squence_len,
+                sequence_len,
                 channel,
                 height,
                 width,

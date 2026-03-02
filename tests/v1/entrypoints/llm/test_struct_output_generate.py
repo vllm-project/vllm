@@ -911,7 +911,7 @@ def test_structured_output_with_structural_tag(backend: str):
         ),
     )
 
-    prompt = "Hello and repete hello 10 times, do not say anything else. Only say hello hello hello, now start"
+    prompt = "Hello and repeat hello 10 times, do not say anything else. Only say hello hello hello, now start"
     outputs = llm.generate(prompt, sampling_params=sampling_params, use_tqdm=True)
     assert outputs is not None
     for output in outputs:

@@ -44,7 +44,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
             rank_in_pack = np.zeros_like(pack_index, dtype=np.int64)
             return pack_index, rank_in_pack
 
-        # Sort and get indices in decending order
+        # Sort and get indices in descending order
         indices = np.argsort(-weight, axis=-1)
 
         pack_index = np.full((num_layers, num_groups), -1, dtype=np.int64)

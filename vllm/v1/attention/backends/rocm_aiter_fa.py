@@ -369,7 +369,7 @@ class AiterFlashAttentionMetadata:
     slot_mapping: torch.Tensor
     block_table: torch.Tensor
 
-    # prefill and deocde split
+    # prefill and decode split
     num_decodes: int
     num_decode_tokens: int
     num_prefills: int
@@ -1089,7 +1089,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 extend_tokens_slice = slice(
                     num_decode_tokens, num_decode_tokens + num_extend_tokens
                 )
-                extend_querys = query[extend_tokens_slice]
+                extend_queries = query[extend_tokens_slice]
                 extend_keys = key[extend_tokens_slice]
                 extend_values = value[extend_tokens_slice]
                 extend_outputs = output[extend_tokens_slice]
@@ -1100,7 +1100,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     v_scale = attn_metadata.v_scale
                 self.extend_forward(
                     attn_metadata=attn_metadata,
-                    query=extend_querys,
+                    query=extend_queries,
                     key=extend_keys,
                     value=extend_values,
                     key_cache=key_cache,
