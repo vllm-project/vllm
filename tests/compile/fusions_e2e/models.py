@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
+from vllm._aiter_ops import is_aiter_found_and_supported
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -22,6 +24,24 @@ FLASHINFER_ATTN = pytest.param(
 
 TRITON_ATTN = pytest.param(
     AttentionBackendCase(backend=AttentionBackendEnum.TRITON_ATTN), id="TRITON_ATTN"
+)
+
+ROCM_ATTN = pytest.param(
+    AttentionBackendCase(backend=AttentionBackendEnum.ROCM_ATTN),
+    id="ROCM_ATTN",
+    marks=pytest.mark.skipif(
+        not current_platform.is_rocm(),
+        reason="ROCm attention only for AMD",
+    ),
+)
+
+ROCM_AITER_UNIFIED_ATTN = pytest.param(
+    AttentionBackendCase(backend=AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+    id="ROCM_AITER_UNIFIED_ATTN",
+    marks=pytest.mark.skipif(
+        not is_aiter_found_and_supported(),
+        reason="ROCM_AITER_UNIFIED_ATTN only for AMD when AITER is installed",
+    ),
 )
 
 # Models
@@ -49,7 +69,6 @@ llama3_8b_fp8 = ModelFusionInfo(
 llama3_8b_fp4 = ModelFusionInfo(
     model_name="nvidia/Llama-3.1-8B-Instruct-FP4",
     matches=lambda n_layers: Matches(
-        rms_quant_fusion=0,
         act_quant_fusion=n_layers,
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
@@ -79,7 +98,6 @@ llama4_scout_fp4 = ModelFusionInfo(
     model_name="nvidia/Llama-4-Scout-17B-16E-Instruct-NVFP4",
     hf_overrides=lambda n_layers: {"text_config": {"num_hidden_layers": n_layers}},
     matches=lambda n_layers: Matches(
-        rms_quant_fusion=0,
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2,
         sequence_parallel=n_layers * 2,
