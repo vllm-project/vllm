@@ -1949,21 +1949,15 @@ class Scheduler(SchedulerInterface):
 
         return self.connector.request_finished_all_groups(request, block_ids)
 
-    def _update_waiting_for_remote_kv(self, request: Request) -> bool:
+    def _update_waiting_for_remote_kv(self, request: Request) -> None:
         """
-        KV Connector: check if the request_id is finished_recving.
-
-        The finished_recving_kv_req_ids list is populated
-        on the previous steps()'s update_from_output based
-        on the worker side connector.
+        KV Connector: update request state after async recv is finished.
 
         When the kv transfer is ready, we cache the blocks
         and the request state will be moved back to WAITING from
         WAITING_FOR_REMOTE_KV.
         """
         assert self.connector is not None
-        if request.request_id not in self.finished_recving_kv_req_ids:
-            return False
 
         if request.request_id in self.failed_recving_kv_req_ids:
             # Request had KV load failures; num_computed_tokens was already
@@ -1991,9 +1985,7 @@ class Scheduler(SchedulerInterface):
             # Update the request state for scheduling.
             request.num_computed_tokens = num_computed_tokens
 
-        # Return that we are ready.
         self.finished_recving_kv_req_ids.remove(request.request_id)
-        return True
 
     def _promote_ready_remote_kv_requests(self) -> None:
         """Move remote-KV-ready requests back to the waiting queue."""
@@ -2012,8 +2004,8 @@ class Scheduler(SchedulerInterface):
             if (
                 request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
                 and request.request_id in self.finished_recving_kv_req_ids
-                and self._update_waiting_for_remote_kv(request)
             ):
+                self._update_waiting_for_remote_kv(request)
                 if request.num_preemptions:
                     request.status = RequestStatus.PREEMPTED
                 else:
