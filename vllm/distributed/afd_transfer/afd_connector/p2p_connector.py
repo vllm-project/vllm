@@ -16,6 +16,7 @@ from vllm.distributed.parallel_state import (
     init_afd_process_group,
     init_model_parallel_group,
 )
+from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.forward_context import (
     DPMetadata,
@@ -181,11 +182,6 @@ class P2PAFDConnector(AFDConnectorBase):
         )
         logger.info(f"jcz afd_pg initialized world_rank:{self.world_rank}")
 
-        # Synchronize all processes before creating sub groups
-        # This ensures all processes have completed afd_pg initialization
-        torch.distributed.barrier(afd_pg)
-        logger.info(f"jcz after barrier world_rank:{self.world_rank}")
-
         # Construct rank lists for sub groups.
         # Each group contains one attention and one ffn rank.
         ffn_ranks = [i for i in range(ffn_size)]
@@ -205,29 +201,47 @@ class P2PAFDConnector(AFDConnectorBase):
                 sub_group_ranks.append(ranks)
                 logger.info(f"P2P group {f_idx}: {ranks} (F + {self.ratio} A's)")
 
-            logger.info("jcz before self.a2e_group")
-            self.a2e_group = init_model_parallel_group(
-                sub_group_ranks,
-                self.local_rank,
-                backend="nccl",
-                group_name="a2e",
+            # Find which subgroup this process belongs to and its rank within the group
+            my_sub_group_idx = None
+            my_rank_in_group = None
+            for group_idx, ranks in enumerate(sub_group_ranks):
+                if self.world_rank in ranks:
+                    my_sub_group_idx = group_idx
+                    my_rank_in_group = ranks.index(self.world_rank)
+                    break
+
+            assert my_sub_group_idx is not None, \
+                f"Rank {self.world_rank} not found in any subgroup"
+            my_group_size = len(sub_group_ranks[my_sub_group_idx])
+
+            # Use StatelessProcessGroup to avoid creating gloo groups
+            # Each subgroup uses a different port offset from the base afd_port
+            base_port = self.config.afd_config.afd_port
+            afd_host = self.config.afd_config.afd_host
+
+            logger.info(f"jcz before creating a2e_group with StatelessProcessGroup afd_host:{afd_host} base_port:{base_port} "
+                        f"my_sub_group_idx:{my_sub_group_idx} my_rank_in_group:{my_rank_in_group} my_group_size:{my_group_size}")
+            self.a2e_group = StatelessProcessGroup.create(
+                host=afd_host,
+                port=base_port + my_sub_group_idx + 1,  # Use offset to avoid conflict with afd_pg
+                rank=my_rank_in_group,
+                world_size=my_group_size,
             )
-            logger.info("jcz before self.e2a_group")
-            self.e2a_group = init_model_parallel_group(
-                sub_group_ranks,
-                self.local_rank,
-                backend="nccl",
-                group_name="e2a",
-            )
+            self.e2a_group = self.a2e_group  # Symmetric groups for A->F and F->A
+
+            # Store rank_in_group for later use in send/recv methods
+            self.rank_in_group = my_rank_in_group
+            self.group_size = my_group_size
+
             logger.info("jcz before a2e_pynccl")
             self.a2e_pynccl = PyNcclCommunicator(
-                group=self.a2e_group.cpu_group,
+                group=self.a2e_group,
                 device=self.local_rank,
             )
             self.a2e_comm_id = _register_comm(self.a2e_pynccl)
             logger.info("jcz before e2a_pynccl")
             self.e2a_pynccl = PyNcclCommunicator(
-                group=self.e2a_group.cpu_group,
+                group=self.e2a_group,
                 device=self.local_rank,
             )
             self.e2a_comm_id = _register_comm(self.e2a_pynccl)
@@ -277,14 +291,16 @@ class P2PAFDConnector(AFDConnectorBase):
         self,
         hidden_states: torch.Tensor,
         dst: int,
-        process_group: GroupCoordinator,
+        process_group: StatelessProcessGroup,
     ) -> None:
-        if not torch.distributed.is_initialized() or process_group.world_size == 1:
-            return []
-        assert dst < process_group.world_size, f"Invalid dst rank ({dst})"
+        world_size = process_group.world_size
+        if world_size == 1:
+            return
+
+        assert dst < world_size, f"Invalid dst rank ({dst})"
         assert not hidden_states.is_cpu, "Hidden states must be on GPU"
 
-        # Try to use PyNCCL first
+        # Get comm_id based on group type
         comm_id = None
         if process_group == self.a2e_group:
             comm_id = self.a2e_comm_id
@@ -292,23 +308,24 @@ class P2PAFDConnector(AFDConnectorBase):
             comm_id = self.e2a_comm_id
 
         if comm_id is not None:
-            # PyNCCL uses rank in group
             torch.ops.vllm.afd_p2p_send(hidden_states, dst, comm_id)
         else:
             raise RuntimeError("PyNCCL communicator is required but not available.")
-
+    
     def _recv_hidden_states(
         self,
         src: int,
-        process_group: GroupCoordinator,
+        process_group: StatelessProcessGroup,
         tensor_metadata: TensorMetadata,
         ref_tensor: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if not torch.distributed.is_initialized() or process_group.world_size == 1:
-            return {}, []
-        assert src < process_group.world_size, f"Invalid src rank ({src})"
+        world_size = process_group.world_size
+        if world_size == 1:
+            return
 
-        # Try to use PyNCCL first
+        assert src < world_size, f"Invalid src rank ({src})"
+
+        # Get comm_id based on group type
         comm_id = None
         if process_group == self.a2e_group:
             comm_id = self.a2e_comm_id
@@ -316,7 +333,6 @@ class P2PAFDConnector(AFDConnectorBase):
             comm_id = self.e2a_comm_id
 
         if comm_id is not None:
-            # PyNCCL uses rank in group
             # Use ref_tensor to capture dynamic shapes (e.g. batch size) if provided
             size = list(tensor_metadata.size)
             if ref_tensor is not None:
@@ -406,9 +422,12 @@ class P2PAFDConnector(AFDConnectorBase):
         """
         Called by ATTN side to send intermediate tensors
         generated by ATTN instances to FFN.
+
+        For asymmetric A/F: Each A sends to F (rank 0).
         """
         try:
-            dst = (self.a2e_group.rank_in_group - 1) % self.a2e_group.world_size
+            # F is always rank 0 in the subgroup
+            dst = 0
             self._send_hidden_states(hidden_states, dst, self.a2e_group)
         except Exception as e:
             raise RuntimeError(f"Communication error: {e}")
@@ -417,9 +436,12 @@ class P2PAFDConnector(AFDConnectorBase):
         """
         Called by the ATTN side to receive MOE output intermediate tensors,
         possibly dispatching from the receiver to other GPUs.
+
+        For asymmetric A/F: Each A receives from F (rank 0).
         """
         ubatch_idx = get_forward_context().afd_metadata.afd_stage_idx
-        src = (self.e2a_group.rank_in_group + 1) % self.e2a_group.world_size
+        # F is always rank 0 in the subgroup
+        src = 0
         hidden_states = self._recv_hidden_states(
             src,
             self.e2a_group,
@@ -440,32 +462,48 @@ class P2PAFDConnector(AFDConnectorBase):
     ) -> None:
         """
         Called by FFN side to send intermediate tensors generated by FFN
-        instances back to the sender (should be the same GPU as source).
+        instances back to all A's in the subgroup.
+
+        For asymmetric A/F: F (rank 0) sends to all A's (ranks 1 to ratio).
         """
-        dst = (self.e2a_group.rank_in_group + 1) % self.e2a_group.world_size
-        self._send_hidden_states(hidden_states, dst, self.e2a_group)
+        # Send to all A's in the subgroup (ranks 1 to group_size-1)
+        for dst in range(1, self.group_size):
+            self._send_hidden_states(hidden_states, dst, self.e2a_group)
 
     def recv_attn_output(
         self, ubatch_idx: int = 0
     ) -> tuple[torch.Tensor, AFDConnectorMetadata]:
         """
-        Called by the FFN side to receive intermediate tensors from ATTN.
+        Called by the FFN side to receive intermediate tensors from all ATTN's.
         Handles receiving and possibly dispatching tensors.
         When graph capturing, recv uses fixed pre-allocated buffers so the graph
         can be replayed without dynamic allocation.
+
+        For asymmetric A/F: F (rank 0) receives from all A's (ranks 1 to ratio)
+        and concatenates them along dimension 0.
         """
-        src = (self.a2e_group.rank_in_group - 1) % self.a2e_group.world_size
-        ref_tensor = None
-        if not self.config.model_config.enforce_eager:
-            meta = self._tensor_metadata_list[ubatch_idx]
-            buffer_key = (ubatch_idx, tuple(meta.size))
-            ref_tensor = self._recv_attn_buffers.get(buffer_key)
-        hidden_states = self._recv_hidden_states(
-            src,
-            self.a2e_group,
-            self._tensor_metadata_list[ubatch_idx],
-            ref_tensor=ref_tensor,
-        )
+        hidden_states_list = []
+
+        # Receive from all A's in the subgroup (ranks 1 to group_size-1)
+        for src in range(1, self.group_size):
+            ref_tensor = None
+            if not self.config.model_config.enforce_eager:
+                meta = self._tensor_metadata_list[ubatch_idx]
+                buffer_key = (ubatch_idx, tuple(meta.size))
+                ref_tensor = self._recv_attn_buffers.get(buffer_key)
+            hidden_states = self._recv_hidden_states(
+                src,
+                self.a2e_group,
+                self._tensor_metadata_list[ubatch_idx],
+                ref_tensor=ref_tensor,
+            )
+            hidden_states_list.append(hidden_states)
+
+        # Concatenate all received tensors along dimension 0
+        if len(hidden_states_list) > 1:
+            hidden_states = torch.cat(hidden_states_list, dim=0)
+        else:
+            hidden_states = hidden_states_list[0]
 
         # TODO(jcz): remove this after.
         from types import SimpleNamespace
