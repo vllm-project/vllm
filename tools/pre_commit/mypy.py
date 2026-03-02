@@ -41,7 +41,6 @@ EXCLUDE = [
     # TODO: Remove these entries after fixing mypy errors.
     "vllm/benchmarks",
     "vllm/config",
-    "vllm/device_allocator",
     "vllm/reasoning",
     "vllm/tool_parser",
 ]
