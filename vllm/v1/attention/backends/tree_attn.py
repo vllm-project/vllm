@@ -11,6 +11,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -388,6 +389,28 @@ class TreeAttentionImpl(AttentionImpl):
         num_kv_heads = key_cache.shape[2]
         seq_threshold_3D = 128 // num_kv_heads
         split_launch = False
+        num_par_softmax_segments = 16
+        head_size_padded = next_power_of_2(self.head_size)
+        softmax_segm_output = torch.empty(
+            (
+                seq_threshold_3D,
+                self.num_heads,
+                num_par_softmax_segments,
+                head_size_padded,
+            ),
+            dtype=torch.float32,
+            device=query.device,
+        )
+        softmax_segm_max = torch.empty(
+            (seq_threshold_3D, self.num_heads, num_par_softmax_segments),
+            dtype=torch.float32,
+            device=query.device,
+        )
+        softmax_segm_expsum = torch.empty(
+            (seq_threshold_3D, self.num_heads, num_par_softmax_segments),
+            dtype=torch.float32,
+            device=query.device,
+        )
         if prefill_meta := attn_metadata.prefill_metadata:
             unified_attention(
                 q=query[num_decode_tokens:num_actual_tokens],
@@ -411,6 +434,10 @@ class TreeAttentionImpl(AttentionImpl):
                 num_decodes=0,
                 seq_threshold_3D=seq_threshold_3D,
                 split_launch=split_launch,
+                num_par_softmax_segments=num_par_softmax_segments,
+                softmax_segm_output=softmax_segm_output,
+                softmax_segm_max=softmax_segm_max,
+                softmax_segm_expsum=softmax_segm_expsum,
             )
 
         if decode_meta := attn_metadata.decode_metadata:
@@ -437,5 +464,9 @@ class TreeAttentionImpl(AttentionImpl):
                 num_decodes=attn_metadata.num_decodes,
                 seq_threshold_3D=seq_threshold_3D,
                 split_launch=split_launch,
+                num_par_softmax_segments=num_par_softmax_segments,
+                softmax_segm_output=softmax_segm_output,
+                softmax_segm_max=softmax_segm_max,
+                softmax_segm_expsum=softmax_segm_expsum,
             )
         return output

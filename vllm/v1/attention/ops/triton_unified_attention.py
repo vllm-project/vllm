@@ -926,10 +926,10 @@ def unified_attention(
     num_decodes,
     seq_threshold_3D,
     split_launch,
-    num_par_softmax_segments=None,
-    softmax_segm_output=None,
-    softmax_segm_max=None,
-    softmax_segm_expsum=None,
+    num_par_softmax_segments,
+    softmax_segm_output,
+    softmax_segm_max,
+    softmax_segm_expsum,
     alibi_slopes=None,
     output_scale=None,
     qq_bias=None,
@@ -1086,18 +1086,9 @@ def unified_attention(
         # Batch contains decodes that are not processed in unified fashion
 
         # Launch the 2D kernel if
-        # 1. No intermediate tiled softmax buffers have been allocated, or
-        # 2. The number of sequences exceeds the configured threshold
-        # 3. Batch invariance is enabled
-        if (
-            seq_threshold_3D is None
-            or num_par_softmax_segments is None
-            or softmax_segm_output is None
-            or softmax_segm_max is None
-            or softmax_segm_expsum is None
-            or num_decodes > seq_threshold_3D
-            or is_batch_invariant
-        ):
+        # 1. The number of sequences exceeds the configured threshold
+        # 2. Batch invariance is enabled
+        if num_decodes > seq_threshold_3D or is_batch_invariant:
             kernel_unified_attention_2d[
                 (
                     num_decodes,
