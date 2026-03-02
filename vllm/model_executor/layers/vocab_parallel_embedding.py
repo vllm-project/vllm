@@ -66,10 +66,18 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
+        weight = layer.weight
+        # Support FP8 weight storage: cast to compute dtype for GEMM
+        if weight.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            weight = weight.to(x.dtype)
+        return dispatch_unquantized_gemm()(layer, x, weight, bias)
 
     def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
-        return F.embedding(input_, layer.weight)
+        output = F.embedding(input_, layer.weight)
+        # Support FP8 weight storage: cast to compute dtype after lookup
+        if output.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            output = output.to(torch.bfloat16)
+        return output
 
 
 def pad_vocab_size(vocab_size: int, pad_to: int = DEFAULT_VOCAB_PADDING_SIZE) -> int:
@@ -428,6 +436,14 @@ class VocabParallelEmbedding(CustomOp):
             if output_dim is not None:
                 shape[output_dim] = self.num_embeddings_per_partition
             param.materialize(tuple(shape), dtype=loaded_weight.dtype)
+
+        # If loaded weight is FP8, cast parameter to match so FP8 is
+        # preserved in memory (saves VRAM for e.g. embed_tokens).
+        if (
+            loaded_weight.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
+            and param.data.dtype != loaded_weight.dtype
+        ):
+            param.data = torch.empty_like(param.data, dtype=loaded_weight.dtype)
 
         # If parameter does not have output dim, then it should
         # be copied onto all gpus (e.g. g_idx for act_order gptq).
