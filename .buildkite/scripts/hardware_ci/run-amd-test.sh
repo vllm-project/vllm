@@ -99,6 +99,15 @@ is_multi_node() {
   return 1
 }
 
+handle_pytest_exit() {
+  local exit_code=$1
+  if [ "$exit_code" -eq 5 ]; then
+    echo "Pytest exit code 5 (no tests collected) - treating as success."
+    exit 0
+  fi
+  exit "$exit_code"
+}
+
 ###############################################################################
 # Pytest marker/keyword re-quoting
 #
@@ -462,12 +471,7 @@ if is_multi_node "$commands"; then
     /bin/bash -c "${composite_command}"
     exit_code=$?
     cleanup_network
-    # Pytest exit code 5 means no tests were collected - treat as success
-    if [ "$exit_code" -eq 5 ]; then
-      echo "Pytest exit code 5 (no tests collected) - treating as success."
-      exit 0
-    fi
-    exit "$exit_code"
+    handle_pytest_exit "$exit_code"
   else
     echo "Multi-node job detected but failed to parse bracket command syntax."
     echo "Expected format: prefix ; [node0_cmd1, node0_cmd2] && [node1_cmd1, node1_cmd2]"
@@ -496,10 +500,5 @@ else
     /bin/bash -c "${commands}"
 
   exit_code=$?
-  # Pytest exit code 5 means no tests were collected - treat as success
-  if [ "$exit_code" -eq 5 ]; then
-    echo "Pytest exit code 5 (no tests collected) - treating as success."
-    exit 0
-  fi
-  exit "$exit_code"
+  handle_pytest_exit "$exit_code"
 fi
