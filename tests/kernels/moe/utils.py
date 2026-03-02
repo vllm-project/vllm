@@ -33,6 +33,16 @@ from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.utils.math_utils import round_up
 
 
+def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
+    """Fold weights to adjacent locations for Triton MoE / SwiGLU kernel layout."""
+    shape = w.shape
+    n = shape[-1]
+    first = w[..., : n // 2]
+    second = w[..., n // 2 :]
+    stacked = torch.stack((first, second), dim=-1)
+    return stacked.reshape(shape)
+
+
 def make_dummy_moe_config(
     num_experts: int = 1,
     experts_per_token: int = 1,
