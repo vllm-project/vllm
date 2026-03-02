@@ -45,12 +45,12 @@ from vllm.utils.async_utils import merge_async_iterators
 
 from .io_processor import AnyPoolingRequest, AnyPoolingResponse, PoolingIOProcessor
 
-RequestT = TypeVar("RequestT", bound=AnyPoolingRequest)
+PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
 
 
 @dataclass(kw_only=True)
-class ServeContext(Generic[RequestT]):
-    request: RequestT
+class PoolingServeContext(Generic[PoolingRequestT]):
+    request: PoolingRequestT
     raw_request: Request | None = None
     model_name: str
     request_id: str
@@ -111,7 +111,7 @@ class PoolingServing:
 
     async def __call__(
         self,
-        request: OpenAIBaseModel,
+        request: AnyPoolingRequest,
         raw_request: Request,
     ):
         try:
@@ -122,7 +122,7 @@ class PoolingServing:
 
             await self._check_model(request, raw_request)
 
-            ctx = ServeContext(
+            ctx = PoolingServeContext(
                 request=request,
                 raw_request=raw_request,
                 model_name=model_name,
@@ -130,7 +130,7 @@ class PoolingServing:
             )
 
             self._validate_request(ctx)
-            ctx.lora_request = self._maybe_get_adapters(ctx.request)
+            self._maybe_get_adapters(ctx)
             await self._preprocess(ctx)
             await self._prepare_generators(ctx)
             await self._collect_batch(ctx)
@@ -149,7 +149,7 @@ class PoolingServing:
 
     async def _preprocess(
         self,
-        ctx: ServeContext,
+        ctx: PoolingServeContext,
     ):
         ctx.engine_prompts = await self.io_processor.pre_process(ctx.request)
 
@@ -169,7 +169,7 @@ class PoolingServing:
 
     async def _prepare_generators(
         self,
-        ctx: ServeContext,
+        ctx: PoolingServeContext,
     ):
         """Schedule the request and get the result generator."""
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
@@ -207,7 +207,7 @@ class PoolingServing:
 
     async def _collect_batch(
         self,
-        ctx: ServeContext,
+        ctx: PoolingServeContext,
     ) -> ErrorResponse | None:
         """Collect batch results from the result generator."""
 
@@ -225,7 +225,7 @@ class PoolingServing:
 
     async def _build_response(
         self,
-        ctx: ServeContext,
+        ctx: PoolingServeContext,
     ) -> AnyPoolingResponse:
         raise NotImplementedError
 
@@ -248,7 +248,7 @@ class PoolingServing:
 
     async def _check_model(
         self,
-        request: AnyRequest,
+        request: AnyPoolingRequest,
         raw_request: Request,
     ) -> ErrorResponse | None:
         error_response = None
@@ -271,7 +271,7 @@ class PoolingServing:
                 raise ValueError(load_result.error.message)
         return None
 
-    def _validate_request(self, ctx: ServeContext) -> None:
+    def _validate_request(self, ctx: PoolingServeContext) -> None:
         truncate_prompt_tokens = getattr(ctx.request, "truncate_prompt_tokens", None)
 
         if (
@@ -302,18 +302,19 @@ class PoolingServing:
 
     def _maybe_get_adapters(
         self,
-        request: AnyRequest,
+        ctx: PoolingServeContext,
         supports_default_mm_loras: bool = False,
-    ) -> LoRARequest | None:
+    ):
+        request = ctx.request
         if request.model in self.models.lora_requests:
-            return self.models.lora_requests[request.model]
+            ctx.lora_request = self.models.lora_requests[request.model]
 
         # Currently only support default modality specific loras
         # if we have exactly one lora matched on the request.
         if supports_default_mm_loras:
             default_mm_lora = self._get_active_default_mm_loras(request)
             if default_mm_lora is not None:
-                return default_mm_lora
+                ctx.lora_request = default_mm_lora
 
         if self._is_model_supported(request.model):
             return None
@@ -321,7 +322,9 @@ class PoolingServing:
         # if _check_model has been called earlier, this will be unreachable
         raise ValueError(f"The model `{request.model}` does not exist.")
 
-    def _get_active_default_mm_loras(self, request: AnyRequest) -> LoRARequest | None:
+    def _get_active_default_mm_loras(
+        self, request: AnyPoolingRequest
+    ) -> LoRARequest | None:
         """Determine if there are any active default multimodal loras."""
         # TODO: Currently this is only enabled for chat completions
         # to be better aligned with only being enabled for .generate
@@ -344,7 +347,7 @@ class PoolingServing:
             return default_mm_loras.pop()
         return None
 
-    def _get_message_types(self, request: AnyRequest) -> set[str]:
+    def _get_message_types(self, request: AnyPoolingRequest) -> set[str]:
         """Retrieve the set of types from message content dicts up
         until `_`; we use this to match potential multimodal data
         with default per modality loras.
@@ -379,7 +382,7 @@ class PoolingServing:
         if self.request_logger is None:
             return
 
-        components = self._extract_prompt_components(inputs)
+        components = extract_prompt_components(self.model_config, inputs)
 
         self.request_logger.log_inputs(
             request_id,
@@ -389,6 +392,3 @@ class PoolingServing:
             params=params,
             lora_request=lora_request,
         )
-
-    def _extract_prompt_components(self, prompt: PromptType | ProcessorInputs):
-        return extract_prompt_components(self.model_config, prompt)
