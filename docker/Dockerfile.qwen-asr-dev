@@ -1,0 +1,12 @@
+FROM vllm/vllm-openai:latest
+
+RUN pip install --no-cache-dir "vllm[audio]"
+
+COPY vllm/model_executor/models/qwen3_asr.py /tmp/qwen3_asr.py
+COPY vllm/model_executor/models/qwen3_asr_realtime.py /tmp/qwen3_asr_realtime.py
+
+RUN DEST_DIR=$(python3 -c "import vllm.model_executor.models.qwen3_asr as m; import os; print(os.path.dirname(m.__file__))" 2>/dev/null | tail -1) \
+    && cp /tmp/qwen3_asr.py "$DEST_DIR/qwen3_asr.py" \
+    && cp /tmp/qwen3_asr_realtime.py "$DEST_DIR/qwen3_asr_realtime.py"
+
+WORKDIR /vllm-workspace
