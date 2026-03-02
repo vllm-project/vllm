@@ -229,6 +229,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         elif isinstance(layer, VocabParallelEmbedding) and getattr(
             self, "nvfp4_embed", False
         ):
+            assert isinstance(self, ModelOptNvFp4Config)
             return ModelOptNvFp4EmbeddingMethod(self)
 
         return None
