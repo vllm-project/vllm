@@ -4,11 +4,7 @@ import time
 from collections.abc import AsyncGenerator, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import (
-    ClassVar,
-    Generic,
-    TypeVar,
-)
+from typing import ClassVar, Generic, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict
@@ -146,7 +142,7 @@ class PoolingServing:
         self,
         ctx: PoolingServeContext,
     ):
-        ctx.engine_prompts = await self.io_processor.pre_process(ctx.request)
+        ctx.engine_prompts = await self.io_processor.pre_process_async(ctx.request)
 
     async def _prepare_generators(
         self,
