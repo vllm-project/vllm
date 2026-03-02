@@ -910,15 +910,15 @@ def unified_attention(
     q_descale,
     k_descale,
     v_descale,
+    seq_threshold_3D,
+    num_par_softmax_segments,
+    softmax_segm_output,
+    softmax_segm_max,
+    softmax_segm_expsum,
     BLOCK_M=None,
     BLOCK_Q=None,
     num_q_blocks=None,
     block_q_seq_boundaries_tensor=None,
-    seq_threshold_3D=None,
-    num_par_softmax_segments=None,
-    softmax_segm_output=None,
-    softmax_segm_max=None,
-    softmax_segm_expsum=None,
     alibi_slopes=None,
     output_scale=None,
     qq_bias=None,
@@ -983,9 +983,6 @@ def unified_attention(
         block_q_seq_boundaries_tensor[1:].floor_divide_(BLOCK_Q)
         block_q_seq_boundaries_tensor.cumsum_(dim=0)
         num_q_blocks = block_q_seq_boundaries_tensor[-1]
-
-    if seq_threshold_3D is None:
-        seq_threshold_3D = 128 // num_kv_heads
 
     # Tile sizes for prefill and decode. Gemma3 models use optimized values.
     # Note: tile size must be at least 32 for fp8 (element_size == 1).

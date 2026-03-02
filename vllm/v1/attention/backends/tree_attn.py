@@ -11,6 +11,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -69,6 +70,10 @@ class TreeAttentionBackend(AttentionBackend):
         return False
 
 
+# Number of parallel tiled softmax segments
+NUM_PAR_SOFTMAX_SEGMENTS = 16
+
+
 @dataclass
 class TreeAttentionMetadata:
     num_actual_tokens: int  # Number of tokens excluding padding.
@@ -78,6 +83,11 @@ class TreeAttentionMetadata:
     seq_lens: torch.Tensor
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
+    seq_threshold_3D: int
+    num_par_softmax_segments: int
+    softmax_segm_output: torch.Tensor
+    softmax_segm_max: torch.Tensor
+    softmax_segm_expsum: torch.Tensor
 
     num_prefill_tokens: int = 0
     num_decode_tokens: int = 0
@@ -112,6 +122,11 @@ class TreeAttentionMetadata:
             seq_lens=kv_seqlens,
             block_table=self.block_table[self.num_decodes :],
             slot_mapping=self.slot_mapping[self.num_decode_tokens :],
+            seq_threshold_3D=self.seq_threshold_3D,
+            num_par_softmax_segments=self.num_par_softmax_segments,
+            softmax_segm_output=self.softmax_segm_output,
+            softmax_segm_max=self.softmax_segm_max,
+            softmax_segm_expsum=self.softmax_segm_expsum,
         )
         return self._cached_prefill_metadata
 
@@ -138,6 +153,11 @@ class TreeAttentionMetadata:
             block_table=self.block_table[: self.num_decodes],
             slot_mapping=self.slot_mapping[: self.num_decode_tokens],
             tree_attn_bias=self.tree_attn_bias,
+            seq_threshold_3D=self.seq_threshold_3D,
+            num_par_softmax_segments=self.num_par_softmax_segments,
+            softmax_segm_output=self.softmax_segm_output,
+            softmax_segm_max=self.softmax_segm_max,
+            softmax_segm_expsum=self.softmax_segm_expsum,
         )
         return self._cached_decode_metadata
 
@@ -153,6 +173,13 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
         self.block_size = kv_cache_spec.block_size
+
+        model_config = vllm_config.model_config
+        self.num_heads_q = model_config.get_num_attention_heads(
+            vllm_config.parallel_config
+        )
+        self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
+        self.headdim = model_config.get_head_size()
 
         spec_config = vllm_config.speculative_config
         spec_token_tree: str | None = None
@@ -171,6 +198,32 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         )
 
         self.reorder_batch_threshold = self.tree_attn_bias.shape[0]
+
+        # Pre-allocate softmax segment buffers (matching triton_attn.py).
+        self.seq_threshold_3D = 128 // self.num_heads_kv
+
+        self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
+        headdim_padded = next_power_of_2(self.headdim)
+        self.softmax_segm_output = torch.empty(
+            (
+                self.seq_threshold_3D,
+                self.num_heads_q,
+                self.num_par_softmax_segments,
+                headdim_padded,
+            ),
+            dtype=torch.float32,
+            device=device,
+        )
+        self.softmax_segm_max = torch.empty(
+            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            dtype=torch.float32,
+            device=device,
+        )
+        self.softmax_segm_expsum = torch.empty(
+            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            dtype=torch.float32,
+            device=device,
+        )
 
     def build(
         self,
@@ -206,6 +259,11 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
             block_table=block_table,
             slot_mapping=slot_mapping,
             tree_attn_bias=self.tree_attn_bias,
+            seq_threshold_3D=self.seq_threshold_3D,
+            num_par_softmax_segments=self.num_par_softmax_segments,
+            softmax_segm_output=self.softmax_segm_output,
+            softmax_segm_max=self.softmax_segm_max,
+            softmax_segm_expsum=self.softmax_segm_expsum,
         )
 
     def build_for_drafting(
@@ -404,6 +462,11 @@ class TreeAttentionImpl(AttentionImpl):
                 q_descale=None,  # Not supported
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
+                seq_threshold_3D=attn_metadata.seq_threshold_3D,
+                num_par_softmax_segments=attn_metadata.num_par_softmax_segments,
+                softmax_segm_output=attn_metadata.softmax_segm_output,
+                softmax_segm_max=attn_metadata.softmax_segm_max,
+                softmax_segm_expsum=attn_metadata.softmax_segm_expsum,
             )
 
         if decode_meta := attn_metadata.decode_metadata:
@@ -426,5 +489,10 @@ class TreeAttentionImpl(AttentionImpl):
                 q_descale=None,  # Not supported
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
+                seq_threshold_3D=attn_metadata.seq_threshold_3D,
+                num_par_softmax_segments=attn_metadata.num_par_softmax_segments,
+                softmax_segm_output=attn_metadata.softmax_segm_output,
+                softmax_segm_max=attn_metadata.softmax_segm_max,
+                softmax_segm_expsum=attn_metadata.softmax_segm_expsum,
             )
         return output
