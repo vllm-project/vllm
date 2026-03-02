@@ -80,6 +80,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
+    firered_audio="FireRedAudioConfig",
     flex_olmo="FlexOlmoConfig",
     funaudiochat="FunAudioChatConfig",
     hunyuan_vl="HunYuanVLConfig",
