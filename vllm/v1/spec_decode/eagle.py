@@ -48,6 +48,7 @@ from vllm.v1.spec_decode.utils import (
     copy_and_expand_eagle_inputs_kernel,
     eagle_prepare_inputs_padded_kernel,
     eagle_prepare_next_token_padded_kernel,
+    eagle_step_update_slot_mapping_and_metadata,
     extend_all_queries_by_N,
 )
 from vllm.v1.utils import CpuGpuBuffer
@@ -563,41 +564,45 @@ class SpecDecodeBaseProposer:
             common_attn_metadata._seq_lens_cpu = None
             common_attn_metadata._num_computed_tokens_cpu = None
 
+        block_size = attn_metadata_builder.kv_cache_spec.block_size
         for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
             input_ids = draft_token_ids_list[-1].int()
+            # Use fused kernel for slot mapping and metadata updates.
+            # Write clamped positions directly into the positions buffer to
+            # avoid an extra D2D copy for the common (non-mrope) case.
+            positions_1d = positions[0] if self.uses_mrope else positions
             if self.uses_mrope:
-                positions += 1
-                # NOTE(woosuk): We should handle the case where the draft model
-                # generates tokens beyond the max model length.
-                # Since it is complex to remove such requests from the batch,
-                # we keep them in the batch but adjust the position ids
-                # and slot mappings to avoid the
-                # out-of-range access during the model execution.
-                # The draft tokens generated with this adjustment
-                # should be ignored.
-                exceeds_max_model_len = positions[0] >= self.max_model_len
-                # Mask out the position ids that exceed the max model length.
-                # Otherwise, we may get out-of-range error in RoPE.
-                clamped_positions = torch.where(
-                    exceeds_max_model_len.unsqueeze(0),
-                    torch.zeros_like(positions),
-                    positions,
-                )
+                out_pos = self.mrope_positions[0, :batch_size]
+            elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
+                out_pos = self.xdrope_positions[0, :batch_size]
             else:
-                positions += 1
-                exceeds_max_model_len = positions >= self.max_model_len
-                clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
-            # For data integrity when async scheduling, we shouldn't use in place
-            # operations in case they are modified in next step's `prepare_input`
-            # of main model.
-            # Increment the sequence lengths.
-            common_attn_metadata.seq_lens += 1
-            # For the requests that exceed the max model length, we set the
-            # sequence length to 1 to minimize their overheads in attention.
-            common_attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
+                out_pos = self.positions[:batch_size]
+            eagle_step_update_slot_mapping_and_metadata(
+                positions_1d=positions_1d,
+                block_table_tensor=common_attn_metadata.block_table_tensor,
+                seq_lens=common_attn_metadata.seq_lens,
+                block_size=block_size,
+                max_model_len=self.max_model_len,
+                out_clamped_positions=out_pos,
+                out_slot_mapping=self._slot_mapping_buffer[:input_batch_size],
+                input_batch_size=input_batch_size,
+            )
+            common_attn_metadata.slot_mapping = self._slot_mapping_buffer[:batch_size]
+            if self.uses_mrope:
+                self.mrope_positions[1:, :batch_size] = self.mrope_positions[
+                    0, :batch_size
+                ]
+                positions = self.mrope_positions[:, :batch_size]
+            elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
+                self.xdrope_positions[1:, :batch_size] = self.xdrope_positions[
+                    0, :batch_size
+                ]
+                positions = self.xdrope_positions[0, :batch_size]
+            else:
+                positions = self.positions[:batch_size]
             # Increment the maximum sequence length. We increment max_seq_len
             # unconditionally even though some seq_lens may have been capped above,
             # as max_seq_len serves as an upper bound for sequence lengths.
@@ -612,32 +617,6 @@ class SpecDecodeBaseProposer:
             if common_attn_metadata._num_computed_tokens_cpu is not None:
                 common_attn_metadata._num_computed_tokens_cpu += 1
 
-            # Compute the slot mapping.
-            block_size = attn_metadata_builder.kv_cache_spec.block_size
-            if self.uses_mrope:
-                # all dimensions of positions are the same
-                block_numbers = clamped_positions[0] // block_size
-            else:
-                block_numbers = clamped_positions // block_size
-            block_ids = common_attn_metadata.block_table_tensor.gather(
-                dim=1, index=block_numbers.view(-1, 1)
-            )
-            block_ids = block_ids.view(-1)
-            if self.uses_mrope:
-                common_attn_metadata.slot_mapping = (
-                    block_ids * block_size + clamped_positions[0] % block_size
-                )
-            else:
-                common_attn_metadata.slot_mapping = (
-                    block_ids * block_size + clamped_positions % block_size
-                )
-            # Mask out the slot mappings that exceed the max model length.
-            # Otherwise, the KV cache will be inadvertently updated with the
-            # padding tokens.
-            common_attn_metadata.slot_mapping.masked_fill_(
-                exceeds_max_model_len, PADDING_SLOT_ID
-            )
-
             # Rebuild attention metadata
             attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
                 common_attn_metadata=common_attn_metadata, draft_index=token_index + 1
@@ -647,7 +626,6 @@ class SpecDecodeBaseProposer:
 
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
-            self._set_positions(batch_size, clamped_positions)
             self.hidden_states[:batch_size] = hidden_states
             if self.supports_mm_inputs:
                 self.inputs_embeds[:batch_size] = self.model.embed_input_ids(input_ids)
@@ -667,15 +645,18 @@ class SpecDecodeBaseProposer:
             if self.pass_hidden_states_to_model:
                 model_kwargs["hidden_states"] = self.hidden_states[:input_batch_size]
 
+            slot_view = self._slot_mapping_buffer[:input_batch_size]
+            slot_mapping = {
+                name: slot_view
+                for name in self.attn_layer_names + self.indexer_layer_names
+            }
             with set_forward_context(
                 per_layer_attn_metadata,
                 self.vllm_config,
                 num_tokens=input_batch_size,
                 num_tokens_across_dp=batch_size_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
-                slot_mapping=self._get_slot_mapping(
-                    input_batch_size, common_attn_metadata.slot_mapping
-                ),
+                slot_mapping=slot_mapping,
             ):
                 ret_hidden_states = self.model(**model_kwargs)
                 if not self.model_returns_tuple():
