@@ -102,11 +102,6 @@ class SpeculativeConfig:
     will use the default version."""
 
     # Advanced control
-    disable_padded_drafter_batch: bool = False
-    """Disable input padding for speculative decoding. If set to True,
-    speculative input batches can contain sequences of different lengths,
-    which may only be supported by certain attention backends. This currently
-    only affects the EAGLE method of speculation."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to

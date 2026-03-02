@@ -175,7 +175,6 @@ class SpecDecodeBaseProposer:
         )
 
         if self.needs_extra_input_slots:
-            self._raise_if_padded_drafter_batch_disabled()
             self._raise_if_multimodal()
             self._raise_if_mrope()
 
@@ -273,14 +272,6 @@ class SpecDecodeBaseProposer:
         self.tree_draft_pos_offsets = torch.arange(
             1, len(self.tree_choices) + 1, device=device, dtype=torch.int32
         ).repeat(max_batch_size, 1)
-
-    def _raise_if_padded_drafter_batch_disabled(self):
-        if self.speculative_config.disable_padded_drafter_batch:
-            raise NotImplementedError(
-                "Speculative Decoding with draft models or parallel drafting only "
-                "supports padded drafter batch. Please unset "
-                "disable_padded_drafter_batch in the speculative_config."
-            )
 
     def _raise_if_multimodal(self):
         if self.supports_mm_inputs:
@@ -834,39 +825,6 @@ class SpecDecodeBaseProposer:
     def model_returns_tuple(self) -> bool:
         return self.method not in ("mtp", "draft_model")
 
-    def prepare_next_token_ids_cpu(
-        self,
-        sampled_token_ids: list[list[int]],
-        requests: dict[str, CachedRequestState],
-        gpu_input_batch: InputBatch,
-        num_scheduled_tokens: dict[str, int],
-    ) -> torch.Tensor:
-        """
-        This function is used to prepare the inputs for speculative decoding.
-        It calculates the next token ids for each request based on the sampled
-        token ids from the CPU. If a request has no sampled token ids (e.g.,
-        during the initial decoding steps), it falls back to using the request
-        state to get the next token id.
-        """
-        req_ids = gpu_input_batch.req_ids
-        next_token_ids: list[int] = []
-        for i, token_ids in enumerate(sampled_token_ids):
-            if token_ids:
-                # Common case.
-                next_token_id = token_ids[-1]
-            else:
-                # Partial prefill (rare case).
-                # Get the next token id from the request state.
-                req_id = req_ids[i]
-                req_state = requests[req_id]
-                seq_len = req_state.num_computed_tokens + num_scheduled_tokens[req_id]
-                next_token_id = req_state.get_token_id(seq_len)
-            next_token_ids.append(next_token_id)
-        next_token_ids = torch.tensor(
-            next_token_ids, dtype=torch.int32, device=self.input_ids.device
-        )
-        return next_token_ids
-
     def prepare_next_token_ids_padded(
         self,
         common_attn_metadata: CommonAttentionMetadata,
@@ -1158,108 +1116,6 @@ class SpecDecodeBaseProposer:
             level_num_drafts = self.cu_drafts_per_level[level + 1] - total_num_drafts
             total_num_drafts = self.cu_drafts_per_level[level + 1]
         return draft_token_ids_list
-
-    def prepare_inputs(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        sampled_token_ids: list[list[int]],
-        num_draft_tokens: list[int],
-    ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
-        """
-        This function is used to prepare the inputs for speculative decoding.
-        It updates to the common_attn_metadata to account for the rejected
-        tokens (and newly sampled tokens). It also returns the token indices
-        of the tokens that should be fed to the speculator.
-        """
-        # E.g.
-        #  common_attn_metadata.query_start_loc{_cpu}:
-        #       [0, q1, q1 + q2, q1 + q2 + q3]
-        #  common_attn_metadata.seq_lens{_cpu}: [s1, s2, s3]
-        #  num_rejected_tokens: [n1, n2, n3]
-        # This function computes the intermediate values:
-        #  num_tokens_per_req: [q1 - n1, q2 - n2, q3 - n3]
-        # And returns:
-        #  common_attn_metadata.query_start_loc{_cpu}:
-        #       [0, q1 - n1, q1 + q2 - n1 - n2, q1 + q2 + q3 - n1 - n2 - n3]
-        #  common_attn_metadata.seq_lens{_cpu}:
-        #       [s1 - n1 + 1, s2 - n2 + 1, s3 - n3 + 1]
-        #  token_indices: [0, 1, ..., q1 - n1 - 1,
-        #                 q1, q1 + 1, ..., q1 + q2 - n2 - 1,
-        #                 q1 + q2, q1 + q2 + 1, ..., q1 + q2 + q3 - n3 - 1]
-
-        num_rejected_tokens = [
-            n + 1 - len(sampled_token_ids[i]) if n > 0 else 0
-            for i, n in enumerate(num_draft_tokens)
-        ]
-        num_rejected_tokens = torch.tensor(num_rejected_tokens, dtype=torch.int32)
-
-        device = common_attn_metadata.query_start_loc.device
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        new_seq_lens_cpu = common_attn_metadata.seq_lens_cpu - num_rejected_tokens
-
-        # [0, q1, q1 + q2, q1 + q2 + q3] -> [q1, q2, q3]
-        new_query_len_per_req = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        # [q1, q2, q3] -> [q1 - n1, q2 - n2, q3 - n3]
-        new_num_tokens_per_req = new_query_len_per_req - num_rejected_tokens
-        new_num_tokens_per_req_np = new_num_tokens_per_req.numpy()
-
-        # [q1 - n1, q2 - n2, q3 - n3] ->
-        # [0, q1 - n1, q1 + q2 - n1 - n2, q1 + q2 + q3 - n1 - n2 - n3]
-        new_query_start_loc_cpu = torch.zeros(
-            query_start_loc_cpu.shape,
-            dtype=torch.int32,
-            pin_memory=is_pin_memory_available(),
-        )
-        new_query_start_loc_np = new_query_start_loc_cpu.numpy()
-        np.cumsum(new_num_tokens_per_req_np, out=new_query_start_loc_np[1:])
-
-        total_num_tokens = new_query_start_loc_np[-1]
-        # Example assuming num_tokens_per_req_np = [2, 4, 3]
-        # this implies that `new_query_start_locs` is:
-        # [0, 2, 6, 9] ->
-        # [0, 0, 2, 2, 2, 2, 6, 6, 6]
-        #  _r1_  ____r2____  ___r3__
-        new_query_start_locs_expanded = np.repeat(
-            new_query_start_loc_np[:-1], new_num_tokens_per_req_np
-        )
-        # [0, 1, 2, 3, 4, 5, 6, 7, 8] ->
-        # [0, 1, 0, 1, 2, 3, 0, 1, 2]
-        #  _r1_  ____r2____  ___r3__
-        token_offsets = (
-            self.token_arange_np[:total_num_tokens] - new_query_start_locs_expanded
-        )
-
-        # Expand starting positions to match token pattern
-        # [0, q1, q1 + q2] ->
-        # [0, 0, q1, q1, q1, q1, q1 + q2, q1 + q2, q1 + q2]
-        #  _r1_  _____r2_______  ___________r3____________
-        old_query_start_locs_expanded = np.repeat(
-            query_start_loc_cpu[:-1].numpy(), new_num_tokens_per_req_np
-        )
-        # Final token indices are:
-        # [0, 1,                                // req 1
-        #  q1 + 0, q1 + 1, q1 + 2, q1 + 3,       // req 2
-        #  q1 + q2 + 0, q1 + q2 + 1, q1 + q2 + 2] // req 3
-        token_indices_np = token_offsets + old_query_start_locs_expanded
-        token_indices = torch.from_numpy(token_indices_np).to(device, non_blocking=True)
-
-        spec_common_attn_metadata = CommonAttentionMetadata(
-            query_start_loc=new_query_start_loc_cpu.to(device, non_blocking=True),
-            seq_lens=new_seq_lens_cpu.to(device, non_blocking=True),
-            query_start_loc_cpu=new_query_start_loc_cpu,
-            _seq_lens_cpu=new_seq_lens_cpu,
-            _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
-            num_reqs=common_attn_metadata.num_reqs,
-            num_actual_tokens=total_num_tokens,
-            max_query_len=new_query_len_per_req.max().item(),
-            max_seq_len=new_seq_lens_cpu.max().item(),
-            block_table_tensor=common_attn_metadata.block_table_tensor,
-            slot_mapping=common_attn_metadata.slot_mapping[token_indices],
-            causal=True,
-            dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
-        )
-
-        return spec_common_attn_metadata, token_indices
 
     def get_model_name(self, model: nn.Module) -> str:
         if hasattr(model, "module"):  # multi-GPU

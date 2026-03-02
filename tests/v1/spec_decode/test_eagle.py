@@ -96,12 +96,11 @@ def _create_proposer(
         return DraftModelProposer(vllm_config=vllm_config, device=device)
 
 
-def test_prepare_next_token_ids():
+def test_prepare_next_token_ids_padded():
     """
-    Test for prepare_next_token_ids_cpu and prepare_next_token_ids_padded.
-    Each will produce a device tensor of next_token_ids, taking as input
-    either the GPU tensor of sampled_token_ids with -1 for rejected tokens,
-    or the CPU python list[list[int]] with the rejected tokens removed.
+    Test for prepare_next_token_ids_padded.
+    Produces a device tensor of next_token_ids, taking as input the GPU
+    tensor of sampled_token_ids with -1 for rejected tokens.
     """
     device = torch.device(current_platform.device_type)
 
@@ -118,11 +117,9 @@ def test_prepare_next_token_ids():
     mock_input_batch.num_reqs = num_requests
     mock_input_batch.vocab_size = 100
 
-    mock_num_scheduled_tokens = {req_id: 0 for req_id in req_ids}
     mock_requests = {}
     for req_id in req_ids:
         mock_request = mock.MagicMock(spec=CachedRequestState)
-        # Each request will have a backup next token id of 10, 20, 30, 40
         mock_request.get_token_id.return_value = int(req_id.split("_")[1]) * 10
         mock_request.num_computed_tokens = 0
         mock_requests[req_id] = mock_request
@@ -140,26 +137,12 @@ def test_prepare_next_token_ids():
     sampled_token_ids_tensor = torch.tensor(
         sampled_token_ids, dtype=torch.int32, device=device
     )
-    sampled_token_ids_cpu = [[i for i in seq if i != -1] for seq in sampled_token_ids]
-    for i in range(len(sampled_token_ids_cpu)):
-        if discarded_req_mask[i]:
-            sampled_token_ids_cpu[i] = []
 
-    expected_next_token_ids_cpu = [1, 4, 30, 40]
-    expected_next_token_ids_tensor = torch.tensor(
-        expected_next_token_ids_cpu, dtype=torch.int32, device=device
+    expected_next_token_ids = torch.tensor(
+        [1, 4, 30, 40], dtype=torch.int32, device=device
     )
 
     proposer = _create_proposer("eagle", num_speculative_tokens)
-
-    next_token_ids_from_cpu = proposer.prepare_next_token_ids_cpu(
-        sampled_token_ids_cpu,
-        mock_requests,
-        mock_input_batch,
-        mock_num_scheduled_tokens,
-    )
-
-    assert torch.equal(next_token_ids_from_cpu, expected_next_token_ids_tensor)
 
     common_attn_metadata = create_common_attn_metadata(
         batch_spec,
@@ -181,98 +164,8 @@ def test_prepare_next_token_ids():
         )
     )
 
-    assert torch.equal(next_token_ids_from_padded, expected_next_token_ids_tensor)
+    assert torch.equal(next_token_ids_from_padded, expected_next_token_ids)
     assert torch.equal(valid_sampled_tokens_count, expected_valid_sampled_tokens_count)
-
-
-def test_prepare_inputs():
-    """
-    cu_target_query_lens: [0, a, a + b, a + b + c]
-    num_rejected_tokens: [n1, n2, n3]
-    num_tokens_per_req: [a - n1, b - n2, c - n3]
-    cu_num_tokens: [0, a - n1, a + b - n1 - n2, a + b + c - n1 - n2 - n3]
-    token_indices: [0, 1, ..., a - n1 - 1,
-                    a, a + 1, ..., a + b - n2 - 1,
-                    a + b, a + b + 1, ..., a + b + c - n3 - 1]
-    """
-    device = torch.device(current_platform.device_type)
-
-    # q1 = 4, q2 = 7, q3 = 5
-    # n1 = 1, n2 = 3, n3 = 2
-
-    batch_spec = BatchSpec(
-        seq_lens=[4, 7, 5],
-        query_lens=[4, 7, 5],
-    )
-
-    common_attn_metadata = create_common_attn_metadata(
-        batch_spec,
-        block_size=16,
-        device=device,
-    )
-
-    # If there are `k` sampled tokens, then `k-1` tokens are draft tokens
-    # from the previous iteration, and the last token is the bonus token sampled
-    # from the base model.
-    num_draft_tokens = [3, 6, 4]  # one less than query_lens
-    # num rejected tokens is [1, 3, 2]
-    ACCEPT_TOKEN = 0
-    BONUS_TOKEN = 1
-    REJECT_TOKEN = -1
-    sampled_token_ids = [
-        [ACCEPT_TOKEN, ACCEPT_TOKEN, REJECT_TOKEN, BONUS_TOKEN],
-        [
-            ACCEPT_TOKEN,
-            ACCEPT_TOKEN,
-            ACCEPT_TOKEN,
-            REJECT_TOKEN,
-            REJECT_TOKEN,
-            REJECT_TOKEN,
-            BONUS_TOKEN,
-        ],
-        [ACCEPT_TOKEN, ACCEPT_TOKEN, REJECT_TOKEN, REJECT_TOKEN, BONUS_TOKEN],
-    ]
-    sampled_token_ids = [
-        [i for i in seq if i != REJECT_TOKEN] for seq in sampled_token_ids
-    ]
-
-    # Expected calculations:
-    # query_len_per_req = [4, 7, 5]
-    # num_tokens_per_req = [3, 4, 3]  (after subtracting rejected tokens)
-    # Expected cumulative counts: [0, 3, 7, 10]
-    expected_cu_num_tokens = torch.tensor(
-        [0, 3, 7, 10], dtype=torch.int32, device=device
-    )
-
-    # Expected token indices (mapped from original positions):
-    # First request: indices 0, 1, 2      (keeping first 3 from positions 0-3)
-    # Second request: indices 4, 5, 6, 7  (keeping first 4 from positions 4-10)
-    # Third request: indices 11, 12, 13   (keeping first 3 from positions 11-15)
-    expected_token_indices = torch.tensor(
-        [
-            0,
-            1,
-            2,  # First request: 3 tokens (4-1)
-            4,
-            5,
-            6,
-            7,  # Second request: 4 tokens (7-3)
-            11,
-            12,
-            13,  # Third request: 3 tokens (5-2)
-        ],
-        dtype=torch.int32,
-        device=device,
-    )
-    proposer = _create_proposer("eagle", 1)
-
-    updated_metadata, token_indices = proposer.prepare_inputs(
-        common_attn_metadata, sampled_token_ids, num_draft_tokens
-    )
-
-    assert torch.equal(updated_metadata.query_start_loc, expected_cu_num_tokens)
-    assert token_indices.shape[0] == expected_cu_num_tokens[-1].item()
-    assert torch.equal(token_indices, expected_token_indices)
 
 
 def test_prepare_inputs_padded():
