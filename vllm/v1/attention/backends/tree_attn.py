@@ -385,6 +385,9 @@ class TreeAttentionImpl(AttentionImpl):
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
         descale_shape = (attn_metadata.query_start_loc.shape[0] - 1, key.shape[1])
+        num_kv_heads = key_cache.shape[2]
+        seq_threshold_3D = 128 // num_kv_heads
+        split_launch = False
         if prefill_meta := attn_metadata.prefill_metadata:
             unified_attention(
                 q=query[num_decode_tokens:num_actual_tokens],
@@ -406,6 +409,8 @@ class TreeAttentionImpl(AttentionImpl):
                 v_descale=layer._v_scale.expand(descale_shape),
                 num_prefills=attn_metadata.num_prefills,
                 num_decodes=0,
+                seq_threshold_3D=seq_threshold_3D,
+                split_launch=split_launch,
             )
 
         if decode_meta := attn_metadata.decode_metadata:
@@ -430,5 +435,7 @@ class TreeAttentionImpl(AttentionImpl):
                 v_descale=layer._v_scale.expand(descale_shape),
                 num_prefills=0,
                 num_decodes=attn_metadata.num_decodes,
+                seq_threshold_3D=seq_threshold_3D,
+                split_launch=split_launch,
             )
         return output

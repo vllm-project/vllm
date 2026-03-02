@@ -924,8 +924,8 @@ def unified_attention(
     v_descale,
     num_prefills,
     num_decodes,
-    seq_threshold_3D=None,
-    split_launch=None,
+    seq_threshold_3D,
+    split_launch,
     num_par_softmax_segments=None,
     softmax_segm_output=None,
     softmax_segm_max=None,
@@ -965,16 +965,6 @@ def unified_attention(
     num_kv_heads = k.shape[2]
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
-
-    # Assign the following variables if they are not assigned in the attention metadata.
-    # This ensures backward compatibility with callers using an earlier version of this
-    # function. However, it is recommended to include these assignments in the
-    # attention metadata itself, as performing them here may negatively impact
-    # performance.
-    if seq_threshold_3D is None or split_launch is None:
-        MIN_LAUNCH_GRID_SIZE_2D = 128
-        seq_threshold_3D = MIN_LAUNCH_GRID_SIZE_2D // num_kv_heads
-        split_launch = False
 
     # Assigning Q Block dimensions for prefill and decode.
     BLOCK_M_2D_PREFILL = (
