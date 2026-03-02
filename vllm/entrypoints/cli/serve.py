@@ -51,7 +51,7 @@ class ServeSubcommand(CLISubcommand):
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
 
-        if getattr(args, 'hip_online_tuning', False):
+        if getattr(args, "hip_online_tuning", False):
             os.environ["HIP_ONLINE_TUNING"] = "1"
             
         if args.headless:
