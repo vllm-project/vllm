@@ -205,6 +205,181 @@ def test_schedule_partial_requests():
     assert requests[2].request_id not in output.num_scheduled_tokens
 
 
+def test_inter_prefill_budget():
+    """Test scheduling behavior with inter_prefill_budget.
+
+    This test verifies that:
+    1. The scheduler respects inter_prefill_budget when scheduling multiple
+       prefill requests in the same batch.
+    2. Partial requests are not scheduled if they would exceed the
+       inter_prefill_budget.
+    3. The first prefill request is not constrained by inter_prefill_budget,
+       but subsequent prefill requests are limited.
+    """
+    scheduler = create_scheduler(
+        model="facebook/opt-125m",
+        max_num_batched_tokens=2048,
+        inter_prefill_budget=800,
+    )
+    requests = create_requests(
+        num_requests=3,
+        num_tokens=500,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    # All 3 requests should be added to the scheduler as new requests
+    assert len(output.scheduled_new_reqs) == 2
+    assert output.scheduled_cached_reqs.num_reqs == 0
+    assert len(output.finished_req_ids) == 0
+
+    # The first request is scheduled fully (first prefill is not constrained).
+    assert output.num_scheduled_tokens[requests[0].request_id] == 500
+    # The second request is scheduled partially (limited by inter_prefill_budget).
+    # After the first request uses 500 tokens, a second request is scheduled
+    # but limited by remaining inter prefill budget of 800 - 500 = 300 tokens.
+    assert output.num_scheduled_tokens[requests[1].request_id] == 300
+    # The third request is not scheduled because the inter_prefill_budget
+    # is exhausted
+    assert requests[2].request_id not in output.num_scheduled_tokens
+
+    req_to_index = {request.request_id: i for i, request in enumerate(requests[:2])}
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[requests[0].request_id, requests[1].request_id],
+        req_id_to_index=req_to_index,
+        # First request has a sampled token id because it finished prefill.
+        # Second request is still being prefilled.
+        sampled_token_ids=[[0], []],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_runner_output)
+
+    # Schedule the next step.
+    # The first request should be in decode phase (1 token).
+    # The second request should continue prefill (remaining 200 tokens).
+    # The third request should now be able to start prefilling.
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 3
+    assert len(output.scheduled_new_reqs) == 1
+    assert output.scheduled_cached_reqs.num_reqs == 2
+    assert len(output.finished_req_ids) == 0
+    # First request is decoding (1 token).
+    assert output.num_scheduled_tokens[requests[0].request_id] == 1
+    # Second request continues prefilling (remaining 200 tokens).
+    assert output.num_scheduled_tokens[requests[1].request_id] == 200
+    # Third request fully scheduled as inter_prefill_budget = 800 > 200 + 500
+    assert output.num_scheduled_tokens[requests[2].request_id] == 500
+
+
+def test_inter_prefill_budget_with_decode_requests():
+    """Test inter_prefill_budget with mixed decode and prefill requests."""
+    # Create scheduler with inter_prefill_budget
+    scheduler = create_scheduler(
+        model="facebook/opt-125m",
+        max_num_batched_tokens=2048,
+        inter_prefill_budget=800,
+    )
+    # Start one request that will be in decode phase
+    decode_requests = create_requests(
+        num_requests=1, num_tokens=100, req_ids=["decode"]
+    )
+    prefill_requests = create_requests(
+        num_requests=2, num_tokens=500, req_ids=["prefill1", "prefill2"]
+    )
+
+    scheduler.add_request(decode_requests[0])
+    output = scheduler.schedule()
+
+    # Complete prefill for decode request
+    req_to_index = {decode_requests[0].request_id: 0}
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[decode_requests[0].request_id],
+        req_id_to_index=req_to_index,
+        sampled_token_ids=[[0]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_runner_output)
+
+    # Add prefill requests and schedule
+    for req in prefill_requests:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+    # Decode request should get 1 token (decode phase)
+    assert output.num_scheduled_tokens["decode"] == 1
+    # First prefill should be fully scheduled (500 tokens)
+    assert output.num_scheduled_tokens["prefill1"] == 500
+    # Second prefill should be limited by inter_prefill_budget (800-500=300)
+    assert output.num_scheduled_tokens["prefill2"] == 300
+
+
+def test_inter_prefill_budget_does_not_chunk_single_prefill():
+    "Single request that exceeds inter_prefill_budget should not be chunked"
+    scheduler = create_scheduler(
+        model="facebook/opt-125m",
+        max_num_batched_tokens=2048,
+        inter_prefill_budget=600,
+    )
+    # Create requests with more tokens than inter_prefill_budget
+    requests = create_requests(num_requests=3, num_tokens=700)
+    for request in requests:
+        scheduler.add_request(request)
+
+    # First schedule - should partially schedule requests
+    output = scheduler.schedule()
+
+    # First request scheduled fully, others limited by budget
+    # Total budget per request should not exceed inter_prefill_budget after first
+    first_scheduled = output.num_scheduled_tokens[requests[0].request_id]
+    assert first_scheduled == 700  # First request unconstrained
+    assert requests[1].request_id not in output.num_scheduled_tokens
+    assert requests[2].request_id not in output.num_scheduled_tokens
+
+
+def test_inter_prefill_budget_exact_limit():
+    """Test when requests exactly fill the inter_prefill_budget."""
+    scheduler = create_scheduler(
+        model="facebook/opt-125m",
+        max_num_batched_tokens=2048,
+        inter_prefill_budget=1000,
+    )
+    # First request uses 500, budget has 500 remaining
+    # Second request with exactly 500 tokens should fit
+    requests = create_requests(num_requests=2, num_tokens=500)
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[requests[0].request_id] == 500
+    assert output.num_scheduled_tokens[requests[1].request_id] == 500
+
+
+def test_inter_prefill_budget_with_long_prefill_threshold():
+    """Test inter_prefill_budget interaction with long_prefill_token_threshold."""
+    scheduler = create_scheduler(
+        model="facebook/opt-125m",
+        max_num_batched_tokens=2048,
+        inter_prefill_budget=800,
+        long_prefill_token_threshold=400,  # Limits each chunk
+    )
+    requests = create_requests(num_requests=3, num_tokens=500)
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    # First request limited by long_prefill_token_threshold to 400
+    assert output.num_scheduled_tokens[requests[0].request_id] == 400
+    # Second request also gets 400 (800 - 400 = 400 remaining)
+    assert output.num_scheduled_tokens[requests[1].request_id] == 400
+    # Third request should not be scheduled (budget exhausted)
+    assert requests[2].request_id not in output.num_scheduled_tokens
+
+
 def test_no_mm_input_chunking():
     # Disable multimodal input chunking.
     scheduler = create_scheduler(
