@@ -19,7 +19,7 @@ for arch in sys.argv[1].split(","):
     # fully support mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32.
     # SM90 and SM100 can use this PTX, but it’s simulated
     # with FP16 MMA, so it cannot achieve any acceleration.
-    if arch == 89 or arch >= 120:
+    if arch == 89 or arch // 10 == 12:
         SUPPORT_FP8 = True
     if arch >= 80:
         SUPPORT_SM80 = True
