@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import asyncio
 import json
 import time
 from collections.abc import AsyncGenerator, Callable, Sequence
 from functools import partial
 from typing import Final, Literal, cast
 
-import jinja2
 from fastapi import Request
 from typing_extensions import assert_never
 
@@ -53,13 +51,11 @@ class OpenAIServingPooling(OpenAIServing):
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
         trust_request_chat_template: bool = False,
-        log_error_stack: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
-            log_error_stack=log_error_stack,
         )
 
         self.chat_template = chat_template
@@ -84,101 +80,92 @@ class OpenAIServingPooling(OpenAIServing):
         request_id = f"pool-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
-        try:
-            lora_request = self._maybe_get_adapters(request)
+        lora_request = self._maybe_get_adapters(request)
 
-            if getattr(request, "dimensions", None) is not None:
-                return self.create_error_response(
-                    "dimensions is currently not supported"
+        if getattr(request, "dimensions", None) is not None:
+            return self.create_error_response("dimensions is currently not supported")
+
+        engine_prompts: Sequence[ProcessorInputs]
+        if use_io_processor := isinstance(request, IOProcessorRequest):
+            if self.io_processor is None:
+                raise ValueError(
+                    "No IOProcessor plugin installed. Please refer "
+                    "to the documentation and to the "
+                    "'prithvi_geospatial_mae_io_processor' "
+                    "offline inference example for more details."
                 )
 
-            engine_prompts: Sequence[ProcessorInputs]
-            if use_io_processor := isinstance(request, IOProcessorRequest):
-                if self.io_processor is None:
-                    raise ValueError(
-                        "No IOProcessor plugin installed. Please refer "
-                        "to the documentation and to the "
-                        "'prithvi_geospatial_mae_io_processor' "
-                        "offline inference example for more details."
-                    )
+            validated_prompt = self.io_processor.parse_data(request.data)
 
-                validated_prompt = self.io_processor.parse_data(request.data)
+            raw_prompts = await self.io_processor.pre_process_async(
+                prompt=validated_prompt, request_id=request_id
+            )
+            engine_prompts = await self._preprocess_cmpl(
+                request,
+                prompt_to_seq(raw_prompts),
+            )
+        elif isinstance(request, PoolingChatRequest):
+            error_check_ret = self._validate_chat_template(
+                request_chat_template=request.chat_template,
+                chat_template_kwargs=request.chat_template_kwargs,
+                trust_request_chat_template=self.trust_request_chat_template,
+            )
+            if error_check_ret is not None:
+                return error_check_ret
 
-                raw_prompts = await self.io_processor.pre_process_async(
-                    prompt=validated_prompt, request_id=request_id
-                )
-                engine_prompts = await self._preprocess_cmpl(
-                    request,
-                    prompt_to_seq(raw_prompts),
-                )
-            elif isinstance(request, PoolingChatRequest):
-                error_check_ret = self._validate_chat_template(
-                    request_chat_template=request.chat_template,
-                    chat_template_kwargs=request.chat_template_kwargs,
-                    trust_request_chat_template=self.trust_request_chat_template,
-                )
-                if error_check_ret is not None:
-                    return error_check_ret
-
-                _, engine_prompts = await self._preprocess_chat(
-                    request,
-                    request.messages,
-                    default_template=self.chat_template,
-                    default_template_content_format=self.chat_template_content_format,
-                    default_template_kwargs=None,
-                )
-            elif isinstance(request, PoolingCompletionRequest):
-                engine_prompts = await self._preprocess_completion(
-                    request,
-                    prompt_input=request.input,
-                    prompt_embeds=None,
-                )
-            else:
-                raise ValueError(f"Unsupported request of type {type(request)}")
-        except (ValueError, TypeError, jinja2.TemplateError) as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            _, engine_prompts = await self._preprocess_chat(
+                request,
+                request.messages,
+                default_template=self.chat_template,
+                default_template_content_format=self.chat_template_content_format,
+                default_template_kwargs=None,
+            )
+        elif isinstance(request, PoolingCompletionRequest):
+            engine_prompts = await self._preprocess_completion(
+                request,
+                prompt_input=request.input,
+                prompt_embeds=None,
+            )
+        else:
+            raise ValueError(f"Unsupported request of type {type(request)}")
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
-        try:
-            if use_io_processor:
-                assert self.io_processor is not None
+        if use_io_processor:
+            assert self.io_processor is not None
 
-                pooling_params = self.io_processor.merge_pooling_params()
-                if pooling_params.task is None:
-                    pooling_params.task = "plugin"
-            else:
-                pooling_params = request.to_pooling_params()  # type: ignore
+            pooling_params = self.io_processor.merge_pooling_params()
+            if pooling_params.task is None:
+                pooling_params.task = "plugin"
+        else:
+            pooling_params = request.to_pooling_params()  # type: ignore
 
-            for i, engine_prompt in enumerate(engine_prompts):
-                request_id_item = f"{request_id}-{i}"
+        for i, engine_prompt in enumerate(engine_prompts):
+            request_id_item = f"{request_id}-{i}"
 
-                self._log_inputs(
-                    request_id_item,
-                    engine_prompt,
-                    params=pooling_params,
-                    lora_request=lora_request,
-                )
+            self._log_inputs(
+                request_id_item,
+                engine_prompt,
+                params=pooling_params,
+                lora_request=lora_request,
+            )
 
-                trace_headers = (
-                    None
-                    if raw_request is None
-                    else await self._get_trace_headers(raw_request.headers)
-                )
+            trace_headers = (
+                None
+                if raw_request is None
+                else await self._get_trace_headers(raw_request.headers)
+            )
 
-                generator = self.engine_client.encode(
-                    engine_prompt,
-                    pooling_params,
-                    request_id_item,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                    priority=request.priority,
-                )
+            generator = self.engine_client.encode(
+                engine_prompt,
+                pooling_params,
+                request_id_item,
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+                priority=request.priority,
+            )
 
-                generators.append(generator)
-        except ValueError as e:
-            return self.create_error_response(e)
+            generators.append(generator)
 
         result_generator = merge_async_iterators(*generators)
 
@@ -214,27 +201,22 @@ class OpenAIServingPooling(OpenAIServing):
         # Non-streaming response
         final_res_batch: list[PoolingRequestOutput | None]
         final_res_batch = [None] * num_prompts
-        try:
-            async for i, res in result_generator:
-                final_res_batch[i] = res
+        async for i, res in result_generator:
+            final_res_batch[i] = res
 
-            assert all(final_res is not None for final_res in final_res_batch)
+        assert all(final_res is not None for final_res in final_res_batch)
 
-            final_res_batch_checked = cast(list[PoolingRequestOutput], final_res_batch)
+        final_res_batch_checked = cast(list[PoolingRequestOutput], final_res_batch)
 
-            response = self.request_output_to_pooling_response(
-                final_res_batch_checked,
-                request_id,
-                created_time,
-                model_name,
-                request.encoding_format,
-                request.embed_dtype,
-                request.endianness,
-            )
-        except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            return self.create_error_response(e)
+        response = self.request_output_to_pooling_response(
+            final_res_batch_checked,
+            request_id,
+            created_time,
+            model_name,
+            request.encoding_format,
+            request.embed_dtype,
+            request.endianness,
+        )
 
         return response
 

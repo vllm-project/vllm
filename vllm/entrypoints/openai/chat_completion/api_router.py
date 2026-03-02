@@ -54,10 +54,7 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
             message="The model does not support Chat Completions API"
         )
 
-    try:
-        generator = await handler.create_chat_completion(request, raw_request)
-    except Exception as e:
-        generator = handler.create_error_response(e)
+    generator = await handler.create_chat_completion(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
@@ -93,10 +90,7 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
             message="The model does not support Chat Completions API"
         )
 
-    try:
-        result = await handler.render_chat_request(request)
-    except Exception as e:
-        result = handler.create_error_response(e)
+    result = await handler.render_chat_request(request)
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)

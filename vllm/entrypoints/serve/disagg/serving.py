@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-import asyncio
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
@@ -49,7 +48,6 @@ class ServingTokens(OpenAIServing):
         request_logger: RequestLogger | None,
         force_no_detokenize: bool = False,
         return_tokens_as_token_ids: bool = False,
-        log_error_stack: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_log_outputs: bool = False,
     ):
@@ -58,7 +56,6 @@ class ServingTokens(OpenAIServing):
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            log_error_stack=log_error_stack,
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_log_outputs = enable_log_outputs
@@ -108,45 +105,38 @@ class ServingTokens(OpenAIServing):
 
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
-        try:
-            sampling_params = request.sampling_params
-            if self.force_no_detokenize:
-                sampling_params.detokenize = False
+        sampling_params = request.sampling_params
+        if self.force_no_detokenize:
+            sampling_params.detokenize = False
 
-            self._log_inputs(
-                request_id,
-                engine_prompt,
-                params=sampling_params,
-                lora_request=lora_request,
-            )
+        self._log_inputs(
+            request_id,
+            engine_prompt,
+            params=sampling_params,
+            lora_request=lora_request,
+        )
 
-            trace_headers = (
-                None
-                if raw_request is None
-                else await self._get_trace_headers(raw_request.headers)
-            )
+        trace_headers = (
+            None
+            if raw_request is None
+            else await self._get_trace_headers(raw_request.headers)
+        )
 
-            result_generator = self.engine_client.generate(
-                engine_prompt,
-                sampling_params,
-                request_id,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-                priority=request.priority,
-            )
-
-        except ValueError as e:
-            return self.create_error_response(str(e))
+        result_generator = self.engine_client.generate(
+            engine_prompt,
+            sampling_params,
+            request_id,
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+            priority=request.priority,
+        )
 
         # TODO(NickLucche): Implement streaming response
 
-        try:
-            assert result_generator is not None
-            return await self.serve_tokens_full_generator(
-                request, result_generator, request_id, model_name, request_metadata
-            )
-        except ValueError as e:
-            return self.create_error_response(str(e))
+        assert result_generator is not None
+        return await self.serve_tokens_full_generator(
+            request, result_generator, request_id, model_name, request_metadata
+        )
 
     async def serve_tokens_full_generator(
         self,
@@ -160,13 +150,8 @@ class ServingTokens(OpenAIServing):
         final_res: RequestOutput | None = None
         sampling_params: SamplingParams = request.sampling_params
 
-        try:
-            async for res in result_generator:
-                final_res = res
-        except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            return self.create_error_response(str(e))
+        async for res in result_generator:
+            final_res = res
 
         assert final_res is not None
 

@@ -32,10 +32,7 @@ async def create_classify(request: ClassificationRequest, raw_request: Request):
             message="The model does not support Classification API"
         )
 
-    try:
-        generator = await handler.create_classify(request, raw_request)
-    except Exception as e:
-        generator = handler.create_error_response(e)
+    generator = await handler.create_classify(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(

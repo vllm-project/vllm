@@ -11,7 +11,6 @@ from copy import copy
 from http import HTTPStatus
 from typing import Final
 
-import jinja2
 from fastapi import Request
 from openai.types.responses import (
     ResponseContentPartAddedEvent,
@@ -174,14 +173,12 @@ class OpenAIServingResponses(OpenAIServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
-        log_error_stack: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            log_error_stack=log_error_stack,
         )
 
         self.chat_template = chat_template
@@ -365,28 +362,15 @@ class OpenAIServingResponses(OpenAIServing):
         else:
             prev_response = None
 
-        try:
-            lora_request = self._maybe_get_adapters(request)
-            model_name = self.models.model_name(lora_request)
+        lora_request = self._maybe_get_adapters(request)
+        model_name = self.models.model_name(lora_request)
 
-            if self.use_harmony:
-                messages, engine_prompts = self._make_request_with_harmony(
-                    request, prev_response
-                )
-            else:
-                messages, engine_prompts = await self._make_request(
-                    request, prev_response
-                )
-
-        except (
-            ValueError,
-            TypeError,
-            RuntimeError,
-            jinja2.TemplateError,
-            NotImplementedError,
-        ) as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(e)
+        if self.use_harmony:
+            messages, engine_prompts = self._make_request_with_harmony(
+                request, prev_response
+            )
+        else:
+            messages, engine_prompts = await self._make_request(request, prev_response)
 
         request_metadata = RequestResponseMetadata(request_id=request.request_id)
         if raw_request:
@@ -424,86 +408,83 @@ class OpenAIServingResponses(OpenAIServing):
         else:
             assert len(builtin_tool_list) == 0
             available_tools = []
-        try:
-            tokenizer = self.renderer.get_tokenizer()
+        tokenizer = self.renderer.get_tokenizer()
 
-            for engine_prompt in engine_prompts:
-                maybe_error = self._validate_generator_input(engine_prompt)
-                if maybe_error is not None:
-                    return maybe_error
+        for engine_prompt in engine_prompts:
+            maybe_error = self._validate_generator_input(engine_prompt)
+            if maybe_error is not None:
+                return maybe_error
 
-                default_max_tokens = get_max_tokens(
-                    max_model_len,
-                    request.max_output_tokens,
-                    self._extract_prompt_len(engine_prompt),
-                    self.default_sampling_params,
-                    self.override_max_tokens,
-                )
+            default_max_tokens = get_max_tokens(
+                max_model_len,
+                request.max_output_tokens,
+                self._extract_prompt_len(engine_prompt),
+                self.default_sampling_params,
+                self.override_max_tokens,
+            )
 
-                sampling_params = request.to_sampling_params(
-                    default_max_tokens, self.default_sampling_params
-                )
+            sampling_params = request.to_sampling_params(
+                default_max_tokens, self.default_sampling_params
+            )
 
-                trace_headers = (
-                    None
-                    if raw_request is None
-                    else await self._get_trace_headers(raw_request.headers)
-                )
+            trace_headers = (
+                None
+                if raw_request is None
+                else await self._get_trace_headers(raw_request.headers)
+            )
 
-                context: ConversationContext
-                if self.use_harmony:
-                    if request.stream:
-                        context = StreamingHarmonyContext(messages, available_tools)
-                    else:
-                        context = HarmonyContext(messages, available_tools)
+            context: ConversationContext
+            if self.use_harmony:
+                if request.stream:
+                    context = StreamingHarmonyContext(messages, available_tools)
                 else:
-                    if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
-                        # This is a feature in development for parsing
-                        # tokens during generation instead of at the end
-                        context = ParsableContext(
-                            response_messages=messages,
-                            tokenizer=tokenizer,
-                            reasoning_parser_cls=self.parser.reasoning_parser_cls
-                            if self.parser
-                            else None,
-                            request=request,
-                            tool_parser_cls=self.parser.tool_parser_cls
-                            if self.parser
-                            else None,
-                            available_tools=available_tools,
-                            chat_template=self.chat_template,
-                            chat_template_content_format=self.chat_template_content_format,
-                        )
-                    else:
-                        context = SimpleContext()
+                    context = HarmonyContext(messages, available_tools)
+            else:
+                if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
+                    # This is a feature in development for parsing
+                    # tokens during generation instead of at the end
+                    context = ParsableContext(
+                        response_messages=messages,
+                        tokenizer=tokenizer,
+                        reasoning_parser_cls=self.parser.reasoning_parser_cls
+                        if self.parser
+                        else None,
+                        request=request,
+                        tool_parser_cls=self.parser.tool_parser_cls
+                        if self.parser
+                        else None,
+                        available_tools=available_tools,
+                        chat_template=self.chat_template,
+                        chat_template_content_format=self.chat_template_content_format,
+                    )
+                else:
+                    context = SimpleContext()
 
-                if self.parser and self.parser.reasoning_parser_cls is not None:
-                    reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
-                    if (
-                        isinstance(
-                            struct_out := sampling_params.structured_outputs,
-                            StructuredOutputsParams,
-                        )
-                        and struct_out.all_non_structural_tag_constraints_none()
-                    ):
-                        sampling_params.structured_outputs = replace(
-                            struct_out,
-                            structural_tag=reasoning_parser.prepare_structured_tag(
-                                struct_out.structural_tag, self.tool_server
-                            ),
-                        )
-                generator = self._generate_with_builtin_tools(
-                    request_id=request.request_id,
-                    engine_prompt=engine_prompt,
-                    sampling_params=sampling_params,
-                    context=context,
-                    lora_request=lora_request,
-                    priority=request.priority,
-                    trace_headers=trace_headers,
-                )
-                generators.append(generator)
-        except ValueError as e:
-            return self.create_error_response(e)
+            if self.parser and self.parser.reasoning_parser_cls is not None:
+                reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
+                if (
+                    isinstance(
+                        struct_out := sampling_params.structured_outputs,
+                        StructuredOutputsParams,
+                    )
+                    and struct_out.all_non_structural_tag_constraints_none()
+                ):
+                    sampling_params.structured_outputs = replace(
+                        struct_out,
+                        structural_tag=reasoning_parser.prepare_structured_tag(
+                            struct_out.structural_tag, self.tool_server
+                        ),
+                    )
+            generator = self._generate_with_builtin_tools(
+                request_id=request.request_id,
+                engine_prompt=engine_prompt,
+                sampling_params=sampling_params,
+                context=context,
+                lora_request=lora_request,
+                priority=request.priority,
+                trace_headers=trace_headers,
+            )
+            generators.append(generator)
 
         assert len(generators) == 1
         (result_generator,) = generators
@@ -578,20 +559,15 @@ class OpenAIServingResponses(OpenAIServing):
                 request_metadata,
             )
 
-        try:
-            return await self.responses_full_generator(
-                request,
-                sampling_params,
-                result_generator,
-                context,
-                model_name,
-                tokenizer,
-                request_metadata,
-            )
-        except GenerationError as e:
-            return self._convert_generation_error_to_response(e)
-        except Exception as e:
-            return self.create_error_response(e)
+        return await self.responses_full_generator(
+            request,
+            sampling_params,
+            result_generator,
+            context,
+            model_name,
+            tokenizer,
+            request_metadata,
+        )
 
     async def _make_request(
         self,
@@ -669,14 +645,9 @@ class OpenAIServingResponses(OpenAIServing):
             created_time = int(time.time())
 
         async with AsyncExitStack() as exit_stack:
-            try:
-                await self._initialize_tool_sessions(request, context, exit_stack)
-                async for _ in result_generator:
-                    pass
-            except asyncio.CancelledError:
-                return self.create_error_response("Client disconnected")
-            except ValueError as e:
-                return self.create_error_response(e)
+            await self._initialize_tool_sessions(request, context, exit_stack)
+            async for _ in result_generator:
+                pass
 
         # NOTE: Implementation of status is still WIP, but for now
         # we guarantee that if the status is not "completed", it is accurate.
@@ -1129,16 +1100,11 @@ class OpenAIServingResponses(OpenAIServing):
         new_event_signal = asyncio.Event()
         self.event_store[request.request_id] = (event_deque, new_event_signal)
         response = None
+        generator = self.responses_stream_generator(request, *args, **kwargs)
         try:
-            generator = self.responses_stream_generator(request, *args, **kwargs)
             async for event in generator:
                 event_deque.append(event)
                 new_event_signal.set()  # Signal new event available
-        except GenerationError as e:
-            response = self._convert_generation_error_to_response(e)
-        except Exception as e:
-            logger.exception("Background request failed for %s", request.request_id)
-            response = self.create_error_response(e)
         finally:
             new_event_signal.set()
 
@@ -1157,13 +1123,7 @@ class OpenAIServingResponses(OpenAIServing):
         *args,
         **kwargs,
     ):
-        try:
-            response = await self.responses_full_generator(request, *args, **kwargs)
-        except GenerationError as e:
-            response = self._convert_generation_error_to_response(e)
-        except Exception as e:
-            logger.exception("Background request failed for %s", request.request_id)
-            response = self.create_error_response(e)
+        response = await self.responses_full_generator(request, *args, **kwargs)
 
         if isinstance(response, ErrorResponse):
             # If the request has failed, update the status to "failed".

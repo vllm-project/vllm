@@ -30,6 +30,8 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_se
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.server_utils import (
+    engine_related_error_handler,
+    exception_handler,
     get_uvicorn_log_config,
     http_exception_handler,
     lifespan,
@@ -56,6 +58,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import is_valid_ipv6_address
 from vllm.utils.system_utils import decorate_logs, set_ulimit
+from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.version import __version__ as VLLM_VERSION
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
@@ -249,6 +252,9 @@ def build_app(
 
     app.exception_handler(HTTPException)(http_exception_handler)
     app.exception_handler(RequestValidationError)(validation_exception_handler)
+    app.exception_handler(EngineGenerateError)(engine_related_error_handler)
+    app.exception_handler(EngineDeadError)(engine_related_error_handler)
+    app.exception_handler(Exception)(exception_handler)
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
     if tokens := [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]:
@@ -346,7 +352,6 @@ async def init_app_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
         trust_request_chat_template=args.trust_request_chat_template,
-        log_error_stack=args.log_error_stack,
     )
 
     if "generate" in supported_tasks:
