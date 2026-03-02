@@ -85,7 +85,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         # The base_layer type is ColumnParallelLinear or
         # MergedColumnParallelLinear, their weight sharding logic is
         # inconsistent when TP is greater than 1.
-        self.is_merged_col_linear = type(base_layer) is MergedColumnParallelLinear
+        self.is_merged_col_linear = isinstance(base_layer, MergedColumnParallelLinear)
         self.output_size = self.base_layer.output_size_per_partition
         # There is only one LoRA layer
         self.n_slices = 1
@@ -157,7 +157,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     ) -> bool:
         if type(source_layer) is ColumnParallelLinear:
             return True
-        if type(source_layer) is MergedColumnParallelLinear:
+        if isinstance(source_layer, MergedColumnParallelLinear):
             if len(packed_modules_list) != 1:
                 return False
             # Exclude layers with 3+ output sizes - those are handled by
@@ -284,7 +284,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> bool:
         return (
-            type(source_layer) is MergedColumnParallelLinear
+            isinstance(source_layer, MergedColumnParallelLinear)
             and len(packed_modules_list) == 2
         )
 
@@ -606,7 +606,7 @@ class MergedColumnParallelLinearVariableSliceWithLoRA(
     ) -> bool:
         # Support MergedColumnParallelLinear with 3 or more slices
         # (2 slices are handled by MergedColumnParallelLinearWithLoRA)
-        if type(source_layer) is not MergedColumnParallelLinear:
+        if not isinstance(source_layer, MergedColumnParallelLinear):
             return False
 
         # If packed_modules_list has 3+ items, use this class
