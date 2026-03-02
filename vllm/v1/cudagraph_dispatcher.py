@@ -195,7 +195,7 @@ class CudagraphDispatcher:
                 # Only relax for PIECEWISE mode. FULL mode needs exact num_reqs
                 # because FA3's scheduler_metadata computation depends on it.
                 if cudagraph_mode.mixed_mode() == CUDAGraphMode.PIECEWISE:
-                    batch_desc = replace(batch_desc, num_reqs=None, uniform=False)
+                    batch_desc = replace(batch_desc, num_reqs=None)
                 self.add_cudagraph_key(cudagraph_mode.mixed_mode(), batch_desc)
 
         # if decode cudagraph mode is FULL, and we don't already have mixed
