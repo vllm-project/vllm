@@ -461,8 +461,6 @@ class ModelConfig:
 
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
 
-        from vllm.platforms import current_platform
-
         if self.override_attention_dtype is not None and not current_platform.is_rocm():
             warnings.warn(
                 "override-attention-dtype is set but not using ROCm platform",
@@ -940,8 +938,6 @@ class ModelConfig:
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}."
                 )
-            from vllm.platforms import current_platform
-
             current_platform.verify_quantization(self.quantization)
 
         if self.quantization in me_quant.DEPRECATED_QUANTIZATION_METHODS:
@@ -1811,8 +1807,6 @@ def _resolve_auto_dtype(
     *,
     is_pooling_model: bool,
 ):
-    from vllm.platforms import current_platform
-
     supported_dtypes = [
         dtype
         for dtype in current_platform.supported_dtypes
