@@ -104,7 +104,7 @@ class MyLLM(vllm.AsyncLLMEngine):
         while not self._request_pause_flag:
             await asyncio.sleep(0)
         await super().pause_generation(mode="keep")
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(5)
         self._generation_paused = True
 
 
