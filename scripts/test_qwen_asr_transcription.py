@@ -5,7 +5,7 @@ Test Qwen3-ASR prompt parameter support via v1/audio/transcriptions.
 
 Reproduces the test from PR #35415:
   1. Transcribe mary_had_lamb.ogg WITHOUT a prompt
-  2. Transcribe mary_had_lamb.ogg WITH prompt "Listen for the words phonograph and fleece"
+  2. Transcribe mary_had_lamb.ogg WITH a vocabulary-guiding prompt
   3. Show the diff — the prompt should guide the model toward correct vocabulary
 """
 
