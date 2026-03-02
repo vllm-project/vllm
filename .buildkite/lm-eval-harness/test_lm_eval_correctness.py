@@ -53,11 +53,17 @@ def launch_lm_eval(eval_config, tp_size):
     backend = eval_config.get("backend", "vllm")
     enforce_eager = eval_config.get("enforce_eager", "true")
     kv_cache_dtype = eval_config.get("kv_cache_dtype", "auto")
+    mamba_ssm_cache_dtype = eval_config.get("mamba_ssm_cache_dtype", "auto")
+    enable_mamba_cache_stochastic_rounding = eval_config.get(
+        "enable_mamba_cache_stochastic_rounding", False
+    )
     model_args = (
         f"pretrained={eval_config['model_name']},"
         f"tensor_parallel_size={tp_size},"
         f"enforce_eager={enforce_eager},"
         f"kv_cache_dtype={kv_cache_dtype},"
+        f"mamba_ssm_cache_dtype={mamba_ssm_cache_dtype},"
+        f"enable_mamba_cache_stochastic_rounding={enable_mamba_cache_stochastic_rounding},"
         f"add_bos_token=true,"
         f"trust_remote_code={trust_remote_code},"
         f"max_model_len={max_model_len},"

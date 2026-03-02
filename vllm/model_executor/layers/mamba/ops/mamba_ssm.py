@@ -28,6 +28,21 @@ else:
         return dt
 
 
+@triton.jit
+def convert_rs_fp16x2(x: tl.tensor, rand: tl.tensor) -> tl.tensor:
+    y = tl.inline_asm_elementwise(
+        asm="""{
+cvt.rs.f16x2.f32 $0, $2, $1, $3;
+}""",
+        constraints="=r,r,r,r,r",
+        args=(x, rand),
+        dtype=tl.float16,
+        is_pure=True,
+        pack=2,
+    )
+    return y
+
+
 @triton.heuristics({"HAS_DT_BIAS": lambda args: args["dt_bias_ptr"] is not None})
 @triton.heuristics({"HAS_D": lambda args: args["D_ptr"] is not None})
 @triton.heuristics({"HAS_Z": lambda args: args["z_ptr"] is not None})
@@ -48,6 +63,7 @@ else:
 def _selective_scan_update_kernel(
     # Pointers to matrices
     state_ptr,
+    rand_seed_ptr,
     x_ptr,
     dt_ptr,
     dt_bias_ptr,
@@ -113,6 +129,8 @@ def _selective_scan_update_kernel(
     IS_SPEC_DECODING: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
+    USE_RS_ROUNDING: tl.constexpr,
+    PHILOX_ROUNDS: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_b = tl.program_id(axis=1)
@@ -267,7 +285,35 @@ def _selective_scan_update_kernel(
             z_ptr += stride_z_batch
 
     if not IS_SPEC_DECODING:
-        tl.store(dst_state_ptrs, state.to(dst_state_ptrs.dtype.element_ty), mask=mask)
+        if USE_RS_ROUNDING:
+            # Load random seed
+            rand_seed = tl.load(rand_seed_ptr)
+            # Generate random offsets for each element in state
+            if HAS_STATE_BATCH_INDICES:
+                rand_offsets = (
+                    state_batch_idx * stride_state_batch + pid_h * stride_state_head
+                )
+            else:
+                rand_offsets = pid_b * stride_state_batch + pid_h * stride_state_head
+            rand_offsets += (
+                offs_m[:, None] * stride_state_dim
+                + offs_n[None, :] * stride_state_dstate
+            )
+            # Generate random 32-bits for each element in state
+            if PHILOX_ROUNDS > 0:
+                rand = tl.randint(rand_seed, rand_offsets, PHILOX_ROUNDS)
+            else:
+                rand = tl.randint(rand_seed, rand_offsets)
+            # Convert state to fp16 with RS rounding
+            state = convert_rs_fp16x2(state, rand)
+            tl.static_assert(state.dtype == tl.float16, "state must be fp16")
+            tl.static_assert(
+                dst_state_ptrs.dtype.element_ty == tl.float16,
+                "dst_state_ptrs must be fp16",
+            )
+        else:
+            state = state.to(dst_state_ptrs.dtype.element_ty)
+        tl.store(dst_state_ptrs, state, mask=mask)
 
 
 def selective_state_update(
@@ -288,6 +334,8 @@ def selective_state_update(
     num_accepted_tokens=None,
     cu_seqlens=None,
     is_blackwell=False,
+    enable_stochastic_rounding=False,
+    cache_philox_rounds=0,
 ):
     """
     Argument:
@@ -419,9 +467,18 @@ def selective_state_update(
         and dt.stride(-1) == 0
         and dt_bias.stride(-1) == 0
     )
+    if enable_stochastic_rounding:
+        assert state.dtype == torch.float16, (
+            f"Stochastic rounding requires fp16 state, got {state.dtype}"
+        )
+        rand_seed = torch.randint(0, 2**32, (1,), device=state.device)
+    else:
+        rand_seed = None
+
     with torch.accelerator.device_index(x.device.index):
         _selective_scan_update_kernel[grid](
             state,
+            rand_seed,
             x,
             dt,
             dt_bias,
@@ -476,6 +533,8 @@ def selective_state_update(
             tie_hdim,
             BLOCK_SIZE_M,
             num_warps=num_warps,
+            USE_RS_ROUNDING=enable_stochastic_rounding,
+            PHILOX_ROUNDS=cache_philox_rounds,
         )
 
 
