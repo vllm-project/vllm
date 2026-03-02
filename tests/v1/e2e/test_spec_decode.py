@@ -630,7 +630,7 @@ def test_eagle_correctness_medium(
             False,
             "auto",
             0.8,
-            marks=multi_gpu_marks(num_gpus=4),
+            marks=[*multi_gpu_marks(num_gpus=4), large_gpu_mark(min_gb=40)],
             id="llama4_eagle",
         ),
         pytest.param(
