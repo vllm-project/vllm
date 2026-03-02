@@ -5,7 +5,7 @@
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
 
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Request, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
@@ -135,6 +135,61 @@ async def cancel_responses(response_id: str, raw_request: Request):
             content=response.model_dump(), status_code=response.error.code
         )
     return JSONResponse(content=response.model_dump())
+
+
+@router.websocket("/v1/responses")
+async def create_responses_websocket(websocket: WebSocket):
+    """WebSocket endpoint for Responses API WebSocket mode.
+
+    Protocol:
+    1. Client connects to ws://host/v1/responses
+    2. Client sends {"type": "response.create", ...} messages
+    3. Server streams response events as JSON text frames
+    4. Client can use previous_response_id for continuation
+    """
+    import json
+
+    app = websocket.app
+    serving = app.state.openai_serving_responses
+
+    await websocket.accept()
+
+    if serving is None:
+        await websocket.close(code=1008, reason="Responses API not supported")
+        return
+
+    # Connection limit check
+    async with app.state.ws_responses_lock:
+        if (
+            app.state.ws_responses_active_connections
+            >= app.state.ws_responses_max_connections
+        ):
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "error",
+                        "status": HTTPStatus.TOO_MANY_REQUESTS,
+                        "error": {
+                            "code": "websocket_connection_limit_reached",
+                            "message": "Maximum WebSocket connections reached",
+                        },
+                    }
+                )
+            )
+            await websocket.close()
+            return
+        app.state.ws_responses_active_connections += 1
+
+    try:
+        from vllm.entrypoints.openai.responses.websocket import (
+            WebSocketResponsesConnection,
+        )
+
+        connection = WebSocketResponsesConnection(websocket, serving)
+        await connection.handle_connection()
+    finally:
+        async with app.state.ws_responses_lock:
+            app.state.ws_responses_active_connections -= 1
 
 
 def attach_router(app: FastAPI):
