@@ -108,19 +108,7 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
 
-    _, engine_prompts = result
-
-    if not engine_prompts:
-        err = handler.create_error_response(ValueError("No engine prompts rendered"))
-        return JSONResponse(content=err.model_dump(), status_code=err.error.code)
-
-    if len(engine_prompts) != 1:
-        err = handler.create_error_response(
-            ValueError("Multiple engine prompts are not supported by this endpoint")
-        )
-        return JSONResponse(content=err.model_dump(), status_code=err.error.code)
-
-    engine_prompt = engine_prompts[0]
+    _, (engine_prompt,) = result
 
     # Extract token IDs only; do not return internal multimodal artifacts.
     prompt_components = handler._extract_prompt_components(engine_prompt)
