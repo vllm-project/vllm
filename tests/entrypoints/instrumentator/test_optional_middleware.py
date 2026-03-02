@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Tests for middleware that's off by default and can be toggled through
-server arguments, mainly --api-key and --enable-request-id-headers.
+server arguments, mainly --api-key, --enable-request-id-headers, and
+--allowed-hosts.
 """
 
 from http import HTTPStatus
@@ -117,3 +118,34 @@ async def test_custom_request_id_header(server: RemoteOpenAIServer):
     )
     assert "X-Request-Id" in response.headers
     assert response.headers.get("X-Request-Id") == "Custom"
+
+
+@pytest.mark.parametrize(
+    "server",
+    [["--allowed-hosts", '["localhost", "127.0.0.1"]']],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_trusted_host_accepted(server: RemoteOpenAIServer):
+    # Request with a trusted Host header should succeed.
+    response = requests.get(
+        server.url_for("v1/models"),
+        headers={"Host": "127.0.0.1"},
+    )
+    assert response.status_code == HTTPStatus.OK
+
+
+@pytest.mark.parametrize(
+    "server",
+    [["--allowed-hosts", '["localhost", "127.0.0.1"]']],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_trusted_host_rejected(server: RemoteOpenAIServer):
+    # Request with an untrusted Host header (simulating DNS rebinding)
+    # should be rejected with 400.
+    response = requests.get(
+        server.url_for("v1/models"),
+        headers={"Host": "evil.com"},
+    )
+    assert response.status_code == HTTPStatus.BAD_REQUEST
