@@ -51,8 +51,6 @@ endif()
 # These run at install time, before the FA library's own install rules
 foreach(_FA_COMPONENT _vllm_fa2_C _vllm_fa3_C)
   install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY FALSE)" COMPONENT ${_FA_COMPONENT})
-  install(CODE "set(OLD_CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}\")" COMPONENT ${_FA_COMPONENT})
-  install(CODE "set(CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}/vllm/\")" COMPONENT ${_FA_COMPONENT})
 endforeach()
 
 # Fetch the vllm-flash-attn library
@@ -61,7 +59,6 @@ message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
 
 # Restore the install prefix after FA's install rules
 foreach(_FA_COMPONENT _vllm_fa2_C _vllm_fa3_C)
-  install(CODE "set(CMAKE_INSTALL_PREFIX \"\${OLD_CMAKE_INSTALL_PREFIX}\")" COMPONENT ${_FA_COMPONENT})
   install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" COMPONENT ${_FA_COMPONENT})
 endforeach()
 
