@@ -8,13 +8,13 @@ from typing import (
     ClassVar,
     Generic,
     TypeVar,
-    assert_never,
 )
-from wsgiref.headers import Headers
 
 from fastapi import Request
 from pydantic import ConfigDict
+from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
+from typing_extensions import assert_never
 
 from vllm import (
     PoolingParams,
@@ -114,6 +114,7 @@ class PoolingServing:
         request: AnyPoolingRequest,
         raw_request: Request,
     ):
+        generator: AnyPoolingResponse | ErrorResponse
         try:
             model_name = self.models.model_name()
             request_id = (
@@ -251,8 +252,6 @@ class PoolingServing:
         request: AnyPoolingRequest,
         raw_request: Request,
     ) -> ErrorResponse | None:
-        error_response = None
-
         if self._is_model_supported(request.model):
             return None
         if request.model in self.models.lora_requests:
