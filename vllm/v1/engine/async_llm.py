@@ -264,16 +264,15 @@ class AsyncLLM(EngineClient):
     def __del__(self):
         self.shutdown()
 
-    def shutdown(self):
+    def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown, cleaning up the background proc and IPC."""
-
         shutdown_prometheus()
 
         if renderer := getattr(self, "renderer", None):
             renderer.shutdown()
 
         if engine_core := getattr(self, "engine_core", None):
-            engine_core.shutdown()
+            engine_core.shutdown(timeout=timeout)
 
         handler = getattr(self, "output_handler", None)
         if handler is not None:

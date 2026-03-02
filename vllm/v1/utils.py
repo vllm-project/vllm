@@ -223,6 +223,10 @@ class APIServerProcessManager:
     def close(self) -> None:
         self._finalizer()
 
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown API server processes with configurable timeout"""
+        shutdown(self.processes, timeout=timeout)
+
 
 def wait_for_completion_or_failure(
     api_server_manager: APIServerProcessManager,
@@ -299,14 +303,26 @@ def wait_for_completion_or_failure(
 
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the object.
-def shutdown(procs: list[BaseProcess]):
+def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
+    """Shutdown processes with timeout.
+
+    Args:
+        procs: List of processes to shutdown
+        timeout: Maximum time in seconds to wait for graceful shutdown
+    """
+    if timeout is None:
+        timeout = 0.0
+
+    # Allow at least 5 seconds for remaining procs to terminate.
+    timeout = max(timeout, 5.0)
+
     # Shutdown the process.
     for proc in procs:
         if proc.is_alive():
             proc.terminate()
 
-    # Allow 5 seconds for remaining procs to terminate.
-    deadline = time.monotonic() + 5
+    # Allow time for remaining procs to terminate.
+    deadline = time.monotonic() + timeout
     for proc in procs:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
