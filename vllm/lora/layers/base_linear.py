@@ -22,10 +22,11 @@ from vllm.utils.torch_utils import current_stream, direct_register_custom_op
 from .base import BaseLayerWithLoRA
 from .utils import _get_lora_device
 
+_aux_stream: torch.cuda.Stream | None = None
+
 if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
     # aux_stream() is shared for:
     #   - LoRA dual-stream: base linear and LoRA compute on different CUDA streams
-    _aux_stream: torch.cuda.Stream | None = None
 
     def aux_stream() -> torch.cuda.Stream | None:
         """
@@ -41,7 +42,6 @@ if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
 
     def lora_linear(
         layer_name: str,
-        num_tokens: int,
         output_size: int,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
@@ -52,11 +52,11 @@ if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
 
     def lora_linear_fake(
         layer_name: str,
-        num_tokens: int,
         output_size: int,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        num_tokens = x.size(0) if x.ndim == 2 else x.size(1)
         return torch.empty(
             (num_tokens, output_size),
             device=x.device,
@@ -186,11 +186,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         if self._enable_srteam:
-            num_tokens = x.size(0)
             output_size = sum(self.output_slices)
-            return torch.ops.vllm.lora_linear(
-                self.layer_name, num_tokens, output_size, x, bias
-            )
+            return torch.ops.vllm.lora_linear(self.layer_name, output_size, x, bias)
         else:
             return self._apply_sync(x, bias)
 
@@ -244,8 +241,6 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             dtype=x.dtype,
         )
         with torch.cuda.stream(self._lora_stream):
-            # LoRA stream waits for base layer output before reading.
-            self._lora_stream.wait_stream(current_stream())
             self.punica_wrapper.add_lora_linear(
                 lora_output,
                 x,
@@ -265,7 +260,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         if x.ndim == 3 and output.ndim == 3:
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
-
+        # We need to add op to get the final result.
         output = output + lora_output
 
         # Reshape the flattened output back to its original shape,

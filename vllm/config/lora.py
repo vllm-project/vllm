@@ -101,7 +101,12 @@ class LoRAConfig:
             )
         if envs.VLLM_LORA_ENABLE_DUAL_STREAM and not current_platform.is_cuda_alike():
             raise ValueError("Dual CUDA streams are only supported on CUDA platforms.")
-
+        if envs.VLLM_LORA_ENABLE_DUAL_STREAM and self.fully_sharded_loras:
+            logger.warning_once(
+                "fully_sharded_loras isn't camptabile with "
+                "VLLM_LORA_ENABLE_DUAL_STREAM, set VLLM_LORA_ENABLE_DUAL_STREAM=False"
+            )
+            envs.VLLM_LORA_ENABLE_DUAL_STREAM = False
         return self
 
     def verify_with_model_config(self, model_config: ModelConfig):
