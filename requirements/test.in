@@ -40,6 +40,7 @@ mteb[bm25s]>=2, <3 # required for mteb test
 transformers==4.57.5
 tokenizers==0.22.0
 schemathesis>=3.39.15 # Required for openai schema test.
+helion==0.3.0
 # quantization
 bitsandbytes==0.49.2
 buildkite-test-collector==0.1.9
