@@ -2922,7 +2922,7 @@ class GPUModelRunner(
             # We are not doing any prompt replacement. We also will only
             # ever have a single encoder input.
             encoder_outputs = self._execute_mm_encoder(scheduler_output)
-            model_kwargs.update({"encoder_outputs": encoder_outputs})
+            model_kwargs.update({"encoder_outputs": encoder_outputs}) # TODO < we should hit this in whisper?
 
         return (
             input_ids,
