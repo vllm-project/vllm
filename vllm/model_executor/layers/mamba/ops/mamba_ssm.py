@@ -333,13 +333,13 @@ def selective_state_update(
         dt_bias = dt_bias.unsqueeze(0)
     if out.dim() == 2:
         out = out.unsqueeze(1)
-    if num_accepted_tokens is not None:
-        assert state_batch_indices is not None and state_batch_indices.dim() == 2
-        assert dst_state_batch_indices is None or dst_state_batch_indices.dim() == 2
     if state_batch_indices is not None and state_batch_indices.dim() == 1:
         state_batch_indices = state_batch_indices.unsqueeze(1)
     if dst_state_batch_indices is not None and dst_state_batch_indices.dim() == 1:
         dst_state_batch_indices = dst_state_batch_indices.unsqueeze(1)
+    if num_accepted_tokens is not None:
+        assert state_batch_indices is not None and state_batch_indices.dim() == 2
+        assert dst_state_batch_indices is None or dst_state_batch_indices.dim() == 2
 
     _, nheads, dim, dstate = state.shape
     batch = x.shape[0]
