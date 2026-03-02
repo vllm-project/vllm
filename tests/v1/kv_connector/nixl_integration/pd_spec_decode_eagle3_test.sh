@@ -82,9 +82,9 @@ SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
 cleanup_instances() {
   echo ""
   echo "Cleaning up..."
-  kill $(jobs -pr) 2>/dev/null || true
+  kill "$(jobs -pr)" 2>/dev/null || true
   sleep 1
-  kill -9 $(jobs -pr) 2>/dev/null || true
+  kill -9 "$(jobs -pr)" 2>/dev/null || true
   pkill -9 -f "vllm serve" 2>/dev/null || true
   pkill -9 -f "toy_proxy_server.*8192" 2>/dev/null || true
   sleep 1
@@ -123,7 +123,7 @@ else
   else
     num=1
   fi
-  for (( g=0; g<num; g++ )); do ALL_GPUS+=($g); done
+  for (( g=0; g<num; g++ )); do ALL_GPUS+=("$g"); done
 fi
 
 TOTAL_GPUS_NEEDED=$(( PREFILLER_TP_SIZE + DECODER_TP_SIZE ))
@@ -159,9 +159,9 @@ run_config() {
     local kv_config="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"${KV_BUFFER_DEVICE}\"}"
   fi
 
-  local backend_args=""
+  local backend_args=()
   if [[ -n "$backend" ]]; then
-    backend_args="--attention-backend $backend"
+    backend_args=(--attention-backend "$backend")
   fi
 
   echo ""
@@ -200,39 +200,39 @@ run_config() {
 
   # Start prefill
   echo "Starting prefill on GPU $prefill_gpu, port $prefill_port"
-  CUDA_VISIBLE_DEVICES=$prefill_gpu \
+  CUDA_VISIBLE_DEVICES="$prefill_gpu" \
   VLLM_KV_CACHE_LAYOUT='HND' \
   UCX_NET_DEVICES=all \
   VLLM_NIXL_SIDE_CHANNEL_PORT=5559 \
-  vllm serve $model \
-    --port $prefill_port \
+  vllm serve "$model" \
+    --port "$prefill_port" \
     --enforce-eager \
-    --max-model-len $max_model_len \
-    --block-size ${BLOCK_SIZE} \
-    --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
-    --tensor-parallel-size $PREFILLER_TP_SIZE \
+    --max-model-len "$max_model_len" \
+    --block-size "${BLOCK_SIZE}" \
+    --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
+    --tensor-parallel-size "$PREFILLER_TP_SIZE" \
     --kv-transfer-config "$kv_config" \
     --speculative-config "$prefill_spec" \
     --disable-log-requests \
-    ${backend_args} &
+    "${backend_args[@]}" &
 
   # Start decode
   echo "Starting decode on GPU $decode_gpu, port $decode_port"
-  CUDA_VISIBLE_DEVICES=$decode_gpu \
+  CUDA_VISIBLE_DEVICES="$decode_gpu" \
   VLLM_KV_CACHE_LAYOUT='HND' \
   UCX_NET_DEVICES=all \
   VLLM_NIXL_SIDE_CHANNEL_PORT=5659 \
-  vllm serve $model \
-    --port $decode_port \
+  vllm serve "$model" \
+    --port "$decode_port" \
     --enforce-eager \
-    --max-model-len $max_model_len \
-    --block-size ${BLOCK_SIZE} \
-    --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
-    --tensor-parallel-size $DECODER_TP_SIZE \
+    --max-model-len "$max_model_len" \
+    --block-size "${BLOCK_SIZE}" \
+    --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
+    --tensor-parallel-size "$DECODER_TP_SIZE" \
     --kv-transfer-config "$kv_config" \
     --speculative-config "$decode_spec" \
     --disable-log-requests \
-    ${backend_args} &
+    "${backend_args[@]}" &
 
   wait_for_server "$prefill_port"
   wait_for_server "$decode_port"

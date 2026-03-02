@@ -16,15 +16,14 @@ The shell script sets these environment variables:
 """
 
 import os
-import re
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from urllib.request import Request, urlopen
+from urllib.request import urlopen
 
 import openai
-import pytest
-
+import regex as re
 from transformers import AutoTokenizer
+
 from vllm.benchmarks.datasets import get_samples
 
 # ── Config from environment (set by shell script) ────────────────────────
@@ -48,9 +47,7 @@ class Eagle3PdModelConfig:
     verifier: str
     drafter: str
     expected_acceptance_length: float
-    expected_acceptance_lengths_per_pos: list[float] = field(
-        default_factory=list
-    )
+    expected_acceptance_lengths_per_pos: list[float] = field(default_factory=list)
     id: str = ""
     rtol: float | None = None
 
@@ -123,9 +120,7 @@ def _fetch_metric(metric_name: str) -> float:
     url = f"http://localhost:{DECODE_PORT}/metrics"
     body = urlopen(url).read().decode()
     for line in body.split("\n"):
-        if line.startswith(metric_name + "{") or line.startswith(
-            metric_name + " "
-        ):
+        if line.startswith(metric_name + "{") or line.startswith(metric_name + " "):
             return float(line.rsplit(" ", 1)[-1])
     raise ValueError(f"Metric {metric_name} not found in decode /metrics")
 
@@ -178,9 +173,7 @@ def test_pd_eagle3_acceptance_length():
 
     # ── Extract metrics ───────────────────────────────────────────────
     n_drafts = _fetch_metric("vllm:spec_decode_num_drafts_total")
-    n_accepted = _fetch_metric(
-        "vllm:spec_decode_num_accepted_tokens_total"
-    )
+    n_accepted = _fetch_metric("vllm:spec_decode_num_accepted_tokens_total")
 
     assert n_drafts > 0, "No spec-decode drafts were generated"
 
