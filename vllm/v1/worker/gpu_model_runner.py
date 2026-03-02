@@ -4842,6 +4842,10 @@ class GPUModelRunner(
                 else:
                     seq_lens = max_query_len  # type: ignore[assignment]
                 self.seq_lens.np[:num_reqs] = seq_lens
+                # Mark all dummy requests as having prior context so
+                # split_decodes_and_prefills won't misclassify them
+                # as new prefill requests.
+                self.input_batch.num_computed_tokens_cpu[:num_reqs] = 1
                 self.seq_lens.np[num_reqs:] = 0
                 self.seq_lens.copy_to_gpu()
 

@@ -516,11 +516,14 @@ def split_decodes_and_prefills(
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
 
-    # A new request has no prior context (num_computed_tokens == 0),
-    # which means seq_lens == query_lens. New requests need prefill
-    # treatment even if query_lens <= decode_threshold (e.g., for Mamba
-    # state initialization). Exclude padding (query_lens == 0).
-    is_new_request = (seq_lens == query_lens) & (query_lens > 0)
+    # A new request has no prior context (num_computed_tokens == 0).
+    # New requests need prefill treatment even if
+    # query_lens <= decode_threshold (e.g., for Mamba state init).
+    num_computed = common_attn_metadata._num_computed_tokens_cpu
+    if num_computed is not None:
+        is_new_request = (num_computed[:num_reqs] == 0) & (query_lens > 0)
+    else:
+        is_new_request = (seq_lens == query_lens) & (query_lens > 0)
 
     if max_query_len <= decode_threshold and (
         not require_uniform or decode_threshold <= 1
