@@ -4,6 +4,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -34,8 +35,8 @@ def _supports_current_device() -> bool:
 
 
 def _supports_no_act_and_mul() -> bool:
-    """Does not support non-gated MoE (i.e. Nanotron-Mini)."""
-    return False
+    """Supports non-gated MoE."""
+    return True
 
 
 def _supports_quant_scheme(
@@ -50,9 +51,8 @@ def _supports_quant_scheme(
     return (weight_key, activation_key) in SUPPORTED_W_A
 
 
-def _supports_activation(activation: str) -> bool:
-    """Supports silu activation only."""
-    return activation in ["silu"]
+def _supports_activation(activation: MoEActivation) -> bool:
+    return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
 
 def _supports_routing_method(
@@ -61,6 +61,8 @@ def _supports_routing_method(
     routing_method: RoutingMethodType,
 ) -> bool:
     """Monolithic kernels need to express router support."""
+    # NOTE(dbari): TopK routing could also be enabled, but need to validate models
+    # NOTE(dbari): Default is not implemented and should not be enabled until it is
     if (weight_key, activation_key) == (kFp8Static128BlockSym, kFp8Dynamic128Sym):
         # NOTE(rob): potentially allow others here. This is a conservative list.
         return routing_method in [
@@ -71,11 +73,10 @@ def _supports_routing_method(
     elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
         # NOTE(dbari): as above, potentially allow others here.
         return routing_method in [
+            RoutingMethodType.DeepSeekV3,
             RoutingMethodType.Llama4,
-            # NOTE(mgoin): Disabled to investigate accuracy issues.
-            # See https://github.com/vllm-project/vllm/issues/33532
-            # RoutingMethodType.Renormalize,
-            # RoutingMethodType.RenormalizeNaive,
+            RoutingMethodType.Renormalize,
+            RoutingMethodType.RenormalizeNaive,
         ]
     else:
         raise ValueError("Unsupported quantization scheme.")
@@ -128,25 +129,28 @@ def is_supported_config_trtllm_fp8(
         return f"kernel does not support {reason}"
 
     if not _supports_current_device():
-        return False, _make_reason("current device")
+        return False, _make_reason(f"current device {current_platform.device_name}")
     elif not (moe_config.is_act_and_mul or _supports_no_act_and_mul()):
         return False, _make_reason("no act_and_mul MLP layer")
     elif not _supports_activation(moe_config.activation):
         return False, _make_reason(f"{moe_config.activation} activation")
     elif not _supports_quant_scheme(weight_key, activation_key):
-        return False, _make_reason("quantization scheme")
+        return False, _make_reason(f"quantization scheme {weight_key}x{activation_key}")
     elif not _supports_parallel_config(moe_config.moe_parallel_config):
-        return False, _make_reason("parallel config")
+        return False, _make_reason(f"parallel config {moe_config.moe_parallel_config}")
     elif not _supports_routing_method(
         weight_key, activation_key, moe_config.routing_method
     ):
-        return False, _make_reason("routing method")
+        return False, _make_reason(f"routing method {moe_config.routing_method}")
     elif activation_format != mk.FusedMoEActivationFormat.Standard:
-        return False, _make_reason("activation format")
+        return False, _make_reason(f"activation format {activation_format}")
     elif not _supports_router_logits_dtype(
         moe_config.router_logits_dtype, moe_config.routing_method
     ):
-        return False, _make_reason("float32 router_logits with non-DeepSeekV3 routing")
+        return False, _make_reason(
+            "float32 router_logits with non-DeepSeekV3 routing "
+            f"{moe_config.router_logits_dtype}x{moe_config.routing_method}"
+        )
 
     return True, None
 
@@ -164,17 +168,17 @@ def is_supported_config_trtllm_bf16(
         return f"kernel does not support {reason}"
 
     if not _supports_current_device():
-        return False, _make_reason("current device")
+        return False, _make_reason(f"current device {current_platform.device_name}")
     elif not (moe_config.is_act_and_mul or _supports_no_act_and_mul()):
         return False, _make_reason("no act_and_mul MLP layer")
     elif not _supports_activation(moe_config.activation):
         return False, _make_reason(f"{moe_config.activation} activation")
     elif not _supports_parallel_config(moe_config.moe_parallel_config):
-        return False, _make_reason("parallel config")
+        return False, _make_reason(f"parallel config {moe_config.moe_parallel_config}")
     elif not _supports_routing_method_bf16(moe_config.routing_method):
-        return False, _make_reason("routing method")
+        return False, _make_reason(f"routing method {moe_config.routing_method}")
     elif activation_format != mk.FusedMoEActivationFormat.Standard:
-        return False, _make_reason("activation format")
+        return False, _make_reason(f"activation format {activation_format}")
 
     return True, None
 
@@ -200,6 +204,7 @@ def flashinfer_fused_moe_blockscale_fp8(
 ) -> torch.Tensor:
     from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
 
+    num_expert_group = num_expert_group if num_expert_group is not None else 0
     topk_group = topk_group if topk_group is not None else 0
     assert top_k <= global_num_experts
     assert top_k <= 10
@@ -290,6 +295,7 @@ def fi_trtllm_fp8_per_tensor_moe(
     local_num_experts: int,
     use_routing_scales_on_input: bool,
     routing_method_type: int,
+    activation_type: int,
     routed_scaling_factor: float = 1.0,
 ) -> torch.Tensor:
     num_expert_group = num_expert_group if num_expert_group is not None else 0
@@ -302,7 +308,13 @@ def fi_trtllm_fp8_per_tensor_moe(
         per_act_token_quant=False,
     )
 
+    from flashinfer.fused_moe.core import ActivationType
+
     from vllm.utils.flashinfer import flashinfer_trtllm_fp8_per_tensor_scale_moe
+
+    # The DeepSeekV3 routing method requires float32 router logits.
+    if routing_method_type == RoutingMethodType.DeepSeekV3:
+        routing_logits = routing_logits.to(torch.float32)
 
     return flashinfer_trtllm_fp8_per_tensor_scale_moe(
         routing_logits=routing_logits,
@@ -323,6 +335,9 @@ def fi_trtllm_fp8_per_tensor_moe(
         routed_scaling_factor=routed_scaling_factor,
         use_routing_scales_on_input=use_routing_scales_on_input,
         routing_method_type=routing_method_type,
+        # TODO: enum type Required for flashinfer==0.6.3, remove with update
+        # https://github.com/flashinfer-ai/flashinfer/pull/2508
+        activation_type=ActivationType(activation_type),
     )
 
 
@@ -345,6 +360,7 @@ def fi_trtllm_fp8_per_tensor_moe_fake(
     local_num_experts: int,
     use_routing_scales_on_input: bool,
     routing_method_type: int,
+    activation_type: int,
     routed_scaling_factor: float = 1.0,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)

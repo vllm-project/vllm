@@ -17,6 +17,13 @@ import os
 from typing import TypeVar
 
 import torch
+
+import vllm.envs as envs
+from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.mixed_precision import (
+    MPLinearKernel,
+    MPLinearLayerConfig,
+)
 from vllm.model_executor.kernels.linear.mixed_precision.allspark import (
     AllSparkLinearKernel,
 )
@@ -47,6 +54,18 @@ from vllm.model_executor.kernels.linear.mixed_precision.xpu import (
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterBpreshufflePerTokenFp8ScaledMMLinearKernel,
     AiterCKPerTokenFp8ScaledMMLinearKernel,
+    AiterInt8ScaledMMLinearKernel
+)
+    
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    FP8ScaledMMLinearKernel,
+    FP8ScaledMMLinearLayerConfig,
+    Int8ScaledMMLinearKernel,
+    Int8ScaledMMLinearLayerConfig,
+    ScaledMMLinearKernel,
+    ScaledMMLinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
@@ -72,21 +91,6 @@ from vllm.model_executor.kernels.linear.scaled_mm.triton import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
     XPUFP8ScaledMMLinearKernel,
-)
-
-import vllm.envs as envs
-from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear.mixed_precision import (
-    MPLinearKernel,
-    MPLinearLayerConfig,
-)
-from vllm.model_executor.kernels.linear.scaled_mm import (
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
-    Int8ScaledMMLinearKernel,
-    Int8ScaledMMLinearLayerConfig,
-    ScaledMMLinearKernel,
-    ScaledMMLinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import PlatformEnum, current_platform
@@ -379,6 +383,8 @@ __all__ = [
     "FP8ScaledMMLinearLayerConfig",
     "Int8ScaledMMLinearLayerConfig",
     "ScaledMMLinearLayerConfig",
+    "AiterBpreshufflePerTokenFp8ScaledMMLinearKernel",
+    "AiterCKPerTokenFp8ScaledMMLinearKernel",
     "AiterInt8ScaledMMLinearKernel",
     "CPUInt8ScaledMMLinearKernel",
     "CutlassFP8ScaledMMLinearKernel",

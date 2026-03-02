@@ -10,7 +10,7 @@ from torch import nn
 import tests.compile.silly_attention  # noqa
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
-from vllm.compilation.inductor_pass import (
+from vllm.compilation.passes.inductor_pass import (
     InductorPass,
     get_pass_context,
 )

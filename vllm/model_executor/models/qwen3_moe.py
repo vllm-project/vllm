@@ -443,7 +443,6 @@ class Qwen3MoeModel(nn.Module):
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.config = config
         self.quant_config = quant_config
@@ -687,6 +686,11 @@ class Qwen3MoeForCausalLM(
             "k_proj",
             "v_proj",
         ]
+    }
+
+    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+        "lm_head": "output_embeddings",
     }
 
     fall_back_to_pt_during_load = False

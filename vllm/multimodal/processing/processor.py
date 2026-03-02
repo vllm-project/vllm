@@ -17,13 +17,12 @@ from typing import (
 
 import regex as re
 import torch
-from typing_extensions import TypeVar, assert_never, deprecated
+from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
 
-from ..hasher import MultiModalHasher
 from ..inputs import (
     MultiModalEncDecInputs,
     MultiModalFieldConfig,
@@ -32,20 +31,19 @@ from ..inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
     MultiModalKwargsOptionalItems,
-    MultiModalUUIDDict,
     PlaceholderRange,
+    mm_enc_dec_inputs,
+    mm_inputs,
 )
 from ..parse import (
     DictEmbeddingItems,
     EmbeddingItems,
     MultiModalDataItems,
+    MultiModalUUIDItems,
 )
-from .context import (
-    BaseProcessingInfo,
-    get_current_request_id,
-    timed_preprocessor_operation,
-)
+from .context import BaseProcessingInfo, TimingContext
 from .dummy_inputs import BaseDummyInputsBuilder
+from .inputs import ProcessorInputs
 
 if TYPE_CHECKING:
     from transformers.feature_extraction_utils import BatchFeature
@@ -998,25 +996,21 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         self.data_parser = self.info.get_data_parser()
 
-    @property
-    @deprecated("Will be removed in v0.17. Use `info.supported_mm_limits` instead.")
-    def supported_mm_limits(self):
-        return self.info.supported_mm_limits
-
-    @property
-    @deprecated("Will be removed in v0.17. Use `info.allowed_mm_limits` instead.")
-    def allowed_mm_limits(self):
-        return self.info.allowed_mm_limits
-
     def __call__(
         self,
         prompt: str,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
+        mm_uuid_items: MultiModalUUIDItems | None = None,
+        hf_processor_mm_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalInputs:
-        return self.apply(prompt, mm_items, hf_processor_mm_kwargs, mm_uuids=mm_uuids)
+        processor_inputs = ProcessorInputs(
+            prompt,
+            mm_items,
+            mm_uuid_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs or {},
+        )
+
+        return self.apply(processor_inputs, TimingContext(enabled=False))
 
     @abstractmethod
     def _get_mm_fields_config(
@@ -1110,6 +1104,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         mm_items: MultiModalDataItems,
     ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        """Extract processor and passthrough data from multi-modal items."""
         processor_data = dict[str, object]()
         passthrough_data = dict[str, object]()
 
@@ -1132,12 +1127,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Call the HF processor on the prompt text and
         associated multi-modal data.
         """
-        with timed_preprocessor_operation(self.info.ctx, "hf_processor"):
-            return self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**mm_kwargs),
-                dict(text=prompt, **mm_data),
-                dict(**mm_kwargs, **tok_kwargs),
-            )
+        return self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**mm_kwargs),
+            dict(text=prompt, **mm_data),
+            dict(**mm_kwargs, **tok_kwargs),
+        )
 
     def _hf_processor_applies_updates(
         self,
@@ -1171,7 +1165,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         In addition, return whether prompt updates have been applied.
         """
-        processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         processed_data = self._call_hf_processor(
             prompt=prompt_text,
@@ -1296,72 +1293,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         return prompt_ids, mm_processed_data, False
 
-    def _hash_mm_items(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
-    ) -> MultiModalHashes:
-        """Create MM hashes to be returned.
-
-
-        Note: When overrides are provided via callers of `apply`,
-        `_hash_mm_items` will be bypassed and the overrides will be used.
-        """
-        model_id = self.info.model_id
-
-        hashes: MultiModalHashes = {}
-        mm_uuids = mm_uuids or {}
-
-        for modality, items in mm_items.items():
-            if modality in mm_uuids:
-                mm_uuids_per_modality = mm_uuids[modality]
-                if isinstance(mm_uuids_per_modality, str):
-                    mm_uuids_per_modality = [mm_uuids_per_modality]
-
-                # For None entries, compute a hash; otherwise, use provided ID.
-                computed: list[str] = []
-                for i, item in enumerate(items.get_all_items_for_hash()):
-                    item_uuid = mm_uuids_per_modality[i]
-
-                    # NOTE: Even if a item_uuid is provided, we still compute a
-                    # hash if `hf_processor_mm_kwargs` or `tokenization_kwargs`
-                    # are provided. This is because the processed multimodal
-                    # inputs can be different depending on the processor kwargs.
-                    if (
-                        item_uuid is None
-                        or hf_processor_mm_kwargs
-                        or tokenization_kwargs
-                    ):
-                        # NOTE: use provided hash string to hash with kwargs
-                        # if available for better performance.
-                        item = item_uuid if item_uuid is not None else item
-                        computed.append(
-                            MultiModalHasher.hash_kwargs(
-                                model_id=model_id,
-                                **{modality: item},
-                                **hf_processor_mm_kwargs,
-                                **tokenization_kwargs,
-                            )
-                        )
-                    else:
-                        computed.append(item_uuid)
-                hashes[modality] = computed
-            else:
-                hashes[modality] = [
-                    MultiModalHasher.hash_kwargs(
-                        model_id=model_id,
-                        **{modality: item},
-                        **hf_processor_mm_kwargs,
-                        **tokenization_kwargs,
-                    )
-                    for item in items
-                ]
-
-        return hashes
-
     def _get_cache_missing_items(
         self,
         cache: BaseMultiModalProcessorCache,
@@ -1395,7 +1326,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     missing_modality_data.append(data)
             mm_missing_data[modality] = missing_modality_data
 
-        mm_missing_items = self.info.parse_mm_data(mm_missing_data)
+        mm_missing_items = self.info.parse_mm_data(mm_missing_data, validate=False)
 
         return mm_is_cached, mm_missing_items
 
@@ -1463,42 +1394,36 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def _apply_hf_processor(
         self,
-        prompt: str | list[int],
-        mm_data_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
-        (
-            prompt_ids,
-            mm_processed_data,
-            is_update_applied,
-        ) = self._apply_hf_processor_main(
-            prompt=prompt,
-            mm_items=mm_data_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-            enable_hf_prompt_update=True,
-        )
+        with timing_ctx.record("apply_hf_processor"):
+            (
+                prompt_ids,
+                mm_processed_data,
+                is_update_applied,
+            ) = self._apply_hf_processor_main(
+                prompt=inputs.prompt,
+                mm_items=inputs.mm_data_items,
+                hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
+                tokenization_kwargs=inputs.tokenization_kwargs,
+                enable_hf_prompt_update=True,
+            )
 
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_processed_data,
-            self._get_mm_fields_config(mm_processed_data, hf_processor_mm_kwargs),
+            self._get_mm_fields_config(
+                mm_processed_data, inputs.hf_processor_mm_kwargs
+            ),
         )
 
         # Use overrides if provided; fallback to data-dependent hashing.
-        with timed_preprocessor_operation(self.info.ctx, "hashing"):
-            mm_hashes = self._hash_mm_items(
-                mm_data_items,
-                hf_processor_mm_kwargs,
-                tokenization_kwargs,
-                mm_uuids=mm_uuids,
-            )
+        with timing_ctx.record("get_mm_hashes"):
+            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
 
         mm_prompt_updates = self._get_mm_prompt_updates(
-            mm_data_items,
-            hf_processor_mm_kwargs,
+            inputs.mm_data_items,
+            inputs.hf_processor_mm_kwargs,
             mm_kwargs,
         )
 
@@ -1512,12 +1437,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def _cached_apply_hf_processor(
         self,
-        prompt: str | list[int],
-        mm_data_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         """
         Apply the HF processor on the full prompt text,
@@ -1525,60 +1446,50 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         cache = self.cache
 
-        _, passthrough_data = self._get_hf_mm_data(mm_data_items)
+        _, passthrough_data = self._get_hf_mm_data(inputs.mm_data_items)
         if cache is None or passthrough_data:
-            return self._apply_hf_processor(
-                prompt=prompt,
-                mm_data_items=mm_data_items,
-                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-                tokenization_kwargs=tokenization_kwargs,
-                mm_uuids=mm_uuids,
-            )
+            return self._apply_hf_processor(inputs, timing_ctx)
 
-        with timed_preprocessor_operation(self.info.ctx, "hashing"):
-            mm_hashes = self._hash_mm_items(
-                mm_data_items,
-                hf_processor_mm_kwargs,
-                tokenization_kwargs,
-                mm_uuids=mm_uuids,
-            )
+        with timing_ctx.record("get_mm_hashes"):
+            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
 
-        with timed_preprocessor_operation(self.info.ctx, "cache_lookup"):
+        with timing_ctx.record("get_cache_missing_items"):
             mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
                 cache=cache,
-                mm_data_items=mm_data_items,
+                mm_data_items=inputs.mm_data_items,
                 mm_hashes=mm_hashes,
             )
 
         # NOTE: `prompt` does not correspond to `mm_missing_data_items`,
         # so we can't apply prompt updates until the new multimodal
         # items are combined with the cached multimodal items
-        (
-            prompt_ids,
-            mm_missing_processed_data,
-            is_update_applied,
-        ) = self._apply_hf_processor_main(
-            prompt=prompt,
-            mm_items=mm_missing_data_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-            enable_hf_prompt_update=False,
-        )
+        with timing_ctx.record("apply_hf_processor"):
+            (
+                prompt_ids,
+                mm_missing_processed_data,
+                is_update_applied,
+            ) = self._apply_hf_processor_main(
+                prompt=inputs.prompt,
+                mm_items=mm_missing_data_items,
+                hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
+                tokenization_kwargs=inputs.tokenization_kwargs,
+                enable_hf_prompt_update=False,
+            )
 
         mm_missing_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_missing_processed_data,
             self._get_mm_fields_config(
-                mm_missing_processed_data, hf_processor_mm_kwargs
+                mm_missing_processed_data, inputs.hf_processor_mm_kwargs
             ),
         )
 
         mm_missing_prompt_updates = self._get_mm_prompt_updates(
             mm_missing_data_items,
-            hf_processor_mm_kwargs,
+            inputs.hf_processor_mm_kwargs,
             mm_missing_kwargs,
         )
 
-        with timed_preprocessor_operation(self.info.ctx, "cache_lookup"):
+        with timing_ctx.record("merge_mm_kwargs"):
             mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
                 cache,
                 mm_hashes=mm_hashes,
@@ -1616,6 +1527,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         token_ids: list[int],
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        """Apply multi-modal prompt updates to token IDs."""
         tokenizer = self.info.get_tokenizer()
 
         new_token_ids, match_result = self._apply_token_matches(
@@ -1747,12 +1659,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def apply(
         self,
-        prompt: str | list[int],
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object] | None = None,
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -1767,29 +1675,16 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         3. Extract information about the placeholder tokens from the
            processed token IDs.
         """
-        request_id = get_current_request_id()
-        if request_id is not None:
-            self.info.ctx.create_timing_stats(request_id)
-
-        if tokenization_kwargs is None:
-            tokenization_kwargs = {}
-
         (
             prompt_ids,
             mm_info,
             is_update_applied,
-        ) = self._cached_apply_hf_processor(
-            prompt,
-            mm_items,
-            hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        ) = self._cached_apply_hf_processor(inputs, timing_ctx)
 
         # NOTE: tokenization_kwargs are not required to init processor
-        with timed_preprocessor_operation(self.info.ctx, "prompt_update"):
+        with timing_ctx.record("apply_prompt_updates"):
             prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
-                mm_items=mm_items,
+                mm_items=inputs.mm_data_items,
                 prompt_ids=prompt_ids,
                 mm_kwargs=mm_info.kwargs,
                 mm_prompt_updates=mm_info.prompt_updates,
@@ -1801,8 +1696,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for modality, placeholders in mm_placeholders.items()
         }
 
-        return MultiModalInputs(
-            type="multimodal",
+        return mm_inputs(
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_info.kwargs,
             mm_hashes=mm_info.hashes,
@@ -1840,27 +1734,24 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         tokenizer = self.info.get_tokenizer()
         decoder_prompt_raw = self.create_decoder_prompt(prompt, mm_items)
         if isinstance(decoder_prompt_raw, str):
+            decoder_prompt_text = decoder_prompt_raw
             decoder_prompt_ids = tokenizer.encode(
                 decoder_prompt_raw, add_special_tokens=False
             )
         else:
+            decoder_prompt_text = None
             decoder_prompt_ids = decoder_prompt_raw
 
-        mm_inputs = MultiModalEncDecInputs(
-            encoder_prompt_token_ids=encoder_inputs["prompt_token_ids"],
-            **encoder_inputs,
+        return mm_enc_dec_inputs(
+            encoder_inputs,
+            decoder_prompt_ids,
+            decoder_prompt=decoder_prompt_text,
         )
-        mm_inputs["prompt_token_ids"] = decoder_prompt_ids
-        return mm_inputs
 
     def apply(
         self,
-        prompt: str | list[int],
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object] | None = None,
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> MultiModalEncDecInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -1869,17 +1760,22 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         2. Apply the HF processor on encoder prompt.
         3. Copy the input prompt text as decoder prompt inputs.
         """
-        encoder_prompt = self.create_encoder_prompt(prompt, mm_items)
-        encoder_inputs = super().apply(
+        encoder_prompt = self.create_encoder_prompt(
+            inputs.prompt,
+            inputs.mm_data_items,
+        )
+        encoder_processor_inputs = ProcessorInputs(
             encoder_prompt,
-            mm_items,
-            hf_processor_mm_kwargs,
-            tokenization_kwargs,
-            mm_uuids=mm_uuids,
+            inputs.mm_data_items,
+            inputs.mm_uuid_items,
+            hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
+            tokenization_kwargs=inputs.tokenization_kwargs,
         )
 
+        encoder_inputs = super().apply(encoder_processor_inputs, timing_ctx)
+
         return self._get_enc_dec_inputs(
-            prompt=prompt,
-            mm_items=mm_items,
+            prompt=inputs.prompt,
+            mm_items=inputs.mm_data_items,
             encoder_inputs=encoder_inputs,
         )
