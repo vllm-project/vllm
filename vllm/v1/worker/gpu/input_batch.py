@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import cast
 
 import numpy as np
 import torch
@@ -98,10 +97,8 @@ class InputBatch:
         assert int(num_scheduled_tokens.sum()) == num_tokens
 
         # seq_len equals to query_len
-        seq_lens_tensor = torch.as_tensor(
-            num_scheduled_tokens, dtype=torch.int32, device=device
-        )
-        input_buffers.seq_lens[:num_reqs].copy_(seq_lens_tensor, non_blocking=True)
+        input_buffers.seq_lens[:num_reqs] = num_tokens // num_reqs
+        input_buffers.seq_lens[num_reqs - 1] += num_tokens % num_reqs
         # Pad for full CUDA graph mode.
         input_buffers.seq_lens[num_reqs:] = 0
         seq_lens = input_buffers.seq_lens[:num_reqs]
@@ -124,7 +121,7 @@ class InputBatch:
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
         cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
         return cls(
-            req_ids=cast(list[str], req_ids),
+            req_ids=req_ids,
             num_reqs=num_reqs,
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
