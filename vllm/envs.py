@@ -245,6 +245,7 @@ if TYPE_CHECKING:
     VLLM_CUDA_COMPATIBILITY_PATH: str | None = None
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
+    VLLM_NIXL_EP_MAX_NUM_RANKS: int = 128
 
 
 def get_default_cache_root():
@@ -1628,6 +1629,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # scaling command in elastic EP.
     "VLLM_ELASTIC_EP_DRAIN_REQUESTS": lambda: bool(
         int(os.getenv("VLLM_ELASTIC_EP_DRAIN_REQUESTS", "0"))
+    ),
+    # NIXL EP environment variables
+    # These are temporarily registered here for Ray to pass to downstream
+    # EngineCore actors
+    "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
+        os.getenv("VLLM_NIXL_EP_MAX_NUM_RANKS", "128")
     ),
 }
 
