@@ -195,8 +195,10 @@ class P2PAFDConnector(AFDConnectorBase):
             sub_group_ranks = []
             for f_idx in range(ffn_size):
                 ranks = [ffn_ranks[f_idx]]  # F is rank 0
+                # Each F is paired with consecutive A's
+                # F0 -> A0, A1; F1 -> A2, A3 (for 4A2F)
                 for k in range(self.ratio):
-                    a_idx = f_idx + k * ffn_size
+                    a_idx = f_idx * self.ratio + k
                     ranks.append(attn_ranks[a_idx])
                 sub_group_ranks.append(ranks)
                 logger.info(f"P2P group {f_idx}: {ranks} (F + {self.ratio} A's)")
@@ -538,7 +540,6 @@ class P2PAFDConnector(AFDConnectorBase):
     ):
         
         t0 = time.perf_counter()
-        self.update_state_from_dp_metadata(data, is_graph_capturing)
         send_data = (data, is_graph_capturing, is_warmup)
         device = torch.device(f"cuda:{self.local_rank}")
         # Use explicit device (cuda:local_rank) so multi-process on same node
@@ -586,19 +587,6 @@ class P2PAFDConnector(AFDConnectorBase):
         else:
             data, is_graph_capturing = obj
             is_warmup = False
-
-        # For asymmetric A/F, scale token counts by ratio
-        # because FFN receives concatenated tokens from multiple A's
-        if self.ratio > 1 and data is not None:
-            from vllm.forward_context import DPMetadata
-            scaled_data = {}
-            for stage_idx, dp_metadata in data.items():
-                scaled_data[stage_idx] = DPMetadata(
-                    num_tokens_across_dp_cpu=dp_metadata.num_tokens_across_dp_cpu * self.ratio,
-                    max_tokens_across_dp_cpu=dp_metadata.max_tokens_across_dp_cpu * self.ratio,
-                    local_sizes=dp_metadata.local_sizes,
-                )
-            data = scaled_data
 
         logger.info(
             "jcz recv_dp_metadata_list is_graph_capturing:%s is_warmup:%s",

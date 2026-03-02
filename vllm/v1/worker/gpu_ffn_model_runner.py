@@ -167,8 +167,43 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                 with set_forward_context(
                     attn_metadata=None, vllm_config=self.vllm_config
                 ):
-                    print(f"jcz _ffn_forward execute_eager_mode dp_metadata:{dp_metadata} hidden_states:{hidden_states.shape}")
-                    get_forward_context().dp_metadata = dp_metadata
+                    # For asymmetric A/F, scale token counts by ratio
+                    # because FFN receives concatenated tokens from multiple A's
+                    # Also need to rebuild num_tokens_across_dp_cpu to match F side's DP size
+                    if self.connector.ratio > 1 and dp_metadata is not None:
+                        # A side has ratio * ffn_size DP ranks
+                        # F side has ffn_size DP ranks
+                        # Each F receives tokens from ratio consecutive A's
+                        attn_num_tokens = dp_metadata.num_tokens_across_dp_cpu
+                        ffn_size = self.connector.ffn_size
+                        ratio = self.connector.ratio
+
+                        # Build F side's num_tokens_across_dp_cpu by summing each group
+                        ffn_num_tokens_list = []
+                        for f_idx in range(ffn_size):
+                            # Each F corresponds to ratio consecutive A's
+                            start_a_idx = f_idx * ratio
+                            end_a_idx = start_a_idx + ratio
+                            ffn_num_tokens_list.append(
+                                attn_num_tokens[start_a_idx:end_a_idx].sum().item()
+                            )
+
+                        ffn_dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+                        ffn_num_tokens = ffn_num_tokens_list[ffn_dp_rank]
+                        ffn_num_tokens_across_dp_cpu = torch.tensor(
+                            ffn_num_tokens_list,
+                            dtype=attn_num_tokens.dtype,
+                            device=attn_num_tokens.device,
+                        )
+
+                        scaled_dp_metadata = DPMetadata.make(
+                            parallel_config=self.vllm_config.parallel_config,
+                            num_tokens=ffn_num_tokens,
+                            num_tokens_across_dp_cpu=ffn_num_tokens_across_dp_cpu,
+                        )
+                        get_forward_context().dp_metadata = scaled_dp_metadata
+                    else:
+                        get_forward_context().dp_metadata = dp_metadata
                     rank_ffn_output = self._execute_eager_mode(
                         hidden_states, layer_idx
                     )
