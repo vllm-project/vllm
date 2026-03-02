@@ -239,6 +239,37 @@ class Qwen3CoderToolParser(ToolParser):
                 )
             return param_value
 
+    def _update_final_tool_arguments(self, tool_text: str) -> None:
+        """Parse the fully accumulated tool_text and update prev_tool_call_arr
+        with the final, correctly-typed arguments. Called once when the
+        function body is closed during streaming.
+        """
+        func_start_pos = tool_text.find(self.tool_call_prefix) + len(
+            self.tool_call_prefix
+        )
+        func_content_end = tool_text.find(self.function_end_token, func_start_pos)
+        if func_content_end == -1:
+            return
+        func_content = tool_text[func_start_pos:func_content_end]
+        try:
+            parsed_tool = self._parse_xml_function_call(
+                func_content,
+                self.streaming_request.tools if self.streaming_request else None,
+            )
+            if not parsed_tool:
+                return
+            for i, tool in enumerate(self.prev_tool_call_arr):
+                if tool.get("name") == parsed_tool.function.name:
+                    self.prev_tool_call_arr[i]["arguments"] = (
+                        parsed_tool.function.arguments
+                    )
+                    break
+        except Exception:
+            logger.warning(
+                "Failed to parse and update final arguments during streaming.",
+                exc_info=True,
+            )
+
     def _parse_xml_function_call(
         self, function_call_str: str, tools: list[ChatCompletionToolsParam] | None
     ) -> ToolCall | None:
@@ -556,33 +587,7 @@ class Qwen3CoderToolParser(ToolParser):
                 # Close JSON
                 self.json_closed = True
 
-                # Extract complete tool call to update
-                # prev_tool_call_arr with final arguments
-                # Find the function content
-                func_start = tool_text.find(self.tool_call_prefix) + len(
-                    self.tool_call_prefix
-                )
-                func_content_end = tool_text.find(self.function_end_token, func_start)
-                if func_content_end != -1:
-                    func_content = tool_text[func_start:func_content_end]
-                    # Parse to get the complete arguments
-                    try:
-                        parsed_tool = self._parse_xml_function_call(
-                            func_content,
-                            self.streaming_request.tools
-                            if self.streaming_request
-                            else None,
-                        )
-                        if parsed_tool:
-                            # Update existing entry in
-                            # prev_tool_call_arr with complete args
-                            for i, tool in enumerate(self.prev_tool_call_arr):
-                                if tool.get("name") == parsed_tool.function.name:
-                                    args = parsed_tool.function.arguments
-                                    self.prev_tool_call_arr[i]["arguments"] = args
-                                    break
-                    except Exception:
-                        pass  # Ignore parsing errors during streaming
+                self._update_final_tool_arguments(tool_text)
 
                 result = DeltaMessage(
                     tool_calls=[
@@ -703,38 +708,7 @@ class Qwen3CoderToolParser(ToolParser):
                         ):
                             json_fragment += "}"
                             self.json_closed = True
-                            # Update prev_tool_call_arr with final arguments
-                            func_start_pos = tool_text.find(
-                                self.tool_call_prefix
-                            ) + len(self.tool_call_prefix)
-                            func_content_end = tool_text.find(
-                                self.function_end_token, func_start_pos
-                            )
-                            if func_content_end != -1:
-                                func_content = tool_text[
-                                    func_start_pos:func_content_end
-                                ]
-                                try:
-                                    parsed_tool = self._parse_xml_function_call(
-                                        func_content,
-                                        self.streaming_request.tools
-                                        if self.streaming_request
-                                        else None,
-                                    )
-                                    if parsed_tool:
-                                        for i, tool in enumerate(
-                                            self.prev_tool_call_arr
-                                        ):
-                                            if (
-                                                tool.get("name")
-                                                == parsed_tool.function.name
-                                            ):
-                                                self.prev_tool_call_arr[i][
-                                                    "arguments"
-                                                ] = parsed_tool.function.arguments
-                                                break
-                                except Exception:
-                                    pass
+                            self._update_final_tool_arguments(tool_text)
                             self.in_function = False
                             self.accumulated_params = {}
 
