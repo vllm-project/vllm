@@ -15,7 +15,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.utils.flashinfer import (
     activation_to_flashinfer_int,
     align_fp4_moe_weights_for_fi,
 )
