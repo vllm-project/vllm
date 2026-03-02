@@ -136,9 +136,15 @@ elseif(HIP_FOUND)
 
   # Sanitize CMAKE_HIP_FLAGS to remove any stderr contamination from offload-arch.
   # When building in Docker without GPU passthrough, offload-arch fails and its
-  # stderr (e.g., "[WARNING] offload-arch failed...") can get baked into flags.
+  # stderr (e.g., "[stderr] [WARNING] offload-arch failed...") can get baked into flags.
+  # First, remove any quoted warning chunks entirely.
   string(REGEX REPLACE "[\"']\\[WARNING\\][^\"']*[\"']" "" CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS}")
-  string(REGEX REPLACE "\\[WARNING\\][^ ]*" "" CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS}")
+  # Then, remove any unquoted stderr/warning chunks (optionally starting with [stderr]),
+  # including the full multi-word warning message.
+  string(REGEX REPLACE "(\\[stderr\\][ ]*)?\\[WARNING\\]( [^ ]*)*" " " CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS}")
+  # Normalize whitespace after sanitization.
+  string(REGEX REPLACE "[ \\t]+" " " CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS}")
+  string(STRIP "${CMAKE_HIP_FLAGS}" CMAKE_HIP_FLAGS)
 
   # ROCm 5.X and 6.X
   if (ROCM_VERSION_DEV_MAJOR GREATER_EQUAL 5 AND
