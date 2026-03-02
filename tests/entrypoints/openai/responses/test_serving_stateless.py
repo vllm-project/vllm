@@ -194,7 +194,8 @@ class TestStorelessErrorPaths:
         assert "VLLM_ENABLE_RESPONSES_API_STORE" in result.error.message
 
     @pytest.mark.asyncio
-    async def test_cancel_without_store_returns_501(self):
+    async def test_cancel_without_store_unknown_id_returns_404(self):
+        """With store off and no matching background task, cancel returns 404."""
         from vllm.entrypoints.openai.engine.protocol import ErrorResponse
         from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 
@@ -202,7 +203,7 @@ class TestStorelessErrorPaths:
         result = await OpenAIServingResponses.cancel_responses(serving, "resp_123")
 
         assert isinstance(result, ErrorResponse)
-        assert result.error.code == HTTPStatus.NOT_IMPLEMENTED
+        assert result.error.code == HTTPStatus.NOT_FOUND
 
     @pytest.mark.asyncio
     async def test_previous_response_id_without_store_returns_400(self):
