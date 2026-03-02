@@ -260,6 +260,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
 )
+from vllm.model_executor.layers.attention.mla_path_selector import (
+    MLAPathSelector, MLA_PATH_MHA_UNABSORBED
+)
 
 logger = init_logger(__name__)
 
@@ -307,6 +310,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
         self.indexer = indexer
+        self.path_selector = MLAPathSelector()
 
         self.num_kv_heads = 1
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
@@ -434,22 +438,41 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            
+            path = self.path_selector.select_path(attn_metadata)
 
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-                self.forward_impl(
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    self_kv_cache,
-                    attn_metadata,
-                    output=output,
-                )
+                if path == MLA_PATH_MHA_UNABSORBED and attn_metadata.num_prefills > 0:
+                    # Bypass standard compressed KV cache logic and route 
+                    # strictly to the un-absorbed MHA prefill kernel.
+                    self.impl.forward_mha(
+                        q,
+                        kv_c_normed,
+                        k_pe,
+                        torch.tensor([], device=q.device, dtype=q.dtype), # Pass empty cache to bypass compressed logic
+                        attn_metadata,
+                        self._k_scale,
+                        output=output,
+                    )
+                else:
+                    self.forward_impl(
+                        q,
+                        kv_c_normed,
+                        k_pe,
+                        self_kv_cache,
+                        attn_metadata,
+                        output=output,
+                    )
                 return output
             else:
-                return self.forward_impl(
-                    q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
-                )
+                if path == MLA_PATH_MHA_UNABSORBED and attn_metadata.num_prefills > 0:
+                    # Same bypass but allowing the kernel to allocate the output buffer
+                    raise NotImplementedError("Dynamic attention router requires accept_output_buffer")
+                else:
+                    return self.forward_impl(
+                        q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
+                    )
         else:
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
@@ -829,7 +852,11 @@ def unified_mla_attention(
     layer_name: str,
 ) -> torch.Tensor:
     attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
-    output = layer.forward_impl(q, kv_c_normed, k_pe, kv_cache, attn_metadata)
+    path = layer.path_selector.select_path(attn_metadata)
+    if path == MLA_PATH_MHA_UNABSORBED and attn_metadata.num_prefills > 0:
+        raise NotImplementedError("Dynamic attention router requires accept_output_buffer")
+    else:
+        output = layer.forward_impl(q, kv_c_normed, k_pe, kv_cache, attn_metadata)
 
     return output
 
@@ -863,16 +890,28 @@ def unified_mla_attention_with_output(
     output_block_scale: torch.Tensor | None = None,
 ) -> None:
     attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
-    layer.forward_impl(
-        q,
-        kv_c_normed,
-        k_pe,
-        kv_cache,
-        attn_metadata,
-        output=output,
-        output_scale=output_scale,
-        output_block_scale=output_block_scale,
-    )
+    path = layer.path_selector.select_path(attn_metadata)
+    if path == MLA_PATH_MHA_UNABSORBED and attn_metadata.num_prefills > 0:
+        layer.impl.forward_mha(
+            q,
+            kv_c_normed,
+            k_pe,
+            torch.tensor([], device=q.device, dtype=q.dtype),
+            attn_metadata,
+            layer._k_scale,
+            output=output,
+        )
+    else:
+        layer.forward_impl(
+            q,
+            kv_c_normed,
+            k_pe,
+            kv_cache,
+            attn_metadata,
+            output=output,
+            output_scale=output_scale,
+            output_block_scale=output_block_scale,
+        )
 
 
 def unified_mla_attention_with_output_fake(
