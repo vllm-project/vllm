@@ -5803,7 +5803,7 @@ class GPUModelRunner(
                 # There may be a last group for layers without kv cache.
                 continue
             kernel_block_size = kernel_block_sizes[group.kv_cache_group_id]
-            for layer_name in group.layer_names:
+            for layer_idx, layer_name in enumerate(group.layer_names):
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
@@ -5842,12 +5842,37 @@ class GPUModelRunner(
                         kv_cache_stride_order.index(i)
                         for i in range(len(kv_cache_stride_order))
                     ]
-                    kv_caches[layer_name] = (
-                        kv_cache_raw_tensors[layer_name]
-                        .view(dtype)
-                        .view(kv_cache_shape)
-                        .permute(*inv_order)
-                    )
+                    if (
+                        isinstance(kv_cache_spec, FullAttentionSpec)
+                        and (attn_group_size := kv_cache_spec.group_size) > 1
+                    ):
+                        attn_group_idx = layer_idx % attn_group_size
+                        ori_stride = list(torch.empty(kv_cache_shape).stride())
+                        kernel_blocks_idx = kv_cache_shape.index(kernel_num_blocks)
+                        ori_stride[kernel_blocks_idx] *= attn_group_size
+                        target_stride = tuple(ori_stride)
+                        dtype_size = get_dtype_size(dtype)
+                        num_element_per_page = (
+                            kv_cache_spec.page_size_bytes // dtype_size
+                        )
+                        num_element_per_attn_group = (
+                            num_element_per_page
+                            // num_blocks_per_kv_block
+                            // attn_group_size
+                        )
+                        kv_caches[layer_name] = torch.as_strided(
+                            kv_cache_raw_tensors[layer_name].view(dtype),
+                            size=kv_cache_shape,
+                            stride=target_stride,
+                            storage_offset=attn_group_idx * num_element_per_attn_group,
+                        ).permute(*inv_order)
+                    else:
+                        kv_caches[layer_name] = (
+                            kv_cache_raw_tensors[layer_name]
+                            .view(dtype)
+                            .view(kv_cache_shape)
+                            .permute(*inv_order)
+                        )
                 elif isinstance(kv_cache_spec, MambaSpec):
                     has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
@@ -5902,9 +5927,18 @@ class GPUModelRunner(
                         f"a tensor of shape {kv_cache.shape}"
                     )
                     hidden_size = kv_cache.shape[2:].numel()
+                    attn_group_size = (
+                        kv_cache_spec.group_size
+                        if isinstance(kv_cache_spec, FullAttentionSpec)
+                        else 1
+                    )
                     kv_cache.as_strided_(
                         size=kv_cache.shape,
-                        stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
+                        stride=(
+                            hidden_size,
+                            2 * hidden_size * attn_group_size,
+                            *kv_cache.stride()[2:],
+                        ),
                     )
 
     def initialize_kv_cache_tensors(

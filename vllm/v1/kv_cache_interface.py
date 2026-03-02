@@ -106,9 +106,19 @@ class FullAttentionSpec(AttentionSpec):
     """
     attention_chunk_size: int | None = None
 
+    group_size: int = 1
+    """
+    The size of a group of attention layers.
+    It's used for Mamba models to group more than one FullAttn layers to one page.
+    """
+
     def __post_init__(self):
         if self.head_size_v is None:
             object.__setattr__(self, "head_size_v", self.head_size)
+
+    @property
+    def page_size_bytes(self) -> int:
+        return super().page_size_bytes * self.group_size
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
@@ -162,6 +172,7 @@ class FullAttentionSpec(AttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
+            group_size=specs[0].group_size,
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -469,6 +480,16 @@ class KVCacheGroupSpec:
     layer_names: list[str]
     # The KV cache spec of this manager layer
     kv_cache_spec: KVCacheSpec
+    # The size of this group.
+    # Normally, it is the length of the layer names.
+    # For Mamba models, some FullAttn layers are grouped together and map
+    # to the same KV cache block, so the group size will be smaller than
+    # the number of layers.
+    group_size: int = -1
+
+    def __post_init__(self):
+        if self.group_size <= 0:
+            self.group_size = len(self.layer_names)
 
 
 @dataclass
