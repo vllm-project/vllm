@@ -109,6 +109,23 @@ async def test_long_audio_request(mary_had_lamb, whisper_client):
 
 
 @pytest.mark.asyncio
+async def test_invalid_audio_file(client):
+    """Corrupted audio should surface as HTTP 400."""
+    invalid_audio = io.BytesIO(b"not a valid audio file")
+    invalid_audio.name = "invalid.wav"
+
+    with pytest.raises(openai.BadRequestError) as exc_info:
+        await client.audio.transcriptions.create(
+            model=MODEL_NAME,
+            file=invalid_audio,
+            language="en",
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "Invalid or unsupported audio file" in exc_info.value.message
+
+
+@pytest.mark.asyncio
 async def test_completion_endpoints(whisper_client):
     # text to text model
     with pytest.raises(openai.NotFoundError):
