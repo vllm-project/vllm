@@ -3886,7 +3886,7 @@ def _create_encoder_decoder_scheduler(
 
     # Patch to enable encoder-decoder behavior in the scheduling loop.
     scheduler.is_encoder_decoder = True
-    scheduler.max_num_encoder_input_tokens = max_num_batched_tokens
+    scheduler.encoder_compute_budget = max_num_batched_tokens
     scheduler.encoder_cache_manager = EncoderDecoderCacheManager(
         cache_size=max_num_batched_tokens
     )

@@ -5228,6 +5228,26 @@ class GPUModelRunner(
                             **batched_dummy_mm_inputs
                         )
 
+                        dummy_num_embeds = sum(
+                            len(out) for out in dummy_encoder_outputs
+                        )
+                        if dummy_num_embeds >= (
+                            mm_budget.mm_max_toks_per_item[dummy_modality]
+                            * max_mm_items_per_batch
+                        ):
+                            logger.warning(
+                                "Expected maximum feature size to be %d (x %d %s) "
+                                "embeddings, but found %s embeddings. This likely "
+                                "results from an inaccurate implementation of "
+                                "`BaseProcessingInfo.get_mm_max_tokens_per_item` and "
+                                "may result in some requests getting rejected during "
+                                "inference.",
+                                mm_budget.mm_max_toks_per_item[dummy_modality],
+                                max_mm_items_per_batch,
+                                dummy_modality,
+                                dummy_num_embeds,
+                            )
+
                         sanity_check_mm_encoder_outputs(
                             dummy_encoder_outputs,
                             expected_num_items=max_mm_items_per_batch,
@@ -5242,7 +5262,7 @@ class GPUModelRunner(
                     num_embeds_to_pad = (
                         mm_budget.encoder_cache_size - num_embeds_in_cache
                     )
-                    if num_embeds_to_pad:
+                    if num_embeds_to_pad > 0:
                         self.encoder_cache["tmp_pad"] = torch.empty(
                             (num_embeds_to_pad, self.inputs_embeds_size),
                             dtype=self.dtype,
