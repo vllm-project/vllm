@@ -320,9 +320,13 @@ class AnthropicServingMessages(OpenAIServingChat):
 
     @classmethod
     def _handle_streaming_options(
-        cls, req: ChatCompletionRequest, anthropic_request: AnthropicMessagesRequest
+        cls,
+        req: ChatCompletionRequest,
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
     ) -> None:
         """Handle streaming configuration"""
+        if isinstance(anthropic_request, AnthropicCountTokensRequest):
+            return
         if anthropic_request.stream:
             req.stream = anthropic_request.stream
             req.stream_options = StreamOptions.model_validate(
@@ -331,7 +335,9 @@ class AnthropicServingMessages(OpenAIServingChat):
 
     @classmethod
     def _convert_tool_choice(
-        cls, anthropic_request: AnthropicMessagesRequest, req: ChatCompletionRequest
+        cls,
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+        req: ChatCompletionRequest,
     ) -> None:
         """Convert Anthropic tool_choice to OpenAI format"""
         if anthropic_request.tool_choice is None:
@@ -353,7 +359,9 @@ class AnthropicServingMessages(OpenAIServingChat):
 
     @classmethod
     def _convert_tools(
-        cls, anthropic_request: AnthropicMessagesRequest, req: ChatCompletionRequest
+        cls,
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+        req: ChatCompletionRequest,
     ) -> None:
         """Convert Anthropic tools to OpenAI format"""
         if anthropic_request.tools is None:
