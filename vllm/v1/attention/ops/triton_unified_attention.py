@@ -922,8 +922,8 @@ def unified_attention(
     q_descale,
     k_descale,
     v_descale,
-    num_prefills=None,
-    num_decodes=None,
+    num_prefills,
+    num_decodes,
     seq_threshold_3D=None,
     split_launch=None,
     num_par_softmax_segments=None,
@@ -974,15 +974,11 @@ def unified_attention(
     if (
         seq_threshold_3D is None
         or split_launch is None
-        or num_prefills is None
-        or num_decodes is None
     ):
         MIN_LAUNCH_GRID_SIZE_2D = 128
         seq_threshold_3D = MIN_LAUNCH_GRID_SIZE_2D // num_kv_heads
         split_launch = False
         seq_lens_q = torch.diff(cu_seqlens_q)
-        num_prefills = (seq_lens_q > 1).sum().item()
-        num_decodes = (seq_lens_q == 1).sum().item()
 
     # Assigning Q Block dimensions for prefill and decode.
     BLOCK_M_2D_PREFILL = (

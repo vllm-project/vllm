@@ -404,6 +404,8 @@ class TreeAttentionImpl(AttentionImpl):
                 q_descale=None,  # Not supported
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
+                num_prefills=attn_metadata.num_prefills,
+                num_decodes=0,
             )
 
         if decode_meta := attn_metadata.decode_metadata:
@@ -426,5 +428,7 @@ class TreeAttentionImpl(AttentionImpl):
                 q_descale=None,  # Not supported
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
+                num_prefills=0,
+                num_decodes=attn_metadata.num_decodes,
             )
         return output
