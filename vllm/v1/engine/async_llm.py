@@ -32,6 +32,7 @@ from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
+from vllm.tokenizers.protocol import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.usage.usage_lib import UsageContext
@@ -857,6 +858,34 @@ class AsyncLLM(EngineClient):
             if q is not None:
                 q.close()
 
+    @property
+    def tokenizer(self) -> TokenizerLike | None:
+        warnings.warn(
+            "`AsyncLLM.tokenizer` is deprecated and will be removed in a "
+            "future version. Please use `AsyncRenderer.tokenizer` instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.renderer.tokenizer
+
+    def get_tokenizer(self) -> TokenizerLike:
+        warnings.warn(
+            "`AsyncLLM.get_tokenizer()` is deprecated and will be removed in a "
+            "future version. Please use `AsyncRenderer.get_tokenizer()` instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.renderer.get_tokenizer()
+
+    async def is_tracing_enabled(self) -> bool:
+        warnings.warn(
+            "`AsyncLLM.is_tracing_enabled()` is deprecated and will be removed in a "
+            "future version. Please use `AsyncRenderer.is_tracing_enabled()` instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.observability_config.otlp_traces_endpoint is not None
+
     async def do_log_stats(self) -> None:
         if self.logger_manager:
             self.logger_manager.log()
@@ -1074,12 +1103,12 @@ class AsyncRenderer(RendererClient):
     def __init__(self, vllm_config: VllmConfig) -> None:
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
-        self.renderer = renderer = renderer_from_config(vllm_config)
+        self.renderer = renderer_from_config(vllm_config)
         self.io_processor = get_io_processor(
             vllm_config,
             self.model_config.io_processor_plugin,
         )
-        self.input_processor = InputProcessor(vllm_config, renderer)
+        self.input_processor = InputProcessor(vllm_config, self.renderer)
         self._observability_config = vllm_config.observability_config
 
         tracing_endpoint = self._observability_config.otlp_traces_endpoint
@@ -1110,6 +1139,13 @@ class AsyncRenderer(RendererClient):
     def shutdown(self) -> None:
         if renderer := getattr(self, "renderer", None):
             renderer.shutdown()
+
+    @property
+    def tokenizer(self) -> TokenizerLike | None:
+        return self.renderer.tokenizer
+
+    def get_tokenizer(self) -> TokenizerLike:
+        return self.renderer.get_tokenizer()
 
     async def is_tracing_enabled(self) -> bool:
         return self._observability_config.otlp_traces_endpoint is not None
