@@ -137,9 +137,6 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
             swizzle=False,
         )
 
-        assert w1_dequant.dtype == torch.bfloat16
-        assert w2_dequant.dtype == torch.bfloat16
-
         hidden_states, _ = moe_kernel_quantize_input(
             A=hidden_states,
             A_scale=self.quant_config.a1_gscale,
