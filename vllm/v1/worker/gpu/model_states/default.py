@@ -13,11 +13,12 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
 
-class ModelState:
+class DefaultModelState(ModelState):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -40,7 +41,9 @@ class ModelState:
 
         if self.supports_mm_inputs:
             assert encoder_cache is not None
+            self.encoder_cache = encoder_cache
             self.encoder_runner = EncoderRunner(
+                model=self.model,
                 max_num_tokens=self.max_num_tokens,
                 hidden_size=self.inputs_embeds_size,
                 encoder_cache=encoder_cache,
@@ -81,7 +84,12 @@ class ModelState:
         mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
             scheduled_encoder_inputs
         )
-        self.encoder_runner.execute_mm_encoder(self.model, mm_hashes, mm_kwargs)
+        if mm_kwargs:
+            # Execute the multimodal encoder.
+            encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+            # Cache the encoder outputs by mm_hash
+            self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
+
         mm_embeds, is_mm_embed = self.encoder_runner.gather_mm_embeddings(
             input_batch.req_ids,
             input_batch.num_tokens,
@@ -91,7 +99,7 @@ class ModelState:
             req_states.num_computed_prefill_tokens[input_batch.idx_mapping_np],
         )
         inputs_embeds = self.encoder_runner.get_inputs_embeds(
-            self.model, input_batch.input_ids, mm_embeds, is_mm_embed
+            input_batch.input_ids, mm_embeds, is_mm_embed
         )
         return inputs_embeds[: input_batch.num_tokens_after_padding]
 
