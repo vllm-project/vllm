@@ -2132,6 +2132,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             self.per_act_token_quant,
             self.block_shape,
             emulation=self.emulation,
+            topk_ids=topk_ids,
         )
 
         invoke_fused_moe_triton_kernel(

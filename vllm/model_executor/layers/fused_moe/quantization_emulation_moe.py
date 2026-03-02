@@ -63,8 +63,11 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
         self.quant_config._w1.scale = None
         self.quant_config._w2.scale = None
 
-        self.quant_dtype = "nvfp4"  # type: ignore[misc]
         self.emulation = True
+
+    @property
+    def quant_dtype(self) -> torch.dtype | str | None:
+        return "nvfp4"
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -137,9 +140,9 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
         assert w1_dequant.dtype == torch.bfloat16
         assert w2_dequant.dtype == torch.bfloat16
 
-        hidden_states, a1q_scale = moe_kernel_quantize_input(
+        hidden_states, _ = moe_kernel_quantize_input(
             A=hidden_states,
-            A_scale=a1q_scale,
+            A_scale=self.quant_config.a1_gscale,
             quant_dtype="nvfp4",
             per_act_token_quant=False,
             emulation=True,
@@ -157,8 +160,8 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
             activation=activation,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
-            a1q_scale=a1q_scale,
-            a2_scale=a2_scale,
+            a1q_scale=None,
+            a2_scale=self.quant_config.a2_gscale,
             workspace13=workspace13,
             workspace2=workspace2,
             expert_tokens_meta=expert_tokens_meta,

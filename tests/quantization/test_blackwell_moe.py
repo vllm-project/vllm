@@ -116,6 +116,14 @@ def test_llama4_nvfp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     )
 
 
+def test_llama4_nvfp4_moe_emulation(monkeypatch: pytest.MonkeyPatch):
+    can_initialize(
+        "/shareddata/nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
+        hf_overrides=HF_OVERRIDE_MM,
+        extra_args=["--moe-backend=emulation", "--gpu-memory-utilization", "0.8"],
+    )
+
+
 ## DeepSeekV3 ##
 
 

@@ -1434,10 +1434,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             is_act_and_mul=self.moe.is_act_and_mul,
         )
 
-        if self.nvfp4_backend == NvFp4MoeBackend.EMULATION:
-            w13_scale_2 = 1.0 / w13_scale_2
-            w2_scale_2 = 1.0 / w2_scale_2
-
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
         replace_parameter(layer, "w13_weight_scale_2", w13_scale_2)

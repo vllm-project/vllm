@@ -127,16 +127,74 @@ def cast_to_fp4(x):
     return x * sign
 
 
-def ref_nvfp4_quant(x, global_scale, block_size):
+def ref_nvfp4_quant_dequant_moe(
+    x: torch.Tensor,
+    global_scale: torch.Tensor,
+    block_size: int,
+    topk_ids: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, None]:
+    """
+    NVFP4 QDQ for MOE.
+
+    Args:
+        x: Input tensor of shape (num_tokens * top_k, hidden_size)
+        global_scale: Either a scalar, or a 1D tensor of shape (num_total_experts,)
+        with a global scale for each expert
+        block_size: Block size for quantization
+        num_experts: top_k value (number of experts per token)
+        topk_ids: Tensor of shape (num_tokens, top_k) containing expert indices.
+    """
+    if topk_ids is None:
+        return ref_nvfp4_quant_dequant(x, global_scale, block_size)
+    else:
+        # x: (num_tokens * top_k, hidden_size)
+        # topk_ids: (num_tokens, top_k)
+        # global_scale: (num_total_experts,)
+
+        # Flatten to (num_tokens * top_k,)
+        topk_ids = topk_ids.flatten()
+
+        # Select the global scale for each token-expert pair.
+        # selected_scales: (num_tokens * top_k,)
+        if global_scale.numel() > 1:
+            selected_scales = global_scale[topk_ids]
+        else:
+            selected_scales = global_scale
+
+        # Apply QDQ with per-row scales.
+        x_qdq, _ = ref_nvfp4_quant_dequant(x, selected_scales, block_size)
+
+        return x_qdq, None
+
+
+def ref_nvfp4_quant(x: torch.Tensor, global_scale: torch.Tensor, block_size: int):
+    """
+    NVFP4 quantization.
+
+    In case `global_scale` has more than one element, we assume that `global_scale[i]`
+    is used for the quantization of `x[i]`.
+
+    Args:
+        x: Input tensor of shape (m, n)
+        global_scale: Either a scalar or shape (m,) with one scale per row
+    """
     assert global_scale.dtype == torch.float32
     assert x.ndim == 2
     m, n = x.shape
+
+    if global_scale.numel() > 1:
+        assert global_scale.shape[0] == m
+        # Per-row global scales: (m,) -> (m, 1, 1) for broadcasting
+        global_scale_expanded = global_scale[:, None, None]
+    else:
+        global_scale_expanded = global_scale
+
     x = torch.reshape(x, (m, n // block_size, block_size))
     vec_max = torch.max(torch.abs(x), dim=-1, keepdim=True)[0].to(torch.float32)
-    scale = global_scale * (vec_max * FLOAT4_E2M1_MAX_RECIPROCAL)
+    scale = global_scale_expanded * (vec_max * FLOAT4_E2M1_MAX_RECIPROCAL)
     scale = torch.clamp(scale, max=448, min=-448)
     scale = scale.to(torch.float8_e4m3fn).to(torch.float32)
-    output_scale = get_reciprocal(scale * get_reciprocal(global_scale))
+    output_scale = get_reciprocal(scale * get_reciprocal(global_scale_expanded))
 
     scaled_x = x.to(torch.float32) * output_scale
     clipped_x = torch.clamp(scaled_x, -6.0, 6.0).reshape(m, n)
@@ -144,16 +202,36 @@ def ref_nvfp4_quant(x, global_scale, block_size):
     return cast_to_fp4(clipped_x), scale.squeeze(-1)
 
 
-def ref_nvfp4_quant_dequant(x, global_scale, block_size) -> tuple[torch.Tensor, None]:
+def ref_nvfp4_quant_dequant(
+    x: torch.Tensor, global_scale: torch.Tensor, block_size: int
+) -> tuple[torch.Tensor, None]:
+    """
+    NVFP4 quantize-dequantize operation.
+
+    In case `global_scale` has more than one element, we assume that `global_scale[i]`
+    is used for the quantization of `x[i]`.
+
+    Args:
+        x: Input tensor of shape (m, k)
+        global_scale: Either a scalar or shape (m,) with one scale per row
+        block_size: Block size for quantization
+    """
     x_m, x_k = x.shape
     output_dtype = x.dtype
+
+    if global_scale.numel() > 1:
+        assert global_scale.shape[0] == x_m
+        # Per-row global scales: (m,) -> (m, 1, 1) for broadcasting in dequantization
+        global_scale_expanded = global_scale[:, None, None]
+    else:
+        global_scale_expanded = global_scale
 
     # quantize input to (FP4 and interleaved block scale)
     x_fp4, x_blockscale = ref_nvfp4_quant(x, global_scale, block_size)
 
     # dequantize input
     x_fp4 = x_fp4.reshape(x_m, x_k // block_size, block_size)
-    x_blockscale = x_blockscale.unsqueeze(-1) / global_scale
+    x_blockscale = x_blockscale.unsqueeze(-1) / global_scale_expanded
     x_dq = (x_fp4 * x_blockscale).reshape(x_m, x_k).to(output_dtype)
     del x_fp4, x_blockscale
 

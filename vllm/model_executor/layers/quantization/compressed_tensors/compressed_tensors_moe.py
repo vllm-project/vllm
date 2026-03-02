@@ -529,17 +529,11 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             )
         w13_weight_global_scale = layer.w13_weight_global_scale[:, 0].contiguous()
 
-        if self.nvfp4_backend != NvFp4MoeBackend.EMULATION:
-            w13_weight_global_scale = 1.0 / w13_weight_global_scale
-            w2_weight_global_scale = 1.0 / layer.w2_weight_global_scale
-            w13_input_global_scale = 1.0 / layer.w13_input_global_scale
-            w2_input_global_scale = 1.0 / layer.w2_input_global_scale
-        else:
-            w2_weight_global_scale = layer.w2_weight_global_scale
-            w13_input_global_scale = layer.w13_input_global_scale
-            w2_input_global_scale = layer.w2_input_global_scale
+        w13_weight_global_scale = 1.0 / w13_weight_global_scale
+        w2_weight_global_scale = 1.0 / layer.w2_weight_global_scale
+        w13_input_global_scale = 1.0 / layer.w13_input_global_scale
+        w2_input_global_scale = 1.0 / layer.w2_input_global_scale
 
-        # Shuffle weights into the NvFp4 kernel format.
         (
             w13,
             w13_scale,

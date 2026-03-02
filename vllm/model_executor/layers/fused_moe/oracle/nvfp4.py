@@ -42,7 +42,7 @@ class NvFp4MoeBackend(Enum):
     FLASHINFER_CUTEDSL = "FLASHINFER_CUTEDSL"
     VLLM_CUTLASS = "VLLM_CUTLASS"
     MARLIN = "MARLIN"
-    EMULATION = "emulation"
+    EMULATION = "EMULATION"
 
 
 FLASHINFER_NVFP4_MOE_BACKENDS = [
@@ -119,6 +119,7 @@ def map_nvfp4_backend(runner_backend: MoEBackend) -> NvFp4MoeBackend:
         "flashinfer_cutlass": NvFp4MoeBackend.FLASHINFER_CUTLASS,
         "flashinfer_cutedsl": NvFp4MoeBackend.FLASHINFER_CUTEDSL,
         "marlin": NvFp4MoeBackend.MARLIN,
+        "emulation": NvFp4MoeBackend.EMULATION,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -381,7 +382,28 @@ def convert_to_nvfp4_moe_kernel_format(
             is_act_and_mul=is_act_and_mul,
         )
     elif nvfp4_backend == NvFp4MoeBackend.EMULATION:
-        pass
+        if torch.unique(a13_scale).numel() != 1:
+            logger.warning_once(
+                "In NVFP4 linear, the activation global scale for inputs are different"
+                " for MOE w13 (gate_up_proj) layer. This "
+                " will likely results in reduced accuracy. Please verify the model"
+                " accuracy. Consider using a checkpoint with a shared global NVFP4"
+                " scale for parallel layers."
+            )
+
+        if a13_scale is None or a2_scale is None:
+            raise ValueError(
+                "Activation global scales should not be None, got"
+                f" a13_scale={a13_scale}, a2_scale={a2_scale}"
+            )
+
+        w13_scale_2 = 1.0 / w13_scale_2
+        w2_scale_2 = 1.0 / w2_scale_2
+
+        a13_scale = a13_scale[0][0]
+        a13_scale = 1.0 / a13_scale
+
+        a2_scale = 1.0 / a2_scale
     else:
         raise ValueError(f"Unknown NvFp4 backend for MoE: {nvfp4_backend}")
 
