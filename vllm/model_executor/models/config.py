@@ -653,9 +653,7 @@ class NemotronHNanoVLV2Config(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         mm_config = model_config.multimodal_config
         if mm_config is not None:
-            video_kwargs = mm_config.media_io_kwargs.setdefault(
-                "video", {}
-            )
+            video_kwargs = mm_config.media_io_kwargs.setdefault("video", {})
             video_kwargs.setdefault("video_backend", "nemotron_vl")
 
 

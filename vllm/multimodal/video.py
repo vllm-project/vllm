@@ -451,7 +451,7 @@ class NemotronVLVideoBackend(OpenCVVideoBackend):
             frame_recovery=frame_recovery,
             **kwargs,
         )
-        
+
         metadata = dict(metadata)
         metadata["original_video_bytes"] = data
 
