@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import os
 import signal
 from typing import Optional
 
@@ -39,6 +40,9 @@ class ServeSubcommand(CLISubcommand):
         # If model is specified in CLI (as positional arg), it takes precedence
         if hasattr(args, 'model_tag') and args.model_tag is not None:
             args.model = args.model_tag
+
+        if getattr(args, 'hip_online_tuning', False):
+            os.environ["HIP_ONLINE_TUNING"] = "1"
 
         if args.headless or args.api_server_count < 1:
             run_headless(args)

@@ -181,6 +181,9 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     Helps mitigate header abuse. Default: 256."""
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
+    hip_online_tuning: bool = False
+    """If set to True, enable AITER hipBLASLt online GEMM tuning by setting the
+    HIP_ONLINE_TUNING environment variable to 1. Only relevant for AMD GPUs."""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
