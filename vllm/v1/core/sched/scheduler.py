@@ -32,6 +32,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -636,6 +637,7 @@ class Scheduler(SchedulerInterface):
                     num_computed_tokens = (
                         num_new_local_computed_tokens + num_external_computed_tokens
                     )
+                    assert num_computed_tokens <= request.num_tokens
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
                     # after async KV recvs are completed.
@@ -771,6 +773,9 @@ class Scheduler(SchedulerInterface):
                     # into the WAITING_FOR_REMOTE_KV state.
                     skipped_waiting_requests.prepend_request(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                    # set num_computed_tokens even though KVs are not yet loaded
+                    # _update_requests_with_invalid_blocks can later adjust it
+                    request.num_computed_tokens = num_computed_tokens
                     continue
 
                 self.running.append(request)
@@ -1990,17 +1995,17 @@ class Scheduler(SchedulerInterface):
             self.failed_recving_kv_req_ids.remove(request.request_id)
         else:
             # Now that the blocks are ready, actually cache them.
-            (block_ids,) = self.kv_cache_manager.get_block_ids(request.request_id)
-            num_computed_tokens = len(block_ids) * self.block_size
-            # Handle the case where num request tokens less than one block.
-            num_computed_tokens = min(num_computed_tokens, request.num_tokens)
-            if num_computed_tokens == request.num_tokens:
-                num_computed_tokens -= 1
             # This will cache the blocks iff caching is enabled.
-            self.kv_cache_manager.cache_blocks(request, num_computed_tokens)
+            self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
 
-            # Update the request state for scheduling.
-            request.num_computed_tokens = num_computed_tokens
+            # on a full prompt hit, we need to re-compute the last token
+            # in order to be able to sample the next token
+            if request.num_computed_tokens == request.num_tokens:
+                request.num_computed_tokens = request.num_tokens - 1
+
+            # Count the number of prefix cached tokens.
+            if request.num_cached_tokens < 0:
+                request.num_cached_tokens = request.num_computed_tokens
 
         # Return that we are ready.
         self.finished_recving_kv_req_ids.remove(request.request_id)
@@ -2075,30 +2080,51 @@ class Scheduler(SchedulerInterface):
             is_affected = False
             marked_invalid_block = False
             req_id = request.request_id
-            # TODO (davidb): add support for hybrid memory allocator
-            (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
+
             # We iterate only over blocks that may contain externally computed
             # tokens
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                # Async loading. If num_computed_tokens is set it implies we
-                # already processed some block failures for it in a prior step
-                req_num_computed_tokens = (
-                    request.num_computed_tokens
-                    if req_id in self.failed_recving_kv_req_ids
-                    else len(req_block_ids) * self.block_size
-                )
+                # Async loading. num_computed_tokens does not include new tokens
+                req_num_computed_tokens = request.num_computed_tokens
             else:
                 # Sync loading. num_computed_tokens includes new tokens
                 req_num_computed_tokens = request.num_cached_tokens
 
-            req_num_computed_blocks = (
-                req_num_computed_tokens + self.block_size - 1
-            ) // self.block_size
-            for idx, block_id in zip(range(req_num_computed_blocks), req_block_ids):
+            block_sizes = (
+                kv_cache_group.kv_cache_spec.block_size
+                for kv_cache_group in self.kv_cache_config.kv_cache_groups
+            )
+
+            req_block_ids = itertools.chain.from_iterable(
+                group_block_ids[: cdiv(req_num_computed_tokens, block_size)]
+                for group_block_ids, block_size in zip(
+                    self.kv_cache_manager.get_block_ids(req_id), block_sizes
+                )
+            )
+
+            for idx, block_id in enumerate(req_block_ids):
                 if block_id not in invalid_block_ids:
                     continue
 
                 is_affected = True
+
+                if len(self.kv_cache_config.kv_cache_groups) > 1:
+                    # We have more than one KV cache group.
+                    # This means that not all layers are full attention,
+                    # but instead some layers are sliding window attention or SSM.
+                    # This means the entire request has to be re-computed.
+                    total_affected_tokens += request.num_computed_tokens
+                    request.num_computed_tokens = 0
+                    request.num_external_computed_tokens = 0
+                    marked_invalid_block = True
+                    if evict_blocks:
+                        # evict the entire request
+                        blocks_to_evict.update(
+                            itertools.chain.from_iterable(
+                                self.kv_cache_manager.get_block_ids(req_id)
+                            )
+                        )
+                    break
 
                 if block_id in marked_invalid_block_ids:
                     # This invalid block is shared with a previous request
@@ -2126,7 +2152,9 @@ class Scheduler(SchedulerInterface):
                 request.num_external_computed_tokens -= num_affected_tokens
                 # collect invalid block and all downstream dependent blocks
                 if evict_blocks:
-                    blocks_to_evict.update(req_block_ids[idx:])
+                    blocks_to_evict.update(
+                        self.kv_cache_manager.get_block_ids(req_id)[0][idx:]
+                    )
 
             if is_affected:
                 if not marked_invalid_block:
