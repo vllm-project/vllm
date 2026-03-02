@@ -17,6 +17,7 @@ from vllm.distributed.eplb.rebalance_execute import (
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
     get_ep_group,
+    get_eplb_group,
 )
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
@@ -331,7 +332,7 @@ def _test_async_transfer_layer_without_mtp_worker(
     cuda_stream = torch.cuda.Stream(device=device)
 
     communicator = create_eplb_communicator(
-        ep_group=ep_group,
+        group_coordinator=get_eplb_group(),
         backend=eplb_communicator,
         expert_weights=expert_weights[0],
     )
@@ -437,7 +438,7 @@ def _test_rearrange_expert_weights_with_redundancy(
     )
 
     communicator = create_eplb_communicator(
-        ep_group=ep_group,
+        group_coordinator=get_eplb_group(),
         backend=eplb_communicator,
         expert_weights=expert_weights[0],
     )
@@ -562,7 +563,7 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
         original_weights.append(layer_copy)
 
     communicator = create_eplb_communicator(
-        ep_group=ep_group,
+        group_coordinator=get_eplb_group(),
         backend="torch_nccl",
         expert_weights=expert_weights[0],
     )
@@ -687,7 +688,7 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
         original_weights.append(layer_copy)
 
     communicator = create_eplb_communicator(
-        ep_group=ep_group,
+        group_coordinator=get_eplb_group(),
         backend="torch_nccl",
         expert_weights=expert_weights[0],
     )

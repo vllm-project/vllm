@@ -20,7 +20,7 @@ from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     ncclDataTypeEnum,
 )
-from vllm.distributed.parallel_state import get_ep_group
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -898,11 +898,10 @@ class SymmMemEplbCommunicator(EplbCommunicator):
 
 
 def create_eplb_communicator(
-    ep_group: ProcessGroup,
+    group_coordinator: GroupCoordinator,
     backend: str,
     expert_weights: Sequence[torch.Tensor],
 ) -> EplbCommunicator:
-    group_coordinator = get_ep_group()
     tensor_device_type = expert_weights[0].device.type if expert_weights else "cpu"
     torch_group = (
         group_coordinator.cpu_group
@@ -912,42 +911,33 @@ def create_eplb_communicator(
 
     if backend == "nixl":
         if not nixl_available:
-            logger.warning(
-                "EPLB communicator 'nixl' requested but NIXL is unavailable; "
-                "falling back to torch_nccl."
+            raise RuntimeError(
+                "EPLB communicator 'nixl' requested but NIXL is unavailable."
             )
-            return TorchDistributedEplbCommunicator(ep_group=torch_group)
         if not (current_platform.is_cuda_alike() and tensor_device_type != "cpu"):
-            logger.warning(
-                "EPLB communicator 'nixl' currently supports only cuda-like "
-                "devices (got %s); falling back to torch_nccl.",
-                tensor_device_type,
+            raise RuntimeError(
+                "EPLB communicator 'nixl' supports only cuda-like devices "
+                f"(got {tensor_device_type})."
             )
-            return TorchDistributedEplbCommunicator(ep_group=torch_group)
         try:
             return NixlEplbCommunicator(
                 cpu_group=group_coordinator.cpu_group,
                 expert_weights=expert_weights,
             )
         except Exception as exc:
-            logger.warning(
-                "Failed to initialize NixlEplbCommunicator (%s); "
-                "falling back to torch_nccl.",
-                exc,
-            )
-            return TorchDistributedEplbCommunicator(ep_group=torch_group)
+            raise RuntimeError(
+                f"Failed to initialize NixlEplbCommunicator ({exc})."
+            ) from exc
     if backend == "torch_gloo":
         return GlooCpuStagedEplbCommunicator(cpu_group=group_coordinator.cpu_group)
     if backend == "torch_nccl":
         return TorchDistributedEplbCommunicator(ep_group=torch_group)
     if backend == "pynccl":
         if tensor_device_type == "cpu":
-            logger.warning(
-                "EPLB communicator 'pynccl' currently supports only cuda-like "
-                "devices (got %s); falling back to torch.distributed.",
-                tensor_device_type,
+            raise RuntimeError(
+                "EPLB communicator 'pynccl' supports only cuda-like devices "
+                f"(got {tensor_device_type})."
             )
-            return TorchDistributedEplbCommunicator(ep_group=torch_group)
         unsupported_dtypes = sorted(
             {
                 tensor.dtype
@@ -957,12 +947,11 @@ def create_eplb_communicator(
             key=str,
         )
         if unsupported_dtypes:
-            logger.warning_once(
+            raise RuntimeError(
                 "EPLB communicator 'pynccl' requested but expert weights contain "
-                "unsupported dtypes (%s); falling back to torch.distributed.",
-                ", ".join(str(dtype) for dtype in unsupported_dtypes),
+                "unsupported dtypes: "
+                f"({', '.join(str(dtype) for dtype in unsupported_dtypes)})."
             )
-            return TorchDistributedEplbCommunicator(ep_group=torch_group)
 
         device_comm = group_coordinator.device_communicator
         pynccl_comm = (
@@ -971,56 +960,43 @@ def create_eplb_communicator(
             else None
         )
         if pynccl_comm is None or pynccl_comm.disabled or not pynccl_comm.available:
-            logger.warning(
-                "EPLB communicator 'pynccl' requested but unavailable; "
-                "falling back to torch.distributed."
-            )
-        else:
-            try:
-                return PyNcclEplbCommunicator(pynccl_comm=pynccl_comm)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to initialize PyNcclEplbCommunicator (%s); "
-                    "falling back to torch.distributed.",
-                    exc,
-                )
+            raise RuntimeError("EPLB communicator 'pynccl' requested but unavailable.")
+        try:
+            return PyNcclEplbCommunicator(pynccl_comm=pynccl_comm)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to initialize PyNcclEplbCommunicator ({exc})."
+            ) from exc
     elif backend == "symm_mem":
         if tensor_device_type == "cpu":
-            logger.warning(
-                "EPLB communicator 'symm_mem' currently supports only cuda-like "
-                "devices (got %s); falling back to torch.distributed.",
-                tensor_device_type,
+            raise RuntimeError(
+                "EPLB communicator 'symm_mem' supports only cuda-like devices "
+                f"(got {tensor_device_type})."
             )
-            return TorchDistributedEplbCommunicator(ep_group=torch_group)
         if not symm_mem_available:
-            logger.warning(
+            raise RuntimeError(
                 "EPLB communicator 'symm_mem' requested but torch symmetric memory "
-                "is unavailable; falling back to torch.distributed."
+                "is unavailable."
             )
-            return TorchDistributedEplbCommunicator(ep_group=torch_group)
         if not (
             current_platform.is_cuda() and current_platform.has_device_capability(90)
         ):
-            logger.warning(
+            raise RuntimeError(
                 "EPLB communicator 'symm_mem' requested but device capability "
-                " is below 90; falling back to torch.distributed."
+                "is below 90."
             )
-            return TorchDistributedEplbCommunicator(ep_group=torch_group)
         if not hasattr(torch.ops.symm_mem, "all_to_all_vdev"):
-            logger.warning(
+            raise RuntimeError(
                 "EPLB communicator 'symm_mem' requested but symm_mem all_to_all_vdev "
-                "is unavailable; falling back to torch.distributed."
+                "is unavailable."
             )
-            return TorchDistributedEplbCommunicator(ep_group=torch_group)
         try:
             return SymmMemEplbCommunicator(
-                ep_group=ep_group,
+                ep_group=group_coordinator.device_group,
                 expert_weights=expert_weights,
             )
         except Exception as exc:
-            logger.warning(
-                "Failed to initialize NVSHMEM EPLB symm_mem communicator (%s); "
-                "falling back to torch.distributed.",
-                exc,
-            )
-    return TorchDistributedEplbCommunicator(ep_group=torch_group)
+            raise RuntimeError(
+                f"Failed to initialize NVSHMEM EPLB symm_mem communicator ({exc})."
+            ) from exc
+    raise ValueError(f"Unknown EPLB communicator backend: {backend}")

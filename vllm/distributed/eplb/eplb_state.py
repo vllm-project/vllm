@@ -37,6 +37,7 @@ from torch.distributed import ProcessGroup, all_reduce
 from vllm.config import ModelConfig, ParallelConfig
 from vllm.distributed.parallel_state import (
     get_ep_group,
+    get_eplb_group,
     get_node_count,
     in_the_same_node_as,
 )
@@ -472,6 +473,7 @@ class EplbState:
         self.policy = EPLB_POLICIES[policy_type]
         logger.debug("Selected EPLB policy: %s", policy_type)
         ep_group = get_ep_group().device_group
+        eplb_group_coordinator = get_eplb_group()
         if global_expert_load is not None:
             assert global_expert_load.shape == (
                 model.num_moe_layers,
@@ -529,7 +531,7 @@ class EplbState:
 
         # Create the communicator for this model
         communicator = create_eplb_communicator(
-            ep_group=ep_group,
+            group_coordinator=eplb_group_coordinator,
             backend=self.parallel_config.eplb_config.communicator,
             expert_weights=model.expert_weights[0],
         )
