@@ -1068,7 +1068,12 @@ def _get_kv_cache_groups_uniform_page_size(
         group_size = max_num_layers
     grouped_layers = []
     for kv_spec, layers in same_type_layers.items():
-        num_padding_layers = group_size - len(layers) % group_size
+        if isinstance(kv_spec, FullAttentionSpec) and attn_group_size > 1:
+            num_padding_layers = group_size * attn_group_size - len(layers) % (
+                group_size * attn_group_size
+            )
+        else:
+            num_padding_layers = group_size - len(layers) % group_size
         if num_padding_layers != group_size:
             logger.warning(
                 "Add %d padding layers, may waste at most %.2f%% KV cache memory",  # noqa
