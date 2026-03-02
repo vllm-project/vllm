@@ -1297,6 +1297,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Flashinfer fused allreduce backend.
     # "auto" will default to "mnnvl", which performs mostly same/better than "trtllm".
     # But "mnnvl" backend does not support fuse with quantization.
+    # TODO: Default is "trtllm" right now because "mnnvl" has issues with cudagraph:
+    # https://github.com/vllm-project/vllm/issues/35772
+    # Should switch back to "auto" if the issue is resolved.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
         "VLLM_FLASHINFER_ALLREDUCE_BACKEND",
         "trtllm",
