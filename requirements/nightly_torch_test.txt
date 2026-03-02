@@ -28,12 +28,12 @@ num2words # required for smolvlm test
 opencv-python-headless >= 4.13.0 # required for video test
 datamodel_code_generator # required for minicpm3 test
 lm-eval[api]>=0.4.11 # required for model evaluation test
-mteb>=1.38.11, <2 # required for mteb test
+mteb[bm25s]>=2, <3 # required for mteb test
 transformers==4.57.5
 tokenizers==0.22.0
 schemathesis>=3.39.15 # Required for openai schema test.
 # quantization
-bitsandbytes>=0.46.1
+bitsandbytes>=0.49.2
 buildkite-test-collector==0.1.9
 
 

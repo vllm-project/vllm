@@ -9,7 +9,10 @@ from torch.nn.parameter import Parameter
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.kernels.linear import (
+    init_fp8_linear_kernel,
+)
+from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -45,9 +48,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_fp8_linear_kernel,
-)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     flashinfer_trtllm_fp4_moe,
@@ -70,6 +70,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_VALUE_DTYPE,
     Mxfp8LinearBackend,
     Mxfp8LinearOp,
+    swizzle_mxfp8_scale,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     apply_nvfp4_linear,
@@ -113,6 +114,8 @@ QUANT_ALGOS = [
     "NVFP4",
     # MXFP8
     "MXFP8",
+    # MIXED_PRECISION,
+    "MIXED_PRECISION",
 ]
 KV_CACHE_QUANT_ALGOS = ["FP8"]
 
@@ -180,7 +183,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         # handle kv-cache first so we can focus only on weight quantization thereafter
-        if isinstance(layer, Attention):
+        if isinstance(layer, (Attention, MLAAttention)):
             return self.KVCacheMethodCls(self)
 
         # handle exclusion
@@ -235,6 +238,26 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             self.exclude_modules = hf_to_vllm_mapper.apply_list(new_exclude_modules)
 
     @staticmethod
+    def _extract_modelopt_quant_algo(
+        hf_quant_cfg: dict[str, Any] | None,
+    ) -> str | None:
+        """Extract upper-cased quant_algo from a modelopt config.
+
+        Returns the quant_algo string (upper-cased), or None if the config
+        is not a modelopt config.
+        """
+        if hf_quant_cfg is None:
+            return None
+        if hf_quant_cfg.get("quant_method", "").lower() != "modelopt":
+            return None
+        if "quantization" in hf_quant_cfg:
+            quant_config = hf_quant_cfg["quantization"]
+            if isinstance(quant_config, dict):
+                return str(quant_config.get("quant_algo", "")).upper()
+            return None
+        return str(hf_quant_cfg.get("quant_algo", "")).upper()
+
+    @staticmethod
     def get_config_filenames() -> list[str]:
         return ["hf_quant_config.json"]
 
@@ -271,10 +294,20 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             # "exclude_modules" is the key in the legacy hf_quant_config.json
             exclude_modules = quant_config.get("exclude_modules", [])
         else:
-            # Compressed-tensors style format:
+            # Compressed-tensors style format (config.json quantization_config):
             # {"quant_algo": "...", "quant_method": "modelopt"}
             quant_method = config.get("quant_algo")
-            kv_cache_quant_method = config.get("kv_cache_quant_algo")
+
+            # "kv_cache_scheme" (a dict) instead of "kv_cache_quant_algo" (a string).
+            kv_cache_scheme = config.get("kv_cache_scheme")
+            if isinstance(kv_cache_scheme, dict) and (
+                kv_cache_scheme.get("type") == "float"
+                and kv_cache_scheme.get("num_bits") == 8
+            ):
+                kv_cache_quant_method = "FP8"
+            else:
+                kv_cache_quant_method = None
+
             # "ignore" is the key in config.json
             exclude_modules = config.get("ignore", [])
             group_size_raw = config.get("group_size")
@@ -378,32 +411,9 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
     ) -> QuantizationMethods | None:
-        """Detect if this ModelOpt config should be used based on
-        quantization config."""
-
-        if hf_quant_cfg is None:
-            return None
-
-        # Use the community standard 'quant_method'
-        quant_method = hf_quant_cfg.get("quant_method", "").lower()
-
-        # Only proceed if the method is explicitly "modelopt"
-        if quant_method != "modelopt":
-            return None
-
-        # Look for ModelOpt-specific config structure
-        if "quantization" in hf_quant_cfg:
-            quant_config = hf_quant_cfg["quantization"]
-            if isinstance(quant_config, dict):
-                quant_algo = str(quant_config.get("quant_algo", ""))
-                if quant_algo.upper() == "FP8":
-                    return "modelopt"
-        else:
-            # Check for compressed-tensors style config with specific quant_algo
-            quant_algo = str(hf_quant_cfg.get("quant_algo", ""))
-            if quant_algo.upper() == "FP8":
-                return "modelopt"
-
+        algo = cls._extract_modelopt_quant_algo(hf_quant_cfg)
+        if algo is not None and algo == "FP8":
+            return "modelopt"
         return None
 
     @classmethod
@@ -1030,32 +1040,9 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
     ) -> QuantizationMethods | None:
-        """Detect if this ModelOpt FP4 config should be used based on
-        quantization config."""
-        if hf_quant_cfg is None:
-            return None
-
-        # Use the community standard 'quant_method'
-        quant_method = hf_quant_cfg.get("quant_method", "").lower()
-
-        # Only proceed if the method is explicitly "modelopt"
-        if quant_method != "modelopt":
-            return None
-
-        # Look for ModelOpt-specific config structure
-        if "quantization" in hf_quant_cfg:
-            quant_config = hf_quant_cfg["quantization"]
-            if isinstance(quant_config, dict):
-                quant_algo = quant_config.get("quant_algo", "")
-                if "NVFP4" in quant_algo:
-                    return "modelopt_fp4"
-        else:
-            # Check for compressed-tensors style config with specific
-            # quant_algo field
-            quant_algo = hf_quant_cfg.get("quant_algo", "")
-            if isinstance(quant_algo, str) and "FP4" in quant_algo.upper():
-                return "modelopt_fp4"
-
+        algo = cls._extract_modelopt_quant_algo(hf_quant_cfg)
+        if algo is not None and ("NVFP4" in algo or "FP4" in algo):
+            return "modelopt_fp4"
         return None
 
     @classmethod
@@ -1618,31 +1605,9 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
     ) -> QuantizationMethods | None:
-        """Detect if this ModelOpt MXFP8 config should be used based on
-        quantization config."""
-        if hf_quant_cfg is None:
-            return None
-
-        # Use the community standard 'quant_method'
-        quant_method = hf_quant_cfg.get("quant_method", "").lower()
-
-        # Only proceed if the method is explicitly "modelopt"
-        if quant_method != "modelopt":
-            return None
-
-        # Look for ModelOpt-specific config structure
-        if "quantization" in hf_quant_cfg:
-            quant_config = hf_quant_cfg["quantization"]
-            if isinstance(quant_config, dict):
-                quant_algo = str(quant_config.get("quant_algo", "")).upper()
-                if "MXFP8" in quant_algo:
-                    return "modelopt_mxfp8"
-        else:
-            # Check for compressed-tensors style config with specific quant_algo
-            quant_algo = str(hf_quant_cfg.get("quant_algo", "")).upper()
-            if "MXFP8" in quant_algo:
-                return "modelopt_mxfp8"
-
+        algo = cls._extract_modelopt_quant_algo(hf_quant_cfg)
+        if algo is not None and "MXFP8" in algo:
+            return "modelopt_mxfp8"
         return None
 
     @classmethod
@@ -1689,9 +1654,9 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
                 "Dynamic quantization is not supported."
             )
 
-        backend: Mxfp8LinearBackend = Mxfp8LinearBackend.EMULATION
-        self.mxfp8_linear_op = Mxfp8LinearOp(backend=backend)
-        logger.info_once("Using %s backend for MXFP8 GEMM", backend.value)
+        self.backend: Mxfp8LinearBackend = Mxfp8LinearBackend.FLASHINFER_CUTLASS
+        self.mxfp8_linear_op = Mxfp8LinearOp(backend=self.backend)
+        logger.info_once("Using %s backend for MXFP8 GEMM", self.backend.value)
 
     def create_weights(
         self,
@@ -1749,7 +1714,38 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         )
         layer.register_parameter("weight_scale", weight_scale)
 
+    def _process_weights_after_loading_scale_2d(self, layer: torch.nn.Module) -> None:
+        """Not swizzled - MXFP8 GEMM emulation"""
+        weight = layer.weight.data  # [N, K]
+        N, K = weight.shape
+        scale_k = K // MXFP8_BLOCK_SIZE
+
+        # Slice weight_scale to match weight dimensions (handles padding)
+        weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
+
+        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
+        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+
+    def _process_weights_after_loading_scale_1d(self, layer: torch.nn.Module) -> None:
+        """Swizzled - MXFP8 GEMM Flashinfer CUTLASS"""
+        weight = layer.weight.data  # [N, K]
+        N, K = weight.shape
+
+        # 2D weight scale
+        weight_scale = layer.weight_scale.data
+
+        # Swizzle the weight scales
+        scale_k = K // MXFP8_BLOCK_SIZE
+        weight_scale_2d = weight_scale[:N, :scale_k].contiguous()
+        weight_scale_swizzled = swizzle_mxfp8_scale(weight_scale_2d, M=N, K=K)
+
+        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
+        layer.weight_scale = Parameter(
+            weight_scale_swizzled.contiguous(), requires_grad=False
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Validate weight tensor
         if layer.weight.ndim != 2:
             raise ValueError(
                 f"MXFP8 weight must be 2D tensor [N, K], got {layer.weight.ndim}D "
@@ -1763,15 +1759,23 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
                 f"quantized with MXFP8."
             )
 
-        weight = layer.weight.data  # [N, K]
-        N, K = weight.shape
-        scale_k = K // MXFP8_BLOCK_SIZE
+        # Validate weight scale tensor (should be 2D, not swizzled)
+        assert layer.weight_scale.ndim == 2, (
+            f"MXFP8 weight scale must be 2D, got {layer.weight_scale.ndim}D"
+        )
+        assert layer.weight_scale.dtype == MXFP8_SCALE_DTYPE, (
+            f"MXFP8 weight scale must be {MXFP8_SCALE_DTYPE},"
+            f" got {layer.weight_scale.dtype}"
+        )
 
-        # Slice weight_scale to match weight dimensions (handles padding)
-        weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
+        if self.backend == Mxfp8LinearBackend.EMULATION:
+            # Swizzled layout is not used
+            self._process_weights_after_loading_scale_2d(layer)
+            return
 
-        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
-        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+        assert self.backend == Mxfp8LinearBackend.FLASHINFER_CUTLASS
+        # Swizzled layout is required for Flashinfer CUTLASS
+        self._process_weights_after_loading_scale_1d(layer)
 
     def apply(
         self,
@@ -1801,3 +1805,188 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
 # Register the method classes for ModelOptMxFp8Config
 ModelOptMxFp8Config.LinearMethodCls = ModelOptMxFp8LinearMethod
 ModelOptMxFp8Config.KVCacheMethodCls = ModelOptFp8KVCacheMethod
+
+
+class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
+    """Config class for ModelOpt MIXED_PRECISION.
+
+    Supports checkpoints where different layers use different quantization
+    algorithms (e.g., FP8 for dense layers and NVFP4 for MoE experts).
+    The per-layer algorithm is specified in the ``quantized_layers`` dict
+    inside ``config.json``'s ``quantization_config`` (preferred) or the
+    legacy ``hf_quant_config.json``.
+    """
+
+    def __init__(
+        self,
+        kv_cache_quant_method: str | None,
+        exclude_modules: list[str],
+        quantized_layers: dict[str, dict[str, Any]],
+        fp8_config: ModelOptFp8Config,
+        nvfp4_config: ModelOptNvFp4Config,
+    ) -> None:
+        super().__init__(exclude_modules)
+        self.kv_cache_quant_method = kv_cache_quant_method
+        self.quantized_layers = quantized_layers
+        self.fp8_config = fp8_config
+        self.nvfp4_config = nvfp4_config
+
+    def get_name(self) -> QuantizationMethods:
+        return "modelopt_mixed"
+
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
+        return [torch.bfloat16, torch.half]
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 89
+
+    @classmethod
+    def override_quantization_method(
+        cls, hf_quant_cfg, user_quant
+    ) -> QuantizationMethods | None:
+        algo = cls._extract_modelopt_quant_algo(hf_quant_cfg)
+        if algo is not None and algo == "MIXED_PRECISION":
+            return "modelopt_mixed"
+        return None
+
+    @classmethod
+    def _from_config(
+        cls,
+        *,
+        quant_method: str,
+        kv_cache_quant_method: str | None,
+        exclude_modules: list[str],
+        original_config: dict[str, Any],
+        group_size: int | None,
+        **kwargs: Any,
+    ) -> "ModelOptMixedPrecisionConfig":
+        if "quantization" in original_config:
+            quantized_layers = original_config["quantization"].get(
+                "quantized_layers", {}
+            )
+        else:
+            quantized_layers = original_config.get("quantized_layers", {})
+
+        if not quantized_layers:
+            raise ValueError(
+                "MIXED_PRECISION quant_algo requires a non-empty "
+                "'quantized_layers' mapping in the quantization config."
+            )
+
+        # Determine group_size from the first NVFP4 entry if not provided.
+        if group_size is None:
+            for layer_info in quantized_layers.values():
+                if layer_info.get("quant_algo", "").upper() == "NVFP4":
+                    group_size = layer_info.get("group_size", 16)
+                    break
+        if group_size is None:
+            group_size = 16
+
+        fp8_config = ModelOptFp8Config(
+            quant_method="FP8",
+            is_checkpoint_fp8_serialized=True,
+            kv_cache_quant_method=kv_cache_quant_method,
+            exclude_modules=[],
+        )
+        nvfp4_config = ModelOptNvFp4Config(
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=kv_cache_quant_method,
+            exclude_modules=[],
+            group_size=group_size,
+        )
+
+        return cls(
+            kv_cache_quant_method=kv_cache_quant_method,
+            exclude_modules=exclude_modules,
+            quantized_layers=quantized_layers,
+            fp8_config=fp8_config,
+            nvfp4_config=nvfp4_config,
+        )
+
+    def _resolve_quant_algo(self, prefix: str) -> str | None:
+        """Look up the quant_algo for a vLLM-side layer prefix.
+
+        Tries three strategies in order:
+        1. Direct lookup in ``quantized_layers``.
+        2. Packed/fused-layer lookup (unfuse via ``packed_modules_mapping``).
+        3. Prefix-based lookup for FusedMoE (any child key starts with
+           ``prefix + "."``).
+
+        Returns the upper-cased quant_algo string, or *None* if the prefix
+        is not found.
+        """
+        # 1. Direct lookup
+        if prefix in self.quantized_layers:
+            return self.quantized_layers[prefix]["quant_algo"].upper()
+
+        # 2. Packed / fused layer lookup
+        proj_name = prefix.rsplit(".", 1)[-1]
+        if self.packed_modules_mapping and proj_name in self.packed_modules_mapping:
+            algos: set[str] = set()
+            base = prefix.rsplit(".", 1)[0]
+            for shard_name in self.packed_modules_mapping[proj_name]:
+                shard_prefix = f"{base}.{shard_name}"
+                if shard_prefix in self.quantized_layers:
+                    algos.add(self.quantized_layers[shard_prefix]["quant_algo"].upper())
+            if len(algos) == 1:
+                return algos.pop()
+            if len(algos) > 1:
+                raise ValueError(
+                    f"Mixed quant_algo within fused layer {prefix}: "
+                    f"{algos}. All shards must use the same quantization."
+                )
+
+        # 3. Prefix-based lookup (for FusedMoE / parent modules)
+        prefix_dot = prefix + "."
+        for key, info in self.quantized_layers.items():
+            if key.startswith(prefix_dot):
+                return info["quant_algo"].upper()
+
+        return None
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> "QuantizeMethodBase | None":
+        """Return quantize-method based on layer."""
+        # KV-cache quantization
+        if isinstance(layer, Attention):
+            if self.kv_cache_quant_method:
+                return ModelOptFp8KVCacheMethod(self)
+            return None
+
+        # Excluded layers
+        if self.is_layer_excluded(prefix):
+            if isinstance(layer, LinearBase):
+                return UnquantizedLinearMethod()
+            return None
+
+        quant_algo = self._resolve_quant_algo(prefix)
+
+        if isinstance(layer, LinearBase):
+            if quant_algo == "FP8":
+                return ModelOptFp8LinearMethod(self.fp8_config)
+            if quant_algo == "NVFP4":
+                return ModelOptNvFp4LinearMethod(self.nvfp4_config)
+            # Layer not in quantized_layers — leave unquantized
+            return UnquantizedLinearMethod()
+
+        if isinstance(layer, FusedMoE):
+            if quant_algo == "FP8":
+                return ModelOptFp8MoEMethod(
+                    quant_config=self.fp8_config,
+                    moe_config=layer.moe_config,
+                )
+            if quant_algo == "NVFP4":
+                return ModelOptNvFp4FusedMoE(
+                    quant_config=self.nvfp4_config,
+                    moe_config=layer.moe_config,
+                )
+            return None
+
+        return None
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        super().apply_vllm_mapper(hf_to_vllm_mapper)
+        if self.quantized_layers:
+            self.quantized_layers = hf_to_vllm_mapper.apply_dict(self.quantized_layers)

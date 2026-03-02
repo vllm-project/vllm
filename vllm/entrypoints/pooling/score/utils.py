@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any, TypeAlias, cast
 
 import torch
@@ -21,6 +21,7 @@ from vllm.entrypoints.chat_utils import (
     _parse_chat_message_content_parts,
 )
 from vllm.inputs import TokensPrompt
+from vllm.inputs.data import PromptType, TextPrompt
 from vllm.model_executor.models.interfaces import supports_score_template
 from vllm.multimodal.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.outputs import PoolingRequestOutput
@@ -50,6 +51,82 @@ def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tens
     token_scores = torch.matmul(q_emb, d_emb.T)
     # Max over document tokens, sum over query tokens
     return token_scores.amax(dim=-1).sum()
+
+
+def compute_maxsim_scores(
+    q_embs: Sequence[torch.Tensor],
+    d_embs: Sequence[torch.Tensor],
+    max_batch_size: int = 16,
+    max_score_matrix_elements: int = 16_000_000,
+) -> list[torch.Tensor]:
+    """Compute ColBERT MaxSim scores in padded mini-batches."""
+    if len(q_embs) != len(d_embs):
+        raise ValueError("q_embs and d_embs must have the same length")
+
+    num_pairs = len(q_embs)
+    if num_pairs == 0:
+        return []
+
+    for q_emb, d_emb in zip(q_embs, d_embs):
+        if q_emb.ndim != 2 or d_emb.ndim != 2:
+            raise ValueError("Each embedding tensor must be 2-D")
+        if q_emb.shape[1] != d_emb.shape[1]:
+            raise ValueError("Query and document embeddings must have same dim")
+
+    compute_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    scores: list[torch.Tensor] = []
+    start = 0
+    while start < num_pairs:
+        end = min(start + max_batch_size, num_pairs)
+        max_q = max(int(x.shape[0]) for x in q_embs[start:end])
+        max_d = max(int(x.shape[0]) for x in d_embs[start:end])
+
+        # keep score matrix bounded to avoid oversized allocations.
+        while (
+            end - start > 1
+            and (end - start) * max_q * max_d > max_score_matrix_elements
+        ):
+            end -= 1
+            max_q = max(int(x.shape[0]) for x in q_embs[start:end])
+            max_d = max(int(x.shape[0]) for x in d_embs[start:end])
+
+        batch_q = q_embs[start:end]
+        batch_d = d_embs[start:end]
+        batch_size = end - start
+        dim = int(batch_q[0].shape[1])
+        dtype = batch_q[0].dtype
+
+        q_batch = torch.zeros(
+            (batch_size, max_q, dim), dtype=dtype, device=compute_device
+        )
+        d_batch = torch.zeros(
+            (batch_size, max_d, dim), dtype=dtype, device=compute_device
+        )
+        q_mask = torch.zeros(
+            (batch_size, max_q), dtype=torch.bool, device=compute_device
+        )
+        d_mask = torch.zeros(
+            (batch_size, max_d), dtype=torch.bool, device=compute_device
+        )
+
+        # copy to padded tensors
+        for i, (q_emb, d_emb) in enumerate(zip(batch_q, batch_d)):
+            q_len = int(q_emb.shape[0])
+            d_len = int(d_emb.shape[0])
+            q_batch[i, :q_len] = q_emb.to(device=compute_device, dtype=dtype)
+            d_batch[i, :d_len] = d_emb.to(device=compute_device, dtype=dtype)
+            q_mask[i, :q_len] = True
+            d_mask[i, :d_len] = True
+
+        token_scores = torch.bmm(q_batch, d_batch.transpose(1, 2))
+        token_scores.masked_fill_(~d_mask.unsqueeze(1), float("-inf"))
+        max_per_query = token_scores.amax(dim=-1)
+        max_per_query.masked_fill_(~q_mask, 0)
+        batch_scores = max_per_query.sum(dim=-1).to("cpu")
+        scores.extend(batch_scores.unbind(0))
+        start = end
+
+    return [cast(torch.Tensor, score) for score in scores]
 
 
 class ScoreMultiModalParam(TypedDict, total=False):
@@ -153,29 +230,89 @@ def validate_score_input(
     return score_input_1, score_input_2
 
 
+def _ensure_str(content: list[ConversationMessage]) -> str:
+    """Extract a single string prompt from parsed conversation content."""
+    assert len(content) == 1
+    prompt = content[0]["content"]
+    if prompt is not None and isinstance(prompt, str):
+        return cast(str, prompt)
+    raise ValueError(f"Only string content is supported, but got {content}.")
+
+
 def parse_score_data(
     data_1: ScoreData,
     data_2: ScoreData,
     model_config: ModelConfig,
 ) -> tuple[str, str, MultiModalDataDict | None, MultiModalUUIDDict | None]:
+    """Parse a query-document pair into text prompts and shared multi-modal
+    data.
+
+    Uses a **single** :class:`MultiModalItemTracker` so that multi-modal
+    items from both inputs are merged into one ``mm_data`` dict.  This is
+    the correct behaviour for cross-encoder scoring, where query and
+    document are concatenated into a single model prompt.
+    """
     mm_tracker = MultiModalItemTracker(model_config)
 
     content_1 = _parse_score_content("query", data_1, mm_tracker)
     content_2 = _parse_score_content("document", data_2, mm_tracker)
 
-    def ensure_str(content: list[ConversationMessage]) -> str:
-        assert len(content) == 1
-        prompt = content[0]["content"]
-        if prompt is not None and isinstance(prompt, str):
-            return cast(str, prompt)
-        else:
-            raise ValueError(f"Only string content is supported, but got {content}.")
-
-    prompt_1 = ensure_str(content_1)
-    prompt_2 = ensure_str(content_2)
+    prompt_1 = _ensure_str(content_1)
+    prompt_2 = _ensure_str(content_2)
     mm_items, mm_uuids = mm_tracker.resolve_items()
 
     return prompt_1, prompt_2, mm_items, mm_uuids
+
+
+def parse_score_data_single(
+    data: ScoreData,
+    role: str,
+    model_config: ModelConfig,
+) -> tuple[str, MultiModalDataDict | None, MultiModalUUIDDict | None]:
+    """Parse **one** ScoreData into a text prompt and its own multi-modal
+    data.
+
+    Unlike :func:`parse_score_data`, each call creates an **independent**
+    :class:`MultiModalItemTracker` so multi-modal items are kept separate.
+    This is the correct behaviour for late-interaction scoring, where
+    query and document are encoded independently.
+    """
+    mm_tracker = MultiModalItemTracker(model_config)
+    content = _parse_score_content(role, data, mm_tracker)
+
+    prompt = _ensure_str(content)
+    mm_items, mm_uuids = mm_tracker.resolve_items()
+    return prompt, mm_items, mm_uuids
+
+
+def score_data_to_prompts(
+    data_list: list[ScoreData],
+    role: str,
+    model_config: ModelConfig,
+) -> list[PromptType]:
+    """Convert a list of ScoreData into PromptType objects.
+
+    For plain text inputs, returns the string directly.
+    For multimodal inputs (list of content parts), parses them into
+    a :class:`TextPrompt` with attached ``multi_modal_data`` /
+    ``multi_modal_uuids``.
+
+    This is used by late-interaction scoring where each query/document
+    is encoded independently.
+    """
+    prompts: list[PromptType] = []
+    for data in data_list:
+        if isinstance(data, str):
+            prompts.append(data)
+        else:
+            text, mm_data, mm_uuids = parse_score_data_single(data, role, model_config)
+            prompt: TextPrompt = TextPrompt(prompt=text)
+            if mm_data is not None:
+                prompt["multi_modal_data"] = mm_data
+            if mm_uuids is not None:
+                prompt["multi_modal_uuids"] = mm_uuids
+            prompts.append(prompt)
+    return prompts
 
 
 def _parse_score_content(
