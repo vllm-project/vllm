@@ -1931,8 +1931,8 @@ steps:
   - popd
   # NEW rlhf examples
   - pushd ../examples/offline_inference/new_weight_syncing
-  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
-  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_async_new_apis.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_nccl.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_ipc.py
   - popd
 
 - label: Distributed Tests (8 GPUs) # 4min
@@ -2931,6 +2931,7 @@ steps:
   - pytest -v -s compile/correctness_e2e/test_sequence_parallel.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/offline_inference/new_weight_syncing/rlhf_async_new_apis.py
 
 - label: Distributed Model Tests (2 GPUs) # 37min
   timeout_in_minutes: 50
