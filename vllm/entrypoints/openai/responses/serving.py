@@ -1405,24 +1405,31 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> ErrorResponse | ResponsesResponse:
         if not self.enable_store:
             # Stateless mode: cancel in-flight tasks by ID only (no stored response).
-            if task := self.background_tasks.get(response_id):
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    logger.exception(
-                        "Background task for %s was cancelled (stateless mode)",
-                        response_id,
-                    )
+            task = self.background_tasks.get(response_id)
+            if not task:
+                # Mimic the stateful path's 404 when no task is found.
+                return self._make_not_found_error(response_id)
+
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                logger.info(
+                    "Background task for %s was cancelled (stateless mode)",
+                    response_id,
+                )
+
+            # Cancellation was initiated but we cannot return a full response
+            # object because no state is stored in stateless mode.
             return self.create_error_response(
                 err_type="invalid_request_error",
                 message=(
-                    "Response cancellation in stateless mode cancelled any "
-                    "in-flight task, but no stored response object is available. "
+                    "Response cancellation was initiated for the in-flight task, "
+                    "but a full response object cannot be returned in stateless mode. "
                     "Enable VLLM_ENABLE_RESPONSES_API_STORE=1 for full cancel "
                     "support."
                 ),
-                status_code=HTTPStatus.NOT_IMPLEMENTED,
+                status_code=HTTPStatus.BAD_REQUEST,
             )
 
         async with self.response_store_lock:
