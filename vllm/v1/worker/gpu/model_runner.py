@@ -36,14 +36,9 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.models.interfaces import (
-    supports_realtime,
-    supports_transcription,
-)
-from vllm.model_executor.models.interfaces_base import is_text_generation_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
-from vllm.tasks import GenerationTask, SupportedTask
+from vllm.tasks import SupportedTask
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -233,20 +228,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks: list[SupportedTask] = []
         if self.model_config.runner_type == "generate":
-            generation_tasks = list[GenerationTask]()
-            model = self.get_model()
-            if is_text_generation_model(model):
-                generation_tasks.append("generate")
-
-            if supports_transcription(model):
-                if model.supports_transcription_only:
-                    return ("transcription",)
-                generation_tasks.append("transcription")
-
-            if supports_realtime(model):
-                generation_tasks.append("realtime")
-
-            tasks.extend(generation_tasks)
+            tasks.extend(self.model_state.get_supported_generation_tasks())
         if self.pooling_runner is not None:
             tasks.extend(self.pooling_runner.get_supported_pooling_tasks())
         return tuple(tasks)

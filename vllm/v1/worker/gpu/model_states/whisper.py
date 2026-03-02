@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
-from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -57,11 +56,8 @@ class WhisperModelState(ModelState):
 
         self.encoder_outputs: list[torch.Tensor] = []
 
-    def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
-        return None
-
-    def apply_staged_writes(self) -> None:
-        return None
+    def get_supported_generation_tasks(self):
+        return ("transcription",)
 
     def get_mm_embeddings(
         self,

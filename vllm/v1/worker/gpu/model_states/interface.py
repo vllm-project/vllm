@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
+from vllm.tasks import GenerationTask
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -26,13 +27,14 @@ class ModelState(ABC):
     ) -> None:
         raise NotImplementedError
 
-    @abstractmethod
-    def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
-        raise NotImplementedError
+    def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:
+        return ("generate",)
 
-    @abstractmethod
+    def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        return None
+
     def apply_staged_writes(self) -> None:
-        raise NotImplementedError
+        return None
 
     @abstractmethod
     def get_mm_embeddings(
