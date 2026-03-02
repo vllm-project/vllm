@@ -31,6 +31,7 @@ from tempfile import NamedTemporaryFile
 from typing import Any, cast
 
 import numpy as np
+from huggingface_hub import snapshot_download
 from PIL import Image
 from typing_extensions import deprecated
 
@@ -59,6 +60,8 @@ except ImportError:
     librosa = PlaceholderModule("librosa")
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_NUM_PROMPTS = 1000
 
 # -----------------------------------------------------------------------------
 # Data Classes
@@ -303,9 +306,11 @@ def process_image(image: Any) -> Mapping[str, Any]:
        a JPEG in memory.  - Encodes the JPEG data as a base64 string.  - Returns
        a dictionary with the image as a base64 data URL.
 
-    3. String input: - Treats the string as a URL or local file path.  -
-       Prepends "file://" if the string doesn't start with "http://" or
-       "file://".  - Returns a dictionary with the image URL.
+    3. String input: - Treats the string as a URL, local file path, or base64
+       encoded data.  - If string starts with "data:image/", treats as base64.
+       - If string starts with "http://", "https://", or "file://", treats as URL.
+       - Otherwise treats as local file path and prepends "file://".
+       - Returns a dictionary with the image URL or base64 data.
 
     Raises:
         ValueError: If the input is not a supported type.
@@ -325,14 +330,14 @@ def process_image(image: Any) -> Mapping[str, Any]:
     if isinstance(image, str):
         image_url = (
             image
-            if image.startswith(("http://", "https://", "file://"))
+            if image.startswith(("http://", "https://", "file://", "data:image/"))
             else f"file://{image}"
         )
         return {"type": "image_url", "image_url": {"url": image_url}}
 
     raise ValueError(
-        f"Invalid image input {image}. Must be a PIL.Image.Image"
-        " or str or dictionary with raw image bytes."
+        f"Invalid image input {image}. Must be a PIL.Image.Image, "
+        "str (URL, file path, or base64 data URL), or dictionary with raw image bytes."
     )
 
 
@@ -1338,7 +1343,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--num-prompts",
         type=int,
-        default=1000,
+        default=DEFAULT_NUM_PROMPTS,
         help="Number of prompts to process.",
     )
     parser.add_argument(
@@ -2627,22 +2632,26 @@ class VisionArenaDataset(HuggingFaceDataset):
         no_oversample: bool = False,
         **kwargs,
     ) -> list:
+        parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.hf_name)
+        if parser_fn is None:
+            raise ValueError(f"Unsupported dataset path: {self.hf_name}")
+
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
+
         sampled_requests = []
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
-            parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.hf_name)
-            if parser_fn is None:
-                raise ValueError(f"Unsupported dataset path: {self.hf_name}")
+
             prompt = parser_fn(item)
             mm_content = process_image(item["images"][0])
-            prompt_len = len(tokenizer(prompt).input_ids)
+            prompt_len = len(tokenizer.encode(prompt))
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
                 # accurate and we will be using request output to count the
                 # actual prompt len
                 prompt = self.apply_multimodal_chat_transformation(prompt, mm_content)
+
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
@@ -2652,6 +2661,7 @@ class VisionArenaDataset(HuggingFaceDataset):
                     request_id=request_id_prefix + str(i),
                 )
             )
+
         self.maybe_oversample_requests(
             sampled_requests, num_requests, request_id_prefix, no_oversample
         )
@@ -2671,6 +2681,14 @@ class MMVUDataset(HuggingFaceDataset):
         + (" ".join(f"{k}.{v}" for k, v in x["choices"].items())),
     }
 
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+
+        self._remote_path_root = (
+            f"https://huggingface.co/datasets/{self.hf_name}/resolve/main"
+        )
+        self._local_path_root = snapshot_download(self.hf_name, repo_type="dataset")
+
     def sample(
         self,
         tokenizer: TokenizerLike,
@@ -2681,22 +2699,28 @@ class MMVUDataset(HuggingFaceDataset):
         no_oversample: bool = False,
         **kwargs,
     ) -> list:
+        parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.hf_name)
+        if parser_fn is None:
+            raise ValueError(f"Unsupported dataset path: {self.hf_name}")
+
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
+
         sampled_requests = []
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
-            parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.hf_name)
-            if parser_fn is None:
-                raise ValueError(f"Unsupported dataset path: {self.hf_name}")
+
             prompt = parser_fn(item)
-            mm_content = process_video(item["video"])
-            prompt_len = len(tokenizer(prompt).input_ids)
+            mm_content = process_video(
+                item["video"].replace(self._remote_path_root, self._local_path_root)
+            )
+            prompt_len = len(tokenizer.encode(prompt))
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
                 # accurate and we will be using request output to count the
                 # actual prompt len
                 prompt = self.apply_multimodal_chat_transformation(prompt, mm_content)
+
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
@@ -2706,6 +2730,7 @@ class MMVUDataset(HuggingFaceDataset):
                     request_id=request_id_prefix + str(i),
                 )
             )
+
         self.maybe_oversample_requests(
             sampled_requests, num_requests, request_id_prefix, no_oversample
         )

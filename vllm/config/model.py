@@ -883,6 +883,7 @@ class ModelConfig:
                 "modelopt",
                 "modelopt_fp4",
                 "modelopt_mxfp8",
+                "modelopt_mixed",
                 "petit_nvfp4",
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
@@ -1365,7 +1366,7 @@ class ModelConfig:
 
         return diff_sampling_param
 
-    @property
+    @cached_property
     def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
         return is_encoder_decoder(self.hf_config)
@@ -1686,6 +1687,20 @@ class ModelConfig:
     @property
     def is_quantized(self) -> bool:
         return getattr(self.hf_config, "quantization_config", None) is not None
+
+    def is_nvfp4_quantized(self) -> bool:
+        # ModelOpt NVFP4 checkpoints resolve to modelopt_fp4 quantization method
+        if self.quantization in ("modelopt_fp4",):
+            return True
+
+        # For Compressed Tensors we look for `"format": "nvfp4-pack-quantized"`
+        # in the quantization config
+        quant_config = self.model_arch_config.quantization_config
+        return (
+            self.quantization == "compressed-tensors"
+            and quant_config is not None
+            and "nvfp4" in quant_config.get("format", "").lower()
+        )
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):

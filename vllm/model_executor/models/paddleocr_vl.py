@@ -155,15 +155,30 @@ class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
         patch_size = vision_config.patch_size
         merge_size = vision_config.spatial_merge_size
 
+        if self.ctx.model_config.trust_remote_code:
+            # Defined in HF Hub repo
+            min_pixels_key = "min_pixels"
+            max_pixels_key = "max_pixels"
+        else:
+            # Defined in Transformers library (requires v5.0 or above)
+            min_pixels_key = "shortest_edge"
+            max_pixels_key = "longest_edge"
+
         mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
-        size = mm_kwargs.get("size", image_processor.size)
+        size = image_processor.size
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+        if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+            size = size | {min_pixels_key: override_min_pixels}
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            size = size | {max_pixels_key: override_max_pixels}
 
         resized_height, resized_width = smart_resize(
             height=image_height,
             width=image_width,
             factor=patch_size * merge_size,
-            min_pixels=size["min_pixels"],
-            max_pixels=size["max_pixels"],
+            min_pixels=size[min_pixels_key],
+            max_pixels=size[max_pixels_key],
         )
         preprocessed_size = ImageSize(width=resized_width, height=resized_height)
 
@@ -206,13 +221,12 @@ class PaddleOCRVLDummyInputsBuilder(BaseDummyInputsBuilder[PaddleOCRVLProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         max_image_size = self.info.get_image_size_with_most_features()
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -730,14 +744,7 @@ class SiglipEncoder(nn.Module):
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
         )
-        if self.attn_backend not in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.TORCH_SDPA,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        }:
-            raise RuntimeError(
-                f"PaddleOCR-VL does not support {self.attn_backend} backend now."
-            )
+
         self.layers = nn.ModuleList(
             [
                 SiglipEncoderLayer(
@@ -805,6 +812,7 @@ class SiglipEncoder(nn.Module):
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
         }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 

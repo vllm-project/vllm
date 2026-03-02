@@ -16,8 +16,13 @@ import importlib
 
 _CLASS_TO_MODULE: dict[str, str] = {
     "AfmoeConfig": "vllm.transformers_utils.configs.afmoe",
+    "AXK1Config": "vllm.transformers_utils.configs.AXK1",
     "BagelConfig": "vllm.transformers_utils.configs.bagel",
     "ChatGLMConfig": "vllm.transformers_utils.configs.chatglm",
+    "ColModernVBertConfig": "vllm.transformers_utils.configs.colmodernvbert",
+    "ColQwen3Config": "vllm.transformers_utils.configs.colqwen3",
+    "OpsColQwen3Config": "vllm.transformers_utils.configs.colqwen3",
+    "Qwen3VLNemotronEmbedConfig": "vllm.transformers_utils.configs.colqwen3",
     "DeepseekVLV2Config": "vllm.transformers_utils.configs.deepseek_vl2",
     "DotsOCRConfig": "vllm.transformers_utils.configs.dotsocr",
     "EAGLEConfig": "vllm.transformers_utils.configs.eagle",
@@ -66,8 +71,13 @@ _CLASS_TO_MODULE: dict[str, str] = {
 
 __all__ = [
     "AfmoeConfig",
+    "AXK1Config",
     "BagelConfig",
     "ChatGLMConfig",
+    "ColModernVBertConfig",
+    "ColQwen3Config",
+    "OpsColQwen3Config",
+    "Qwen3VLNemotronEmbedConfig",
     "DeepseekVLV2Config",
     "DeepseekV3Config",
     "DotsOCRConfig",

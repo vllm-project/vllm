@@ -17,9 +17,8 @@ if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
     from vllm.config import VllmConfig
-    from vllm.inputs import ProcessorInputs, PromptType
+    from vllm.inputs import ProcessorInputs
     from vllm.pooling_params import PoolingParams
-    from vllm.renderers.inputs import DictPrompt, TokPrompt
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -395,6 +394,20 @@ class Platform:
         pass
 
     @classmethod
+    def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Apply the platform-specific default values to the config.
+
+        This function is called during the initialization of global VllmConfig, after
+        parsing cli arguments.
+        It can modify the defaults of the config according to the platform. For example,
+        it can enable custom_ops based on the enabled features.
+
+        The config is passed by reference, so it can be modified in place.
+        """
+        pass
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """
         Check and update the configuration for the current platform.
@@ -569,9 +582,8 @@ class Platform:
     @classmethod
     def validate_request(
         cls,
-        prompt: "PromptType | DictPrompt | TokPrompt",
-        params: "SamplingParams | PoolingParams",
         processed_inputs: "ProcessorInputs",
+        params: "SamplingParams | PoolingParams",
     ) -> None:
         """Raises if this request is unsupported on this platform"""
 
@@ -693,6 +705,16 @@ class Platform:
         Set some additional forward context for the current platform if needs.
         """
         return {}
+
+    @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        """
+        Get the number of compute units for the current platform.
+        (NVIDIA SM / AMD CU / Intel EU)
+        """
+        raise NotImplementedError(
+            "num_compute_units is not implemented for the current platform."
+        )
 
 
 class UnspecifiedPlatform(Platform):

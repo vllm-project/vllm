@@ -95,6 +95,11 @@ class FlashAttentionBackend(AttentionBackend):
             AttentionType.ENCODER_DECODER,
         )
 
+    @classmethod
+    def supports_per_head_quant_scales(cls) -> bool:
+        fa_version = get_flash_attn_version()
+        return fa_version is not None and fa_version >= 3
+
     @staticmethod
     def get_impl_cls() -> type["FlashAttentionImpl"]:
         return FlashAttentionImpl
@@ -575,7 +580,15 @@ class FlashAttentionImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         self.attn_type = attn_type
-        self.vllm_flash_attn_version = get_flash_attn_version()
+        self.vllm_flash_attn_version = get_flash_attn_version(
+            requires_alibi=alibi_slopes is not None,
+            head_size=head_size,
+        )
+        logger.info_once(
+            "Using FlashAttention version %s",
+            self.vllm_flash_attn_version,
+            scope="local",
+        )
         # Cache the batch invariant result for use in forward passes
         self.batch_invariant_enabled = vllm_is_batch_invariant()
 
@@ -595,11 +608,6 @@ class FlashAttentionImpl(AttentionImpl):
             )
 
         self.supports_quant_query_input = True
-        self.supports_per_head_quant_scales = (
-            self.vllm_flash_attn_version >= 3
-            if self.vllm_flash_attn_version is not None
-            else False
-        )
 
     def forward(
         self,
@@ -847,6 +855,7 @@ class FlashAttentionImpl(AttentionImpl):
             q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
+            num_splits=attn_metadata.max_num_splits,
         )
         # FA returns LSE in shape [ H, B ] but cp_lse_ag_out_rs wants [ B, H ]
         context_attn_out_cor, context_lse_cor = cp_lse_ag_out_rs(
@@ -876,6 +885,7 @@ class FlashAttentionImpl(AttentionImpl):
             q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
+            num_splits=attn_metadata.max_num_splits,
         )
         assert context_attn_out_cor.shape == query_attn_out.shape
         assert context_lse_cor.shape == query_lse.shape

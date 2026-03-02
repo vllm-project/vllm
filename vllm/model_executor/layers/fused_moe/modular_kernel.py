@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
@@ -498,15 +499,19 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
             return f"kernel does not support {reason}"
 
         if not cls._supports_current_device():
-            return False, _make_reason("current device")
+            return False, _make_reason(f"current device {current_platform.device_name}")
         elif not (moe_config.is_act_and_mul or cls._supports_no_act_and_mul()):
             return False, _make_reason("no act_and_mul MLP layer")
         elif not cls._supports_activation(moe_config.activation):
             return False, _make_reason(f"{moe_config.activation} activation")
         elif not cls._supports_quant_scheme(weight_key, activation_key):
-            return False, _make_reason("quantization scheme")
+            return False, _make_reason(
+                f"quantization scheme {weight_key}x{activation_key}"
+            )
         elif not cls._supports_parallel_config(moe_config.moe_parallel_config):
-            return False, _make_reason("parallel config")
+            return False, _make_reason(
+                f"parallel config {moe_config.moe_parallel_config}"
+            )
         elif activation_format != cls.activation_format():
             return False, _make_reason(f"{activation_format.value} activation format")
         return True, None
@@ -559,8 +564,12 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     #
 
     @property
-    def quant_dtype(self) -> torch.dtype | None:
+    def quant_dtype(self) -> torch.dtype | str | None:
         return self.quant_config.quant_dtype
+
+    @property
+    def weight_quant_dtype(self) -> torch.dtype | str | None:
+        return self.quant_config.weight_quant_dtype
 
     @property
     def block_shape(self) -> list[int] | None:
@@ -1163,9 +1172,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         # This happens when none of the tokens from the all2all reach this
         # EP rank. Also, note that this is only relevant for CUDAGraph
         # incompatible all2all kernels like the DeepEP high-throughput
-        # kernels. CUDAGraph compatible all2all kernels like the pplx
-        # kernels and the DeepEP low-latency kernels are always batched
-        # and can never run into the tensor.numel() == 0 case.
+        # kernels. CUDAGraph compatible all2all kernels like the DeepEP
+        # low-latency kernels are always batched and can never run into
+        # the tensor.numel() == 0 case.
         if M_full == 0:
             assert num_chunks == 0
             workspace13 = None

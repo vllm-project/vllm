@@ -53,6 +53,7 @@ class MockModelConfig:
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     skip_tokenizer_init = False
     is_encoder_decoder: bool = False
+    is_multimodal_model: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -78,7 +79,7 @@ def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
 def _build_renderer(model_config: MockModelConfig):
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
-    return HfRenderer(
+    return HfRenderer.from_config(
         MockVllmConfig(model_config),
         tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
     )
@@ -218,3 +219,36 @@ async def test_completion_error_stream():
         f"Expected error message in chunks: {chunks}"
     )
     assert chunks[-1] == "data: [DONE]\n\n"
+
+
+def test_json_schema_response_format_missing_schema():
+    """When response_format type is 'json_schema' but the json_schema field
+    is not provided, request construction should raise a validation error
+    so the API returns 400 instead of 500."""
+    with pytest.raises(Exception, match="json_schema.*must be provided"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=10,
+            response_format={"type": "json_schema"},
+        )
+
+
+def test_negative_prompt_token_ids_nested():
+    """Negative token IDs in prompt (nested list) should raise validation error."""
+    with pytest.raises(Exception, match="greater than or equal to 0"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt=[[-1]],
+            max_tokens=10,
+        )
+
+
+def test_negative_prompt_token_ids_flat():
+    """Negative token IDs in prompt (flat list) should raise validation error."""
+    with pytest.raises(Exception, match="greater than or equal to 0"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt=[-1],
+            max_tokens=10,
+        )
