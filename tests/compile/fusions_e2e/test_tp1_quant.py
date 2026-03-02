@@ -121,9 +121,6 @@ def test_tp1_fp8_fusions(
         # TODO: enable the `norm_rope_fusion` test,
         # On ROCm norm_rope_fusion is only supported without
         # enabling AITER.
-        # when we are running the tests in
-        # tests/compile/fusions_e2e/test_tp1_quant.py
-        # we are enabling AITER, so no fusion happens.
         matches_check.remove("norm_rope_fusion")
 
     run_e2e_fusion_test(
