@@ -310,7 +310,7 @@ def get_intel_gpu_driver_version(run_lambda):
     return None
 
 
-def get_intel_gpu_models(run_lambda):
+def get_intel_gpu_models():
     if TORCH_AVAILABLE and hasattr(torch, "xpu") and torch.xpu.is_available():
         device_count = torch.xpu.device_count()
         return "\n".join(
@@ -376,9 +376,7 @@ def summarize_vllm_build_flags():
     flags = "CUDA Archs: {}; ROCm: {}; XPU: {}".format(
         os.environ.get("TORCH_CUDA_ARCH_LIST", "Not Set"),
         "Enabled" if os.environ.get("ROCM_HOME") else "Disabled",
-        "Enabled"
-        if (TORCH_AVAILABLE and hasattr(torch, "xpu") and torch.xpu.is_available())
-        else "Disabled",
+        "Enabled" if get_xpu_available() else "Disabled",
     )
     return flags
 
@@ -727,7 +725,7 @@ def get_env_info():
         xpu_available=str(get_xpu_available()),
         xpu_build_version=get_xpu_build_version(),
         intel_gpu_driver_version=get_intel_gpu_driver_version(run_lambda),
-        intel_gpu_models=get_intel_gpu_models(run_lambda),
+        intel_gpu_models=get_intel_gpu_models(),
         oneapi_version=get_oneapi_version(run_lambda),
         level_zero_version=get_level_zero_version(run_lambda),
         sycl_version=get_sycl_version(run_lambda),
@@ -909,9 +907,7 @@ def pretty_str(envinfo):
     all_dynamic_xpu_fields_missing = all(
         mutable_dict[field] is None for field in dynamic_xpu_fields
     )
-    xpu_available = (
-        TORCH_AVAILABLE and hasattr(torch, "xpu") and torch.xpu.is_available()
-    )
+    xpu_available = get_xpu_available()
     if not xpu_available and all_dynamic_xpu_fields_missing:
         for field in all_xpu_fields:
             mutable_dict[field] = "No XPU"
