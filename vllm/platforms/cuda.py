@@ -583,6 +583,104 @@ class CudaPlatformBase(Platform):
 # all the related functions work on real physical device ids.
 # the major benefit of using NVML is that it will not initialize CUDA
 class NvmlCudaPlatform(CudaPlatformBase):
+    @staticmethod
+    def _is_uuid(device_id: str) -> bool:
+        """Check if device ID is in UUID format (GPU-xxx or MIG-xxx)."""
+        return device_id.startswith("GPU-") or device_id.startswith("MIG-")
+
+    @classmethod
+    @cache
+    @with_nvml_context
+    def _build_uuid_to_index_map(cls) -> dict[str, int]:
+        """Build mapping from GPU UUID to physical device index.
+
+        This is cached as it's expensive (queries all GPUs via NVML).
+
+        Returns:
+            Dictionary mapping UUID strings to physical device indices.
+        """
+        uuid_to_index: dict[str, int] = {}
+
+        try:
+            device_count = pynvml.nvmlDeviceGetCount()
+        except pynvml.NVMLError as e:
+            logger.error("Failed to get device count from NVML: %s", e)
+            return uuid_to_index
+
+        for physical_idx in range(device_count):
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(physical_idx)
+                uuid = pynvml.nvmlDeviceGetUUID(handle)
+                uuid_to_index[uuid] = physical_idx
+            except pynvml.NVMLError as e:
+                logger.warning(
+                    "Failed to get UUID for device %s: %s. "
+                    "This device will not be accessible via UUID.",
+                    physical_idx,
+                    e,
+                )
+                continue
+
+        logger.debug("Built UUID to index map: %s", uuid_to_index)
+        return uuid_to_index
+
+    @classmethod
+    def device_id_to_physical_device_id(cls, device_id: int) -> int:
+        """Convert logical device ID to physical device ID.
+
+        Supports both integer indices and UUID formats (GPU-xxx, MIG-xxx)
+        in CUDA_VISIBLE_DEVICES.
+
+        Args:
+            device_id: Logical device ID (index into CUDA_VISIBLE_DEVICES list)
+
+        Returns:
+            Physical device index for NVML calls
+
+        Raises:
+            IndexError: If device_id is out of range
+            ValueError: If UUID format is invalid or device not found
+        """
+        # Ray CPU placement groups can have empty CUDA_VISIBLE_DEVICES
+        cuda_visible_devices = os.environ.get(cls.device_control_env_var)
+        if not cuda_visible_devices:
+            return device_id
+
+        device_ids = cuda_visible_devices.split(",")
+
+        if not 0 <= device_id < len(device_ids):
+            raise IndexError(
+                f"device_id {device_id} out of range for "
+                f"{cls.device_control_env_var}={cuda_visible_devices} "
+                f"(expected 0-{len(device_ids) - 1})"
+            )
+
+        physical_device_id_str = device_ids[device_id].strip()
+
+        # Fast path: integer format (backward compatibility)
+        if physical_device_id_str.isdigit():
+            return int(physical_device_id_str)
+
+        if not cls._is_uuid(physical_device_id_str):
+            raise ValueError(
+                f"Invalid device ID format: '{physical_device_id_str}'. "
+                f"Expected integer index or UUID format (GPU-..., MIG-...)."
+            )
+
+        uuid_map = cls._build_uuid_to_index_map()
+
+        if physical_device_id_str not in uuid_map:
+            available = list(uuid_map.keys())
+            available_str = (
+                f"{available[:3]}..." if len(available) > 3 else str(available)
+            )
+            raise ValueError(
+                f"GPU UUID '{physical_device_id_str}' not found. "
+                f"Available UUIDs: {available_str}"
+            )
+
+        return uuid_map[physical_device_id_str]
+
     @classmethod
     @cache
     @with_nvml_context
