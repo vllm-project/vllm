@@ -21,6 +21,7 @@ from .op import exp
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None,
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
+        "IS_EAGLE_TREE": lambda args: args["retrieve_parent_token"] is not None,
     }
 )
 @triton.jit(do_not_specialize=["N", "T"])
@@ -36,6 +37,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     cu_seqlens,
     ssm_state_indices,
     num_accepted_tokens,
+    retrieve_parent_token,
     scale,
     N: tl.int64,  # num of sequences
     T: tl.int64,  # num of tokens
@@ -58,6 +60,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     IS_KDA: tl.constexpr,
+    IS_EAGLE_TREE: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -120,6 +123,25 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
     for i_t in range(0, T):
+        # i_t = 0 should use the b_h from USE_INITIAL_STATE
+        if IS_EAGLE_TREE:  # noqa: SIM102
+            if i_t != 0:
+                # when calculating current step's attention, load the state from the parent token
+                parent_step_idx = tl.load(
+                    retrieve_parent_token
+                    + (i_n * stride_indices_seq)
+                    + i_t * stride_indices_tok
+                )
+                p_h0 = (
+                    ht
+                    + tl.load(
+                        ssm_state_indices + i_n * stride_indices_seq + parent_step_idx
+                    ).to(tl.int64)
+                    * stride_init_state_token
+                )
+
+                p_h0 = p_h0 + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+                b_h = tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
         b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
@@ -187,6 +209,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
+    retrieve_parent_token: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -214,6 +237,12 @@ def fused_recurrent_gated_delta_rule_fwd(
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
 
+    if retrieve_parent_token is not None:
+        assert retrieve_parent_token.stride() == (
+            stride_indices_seq,
+            stride_indices_tok,
+        ), "retrieve_parent_token and ssm_state_indices must have the same stride"
+
     grid = (NK, NV, N * HV)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
         q=q,
@@ -227,6 +256,7 @@ def fused_recurrent_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         ssm_state_indices=ssm_state_indices,
         num_accepted_tokens=num_accepted_tokens,
+        retrieve_parent_token=retrieve_parent_token,
         scale=scale,
         N=N,
         T=T,
@@ -267,6 +297,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         cu_seqlens: torch.LongTensor | None = None,
         ssm_state_indices: torch.Tensor | None = None,
         num_accepted_tokens: torch.Tensor | None = None,
+        retrieve_parent_token: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
     ):
         o, final_state = fused_recurrent_gated_delta_rule_fwd(
@@ -281,6 +312,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             ssm_state_indices=ssm_state_indices,
             num_accepted_tokens=num_accepted_tokens,
+            retrieve_parent_token=retrieve_parent_token,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         )
 
@@ -299,6 +331,7 @@ def fused_recurrent_gated_delta_rule(
     cu_seqlens: torch.LongTensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
+    retrieve_parent_token: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -388,6 +421,7 @@ def fused_recurrent_gated_delta_rule(
         cu_seqlens,
         ssm_state_indices,
         num_accepted_tokens,
+        retrieve_parent_token,
         use_qk_l2norm_in_kernel,
     )
     return o, final_state
