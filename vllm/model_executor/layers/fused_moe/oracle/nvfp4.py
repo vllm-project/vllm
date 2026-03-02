@@ -435,7 +435,6 @@ def make_nvfp4_moe_quant_config(
             a2_gscale=a2_scale,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
-            emulation=True,
         )
 
     g1_alphas = a13_scale * w13_scale_2

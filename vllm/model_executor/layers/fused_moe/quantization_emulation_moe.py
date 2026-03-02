@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_to_dtype,
 )
@@ -61,6 +62,9 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
 
         self.quant_config._w1.scale = None
         self.quant_config._w2.scale = None
+
+        self.quant_dtype = "nvfp4"
+        self.emulation = True
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -132,6 +136,14 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
 
         assert w1_dequant.dtype == torch.bfloat16
         assert w2_dequant.dtype == torch.bfloat16
+
+        hidden_states, a1q_scale = moe_kernel_quantize_input(
+            A=hidden_states,
+            A_scale=a1q_scale,
+            quant_dtype="nvfp4",
+            per_act_token_quant=False,
+            emulation=True,
+        )
 
         # Activation quantization/dequantization is deferred to
         # `moe_kernel_quantize_input` in TritonExperts.apply.

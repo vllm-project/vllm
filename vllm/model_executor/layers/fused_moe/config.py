@@ -185,9 +185,6 @@ class FusedMoEQuantDesc:
     # Biases for GPT triton MoE
     bias: torch.Tensor | None = None
 
-    # Emulation flag: if True we should use QDQ (activations) or DQ (weights).
-    emulation: bool = False
-
 
 # TODO(bnell): have subclasses for specific moe methods?
 # e.g. for specific arguments bias, precision, etc.
@@ -244,10 +241,6 @@ class FusedMoEQuantConfig:
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
         return self._a1.dtype
-
-    @property
-    def weight_quant_dtype(self) -> torch.dtype | str | None:
-        return self._w1.dtype
 
     @property
     def is_quantized(self) -> bool:
@@ -478,7 +471,6 @@ class FusedMoEQuantConfig:
         w1_zp: torch.Tensor | None = None,
         w2_zp: torch.Tensor | None = None,
         weight_dtype: torch.dtype | str | None = None,
-        emulation: bool = False,
     ) -> "FusedMoEQuantConfig":
         """
         General builder function for a FusedMoEQuantConfig.
@@ -532,37 +524,13 @@ class FusedMoEQuantConfig:
             quant_dtype, per_act_token_quant, per_out_ch_quant, block_shape
         )
         quant_config = FusedMoEQuantConfig(
-            _a1=FusedMoEQuantDesc(
-                quant_dtype,
-                a_shape,
-                a1_scale,
-                a1_gscale,
-                emulation=emulation,
-            ),
-            _a2=FusedMoEQuantDesc(
-                quant_dtype,
-                a_shape,
-                a2_scale,
-                a2_gscale,
-                emulation=emulation,
-            ),
+            _a1=FusedMoEQuantDesc(quant_dtype, a_shape, a1_scale, a1_gscale),
+            _a2=FusedMoEQuantDesc(quant_dtype, a_shape, a2_scale, a2_gscale),
             _w1=FusedMoEQuantDesc(
-                weight_dtype,
-                w_shape,
-                w1_scale,
-                g1_alphas,
-                w1_zp,
-                w1_bias,
-                emulation=emulation,
+                weight_dtype, w_shape, w1_scale, g1_alphas, w1_zp, w1_bias
             ),
             _w2=FusedMoEQuantDesc(
-                weight_dtype,
-                w_shape,
-                w2_scale,
-                g2_alphas,
-                w2_zp,
-                w2_bias,
-                emulation=emulation,
+                weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
             ),
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
@@ -674,7 +642,6 @@ def mxfp4_w4a16_moe_quant_config(
     w2_scale: Union[torch.Tensor, "PrecisionConfig"],
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    emulation: bool = False,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for unquantized activations and mxfp4 weights.
@@ -682,12 +649,8 @@ def mxfp4_w4a16_moe_quant_config(
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(),
         _a2=FusedMoEQuantDesc(),
-        _w1=FusedMoEQuantDesc(
-            "mxfp4", None, w1_scale, None, None, w1_bias, emulation=emulation
-        ),
-        _w2=FusedMoEQuantDesc(
-            "mxfp4", None, w2_scale, None, None, w2_bias, emulation=emulation
-        ),
+        _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
+        _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
     )
 
 
@@ -719,26 +682,16 @@ def mxfp4_w4a8_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
-    emulation: bool = False,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for fp8 activations and mxfp4 weights.
     """
-    quant_config = FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(
-            "fp8", None, a1_scale, None, None, None, emulation=emulation
-        ),
-        _a2=FusedMoEQuantDesc(
-            "fp8", None, a2_scale, None, None, None, emulation=emulation
-        ),
-        _w1=FusedMoEQuantDesc(
-            "mxfp4", None, w1_scale, None, None, w1_bias, emulation=emulation
-        ),
-        _w2=FusedMoEQuantDesc(
-            "mxfp4", None, w2_scale, None, None, w2_bias, emulation=emulation
-        ),
+    return FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc("fp8", None, a1_scale, None, None, None),
+        _a2=FusedMoEQuantDesc("fp8", None, a2_scale, None, None, None),
+        _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
+        _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
     )
-    return quant_config
 
 
 def ocp_mx_moe_quant_config(
@@ -751,7 +704,6 @@ def ocp_mx_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
-    emulation: bool = False,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for mxfp4 activations and mxfp4 weights.
@@ -769,7 +721,6 @@ def ocp_mx_moe_quant_config(
         per_act_token_quant=False,
         per_out_ch_quant=False,
         block_shape=block_shape,
-        emulation=emulation,
     )
 
 
@@ -782,7 +733,6 @@ def nvfp4_moe_quant_config(
     w2_scale: torch.Tensor,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    emulation: bool = False,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for mxfp4 activations and nvp4 weights.
@@ -800,7 +750,6 @@ def nvfp4_moe_quant_config(
         per_act_token_quant=False,
         per_out_ch_quant=False,
         block_shape=None,
-        emulation=emulation,
     )
 
 
@@ -987,6 +936,10 @@ class FusedMoEParallelConfig:
         return self.dp_size > 1 and self.use_ep
 
     @property
+    def use_pplx_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "pplx"
+
+    @property
     def use_deepep_ht_kernels(self):
         return (
             self.use_all2all_kernels
@@ -1005,7 +958,7 @@ class FusedMoEParallelConfig:
 
     @property
     def use_batched_activation_format(self):
-        return self.use_deepep_ll_kernels
+        return self.use_deepep_ll_kernels or self.use_pplx_kernels
 
     @property
     def use_naive_all2all_kernels(self):
@@ -1109,6 +1062,7 @@ class FusedMoEParallelConfig:
             - Comment: There are 2 engine instances and the experts are split
                 between the 4 devices.
         """
+
         use_ep = (
             dp_size_ * pcp_size_ * tp_size_ > 1
             and vllm_parallel_config.enable_expert_parallel
@@ -1197,7 +1151,6 @@ class FusedMoEConfig:
     # Defaults to in_dtype if not specified.
     router_logits_dtype: torch.dtype | None = None
 
-    moe_backend: str = "auto"
     max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
     has_bias: bool = False
     is_act_and_mul: bool = True
@@ -1263,6 +1216,10 @@ class FusedMoEConfig:
     @property
     def use_ep(self):
         return self.moe_parallel_config.use_ep
+
+    @property
+    def use_pplx_kernels(self):
+        return self.moe_parallel_config.use_pplx_kernels
 
     @property
     def use_deepep_ht_kernels(self):
