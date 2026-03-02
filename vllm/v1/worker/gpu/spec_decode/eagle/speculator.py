@@ -17,9 +17,10 @@ from vllm.v1.worker.gpu.attn_utils import (
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.sample.gumbel import apply_temperature, gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
+from vllm.v1.worker.gpu.spec_decode.outputs import Speculation
 from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
@@ -66,6 +67,13 @@ class EagleSpeculator:
             self.max_num_reqs,
             self.num_speculative_steps,
             dtype=torch.int64,
+            device=device,
+        )
+        self.draft_logits = torch.zeros(
+            self.max_num_reqs,
+            self.num_speculative_steps,
+            self.vocab_size,
+            dtype=torch.float32,
             device=device,
         )
 
@@ -138,19 +146,21 @@ class EagleSpeculator:
             )
             last_hidden_states = last_hidden_states[:num_reqs]
             hidden_states = hidden_states[:num_reqs]
-            logits = self.model.compute_logits(last_hidden_states)
+            draft_logits = self.model.compute_logits(last_hidden_states)
+            apply_temperature(draft_logits, idx_mapping, self.temperature)
 
             # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
             # used for draft and target sampling.
             draft_tokens = gumbel_sample(
-                logits,
+                draft_logits,
                 idx_mapping,
                 self.temperature,
                 self.seeds,
                 pos + 1,
-                apply_temperature=True,
+                apply_temperature=False,
             )
             self.draft_tokens[:num_reqs, step] = draft_tokens
+            self.draft_logits[:num_reqs, step] = draft_logits
 
             if step < self.num_speculative_steps - 1:
                 # Update the inputs for the next step.
@@ -199,7 +209,7 @@ class EagleSpeculator:
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> Speculation:
         # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
         # number of rejected tokens, we maintain the size of eagle's input_ids and
         # hidden_states the same as the target model's. This means, we pad each
@@ -235,7 +245,7 @@ class EagleSpeculator:
             num_tokens_across_dp=None,  # FIXME
         )
         sample_hidden_states = last_hidden_states[last_token_indices]
-        logits = self.model.compute_logits(sample_hidden_states)
+        draft_logits = self.model.compute_logits(sample_hidden_states)
 
         num_reqs = input_batch.num_reqs
         # NOTE(woosuk): For draft sampling, we only consider the temperature
@@ -252,20 +262,26 @@ class EagleSpeculator:
         torch.gather(input_batch.positions, 0, last_token_indices, out=pos)
         # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
         # used for draft and target sampling.
+        apply_temperature(draft_logits, idx_mapping, self.temperature)
         draft_tokens = gumbel_sample(
-            logits,
+            draft_logits,
             idx_mapping,
             self.temperature,
             self.seeds,
             pos + 1,
-            apply_temperature=True,
+            apply_temperature=False,
         )
         if self.num_speculative_steps == 1:
             # Early exit.
-            return draft_tokens.view(-1, 1)
+            return Speculation(
+                draft_tokens=draft_tokens.view(-1, 1),
+                draft_logits=draft_logits.view(-1, 1, self.vocab_size),
+            )
 
-        # Save the draft tokens for the first step.
+        # Save the draft tokens/probs for the first step.
         self.draft_tokens[:num_reqs, 0] = draft_tokens
+        self.draft_logits[:num_reqs, 0] = draft_logits
+
         # Prepare the inputs for the decode steps.
         prepare_eagle_decode(
             draft_tokens,
@@ -288,7 +304,10 @@ class EagleSpeculator:
         if cudagraph_size is not None and cudagraph_mode == CUDAGraphMode.FULL:
             # Run full CUDA graph.
             self.cudagraph_manager.run_fullgraph(cudagraph_size)
-            return self.draft_tokens[:num_reqs]
+            return Speculation(
+                draft_tokens=self.draft_tokens[:num_reqs],
+                draft_logits=self.draft_logits[:num_reqs],
+            )
 
         # Run eager or piecewise CUDA graph.
         num_tokens_padded = cudagraph_size if cudagraph_size is not None else num_reqs
@@ -322,7 +341,10 @@ class EagleSpeculator:
             num_tokens_across_dp=None,  # FIXME
             cudagraph_runtime_mode=cudagraph_mode,
         )
-        return self.draft_tokens[:num_reqs]
+        return Speculation(
+            draft_tokens=self.draft_tokens[:num_reqs],
+            draft_logits=self.draft_logits[:num_reqs],
+        )
 
 
 @triton.jit

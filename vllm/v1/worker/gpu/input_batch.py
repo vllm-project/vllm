@@ -73,6 +73,9 @@ class InputBatch:
     cu_num_logits: torch.Tensor
     cu_num_logits_np: np.ndarray
 
+    # [num_draft_tokens]
+    draft_logits: torch.Tensor
+
     # Whether any requests in batch use structured output.
     has_structured_output_reqs: bool
 
@@ -81,6 +84,7 @@ class InputBatch:
         cls,
         num_reqs: int,
         num_tokens: int,
+        vocab_size: int,
         input_buffers: InputBuffers,
         device: torch.device,
     ) -> "InputBatch":
@@ -139,6 +143,7 @@ class InputBatch:
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
+            draft_logits=torch.empty(0, vocab_size, device=device, dtype=torch.float32),
             has_structured_output_reqs=False,
         )
 

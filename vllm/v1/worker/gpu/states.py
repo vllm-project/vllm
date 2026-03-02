@@ -70,6 +70,13 @@ class RequestState:
             dtype=torch.int64,
             device=device,
         )
+        self.draft_logits = torch.zeros(
+            self.max_num_reqs,
+            self.num_speculative_steps,
+            self.vocab_size,
+            dtype=torch.float32,
+            device=device,
+        )
         self.next_prefill_tokens = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=device
         )
