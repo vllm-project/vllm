@@ -166,7 +166,7 @@ def run_cutlass_moe_fp8(
         problem_sizes1 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
         problem_sizes2 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
 
-        ops.get_cutlass_pplx_moe_mm_data(
+        ops.get_cutlass_batched_moe_mm_data(
             expert_offsets,
             problem_sizes1,
             problem_sizes2,
