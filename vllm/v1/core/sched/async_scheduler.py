@@ -49,8 +49,21 @@ class AsyncScheduler(Scheduler):
         )
 
         # Update the number of output placeholders.
+        # For streaming input (e.g. realtime ASR), a new segment can cause
+        # is_prefill_chunk=True in _update_after_schedule, which skips the
+        # placeholder increment. But encoder-decoder models may still emit
+        # output tokens in that step, causing an underflow here.
+        # See: https://github.com/vllm-project/vllm/issues/35755
         request.num_output_placeholders -= len(new_token_ids)
-        assert request.num_output_placeholders >= 0
+        if request.num_output_placeholders < 0:
+            logger.warning(
+                "num_output_placeholders underflow for request %s "
+                "(new value=%d, new_tokens=%d). Clamping to 0.",
+                request.request_id,
+                request.num_output_placeholders,
+                len(new_token_ids),
+            )
+            request.num_output_placeholders = 0
 
         # Cache the new tokens. Preempted requests should be skipped.
         if status_before_update == RequestStatus.RUNNING:
