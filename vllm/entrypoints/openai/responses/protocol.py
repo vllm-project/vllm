@@ -4,7 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 import torch
 from openai.types.responses import (
@@ -233,6 +233,13 @@ class ResponsesRequest(OpenAIBaseModel):
     # this cannot be used in conjunction with previous_response_id
     # TODO: consider supporting non harmony messages as well
     previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = None
+    # Accept full previous response for stateless multi-turn (RFC #26934 + @grs).
+    # The client stores the full response object and passes it back on the next
+    # turn instead of a previous_response_id.  vLLM extracts the Harmony message
+    # history from the encrypted_content state carrier embedded in the response
+    # output, so no server-side store is required.
+    # Cannot be set together with previous_response_id.
+    previous_response: "ResponsesResponse | None" = None
     structured_outputs: StructuredOutputsParams | None = Field(
         default=None,
         description="Additional kwargs for structured outputs",
@@ -376,6 +383,21 @@ class ResponsesRequest(OpenAIBaseModel):
             isinstance(self.include, list)
             and "message.output_text.logprobs" in self.include
         )
+
+    @model_validator(mode="after")
+    def validate_previous_response_xor_id(self) -> "ResponsesRequest":
+        if self.previous_response_id and self.previous_response is not None:
+            raise ValueError(
+                "Cannot set both 'previous_response_id' and 'previous_response'. "
+                "Use 'previous_response_id' for store-backed multi-turn, or "
+                "'previous_response' (with include=['reasoning.encrypted_content'] "
+                "and store=false) for stateless multi-turn."
+            )
+        if self.previous_response is not None and self.store:
+            # Stateless path: store is meaningless (and would cause confusion).
+            # Mirror the silent-disable behavior in create_responses for store=True.
+            self.store = False
+        return self
 
     @model_validator(mode="before")
     def validate_background(cls, data):
@@ -639,3 +661,8 @@ StreamingResponsesResponse: TypeAlias = (
     | ResponseMcpCallInProgressEvent
     | ResponseMcpCallCompletedEvent
 )
+
+# Resolve forward reference: ResponsesRequest.previous_response -> ResponsesResponse
+# Both classes are defined in this module; model_rebuild() is needed because
+# ResponsesResponse did not exist when ResponsesRequest was first evaluated.
+ResponsesRequest.model_rebuild()

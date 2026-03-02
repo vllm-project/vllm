@@ -164,14 +164,16 @@ def construct_chat_messages_with_tool_call(
         if maybe_combined_message is not None:
             messages[-1] = maybe_combined_message
         else:
-            messages.append(_construct_single_message_from_response_item(item))
+            result = _construct_single_message_from_response_item(item)
+            if result is not None:  # None means state carrier — skip it
+                messages.append(result)
 
     return messages
 
 
 def _construct_single_message_from_response_item(
     item: ResponseInputOutputItem,
-) -> ChatCompletionMessageParam:
+) -> ChatCompletionMessageParam | None:
     if isinstance(item, ResponseFunctionToolCall):
         # Append the function call as a tool call.
         return ChatCompletionAssistantMessageParam(
@@ -188,9 +190,18 @@ def _construct_single_message_from_response_item(
             ],
         )
     elif isinstance(item, ResponseReasoningItem):
+        from vllm.entrypoints.openai.responses.state import is_state_carrier
+
+        if is_state_carrier(item):
+            # This is a vLLM state-carrier item: it carries serialized Harmony
+            # history in encrypted_content and must not be forwarded to the LLM.
+            return None
         reasoning_content = ""
         if item.encrypted_content:
-            raise ValueError("Encrypted content is not supported.")
+            raise ValueError(
+                "Encrypted content from external providers is not supported. "
+                "vLLM-generated state carriers are handled transparently."
+            )
         if len(item.summary) == 1:
             reasoning_content = item.summary[0].text
         elif item.content and len(item.content) == 1:
