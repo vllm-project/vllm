@@ -14,6 +14,7 @@ logger = init_logger(__name__)
 
 
 def main():
+    import vllm.entrypoints.cli.admin
     import vllm.entrypoints.cli.benchmark.main
     import vllm.entrypoints.cli.collect_env
     import vllm.entrypoints.cli.openai
@@ -25,6 +26,7 @@ def main():
     CMD_MODULES = [
         vllm.entrypoints.cli.openai,
         vllm.entrypoints.cli.serve,
+        vllm.entrypoints.cli.admin,
         vllm.entrypoints.cli.benchmark.main,
         vllm.entrypoints.cli.collect_env,
         vllm.entrypoints.cli.run_batch,
