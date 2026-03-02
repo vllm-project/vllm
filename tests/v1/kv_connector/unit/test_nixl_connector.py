@@ -1479,11 +1479,13 @@ def test_register_kv_caches(
         patch(f"{nixl_module}.threading.Event"),
         patch(f"{nixl_module}.threading.Thread") as mock_thread,
         patch(f"{nixl_module}.get_current_attn_backend") as mock_get_attn_backend,
+        patch(f"{nixl_module}.get_current_attn_backends") as mock_get_attn_backends,
     ):
         # Ensure get_attn_backend returns the correct value due to
         # _cached_get_attn_backend returning the backend from previous
         # test run if not mocking.
         mock_get_attn_backend.return_value = backend_cls
+        mock_get_attn_backends.return_value = [backend_cls]
 
         # Create connector
         connector = NixlConnector(

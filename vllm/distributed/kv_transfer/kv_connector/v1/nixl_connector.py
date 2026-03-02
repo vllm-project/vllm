@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TpKVTopology,
     get_current_attn_backend,
+    get_current_attn_backends,
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
     kv_postprocess_layout_on_receive,
@@ -61,6 +62,7 @@ from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, SlidingWindowSpec
 from vllm.v1.worker.block_table import BlockTable
+from vllm.v1.worker.utils import select_common_block_size
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -993,7 +995,7 @@ class NixlConnectorWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
         self.tp_group = get_tp_group()
-        self.num_blocks = 0
+        self.num_blocks = kv_cache_config.num_blocks
         self.enable_permute_local_kv = False
 
         # KV Caches and nixl tracking data.
@@ -1128,10 +1130,29 @@ class NixlConnectorWorker:
         self.xfer_stats = NixlKVConnectorStats()
 
         self._physical_blocks_per_logical_kv_block = 1
+        self._sync_block_size_with_kernel()
 
         self.enforce_compat_hash = self.kv_transfer_config.get_from_extra_config(
             "enforce_handshake_compat", True
         )
+
+    def _sync_block_size_with_kernel(self) -> None:
+        backends = get_current_attn_backends(self.vllm_config)
+        kernel_block_size = select_common_block_size(self.block_size, backends)
+        if self.block_size != kernel_block_size:
+            logger.info_once(
+                "User-specified logical block size (%s) does not match"
+                " physical kernel block size (%s). Using the latter.",
+                self.block_size,
+                kernel_block_size,
+            )
+            assert self.block_size > kernel_block_size
+            self._physical_blocks_per_logical_kv_block = (
+                self.block_size // kernel_block_size
+            )
+            self.block_size = kernel_block_size
+            self._block_size[self.engine_id] = kernel_block_size
+            self.num_blocks *= self._physical_blocks_per_logical_kv_block
 
     def _nixl_handshake(
         self,
@@ -1470,26 +1491,11 @@ class NixlConnectorWorker:
                 logger.debug(
                     "Registering layer %s with cache shape: %s", layer_name, cache.shape
                 )
-                kernel_block_size = cache.shape[self.kv_topo.block_size_position]
-                if self.block_size != kernel_block_size:
-                    logger.info_once(
-                        "User-specified logical block size (%s) does not match"
-                        " physical kernel block size (%s). Using the latter. ",
-                        self.block_size,
-                        kernel_block_size,
-                    )
-                    self._physical_blocks_per_logical_kv_block = (
-                        self.block_size // kernel_block_size
-                    )
-                    self.block_size = kernel_block_size
-                    self._block_size[self.engine_id] = kernel_block_size
-
                 seen_base_addresses.append(base_addr)
                 curr_tensor_size_bytes = cache.numel() * cache.element_size()
 
                 if tensor_size_bytes is None:
                     tensor_size_bytes = curr_tensor_size_bytes
-                    self.num_blocks = cache.shape[0]
 
                 assert cache.shape[0] == self.num_blocks, (
                     "All kv cache tensors must have the same number of blocks"
@@ -1518,7 +1524,6 @@ class NixlConnectorWorker:
             "Different block lengths collected: %s", set(self.block_len_per_layer)
         )
         assert len(self.block_len_per_layer) == len(seen_base_addresses)
-        assert self.num_blocks != 0
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(caches_data)
