@@ -153,7 +153,6 @@ def run_evaluation(
     return wer_score
 
 
-# REMOVE: EKAGRA: cleanup
 # alternatives "openai/whisper-large-v2", "openai/whisper-large-v3-turbo"..
 # NOTE: Expected WER measured with equivalent hf.transformers args:
 # whisper-large-v3 + esb-datasets-earnings22-validation-tiny-filtered.

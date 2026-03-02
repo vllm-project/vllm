@@ -399,14 +399,12 @@ def build_enc_dec_inputs(
     else:
         assert_never(enc_inputs)
 
-    # COHERE START
     # Do not modify the original decoder_inputs for cohere_asr
     if model_config.hf_config.model_type != "cohere_asr":
         dec_inputs_new["prompt_token_ids"] = _prepare_decoder_input_ids_for_generation(
             dec_inputs_new["prompt_token_ids"],
             decoder_start_token_id,
         )
-    # COHERE END
 
     if cache_salt := enc_inputs.get("cache_salt"):
         dec_inputs_new["cache_salt"] = cache_salt
