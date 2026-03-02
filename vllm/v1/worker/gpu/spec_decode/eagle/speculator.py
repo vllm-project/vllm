@@ -16,6 +16,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     build_slot_mappings_by_layer,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.dp_utils import get_cudagraph_and_dp_padding
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
@@ -46,6 +47,10 @@ class EagleSpeculator:
         self.hidden_size = self.draft_model_config.get_hidden_size()
         self.vocab_size = self.draft_model_config.get_vocab_size()
         self.dtype = vllm_config.model_config.dtype
+
+        # DP configuration
+        self.dp_size = vllm_config.parallel_config.data_parallel_size
+        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
@@ -119,8 +124,8 @@ class EagleSpeculator:
         self,
         num_reqs: int,
         num_tokens_padded: int,
-        attn_metadata: dict[str, Any],
-        slot_mappings: dict[str, torch.Tensor],
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
@@ -161,9 +166,10 @@ class EagleSpeculator:
                     self.hidden_states,
                     self.max_model_len,
                 )
-                self.block_tables.compute_slot_mappings(
-                    idx_mapping, query_start_loc, pos
-                )
+                if attn_metadata is not None:
+                    self.block_tables.compute_slot_mappings(
+                        idx_mapping, query_start_loc, pos
+                    )
 
     def capture_model(self) -> None:
         if self.num_speculative_steps == 1:
@@ -199,6 +205,9 @@ class EagleSpeculator:
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
+        num_tokens_across_dp: torch.Tensor | None = None,
+        dummy_run: bool = False,
+        skip_attn_for_dummy_run: bool = False,
     ) -> torch.Tensor:
         # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
         # number of rejected tokens, we maintain the size of eagle's input_ids and
@@ -232,7 +241,7 @@ class EagleSpeculator:
             num_tokens,
             attn_metadata,
             slot_mappings,
-            num_tokens_across_dp=None,  # FIXME
+            num_tokens_across_dp=num_tokens_across_dp,
         )
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
@@ -278,48 +287,64 @@ class EagleSpeculator:
             self.max_model_len,
             self.max_num_reqs,
         )
-        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
-        slot_mappings = self.block_tables.compute_slot_mappings(
-            idx_mapping, query_start_loc, pos
-        )
 
-        cudagraph_size = self.cudagraph_manager.get_cudagraph_size(num_reqs)
-        cudagraph_mode = self.cudagraph_manager.cudagraph_mode
-        if cudagraph_size is not None and cudagraph_mode == CUDAGraphMode.FULL:
+        if not (dummy_run and skip_attn_for_dummy_run):
+            query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+            slot_mappings = self.block_tables.compute_slot_mappings(
+                idx_mapping, query_start_loc, pos
+            )
+
+        cudagraph_mode, cudagraph_size = (
+            self.cudagraph_manager.get_cudagraph_runtime_mode(num_reqs)
+        )
+        num_tokens_padded, num_tokens_across_dp, synced_cudagraph_mode = (
+            get_cudagraph_and_dp_padding(
+                num_reqs,
+                cudagraph_size,
+                cudagraph_mode.value,
+                self.dp_size,
+                self.dp_rank,
+            )
+        )
+        cudagraph_mode = CUDAGraphMode(synced_cudagraph_mode)
+        if cudagraph_mode == CUDAGraphMode.FULL:
             # Run full CUDA graph.
-            self.cudagraph_manager.run_fullgraph(cudagraph_size)
+            self.cudagraph_manager.run_fullgraph(num_tokens_padded)
             return self.draft_tokens[:num_reqs]
 
         # Run eager or piecewise CUDA graph.
-        num_tokens_padded = cudagraph_size if cudagraph_size is not None else num_reqs
-        query_start_loc_cpu = torch.arange(
-            num_reqs + 1, dtype=torch.int32, device="cpu"
-        )
-        block_tables = [x[:num_reqs] for x in self.block_tables.input_block_tables]
+        attn_metadata_updated = None
+        slot_mappings_updated = None
+        if not (dummy_run and skip_attn_for_dummy_run):
+            query_start_loc_cpu = torch.arange(
+                num_reqs + 1, dtype=torch.int32, device="cpu"
+            )
+            block_tables = [x[:num_reqs] for x in self.block_tables.input_block_tables]
 
-        # FIXME(woosuk): This is UNSAFE!!
-        attn_metadata = build_attn_metadata(
-            attn_groups=self.attn_groups,
-            num_reqs=num_reqs,
-            num_tokens=num_reqs,
-            query_start_loc_gpu=query_start_loc,
-            query_start_loc_cpu=query_start_loc_cpu,
-            max_query_len=1,
-            seq_lens=self.input_buffers.seq_lens[:num_reqs],
-            max_seq_len=self.max_model_len,
-            block_tables=block_tables,
-            slot_mappings=slot_mappings,
-            kv_cache_config=self.kv_cache_config,
-        )
-        slot_mappings_by_layer = build_slot_mappings_by_layer(
-            slot_mappings, self.kv_cache_config
-        )
+            # FIXME(woosuk): This is UNSAFE!!
+            attn_metadata_updated = build_attn_metadata(
+                attn_groups=self.attn_groups,
+                num_reqs=num_reqs,
+                num_tokens=num_reqs,
+                query_start_loc_gpu=query_start_loc,
+                query_start_loc_cpu=query_start_loc_cpu,
+                max_query_len=1,
+                seq_lens=self.input_buffers.seq_lens[:num_reqs],
+                max_seq_len=self.max_model_len,
+                block_tables=block_tables,
+                slot_mappings=slot_mappings,
+                kv_cache_config=self.kv_cache_config,
+            )
+            slot_mappings_updated = build_slot_mappings_by_layer(
+                slot_mappings, self.kv_cache_config
+            )
+
         self.generate_draft(
             num_reqs,
             num_tokens_padded,
-            attn_metadata,
-            slot_mappings_by_layer,
-            num_tokens_across_dp=None,  # FIXME
+            attn_metadata_updated,
+            slot_mappings_updated,
+            num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_mode,
         )
         return self.draft_tokens[:num_reqs]
