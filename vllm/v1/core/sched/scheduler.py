@@ -1709,8 +1709,19 @@ class Scheduler(SchedulerInterface):
         # First pass: collect requests to remove from queues
         for req_id in request_ids:
             request = self.requests.get(req_id)
-            if request is None or request.is_finished():
+            if request is None:
                 # Invalid request ID.
+                continue
+
+            if request.is_finished():
+                # If the request is already finished, only FINISHED_ABORTED is
+                # allowed, which is used to force resource cleanup.
+                assert finished_status == RequestStatus.FINISHED_ABORTED, (
+                    "Only FINISHED_ABORTED is allowed for requests that are "
+                    "already finished."
+                )
+                logger.info("Aborting finished request %s, freeing blocks.", req_id)
+                self._free_blocks(request)
                 continue
 
             valid_requests.append(request)
@@ -2032,8 +2043,14 @@ class Scheduler(SchedulerInterface):
                 self._free_blocks(self.requests[req_id])
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            self._free_blocks(self.requests[req_id])
+            if req_id not in self.requests:
+                logger.warning(
+                    "Got finished sending KV transfer for request %s,"
+                    "but the request is already freed.",
+                    req_id,
+                )
+            else:
+                self._free_blocks(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(
         self,

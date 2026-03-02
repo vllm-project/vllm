@@ -250,7 +250,7 @@ def test_abort_during_kv_transfer():
 
     # Abort the request, and check the blocks are still not freed
     scheduler.finish_requests([request.request_id], RequestStatus.FINISHED_ABORTED)
-    assert len(scheduler.requests) == 1
+    assert_scheduler_empty(scheduler)
 
     # Simulate a finished sending notification
     scheduler_output = scheduler.schedule()
