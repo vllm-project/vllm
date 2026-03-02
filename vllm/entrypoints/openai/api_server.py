@@ -12,7 +12,7 @@ import warnings
 from argparse import Namespace
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, cast
 
 import uvloop
 from fastapi import FastAPI, HTTPException
@@ -286,12 +286,27 @@ def build_app(
 
 
 async def init_app_state(
-    renderer_client: RendererClient,
     engine_client: EngineClient,
     state: State,
     args: Namespace,
     supported_tasks: tuple["SupportedTask", ...] | None = None,
+    renderer_client: RendererClient | None = None,
 ) -> None:
+    if renderer_client is None:
+        # Backward compat: callers that only pass engine_client (e.g. external
+        # users such as open-instruct).  AsyncLLM satisfies the RendererClient
+        # interface structurally (owns renderer, vllm_config, input_processor).
+        warnings.warn(
+            "Calling init_app_state without renderer_client is deprecated "
+            "and will be removed in a future version. "
+            "Pass the renderer explicitly: "
+            "init_app_state(engine_client, state, args, "
+            "renderer_client=renderer_client).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        renderer_client = cast(RendererClient, engine_client)
+
     vllm_config = renderer_client.vllm_config
     if supported_tasks is None:
         warnings.warn(
@@ -521,7 +536,7 @@ async def run_server_worker(
 
         app = build_app(args, supported_tasks)
         await init_app_state(
-            renderer_client, engine_client, app.state, args, supported_tasks
+            engine_client, app.state, args, supported_tasks, renderer_client
         )
 
         logger.info(
