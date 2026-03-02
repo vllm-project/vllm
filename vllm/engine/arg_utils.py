@@ -2189,7 +2189,7 @@ class AsyncEngineArgs(EngineArgs):
             default=AsyncEngineArgs.enable_log_requests,
             help="Enable logging request information, dependant on log level:\n"
             "- `VLLM_LOGGING_LEVEL=INFO`: Request ID, parameters and LoRA.\n"
-            "- `VLLM_LOGGING_LEVEL=DEBUG`: Prompt inputs, in addition to the above.",
+            "- `VLLM_LOGGING_LEVEL=DEBUG`: Prompt inputs (e.g: text, token IDs).",
         )
         current_platform.pre_register_and_update(parser)
         return parser
