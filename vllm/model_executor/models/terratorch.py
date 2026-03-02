@@ -54,13 +54,14 @@ from vllm.multimodal.parse import (
     ModalityDataItems,
     MultiModalDataItems,
     MultiModalDataParser,
-    MultiModalUUIDItems,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    ProcessorInputs,
     PromptUpdate,
+    TimingContext,
 )
 from vllm.sequence import IntermediateTensors
 
@@ -154,8 +155,7 @@ class TerratorchInputBuilder(BaseDummyInputsBuilder[TerratorchProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         # Dummy data is generated based on the 'input' section
         # defined in the HF configuration file
@@ -194,29 +194,21 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
 
     def apply(
         self,
-        prompt: str | list[int],
-        mm_items: MultiModalDataItems,
-        mm_uuid_items: MultiModalUUIDItems | None = None,
-        hf_processor_mm_kwargs: Mapping[str, object] | None = None,
-        tokenization_kwargs: Mapping[str, object] | None = None,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> MultiModalInputs:
-        if hf_processor_mm_kwargs is None:
-            hf_processor_mm_kwargs = {}
-        if tokenization_kwargs is None:
-            tokenization_kwargs = {}
+        mm_items = inputs.mm_data_items
+        hf_processor_mm_kwargs = inputs.hf_processor_mm_kwargs
 
-        mm_hashes = self._hash_mm_items(
-            mm_items,
-            mm_uuid_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-        )
-
-        _, passthrough_data = self._get_hf_mm_data(mm_items)
-        mm_processed_data = BatchFeature(
-            {k: torch.as_tensor(v).unsqueeze(0) for k, v in passthrough_data.items()},
-            tensor_type="pt",
-        )
-        mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
+        with timing_ctx.record("apply_hf_processor"):
+            _, passthrough_data = self._get_hf_mm_data(mm_items)
+            mm_processed_data = BatchFeature(
+                {
+                    k: torch.as_tensor(v).unsqueeze(0)
+                    for k, v in passthrough_data.items()
+                },
+                tensor_type="pt",
+            )
 
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_processed_data,
@@ -226,6 +218,11 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
                 is_shared=False,
             ),
         )
+
+        with timing_ctx.record("get_mm_hashes"):
+            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
+
+        mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
         return mm_inputs(
             prompt_token_ids=[1],
