@@ -27,7 +27,6 @@ from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
 from vllm.utils.async_utils import in_loop
-from vllm.utils.collection_utils import ThreadSafeDict
 from vllm.utils.network_utils import (
     close_sockets,
     get_open_port,
@@ -896,16 +895,11 @@ class AsyncMPClient(MPClient):
                 )
                 self.resources.client_sentinel = self.client_sentinel
             self.ft_request_lock = threading.Lock()
-            self.engine_status_dict: ThreadSafeDict[
-                int, dict[str, EngineStatusType]
-            ] = ThreadSafeDict()
-            self.engine_status_dict.update(
-                {
-                    engine_index: {"status": EngineStatusType.HEALTHY}
-                    for engine_index in self.engine_ranks_managed
-                }.items()
-            )
-
+            self.engine_status_dict: dict[int, dict[str, EngineStatusType]] = {
+                engine_index: {"status": EngineStatusType.HEALTHY}
+                for engine_index in self.engine_ranks_managed
+            }
+            self.engine_status_lock = threading.Lock()
             self.client_sentinel_req_socket = make_zmq_socket(
                 self.resources.ctx,
                 ft_addr.client_sentinel_request_addr,
@@ -1195,7 +1189,9 @@ class AsyncMPClient(MPClient):
                 frames = self.fault_state_sub_socket.recv_multipart()
                 payload = frames[-1]
                 status_dict = msgspec.msgpack.decode(payload)
-                self.engine_status_dict.set_from_dict(status_dict)
+                with self.engine_status_lock:
+                    self.engine_status_dict.clear()
+                    self.engine_status_dict.update(status_dict)
                 status_set = {v["status"] for v in status_dict.values()}
                 healthy = (
                     len(status_set) == 1 and EngineStatusType.HEALTHY in status_set
@@ -1208,7 +1204,8 @@ class AsyncMPClient(MPClient):
                 break
 
     async def fault_reporter(self):
-        raw = self.engine_status_dict.to_dict()
+        with self.engine_status_lock:
+            raw = self.engine_status_dict.copy()
         result = {}
         for k, v in raw.items():
             status_val = v["status"]

@@ -9,7 +9,6 @@ import msgspec.msgpack
 import zmq
 
 from vllm.config import VllmConfig
-from vllm.utils.collection_utils import ThreadSafeDict
 from vllm.utils.network_utils import close_sockets, get_open_port, make_zmq_socket
 from vllm.v1.engine import EngineStatusType
 from vllm.v1.fault_tolerance.sentinel import BaseSentinel
@@ -85,15 +84,11 @@ class ClientSentinel(BaseSentinel):
         )
 
         self.is_faulted = threading.Event()
-        self.engine_status_dict: ThreadSafeDict[int, dict[str, EngineStatusType]] = (
-            ThreadSafeDict()
-        )
-        self.engine_status_dict.update(
-            {
-                engine_index: {"status": EngineStatusType.HEALTHY}
-                for engine_index in range(dp_rank, dp_rank + num_dp_managed)
-            }.items()
-        )
+        self.engine_status_dict: dict[int, dict[str, EngineStatusType]] = {
+            engine_index: {"status": EngineStatusType.HEALTHY}
+            for engine_index in range(dp_rank, dp_rank + num_dp_managed)
+        }
+        self.engine_status_lock = threading.Lock()
         # todo: use identities as the key, indexes as the value as the index may
         # change in dp scale down and up
         self.engine_core_sentinel_identities = (
@@ -128,13 +123,14 @@ class ClientSentinel(BaseSentinel):
             pass
 
     def retry(self, timeout: int = 1, **kwargs) -> bool:
-        for engine_status in self.engine_status_dict.values():
-            if engine_status["status"] == EngineStatusType.DEAD:
-                self.logger(
-                    "Engine core is dead; retry won't work.",
-                    level="warning",
-                )
-                return False
+        with self.engine_status_lock:
+            for engine_status in self.engine_status_dict.values():
+                if engine_status["status"] == EngineStatusType.DEAD:
+                    self.logger(
+                        "Engine core is dead; retry won't work.",
+                        level="warning",
+                    )
+                    return False
 
         target_engines = set(self.engine_core_sentinel_identities.values())
         new_stateless_dp_group_port = get_open_port()
@@ -145,8 +141,9 @@ class ClientSentinel(BaseSentinel):
             timeout=timeout,
         )
 
-        for engine_index, _ in self.engine_status_dict.items():
-            self.engine_status_dict[engine_index] = {"status": EngineStatusType.HEALTHY}
+        with self.engine_status_lock:
+            for index in self.engine_status_dict:
+                self.engine_status_dict[index] = {"status": EngineStatusType.HEALTHY}
 
         if success:
             self.is_faulted.clear()
@@ -166,12 +163,13 @@ class ClientSentinel(BaseSentinel):
         )
         exclude_engine_index = kwargs.get("exclude_engine_index")
         soft_pause = kwargs.get("soft_pause", False)
-        alive_engines = {
-            identity
-            for index, identity in self.engine_core_sentinel_identities.items()
-            if self.engine_status_dict[index]["status"] != EngineStatusType.DEAD
-            and (exclude_engine_index is None or index not in exclude_engine_index)
-        }
+        with self.engine_status_lock:
+            alive_engines = {
+                identity
+                for index, identity in self.engine_core_sentinel_identities.items()
+                if self.engine_status_dict[index]["status"] != EngineStatusType.DEAD
+                and (exclude_engine_index is None or index not in exclude_engine_index)
+            }
         success, responses = self._execute_command_on_downstreams(
             "pause",
             alive_engines,
@@ -182,16 +180,18 @@ class ClientSentinel(BaseSentinel):
             identity: index
             for index, identity in self.engine_core_sentinel_identities.items()
         }
-        for engine_identity, ft_result in responses.items():
-            if ft_result.success:
-                i = identity_to_index[engine_identity]
-                engine_status = self.engine_status_dict[i]["status"]
-                if engine_status == EngineStatusType.HEALTHY:
-                    self.engine_status_dict[i] = {"status": EngineStatusType.PAUSED}
+        with self.engine_status_lock:
+            for engine_identity, ft_result in responses.items():
+                if ft_result.success:
+                    i = identity_to_index[engine_identity]
+                    engine_status = self.engine_status_dict[i]["status"]
+                    if engine_status == EngineStatusType.HEALTHY:
+                        self.engine_status_dict[i] = {"status": EngineStatusType.PAUSED}
         return success
 
     def _pub_engine_status(self):
-        engine_status = self.engine_status_dict.to_dict()
+        with self.engine_status_lock:
+            engine_status = self.engine_status_dict.copy()
         topic = self.ft_config.fault_state_pub_topic.encode()
         self.fault_state_pub_socket.send_multipart(
             (topic, msgspec.msgpack.encode(engine_status))
@@ -207,9 +207,10 @@ class ClientSentinel(BaseSentinel):
                 if "dead" in fault_info.type
                 else EngineStatusType.UNHEALTHY
             )
-            self.engine_status_dict[int(fault_info.engine_id)] = {
-                "status": engine_status
-            }
+            with self.engine_status_lock:
+                self.engine_status_dict[int(fault_info.engine_id)] = {
+                    "status": engine_status
+                }
             self._pub_engine_status()
             if not self.is_faulted.is_set():
                 self.is_faulted.set()
