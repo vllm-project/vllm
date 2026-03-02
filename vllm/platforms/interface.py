@@ -655,6 +655,15 @@ class Platform:
         return False
 
     @classmethod
+    def use_custom_op_collectives(cls) -> bool:
+        """
+        Whether this platform should use torch.ops.vllm.* custom ops for collectives.
+
+        Returns False by default - platforms must explicitly opt-in.
+        """
+        return False
+
+    @classmethod
     def use_sync_weight_loader(cls) -> bool:
         """
         Returns if the current platform needs to sync weight loader.

@@ -574,8 +574,12 @@ class CudaPlatformBase(Platform):
         return True
 
     @classmethod
-    def num_compute_units(cls, device_id=0):
+    def num_compute_units(cls, device_id: int = 0) -> int:
         return torch.cuda.get_device_properties(device_id).multi_processor_count
+
+    @classmethod
+    def use_custom_op_collectives(cls) -> bool:
+        return True
 
 
 # NVML utils
