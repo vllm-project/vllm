@@ -33,7 +33,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
 from multiprocessing import shared_memory
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Optional, Protocol
 from unittest.mock import patch
 
 import torch
@@ -117,7 +117,7 @@ def _get_unique_name(name: str) -> str:
     return newname
 
 
-_groups: dict[str, Callable[[], "GroupCoordinator | None"]] = {}
+_groups: dict[str, Callable[[], Optional["GroupCoordinator"]]] = {}
 
 
 def _register_group(group: "GroupCoordinator") -> None:
@@ -809,7 +809,7 @@ class GroupCoordinator:
         self,
         tensor_dict: dict[str, torch.Tensor | Any],
         dst: int | None = None,
-        all_gather_group: "GroupCoordinator | None" = None,
+        all_gather_group: Optional["GroupCoordinator"] = None,
         all_gather_tensors: dict[str, bool] | None = None,
     ) -> dict[str, torch.Tensor | Any] | None:
         """Send the input tensor dictionary.
@@ -903,7 +903,7 @@ class GroupCoordinator:
     def recv_tensor_dict(
         self,
         src: int | None = None,
-        all_gather_group: "GroupCoordinator | None" = None,
+        all_gather_group: Optional["GroupCoordinator"] = None,
         all_gather_tensors: dict[str, bool] | None = None,
     ) -> dict[str, torch.Tensor | Any] | None:
         """Recv the input tensor dictionary.
@@ -1224,9 +1224,6 @@ def get_dcp_group() -> GroupCoordinator:
     assert _DCP is not None, "decode context model parallel group is not initialized"
     return _DCP
 
-
-# kept for backward compatibility
-get_context_model_parallel_group = get_dcp_group
 
 _PP: GroupCoordinator | None = None
 
@@ -1571,11 +1568,17 @@ def initialize_model_parallel(
     # Build the DCP model-parallel groups.
     global _DCP
     assert _DCP is None, "decode context model parallel group is already initialized"
-    # Note(hc): In the current implementation of decode context parallel,
-    # dcp_size must not exceed tp_size, because the world size does not
-    # change by DCP, it simply reuses the GPUs of TP group, and split one
-    # TP group into tp_size//dcp_size DCP groups.
-    group_ranks = all_ranks.reshape(-1, decode_context_model_parallel_size).unbind(0)
+    dcp = decode_context_model_parallel_size or 1
+    if dcp > 1:
+        # DCP spans PCP dimension first, then TP dimension.
+        # E.g. tp=2, pcp=2: layout is [[0,1], [2,3]] (pcp x tp)
+        #      dcp=2: groups [0,2], [1,3] (same TP, span PCP)
+        #      dcp=4: group [0,2,1,3] (span both)
+        # Transpose to (tp, pcp) so PCP is innermost, then reshape.
+        r = all_ranks.transpose(-1, -2)
+        group_ranks = r.reshape(-1, dcp).unbind(0)
+    else:
+        group_ranks = all_ranks.reshape(-1, 1).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     if enable_elastic_ep:
         group_ranks = local_all_ranks.reshape(
@@ -1592,6 +1595,8 @@ def initialize_model_parallel(
 
     global _PCP
     assert _PCP is None, "prefill context parallel group is already initialized"
+    # PCP groups are essentially TP-sized groups across PCP dimension.
+    # For tp=6, pcp=2: PCP groups are [0,1,2,3,4,5] and [6,7,8,9,10,11]
     group_ranks = (
         all_ranks.transpose(3, 4)
         .reshape(-1, prefill_context_model_parallel_size)
@@ -1651,14 +1656,17 @@ def initialize_model_parallel(
     global _EP
     assert _EP is None, "expert parallel group is already initialized"
     # Don't create EP group for dense models.
-    if config.model_config is None or config.model_config.is_moe:
+    if config is None or config.model_config is None or config.model_config.is_moe:
+        # EP groups span DP and TP but NOT PCP. PCP ranks should have
+        # independent EP groups since they process different token chunks
+        # and run MoE all2all independently.
+        # Layout after transposes: (DCP_remain, PP, PCP, DP, TP)
         group_ranks = (
             all_ranks.transpose(1, 2)
+            .transpose(2, 3)
             .reshape(
                 -1,
-                data_parallel_size
-                * prefill_context_model_parallel_size
-                * tensor_model_parallel_size,
+                data_parallel_size * tensor_model_parallel_size,
             )
             .unbind(0)
         )

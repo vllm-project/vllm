@@ -36,6 +36,7 @@ ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
+DCPCommBackend = Literal["ag_rs", "a2a"]
 All2AllBackend = Literal[
     "naive",
     "pplx",
@@ -287,6 +288,14 @@ class ParallelConfig:
     and will be deprecated when PCP is fully supported.
 
     """
+    dcp_comm_backend: DCPCommBackend = "ag_rs"
+    """Communication backend for Decode Context Parallel (DCP).
+    - "ag_rs": AllGather + ReduceScatter (default, existing behavior)
+    - "a2a": All-to-All exchange of partial outputs + LSE, then
+      combine with Triton kernel. Reduces NCCL calls from 3 to 2
+      per layer for MLA models.
+    """
+
     cp_kv_cache_interleave_size: int = 1
     """Interleave size of kv_cache storage while using DCP or PCP.
     For `total_cp_rank = pcp_rank * dcp_world_size + dcp_rank`,
@@ -294,12 +303,11 @@ class ParallelConfig:
     store interleave_size tokens on total_cp_rank i,
     then store next interleave_size tokens on total_cp_rank i+1.
     Interleave_size=1: token-level alignment, where token `i` is stored on
-        total_cp_rank `i % total_cp_world_size`.
+        dcp_rank `i % dcp_world_size`.
     Interleave_size=block_size: block-level alignment, where tokens are
         first populated to the preceding ranks. Tokens are then stored
         in (rank i+1, block j) only after (rank i, block j) is fully occupied.
-    Block_size should be greater than or equal to cp_kv_cache_interleave_size.
-    Block_size should be divisible by cp_kv_cache_interleave_size.
+    Block_size should be >= dcp_kv_cache_interleave_size and divisible by it.
     """
 
     data_parallel_index: int = Field(init=False)
@@ -381,15 +389,32 @@ class ParallelConfig:
                     "num_redundant_experts."
                 )
 
-        # Note(hc): In the current implementation of decode context
-        # parallel(DCP), tp_size needs to be divisible by dcp_size,
-        # because the world size does not change by dcp, it simply
-        # reuses the GPUs of TP group, and split one TP group into
-        # tp_size//dcp_size DCP groups.
-        if self.tensor_parallel_size % self.decode_context_parallel_size != 0:
+        # DCP configuration with PCP is restricted to two clean cases:
+        #
+        # Case 1: DCP = PCP (e.g., PCP=2, TP=2, DCP=2)
+        #   - DCP groups ranks at same TP position, different PCP slices
+        #   - No Q all-gather needed (same heads)
+        #   - All-reduce across DCP to combine KV slices
+        #
+        # Case 2: DCP = TP × PCP (e.g., PCP=2, TP=2, DCP=4)
+        #   - DCP group contains all ranks
+        #   - Full TP all-gather for Q
+        #   - Reduce-scatter across DCP
+        tp = self.tensor_parallel_size
+        dcp = self.decode_context_parallel_size
+        pcp = self.prefill_context_parallel_size
+        if dcp > 1 and pcp > 1:
+            valid_dcp_sizes = {pcp, tp * pcp}
+            if dcp not in valid_dcp_sizes:
+                raise ValueError(
+                    f"When PCP > 1, DCP must be either PCP ({pcp}) or "
+                    f"TP×PCP ({tp * pcp}), but got DCP={dcp}. "
+                    f"Valid options: {valid_dcp_sizes}"
+                )
+
+        if self.dcp_comm_backend == "a2a" and self.decode_context_parallel_size <= 1:
             raise ValueError(
-                f"tp_size={self.tensor_parallel_size} must be divisible by"
-                f"dcp_size={self.decode_context_parallel_size}."
+                "dcp_comm_backend='a2a' requires decode_context_parallel_size > 1."
             )
 
         return self
