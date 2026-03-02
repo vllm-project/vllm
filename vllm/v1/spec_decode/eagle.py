@@ -463,7 +463,10 @@ class SpecDecodeBaseProposer:
             self._determine_batch_execution_and_padding(num_tokens)
         )
 
-        if self.supports_mm_inputs:
+        if self.supports_mm_inputs and self.pass_hidden_states_to_model:
+            # EAGLE with VLM draft: the draft IS the full VLM (same architecture
+            # as the target). Inject the target's cached mm_embeds so that image
+            # placeholder positions are correctly embedded.
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
 
             self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
