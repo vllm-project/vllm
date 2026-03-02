@@ -4448,13 +4448,22 @@ class GPUModelRunner(
             diff_seconds,
             scope="local",
         )
-        if self.model_config.quantization is None and loaded_weights is not None:
+        if loaded_weights is not None:
             weights_not_loaded = weights_to_load - loaded_weights
             if weights_not_loaded:
-                logger.warning(
-                    "Following weights were not loaded from checkpoint: %s",
-                    weights_not_loaded,
-                )
+                if self.model_config.quantization is None:
+                    logger.warning(
+                        "Following weights were not loaded from checkpoint: %s",
+                        weights_not_loaded,
+                    )
+                else:
+                    logger.warning(
+                        "Some weights were not loaded from checkpoint "
+                        "for quantized model (%s): %s. "
+                        "This may indicate missing shard files.",
+                        self.model_config.quantization,
+                        weights_not_loaded,
+                    )
 
     def save_tensorized_model(
         self,
