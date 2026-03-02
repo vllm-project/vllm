@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+model_name: openai/gpt-oss-20b
+metric_threshold: 0.568
+reasoning_effort: low
+server_args: "--tensor-parallel-size 2"
+env:
+  VLLM_ROCM_USE_AITER_MHA: "0"
+  VLLM_ROCM_USE_AITER: "1"
+  VLLM_USE_AITER_UNIFIED_ATTENTION: "1"
