@@ -239,6 +239,11 @@ class Qwen3CoderToolParser(ToolParser):
                 )
             return param_value
 
+    def _ensure_streamed_args_for_tool_entry(self) -> None:
+        """Ensures self.streamed_args_for_tool has an entry for current tool."""
+        if len(self.streamed_args_for_tool) <= self.current_tool_index:
+            self.streamed_args_for_tool.append("")
+
     def _parse_xml_function_call(
         self, function_call_str: str, tools: list[ChatCompletionToolsParam] | None
     ) -> ToolCall | None:
@@ -494,6 +499,9 @@ class Qwen3CoderToolParser(ToolParser):
                             }
                         )
 
+                    # Ensure streamed_args_for_tool list has entry for this tool
+                    self._ensure_streamed_args_for_tool_entry()
+
                     # Send header with function info
                     return DeltaMessage(
                         tool_calls=[
@@ -514,6 +522,9 @@ class Qwen3CoderToolParser(ToolParser):
             # Send opening brace if not sent yet
             if not self.json_started and self.parameter_prefix not in delta_text:
                 self.json_started = True
+                # Update streamed_args_for_tool to track what we've sent
+                self._ensure_streamed_args_for_tool_entry()
+                self.streamed_args_for_tool[self.current_tool_index] += "{"
                 return DeltaMessage(
                     tool_calls=[
                         DeltaToolCall(
@@ -559,6 +570,9 @@ class Qwen3CoderToolParser(ToolParser):
                                     break
                     except Exception:
                         pass  # Ignore parsing errors during streaming
+
+                self._ensure_streamed_args_for_tool_entry()
+                self.streamed_args_for_tool[self.current_tool_index] += "}"
 
                 result = DeltaMessage(
                     tool_calls=[
@@ -675,6 +689,11 @@ class Qwen3CoderToolParser(ToolParser):
                             )
 
                         self.param_count += 1
+
+                        self._ensure_streamed_args_for_tool_entry()
+                        self.streamed_args_for_tool[self.current_tool_index] += (
+                            json_fragment
+                        )
 
                         return DeltaMessage(
                             tool_calls=[
