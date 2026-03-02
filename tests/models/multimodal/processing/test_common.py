@@ -127,6 +127,8 @@ MM_DATA_PATCHES = {
     "glmasr": glmasr_patch_mm_data,
     "interns1_pro": qwen3_vl_patch_mm_data,
     "molmo2": qwen3_vl_patch_mm_data,
+    "qwen3_5": qwen3_vl_patch_mm_data,
+    "qwen3_5_moe": qwen3_vl_patch_mm_data,
     "qwen3_vl": qwen3_vl_patch_mm_data,
     "qwen3_vl_moe": qwen3_vl_patch_mm_data,
 }
