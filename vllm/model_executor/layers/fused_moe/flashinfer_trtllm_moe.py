@@ -14,11 +14,16 @@ from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    mxfp8_e4m3_quantize,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
+    kMxfp8Dynamic,
+    kMxfp8Static,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -47,6 +52,7 @@ def _supports_quant_scheme(
     SUPPORTED_W_A = [
         (kFp8Static128BlockSym, kFp8Dynamic128Sym),
         (kFp8StaticTensorSym, kFp8StaticTensorSym),
+        (kMxfp8Static, kMxfp8Dynamic),
     ]
     return (weight_key, activation_key) in SUPPORTED_W_A
 
@@ -63,7 +69,10 @@ def _supports_routing_method(
     """Monolithic kernels need to express router support."""
     # NOTE(dbari): TopK routing could also be enabled, but need to validate models
     # NOTE(dbari): Default is not implemented and should not be enabled until it is
-    if (weight_key, activation_key) == (kFp8Static128BlockSym, kFp8Dynamic128Sym):
+    if (weight_key, activation_key) in [
+        (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+        (kMxfp8Static, kMxfp8Dynamic),
+    ]:
         # NOTE(rob): potentially allow others here. This is a conservative list.
         return routing_method in [
             RoutingMethodType.DeepSeekV3,
@@ -202,6 +211,8 @@ def flashinfer_fused_moe_blockscale_fp8(
     routing_method_type: int,
     routed_scaling: float | None = 1.0,
 ) -> torch.Tensor:
+    from flashinfer.fused_moe import Fp8QuantizationType
+
     from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
 
     num_expert_group = num_expert_group if num_expert_group is not None else 0
@@ -209,10 +220,15 @@ def flashinfer_fused_moe_blockscale_fp8(
     assert top_k <= global_num_experts
     assert top_k <= 10
     assert global_num_experts % 4 == 0
-    assert block_shape == [128, 128]
+    assert block_shape in [[128, 128], [1, 32]]
     # Routing kernel expects #experts <= #threads 512
     assert global_num_experts <= 512
 
+    fp8_quantization_type = (
+        Fp8QuantizationType.MxFp8
+        if block_shape == [1, 32]
+        else Fp8QuantizationType.DeepSeekFp8
+    )
     # The DeepSeekV3 routing method requires float32 router logits.
     if routing_method_type == RoutingMethodType.DeepSeekV3:
         routing_logits = routing_logits.to(torch.float32)
@@ -220,7 +236,12 @@ def flashinfer_fused_moe_blockscale_fp8(
     if routing_bias is not None:
         routing_bias = routing_bias.to(x.dtype)
 
-    a_q, a_sf = per_token_group_quant_fp8(x, block_shape[1])
+    if fp8_quantization_type == Fp8QuantizationType.DeepSeekFp8:
+        a_q, a_sf = per_token_group_quant_fp8(x, block_shape[1])
+        use_shuffled_weight = False
+    else:
+        a_q, a_sf = mxfp8_e4m3_quantize(x)
+        use_shuffled_weight = True
     # NOTE: scales of hidden states have to be transposed!
     a_sf_t = a_sf.t().contiguous()
     return flashinfer_trtllm_fp8_block_scale_moe(
@@ -241,7 +262,8 @@ def flashinfer_fused_moe_blockscale_fp8(
         local_num_experts=local_num_experts,
         routed_scaling_factor=routed_scaling,
         routing_method_type=routing_method_type,
-        use_shuffled_weight=False,
+        use_shuffled_weight=use_shuffled_weight,
+        fp8_quantization_type=fp8_quantization_type,
     )
 
 
