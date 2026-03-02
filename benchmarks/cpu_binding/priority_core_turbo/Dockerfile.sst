@@ -1,0 +1,44 @@
+# Dockerfile
+# Build intel-speed-select from Linux kernel v6.8 tools tree on Ubuntu.
+#
+# This image produces /usr/local/bin/intel-speed-select inside the container.
+# To *use* it against host hardware, you will typically need --privileged and
+# access to /dev/cpu/*/msr (plus relevant /sys entries) on the host.
+
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG KERNEL_TAG=v6.8
+
+# Build dependencies and runtime basics
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    make \
+    gcc \
+    g++ \
+    libc6-dev \
+    pkg-config \
+    libcap2-bin \
+    libnl-3-dev \
+    libnl-genl-3-dev \
+    libnl-route-3-dev \
+    kmod \
+    numactl \
+    jq \
+    bc \
+    util-linux \
+    python3 \
+    sudo \
+    && rm -rf /var/lib/apt/lists/*
+
+# Fetch Linux kernel source (tools tree includes intel-speed-select)
+WORKDIR /opt
+RUN git clone --depth 1 --branch ${KERNEL_TAG} https://github.com/torvalds/linux.git
+
+# Build only intel-speed-select
+WORKDIR /opt/linux/tools/power/x86/intel-speed-select
+RUN make -j"$(nproc)" && make install
+
+# No ENTRYPOINT so docker compose can run arbitrary commands (bash, etc.)
+CMD ["intel-speed-select", "--help"]

@@ -1,0 +1,41 @@
+x-intel-speed-select-base: &base
+  image: intel-speed-select:6.8
+  build:
+    context: .
+    dockerfile: Dockerfile.sst
+    args:
+      KERNEL_TAG: v6.8
+      http_proxy: ${http_proxy}
+      https_proxy: ${https_proxy}
+      no_proxy: ${no_proxy}
+  privileged: true
+  user: "0:0"
+  tty: true
+  stdin_open: true
+  volumes:
+    - /dev/cpu:/dev/cpu
+    - /sys:/sys
+    - "${PWD}/check_pct_status.sh:/workspace/check_pct_status.sh:ro"
+    - "${PWD}/pct_map_and_set_clos.sh:/workspace/pct_map_and_set_clos.sh:ro"
+    - "${PWD}/results:/workspace/benchmarks/results"
+  environment:
+    http_proxy: ${http_proxy}
+    https_proxy: ${https_proxy}
+    no_proxy: ${no_proxy}
+  working_dir: /workspace
+  entrypoint: ["bash", "-lc"]
+
+services:
+  intel-speed-select-check:
+    <<: *base
+    profiles: ["check"]
+    command: ["bash /workspace/check_pct_status.sh"]
+
+  intel-speed-select-set:
+    <<: *base
+    profiles: ["set"]
+    command: ["bash /workspace/pct_map_and_set_clos.sh"]
+  intel-speed-select-shell:
+    <<: *base
+    command: ["bash"]
+

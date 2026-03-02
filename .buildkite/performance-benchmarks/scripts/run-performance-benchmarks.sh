@@ -351,6 +351,28 @@ run_serving_tests() {
     server_envs=$(json2envs "$server_envs")
     client_args=$(json2args "$client_params")
 
+    # ------------------------------------------------------------
+    # Option 1: Dynamic num-prompts scaling based on max_concurrency
+    #
+    # If PROMPTS_PER_CONCURRENCY is set, override JSON num_prompts with:
+    #   num_prompts = max_concurrency * PROMPTS_PER_CONCURRENCY
+    #
+    # If PROMPTS_PER_CONCURRENCY is NOT set, keep JSON num_prompts behavior
+    # unchanged (i.e., whatever is in serving-tests-*.json).
+    # ------------------------------------------------------------
+    PROMPTS_PER_CONCURRENCY="${PROMPTS_PER_CONCURRENCY-}"  # no default on purpose
+    MIN_NUM_PROMPTS="${MIN_NUM_PROMPTS:-1}"
+    MAX_NUM_PROMPTS="${MAX_NUM_PROMPTS:-1000000}"
+
+    if [[ -n "${PROMPTS_PER_CONCURRENCY}" ]]; then
+      # Remove any fixed --num-prompts from JSON-derived args (avoid duplicates)
+      client_args_no_np="$(echo " $client_args " | sed -E 's/[[:space:]]--num-prompts[[:space:]]+[0-9]+([[:space:]]|$)/ /g')"
+      client_args_no_np="$(echo "$client_args_no_np" | xargs)"
+      client_args_effective="$client_args_no_np"
+    else
+      client_args_effective="$client_args"
+    fi
+
     # qps_list
     qps_list=$(echo "$params" | jq -r '.qps_list')
     qps_list=$(echo "$qps_list" | jq -r '.[] | @sh')
@@ -436,6 +458,16 @@ run_serving_tests() {
       for max_concurrency in $max_concurrency_list; do
         new_test_name="${test_name}_qps_${qps}_concurrency_${max_concurrency}"
         echo " new test name $new_test_name"
+
+        # If PROMPTS_PER_CONCURRENCY is set, compute per-concurrency --num-prompts.
+        num_prompts_arg=""
+        if [[ -n "${PROMPTS_PER_CONCURRENCY}" ]]; then
+          num_prompts=$(( max_concurrency * PROMPTS_PER_CONCURRENCY ))
+          if (( num_prompts < MIN_NUM_PROMPTS )); then num_prompts=$MIN_NUM_PROMPTS; fi
+          if (( num_prompts > MAX_NUM_PROMPTS )); then num_prompts=$MAX_NUM_PROMPTS; fi
+          num_prompts_arg="--num-prompts $num_prompts"
+        fi
+
         # pass the tensor parallel size, the compilation mode, and the optimization
         # level to the client so that they can be used on the benchmark dashboard
         client_command="vllm bench serve \
@@ -444,8 +476,9 @@ run_serving_tests() {
           --result-filename ${new_test_name}.json \
           --request-rate $qps \
           --max-concurrency $max_concurrency \
+          $num_prompts_arg \
           --metadata tensor_parallel_size=$tp compilation_config.mode=$compilation_config_mode optimization_level=$optimization_level \
-          $client_args $client_remote_args "
+          $client_args_effective $client_remote_args "
 
         echo "Running test case $test_name with qps $qps"
         echo "Client command: $client_command"

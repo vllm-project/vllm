@@ -1,0 +1,37 @@
+services:
+  vllm-server:
+    image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:latest
+    container_name: vllm-ci-test-gpu
+    volumes:
+      - "${MODEL_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface"
+      #- /mnt/hf_cache:/mnt/hf_cache
+      #- "${VLLM_FOLDER_PATH:-./vllm}/.buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh:/vllm-workspace/.buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh"
+      #- "${VLLM_FOLDER_PATH:-./vllm}/benchmarks:/workspace/benchmarks"
+      - "./tests/serving-tests.json:/vllm-workspace/.buildkite/performance-benchmarks/tests/serving-tests.json:ro"
+      - "./results:/vllm-workspace/benchmarks/results"
+    shm_size: 128g
+    # Equivalent to: --gpus all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Equivalent to: --runtime nvidia (for older Docker setups)
+    runtime: nvidia
+    # Equivalent to: --ipc=host
+    ipc: host
+    environment:
+      no_proxy: ${no_proxy}
+      http_proxy: ${http_proxy}
+      https_proxy: ${https_proxy}
+      HF_TOKEN: ${HF_TOKEN}
+      PROMPTS_PER_CONCURRENCY: 1
+    entrypoint: ["bash", "/vllm-workspace/.buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/v1/models >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 600s
