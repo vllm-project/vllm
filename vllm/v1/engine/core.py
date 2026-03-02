@@ -34,7 +34,7 @@ from vllm.utils.gc_utils import (
 )
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
-from vllm.utils.system_utils import decorate_logs, set_process_title
+from vllm.utils.system_utils import decorate_logs, set_pdeathsig, set_process_title
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
@@ -1023,6 +1023,13 @@ class EngineCoreProc(EngineCore):
     @staticmethod
     def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
+
+        # Ensure this process is killed when its parent exits (e.g. OOM crash).
+        # EngineCoreProc is not a daemon process (daemon processes cannot have
+        # their own child processes on some Python versions), so it has no
+        # automatic cleanup when the parent dies.  prctl(PR_SET_PDEATHSIG) is
+        # a kernel-level guarantee that works even for SIGKILL.
+        set_pdeathsig(signal.SIGTERM)
 
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker

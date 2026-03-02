@@ -53,6 +53,7 @@ from vllm.utils.system_utils import (
     _maybe_force_spawn,
     decorate_logs,
     get_mp_context,
+    set_pdeathsig,
     set_process_title,
 )
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -714,6 +715,13 @@ class WorkerProc:
         """Worker initialization and execution loops.
         This runs a background process"""
 
+        # Belt-and-suspenders: ensure this worker dies when its parent
+        # (EngineCore) exits, even if the EngineCore is killed with SIGKILL.
+        # The death_pipe mechanism below handles clean shutdown; this provides
+        # an OS-level guarantee for cases where the pipe-based detection fails
+        # (e.g. worker blocked in a CUDA kernel when the parent dies).
+        set_pdeathsig(signal.SIGTERM)
+
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker
         # processes to terminate without error
@@ -745,10 +753,17 @@ class WorkerProc:
                     # This will block until parent process exits (pipe closes)
                     death_pipe.recv()
                 except EOFError:
-                    # Parent process has exited, terminate this worker
+                    # Parent process has exited, terminate this worker.
                     logger.info_once("Parent process exited, terminating worker")
-                    # Send signal to self to trigger clean shutdown
+                    # First attempt graceful shutdown via the event, giving
+                    # the worker a chance to exit cleanly (e.g. when the
+                    # parent intentionally closes the pipe).
                     shutdown_event.set()
+                    # If the worker is still alive after a short grace
+                    # period (e.g. blocked in a CUDA kernel), send SIGTERM
+                    # so the signal_handler raises SystemExit.
+                    time.sleep(5)
+                    os.kill(os.getpid(), signal.SIGTERM)
                 except Exception as e:
                     logger.warning("Death monitoring error: %s", e)
 
