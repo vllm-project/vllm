@@ -36,7 +36,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatMessage,
 )
 from vllm.entrypoints.openai.chat_completion.stream_harmony import (
-    TokenState,
+    HarmonyStreamingState,
     extract_harmony_streaming_delta,
 )
 from vllm.entrypoints.openai.engine.protocol import (
@@ -649,6 +649,9 @@ class OpenAIServingChat(OpenAIServing):
             harmony_parsers = [
                 get_streamable_parser_for_assistant() for _ in range(num_choices)
             ]
+            harmony_stream_states = [
+                HarmonyStreamingState() for _ in range(num_choices)
+            ]
             harmony_tools_streamed = [False] * num_choices
         tools_streamed = [False] * num_choices
 
@@ -832,28 +835,10 @@ class OpenAIServingChat(OpenAIServing):
 
                     if self.use_harmony:
                         harmony_parser = harmony_parsers[i]
-                        prev_recipient = harmony_parser.current_recipient
-
-                        # Track accumulated content per token with their state
-                        token_states: list[TokenState] = []
+                        delta_text = ""
                         for token_id in output.token_ids:
                             harmony_parser.process(token_id)
-                            token_delta = harmony_parser.last_content_delta or ""
-                            token_states.append(
-                                TokenState(
-                                    harmony_parser.current_channel,
-                                    harmony_parser.current_recipient,
-                                    token_delta,
-                                )
-                            )
-                        delta_text = "".join(delta for _, _, delta in token_states)
-                        cur_channel = harmony_parser.current_channel
-
-                        # handle the case where several tokens where generated at once
-                        # including the final token, leading to a delta in the text
-                        # but the current channel to be empty (start state)
-                        if not cur_channel and delta_text:
-                            cur_channel = "final"
+                            delta_text += harmony_parser.last_content_delta or ""
                     else:
                         delta_text = output.text
 
@@ -886,8 +871,7 @@ class OpenAIServingChat(OpenAIServing):
                         delta_message, tools_streamed_flag = (
                             extract_harmony_streaming_delta(
                                 harmony_parser=harmony_parser,
-                                token_states=token_states,
-                                prev_recipient=prev_recipient,
+                                stream_state=harmony_stream_states[i],
                                 include_reasoning=request.include_reasoning,
                             )
                         )
