@@ -172,9 +172,9 @@ def test_streaming_update_placeholder_underflow():
     # is_prefill_chunk=True and AsyncScheduler skips placeholder increment.
     so = scheduler.schedule()
     assert "session-0" in so.num_scheduled_tokens
-    assert (
-        req.is_prefill_chunk
-    ), "Request should be in prefill chunk (not all new tokens scheduled)"
+    assert req.is_prefill_chunk, (
+        "Request should be in prefill chunk (not all new tokens scheduled)"
+    )
     assert req.num_output_placeholders == 0, (
         f"Bug precondition: placeholders should be 0 because "
         f"AsyncScheduler skipped increment (is_prefill_chunk=True), "
