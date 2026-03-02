@@ -157,10 +157,26 @@ def get_rope(
         )
     elif scaling_type == "linear":
         scaling_factor = rope_parameters["factor"]
+        max_position_for_rope = rope_parameters.get(
+            "original_max_position_embeddings", max_position
+        )
+        # If the config already reports a scaled max_position_embeddings and
+        # does not provide original_max_position_embeddings, avoid double-scaling
+        # for very large contexts (e.g., 128K).
+        if (
+            max_position_for_rope == max_position
+            and "original_max_position_embeddings" not in rope_parameters
+            and max_position is not None
+            and scaling_factor is not None
+            and scaling_factor > 1
+            and max_position % int(scaling_factor) == 0
+            and max_position >= 131072
+        ):
+            max_position_for_rope = int(max_position / scaling_factor)
         rotary_emb = LinearScalingRotaryEmbedding(
             head_size,
             rotary_dim,
-            max_position,
+            max_position_for_rope,
             base,
             is_neox_style,
             scaling_factor,
