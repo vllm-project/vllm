@@ -2506,6 +2506,9 @@ class NixlConnectorWorker:
 
     def shutdown(self):
         """Shutdown the connector worker."""
+        if not hasattr(self, "_handshake_initiation_executor"):
+            # error happens during init, no need to shutdown
+            return
         self._handshake_initiation_executor.shutdown(wait=False)
         for handles in self._recving_transfers.values():
             for handle in handles:
