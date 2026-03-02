@@ -399,11 +399,15 @@ class OpenAIServingResponses(OpenAIServing):
         prev_messages_from_state: list | None = None
         if prev_response is not None and request.previous_response is not None:
             prev_messages_from_state = self._extract_state_from_response(prev_response)
-            if prev_messages_from_state is None and not self.enable_store:
-                # The caller passed previous_response but omitted
-                # include=['reasoning.encrypted_content'] on the prior turn,
-                # so no state carrier is present.  With store disabled there is
-                # no fallback — return a clear 400 rather than a KeyError 500.
+            if prev_messages_from_state is None:
+                # The caller passed previous_response but the prior response
+                # contains no vLLM state carrier — most likely because
+                # include=['reasoning.encrypted_content'] was omitted on the
+                # prior turn.  previous_response always implies the stateless
+                # path; there is no msg_store fallback regardless of
+                # enable_store (msg_store is keyed by response ID, not carried
+                # in the response object).  Return a clear 400 rather than
+                # letting msg_store[prev_response.id] raise a KeyError 500.
                 return self.create_error_response(
                     err_type="invalid_request_error",
                     message=(
@@ -971,9 +975,21 @@ class OpenAIServingResponses(OpenAIServing):
         ):
             carrier_messages: list | None = None
             if self.use_harmony and isinstance(context, HarmonyContext):
+                # Harmony context already contains the full history including
+                # the assistant turn that was just generated.
                 carrier_messages = list(context.messages)
             elif messages is not None:
-                carrier_messages = messages
+                # Non-Harmony path: `messages` is the input to the LLM for
+                # this turn. Append the assistant's response output so the
+                # carrier contains the complete history (input + response)
+                # for the next turn to build on.
+                from vllm.entrypoints.openai.responses.utils import (
+                    construct_chat_messages_with_tool_call,
+                )
+
+                carrier_messages = messages + construct_chat_messages_with_tool_call(
+                    response.output
+                )
             if carrier_messages is not None:
                 state_carrier = self._build_state_carrier(
                     carrier_messages, request.request_id
@@ -1257,9 +1273,7 @@ class OpenAIServingResponses(OpenAIServing):
                 # Stateless path: messages came from the encrypted_content
                 # state carrier; deserialize dicts back to OpenAIHarmonyMessage.
                 prev_msgs = [
-                    OpenAIHarmonyMessage.model_validate(m)
-                    if isinstance(m, dict)
-                    else m
+                    OpenAIHarmonyMessage.model_validate(m) if isinstance(m, dict) else m
                     for m in prev_messages
                 ]
             else:
@@ -1501,9 +1515,7 @@ class OpenAIServingResponses(OpenAIServing):
             encrypted_content=serialize_state(messages),
         )
 
-    def _extract_state_from_response(
-        self, response: ResponsesResponse
-    ) -> list | None:
+    def _extract_state_from_response(self, response: ResponsesResponse) -> list | None:
         """Extract the serialized message history from a response's state carrier.
 
         Scans ``response.output`` for a vLLM state-carrier ReasoningItem and

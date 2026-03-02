@@ -3,9 +3,6 @@
 
 """Unit tests for the stateless Responses API state carrier (state.py)."""
 
-import importlib
-import os
-
 import pytest
 
 # ---------------------------------------------------------------------------
@@ -29,7 +26,8 @@ def _reset_signing_key():
 def isolated_key(monkeypatch):
     """Each test gets a fresh, deterministic signing key."""
     monkeypatch.setenv(
-        "VLLM_RESPONSES_STATE_SIGNING_KEY", "ab" * 32  # 64 hex chars = 32 bytes
+        "VLLM_RESPONSES_STATE_SIGNING_KEY",
+        "ab" * 32,  # 64 hex chars = 32 bytes
     )
     _reset_signing_key()
     yield
@@ -235,4 +233,20 @@ def test_invalid_hex_key_raises(monkeypatch):
     state_mod._SIGNING_KEY = None
 
     with pytest.raises(ValueError, match="valid hex string"):
+        state_mod._get_signing_key()
+
+
+def test_short_key_raises(monkeypatch):
+    """A key shorter than 32 bytes (64 hex chars) must be rejected.
+
+    Short HMAC keys weaken tamper protection; enforce minimum length so
+    misconfigured deployments fail loudly rather than silently degrading
+    security.  'aa' decodes to 1 byte — well below the 32-byte minimum.
+    """
+    import vllm.entrypoints.openai.responses.state as state_mod
+
+    monkeypatch.setenv("VLLM_RESPONSES_STATE_SIGNING_KEY", "aa" * 4)  # 4 bytes
+    state_mod._SIGNING_KEY = None
+
+    with pytest.raises(ValueError, match="minimum of 32 bytes"):
         state_mod._get_signing_key()
