@@ -159,6 +159,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
         assert sizes is not None
         dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
+        logger.info("AgRsAll2AllManager dispatch sizes: %s hidden_states.shape[0]: %s", sizes, hidden_states.shape)
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
 
         tensors_to_gather = [hidden_states, router_logits]
