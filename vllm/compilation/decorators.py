@@ -323,6 +323,11 @@ def _support_torch_compile(
         compilation_counter.num_models_seen += 1
         self.compiled = False
 
+        # Skip if a parent class's @support_torch_compile already
+        # initialized the compile wrapper
+        if hasattr(self, "_compiled_callable"):
+            return
+
         # Handled by monkeypatching `TorchCompileWithNoGuardsWrapper` into base class
         TorchCompileWithNoGuardsWrapper.__init__(self)
 
