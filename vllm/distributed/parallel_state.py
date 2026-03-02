@@ -355,11 +355,14 @@ class GroupCoordinator:
 
         from vllm.platforms import current_platform
 
-        self.device = torch.device(
-            f"{current_platform.device_type}:{local_rank}"
-            if not current_platform.is_cpu()
-            else "cpu"
-        )
+        if current_platform.is_cuda_alike():
+            self.device = torch.device(f"cuda:{local_rank}")
+        elif current_platform.is_xpu():
+            self.device = torch.device(f"xpu:{local_rank}")
+        elif current_platform.is_out_of_tree():
+            self.device = torch.device(f"{current_platform.device_name}:{local_rank}")
+        else:
+            self.device = torch.device("cpu")
 
         self.use_device_communicator = use_device_communicator
         self.device_communicator = None
