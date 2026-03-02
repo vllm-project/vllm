@@ -60,8 +60,8 @@ steps:
   device: b200
   source_file_dependencies: []
   commands:
-    - pytest -v -s models/nightly/gptoss.py
-    - pytest -v -s models/nightly/guidellm/gptoss_gllm.py
+    - pytest -v -s models/release/gptoss.py
+    - pytest -v -s models/release/guidellm/gptoss_gllm.py
 
 
 - label: Transformers Nightly Models
