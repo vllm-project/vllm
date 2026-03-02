@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Final, TypeAlias
 
-from vllm import PoolingRequestOutput, TokensPrompt
+from vllm import PoolingRequestOutput, PromptType, TokensPrompt
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -43,6 +43,7 @@ from vllm.inputs import SingletonPrompt
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs import TokPrompt
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
+from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 
@@ -90,11 +91,17 @@ class PoolingIOProcessor:
         self.chat_template_content_format: Final = chat_template_content_format
         self.trust_request_chat_template = trust_request_chat_template
 
-    def pre_process(self, *args, **kwargs):
+    def pre_process_online(self, *args, **kwargs):
         raise NotImplementedError
 
-    async def pre_process_async(self, *args, **kwargs):
-        return self.pre_process(*args, **kwargs)
+    async def pre_process_online_async(self, *args, **kwargs):
+        return self.pre_process_online(*args, **kwargs)
+
+    def pre_process_offline(self, *args, **kwargs):
+        raise NotImplementedError
+
+    async def pre_process_offline_async(self, *args, **kwargs):
+        return self.pre_process_offline(*args, **kwargs)
 
     def post_process(
         self, outputs: list[PoolingRequestOutput]
@@ -138,7 +145,7 @@ class PoolingIOProcessor:
             )
         return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
-    def _preprocess_completion(
+    def _preprocess_completion_online(
         self,
         request: RendererRequest,
         prompt_input: str | list[str] | list[int] | list[list[int]] | None,
@@ -173,7 +180,7 @@ class PoolingIOProcessor:
             },
         )
 
-    def _preprocess_chat(
+    def _preprocess_chat_online(
         self,
         request: RendererChatRequest,
         messages: list[ChatCompletionMessageParam],
@@ -213,6 +220,33 @@ class PoolingIOProcessor:
 
         return conversation, [engine_prompt]
 
+    def _preprocess_completion_offline(
+        self,
+        prompts: PromptType | Sequence[PromptType],
+        tokenization_kwargs: dict[str, Any] | None = None,
+    ):
+        renderer = self.renderer
+        model_config = self.model_config
+
+        prompts = prompt_to_seq(prompts)
+
+        parsed_prompts = [
+            (
+                prompt
+                if isinstance(prompt, bytes)
+                else parse_model_prompt(model_config, prompt)
+            )
+            for prompt in prompts
+        ]
+        tok_params = renderer.default_cmpl_tok_params.with_kwargs(
+            **(tokenization_kwargs or {})
+        )
+
+        return renderer.render_cmpl(
+            parsed_prompts,
+            tok_params,
+        )
+
     def _validate_chat_template(
         self,
         request_chat_template: str | None,
@@ -232,3 +266,30 @@ class PoolingIOProcessor:
                 "Refused request with untrusted chat template."
             )
         return None
+
+
+def init_pooling_io_processor(
+    supported_tasks: tuple[SupportedTask, ...],
+    model_config: ModelConfig,
+    renderer: BaseRenderer,
+    *,
+    chat_template: str | None = None,
+    chat_template_content_format: ChatTemplateContentFormatOption = "auto",
+    trust_request_chat_template: bool = False,
+) -> dict[str, PoolingIOProcessor]:
+    pooling_io_processor: dict[str, PoolingIOProcessor] = {}
+
+    if "classify" in supported_tasks:
+        from vllm.entrypoints.pooling.classify.io_processor import (
+            ClassifyIOProcessor,
+        )
+
+        pooling_io_processor["classify"] = ClassifyIOProcessor(
+            model_config=model_config,
+            renderer=renderer,
+            chat_template=chat_template,
+            chat_template_content_format=chat_template_content_format,
+            trust_request_chat_template=trust_request_chat_template,
+        )
+
+    return pooling_io_processor

@@ -142,7 +142,9 @@ class PoolingServing:
         self,
         ctx: PoolingServeContext,
     ):
-        ctx.engine_prompts = await self.io_processor.pre_process_async(ctx.request)
+        ctx.engine_prompts = await self.io_processor.pre_process_online_async(
+            ctx.request
+        )
 
     async def _prepare_generators(
         self,
