@@ -13,6 +13,7 @@ from torch.distributed.distributed_c10d import is_nccl_available
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils.optional_deps import validate_platform_optional_deps
 from vllm.utils.torch_utils import cuda_device_count_stateless
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -342,6 +343,10 @@ class RocmPlatform(Platform):
     def import_kernels(cls) -> None:
         """Import ROCm-specific kernels."""
         super().import_kernels()
+
+        # Fail fast if optional deps for ROCm-supported features are missing
+        # (e.g. amd-quark for mxfp4). See vllm.utils.optional_deps.
+        validate_platform_optional_deps(PlatformEnum.ROCM)
 
         import contextlib
 
