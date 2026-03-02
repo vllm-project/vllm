@@ -22,7 +22,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
-from vllm.v1.worker.gpu.model_states import ModelState
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -420,8 +420,8 @@ def prepare_inputs_to_capture(
     input_buffers.dcp_local_seq_lens[:num_reqs] = num_tokens
     input_buffers.dcp_local_seq_lens[num_reqs:] = 0
 
-    input_block_tables = [x[:num_reqs] for x in block_tables.input_block_tables]
-    slot_mappings = block_tables.slot_mappings[:, :num_tokens]
+    input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
+    slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
     )
