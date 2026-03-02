@@ -175,7 +175,6 @@ def run_nvfp4_emulations(
 
     # dequantize weight
     w_fp4 = weight.data.view(torch.uint8)
-
     w_dq = dequantize_to_dtype(
         w_fp4,
         weight_scale_swizzled.data,

@@ -281,7 +281,6 @@ def moe_kernel_quantize_input(
         else:
             return ref_nvfp4_quant_dequant(A, A_scale, block_size=16)
     elif quant_dtype == "mxfp4":
-        assert emulation
         return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp8":
         # TODO: `quant_dtype == "mxfp8"` is ambiguous,
@@ -294,10 +293,8 @@ def moe_kernel_quantize_input(
             is_sf_swizzled_layout=is_fp4_scale_swizzled,
         )
     elif quant_dtype == "mxfp6_e3m2":
-        assert emulation
         return _mxfp6_e3m2_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp6_e2m3":
-        assert emulation
         return _mxfp6_e2m3_quantize(A, A_scale, per_act_token_quant, block_shape)
     else:
         return A, A_scale
