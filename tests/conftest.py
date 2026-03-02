@@ -1548,6 +1548,14 @@ def use_fresh_inductor_cache():
         yield
 
 
+@pytest.fixture
+def fresh_vllm_cache(monkeypatch, use_fresh_inductor_cache):
+    """Temporary VLLM_CACHE_ROOT combined with a fresh inductor cache."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        monkeypatch.setenv("VLLM_CACHE_ROOT", tmp_dir)
+        yield tmp_dir
+
+
 @pytest.fixture(scope="function")
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
