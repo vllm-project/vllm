@@ -15,13 +15,12 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
-    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.utils import SUPPORTED_MOE_ACTIVATION
+from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_to_dtype,
 )
@@ -34,12 +33,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 logger = init_logger(__name__)
 
 
-class QuantEmulationExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
     """
-    Emulation backend for quantized MoE experts.
+    Emulation backend for NVFP4 quantized MoE experts.
 
-    This backend dequantizes weights on the fly and falls back to
-    calling fused_experts. It may be used for NVFP4 models when the device does not have
+    It may be used for NVFP4 models when the device does not have
     native support for this dtype.
     """
 
@@ -50,13 +48,14 @@ class QuantEmulationExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         super().__init__(moe_config, quant_config)
         logger.warning_once(
-            "Using QuantEmulationExperts MOE backend. This will dequantize "
-            "weights on the fly and may be slower than native quantized MOE. "
-            "Consider using a device with native quantization support for "
-            "better performance."
+            "Using Nvfp4QuantizationEmulationTritonExperts MOE backend. This will"
+            " dequantize weights on the fly and may be slower than native"
+            " quantized MOE. Consider using a device with native quantization"
+            " support (e.g. Nvidia Blackwell) for better performance."
         )
 
-        # `fused_experts` expects pre-dequantized weights, which we handle in `apply` below.
+        # `TritonExperts.apply` expects pre-dequantized weights,
+        # which we handle in `apply` below.
         self.w1_scale_val = self.quant_config.w1_scale
         self.w2_scale_val = self.quant_config.w2_scale
 
@@ -68,69 +67,11 @@ class QuantEmulationExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return True
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
-
-    @staticmethod
-    def _supports_current_device() -> bool:
-        return True
-
-    @staticmethod
-    def _supports_no_act_and_mul() -> bool:
-        return True
-
-    @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
         return (weight_key, activation_key) == (kNvfp4Static, kNvfp4Dynamic)
-
-    @staticmethod
-    def _supports_activation(activation: str) -> bool:
-        return activation in SUPPORTED_MOE_ACTIVATION
-
-    @staticmethod
-    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return not moe_parallel_config.use_fi_all2allv_kernels
-
-    def supports_chunking(self) -> bool:
-        return True
-
-    def supports_expert_map(self) -> bool:
-        return True
-
-    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-            TopKWeightAndReduceNoOP,
-        )
-
-        return TopKWeightAndReduceNoOP()
-
-    def workspace_shapes(
-        self,
-        M: int,
-        N: int,
-        K: int,
-        topk: int,
-        global_num_experts: int,
-        local_num_experts: int,
-        expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        """
-        Return workspace shapes for the modular kernel.
-
-        fused_experts_impl allocates its own workspaces internally,
-        so workspace13 and workspace2 are not used. However, the output
-        shape must be correct since it's pre-allocated by the modular kernel.
-        """
-        # Workspaces are not used, allocate minimal size
-        workspace13 = (1,)
-        workspace2 = (1,)
-        # Output must match the actual output shape
-        output = (M, K)
-        return (workspace13, workspace2, output)
 
     def apply(
         self,
@@ -140,7 +81,7 @@ class QuantEmulationExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
@@ -192,30 +133,22 @@ class QuantEmulationExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert w1_dequant.dtype == torch.bfloat16
         assert w2_dequant.dtype == torch.bfloat16
 
-        # For emulation, we perform activation QDQ (quantize-dequantize) if needed
-        # This simulates the quantization that would happen in native NVFP4
-        # The scales are provided in a1_gscale and a2_gscale
-        # For now, we call fused_experts_impl without activation quantization
-        # TODO: Implement activation QDQ when needed for accuracy
-
-        # Call fused_experts_impl with dequantized weights
-        # Since weights are dequantized, we run in unquantized mode
-        result = fused_experts(
+        # Activation quantization/dequantization is deferred to
+        # `moe_kernel_quantize_input` in TritonExperts.apply.
+        super().apply(
+            output=output,
             hidden_states=hidden_states,
             w1=w1_dequant,
             w2=w2_dequant,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=False,
             activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
-            quant_config=self.quant_config,
+            a1q_scale=a1q_scale,
+            a2_scale=a2_scale,
+            workspace13=workspace13,
+            workspace2=workspace2,
+            expert_tokens_meta=expert_tokens_meta,
+            apply_router_weight_on_input=apply_router_weight_on_input,
         )
-
-        assert result.shape == output.shape
-        assert result.dtype == output.dtype
-
-        # Copy result to pre-allocated output tensor
-        output.copy_(result)

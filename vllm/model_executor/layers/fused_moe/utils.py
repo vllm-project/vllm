@@ -22,11 +22,11 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    per_tensor_dequantize,
-)
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     ref_nvfp4_quant_dequant,
+)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    per_tensor_dequantize,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
