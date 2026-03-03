@@ -119,7 +119,7 @@ def deserialize_state(encrypted_content: str) -> list[Any] | None:
     # Expected: "vllm:1:<payload_b64>:<sig>"
     # Strip the prefix, then split payload from signature from the right
     # so future format version changes (e.g. "vllm:2:alpha") don't break.
-    suffix = encrypted_content[len(f"{_FORMAT_VERSION}:"):]
+    suffix = encrypted_content[len(f"{_FORMAT_VERSION}:") :]
     try:
         payload_b64, sig = suffix.rsplit(":", 1)
     except ValueError as exc:
