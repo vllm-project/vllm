@@ -55,6 +55,14 @@ class BatchDescriptor(NamedTuple):
     (like fused_moe_lora) whose grid size depends on num_active_loras
     to be properly captured.
     """
+    max_seq_len: int = 0
+    """
+    Maximum sequence length for this batch descriptor.
+    When non-zero, separate CUDA graphs are captured for different seq_len
+    ranges. This allows kernels whose selection depends on seq_len (e.g.,
+    sparse attention topk) to be properly captured in the correct variant.
+    0 means no seq_len specialization.
+    """
 
     def relax_for_mixed_batch_cudagraphs(self) -> "BatchDescriptor":
         """
