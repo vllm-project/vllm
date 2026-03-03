@@ -121,7 +121,7 @@ class TritonAttentionMetadata:
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
-    reorder_batch_threshold: int = 1
+    reorder_batch_threshold: int | None = 1
 
     def __init__(
         self,
@@ -150,6 +150,15 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 CUDAGraphMode.FULL,
             )
         )
+
+        # Initialize reorder_batch_threshold based on CUDA graph settings.
+        # Batch reordering (separating decodes from prefills) is only needed
+        # when CUDA graphs are enabled for decode.
+        if self.decode_cudagraph_enabled:
+            self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
+        else:
+            # Disable batch reordering when CUDA graphs are not enabled
+            self.reorder_batch_threshold = None
 
         # Check if CUDA Graphs are enabled for prefill.
         self.prefill_cudagraph_enabled = (
@@ -254,7 +263,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold,
+                decode_threshold=self.reorder_batch_threshold or 1,
                 require_uniform=True,
             )
         )
