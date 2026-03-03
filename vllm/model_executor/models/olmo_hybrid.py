@@ -101,7 +101,6 @@ from .utils import (
     maybe_prefix,
 )
 
-
 logger = init_logger(__name__)
 
 
@@ -854,9 +853,7 @@ class OlmoHybridDecoderLayer(nn.Module):
                 logger.error("Layer %d: after mlp sync", self.layer_idx)
                 hidden_states = residual + hidden_states
             except Exception as e:
-                logger.error(
-                    "Layer %d (linear) forward failed: %s", self.layer_idx, e
-                )
+                logger.error("Layer %d (linear) forward failed: %s", self.layer_idx, e)
                 raise
         else:
             try:
