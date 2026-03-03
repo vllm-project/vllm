@@ -497,6 +497,32 @@ direct_register_custom_op(
 )
 
 
+def _register_inductor_lowering_for_fused_collective_fp8_ops() -> None:
+    """Register explicit Inductor lowerings for fused FP8 collective ops.
+
+    This is compile-time wiring only: it makes Inductor lower these custom ops
+    as extern calls instead of relying on generic/unregistered behavior that is
+    brittle for non-standard FP8 strides.
+    """
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    if not is_torch_equal_or_newer("2.11.0.dev"):
+        return
+
+    import torch._inductor.lowering as _lowering
+
+    ops = (
+        torch.ops.vllm.fused_all_gather_bmm_fp8.default,
+        torch.ops.vllm.fused_bmm_fp8_reduce_scatter.default,
+    )
+    for op in ops:
+        if op not in _lowering.lowerings:
+            _lowering.make_fallback(op)
+
+
+_register_inductor_lowering_for_fused_collective_fp8_ops()
+
+
 class GroupCoordinator:
     """
     PyTorch ProcessGroup wrapper for a group of processes.
