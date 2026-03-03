@@ -202,7 +202,7 @@ class FireRedASR2FeatureExtractor(SequenceFeatureExtractor):
             mask = x_mask[:, :, :-2:2][:, :, :-2:2]
             input_lengths = mask[:, -1, :].sum(dim=-1)
             input_lengths = input_lengths // self.downsample_rate
-            fake_token_len = input_lengths
+            fake_token_len = torch.clamp(input_lengths, min=1)
             fake_token_lengths.append(fake_token_len)
 
         feats = torch.stack(feats, dim=0)
