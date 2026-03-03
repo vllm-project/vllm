@@ -900,7 +900,7 @@ def _get_tile_size(
         return 32
 
     # Default behavior
-    if is_prefill or use_2d_kernel:
+    if is_prefill:
         return 32
     return 16 if element_size >= 2 else 32
 
