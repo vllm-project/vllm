@@ -9,14 +9,14 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_experts,
     fused_topk,
-)
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -131,16 +131,22 @@ def bench_run(
             w2_scale=w2_scale,
             per_act_token_quant=per_act_token,
         )
+        moe_config = make_dummy_moe_config(
+            num_experts=w2.shape[0],
+            hidden_dim=w2.shape[1],
+            intermediate_size_per_partition=w2.shape[2],
+            in_dtype=a.dtype,
+        )
 
-        fn = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+        fn = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
             CutlassExpertsFp8(
-                moe_config=make_dummy_moe_config(
-                    num_experts=w2.shape[0],
-                    hidden_dim=w2.shape[1],
-                    intermediate_size_per_partition=w2.shape[2],
-                    in_dtype=a.dtype,
-                ),
+                moe_config=moe_config,
                 quant_config=quant_config,
             ),
         )
@@ -163,16 +169,22 @@ def bench_run(
             w2_scale=w2_scale,
             per_act_token_quant=per_act_token,
         )
+        moe_config = make_dummy_moe_config(
+            num_experts=w2.shape[0],
+            hidden_dim=w2.shape[1],
+            intermediate_size_per_partition=w2.shape[2],
+            in_dtype=a.dtype,
+        )
 
-        fn = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+        fn = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
             CutlassExpertsFp8(
-                moe_config=make_dummy_moe_config(
-                    num_experts=w2.shape[0],
-                    hidden_dim=w2.shape[1],
-                    intermediate_size_per_partition=w2.shape[2],
-                    in_dtype=a.dtype,
-                ),
+                moe_config=moe_config,
                 quant_config=quant_config,
             ),
         )

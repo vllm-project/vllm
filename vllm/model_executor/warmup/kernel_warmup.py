@@ -88,9 +88,14 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     Without autotuning, FlashInfer will rely on heuristics, which may
     be significantly slower.
     """
-    from vllm.utils.flashinfer import autotune
+    import vllm.utils.flashinfer as fi_utils
 
-    with torch.inference_mode(), autotune():
+    with torch.inference_mode(), fi_utils.autotune():
+        # Certain FlashInfer kernels (e.g. nvfp4 routed moe) are
+        # incompatible with autotuning. This state is used to skip
+        # those kernels during the autotuning process.
+        fi_utils._is_fi_autotuning = True
+
         # We skip EPLB here since we don't want to record dummy metrics
         # When autotuning with number of tokens m, flashinfer will autotune
         # operations for all number of tokens up to m.
@@ -100,3 +105,5 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             skip_eplb=True,
             is_profile=True,
         )
+
+        fi_utils._is_fi_autotuning = False

@@ -18,7 +18,7 @@ def get_local_sizes():
     return get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
 
 
-class FlashInferA2APrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+class FlashInferA2APrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """Base class for FlashInfer MoE prepare and finalize operations."""
 
     def __init__(
@@ -185,8 +185,8 @@ def flashinfer_alltoall_dispatch(
             ep_size,
         )
 
-        # Swizzle after the A2A if nvfp4.
-        if quant_config.quant_dtype == "nvfp4":
+        # Swizzle after the A2A if MoE kernel expects swizzled scales.
+        if quant_config.quant_dtype == "nvfp4" and quant_config.is_nvfp4_scale_swizzled:
             if x_sf.element_size() == 1:
                 x_sf = x_sf.view(torch.uint8)
             x_sf = nvfp4_block_scale_interleave(x_sf)

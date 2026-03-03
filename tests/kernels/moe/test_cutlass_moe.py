@@ -13,6 +13,9 @@ from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEQuantConfig,
@@ -21,9 +24,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
     CutlassExpertsFp8,
     run_cutlass_moe_fp8,
-)
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.platforms import current_platform
@@ -197,20 +197,26 @@ def run_with_expert_maps(
     for kwargs, new_quant_config in slice_experts():
         w2 = kwargs["w2"]
         a = kwargs["hidden_states"]
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+        moe_config = make_dummy_moe_config(
+            num_experts=w2.shape[0],
+            hidden_dim=w2.shape[1],
+            intermediate_size_per_partition=w2.shape[2],
+            in_dtype=a.dtype,
+        )
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=new_quant_config,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
             CutlassExpertsFp8(
-                moe_config=make_dummy_moe_config(
-                    num_experts=w2.shape[0],
-                    hidden_dim=w2.shape[1],
-                    intermediate_size_per_partition=w2.shape[2],
-                    in_dtype=a.dtype,
-                ),
+                moe_config=moe_config,
                 quant_config=new_quant_config,
             ),
             inplace=False,
         )
-        out_tensor = out_tensor + kernel(**kwargs)
+        out_tensor = out_tensor + kernel.apply(**kwargs)
 
     return out_tensor
 
@@ -252,25 +258,35 @@ def run_8_bit(
         "w2": moe_tensors.w2_q,  # type: ignore[union-attr]
         "topk_weights": topk_weights,
         "topk_ids": topk_ids,
+        "global_num_experts": moe_tensors.w1_q.shape[0],  # type: ignore[union-attr]
+        "activation": MoEActivation.SILU,
+        "expert_map": None,
+        "apply_router_weight_on_input": False,
     }
 
     num_experts = moe_tensors.w1.size(0)  # type: ignore[attr-defined]
     with_ep = num_local_experts is not None or num_local_experts == num_experts
     if not with_ep:
-        kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+        moe_config = make_dummy_moe_config(
+            num_experts=moe_tensors.w2_q.shape[0],  # type: ignore[union-attr]
+            hidden_dim=moe_tensors.w2_q.shape[1],  # type: ignore[union-attr]
+            intermediate_size_per_partition=moe_tensors.w2_q.shape[2],  # type: ignore[union-attr]
+            in_dtype=moe_tensors.a.dtype,
+        )
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
             CutlassExpertsFp8(
-                moe_config=make_dummy_moe_config(
-                    num_experts=moe_tensors.w2_q.shape[0],  # type: ignore[union-attr]
-                    hidden_dim=moe_tensors.w2_q.shape[1],  # type: ignore[union-attr]
-                    intermediate_size_per_partition=moe_tensors.w2_q.shape[2],  # type: ignore[union-attr]
-                    in_dtype=moe_tensors.a.dtype,
-                ),
+                moe_config=moe_config,
                 quant_config=quant_config,
             ),
             inplace=False,
         )
-        return kernel(**kwargs)
+        return kernel.apply(**kwargs)
 
     assert num_local_experts is not None
     return run_with_expert_maps(

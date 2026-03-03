@@ -11,13 +11,13 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
-class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
+class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
     """Base class for runtime dispatching of expert implementations."""
 
     def __init__(
         self,
-        experts: mk.FusedMoEPermuteExpertsUnpermute,
-        fallback_experts: mk.FusedMoEPermuteExpertsUnpermute,
+        experts: mk.FusedMoEExpertsModular,
+        fallback_experts: mk.FusedMoEExpertsModular,
     ):
         super().__init__(
             moe_config=experts.moe_config, quant_config=experts.quant_config
@@ -27,8 +27,8 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
 
     @staticmethod
     def get_clses() -> tuple[
-        type[mk.FusedMoEPermuteExpertsUnpermute],
-        type[mk.FusedMoEPermuteExpertsUnpermute],
+        type[mk.FusedMoEExpertsModular],
+        type[mk.FusedMoEExpertsModular],
     ]:
         """
         Get the cls for the experts and fallback experts.
@@ -149,7 +149,7 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+    ) -> mk.FusedMoEExpertsModular:
         raise NotImplementedError
 
     def apply(
