@@ -297,12 +297,12 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         expert_map: torch.Tensor | None = None,
         pad_sorted_ids: bool = False,
         naive_block_assignment: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor | None]:
         """
         Aligns tokens and experts into block-sized chunks for LoRA-based
         mixture-of-experts (MoE) execution.
         """
-        (token_lora_mapping, _, _, _, lora_ids, _, _) = (
+        (token_lora_mapping, _, _, _, lora_ids, _, _, _) = (
             self.token_mapping_meta.meta_args(
                 num_tokens, self.lora_config.specialize_active_lora
             )
@@ -348,7 +348,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             if expert_map is not None:
                 expert_ids = expert_map[expert_ids]
 
-        return None, sorted_ids, expert_ids, num_tokens_post_pad
+        return sorted_ids, expert_ids, num_tokens_post_pad
 
     def add_lora_fused_moe(
         self,
@@ -381,6 +381,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             lora_ids,
             _,
             num_active_loras,
+            _,
         ) = self.token_mapping_meta.meta_args(
             x.size(0), self.lora_config.specialize_active_lora
         )
