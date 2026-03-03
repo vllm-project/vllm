@@ -56,9 +56,9 @@ def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     return mm_data
 
 
-def qwen3_vl_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
+def add_video_metadata(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     """
-    Patch the multimodal data for Qwen3-VL model.
+    Add metadata to video mm_data
     """
 
     def create_metadata(frames: np.ndarray):
@@ -119,18 +119,7 @@ _IGNORE_MM_KEYS = {
 }
 
 MM_DATA_PATCHES = {
-    # Ernie4.5-VL, GLM4.1V and Qwen3-VL requires video metadata
-    "ernie4_5_moe_vl": qwen3_vl_patch_mm_data,
-    "glm4v": glm4_1v_patch_mm_data,
-    "glm4v_moe": glm4_1v_patch_mm_data,
-    "glm_ocr": glm4_1v_patch_mm_data,
     "glmasr": glmasr_patch_mm_data,
-    "interns1_pro": qwen3_vl_patch_mm_data,
-    "molmo2": qwen3_vl_patch_mm_data,
-    "qwen3_5": qwen3_vl_patch_mm_data,
-    "qwen3_5_moe": qwen3_vl_patch_mm_data,
-    "qwen3_vl": qwen3_vl_patch_mm_data,
-    "qwen3_vl_moe": qwen3_vl_patch_mm_data,
 }
 
 
@@ -176,9 +165,12 @@ def get_text_token_prompts(
     tokenizer: TokenizerLike = processor.info.get_tokenizer()
     model_config = processor.info.ctx.model_config
 
-    model_type = model_config.hf_config.model_type
     if processor.info.data_parser.video_needs_metadata:
-        mm_data = qwen3_vl_patch_mm_data(mm_data)
+        mm_data = add_video_metadata(mm_data)
+
+    model_type = model_config.hf_config.model_type
+    if model_type in MM_DATA_PATCHES:
+        mm_data = MM_DATA_PATCHES[model_type](mm_data)
 
     parsed_data = processor.info.parse_mm_data(mm_data)
     mm_counts = {k: len(vs) for k, vs in parsed_data.items()}
