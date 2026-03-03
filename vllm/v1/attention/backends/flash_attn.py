@@ -9,6 +9,7 @@ from typing import ClassVar
 import numpy as np
 import torch
 
+from vllm.config.attention import _FA3_DEFAULT_NUM_SPLITS
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -334,6 +335,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             # pre-allocated during capture.
             self.max_num_splits = (
                 self.attention_config.flash_attn_max_num_splits_for_cuda_graph
+                or _FA3_DEFAULT_NUM_SPLITS
             )
 
         # Sliding window size to be used with the AOT scheduler will be

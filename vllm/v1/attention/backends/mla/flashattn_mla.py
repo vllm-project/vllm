@@ -7,6 +7,7 @@ from typing import ClassVar
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.attention import _FA3_DEFAULT_NUM_SPLITS
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -149,6 +150,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             # pre-allocated during capture.
             self.max_num_splits = (
                 vllm_config.attention_config.flash_attn_max_num_splits_for_cuda_graph
+                or _FA3_DEFAULT_NUM_SPLITS
             )
 
         if vllm_is_batch_invariant():
