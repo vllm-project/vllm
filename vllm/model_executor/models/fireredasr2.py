@@ -86,12 +86,12 @@ class FireRedASR2AudioInputs(TensorSchema):
 
 
 class Swish(nn.Module):
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x * torch.sigmoid(x)
 
 
 class Conv2dSubsampling(nn.Module):
-    def __init__(self, idim, d_model, out_channels=32):
+    def __init__(self, idim: int, d_model: int, out_channels: int = 32):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(1, out_channels, 3, 2),
@@ -110,7 +110,9 @@ class Conv2dSubsampling(nn.Module):
         left_context = right_context = 3  # both exclude currect frame
         self.context = left_context + 1 + right_context  # 7
 
-    def forward(self, x, x_mask):
+    def forward(
+        self, x: torch.Tensor, x_mask: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x = x.unsqueeze(1)
         x = self.conv(x)
         N, C, T, D = x.size()
@@ -121,7 +123,7 @@ class Conv2dSubsampling(nn.Module):
 
 
 class RelPositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
+    def __init__(self, d_model: int, max_len: int = 5000):
         super().__init__()
         pe_positive = torch.zeros(max_len, d_model, requires_grad=False)
         pe_negative = torch.zeros(max_len, d_model, requires_grad=False)
@@ -139,7 +141,7 @@ class RelPositionalEncoding(nn.Module):
         pe_negative = pe_negative[1:].unsqueeze(0)
         self.pe = torch.cat([pe_positive, pe_negative], dim=1)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Tmax = 2 * max_len - 1
         Tmax, T = self.pe.size(1), x.size(1)
         pos_emb = self.pe[:, Tmax // 2 - T + 1 : Tmax // 2 + T].clone().detach()
@@ -147,7 +149,7 @@ class RelPositionalEncoding(nn.Module):
 
 
 class ConformerFeedForward(nn.Module):
-    def __init__(self, d_model):
+    def __init__(self, d_model: int):
         super().__init__()
         self.pre_layer_norm = nn.LayerNorm(d_model)
         self.linear_expand = ReplicatedLinear(
@@ -162,7 +164,7 @@ class ConformerFeedForward(nn.Module):
             bias=True,
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual = x
         x = self.pre_layer_norm(x)
         x, _ = self.linear_expand(x)
@@ -173,7 +175,7 @@ class ConformerFeedForward(nn.Module):
 
 
 class EncoderMultiHeadAttention(nn.Module):
-    def __init__(self, n_head, d_model):
+    def __init__(self, n_head: int, d_model: int):
         super().__init__()
         assert d_model % n_head == 0
         self.n_head = n_head
@@ -194,13 +196,13 @@ class EncoderMultiHeadAttention(nn.Module):
         self.layer_norm_k = nn.LayerNorm(d_model)
         self.layer_norm_v = nn.LayerNorm(d_model)
 
-        self.INF = float("inf")
-
         self.fc = ReplicatedLinear(
             input_size=n_head * self.d_v, output_size=d_model, bias=False
         )
 
-    def forward_qkv(self, q, k, v):
+    def forward_qkv(
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         d_k, d_v, n_head = self.d_k, self.d_v, self.n_head
         sz_b, len_q, len_k, len_v = q.size(0), q.size(1), k.size(1), v.size(1)
 
@@ -216,18 +218,22 @@ class EncoderMultiHeadAttention(nn.Module):
         v = v.transpose(1, 2)
         return q, k, v
 
-    def forward_output(self, output, residual, sz_b, len_q):
+    def forward_output(
+        self, output: torch.Tensor, residual: torch.Tensor, sz_b: int, len_q: int
+    ) -> torch.Tensor:
         output = output.transpose(1, 2).contiguous().view(sz_b, len_q, -1)
         fc_out, _ = self.fc(output)
         output = fc_out
         output = output + residual
         return output
 
-    def forward_attention(self, attn, v, mask=None):
+    def forward_attention(
+        self, attn: torch.Tensor, v: torch.Tensor, mask: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if mask is not None:
             mask = mask.unsqueeze(1)
             mask = mask.eq(0)
-            attn = attn.masked_fill(mask, -self.INF)
+            attn = attn.masked_fill(mask, -float("inf"))
             attn = torch.softmax(attn, dim=-1).masked_fill(mask, 0.0)
         else:
             attn = torch.softmax(attn, dim=-1)
@@ -239,7 +245,7 @@ class EncoderMultiHeadAttention(nn.Module):
 
 
 class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
-    def __init__(self, n_head, d_model):
+    def __init__(self, n_head: int, d_model: int):
         super().__init__(n_head, d_model)
         d_k = d_model // n_head
         self.scale = 1.0 / (d_k**0.5)
@@ -248,8 +254,6 @@ class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
         )
         self.pos_bias_u = nn.Parameter(torch.empty([n_head, d_k]))
         self.pos_bias_v = nn.Parameter(torch.empty([n_head, d_k]))
-        torch.nn.init.xavier_uniform_(self.pos_bias_u)
-        torch.nn.init.xavier_uniform_(self.pos_bias_v)
 
     def _rel_shift(self, x):
         N, H, T1, T2 = x.size()
@@ -261,7 +265,14 @@ class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
         x = x[:, :, :, : x.size(-1) // 2 + 1]
         return x
 
-    def forward(self, q, k, v, pos_emb, mask=None):
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        pos_emb: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         sz_b, len_q = q.size(0), q.size(1)
 
         residual = q
@@ -290,7 +301,7 @@ class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
 
 
 class ConformerConvolution(nn.Module):
-    def __init__(self, d_model, kernel_size=33):
+    def __init__(self, d_model: int, kernel_size: int = 33):
         super().__init__()
         assert kernel_size % 2 == 1
         self.pre_layer_norm = nn.LayerNorm(d_model)
@@ -313,7 +324,9 @@ class ConformerConvolution(nn.Module):
             d_model * 2, d_model, kernel_size=1, bias=False
         )
 
-    def forward(self, x, mask=None):
+    def forward(
+        self, x: torch.Tensor, mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         residual = x
         out = self.pre_layer_norm(x)
         out = out.transpose(1, 2)
@@ -343,7 +356,13 @@ class RelPosEmbConformerBlock(nn.Module):
         self.ffn2 = ConformerFeedForward(d_model)
         self.layer_norm = nn.LayerNorm(d_model)
 
-    def forward(self, x, pos_emb, slf_attn_mask=None, pad_mask=None):
+    def forward(
+        self,
+        x: torch.Tensor,
+        pos_emb: torch.Tensor,
+        slf_attn_mask: torch.Tensor | None = None,
+        pad_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         out = 0.5 * x + 0.5 * self.ffn1(x)
         out = self.mhsa(out, out, out, pos_emb, mask=slf_attn_mask)[0]
         out = self.conv(out, pad_mask)
@@ -355,12 +374,12 @@ class RelPosEmbConformerBlock(nn.Module):
 class ConformerEncoder(nn.Module):
     def __init__(
         self,
-        idim,
-        n_layers_enc,
-        n_head,
-        d_model,
-        kernel_size=33,
-        pe_maxlen=5000,
+        idim: int,
+        n_layers_enc: int,
+        n_head: int,
+        d_model: int,
+        kernel_size: int = 33,
+        pe_maxlen: int = 5000,
     ):
         super().__init__()
         self.odim = d_model
@@ -373,7 +392,9 @@ class ConformerEncoder(nn.Module):
             block = RelPosEmbConformerBlock(d_model, n_head, kernel_size)
             self.layer_stack.append(block)
 
-    def forward(self, padded_input, input_lengths, pad=True):
+    def forward(
+        self, padded_input: torch.Tensor, input_lengths: torch.Tensor, pad: bool = True
+    ):
         if pad:
             padded_input = F.pad(
                 padded_input,
@@ -399,7 +420,9 @@ class ConformerEncoder(nn.Module):
 
         return enc_output, input_lengths, src_mask
 
-    def padding_position_is_0(self, padded_input, input_lengths):
+    def padding_position_is_0(
+        self, padded_input: torch.Tensor, input_lengths: torch.Tensor
+    ) -> torch.Tensor:
         N, T = padded_input.size()[:2]
         mask = torch.ones((N, T)).to(padded_input.device)
         for i in range(N):
@@ -409,7 +432,7 @@ class ConformerEncoder(nn.Module):
 
 
 class FireRedASR2Adapter(nn.Module):
-    def __init__(self, encoder_dim, llm_dim, downsample_rate=2):
+    def __init__(self, encoder_dim: int, llm_dim: int, downsample_rate: int = 2):
         super().__init__()
         self.ds = downsample_rate
         self.linear1 = ReplicatedLinear(
