@@ -5,6 +5,7 @@ from collections.abc import Callable
 import pytest
 
 from vllm.config import PassConfig
+from vllm.platforms import current_platform
 
 from ...utils import multi_gpu_test
 from .common import (
@@ -22,6 +23,8 @@ from .models import (
     llama4_scout_fp8,
     qwen3_a3b,
 )
+
+pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
 
 
 @multi_gpu_test(num_gpus=2)
