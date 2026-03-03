@@ -59,6 +59,14 @@ class _MockHNDBackend(_MockBackend):
         return (0, 1, 2, 3, 4)
 
 
+class _MockBlocksNotFirstBackend(_MockBackend):
+    @staticmethod
+    def get_kv_cache_stride_order(include_num_layers_dimension=False):
+        if include_num_layers_dimension:
+            return (3, 1, 0, 2, 4, 5)
+        return (0, 1, 2, 3, 4)
+
+
 class _MockMambaBackend:
     @staticmethod
     def get_kv_cache_shape(*a, **kw):
@@ -270,13 +278,17 @@ def test_hnd_backend_extracts_heads():
     group = groups[0]
 
     # HND backend -- heads-first layout (blocks, heads, layers, per_head_page)
-    spec = group.spec
-    per_head_page = spec.page_size_bytes // NUM_KV_HEADS
+    per_head_page = group.page_size_bytes // NUM_KV_HEADS
     assert group.tensor.shape == (nb, NUM_KV_HEADS, num_layers, per_head_page)
 
     expected = (nb, 2, NUM_KV_HEADS, BLOCK_SIZE, HEAD_SIZE)
     for i in range(num_layers):
         assert kv_caches[f"layer.{i}"].shape == expected
+
+    topo = group.topologies[0]
+    assert topo.num_blocks_dim == 0
+    assert topo.num_layers_dim == 2
+    assert topo.num_heads_dim == 1
 
 
 def test_hnd_head_contiguity():
@@ -298,8 +310,23 @@ def test_nhd_backend_uses_default_layout():
     assert len(groups) == 1
     group = groups[0]
     # NHD backend -- default layout (blocks, layers, page_size)
-    assert group.tensor.shape == (nb, num_layers, group.spec.page_size_bytes)
+    assert group.tensor.shape == (nb, num_layers, group.page_size_bytes)
 
     expected = (nb, 2, NUM_KV_HEADS, BLOCK_SIZE, HEAD_SIZE)
     for i in range(num_layers):
         assert kv_caches[f"l.{i}"].shape == expected
+
+
+def test_blocks_not_first_is_isolated():
+    nb, num_layers = 4, 2
+    _, groups = _allocate(
+        nb,
+        num_layers,
+        backend=_MockBlocksNotFirstBackend,
+        prefix="nf",
+    )
+
+    assert len(groups) == num_layers
+    for group in groups:
+        topo = group.topologies[0]
+        assert topo.num_layers_dim is None
