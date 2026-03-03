@@ -92,7 +92,8 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         super().__init__()
 
         # `kwargs` contains custom arguments from
-        # --media-io-kwargs for this modality.
+        # --media-io-kwargs for this modality, merged with
+        # per-request runtime media_io_kwargs via merge_kwargs().
         # They can be passed to the underlying
         # media loaders (e.g. custom implementations)
         # for flexible control.
@@ -127,9 +128,7 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
 
 
 class AudioEmbeddingMediaIO(MediaIO[torch.Tensor]):
-    """Audio embedding MediaIO implementation.
-
-    Configuration values can be user-provided either by --media-io-kwargs or
+    """Configuration values can be user-provided either by --media-io-kwargs or
     by the runtime API field "media_io_kwargs". Ensure proper validation and
     error handling.
     """

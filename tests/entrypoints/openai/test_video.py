@@ -164,6 +164,40 @@ async def test_request_media_io_kwargs_override_uses_fewer_video_frames(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("video_url", [TEST_VIDEO_URLS[0]])
+async def test_invalid_num_frames_request_recoverable(
+    client: openai.AsyncOpenAI, model_name: str, video_url: str
+):
+    messages = dummy_messages_from_video_url(video_url)
+
+    with pytest.raises((openai.BadRequestError, openai.APIStatusError)):
+        await client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            max_completion_tokens=1,
+            temperature=0.0,
+            extra_body={
+                "media_io_kwargs": {
+                    "video": {
+                        "num_frames": "invalid",
+                    }
+                }
+            },
+        )
+
+    # Server should still handle subsequent requests after the failed one.
+    recovery_resp = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=1,
+        temperature=0.0,
+    )
+    recovery_msg = recovery_resp.choices[0].message
+    assert recovery_msg.content is not None and len(recovery_msg.content) >= 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
 async def test_error_on_invalid_video_url_type(
     client: openai.AsyncOpenAI, model_name: str, video_url: str

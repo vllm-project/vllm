@@ -25,7 +25,8 @@ class ImageMediaIO(MediaIO[Image.Image]):
 
         self.image_mode = image_mode
         # `kwargs` contains custom arguments from
-        # --media-io-kwargs for this modality.
+        # --media-io-kwargs for this modality, merged with
+        # per-request runtime media_io_kwargs via merge_kwargs().
         # They can be passed to the underlying
         # media loaders (e.g. custom implementations)
         # for flexible control.
