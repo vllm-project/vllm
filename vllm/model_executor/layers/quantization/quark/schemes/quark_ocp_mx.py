@@ -221,6 +221,11 @@ class QuarkOCP_MX(QuarkScheme):
             self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
         )
         self.emulation_dequantize_weights = emulation_dequantize_weights
+        if self.emulation_dequantize_weights:
+            logger.info_once(
+                "QuarkOCP_MX simulated dense linear: "
+                "dequantizing weights ahead of time."
+            )
 
         self.rocm_use_aiter_fp4_asm_gemm = is_rocm_aiter_fp4_asm_gemm_enabled()
 
