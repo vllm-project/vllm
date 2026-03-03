@@ -370,10 +370,11 @@ def test_warning_logs(caplog_vllm):
         reader.wait_until_ready()
 
         # We should have at least one warning log here
+        # "0 seconds" expected due to rounding of 1ms test interval
         with pytest.raises(TimeoutError):
             reader.dequeue(timeout=0.01, indefinite=False)
         assert any(
-            "No available shared memory broadcast block found in 0.001 seconds"
+            "No available shared memory broadcast block found in 0 seconds"
             in record.message
             for record in caplog_vllm.records
         )
@@ -383,7 +384,7 @@ def test_warning_logs(caplog_vllm):
         with pytest.raises(TimeoutError):
             reader.dequeue(timeout=0.01, indefinite=True)
         assert all(
-            "No available shared memory broadcast block found in 0.001 seconds"
+            "No available shared memory broadcast block found in 0 seconds"
             not in record.message
             for record in caplog_vllm.records
         )
