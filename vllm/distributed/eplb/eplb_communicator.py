@@ -941,8 +941,14 @@ def create_eplb_communicator(
     is_stateless = isinstance(group_coordinator, StatelessGroupCoordinator)
     if is_stateless:
         assert backend in ("torch_nccl", "pynccl"), (
-            f"Stateless EPLB requires NCCL/PyNCCL backend (got backend={backend})."
+            f"Elastic EP requires NCCL/PyNCCL backend (got backend={backend})."
         )
+        if backend == "torch_nccl":
+            logger.warning(
+                "Stateless elastic EP requires PyNCCL backend. "
+                "Forcing EPLB communicator to 'pynccl'."
+            )
+            backend = "pynccl"
         return _create_pynccl()
 
     if backend == "nixl":

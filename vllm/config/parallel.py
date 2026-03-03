@@ -788,15 +788,16 @@ class ParallelConfig:
             )
 
         if (
-            self.all2all_backend in ("allgather_reducescatter", "naive")
+            self.enable_eplb
             and self.eplb_config.use_async
+            and self.eplb_config.communicator not in ["torch_gloo", "nixl"]
         ):
             logger.warning(
                 "Async EPLB causes hangs with the '%s' all2all backend. "
-                "Forcing synchronous EPLB.",
+                "Forcing EPLB communicator to 'torch_gloo'.",
                 self.all2all_backend,
             )
-            self.eplb_config.use_async = False
+            self.eplb_config.communicator = "torch_gloo"
 
     @property
     def use_ray(self) -> bool:
