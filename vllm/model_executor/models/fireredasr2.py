@@ -194,7 +194,6 @@ class EncoderMultiHeadAttention(nn.Module):
         self.layer_norm_k = nn.LayerNorm(d_model)
         self.layer_norm_v = nn.LayerNorm(d_model)
 
-        self.temperature = self.d_k**0.5
         self.INF = float("inf")
 
         self.fc = ReplicatedLinear(
