@@ -158,56 +158,12 @@ def test_silu_and_mul_per_block_quant(
     ), f"Scale mismatch: max diff = {max_diff}"
 
     # Check output correctness
-    a = ref_out.to(dtype=torch.float32)
-    b = ops_out.to(dtype=torch.float32)
-    ok = torch.allclose(a, b, atol=1.0, rtol=0.0)
-
-    if not ok:
-        # Fallback: compare dequantized values
-        # Both ref_scales and ops_scales are now in SAME layout
-
-        # Normalize both to [num_tokens, num_groups]
-        if is_scale_transposed:
-            # ops_scales is [num_groups, num_tokens], ref is [num_tokens, num_groups]
-            ops_scales_row_major = ops_scales.t()
-            ref_scales_row_major = ref_scales
-        else:
-            # Both are [num_tokens, num_groups]
-            ops_scales_row_major = ops_scales
-            ref_scales_row_major = ref_scales
-
-        # Expand to [num_tokens, hidden_size]
-        ref_scales_expanded = ref_scales_row_major.repeat_interleave(group_size, dim=1)
-        ops_scales_expanded = ops_scales_row_major.repeat_interleave(group_size, dim=1)
-
-        # ========== ADD DEBUG PRINTS HERE ==========
-        print("\n=== DEBUG INFO ===")
-        print(
-            f"num_tokens={num_tokens}, "
-            f"hidden_size={hidden_size}, "
-            f"group_size={group_size}"
-        )
-
-        print(f"is_scale_transposed={is_scale_transposed}")
-        print(f"a.shape: {a.shape}")
-        print(f"b.shape: {b.shape}")
-        print(f"ref_scales.shape: {ref_scales.shape}")
-        print(f"ops_scales.shape: {ops_scales.shape}")
-        print(f"ref_scales_row_major.shape: {ref_scales_row_major.shape}")
-        print(f"ops_scales_row_major.shape: {ops_scales_row_major.shape}")
-        print(f"ref_scales_expanded.shape: {ref_scales_expanded.shape}")
-        print(f"ops_scales_expanded.shape: {ops_scales_expanded.shape}")
-        # ===========================================
-
-        a_deq = a * ref_scales_expanded
-        b_deq = b * ops_scales_expanded
-        ok = torch.allclose(a_deq, b_deq, rtol=5e-2, atol=5e-2)
-
-        if not ok:
-            max_diff = (a_deq - b_deq).abs().max()
-            print(f"Max dequantized difference: {max_diff}")
-
-    assert ok, "Output values don't match within tolerance"
+    torch.testing.assert_close(
+        ref_out.to(dtype=torch.float32),
+        ops_out.to(dtype=torch.float32),
+        atol=1.0,
+        rtol=0.0,
+    )
 
     # Test opcheck for correctness verification
     output = torch.empty(num_tokens, hidden_size, device=device, dtype=quant_dtype)
