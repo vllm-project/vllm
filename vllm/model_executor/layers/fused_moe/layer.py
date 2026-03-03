@@ -1505,21 +1505,6 @@ class FusedMoE(CustomOp):
         self.ensure_moe_quant_config_init()
         return self.quant_method.moe_quant_config
 
-    def must_reduce_shared_expert_outputs(self) -> bool:
-        """
-        The shared_experts are typically computed using the RowParallelLinear
-        layer. The result of this function is typically used as
-        the reduce_results argument to the module.
-        When just tensor-parallel is used, it is not required to reduce
-        the shared_experts results immediately. Instead we reduce at the
-        once at the end of the MoE op. (Refer to DeepSeekV2MoE module)
-        With EP and all2all kernels - this is no longer viable as all
-        GPU ranks in DP, produce the complete set of hidden_states.
-        Therefore it is required that we reduce the shared_experts output
-        early.
-        """
-        return self.runner.must_reduce_shared_expert_outputs()
-
     def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
         """
         Some combine kernels reduce across GPU ranks by default.

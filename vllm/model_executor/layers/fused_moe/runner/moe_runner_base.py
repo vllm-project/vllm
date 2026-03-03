@@ -223,7 +223,7 @@ class MoERunnerBase(MoERunner):
     def reduce_results(self) -> bool:
         raise NotImplementedError
 
-    def must_reduce_shared_expert_outputs(self) -> bool:
+    def _must_reduce_shared_expert_outputs(self) -> bool:
         """
         The shared_experts are typically computed using the RowParallelLinear
         layer. The result of this function is typically used as
@@ -245,7 +245,7 @@ class MoERunnerBase(MoERunner):
         """
         Some combine kernels reduce across GPU ranks by default.
         """
-        if self.must_reduce_shared_expert_outputs():
+        if self._must_reduce_shared_expert_outputs():
             return final_hidden_states
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)

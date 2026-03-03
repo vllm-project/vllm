@@ -23,10 +23,6 @@ class MoERunner(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def must_reduce_shared_expert_outputs(self) -> bool:
-        raise NotImplementedError
-
-    @abstractmethod
     def maybe_all_reduce_tensor_model_parallel(
         self,
         final_hidden_states: torch.Tensor,
