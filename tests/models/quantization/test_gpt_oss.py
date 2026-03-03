@@ -21,6 +21,8 @@ import lm_eval
 import pytest
 from packaging import version
 
+from vllm.utils.torch_utils import cuda_device_count_stateless
+
 MODEL_ACCURACIES = {
     # Full quantization: attention linears and MoE linears
     "amd/gpt-oss-20b-WFP8-AFP8-KVFP8": 0.89,
@@ -83,6 +85,9 @@ class EvaluationConfig:
 def test_gpt_oss_attention_quantization(
     model_name: str, tp_size: int, expected_accuracy: float
 ):
+    if tp_size > cuda_device_count_stateless():
+        pytest.skip("Not enough GPUs to run this test case")
+
     model_args = EvaluationConfig(model_name).get_model_args(tp_size)
 
     extra_run_kwargs = {
