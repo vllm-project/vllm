@@ -2477,8 +2477,11 @@ class GPUModelRunner(
                         micro_batch_outputs = model.embed_multimodal(
                             **micro_batch_mm_inputs
                         )
-
-                        curr_group_outputs_lst.extend(micro_batch_outputs)
+                        if isinstance(micro_batch_outputs, PackedEmbeddings):
+                            micro_batch_outputs = micro_batch_outputs.embeddings
+                        curr_group_outputs_lst.extend(
+                            cast(Iterable[torch.Tensor], micro_batch_outputs)
+                        )
 
                 curr_group_outputs = curr_group_outputs_lst
             else:
@@ -2495,19 +2498,20 @@ class GPUModelRunner(
                     should_time, mm_lora_refs, current_item_idx, num_items
                 ):
                     curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
-                    is_packed_outputs = isinstance(curr_group_outputs, PackedEmbeddings)
-                    curr_group_outputs = (
-                        curr_group_outputs.embeddings
-                        if is_packed_outputs
-                        else curr_group_outputs
-                    )
+                    if isinstance(curr_group_outputs, PackedEmbeddings):
+                        is_packed_outputs = True
+                        curr_group_outputs = curr_group_outputs.embeddings
+                    else:
+                        is_packed_outputs = False
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
                 expected_num_items=num_items,
                 is_packed_outputs=is_packed_outputs,
             )
-            encoder_outputs.extend(curr_group_outputs)
+            encoder_outputs.extend(
+                cast(Iterable[torch.Tensor], curr_group_outputs)
+            )
 
             current_item_idx += num_items
 

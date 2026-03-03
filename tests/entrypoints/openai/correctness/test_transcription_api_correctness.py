@@ -134,9 +134,7 @@ def run_evaluation(
     if n_examples > 0:
         dataset = dataset.select(range(n_examples))
     start = time.perf_counter()
-    results = asyncio.run(
-        process_dataset(model, client, dataset, max_concurrent_reqs)
-    )
+    results = asyncio.run(process_dataset(model, client, dataset, max_concurrent_reqs))
     end = time.perf_counter()
     total_time = end - start
     print(f"Total Test Time: {total_time:.4f} seconds")

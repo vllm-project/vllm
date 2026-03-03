@@ -360,7 +360,7 @@ class OpenAISpeechToText(OpenAIServing):
                 task_type=self.task_type,
                 request_prompt=request.prompt,
                 to_language=to_language,
-                vllm_xargs=request.vllm_xargs,
+                vllm_xargs=getattr(request, "vllm_xargs", None),
             )
 
             parsed_prompt: DictPrompt

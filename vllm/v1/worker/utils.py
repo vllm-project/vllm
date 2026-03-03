@@ -201,6 +201,7 @@ def sanity_check_mm_encoder_outputs(
     )
 
     if is_packed_outputs:
+        assert isinstance(mm_embeddings, torch.Tensor)
         assert mm_embeddings.ndim == 2, (
             "Expected multimodal embeddings to be a 2D packed tensor when "
             "`is_packed_outputs` is True, but got a tensor with "

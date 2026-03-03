@@ -500,7 +500,6 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
-
 model_example_map = {
     "audioflamingo3": run_audioflamingo3,
     "cohere_asr": run_cohere_asr,
