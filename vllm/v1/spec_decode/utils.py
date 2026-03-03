@@ -12,6 +12,114 @@ PADDING_SLOT_ID = -1
 
 
 @triton.jit
+def eagle_step_slot_mapping_metadata_kernel(
+    positions_ptr,  # [batch_size] - current positions (1D view for M-RoPE)
+    block_table_ptr,  # [batch_size, n_blocks_per_req]
+    block_table_stride,  # stride for block_table dim 1
+    seq_lens_ptr,  # [batch_size] - read and write
+    out_clamped_positions_ptr,  # [batch_size] (output)
+    out_slot_mapping_ptr,  # [input_batch_size] (output)
+    block_size: tl.constexpr,
+    max_model_len: tl.constexpr,
+    n_blocks_per_req: tl.constexpr,
+    PAD_ID: tl.constexpr,
+    batch_size,
+):
+    """
+    Fused kernel for EAGLE autoregressive step: updates positions, slot mapping,
+    and sequence lengths in a single kernel to reduce launch overhead.
+
+    Launched with input_batch_size threads. Threads with req_idx >= batch_size
+    are cudagraph padding slots and only write PADDING_SLOT_ID.
+
+    Each real thread handles one request in the batch. Computes:
+    - new_position = position + 1, clamped if exceeds max_model_len
+    - slot_mapping from block table lookup
+    - seq_lens += 1, or 1 if position exceeds max
+    """
+    req_idx = tl.program_id(0)
+
+    if req_idx >= batch_size:
+        tl.store(out_slot_mapping_ptr + req_idx, PAD_ID)
+        return
+
+    # Load current position and increment
+    position = tl.load(positions_ptr + req_idx)
+    new_position = position + 1
+
+    # Check bounds and compute clamped position
+    exceeds_max = new_position >= max_model_len
+    clamped_position = tl.where(exceeds_max, 0, new_position)
+
+    # Block table lookup: block_number = position // block_size
+    # Clamp block_number to avoid OOB when position is at max
+    block_number = clamped_position // block_size
+    block_number = tl.minimum(block_number, n_blocks_per_req - 1)
+
+    block_id = tl.load(block_table_ptr + req_idx * block_table_stride + block_number)
+    slot_id = block_id * block_size + (clamped_position % block_size)
+    slot_id = tl.where(exceeds_max, PAD_ID, slot_id)
+
+    # Update seq_lens: +1 normally, or 1 if exceeded
+    seq_len = tl.load(seq_lens_ptr + req_idx)
+    new_seq_len = tl.where(exceeds_max, 1, seq_len + 1)
+    new_seq_len = tl.minimum(new_seq_len, max_model_len)
+
+    # Store outputs
+    tl.store(out_clamped_positions_ptr + req_idx, clamped_position)
+    tl.store(out_slot_mapping_ptr + req_idx, slot_id)
+    tl.store(seq_lens_ptr + req_idx, new_seq_len)
+
+
+def eagle_step_update_slot_mapping_and_metadata(
+    positions_1d: torch.Tensor,
+    block_table_tensor: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_size: int,
+    max_model_len: int,
+    out_clamped_positions: torch.Tensor,
+    out_slot_mapping: torch.Tensor,
+    input_batch_size: int | None = None,
+) -> None:
+    """
+    Fused update of slot mapping and metadata for one EAGLE autoregressive step.
+    Updates seq_lens in place. Writes to out_clamped_positions and out_slot_mapping.
+
+    When input_batch_size > batch_size, threads beyond batch_size write
+    PADDING_SLOT_ID to out_slot_mapping for cudagraph padding.
+
+    Args:
+        positions_1d: [batch_size] current positions (use positions[0] for M-RoPE)
+        block_table_tensor: [batch_size, n_blocks_per_req]
+        seq_lens: [batch_size] updated in place
+        block_size: KV cache block size
+        max_model_len: max model length for clamping
+        out_clamped_positions: [batch_size] output buffer for clamped positions
+        out_slot_mapping: [input_batch_size] output buffer for slot mapping
+        input_batch_size: total batch size including cudagraph padding;
+            defaults to batch_size (no padding)
+    """
+    batch_size = positions_1d.shape[0]
+    if input_batch_size is None:
+        input_batch_size = batch_size
+    n_blocks_per_req = block_table_tensor.shape[1]
+
+    eagle_step_slot_mapping_metadata_kernel[(input_batch_size,)](
+        positions_1d,
+        block_table_tensor,
+        block_table_tensor.stride(0),
+        seq_lens,
+        out_clamped_positions,
+        out_slot_mapping,
+        block_size=block_size,
+        max_model_len=max_model_len,
+        n_blocks_per_req=n_blocks_per_req,
+        PAD_ID=PADDING_SLOT_ID,
+        batch_size=batch_size,
+    )
+
+
+@triton.jit
 def eagle_prepare_inputs_padded_kernel(
     cu_num_draft_tokens_ptr,  # [num_reqs]
     valid_sampled_tokens_count_ptr,  # [num_reqs]
