@@ -14,13 +14,16 @@ import torch
 # vLLM fused-expert reference (Triton fallback + DeepGEMM option)
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+)
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
-)
 from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
@@ -108,11 +111,17 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
         a1_scale=a1_scale,
         block_shape=block_size,
     )
+    moe_config = make_dummy_moe_config()
 
-    deep_gemm_experts = mk.FusedMoEModularKernel(
-        prepare_finalize=MoEPrepareAndFinalizeNoEP(),
+    deep_gemm_experts = mk.FusedMoEKernel(
+        prepare_finalize=maybe_make_prepare_finalize(
+            moe=moe_config,
+            quant_config=quant_config,
+            allow_new_interface=True,
+            use_monolithic=False,
+        ),
         fused_experts=TritonOrDeepGemmExperts(
-            moe_config=make_dummy_moe_config(),
+            moe_config=moe_config,
             quant_config=quant_config,
         ),
         inplace=False,
@@ -130,12 +139,16 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
     )
 
     # DeepGemm
-    out_deepgemm = deep_gemm_experts(
+    out_deepgemm = deep_gemm_experts.apply(
         hidden_states=tokens_bf16,
         w1=w1,
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
+        global_num_experts=num_experts,
+        activation=MoEActivation.SILU,
+        apply_router_weight_on_input=False,
+        expert_map=None,
     )
     diff = calc_diff(out_deepgemm, out_triton)
     assert diff < 0.001, f"Diff exceeded 1%: {diff}"
