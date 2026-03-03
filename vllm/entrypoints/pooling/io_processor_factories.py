@@ -9,7 +9,7 @@ from vllm.renderers import BaseRenderer
 from vllm.tasks import SupportedTask
 
 
-def init_pooling_io_processor(
+def init_pooling_io_processors(
     supported_tasks: tuple[SupportedTask, ...],
     model_config: ModelConfig,
     renderer: BaseRenderer,
