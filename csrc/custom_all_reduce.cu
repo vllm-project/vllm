@@ -144,6 +144,12 @@ void all_gather(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                              reinterpret_cast<uint8_t*>(out.data_ptr()), size);
       break;
     }
+    case at::ScalarType::Float8_e4m3fn: {
+      // FP8 E4M3 is a 1-byte storage type. All-gather can use byte-wise copy.
+      fa->allgather<uint8_t>(stream, reinterpret_cast<uint8_t*>(reg_buffer),
+                             reinterpret_cast<uint8_t*>(out.data_ptr()), size);
+      break;
+    }
     case at::ScalarType::Float: {
       fa->allgather<float>(stream, reinterpret_cast<float*>(reg_buffer),
                            reinterpret_cast<float*>(out.data_ptr()), size);
@@ -164,8 +170,8 @@ void all_gather(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
 #endif
     default:
       throw std::runtime_error(
-          "custom all_gather only supports uint8, float32, float16 and "
-          "bfloat16");
+          "custom all_gather only supports uint8, float8_e4m3fn, float32, "
+          "float16 and bfloat16");
   }
 }
 
