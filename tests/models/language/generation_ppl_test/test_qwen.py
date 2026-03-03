@@ -22,4 +22,6 @@ def test_ppl(hf_runner, vllm_runner, model_info: GenerateModelInfo):
     if model_info.name == "Qwen/Qwen3.5-0.8B":
         vllm_extra_kwargs["language_model_only"] = True
 
-    wikitext_ppl_test(hf_runner, vllm_runner, model_info, vllm_extra_kwargs=vllm_extra_kwargs)
+    wikitext_ppl_test(
+        hf_runner, vllm_runner, model_info, vllm_extra_kwargs=vllm_extra_kwargs
+    )
