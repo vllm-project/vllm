@@ -145,10 +145,7 @@ class CPUWorker(Worker):
             CpuPlatform.get_allowed_cpu_core_node_list()
         )
         local_world_size = self.parallel_config.local_world_size
-        assert (
-            len(allowed_numa_nodes) >= local_world_size
-            or sim_multi_numa_nodes
-        ), (
+        assert len(allowed_numa_nodes) >= local_world_size or sim_multi_numa_nodes, (
             f"Not enough allowed NUMA nodes to bind threads of "
             f"{local_world_size} local CPUWorkers. "
             f"Allowed NUMA nodes are {allowed_numa_nodes}. "
