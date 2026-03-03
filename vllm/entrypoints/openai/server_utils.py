@@ -127,8 +127,8 @@ def get_uvicorn_log_config(args: Namespace) -> dict | None:
 
     Priority:
     1. If log_config_file is specified, use it
-    2. If disable_access_log_for_endpoints is specified, create a config with
-       the access log filter
+    2. If disable_access_log_for_endpoints is specified or dashboard is enabled,
+       create a config with the access log filter
     3. Otherwise, return None (use uvicorn defaults)
     """
     # First, try to load from file if specified
@@ -136,16 +136,23 @@ def get_uvicorn_log_config(args: Namespace) -> dict | None:
     if log_config is not None:
         return log_config
 
-    # If endpoints to filter are specified, create a config with the filter
-    if args.disable_access_log_for_endpoints:
-        from vllm.logging_utils import create_uvicorn_log_config
+    excluded_paths: list[str] = []
 
-        # Parse comma-separated string into list
+    # User-specified endpoints to filter
+    if args.disable_access_log_for_endpoints:
         excluded_paths = [
             p.strip()
             for p in args.disable_access_log_for_endpoints.split(",")
             if p.strip()
         ]
+
+    # Dashboard polling endpoints create noise every 5s; suppress them
+    if getattr(args, "enable_dashboard", False):
+        excluded_paths.extend(["/dashboard/api/info", "/dashboard/api/metrics", "/dashboard"])
+
+    if excluded_paths:
+        from vllm.logging_utils import create_uvicorn_log_config
+
         return create_uvicorn_log_config(
             excluded_paths=excluded_paths,
             log_level=args.uvicorn_log_level,

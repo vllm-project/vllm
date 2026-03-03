@@ -35,8 +35,8 @@
             --error: #ef4444;
 
             --radius: 0.625rem;
-            --font-sans: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+            --font-sans: var(--font-inter), Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+            --font-mono: var(--font-jetbrains), "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
         }
 
         /* Light theme */
@@ -95,22 +95,141 @@
             background: var(--scrollbar-hover);
         }
 
-        /* Main Layout - top bar + 3 columns */
+        /* Main Layout - vertical flow with tabs */
         .dashboard {
-            display: grid;
-            grid-template-rows: auto 1fr;
-            grid-template-columns: 280px 1fr 280px;
-            grid-template-areas:
-                "topbar topbar topbar"
-                "left center right";
+            display: flex;
+            flex-direction: column;
             height: 100vh;
             gap: 12px;
             padding: 12px;
         }
 
+        /* Tab Bar */
+        .tab-bar {
+            display: flex;
+            gap: 4px;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 4px;
+            flex-shrink: 0;
+        }
+
+        .tab-btn {
+            padding: 8px 20px;
+            background: transparent;
+            border: none;
+            border-radius: calc(var(--radius) - 2px);
+            color: var(--muted-foreground);
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            letter-spacing: 0.02em;
+        }
+
+        .tab-btn:hover {
+            color: var(--foreground);
+            background: var(--hover-bg);
+        }
+
+        .tab-btn.active {
+            color: var(--vllm-yellow);
+            background: rgba(253, 181, 23, 0.1);
+        }
+
+        /* Tab Content */
+        .tab-content {
+            flex: 1;
+            min-height: 0;
+            overflow: hidden;
+        }
+
+        .tab-page {
+            display: none;
+            height: 100%;
+        }
+
+        .tab-page.active {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        /* Hero Metrics Strip */
+        .hero-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+            gap: 10px;
+            flex-shrink: 0;
+        }
+
+        .hero-card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 14px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            transition: box-shadow 0.3s ease;
+        }
+
+        .hero-card:hover {
+            box-shadow: 0 4px 20px var(--shadow-color);
+        }
+
+        .hero-label {
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--muted-foreground);
+        }
+
+        .hero-value {
+            font-size: 26px;
+            font-weight: 700;
+            font-family: var(--font-mono);
+            color: var(--vllm-blue);
+            line-height: 1.1;
+        }
+
+        /* Overview Tab Layout - 3 panels: Key Info | Chat | Stats */
+        .overview-columns {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 1fr 1.8fr 1.2fr;
+            gap: 12px;
+            min-height: 0;
+        }
+
+        .overview-columns > .panel {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            min-height: 0;
+        }
+
+        /* Config Tab Layout */
+        .config-columns {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 12px;
+            min-height: 0;
+        }
+
+        .config-columns > .panel {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Removed: standalone playground tab layout (chat is now in overview) */
+
         /* Top Bar */
         .top-bar {
-            grid-area: topbar;
             display: flex;
             align-items: center;
             gap: 8px;
@@ -118,6 +237,7 @@
             border: 1px solid var(--border);
             border-radius: var(--radius);
             padding: 8px 12px;
+            flex-shrink: 0;
         }
 
         .status-indicator {
@@ -138,7 +258,7 @@
         }
 
         .status-indicator .version {
-            font-size: 12px;
+            font-size: 14px;
             color: var(--muted-foreground);
             font-family: var(--font-mono);
             font-weight: 500;
@@ -150,7 +270,7 @@
             gap: 6px;
             padding: 0 10px;
             border-left: 1px solid var(--border);
-            font-size: 11px;
+            font-size: 13px;
             color: var(--muted-foreground);
         }
 
@@ -173,7 +293,7 @@
             background: rgba(234, 179, 8, 0.15);
             border: 1px solid var(--warning);
             border-radius: calc(var(--radius) - 2px);
-            font-size: 11px;
+            font-size: 13px;
             font-weight: 600;
             color: var(--warning);
         }
@@ -241,7 +361,7 @@
             padding: 14px 16px;
             background: linear-gradient(90deg, rgba(48, 162, 255, 0.08) 0%, transparent 100%);
             border-bottom: 1px solid var(--border);
-            font-size: 11px;
+            font-size: 13px;
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 0.05em;
@@ -260,19 +380,122 @@
             box-shadow: 0 0 8px var(--vllm-blue);
         }
 
-        /* Left Panel - Info */
-        .left-panel {
-            grid-area: left;
-            display: flex;
-            flex-direction: column;
-        }
+        /* Removed: left-panel, left-panel-section, center-panel, right-panel (replaced by tab layout) */
 
-        .left-panel-section {
+        /* Key Info summary card */
+        .key-info-section {
             flex: 1;
             display: flex;
             flex-direction: column;
             min-height: 0;
-            overflow: hidden;
+        }
+
+        .key-info-section .panel-header {
+            background: linear-gradient(90deg, rgba(253, 181, 23, 0.12) 0%, transparent 100%);
+            user-select: none;
+        }
+
+        .key-info-section .panel-header::before {
+            background: var(--vllm-yellow);
+            box-shadow: 0 0 8px var(--vllm-yellow);
+        }
+
+        .key-info-section .panel-header .header-title {
+            color: var(--vllm-yellow);
+        }
+
+        .key-info-section .panel-header .expand-arrow {
+            display: none;
+            width: 12px;
+            height: 12px;
+            fill: none;
+            stroke: var(--muted-foreground);
+            stroke-width: 2;
+            transition: transform 0.2s ease;
+        }
+
+        /* collapsed state removed - panel is always open */
+
+        .key-info-content {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        /* collapsed content rule removed - always visible */
+
+        .key-info-group {
+            padding: 0;
+        }
+
+        .key-info-group-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 12px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--muted-foreground);
+            background: var(--muted);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .key-info-group-header svg {
+            width: 12px;
+            height: 12px;
+            stroke: currentColor;
+            fill: none;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .key-info-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            padding: 4px 12px;
+            border-bottom: 1px solid var(--border);
+            font-size: 13px;
+        }
+
+        .key-info-row:last-child {
+            border-bottom: none;
+        }
+
+        .key-info-label {
+            color: var(--muted-foreground);
+            font-family: var(--font-mono);
+            font-size: 12px;
+            white-space: nowrap;
+            flex-shrink: 0;
+            min-width: 0;
+        }
+
+        .key-info-value {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            font-weight: 600;
+            text-align: right;
+            word-break: break-all;
+            flex-shrink: 0;
+        }
+
+        .key-info-value.val-enabled {
+            color: var(--success);
+        }
+
+        .key-info-value.val-disabled {
+            color: var(--muted-foreground);
+        }
+
+        .key-info-value.val-highlight {
+            color: var(--vllm-yellow);
+        }
+
+        .key-info-value.val-info {
+            color: var(--vllm-blue);
         }
 
         /* Config section */
@@ -287,7 +510,7 @@
             justify-content: space-between;
             padding: 8px 16px;
             border-bottom: 1px solid var(--border);
-            font-size: 11px;
+            font-size: 13px;
             transition: background 0.15s ease;
         }
 
@@ -343,7 +566,7 @@
             border: 1px solid var(--vllm-blue);
             padding: 12px 16px;
             border-radius: var(--radius);
-            font-size: 12px;
+            font-size: 14px;
             font-family: var(--font-mono);
             color: var(--foreground);
             max-width: 500px;
@@ -435,7 +658,7 @@
             border: 1px solid var(--border);
             border-radius: calc(var(--radius) - 4px);
             color: var(--foreground);
-            font-size: 11px;
+            font-size: 13px;
             outline: none;
             transition: opacity 0.15s ease;
         }
@@ -452,20 +675,6 @@
             color: var(--muted-foreground);
         }
 
-        /* Center Panel - Chat */
-        .center-panel {
-            grid-area: center;
-            display: flex;
-            flex-direction: column;
-            min-width: 0;
-        }
-
-        /* Right Panel - Environment */
-        .right-panel {
-            grid-area: right;
-            display: flex;
-            flex-direction: column;
-        }
 
         /* Parameters Panel */
         .params-panel {
@@ -481,7 +690,7 @@
             padding: 8px 12px;
             cursor: pointer;
             user-select: none;
-            font-size: 11px;
+            font-size: 13px;
             color: var(--muted-foreground);
             gap: 8px;
         }
@@ -507,7 +716,7 @@
         .params-header .params-summary code {
             color: var(--muted-foreground);
             font-family: var(--font-mono);
-            font-size: 10px;
+            font-size: 12px;
             background: none;
         }
 
@@ -563,7 +772,7 @@
 
         .param-label {
             font-family: var(--font-mono);
-            font-size: 11px;
+            font-size: 13px;
             color: var(--muted-foreground);
             min-width: 120px;
             flex-shrink: 0;
@@ -614,7 +823,7 @@
 
         .param-value {
             font-family: var(--font-mono);
-            font-size: 11px;
+            font-size: 13px;
             color: var(--vllm-blue);
             min-width: 45px;
             text-align: right;
@@ -629,7 +838,7 @@
             border-radius: calc(var(--radius) - 4px);
             color: var(--foreground);
             font-family: var(--font-mono);
-            font-size: 11px;
+            font-size: 13px;
             outline: none;
         }
 
@@ -675,7 +884,7 @@
             border: 1px solid var(--border);
             border-radius: calc(var(--radius) - 4px);
             color: var(--foreground);
-            font-size: 11px;
+            font-size: 13px;
             outline: none;
             cursor: pointer;
             appearance: none;
@@ -697,7 +906,7 @@
         }
 
         .params-reset {
-            font-size: 10px;
+            font-size: 12px;
             color: var(--muted-foreground);
             background: none;
             border: none;
@@ -739,7 +948,7 @@
             justify-content: center;
             height: 100%;
             color: var(--muted-foreground);
-            font-size: 14px;
+            font-size: 16px;
         }
 
         .message {
@@ -760,7 +969,7 @@
         .message-bubble {
             padding: 10px 14px;
             border-radius: var(--radius);
-            font-size: 13px;
+            font-size: 15px;
         }
 
         .message-user .message-bubble {
@@ -781,7 +990,7 @@
             padding: 8px 10px;
             margin-bottom: 8px;
             border-radius: 0 6px 6px 0;
-            font-size: 11px;
+            font-size: 13px;
         }
 
         .thinking-header {
@@ -806,7 +1015,7 @@
         }
 
         .message-meta {
-            font-size: 10px;
+            font-size: 12px;
             color: var(--muted-foreground);
             margin-top: 4px;
             padding: 0 4px;
@@ -835,7 +1044,7 @@
             border-radius: var(--radius);
             padding: 10px 14px;
             color: var(--foreground);
-            font-size: 13px;
+            font-size: 15px;
             outline: none;
             transition: border-color 0.2s, box-shadow 0.2s;
         }
@@ -856,7 +1065,7 @@
             padding: 10px 20px;
             color: white;
             font-weight: 600;
-            font-size: 12px;
+            font-size: 14px;
             cursor: pointer;
             transition: transform 0.1s, box-shadow 0.2s;
         }
@@ -882,7 +1091,7 @@
         .chat-stats {
             display: flex;
             gap: 12px;
-            font-size: 10px;
+            font-size: 12px;
             color: var(--muted-foreground);
         }
 
@@ -903,7 +1112,7 @@
             border-radius: 4px;
             padding: 4px 10px;
             color: var(--muted-foreground);
-            font-size: 10px;
+            font-size: 12px;
             cursor: pointer;
             transition: all 0.2s;
         }
@@ -976,7 +1185,7 @@
             border: none;
             border-radius: 50%;
             color: white;
-            font-size: 12px;
+            font-size: 14px;
             cursor: pointer;
             display: flex;
             align-items: center;
@@ -1015,7 +1224,7 @@
             align-items: center;
             gap: 4px;
             padding: 8px 16px;
-            font-size: 12px;
+            font-size: 14px;
             color: var(--muted-foreground);
         }
 
@@ -1117,57 +1326,36 @@
             </button>
         </div>
 
-        <!-- Left Panel: Configuration + Environment -->
-        <div class="panel left-panel">
-            <div class="left-panel-section">
-                <div class="panel-header">
-                    Configuration
-                    <div class="panel-actions">
-                        <button class="icon-btn" id="config-filter-btn" title="Show only set values" onclick="toggleFilter('config')">
-                            <svg viewBox="0 0 24 24"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>
-                        </button>
-                        <div class="search-wrapper" id="config-search-wrapper">
-                            <button class="icon-btn" title="Search" onclick="toggleSearch('config')">
-                                <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                            </button>
-                            <input type="text" class="search-input" id="config-search" placeholder="Search..." oninput="filterList('config')">
-                        </div>
-                    </div>
-                </div>
-                <div class="config-scroll" id="config-list">
-                    <div class="config-item">
-                        <span class="config-key">Loading...</span>
-                    </div>
-                </div>
-            </div>
-            <div class="left-panel-section" style="border-top: 1px solid var(--border);">
-                <div class="panel-header">
-                    Environment
-                    <div class="panel-actions">
-                        <button class="icon-btn" id="env-filter-btn" title="Show only set values" onclick="toggleFilter('env')">
-                            <svg viewBox="0 0 24 24"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>
-                        </button>
-                        <div class="search-wrapper" id="env-search-wrapper">
-                            <button class="icon-btn" title="Search" onclick="toggleSearch('env')">
-                                <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                            </button>
-                            <input type="text" class="search-input" id="env-search" placeholder="Search..." oninput="filterList('env')">
-                        </div>
-                    </div>
-                </div>
-                <div class="config-scroll" id="env-list">
-                    <div class="config-item">
-                        <span class="config-key">Loading...</span>
-                    </div>
-                </div>
-            </div>
+        <!-- Tab Bar -->
+        <div class="tab-bar">
+            <button class="tab-btn active" data-tab="overview" onclick="switchTab('overview')">Overview</button>
+            <button class="tab-btn" data-tab="config" onclick="switchTab('config')">Config</button>
         </div>
 
-        <!-- Center Panel: Chat -->
-        <div class="panel center-panel">
+        <!-- Tab Content -->
+        <div class="tab-content">
+            <!-- Overview Tab -->
+            <div class="tab-page active" id="tab-overview">
+                <div class="hero-metrics" id="hero-metrics">
+                    <div class="hero-card"><span class="hero-label">Loading metrics...</span><span class="hero-value">-</span></div>
+                </div>
+                <div class="overview-columns">
+                    <div class="panel">
+                        <div class="key-info-section" id="key-info-section">
+                            <div class="panel-header">
+                                <span class="header-title">Key Info</span>
+                            </div>
+                            <div class="key-info-content" id="key-info-content">
+                                <div class="key-info-row">
+                                    <span class="key-info-label">Loading...</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
             <div class="panel-header">
                 <span id="model-name" style="color:var(--vllm-yellow);text-transform:none;letter-spacing:0;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="">-</span>
-                <span style="margin-left:auto;font-size:10px;color:var(--muted-foreground);text-transform:none;letter-spacing:0;font-weight:400">Press Enter to send</span>
+                <span style="margin-left:auto;font-size:12px;color:var(--muted-foreground);text-transform:none;letter-spacing:0;font-weight:400">Press Enter to send</span>
             </div>
 
             <!-- Parameters Panel -->
@@ -1328,26 +1516,94 @@
                     </div>
                 </div>
             </div>
-        </div>
-
-        <!-- Right Panel: Runtime Stats -->
-        <div class="panel right-panel">
-            <div class="panel-header">
-                Runtime Stats
-                <div class="panel-actions">
-                    <div class="search-wrapper" id="stats-search-wrapper">
-                        <button class="icon-btn" title="Search" onclick="toggleSearch('stats')">
-                            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                        </button>
-                        <input type="text" class="search-input" id="stats-search" placeholder="Search..." oninput="filterList('stats')">
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            Runtime Stats
+                            <div class="panel-actions">
+                                <div class="search-wrapper" id="stats-search-wrapper">
+                                    <button class="icon-btn" title="Search" onclick="toggleSearch('stats')">
+                                        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                                    </button>
+                                    <input type="text" class="search-input" id="stats-search" placeholder="Search..." oninput="filterList('stats')">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="config-scroll" id="stats-list">
+                            <div class="config-item">
+                                <span class="config-key">Loading...</span>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
-            <div class="config-scroll" id="stats-list">
-                <div class="config-item">
-                    <span class="config-key">Loading...</span>
+
+            <!-- Config Tab -->
+            <div class="tab-page" id="tab-config">
+                <div class="config-columns">
+                    <div class="panel">
+                        <div class="panel-header">
+                            Configuration
+                            <div class="panel-actions">
+                                <button class="icon-btn" id="config-filter-btn" title="Show only set values" onclick="toggleFilter('config')">
+                                    <svg viewBox="0 0 24 24"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>
+                                </button>
+                                <div class="search-wrapper" id="config-search-wrapper">
+                                    <button class="icon-btn" title="Search" onclick="toggleSearch('config')">
+                                        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                                    </button>
+                                    <input type="text" class="search-input" id="config-search" placeholder="Search..." oninput="filterList('config')">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="config-scroll" id="config-list">
+                            <div class="config-item">
+                                <span class="config-key">Loading...</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            Environment
+                            <div class="panel-actions">
+                                <button class="icon-btn" id="env-filter-btn" title="Show only set values" onclick="toggleFilter('env')">
+                                    <svg viewBox="0 0 24 24"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>
+                                </button>
+                                <div class="search-wrapper" id="env-search-wrapper">
+                                    <button class="icon-btn" title="Search" onclick="toggleSearch('env')">
+                                        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                                    </button>
+                                    <input type="text" class="search-input" id="env-search" placeholder="Search..." oninput="filterList('env')">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="config-scroll" id="env-list">
+                            <div class="config-item">
+                                <span class="config-key">Loading...</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            System
+                            <div class="panel-actions">
+                                <div class="search-wrapper" id="sys-search-wrapper">
+                                    <button class="icon-btn" title="Search" onclick="toggleSearch('sys')">
+                                        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                                    </button>
+                                    <input type="text" class="search-input" id="sys-search" placeholder="Search..." oninput="filterList('sys')">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="config-scroll" id="sys-list">
+                            <div class="config-item">
+                                <span class="config-key">Loading...</span>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
+
         </div>
     </div>
 
@@ -1715,6 +1971,190 @@
             }
         });
 
+        // Key Info panel (non-collapsible)
+        function restoreKeyInfoState() { /* no-op, kept for init() compat */ }
+
+        // Render Key Info summary card from vllm_config
+        function renderKeyInfo(data) {
+            const container = document.getElementById('key-info-content');
+            const cfg = data.vllm_config;
+            if (!cfg) {
+                container.innerHTML = '<div class="key-info-row"><span class="key-info-label">No config available</span></div>';
+                return;
+            }
+
+            const mc = cfg.model_config || {};
+            const pc = cfg.parallel_config || {};
+            const cc = cfg.cache_config || {};
+            const sc = cfg.scheduler_config || {};
+            const cpc = cfg.compilation_config || {};
+            const nda = data.non_default_args || {};
+            const si = data.startup_info || {};
+            const se = data.system_env || {};
+
+            const g = (label, icon, rows) => {
+                let h = `<div class="key-info-group"><div class="key-info-group-header">${icon} ${label}</div>`;
+                for (const [k, v, cls] of rows) {
+                    if (v == null || v === '' || v === undefined) continue;
+                    const vc = cls || 'val-info';
+                    h += `<div class="key-info-row"><span class="key-info-label">${k}</span><span class="key-info-value ${vc}" title="${esc(String(v))}">${esc(String(v))}</span></div>`;
+                }
+                h += '</div>';
+                return h;
+            };
+
+            const svgCpu = '<svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>';
+            const svgGrid = '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>';
+            const svgDb = '<svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>';
+            const svgZap = '<svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>';
+            const svgSliders = '<svg viewBox="0 0 24 24"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>';
+
+            // Architecture from startup_info (property, not in serialized config)
+            const arch = si.architecture || '-';
+
+            // Dtype: strip 'torch.' prefix for display
+            let dtype = mc.dtype || '-';
+            if (typeof dtype === 'string') dtype = dtype.replace(/^torch\./, '');
+
+            const quant = mc.quantization || 'none';
+
+            // Parallelism
+            const tp = pc.tensor_parallel_size || 1;
+            const pp = pc.pipeline_parallel_size || 1;
+            const dp = pc.data_parallel_size || 1;
+
+            // Cache
+            let kvDtype = cc.cache_dtype || '-';
+            if (typeof kvDtype === 'string') kvDtype = kvDtype.replace(/^torch\./, '');
+            const prefixCache = cc.enable_prefix_caching;
+
+            // Scheduling
+            const chunkedPrefill = sc.enable_chunked_prefill;
+            const maxBatchedTokens = sc.max_num_batched_tokens;
+            const asyncSched = sc.async_scheduling;
+
+            // Compilation and attention (enums exposed as strings via startup_info)
+            const compilationMode = si.compilation_mode;
+            const cudagraphMode = si.cudagraph_mode;
+            const attnBackend = si.attention_backend;
+            const optLevel = si.optimization_level;
+            const inductorPartition = si.inductor_graph_partition;
+            const passConfigFusions = si.pass_config_fusions || {};
+            const flashinferAutotune = si.flashinfer_autotune;
+            const moeBackend = si.moe_backend;
+
+            // Non-default args summary
+            const ndaKeys = Object.keys(nda);
+
+            let html = '';
+
+            html += g('Model', svgCpu, [
+                ['Architecture', arch, 'val-highlight'],
+                ['Max Model Len', mc.max_model_len != null ? Number(mc.max_model_len).toLocaleString() : '-', 'val-info'],
+                ['Dtype', dtype, 'val-info'],
+                ['Quantization', quant, quant !== 'none' ? 'val-highlight' : 'val-disabled'],
+                ['Trust Remote Code', mc.trust_remote_code === true ? 'yes' : mc.trust_remote_code === false ? 'no' : '-', mc.trust_remote_code ? 'val-enabled' : 'val-disabled'],
+            ]);
+
+            html += g('Parallelism', svgGrid, [
+                ['TP / PP / DP', `${tp} / ${pp} / ${dp}`, (tp > 1 || pp > 1 || dp > 1) ? 'val-highlight' : 'val-info'],
+            ]);
+
+            const kvTokens = si.kv_cache_tokens;
+            const maxConc = si.max_concurrency;
+
+            html += g('Cache', svgDb, [
+                ['KV Cache Dtype', kvDtype, 'val-info'],
+                ['Prefix Caching', prefixCache === true ? 'enabled' : prefixCache === false ? 'disabled' : '-', prefixCache ? 'val-enabled' : 'val-disabled'],
+                ['KV Cache Size', kvTokens ? Number(kvTokens).toLocaleString() + ' tokens' : null, 'val-info'],
+                ['Max Concurrency', maxConc ? maxConc + 'x' : null, 'val-info'],
+            ]);
+
+            html += g('Scheduling', svgZap, [
+                ['Attn Backend', attnBackend || '-', attnBackend ? 'val-highlight' : 'val-disabled'],
+                ['Chunked Prefill', chunkedPrefill === true ? (maxBatchedTokens ? maxBatchedTokens.toLocaleString() + ' tokens' : 'enabled') : chunkedPrefill === false ? 'disabled' : '-', chunkedPrefill ? 'val-enabled' : 'val-disabled'],
+                ['Async Scheduling', asyncSched === true ? 'enabled' : asyncSched === false ? 'disabled' : '-', asyncSched ? 'val-enabled' : 'val-disabled'],
+            ]);
+
+            const svgCompile = '<svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.376 3.622a1 1 0 0 1 3.002 3.002L7.368 18.635a2 2 0 0 1-.855.506l-2.872.838a.5.5 0 0 1-.62-.62l.838-2.872a2 2 0 0 1 .506-.854z"/></svg>';
+            const fusionNames = Object.keys(passConfigFusions);
+            const fusionDisplay = fusionNames.length > 0
+                ? fusionNames.map(n => n.replace(/^fuse_/, '').replace(/^enable_/, '')).join(', ')
+                : null;
+            html += g('Compilation', svgCompile, [
+                ['-O Level', optLevel || '-', optLevel && optLevel !== 'O0' ? 'val-highlight' : 'val-disabled'],
+                ['Mode', compilationMode || '-', compilationMode && compilationMode !== 'NONE' ? 'val-info' : 'val-disabled'],
+                ['CUDA Graphs', cudagraphMode || '-', cudagraphMode && cudagraphMode !== 'NONE' ? 'val-info' : 'val-disabled'],
+                ['Inductor Partition', inductorPartition === true ? 'enabled' : inductorPartition === false ? 'disabled' : '-', inductorPartition ? 'val-enabled' : 'val-disabled'],
+                ['Kernel Fusions', fusionDisplay, 'val-info'],
+                ['FlashInfer Autotune', flashinferAutotune === true ? 'enabled' : flashinferAutotune === false ? 'disabled' : '-', flashinferAutotune ? 'val-enabled' : 'val-disabled'],
+                ['MoE Backend', moeBackend && moeBackend !== 'auto' ? moeBackend : null, 'val-info'],
+            ]);
+
+            // System info (GPU, CUDA, torch)
+            const svgMonitor = '<svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>';
+            let gpuName = se.nvidia_gpu_models || '';
+            if (gpuName && gpuName.length > 30) gpuName = gpuName.substring(0, 28) + '...';
+            const cudaVer = se.cuda_runtime_version;
+            const torchVer = se.torch_version;
+            if (gpuName || cudaVer || torchVer) {
+                html += g('System', svgMonitor, [
+                    ['GPU', gpuName || '-', 'val-highlight'],
+                    ['CUDA', cudaVer || '-', 'val-info'],
+                    ['PyTorch', torchVer || '-', 'val-info'],
+                ]);
+            }
+
+            if (ndaKeys.length > 0) {
+                const ndaRows = ndaKeys.map(k => {
+                    let v = nda[k];
+                    if (typeof v === 'object') v = JSON.stringify(v);
+                    if (typeof v === 'string' && v.length > 25) v = v.substring(0, 23) + '...';
+                    return [k, String(v), 'val-highlight'];
+                });
+                html += g('Non-Default Args', svgSliders, ndaRows);
+            }
+
+            // Backend-related env vars: show env vars associated with the
+            // resolved attn backend and other active features.
+            const env = data.vllm_env || {};
+            const explicitEnvSet = new Set(data.explicit_envs || []);
+            const backendKwMap = {
+                'FLASHINFER': 'FLASHINFER', 'FLASHINFER_MLA': 'FLASHINFER',
+                'FLASHINFER_MLA_SPARSE': 'FLASHINFER',
+                'FLASH_ATTN': 'FLASH_ATTN', 'FLASH_ATTN_DIFFKV': 'FLASH_ATTN',
+                'FLASH_ATTN_MLA': 'FLASH_ATTN',
+                'TRITON_ATTN': 'TRITON', 'TRITON_MLA': 'TRITON',
+                'ROCM_ATTN': 'ROCM', 'ROCM_AITER_MLA': 'ROCM',
+                'ROCM_AITER_FA': 'ROCM', 'ROCM_AITER_UNIFIED_ATTN': 'ROCM',
+            };
+            const keywords = new Set();
+            if (attnBackend && backendKwMap[attnBackend]) keywords.add(backendKwMap[attnBackend]);
+            if (mc.use_mla || (attnBackend && attnBackend.includes('MLA'))) keywords.add('MLA');
+
+            if (keywords.size > 0) {
+                const kwArr = [...keywords];
+                const rows = [];
+                for (const [k, v] of Object.entries(env)) {
+                    if (!kwArr.some(kw => k.includes(kw))) continue;
+                    const isExplicit = explicitEnvSet.has(k);
+                    const isActive = v === true || v === 'true' || (typeof v === 'number' && v !== 0) || (typeof v === 'string' && v !== '' && v !== 'false' && v !== '0');
+                    const short = k.replace(/^VLLM_/, '');
+                    let dv = typeof v === 'boolean' ? (v ? 'true' : 'false') : String(v);
+                    if (dv.length > 20) dv = dv.substring(0, 18) + '..';
+                    const cls = isExplicit ? 'val-highlight' : isActive ? 'val-enabled' : 'val-disabled';
+                    rows.push([short, dv, cls]);
+                }
+                if (rows.length > 0) {
+                    const svgLink = '<svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>';
+                    const label = kwArr.join(' / ') + ' Env';
+                    html += g(label, svgLink, rows);
+                }
+            }
+
+            container.innerHTML = html;
+        }
+
         // Fetch server info
         async function fetchServerInfo() {
             try {
@@ -1774,7 +2214,8 @@
                     statusDot.style.boxShadow = '0 0 10px var(--success)';
                 }
 
-                // Render config and env
+                // Render key info summary and full config
+                renderKeyInfo(data);
                 fetchConfig(data);
             } catch (e) {
                 const dot = document.getElementById('status-dot');
@@ -1790,9 +2231,9 @@
                 if (!resp.ok) return;  // Silently ignore errors
                 const data = await resp.json();
 
-                // Update Runtime Stats panel
+                // Update hero metrics and runtime stats panel
+                renderHeroMetrics(data);
                 renderRuntimeStats(data);
-                // Reapply search filter if active
                 filterList('stats');
 
             } catch (e) {
@@ -1886,9 +2327,50 @@
                 }
                 envList.innerHTML = envHtml || '<div class="config-item"><span class="config-key">No env vars</span></div>';
 
+                // Render system environment info
+                const sysList = document.getElementById('sys-list');
+                const sysEnv = data.system_env;
+                let sysHtml = '';
+                if (sysEnv && typeof sysEnv === 'object') {
+                    const displayOrder = [
+                        'nvidia_gpu_models', 'gpu_topo',
+                        'cuda_runtime_version', 'cuda_compiled_version',
+                        'cudnn_version', 'nvidia_driver_version',
+                        'torch_version', 'vllm_version', 'vllm_build_flags',
+                        'python_version', 'os', 'gcc_version',
+                        'cpu_info', 'libc_version',
+                    ];
+                    const shown = new Set();
+                    for (const key of displayOrder) {
+                        if (key in sysEnv) {
+                            const val = sysEnv[key];
+                            if (val == null || val === '' || val === 'N/A') continue;
+                            const fullVal = formatFullValue(val);
+                            sysHtml += `<div class="config-item" data-tooltip="${key}: ${esc(String(fullVal).substring(0, 200))}">
+                                <span class="config-key">${key}</span>
+                                <span class="config-val">${formatValue(val)}</span>
+                            </div>`;
+                            shown.add(key);
+                        }
+                    }
+                    for (const key of Object.keys(sysEnv).sort()) {
+                        if (shown.has(key)) continue;
+                        const val = sysEnv[key];
+                        if (val == null || val === '' || val === 'N/A') continue;
+                        if (key === 'pip_packages' || key === 'conda_packages') continue;
+                        const fullVal = formatFullValue(val);
+                        sysHtml += `<div class="config-item" data-tooltip="${key}: ${esc(String(fullVal).substring(0, 200))}">
+                            <span class="config-key">${key}</span>
+                            <span class="config-val">${formatValue(val)}</span>
+                        </div>`;
+                    }
+                }
+                sysList.innerHTML = sysHtml || '<div class="config-item"><span class="config-key">No system info</span></div>';
+
                 // Apply filters after rendering (respect saved toggle states)
                 filterList('config');
                 filterList('env');
+                filterList('sys');
 
             } catch (e) {
                 console.error('Config render error:', e);
@@ -2290,16 +2772,21 @@
                 const reader = resp.body.getReader();
                 const decoder = new TextDecoder();
                 const responseEl = assistantDiv.querySelector('.message-content');
+                let sseBuffer = '';
 
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
 
-                    const chunk = decoder.decode(value);
-                    for (const line of chunk.split('\n')) {
-                        if (line.startsWith('data: ') && line.slice(6) !== '[DONE]') {
+                    sseBuffer += decoder.decode(value, { stream: true });
+                    const lines = sseBuffer.split('\n');
+                    sseBuffer = lines.pop();
+
+                    for (const line of lines) {
+                        const trimmed = line.trim();
+                        if (trimmed.startsWith('data: ') && trimmed.slice(6) !== '[DONE]') {
                             try {
-                                const delta = JSON.parse(line.slice(6)).choices?.[0]?.delta?.content;
+                                const delta = JSON.parse(trimmed.slice(6)).choices?.[0]?.delta?.content;
                                 if (delta) {
                                     fullContent += delta;
                                     tokens++;
@@ -2309,7 +2796,7 @@
                                     if (thinking) {
                                         html = `<div class="thinking-block">
                                             <div class="thinking-header" onclick="this.nextElementSibling.classList.toggle('expanded')">
-                                                <span>Thinking</span><span style="font-size:9px;color:var(--muted-foreground)">Click to expand</span>
+                                                <span>Thinking</span><span style="font-size:11px;color:var(--muted-foreground)">Click to expand</span>
                                             </div>
                                             <div class="thinking-content">${esc(thinking)}</div>
                                         </div>`;
@@ -2398,18 +2885,66 @@
             }
         }
 
+        // Tab switching
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-page').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            const page = document.getElementById('tab-' + tabId);
+            if (page) page.classList.add('active');
+            const btn = document.querySelector(`.tab-btn[data-tab="${tabId}"]`);
+            if (btn) btn.classList.add('active');
+            localStorage.setItem('vllm-dashboard-active-tab', tabId);
+        }
+
+        function restoreTab() {
+            const saved = localStorage.getItem('vllm-dashboard-active-tab');
+            if (saved && document.getElementById('tab-' + saved)) {
+                switchTab(saved);
+            }
+        }
+
+        // Hero metrics cards
+        function renderHeroMetrics(metricsData) {
+            const container = document.getElementById('hero-metrics');
+            if (!container) return;
+
+            const running = metricsData['vllm:num_requests_running']?.value || 0;
+            const waiting = metricsData['vllm:num_requests_waiting']?.value || 0;
+            const kv = metricsData['vllm:kv_cache_usage_perc'] || metricsData['vllm:gpu_cache_usage_perc'];
+            const e2e = metricsData['vllm:e2e_request_latency_seconds'];
+            const ttft = metricsData['vllm:time_to_first_token_seconds'];
+            const itl = metricsData['vllm:inter_token_latency_seconds'];
+            const cacheQueries = metricsData['vllm:prefix_cache_queries']?.value || 0;
+            const cacheHits = metricsData['vllm:prefix_cache_hits']?.value || 0;
+
+            const card = (label, value, color) =>
+                `<div class="hero-card"><span class="hero-label">${label}</span><span class="hero-value" style="color:${color}">${value}</span></div>`;
+
+            let html = '';
+            html += card('Running', running, running > 0 ? 'var(--success)' : 'var(--muted-foreground)');
+            html += card('Waiting', waiting, waiting > 0 ? 'var(--warning)' : 'var(--muted-foreground)');
+            html += card('KV Cache', kv ? (kv.value * 100).toFixed(1) + '%' : '-', 'var(--vllm-blue)');
+            html += card('Avg TTFT', ttft?.count > 0 ? ((ttft.sum / ttft.count) * 1000).toFixed(0) + 'ms' : '-', 'var(--vllm-blue)');
+            html += card('Avg ITL', itl?.count > 0 ? ((itl.sum / itl.count) * 1000).toFixed(1) + 'ms' : '-', 'var(--vllm-blue)');
+            html += card('Avg E2E', e2e?.count > 0 ? (e2e.sum / e2e.count).toFixed(2) + 's' : '-', 'var(--vllm-blue)');
+            html += card('Cache Hit', cacheQueries > 0 ? (cacheHits / cacheQueries * 100).toFixed(1) + '%' : '-', cacheQueries > 0 ? 'var(--success)' : 'var(--muted-foreground)');
+            html += card('Total Reqs', e2e?.count || 0, 'var(--vllm-blue)');
+
+            container.innerHTML = html;
+        }
+
         // Init
         async function init() {
-            loadParams();            // Load saved chat parameters
-            restoreParamsPanel();    // Restore params panel expand state
-            restoreFilterToggles();  // Restore saved toggle states
-            setupDragDrop();         // Enable drag & drop for images
-            await fetchServerInfo();  // Also fetches config & env
+            restoreTab();
+            loadParams();
+            restoreParamsPanel();
+            restoreFilterToggles();
+            restoreKeyInfoState();
+            setupDragDrop();
+            await fetchServerInfo();
             await fetchMetrics();
             setInterval(fetchMetrics, 5000);
-            setInterval(refreshServerStatus, 5000);  // Refresh load/sleeping status
-            // Auto focus chat input
-            document.getElementById('chat-input').focus();
+            setInterval(refreshServerStatus, 5000);
         }
 
         init();
