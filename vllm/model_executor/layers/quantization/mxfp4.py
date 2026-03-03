@@ -1001,6 +1001,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     @property
     def is_monolithic(self) -> bool:
+        if self.moe.is_lora_enabled:
+            return False
         return (
             self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
             or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
@@ -1256,7 +1258,7 @@ class XpuMxfp4MoEMethod(Mxfp4MoEMethod):
             topk_weights=routing_weights,
             topk_ids=selected_experts,
             n_experts_per_token=layer.top_k,
-            activation=layer.activation,
+            activation=layer.activation.value,
             num_experts=layer.local_num_experts,
             is_mxfp4=True,
         )
