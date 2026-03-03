@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from typing import Optional, Union
 
-from transformers.dynamic_module_utils import get_class_from_dynamic_module
+from transformers.dynamic_module_utils import (
+    get_class_from_dynamic_module,
+    resolve_trust_remote_code,
+)
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -14,23 +16,31 @@ logger = init_logger(__name__)
 def try_get_class_from_dynamic_module(
     class_reference: str,
     pretrained_model_name_or_path: str,
-    cache_dir: Optional[Union[str, os.PathLike]] = None,
+    trust_remote_code: bool,
+    cache_dir: str | os.PathLike | None = None,
     force_download: bool = False,
-    resume_download: Optional[bool] = None,
-    proxies: Optional[dict[str, str]] = None,
-    token: Optional[Union[bool, str]] = None,
-    revision: Optional[str] = None,
+    resume_download: bool | None = None,
+    proxies: dict[str, str] | None = None,
+    token: bool | str | None = None,
+    revision: str | None = None,
     local_files_only: bool = False,
-    repo_type: Optional[str] = None,
-    code_revision: Optional[str] = None,
+    repo_type: str | None = None,
+    code_revision: str | None = None,
     warn_on_fail: bool = True,
     **kwargs,
-) -> Optional[type]:
+) -> type | None:
     """
-    As [transformers.dynamic_module_utils.get_class_from_dynamic_module][],
+    As `transformers.dynamic_module_utils.get_class_from_dynamic_module`,
     but ignoring any errors.
     """
     try:
+        resolve_trust_remote_code(
+            trust_remote_code,
+            pretrained_model_name_or_path,
+            has_local_code=False,
+            has_remote_code=True,
+        )
+
         return get_class_from_dynamic_module(
             class_reference,
             pretrained_model_name_or_path,

@@ -15,62 +15,69 @@ MODELS = [
 
 def test_phimoe_routing_function():
     from vllm.model_executor.models.phimoe import phimoe_routing_function
+
     test_case = {
         0: {
-            "hidden_states":
-            torch.tensor([1, 2, 3, 4, 5, 6, 7, 8],
-                         dtype=torch.float32,
-                         requires_grad=False).view(4, 2),
-            "gating_output":
-            torch.tensor([0.1, 0.2, 0.3, 0.4],
-                         dtype=torch.float32,
-                         requires_grad=False),
-            "topk":
-            2,
-            "renormalize":
-            False,
+            "hidden_states": torch.tensor(
+                [1, 2, 3, 4, 5, 6, 7, 8], dtype=torch.float32, requires_grad=False
+            ).view(4, 2),
+            "gating_output": torch.tensor(
+                [0.1, 0.2, 0.3, 0.4], dtype=torch.float32, requires_grad=False
+            ),
+            "topk": 2,
+            "renormalize": False,
         },
         1: {
-            "hidden_states":
-            torch.tensor([1, 2, 3, 4, 5, 6, 7, 8],
-                         dtype=torch.float32,
-                         requires_grad=False).view(4, 2),
-            "gating_output":
-            torch.tensor([0.4, 0.2, 0.3, 0.4],
-                         dtype=torch.float32,
-                         requires_grad=False),
-            "topk":
-            2,
-            "renormalize":
-            False,
-        }
+            "hidden_states": torch.tensor(
+                [1, 2, 3, 4, 5, 6, 7, 8], dtype=torch.float32, requires_grad=False
+            ).view(4, 2),
+            "gating_output": torch.tensor(
+                [0.4, 0.2, 0.3, 0.4], dtype=torch.float32, requires_grad=False
+            ),
+            "topk": 2,
+            "renormalize": False,
+        },
     }
 
     ground_truth = {
         0: {
-            "topk_weights":
-            torch.tensor([1., 1.], dtype=torch.float32, requires_grad=False),
-            "topk_ids":
-            torch.tensor([3, 2], dtype=torch.long, requires_grad=False),
+            "topk_weights": torch.tensor(
+                [1.0, 1.0], dtype=torch.float32, requires_grad=False
+            ),
+            "topk_ids": torch.tensor([3, 2], dtype=torch.long, requires_grad=False),
         },
         1: {
-            "topk_weights":
-            torch.tensor([0.5, 1.], dtype=torch.float32, requires_grad=False),
-            "topk_ids":
-            torch.tensor([0, 3], dtype=torch.long, requires_grad=False),
-        }
+            "topk_weights": torch.tensor(
+                [0.5, 1.0], dtype=torch.float32, requires_grad=False
+            ),
+            "topk_ids": torch.tensor([0, 3], dtype=torch.long, requires_grad=False),
+        },
     }
 
     for test_id in test_case:
         topk_weights, topk_ids = phimoe_routing_function(**test_case[test_id])
-        assert torch.allclose(topk_weights,
-                              ground_truth[test_id]["topk_weights"])
+        assert torch.allclose(topk_weights, ground_truth[test_id]["topk_weights"])
         assert torch.equal(topk_ids, ground_truth[test_id]["topk_ids"])
 
 
-@pytest.mark.skipif(condition=current_platform.is_cpu(),
-                    reason="This test takes a lot time to run on CPU, "
-                    "and vllm CI's disk space is not enough for this model.")
+# There is a known issue that triggers `AttributeError: 'DynamicCache'
+# object has no attribute 'seen_tokens'` when running:
+# `tests/models/language/generation/test_phimoe.py::test_models
+#   [5-64-bfloat16-microsoft/Phi-3.5-MoE-instruct]`
+# This issue is being investigated and tracked in:
+#   https://huggingface.co/microsoft/Phi-3.5-MoE-instruct/discussions/58
+# It is platform-agnostic. Therefore, we skip this test on all platforms for now.
+@pytest.mark.skip(
+    reason="Skipping due to known issue: "
+    "'DynamicCache' object has no attribute 'seen_tokens'. See: "
+    "https://huggingface.co/microsoft/Phi-3.5-MoE-instruct/discussions/58 "
+    "for details.",
+)
+@pytest.mark.skipif(
+    condition=current_platform.is_cpu(),
+    reason="This test takes a lot time to run on CPU, "
+    "and vllm CI's disk space is not enough for this model.",
+)
 @large_gpu_test(min_gb=80)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
@@ -87,11 +94,13 @@ def test_models(
 ) -> None:
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            example_prompts, max_tokens, num_logprobs)
+            example_prompts, max_tokens, num_logprobs
+        )
 
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
+            example_prompts, max_tokens, num_logprobs
+        )
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,

@@ -15,12 +15,12 @@ from ...registry import HF_EXAMPLE_MODELS
 
 MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 
-AUDIO_PROMPTS = AUDIO_ASSETS.prompts({
-    "mary_had_lamb":
-    "Transcribe this into English.",
-    "winning_call":
-    "What is happening in this audio clip?",
-})
+AUDIO_PROMPTS = AUDIO_ASSETS.prompts(
+    {
+        "mary_had_lamb": "Transcribe this into English.",
+        "winning_call": "What is happening in this audio clip?",
+    }
+)
 
 MULTI_AUDIO_PROMPT = "Describe each of the audios above."
 
@@ -33,7 +33,7 @@ CHUNKED_PREFILL_KWARGS = {
     "enable_chunked_prefill": True,
     "max_num_seqs": 2,
     # Use a very small limit to exercise chunked prefill.
-    "max_num_batched_tokens": 16
+    "max_num_batched_tokens": 16,
 }
 
 
@@ -43,27 +43,33 @@ def params_kwargs_to_cli_args(params_kwargs: dict[str, Any]) -> list[str]:
     for key, value in params_kwargs.items():
         if isinstance(value, bool):
             if value:
-                args.append(f"--{key.replace('_','-')}")
+                args.append(f"--{key.replace('_', '-')}")
         else:
-            args.append(f"--{key.replace('_','-')}={value}")
+            args.append(f"--{key.replace('_', '-')}={value}")
     return args
 
 
-@pytest.fixture(params=[
-    pytest.param({}, marks=pytest.mark.cpu_model),
-    pytest.param(CHUNKED_PREFILL_KWARGS),
-])
+@pytest.fixture(
+    params=[
+        pytest.param({}, marks=pytest.mark.cpu_model),
+        pytest.param(CHUNKED_PREFILL_KWARGS),
+    ]
+)
 def server(request, audio_assets: AudioTestAssets):
     args = [
-        "--dtype", "bfloat16", "--max-model-len", "4096", "--enforce-eager",
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "4096",
+        "--enforce-eager",
         "--limit-mm-per-prompt",
-        json.dumps({"audio": len(audio_assets)}), "--trust-remote-code"
+        json.dumps({"audio": len(audio_assets)}),
+        "--trust-remote-code",
     ] + params_kwargs_to_cli_args(request.param)
 
-    with RemoteOpenAIServer(MODEL_NAME,
-                            args,
-                            env_dict={"VLLM_AUDIO_FETCH_TIMEOUT":
-                                      "30"}) as remote_server:
+    with RemoteOpenAIServer(
+        MODEL_NAME, args, env_dict={"VLLM_AUDIO_FETCH_TIMEOUT": "30"}
+    ) as remote_server:
         yield remote_server
 
 
@@ -77,12 +83,11 @@ def _get_prompt(audio_count, question, placeholder):
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     placeholder = f"{placeholder}\n" * audio_count
 
-    return tokenizer.apply_chat_template([{
-        'role': 'user',
-        'content': f"{placeholder}{question}"
-    }],
-                                         tokenize=False,
-                                         add_generation_prompt=True)
+    return tokenizer.apply_chat_template(
+        [{"role": "user", "content": f"{placeholder}{question}"}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
 
 
 def run_multi_audio_test(
@@ -99,19 +104,21 @@ def run_multi_audio_test(
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
-    with vllm_runner(model,
-                     dtype=dtype,
-                     enforce_eager=True,
-                     limit_mm_per_prompt={
-                         "audio":
-                         max((len(audio) for _, audio in prompts_and_audios))
-                     },
-                     **kwargs) as vllm_model:
+    with vllm_runner(
+        model,
+        dtype=dtype,
+        enforce_eager=True,
+        limit_mm_per_prompt={
+            "audio": max((len(audio) for _, audio in prompts_and_audios))
+        },
+        **kwargs,
+    ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             [prompt for prompt, _ in prompts_and_audios],
             max_tokens,
             num_logprobs=num_logprobs,
-            audios=[audios for _, audios in prompts_and_audios])
+            audios=[audios for _, audios in prompts_and_audios],
+        )
 
     # The HuggingFace model doesn't support multiple audios yet, so
     # just assert that some tokens were generated.
@@ -122,21 +129,25 @@ def run_multi_audio_test(
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
-@pytest.mark.parametrize("vllm_kwargs", [
-    pytest.param({}, marks=pytest.mark.cpu_model),
-    pytest.param(CHUNKED_PREFILL_KWARGS),
-])
-def test_models_with_multiple_audios(vllm_runner,
-                                     audio_assets: AudioTestAssets, dtype: str,
-                                     max_tokens: int, num_logprobs: int,
-                                     vllm_kwargs: dict) -> None:
-
-    vllm_prompt = _get_prompt(len(audio_assets), MULTI_AUDIO_PROMPT,
-                              VLLM_PLACEHOLDER)
+@pytest.mark.parametrize(
+    "vllm_kwargs",
+    [
+        pytest.param({}, marks=pytest.mark.cpu_model),
+        pytest.param(CHUNKED_PREFILL_KWARGS),
+    ],
+)
+def test_models_with_multiple_audios(
+    vllm_runner,
+    audio_assets: AudioTestAssets,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    vllm_kwargs: dict,
+) -> None:
+    vllm_prompt = _get_prompt(len(audio_assets), MULTI_AUDIO_PROMPT, VLLM_PLACEHOLDER)
     run_multi_audio_test(
         vllm_runner,
-        [(vllm_prompt, [audio.audio_and_sample_rate
-                        for audio in audio_assets])],
+        [(vllm_prompt, [audio.audio_and_sample_rate for audio in audio_assets])],
         MODEL_NAME,
         dtype=dtype,
         max_tokens=max_tokens,
@@ -145,32 +156,74 @@ def test_models_with_multiple_audios(vllm_runner,
     )
 
 
+@pytest.mark.core_model
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [32])
+def test_variable_length_audio_batching(
+    vllm_runner,
+    audio_assets: AudioTestAssets,
+    dtype: str,
+    max_tokens: int,
+) -> None:
+    """Test batching of requests with different audio durations.
+
+    This exercises the variable-length tensor handling in
+    MultiModalFlatField._reduce_data() which was buggy before
+    https://github.com/vllm-project/vllm/issues/31658 was fixed.
+    """
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(MODEL_NAME)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
+
+    # Create prompts with single audio each (different durations)
+    prompts_and_audios = []
+    for audio, question in zip(audio_assets, AUDIO_PROMPTS):
+        prompt = _get_prompt(1, question, VLLM_PLACEHOLDER)
+        prompts_and_audios.append((prompt, [audio.audio_and_sample_rate]))
+
+    with vllm_runner(
+        MODEL_NAME,
+        dtype=dtype,
+        enforce_eager=True,
+        limit_mm_per_prompt={"audio": 1},
+    ) as vllm_model:
+        # Generate for all prompts in a single batch
+        # This triggers the variable-length batching code path
+        outputs = vllm_model.generate_greedy(
+            [prompt for prompt, _ in prompts_and_audios],
+            max_tokens,
+            audios=[audios for _, audios in prompts_and_audios],
+        )
+
+    # Verify outputs were generated for each request
+    assert len(outputs) == len(prompts_and_audios)
+    for output in outputs:
+        assert len(output[1]) > 0, "Expected non-empty output"
+
+
 @pytest.mark.asyncio
 async def test_online_serving(client, audio_assets: AudioTestAssets):
     """Exercises online serving with/without chunked prefill enabled."""
 
-    messages = [{
-        "role":
-        "user",
-        "content": [
-            *[{
-                "type": "audio_url",
-                "audio_url": {
-                    "url": audio.url
-                }
-            } for audio in audio_assets],
-            {
-                "type":
-                "text",
-                "text":
-                f"What's happening in these {len(audio_assets)} audio clips?"
-            },
-        ],
-    }]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *[
+                    {"type": "audio_url", "audio_url": {"url": audio.url}}
+                    for audio in audio_assets
+                ],
+                {
+                    "type": "text",
+                    "text": f"What's happening in these {len(audio_assets)} audio clips?",  # noqa: E501
+                },
+            ],
+        }
+    ]
 
-    chat_completion = await client.chat.completions.create(model=MODEL_NAME,
-                                                           messages=messages,
-                                                           max_tokens=10)
+    chat_completion = await client.chat.completions.create(
+        model=MODEL_NAME, messages=messages, max_tokens=10
+    )
 
     assert len(chat_completion.choices) == 1
     choice = chat_completion.choices[0]

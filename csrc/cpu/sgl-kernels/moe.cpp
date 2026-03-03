@@ -215,7 +215,7 @@ int moe_align_block_size(
       offsets[mb + 1] = sorted_id_size(sorted_ids + mb * BLOCK_M);
     }
   });
-  // TODO: do we need to vecterize this ?
+  // TODO: do we need to vectorize this ?
   for (int mb = 0; mb < num_token_blocks; ++mb) {
     offsets[mb + 1] += offsets[mb];
   }
@@ -398,7 +398,7 @@ void tinygemm_kernel(
         case 0x32: LAUNCH_TINYGEMM_KERNEL_NN(3, 32); break;
         // mb_size = 4
         case 0x42: LAUNCH_TINYGEMM_KERNEL_NN(4, 32); break;
-        default: TORCH_CHECK(false, "Unexpected block size, ", mb_size, "x", "nb_size");
+        default: TORCH_CHECK(false, "Unexpected block size, ", mb_size, "x", nb_size);
       }
     }
   }
@@ -511,7 +511,7 @@ void tinygemm_kernel(
         case 0x32: LAUNCH_TINYGEMM_KERNEL_NN2(3, 32); break;
         // mb_size = 4
         case 0x42: LAUNCH_TINYGEMM_KERNEL_NN2(4, 32); break;
-        default: TORCH_CHECK(false, "Unexpected block size, ", mb_size, "x", "nb_size");
+        default: TORCH_CHECK(false, "Unexpected block size, ", mb_size, "x", nb_size);
       }
     }
   }

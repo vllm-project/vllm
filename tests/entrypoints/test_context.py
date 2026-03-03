@@ -4,16 +4,15 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from openai_harmony import StreamState
+from openai_harmony import Author, Message, Role, StreamState, TextContent
 
-from vllm.entrypoints.context import HarmonyContext, StreamingHarmonyContext
+from vllm.entrypoints.openai.responses.context import (
+    HarmonyContext,
+    SimpleContext,
+    StreamingHarmonyContext,
+    TurnMetrics,
+)
 from vllm.outputs import CompletionOutput, RequestOutput
-
-
-# Helper function for Python < 3.10 compatibility
-async def async_next(async_iterator):
-    """Compatibility function equivalent to Python 3.10's anext()."""
-    return await async_iterator.__anext__()
 
 
 def create_mock_request_output(
@@ -48,10 +47,9 @@ def create_mock_request_output(
     )
 
 
-async def generate_mock_outputs(num_turns,
-                                prompt_token_counts,
-                                output_token_counts,
-                                cached_token_counts=None):
+async def generate_mock_outputs(
+    num_turns, prompt_token_counts, output_token_counts, cached_token_counts=None
+):
     """Generate a sequence of mock RequestOutput objects to simulate multiple
     turns."""
     if cached_token_counts is None:
@@ -73,8 +71,9 @@ async def generate_mock_outputs(num_turns,
 @pytest.fixture
 def mock_parser():
     """Set up a mock parser for tests."""
-    with patch("vllm.entrypoints.context.get_streamable_parser_for_assistant"
-               ) as mock_parser_factory:
+    with patch(
+        "vllm.entrypoints.openai.responses.context.get_streamable_parser_for_assistant"
+    ) as mock_parser_factory:
         # Create a mock parser object
         parser = MagicMock()
         parser.messages = []
@@ -107,8 +106,12 @@ def test_single_turn_token_counting():
 
     # Verify internal state tracking
     assert not context.is_first_turn
-    assert context.previous_turn.input_tokens == 5
-    assert context.previous_turn.output_tokens == 3
+    assert len(context.all_turn_metrics) == 1
+    previous_turn = context.all_turn_metrics[0]
+    assert previous_turn.input_tokens == 5
+    assert previous_turn.output_tokens == 3
+    assert previous_turn.cached_input_tokens == 2
+    assert previous_turn.tool_output_tokens == 0
 
 
 @pytest.mark.asyncio
@@ -124,12 +127,12 @@ async def test_multi_turn_token_counting():
     prompt_token_counts = [5, 15, 20]
     output_token_counts = [3, 4, 5]
     cached_token_counts = [0, 5, 15]
-    mock_generator = generate_mock_outputs(3, prompt_token_counts,
-                                           output_token_counts,
-                                           cached_token_counts)
+    mock_generator = generate_mock_outputs(
+        3, prompt_token_counts, output_token_counts, cached_token_counts
+    )
 
     # First turn - initial prompt and response
-    mock_output1 = await async_next(mock_generator)
+    mock_output1 = await anext(mock_generator)
     context.append_output(mock_output1)
 
     # At this point, we should have 5 prompt tokens and 3 output tokens
@@ -138,7 +141,7 @@ async def test_multi_turn_token_counting():
     assert context.num_tool_output_tokens == 0
 
     # Second turn - after tool output
-    mock_output2 = await async_next(mock_generator)
+    mock_output2 = await anext(mock_generator)
     context.append_output(mock_output2)
     # Current prompt tokens (15) - last_turn_input_tokens (5) -
     # last_turn_output_tokens (3) = 7
@@ -150,7 +153,7 @@ async def test_multi_turn_token_counting():
     assert context.num_cached_tokens == 5
 
     # Third turn - final response
-    mock_output3 = await async_next(mock_generator)
+    mock_output3 = await anext(mock_generator)
     context.append_output(mock_output3)
     # Additional tool output tokens from third turn:
     # Current prompt (20) - last_turn_input_tokens (15) -
@@ -161,6 +164,15 @@ async def test_multi_turn_token_counting():
     assert context.num_output_tokens == 3 + 4 + 5
     assert context.num_tool_output_tokens == expected_tool_output
     assert context.num_cached_tokens == 5 + 15
+
+    # Validate all turn metrics
+    assert len(context.all_turn_metrics) == 3
+    for i, turn in enumerate(context.all_turn_metrics):
+        assert turn.input_tokens == prompt_token_counts[i]
+        assert turn.output_tokens == output_token_counts[i]
+        assert turn.cached_input_tokens == cached_token_counts[i]
+    assert context.all_turn_metrics[1].tool_output_tokens == 7
+    assert context.all_turn_metrics[2].tool_output_tokens == 1
 
 
 def test_empty_output_tokens():
@@ -224,6 +236,44 @@ def test_reasoning_tokens_counting(mock_parser):
     assert context.num_output_tokens == 4
 
 
+def test_preamble_tokens_not_counted_as_reasoning(mock_parser):
+    """Preambles (commentary with no recipient) are visible user text,
+    not hidden reasoning. They must NOT inflate num_reasoning_tokens."""
+    context = HarmonyContext(messages=[], available_tools=[])
+
+    mock_parser.current_channel = "commentary"
+    mock_parser.current_recipient = None  # preamble
+
+    mock_output = create_mock_request_output(
+        prompt_token_ids=[1, 2, 3],
+        output_token_ids=[4, 5, 6],
+        num_cached_tokens=0,
+    )
+    context.append_output(mock_output)
+
+    assert context.num_reasoning_tokens == 0
+    assert context.num_output_tokens == 3
+
+
+def test_commentary_with_recipient_counted_as_reasoning(mock_parser):
+    """Commentary directed at a tool (recipient != None) is hidden from
+    the user, so it should still count as reasoning tokens."""
+    context = HarmonyContext(messages=[], available_tools=[])
+
+    mock_parser.current_channel = "commentary"
+    mock_parser.current_recipient = "python"
+
+    mock_output = create_mock_request_output(
+        prompt_token_ids=[1, 2, 3],
+        output_token_ids=[4, 5, 6],
+        num_cached_tokens=0,
+    )
+    context.append_output(mock_output)
+
+    assert context.num_reasoning_tokens == 3
+    assert context.num_output_tokens == 3
+
+
 def test_zero_tokens_edge_case():
     """Test behavior with all zero token counts."""
     context = HarmonyContext(messages=[], available_tools=[])
@@ -251,7 +301,7 @@ async def test_single_turn_no_tool_output():
     """Test that first turn never generates tool output tokens."""
     context = HarmonyContext(
         messages=[],
-        available_tools=["browser"]  # Tools available
+        available_tools=["browser"],  # Tools available
     )
 
     # Even with large prompt in first turn, no tool tokens should be counted
@@ -273,7 +323,7 @@ async def test_negative_tool_tokens_edge_case():
     """Test edge case where calculation could result in negative tool
     tokens. We should log an error and clamp the value to 0."""
     # Use patch to check if logger.error was called
-    with patch("vllm.entrypoints.context.logger.error") as mock_log:
+    with patch("vllm.entrypoints.openai.responses.context.logger.error") as mock_log:
         context = HarmonyContext(messages=[], available_tools=["browser"])
 
         # First turn
@@ -312,13 +362,17 @@ async def test_negative_tool_tokens_edge_case():
 @pytest.mark.asyncio
 async def test_streaming_multi_turn_token_counting(mock_parser):
     """Test token counting for streaming multi-turn conversations.
-    
-    This test focuses on how StreamingHarmonyContext counts tokens in a 
-    multi-turn conversation with streaming (token-by-token) outputs and 
+
+    This test focuses on how StreamingHarmonyContext counts tokens in a
+    multi-turn conversation with streaming (token-by-token) outputs and
     message boundaries.
     """
     # Create a streaming context
     context = StreamingHarmonyContext(messages=[], available_tools=["browser"])
+
+    num_prompt_tokens = [3, 8, 13]
+    num_output_tokens = [3, 3, 2]
+    num_cached_tokens = [0, 3, 8]
 
     # Simulate three turns of conversation:
     # Turn 1: stream tokens one by one, then finish the message
@@ -331,23 +385,26 @@ async def test_streaming_multi_turn_token_counting(mock_parser):
         create_mock_request_output(
             prompt_token_ids=[1, 2, 3],  # 3 prompt tokens
             output_token_ids=[101],  # Single token
-            num_cached_tokens=0,
+            num_cached_tokens=num_cached_tokens[0],
             finished=False,  # Not end of message yet
-        ))
+        )
+    )
 
     # Second token of first turn
     context.append_output(
         create_mock_request_output(
             output_token_ids=[102],
             finished=False,
-        ))
+        )
+    )
 
     # Last token of first turn (finished=True signals end of message)
     context.append_output(
         create_mock_request_output(
             output_token_ids=[103],
             finished=True,  # End of message
-        ))
+        )
+    )
 
     # Check token counts after first turn
     assert context.num_prompt_tokens == 3  # Initial prompt tokens
@@ -362,25 +419,36 @@ async def test_streaming_multi_turn_token_counting(mock_parser):
     # First token of second turn
     context.append_output(
         create_mock_request_output(
-            prompt_token_ids=[1, 2, 3, 101, 102, 103, 4,
-                              5],  # 8 tokens (includes previous)
+            prompt_token_ids=[
+                1,
+                2,
+                3,
+                101,
+                102,
+                103,
+                4,
+                5,
+            ],  # 8 tokens (includes previous)
             output_token_ids=[201],
-            num_cached_tokens=3,  # Some tokens cached
+            num_cached_tokens=num_cached_tokens[1],  # Some tokens cached
             finished=False,
-        ))
+        )
+    )
 
     # More tokens in reasoning channel
     context.append_output(
         create_mock_request_output(
             output_token_ids=[202],
             finished=False,
-        ))
+        )
+    )
 
     context.append_output(
         create_mock_request_output(
             output_token_ids=[203],
             finished=True,  # End of reasoning message
-        ))
+        )
+    )
 
     # Check counts after second turn (reasoning message)
     assert context.num_prompt_tokens == 3 + 8  # Initial + second prompt
@@ -399,27 +467,417 @@ async def test_streaming_multi_turn_token_counting(mock_parser):
     context.append_output(
         create_mock_request_output(
             prompt_token_ids=[
-                1, 2, 3, 101, 102, 103, 4, 5, 201, 202, 203, 6, 7
+                1,
+                2,
+                3,
+                101,
+                102,
+                103,
+                4,
+                5,
+                201,
+                202,
+                203,
+                6,
+                7,
             ],  # 13 tokens
             output_token_ids=[301],
-            num_cached_tokens=8,  # More cached tokens
+            num_cached_tokens=num_cached_tokens[2],  # More cached tokens
             finished=False,
-        ))
+        )
+    )
 
     context.append_output(
         create_mock_request_output(
             output_token_ids=[302],
             finished=True,
-        ))
+        )
+    )
 
     # Final token counts check
-    assert context.num_prompt_tokens == 3 + 8 + 13  # All prompts
-    assert context.num_output_tokens == 3 + 3 + 2  # All outputs
+    assert context.num_prompt_tokens == sum(num_prompt_tokens)  # All prompts
+    assert context.num_output_tokens == sum(num_output_tokens)  # All outputs
     assert context.num_reasoning_tokens == 3  # Unchanged from second turn
-    assert context.num_cached_tokens == 3 + 8  # Accumulated cached tokens
+    assert context.num_cached_tokens == sum(
+        num_cached_tokens
+    )  # Accumulated cached tokens
 
     # Additional tool tokens from third turn
     # Formula: this turn prompt - last turn prompt - last turn output
     additional_tool_tokens = 13 - 8 - 3  # = 2
-    assert context.num_tool_output_tokens == expected_tool_tokens \
-        + additional_tool_tokens
+    assert (
+        context.num_tool_output_tokens == expected_tool_tokens + additional_tool_tokens
+    )
+
+    # Validate all turn metrics
+    assert len(context.all_turn_metrics) == 3
+    for i, turn in enumerate(context.all_turn_metrics):
+        assert turn.input_tokens == num_prompt_tokens[i]
+        assert turn.output_tokens == num_output_tokens[i]
+        assert turn.cached_input_tokens == num_cached_tokens[i]
+    assert context.all_turn_metrics[1].tool_output_tokens == 2
+    assert context.all_turn_metrics[2].tool_output_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_streaming_message_synchronization(mock_parser):
+    """Test message synchronization logic from lines 413-417 in context.py.
+
+    This test verifies that when parser.messages contains more messages than
+    the context's _messages (minus initial messages), the context properly
+    extends its message list with the new parser messages.
+    """
+
+    # Create a streaming context with some initial messages
+    initial_messages = [
+        Message(
+            author=Author(role=Role.USER, name="user"),
+            content=[TextContent(text="Hello")],
+            recipient=Role.ASSISTANT,
+        )
+    ]
+    context = StreamingHarmonyContext(messages=initial_messages, available_tools=[])
+
+    # Verify initial state
+    assert len(context._messages) == 1
+    assert context.num_init_messages == 1
+
+    # Mock parser to have more messages than context
+    # Simulate parser having processed 3 new messages
+    mock_parser.messages = [
+        Message(
+            author=Author(role=Role.ASSISTANT, name="assistant"),
+            content=[TextContent(text="Response 1")],
+            recipient=Role.USER,
+        ),
+    ]
+
+    # This should trigger the message synchronization logic
+    context.append_output(
+        create_mock_request_output(
+            prompt_token_ids=[1, 2, 3], output_token_ids=[101], finished=False
+        )
+    )
+
+    # Verify that messages were synchronized
+    assert len(context._messages) == 2
+
+    # Verify the new messages were added correctly
+    assert context._messages[1].content[0].text == "Response 1"
+
+    # Test the specific condition from line 413-414:
+    # len(self._messages) - self.num_init_messages < len(self.parser.messages)
+    messages_minus_init = len(context._messages) - context.num_init_messages
+    parser_messages_count = len(mock_parser.messages)
+
+    # After synchronization, they should be equal (no longer less than)
+    assert messages_minus_init == parser_messages_count
+
+    # Test edge case: add one more parser message
+    mock_parser.messages.append(
+        Message(
+            author=Author(role=Role.ASSISTANT, name="assistant"),
+            content=[TextContent(text="Response 4")],
+            recipient=Role.USER,
+        )
+    )
+
+    # Create another output to trigger synchronization again
+    mock_output2 = create_mock_request_output(
+        prompt_token_ids=[1, 2, 3], output_token_ids=[102], finished=True
+    )
+
+    context.append_output(mock_output2)
+
+    # Verify the fourth message was added, num_init_messages is still 1
+    assert len(context._messages) == 3
+    assert context.num_init_messages == 1
+    assert context._messages[2].content[0].text == "Response 4"
+
+
+def test_turn_metrics_copy_and_reset():
+    """Test TurnMetrics copy and reset methods work correctly."""
+    # Create a TurnMetrics with specific values
+    original_metrics = TurnMetrics(
+        input_tokens=10,
+        output_tokens=20,
+        cached_input_tokens=5,
+        tool_output_tokens=3,
+    )
+
+    # Test copy functionality
+    copied_metrics = original_metrics.copy()
+
+    # Verify copy has same values
+    assert copied_metrics.input_tokens == 10
+    assert copied_metrics.output_tokens == 20
+    assert copied_metrics.cached_input_tokens == 5
+    assert copied_metrics.tool_output_tokens == 3
+
+    # Verify they are separate objects
+    assert copied_metrics is not original_metrics
+
+    # Modify copy to ensure independence
+    copied_metrics.input_tokens = 999
+    assert original_metrics.input_tokens == 10  # Original unchanged
+    assert copied_metrics.input_tokens == 999
+
+    # Test reset functionality
+    original_metrics.reset()
+
+    # Verify all fields are reset to zero
+    assert original_metrics.input_tokens == 0
+    assert original_metrics.output_tokens == 0
+    assert original_metrics.cached_input_tokens == 0
+    assert original_metrics.tool_output_tokens == 0
+
+    # Verify copied metrics are unaffected by reset
+    assert copied_metrics.input_tokens == 999
+    assert copied_metrics.output_tokens == 20
+    assert copied_metrics.cached_input_tokens == 5
+    assert copied_metrics.tool_output_tokens == 3
+
+
+# ==================== SimpleContext Tests ====================
+
+
+def create_simple_context_output(
+    text="",
+    token_ids=None,
+    prompt="Test prompt",
+    prompt_token_ids=None,
+    num_cached_tokens=0,
+    logprobs=None,
+    finished=True,
+):
+    """Helper to create a RequestOutput with customizable text for
+    SimpleContext tests."""
+    if token_ids is None:
+        token_ids = []
+    return RequestOutput(
+        request_id="test-id",
+        prompt=prompt,
+        prompt_token_ids=prompt_token_ids,
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text=text,
+                token_ids=token_ids,
+                cumulative_logprob=0.0,
+                logprobs=logprobs,
+                finish_reason=None,
+                stop_reason=None,
+            )
+        ],
+        finished=finished,
+        num_cached_tokens=num_cached_tokens,
+    )
+
+
+def test_simple_context_output_messages_empty():
+    """output_messages should be empty before any output is appended."""
+    context = SimpleContext()
+    assert context.output_messages == []
+
+
+def test_simple_context_output_messages_single_call():
+    """Non-streaming: single append_output produces a single output message."""
+    context = SimpleContext()
+    output = create_simple_context_output(
+        text="Hello world",
+        token_ids=[10, 20, 30],
+        prompt_token_ids=[1, 2, 3],
+    )
+    context.append_output(output)
+
+    messages = context.output_messages
+    assert len(messages) == 1
+    assert messages[0].message == "Hello world"
+    assert messages[0].tokens == [10, 20, 30]
+    assert messages[0].type == "raw_message_tokens"
+
+
+def test_simple_context_output_messages_streaming_consolidation():
+    """Streaming: multiple append_output calls consolidate into one message."""
+    context = SimpleContext()
+
+    # Simulate 3 streaming deltas
+    context.append_output(
+        create_simple_context_output(
+            text="Hello",
+            token_ids=[10],
+            prompt_token_ids=[1, 2, 3],
+        )
+    )
+    context.append_output(
+        create_simple_context_output(
+            text=" world",
+            token_ids=[20],
+            prompt_token_ids=[1, 2, 3],
+        )
+    )
+    context.append_output(
+        create_simple_context_output(
+            text="!",
+            token_ids=[30],
+            prompt_token_ids=[1, 2, 3],
+        )
+    )
+
+    messages = context.output_messages
+    assert len(messages) == 1
+    assert messages[0].message == "Hello world!"
+    assert messages[0].tokens == [10, 20, 30]
+
+
+def test_simple_context_output_messages_many_deltas():
+    """Streaming with many small deltas still produces a single message."""
+    context = SimpleContext()
+
+    words = ["The", " quick", " brown", " fox", " jumps"]
+    for i, word in enumerate(words):
+        context.append_output(
+            create_simple_context_output(
+                text=word,
+                token_ids=[100 + i],
+                prompt_token_ids=[1, 2],
+            )
+        )
+
+    messages = context.output_messages
+    assert len(messages) == 1
+    assert messages[0].message == "The quick brown fox jumps"
+    assert messages[0].tokens == [100, 101, 102, 103, 104]
+
+
+def test_simple_context_input_messages():
+    """input_messages is populated on the first append_output call."""
+    context = SimpleContext()
+    assert context.input_messages == []
+
+    context.append_output(
+        create_simple_context_output(
+            text="Hi",
+            token_ids=[10],
+            prompt="My prompt text",
+            prompt_token_ids=[1, 2, 3],
+        )
+    )
+
+    assert len(context.input_messages) == 1
+    assert context.input_messages[0].message == "My prompt text"
+    assert context.input_messages[0].tokens == [1, 2, 3]
+
+    # Second call should not add another input message
+    context.append_output(
+        create_simple_context_output(
+            text=" there",
+            token_ids=[20],
+            prompt="My prompt text",
+            prompt_token_ids=[1, 2, 3],
+        )
+    )
+
+    assert len(context.input_messages) == 1
+
+
+def test_simple_context_token_counting():
+    """Token counting accumulates across streaming deltas."""
+    context = SimpleContext()
+
+    context.append_output(
+        create_simple_context_output(
+            text="a",
+            token_ids=[10, 11],
+            prompt_token_ids=[1, 2, 3, 4, 5],
+            num_cached_tokens=2,
+        )
+    )
+    context.append_output(
+        create_simple_context_output(
+            text="b",
+            token_ids=[12],
+            prompt_token_ids=[1, 2, 3, 4, 5],
+            num_cached_tokens=2,
+        )
+    )
+
+    assert context.num_prompt_tokens == 5
+    assert context.num_output_tokens == 3  # 2 + 1
+    assert context.num_cached_tokens == 2
+
+
+def test_simple_context_final_output():
+    """final_output reconstructs accumulated text and token_ids."""
+    context = SimpleContext()
+
+    context.append_output(
+        create_simple_context_output(
+            text="foo",
+            token_ids=[1, 2],
+            prompt_token_ids=[10],
+        )
+    )
+    context.append_output(
+        create_simple_context_output(
+            text="bar",
+            token_ids=[3],
+            prompt_token_ids=[10],
+        )
+    )
+
+    final = context.final_output
+    assert final is not None
+    assert final.outputs[0].text == "foobar"
+    assert final.outputs[0].token_ids == (1, 2, 3)
+
+
+def test_simple_context_output_messages_empty_text_with_tokens():
+    """output_messages should be returned when tokens exist even if text is
+    empty (e.g. special tokens)."""
+    context = SimpleContext()
+    context.append_output(
+        create_simple_context_output(
+            text="",
+            token_ids=[99],
+            prompt_token_ids=[1],
+        )
+    )
+
+    messages = context.output_messages
+    assert len(messages) == 1
+    assert messages[0].message == ""
+    assert messages[0].tokens == [99]
+
+
+def test_simple_context_output_messages_no_mutation():
+    """Each call to output_messages returns a fresh list; callers can't
+    corrupt internal state."""
+    context = SimpleContext()
+    context.append_output(
+        create_simple_context_output(
+            text="hello",
+            token_ids=[1],
+            prompt_token_ids=[10],
+        )
+    )
+
+    msgs1 = context.output_messages
+    msgs2 = context.output_messages
+    assert msgs1 is not msgs2
+    assert msgs1[0].message == msgs2[0].message
+
+    # Appending more output updates the property
+    context.append_output(
+        create_simple_context_output(
+            text=" world",
+            token_ids=[2],
+            prompt_token_ids=[10],
+        )
+    )
+
+    msgs3 = context.output_messages
+    assert len(msgs3) == 1
+    assert msgs3[0].message == "hello world"
+    assert msgs3[0].tokens == [1, 2]

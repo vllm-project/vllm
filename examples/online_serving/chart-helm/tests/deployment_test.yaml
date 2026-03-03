@@ -1,0 +1,135 @@
+suite: test deployment
+templates:
+  - deployment.yaml
+tests:
+  - it: should create wait-download-model init container when modelDownload is enabled
+    set:
+      extraInit:
+        modelDownload:
+          enabled: true
+          image:
+            repository: "amazon/aws-cli"
+            tag: "2.6.4"
+            pullPolicy: "IfNotPresent"
+          waitContainer:
+            command: [ "/bin/bash" ]
+            args:
+              - "-eucx"
+              - "while aws --endpoint-url $S3_ENDPOINT_URL s3 sync --dryrun s3://$S3_BUCKET_NAME/$S3_PATH /data | grep -q download; do sleep 10; done"
+          downloadJob:
+            command: [ "/bin/bash" ]
+            args:
+              - "-eucx"
+              - "aws --endpoint-url $S3_ENDPOINT_URL s3 sync s3://$S3_BUCKET_NAME/$S3_PATH /data"
+        initContainers: [ ]
+        pvcStorage: "1Gi"
+        s3modelpath: "relative_s3_model_path/opt-125m"
+        awsEc2MetadataDisabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: Deployment
+      - isNotEmpty:
+          path: spec.template.spec.initContainers
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-download-model
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: amazon/aws-cli:2.6.4
+      - equal:
+          path: spec.template.spec.initContainers[0].imagePullPolicy
+          value: IfNotPresent
+
+  - it: should only create custom init containers when modelDownload is disabled
+    set:
+      extraInit:
+        modelDownload:
+          enabled: false
+          image:
+            repository: "amazon/aws-cli"
+            tag: "2.6.4"
+            pullPolicy: "IfNotPresent"
+          waitContainer:
+            command: [ "/bin/bash" ]
+            args: [ "-c", "echo test" ]
+          downloadJob:
+            command: [ "/bin/bash" ]
+            args: [ "-c", "echo test" ]
+        initContainers:
+          - name: llm-d-routing-proxy
+            image: ghcr.io/llm-d/llm-d-routing-sidecar:v0.2.0
+            imagePullPolicy: IfNotPresent
+            ports:
+              - containerPort: 8080
+                name: proxy
+        pvcStorage: "10Gi"
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: Deployment
+      - lengthEqual:
+          path: spec.template.spec.initContainers
+          count: 1
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: llm-d-routing-proxy
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: ghcr.io/llm-d/llm-d-routing-sidecar:v0.2.0
+      - equal:
+          path: spec.template.spec.initContainers[0].ports[0].containerPort
+          value: 8080
+
+  - it: should create both wait-download-model and custom init containers when both are enabled
+    set:
+      extraInit:
+        modelDownload:
+          enabled: true
+          image:
+            repository: "amazon/aws-cli"
+            tag: "2.6.4"
+            pullPolicy: "IfNotPresent"
+          waitContainer:
+            command: [ "/bin/bash" ]
+            args:
+              - "-eucx"
+              - "while aws --endpoint-url $S3_ENDPOINT_URL s3 sync --dryrun s3://$S3_BUCKET_NAME/$S3_PATH /data | grep -q download; do sleep 10; done"
+          downloadJob:
+            command: [ "/bin/bash" ]
+            args:
+              - "-eucx"
+              - "aws --endpoint-url $S3_ENDPOINT_URL s3 sync s3://$S3_BUCKET_NAME/$S3_PATH /data"
+        initContainers:
+          - name: llm-d-routing-proxy
+            image: ghcr.io/llm-d/llm-d-routing-sidecar:v0.2.0
+            imagePullPolicy: IfNotPresent
+            ports:
+              - containerPort: 8080
+                name: proxy
+        pvcStorage: "10Gi"
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: Deployment
+      - lengthEqual:
+          path: spec.template.spec.initContainers
+          count: 2
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-download-model
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: amazon/aws-cli:2.6.4
+      - equal:
+          path: spec.template.spec.initContainers[1].name
+          value: llm-d-routing-proxy
+      - equal:
+          path: spec.template.spec.initContainers[1].image
+          value: ghcr.io/llm-d/llm-d-routing-sidecar:v0.2.0
+      - equal:
+          path: spec.template.spec.initContainers[1].ports[0].containerPort
+          value: 8080

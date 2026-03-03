@@ -9,23 +9,23 @@ from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import dataclass, fields
 from functools import reduce
-from typing import Optional, Union
 
 import jinja2
-# yapf conflicts with isort for this block
-# yapf: disable
-from vllm_cutlass_library_extension import (DataType, EpilogueScheduleTag,
-                                            EpilogueScheduleType,
-                                            MixedInputKernelScheduleType,
-                                            TileSchedulerTag,
-                                            TileSchedulerType, VLLMDataType,
-                                            VLLMDataTypeNames,
-                                            VLLMDataTypeSize, VLLMDataTypeTag,
-                                            VLLMDataTypeTorchDataTypeTag,
-                                            VLLMDataTypeVLLMScalarTypeTag,
-                                            VLLMKernelScheduleTag)
-
-# yapf: enable
+from vllm_cutlass_library_extension import (
+    DataType,
+    EpilogueScheduleTag,
+    EpilogueScheduleType,
+    MixedInputKernelScheduleType,
+    TileSchedulerTag,
+    TileSchedulerType,
+    VLLMDataType,
+    VLLMDataTypeNames,
+    VLLMDataTypeSize,
+    VLLMDataTypeTag,
+    VLLMDataTypeTorchDataTypeTag,
+    VLLMDataTypeVLLMScalarTypeTag,
+    VLLMKernelScheduleTag,
+)
 
 #
 #   Generator templating
@@ -258,7 +258,7 @@ class ScheduleConfig:
 @dataclass(frozen=True)
 class TypeConfig:
     a: DataType
-    b: Union[DataType, VLLMDataType]
+    b: DataType | VLLMDataType
     b_group_scale: DataType
     b_group_zeropoint: DataType
     b_channel_scale: DataType
@@ -279,25 +279,30 @@ class PrepackTypeConfig:
 class ImplConfig:
     types: TypeConfig
     schedules: list[ScheduleConfig]
-    heuristic: list[tuple[Optional[str], ScheduleConfig]]
+    heuristic: list[tuple[str | None, ScheduleConfig]]
 
 
 def generate_sch_sig(schedule_config: ScheduleConfig) -> str:
     tile_shape = (
         f"{schedule_config.tile_shape_mn[0]}x{schedule_config.tile_shape_mn[1]}"
     )
-    cluster_shape = (f"{schedule_config.cluster_shape_mnk[0]}" +
-                     f"x{schedule_config.cluster_shape_mnk[1]}" +
-                     f"x{schedule_config.cluster_shape_mnk[2]}")
-    kernel_schedule = VLLMKernelScheduleTag[schedule_config.kernel_schedule]\
-        .split("::")[-1]
-    epilogue_schedule = EpilogueScheduleTag[
-        schedule_config.epilogue_schedule].split("::")[-1]
-    tile_scheduler = TileSchedulerTag[schedule_config.tile_scheduler]\
-        .split("::")[-1]
+    cluster_shape = (
+        f"{schedule_config.cluster_shape_mnk[0]}"
+        f"x{schedule_config.cluster_shape_mnk[1]}"
+        f"x{schedule_config.cluster_shape_mnk[2]}"
+    )
+    kernel_schedule = VLLMKernelScheduleTag[schedule_config.kernel_schedule].split(
+        "::"
+    )[-1]
+    epilogue_schedule = EpilogueScheduleTag[schedule_config.epilogue_schedule].split(
+        "::"
+    )[-1]
+    tile_scheduler = TileSchedulerTag[schedule_config.tile_scheduler].split("::")[-1]
 
-    return (f"{tile_shape}_{cluster_shape}_{kernel_schedule}" +
-            f"_{epilogue_schedule}_{tile_scheduler}")
+    return (
+        f"{tile_shape}_{cluster_shape}_{kernel_schedule}"
+        f"_{epilogue_schedule}_{tile_scheduler}"
+    )
 
 
 # mostly unique shorter sch_sig
@@ -316,18 +321,24 @@ def generate_terse_sch_sig(schedule_config: ScheduleConfig) -> str:
 
 # unique type_name
 def generate_type_signature(kernel_types: TypeConfig):
-    return str("".join([
-        VLLMDataTypeNames[getattr(kernel_types, field.name)]
-        for field in fields(TypeConfig)
-    ]))
+    return str(
+        "".join(
+            [
+                VLLMDataTypeNames[getattr(kernel_types, field.name)]
+                for field in fields(TypeConfig)
+            ]
+        )
+    )
 
 
 def generate_type_option_name(kernel_types: TypeConfig):
-    return ", ".join([
-        f"{field.name.replace('b_', 'with_')+'_type'}=" +
-        VLLMDataTypeNames[getattr(kernel_types, field.name)]
-        for field in fields(TypeConfig)
-    ])
+    return ", ".join(
+        [
+            f"{field.name.replace('b_', 'with_') + '_type'}="
+            + VLLMDataTypeNames[getattr(kernel_types, field.name)]
+            for field in fields(TypeConfig)
+        ]
+    )
 
 
 def is_power_of_two(n):
@@ -335,7 +346,6 @@ def is_power_of_two(n):
 
 
 def to_cute_constant(value: list[int]):
-
     def _to_cute_constant(value: int):
         if is_power_of_two(value):
             return f"_{value}"
@@ -350,11 +360,11 @@ def to_cute_constant(value: list[int]):
 
 def unique_schedules(impl_configs: list[ImplConfig]):
     # Use dict over set for deterministic ordering
-    return list({
-        sch: None
-        for impl_config in impl_configs
-        for sch in impl_config.schedules
-    }.keys())
+    return list(
+        {
+            sch: None for impl_config in impl_configs for sch in impl_config.schedules
+        }.keys()
+    )
 
 
 def unsigned_type_with_bitwidth(num_bits):
@@ -380,7 +390,7 @@ template_globals = {
     "gen_type_sig": generate_type_signature,
     "unique_schedules": unique_schedules,
     "unsigned_type_with_bitwidth": unsigned_type_with_bitwidth,
-    "gen_type_option_name": generate_type_option_name
+    "gen_type_option_name": generate_type_option_name,
 }
 
 
@@ -398,23 +408,28 @@ prepack_dispatch_template = create_template(PREPACK_TEMPLATE)
 def create_sources(impl_configs: list[ImplConfig], num_impl_files=8):
     sources = []
 
-    sources.append((
-        "machete_mm_dispatch",
-        mm_dispatch_template.render(impl_configs=impl_configs),
-    ))
+    sources.append(
+        (
+            "machete_mm_dispatch",
+            mm_dispatch_template.render(impl_configs=impl_configs),
+        )
+    )
 
     prepack_types = []
     for impl_config in impl_configs:
-        convert_type = impl_config.types.a \
-             if impl_config.types.b_group_scale == DataType.void \
-             else impl_config.types.b_group_scale
+        convert_type = (
+            impl_config.types.a
+            if impl_config.types.b_group_scale == DataType.void
+            else impl_config.types.b_group_scale
+        )
         prepack_types.append(
             PrepackTypeConfig(
                 a=impl_config.types.a,
                 b_num_bits=VLLMDataTypeSize[impl_config.types.b],
                 convert=convert_type,
                 accumulator=impl_config.types.accumulator,
-            ))
+            )
+        )
 
     def prepacked_type_key(prepack_type: PrepackTypeConfig):
         # For now, we can just use the first accumulator type seen since
@@ -430,10 +445,14 @@ def create_sources(impl_configs: list[ImplConfig], num_impl_files=8):
             unique_prepack_types.append(prepack_type)
             prepack_types_seen.add(key)
 
-    sources.append((
-        "machete_prepack",
-        prepack_dispatch_template.render(types=unique_prepack_types, ),
-    ))
+    sources.append(
+        (
+            "machete_prepack",
+            prepack_dispatch_template.render(
+                types=unique_prepack_types,
+            ),
+        )
+    )
 
     # Split up impls across files
     num_impls = reduce(lambda x, y: x + len(y.schedules), impl_configs, 0)
@@ -466,10 +485,12 @@ def create_sources(impl_configs: list[ImplConfig], num_impl_files=8):
         curr_impl_in_file += len(files_impls[-1][-1].schedules)
 
     for part, file_impls in enumerate(files_impls):
-        sources.append((
-            f"machete_mm_impl_part{part+1}",
-            mm_impl_template.render(impl_configs=file_impls),
-        ))
+        sources.append(
+            (
+                f"machete_mm_impl_part{part + 1}",
+                mm_impl_template.render(impl_configs=file_impls),
+            )
+        )
 
     return sources
 
@@ -514,8 +535,7 @@ def generate():
     # For now we use the same heuristic for all types
     # Heuristic is currently tuned for H100s
     default_heuristic = [
-        (cond, ScheduleConfig(*tile_config,
-                              **sch_common_params))  # type: ignore
+        (cond, ScheduleConfig(*tile_config, **sch_common_params))  # type: ignore
         for cond, tile_config in default_tile_heuristic_config.items()
     ]
 
@@ -541,14 +561,18 @@ def generate():
             a_token_scale=DataType.void,
             out=a,
             accumulator=DataType.f32,
-        ) for b in (VLLMDataType.u4b8, VLLMDataType.u8b128)
-        for a in (DataType.f16, DataType.bf16))
+        )
+        for b in (VLLMDataType.u4b8, VLLMDataType.u8b128)
+        for a in (DataType.f16, DataType.bf16)
+    )
 
     impl_configs += [
         ImplConfig(x[0], x[1], x[2])
-        for x in zip(GPTQ_kernel_type_configs,
-                     itertools.repeat(get_unique_schedules(default_heuristic)),
-                     itertools.repeat(default_heuristic))
+        for x in zip(
+            GPTQ_kernel_type_configs,
+            itertools.repeat(get_unique_schedules(default_heuristic)),
+            itertools.repeat(default_heuristic),
+        )
     ]
 
     AWQ_kernel_type_configs = list(
@@ -561,14 +585,18 @@ def generate():
             a_token_scale=DataType.void,
             out=a,
             accumulator=DataType.f32,
-        ) for b in (DataType.u4, DataType.u8)
-        for a in (DataType.f16, DataType.bf16))
+        )
+        for b in (DataType.u4, DataType.u8)
+        for a in (DataType.f16, DataType.bf16)
+    )
 
     impl_configs += [
         ImplConfig(x[0], x[1], x[2])
-        for x in zip(AWQ_kernel_type_configs,
-                     itertools.repeat(get_unique_schedules(default_heuristic)),
-                     itertools.repeat(default_heuristic))
+        for x in zip(
+            AWQ_kernel_type_configs,
+            itertools.repeat(get_unique_schedules(default_heuristic)),
+            itertools.repeat(default_heuristic),
+        )
     ]
 
     # TODO: Support W4A8 when ready

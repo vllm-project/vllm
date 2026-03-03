@@ -23,14 +23,17 @@ def test_get_vllm_port_valid():
 
 def test_get_vllm_port_invalid():
     """Test when VLLM_PORT is set to a non-integer value."""
-    with (patch.dict(os.environ, {"VLLM_PORT": "abc"}, clear=True),
-          pytest.raises(ValueError, match="must be a valid integer")):
+    with (
+        patch.dict(os.environ, {"VLLM_PORT": "abc"}, clear=True),
+        pytest.raises(ValueError, match="must be a valid integer"),
+    ):
         get_vllm_port()
 
 
 def test_get_vllm_port_uri():
     """Test when VLLM_PORT is set to a URI."""
-    with (patch.dict(os.environ, {"VLLM_PORT": "tcp://localhost:5678"},
-                     clear=True),
-          pytest.raises(ValueError, match="appears to be a URI")):
+    with (
+        patch.dict(os.environ, {"VLLM_PORT": "tcp://localhost:5678"}, clear=True),
+        pytest.raises(ValueError, match="appears to be a URI"),
+    ):
         get_vllm_port()

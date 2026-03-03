@@ -10,10 +10,11 @@ import torch
 
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
-from vllm.model_executor.layers.quantization.gptq_marlin import (
-    GPTQMarlinLinearMethod)
+from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinLinearMethod
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
-    get_dynamic_override)
+    get_dynamic_override,
+)
+from vllm.platforms import current_platform
 
 PROMPT = "On the surface of Mars, we found"
 
@@ -21,51 +22,64 @@ PROMPT = "On the surface of Mars, we found"
 # The second layer is quantized using bits=8, group_size=32
 # All other layers (layer index >= 2) are not quantized
 MODEL_QUANT = [
-    ("ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symTrue",
-     True),
-    ("ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symFalse",
-     False),
+    (
+        "ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symTrue",
+        current_platform.is_cuda(),
+    ),
+    (
+        "ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symFalse",
+        False,
+    ),
 ]
 
 
 @pytest.mark.parametrize("model_id, use_marlin_kernel", MODEL_QUANT)
-def test_gptq_with_dynamic(vllm_runner, model_id: str, use_marlin_kernel: bool,
-                           monkeypatch):
-    # vllm_runner.apply_model() relies on V0 internals.
-    monkeypatch.setenv("VLLM_USE_V1", "0")
+def test_gptq_with_dynamic(
+    vllm_runner, model_id: str, use_marlin_kernel: bool, monkeypatch
+):
+    # `LLM.apply_model` requires pickling a function.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
-    vllm_model = vllm_runner(model_id, dtype=torch.float16, max_model_len=2048)
+    linear_method_cls = (
+        GPTQMarlinLinearMethod if use_marlin_kernel else (GPTQLinearMethod)
+    )
 
-    linear_method_cls = GPTQMarlinLinearMethod if use_marlin_kernel else (
-        GPTQLinearMethod)
+    with vllm_runner(
+        model_id, dtype=torch.float16, max_model_len=2048, enforce_eager=True
+    ) as llm:
 
-    for name, submodule in (vllm_model.llm.llm_engine.model_executor.
-                            driver_worker.model_runner.model.named_modules()):
-        if name == "lm_head":
-            assert isinstance(submodule.quant_method, linear_method_cls)
-        elif name == 'model.layers.0.self_attn.qkv_proj':
-            # The first layer is quantized using bits=4, group_size=128
-            # desc_act=True
-            assert isinstance(submodule.quant_method, linear_method_cls)
-            config = submodule.quant_method.quant_config
-            assert config.weight_bits == 4
-            assert config.group_size == 128
-            assert config.desc_act
-        elif name == 'model.layers.1.self_attn.qkv_proj':
-            # The second layer is quantized using bits=8, group_size=32
-            # desc_act=False
-            assert isinstance(submodule.quant_method, linear_method_cls)
-            config = submodule.quant_method.quant_config
-            assert get_dynamic_override(config, layer_name=name,
-                                        key="bits") == 8
-            assert get_dynamic_override(config,
-                                        layer_name=name,
-                                        key="group_size") == 32
-            assert not get_dynamic_override(
-                config, layer_name=name, key="desc_act")
-        elif (name == 'model.layers.2.self_attn.qkv_proj'
-              or name == 'model.layers.2.mlp.gate_up_proj'):
-            # All other layers (layer index >= 2) are not quantized
-            assert isinstance(submodule.quant_method, UnquantizedLinearMethod)
+        def check_model(model):
+            for name, submodule in model.named_modules():
+                if name == "lm_head":
+                    assert isinstance(submodule.quant_method, linear_method_cls)
+                elif name == "model.layers.0.self_attn.qkv_proj":
+                    # The first layer is quantized using bits=4, group_size=128
+                    # desc_act=True
+                    assert isinstance(submodule.quant_method, linear_method_cls)
+                    config = submodule.quant_method.quant_config
+                    assert config.weight_bits == 4
+                    assert config.group_size == 128
+                    assert config.desc_act
+                elif name == "model.layers.1.self_attn.qkv_proj":
+                    # The second layer is quantized using bits=8, group_size=32
+                    # desc_act=False
+                    assert isinstance(submodule.quant_method, linear_method_cls)
+                    config = submodule.quant_method.quant_config
+                    assert (
+                        get_dynamic_override(config, layer_name=name, key="bits") == 8
+                    )
+                    assert (
+                        get_dynamic_override(config, layer_name=name, key="group_size")
+                        == 32
+                    )
+                    assert not get_dynamic_override(
+                        config, layer_name=name, key="desc_act"
+                    )
+                elif (
+                    name == "model.layers.2.self_attn.qkv_proj"
+                    or name == "model.layers.2.mlp.gate_up_proj"
+                ):
+                    # All other layers (layer index >= 2) are not quantized
+                    assert isinstance(submodule.quant_method, UnquantizedLinearMethod)
 
-    del vllm_model
+        llm.apply_model(check_model)

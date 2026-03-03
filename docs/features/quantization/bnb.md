@@ -7,7 +7,7 @@ Compared to other quantization methods, BitsAndBytes eliminates the need for cal
 Below are the steps to utilize BitsAndBytes with vLLM.
 
 ```bash
-pip install bitsandbytes>=0.46.1
+pip install bitsandbytes>=0.49.2
 ```
 
 vLLM reads the model's config file and supports both in-flight quantization and pre-quantized checkpoint.
@@ -27,7 +27,7 @@ model_id = "unsloth/tinyllama-bnb-4bit"
 llm = LLM(
     model=model_id,
     dtype=torch.bfloat16,
-    trust_remote_code=True
+    trust_remote_code=True,
 )
 ```
 
@@ -43,7 +43,7 @@ llm = LLM(
     model=model_id,
     dtype=torch.bfloat16,
     trust_remote_code=True,
-    quantization="bitsandbytes"
+    quantization="bitsandbytes",
 )
 ```
 

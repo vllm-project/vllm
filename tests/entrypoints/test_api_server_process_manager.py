@@ -5,13 +5,11 @@ import multiprocessing
 import socket
 import threading
 import time
-from typing import Optional
 from unittest.mock import patch
 
 import pytest
 
-from vllm.v1.utils import (APIServerProcessManager,
-                           wait_for_completion_or_failure)
+from vllm.v1.utils import APIServerProcessManager, wait_for_completion_or_failure
 
 # Global variables to control worker behavior
 WORKER_RUNTIME_SECONDS = 0.5
@@ -30,26 +28,22 @@ def api_server_args():
     """Fixture to provide arguments for APIServerProcessManager."""
     sock = socket.socket()
     return {
-        "target_server_fn":
-        mock_run_api_server_worker,
-        "listen_address":
-        "localhost:8000",
-        "sock":
-        sock,
-        "args":
-        "test_args",  # Simple string to avoid pickling issues
-        "num_servers":
-        3,
+        "target_server_fn": mock_run_api_server_worker,
+        "listen_address": "localhost:8000",
+        "sock": sock,
+        "args": "test_args",  # Simple string to avoid pickling issues
+        "num_servers": 3,
         "input_addresses": [
-            "tcp://127.0.0.1:5001", "tcp://127.0.0.1:5002",
-            "tcp://127.0.0.1:5003"
+            "tcp://127.0.0.1:5001",
+            "tcp://127.0.0.1:5002",
+            "tcp://127.0.0.1:5003",
         ],
         "output_addresses": [
-            "tcp://127.0.0.1:6001", "tcp://127.0.0.1:6002",
-            "tcp://127.0.0.1:6003"
+            "tcp://127.0.0.1:6001",
+            "tcp://127.0.0.1:6002",
+            "tcp://127.0.0.1:6003",
         ],
-        "stats_update_address":
-        "tcp://127.0.0.1:7000",
+        "stats_update_address": "tcp://127.0.0.1:7000",
     }
 
 
@@ -60,7 +54,7 @@ def test_api_server_process_manager_init(api_server_args, with_stats_update):
     global WORKER_RUNTIME_SECONDS
     WORKER_RUNTIME_SECONDS = 0.5
 
-    # Copy the args to avoid mutating the
+    # Copy the args to avoid mutating them
     args = api_server_args.copy()
 
     if not with_stats_update:
@@ -95,8 +89,9 @@ def test_api_server_process_manager_init(api_server_args, with_stats_update):
             assert not proc.is_alive()
 
 
-@patch("vllm.entrypoints.cli.serve.run_api_server_worker",
-       mock_run_api_server_worker)
+@patch(
+    "vllm.entrypoints.cli.serve.run_api_server_worker_proc", mock_run_api_server_worker
+)
 def test_wait_for_completion_or_failure(api_server_args):
     """Test that wait_for_completion_or_failure works with failures."""
     global WORKER_RUNTIME_SECONDS
@@ -109,7 +104,7 @@ def test_wait_for_completion_or_failure(api_server_args):
         assert len(manager.processes) == 3
 
         # Create a result capture for the thread
-        result: dict[str, Optional[Exception]] = {"exception": None}
+        result: dict[str, Exception | None] = {"exception": None}
 
         def run_with_exception_capture():
             try:
@@ -118,8 +113,7 @@ def test_wait_for_completion_or_failure(api_server_args):
                 result["exception"] = e
 
         # Start a thread to run wait_for_completion_or_failure
-        wait_thread = threading.Thread(target=run_with_exception_capture,
-                                       daemon=True)
+        wait_thread = threading.Thread(target=run_with_exception_capture, daemon=True)
         wait_thread.start()
 
         # Let all processes run for a short time
@@ -174,8 +168,7 @@ def test_normal_completion(api_server_args):
 
         # Verify all processes have terminated
         for i, proc in enumerate(manager.processes):
-            assert not proc.is_alive(
-            ), f"Process {i} still alive after terminate()"
+            assert not proc.is_alive(), f"Process {i} still alive after terminate()"
 
         # Now call wait_for_completion_or_failure
         # since all processes have already
@@ -198,13 +191,13 @@ def test_external_process_monitoring(api_server_args):
     # Create and start the external process
     # (simulates local_engine_manager or coordinator)
     spawn_context = multiprocessing.get_context("spawn")
-    external_proc = spawn_context.Process(target=mock_run_api_server_worker,
-                                          name="MockExternalProcess")
+    external_proc = spawn_context.Process(
+        target=mock_run_api_server_worker, name="MockExternalProcess"
+    )
     external_proc.start()
 
     # Create the class to simulate a coordinator
     class MockCoordinator:
-
         def __init__(self, proc):
             self.proc = proc
 
@@ -224,18 +217,18 @@ def test_external_process_monitoring(api_server_args):
         assert len(manager.processes) == 3
 
         # Create a result capture for the thread
-        result: dict[str, Optional[Exception]] = {"exception": None}
+        result: dict[str, Exception | None] = {"exception": None}
 
         def run_with_exception_capture():
             try:
-                wait_for_completion_or_failure(api_server_manager=manager,
-                                               coordinator=mock_coordinator)
+                wait_for_completion_or_failure(
+                    api_server_manager=manager, coordinator=mock_coordinator
+                )
             except Exception as e:
                 result["exception"] = e
 
         # Start a thread to run wait_for_completion_or_failure
-        wait_thread = threading.Thread(target=run_with_exception_capture,
-                                       daemon=True)
+        wait_thread = threading.Thread(target=run_with_exception_capture, daemon=True)
         wait_thread.start()
 
         # Terminate the external process to trigger a failure
@@ -246,21 +239,23 @@ def test_external_process_monitoring(api_server_args):
         wait_thread.join(timeout=1.0)
 
         # The wait thread should have completed
-        assert not wait_thread.is_alive(
-        ), "wait_for_completion_or_failure thread still running"
+        assert not wait_thread.is_alive(), (
+            "wait_for_completion_or_failure thread still running"
+        )
 
         # Verify that an exception was raised with appropriate error message
         assert result["exception"] is not None, "No exception was raised"
         error_message = str(result["exception"])
-        assert "died with exit code" in error_message, \
+        assert "died with exit code" in error_message, (
             f"Unexpected error message: {error_message}"
-        assert "MockExternalProcess" in error_message, \
+        )
+        assert "MockExternalProcess" in error_message, (
             f"Error doesn't mention external process: {error_message}"
+        )
 
         # Verify that all API server processes were terminated as a result
         for i, proc in enumerate(manager.processes):
-            assert not proc.is_alive(
-            ), f"API server process {i} was not terminated"
+            assert not proc.is_alive(), f"API server process {i} was not terminated"
 
     finally:
         # Clean up
