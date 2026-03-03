@@ -42,6 +42,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateRequest,
 )
 from vllm.distributed.weight_transfer.nccl_engine import (
+    NCCLTrainerSendWeightsArgs,
     NCCLWeightTransferEngine,
     NCCLWeightTransferInitInfo,
     NCCLWeightTransferUpdateInfo,
@@ -103,7 +104,7 @@ class MyLLM(vllm.AsyncLLMEngine):
         while not self._request_pause_flag:
             await asyncio.sleep(0)
         await super().pause_generation(mode="keep")
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(5)
         self._generation_paused = True
 
 
@@ -152,10 +153,13 @@ class TrainModel:
 
     def broadcast_weights(self, packed: bool = True):
         """Broadcast weights to the inference engine."""
-        NCCLWeightTransferEngine.trainer_send_weights(
-            iterator=self.model.named_parameters(),
+        trainer_args = NCCLTrainerSendWeightsArgs(
             group=self.model_update_group,
             packed=packed,
+        )
+        NCCLWeightTransferEngine.trainer_send_weights(
+            iterator=self.model.named_parameters(),
+            trainer_args=trainer_args,
         )
 
     @torch.inference_mode()

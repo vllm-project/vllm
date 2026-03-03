@@ -10,6 +10,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 import vllm.envs as envs
+from tests.utils import ensure_current_vllm_config
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.distributed.device_communicators.pynccl import register_nccl_symmetric_ops
@@ -51,7 +52,8 @@ def nccl_symm_mem_allreduce_worker(local_rank: int, world_size: int):
         )
 
         init_distributed_environment()
-        initialize_model_parallel(tensor_model_parallel_size=world_size)
+        with ensure_current_vllm_config():
+            initialize_model_parallel(tensor_model_parallel_size=world_size)
 
         cuda_communicator = typing.cast(
             CudaCommunicator, get_tp_group().device_communicator

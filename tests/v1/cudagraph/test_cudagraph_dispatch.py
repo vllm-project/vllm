@@ -176,10 +176,14 @@ class TestCudagraphDispatcher:
         assert rt_mode == CUDAGraphMode.NONE
         assert key == BatchDescriptor(num_tokens=15)
 
-        # 4. disable_full should have a fall back mode (e.g., cascade attention)
+        # 4. invalid_modes={FULL} should have a fall back mode
+        #    (e.g., cascade attention)
         desc_full_exact = BatchDescriptor(num_tokens=8, uniform=False)
         rt_mode, key = dispatcher.dispatch(
-            num_tokens=8, uniform_decode=False, has_lora=False, disable_full=True
+            num_tokens=8,
+            uniform_decode=False,
+            has_lora=False,
+            invalid_modes={CUDAGraphMode.FULL},
         )
 
         if "PIECEWISE" in cudagraph_mode_str:  # string contains check
@@ -187,6 +191,16 @@ class TestCudagraphDispatcher:
             assert key == replace(desc_full_exact, num_reqs=None, uniform=False)
         else:
             assert rt_mode == CUDAGraphMode.NONE
+
+        # 5. valid_modes={NONE} always returns NONE even when keys exist
+        rt_mode, key = dispatcher.dispatch(
+            num_tokens=8,
+            uniform_decode=False,
+            has_lora=False,
+            valid_modes={CUDAGraphMode.NONE},
+        )
+        assert rt_mode == CUDAGraphMode.NONE
+        assert key == BatchDescriptor(num_tokens=8)
 
     @pytest.mark.parametrize(
         "cudagraph_mode_str,compilation_mode,expected_modes",
