@@ -411,9 +411,9 @@ class CompressedTensorsW4A16Mxfp4MoEMethod(CompressedTensorsMoEMethod):
     def apply(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor:
         """
         Execute the MoE Layer with MXFP4 XPU Kernel.
@@ -421,12 +421,14 @@ class CompressedTensorsW4A16Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         # Lazy import
         from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
-        # 1. Router Selection
-        routing_weights, selected_experts = router.select_experts(
-            hidden_states=x, router_logits=router_logits
-        )
+        # # 原理： (x 左移4位) 位或 (x 右移4位)
+        # layer.w13_weight_packed = ((layer.w13_weight_packed & 0x0F) << 4) | ((layer.w13_weight_packed & 0xF0) >> 4)
+        # layer.w2_weight_packed = ((layer.w2_weight_packed & 0x0F) << 4) | ((layer.w2_weight_packed & 0xF0) >> 4)
 
-        # 2. Kernel Execution
+        # if torch.distributed.get_rank() == 0:
+        #     mem_scale = layer.w13_weight_scale.flatten()[:5].tolist()
+        #     print(f"\n W13 Scale: {mem_scale}")
+
         return xpu_fused_moe(
             hidden_states=x,
             w13=layer.w13_weight_packed,
@@ -435,8 +437,8 @@ class CompressedTensorsW4A16Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             w2=layer.w2_weight_packed,
             w2_scales=layer.w2_weight_scale,
             w2_bias=layer.w2_bias if self.moe.has_bias else None,
-            topk_weights=routing_weights,
-            topk_ids=selected_experts,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
             n_experts_per_token=layer.top_k,
             activation=layer.activation,
             num_experts=layer.global_num_experts
@@ -583,24 +585,28 @@ class CompressedTensorsW4A16Int4MoEMethod(CompressedTensorsMoEMethod):
     ) -> FusedMoEQuantConfig | None:
         return None
 
-    def apply(self, layer, router, x, router_logits):
+    def apply(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
         from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
-        routing_weights, selected_experts = router.select_experts(
-            hidden_states=x, router_logits=router_logits
-        )
+        # routing_weights, selected_experts = select_experts(
+        #     hidden_states=x, router_logits=router_logits
+        # )
 
         # int32 (K/8) -> uint8 (K/2)
         w13_uint8 = layer.w13_weight_packed.view(torch.uint8)
         w2_uint8 = layer.w2_weight_packed.view(torch.uint8)
 
-        # # === 调试打印 (Debug) ===
         # if torch.distributed.get_rank() == 0:
         #     print(f"\n[DEBUG XPU MoE] Group Size Check:")
         #     print(f"  W13 Weight (uint8): {w13_uint8.shape}")
         #     print(f"  W13 Scale:          {layer.w13_weight_scale.shape}")
 
-        #     # 手动模拟 Kernel 的推断逻辑
         #     w13_k = w13_uint8.shape[-1] * 2  # uint8 * 2 = 实际参数量
         #     w13_g = layer.w13_weight_scale.shape[-1]
         #     if w13_g > 0:
@@ -613,14 +619,14 @@ class CompressedTensorsW4A16Int4MoEMethod(CompressedTensorsMoEMethod):
 
         return xpu_fused_moe(
             hidden_states=x,
-            w13=w13_uint8,  # 传入转换后的 uint8 视图
+            w13=w13_uint8,
             w13_scales=layer.w13_weight_scale,
             w13_bias=layer.w13_bias if self.moe.has_bias else None,
-            w2=w2_uint8,  # 传入转换后的 uint8 视图
+            w2=w2_uint8,
             w2_scales=layer.w2_weight_scale,
             w2_bias=layer.w2_bias if self.moe.has_bias else None,
-            topk_weights=routing_weights,
-            topk_ids=selected_experts,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
             n_experts_per_token=layer.top_k,
             activation=layer.activation,
             num_experts=layer.global_num_experts
@@ -797,7 +803,6 @@ class CompressedTensorsW8A16Fp8MoEMethod(CompressedTensorsMoEMethod):
     def apply(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
@@ -806,7 +811,7 @@ class CompressedTensorsW8A16Fp8MoEMethod(CompressedTensorsMoEMethod):
         """
 
         # 1. Router: Select the top-k experts for each token
-        routing_weights, selected_experts = router.select_experts(
+        routing_weights, selected_experts = select_experts(
             hidden_states=x, router_logits=router_logits
         )
 
@@ -1630,9 +1635,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             )
             routing_method_type = layer.routing_method_type
             return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
-                routing_logits=router_logits.to(torch.float32)
-                if routing_method_type == RoutingMethodType.DeepSeekV3
-                else router_logits,
+                routing_logits=(
+                    router_logits.to(torch.float32)
+                    if routing_method_type == RoutingMethodType.DeepSeekV3
+                    else router_logits
+                ),
                 routing_bias=e_score_correction_bias,
                 x=x,
                 w13_weight=layer.w13_weight,
@@ -1880,13 +1887,13 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         for weight scales.
         """
         if weight_name == "w13_scale":
-            assert num_groups_w13 is not None, (
-                "num_groups_w13 must be provided for weight scales"
-            )
+            assert (
+                num_groups_w13 is not None
+            ), "num_groups_w13 must be provided for weight scales"
         if weight_name == "w2_scale":
-            assert num_groups_w2 is not None, (
-                "num_groups_w2 must be provided for weight scales"
-            )
+            assert (
+                num_groups_w2 is not None
+            ), "num_groups_w2 must be provided for weight scales"
         w13_num_shards = 2 if self.moe.is_act_and_mul else 1
         shape_map = {
             "w13_weight": {
