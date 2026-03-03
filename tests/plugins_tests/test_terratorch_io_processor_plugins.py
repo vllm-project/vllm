@@ -9,6 +9,7 @@ import requests
 from PIL import Image
 
 from tests.utils import RemoteOpenAIServer
+from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
 from vllm.entrypoints.pooling.pooling.protocol import IOProcessorResponse
 
 models_config = {
@@ -134,6 +135,10 @@ def test_prithvi_mae_plugin_offline(
         default_torch_num_threads=1,
     ) as llm_runner:
         pooler_output = llm_runner.get_llm().encode(prompt, pooling_task="plugin")
+
+    # Ensuring resources are being released across runs
+    cleanup_dist_env_and_memory()
+
     output = pooler_output[0].outputs
 
     # verify the output is formatted as expected for this plugin
