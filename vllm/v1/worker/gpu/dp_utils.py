@@ -13,10 +13,7 @@ def make_num_tokens_across_dp(dp_size: int, num_tokens: int) -> torch.Tensor | N
 
 
 def get_batch_metadata_across_dp(
-    num_tokens: int,
-    cudagraph_size: int,
-    dp_size: int,
-    dp_rank: int,
+    num_tokens: int, cudagraph_size: int, dp_size: int, dp_rank: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert dp_size > 1
     # Use CPU group to avoid CPU-GPU synchronization.
@@ -29,10 +26,7 @@ def get_batch_metadata_across_dp(
 
 
 def get_cudagraph_and_dp_padding(
-    num_tokens: int,
-    cudagraph_size: int | None,
-    dp_size: int,
-    dp_rank: int,
+    num_tokens: int, cudagraph_size: int | None, dp_size: int, dp_rank: int
 ) -> tuple[bool, int, torch.Tensor | None]:
     if dp_size == 1:
         if cudagraph_size is not None:

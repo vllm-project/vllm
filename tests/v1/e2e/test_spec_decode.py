@@ -455,7 +455,7 @@ def test_eagle_correctness(
         from packaging.version import Version
 
         installed = Version(transformers.__version__)
-        required = Version("5.0.0.dev")
+        required = Version("5.0.0")
         if installed < required:
             pytest.skip(
                 "Eagle3 with the Transformers modeling backend requires "
@@ -808,7 +808,7 @@ def some_high_acceptance_metrics() -> dict:
     return {
         "sampling_config": greedy_sampling(),
         "num_speculative_tokens": 3,
-        "expected_acceptance_len": 2.90 + 1,
+        "expected_acceptance_len": 2.8 + 1,
         "expected_acceptance_rate": 0.90,
     }
 

@@ -14,7 +14,8 @@ from PIL import Image, ImageChops
 
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import PlaceholderRange
-from vllm.multimodal.utils import MediaConnector, argsort_mm_positions
+from vllm.multimodal.media import MediaConnector
+from vllm.multimodal.utils import argsort_mm_positions
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_ASSETS = [

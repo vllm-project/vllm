@@ -6,14 +6,14 @@ from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import Any
 
 from vllm.config import ModelConfig, VllmConfig
-from vllm.inputs.data import PromptType
+from vllm.inputs.data import PromptType, StreamingInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import IOProcessor
 from vllm.pooling_params import PoolingParams
+from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
 
@@ -25,6 +25,10 @@ class EngineClient(ABC):
     model_config: ModelConfig
     input_processor: InputProcessor
     io_processor: IOProcessor | None
+
+    @property
+    @abstractmethod
+    def renderer(self) -> BaseRenderer: ...
 
     @property
     @abstractmethod
@@ -45,7 +49,7 @@ class EngineClient(ABC):
     @abstractmethod
     def generate(
         self,
-        prompt: EngineCoreRequest | PromptType,
+        prompt: EngineCoreRequest | PromptType | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
         *,
@@ -68,14 +72,9 @@ class EngineClient(ABC):
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        truncate_prompt_tokens: int | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
-        """Generate outputs for a request from a pooling model.
-
-        NOTE: truncate_prompt_tokens is deprecated in v0.14.
-        TODO: Remove this argument in v0.15.
-        """
+        """Generate outputs for a request from a pooling model."""
         ...
 
     @abstractmethod
@@ -86,11 +85,6 @@ class EngineClient(ABC):
             request_id: The unique id of the request,
                         or an iterable of such ids.
         """
-        ...
-
-    @abstractmethod
-    async def get_tokenizer(self) -> TokenizerLike:
-        """Get the tokenizer"""
         ...
 
     @abstractmethod
@@ -117,6 +111,11 @@ class EngineClient(ABC):
     @abstractmethod
     async def reset_mm_cache(self) -> None:
         """Reset the multi-modal cache"""
+        ...
+
+    @abstractmethod
+    async def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache"""
         ...
 
     @abstractmethod

@@ -288,7 +288,6 @@ class ParsableContext(ConversationContext):
         )
         self.tool_parser_cls = tool_parser_cls
         self.request = request
-        self.tokenizer = tokenizer
 
         self.available_tools = available_tools or []
         self._tool_sessions: dict[str, ClientSession | Tool] = {}

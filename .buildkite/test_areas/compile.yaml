@@ -5,7 +5,7 @@ steps:
 - label: Fusion and Compile Tests (B200)
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
-  gpu: b200
+  device: b200
   source_file_dependencies:
   - csrc/quantization/fp4/
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
@@ -26,7 +26,7 @@ steps:
     - nvidia-smi
     - pytest -v -s tests/compile/test_fusion_attn.py
     - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
-    # this runner has 2 GPUs available even though num_gpus=2 is not set
+    # this runner has 2 GPUs available even though num_devices=2 is not set
     - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
     # Limit to Inductor partition, no custom ops, and allreduce & attn fusion to reduce running time
     # Wrap with quotes to escape yaml
@@ -37,9 +37,9 @@ steps:
 - label: Fusion E2E (2 GPUs)(B200)
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
-  gpu: b200
+  device: b200
   optional: true
-  num_gpus: 2
+  num_devices: 2
   source_file_dependencies:
   - csrc/quantization/fp4/
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py

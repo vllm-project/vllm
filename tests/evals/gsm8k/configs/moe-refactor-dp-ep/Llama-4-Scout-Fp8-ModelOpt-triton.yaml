@@ -3,3 +3,6 @@ accuracy_threshold: 0.92
 num_questions: 1319
 num_fewshot: 5
 server_args: "--enforce-eager --max-model-len 8192 --data-parallel-size 2 --enable-expert-parallel"
+env:
+  VLLM_USE_FLASHINFER_MOE_FP8: "0"
+  VLLM_USE_DEEP_GEMM: "0"

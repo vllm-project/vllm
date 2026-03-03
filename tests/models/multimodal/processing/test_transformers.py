@@ -21,7 +21,7 @@ def test_multimodal_processor(model_id):
     str_prompt = "<|im_start|>user <image>\nWhat is the content of this image?<|im_end|><|im_start|>assistant\n"  # noqa: E501
     str_processed_inputs = mm_processor.apply(
         prompt=str_prompt,
-        mm_data=mm_data,
+        mm_items=mm_processor.info.parse_mm_data(mm_data),
         hf_processor_mm_kwargs={},
     )
 
@@ -46,7 +46,7 @@ def test_multimodal_processor(model_id):
     ]
     ids_processed_inputs = mm_processor.apply(
         prompt=ids_prompt,
-        mm_data=mm_data,
+        mm_items=mm_processor.info.parse_mm_data(mm_data),
         hf_processor_mm_kwargs={},
     )
 

@@ -565,6 +565,26 @@ class EngineCore:
             reset_running_requests, reset_connector
         )
 
+    def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache to invalidate all cached encoder outputs.
+
+        This should be called when model weights are updated to ensure
+        stale vision embeddings computed with old weights are not reused.
+        Clears both the scheduler's cache manager and the GPU model runner's cache.
+        """
+        # NOTE: Since this is mainly for debugging, we don't attempt to
+        # re-sync the internal caches (P0 sender, P1 receiver)
+        if self.scheduler.has_unfinished_requests():
+            logger.warning(
+                "Resetting the encoder cache when requests are "
+                "in progress may lead to desynced internal caches."
+            )
+
+        # Reset the scheduler's encoder cache manager (logical state)
+        self.scheduler.reset_encoder_cache()
+        # Reset the GPU model runner's encoder cache (physical storage)
+        self.model_executor.reset_encoder_cache()
+
     def sleep(self, level: int = 1):
         self.model_executor.sleep(level)
 
@@ -910,6 +930,17 @@ class EngineCoreProc(EngineCore):
             else:
                 set_process_title("EngineCore")
             decorate_logs()
+
+            if data_parallel and vllm_config.kv_transfer_config is not None:
+                # modify the engine_id and append the local_dp_rank to it to ensure
+                # that the kv_transfer_config is unique for each DP rank.
+                vllm_config.kv_transfer_config.engine_id = (
+                    f"{vllm_config.kv_transfer_config.engine_id}_dp{local_dp_rank}"
+                )
+                logger.debug(
+                    "Setting kv_transfer_config.engine_id to %s",
+                    vllm_config.kv_transfer_config.engine_id,
+                )
 
             parallel_config.data_parallel_index = dp_rank
             if data_parallel and vllm_config.model_config.is_moe:
@@ -1284,17 +1315,6 @@ class DPEngineCoreProc(EngineCoreProc):
         assert dp_size > 1
         assert local_dp_rank is not None
         assert 0 <= local_dp_rank <= dp_rank < dp_size
-
-        if vllm_config.kv_transfer_config is not None:
-            # modify the engine_id and append the local_dp_rank to it to ensure
-            # that the kv_transfer_config is unique for each DP rank.
-            vllm_config.kv_transfer_config.engine_id = (
-                f"{vllm_config.kv_transfer_config.engine_id}_dp{local_dp_rank}"
-            )
-            logger.debug(
-                "Setting kv_transfer_config.engine_id to %s",
-                vllm_config.kv_transfer_config.engine_id,
-            )
 
         self.dp_rank = dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()

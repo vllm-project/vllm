@@ -23,7 +23,6 @@ from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 from transformers.video_utils import VideoInput, VideoMetadata
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
@@ -36,7 +35,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import MulAndSilu, SiluAndMul, get_act_fn
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -1217,7 +1216,7 @@ class Molmo2TextModel(nn.Module, SupportsQuant):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -1861,6 +1860,12 @@ def get_frame_times_and_chosen_fps(
 
 
 class Molmo2ProcessingInfo(BaseProcessingInfo):
+    def get_data_parser(self):
+        return MultiModalDataParser(
+            video_needs_metadata=True,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_hf_processor(self, **kwargs: object) -> Molmo2ProcessorWrapper:
         processor = self.ctx.get_hf_processor(**kwargs)
         hf_config = self.ctx.get_hf_config()
@@ -2183,9 +2188,6 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             prompt_tokens = [bos_token_id] + prompt_tokens
 
         return prompt_tokens
-
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return MultiModalDataParser(video_needs_metadata=True)
 
     def _call_hf_processor(
         self,
@@ -2514,16 +2516,19 @@ class Molmo2ForConditionalGeneration(
             kwargs[field.name] = getattr(config.adapter_config, field.name)
         adapter_config = AdapterConfig(**kwargs)
 
-        self.vision_backbone = Molmo2VisionBackbone(
-            vit_config,
-            adapter_config,
-            quant_config,
-            prefix=maybe_prefix(prefix, "vision_backbone"),
-        )
-        self.model = Molmo2TextModel(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
-        )
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.vision_backbone = Molmo2VisionBackbone(
+                vit_config,
+                adapter_config,
+                quant_config,
+                prefix=maybe_prefix(prefix, "vision_backbone"),
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.model = Molmo2TextModel(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "model"),
+            )
 
         self.img_patch_id = config.image_patch_id
 
@@ -2686,9 +2691,6 @@ class Molmo2ForConditionalGeneration(
             out_features[is_image_patch] = image_features_i
             out.append(out_features)
         return tuple(out)
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)

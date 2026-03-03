@@ -5,9 +5,9 @@ from copy import copy
 
 import torch
 
-from vllm.attention.layer import Attention
 from vllm.config import CacheConfig
 from vllm.config.vllm import VllmConfig
+from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadata,

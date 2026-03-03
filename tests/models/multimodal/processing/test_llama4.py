@@ -49,7 +49,11 @@ def test_processor_override(
     if tokenized_prompt:
         prompt = tokenizer.encode(prompt)
 
-    processed_inputs = processor.apply(prompt, mm_data, mm_processor_kwargs)
+    processed_inputs = processor.apply(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs=mm_processor_kwargs,
+    )
     mm_data = processed_inputs["mm_kwargs"].get_data()
 
     # place holder replacements

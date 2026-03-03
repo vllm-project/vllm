@@ -13,14 +13,19 @@ from tests.kernels.utils import torch_moe
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    RoutingMethodType,
+)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
     is_valid_flashinfer_cutlass_fused_moe,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (
-    create_flashinfer_prepare_finalize,
-)
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.torch_utils import set_random_seed
@@ -86,9 +91,23 @@ def test_flashinfer_fp4_moe_no_graph(
 
         assert is_valid_flashinfer_cutlass_fused_moe(a, w1_q, w2_q)
 
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size_per_partition=n,
+            num_local_experts=e,
+            activation=activation,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=dtype,
+            is_act_and_mul=is_gated_act,
+            routing_method=RoutingMethodType.TopK,
+        )
+
         flashinfer_experts = FusedMoEModularKernel(
-            create_flashinfer_prepare_finalize(use_dp=False, use_nvfp4=True),
-            FlashInferExperts(out_dtype=dtype, quant_config=quant_config),
+            MoEPrepareAndFinalizeNoEP(),
+            FlashInferExperts(moe_config=moe_config, quant_config=quant_config),
         )
 
         fi_activation = {"silu_and_mul": "silu", "relu2": "relu2_no_mul"}[activation]

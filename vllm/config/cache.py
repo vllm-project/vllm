@@ -31,6 +31,7 @@ CacheDType = Literal[
     "fp8_ds_mla",
 ]
 MambaDType = Literal["auto", "float32", "float16"]
+MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
@@ -123,6 +124,15 @@ class CacheConfig:
     """The data type to use for the Mamba cache (ssm state only, conv state will
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
     for the ssm state will be determined by mamba_cache_dtype."""
+    mamba_cache_mode: MambaCacheMode = "none"
+    """The cache strategy for Mamba layers.
+    - "none": set when prefix caching is disabled.
+    - "all": cache the mamba state of all tokens at position i * block_size. This is 
+           the default behavior (for models that support it) when prefix caching is
+           enabled.
+    - "align": only cache the mamba state of the last token of each scheduler step and
+           when the token is at position i * block_size.
+    """
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)

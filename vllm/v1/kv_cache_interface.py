@@ -98,7 +98,7 @@ class FullAttentionSpec(AttentionSpec):
     In this case, we use FullAttentionSpec and record the sliding window size.
     """
 
-    head_size_v: int | None = None
+    head_size_v: int = None  # type: ignore[assignment]
 
     sliding_window: int | None = None
     """
@@ -276,6 +276,7 @@ class MambaSpec(KVCacheSpec):
     dtypes: tuple[torch.dtype]
     page_size_padded: int | None = None
     mamba_type: str = "mamba2"
+    mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
 
     @property
@@ -290,8 +291,13 @@ class MambaSpec(KVCacheSpec):
         return page_size
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        max_model_len = vllm_config.model_config.max_model_len
-        return cdiv(max_model_len, self.block_size) * self.page_size_bytes
+        if vllm_config.cache_config.mamba_cache_mode == "all":
+            max_model_len = vllm_config.model_config.max_model_len
+            return cdiv(max_model_len, self.block_size) * self.page_size_bytes
+        elif vllm_config.cache_config.mamba_cache_mode == "align":
+            return self.page_size_bytes * (2 + self.num_speculative_blocks)
+        else:
+            return self.page_size_bytes * (1 + self.num_speculative_blocks)
 
 
 @dataclass(frozen=True)

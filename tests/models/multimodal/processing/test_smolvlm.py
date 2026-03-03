@@ -55,7 +55,11 @@ def test_processor_override(
     dummy_image = image_assets[0].pil_image.resize(dummy_image_size)
     mm_data = {"image": [dummy_image] * num_imgs}
 
-    processed_inputs = processor.apply(prompt, mm_data, hf_processor_mm_kwargs)
+    processed_inputs = processor.apply(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+    )
 
     # Ensure the placeholders format are correct
     hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)

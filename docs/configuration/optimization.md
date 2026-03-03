@@ -47,6 +47,10 @@ You can tune the performance by adjusting `max_num_batched_tokens`:
 - For optimal throughput, we recommend setting `max_num_batched_tokens > 8192` especially for smaller models on large GPUs.
 - If `max_num_batched_tokens` is the same as `max_model_len`, that's almost the equivalent to the V0 default scheduling policy (except that it still prioritizes decodes).
 
+!!! warning
+    When chunked prefill is disabled, `max_num_batched_tokens` must be greater than `max_model_len`.  
+    In that case, if `max_num_batched_tokens < max_model_len`, vLLM may crash at server start‑up.
+
 ```python
 from vllm import LLM
 
@@ -284,5 +288,11 @@ Based on the configuration, the content of the multi-modal caches on `P0` and `P
 | shm | Shared Memory Caching | K | N/A | V | `mm_processor_cache_gb * api_server_count` |
 | N/A | Disabled | N/A | N/A | N/A | `0` |
 
-K: Stores the hashes of multi-modal items  
+K: Stores the hashes of multi-modal items
 V: Stores the processed tensor data of multi-modal items
+
+## Attention Backend Selection
+
+vLLM supports multiple attention backends optimized for different hardware and use cases. The backend is automatically selected based on your GPU architecture, model type, and configuration, but you can also manually specify one for optimal performance.
+
+For detailed information on available backends, their feature support, and how to configure them, see the [Attention Backend Feature Support](../design/attention_backends.md) documentation.

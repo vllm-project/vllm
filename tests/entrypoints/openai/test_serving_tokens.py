@@ -92,7 +92,8 @@ async def test_same_response_as_chat_completions(client, tokenizer, messages):
         messages,
         add_generation_prompt=True,
         enable_thinking=False,  # default with Qwen3
-    )
+        return_dict=True,  # default with Transformers v5
+    ).input_ids
 
     for ignore_eos in [True, False]:
         payload = {
@@ -155,7 +156,8 @@ async def test_stop_string_workflow(client, tokenizer, messages):
         messages,
         add_generation_prompt=True,
         enable_thinking=False,  # default with Qwen3
-    )
+        return_dict=True,  # default with Transformers v5
+    ).input_ids
     payload = {
         "model": MODEL_NAME,
         "token_ids": token_ids,
@@ -251,7 +253,8 @@ async def test_generate_with_lora_adapter(client, tokenizer, messages):
         messages,
         add_generation_prompt=True,
         enable_thinking=False,  # default with Qwen3
-    )
+        return_dict=True,  # default with Transformers v5
+    ).input_ids
     payload = {
         "model": "Alice",
         "token_ids": token_ids,

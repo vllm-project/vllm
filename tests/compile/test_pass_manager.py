@@ -28,7 +28,7 @@ def test_bad_callable():
     pass_manager.configure(config)
 
     with pytest.raises(AssertionError):
-        pass_manager.add(simple_callable)
+        pass_manager.add(simple_callable)  # type: ignore[arg-type]
 
 
 # Pass that inherits from InductorPass

@@ -9,11 +9,9 @@ from dataclasses import replace
 from typing import Annotated, Any, Literal
 
 import torch
-from pydantic import (
-    Field,
-    model_validator,
-)
+from pydantic import Field, model_validator
 
+from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     LegacyStructuralTagResponseFormat,
@@ -27,6 +25,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.renderers import TokenizeParams
 from vllm.sampling_params import (
     BeamSearchParams,
     RequestOutputKind,
@@ -177,6 +176,17 @@ class CompletionRequest(OpenAIBaseModel):
     )
 
     # --8<-- [end:completion-extra-params]
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=self.max_tokens or 0,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            add_special_tokens=self.add_special_tokens,
+            needs_detokenization=bool(self.echo and not self.return_token_ids),
+            max_total_tokens_param="max_model_len",
+            max_output_tokens_param="max_tokens",
+        )
 
     # Default sampling parameters for completion requests
     _DEFAULT_SAMPLING_PARAMS: dict = {

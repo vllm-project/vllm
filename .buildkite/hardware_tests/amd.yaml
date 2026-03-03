@@ -1,0 +1,29 @@
+group: Hardware
+steps:
+  - label: "AMD: :docker: build image"
+    depends_on: []
+    device: amd_cpu
+    no_plugin: true
+    commands:
+    - >
+      docker build
+      --build-arg max_jobs=16
+      --build-arg REMOTE_VLLM=1
+      --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942'
+      --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
+      --tag "rocm/vllm-ci:${BUILDKITE_COMMIT}"
+      -f docker/Dockerfile.rocm
+      --target test
+      --no-cache
+      --progress plain .
+    - docker push "rocm/vllm-ci:${BUILDKITE_COMMIT}"
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+        - exit_status: 1  # Machine occasionally fail
+          limit: 1

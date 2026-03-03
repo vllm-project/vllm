@@ -18,6 +18,7 @@ class PenaltiesState:
         self.repetition_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.frequency_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.presence_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
+        self.use_penalty = np.zeros(max_num_reqs, dtype=bool)
 
         # Initialize repetition penalty manually because 0 is an invalid value for it.
         self.repetition_penalty.np.fill(1.0)
@@ -42,7 +43,10 @@ class PenaltiesState:
         self.repetition_penalty.np[req_idx] = sampling_params.repetition_penalty
         self.frequency_penalty.np[req_idx] = sampling_params.frequency_penalty
         self.presence_penalty.np[req_idx] = sampling_params.presence_penalty
-        if use_penalty(sampling_params):
+
+        do_penalty = use_penalty(sampling_params)
+        self.use_penalty[req_idx] = do_penalty
+        if do_penalty:
             self._penalties_reqs.append(req_idx)
 
     def apply_staged_writes(
@@ -66,7 +70,16 @@ class PenaltiesState:
         self.frequency_penalty.copy_to_uva()
         self.presence_penalty.copy_to_uva()
 
-    def apply_penalties(self, logits: torch.Tensor, idx_mapping: torch.Tensor) -> None:
+    def apply_penalties(
+        self,
+        logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ) -> None:
+        if not np.any(self.use_penalty[idx_mapping_np]):
+            # No request uses penalties. Skip the kernel launch.
+            return
+
         apply_penalties(
             logits,
             idx_mapping,

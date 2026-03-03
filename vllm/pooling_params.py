@@ -2,12 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import deepcopy
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any
 
 import msgspec
 
 from vllm.config import ModelConfig, PoolerConfig
-from vllm.config.pooler import get_use_activation
 from vllm.sampling_params import RequestOutputKind
 from vllm.tasks import PoolingTask
 
@@ -24,31 +23,25 @@ class PoolingParams(
             Set to -1 to use the model's default truncation size.
             Set to k to keep only the last k tokens (left truncation).
             Set to None to disable truncation.
+        use_activation: Whether to apply activation function to the pooler outputs.
+            `None` uses the pooler's default, which is `True` in most cases.
         dimensions: Reduce the dimensions of embeddings
             if model support matryoshka representation.
-        normalize: Deprecated, please use use_activation instead.
-        softmax: Deprecated, please use use_activation instead.
-        activation: Deprecated, please use use_activation instead.
-        use_activation: Whether to apply activation function to
-            the classification outputs.
     """
 
     # --8<-- [start:common-pooling-params]
     truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None
+    use_activation: bool | None = None
     # --8<-- [end:common-pooling-params]
 
     ## for embeddings models
-    # --8<-- [start:embedding-pooling-params]
+    # --8<-- [start:embed-pooling-params]
     dimensions: int | None = None
-    normalize: bool | None = None
-    # --8<-- [end:embedding-pooling-params]
+    # --8<-- [end:embed-pooling-params]
 
     ## for classification, scoring and rerank
-    # --8<-- [start:classification-pooling-params]
-    softmax: bool | None = None
-    activation: bool | None = None
-    use_activation: bool | None = None
-    # --8<-- [end:classification-pooling-params]
+    # --8<-- [start:classify-pooling-params]
+    # --8<-- [end:classify-pooling-params]
 
     ## for step pooling models
     step_tag_id: int | None = None
@@ -80,16 +73,13 @@ class PoolingParams(
         return deepcopy(self)
 
     def verify(
-        self, task: PoolingTask, model_config: Optional["ModelConfig"] = None
+        self, task: PoolingTask, model_config: "ModelConfig | None" = None
     ) -> None:
         if self.task is None:
             self.task = task
         elif self.task != task:
             msg = f"You cannot overwrite {self.task=!r} with {task=!r}!"
             raise ValueError(msg)
-
-        # raise deprecated warning for softmax and activation
-        self.use_activation = get_use_activation(self)
 
         # plugin task uses io_processor.parse_request to verify inputs,
         # skipping PoolingParams verify
@@ -106,7 +96,7 @@ class PoolingParams(
         self._verify_valid_parameters()
 
     def _merge_default_parameters(
-        self, model_config: Optional["ModelConfig"] = None
+        self, model_config: "ModelConfig | None" = None
     ) -> None:
         if model_config is None:
             return
@@ -160,7 +150,7 @@ class PoolingParams(
                 if getattr(self, k, None) is None:
                     setattr(self, k, getattr(pooler_config, k))
 
-    def _set_default_parameters(self, model_config: Optional["ModelConfig"]):
+    def _set_default_parameters(self, model_config: "ModelConfig | None"):
         if self.task in ["embed", "token_embed"]:
             if self.use_activation is None:
                 self.use_activation = True

@@ -14,6 +14,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
+    is_supported_config_trtllm_bf16,
+)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
@@ -21,12 +24,13 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_cutlass_fused_moe
 
 logger = init_logger(__name__)
 
 
 class UnquantizedMoeBackend(Enum):
+    FLASHINFER_TRTLLM = "FlashInfer TRTLLM"
     FLASHINFER_CUTLASS = "FlashInfer CUTLASS"
     AITER = "ROCm AITER"
     TRITON = "TRITON"
@@ -40,6 +44,7 @@ class UnquantizedMoeBackend(Enum):
 # that is not conform with Modular kernel format.
 # We will directly call the kernel for those backend
 UNSUPPORTED_BACKEND = [
+    UnquantizedMoeBackend.FLASHINFER_TRTLLM,
     UnquantizedMoeBackend.CPU,
     UnquantizedMoeBackend.XPU,
     UnquantizedMoeBackend.TPU,
@@ -48,11 +53,12 @@ UNSUPPORTED_BACKEND = [
 
 
 def select_unquantized_moe_backend(
+    moe_config: FusedMoEConfig,
     use_ep: bool,
     use_dp: bool,
 ) -> UnquantizedMoeBackend:
     """
-    Select the primary FP8 MoE backend
+    Select the primary Unquantized MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
 
@@ -61,13 +67,27 @@ def select_unquantized_moe_backend(
 
     rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
+    activation_format = (
+        mk.FusedMoEActivationFormat.BatchedExperts
+        if moe_config.moe_parallel_config.use_batched_activation_format
+        else mk.FusedMoEActivationFormat.Standard
+    )
+
+    # Check if FlashInfer TRTLLM BF16 MoE is supported
+    trtllm_supported, _ = is_supported_config_trtllm_bf16(
+        moe_config=moe_config,
+        activation_format=activation_format,
+    )
+    flashinfer_trtllm_moe_enabled = (
+        has_flashinfer() and envs.VLLM_USE_FLASHINFER_MOE_FP16 and trtllm_supported
+    )
     # FlashInfer CUTLASS MoE is only supported on Hopper and later GPUS
     flashinfer_cutlass_moe_enabled = (
         has_flashinfer_cutlass_fused_moe()
         and envs.VLLM_USE_FLASHINFER_MOE_FP16
         and use_ep
         and (not use_dp)
-        and current_platform.get_device_capability()[0] >= 9
+        and current_platform.has_device_capability(90)
     )
     if current_platform.is_rocm():
         if rocm_aiter_moe_enabled:
@@ -75,12 +95,21 @@ def select_unquantized_moe_backend(
         else:
             backend = UnquantizedMoeBackend.TRITON
     if current_platform.is_cuda():
-        if flashinfer_cutlass_moe_enabled:
+        if flashinfer_trtllm_moe_enabled:
+            backend = UnquantizedMoeBackend.FLASHINFER_TRTLLM
+        elif flashinfer_cutlass_moe_enabled:
             backend = UnquantizedMoeBackend.FLASHINFER_CUTLASS
         else:
-            if use_ep and (not use_dp):
+            if not envs.VLLM_USE_FLASHINFER_MOE_FP16 and trtllm_supported:
                 logger.info_once(
-                    "FlashInfer CUTLASS MoE is available for EP"
+                    "FlashInfer TRTLLM MoE is available but not enabled, "
+                    "consider setting VLLM_USE_FLASHINFER_MOE_FP16=1 "
+                    "to enable it for better performance.",
+                    scope="local",
+                )
+            elif use_ep and (not use_dp):
+                logger.info_once(
+                    "FlashInfer MoE is available for EP"
                     " but not enabled, consider setting"
                     " VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it.",
                     scope="local",
@@ -123,7 +152,6 @@ def convert_to_unquantized_kernel_format(
 
 
 def make_unquantized_moe_kernel(
-    layer: torch.nn.Module,
     backend: UnquantizedMoeBackend,
     quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
@@ -141,12 +169,8 @@ def make_unquantized_moe_kernel(
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             FlashInferExperts(
-                out_dtype=layer.params_dtype,
+                moe_config=moe_config,
                 quant_config=quant_config,
-                tp_rank=moe_config.moe_parallel_config.tp_rank,
-                tp_size=moe_config.moe_parallel_config.tp_size,
-                ep_rank=moe_config.moe_parallel_config.ep_rank,
-                ep_size=moe_config.moe_parallel_config.ep_size,
             ),
         )
         use_inplace = False
@@ -157,13 +181,19 @@ def make_unquantized_moe_kernel(
 
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
-            AiterExperts(quant_config),
+            AiterExperts(
+                moe_config=moe_config,
+                quant_config=quant_config,
+            ),
         )
     elif backend == UnquantizedMoeBackend.TRITON:
         from vllm.model_executor.layers.fused_moe import TritonExperts
 
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
-            TritonExperts(quant_config),
+            TritonExperts(
+                moe_config=moe_config,
+                quant_config=quant_config,
+            ),
         )
     return kernel, use_inplace

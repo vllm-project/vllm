@@ -290,6 +290,9 @@ def test_rms_group_quant(
     # Force spawn as it is more general.
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
+    # TODO: remove this after fusion is fixed
+    monkeypatch.setenv("VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES", "0")
+
     model_kwargs["attention_config"] = {"backend": backend.name}
 
     compilation_config = CompilationConfig(

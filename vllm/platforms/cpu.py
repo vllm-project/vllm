@@ -16,6 +16,7 @@ import torch
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.v1.attention.backend import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
@@ -198,13 +199,13 @@ class CpuPlatform(Platform):
         if (
             scheduler_config.enable_chunked_prefill
             or cache_config.enable_prefix_caching
-        ) and cache_config.cache_dtype != "auto":
+        ) and is_quantized_kv_cache(cache_config.cache_dtype):
             raise RuntimeError(
                 "Chunked-prefill and prefix-cache on the CPU "
                 "backend is not compatible with FP8 KV cache."
             )
 
-        if cache_config.cache_dtype != "auto":
+        if cache_config.cache_dtype.startswith("fp8"):
             logger.warning(
                 "CPU backend doesn't support KV cache quantization fallback to auto."
             )

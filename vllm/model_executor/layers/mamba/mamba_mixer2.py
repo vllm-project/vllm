@@ -41,6 +41,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
@@ -502,6 +503,9 @@ class MambaMixer2(MambaBase, CustomOp):
             dim=-1,
         )
 
+        # Check if running on Blackwell (SM100+) for kernel tuning
+        self.is_blackwell = current_platform.is_device_capability_family(100)
+
     def forward_native(
         self,
         hidden_states: torch.Tensor,
@@ -570,7 +574,7 @@ class MambaMixer2(MambaBase, CustomOp):
 
         assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
-        prefix_caching_enabled = self.cache_config.enable_prefix_caching
+        is_mamba_cache_all = self.cache_config.mamba_cache_mode == "all"
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
@@ -622,7 +626,7 @@ class MambaMixer2(MambaBase, CustomOp):
             dim=0,
         )
 
-        if prefix_caching_enabled:
+        if is_mamba_cache_all:
             # If prefix caching is enabled, retrieve the relevant variables
             # for prefill and decode
             block_idx_last_computed_token_d, block_idx_last_computed_token_p = (
@@ -701,7 +705,7 @@ class MambaMixer2(MambaBase, CustomOp):
             initial_states = None
             if has_initial_states_p is not None and prep_initial_states:
                 kernel_ssm_indices = state_indices_tensor_p
-                if prefix_caching_enabled:
+                if is_mamba_cache_all:
                     kernel_ssm_indices = state_indices_tensor_p.gather(
                         1, block_idx_last_computed_token_p.unsqueeze(1)
                     ).squeeze(1)
@@ -729,14 +733,14 @@ class MambaMixer2(MambaBase, CustomOp):
                 cu_chunk_seqlens=cu_chunk_seqlen_p,
                 last_chunk_indices=last_chunk_indices_p,
                 initial_states=initial_states,
-                return_intermediate_states=prefix_caching_enabled,
+                return_intermediate_states=is_mamba_cache_all,
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),
                 out=preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
                 state_dtype=ssm_state.dtype,
             )
 
-            if prefix_caching_enabled:
+            if is_mamba_cache_all:
                 # The chunk_stride is the number of chunks per mamba block
                 # e.g., if mamba_block_size = 512 and chunk_size = 256,
                 # then chunk_stride = 2
@@ -815,7 +819,7 @@ class MambaMixer2(MambaBase, CustomOp):
 
         # Process decode requests
         if has_decode:
-            if prefix_caching_enabled:
+            if is_mamba_cache_all:
                 state_indices_tensor_d_input = state_indices_tensor_d.gather(
                     1, block_idx_last_computed_token_d.unsqueeze(1)
                 ).squeeze(1)
@@ -883,6 +887,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 state_batch_indices=state_indices_tensor_d_input,
                 dst_state_batch_indices=state_indices_tensor_d_output,
                 out=preallocated_ssm_out_d.view(num_decodes, -1, self.head_dim),
+                is_blackwell=self.is_blackwell,
             )
 
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:

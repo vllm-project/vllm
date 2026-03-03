@@ -42,6 +42,22 @@ def test_compile_config_repr_succeeds():
     assert "inductor_passes" in val
 
 
+def test_async_scheduling_with_pipeline_parallelism_is_allowed():
+    cfg = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_model_len=8192,
+            is_encoder_decoder=False,
+            async_scheduling=True,
+        ),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=2,
+            distributed_executor_backend="mp",
+            nnodes=2,
+        ),
+    )
+    assert cfg.scheduler_config.async_scheduling is True
+
+
 @dataclass
 class _TestConfigFields:
     a: int

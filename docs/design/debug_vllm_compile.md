@@ -39,10 +39,9 @@ For more details on the design, please see the following resources:
 
 ## Use tlparse
 
-Use [tlparse](https://github.com/meta-pytorch/tlparse) to acquire torch.compile logs. These logs show all stages of the compilation process,
-including the fused kernels that torch.compile produces.
-If you can, we recommend sending these or pieces of these along with any bug reports --
-they are very helpful.
+Use [tlparse](https://github.com/meta-pytorch/tlparse) to view torch.compile
+logs. These logs show all stages of the compilation process, including the fused
+kernels that torch.compile produces.
 
 Install tlparse:
 
@@ -50,11 +49,16 @@ Install tlparse:
 pip install tlparse
 ```
 
+To enable the torch.compile logs, you can set the envvar `TORCH_TRACE=<dir>`.
+During tracing, a file per rank will be created inside of that directory, with
+each file containing the artifacts during compilation. If you can, we recommend
+sending these log files along with bug reports -- they are very helpful.
+
 Usage (offline inference)
 
 ```sh
 TORCH_TRACE=~/trace_dir python my_script.py
-tlparse ~/trace_dir/<the_first_log_file>
+tlparse ~/trace_dir/<rank_0_log_file>
 ```
 
 Usage (serving)
@@ -62,10 +66,11 @@ Usage (serving)
 ```sh
 TORCH_TRACE=~/trace_dir vllm serve
 # ctrl-c out of the server
-tlparse ~/trace_dir/<the_first_log_file>
+tlparse ~/trace_dir/<rank_0_log_file>
 ```
 
-The `tlparse` command outputs some HTML files (perhaps into e.g. `./tl_out/index.html`).
+Given one of the log files, the `tlparse` command outputs some HTML files
+(perhaps into e.g. `./tl_out/index.html`).
 Open it to see the logs. It'll look something like the following:
 
 ![tlparse example](../assets/design/debug_vllm_compile/tlparse_inductor.png)
@@ -206,7 +211,7 @@ LLM(model, compilation_config=CompilationConfig(
 These modes are stricter and reduce or eliminate the need of dynamic shapes guarding, which can help isolate issues:
 
 - `unbacked`: Uses unbacked symints which don't allow guards, making it easier to identify where guards are being incorrectly added
-- `backed_size_oblivious`: Uses a mode that is more strict about guarding.
+- `backed_size_oblivious`: Uses a mode that is stricter about guarding.
 
 For more details on dynamic shapes modes, see [Dynamic shapes and vLLM guard dropping](torch_compile.md#dynamic-shapes-and-vllm-guard-dropping).
 

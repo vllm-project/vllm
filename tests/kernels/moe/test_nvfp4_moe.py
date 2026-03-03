@@ -4,7 +4,7 @@ import pytest
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from tests.kernels.moe.utils import make_test_weights
+from tests.kernels.moe.utils import make_dummy_moe_config, make_test_weights
 from tests.kernels.quantization.nvfp4_utils import (
     FLOAT4_E2M1_MAX,
     FLOAT8_E4M3_MAX,
@@ -90,10 +90,9 @@ def test_cutlass_fp4_moe_no_graph(
         )
 
         kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+            MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp4(
-                out_dtype=dtype,
-                max_experts_per_worker=e,
+                moe_config=make_dummy_moe_config(),
                 quant_config=quant_config,
             ),
         )

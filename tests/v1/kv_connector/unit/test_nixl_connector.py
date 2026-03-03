@@ -518,11 +518,12 @@ class TestNixlHandshake:
                 )
             connector.bind_connector_metadata(metadata)
 
-            # Mimic maybe_setup_kv_connector in gpu_model_runner.
+            # Mimic logic in KVConnectorModelRunnerMixin._get_kv_connector_output.
             dummy_ctx = ForwardContext(
                 no_compile_layers={},
                 attn_metadata={},
                 virtual_engine=0,
+                slot_mapping={},
             )
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
@@ -531,7 +532,7 @@ class TestNixlHandshake:
                 f"start_load_kv took {_after_load - _before_load} seconds"
             )
 
-            # Mimic get_finished_kv_transfers in gpu_model_runner.
+            # Mimic logic in KVConnectorModelRunnerMixin._get_kv_connector_output.
             _, done_recving = connector.get_finished(finished_req_ids=set())
             if len(done_recving) > 0:
                 assert request_id in done_recving
@@ -593,6 +594,7 @@ class TestNixlHandshake:
                 no_compile_layers={},
                 attn_metadata={},
                 virtual_engine=0,
+                slot_mapping={},
             )
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
@@ -819,6 +821,7 @@ class TestNixlHandshake:
                 no_compile_layers={},
                 attn_metadata={},
                 virtual_engine=0,
+                slot_mapping={},
             )
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
@@ -981,6 +984,7 @@ def test_kv_connector_stats(default_vllm_config, dist_init):
         no_compile_layers={},
         attn_metadata={},
         virtual_engine=0,
+        slot_mapping={},
     )
     connector.start_load_kv(dummy_ctx)
 
@@ -1670,6 +1674,7 @@ def test_aborted_request_removed_from_worker_in_batch(default_vllm_config, dist_
         no_compile_layers={},
         attn_metadata={},
         virtual_engine=0,
+        slot_mapping={},
     )
     connector.start_load_kv(dummy_ctx)
 
@@ -1820,6 +1825,7 @@ def test_transfer_failure_logging(
         no_compile_layers={},
         attn_metadata={},
         virtual_engine=0,
+        slot_mapping={},
     )
 
     # Capture logs from the nixl_connector logger specifically
@@ -1920,6 +1926,7 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
         no_compile_layers={},
         attn_metadata={},
         virtual_engine=0,
+        slot_mapping={},
     )
     connector.start_load_kv(dummy_ctx)
 
@@ -1970,6 +1977,7 @@ def test_transfer_setup_failure_returns_finished(default_vllm_config, dist_init)
         no_compile_layers={},
         attn_metadata={},
         virtual_engine=0,
+        slot_mapping={},
     )
     connector.start_load_kv(dummy_ctx)
 
