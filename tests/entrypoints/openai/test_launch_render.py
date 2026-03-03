@@ -2,43 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """E2E tests for render endpoints via `vllm launch` (GPU-less serving)."""
 
-import os
-import subprocess
-import sys
-
 import httpx
 import pytest
 import pytest_asyncio
 
-from ...utils import RemoteOpenAIServer
+from ...utils import RemoteLaunchServer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
-
-
-class RemoteLaunchServer(RemoteOpenAIServer):
-    """Launches `vllm launch` subprocess instead of `vllm serve`."""
-
-    def _start_server(
-        self,
-        model: str,
-        vllm_serve_args: list[str],
-        env_dict: dict[str, str] | None,
-    ) -> None:
-        env = os.environ.copy()
-        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-        if env_dict is not None:
-            env.update(env_dict)
-        serve_cmd = ["vllm", "launch", "--stage", "all", model, *vllm_serve_args]
-        print(f"Launching RemoteLaunchServer with: {' '.join(serve_cmd)}")
-        self.proc: subprocess.Popen = subprocess.Popen(
-            serve_cmd,
-            env=env,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-        )
-
-    def _wait_for_gpu_memory_release(self, timeout: float = 30.0):
-        pass  # No GPU used
 
 
 @pytest.fixture(scope="module")

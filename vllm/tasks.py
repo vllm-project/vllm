@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Literal, get_args
 
-GenerationTask = Literal["generate", "render", "transcription", "realtime"]
+GenerationTask = Literal["generate", "transcription", "realtime"]
 GENERATION_TASKS: tuple[GenerationTask, ...] = get_args(GenerationTask)
 
 PoolingTask = Literal[
@@ -10,4 +10,7 @@ PoolingTask = Literal[
 ]
 POOLING_TASKS: tuple[PoolingTask, ...] = get_args(PoolingTask)
 
-SupportedTask = Literal[GenerationTask, PoolingTask]
+PreprocessingTask = Literal["render"]
+PREPROCESSING_TASKS: tuple[PreprocessingTask, ...] = get_args(PreprocessingTask)
+
+SupportedTask = Literal[GenerationTask, PoolingTask, PreprocessingTask]

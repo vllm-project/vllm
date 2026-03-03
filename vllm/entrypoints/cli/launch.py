@@ -21,9 +21,11 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 
-DESCRIPTION = """Launch a GPU-less online serving layer for preprocessing and
-postprocessing only (tokenization, rendering, detokenization). This runs the
-OpenAI-compatible API server without AsyncLLM or EngineCore.
+DESCRIPTION = """Launch individual vLLM components. Use --stage to select which
+component to start.
+
+  --stage all    Launch the full online serving layer (preprocessing and
+                 postprocessing) without GPU inference.
 
 Search by using: `--help=<ConfigGroup>` to explore options by section (e.g.,
 --help=ModelConfig, --help=Frontend)
@@ -94,7 +96,7 @@ def cmd_init() -> list[CLISubcommand]:
 async def run_launch_fastapi(args: argparse.Namespace) -> None:
     """Run the online serving layer with FastAPI (no GPU inference)."""
     from vllm.config import VllmConfig
-    from vllm.engine.launch_engine import LaunchEngineClient
+    from vllm.v1.engine.launch import LaunchEngineClient
 
     # 1. Socket binding
     listen_address, sock = setup_server(args)
