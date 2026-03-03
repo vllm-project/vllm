@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""E2E tests for render endpoints via `vllm online` (GPU-less serving)."""
+"""E2E tests for render endpoints via `vllm launch` (GPU-less serving)."""
 
 import os
 import subprocess
@@ -15,8 +15,8 @@ from ...utils import RemoteOpenAIServer
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 
-class RemoteOnlineServer(RemoteOpenAIServer):
-    """Launches `vllm online` subprocess instead of `vllm serve`."""
+class RemoteLaunchServer(RemoteOpenAIServer):
+    """Launches `vllm launch` subprocess instead of `vllm serve`."""
 
     def _start_server(
         self,
@@ -28,8 +28,8 @@ class RemoteOnlineServer(RemoteOpenAIServer):
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         if env_dict is not None:
             env.update(env_dict)
-        serve_cmd = ["vllm", "online", model, *vllm_serve_args]
-        print(f"Launching RemoteOnlineServer with: {' '.join(serve_cmd)}")
+        serve_cmd = ["vllm", "launch", "--stage", "all", model, *vllm_serve_args]
+        print(f"Launching RemoteLaunchServer with: {' '.join(serve_cmd)}")
         self.proc: subprocess.Popen = subprocess.Popen(
             serve_cmd,
             env=env,
@@ -44,7 +44,7 @@ class RemoteOnlineServer(RemoteOpenAIServer):
 @pytest.fixture(scope="module")
 def server():
     args: list[str] = []
-    with RemoteOnlineServer(MODEL_NAME, args, max_wait_seconds=120) as srv:
+    with RemoteLaunchServer(MODEL_NAME, args, max_wait_seconds=120) as srv:
         yield srv
 
 

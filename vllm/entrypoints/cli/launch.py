@@ -31,10 +31,10 @@ Search by using: `--help=<ConfigGroup>` to explore options by section (e.g.,
 """
 
 
-class OnlineSubcommand(CLISubcommand):
-    """The `online` subcommand for the vLLM CLI."""
+class LaunchSubcommand(CLISubcommand):
+    """The `launch` subcommand for the vLLM CLI."""
 
-    name = "online"
+    name = "launch"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -42,10 +42,15 @@ class OnlineSubcommand(CLISubcommand):
             args.model = args.model_tag
 
         server = getattr(args, "server", "fastapi")
-        if server == "fastapi":
-            uvloop.run(run_online_fastapi(args))
+        stage = getattr(args, "stage", "all")
+
+        if stage == "all":
+            if server == "fastapi":
+                uvloop.run(run_launch_fastapi(args))
+            else:
+                raise ValueError(f"Unknown server type: {server}")
         else:
-            raise ValueError(f"Unknown server type: {server}")
+            raise ValueError(f"Unknown stage: {stage}")
 
     def validate(self, args: argparse.Namespace) -> None:
         validate_parsed_serve_args(args)
@@ -53,15 +58,23 @@ class OnlineSubcommand(CLISubcommand):
     def subparser_init(
         self, subparsers: argparse._SubParsersAction
     ) -> FlexibleArgumentParser:
-        online_parser = subparsers.add_parser(
+        launch_parser = subparsers.add_parser(
             self.name,
             help="Launch a GPU-less online serving layer for "
             "preprocessing/postprocessing only.",
             description=DESCRIPTION,
-            usage="vllm online [model_tag] [options]",
+            usage="vllm launch [model_tag] [options]",
         )
 
-        online_parser.add_argument(
+        launch_parser.add_argument(
+            "--stage",
+            type=str,
+            choices=["all"],
+            default="all",
+            help="Stage to launch (default: all).",
+        )
+
+        launch_parser.add_argument(
             "--server",
             type=str,
             choices=["fastapi", "grpc"],
@@ -69,19 +82,19 @@ class OnlineSubcommand(CLISubcommand):
             help="Server type to run (default: fastapi).",
         )
 
-        online_parser = make_arg_parser(online_parser)
-        online_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
-        return online_parser
+        launch_parser = make_arg_parser(launch_parser)
+        launch_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
+        return launch_parser
 
 
 def cmd_init() -> list[CLISubcommand]:
-    return [OnlineSubcommand()]
+    return [LaunchSubcommand()]
 
 
-async def run_online_fastapi(args: argparse.Namespace) -> None:
+async def run_launch_fastapi(args: argparse.Namespace) -> None:
     """Run the online serving layer with FastAPI (no GPU inference)."""
     from vllm.config import VllmConfig
-    from vllm.engine.online_engine import OnlineEngineClient
+    from vllm.engine.launch_engine import LaunchEngineClient
 
     # 1. Socket binding
     listen_address, sock = setup_server(args)
@@ -90,7 +103,7 @@ async def run_online_fastapi(args: argparse.Namespace) -> None:
     engine_args = AsyncEngineArgs.from_cli_args(args)
     model_config = engine_args.create_model_config()
     vllm_config = VllmConfig(model_config=model_config)
-    engine_client = OnlineEngineClient.from_vllm_config(vllm_config)
+    engine_client = LaunchEngineClient.from_vllm_config(vllm_config)
 
     # 3. Build app, initialize state, and start serving
     shutdown_task = await build_and_serve(engine_client, listen_address, sock, args)

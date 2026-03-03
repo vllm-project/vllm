@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-OnlineEngineClient: A lightweight EngineClient for GPU-less online serving.
+LaunchEngineClient: A lightweight EngineClient for GPU-less online serving.
 
 This implements the EngineClient protocol without AsyncLLM or EngineCore,
 enabling preprocessing (tokenization, rendering) and postprocessing
@@ -29,7 +29,7 @@ from vllm.v1.engine.input_processor import InputProcessor
 logger = init_logger(__name__)
 
 
-class OnlineEngineClient(EngineClient):
+class LaunchEngineClient(EngineClient):
     """GPU-less EngineClient that only supports preprocessing/postprocessing.
 
     This is a Null Object at the EngineClient level, bypassing AsyncLLM
@@ -58,8 +58,8 @@ class OnlineEngineClient(EngineClient):
     def from_vllm_config(
         cls,
         vllm_config: VllmConfig,
-    ) -> "OnlineEngineClient":
-        """Create an OnlineEngineClient from a VllmConfig without GPU."""
+    ) -> "LaunchEngineClient":
+        """Create a LaunchEngineClient from a VllmConfig without GPU."""
         return cls(
             vllm_config=vllm_config,
         )
@@ -89,7 +89,7 @@ class OnlineEngineClient(EngineClient):
         data_parallel_rank: int | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         raise NotImplementedError(
-            "OnlineEngineClient does not support inference. "
+            "LaunchEngineClient does not support inference. "
             "Use vllm serve for generation requests."
         )
         # yield is needed to make this an async generator
@@ -130,7 +130,7 @@ class OnlineEngineClient(EngineClient):
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         raise NotImplementedError(
-            "OnlineEngineClient does not support inference. "
+            "LaunchEngineClient does not support inference. "
             "Use vllm serve for encoding requests."
         )
         yield  # type: ignore[misc] # pragma: no cover
@@ -197,4 +197,4 @@ class OnlineEngineClient(EngineClient):
 
     @property
     def dead_error(self) -> BaseException:
-        return RuntimeError("OnlineEngineClient does not support inference")
+        return RuntimeError("LaunchEngineClient does not support inference")
