@@ -3,7 +3,6 @@
 
 
 from http import HTTPStatus
-from typing import cast
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -19,7 +18,6 @@ from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
 from vllm.entrypoints.utils import load_aware_call, with_cancellation
 from vllm.logger import init_logger
-from vllm.sampling_params import BeamSearchParams, SamplingParams
 
 logger = init_logger(__name__)
 
@@ -96,64 +94,15 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
             message="The model does not support Chat Completions API"
         )
 
-    # This endpoint returns a token-in request; beam search params are not part
-    # of the token-in schema.
-    if request.use_beam_search:
-        err = handler.create_error_response(
-            ValueError("Beam search is not supported by the token-in render endpoint")
-        )
-        return JSONResponse(content=err.model_dump(), status_code=err.error.code)
-
     try:
-        result = await handler.render_chat_request(request)
+        result = await handler.render_chat_completion(request, raw_request)
     except Exception as e:
         result = handler.create_error_response(e)
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
 
-    _, (engine_prompt,) = result
-
-    # Extract token IDs only; do not return internal multimodal artifacts.
-    prompt_components = handler._extract_prompt_components(engine_prompt)
-    token_ids = prompt_components.token_ids
-    if not token_ids:
-        err = handler.create_error_response(ValueError("No token_ids rendered"))
-        return JSONResponse(content=err.model_dump(), status_code=err.error.code)
-    token_ids = cast(list[int], token_ids)
-
-    params: SamplingParams | BeamSearchParams = handler._build_params(
-        request, engine_prompt
-    )
-
-    # Ensure params is of type SamplingParams and not BeamSearchParams
-    if not isinstance(params, SamplingParams):
-        err = handler.create_error_response(
-            ValueError(
-                "Internal logic error: Beam search parameters were found, but should have been filtered out earlier."
-            )
-        )
-        return JSONResponse(content=err.model_dump(), status_code=err.error.code)
-
-    # Prefix matches OpenAI-style Chat Completions IDs (e.g. "chatcmpl-...")
-    # to keep logs/tooling consistent with /v1/chat/completions.
-    request_id = f"chatcmpl-{handler._base_request_id(raw_request, request.request_id)}"
-
-    # NOTE: 'features' is a placeholder in the RFC. Multimodal inputs are
-    # currently rendered internally; we avoid returning non-JSON-serializable
-    # tensors here.
-    return GenerateRequest(
-        request_id=request_id,
-        token_ids=token_ids,
-        sampling_params=params,
-        model=request.model,
-        # Preserve stream intent on the returned token-in request. The /render
-        # HTTP response itself is always non-streamed JSON.
-        stream=bool(request.stream),
-        stream_options=request.stream_options if request.stream else None,
-        cache_salt=request.cache_salt,
-        priority=request.priority,
-    )
+    return JSONResponse(content=result.model_dump())
 
 
 def attach_router(app: FastAPI):

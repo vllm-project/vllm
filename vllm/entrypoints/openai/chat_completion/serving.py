@@ -6,6 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from http import HTTPStatus
 from typing import Any, Final
 
 import jinja2
@@ -66,6 +67,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     render_for_completion,
 )
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
+from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs.data import ProcessorInputs, TokensPrompt
 from vllm.logger import init_logger
@@ -138,6 +140,7 @@ class OpenAIServingChat(OpenAIServing):
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
+
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
@@ -244,7 +247,7 @@ class OpenAIServingChat(OpenAIServing):
         request: ChatCompletionRequest,
     ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
         """
-        render chat request by validating and preprocessing inputs.
+        Internal helper: validate and preprocess chat inputs.
 
         Returns:
             A tuple of (conversation, engine_prompts) on success,
@@ -338,6 +341,73 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(e)
 
         return conversation, engine_prompts
+
+    async def render_chat_completion(
+        self,
+        request: ChatCompletionRequest,
+        raw_request: Request | None = None,
+    ) -> GenerateRequest | ErrorResponse:
+        """Render a chat completion request into a token-in GenerateRequest.
+
+        This is a pure preprocessing step: it does not generate text.
+        The returned ``GenerateRequest`` is directly consumable by
+        ``/inference/v1/generate`` (``ServingTokens``).
+
+        Beam search is not supported; requests with
+        ``use_beam_search=True`` will receive an ``ErrorResponse``.
+        """
+        if request.use_beam_search:
+            return self.create_error_response(
+                "Beam search is not supported by the token-in render endpoint"
+            )
+
+        result = await self.render_chat_request(request)
+        if isinstance(result, ErrorResponse):
+            return result
+
+        _, engine_prompts = result
+
+        if len(engine_prompts) != 1:
+            return self.create_error_response(
+                f"Expected exactly 1 engine prompt, got {len(engine_prompts)}"
+            )
+
+        engine_prompt = engine_prompts[0]
+
+        # Extract token IDs only; do not return internal multimodal artifacts.
+        prompt_components = self._extract_prompt_components(engine_prompt)
+        token_ids = prompt_components.token_ids
+        if not token_ids:
+            return self.create_error_response("No token_ids rendered")
+        token_ids = list(token_ids)
+
+        params = self._build_params(request, engine_prompt)
+        # The beam-search guard above should prevent BeamSearchParams, but
+        # check defensively so callers always get SamplingParams.
+        if not isinstance(params, SamplingParams):
+            return self.create_error_response(
+                "Internal logic error: Beam search parameters were found, "
+                "but should have been filtered out earlier.",
+                err_type = "InternalServerError",
+                status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+            )
+
+        request_id = (
+            f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
+        )
+
+        return GenerateRequest(
+            request_id=request_id,
+            token_ids=token_ids,
+            sampling_params=params,
+            model=request.model,
+            # Preserve stream intent on the returned token-in request.
+            # The /render HTTP response itself is always non-streamed JSON.
+            stream=bool(request.stream),
+            stream_options=(request.stream_options if request.stream else None),
+            cache_salt=request.cache_salt,
+            priority=request.priority,
+        )
 
     async def create_chat_completion(
         self,
