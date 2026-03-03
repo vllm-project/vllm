@@ -27,7 +27,6 @@ causes unexpected behavior.
 """
 
 import asyncio
-import time
 import uuid
 from dataclasses import asdict
 
@@ -258,11 +257,6 @@ ray.get([train_handle, inference_handle])
 
 
 N_NEW_TOKENS = 100
-# Fixed seed for cross-environment reproducibility (CI vs local).
-# With temperature=0 we are greedy, but vLLM may still use RNG; seeding
-# ensures weight-synced V1 and fresh V2 produce the same continuation in
-# all environments.
-SAMPLING_SEED = 42
 
 # Collect weight metadata once
 names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
@@ -275,9 +269,7 @@ for p in PROMPTS:
 print(f"{'=' * 50}")
 
 sampling_params = SamplingParams(
-    temperature=0,
-    max_tokens=PAUSE_TOKEN_THRESHOLD + N_NEW_TOKENS,
-    seed=SAMPLING_SEED,
+    temperature=0, max_tokens=PAUSE_TOKEN_THRESHOLD + N_NEW_TOKENS
 )
 
 gen_futures = [
@@ -302,8 +294,6 @@ train_handle = train_model.broadcast_weights.remote(packed=True)
 ray.get([train_handle, inference_handle])
 
 ray.get(llm.resume_generation.remote())
-time.sleep(10)
-
 results = ray.get(gen_futures)
 
 for i, (output, pause_idx) in enumerate(results):
@@ -341,9 +331,7 @@ val_futures = [
     llm_v2.do_generate.remote(
         list(output.prompt_token_ids) + list(output.outputs[0].token_ids)[:pause_idx],
         SamplingParams(
-            temperature=0,
-            max_tokens=len(output.outputs[0].token_ids) - pause_idx,
-            seed=SAMPLING_SEED,
+            temperature=0, max_tokens=len(output.outputs[0].token_ids) - pause_idx
         ),
     )
     for output, pause_idx in results
