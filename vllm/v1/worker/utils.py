@@ -48,7 +48,7 @@ class AttentionGroup:
         self,
         vllm_config,
         device,
-        kernel_block_size: int | None,
+        kernel_block_size: int | None = None,
         num_metadata_builders: int = 1,
     ):
         kv_cache_spec_builder = (
