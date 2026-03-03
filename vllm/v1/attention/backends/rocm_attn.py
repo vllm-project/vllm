@@ -175,7 +175,7 @@ class RocmAttentionBackend(AttentionBackend):
         # as addressed in this PR: https://github.com/vllm-project/vllm/pull/31380,
         # where the Triton kernel under rocm_atten does not support inference
         # for a non-standard qwen3-next model with a block_size or qwen3_5
-	# with a block_size of 1056
+        # with a block_size of 1056
         # We have fixed the Triton kernel so that the standard model uses the original
         # bit-addressing logic, while the non-standard model
         # uses our optimized kernel logic.
