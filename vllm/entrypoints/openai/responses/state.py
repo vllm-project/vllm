@@ -117,14 +117,16 @@ def deserialize_state(encrypted_content: str) -> list[Any] | None:
     if not encrypted_content.startswith(f"{_FORMAT_VERSION}:"):
         return None
     # Expected: "vllm:1:<payload_b64>:<sig>"
-    # Split into exactly 4 parts on the first 3 colons.
-    parts = encrypted_content.split(":", 3)
-    if len(parts) != 4:
+    # Strip the prefix, then split payload from signature from the right
+    # so future format version changes (e.g. "vllm:2:alpha") don't break.
+    suffix = encrypted_content[len(f"{_FORMAT_VERSION}:"):]
+    try:
+        payload_b64, sig = suffix.rsplit(":", 1)
+    except ValueError as exc:
         raise ValueError(
             "Malformed vLLM state carrier: expected "
             f"'{_FORMAT_VERSION}:<payload>:<sig>', got {encrypted_content!r}"
-        )
-    _, _, payload_b64, sig = parts
+        ) from exc
     expected = hmac.new(
         _get_signing_key(), payload_b64.encode(), hashlib.sha256
     ).hexdigest()
