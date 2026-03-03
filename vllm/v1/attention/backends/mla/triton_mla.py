@@ -128,7 +128,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         q_num_heads = q.shape[1]
         # Cast FP8 q to bfloat16 for Blackwell compatibility (FP8 tl.dot
         # may produce invalid instructions) and for V up-proj torch.bmm.
-        if use_fp8:
+        if use_fp8 and q.dtype not in (torch.float16, torch.bfloat16):
             q = q.to(torch.bfloat16)
         out_dtype = q.dtype
         o = torch.zeros(
