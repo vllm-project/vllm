@@ -4188,37 +4188,31 @@ class GPUModelRunner(
                 scheduler_output,
                 defer_finalize=defer_kv_connector_finalize,
             ) as kv_connector_output,
-        ):
-            if input_ids is not None:
-                logger.info(f"input_ids: {input_ids.shape}")
-            if inputs_embeds is not None:
-                logger.info(f"inputs_embeds: {inputs_embeds.shape}")
-            
-            # Build dp_metadata_list
-            dp_metadata_list = {}
-            if ubatch_slices_padded is not None:
-                for idx, ubatch_slice in enumerate(ubatch_slices_padded):
-                    dp_size = self.vllm_config.parallel_config.data_parallel_size
-                    ubatch_num_tokens_across_dp = torch.tensor(
-                        [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32
-                    )
-                    dp_metadata_list[idx] = DPMetadata.make(
-                        self.vllm_config.parallel_config,
-                        ubatch_slice.num_tokens,
-                        ubatch_num_tokens_across_dp,
-                    )
-            else:
-                dp_metadata_list[0] = get_forward_context().dp_metadata
+        ):  
+            if self.afd_config:
+                # Build dp_metadata_list
+                dp_metadata_list = {}
+                if ubatch_slices_padded is not None:
+                    for idx, ubatch_slice in enumerate(ubatch_slices_padded):
+                        dp_size = self.vllm_config.parallel_config.data_parallel_size
+                        ubatch_num_tokens_across_dp = torch.tensor(
+                            [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32
+                        )
+                        dp_metadata_list[idx] = DPMetadata.make(
+                            self.vllm_config.parallel_config,
+                            ubatch_slice.num_tokens,
+                            ubatch_num_tokens_across_dp,
+                        )
+                else:
+                    dp_metadata_list[0] = get_forward_context().dp_metadata
 
-            # to support inequal AF,[ffn_size,ffn_size + min_size) send
-            self.afd_connector.update_state_from_dp_metadata(dp_metadata_list, False)
-            if self.afd_config and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
-                logger.info(f'jcz self.afd_connector.world_rank in prepare input is {self.afd_connector.world_rank}')
-                logger.info(f'jcz self.afd_connector.world_rank in prepare input dp_metadata_list:{dp_metadata_list}')
-                self.afd_connector.send_dp_metadata_list(
-                    dp_metadata_list, is_warmup=self._is_warmup
-                )
-            logger.info(f'jcz send dp_metadata_list in prepare input')
+                # to support inequal AF,[ffn_size,ffn_size + min_size) send
+                self.afd_connector.update_state_from_dp_metadata(dp_metadata_list, False)
+                if self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
+                    logger.info(f'jcz self.afd_connector.world_rank in prepare input dp_metadata_list:{dp_metadata_list}')
+                    self.afd_connector.send_dp_metadata_list(
+                        dp_metadata_list, is_warmup=self._is_warmup
+                    )
 
             model_output = self._model_forward(
                 input_ids=input_ids,
@@ -5724,33 +5718,33 @@ class GPUModelRunner(
                     afd_metadata=afd_metadata,
                 ),
             ):
-                # Build dp_metadata_list
-                dp_metadata_list = {}
-                if ubatch_slices_padded is not None:
-                    for idx, ubatch_slice in enumerate(ubatch_slices_padded):
-                        dp_size = self.vllm_config.parallel_config.data_parallel_size
-                        ubatch_num_tokens_across_dp = torch.tensor(
-                            [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32
-                        )
-                        dp_metadata_list[idx] = DPMetadata.make(
-                            self.vllm_config.parallel_config,
-                            ubatch_slice.num_tokens,
-                            ubatch_num_tokens_across_dp,
-                        )
-                else:
-                    dp_metadata_list[0] = get_forward_context().dp_metadata
+                if self.afd_config:
+                    # Build dp_metadata_list
+                    dp_metadata_list = {}
+                    if ubatch_slices_padded is not None:
+                        for idx, ubatch_slice in enumerate(ubatch_slices_padded):
+                            dp_size = self.vllm_config.parallel_config.data_parallel_size
+                            ubatch_num_tokens_across_dp = torch.tensor(
+                                [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32
+                            )
+                            dp_metadata_list[idx] = DPMetadata.make(
+                                self.vllm_config.parallel_config,
+                                ubatch_slice.num_tokens,
+                                ubatch_num_tokens_across_dp,
+                            )
+                    else:
+                        dp_metadata_list[0] = get_forward_context().dp_metadata
 
-                # to support inequal AF,[ffn_size,ffn_size + min_size) send
-                self.afd_connector.update_state_from_dp_metadata(dp_metadata_list, is_graph_capturing)
-                if self.afd_config and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
-                    logger.info(f'jcz self.afd_connector.world_rank in prepare input is {self.afd_connector.world_rank}')
-                    logger.info(f'jcz self.afd_connector.world_rank in prepare input dp_metadata_list:{dp_metadata_list}')
-                    self.afd_connector.send_dp_metadata_list(
-                        dp_metadata_list,
-                        is_graph_capturing=is_graph_capturing,
-                        is_warmup=self._is_warmup,
-                    )
-                logger.info(f'jcz send dp_metadata_list in prepare input')
+                    # to support inequal AF,[ffn_size,ffn_size + min_size) send
+                    self.afd_connector.update_state_from_dp_metadata(dp_metadata_list, is_graph_capturing)
+                    if self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
+                        logger.info(f'jcz self.afd_connector.world_rank in prepare input is {self.afd_connector.world_rank}')
+                        logger.info(f'jcz self.afd_connector.world_rank in prepare input dp_metadata_list:{dp_metadata_list}')
+                        self.afd_connector.send_dp_metadata_list(
+                            dp_metadata_list,
+                            is_graph_capturing=is_graph_capturing,
+                            is_warmup=self._is_warmup,
+                        )
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,

@@ -5,13 +5,10 @@ import hashlib
 from dataclasses import field
 from typing import Any, Literal
 
-from pydantic.dataclasses import dataclass
-
 from vllm.config.utils import config
 
 
 @config
-@dataclass
 class AFDConfig:
     """Configuration for AFD (Attention FFN Disaggregation) distributed
     computation."""
