@@ -11,6 +11,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.triton_utils import triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -88,6 +89,10 @@ class TreeAttentionMetadata:
     softmax_segm_output: torch.Tensor
     softmax_segm_max: torch.Tensor
     softmax_segm_expsum: torch.Tensor
+    BLOCK_M: int
+    BLOCK_Q: int
+    num_q_blocks: int
+    block_q_seq_boundaries_tensor: torch.Tensor
 
     num_prefill_tokens: int = 0
     num_decode_tokens: int = 0
@@ -113,11 +118,26 @@ class TreeAttentionMetadata:
         q_start_loc = self.query_start_loc[self.num_decodes :]
         q_seqlens = torch.diff(q_start_loc)
         kv_seqlens = self.seq_lens[self.num_decodes :]
+
+        # Recalculate block_q_seq_boundaries for prefill subset
+        num_prefill_seqs = self.num_prefills
+        prefill_block_q_seq_boundaries = torch.empty(
+            num_prefill_seqs + 1, dtype=torch.int32, device=q_start_loc.device
+        )
+        prefill_q_start_loc = q_start_loc - q_start_loc[0]
+        prefill_block_q_seq_boundaries[0] = 0
+        prefill_block_q_seq_boundaries[1:].copy_(prefill_q_start_loc[1:])
+        prefill_block_q_seq_boundaries[1:].sub_(prefill_q_start_loc[:-1])
+        prefill_block_q_seq_boundaries[1:].add_(self.BLOCK_Q - 1)
+        prefill_block_q_seq_boundaries[1:].floor_divide_(self.BLOCK_Q)
+        prefill_block_q_seq_boundaries.cumsum_(dim=0)
+        prefill_num_q_blocks = int(prefill_block_q_seq_boundaries[-1].item())
+
         # Construct & cache prefill-phase attention metadata structure
         self._cached_prefill_metadata = TreeAttentionMetadata(
             num_actual_tokens=self.num_prefill_tokens,
             max_query_len=int(q_seqlens.max().item()),
-            query_start_loc=q_start_loc - q_start_loc[0],
+            query_start_loc=prefill_q_start_loc,
             max_seq_len=int(kv_seqlens.max().item()),
             seq_lens=kv_seqlens,
             block_table=self.block_table[self.num_decodes :],
@@ -127,6 +147,10 @@ class TreeAttentionMetadata:
             softmax_segm_output=self.softmax_segm_output,
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
+            BLOCK_M=self.BLOCK_M,
+            BLOCK_Q=self.BLOCK_Q,
+            num_q_blocks=prefill_num_q_blocks,
+            block_q_seq_boundaries_tensor=prefill_block_q_seq_boundaries,
         )
         return self._cached_prefill_metadata
 
@@ -143,6 +167,20 @@ class TreeAttentionMetadata:
         q_start_loc = self.query_start_loc[: self.num_decodes + 1]
         q_seqlens = torch.diff(q_start_loc)
         kv_seqlens = self.seq_lens[: self.num_decodes]
+
+        # Recalculate block_q_seq_boundaries for decode subset
+        num_decode_seqs = self.num_decodes
+        decode_block_q_seq_boundaries = torch.empty(
+            num_decode_seqs + 1, dtype=torch.int32, device=q_start_loc.device
+        )
+        decode_block_q_seq_boundaries[0] = 0
+        decode_block_q_seq_boundaries[1:].copy_(q_start_loc[1:])
+        decode_block_q_seq_boundaries[1:].sub_(q_start_loc[:-1])
+        decode_block_q_seq_boundaries[1:].add_(self.BLOCK_Q - 1)
+        decode_block_q_seq_boundaries[1:].floor_divide_(self.BLOCK_Q)
+        decode_block_q_seq_boundaries.cumsum_(dim=0)
+        decode_num_q_blocks = int(decode_block_q_seq_boundaries[-1].item())
+
         # Construct & cache decode-phase attention metadata structure
         self._cached_decode_metadata = TreeAttentionMetadata(
             num_actual_tokens=self.num_decode_tokens,
@@ -158,6 +196,10 @@ class TreeAttentionMetadata:
             softmax_segm_output=self.softmax_segm_output,
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
+            BLOCK_M=self.BLOCK_M,
+            BLOCK_Q=self.BLOCK_Q,
+            num_q_blocks=decode_num_q_blocks,
+            block_q_seq_boundaries_tensor=decode_block_q_seq_boundaries,
         )
         return self._cached_decode_metadata
 
@@ -173,6 +215,7 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
         self.block_size = kv_cache_spec.block_size
+        self.device = device
 
         model_config = vllm_config.model_config
         self.num_heads_q = model_config.get_num_attention_heads(
@@ -180,6 +223,22 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         )
         self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
+
+        # Calculate BLOCK_M and BLOCK_Q
+        num_queries_per_kv = self.num_heads_q // self.num_heads_kv
+        self.BLOCK_M = (
+            16
+            if num_queries_per_kv <= 16
+            else triton.next_power_of_2(num_queries_per_kv)
+        )
+        self.BLOCK_Q = self.BLOCK_M // num_queries_per_kv
+
+        # Pre-allocate block_q_seq_boundaries_tensor with a reasonable max size
+        # This will be sliced to the actual size needed
+        max_seqs = 1024  # Reasonable upper bound
+        self.block_q_seq_boundaries_tensor = torch.empty(
+            max_seqs + 1, dtype=torch.int32, device=device
+        )
 
         spec_config = vllm_config.speculative_config
         spec_token_tree: str | None = None
@@ -246,6 +305,19 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         block_table = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
 
+        # Calculate block_q_seq_boundaries_tensor and num_q_blocks
+        num_seqs = q_start_loc.numel() - 1
+        block_q_seq_boundaries_tensor = self.block_q_seq_boundaries_tensor[
+            : num_seqs + 1
+        ]
+        block_q_seq_boundaries_tensor[0] = 0
+        block_q_seq_boundaries_tensor[1 : num_seqs + 1].copy_(q_start_loc[1:])
+        block_q_seq_boundaries_tensor[1 : num_seqs + 1].sub_(q_start_loc[:-1])
+        block_q_seq_boundaries_tensor[1 : num_seqs + 1].add_(self.BLOCK_Q - 1)
+        block_q_seq_boundaries_tensor[1 : num_seqs + 1].floor_divide_(self.BLOCK_Q)
+        block_q_seq_boundaries_tensor[: num_seqs + 1].cumsum_(dim=0)
+        num_q_blocks = int(block_q_seq_boundaries_tensor[num_seqs].item())
+
         return TreeAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             num_prefill_tokens=num_prefill_tokens,
@@ -264,6 +336,10 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
             softmax_segm_output=self.softmax_segm_output,
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
+            BLOCK_M=self.BLOCK_M,
+            BLOCK_Q=self.BLOCK_Q,
+            num_q_blocks=num_q_blocks,
+            block_q_seq_boundaries_tensor=block_q_seq_boundaries_tensor,
         )
 
     def build_for_drafting(
@@ -467,6 +543,10 @@ class TreeAttentionImpl(AttentionImpl):
                 softmax_segm_output=attn_metadata.softmax_segm_output,
                 softmax_segm_max=attn_metadata.softmax_segm_max,
                 softmax_segm_expsum=attn_metadata.softmax_segm_expsum,
+                BLOCK_M=prefill_meta.BLOCK_M,
+                BLOCK_Q=prefill_meta.BLOCK_Q,
+                num_q_blocks=prefill_meta.num_q_blocks,
+                block_q_seq_boundaries_tensor=prefill_meta.block_q_seq_boundaries_tensor,
             )
 
         if decode_meta := attn_metadata.decode_metadata:
@@ -494,5 +574,9 @@ class TreeAttentionImpl(AttentionImpl):
                 softmax_segm_output=attn_metadata.softmax_segm_output,
                 softmax_segm_max=attn_metadata.softmax_segm_max,
                 softmax_segm_expsum=attn_metadata.softmax_segm_expsum,
+                BLOCK_M=decode_meta.BLOCK_M,
+                BLOCK_Q=decode_meta.BLOCK_Q,
+                num_q_blocks=decode_meta.num_q_blocks,
+                block_q_seq_boundaries_tensor=decode_meta.block_q_seq_boundaries_tensor,
             )
         return output

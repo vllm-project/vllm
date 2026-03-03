@@ -904,10 +904,10 @@ def unified_attention(
     softmax_segm_output,
     softmax_segm_max,
     softmax_segm_expsum,
-    BLOCK_M=None,
-    BLOCK_Q=None,
-    num_q_blocks=None,
-    block_q_seq_boundaries_tensor=None,
+    BLOCK_M,
+    BLOCK_Q,
+    num_q_blocks,
+    block_q_seq_boundaries_tensor,
     alibi_slopes=None,
     output_scale=None,
     qq_bias=None,
@@ -943,35 +943,6 @@ def unified_attention(
     num_kv_heads = k.shape[2]
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
-
-    # Assign the following variables if they are not assigned in the attention metadata.
-    # This ensures backward compatibility with callers using an earlier version of this
-    # function. However, it is recommended to include these assignments in the
-    # attention metadata itself, as performing them here may negatively impact
-    # performance.
-    if (
-        BLOCK_M is None
-        or BLOCK_Q is None
-        or num_q_blocks is None
-        or block_q_seq_boundaries_tensor is None
-    ):
-        BLOCK_M = (
-            16
-            if num_queries_per_kv <= 16
-            else triton.next_power_of_2(num_queries_per_kv)
-        )
-        BLOCK_Q = BLOCK_M // num_queries_per_kv
-
-        block_q_seq_boundaries_tensor = torch.empty(
-            num_seqs + 1, dtype=torch.int32, device=cu_seqlens_q.device
-        )
-        block_q_seq_boundaries_tensor[0] = 0
-        block_q_seq_boundaries_tensor[1:].copy_(cu_seqlens_q[1:])
-        block_q_seq_boundaries_tensor[1:].sub_(cu_seqlens_q[:-1])
-        block_q_seq_boundaries_tensor[1:].add_(BLOCK_Q - 1)
-        block_q_seq_boundaries_tensor[1:].floor_divide_(BLOCK_Q)
-        block_q_seq_boundaries_tensor.cumsum_(dim=0)
-        num_q_blocks = block_q_seq_boundaries_tensor[-1]
 
     # Tile sizes for prefill and decode. Gemma3 models use optimized values.
     # Note: tile size must be at least 32 for fp8 (element_size == 1).
