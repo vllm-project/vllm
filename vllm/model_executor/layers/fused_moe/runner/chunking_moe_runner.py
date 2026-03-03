@@ -27,12 +27,11 @@ class ChunkingMoERunner(MoERunnerBase):
     All MoERunnerBase state (moe_config, router, quant_method, etc.) is
     transparently delegated to the inner runner via __getattr__.
     ChunkingMoERunner only owns chunking-specific state: the pre-allocated
-    workspace buffers and the reduce_results override.
+    workspace buffers.
 
     Key behaviors:
     - Pre-allocates workspace tensors for CUDA graph compatibility
     - Processes chunks via inner._forward_impl per chunk
-    - Never reduces results (reduce_results always returns False)
     """
 
     def __init__(self, inner: MoERunnerBase):
@@ -54,10 +53,6 @@ class ChunkingMoERunner(MoERunnerBase):
         # called when normal lookup (instance __dict__, class MRO) fails,
         # so ChunkingMoERunner's own attributes and methods take priority.
         return getattr(self._inner, name)
-
-    @property
-    def reduce_results(self) -> bool:
-        return False
 
     def _init_dp_chunking(self) -> list[torch.Tensor]:
         states_shape: tuple[int, ...]

@@ -5,10 +5,6 @@ from enum import IntEnum
 import torch
 
 import vllm.envs as envs
-from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -50,7 +46,6 @@ class SharedExperts:
         layer: torch.nn.Module,
         moe_config: FusedMoEConfig,
         quant_method: QuantizeMethodBase,
-        reduce_results: bool,
     ):
         from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
             FusedMoEMethodBase,
@@ -64,7 +59,6 @@ class SharedExperts:
         self._layer = layer
         self._moe_config = moe_config
         self._quant_method = quant_method
-        self._reduce_results = reduce_results
         self._use_dp_chunking = moe_config.moe_parallel_config.use_dp_chunking
 
         # Allow disabling of the separate shared experts stream for

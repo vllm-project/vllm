@@ -14,7 +14,6 @@ from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -71,7 +70,6 @@ class FusedMoEBlock(nn.Module):
             top_k=config.moe_top_k,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=config.norm_expert_weight,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -94,8 +92,6 @@ class FusedMoEBlock(nn.Module):
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-        if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(orig_shape)
 

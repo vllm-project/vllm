@@ -211,7 +211,7 @@ class ForwardContext:
 
     # For torch.compile cold start times, we need to avoid hard-coding
     # any strings into the graph. Right now, the vllm.moe_forward
-    # and vllm.moe_forward_shared custom operators hard-code strings into
+    # custom operator hard-codes strings into
     # the graph.
     #
     # The workaround is to store a list of the strings that each of those

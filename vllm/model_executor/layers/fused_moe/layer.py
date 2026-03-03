@@ -273,7 +273,6 @@ class FusedMoE(CustomOp):
         hidden_size: Input hidden state size of the transformer
         intermediate_size: Intermediate size of the experts
         params_dtype: Data type for the parameters.
-        reduce_results: Whether to all_reduce on the output of the layer
         renormalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.
@@ -289,7 +288,6 @@ class FusedMoE(CustomOp):
         hidden_size: int,
         intermediate_size: int,
         params_dtype: torch.dtype | None = None,
-        reduce_results: bool = False,
         renormalize: bool = True,
         use_grouped_topk: bool = False,
         num_expert_group: int | None = None,
@@ -317,11 +315,15 @@ class FusedMoE(CustomOp):
         gate: torch.nn.Module | None = None,
         shared_experts: torch.nn.Module | None = None,
         routed_input_transform: torch.nn.Module | None = None,
+        routed_output_transform: torch.nn.Module | None = None,
+        output_scale: float | None = None,
         zero_expert_type: str | None = None,
     ):
         super().__init__()
 
         self._routed_input_transform = routed_input_transform
+        self._routed_output_transform = routed_output_transform
+        self._output_scale = output_scale
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -468,7 +470,6 @@ class FusedMoE(CustomOp):
 
         assert intermediate_size % self.tp_size == 0
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
-        self.reduce_results = reduce_results
         self.renormalize = renormalize
 
         # TODO(bnell): these attributes are only used by monolithic kernels.
@@ -667,7 +668,6 @@ class FusedMoE(CustomOp):
             # called, i.e. by a MK or by the MoERunner.
             # Once the MK can be created upfront, we can just pass in the proper
             # flags derived from the quant_method's MK.
-            reduce_results=self.reduce_results,
             quant_method=self.quant_method,
         )
 
@@ -684,8 +684,9 @@ class FusedMoE(CustomOp):
             gate=self._gate,
             shared_experts=self.shared_experts,
             quant_method=self.quant_method,
-            reduce_results=self.reduce_results,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
+            routed_output_transform=self._routed_output_transform,
+            output_scale=self._output_scale,
         )
 
     # TODO(bnell): This method is provided as a hook so vllm/lora/layers/fused_moe.py
@@ -1505,17 +1506,11 @@ class FusedMoE(CustomOp):
         self.ensure_moe_quant_config_init()
         return self.quant_method.moe_quant_config
 
-    def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
-        """
-        Some combine kernels reduce across GPU ranks by default.
-        """
-        return self.runner.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
-
     def forward_native(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         return self.runner.forward(
             hidden_states,
             router_logits,
@@ -1531,7 +1526,7 @@ class FusedMoE(CustomOp):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         return self.forward_native(hidden_states, router_logits)
 
     @classmethod
@@ -1588,7 +1583,6 @@ class FusedMoE(CustomOp):
             f"intermediate_size_per_partition={self.intermediate_size_per_partition}, "  # noqa: E501
             f"tp_size={self.tp_size},\n"
             f"ep_size={self.ep_size}, "
-            f"reduce_results={self.reduce_results}, "
         )
 
         return s
