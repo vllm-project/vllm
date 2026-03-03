@@ -907,6 +907,8 @@ class Worker(WorkerBase):
                 load_weights=load_weights_direct,
             )
 
+        # NCCL broadcast and param.copy_() are asynchronous; sync so the next
+        # step uses the new weights and we do not return with copies in flight.
         torch.cuda.synchronize()
 
     def shutdown(self) -> None:
