@@ -112,3 +112,30 @@ def test_nvfp4(vllm_runner, model, eager, backend, monkeypatch):
     with vllm_runner(model, enforce_eager=eager) as llm:
         output = llm.generate_greedy(["1 2 3 4 5"], max_tokens=2)
     assert output[0][1] == "1 2 3 4 5 6"
+
+
+# Qwen3-30B-A3B is 60 GB vs Llama-4-Scout-17B-16E-Instruct-FP4 that is 210 GB.
+@pytest.mark.parametrize(
+    "model",
+    [
+        "nvidia/Qwen3-30B-A3B-NVFP4",
+        "RedHatAI/Qwen3-30B-A3B-NVFP4",
+    ],
+)
+@pytest.mark.parametrize("eager", EAGER)
+@pytest.mark.parametrize("backend", ["emulation"])
+@pytest.mark.parametrize("emulation_dequantize_weights", [True, False])
+def test_nvfp4_moe(
+    vllm_runner, model, eager, backend, emulation_dequantize_weights, monkeypatch
+):
+    monkeypatch.setenv("VLLM_NVFP4_GEMM_BACKEND", backend)
+    hf_overrides = {
+        "quantization_config": {
+            "emulation_dequantize_weights": emulation_dequantize_weights
+        }
+    }
+    with vllm_runner(
+        model, enforce_eager=eager, hf_overrides=hf_overrides, moe_backend="emulation"
+    ) as llm:
+        output = llm.generate_greedy(["1 2 3 4 5"], max_tokens=2)
+    assert output[0][1] == "1 2 3 4 5 6"
