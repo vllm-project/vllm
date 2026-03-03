@@ -74,8 +74,14 @@ class WhisperModelState(ModelState):
         _, mm_kwargs = self.encoder_runner.prepare_mm_inputs(encoder_inputs)
         if mm_kwargs:
             # Whisper consumes encoder outputs through `encoder_outputs`, not
-            # `inputs_embeds`.
+            # `inputs_embeds`. Single modality (audio) so execute_mm_encoder
+            # preserves request order; use its return value directly.
+            # No need to store in encoder_cache: cross-attention K/V are written
+            # to the KV cache on the first step; decode steps use the cache.
             self.encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+        else:
+            # Decode steps: encoder K/V are in cross-attention KV cache.
+            self.encoder_outputs = []
         return None
 
     def prepare_inputs(
@@ -133,7 +139,7 @@ class WhisperModelState(ModelState):
             for i, req_id in enumerate(req_ids):
                 mm_features = self.encoder_cache.mm_features.get(req_id, [])
                 encoder_seq_lens_np[i] = sum(
-                    feature.mm_position.length for feature in mm_features
+                    feature.mm_position.get_num_embeds() for feature in mm_features
                 )
         else:
             # During CUDA graph capture, use max encoder length so max_seqlen_k
