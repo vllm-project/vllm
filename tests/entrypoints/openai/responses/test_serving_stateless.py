@@ -45,19 +45,17 @@ def _make_minimal_serving(enable_store: bool = False):
     set exactly what is needed.
 
     Attributes touched by retrieve_responses / cancel_responses:
-      enable_store, response_store, response_store_lock, background_tasks,
+      enable_store, store, background_tasks,
       log_error_stack (for create_error_response from base class)
     Attributes touched by create_responses (up to store check):
       models (for _check_model), engine_client (for errored check)
     """
-    import asyncio
-
     from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
+    from vllm.entrypoints.openai.responses.store import InMemoryResponseStore
 
     obj = OpenAIServingResponses.__new__(OpenAIServingResponses)
     obj.enable_store = enable_store
-    obj.response_store = {}
-    obj.response_store_lock = asyncio.Lock()
+    obj.store = InMemoryResponseStore()
     obj.background_tasks = {}
     obj.log_error_stack = False
     # _check_model needs models.is_base_model to return True (model found)
