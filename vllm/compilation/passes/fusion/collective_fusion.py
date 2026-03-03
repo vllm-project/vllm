@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
+from typing import Literal
+
 import torch
 import torch._inductor.pattern_matcher as pm
 import torch.fx as fx
@@ -138,19 +141,54 @@ def _parse_bmm_fp8(
     return a_2d, b_2d, a_scale, b_scale, out_dtype, backend
 
 
-def _has_reduce_scatter_consumer_through_view_like(node: fx.Node) -> bool:
-    worklist = list(node.users)
+@dataclass
+class _FP8CollectiveGemmMatch:
+    kind: Literal["ag_bmm", "bmm_rs"]
+    replace_node: fx.Node
+    a_2d: fx.Node
+    b_2d: fx.Node
+    a_scale: object
+    b_scale: object
+    out_dtype: object
+    backend: str
+    group_name: str
+    world_size: int
+
+
+def _find_bmm_reduce_scatter(
+    bmm_node: fx.Node,
+) -> tuple[fx.Node, object, object, object] | None:
+    worklist = list(bmm_node.users)
     visited: set[fx.Node] = set()
+    rs_matches: list[tuple[fx.Node, object, object, object]] = []
+
     while worklist:
         user = worklist.pop()
         if user in visited:
             continue
         visited.add(user)
-        if is_func(user, torch.ops.vllm.reduce_scatter.default):
-            return True
+
+        parsed_rs = _parse_reduce_scatter(user)
+        if parsed_rs is not None:
+            _, dim, world_size, group_name = parsed_rs
+            rs_matches.append((user, dim, world_size, group_name))
+            continue
+
         if _is_view_like(user):
             worklist.extend(user.users)
-    return False
+
+    if len(rs_matches) == 1:
+        return rs_matches[0]
+    return None
+
+
+def _find_ag_bmm_replace_target(bmm_node: fx.Node) -> fx.Node | None:
+    replace_targets = [
+        user for user in bmm_node.users if _is_view_like(user) and _node_ndim(user) == 2
+    ]
+    if len(replace_targets) != 1:
+        return None
+    return replace_targets[0]
 
 
 class BasePattern:
@@ -291,60 +329,6 @@ class ScaledMMReduceScatterPattern(BasePattern):
             )
 
             return gemm_rs
-
-        pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
-        )
-
-
-class BmmFP8ReduceScatterPattern(BasePattern):
-    def get_inputs(self) -> list[torch.Tensor]:
-        input = torch.empty([16, 16], device=self.device, dtype=FP8_DTYPE)
-        mm_weight = torch.empty([16, 16], device=self.device, dtype=FP8_DTYPE)
-        scale_a = torch.empty([1], device=self.device, dtype=torch.float32)
-        scale_b = torch.empty([1], device=self.device, dtype=torch.float32)
-        return [input, mm_weight, scale_a, scale_b]
-
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(
-            input: torch.Tensor,
-            mat2: torch.Tensor,
-            scale_a: torch.Tensor,
-            scale_b: torch.Tensor,
-        ) -> torch.Tensor:
-            bmm = torch.ops.vllm.bmm_fp8.default(
-                input.unsqueeze(0),
-                mat2.unsqueeze(0),
-                scale_a,
-                scale_b,
-                self.dtype,
-                "auto",
-            )
-            mm = bmm.view(input.shape[0], mat2.shape[1])
-            reduce_scatter = torch.ops.vllm.reduce_scatter.default(
-                mm,
-                dim=0,
-                world_size=self.tp_size,
-                group_name=self.tp.unique_name,
-            )
-            return reduce_scatter
-
-        def replacement(
-            input: torch.Tensor,
-            mat2: torch.Tensor,
-            scale_a: torch.Tensor,
-            scale_b: torch.Tensor,
-        ) -> torch.Tensor:
-            return torch.ops.vllm.fused_bmm_fp8_reduce_scatter.default(
-                input,
-                mat2,
-                scale_a,
-                scale_b,
-                self.tp.unique_name,
-                self.tp_size,
-                self.dtype,
-                "auto",
-            )
 
         pm.register_replacement(
             pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
@@ -572,12 +556,6 @@ class AsyncTPPass(VllmPatternMatcherPass):
         # `scaled_mm` or `cutlass_scaled_mm` with per-token (row-wise) scaling
         # only supports bfloat16 as the output dtype.
         if self.model_dtype == torch.bfloat16:
-            # This fusion is available only when the vllm.bmm_fp8 op exists.
-            if hasattr(torch.ops.vllm, "bmm_fp8"):
-                BmmFP8ReduceScatterPattern(self.model_dtype, self.device).register(
-                    self.patterns
-                )
-
             ScaledMMReduceScatterPattern(self.model_dtype, self.device).register(
                 self.patterns
             )
@@ -606,100 +584,98 @@ class AsyncTPPass(VllmPatternMatcherPass):
         tp_size = get_tensor_model_parallel_world_size()
         return bool(compile_range.is_single_size() and compile_range.end % tp_size == 0)
 
-    def _rewrite_all_gather_bmm_fp8_variants(self, graph: fx.Graph) -> int:
+    def _match_fp8_collective_gemm(
+        self, bmm_node: fx.Node
+    ) -> _FP8CollectiveGemmMatch | None:
+        parsed_bmm = _parse_bmm_fp8(bmm_node)
+        if parsed_bmm is None:
+            return None
+
+        a_2d, b_2d, a_scale, b_scale, out_dtype, backend = parsed_bmm
+        if not isinstance(backend, str):
+            return None
+
+        rs_match = _find_bmm_reduce_scatter(bmm_node)
+        if rs_match is not None:
+            rs_node, dim, world_size, group_name = rs_match
+            if dim == 0 and isinstance(world_size, int) and isinstance(group_name, str):
+                return _FP8CollectiveGemmMatch(
+                    kind="bmm_rs",
+                    replace_node=rs_node,
+                    a_2d=a_2d,
+                    b_2d=b_2d,
+                    a_scale=a_scale,
+                    b_scale=b_scale,
+                    out_dtype=out_dtype,
+                    backend=backend,
+                    group_name=group_name,
+                    world_size=world_size,
+                )
+
+        ag_node = _strip_view_like(a_2d)
+        parsed_ag = _parse_all_gather(ag_node)
+        if parsed_ag is None:
+            return None
+        ag_input, dim, world_size, group_name = parsed_ag
+        if (
+            dim != 0
+            or not isinstance(world_size, int)
+            or not isinstance(group_name, str)
+        ):
+            return None
+
+        target = _find_ag_bmm_replace_target(bmm_node)
+        if target is None:
+            return None
+
+        return _FP8CollectiveGemmMatch(
+            kind="ag_bmm",
+            replace_node=target,
+            a_2d=ag_input,
+            b_2d=b_2d,
+            a_scale=a_scale,
+            b_scale=b_scale,
+            out_dtype=out_dtype,
+            backend=backend,
+            group_name=group_name,
+            world_size=world_size,
+        )
+
+    def _lower_fp8_collective_gemm(
+        self, graph: fx.Graph, match: _FP8CollectiveGemmMatch
+    ) -> None:
+        if match.kind == "ag_bmm":
+            fused_op = torch.ops.vllm.fused_all_gather_bmm_fp8.default
+        else:
+            fused_op = torch.ops.vllm.fused_bmm_fp8_reduce_scatter.default
+
+        with graph.inserting_before(match.replace_node):
+            fused = graph.call_function(
+                fused_op,
+                args=(
+                    match.a_2d,
+                    match.b_2d,
+                    match.a_scale,
+                    match.b_scale,
+                    match.group_name,
+                    match.world_size,
+                    match.out_dtype,
+                    match.backend,
+                ),
+            )
+        fused.meta = dict(match.replace_node.meta)
+        match.replace_node.replace_all_uses_with(fused)
+        graph.erase_node(match.replace_node)
+
+    def _rewrite_fp8_collective_gemm(self, graph: fx.Graph) -> int:
         replaced = 0
         for node in list(graph.nodes):
-            parsed_bmm = _parse_bmm_fp8(node)
-            if parsed_bmm is None:
+            if not is_func(node, torch.ops.vllm.bmm_fp8.default):
                 continue
-            if _has_reduce_scatter_consumer_through_view_like(node):
+            match = self._match_fp8_collective_gemm(node)
+            if match is None:
                 continue
-
-            a_2d, b_2d, a_scale, b_scale, out_dtype, backend = parsed_bmm
-            if not isinstance(backend, str):
-                continue
-
-            ag_node = _strip_view_like(a_2d)
-            parsed_ag = _parse_all_gather(ag_node)
-            if parsed_ag is None:
-                continue
-            ag_input, dim, world_size, group_name = parsed_ag
-            if dim != 0:
-                continue
-            if not isinstance(world_size, int) or not isinstance(group_name, str):
-                continue
-
-            replace_targets = [
-                user
-                for user in node.users
-                if _is_view_like(user) and _node_ndim(user) == 2
-            ]
-            if len(replace_targets) != 1:
-                continue
-            target = replace_targets[0]
-
-            with graph.inserting_before(target):
-                fused = graph.call_function(
-                    torch.ops.vllm.fused_all_gather_bmm_fp8.default,
-                    args=(
-                        ag_input,
-                        b_2d,
-                        a_scale,
-                        b_scale,
-                        group_name,
-                        world_size,
-                        out_dtype,
-                        backend,
-                    ),
-                )
-            fused.meta = dict(target.meta)
-            target.replace_all_uses_with(fused)
-            graph.erase_node(target)
-            replaced += 1
-
-        if replaced > 0:
-            graph.eliminate_dead_code()
-        return replaced
-
-    def _rewrite_bmm_fp8_reduce_scatter_variants(self, graph: fx.Graph) -> int:
-        replaced = 0
-        for node in list(graph.nodes):
-            parsed_rs = _parse_reduce_scatter(node)
-            if parsed_rs is None:
-                continue
-
-            rs_input, dim, world_size, group_name = parsed_rs
-            if dim != 0:
-                continue
-            if not isinstance(world_size, int) or not isinstance(group_name, str):
-                continue
-
-            bmm_node = _strip_view_like(rs_input)
-            parsed_bmm = _parse_bmm_fp8(bmm_node)
-            if parsed_bmm is None:
-                continue
-
-            a_2d, b_2d, a_scale, b_scale, out_dtype, backend = parsed_bmm
-            if not isinstance(backend, str):
-                continue
-
-            with graph.inserting_before(node):
-                fused = graph.call_function(
-                    torch.ops.vllm.fused_bmm_fp8_reduce_scatter.default,
-                    args=(
-                        a_2d,
-                        b_2d,
-                        a_scale,
-                        b_scale,
-                        group_name,
-                        world_size,
-                        out_dtype,
-                        backend,
-                    ),
-                )
-            fused.meta = dict(node.meta)
-            node.replace_all_uses_with(fused)
-            graph.erase_node(node)
+            self._lower_fp8_collective_gemm(graph, match)
             replaced += 1
 
         if replaced > 0:
@@ -709,7 +685,6 @@ class AsyncTPPass(VllmPatternMatcherPass):
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         matched_by_patterns = self.patterns.apply(graph)
-        matched_ag_bmm = self._rewrite_all_gather_bmm_fp8_variants(graph)
-        matched_bmm_rs = self._rewrite_bmm_fp8_reduce_scatter_variants(graph)
-        self.matched_count = matched_by_patterns + matched_ag_bmm + matched_bmm_rs
+        matched_fp8_collective_gemm = self._rewrite_fp8_collective_gemm(graph)
+        self.matched_count = matched_by_patterns + matched_fp8_collective_gemm
         logger.debug("Replaced %s patterns", self.matched_count)
