@@ -41,6 +41,11 @@ from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
+from vllm.v1.spec_decode.draft_length_policy import (
+    AlwaysContinuePolicy,
+    ConfidenceThresholdPolicy,
+    DraftLengthPolicy,
+)
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
@@ -79,6 +84,16 @@ class SpecDecodeBaseProposer:
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
         self.draft_confidence_threshold = self.speculative_config.draft_confidence_threshold
+
+        # Pluggable policy that decides whether to continue drafting at each
+        # step.  ConfidenceThresholdPolicy implements the DISCO-style mean
+        # early-exit heuristic; AlwaysContinuePolicy is a no-op sentinel used
+        # when DSL is disabled (threshold == 0).
+        self.draft_length_policy: DraftLengthPolicy = (
+            ConfidenceThresholdPolicy(self.draft_confidence_threshold)
+            if self.draft_confidence_threshold > 0
+            else AlwaysContinuePolicy()
+        )
 
         # DSL (Dynamic Speculative Length) metrics tracking
         # These track early exit behavior when draft_confidence_threshold > 0
@@ -817,19 +832,15 @@ class SpecDecodeBaseProposer:
             # Always append the token first
             draft_token_ids_list.append(draft_token_ids)
 
-            # Check if we should stop early (DSL early exit)
-            # Only evaluate on tokens before the last one, and only if DSL is enabled
+            # Check if we should stop early (DSL early exit).
+            # Delegate the continue/stop decision to the pluggable policy; the
+            # policy is a no-op (AlwaysContinuePolicy) when DSL is disabled.
+            # Only evaluate before the final draft step to avoid a wasted check.
             if dsl_enabled and (token_index + 1) < (self.num_speculative_tokens - 1):
                 assert logits is not None
                 draft_probs = logits.softmax(dim=-1, dtype=torch.float32)
                 draft_token_ids_probs = draft_probs.gather(1, draft_token_ids.unsqueeze(1)).squeeze(-1)
-                # Mean policy: exit if the average confidence across the batch
-                # falls below the threshold. More robust than 'any' under mixed
-                # workloads — a single low-confidence request does not penalise
-                # high-confidence ones.
-                should_exit_gpu = draft_token_ids_probs.mean() < self.draft_confidence_threshold
-
-                if should_exit_gpu.item():
+                if not self.draft_length_policy.should_continue(token_index, draft_token_ids_probs):
                     self.dsl_early_exits += 1
                     self.dsl_tokens_generated += (token_index + 1) * batch_size
                     dsl_did_early_exit = True
