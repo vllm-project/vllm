@@ -3,6 +3,7 @@
 
 import copy
 import time
+import math
 from collections import Counter as collectionsCounter
 from collections import deque
 from contextlib import contextmanager
@@ -401,6 +402,9 @@ class LLMEngine:
 
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
+
+        # Tree decoder
+        self.tree_decoder = TreeDecoder()
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -1351,6 +1355,11 @@ class LLMEngine:
             try:
                 outputs = self.model_executor.execute_model(
                     execute_model_req=execute_model_req)
+                if self._should_enable_tree_decoding(seq_group_metadata_list):
+                    outputs, new_branch_groups = self._process_tree_decoding(
+                        outputs, seq_group_metadata_list)
+                    for branch_group in new_branch_groups:
+                        self._add_branch_to_scheduler(branch_group, virtual_engine)
                 self._skip_scheduling_next_step = False
             except InputProcessingError as e:
                 # The input for this request cannot be processed, so we must
@@ -1438,6 +1447,52 @@ class LLMEngine:
             self.model_executor.stop_remote_worker_execution_loop()
 
         return ctx.request_outputs
+
+    def _should_enable_tree_decoding(self, seq_group_metadata_list):
+        """检查是否有序列组启用了tree decoding"""
+        return any(
+            seq_group_metadata.sampling_params.tree_search_params.enable_tree_search 
+            for seq_group_metadata in seq_group_metadata_list
+        )
+    
+    # todo
+    def _process_tree_decoding(self, outputs, seq_group_metadata_list):
+        """处理tree decoding逻辑"""
+        new_branch_groups = []
+    
+        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
+            sampling_params = seq_group_metadata.sampling_params
+            
+            if not sampling_params.tree_search_params.enable_tree_search:
+                continue
+                
+            # 获取当前序列组的logprobs
+            if i < len(outputs) and hasattr(outputs[i], 'logprobs'):
+                logprobs = outputs[i].logprobs
+                
+                # 判断是否需要创建分支
+                if self.tree_decoder.should_create_branches(
+                    seq_group_metadata, logprobs, sampling_params
+                ):
+                    # 创建分支序列组
+                    branch_groups = self.tree_decoder.create_branch_sequences(
+                        seq_group_metadata, logprobs, sampling_params
+                    )
+                    new_branch_groups.extend(branch_groups)
+                    
+                    # 标记原序列进入树模式
+                    seq_group_metadata.is_tree_decoding = True
+        
+        return outputs, new_branch_groups
+    
+    def _add_branch_to_scheduler(self, branch_group, virtual_engine):
+        """将分支序列组添加到调度器"""
+        # 添加到等待队列
+        self.scheduler[virtual_engine].add_seq_group(branch_group)
+        
+        # 更新序列ID映射
+        self.seq_id_to_seq_group[branch_group.request_id] = branch_group
+
 
     def _abort_and_cache_schedule(
             self, request_id: str, virtual_engine: int,
@@ -2095,3 +2150,63 @@ class LLMEngine:
 if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
     from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
     LLMEngine = V1LLMEngine  # type: ignore
+
+class TreeDecoder:
+    """A class that encapsulates the logic for tree decoding. This is used to
+    keep the tree decoding logic separate from the main LLMEngine code, which
+    is already quite complex. The TreeDecoder class can be used by the
+    LLMEngine to process tree decoding logic when enabled in the sampling
+    parameters."""
+    def should_create_branches(self, seq_group, logprobs, sampling_params):
+        if not sampling_params.tree_search_params.enable_tree_search:
+            return False
+        if seq_group.tree_depth >= sampling_params.tree_search_params.max_tree_depth:
+            return False
+        entropy = self._calculate_entropy(logprobs)
+        return entropy > sampling_params.tree_search_params.entropy_threshold
+    
+    def _calculate_entropy(self, logprobs):
+        """Calculate the entropy of the logits."""
+        # Convert logits to probabilities
+        probs = torch.exp(logprobs)
+        # Calculate entropy
+        entropy = -torch.sum(probs * logprobs, dim=-1)
+        return entropy.item()
+    
+    def create_branch_sequences(self, parent_seq_group, logprobs, sampling_params):
+        """Create new branch sequence groups based on the model output and sampling parameters."""
+        num_branches = sampling_params.tree_search_params.branching_factor
+        probs = torch.exp(logprobs)
+        top_k_probs, top_k_indices = torch.topk(
+            probs, num_branches, dim=-1
+        )
+        branch_seq_groups = []
+        for i, (token_id, prob) in enumerate(zip(top_k_indices[0], top_k_probs[0])):
+            # 创建新的序列组作为分支
+            branch_seq_group = self._clone_sequence_group_for_branch(
+                parent_seq_group, token_id.item(), i, prob.item()
+            )
+            branch_seq_groups.append(branch_seq_group)
+            
+        return branch_seq_groups
+    
+    def _clone_sequence_group_for_branch(self, original_seq_group, token_id, branch_id, prob):
+        """克隆序列组创建分支"""
+        # 深度复制原序列组
+        branch_seq_group = copy.deepcopy(original_seq_group)
+
+        # 更新分支特有属性
+        branch_seq_group.is_tree_decoding = True
+        branch_seq_group.tree_depth = original_seq_group.tree_depth + 1
+        branch_seq_group.parent_sequence_id = original_seq_group.request_id
+        
+        # 为分支生成新的请求ID
+        branch_seq_group.request_id = f"{original_seq_group.request_id}_branch_{branch_id}"
+        
+        # 添加预测的token到分支序列
+        for seq in branch_seq_group.get_seqs():
+            seq.tree_branch_id = branch_id
+            seq.tree_depth = branch_seq_group.tree_depth
+            seq.append_token_id(token_id, logprob=math.log(prob))
+            
+        return branch_seq_group
