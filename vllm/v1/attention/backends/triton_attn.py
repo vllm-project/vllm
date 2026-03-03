@@ -67,7 +67,7 @@ class TritonAttentionMetadata:
     num_prefills: int
     num_decodes: int
     seq_threshold_3D: int
-    split_launch: bool
+    prefill_cudagraph_enabled: bool
     num_par_softmax_segments: int
     softmax_segm_output: torch.Tensor
     softmax_segm_max: torch.Tensor
@@ -164,7 +164,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         self.prefill_cudagraph_enabled = (
             self.vllm_config.compilation_config.cudagraph_mode in (CUDAGraphMode.FULL,)
         )
-        self.split_launch = self.prefill_cudagraph_enabled
 
         # The launch grid for the 2D kernel is defined as (num_q_blocks, num_heads_kv).
         # A lower bound for num_q_blocks is the number of sequences.
@@ -302,7 +301,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             num_prefills=num_prefills,
             num_decodes=num_decodes,
             seq_threshold_3D=self.seq_threshold_3D,
-            split_launch=self.split_launch,
+            prefill_cudagraph_enabled=self.prefill_cudagraph_enabled,
             num_par_softmax_segments=self.num_par_softmax_segments,
             softmax_segm_output=self.softmax_segm_output,
             softmax_segm_max=self.softmax_segm_max,
@@ -539,7 +538,7 @@ class TritonAttentionImpl(AttentionImpl):
         num_prefills = attn_metadata.num_prefills
         num_decodes = attn_metadata.num_decodes
         seq_threshold_3D = attn_metadata.seq_threshold_3D
-        split_launch = attn_metadata.split_launch
+        prefill_cudagraph_enabled = attn_metadata.prefill_cudagraph_enabled
         num_par_softmax_segments = attn_metadata.num_par_softmax_segments
         softmax_segm_output = attn_metadata.softmax_segm_output
         softmax_segm_max = attn_metadata.softmax_segm_max
@@ -570,7 +569,7 @@ class TritonAttentionImpl(AttentionImpl):
             num_prefills=num_prefills,
             num_decodes=num_decodes,
             seq_threshold_3D=seq_threshold_3D,
-            split_launch=split_launch,
+            split_launch=prefill_cudagraph_enabled,
             num_par_softmax_segments=num_par_softmax_segments,
             softmax_segm_output=softmax_segm_output,
             softmax_segm_max=softmax_segm_max,
