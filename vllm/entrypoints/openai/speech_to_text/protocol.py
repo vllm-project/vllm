@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import time
 from http import HTTPStatus
 from typing import Literal, TypeAlias
@@ -244,8 +245,6 @@ class TranscriptionRequest(OpenAIBaseModel):
         # Parse vllm_xargs from JSON string (form data sends it as a string)
         xargs = data.get("vllm_xargs")
         if isinstance(xargs, str):
-            import json
-
             data["vllm_xargs"] = json.loads(xargs)
 
         return data

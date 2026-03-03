@@ -70,6 +70,28 @@ def run_audioflamingo3(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# CohereASR
+def run_cohere_asr(question: str, audio_count: int) -> ModelRequestData:
+    assert audio_count == 1, "CohereASR only support single audio input per prompt"
+    model_name = "/host/engines/vllm/audio/2b-release"
+
+    prompt = (
+        "<|startofcontext|><|startoftranscript|>"
+        "<|emo:undefined|><|en|><|en|><|pnc|><|noitn|>"
+        "<|notimestamp|><|nodiarize|>"
+    )
+    engine_args = EngineArgs(
+        model=model_name,
+        limit_mm_per_prompt={"audio": audio_count},
+        tokenizer_mode="cohere_asr",
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # MusicFlamingo
 def run_musicflamingo(question: str, audio_count: int) -> ModelRequestData:
     model_name = "nvidia/music-flamingo-2601-hf"
@@ -478,37 +500,17 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
-# CohereASR
-def run_cohere_asr(question: str, audio_count: int) -> ModelRequestData:
-    assert audio_count == 1, "CohereASR only support single audio input per prompt"
-    model_name = "/host/engines/vllm/audio/2b-release"
-
-    prompt = (
-        "<|startofcontext|><|startoftranscript|>"
-        "<|emo:undefined|><|en|><|en|><|pnc|><|noitn|>"
-        "<|notimestamp|><|nodiarize|>"
-    )
-    engine_args = EngineArgs(
-        model=model_name,
-        limit_mm_per_prompt={"audio": audio_count},
-        tokenizer_mode="cohere_asr",
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-    )
-
 
 model_example_map = {
     "audioflamingo3": run_audioflamingo3,
-    "musicflamingo": run_musicflamingo,
+    "cohere_asr": run_cohere_asr,
+    "funaudiochat": run_funaudiochat,
     "gemma3n": run_gemma3n,
     "glmasr": run_glmasr,
-    "funaudiochat": run_funaudiochat,
     "granite_speech": run_granite_speech,
     "midashenglm": run_midashenglm,
     "minicpmo": run_minicpmo,
+    "musicflamingo": run_musicflamingo,
     "phi4_mm": run_phi4mm,
     "qwen2_audio": run_qwen2_audio,
     "qwen2_5_omni": run_qwen2_5_omni,
@@ -516,7 +518,6 @@ model_example_map = {
     "ultravox": run_ultravox,
     "voxtral": run_voxtral,
     "whisper": run_whisper,
-    "cohere_asr": run_cohere_asr,
 }
 
 
