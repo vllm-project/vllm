@@ -125,10 +125,12 @@ class InMemoryResponseStore(ResponseStore):
             return response
 
     async def get_messages(self, response_id: str) -> list | None:
-        return self._messages.get(response_id)
+        async with self._lock:
+            return self._messages.get(response_id)
 
     async def put_messages(self, response_id: str, messages: list) -> None:
-        self._messages[response_id] = messages
+        async with self._lock:
+            self._messages[response_id] = messages
 
 
 def create_response_store() -> ResponseStore:
