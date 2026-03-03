@@ -177,8 +177,8 @@ def get_text_token_prompts(
     model_config = processor.info.ctx.model_config
 
     model_type = model_config.hf_config.model_type
-    if model_type in MM_DATA_PATCHES:
-        mm_data = MM_DATA_PATCHES[model_type](mm_data)
+    if processor.info.data_parser.video_needs_metadata:
+        mm_data = qwen3_vl_patch_mm_data(mm_data)
 
     parsed_data = processor.info.parse_mm_data(mm_data)
     mm_counts = {k: len(vs) for k, vs in parsed_data.items()}
