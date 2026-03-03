@@ -272,6 +272,18 @@ def memory_profiling(
     diff_from_create = result.after_profile - result.before_create
     result.torch_peak_increase = diff_profile.torch_peak
     result.non_torch_increase = diff_from_create.non_torch_memory
+
+    device = baseline_snapshot.device_
+    shared_sysmem_device_mem_sms = ((8, 7), (11, 0), (12, 1))  # Orin, Thor, Spark
+    if (
+        current_platform.is_cuda()
+        and current_platform.get_device_capability(device.index)
+        in shared_sysmem_device_mem_sms
+    ):
+        # Force non-torch increase to 0 on UMA systems so concurrent engine
+        # memory allocations do not register as local overhead.
+        result.non_torch_increase = 0
+
     result.profile_time = diff_profile.timestamp
 
     non_torch_memory = result.non_torch_increase
