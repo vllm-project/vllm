@@ -243,7 +243,7 @@ def build_http_app(renderer) -> FastAPI:
     async def health():
         return {"healthy": True, "message": "OK"}
 
-    @app.post("/render/chat")
+    @app.post("/v1/chat/completions/render")
     async def render_chat(request: dict):
         try:
             result = await _render_chat(renderer, request)
@@ -254,7 +254,7 @@ def build_http_app(renderer) -> FastAPI:
                 content={"error": f"RenderChat failed: {e}"},
             )
 
-    @app.post("/render/completion")
+    @app.post("/v1/completions/render")
     async def render_completion(request: dict):
         try:
             result = await _render_completion(renderer, request)

@@ -352,7 +352,7 @@ async def test_http_health(http_client):
 async def test_http_render_chat(http_client):
     """Test HTTP render chat endpoint."""
     response = await http_client.post(
-        "/render/chat",
+        "/v1/chat/completions/render",
         json={
             "messages": [
                 {"role": "user", "content": "Hello, how are you?"},
@@ -372,7 +372,7 @@ async def test_http_render_chat(http_client):
 async def test_http_render_chat_with_params(http_client):
     """Test HTTP render chat with explicit params."""
     response = await http_client.post(
-        "/render/chat",
+        "/v1/chat/completions/render",
         json={
             "messages": [
                 {"role": "user", "content": "Hi!"},
@@ -393,7 +393,7 @@ async def test_http_render_chat_with_params(http_client):
 async def test_http_render_completion(http_client):
     """Test HTTP render completion endpoint."""
     response = await http_client.post(
-        "/render/completion",
+        "/v1/completions/render",
         json={"prompt": "The quick brown fox"},
     )
 
@@ -408,7 +408,7 @@ async def test_http_render_completion(http_client):
 async def test_http_render_completion_with_tok_params(http_client):
     """Test HTTP render completion with explicit TokenizeParams."""
     response = await http_client.post(
-        "/render/completion",
+        "/v1/completions/render",
         json={
             "prompt": "Hello world",
             "tok_params": {
