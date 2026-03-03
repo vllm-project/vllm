@@ -53,7 +53,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import (
-    get_dcp_local_seq_lens,
     get_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -438,15 +437,11 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         prefix_scheduler_metadata = None
 
         if self.dcp_world_size > 1:
-            query_kv_lens = query_start_loc[1:] - query_start_loc[:-1]
-            dcp_context_kv_lens = seq_lens - query_kv_lens
-
-            dcp_context_kv_lens = get_dcp_local_seq_lens(
-                dcp_context_kv_lens,
-                self.dcp_world_size,
-                self.dcp_rank,
-                self.cp_kv_cache_interleave_size,
-            )
+            # Use pre-computed persistent buffer from gpu_model_runner for
+            # FULL CUDA graph compatibility. The buffer contains context-only
+            # KV lengths (total - new tokens) distributed across DCP ranks.
+            dcp_context_kv_lens = common_attn_metadata.dcp_context_kv_lens
+            assert dcp_context_kv_lens is not None
             # After DCP distribution, the maximum number of tokens for any rank is
             # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
             # and I is cp_kv_cache_interleave_size.
