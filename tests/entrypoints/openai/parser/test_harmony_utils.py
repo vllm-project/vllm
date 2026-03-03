@@ -8,10 +8,12 @@ from tests.entrypoints.openai.utils import verify_harmony_messages
 from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
     get_encoding,
+    get_streamable_parser_for_assistant,
     get_system_message,
     has_custom_tools,
     parse_chat_input_to_harmony_message,
     parse_chat_output,
+    sanitize_harmony_name,
 )
 from vllm.entrypoints.openai.responses.harmony import (
     response_input_to_harmony,
@@ -928,3 +930,120 @@ class TestResponseInputToHarmonyReasoningItem:
         msg = response_input_to_harmony(item, prev_responses=[])
 
         assert msg is None
+
+
+class TestSanitizeHarmonyName:
+    """Tests for sanitize_harmony_name()."""
+
+    def test_clean_name_unchanged(self) -> None:
+        assert sanitize_harmony_name("get_weather") == "get_weather"
+
+    def test_strip_channel_token(self) -> None:
+        assert (
+            sanitize_harmony_name("manage_cart<|channel|>commentary") == "manage_cart"
+        )
+
+    def test_strip_constrain_token(self) -> None:
+        assert sanitize_harmony_name("<|constrain|>json") == ""
+
+    def test_pure_control_token_returns_empty(self) -> None:
+        assert sanitize_harmony_name("<|start|>") == ""
+
+    def test_multiple_tokens_earliest_wins(self) -> None:
+        assert (
+            sanitize_harmony_name("foo<|channel|>bar<|constrain|>baz") == "foo"
+        )
+
+    def test_empty_string(self) -> None:
+        assert sanitize_harmony_name("") == ""
+
+    def test_trailing_whitespace_stripped(self) -> None:
+        assert sanitize_harmony_name("tool_name  <|end|>") == "tool_name"
+
+
+class TestResilientStreamableParser:
+    """Tests for ResilientStreamableParser error recovery."""
+
+    def test_normal_sequence_unchanged(self) -> None:
+        """Normal token sequence should produce same results as raw parser."""
+        encoding = get_encoding()
+        harmony_str = "<|channel|>final<|message|>Hello world<|end|>"
+        token_ids = encoding.encode(harmony_str, allowed_special="all")
+
+        parser = get_streamable_parser_for_assistant()
+        for tok in token_ids:
+            parser.process(tok)
+
+        assert len(parser.messages) == 1
+        assert parser.messages[0].content[0].text == "Hello world"
+        assert parser.messages[0].channel == "final"
+
+    def test_missing_start_recovery(self) -> None:
+        """Parser should recover when <|start|> is missing between messages."""
+        encoding = get_encoding()
+        # First message completes normally, second is missing <|start|>
+        first_msg = "<|channel|>final<|message|>First.<|end|>"
+        second_msg = "<|channel|>final<|message|>Second.<|end|>"
+        first_tokens = encoding.encode(first_msg, allowed_special="all")
+        second_tokens = encoding.encode(second_msg, allowed_special="all")
+
+        parser = get_streamable_parser_for_assistant()
+        for tok in first_tokens:
+            parser.process(tok)
+        # Feed second message tokens directly (missing <|start|>assistant)
+        for tok in second_tokens:
+            parser.process(tok)
+
+        assert len(parser.messages) == 2
+        assert parser.messages[0].content[0].text == "First."
+        assert parser.messages[1].content[0].text == "Second."
+
+    def test_constrain_in_header_skipped(self) -> None:
+        """<|constrain|> in HEADER state should be skipped gracefully."""
+        encoding = get_encoding()
+        # First, complete a normal message so parser goes to EXPECT_START
+        first_msg = "<|channel|>final<|message|>First.<|end|>"
+        first_tokens = encoding.encode(first_msg, allowed_special="all")
+
+        # Build a second message where <|constrain|> appears in the header
+        # after <|start|>assistant, before <|channel|>
+        start_tok = encoding.encode("<|start|>", allowed_special="all")
+        role_toks = encoding.encode("assistant", allowed_special="all")
+        constrain_tok = encoding.encode("<|constrain|>", allowed_special="all")
+        # Garbage tokens that should be skipped
+        json_toks = encoding.encode("json", allowed_special="all")
+        message_tok = encoding.encode("<|message|>", allowed_special="all")
+        text_toks = encoding.encode("Second.", allowed_special="all")
+        end_tok = encoding.encode("<|end|>", allowed_special="all")
+
+        parser = get_streamable_parser_for_assistant()
+        # Complete first message
+        for tok in first_tokens:
+            parser.process(tok)
+        assert len(parser.messages) == 1
+
+        # Feed: <|start|>assistant → puts parser in HEADER state
+        for tok in start_tok:
+            parser.process(tok)
+        for tok in role_toks:
+            parser.process(tok)
+        # Feed: <|constrain|> → should enter skip mode
+        for tok in constrain_tok:
+            parser.process(tok)
+        # Feed: json tokens → should be discarded in skip mode
+        for tok in json_toks:
+            parser.process(tok)
+        # Feed: <|message|> → should exit skip mode and resume
+        for tok in message_tok:
+            parser.process(tok)
+        # Feed: text + <|end|>
+        for tok in text_toks:
+            parser.process(tok)
+        for tok in end_tok:
+            parser.process(tok)
+
+        # Should have produced two messages despite the malformed sequence
+        assert len(parser.messages) == 2
+        assert parser.messages[0].content[0].text == "First."
+
+

@@ -15,6 +15,7 @@ from openai_harmony import (
     ReasoningEffort,
     Role,
     StreamableParser,
+    StreamState,
     SystemContent,
     TextContent,
     ToolDescription,
@@ -26,6 +27,126 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionTools
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+# Harmony special token strings that may leak into tool names or recipients
+# during generation by GPT-OSS models.
+_HARMONY_SPECIAL_TOKEN_STRS = (
+    "<|channel|>",
+    "<|constrain|>",
+    "<|start|>",
+    "<|end|>",
+    "<|message|>",
+    "<|call|>",
+)
+
+# Harmony special token IDs (GPT-OSS encoding)
+_TOK_CONSTRAIN = 200003
+_TOK_CHANNEL = 200005
+_TOK_START = 200006
+_TOK_END = 200007
+_TOK_MESSAGE = 200008
+
+
+def sanitize_harmony_name(name: str) -> str:
+    """Strip leaked Harmony control tokens from a tool/recipient name.
+
+    Finds the earliest Harmony control token string in *name* and returns
+    only the text before it.  Returns the original string unchanged when
+    no control tokens are present.
+    """
+    earliest = len(name)
+    for tok in _HARMONY_SPECIAL_TOKEN_STRS:
+        idx = name.find(tok)
+        if idx != -1 and idx < earliest:
+            earliest = idx
+    return name[:earliest].rstrip()
+
+
+class ResilientStreamableParser:
+    """Wrapper around ``StreamableParser`` that recovers from two common
+    malformed-output patterns produced by GPT-OSS models:
+
+    1. **Missing ``<|start|>`` recovery** – When the parser expects a
+       ``<|start|>`` token but receives ``<|channel|>`` instead, inject the
+       missing ``<|start|>`` + assistant role token before forwarding.
+
+    2. **Malformed ``<|constrain|>`` in headers** – When the parser is in
+       ``HEADER`` state and receives ``<|constrain|>``, enter skip mode and
+       discard tokens until ``<|message|>`` or ``<|end|>`` is seen.
+
+    All public properties are delegated to the underlying parser.  The
+    ``current_recipient`` getter additionally sanitizes leaked tokens.
+    """
+
+    def __init__(self, inner: StreamableParser, encoding):
+        self._inner = inner
+        self._encoding = encoding
+        self._skip_until_message_or_end = False
+
+    # --- error-recovering process() -----------------------------------
+
+    def process(self, token_id: int) -> None:
+        # Pattern 2: skip mode – discard until <|message|> or <|end|>
+        if self._skip_until_message_or_end:
+            if token_id in (_TOK_MESSAGE, _TOK_END):
+                self._skip_until_message_or_end = False
+                self._inner.process(token_id)
+            # else: silently discard the token
+            return
+
+        state = self._inner.state
+
+        # Pattern 1: missing <|start|> before <|channel|>
+        if state == StreamState.EXPECT_START and token_id == _TOK_CHANNEL:
+            # Inject <|start|> + assistant role token
+            self._inner.process(_TOK_START)
+            role_tokens = self._encoding.encode("assistant", allowed_special="all")
+            for rt in role_tokens:
+                self._inner.process(rt)
+            self._inner.process(token_id)
+            return
+
+        # Pattern 2: <|constrain|> during HEADER → enter skip mode
+        if state == StreamState.HEADER and token_id == _TOK_CONSTRAIN:
+            self._skip_until_message_or_end = True
+            return
+
+        self._inner.process(token_id)
+
+    # --- delegated properties -----------------------------------------
+
+    @property
+    def messages(self):
+        return self._inner.messages
+
+    @property
+    def current_content(self):
+        return self._inner.current_content
+
+    @property
+    def current_channel(self):
+        return self._inner.current_channel
+
+    @property
+    def current_recipient(self):
+        raw = self._inner.current_recipient
+        if raw is not None:
+            sanitized = sanitize_harmony_name(raw)
+            return sanitized if sanitized else None
+        return raw
+
+    @property
+    def current_role(self):
+        return self._inner.current_role
+
+    @property
+    def state(self):
+        return self._inner.state
+
+    @property
+    def last_content_delta(self):
+        return self._inner.last_content_delta
+
 
 REASONING_EFFORT = {
     "high": ReasoningEffort.HIGH,
@@ -256,7 +377,7 @@ def parse_chat_input_to_harmony_message(
 
         for call in tool_calls:
             func = call.get("function", {})
-            name = func.get("name", "")
+            name = sanitize_harmony_name(func.get("name", ""))
             arguments = func.get("arguments", "") or ""
             msg = Message.from_role_and_content(Role.ASSISTANT, arguments)
             msg = msg.with_channel("commentary")
@@ -328,8 +449,10 @@ def get_stop_tokens_for_assistant_actions() -> list[int]:
     return get_encoding().stop_tokens_for_assistant_actions()
 
 
-def get_streamable_parser_for_assistant() -> StreamableParser:
-    return StreamableParser(get_encoding(), role=Role.ASSISTANT)
+def get_streamable_parser_for_assistant() -> ResilientStreamableParser:
+    encoding = get_encoding()
+    inner = StreamableParser(encoding, role=Role.ASSISTANT)
+    return ResilientStreamableParser(inner, encoding)
 
 
 def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
