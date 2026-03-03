@@ -53,7 +53,7 @@ class ServeSubcommand(CLISubcommand):
 
         if getattr(args, "hip_online_tuning", False):
             os.environ["HIP_ONLINE_TUNING"] = "1"
-            
+
         if args.headless:
             if args.api_server_count is not None and args.api_server_count > 0:
                 raise ValueError(

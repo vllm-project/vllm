@@ -143,7 +143,8 @@ class BaseFrontendArgs:
     templates and other tokenizer configuration."""
     enable_log_outputs: bool = False
     """If set to True, log model outputs (generations).
-    Requires --enable-log-requests."""
+    Requires `--enable-log-requests`. As with `--enable-log-requests`,
+    information is only logged at INFO level at maximum."""
     enable_log_deltas: bool = True
     """If set to False, output deltas will not be logged. Relevant only if 
     --enable-log-outputs is set.
@@ -277,11 +278,6 @@ class FrontendArgs(BaseFrontendArgs):
     Enable offline FastAPI documentation for air-gapped environments.
     Uses vendored static assets bundled with vLLM.
     """
-    hip_online_tuning: bool = False
-    """
-    If set to True, enable AITER hipBLASLt online GEMM tuning by setting the
-    HIP_ONLINE_TUNING environment variable to 1. Only relevant for AMD GPUs.
-    """
 
     @classmethod
     def _customize_cli_kwargs(
@@ -348,6 +344,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         help="Read CLI options from a config file. "
         "Must be a YAML with the following options: "
         "https://docs.vllm.ai/en/latest/configuration/serve_args.html",
+    )
+    parser.add_argument(
+        "--hip-online-tuning",
+        action="store_true",
+        default=False,
+        help="Enable AITER hipBLASLt online tuning by setting the "
+        "HIP_ONLINE_TUNING environment variable to 1.",
     )
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
