@@ -155,9 +155,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         # View as FP8 and pass scale for in-kernel dequantization.
         if use_fp8:
-            kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
-                current_platform.fp8_dtype()
-            )
+            kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(current_platform.fp8_dtype())
             k_scale = layer._k_scale
         else:
             k_scale = None
