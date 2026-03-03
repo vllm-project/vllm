@@ -23,7 +23,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
-from vllm.tool_parsers.utils import extract_intermediate_diff
+from vllm.tool_parsers.utils import compute_streamed_args_delta, is_complete_json
 from vllm.utils.mistral import is_mistral_tokenizer
 
 logger = init_logger(__name__)
@@ -139,16 +139,6 @@ class JambaToolParser(ToolParser):
         # if the tool call token ID IS in the tokens generated so far, that
         # means we're parsing as tool calls now
 
-        # handle if we detected the start of tool calls token which means
-        # the start of tool calling
-        if (
-            self.tool_calls_start_token_id in delta_token_ids
-            and len(delta_token_ids) == 1
-        ):
-            # if it's the only token, return None, so we don't send a chat
-            # completion and don't send a control token
-            return None
-
         # bit mask flags for partial JSON parsing. If the name hasn't been
         # sent yet, don't allow sending
         # an incomplete string since OpenAI only ever (as far as I have
@@ -176,42 +166,41 @@ class JambaToolParser(ToolParser):
                 tool_call_arr[self.current_tool_id] if len(tool_call_arr) > 0 else {}
             )
 
-            # case -- if no tokens have been streamed for the tool, e.g.
+            # if no tokens have been streamed for the tool, e.g.
             #   only the array brackets, stream nothing
             if len(tool_call_arr) == 0:
                 return None
 
+            delta = None
+
             # case: we are starting a new tool in the array
-            #   -> array has > 0 length AND length has moved past cursor
-            elif (
-                len(tool_call_arr) > 0 and len(tool_call_arr) > self.current_tool_id + 1
-            ):
+            #   -> array length has moved past cursor
+            if len(tool_call_arr) > self.current_tool_id + 1:
                 # if we're moving on to a new call, first make sure we
                 # haven't missed anything in the previous one that was
                 # auto-generated due to JSON completions, but wasn't
                 # streamed to the client yet.
                 if self.current_tool_id >= 0:
-                    diff: str | None = current_tool_call.get("arguments")
+                    prev_args = current_tool_call.get("arguments")
+                    if prev_args:
+                        prev_args_json = json.dumps(prev_args, ensure_ascii=False)
+                        already = self.streamed_args_for_tool[self.current_tool_id]
+                        remaining = prev_args_json[len(already) :]
+                        if remaining:
+                            delta = DeltaMessage(
+                                tool_calls=[
+                                    DeltaToolCall(
+                                        index=self.current_tool_id,
+                                        function=DeltaFunctionCall(
+                                            arguments=remaining
+                                        ).model_dump(exclude_none=True),
+                                    )
+                                ]
+                            )
+                            self.streamed_args_for_tool[self.current_tool_id] += (
+                                remaining
+                            )
 
-                    if diff:
-                        diff = json.dumps(diff, ensure_ascii=False).replace(
-                            self.streamed_args_for_tool[self.current_tool_id], ""
-                        )
-                        delta = DeltaMessage(
-                            tool_calls=[
-                                DeltaToolCall(
-                                    index=self.current_tool_id,
-                                    function=DeltaFunctionCall(
-                                        arguments=diff
-                                    ).model_dump(exclude_none=True),
-                                )
-                            ]
-                        )
-                        self.streamed_args_for_tool[self.current_tool_id] += diff
-                    else:
-                        delta = None
-                else:
-                    delta = None
                 # re-set stuff pertaining to progress in the current tool
                 self.current_tool_id = len(tool_call_arr) - 1
                 self.current_tool_name_sent = False
@@ -219,10 +208,9 @@ class JambaToolParser(ToolParser):
                 logger.debug("starting on new tool %d", self.current_tool_id)
                 return delta
 
-            # case: update an existing tool - this is handled below
+            # case: update an existing tool
 
             # if the current tool name hasn't been sent, send if available
-            # - otherwise send nothing
             if not self.current_tool_name_sent:
                 function_name = current_tool_call.get("name")
                 if function_name:
@@ -239,81 +227,48 @@ class JambaToolParser(ToolParser):
                         ]
                     )
                     self.current_tool_name_sent = True
-                else:
-                    delta = None
 
-            # now we know we're on the same tool call and we're streaming
-            # arguments
+            # streaming arguments — compare fully-parsed current vs
+            # previous arguments and emit only the stable diff.
             else:
                 prev_arguments = self.prev_tool_call_arr[self.current_tool_id].get(
                     "arguments"
                 )
                 cur_arguments = current_tool_call.get("arguments")
 
-                new_text = delta_text.replace("'", '"')
-
-                if not cur_arguments and not prev_arguments:
-                    delta = None
-                elif not cur_arguments and prev_arguments:
-                    logger.error(
-                        "INVARIANT - impossible to have arguments reset mid-arguments"
-                    )
-                    delta = None
-                elif cur_arguments and not prev_arguments:
-                    cur_arguments_json = json.dumps(cur_arguments, ensure_ascii=False)
-                    logger.debug("finding %s in %s", new_text, cur_arguments_json)
-
-                    arguments_delta = cur_arguments_json[
-                        : cur_arguments_json.index(new_text) + len(new_text)
-                    ]
-                    logger.debug(
-                        "First tokens in arguments received: %s", arguments_delta
-                    )
-                    delta = DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_id,
-                                function=DeltaFunctionCall(
-                                    arguments=arguments_delta
-                                ).model_dump(exclude_none=True),
-                            )
-                        ]
-                    )
-                    self.streamed_args_for_tool[self.current_tool_id] += arguments_delta
-
-                elif cur_arguments and prev_arguments:
+                if cur_arguments is not None:
                     cur_args_json = json.dumps(cur_arguments, ensure_ascii=False)
-                    prev_args_json = json.dumps(prev_arguments, ensure_ascii=False)
-                    logger.debug(
-                        "Searching for diff between \n%s\n%s",
-                        cur_args_json,
-                        prev_args_json,
+                    prev_args_json = (
+                        json.dumps(prev_arguments, ensure_ascii=False)
+                        if prev_arguments is not None
+                        else None
                     )
+                    argument_diff = compute_streamed_args_delta(
+                        cur_args_json=cur_args_json,
+                        prev_args_json=prev_args_json,
+                        already_streamed=self.streamed_args_for_tool[
+                            self.current_tool_id
+                        ],
+                        is_complete=(
+                            self.tool_calls_end_token in current_text
+                            and is_complete_json(parsable_arr)
+                        ),
+                    )
+                    if argument_diff:
+                        delta = DeltaMessage(
+                            tool_calls=[
+                                DeltaToolCall(
+                                    index=self.current_tool_id,
+                                    function=DeltaFunctionCall(
+                                        arguments=argument_diff
+                                    ).model_dump(exclude_none=True),
+                                )
+                            ]
+                        )
+                        self.streamed_args_for_tool[self.current_tool_id] += (
+                            argument_diff
+                        )
 
-                    argument_diff = extract_intermediate_diff(
-                        cur_args_json, prev_args_json
-                    )
-                    logger.debug("got arguments diff: %s", argument_diff)
-                    delta = DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_id,
-                                function=DeltaFunctionCall(
-                                    arguments=argument_diff
-                                ).model_dump(exclude_none=True),
-                            )
-                        ]
-                    )
-                    self.streamed_args_for_tool[self.current_tool_id] += argument_diff
-                else:
-                    # try parsing it with regular JSON - if it works we're
-                    # at the end, and we need to send the difference between
-                    # tokens streamed so far and the valid JSON
-                    delta = None
-
-            # check to see if the name is defined and has been sent. if so,
-            # stream the name - otherwise keep waiting
-            # finish by setting old and returning None as base case
             self.prev_tool_call_arr = tool_call_arr
             return delta
 

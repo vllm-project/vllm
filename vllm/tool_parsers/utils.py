@@ -93,6 +93,51 @@ def extract_intermediate_diff(curr: str, old: str) -> str:
     return diff
 
 
+def compute_streamed_args_delta(
+    cur_args_json: str,
+    prev_args_json: str | None,
+    already_streamed: str,
+    is_complete: bool,
+) -> str | None:
+    """Compute the next chunk of tool call arguments to stream to the client.
+
+    Compare fully-parsed current vs previous arguments JSON and emit only
+    the diff relative to what's already been streamed.
+
+    Args:
+        cur_args_json: Current arguments serialized as a JSON string.
+        prev_args_json: Previous arguments serialized as a JSON string,
+            or None if this is the first time arguments appear.
+        already_streamed: What has already been streamed for this tool call
+            (i.e. streamed_args_for_tool[tool_id]).
+        is_complete: Whether the tool_call_portion is complete, valid JSON.
+
+    Returns:
+        The argument diff string to stream, or None if nothing to stream yet.
+    """
+    sent = len(already_streamed)
+
+    if is_complete:
+        # JSON is finalized — everything after what we've sent is the diff
+        diff = cur_args_json[sent:]
+        return diff if diff else None
+
+    if prev_args_json is None:
+        # First time seeing arguments — nothing safe to send yet
+        # (partial JSON parser may have auto-completed structure)
+        return None
+
+    if cur_args_json == prev_args_json:
+        # No change since last call
+        return None
+
+    # Find the stable prefix between previous and current parsed arguments.
+    # This avoids streaming auto-completed closing brackets/quotes.
+    prefix = find_common_prefix(prev_args_json, cur_args_json)
+    diff = prefix[sent:]
+    return diff if diff else None
+
+
 def find_all_indices(string: str, substring: str) -> list[int]:
     """
     Find all (starting) indices of a substring in a given string. Useful for
