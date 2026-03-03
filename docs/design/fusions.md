@@ -22,8 +22,8 @@ visible (either via Inductor partition or `splitting_ops=[]`).
 | [Attention + Quant](#attention--quantization-fuse_attn_quant)             | `fuse_attn_quant`            | Attention output → FP8/NVfp4 quant             | Off by default                 | 3-7%               | Yes                |
 | [AllReduce + RMSNorm](#allreduce--rmsnorm-fuse_allreduce_rms)             | `fuse_allreduce_rms`         | All-reduce → RMSNorm (+residual_add) (→ quant) | O2 (Hopper/Blackwell + TP > 1) | 5-20%              | No                 |
 | [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion)               | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No                 |
-| [Sequence Parallel](#gemm--communication-overlap-fuse_gemm_comms)         | `fuse_gemm_comms`            | GEMM → reduce-scatter / all-gather → GEMM      | Off by default                 | Prereq for AsyncTP | Yes                |
-| [AsyncTP GEMM + collective](#gemm--communication-overlap-fuse_gemm_comms) | `fuse_gemm_comms`            | GEMM → reduce-scatter / all-gather → GEMM      | Off by default                 | 7-10%              | Yes                |
+| [Sequence Parallelism](#sequence-parallelism-enable_sp)                   | `enable_sp`                  | AllReduce → ReduceScatter + AllGather          | Off by default                 | Prereq for AsyncTP | Yes                |
+| [AsyncTP GEMM + collective](#asynctp-gemm--collective-overlap-fuse_gemm_comms) | `fuse_gemm_comms`       | GEMM → reduce-scatter / all-gather → GEMM      | Off by default                 | 7-10%              | Yes                |
 | [RMSNorm + Quant](#rmsnorm--quantization-fuse_norm_quant)                 | `fuse_norm_quant`            | RMSNorm (+residual add) → FP8/FP4 quant        | O1 (conditional)               | 1-4%               | No                 |
 | [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant)                 | `fuse_act_quant`             | SiLU+Mul activation → FP8/FP4 quant            | O1 (conditional)               | 1-4%               | No                 |
 | [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)        | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O1 (ROCm/AITER only)           | TBD                | No                 |
@@ -100,74 +100,45 @@ Supported quantization scheme/hardware combinations:
 ---
 
 ### SiLU+Mul + Quantization (`fuse_act_quant`)
+> [!WARNING]
+> Same as `fuse_norm_quant`: on NVIDIA, Inductor generates a faster fused kernel than our custom ops.
+> This fusion is only enabled when either `silu_and_mul` or `quant_fp8` custom ops are active,
+> or for NVfp4-quantized models (where FP4 quant is always a custom op).
 
-**What it fuses.** Fuses the `silu_and_mul` gate-up projection activation (used
-in LLaMA/Mistral FFN layers) with a subsequent FP8 or NVfp4 quantization step.
-Avoids materialising the full-precision post-activation tensor.
+**What it fuses.** Fuses the `silu_and_mul` gate-up projection activation (used in LLaMA/Mistral FFN
+layers) with a subsequent quantization step into a single kernel, avoiding materialization of the
+full-precision post-activation tensor.
 
-Supported quantization schemes: FP8 static tensor scale, NVfp4 dynamic.
-On ROCm/AITER, a group-quantized FP8 variant (`silu_and_mul_group_fp8_quant`)
-is also fused.
+Note that AITER fusions are in a separate pass in `vllm.compilation.passes.fusion.rocm_aiter_fusion`.
 
-**How to enable/disable.**
-
-```python
-PassConfig(fuse_act_quant=True)
-PassConfig(fuse_act_quant=False)
-```
-
-Enabled automatically at **O1 and above** when the `silu_and_mul` or `quant_fp8`
-custom op is active, or for NVfp4-quantised models.
-
-**Supported backends / kernels.**
-
-- CUDA (SM70+): `torch.ops._C.silu_and_mul_quant`, `silu_and_mul_nvfp4_quant`
-- AMD ROCm/AITER: `AiterSiluMulFp8GroupQuantPattern` via
-  `RocmAiterSiluMulFp8GroupQuantFusionPass`
-
-**Known limitations / fallbacks.**
-
-- `silu_and_mul_nvfp4_quant` requires CUDA and the CUDA `scaled_fp4_quant`
-  kernel to be present; falls back to unfused path otherwise.
-- ROCm AITER group-quant variant is only registered when AITER is enabled.
+Supported quantization scheme/hardware combinations:
+- FP8 static per-tensor: CUDA & HIP kernel
+- NVfp4 dynamic: CUDA only (requires `scaled_fp4_quant`)
+- FP8 per-token-group (128): ROCm AITER only
 
 **Code locations.**
 
 - Pass: [`vllm/compilation/passes/fusion/act_quant_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/act_quant_fusion.py)
 - ROCm AITER pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py)
-- CUDA kernels: [`csrc/quantization/`](https://github.com/vllm-project/vllm/blob/main/csrc/quantization/)
+- CUDA/HIP kernels: [`csrc/quantization/`](https://github.com/vllm-project/vllm/blob/main/csrc/quantization/)
 
 ---
 
 ### Attention + Quantization (`fuse_attn_quant`)
+> [!WARNING]
+> `fuse_attn_quant` is currently not enabled at any optimization level by default and must be set
+> explicitly. It requires the full model graph to be visible (fullgraph compilation or Inductor
+> partition) and `CompilationConfig.static_forward_context` to contain attention layer metadata.
 
-**What it fuses.** Fuses the attention output quantization (FP8 static / NVfp4
-dynamic) directly after the attention computation, removing an additional
-pass over the output tensor.  Patterns covered:
+**What it fuses.** Fuses the attention output quantization directly after the attention computation,
+removing an extra full pass over the output tensor. Patterns covered:
 
-- `Attention → static FP8 quant`
+- `Attention → FP8 static quant`
 - `Attention → NVfp4 dynamic quant` (CUDA only, requires `scaled_fp4_quant`)
 
-**How to enable/disable.**
+FlexAttentionImpl does not yet support fused output quantization.
 
-```python
-PassConfig(fuse_attn_quant=True)
-PassConfig(fuse_attn_quant=False)
-```
-
-Included in **O2 and above** optimization levels, but currently the
-`IS_QUANTIZED` guard is `False` (hard-coded), so it must be enabled explicitly
-for now.
-
-**Supported backends / kernels.**
-
-- CUDA (SM70+ for FP8; SM90+ recommended for NVfp4)
-
-**Known limitations / fallbacks.**
-
-- Requires `CompilationConfig.static_forward_context` to contain attention
-  layer metadata; logs a warning if no attention layers are found.
-- FlexAttentionImpl does not yet support fused output quantization.
+Supported hardware: CUDA (SM70+ for FP8; SM90+ recommended for NVfp4).
 
 **Code locations.**
 
@@ -176,51 +147,23 @@ for now.
 ---
 
 ### AllReduce + RMSNorm (`fuse_allreduce_rms`)
+> [!WARNING]
+> TP+DP and TP+PP combinations are currently broken
+> ([#34458](https://github.com/vllm-project/vllm/issues/34458) and
+> [#35426](https://github.com/vllm-project/vllm/issues/35426)).
+> Only supported on NVIDIA Hopper (SM90) and Blackwell (SM100) with FlashInfer installed.
 
-**What it fuses.** Fuses the tensor-parallel all-reduce collective with the
-subsequent residual add and RMSNorm (and optionally an FP8/NVfp4 quantization)
-into a single FlashInfer / TRT-LLM collective-communication kernel.  This
-reduces the number of synchronisation barriers per transformer layer by
-combining communication and computation.
+**What it fuses.** Fuses the tensor-parallel all-reduce collective with the subsequent residual add,
+RMSNorm, and optionally a quantization step into a single FlashInfer / TRT-LLM communication kernel,
+reducing the number of synchronisation barriers per transformer layer.
 
 Patterns covered:
-
 - `AllReduce → RMSNorm`
 - `AllReduce → residual add → RMSNorm`
-- `AllReduce → RMSNorm → FP8 static quant`
-- `AllReduce → residual add → RMSNorm → FP8 static quant`
-- `AllReduce → RMSNorm → NVfp4 dynamic quant`
-- `AllReduce → residual add → RMSNorm → NVfp4 dynamic quant`
+- Both with optional suffix: `→ FP8 static quant` or `→ NVfp4 dynamic quant`
 
-**How to enable/disable.**
-
-```python
-PassConfig(fuse_allreduce_rms=True)
-PassConfig(fuse_allreduce_rms=False)
-```
-
-Enabled automatically at **O2 and above** when all of the following hold:
-- `tensor_parallel_size > 1`
-- Running on CUDA (Hopper SM90 or Blackwell SM100)
-- FlashInfer is installed
-- `data_parallel_size == 1` (TP+DP combination has a known issue)
-- `pipeline_parallel_size == 1` (TP+PP combination has a known issue)
-
-The maximum tensor size below which the fused kernel is used is
-hardware-dependent (64 MB for TP=2 on SM90/SM100; see `PassConfig.fi_allreduce_fusion_max_size_mb`).
-
-**Supported backends / kernels.**
-
-- NVIDIA Hopper (SM90) and Blackwell (SM100) only
-- Requires [FlashInfer](https://flashinfer.ai/) with TRT-LLM all-reduce backend
-
-**Known limitations / fallbacks.**
-
-- TP+DP and TP+PP combinations are currently broken (tracked in
-  [#34458](https://github.com/vllm-project/vllm/issues/34458) and
-  [#35426](https://github.com/vllm-project/vllm/issues/35426)).
-- Not supported on AMD ROCm or CPU.
-- Falls back to separate all-reduce + RMSNorm if FlashInfer is unavailable.
+The maximum tensor size below which the fused kernel is used is hardware-dependent (64 MB for TP=2
+on SM90/SM100) and configurable via `PassConfig.fi_allreduce_fusion_max_size_mb`.
 
 **Code locations.**
 
@@ -230,36 +173,58 @@ hardware-dependent (64 MB for TP=2 on SM90/SM100; see `PassConfig.fi_allreduce_f
 
 ---
 
-### GEMM + Communication Overlap (`fuse_gemm_comms`)
+### Sequence Parallelism (`enable_sp`)
+> [!NOTE]
+> Sequence Parallelism itself does not directly improve performance; it is a prerequisite for the
+> AsyncTP pass (`fuse_gemm_comms`). SP is only applied above a minimum token threshold that is
+> auto-configured based on device capability and model `hidden_size`. Currently only active on
+> H100/SM90 for models with `hidden_size >= 8192`. The threshold is configurable via
+> `PassConfig.sp_min_token_num`.
 
-**What it fuses.** When [sequence parallelism](torch_compile.md) (`enable_sp`)
-is active, this pass further overlaps the GEMM kernel with the subsequent
-reduce-scatter (output projection) or precedes it with an all-gather (input
-projection), using `torch.ops.symm_mem` symmetric-memory primitives.
+**What it fuses.** Replaces all-reduce collectives with reduce-scatter + local RMSNorm + all-gather,
+splitting the sequence dimension across TP ranks. This restructures the graph so the subsequent AsyncTP
+pass can fuse the reduce-scatter / all-gather with the surrounding GEMMs.
 
-Patterns covered:
+The general transformation:
 
-- `GEMM (matmul) → reduce-scatter` → replaced by `fused_matmul_reduce_scatter`
-- `all-gather → GEMM (matmul)` → replaced by `all_gather_matmul`
-
-**How to enable/disable.**
-
-```python
-# enable_sp must also be True
-PassConfig(enable_sp=True, fuse_gemm_comms=True)
+```
+Input → AllReduce → RMSNorm → Output
+becomes:
+Input → ReduceScatter → local RMSNorm → AllGather → Output
 ```
 
-Included at **O2 and above** for dense (non-MoE) models, but currently the
-`IS_DENSE` guard is `False`; enable explicitly if needed.
+Patterns covered:
+- First block: `AllReduce → RMSNorm` → `ReduceScatter → RMSNorm → AllGather`
+- Middle blocks: `AllReduce → fused_add_RMSNorm` → `ReduceScatter → fused_add_RMSNorm → AllGather`
+- Both with optional `→ FP8 static quant` suffix
 
-**Supported backends / kernels.**
+Requires: `use_inductor_graph_partition=True` **or** piecewise compilation with batch sizes
+divisible by `tensor_parallel_size`.
 
-- CUDA; requires symmetric-memory support (`torch.distributed._symmetric_memory`)
+Supported hardware: NVIDIA CUDA only (SM90 enabled by default; other capabilities require explicit
+`sp_min_token_num` configuration).
 
-**Known limitations / fallbacks.**
+**Code locations.**
 
-- Only active when `enable_sp=True`; the pass is a no-op otherwise.
-- Requires `tensor_parallel_size > 1`.
+- Pass: [`vllm/compilation/passes/fusion/sequence_parallelism.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/sequence_parallelism.py)
+
+---
+
+### AsyncTP GEMM + Collective Overlap (`fuse_gemm_comms`)
+> [!WARNING]
+> Requires `enable_sp=True`. This pass is a no-op if Sequence Parallelism has not been applied.
+> Requires symmetric-memory support (`torch.distributed._symmetric_memory`) on CUDA.
+
+**What it fuses.** After Sequence Parallelism transforms the graph, fuses GEMM kernels with the
+surrounding reduce-scatter (output projection) and all-gather (input projection) using
+`torch.ops.symm_mem` symmetric-memory primitives, overlapping communication and computation.
+
+Patterns covered:
+- `GEMM → reduce-scatter` → `fused_matmul_reduce_scatter`
+- `all-gather → GEMM` → `all_gather_matmul`
+- FP8 scaled variants of both patterns (CUTLASS)
+
+Supported hardware: NVIDIA CUDA (requires `tensor_parallel_size > 1`).
 
 **Code locations.**
 
@@ -269,11 +234,12 @@ Included at **O2 and above** for dense (non-MoE) models, but currently the
 ---
 
 ### QK Norm + RoPE (`enable_qk_norm_rope_fusion`)
+> [!NOTE]
+> Only applicable to models that apply per-head RMSNorm to Q and K before rotary positional
+> embedding (e.g. some Gemma or Cohere variants). Not enabled by default at any optimization level.
 
-**What it fuses.** For models that apply per-head RMSNorm to Q and K before
-rotary positional embedding (e.g. some newer models), this pass fuses the whole
-sequence — split QKV → reshape → Q/K RMSNorm → reshape → rotary embedding —
-into a single `fused_qk_norm_rope` CUDA kernel.
+**What it fuses.** Fuses the sequence: split QKV → reshape → Q/K RMSNorm → reshape → rotary
+embedding into a single `fused_qk_norm_rope` CUDA kernel.
 
 ```
 # Unfused:
@@ -286,22 +252,7 @@ q_rope, k_rope = rotary_embedding(q_norm, k_norm, ...)
 fused_qk_norm_rope(qkv, ...)
 ```
 
-**How to enable/disable.**
-
-```python
-PassConfig(enable_qk_norm_rope_fusion=True)
-```
-
-Not enabled by any optimization level by default; must be set explicitly.
-
-**Supported backends / kernels.**
-
-- CUDA: `torch.ops._C.fused_qk_norm_rope`
-
-**Known limitations / fallbacks.**
-
-- Only applicable to models that have per-head QK norm (e.g. those using
-  `RotaryEmbedding` together with per-head `RMSNorm` on Q and K).
+Supported hardware: CUDA (SM70+) only.
 
 **Code locations.**
 
@@ -311,36 +262,17 @@ Not enabled by any optimization level by default; must be set explicitly.
 ---
 
 ### RoPE + KV-Cache Update (`fuse_rope_kvcache`)
+> [!NOTE]
+> ROCm/AITER-only. Not available on NVIDIA CUDA or CPU.
+> The fusion only fires when `num_tokens ≤ rope_kvcache_fusion_max_token_num` (default: 256);
+> larger batches fall back to unfused kernels.
 
-**What it fuses.** On AMD ROCm with AITER, fuses the rotary positional embedding
-kernel with the KV-cache scatter/write.  Without this fusion the two operations
-require separate reads and writes of the key and value tensors.
+**What it fuses.** Fuses the rotary positional embedding kernel with the KV-cache scatter/write into
+a single kernel, avoiding separate reads and writes of the key and value tensors.
 
-**How to enable/disable.**
-
-```python
-PassConfig(fuse_rope_kvcache=True)
-# rope_kvcache_fusion_max_token_num controls the batch-size threshold (default 256)
-PassConfig(fuse_rope_kvcache=True, rope_kvcache_fusion_max_token_num=512)
-```
-
-Enabled automatically at **O1 and above** when:
-- AMD ROCm with AITER is active
-- The `rotary_embedding` custom op is enabled
-- `use_inductor_graph_partition` is enabled
-
-The fusion only fires when `num_tokens ≤ rope_kvcache_fusion_max_token_num`;
-larger batches (e.g. prefill) fall back to the unfused path.
-
-**Supported backends / kernels.**
-
-- AMD ROCm / CDNA (AITER only)
-
-**Known limitations / fallbacks.**
-
-- Not supported on NVIDIA CUDA or CPU.
-- Automatically falls back to separate RoPE + KV-cache kernels when the token
-  count exceeds the threshold.
+Requires: AMD ROCm with AITER enabled, the `rotary_embedding` custom op active, and
+`use_inductor_graph_partition=True`. The token threshold is configurable via
+`PassConfig.rope_kvcache_fusion_max_token_num`.
 
 **Code locations.**
 
@@ -349,31 +281,15 @@ larger batches (e.g. prefill) fall back to the unfused path.
 ---
 
 ### RMSNorm + Padding (`fuse_act_padding`)
+> [!NOTE]
+> ROCm/AITER-only. Targeted at models with `hidden_size=2880` (GPT-OSS variants).
+> Not available on NVIDIA CUDA or CPU.
 
-**What it fuses.** On AMD ROCm with AITER, fuses a residual add + RMSNorm with
-a subsequent padding operation that pads the hidden dimension to a multiple
-required by downstream AITER Triton GEMM kernels.  Targeted at models with
-`hidden_size=2880` (e.g. GPT-OSS variants).
+**What it fuses.** Fuses a residual add + RMSNorm with a subsequent padding operation that pads
+the hidden dimension to a multiple required by downstream AITER Triton GEMM kernels.
 
-**How to enable/disable.**
-
-```python
-PassConfig(fuse_act_padding=True)
-```
-
-Enabled automatically at **O1 and above** when:
-- AMD ROCm with AITER RMSNorm is enabled
-- AITER Triton GEMMs are *not* enabled (the padding is only needed without them)
-- `model_config.hidden_size == 2880`
-
-**Supported backends / kernels.**
-
-- AMD ROCm / CDNA (AITER only)
-
-**Known limitations / fallbacks.**
-
-- Narrow applicability: only for specific hidden sizes.
-- Not supported on NVIDIA CUDA or CPU.
+Requires: AMD ROCm with AITER RMSNorm enabled and AITER Triton GEMMs *not* enabled
+(the padding is only needed without them), and `model_config.hidden_size == 2880`.
 
 **Code locations.**
 
@@ -382,11 +298,12 @@ Enabled automatically at **O1 and above** when:
 ---
 
 ### Fused Add RMSNorm (kernel-level)
+> [!NOTE]
+> This is a kernel-level fusion (not a compilation pass) that is always active when
+> `RMSNorm.forward_cuda` is called with a non-`None` residual argument. Not user-configurable.
 
-**What it fuses.** A CUDA kernel that performs residual addition and RMSNorm in
-a single pass over the data.  This is a *kernel-level* fusion (not a compilation
-pass) and is always used when `RMSNorm.forward_cuda` is called with a non-`None`
-`residual` argument.
+**What it fuses.** Performs residual addition and RMSNorm normalization in a single kernel pass,
+avoiding an intermediate materialization of the residual-added tensor.
 
 ```python
 # Equivalent unfused:
@@ -398,22 +315,16 @@ ops.fused_add_rms_norm(x, residual, weight, epsilon)
 # x → normalised output; residual → updated residual
 ```
 
-On SM100 (Blackwell) with the Oink library, an alternative
-`oink.fused_add_rms_norm` path is taken when the tensor layout is compatible.
+On SM100 (Blackwell) with the Oink library, an alternative `oink.fused_add_rms_norm` path is taken
+when the tensor layout is compatible.
 
-**How to enable/disable.** Always enabled; not user-configurable.
-
-**Supported backends / kernels.**
-
-- CUDA (SM70+): `torch.ops._C.fused_add_rms_norm`, `csrc/layernorm_kernels.cu`
+Supported hardware/kernels:
+- CUDA (SM70+): `torch.ops._C.fused_add_rms_norm` (`csrc/layernorm_kernels.cu`)
 - CUDA SM100 (Blackwell): `torch.ops.oink.fused_add_rms_norm` (Oink fast path)
 - AMD ROCm: equivalent HIP kernel
 
-**Known limitations / fallbacks.**
-
-- Alignment requirements: input, residual, and weight pointers must be 16-byte
-  aligned and `hidden_size` must be a multiple of 8 for the vectorised (width-8)
-  path; otherwise a scalar fallback is used.
+Alignment requirements: input, residual, and weight pointers must be 16-byte aligned and
+`hidden_size` a multiple of 8 for the vectorised (width-8) path; otherwise a scalar fallback is used.
 
 **Code locations.**
 
@@ -425,17 +336,14 @@ On SM100 (Blackwell) with the Oink library, an alternative
 ---
 
 ### Fused Mixture-of-Experts (`fused_moe`)
+> [!NOTE]
+> Always active for MoE models. Controlled by the `CustomOp` system
+> (see [`VLLM_CUSTOM_OPS`](../configuration/env_vars.md)).
 
-**What it fuses.** The `FusedMoE` custom op (`@CustomOp.register("fused_moe")`)
-implements the entire MoE forward pass — token routing, batched expert GEMMs
-(gate+up projections), activation (SiLU/GELU), down projection, and weighted
-expert reduction — as a single fused unit.  Multiple backend implementations are
-available and selected automatically based on hardware and quantisation.
-
-**How to enable/disable.** Always active for MoE models; controlled by the
-`CustomOp` system (see [`VLLM_CUSTOM_OPS`](../configuration/env_vars.md)).
-
-**Supported backends / kernels.**
+**What it fuses.** The `FusedMoE` custom op implements the entire MoE forward pass — token routing,
+batched expert GEMMs (gate+up projections), activation (SiLU/GELU), down projection, and weighted
+expert reduction — as a single fused unit. Multiple backend implementations are selected
+automatically based on hardware and quantization.
 
 | Backend | Quant schemes | Hardware |
 |---|---|---|
@@ -446,12 +354,9 @@ available and selected automatically based on hardware and quantisation.
 | ROCm AITER | FP16, BF16, FP8 (group / token), INT8 | AMD CDNA (gfx940+) |
 | GGUF | GGUF quantized types | NVIDIA CUDA |
 
-**Known limitations / fallbacks.**
-
-- ROCm AITER backend requires `rocm_aiter_ops` to be enabled; logs a warning
-  and falls back to Triton otherwise.
-- FlashInfer-based backends require FlashInfer to be installed.
-- CUTLASS FP8 path requires SM90+ and the compiled CUTLASS extension.
+ROCm AITER backend requires `rocm_aiter_ops` to be enabled; falls back to Triton otherwise.
+FlashInfer-based backends require FlashInfer to be installed.
+CUTLASS FP8 path requires SM90+ and the compiled CUTLASS extension.
 
 **Code locations.**
 
@@ -480,10 +385,14 @@ combination for common numerical precisions.  **Yes** = fully supported;
 | `fuse_act_quant` (SiLU+Mul+quant) | Partial (no quant) | Yes | Yes | Yes | Yes | No |
 | `fuse_attn_quant` (Attn+quant) | No | Yes | Yes (NVfp4) | No | No | No |
 | `fuse_allreduce_rms` | No | Yes | Yes | No | No | No |
-| `fuse_gemm_comms` (async TP) | Yes | Yes | Yes | No | No | No |
+| `enable_sp` (Sequence Parallelism) | No | Yes | No† | No | No | No |
+| `fuse_gemm_comms` (AsyncTP) | No | Yes | No† | No | No | No |
 | `enable_qk_norm_rope_fusion` | Yes | Yes | Yes | No | No | No |
 | `fuse_rope_kvcache` (ROCm/AITER) | No | No | No | Yes | Yes | No |
 | `fuse_act_padding` (ROCm/AITER) | No | No | No | Yes | Yes | No |
+
+† `enable_sp` and `fuse_gemm_comms` are only auto-configured for SM90 today;
+SM100 support requires setting `PassConfig.sp_min_token_num` explicitly.
 
 ### Kernel-Level Fusions
 
