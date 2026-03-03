@@ -141,10 +141,11 @@ class ARCOffloadingManager(OffloadingManager):
             len(block_hashes_to_store) - self.backend.get_num_free_blocks()
         )
 
-        # Blocks from the original input are excluded from eviction candidates:
-        # a block that was already stored must remain in the cache after this call.
-        protected = set(block_hashes_list)
         to_evict = []
+        if num_blocks_to_evict > 0:
+            # Blocks from the original input are excluded from eviction candidates:
+            # a block that was already stored must remain in the cache after this call.
+            protected = set(block_hashes_list)
         while num_blocks_to_evict > 0:
             block_to_evict = None
             if len(self.t1) >= int(self.target_t1_size):

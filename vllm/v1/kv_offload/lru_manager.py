@@ -71,11 +71,11 @@ class LRUOffloadingManager(OffloadingManager):
         )
 
         # build list of blocks to evict
-        # Blocks from the original input are excluded from eviction candidates:
-        # a block that was already stored must remain in the cache after this call.
-        protected = set(block_hashes_list)
         to_evict = []
         if num_blocks_to_evict > 0:
+            # Blocks from the original input are excluded from eviction candidates:
+            # a block that was already stored must remain in the cache after this call.
+            protected = set(block_hashes_list)
             for block_hash, block in self.blocks.items():
                 if block.ref_cnt == 0 and block_hash not in protected:
                     to_evict.append(block_hash)
