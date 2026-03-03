@@ -1265,7 +1265,7 @@ class EngineCoreProc(EngineCore):
             return False
 
         logger.info("Rejecting request %s (server shutting down)", request.request_id)
-        self._send_request_error_output(request.request_id, request.client_index)
+        self._send_abort_outputs_to_client([request.request_id], request.client_index)
         return True
 
     def _reject_utility_in_shutdown(
@@ -1494,7 +1494,7 @@ class EngineCoreProc(EngineCore):
         logger.exception(
             "Unexpected error pre-processing request %s", request.request_id
         )
-        self._send_request_error_output(request.request_id, request.client_index)
+        self._send_error_outputs_to_client([request.request_id], request.client_index)
 
     def pause_scheduler(
         self, mode: PauseMode = "abort", clear_cache: bool = True
@@ -1537,6 +1537,26 @@ class EngineCoreProc(EngineCore):
         self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
         return future
 
+    def _send_finish_outputs_to_client(
+        self, req_ids: list[str], client_index: int, finish_reason: FinishReason
+    ) -> None:
+        outputs = [
+            EngineCoreOutput(req_id, [], finish_reason=finish_reason)
+            for req_id in req_ids
+        ]
+        eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
+        self.output_queue.put_nowait((client_index, eco))
+
+    def _send_abort_outputs_to_client(
+        self, req_ids: list[str], client_index: int
+    ) -> None:
+        self._send_finish_outputs_to_client(req_ids, client_index, FinishReason.ABORT)
+
+    def _send_error_outputs_to_client(
+        self, req_ids: list[str], client_index: int
+    ) -> None:
+        self._send_finish_outputs_to_client(req_ids, client_index, FinishReason.ERROR)
+
     def _send_abort_outputs(self, aborted_reqs: list[tuple[str, int]]) -> None:
         # TODO(nick) this will be moved inside the scheduler
         if aborted_reqs:
@@ -1545,19 +1565,7 @@ class EngineCoreProc(EngineCore):
             for req_id, client_index in aborted_reqs:
                 by_client[client_index].add(req_id)
             for client_index, req_ids in by_client.items():
-                outputs = [
-                    EngineCoreOutput(req_id, [], finish_reason=FinishReason.ABORT)
-                    for req_id in req_ids
-                ]
-                eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
-                self.output_queue.put_nowait((client_index, eco))
-
-    def _send_request_error_output(self, req_id: str, client_index: int) -> None:
-        outputs = [
-            EngineCoreOutput(req_id, [], finish_reason=FinishReason.ERROR),
-        ]
-        eco = EngineCoreOutputs(finished_requests=[req_id], outputs=outputs)
-        self.output_queue.put_nowait((client_index, eco))
+                self._send_abort_outputs_to_client(list(req_ids), client_index)
 
 
 class DPEngineCoreProc(EngineCoreProc):
