@@ -62,8 +62,7 @@ class LaunchSubcommand(CLISubcommand):
     ) -> FlexibleArgumentParser:
         launch_parser = subparsers.add_parser(
             self.name,
-            help="Launch a GPU-less online serving layer for "
-            "preprocessing/postprocessing only.",
+            help="Launch individual vLLM components.",
             description=DESCRIPTION,
             usage="vllm launch [model_tag] [options]",
         )
