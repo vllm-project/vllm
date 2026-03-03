@@ -250,12 +250,18 @@ class KVConnectorModelRunnerMixin:
           sizes between blocks and layers in physical order. Layers with
           the same prefix share a tensor shaped
           (num_blocks, *prefix_sizes, num_layers, remaining_bytes).
-        - ("default", page_size_bytes): everything else (including
-          non-attention specs or heads after layers). Layers share a
-          tensor shaped (num_blocks, num_layers, page_size_bytes).
+        - ("default", page_size_bytes): AttentionSpec with heads after
+          layers. Tensor shaped (num_blocks, num_layers, page_size_bytes).
+        - ("mamba", page_size_bytes): MambaSpec layers grouped by page
+          size. Same shape as "default".
+        - ("isolated",): unknown spec types or backends that cannot
+          produce a valid cross-layer stride order. The caller appends
+          tensor_idx to make each key unique, preventing sharing.
         """
+        if isinstance(spec, MambaSpec):
+            return ("mamba", spec.page_size_bytes)
         if not isinstance(spec, AttentionSpec):
-            return ("default", spec.page_size_bytes)
+            return ("isolated",)
 
         try:
             stride_order_wl = backend.get_kv_cache_stride_order(
@@ -271,12 +277,17 @@ class KVConnectorModelRunnerMixin:
             )
             heads_base = base_shape.index(_H)
         except (AttributeError, NotImplementedError, ValueError, AssertionError):
-            return ("default", spec.page_size_bytes)
+            return ("isolated",)
 
         # With layers prepended, every base dim index shifts up by 1.
         log_to_phys = {dim: pos for pos, dim in enumerate(stride_order_wl)}
         layers_phys = log_to_phys[0]
         heads_phys = log_to_phys[heads_base + 1]
+
+        blocks_base = base_shape.index(_B)
+        blocks_phys = log_to_phys[blocks_base + 1]
+        if blocks_phys != 0 or layers_phys <= blocks_phys:
+            return ("isolated",)
 
         # Heads after layers means no useful prefix to extract.
         if heads_phys >= layers_phys:
@@ -329,12 +340,9 @@ class KVConnectorModelRunnerMixin:
             cache_dtype_str=cache_dtype,
         )
 
-        try:
-            stride_order_wl = backend.get_kv_cache_stride_order(
-                include_num_layers_dimension=True,
-            )
-        except (AttributeError, NotImplementedError):
-            stride_order_wl = tuple(range(len(base_logical) + 1))
+        stride_order_wl = backend.get_kv_cache_stride_order(
+            include_num_layers_dimension=True,
+        )
 
         logical_wl = (num_layers, *base_logical)
         physical_wl = tuple(
@@ -538,6 +546,28 @@ class KVConnectorModelRunnerMixin:
                 backend,
                 cache_dtype,
             )
+
+            for name in kv_tensor.shared_by:
+                s, b, _ = layer_info[name]
+                assert (
+                    s.page_size_bytes * kv_cache_config.num_blocks == kv_tensor.size
+                ), (
+                    f"Layer {name}: expected tensor size "
+                    f"{s.page_size_bytes * kv_cache_config.num_blocks}, "
+                    f"got {kv_tensor.size}"
+                )
+                other_key = KVConnectorModelRunnerMixin._cross_layer_group_key(
+                    s, b, cache_dtype
+                )
+                assert other_key == key, (
+                    f"Layers sharing tensor disagree on group key: "
+                    f"{kv_tensor.shared_by[0]} -> {key}, "
+                    f"{name} -> {other_key}"
+                )
+
+            if key == ("isolated",):
+                key = ("isolated", tensor_idx)
+
             grouped[key].append((tensor_idx, kv_tensor))
 
         kv_caches: dict[str, torch.Tensor | list[torch.Tensor]] = {}
@@ -574,12 +604,38 @@ class KVConnectorModelRunnerMixin:
                     num_group_layers,
                     remaining,
                 )
-                # Topology mirrors the physical shape we just built:
-                # dim 0 = num_blocks
-                # dims 1..len(prefix_sizes) = prefix (may contain
-                #   block_size, num_heads, etc. depending on backend)
-                # dim 1+len(prefix_sizes) = num_layers
                 base_num_layers_dim = 1 + len(prefix_sizes)
+
+                _, rep_backend, _ = layer_info[rep_name]
+                _B, _H, _BS = 1234, 5678, 9876
+                assert isinstance(rep_spec, AttentionSpec)
+                probe_shape = rep_backend.get_kv_cache_shape(
+                    _B,
+                    _BS,
+                    _H,
+                    rep_spec.head_size,
+                    cache_dtype_str=cache_dtype,
+                )
+                probe_wl = (1, *probe_shape)
+                stride_order_wl = rep_backend.get_kv_cache_stride_order(
+                    include_num_layers_dimension=True,
+                )
+                heads_phys_pos = None
+                block_size_phys_pos = None
+                for phys_pos in range(1, base_num_layers_dim):
+                    logical_dim = stride_order_wl[phys_pos]
+                    val = probe_wl[logical_dim]
+                    if val == _H:
+                        heads_phys_pos = phys_pos
+                    elif val == _BS:
+                        block_size_phys_pos = phys_pos
+
+                ordered_topo = KVCacheTopology(
+                    num_blocks_dim=0,
+                    num_layers_dim=base_num_layers_dim,
+                    num_heads_dim=heads_phys_pos,
+                    block_size_dim=block_size_phys_pos,
+                )
             else:
                 cross_layer_tensor = raw.view(
                     num_blocks,
@@ -629,11 +685,18 @@ class KVConnectorModelRunnerMixin:
                 for name in kv_tensor.shared_by:
                     kv_caches[name] = view
 
-                # One topology entry per layer in the group.
-                layer_topo = KVCacheTopology(
-                    num_blocks_dim=0,
-                    num_layers_dim=base_num_layers_dim,
-                )
+                if group_key[0] == "ordered":
+                    layer_topo = ordered_topo
+                elif group_key[0] == "isolated":
+                    layer_topo = KVCacheTopology(
+                        num_blocks_dim=0,
+                        num_layers_dim=None,
+                    )
+                else:
+                    layer_topo = KVCacheTopology(
+                        num_blocks_dim=0,
+                        num_layers_dim=base_num_layers_dim,
+                    )
                 for _ in kv_tensor.shared_by:
                     group_topologies.append(layer_topo)
                 group_layer_names.extend(kv_tensor.shared_by)
