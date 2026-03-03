@@ -339,7 +339,6 @@ class PyNcclCommunicator:
         )
         if stream is None:
             stream = current_stream()
-<<<<<<< HEAD
         if tensor.dtype in [
             torch.float8_e5m2,
             torch.float8_e4m3fn,
@@ -349,8 +348,6 @@ class PyNcclCommunicator:
             nccl_dtype = ncclDataTypeEnum.from_torch(torch.uint8)
         else:
             nccl_dtype = ncclDataTypeEnum.from_torch(tensor.dtype)
-=======
->>>>>>> 7111d8415 (remove log)
         self.nccl.ncclRecv(
             buffer_type(tensor.data_ptr()),
             tensor.numel(),

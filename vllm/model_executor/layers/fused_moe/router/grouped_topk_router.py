@@ -28,8 +28,6 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 
-from vllm.logger import init_logger
-logger = init_logger(__name__)
 
 def fused_grouped_topk(
     hidden_states: torch.Tensor,
@@ -112,9 +110,7 @@ def grouped_topk(
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
         )
-    
-    print(f"jcz grouped_topk hidden_states.shape: {hidden_states.shape}")
-    print(f"jcz grouped_topk gating_output.shape: {gating_output.shape}")
+
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
     if scoring_func == "softmax":
@@ -342,8 +338,6 @@ class GroupedTopKRouter(BaseRouter):
         else:
             grouped_topk_impl = grouped_topk
 
-        print(f"jcz _compute_routing hidden_states.shape: {hidden_states.shape}")
-        print(f"jcz _compute_routing router_logits.shape: {router_logits.shape}")
         topk_weights, topk_ids = grouped_topk_impl(
             hidden_states=hidden_states,
             gating_output=router_logits,

@@ -66,7 +66,6 @@ def _post_process_ubatch(tensor: torch.Tensor, num_ubatches: int) -> bool:
     # there are no "empty" second ubatches
     orig_min_num_tokens = int(orig_num_tokens_tensor.min().item())
     padded_max_num_tokens = int(padded_num_tokens_tensor.max().item())
-    logger.info(f"jcz _post_process_ubatch orig_min_num_tokens:{orig_min_num_tokens} padded_max_num_tokens:{padded_max_num_tokens} num_ubatches:{num_ubatches}")
     if is_last_ubatch_empty(orig_min_num_tokens, padded_max_num_tokens, num_ubatches):
         logger.debug(
             "Aborting ubatching %s %s", orig_min_num_tokens, padded_max_num_tokens
@@ -212,7 +211,6 @@ def coordinate_batch_across_dp(
             num_tokens_unpadded,
             uniform_decode=uniform_decode,
         )
-    logger.info(f"jcz coordinate_batch_across_dp should_attempt_ubatching:{should_attempt_ubatching}")
 
     if num_tokens_padded is None:
         num_tokens_padded = num_tokens_unpadded
@@ -226,6 +224,5 @@ def coordinate_batch_across_dp(
             parallel_config,
         )
     )
-    logger.info(f"jcz coordinate_batch_across_dp should_ubatch:{should_ubatch}")
 
     return (should_ubatch, num_tokens_after_padding, synced_cudagraph_mode)
