@@ -467,7 +467,8 @@ def load_weights_using_from_2_way_softmax(
     using_vlm_head = is_vlm and hasattr(language_model, "score")
 
     language_model.lm_head = ParallelLMHead(
-        text_config.vocab_size, text_config.hidden_size,
+        text_config.vocab_size,
+        text_config.hidden_size,
     )
     if text_config.tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
@@ -540,7 +541,8 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     using_vlm_head = is_vlm and hasattr(language_model, "score")
 
     language_model.lm_head = ParallelLMHead(
-        text_config.vocab_size, text_config.hidden_size,
+        text_config.vocab_size,
+        text_config.hidden_size,
     )
     if text_config.tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
