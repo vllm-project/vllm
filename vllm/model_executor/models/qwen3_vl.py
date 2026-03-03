@@ -941,6 +941,44 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
 
 
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]):
+    # Qwen3-VL requires at least 2 video frames for processing
+    _MIN_VIDEO_FRAMES = 2
+
+    @staticmethod
+    def _ensure_min_video_frames(
+        video_array: np.ndarray,
+        metadata: dict[str, Any],
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        """
+        Ensure video has at least _MIN_VIDEO_FRAMES frames.
+
+        Qwen3-VL's video processor requires a minimum of 2 frames.
+        For very short videos where only 1 frame is sampled (e.g., when
+        fps * duration < 2), we duplicate the single frame to meet this
+        requirement without re-downloading or re-processing the video.
+
+        Args:
+            video_array: Video frames array with shape (num_frames, H, W, C)
+            metadata: Video metadata dict, may contain 'frames_indices'
+
+        Returns:
+            Tuple of (adjusted_video_array, adjusted_metadata)
+        """
+        min_frames = Qwen3VLMultiModalProcessor._MIN_VIDEO_FRAMES
+        if video_array.shape[0] < min_frames:
+            # Duplicate frames to meet minimum requirement
+            repeats = min_frames - video_array.shape[0] + 1
+            video_array = np.concatenate([video_array] * repeats, axis=0)
+            video_array = video_array[:min_frames]
+
+            # Keep metadata consistent with frame count
+            if "frames_indices" in metadata:
+                metadata = dict(metadata)
+                indices = metadata["frames_indices"]
+                metadata["frames_indices"] = (indices * repeats)[:min_frames]
+
+        return video_array, metadata
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -959,6 +997,11 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
 
             for item in videos:
                 video_array, metadata = item
+
+                # Ensure minimum frame count for Qwen3-VL
+                video_array, metadata = self._ensure_min_video_frames(
+                    video_array, metadata
+                )
 
                 # NOTE: @JJJYmmm new attr metadata.frames_indices indicates
                 # the sampled frames indices of pre-sampled videos, which is
@@ -1058,6 +1101,10 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             assert isinstance(grid_thw, torch.Tensor)
 
             video, metadata = mm_items["video"][item_idx]
+
+            # Apply same frame adjustment as _call_hf_processor for consistency
+            _, metadata = self._ensure_min_video_frames(video, metadata)
+
             do_sample_frames = hf_processor_mm_kwargs.get("do_sample_frames")
             sampled_fps = hf_processor_mm_kwargs.get("fps")
             if is_list_of(sampled_fps, float):
