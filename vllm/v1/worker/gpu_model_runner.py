@@ -976,7 +976,10 @@ class GPUModelRunner(
         kernel_block_sizes = self._kernel_block_sizes
 
         seen_ptrs: set[int] = set()
-        per_tensor_meta: list[tuple] = []
+        first_storage: torch.UntypedStorage | None = None
+        base_ptr = 0
+        seg_offsets: list[int] = []
+        seg_size_el: int | None = None
 
         for group in self._kv_cache_spec_attn_group_iterator():
             spec = group.kv_cache_spec
@@ -1007,47 +1010,40 @@ class GPUModelRunner(
                 if dp in seen_ptrs:
                     continue
                 seen_ptrs.add(dp)
+                if first_storage is None:
+                    first_storage = kv.untyped_storage()
+                    base_ptr = dp
 
                 el = kv.element_size()
-                page_size_el = kv.stride(block_dim) * el // 4
-                assert kv.stride(block_dim) * el % 4 == 0
+                cur_bytes = kv.stride(block_dim) * el
+                assert cur_bytes % 4 == 0
+                cur_el = cur_bytes // 4
+                if seg_size_el is None:
+                    seg_size_el = cur_el
+                else:
+                    assert seg_size_el == cur_el, (
+                        f"Non-uniform segment sizes: {seg_size_el} vs {cur_el}"
+                    )
 
-                seg_offsets: list[int] = []
+                buf_base = dp - base_ptr
                 block_stride_bytes = kv.stride(block_dim) * el
                 outer_dims = [
                     d
                     for d in range(block_dim)
                     if kv.stride(d) * el > block_stride_bytes
                 ]
+                outer_strides = [kv.stride(d) * el for d in outer_dims]
                 for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
-                    off = sum(i * kv.stride(d) * el for i, d in zip(outer, outer_dims))
+                    off = buf_base + sum(i * s for i, s in zip(outer, outer_strides))
                     assert off % 4 == 0
                     seg_offsets.append(off // 4)
 
-                if not seg_offsets:
-                    seg_offsets = [0]
-
-                alignment = page_size_el & (-page_size_el)
-                blk_size = min(alignment, 1024)
-                raw_i32 = torch.tensor([], dtype=torch.int32, device=self.device).set_(
-                    kv.untyped_storage()
-                )
-                per_tensor_meta.append(
-                    (
-                        raw_i32,
-                        torch.tensor(
-                            seg_offsets, dtype=torch.int64, device=self.device
-                        ),
-                        page_size_el,
-                        blk_size,
-                        len(seg_offsets),
-                    )
-                )
-
-        if not per_tensor_meta:
+        if not seg_offsets or first_storage is None or seg_size_el is None:
             self._kv_zero_meta = None
             return
 
+        alignment = seg_size_el & (-seg_size_el)
+        blk_size = min(alignment, 1024)
         self._kv_zero_id_cap = 8192
         self._kv_zero_ids_pinned = torch.empty(
             self._kv_zero_id_cap, dtype=torch.int64, pin_memory=True
@@ -1055,12 +1051,21 @@ class GPUModelRunner(
         self._kv_zero_ids_gpu = torch.empty(
             self._kv_zero_id_cap, dtype=torch.int64, device=self.device
         )
-        self._kv_zero_meta = per_tensor_meta
+        self._kv_zero_raw_i32 = torch.tensor(
+            [], dtype=torch.int32, device=self.device
+        ).set_(first_storage)
+        self._kv_zero_meta = (
+            torch.tensor(seg_offsets, dtype=torch.int64, device=self.device),
+            seg_size_el,
+            blk_size,
+            len(seg_offsets),
+        )
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
         """Zero the KV cache memory for the given block IDs."""
         if not block_ids or self._kv_zero_meta is None:
             return
+        seg_offsets, page_size_el, blk_size, n_segs = self._kv_zero_meta
         n_blocks = len(block_ids)
         if n_blocks > self._kv_zero_id_cap:
             self._kv_zero_id_cap = n_blocks * 2
@@ -1073,17 +1078,16 @@ class GPUModelRunner(
         self._kv_zero_ids_pinned[:n_blocks].numpy()[:] = block_ids
         idx = self._kv_zero_ids_gpu[:n_blocks]
         idx.copy_(self._kv_zero_ids_pinned[:n_blocks], non_blocking=True)
-        for raw_i32, seg_offsets, page_size_el, blk_size, n_segs in self._kv_zero_meta:
-            grid = (n_blocks * n_segs * (page_size_el // blk_size),)
-            _zero_kv_blocks_kernel[grid](
-                raw_i32,
-                seg_offsets,
-                idx,
-                n_blocks,
-                N_SEGS=n_segs,
-                PAGE_SIZE_EL=page_size_el,
-                BLOCK_SIZE=blk_size,
-            )
+        grid = (n_blocks * n_segs * (page_size_el // blk_size),)
+        _zero_kv_blocks_kernel[grid](
+            self._kv_zero_raw_i32,
+            seg_offsets,
+            idx,
+            n_blocks,
+            N_SEGS=n_segs,
+            PAGE_SIZE_EL=page_size_el,
+            BLOCK_SIZE=blk_size,
+        )
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
