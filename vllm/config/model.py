@@ -1120,12 +1120,7 @@ class ModelConfig:
         if hasattr(self.hf_config, "is_mm_prefix_lm"):
             return bool(self.hf_config.is_mm_prefix_lm)
         # fallback to list of known models
-        MM_PREFIX_LM_MODELS = (
-            "gemma3",
-            "molmo2",
-            "paligemma",
-            "moondream3",
-        )
+        MM_PREFIX_LM_MODELS = ("gemma3", "molmo2", "moondream3", "paligemma")
         if not hasattr(self.hf_config, "model_type"):
             return False
         return self.hf_config.model_type in MM_PREFIX_LM_MODELS
