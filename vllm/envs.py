@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
     VLLM_XLA_USE_SPMD: bool = False
+    # Worker multiprocessing method: fork (default) or spawn
     VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_ASSETS_CACHE_MODEL_CLEAN: bool = False
