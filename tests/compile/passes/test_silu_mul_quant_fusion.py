@@ -262,10 +262,41 @@ TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
     "model_class, enable_quant_fp8_custom_op, force_kernel",
     list(itertools.product([TestSiluMulFp8QuantModel], [True, False], TEST_KERNELS))
     + [
-        (TestSiluMulNvfp4QuantModel, False, None),
-        (TestSiluMulGroupFp8QuantModel, False, None),
-        (TestSiluMulBlockQuantModel, True, None),
-        (TestSiluMulBlockQuantTransposedModel, True, None),
+        pytest.param(
+            TestSiluMulNvfp4QuantModel,
+            False,
+            None,
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="CUDA only"
+            ),
+        ),
+        # GroupFP8Quant fusion only works with AITER on ROCm.
+        # and the enable_quant_fp8_custom_op must be True.
+        pytest.param(
+            TestSiluMulGroupFp8QuantModel,
+            True,
+            None,
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(), reason="ROCm only"
+            ),
+        ),
+        # Block quant fusion for per-group FP8 (CUDA only).
+        pytest.param(
+            TestSiluMulBlockQuantModel,
+            True,
+            None,
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="CUDA only"
+            ),
+        ),
+        pytest.param(
+            TestSiluMulBlockQuantTransposedModel,
+            True,
+            None,
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="CUDA only"
+            ),
+        ),
     ],
 )
 @pytest.mark.skipif(
@@ -285,15 +316,15 @@ def test_fusion_silu_and_mul_quant(
     enable_silu_mul_custom_op: bool,
     enable_quant_fp8_custom_op: bool,
     force_kernel: FP8ScaledMMLinearKernel | None,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     if model_class is TestSiluMulNvfp4QuantModel and not is_nvfp4_supported():
         pytest.skip("NVFP4 is not supported on this GPU.")
     if model_class is TestSiluMulGroupFp8QuantModel and not IS_AITER_FOUND:
         pytest.skip("AITER is not supported on this GPU.")
-    if model_class is TestSiluMulBlockQuantModel and not enable_silu_mul_custom_op:
-        pytest.skip("Block quant fusion requires silu_and_mul custom op")
     if (
-        model_class is TestSiluMulBlockQuantTransposedModel
+        model_class
+        in (TestSiluMulBlockQuantModel, TestSiluMulBlockQuantTransposedModel)
         and not enable_silu_mul_custom_op
     ):
         pytest.skip("Block quant fusion requires silu_and_mul custom op")
@@ -318,13 +349,16 @@ def test_fusion_silu_and_mul_quant(
         ),
     )
 
-    with set_current_vllm_config(config):
+    with set_current_vllm_config(config), monkeypatch.context() as m:
         fusion_passes = [ActivationQuantFusionPass(config)]
-        if IS_AITER_FOUND:
+        if IS_AITER_FOUND and model_class is TestSiluMulGroupFp8QuantModel:
+            from vllm._aiter_ops import rocm_aiter_ops
             from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
                 RocmAiterSiluMulFp8GroupQuantFusionPass,
             )
 
+            m.setenv("VLLM_ROCM_USE_AITER", "1")
+            rocm_aiter_ops.refresh_env_variables()
             fusion_passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
         passes = [NoOpEliminationPass(config), *fusion_passes, PostCleanupPass(config)]

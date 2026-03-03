@@ -17,6 +17,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
@@ -76,10 +77,12 @@ class EagleSpeculator:
 
     def set_attn(
         self,
+        model_state: ModelState,
         kv_cache_config: KVCacheConfig,
         attn_groups: list[list[AttentionGroup]],
         block_tables: BlockTables,
     ) -> None:
+        self.model_state = model_state
         self.kv_cache_config = kv_cache_config
         self.attn_groups = attn_groups
         self.block_tables = block_tables
@@ -171,6 +174,7 @@ class EagleSpeculator:
         logger.info("Capturing model for Eagle speculator...")
         self.cudagraph_manager.capture(
             self.generate_draft,
+            self.model_state,
             self.input_buffers,
             self.block_tables,
             self.attn_groups,

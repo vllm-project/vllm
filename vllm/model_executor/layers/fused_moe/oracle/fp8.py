@@ -603,7 +603,7 @@ def make_fp8_moe_kernel(
         )
 
     # NOTE(rob): we only want the mk to control the shared_expert
-    # if using all2all (for SBO). bnell is making this explict in
+    # if using all2all (for SBO). bnell is making this explicit in
     # the new MoE runner class.
     kernel = mk.FusedMoEModularKernel(
         prepare_finalize,
