@@ -50,7 +50,21 @@ except ImportError:
     Tracer = Any  # type: ignore
     inject = None  # type: ignore
     Resource = None  # type: ignore
-    SpanKind = Any  # type: ignore
+
+    class SpanKind:  # type: ignore
+        """Stub for when OpenTelemetry is not installed.
+
+        Using a class with explicit attributes instead of `Any` so that
+        call sites like `SpanKind.SERVER` don't raise AttributeError.
+        The values are never used because `instrument_manual` and other
+        tracing functions return early when OTel is unavailable.
+        """
+
+        SERVER = None
+        CLIENT = None
+        INTERNAL = None
+        PRODUCER = None
+        CONSUMER = None
 
 
 def is_otel_available() -> bool:

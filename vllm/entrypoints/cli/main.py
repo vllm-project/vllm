@@ -8,12 +8,15 @@ to avoid certain eager import breakage."""
 import importlib.metadata
 import sys
 
+from vllm.engine.arg_utils import needs_help
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
 def main():
+    showing_help = needs_help()
+
     import vllm.entrypoints.cli.benchmark.main
     import vllm.entrypoints.cli.collect_env
     import vllm.entrypoints.cli.openai
@@ -32,8 +35,9 @@ def main():
 
     cli_env_setup()
 
-    # For 'vllm bench *': use CPU instead of UnspecifiedPlatform by default
-    if len(sys.argv) > 1 and sys.argv[1] == "bench":
+    # For 'vllm bench *': use CPU instead of UnspecifiedPlatform by default.
+    # When showing help, skip this to avoid triggering platform detection.
+    if len(sys.argv) > 1 and sys.argv[1] == "bench" and not showing_help:
         logger.debug(
             "Bench command detected, must ensure current platform is not "
             "UnspecifiedPlatform to avoid device type inference error"
