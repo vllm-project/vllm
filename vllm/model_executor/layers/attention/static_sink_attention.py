@@ -40,6 +40,8 @@ def create_static_sink_attention_backend(
     underlying_builder = underlying_attn_backend.get_builder_cls()
 
     class StaticSinkAttentionBuilder(underlying_builder):  # type: ignore
+        supports_update_block_table: bool = False
+
         def __init__(
             self,
             kv_cache_spec: AttentionSpec,
@@ -122,6 +124,7 @@ class StaticSinkAttention(Attention, CustomOp):
         cache_config: CacheConfig | None = None,
         **kwargs,
     ):
+        CustomOp.__init__(self)
         dtype = torch.get_default_dtype()
 
         if cache_config is not None:
@@ -150,7 +153,6 @@ class StaticSinkAttention(Attention, CustomOp):
             attn_backend=attn_backend,
             **kwargs,
         )
-        CustomOp.__init__(self)
 
         self.sink_len = sink_len
         self.block_size = block_size
