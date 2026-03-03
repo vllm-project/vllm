@@ -80,14 +80,13 @@ def to_bytes_big(value: int, size: int) -> bytes:
 logger = init_logger(__name__)
 
 
-def long_wait_time_msg(threshold: int) -> str:
-    return (
-        "No available shared memory broadcast block found "
-        f"in {threshold} seconds. This typically happens "
-        "when some processes are hanging or doing some "
-        "time-consuming work (e.g. compilation, "
-        "weight/kv cache quantization)."
-    )
+LONG_WAIT_TIME_LOG_MSG = (
+    "No available shared memory broadcast block found "
+    "in %d seconds. This typically happens "
+    "when some processes are hanging or doing some "
+    "time-consuming work (e.g. compilation, "
+    "weight/kv cache quantization)."
+)
 
 
 class SpinCondition:
@@ -147,7 +146,7 @@ class SpinCondition:
         else:
             # Writer side publishes write notifications
             self.local_notify_socket: zmq.Socket = context.socket(PUB)  # type: ignore
-            # Set high water mark to 1- we don't need to send a massive amount of
+            # Set high water mark to 1 - we don't need to send a massive amount of
             # pings during busy operation. PUB sockets will silently drop subsequent
             # messages after the high water mark is reached.
             self.local_notify_socket.setsockopt(zmq.SNDHWM, 1)
@@ -561,7 +560,7 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if elapsed > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:
                         logger.info(
-                            long_wait_time_msg(VLLM_RINGBUFFER_WARNING_INTERVAL)
+                            LONG_WAIT_TIME_LOG_MSG, VLLM_RINGBUFFER_WARNING_INTERVAL
                         )
                         n_warning += 1
 
@@ -602,13 +601,10 @@ class MessageQueue:
     class ReadTimeoutWithWarnings:
         def __init__(self, timeout: float | None, should_warn: bool) -> None:
             self.started = time.monotonic()
-            if timeout is not None:
-                self.deadline = self.started + timeout
-            else:
-                self.deadline = sys.maxsize
+            self.deadline = sys.maxsize if timeout is None else self.started + timeout
 
             # if should_warn, we need to wake up periodically to log
-            self.warning_wait_timeout_ms: int | None = (
+            self.warning_wait_time_ms: int | None = (
                 VLLM_RINGBUFFER_WARNING_INTERVAL * 1000 if should_warn else None
             )
 
@@ -623,19 +619,18 @@ class MessageQueue:
             - None if the timeout is None and we're not logging warnings
             - raise TimeoutError if we are past the deadline
             """
+            warning_wait_time = self.warning_wait_time_ms
             if self.timeout is None:
-                return self.warning_wait_timeout_ms
+                return warning_wait_time
 
-            time_left = self.deadline - time.monotonic()
-            time_left_ms = int(time_left * 1000)
+            time_left_ms = int((self.deadline - time.monotonic()) * 1000)
             if time_left_ms <= 0:
                 raise TimeoutError
 
-            return (
-                time_left_ms
-                if self.warning_wait_timeout_ms is None
-                else min(self.warning_wait_timeout_ms, time_left_ms)
-            )
+            if warning_wait_time and warning_wait_time < time_left_ms:
+                return warning_wait_time
+
+            return time_left_ms
 
         def should_warn(self) -> bool:
             """Returns true if it's time to log a warning for a timeout that is not
@@ -681,7 +676,7 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if read_timeout.should_warn():
                         logger.info(
-                            long_wait_time_msg(VLLM_RINGBUFFER_WARNING_INTERVAL)
+                            LONG_WAIT_TIME_LOG_MSG, VLLM_RINGBUFFER_WARNING_INTERVAL
                         )
 
                     continue
