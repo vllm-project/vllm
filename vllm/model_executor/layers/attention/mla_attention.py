@@ -321,11 +321,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             calculate_kv_scales = False
         self.quant_config = quant_config
 
-        # Initialize KV cache quantization attributes
-        self.kv_cache_dtype = kv_cache_dtype
-        self.calculate_kv_scales = calculate_kv_scales
-        _init_kv_cache_quant(self, quant_config, prefix)
-
         dtype = torch.get_default_dtype()
         self.attn_backend = get_attn_backend(
             self.head_size,
@@ -336,6 +331,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             use_sparse=use_sparse,
             num_heads=self.num_heads,
         )
+
+        if (
+            self.attn_backend.get_name() == "FLASHMLA_SPARSE"
+            and kv_cache_dtype.startswith("fp8")
+            and kv_cache_dtype != "fp8_ds_mla"
+        ):
+            kv_cache_dtype = "fp8_ds_mla"
+            cache_config.cache_dtype = "fp8_ds_mla"
+            logger.info(
+                "Using custom fp8 kv-cache format for FlashMLA Sparse Attention backend"
+            )
+
+        # Initialize KV cache quantization attributes
+        self.kv_cache_dtype = kv_cache_dtype
+        self.calculate_kv_scales = calculate_kv_scales
+        _init_kv_cache_quant(self, quant_config, prefix)
 
         if (
             cache_config is not None

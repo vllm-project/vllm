@@ -191,6 +191,16 @@ def test_sparse_backend_decode_correctness(
     if kv_cache_dtype not in backend_cls.supported_kv_cache_dtypes:
         pytest.skip(f"{backend_cls.get_name()} does not support {kv_cache_dtype}")
 
+    if (
+        backend_cls == FlashMLASparseBackend
+        and kv_cache_dtype.startswith("fp8")
+        and kv_cache_dtype != "fp8_ds_mla"
+    ):
+        pytest.skip(
+            "FlashMLA Sparse Attention backend fp8 only supports "
+            "fp8_ds_mla kv-cache dtype"
+        )
+
     supported_block_sizes = backend_cls.get_supported_kernel_block_sizes()
     if block_size not in supported_block_sizes:
         pytest.skip(
