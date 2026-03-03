@@ -20,7 +20,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
-    get_col_major_tma_aligned_tensor,
+    get_tma_aligned_size,
     per_block_cast_to_fp8,
     should_use_deepgemm_for_fp8_linear,
 )
@@ -37,11 +37,15 @@ vllm_config = VllmConfig()
 
 # Test configurations
 DTYPES = [torch.bfloat16]  # [torch.half, torch.bfloat16, torch.float32]
+# Quantization test configs
 NUM_TOKENS = [7, 2050]
 D = [512, 4096, 5120, 13824]
 GROUP_SIZE = [64, 128, 512]
-M = [1, 7, 8, 83, 84, 4096]
-N = [128, 512, 7168, 7748, 13824]
+COLUMN_MAJOR_SCALES = [True, False]
+TMA_ALIGNED_SCALES = [True, False]
+# Matmul test configs
+M = [1, 7, 8, 83, 4096]
+N = [128, 512, 576, 7168, 13824]
 K = [256, 3884, 4096, 13824, 16384]
 # Deepseek-V3's intermediate size 18432, so N is 18432*2/8=4608 at TP8
 # and its hidden size is 7168.
@@ -63,19 +67,39 @@ def setup_cuda():
     reason="This platform supports e4m3fnuz, not e4m3fn.",
 )
 @pytest.mark.parametrize(
-    "num_tokens,d,dtype,group_size,seed",
-    itertools.product(NUM_TOKENS, D, DTYPES, GROUP_SIZE, SEEDS),
+    "num_tokens,d,dtype,group_size,column_major_scales,tma_aligned_scales,seed",
+    itertools.product(
+        NUM_TOKENS,
+        D,
+        DTYPES,
+        GROUP_SIZE,
+        COLUMN_MAJOR_SCALES,
+        TMA_ALIGNED_SCALES,
+        SEEDS,
+    ),
 )
 @torch.inference_mode()
-def test_per_token_group_quant_fp8(num_tokens, d, dtype, group_size, seed):
+def test_per_token_group_quant_fp8(
+    num_tokens, d, dtype, group_size, column_major_scales, tma_aligned_scales, seed
+):
     torch.manual_seed(seed)
     x = torch.rand(num_tokens, d, dtype=dtype)
 
     ref_out, ref_scale = native_per_token_group_quant_fp8(x, group_size)
-    out, scale = per_token_group_quant_fp8(x, group_size)
+    out, scale = per_token_group_quant_fp8(
+        x,
+        group_size,
+        column_major_scales=column_major_scales,
+        tma_aligned_scales=tma_aligned_scales,
+    )
 
     assert torch.allclose(out.to(torch.float32), ref_out.to(torch.float32), rtol=0.15)
     assert torch.allclose(scale, ref_scale)
+
+    if column_major_scales:
+        assert scale.stride()[-2] == 1
+        if tma_aligned_scales:
+            assert scale.stride()[-1] == get_tma_aligned_size(num_tokens, 4)
 
 
 @pytest.mark.parametrize(
@@ -140,8 +164,6 @@ def test_w8a8_block_fp8_cutlass_matmul():
     k_tiles = (K + block_k - 1) // block_k
 
     Bs = torch.rand(n_tiles, k_tiles, dtype=torch.float32) * factor_for_scale
-    # Hopper requires row-major format for scales
-    Bs_cutlass = Bs.T.contiguous() if current_platform.is_device_capability(90) else Bs
 
     A_fp8, As = per_token_group_quant_fp8(
         A_fp32, block_size[1], column_major_scales=False
@@ -152,9 +174,7 @@ def test_w8a8_block_fp8_cutlass_matmul():
     )
 
     ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
-    out = cutlass_scaled_mm(
-        A_fp8_cutlass, B_fp8, As_cutlass, Bs_cutlass, block_size, out_dtype
-    )
+    out = cutlass_scaled_mm(A_fp8_cutlass, B_fp8, As_cutlass, Bs, block_size, out_dtype)
 
     rel_diff = torch.mean(
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
@@ -186,16 +206,15 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
     ):
         pytest.skip(f"Skipping test; invalid size {M}, {N}, {K}")
 
-    A_fp8, As_fp8 = per_token_group_quant_fp8(A_fp32, block_size[1])
+    A_fp8, As_fp8 = per_token_group_quant_fp8(
+        A_fp32, block_size[1], column_major_scales=True, tma_aligned_scales=True
+    )
     B_fp8, Bs_fp8 = per_block_cast_to_fp8(B_fp32, block_size=block_size)
 
     As = As_fp8.to(torch.float32)
     Bs = Bs_fp8.to(torch.float32)
 
     ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
-
-    # Transpose earlier so that the testing will not trigger transposing kernels
-    As_fp8 = get_col_major_tma_aligned_tensor(As_fp8)
 
     out = torch.zeros((M, N), device="cuda", dtype=out_dtype)
 

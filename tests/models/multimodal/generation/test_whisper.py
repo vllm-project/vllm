@@ -111,13 +111,53 @@ def check_model_available(model: str) -> None:
     model_info.check_transformers_version(on_fail="skip")
 
 
+def test_parse_language_detection_output():
+    """Unit test for WhisperForConditionalGeneration.parse_language_detection_output.
+
+    No GPU or model loading required.
+    """
+    from unittest.mock import MagicMock
+
+    from vllm.model_executor.models.whisper import (
+        WhisperForConditionalGeneration,
+    )
+
+    cls = WhisperForConditionalGeneration
+
+    def make_tokenizer(return_value: str) -> MagicMock:
+        tok = MagicMock()
+        tok.decode = MagicMock(return_value=return_value)
+        return tok
+
+    # English
+    assert (
+        cls.parse_language_detection_output([50259], make_tokenizer("<|en|>")) == "en"
+    )
+
+    # German
+    assert (
+        cls.parse_language_detection_output([50261], make_tokenizer("<|de|>")) == "de"
+    )
+
+    # Unsupported language code
+    with pytest.raises(AssertionError):
+        cls.parse_language_detection_output([99999], make_tokenizer("<|xx|>"))
+
+    # No special token format
+    with pytest.raises(AssertionError):
+        cls.parse_language_detection_output([1], make_tokenizer("hello"))
+
+    # Empty token_ids
+    with pytest.raises((AssertionError, IndexError)):
+        cls.parse_language_detection_output([], make_tokenizer("anything"))
+
+
 @pytest.mark.core_model
 @pytest.mark.cpu_model
 @pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
 @pytest.mark.parametrize("dtype", ["half", "float"])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("enforce_eager", [True, False])
-@create_new_process_for_each_test("spawn")
 def test_models(
     hf_runner,
     vllm_runner,
@@ -176,3 +216,46 @@ def test_models_distributed(
         distributed_executor_backend=distributed_executor_backend,
         enforce_eager=False,
     )
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
+def test_encoder_cache_cleanup(
+    vllm_runner,
+    model: str,
+    input_audios,
+    monkeypatch,
+) -> None:
+    """Test that encoder cache is properly cleaned up after requests complete.
+
+    This is a regression test for a bug where encoder cache entries were freed
+    in the same scheduling step they were allocated, before the model could use
+    them.
+    """
+    # Set single-process mode to access the model runner's encoder cache directly
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    check_model_available(model)
+
+    with vllm_runner(
+        model,
+        dtype="half",
+        max_model_len=448,
+        tensor_parallel_size=1,
+        limit_mm_per_prompt={"audio": 2},
+        enforce_eager=True,
+    ) as vllm_model:
+        engine_core = vllm_model.llm.llm_engine.engine_core.engine_core
+        model_runner = engine_core.model_executor.driver_worker.worker.model_runner
+        encoder_cache = model_runner.encoder_cache
+
+        # Run multiple sequential requests to ensure cache is properly managed
+        for vllm_prompts, _, audios in input_audios:
+            vllm_model.generate_greedy(vllm_prompts, max_tokens=50, audios=audios)
+
+        # After all requests complete, encoder cache should be empty
+        cache_size = len(encoder_cache)
+        assert cache_size == 0, (
+            f"Encoder cache should be empty after all requests complete, "
+            f"but has {cache_size} entries. This indicates encoder cache "
+            f"entries are not being properly freed."
+        )

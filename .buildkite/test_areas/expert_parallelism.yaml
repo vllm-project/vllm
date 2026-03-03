@@ -14,10 +14,25 @@ steps:
 - label: EPLB Execution
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 4
+  num_devices: 4
   source_file_dependencies:
   - vllm/distributed/eplb
   - tests/distributed/test_eplb_execute.py
   commands:
   - pytest -v -s distributed/test_eplb_execute.py
   - pytest -v -s distributed/test_eplb_spec_decode.py
+
+- label: Elastic EP Scaling Test
+  timeout_in_minutes: 20
+  device: b200
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/compilation/
+  - tests/distributed/
+  commands:
+  - pytest -v -s distributed/test_elastic_ep.py

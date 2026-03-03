@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularK
 from vllm.utils.deep_gemm import calc_diff, is_deep_gemm_supported
 
 from .test_deepgemm import make_block_quant_fp8_weights
+from .utils import make_dummy_moe_config
 
 BLOCK_SIZE = [128, 128]
 
@@ -71,8 +72,13 @@ def test_batched_deepgemm_vs_triton(
         max_num_tokens=max_num_tokens,
         num_dispatchers=1,
         quant_config=quant_config,
+        moe_config=make_dummy_moe_config(),
     )
-    mk_triton = FusedMoEModularKernel(prep_finalize, triton_experts)
+    mk_triton = FusedMoEModularKernel(
+        prep_finalize,
+        triton_experts,
+        inplace=False,
+    )
 
     out_triton = mk_triton(
         hidden_states=a,
@@ -80,7 +86,6 @@ def test_batched_deepgemm_vs_triton(
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=False,
         global_num_experts=E,
     )
 
@@ -89,8 +94,13 @@ def test_batched_deepgemm_vs_triton(
         max_num_tokens=max_num_tokens,
         num_dispatchers=1,
         quant_config=quant_config,
+        moe_config=make_dummy_moe_config(),
     )
-    mk_deepgemm = FusedMoEModularKernel(prep_finalize, deepgemm_experts)
+    mk_deepgemm = FusedMoEModularKernel(
+        prep_finalize,
+        deepgemm_experts,
+        inplace=False,
+    )
 
     out_deepgemm = mk_deepgemm(
         hidden_states=a,
@@ -98,7 +108,6 @@ def test_batched_deepgemm_vs_triton(
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=False,
         global_num_experts=E,
     )
 

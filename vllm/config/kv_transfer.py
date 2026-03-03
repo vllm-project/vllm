@@ -5,8 +5,6 @@ import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
 
-from pydantic.dataclasses import dataclass
-
 from vllm.config.utils import config
 from vllm.utils.hashing import safe_hash
 
@@ -16,7 +14,6 @@ KVRole = Literal[KVProducer, KVConsumer]
 
 
 @config
-@dataclass
 class KVTransferConfig:
     """Configuration for distributed KV cache transfer."""
 
@@ -64,10 +61,10 @@ class KVTransferConfig:
     enable_permute_local_kv: bool = False
     """Experiment feature flag to enable HND to NHD KV Transfer"""
 
-    kv_load_failure_policy: Literal["recompute", "fail"] = "recompute"
+    kv_load_failure_policy: Literal["recompute", "fail"] = "fail"
     """Policy for handling KV cache load failures.
-    'recompute': reschedule the request to recompute failed blocks (default)
-    'fail': immediately fail the request with an error finish reason"""
+    'recompute': reschedule the request to recompute failed blocks
+    'fail': immediately fail the request with an error finish reason (default)"""
 
     def compute_hash(self) -> str:
         """

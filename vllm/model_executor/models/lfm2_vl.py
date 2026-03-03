@@ -22,6 +22,8 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -40,6 +42,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdateDetails,
 )
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -50,13 +53,14 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .siglip2 import Siglip2Model
+from .lfm2_siglip2 import Siglip2Model
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
 )
+from .vision import is_vit_use_data_parallel
 
 
 class Lfm2VLImagePixelInputs(TensorSchema):
@@ -86,6 +90,9 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
 
     def get_image_processor(self, **kwargs: object) -> Lfm2VlImageProcessorFast:
         return self.get_hf_processor(**kwargs).image_processor
+
+    def get_default_tok_params(self) -> TokenizeParams:
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
@@ -173,7 +180,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         min_tiles: int,
         max_tiles: int,
         tile_size: int,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int]:
         aspect_ratio = width / height
         target_ratios = self._target_ratios(min_tiles, max_tiles)
         # find best matching grid configuration
@@ -187,18 +194,27 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         self,
         image_width: int,
         image_height: int,
-        processor: Lfm2VlProcessor | None,
-    ) -> tuple[int, int]:
-        if processor is None:
-            processor = self.get_image_processor()
+        processor: Lfm2VlProcessor,
+        mm_kwargs: Mapping[str, object],
+    ) -> tuple[int, int, int]:
+        image_processor: Lfm2VlImageProcessorFast = processor.image_processor
 
-        downsample_factor = processor.image_processor.downsample_factor
-        encoder_patch_size = processor.image_processor.encoder_patch_size
-        max_pixels_tolerance = processor.image_processor.max_pixels_tolerance
-        min_tiles = processor.image_processor.min_tiles
-        max_tiles = processor.image_processor.max_tiles
-        max_image_tokens = processor.image_processor.max_image_tokens
-        tile_size = processor.image_processor.tile_size
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        downsample_factor = mm_kwargs.get(
+            "downsample_factor", image_processor.downsample_factor
+        )
+        encoder_patch_size = mm_kwargs.get(
+            "encoder_patch_size", image_processor.encoder_patch_size
+        )
+        max_pixels_tolerance = mm_kwargs.get(
+            "max_pixels_tolerance", image_processor.max_pixels_tolerance
+        )
+        min_tiles = mm_kwargs.get("min_tiles", image_processor.min_tiles)
+        max_tiles = mm_kwargs.get("max_tiles", image_processor.max_tiles)
+        max_image_tokens = mm_kwargs.get(
+            "max_image_tokens", image_processor.max_image_tokens
+        )
+        tile_size = mm_kwargs.get("tile_size", image_processor.tile_size)
 
         do_image_splitting = not min_tiles == max_tiles == 1
         is_image_large = self._is_image_too_large(
@@ -232,12 +248,14 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Lfm2VlProcessor | None,
+        processor: Lfm2VlProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
         _, _, total_patches = self._get_image_feature_grid_size(
             image_width=image_width,
             image_height=image_height,
             processor=processor,
+            mm_kwargs=mm_kwargs,
         )
         return total_patches
 
@@ -246,11 +264,9 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         spatial_shapes: torch.Tensor,
-        processor: Lfm2VlProcessor | None,
+        processor: Lfm2VlProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> str:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         grid_placeholder = "<|img_row_{n_h}_col_{n_w}|>"
         image_token = processor.image_token
         image_start_token = processor.image_start_token
@@ -260,6 +276,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         num_thumbnail_tokens, num_tokens_per_tile = self.get_num_image_tokens(
             spatial_shapes=spatial_shapes,
             processor=processor,
+            mm_kwargs=mm_kwargs,
         )
         tile_img_placeholder = grid_placeholder + (image_token * num_tokens_per_tile)
 
@@ -267,6 +284,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
             image_width=image_width,
             image_height=image_height,
             processor=processor,
+            mm_kwargs=mm_kwargs,
         )
 
         if grid_w > 1 or grid_h > 1:
@@ -292,15 +310,25 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         self,
         *,
         spatial_shapes: torch.Tensor,
-        processor: Lfm2VlProcessor | None,
+        processor: Lfm2VlProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> tuple[int, int]:
-        tile_size = processor.image_processor.tile_size
-        downsample_factor = processor.image_processor.downsample_factor
-        encoder_patch_size = processor.image_processor.encoder_patch_size
+        image_processor: Lfm2VlImageProcessorFast = processor.image_processor
+
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        downsample_factor = mm_kwargs.get(
+            "downsample_factor", image_processor.downsample_factor
+        )
+        encoder_patch_size = mm_kwargs.get(
+            "encoder_patch_size", image_processor.encoder_patch_size
+        )
+        tile_size = mm_kwargs.get("tile_size", image_processor.tile_size)
+
         num_thumbnail_tokens = spatial_shapes[-1].prod() // (downsample_factor**2)
         num_patches_tile = tile_size // encoder_patch_size
         dwn_num_patches_tile = math.ceil(num_patches_tile / downsample_factor)
         num_tiles_tokens = dwn_num_patches_tile * dwn_num_patches_tile
+
         return num_thumbnail_tokens, num_tiles_tokens
 
 
@@ -315,13 +343,13 @@ class Lfm2VLDummyInputsBuilder(BaseDummyInputsBuilder[Lfm2VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = self.info.get_image_size_with_most_features()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -343,7 +371,9 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
         if not (images := mm_data.get("images", [])):
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self.info.get_tokenizer().encode(
+                prompt, add_special_tokens=False
+            )
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
@@ -354,11 +384,8 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
             tok_kwargs,
         )
 
-        parsed_images = (
-            self._get_data_parser()
-            .parse_mm_data({"image": images})
-            .get_items("image", ImageProcessorItems)
-        )
+        mm_items = self.info.parse_mm_data({"image": images}, validate=False)
+        parsed_images = mm_items.get_items("image", ImageProcessorItems)
         image_sizes = [
             parsed_images.get_image_size(i) for i in range(len(parsed_images))
         ]
@@ -369,6 +396,7 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
                 image_width=size.width,
                 image_height=size.height,
                 processor=hf_processor,
+                mm_kwargs=mm_kwargs,
             )
             for size in image_sizes
         ]
@@ -411,6 +439,7 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
                 image_height=image_size.height,
                 spatial_shapes=spatial_shapes,
                 processor=hf_processor,
+                mm_kwargs=hf_processor_mm_kwargs,
             )
             return PromptUpdateDetails.select_text(
                 image_repl,
@@ -428,10 +457,12 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
 
 class Lfm2VLMultiModalProjector(nn.Module):
     def __init__(
-        self, config: Lfm2VlConfig, use_data_parallel: bool = False, prefix: str = ""
+        self,
+        config: Lfm2VlConfig,
+        prefix: str = "",
     ):
         super().__init__()
-        self.use_data_parallel = use_data_parallel
+        self.use_data_parallel = is_vit_use_data_parallel()
 
         in_channels = config.vision_config.hidden_size * (config.downsample_factor**2)
         self.factor = config.downsample_factor
@@ -450,29 +481,78 @@ class Lfm2VLMultiModalProjector(nn.Module):
             bias=config.projector_bias,
         )
 
-    def forward(self, image_features: torch.Tensor):
-        image_features = self.pixel_unshuffle(image_features)
-        if self.projector_use_layernorm:
-            image_features = self.layer_norm(image_features)
-        hidden_states = self.linear_1(image_features)
-        hidden_states = self.act(hidden_states)
-        hidden_states = self.linear_2(hidden_states)
-        return hidden_states
+    def forward(
+        self,
+        vision_features_packed: torch.Tensor,
+        spatial_shapes: torch.Tensor,
+    ) -> torch.Tensor:
+        """Project packed vision features without materializing padded tensors.
 
-    def pixel_unshuffle(self, hidden_states: torch.Tensor):
-        batch_size, width, height, channels = hidden_states.size()
-        hidden_states = hidden_states.reshape(
-            batch_size, width, height // self.factor, channels * self.factor
+        Args:
+            vision_features_packed: (total_tokens, hidden_size) packed in tile order.
+            spatial_shapes: (num_tiles, 2) on CPU (height, width) per tile.
+
+        Returns:
+            projected_packed: (total_projected_tokens, text_hidden_size)
+        """
+        assert spatial_shapes.device.type == "cpu", (
+            "Expected `spatial_shapes` on CPU to avoid device-to-host sync in "
+            "variable-length packing."
         )
-        hidden_states = hidden_states.permute(0, 2, 1, 3)
-        hidden_states = hidden_states.reshape(
-            batch_size,
-            height // self.factor,
-            width // self.factor,
-            channels * self.factor**2,
-        )
-        hidden_states = hidden_states.permute(0, 2, 1, 3)
-        return hidden_states
+        factor = self.factor
+        device = vision_features_packed.device
+        hidden_size = vision_features_packed.shape[-1]
+
+        spatial_shapes_list: list[list[int]] = spatial_shapes.tolist()
+        lengths_list = [h * w for h, w in spatial_shapes_list]
+
+        gather_idx_parts: list[torch.Tensor] = []
+        offset = 0
+
+        dh = torch.arange(factor, dtype=torch.int64)
+        dw = torch.arange(factor, dtype=torch.int64)
+        dh_grid, dw_grid = torch.meshgrid(dh, dw, indexing="ij")
+        dh_flat = dh_grid.reshape(-1)
+        dw_flat = dw_grid.reshape(-1)
+
+        for (height, width), length in zip(spatial_shapes_list, lengths_list):
+            if length <= 0:
+                continue
+            if height % factor != 0 or width % factor != 0:
+                raise ValueError(
+                    "spatial_shapes must be divisible by downsample_factor: "
+                    f"got ({height}, {width}) with factor={factor}."
+                )
+            height_out = height // factor
+            width_out = width // factor
+
+            rows_out = torch.arange(height_out, dtype=torch.int64)
+            cols_out = torch.arange(width_out, dtype=torch.int64)
+            rr, cc = torch.meshgrid(rows_out, cols_out, indexing="ij")
+            rr = rr.reshape(-1)
+            cc = cc.reshape(-1)
+
+            token_idx = (rr[:, None] * factor + dh_flat[None, :]) * width + (
+                cc[:, None] * factor + dw_flat[None, :]
+            )
+            gather_idx_parts.append(token_idx.reshape(-1) + offset)
+            offset += length
+
+        if gather_idx_parts:
+            gather_idx = torch.cat(gather_idx_parts).to(device=device)
+            gathered = vision_features_packed.index_select(0, gather_idx)
+            unshuffled = gathered.reshape(-1, factor * factor * hidden_size)
+        else:
+            unshuffled = vision_features_packed.new_empty(
+                (0, factor * factor * hidden_size)
+            )
+
+        if self.projector_use_layernorm:
+            unshuffled = self.layer_norm(unshuffled)
+        hidden_states = self.linear_1(unshuffled)
+        hidden_states = self.act(hidden_states)
+        projected_packed = self.linear_2(hidden_states)
+        return projected_packed
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -534,6 +614,10 @@ class Lfm2VLForConditionalGeneration(
             conv_kernel=hf_language_config.conv_L_cache,
         )
 
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.short_conv_state_copy_func()
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         super().__init__()
         config: Lfm2VlConfig = vllm_config.model_config.hf_config
@@ -546,37 +630,34 @@ class Lfm2VLForConditionalGeneration(
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
-        if vision_config.model_type == "siglip2_vision_model":
-            self.vision_tower = Siglip2Model(
-                config=vision_config,
-                quant_config=quant_config,
-                multimodal_config=multimodal_config,
-                prefix=maybe_prefix(prefix, "vision_tower"),
-            )
-        else:
-            raise ValueError(
-                f"Unsupported visual tokenizer model_type: {vision_config.model_type}"
+        with self._mark_tower_model(vllm_config, "image"):
+            if vision_config.model_type == "siglip2_vision_model":
+                self.vision_tower = Siglip2Model(
+                    config=vision_config,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "vision_tower"),
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported visual tokenizer type: {vision_config.model_type}"
+                )
+
+            self.multi_modal_projector = Lfm2VLMultiModalProjector(
+                config=config,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
             )
 
-        self.multi_modal_projector = Lfm2VLMultiModalProjector(
-            config=config,
-            use_data_parallel=self.use_data_parallel,
-            prefix=f"{prefix}.multi_modal_projector",
-        )
-
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language"),
-            architectures=config.text_config.architectures,
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language"),
+                architectures=config.text_config.architectures,
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
@@ -599,61 +680,90 @@ class Lfm2VLForConditionalGeneration(
         pixel_values: torch.FloatTensor,
         spatial_shapes: torch.Tensor,
     ) -> torch.Tensor:
+        assert spatial_shapes.device.type == "cpu", (
+            "Expected `spatial_shapes` on CPU to avoid device-to-host sync in "
+            "variable-length packing."
+        )
+
         pixel_values = pixel_values.to(
             dtype=self.vision_tower.vision_model.embeddings.patch_embedding.weight.dtype
         )  # fp16 compatibility
 
         # LFM2-VL's HF processor pads patch sequences with trailing zeros.
-        # Derive the valid-patch mask from spatial_shapes instead of carrying
-        # pixel_attention_mask through the vLLM multimodal pipeline.
-        max_seq_len = pixel_values.shape[1]
+        # Pack patch tokens upfront so the vision tower runs entirely unpadded.
+        spatial_shapes_list: list[list[int]] = spatial_shapes.tolist()
+        lengths_list = [h * w for h, w in spatial_shapes_list]
+        total_tokens = int(sum(lengths_list))
         lengths_cpu = (spatial_shapes[:, 0] * spatial_shapes[:, 1]).to(
             dtype=torch.int32
         )
         max_seqlen = (
-            lengths_cpu.max().reshape(1).to(device=pixel_values.device)
+            lengths_cpu.max().reshape(1)
             if lengths_cpu.numel()
-            else torch.tensor([0], dtype=torch.int32, device=pixel_values.device)
+            else torch.tensor([0], dtype=torch.int32)
         )
-        lengths = lengths_cpu.to(device=pixel_values.device)
-        packed_mask = (
-            torch.arange(max_seq_len, device=pixel_values.device)[None, :]
-            < lengths[:, None]
+
+        if total_tokens == 0:
+            return []
+
+        packed_pixel_values = pixel_values.new_empty(
+            (total_tokens, pixel_values.shape[-1])
+        )
+        offset = 0
+        for i, length in enumerate(lengths_list):
+            if length <= 0:
+                continue
+            packed_pixel_values[offset : offset + length].copy_(
+                pixel_values[i, :length]
+            )
+            offset += length
+        packed_pixel_values = packed_pixel_values.unsqueeze(0)
+
+        lengths = torch.tensor(
+            lengths_list, dtype=torch.int32, device=pixel_values.device
         )
         cu_seqlens = torch.zeros(
             lengths.shape[0] + 1,
             dtype=torch.int32,
-            device=lengths.device,
+            device=pixel_values.device,
         )
         cu_seqlens[1:] = torch.cumsum(lengths, dim=0)
 
         with set_forward_context(None, self.vllm_config):
             vision_outputs = self.vision_tower(
-                pixel_values=pixel_values,
+                pixel_values_packed=packed_pixel_values,
                 spatial_shapes=spatial_shapes,
-                packed_mask=packed_mask,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
             )
-        image_outputs = getattr(vision_outputs, "last_hidden_state", vision_outputs)
+        image_outputs_packed = getattr(
+            vision_outputs, "last_hidden_state", vision_outputs
+        )
+        vision_features_packed = image_outputs_packed[0]
 
-        image_features = []
+        factor = self.multi_modal_projector.factor
+        projected_lengths_list: list[int] = []
+        for (height, width), length in zip(spatial_shapes_list, lengths_list):
+            if length <= 0:
+                projected_lengths_list.append(0)
+                continue
+            if height % factor != 0 or width % factor != 0:
+                raise ValueError(
+                    "spatial_shapes must be divisible by downsample_factor: "
+                    f"got ({height}, {width}) with factor={factor}."
+                )
+            projected_lengths_list.append((height // factor) * (width // factor))
 
-        # spatial_shapes is on CPU (keep_on_cpu=True), so .tolist() is instant
-        spatial_shapes_list = spatial_shapes.tolist()
-        for img_idx, (feature_org_h, feature_org_w) in enumerate(spatial_shapes_list):
-            feature_len = feature_org_h * feature_org_w
-            feature = image_outputs[img_idx, :feature_len]
+        projected_packed = self.multi_modal_projector(
+            vision_features_packed=vision_features_packed,
+            spatial_shapes=spatial_shapes,
+        )
 
-            # reshape to original height and width
-            feature = feature.reshape(1, feature_org_h, feature_org_w, -1)
-
-            # project the image representation
-            img_embedding = self.multi_modal_projector(feature)
-
-            # flatten here to handle variable length in naflex
-            img_embedding = img_embedding.reshape(-1, img_embedding.size(-1))
-            image_features.append(img_embedding)
+        image_features: list[torch.Tensor] = []
+        offset = 0
+        for out_len in projected_lengths_list:
+            image_features.append(projected_packed[offset : offset + out_len])
+            offset += out_len
 
         return image_features
 
@@ -693,7 +803,7 @@ class Lfm2VLForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -714,8 +824,7 @@ class Lfm2VLForConditionalGeneration(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.language_model.compute_logits(hidden_states)
-        return logits
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)

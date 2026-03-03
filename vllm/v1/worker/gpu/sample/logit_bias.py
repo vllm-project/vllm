@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import numpy as np
 import torch
 
 from vllm.sampling_params import SamplingParams
@@ -12,11 +13,7 @@ MAX_NUM_STOP_TOKEN_IDS = 128
 
 
 class LogitBiasState:
-    def __init__(
-        self,
-        max_num_reqs: int,
-        device: torch.device,
-    ):
+    def __init__(self, max_num_reqs: int, device: torch.device):
         self.max_num_reqs = max_num_reqs
 
         # Allowed token IDs.
@@ -49,12 +46,15 @@ class LogitBiasState:
             device=device,
         )
 
+        # Using any of the above.
+        self.use_logit_bias = np.zeros(max_num_reqs, dtype=bool)
+
     def add_request(
-        self,
-        req_idx: int,
-        prompt_len: int,
-        sampling_params: SamplingParams,
+        self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
     ) -> None:
+        # Using any logit bias.
+        use_logit_bias = False
+
         # Allowed token IDs.
         allowed_token_ids = sampling_params.allowed_token_ids
         if allowed_token_ids:
@@ -66,6 +66,7 @@ class LogitBiasState:
                 )
             self.num_allowed_token_ids.np[req_idx] = num_allowed_token_ids
             self.allowed_token_ids.stage_write(req_idx, 0, allowed_token_ids)
+            use_logit_bias = True
         else:
             self.num_allowed_token_ids.np[req_idx] = 0
 
@@ -81,6 +82,7 @@ class LogitBiasState:
             self.num_logit_bias.np[req_idx] = num_logit_bias
             self.logit_bias_token_ids.stage_write(req_idx, 0, logit_bias.keys())
             self.logit_bias.stage_write(req_idx, 0, logit_bias.values())
+            use_logit_bias = True
         else:
             self.num_logit_bias.np[req_idx] = 0
 
@@ -89,7 +91,7 @@ class LogitBiasState:
         min_len = prompt_len + min_tokens
         self.min_lens.np[req_idx] = min_len
         stop_token_ids = sampling_params.all_stop_token_ids
-        if stop_token_ids:
+        if min_tokens > 0 and stop_token_ids:
             num_stop_token_ids = len(stop_token_ids)
             if num_stop_token_ids > MAX_NUM_STOP_TOKEN_IDS:
                 raise ValueError(
@@ -98,8 +100,11 @@ class LogitBiasState:
                 )
             self.num_stop_token_ids.np[req_idx] = num_stop_token_ids
             self.stop_token_ids.stage_write(req_idx, 0, stop_token_ids)
+            use_logit_bias = True
         else:
             self.num_stop_token_ids.np[req_idx] = 0
+
+        self.use_logit_bias[req_idx] = use_logit_bias
 
     def apply_staged_writes(self) -> None:
         self.num_allowed_token_ids.copy_to_uva()
@@ -116,12 +121,17 @@ class LogitBiasState:
     def apply_logit_bias(
         self,
         logits: torch.Tensor,
-        idx_mapping: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
     ) -> None:
+        if not np.any(self.use_logit_bias[idx_mapping_np]):
+            # No request uses logit bias. Skip the kernel launch.
+            return
+
         apply_logit_bias(
             logits,
-            idx_mapping,
+            expanded_idx_mapping,
             pos,
             self.num_allowed_token_ids.gpu,
             self.allowed_token_ids.gpu,
@@ -139,7 +149,7 @@ def _bias_kernel(
     logits_ptr,
     logits_stride,
     vocab_size,
-    idx_mapping_ptr,
+    expanded_idx_mapping_ptr,
     # Allowed token IDs.
     num_allowed_token_ids_ptr,
     allowed_token_ids_ptr,
@@ -159,8 +169,8 @@ def _bias_kernel(
     BLOCK_SIZE: tl.constexpr,
     LOGITS_BLOCK_SIZE: tl.constexpr,
 ):
-    batch_idx = tl.program_id(0)
-    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+    token_idx = tl.program_id(0)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
 
     block = tl.arange(0, BLOCK_SIZE)
 
@@ -176,21 +186,21 @@ def _bias_kernel(
             mask=mask,
         )
         logits = tl.load(
-            logits_ptr + batch_idx * logits_stride + allowed_token_ids, mask=mask
+            logits_ptr + token_idx * logits_stride + allowed_token_ids, mask=mask
         )
 
         # Set logits to -inf for all tokens.
         for i in range(0, vocab_size, LOGITS_BLOCK_SIZE):
             offset = i + tl.arange(0, LOGITS_BLOCK_SIZE)
             tl.store(
-                logits_ptr + batch_idx * logits_stride + offset,
+                logits_ptr + token_idx * logits_stride + offset,
                 -float("inf"),
                 mask=offset < vocab_size,
             )
 
         # Restore logits for allowed token IDs.
         tl.store(
-            logits_ptr + batch_idx * logits_stride + allowed_token_ids,
+            logits_ptr + token_idx * logits_stride + allowed_token_ids,
             logits,
             mask=mask,
         )
@@ -204,13 +214,13 @@ def _bias_kernel(
             mask=mask,
         )
         bias = tl.load(bias_ptr + req_state_idx * bias_stride + block, mask=mask)
-        logits = tl.load(logits_ptr + batch_idx * logits_stride + token_ids, mask=mask)
+        logits = tl.load(logits_ptr + token_idx * logits_stride + token_ids, mask=mask)
         logits += bias
-        tl.store(logits_ptr + batch_idx * logits_stride + token_ids, logits, mask=mask)
+        tl.store(logits_ptr + token_idx * logits_stride + token_ids, logits, mask=mask)
 
     # Apply min tokens.
     num_stop_token_ids = tl.load(num_stop_token_ids_ptr + req_state_idx)
-    pos = tl.load(pos_ptr + batch_idx)
+    pos = tl.load(pos_ptr + token_idx)
     min_len = tl.load(min_lens_ptr + req_state_idx)
     if num_stop_token_ids > 0 and pos < min_len:
         mask = block < num_stop_token_ids
@@ -219,7 +229,7 @@ def _bias_kernel(
             mask=mask,
         )
         tl.store(
-            logits_ptr + batch_idx * logits_stride + stop_token_ids,
+            logits_ptr + token_idx * logits_stride + stop_token_ids,
             -float("inf"),
             mask=mask,
         )
@@ -227,7 +237,7 @@ def _bias_kernel(
 
 def apply_logit_bias(
     logits: torch.Tensor,
-    idx_mapping: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
     pos: torch.Tensor,
     num_allowed_token_ids: torch.Tensor,
     allowed_token_ids: torch.Tensor,
@@ -238,7 +248,7 @@ def apply_logit_bias(
     num_stop_token_ids: torch.Tensor,
     stop_token_ids: torch.Tensor,
 ) -> None:
-    num_reqs, vocab_size = logits.shape
+    num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = triton.next_power_of_2(
         max(
             allowed_token_ids.shape[-1],
@@ -247,11 +257,11 @@ def apply_logit_bias(
         )
     )
     LOGITS_BLOCK_SIZE = 8192
-    _bias_kernel[(num_reqs,)](
+    _bias_kernel[(num_tokens,)](
         logits,
         logits.stride(0),
         vocab_size,
-        idx_mapping,
+        expanded_idx_mapping,
         num_allowed_token_ids,
         allowed_token_ids,
         allowed_token_ids.stride(0),

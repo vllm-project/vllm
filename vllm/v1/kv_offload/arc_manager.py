@@ -63,7 +63,7 @@ class ARCOffloadingManager(OffloadingManager):
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
         self.cache_capacity: int = self.backend.get_num_free_blocks()
 
-    def lookup(self, block_hashes: Iterable[BlockHash]) -> int:
+    def lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
         hit_count = 0
         for block_hash in block_hashes:
             block = self.t1.get(block_hash) or self.t2.get(block_hash)
@@ -90,7 +90,8 @@ class ARCOffloadingManager(OffloadingManager):
                 block = self.t1.pop(block_hash)
                 if not block.is_ready:
                     # block was just prepared to be stored, not really touched twice
-                    self.t1.move_to_end(block_hash)
+                    # keep it in T1 and mark as most recently used
+                    self.t1[block_hash] = block
                 else:
                     self.t2[block_hash] = block
 
