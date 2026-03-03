@@ -1102,6 +1102,76 @@ def cutlass_fp4_moe_mm(
     )
 
 
+def mxfp8_experts_quant(
+    input_tensor: torch.Tensor,
+    problem_sizes: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+    quant_output: torch.Tensor,
+    scale_factor: torch.Tensor,
+) -> None:
+    torch.ops._C.mxfp8_experts_quant(
+        input_tensor,
+        problem_sizes,
+        expert_offsets,
+        blockscale_offsets,
+        quant_output,
+        scale_factor,
+    )
+
+
+def cutlass_mxfp8_grouped_mm(
+    a_tensors: torch.Tensor,
+    b_tensors: torch.Tensor,
+    a_scales: torch.Tensor,
+    b_scales: torch.Tensor,
+    out_tensors: torch.Tensor,
+    problem_sizes: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+) -> None:
+    torch.ops._C.cutlass_mxfp8_grouped_mm(
+        a_tensors,
+        b_tensors,
+        a_scales,
+        b_scales,
+        out_tensors,
+        problem_sizes,
+        expert_offsets,
+        blockscale_offsets,
+    )
+
+
+if hasattr(torch.ops._C, "mxfp8_experts_quant"):
+
+    @register_fake("_C::mxfp8_experts_quant")
+    def _mxfp8_experts_quant_fake(
+        input_tensor: torch.Tensor,
+        problem_sizes: torch.Tensor,
+        expert_offsets: torch.Tensor,
+        blockscale_offsets: torch.Tensor,
+        quant_output: torch.Tensor,
+        scale_factor: torch.Tensor,
+    ) -> None:
+        return None
+
+
+if hasattr(torch.ops._C, "cutlass_mxfp8_grouped_mm"):
+
+    @register_fake("_C::cutlass_mxfp8_grouped_mm")
+    def _cutlass_mxfp8_grouped_mm_fake(
+        a_tensors: torch.Tensor,
+        b_tensors: torch.Tensor,
+        a_scales: torch.Tensor,
+        b_scales: torch.Tensor,
+        out_tensors: torch.Tensor,
+        problem_sizes: torch.Tensor,
+        expert_offsets: torch.Tensor,
+        blockscale_offsets: torch.Tensor,
+    ) -> None:
+        return None
+
+
 # gptq_marlin
 def gptq_marlin_repack(
     b_q_weight: torch.Tensor,

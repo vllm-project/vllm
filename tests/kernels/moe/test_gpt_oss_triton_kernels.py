@@ -26,8 +26,9 @@ from vllm.model_executor.layers.fused_moe.config import mxfp4_w4a16_moe_quant_co
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     triton_kernel_moe_forward,
 )
-from vllm.model_executor.layers.utils import shuffle_weight
 from vllm.utils.math_utils import round_up
+
+from .utils import shuffle_weight
 
 
 def deshuffle(w: torch.Tensor):
