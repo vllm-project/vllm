@@ -66,6 +66,7 @@ from vllm.utils.torch_utils import (
 if TYPE_CHECKING:
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 @dataclass
 class GraphCaptureContext:
@@ -1160,7 +1161,7 @@ def init_afd_process_group(
         store = PrefixStore(group_name, store)
 
     pg_options_param_name = (
-        "backend_options" if str(torch.__version__) >= "2.6" else "pg_options"
+        "backend_options" if is_torch_equal_or_newer("2.6.0") else "pg_options"
     )
     pg, _ = _new_process_group_helper(
         world_size,

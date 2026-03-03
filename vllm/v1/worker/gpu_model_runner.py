@@ -3678,37 +3678,31 @@ class GPUModelRunner(
             self.maybe_get_kv_connector_output(
                 scheduler_output, clear_metadata=clear_kv_metadata
             ) as kv_connector_output,
-        ):
-            if input_ids is not None:
-                logger.info(f"input_ids: {input_ids.shape}")
-            if inputs_embeds is not None:
-                logger.info(f"inputs_embeds: {inputs_embeds.shape}")
-            
-            # Build dp_metadata_list
-            dp_metadata_list = {}
-            if ubatch_slices_padded is not None:
-                for idx, ubatch_slice in enumerate(ubatch_slices_padded):
-                    dp_size = self.vllm_config.parallel_config.data_parallel_size
-                    ubatch_num_tokens_across_dp = torch.tensor(
-                        [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32
-                    )
-                    dp_metadata_list[idx] = DPMetadata.make(
-                        self.vllm_config.parallel_config,
-                        ubatch_slice.num_tokens,
-                        ubatch_num_tokens_across_dp,
-                    )
-            else:
-                dp_metadata_list[0] = get_forward_context().dp_metadata
+        ):  
+            if self.afd_config:
+                # Build dp_metadata_list
+                dp_metadata_list = {}
+                if ubatch_slices_padded is not None:
+                    for idx, ubatch_slice in enumerate(ubatch_slices_padded):
+                        dp_size = self.vllm_config.parallel_config.data_parallel_size
+                        ubatch_num_tokens_across_dp = torch.tensor(
+                            [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32
+                        )
+                        dp_metadata_list[idx] = DPMetadata.make(
+                            self.vllm_config.parallel_config,
+                            ubatch_slice.num_tokens,
+                            ubatch_num_tokens_across_dp,
+                        )
+                else:
+                    dp_metadata_list[0] = get_forward_context().dp_metadata
 
-            # to support inequal AF,[ffn_size,ffn_size + min_size) send
-            self.afd_connector.update_state_from_dp_metadata(dp_metadata_list, False)
-            if self.afd_config and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
-                logger.info(f'jcz self.afd_connector.world_rank in prepare input is {self.afd_connector.world_rank}')
-                logger.info(f'jcz self.afd_connector.world_rank in prepare input dp_metadata_list:{dp_metadata_list}')
-                self.afd_connector.send_dp_metadata_list(
-                    dp_metadata_list, is_warmup=self._is_warmup
-                )
-            logger.info(f'jcz send dp_metadata_list in prepare input')
+                # to support inequal AF,[ffn_size,ffn_size + min_size) send
+                self.afd_connector.update_state_from_dp_metadata(dp_metadata_list, False)
+                if self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
+                    logger.info(f'jcz self.afd_connector.world_rank in prepare input dp_metadata_list:{dp_metadata_list}')
+                    self.afd_connector.send_dp_metadata_list(
+                        dp_metadata_list, is_warmup=self._is_warmup
+                    )
 
             model_output = self._model_forward(
                 input_ids=input_ids,
@@ -5088,33 +5082,33 @@ class GPUModelRunner(
                     afd_metadata=afd_metadata,
                 ),
             ):
-                # Build dp_metadata_list
-                dp_metadata_list = {}
-                if ubatch_slices_padded is not None:
-                    for idx, ubatch_slice in enumerate(ubatch_slices_padded):
-                        dp_size = self.vllm_config.parallel_config.data_parallel_size
-                        ubatch_num_tokens_across_dp = torch.tensor(
-                            [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32
-                        )
-                        dp_metadata_list[idx] = DPMetadata.make(
-                            self.vllm_config.parallel_config,
-                            ubatch_slice.num_tokens,
-                            ubatch_num_tokens_across_dp,
-                        )
-                else:
-                    dp_metadata_list[0] = get_forward_context().dp_metadata
+                if self.afd_config:
+                    # Build dp_metadata_list
+                    dp_metadata_list = {}
+                    if ubatch_slices_padded is not None:
+                        for idx, ubatch_slice in enumerate(ubatch_slices_padded):
+                            dp_size = self.vllm_config.parallel_config.data_parallel_size
+                            ubatch_num_tokens_across_dp = torch.tensor(
+                                [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32
+                            )
+                            dp_metadata_list[idx] = DPMetadata.make(
+                                self.vllm_config.parallel_config,
+                                ubatch_slice.num_tokens,
+                                ubatch_num_tokens_across_dp,
+                            )
+                    else:
+                        dp_metadata_list[0] = get_forward_context().dp_metadata
 
-                # to support inequal AF,[ffn_size,ffn_size + min_size) send
-                self.afd_connector.update_state_from_dp_metadata(dp_metadata_list, is_graph_capturing)
-                if self.afd_config and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
-                    logger.info(f'jcz self.afd_connector.world_rank in prepare input is {self.afd_connector.world_rank}')
-                    logger.info(f'jcz self.afd_connector.world_rank in prepare input dp_metadata_list:{dp_metadata_list}')
-                    self.afd_connector.send_dp_metadata_list(
-                        dp_metadata_list,
-                        is_graph_capturing=is_graph_capturing,
-                        is_warmup=self._is_warmup,
-                    )
-                logger.info(f'jcz send dp_metadata_list in prepare input')
+                    # to support inequal AF,[ffn_size,ffn_size + min_size) send
+                    self.afd_connector.update_state_from_dp_metadata(dp_metadata_list, is_graph_capturing)
+                    if self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
+                        logger.info(f'jcz self.afd_connector.world_rank in prepare input is {self.afd_connector.world_rank}')
+                        logger.info(f'jcz self.afd_connector.world_rank in prepare input dp_metadata_list:{dp_metadata_list}')
+                        self.afd_connector.send_dp_metadata_list(
+                            dp_metadata_list,
+                            is_graph_capturing=is_graph_capturing,
+                            is_warmup=self._is_warmup,
+                        )
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,
@@ -5569,27 +5563,19 @@ class GPUModelRunner(
                     # if we want to warm up attention or not. This is
                     # different from the case where `FULL` implies capture
                     # attention while `PIECEWISE` implies no attention.
-                    force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
                     self._is_warmup = True
-                    self._dummy_run(
+                    dummy_run(
                         num_tokens,
                         cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                        force_attention=force_attention,
-                        uniform_decode=uniform_decode,
                         allow_microbatching=False,
-                        skip_eplb=True,
-                        remove_lora=False,
-                        activate_lora=activate_lora,
+                        num_active_loras=num_active_loras,
                     )
                 self._is_warmup = False
-                self._dummy_run(
+                dummy_run(
                     num_tokens,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    uniform_decode=uniform_decode,
                     allow_microbatching=False,
-                    skip_eplb=True,
-                    remove_lora=False,
-                    activate_lora=activate_lora,
+                    num_active_loras=num_active_loras,
                     is_graph_capturing=True,
                 )
 

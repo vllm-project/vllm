@@ -431,6 +431,7 @@ class UBatchWrapper:
                 logger.info("jcz UBatchWrapper __call__ 2")
                 return self.cudagraph_wrapper(*args, **kwargs)
 
+        afd_metadata = forward_context.afd_metadata
         attn_metadata = forward_context.attn_metadata
         slot_mapping = forward_context.slot_mapping
         num_tokens = sum(ubatch_slice.num_tokens for ubatch_slice in ubatch_slices)
