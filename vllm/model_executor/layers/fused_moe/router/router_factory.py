@@ -44,7 +44,7 @@ def create_fused_moe_router(
     # grouped topk + fused topk bias parameters
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
-    # custom routing paramaters
+    # custom routing parameters
     custom_routing_function: Callable | None = None,
     # eplb parameters
     enable_eplb: bool = False,
