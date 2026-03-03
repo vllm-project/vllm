@@ -182,7 +182,6 @@ ray.init(
             "VLLM_BATCH_INVARIANT": "1",
             # prevent ray from setting CUDA_VISIBLE_DEVICES
             "RAY_EXPERIMENTAL_NOSET_CUDA_ENV_VAR": "1",
-            "PYTHONPATH": "/home/ray/default/personal/vllm",
         }
     }
 )
@@ -208,7 +207,6 @@ llm = ray.remote(
     attention_backend="FLASH_ATTN",
     gpu_memory_utilization=0.75,
     weight_transfer_config=WeightTransferConfig(backend="nccl"),
-    enable_prefix_caching=False,
 )
 
 PROMPTS = [
@@ -324,7 +322,6 @@ llm_v2 = ray.remote(
     gpu_memory_utilization=0.75,
     distributed_executor_backend="ray",
     attention_backend="FLASH_ATTN",
-    enable_prefix_caching=False,
 )
 
 val_futures = [
