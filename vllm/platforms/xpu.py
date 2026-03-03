@@ -221,6 +221,12 @@ class XPUPlatform(Platform):
                 vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
 
+        # In some cases, the internal memory type cache can misdetect GPU
+        # memory as host memory, also leading to invalid memory access.
+        # This cache can be disabled by setting UCX_MEMTYPE_CACHE=n.
+        # ref. https://openucx.readthedocs.io/en/master/faq.html
+        os.environ["UCX_MEMTYPE_CACHE"] = "n"
+
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
