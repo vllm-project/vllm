@@ -114,6 +114,12 @@ class RequestOutputKind(Enum):
     # Do not return intermediate RequestOutput
     FINAL_ONLY = 2
 
+@dataclass
+class TreeSearchParams:
+    enable_tree_search: bool = False
+    entropy_threshold: float = 1.0
+    branching_factor: int = 3
+    max_tree_depth: int = 3
 
 class SamplingParams(
         msgspec.Struct,
@@ -247,6 +253,9 @@ class SamplingParams(
     # Fields used for bad words
     bad_words: Optional[list[str]] = None
     _bad_words_token_ids: Optional[list[list[int]]] = None
+
+    # params for Tree search
+    tree_search_params: TreeSearchParams = TreeSearchParams()
 
     @staticmethod
     def from_optional(
