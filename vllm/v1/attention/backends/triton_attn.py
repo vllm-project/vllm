@@ -229,26 +229,23 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         )
         BLOCK_Q = BLOCK_M // num_queries_per_kv
 
-        if max_query_len > 1:
-            self.block_q_seq_boundaries_tensor[0] = 0
-            self.block_q_seq_boundaries_tensor[1 : query_start_loc.numel()].copy_(
-                query_start_loc[1:]
-            )
-            self.block_q_seq_boundaries_tensor[1 : query_start_loc.numel()].sub_(
-                query_start_loc[:-1]
-            )
-            self.block_q_seq_boundaries_tensor[1 : query_start_loc.numel()].add_(
-                BLOCK_Q - 1
-            )
-            self.block_q_seq_boundaries_tensor[
-                1 : query_start_loc.numel()
-            ].floor_divide_(BLOCK_Q)
-            self.block_q_seq_boundaries_tensor[: query_start_loc.numel()].cumsum_(dim=0)
-            self.num_q_blocks = self.block_q_seq_boundaries_tensor[
-                query_start_loc.numel() - 1
-            ]
-        else:
-            self.num_q_blocks = len(seq_lens)
+        self.block_q_seq_boundaries_tensor[0] = 0
+        self.block_q_seq_boundaries_tensor[1 : query_start_loc.numel()].copy_(
+            query_start_loc[1:]
+        )
+        self.block_q_seq_boundaries_tensor[1 : query_start_loc.numel()].sub_(
+            query_start_loc[:-1]
+        )
+        self.block_q_seq_boundaries_tensor[1 : query_start_loc.numel()].add_(
+            BLOCK_Q - 1
+        )
+        self.block_q_seq_boundaries_tensor[1 : query_start_loc.numel()].floor_divide_(
+            BLOCK_Q
+        )
+        self.block_q_seq_boundaries_tensor[: query_start_loc.numel()].cumsum_(dim=0)
+        self.num_q_blocks = self.block_q_seq_boundaries_tensor[
+            query_start_loc.numel() - 1
+        ]
 
         use_cascade = common_prefix_len > 0
 
