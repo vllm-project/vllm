@@ -11,6 +11,7 @@ from copy import copy
 from http import HTTPStatus
 from typing import Any, Final
 
+import jinja2
 from fastapi import Request
 from openai.types.responses import (
     ResponseContentPartAddedEvent,
@@ -1277,13 +1278,14 @@ class OpenAIServingResponses(OpenAIServing):
                     for m in prev_messages
                 ]
             else:
-                prev_msgs = self.msg_store.get(prev_response.id)
-                if prev_msgs is None:
+                stored = self.msg_store.get(prev_response.id)
+                if stored is None:
                     raise ValueError(
                         f"No stored messages found for response "
                         f"'{prev_response.id}'. The response may have "
                         f"expired or the store may be inconsistent."
                     )
+                prev_msgs = stored
 
             # FIXME(woosuk): The slice-delete-reappend cycle below is
             # currently a no-op --- it removes messages then puts them all
@@ -1557,7 +1559,6 @@ class OpenAIServingResponses(OpenAIServing):
             status_code=HTTPStatus.BAD_REQUEST,
             param="store",
         )
-
 
     async def _process_simple_streaming_events(
         self,

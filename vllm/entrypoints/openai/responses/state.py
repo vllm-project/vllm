@@ -25,12 +25,13 @@ Multi-node deployments:
     startup, making state carriers incompatible across restarts/replicas.
 """
 
-import base64
 import hashlib
 import hmac
 import json
 import os
 from typing import Any
+
+import pybase64 as base64
 
 from vllm.logger import init_logger
 
