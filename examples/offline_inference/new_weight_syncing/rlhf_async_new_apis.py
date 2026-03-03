@@ -27,6 +27,7 @@ causes unexpected behavior.
 """
 
 import asyncio
+import time
 import uuid
 from dataclasses import asdict
 
@@ -301,6 +302,8 @@ train_handle = train_model.broadcast_weights.remote(packed=True)
 ray.get([train_handle, inference_handle])
 
 ray.get(llm.resume_generation.remote())
+time.sleep(10)
+
 results = ray.get(gen_futures)
 
 for i, (output, pause_idx) in enumerate(results):

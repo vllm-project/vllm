@@ -907,6 +907,10 @@ class Worker(WorkerBase):
                 load_weights=load_weights_direct,
             )
 
+        # Ensure all NCCL/copy work is visible before return (NCCL and copy_ are
+        # async; packed path uses custom streams that are not synced on last buffer).
+        torch.cuda.synchronize()
+
     def shutdown(self) -> None:
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:
