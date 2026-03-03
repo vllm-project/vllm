@@ -220,6 +220,12 @@ def run_multi_api_server(args: argparse.Namespace):
     num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
 
+    if num_api_servers > 1 and getattr(args, "use_gpu_for_pooling_score", False):
+        # TODO(wentao): remove this once well tested
+        raise ValueError(
+            "--use-gpu-for-pooling-score cannot be used with api_server_count > 1 now"
+        )
+
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
 
