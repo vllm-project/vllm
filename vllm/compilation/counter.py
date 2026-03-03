@@ -29,6 +29,8 @@ class CompilationCounter:
     num_cache_entries_updated: int = 0
     # The number of standalone_compile compiled artifacts saved
     num_compiled_artifacts_saved: int = 0
+    # The number of standalone_compile compiled artifacts loaded from cache
+    num_compiled_artifacts_loaded: int = 0
     # Number of times a model was loaded with CompilationMode.STOCK_TORCH_COMPILE
     stock_torch_compile_count: int = 0
 
