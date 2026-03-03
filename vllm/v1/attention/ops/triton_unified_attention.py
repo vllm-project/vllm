@@ -970,15 +970,12 @@ def unified_attention(
     BLOCK_M_2D_PREFILL = (
         64 if num_queries_per_kv <= 64 else triton.next_power_of_2(num_queries_per_kv)
     )
-    BLOCK_M_2D_DECODE = (
-        16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
-    )
-    BLOCK_M_3D_DECODE = (
+    BLOCK_M_DECODE = (
         16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
     )
     BLOCK_Q_2D_PREFILL = BLOCK_M_2D_PREFILL // num_queries_per_kv
-    BLOCK_Q_2D_DECODE = BLOCK_M_2D_DECODE // num_queries_per_kv
-    BLOCK_Q_3D_DECODE = BLOCK_M_3D_DECODE // num_queries_per_kv
+    BLOCK_Q_2D_DECODE = BLOCK_M_DECODE // num_queries_per_kv
+    BLOCK_Q_3D_DECODE = BLOCK_M_DECODE // num_queries_per_kv
 
     # Tile sizes for prefill and decode. Gemma3 models use optimized values.
     # Note: tile size must be at least 32 for fp8 (element_size == 1).
@@ -1141,7 +1138,7 @@ def unified_attention(
                 query_start_len_ptr=cu_seqlens_q,
                 BLOCK_Q=BLOCK_Q_2D_DECODE,
                 num_seqs=num_decodes,
-                BLOCK_M=BLOCK_M_2D_DECODE,
+                BLOCK_M=BLOCK_M_DECODE,
                 q_block_offset=0,
                 decode_only=True,
                 USE_FP8=output_scale is not None,
@@ -1195,7 +1192,7 @@ def unified_attention(
                 query_start_len_ptr=cu_seqlens_q,
                 BLOCK_Q=BLOCK_Q_3D_DECODE,
                 num_seqs=num_decodes,
-                BLOCK_M=BLOCK_M_3D_DECODE,
+                BLOCK_M=BLOCK_M_DECODE,
                 NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
                 q_block_offset=0,
                 decode_only=True,
