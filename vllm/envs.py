@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     VLLM_USAGE_STATS_SERVER: str = "https://stats.vllm.ai"
     VLLM_NO_USAGE_STATS: bool = False
     VLLM_DO_NOT_TRACK: bool = False
-    VLLM_USAGE_SOURCE: str = ""
+    VLLM_USAGE_SOURCE: str = "production"
     VLLM_CONFIGURE_LOGGING: bool = True
     VLLM_LOGGING_LEVEL: str = "INFO"
     VLLM_LOGGING_PREFIX: str = ""
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_SAMPLER: bool | None = None
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
-    VLLM_CPU_OMP_THREADS_BIND: str = ""
+    VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
     VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
@@ -89,7 +89,7 @@ if TYPE_CHECKING:
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
     VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
     VLLM_USE_AOT_COMPILE: bool = False
-    VLLM_USE_BYTECODE_HOOK: bool = False
+    VLLM_USE_BYTECODE_HOOK: bool = True
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
@@ -168,7 +168,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "masked_gemm"] = (
         "latency"
     )
-    VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
+    VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "trtllm"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -1297,9 +1297,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Flashinfer fused allreduce backend.
     # "auto" will default to "mnnvl", which performs mostly same/better than "trtllm".
     # But "mnnvl" backend does not support fuse with quantization.
+    # TODO: Default is "trtllm" right now because "mnnvl" has issues with cudagraph:
+    # https://github.com/vllm-project/vllm/issues/35772
+    # Should switch back to "auto" if the issue is resolved.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
         "VLLM_FLASHINFER_ALLREDUCE_BACKEND",
-        "auto",
+        "trtllm",
         ["auto", "trtllm", "mnnvl"],
     ),
     # Control the workspace buffer size for the FlashInfer backend.

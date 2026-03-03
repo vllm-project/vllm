@@ -597,15 +597,6 @@ class GPUModelRunner(
             self.async_output_copy_stream = torch.cuda.Stream()
             self.prepare_inputs_event = torch.Event()
 
-        # self.cudagraph_batch_sizes sorts in ascending order.
-        if (
-            self.compilation_config.cudagraph_capture_sizes
-            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
-            self.cudagraph_batch_sizes = sorted(
-                self.compilation_config.cudagraph_capture_sizes
-            )
-
         # Cache the device properties.
         self._init_device_properties()
 
@@ -1200,13 +1191,14 @@ class GPUModelRunner(
             return
 
         # Find the number of accepted tokens for each sequence.
-        num_accepted_tokens = (
+        num_reqs = output_token_ids.size(0)
+        self.num_accepted_tokens.gpu[:num_reqs] = (
             (
                 torch.cat(
                     [
                         output_token_ids,
                         torch.full(
-                            (output_token_ids.size(0), 1),
+                            (num_reqs, 1),
                             -1,
                             device=output_token_ids.device,
                         ),
@@ -1217,12 +1209,13 @@ class GPUModelRunner(
             )
             .int()
             .argmax(-1)
-            .cpu()
-            .numpy()
         )
-        for i, num_tokens in enumerate(num_accepted_tokens):
-            self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
         if self.cache_config.mamba_cache_mode == "align":
+            for i, num_tokens in enumerate(
+                self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
+            ):
+                self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+
             mamba_utils.postprocess_mamba(
                 scheduler_output,
                 self.kv_cache_config,
@@ -1232,6 +1225,10 @@ class GPUModelRunner(
                 self.compilation_config.static_forward_context,
                 self.model.get_mamba_state_copy_func(),
                 self._get_mamba_copy_bufs(),
+            )
+        else:
+            self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
+                self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
             )
 
     def _update_streaming_request(
@@ -5704,10 +5701,6 @@ class GPUModelRunner(
         ):
             self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
                 self.uniform_decode_query_len, self.parallel_config.tensor_parallel_size
-            )
-            capture_sizes = self.compilation_config.cudagraph_capture_sizes
-            self.cudagraph_batch_sizes = (
-                capture_sizes if capture_sizes is not None else []
             )
 
         # Trigger cudagraph dispatching keys initialization after
