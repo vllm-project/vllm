@@ -19,7 +19,6 @@ from .base import MediaIO
 
 def extract_audio_from_video_bytes(
     data: bytes,
-    sr: float | None = None,
 ) -> tuple[npt.NDArray, float]:
     """Extract the audio track from raw video bytes using PyAV.
 
@@ -27,9 +26,12 @@ def extract_audio_from_video_bytes(
     spawned, which is critical to avoid crashing CUDA-active vLLM
     worker processes.
 
+    The returned waveform is at the native sample rate of the video's
+    audio stream.  Resampling to a model-specific rate is left to the
+    downstream :class:`AudioResampler` in the parsing pipeline.
+
     Args:
         data: Raw video file bytes (e.g. from an mp4 file).
-        sr: Target sampling rate.  If ``None``, the native rate is used.
 
     Returns:
         A tuple of ``(waveform, sample_rate)`` suitable for use as an
@@ -50,8 +52,6 @@ def extract_audio_from_video_bytes(
 
             chunks: list[npt.NDArray] = []
             for frame in container.decode(audio=0):
-                # to_ndarray() returns shape (channels, samples) for planar
-                # formats and (1, samples) for packed formats.
                 arr = frame.to_ndarray()
                 chunks.append(arr.mean(axis=0) if arr.ndim > 1 else arr)
     except ValueError:
@@ -64,13 +64,8 @@ def extract_audio_from_video_bytes(
 
     if not chunks:
         raise ValueError("No audio found in the video.")
-    else:
-        audio = np.concatenate(chunks).astype(np.float32)
 
-    if sr is not None and sr != native_sr:
-        audio = librosa.resample(audio, orig_sr=float(native_sr), target_sr=float(sr))
-        return audio, float(sr)
-
+    audio = np.concatenate(chunks).astype(np.float32)
     return audio, float(native_sr)
 
 

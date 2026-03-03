@@ -1402,10 +1402,6 @@ class NanoNemotronVLMultiModalProcessor(
         assert isinstance(videos.metadata, list)
         metadata_list = videos.metadata
 
-        target_sr = None
-        if extractor := self.info.audio_extractor:
-            target_sr = extractor.sampling_rate
-
         audio_items: list[AudioItem] = []
         for metadata in metadata_list:
             video_bytes = metadata.get("original_video_bytes")
@@ -1416,12 +1412,7 @@ class NanoNemotronVLMultiModalProcessor(
                     "video must be loaded with keep_video_bytes=True (e.g. via "
                     "the chat API with a model that sets use_audio_in_video)."
                 )
-            audio_items.append(
-                extract_audio_from_video_bytes(
-                    video_bytes,
-                    sr=target_sr,
-                )
-            )
+            audio_items.append(extract_audio_from_video_bytes(video_bytes))
 
         # Create a new VideoProcessorItems with metadata that does not contain
         # the large video bytes, to avoid modifying the input `mm_items`.
@@ -1473,14 +1464,14 @@ class NanoNemotronVLMultiModalProcessor(
         processor_inputs.mm_data_items = mm_items
 
         prompt = processor_inputs.prompt
+        tokenizer = self.info.get_tokenizer()
         if not isinstance(prompt, str):
-            tokenizer = self.info.get_tokenizer()
             prompt = tokenizer.decode(prompt, skip_special_tokens=False)
 
         for _ in audio_items:
             prompt = prompt.replace("<video>", "<video>" + AUDIO_CONTEXT, 1)
 
-        processor_inputs.prompt = prompt
+        processor_inputs.prompt = tokenizer.encode(prompt, add_special_tokens=False)
 
         if processor_inputs.tokenization_kwargs is None:
             processor_inputs.tokenization_kwargs = {}
