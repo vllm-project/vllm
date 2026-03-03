@@ -56,6 +56,7 @@ class ServingScores(OpenAIServing):
         request_logger: RequestLogger | None,
         score_template: str | None = None,
         log_error_stack: bool = False,
+        use_gpu_for_pooling_score: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -64,6 +65,7 @@ class ServingScores(OpenAIServing):
             log_error_stack=log_error_stack,
         )
         self.score_template = score_template
+        self.use_gpu_for_pooling_score = use_gpu_for_pooling_score
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
@@ -314,6 +316,7 @@ class ServingScores(OpenAIServing):
         maxsim_scores = compute_maxsim_scores(
             [emb.outputs.data for emb in emb_data_1],
             [emb.outputs.data for emb in emb_data_2],
+            use_gpu_for_pooling_score=self.use_gpu_for_pooling_score,
         )
 
         scores: list[PoolingRequestOutput] = []
