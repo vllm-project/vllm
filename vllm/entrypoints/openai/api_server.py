@@ -93,7 +93,7 @@ async def build_async_engine_client(
     if disable_frontend_multiprocessing is None:
         disable_frontend_multiprocessing = bool(args.disable_frontend_multiprocessing)
 
-    async with build_async_engine_client_from_engine_args(
+    async with build_async_clients_from_engine_args(
         engine_args,
         usage_context=usage_context,
         disable_frontend_multiprocessing=disable_frontend_multiprocessing,
@@ -103,7 +103,7 @@ async def build_async_engine_client(
 
 
 @asynccontextmanager
-async def build_async_engine_client_from_engine_args(
+async def build_async_clients_from_engine_args(
     engine_args: AsyncEngineArgs,
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,

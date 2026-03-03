@@ -185,10 +185,10 @@ async def run_vllm_async(
 ) -> float:
     from vllm import SamplingParams
     from vllm.entrypoints.openai.api_server import (
-        build_async_engine_client_from_engine_args,
+        build_async_clients_from_engine_args,
     )
 
-    async with build_async_engine_client_from_engine_args(
+    async with build_async_clients_from_engine_args(
         engine_args,
         disable_frontend_multiprocessing=disable_frontend_multiprocessing,
     ) as (renderer_client, engine_client):
