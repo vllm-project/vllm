@@ -38,7 +38,6 @@ else:
     LoRAModulePath = object
     StreamOptions = object
 
-
 logger = init_logger(__name__)
 
 VLLM_SUBCMD_PARSER_EPILOG = (
