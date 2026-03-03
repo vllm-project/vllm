@@ -47,6 +47,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.platforms import current_platform
 from vllm.renderers import TokenizeParams
 from vllm.transformers_utils.configs.cohere_asr import CohereASRConfig
 from vllm.transformers_utils.processors.cohere_asr import (
@@ -1962,8 +1963,7 @@ class CohereASRModel(nn.Module):
         self.encoder = ConformerEncoder(
             vllm_config=vllm_config, prefix=f"{prefix}.encoder"
         )
-        # TODO: ekagra make it config driven to use cuda or cpu
-        self.encoder = self.encoder.to("cuda")
+
         self.decoder = CohereASRDecoder(
             vllm_config=vllm_config, prefix=f"{prefix}.decoder"
         )
@@ -2115,7 +2115,7 @@ class CohereASRProcessingInfo(BaseProcessingInfo):
                 mel_norm=preproc.get("mel_norm", "slaney"),
                 stft_exact_pad=preproc.get("stft_exact_pad", False),
                 stft_conv=preproc.get("stft_conv", False),
-                device=preproc.get("device", "cuda"),
+                device=current_platform.device_type,
             )
 
             tokenizer = self.ctx.tokenizer
@@ -2427,9 +2427,6 @@ class CohereASRForConditionalGeneration(
             )
 
         if isinstance(input_features, torch.Tensor):
-            input_features = torch.stack(
-                [feat.to(self.dtype) for feat in input_features]
-            )
             seq_lens = length.reshape(-1)
         else:
             input_features = [
