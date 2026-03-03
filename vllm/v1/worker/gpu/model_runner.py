@@ -311,6 +311,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.speculator is not None:
             # HACK(woosuk)
             self.speculator.set_attn(
+                self.model_state,
                 self.kv_cache_config,
                 self.attn_groups,
                 self.block_tables,
@@ -880,10 +881,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # No actual tokens to run. A dummy run for DP or memory profiling.
             num_reqs = min(num_tokens_after_padding, self.max_num_reqs)
             input_batch = InputBatch.make_dummy(
-                num_reqs=num_reqs,
-                num_tokens=num_tokens_after_padding,
-                input_buffers=self.input_buffers,
-                device=self.device,
+                num_reqs, num_tokens_after_padding, self.input_buffers
             )
             if not skip_attn_for_dummy_run:
                 block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)
