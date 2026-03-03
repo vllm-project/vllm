@@ -174,7 +174,8 @@ def _lora_shrink(
         assert weight.dtype in [torch.float16, torch.bfloat16]
 
     assert inputs.size(1) == lora_a_weights[0].size(-1)
-    assert inputs.is_contiguous()
+    # TP sharding (TP > 1) can produce non-contiguous views; make contiguous for Triton kernel. This is a no-op if the input is already contiguous.
+    inputs = inputs.contiguous()
     assert output_tensor.is_contiguous()
 
     # metadata sanity check
