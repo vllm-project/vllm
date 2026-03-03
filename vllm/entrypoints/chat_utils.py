@@ -7,6 +7,7 @@ import warnings
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass
 from functools import cached_property, lru_cache, partial
 from itertools import accumulate
 from pathlib import Path
@@ -1022,6 +1023,13 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
         placeholder = self._tracker.add("video", coro)
         self._add_placeholder("video", placeholder)
+
+
+@dataclass
+class ChatTemplateConfig:
+    chat_template: str | None = None
+    chat_template_content_format: ChatTemplateContentFormatOption = "auto"
+    trust_request_chat_template: bool = False
 
 
 def validate_chat_template(chat_template: Path | str | None):

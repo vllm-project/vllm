@@ -3,6 +3,7 @@
 
 import itertools
 from collections.abc import Callable, Iterable, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import cloudpickle
@@ -40,8 +41,11 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
+    ChatTemplateConfig,
     ChatTemplateContentFormatOption,
+    load_chat_template,
 )
+from vllm.entrypoints.pooling.io_processor_factories import init_pooling_io_processors
 from vllm.entrypoints.pooling.score.utils import (
     ScoreData,
     ScoreMultiModalParam,
@@ -145,6 +149,7 @@ class LLM:
             a tag name, or a commit id.
         tokenizer_revision: The specific tokenizer version to use. It can be a
             branch name, a tag name, or a commit id.
+        chat_template: The chat template to apply.
         seed: The seed to initialize the random number generator for sampling.
         gpu_memory_utilization: The ratio (between 0 and 1) of GPU memory to
             reserve for the model weights, activations, and KV cache. Higher
@@ -232,6 +237,7 @@ class LLM:
         quantization: QuantizationMethods | None = None,
         revision: str | None = None,
         tokenizer_revision: str | None = None,
+        chat_template: Path | str | None = None,
         seed: int = 0,
         gpu_memory_utilization: float = 0.9,
         swap_space: float = 4,
@@ -384,9 +390,16 @@ class LLM:
 
         self.model_config = self.llm_engine.model_config
         self.renderer = self.llm_engine.renderer
+        self.chat_template = load_chat_template(chat_template)
         self.io_processor = self.llm_engine.io_processor
         self.input_processor = self.llm_engine.input_processor
-
+        self.chat_template_config = ChatTemplateConfig(chat_template=self.chat_template)
+        self.init_pooling_io_processors = init_pooling_io_processors(
+            supported_tasks=supported_tasks,
+            model_config=self.model_config,
+            renderer=self.renderer,
+            chat_template_config=self.chat_template_config,
+        )
         # Cache for __repr__ to avoid repeated collective_rpc calls
         self._cached_repr: str | None = None
 
@@ -1086,7 +1099,7 @@ class LLM:
                 "pooling model."
             )
 
-        if use_io_processor := (isinstance(prompts, dict) and "data" in prompts):
+        if isinstance(prompts, dict) and "data" in prompts:
             if self.io_processor is None:
                 raise ValueError(
                     "No IOProcessor plugin installed. Please refer "
@@ -1120,6 +1133,31 @@ class LLM:
             for p in params_seq:
                 if p.task is None:
                     p.task = "plugin"
+
+            outputs = self._run_completion(
+                prompts=prompts_seq,
+                params=params_seq,
+                output_type=PoolingRequestOutput,
+                use_tqdm=use_tqdm,
+                lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
+            )
+
+            # get the post-processed model outputs
+            assert self.io_processor is not None
+            processed_outputs = self.io_processor.post_process(outputs)
+
+            return [
+                PoolingRequestOutput[Any](
+                    request_id="",
+                    outputs=processed_outputs,
+                    num_cached_tokens=getattr(
+                        processed_outputs, "num_cached_tokens", 0
+                    ),
+                    prompt_token_ids=[],
+                    finished=True,
+                )
+            ]
         else:
             if pooling_params is None:
                 # Use default pooling params.
@@ -1137,32 +1175,36 @@ class LLM:
                     )
                     raise ValueError(msg)
 
-        outputs = self._run_completion(
-            prompts=prompts_seq,
-            params=params_seq,
-            output_type=PoolingRequestOutput,
-            use_tqdm=use_tqdm,
-            lora_request=lora_request,
-            tokenization_kwargs=tokenization_kwargs,
-        )
-
-        if use_io_processor:
-            # get the post-processed model outputs
-            assert self.io_processor is not None
-            processed_outputs = self.io_processor.post_process(outputs)
-
-            return [
-                PoolingRequestOutput[Any](
-                    request_id="",
-                    outputs=processed_outputs,
-                    num_cached_tokens=getattr(
-                        processed_outputs, "num_cached_tokens", 0
-                    ),
-                    prompt_token_ids=[],
-                    finished=True,
+            if pooling_task in self.init_pooling_io_processors:
+                io_processor = self.init_pooling_io_processors[pooling_task]
+                processor_inputs = io_processor.pre_process_offline(
+                    prompts_seq, tokenization_kwargs
                 )
-            ]
+                seq_lora_requests = self._lora_request_to_seq(
+                    lora_request, len(prompts_seq)
+                )
+                seq_priority = self._priority_to_seq(None, len(prompts))
 
+                self._render_and_add_requests(
+                    prompts=processor_inputs,
+                    params=params_seq,
+                    lora_requests=seq_lora_requests,
+                    priorities=seq_priority,
+                )
+
+                outputs = self._run_engine(
+                    use_tqdm=use_tqdm, output_type=PoolingRequestOutput
+                )
+                outputs = io_processor.post_process(outputs)
+            else:
+                outputs = self._run_completion(
+                    prompts=prompts_seq,
+                    params=params_seq,
+                    output_type=PoolingRequestOutput,
+                    use_tqdm=use_tqdm,
+                    lora_request=lora_request,
+                    tokenization_kwargs=tokenization_kwargs,
+                )
         return outputs
 
     def embed(

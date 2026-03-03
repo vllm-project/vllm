@@ -62,11 +62,6 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionResponse,
     TranslationRequest,
 )
-from vllm.entrypoints.pooling.classify.protocol import (
-    ClassificationChatRequest,
-    ClassificationCompletionRequest,
-    ClassificationResponse,
-)
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingBytesResponse,
     EmbeddingChatRequest,
@@ -161,7 +156,6 @@ CompletionLikeRequest: TypeAlias = (
     | TokenizeCompletionRequest
     | DetokenizeRequest
     | EmbeddingCompletionRequest
-    | ClassificationCompletionRequest
     | RerankRequest
     | ScoreRequest
     | PoolingCompletionRequest
@@ -171,7 +165,6 @@ ChatLikeRequest: TypeAlias = (
     ChatCompletionRequest
     | TokenizeChatRequest
     | EmbeddingChatRequest
-    | ClassificationChatRequest
     | PoolingChatRequest
 )
 
@@ -194,11 +187,9 @@ AnyResponse: TypeAlias = (
     | TranscriptionResponse
     | TokenizeResponse
     | PoolingResponse
-    | ClassificationResponse
     | ScoreResponse
     | GenerateResponse
 )
-
 
 RequestT = TypeVar("RequestT", bound=AnyRequest)
 
@@ -223,8 +214,8 @@ class ServeContext(Generic[RequestT]):
 
 class OpenAIServing:
     request_id_prefix: ClassVar[str] = """
-    A short string prepended to every request’s ID (e.g. "embd", "classify")
-    so you can easily tell “this ID came from Embedding vs Classification.”
+    A short string prepended to every request’s ID (e.g. "embd")
+    so you can easily tell “this ID came from Embedding.”
     """
 
     def __init__(
@@ -456,7 +447,7 @@ class OpenAIServing:
     ) -> ErrorResponse | None:
         """
         Default preprocessing hook. Subclasses may override
-        to prepare `ctx` (classification, embedding, etc.).
+        to prepare `ctx` (embedding, etc.).
         """
         return None
 
@@ -817,7 +808,7 @@ class OpenAIServing:
         token_num = len(input_ids)
         max_model_len = self.model_config.max_model_len
 
-        # Note: EmbeddingRequest, ClassificationRequest,
+        # Note: EmbeddingRequest,
         # and ScoreRequest doesn't have max_tokens
         if isinstance(
             request,
@@ -828,8 +819,6 @@ class OpenAIServing:
                 ScoreTextRequest,
                 ScoreQueriesDocumentsRequest,
                 RerankRequest,
-                ClassificationCompletionRequest,
-                ClassificationChatRequest,
             ),
         ):
             # Note: input length can be up to the entire model context length
@@ -839,8 +828,6 @@ class OpenAIServing:
                     ScoreDataRequest: "score",
                     ScoreTextRequest: "score",
                     ScoreQueriesDocumentsRequest: "score",
-                    ClassificationCompletionRequest: "classification",
-                    ClassificationChatRequest: "classification",
                 }
                 operation = operations.get(type(request), "embedding generation")
                 raise VLLMValidationError(
