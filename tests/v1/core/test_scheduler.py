@@ -1609,7 +1609,7 @@ def test_kv_connector_handles_preemption(is_async, use_ec_connector, ec_role):
     # This will have a local and remote cache hit.
     output = scheduler.schedule()
     if is_async:
-        waiting_req_ids = [req.request_id for req in scheduler.waiting]
+        waiting_req_ids = [req.request_id for req in scheduler.waiting_for_remote_kvs]
         assert len(waiting_req_ids) == 1
         _step_until_kv_transfer_finished(scheduler, waiting_req_ids)
         output = scheduler.schedule()
