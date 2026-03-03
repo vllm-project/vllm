@@ -455,4 +455,15 @@ def prepare_fp8_moe_layer_for_fi(
             w2_input_scale=w2_input_scale,
         )
 
+    # Clamp block scales to avoid NaN from the FlashInfer CUTLASS kernel.
+    # Some FP8 models have near-zero block scales (~1e-23) for dead/unused
+    # experts. The CUTLASS kernel doesn't handle these correctly on Hopper
+    # (SM 9.0), producing NaN instead of near-zero output. Clamping to a
+    # small minimum prevents this without affecting model accuracy since
+    # these experts' effective weights are already zero.
+    if block_quant:
+        _FI_CUTLASS_MIN_BLOCK_SCALE = 1e-10
+        w13_scale.clamp_(min=_FI_CUTLASS_MIN_BLOCK_SCALE)
+        w2_scale.clamp_(min=_FI_CUTLASS_MIN_BLOCK_SCALE)
+
     return w13, w2, w13_scale

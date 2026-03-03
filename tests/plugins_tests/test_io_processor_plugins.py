@@ -39,7 +39,7 @@ def _compute_image_hash(base64_data: str) -> str:
 def test_loading_missing_plugin():
     vllm_config = VllmConfig()
     with pytest.raises(ValueError):
-        get_io_processor(vllm_config, "wrong_plugin")
+        get_io_processor(vllm_config, None, "wrong_plugin")
 
 
 @pytest.fixture(scope="function")
@@ -120,12 +120,14 @@ async def test_prithvi_mae_plugin_online(
 def test_prithvi_mae_plugin_offline(
     vllm_runner, model_name: str, image_url: str | dict, plugin: str, expected_hash: str
 ):
-    img_prompt = dict(
+    img_data = dict(
         data=image_url,
         data_format="url",
         image_format="tiff",
         out_data_format="b64_json",
     )
+
+    prompt = dict(data=img_data)
 
     with vllm_runner(
         model_name,
@@ -139,7 +141,7 @@ def test_prithvi_mae_plugin_offline(
         io_processor_plugin=plugin,
         default_torch_num_threads=1,
     ) as llm_runner:
-        pooler_output = llm_runner.get_llm().encode(img_prompt, pooling_task="plugin")
+        pooler_output = llm_runner.get_llm().encode(prompt, pooling_task="plugin")
     output = pooler_output[0].outputs
 
     # verify the output is formatted as expected for this plugin

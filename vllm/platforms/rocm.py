@@ -2,10 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from datetime import timedelta
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING
 
+import regex as re
 import torch
+from torch.distributed import PrefixStore, ProcessGroup
+from torch.distributed.distributed_c10d import is_nccl_available
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -61,13 +65,29 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x744c": "AMD_Radeon_RX7900XTX",
 }
 
-# Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES`
-if "HIP_VISIBLE_DEVICES" in os.environ:
-    val = os.environ["HIP_VISIBLE_DEVICES"]
-    if cuda_val := os.environ.get("CUDA_VISIBLE_DEVICES", None):
-        assert val == cuda_val
-    else:
-        os.environ["CUDA_VISIBLE_DEVICES"] = val
+
+def _sync_hip_cuda_env_vars():
+    """Ensure HIP_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES are consistent.
+    Treats empty string as unset. Raises on genuine conflicts."""
+    hip_val = os.environ.get("HIP_VISIBLE_DEVICES") or None
+    cuda_val = os.environ.get("CUDA_VISIBLE_DEVICES") or None
+
+    if hip_val is not None and cuda_val is not None:
+        if hip_val != cuda_val:
+            raise ValueError(
+                f"Inconsistent GPU visibility env vars: "
+                f"HIP_VISIBLE_DEVICES='{hip_val}' vs "
+                f"CUDA_VISIBLE_DEVICES='{cuda_val}'. "
+                f"Please set only one, or ensure they match."
+            )
+    elif hip_val is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = hip_val
+    elif cuda_val is not None:
+        os.environ["HIP_VISIBLE_DEVICES"] = cuda_val
+
+
+# Sync at import time - catches misconfigurations from process start.
+_sync_hip_cuda_env_vars()
 
 # AMDSMI utils
 # Note that NVML is not affected by `{CUDA/HIP}_VISIBLE_DEVICES`,
@@ -129,6 +149,77 @@ _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
 _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 _ON_GFX942 = "gfx942" in _GCN_ARCH
 _ON_GFX950 = "gfx950" in _GCN_ARCH
+
+
+def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
+    """
+    Parse (major, minor) from a GCN arch string, mirroring how
+    HIP derives hipDeviceProp_t.major / .minor.
+
+    Format: gfx<MAJOR><MINOR><STEPPING>
+      - 1-digit major  (gfx9xx):  "gfx" + M + m + stepping
+      - 2-digit major  (gfx1xxx): "gfx" + MM + m + stepping
+
+    Examples:
+      gfx90a  -> (9, 0)    gfx942  -> (9, 4)    gfx950 -> (9, 5)
+      gfx1100 -> (11, 0)   gfx1101 -> (11, 0)   gfx1200 -> (12, 0)
+
+    Returns None only when the string is not gfx-prefixed at all
+    (i.e. not a ROCm arch string). Raises on any string that looks
+    like a GCN arch but does not match a known layout.
+    """
+    m = re.match(r"gfx(\d+)", gcn_arch)
+    if not m:
+        # Not a gfx string at all — caller should fall back to torch.cuda
+        return None
+
+    digits = m.group(1)
+    n = len(digits)
+
+    if n < 2:
+        raise ValueError(
+            f"GCN arch '{gcn_arch}' has too few digits ({n}) after 'gfx' "
+            f"to derive a (major, minor) capability. "
+            f"Please file a vLLM issue with your GPU model."
+        )
+
+    if n in (2, 3):
+        # 1-digit major: gfx9 family
+        # len 2: major + minor          (e.g. gfx90 from gfx90a)
+        # len 3: major + minor + step   (e.g. gfx942)
+        major = int(digits[0])
+        minor = int(digits[1])
+    elif n == 4:
+        # 2-digit major: gfx10xx, gfx11xx, gfx12xx
+        # major(2) + minor(1) + stepping(1)
+        major = int(digits[:2])
+        minor = int(digits[2])
+    elif n >= 5:
+        raise ValueError(
+            f"GCN arch '{gcn_arch}' has {n} digits after 'gfx', which "
+            f"exceeds the known 4-digit layout (MMms). Cannot determine "
+            f"major/minor split unambiguously. "
+            f"Please file a vLLM issue with your GPU model."
+        )
+
+    if major < 9:
+        raise ValueError(
+            f"Parsed unknown ROCm architecture from GCN arch '{gcn_arch}': "
+            f"major={major}, minor={minor}. "
+            f"Major version < 9 is not expected for any supported AMD GPU. "
+            f"Please file a vLLM issue with your GPU model."
+        )
+
+    if major > 12:
+        raise ValueError(
+            f"Parsed unknown ROCm architecture from GCN arch '{gcn_arch}': "
+            f"major={major}, minor={minor}. "
+            f"Major version > 12 is beyond currently known AMD generations. "
+            f"Please file a vLLM issue with your GPU model so support "
+            f"can be added."
+        )
+
+    return (major, minor)
 
 
 def on_gfx1x() -> bool:
@@ -244,10 +335,8 @@ class RocmPlatform(Platform):
         "mxfp4",
         "petit_nvfp4",
         "torchao",
+        "bitsandbytes",
     ]
-    # bitsandbytes not supported on gfx9 (warp size 64 limitation)
-    if not on_gfx9():
-        supported_quantization += ["bitsandbytes"]
 
     @classmethod
     def import_kernels(cls) -> None:
@@ -384,6 +473,7 @@ class RocmPlatform(Platform):
         return [
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
             AttentionBackendEnum.TORCH_SDPA,
         ]
 
@@ -442,6 +532,15 @@ class RocmPlatform(Platform):
     @classmethod
     @lru_cache(maxsize=8)
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
+        cap = _capability_from_gcn_arch(_GCN_ARCH)
+        if cap is not None:
+            return DeviceCapability(major=cap[0], minor=cap[1])
+
+        logger.warning_once(
+            "Could not derive device capability from GCN arch '%s', "
+            "falling back to torch.cuda (this will initialize CUDA).",
+            _GCN_ARCH,
+        )
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
 
@@ -483,18 +582,61 @@ class RocmPlatform(Platform):
         return device_props.total_memory
 
     @classmethod
-    def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+    def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
         from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.config.compilation import CUDAGraphMode
+
+        compilation_config = vllm_config.compilation_config
+        is_eager_execution = compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+        use_aiter_fused_moe = rocm_aiter_ops.is_fused_moe_enabled()
+        use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
+        use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
+        use_aiter_fused_se = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        use_aiter_triton_rope = rocm_aiter_ops.is_triton_rotary_embed_enabled()
+        #  Aiter rms norm perform best when CUDA Graph capture is enabled.
+        if (
+            use_aiter_rms_norm
+            and not is_eager_execution
+            and "-rms_norm" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+rms_norm")
+
+        if use_aiter_fp8_linear and "-quant_fp8" not in compilation_config.custom_ops:
+            compilation_config.custom_ops.append("+quant_fp8")
+
+        if use_aiter_fused_se and "-grouped_topk" in compilation_config.custom_ops:
+            logger.warning_once(
+                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled, which "
+                "requires the 'grouped_topk' custom op. Overriding the "
+                "user-provided '-grouped_topk'."
+            )
+            compilation_config.custom_ops.remove("-grouped_topk")
+        # Ensure grouped_topk is always enabled when using AITER if
+        # its not disabled by user
+        if (
+            use_aiter_fused_moe
+            and "+grouped_topk" not in compilation_config.custom_ops
+            and "-grouped_topk" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+grouped_topk")
+        # Enable rotary embedding when using AITER if its not disabled by user
+        if (
+            use_aiter_triton_rope
+            and "+rotary_embedding" not in compilation_config.custom_ops
+            and "-rotary_embedding" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+rotary_embedding")
+
+        # Default dispatch to rocm's sparse_attn_indexer implementation
+        compilation_config.custom_ops.append("+sparse_attn_indexer")
+
+    @classmethod
+    def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         from vllm.config.compilation import CUDAGraphMode
 
         cache_config = vllm_config.cache_config
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
-        is_eager_execution = compilation_config == CUDAGraphMode.NONE
-        use_aiter_fused_moe = rocm_aiter_ops.is_fused_moe_enabled()
-        use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
-        use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
-        use_aiter_fused_se = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
 
         if compilation_config.cudagraph_mode.has_full_cudagraphs():
             # decode context parallel does not support full cudagraphs
@@ -533,35 +675,6 @@ class RocmPlatform(Platform):
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
-        #  Aiter rms norm perform best when CUDA Graph capture is enabled.
-        if (
-            use_aiter_rms_norm
-            and not is_eager_execution
-            and "-rms_norm" not in compilation_config.custom_ops
-        ):
-            compilation_config.custom_ops.append("+rms_norm")
-
-        if use_aiter_fp8_linear and "-quant_fp8" not in compilation_config.custom_ops:
-            compilation_config.custom_ops.append("+quant_fp8")
-
-        if use_aiter_fused_se and "-grouped_topk" in compilation_config.custom_ops:
-            logger.warning_once(
-                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled, which "
-                "requires the 'grouped_topk' custom op. Overriding the "
-                "user-provided '-grouped_topk'."
-            )
-            compilation_config.custom_ops.remove("-grouped_topk")
-        # Ensure grouped_topk is always enabled when using AITER if
-        # its not disabled by user
-        if (
-            use_aiter_fused_moe
-            and "+grouped_topk" not in compilation_config.custom_ops
-            and "-grouped_topk" not in compilation_config.custom_ops
-        ):
-            compilation_config.custom_ops.append("+grouped_topk")
-
-        # Default dispatch to rocm's sparse_attn_indexer implementation
-        compilation_config.custom_ops.append("+sparse_attn_indexer")
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
@@ -644,6 +757,37 @@ class RocmPlatform(Platform):
         return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
 
     @classmethod
+    def stateless_init_device_torch_dist_pg(
+        cls,
+        backend: str,
+        prefix_store: PrefixStore,
+        group_rank: int,
+        group_size: int,
+        timeout: timedelta,
+    ) -> ProcessGroup:
+        assert is_nccl_available()
+        pg: ProcessGroup = ProcessGroup(
+            prefix_store,
+            group_rank,
+            group_size,
+        )
+        from torch.distributed.distributed_c10d import ProcessGroupNCCL
+
+        backend_options = ProcessGroupNCCL.Options()
+        backend_options._timeout = timeout
+
+        backend_class = ProcessGroupNCCL(
+            prefix_store, group_rank, group_size, backend_options
+        )
+        backend_type = ProcessGroup.BackendType.NCCL
+        device = torch.device("cuda")
+        pg._set_default_backend(backend_type)
+        backend_class._set_sequence_number_for_group()
+
+        pg._register_backend(device, backend_type, backend_class)
+        return pg
+
+    @classmethod
     def device_count(cls) -> int:
         return cuda_device_count_stateless()
 
@@ -675,3 +819,7 @@ class RocmPlatform(Platform):
     @classmethod
     def support_static_graph_mode(cls) -> bool:
         return True
+
+    @classmethod
+    def num_compute_units(cls, device_id=0):
+        return torch.cuda.get_device_properties(device_id).multi_processor_count

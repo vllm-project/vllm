@@ -113,12 +113,10 @@ markers = [
     "cpu_test: mark test as CPU-only test",
     "split: run this test as part of a split",
     "distributed: run this test only in distributed GPU tests",
-    "skip_v1: do not run this test with v1",
     "optional: optional tests that are automatically skipped, include --optional to run them",
 ]
 
 [tool.ty.src]
-root = "./vllm"
 respect-ignore-files = true
 
 [tool.ty.environment]

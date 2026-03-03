@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     disable_inplace,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_input_dtype,
     marlin_make_workspace_new,
     marlin_moe_intermediate_size,
     marlin_quant_input,
@@ -550,6 +551,8 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
         self.w2_g_idx_sort_indices = w2_g_idx_sort_indices
         self.is_k_full = is_k_full
+        self.input_dtype = get_marlin_input_dtype()
+
         super().__init__(
             moe_config=moe_config,
             quant_config=quant_config,
@@ -583,10 +586,13 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
+        # Marlin uses apply_moe_activation() callback for activation,
+        # so any activation supported there can be used here.
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUSTEP,
             MoEActivation.SILU_NO_MUL,
             MoEActivation.GELU_NO_MUL,
             MoEActivation.RELU2_NO_MUL,
@@ -736,6 +742,7 @@ class MarlinExperts(MarlinExpertsBase):
             sort_indices1=self.w13_g_idx_sort_indices,
             sort_indices2=self.w2_g_idx_sort_indices,
             is_k_full=self.is_k_full,
+            input_dtype=self.input_dtype,
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:

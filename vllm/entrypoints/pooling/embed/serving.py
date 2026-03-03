@@ -28,11 +28,10 @@ from vllm.entrypoints.pooling.utils import (
     encode_pooling_output_base64,
     encode_pooling_output_float,
 )
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import ProcessorInputs, TokensPrompt, token_inputs
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.pooling_params import PoolingParams
-from vllm.renderers.inputs import TokPrompt
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import chunk_list
 from vllm.utils.serial_utils import EmbedDType, Endianness
@@ -256,7 +255,7 @@ class OpenAIServingEmbedding(OpenAIServing):
             chunk_request_id = f"{ctx.request_id}-prompt-{prompt_idx}-chunk-{chunk_idx}"
 
             # Create engine prompt for this chunk
-            chunk_engine_prompt = TokensPrompt(prompt_token_ids=chunk_tokens)
+            chunk_engine_prompt = token_inputs(chunk_tokens)
 
             # Log the chunk
             self._log_inputs(
@@ -266,16 +265,12 @@ class OpenAIServingEmbedding(OpenAIServing):
                 lora_request=ctx.lora_request,
             )
 
-            tok_params = ctx.request.build_tok_params(self.model_config)
-            tokenization_kwargs = tok_params.get_encode_kwargs()
-
             # Create generator for this chunk and wrap it to return indices
             original_generator = self.engine_client.encode(
                 chunk_engine_prompt,
                 pooling_params,
                 chunk_request_id,
                 lora_request=ctx.lora_request,
-                tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=ctx.request.priority,
             )
@@ -362,7 +357,7 @@ class OpenAIServingEmbedding(OpenAIServing):
     async def _create_single_prompt_generator(
         self,
         ctx: EmbeddingServeContext,
-        engine_prompt: TokPrompt,
+        engine_prompt: ProcessorInputs,
         pooling_params: PoolingParams,
         trace_headers: Mapping[str, str] | None,
         prompt_index: int,
@@ -377,16 +372,12 @@ class OpenAIServingEmbedding(OpenAIServing):
             lora_request=ctx.lora_request,
         )
 
-        tok_params = ctx.request.build_tok_params(self.model_config)
-        tokenization_kwargs = tok_params.get_encode_kwargs()
-
         # Return the original generator without wrapping
         return self.engine_client.encode(
             engine_prompt,
             pooling_params,
             request_id_item,
             lora_request=ctx.lora_request,
-            tokenization_kwargs=tokenization_kwargs,
             trace_headers=trace_headers,
             priority=ctx.request.priority,
         )

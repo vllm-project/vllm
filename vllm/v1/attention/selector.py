@@ -27,6 +27,7 @@ class AttentionSelectorConfig(NamedTuple):
     has_sink: bool = False
     use_sparse: bool = False
     use_mm_prefix: bool = False
+    use_per_head_quant_scales: bool = False
     attn_type: str = AttentionType.DECODER
 
     def __repr__(self):
@@ -39,6 +40,7 @@ class AttentionSelectorConfig(NamedTuple):
             f"has_sink={self.has_sink}, "
             f"use_sparse={self.use_sparse}, "
             f"use_mm_prefix={self.use_mm_prefix}, "
+            f"use_per_head_quant_scales={self.use_per_head_quant_scales}, "
             f"attn_type={self.attn_type})"
         )
 
@@ -52,6 +54,7 @@ def get_attn_backend(
     has_sink: bool = False,
     use_sparse: bool = False,
     use_mm_prefix: bool = False,
+    use_per_head_quant_scales: bool = False,
     attn_type: str | None = None,
     num_heads: int | None = None,
 ) -> type[AttentionBackend]:
@@ -77,6 +80,7 @@ def get_attn_backend(
         has_sink=has_sink,
         use_sparse=use_sparse,
         use_mm_prefix=use_mm_prefix,
+        use_per_head_quant_scales=use_per_head_quant_scales,
         attn_type=attn_type or AttentionType.DECODER,
     )
 

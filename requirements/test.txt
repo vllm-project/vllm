@@ -5,9 +5,7 @@ absl-py==2.1.0
     #   rouge-score
     #   tensorboard
 accelerate==1.0.1
-    # via
-    #   lm-eval
-    #   peft
+    # via peft
 aenum==3.1.16
     # via lightly
 affine==2.4.0
@@ -68,7 +66,7 @@ backoff==2.2.1
     # via
     #   -r requirements/test.in
     #   schemathesis
-bitsandbytes==0.46.1
+bitsandbytes==0.49.2
     # via
     #   -r requirements/test.in
     #   lightning
@@ -138,7 +136,6 @@ colorama==0.4.6
     #   perceptron
     #   sacrebleu
     #   schemathesis
-    #   tqdm-multiprocess
 colorful==0.5.6
     # via ray
 colorlog==6.10.1
@@ -290,9 +287,13 @@ greenlet==3.2.3
     # via sqlalchemy
 grpcio==1.78.0
     # via
+    #   -r requirements/test.in
+    #   grpcio-reflection
     #   grpcio-tools
     #   ray
     #   tensorboard
+grpcio-reflection==1.78.0
+    # via -r requirements/test.in
 grpcio-tools==1.78.0
     # via -r requirements/test.in
 h11==0.14.0
@@ -383,6 +384,7 @@ jinja2==3.1.6
     # via
     #   datamodel-code-generator
     #   genai-perf
+    #   lm-eval
     #   torch
 jiwer==3.0.5
     # via -r requirements/test.in
@@ -448,7 +450,7 @@ lightning-utilities==0.14.3
     #   torchmetrics
 llvmlite==0.44.0
     # via numba
-lm-eval==0.4.9.2
+lm-eval==0.4.11
     # via -r requirements/test.in
 lxml==5.3.0
     # via
@@ -489,7 +491,7 @@ msgpack==1.1.0
     # via
     #   librosa
     #   ray
-mteb==2.1.2
+mteb==2.8.3
     # via -r requirements/test.in
 multidict==6.1.0
     # via
@@ -513,8 +515,6 @@ numba==0.61.2
     # via
     #   -r requirements/test.in
     #   librosa
-numexpr==2.10.1
-    # via lm-eval
 numpy==2.2.6
     # via
     #   -r requirements/test.in
@@ -540,11 +540,11 @@ numpy==2.2.6
     #   librosa
     #   lightly
     #   lightly-utils
+    #   lm-eval
     #   matplotlib
     #   mistral-common
     #   mteb
     #   numba
-    #   numexpr
     #   opencv-python-headless
     #   optuna
     #   pandas
@@ -657,6 +657,7 @@ orjson==3.11.5
 packaging==24.2
     # via
     #   accelerate
+    #   bitsandbytes
     #   black
     #   datamodel-code-generator
     #   datasets
@@ -707,9 +708,7 @@ pathvalidate==3.2.1
 patsy==1.0.1
     # via statsmodels
 peft==0.16.0
-    # via
-    #   -r requirements/test.in
-    #   lm-eval
+    # via -r requirements/test.in
 perceptron==0.1.4
     # via -r requirements/test.in
 perf-analyzer==0.1.0
@@ -763,6 +762,7 @@ protobuf==6.33.2
     # via
     #   google-api-core
     #   googleapis-common-protos
+    #   grpcio-reflection
     #   grpcio-tools
     #   opentelemetry-proto
     #   proto-plus
@@ -792,8 +792,6 @@ pyasn1==0.6.1
     #   rsa
 pyasn1-modules==0.4.2
     # via google-auth
-pybind11==2.13.6
-    # via lm-eval
 pycocotools==2.0.8
     # via terratorch
 pycountry==24.6.1
@@ -1171,7 +1169,6 @@ torch==2.10.0+cu129
     #   kornia
     #   lightly
     #   lightning
-    #   lm-eval
     #   mteb
     #   open-clip-torch
     #   peft
@@ -1229,15 +1226,11 @@ tqdm==4.67.3
     #   sentence-transformers
     #   tacoreader
     #   terratorch
-    #   tqdm-multiprocess
     #   transformers
-tqdm-multiprocess==0.0.11
-    # via lm-eval
 transformers==4.57.5
     # via
     #   -r requirements/test.in
     #   genai-perf
-    #   lm-eval
     #   peft
     #   sentence-transformers
     #   transformers-stream-generator
@@ -1272,6 +1265,7 @@ typing-extensions==4.15.0
     #   librosa
     #   lightning
     #   lightning-utilities
+    #   lm-eval
     #   mistral-common
     #   mteb
     #   opentelemetry-api

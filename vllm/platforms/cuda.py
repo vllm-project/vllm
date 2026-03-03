@@ -6,10 +6,13 @@ pynvml. However, it should not initialize cuda context.
 
 import os
 from collections.abc import Callable
+from datetime import timedelta
 from functools import cache, wraps
 from typing import TYPE_CHECKING, TypeVar
 
 import torch
+from torch.distributed import PrefixStore, ProcessGroup
+from torch.distributed.distributed_c10d import is_nccl_available
 from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
@@ -411,8 +414,10 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
         return [
-            AttentionBackendEnum.TORCH_SDPA,
             AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.TRITON_ATTN,
+            AttentionBackendEnum.TORCH_SDPA,
+            AttentionBackendEnum.FLASHINFER,
         ]
 
     @classmethod
@@ -430,14 +435,25 @@ class CudaPlatformBase(Platform):
             logger.info_once(f"Using backend {backend} for vit attention")
             return backend
 
-        # Try FlashAttention first
-        if (cc := cls.get_device_capability()) and cc.major >= 8:
+        cc = cls.get_device_capability()
+        for vit_attn_backend in cls.get_supported_vit_attn_backends():
+            if vit_attn_backend == AttentionBackendEnum.TORCH_SDPA:
+                continue
             try:
-                backend_class = AttentionBackendEnum.FLASH_ATTN.get_class()
-                if backend_class.supports_head_size(
+                backend_class = vit_attn_backend.get_class()
+                is_backend_supported = backend_class.supports_head_size(
                     head_size
-                ) and backend_class.supports_dtype(dtype):
-                    return AttentionBackendEnum.FLASH_ATTN
+                ) and backend_class.supports_dtype(dtype)
+                if cc is not None:
+                    is_backend_supported = (
+                        is_backend_supported
+                        and backend_class.supports_compute_capability(cc)
+                    )
+                if is_backend_supported:
+                    logger.info_once(
+                        f"Using backend {vit_attn_backend} for vit attention"
+                    )
+                    return vit_attn_backend
             except ImportError:
                 pass
 
@@ -468,6 +484,37 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
         return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
+
+    @classmethod
+    def stateless_init_device_torch_dist_pg(
+        cls,
+        backend: str,
+        prefix_store: PrefixStore,
+        group_rank: int,
+        group_size: int,
+        timeout: timedelta,
+    ) -> ProcessGroup:
+        assert is_nccl_available()
+        pg: ProcessGroup = ProcessGroup(
+            prefix_store,
+            group_rank,
+            group_size,
+        )
+        from torch.distributed.distributed_c10d import ProcessGroupNCCL
+
+        backend_options = ProcessGroupNCCL.Options()
+        backend_options._timeout = timeout
+
+        backend_class = ProcessGroupNCCL(
+            prefix_store, group_rank, group_size, backend_options
+        )
+        backend_type = ProcessGroup.BackendType.NCCL
+        device = torch.device("cuda")
+        pg._set_default_backend(backend_type)
+        backend_class._set_sequence_number_for_group()
+
+        pg._register_backend(device, backend_type, backend_class)
+        return pg
 
     @classmethod
     def device_count(cls) -> int:
@@ -525,6 +572,10 @@ class CudaPlatformBase(Platform):
     @classmethod
     def support_static_graph_mode(cls) -> bool:
         return True
+
+    @classmethod
+    def num_compute_units(cls, device_id=0):
+        return torch.cuda.get_device_properties(device_id).multi_processor_count
 
 
 # NVML utils

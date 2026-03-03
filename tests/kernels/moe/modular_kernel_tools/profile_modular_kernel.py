@@ -125,7 +125,7 @@ if __name__ == "__main__":
         description=(
             "Run single prepare-finalize & fused-experts combination test"
             "Example : python3 -m tests.kernels.moe.modular_kernel_tools.profile_modular_kernel "  # noqa: E501
-            "--pf-type PplxPrepareAndFinalize --experts-type BatchedTritonExperts"
+            "--pf-type DeepEPLLPrepareAndFinalize --experts-type BatchedTritonExperts"
         )
     )
     args = parser.parse_args()
