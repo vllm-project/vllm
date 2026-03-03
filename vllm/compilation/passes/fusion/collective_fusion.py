@@ -16,12 +16,141 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
+from ..fx_utils import is_func
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
 logger = init_logger(__name__)
+
+VIEW_LIKE_OPS = (
+    torch.ops.aten.view.default,
+    torch.ops.aten.reshape.default,
+    torch.ops.aten._unsafe_view.default,
+    torch.ops.aten.contiguous.default,
+    torch.ops.aten.clone.default,
+)
+
+
+def _is_view_like(node: fx.Node) -> bool:
+    return any(is_func(node, op) for op in VIEW_LIKE_OPS)
+
+
+def _strip_view_like(node: fx.Node) -> fx.Node:
+    while _is_view_like(node):
+        parent = node.args[0]
+        if not isinstance(parent, fx.Node):
+            break
+        node = parent
+    return node
+
+
+def _node_ndim(node: fx.Node) -> int | None:
+    val = node.meta.get("val")
+    if hasattr(val, "dim"):
+        return int(val.dim())
+    return None
+
+
+def _unwrap_bmm_fp8_arg_to_2d(arg: object) -> fx.Node | None:
+    if not isinstance(arg, fx.Node):
+        return None
+
+    node: fx.Node = _strip_view_like(arg)
+    if is_func(node, torch.ops.aten.unsqueeze.default):
+        dim = node.kwargs.get("dim", node.args[1] if len(node.args) > 1 else None)
+        if dim != 0:
+            return None
+        src = node.args[0]
+        if not isinstance(src, fx.Node):
+            return None
+        src = _strip_view_like(src)
+        ndim = _node_ndim(src)
+        if ndim is not None and ndim != 2:
+            return None
+        return src
+
+    ndim = _node_ndim(node)
+    if ndim is not None and ndim != 2:
+        return None
+    return node
+
+
+def _parse_reduce_scatter(
+    node: fx.Node,
+) -> tuple[fx.Node, object, object, object] | None:
+    if not is_func(node, torch.ops.vllm.reduce_scatter.default):
+        return None
+
+    rs_input = node.kwargs.get("tensor", node.args[0] if len(node.args) > 0 else None)
+    dim = node.kwargs.get("dim", node.args[1] if len(node.args) > 1 else None)
+    world_size = node.kwargs.get(
+        "world_size", node.args[2] if len(node.args) > 2 else None
+    )
+    group_name = node.kwargs.get(
+        "group_name", node.args[3] if len(node.args) > 3 else None
+    )
+
+    if not isinstance(rs_input, fx.Node):
+        return None
+    return rs_input, dim, world_size, group_name
+
+
+def _parse_all_gather(
+    node: fx.Node,
+) -> tuple[fx.Node, object, object, object] | None:
+    if not is_func(node, torch.ops.vllm.all_gather.default):
+        return None
+
+    ag_input = node.kwargs.get("tensor", node.args[0] if len(node.args) > 0 else None)
+    dim = node.kwargs.get("dim", node.args[1] if len(node.args) > 1 else None)
+    world_size = node.kwargs.get(
+        "world_size", node.args[2] if len(node.args) > 2 else None
+    )
+    group_name = node.kwargs.get(
+        "group_name", node.args[3] if len(node.args) > 3 else None
+    )
+
+    if not isinstance(ag_input, fx.Node):
+        return None
+    return ag_input, dim, world_size, group_name
+
+
+def _parse_bmm_fp8(
+    node: fx.Node,
+) -> tuple[fx.Node, fx.Node, object, object, object, object] | None:
+    if not is_func(node, torch.ops.vllm.bmm_fp8.default):
+        return None
+
+    a = node.kwargs.get("A", node.args[0] if len(node.args) > 0 else None)
+    b = node.kwargs.get("B", node.args[1] if len(node.args) > 1 else None)
+    a_scale = node.kwargs.get("A_scale", node.args[2] if len(node.args) > 2 else None)
+    b_scale = node.kwargs.get("B_scale", node.args[3] if len(node.args) > 3 else None)
+    out_dtype = node.kwargs.get("dtype", node.args[4] if len(node.args) > 4 else None)
+    backend = node.kwargs.get("backend", node.args[5] if len(node.args) > 5 else None)
+
+    a_2d = _unwrap_bmm_fp8_arg_to_2d(a)
+    b_2d = _unwrap_bmm_fp8_arg_to_2d(b)
+    if a_2d is None or b_2d is None:
+        return None
+
+    return a_2d, b_2d, a_scale, b_scale, out_dtype, backend
+
+
+def _has_reduce_scatter_consumer_through_view_like(node: fx.Node) -> bool:
+    worklist = list(node.users)
+    visited: set[fx.Node] = set()
+    while worklist:
+        user = worklist.pop()
+        if user in visited:
+            continue
+        visited.add(user)
+        if is_func(user, torch.ops.vllm.reduce_scatter.default):
+            return True
+        if _is_view_like(user):
+            worklist.extend(user.users)
+    return False
 
 
 class BasePattern:
@@ -214,6 +343,7 @@ class BmmFP8ReduceScatterPattern(BasePattern):
                 self.tp.unique_name,
                 self.tp_size,
                 self.dtype,
+                "auto",
             )
 
         pm.register_replacement(
@@ -476,7 +606,110 @@ class AsyncTPPass(VllmPatternMatcherPass):
         tp_size = get_tensor_model_parallel_world_size()
         return bool(compile_range.is_single_size() and compile_range.end % tp_size == 0)
 
+    def _rewrite_all_gather_bmm_fp8_variants(self, graph: fx.Graph) -> int:
+        replaced = 0
+        for node in list(graph.nodes):
+            parsed_bmm = _parse_bmm_fp8(node)
+            if parsed_bmm is None:
+                continue
+            if _has_reduce_scatter_consumer_through_view_like(node):
+                continue
+
+            a_2d, b_2d, a_scale, b_scale, out_dtype, backend = parsed_bmm
+            if not isinstance(backend, str):
+                continue
+
+            ag_node = _strip_view_like(a_2d)
+            parsed_ag = _parse_all_gather(ag_node)
+            if parsed_ag is None:
+                continue
+            ag_input, dim, world_size, group_name = parsed_ag
+            if dim != 0:
+                continue
+            if not isinstance(world_size, int) or not isinstance(group_name, str):
+                continue
+
+            replace_targets = [
+                user
+                for user in node.users
+                if _is_view_like(user) and _node_ndim(user) == 2
+            ]
+            if len(replace_targets) != 1:
+                continue
+            target = replace_targets[0]
+
+            with graph.inserting_before(target):
+                fused = graph.call_function(
+                    torch.ops.vllm.fused_all_gather_bmm_fp8.default,
+                    args=(
+                        ag_input,
+                        b_2d,
+                        a_scale,
+                        b_scale,
+                        group_name,
+                        world_size,
+                        out_dtype,
+                        backend,
+                    ),
+                )
+            fused.meta = dict(target.meta)
+            target.replace_all_uses_with(fused)
+            graph.erase_node(target)
+            replaced += 1
+
+        if replaced > 0:
+            graph.eliminate_dead_code()
+        return replaced
+
+    def _rewrite_bmm_fp8_reduce_scatter_variants(self, graph: fx.Graph) -> int:
+        replaced = 0
+        for node in list(graph.nodes):
+            parsed_rs = _parse_reduce_scatter(node)
+            if parsed_rs is None:
+                continue
+
+            rs_input, dim, world_size, group_name = parsed_rs
+            if dim != 0:
+                continue
+            if not isinstance(world_size, int) or not isinstance(group_name, str):
+                continue
+
+            bmm_node = _strip_view_like(rs_input)
+            parsed_bmm = _parse_bmm_fp8(bmm_node)
+            if parsed_bmm is None:
+                continue
+
+            a_2d, b_2d, a_scale, b_scale, out_dtype, backend = parsed_bmm
+            if not isinstance(backend, str):
+                continue
+
+            with graph.inserting_before(node):
+                fused = graph.call_function(
+                    torch.ops.vllm.fused_bmm_fp8_reduce_scatter.default,
+                    args=(
+                        a_2d,
+                        b_2d,
+                        a_scale,
+                        b_scale,
+                        group_name,
+                        world_size,
+                        out_dtype,
+                        backend,
+                    ),
+                )
+            fused.meta = dict(node.meta)
+            node.replace_all_uses_with(fused)
+            graph.erase_node(node)
+            replaced += 1
+
+        if replaced > 0:
+            graph.eliminate_dead_code()
+        return replaced
+
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
-        self.matched_count = self.patterns.apply(graph)
+        matched_by_patterns = self.patterns.apply(graph)
+        matched_ag_bmm = self._rewrite_all_gather_bmm_fp8_variants(graph)
+        matched_bmm_rs = self._rewrite_bmm_fp8_reduce_scatter_variants(graph)
+        self.matched_count = matched_by_patterns + matched_ag_bmm + matched_bmm_rs
         logger.debug("Replaced %s patterns", self.matched_count)

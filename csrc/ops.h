@@ -424,4 +424,10 @@ torch::Tensor fused_bmm_fp8_reduce_scatter(
     const torch::Tensor& a_scale, const torch::Tensor& b_scale,
     at::ScalarType out_dtype, fptr_t custom_ar_ptr, fptr_t reg_buffer,
     int64_t reg_buffer_sz_bytes, int64_t rank, int64_t world_size);
+
+torch::Tensor fused_all_gather_bmm_fp8(
+    const torch::Tensor& a, const torch::Tensor& b,
+    const torch::Tensor& a_scale, const torch::Tensor& b_scale,
+    at::ScalarType out_dtype, fptr_t custom_ar_ptr, fptr_t reg_buffer,
+    int64_t reg_buffer_sz_bytes, int64_t rank, int64_t world_size);
 #endif

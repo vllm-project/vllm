@@ -450,6 +450,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                  Tensor b_scales, Tensor? bias) -> ()");
   ops.impl("cutlass_scaled_mm", torch::kCUDA, &cutlass_scaled_mm);
 
+  // Fused all_gather + FP8 GEMM path for Blackwell AsyncTP.
+  ops.def(
+      "fused_all_gather_bmm_fp8("
+      "    Tensor a,"
+      "    Tensor b,"
+      "    Tensor a_scale,"
+      "    Tensor b_scale,"
+      "    ScalarType out_dtype,"
+      "    int custom_ar_ptr,"
+      "    int reg_buffer,"
+      "    int reg_buffer_sz_bytes,"
+      "    int rank,"
+      "    int world_size"
+      ") -> Tensor");
+  ops.impl("fused_all_gather_bmm_fp8", torch::kCUDA, &fused_all_gather_bmm_fp8);
+
   // Fused FP8 GEMM + reduce_scatter path for Blackwell AsyncTP.
   ops.def(
       "fused_bmm_fp8_reduce_scatter("

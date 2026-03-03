@@ -367,6 +367,27 @@ __global__ void __launch_bounds__(512, 1)
 
 template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
+    cross_device_gather_1stage(RankData* _dp, RankSignals sg, Signal* self_sg,
+                               T* __restrict__ result, int rank, int size) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = gridDim.x * blockDim.x;
+  auto dp = *_dp;
+
+  barrier_at_start<ngpus>(sg, self_sg, rank);
+
+  for (int idx = tid; idx < size; idx += stride) {
+#pragma unroll
+    for (int i = 0; i < ngpus; i++) {
+      reinterpret_cast<T*>(result)[i * size + idx] =
+          reinterpret_cast<const T*>(dp.ptrs[i])[idx];
+    }
+  }
+
+  barrier_at_end<ngpus, true>(sg, self_sg, rank);
+}
+
+template <typename T, int ngpus>
+__global__ void __launch_bounds__(512, 1)
     cross_device_reduce_scatter_1stage(RankData* _dp, RankSignals sg,
                                        Signal* self_sg, T* __restrict__ result,
                                        int rank, int size) {
@@ -638,6 +659,63 @@ class CustomAllreduce {
     }
 #undef REDUCE_CASE
 #undef KL
+  }
+
+  template <typename T>
+  void allgather(cudaStream_t stream, T* input, T* output, int size,
+                 int threads = 512, int block_limit = defaultBlockLimit) {
+    if (block_limit > kMaxBlocks)
+      throw std::runtime_error("max supported block limit is " +
+                               std::to_string(kMaxBlocks) + ". Got " +
+                               std::to_string(block_limit));
+
+    RankData* ptrs;
+    cudaStreamCaptureStatus status;
+    CUDACHECK(cudaStreamIsCapturing(stream, &status));
+    if (status == cudaStreamCaptureStatusActive) {
+      ptrs = d_rank_data_base_ + graph_unreg_buffers_.size();
+      graph_unreg_buffers_.push_back(input);
+    } else {
+      auto it = buffers_.find(input);
+      if (it == buffers_.end())
+        throw std::runtime_error(
+            "buffer address " +
+            std::to_string(reinterpret_cast<uint64_t>(input)) +
+            " is not registered!");
+      ptrs = it->second;
+    }
+
+    int blocks = std::min(block_limit, (size + threads - 1) / threads);
+
+#define KL_AG(ngpus)                                                    \
+  cross_device_gather_1stage<T, ngpus><<<blocks, threads, 0, stream>>>( \
+      ptrs, sg_, self_sg_, output, rank_, size);
+
+    switch (world_size_) {
+      case 2: {
+        KL_AG(2)
+        break;
+      }
+      case 4: {
+        KL_AG(4)
+        break;
+      }
+      case 6: {
+        KL_AG(6)
+        break;
+      }
+      case 8: {
+        KL_AG(8)
+        break;
+      }
+      default:
+        throw std::runtime_error(
+            "custom allgather only supports num gpus in (2,4,6,8). Actual "
+            "num gpus = " +
+            std::to_string(world_size_));
+    }
+
+#undef KL_AG
   }
 
   template <typename T>
