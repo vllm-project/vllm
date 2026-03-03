@@ -112,15 +112,18 @@ class UBatchWrapper:
         self.cudagraphs: dict[int, CUDAGraphMetaData] = {}
 
         self.cudagraph_wrapper = None
-        self.graph_pool = None
         if runtime_mode is not CUDAGraphMode.NONE:
             self.cudagraph_wrapper = CUDAGraphWrapper(
                 runnable, vllm_config, runtime_mode=runtime_mode
             )
-            self.graph_pool = current_platform.get_global_graph_pool()
 
         self.sm_control = self._create_sm_control_context(vllm_config)
         self.device = device
+
+    def clear_graphs(self) -> None:
+        self.cudagraphs.clear()
+        if self.cudagraph_wrapper is not None:
+            self.cudagraph_wrapper.clear_graphs()
 
     @staticmethod
     def _create_sm_control_context(vllm_config: VllmConfig):

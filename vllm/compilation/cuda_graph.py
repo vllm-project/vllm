@@ -205,6 +205,9 @@ class CUDAGraphWrapper:
         # in case we need to access the original runnable.
         return self.runnable
 
+    def clear_graphs(self) -> None:
+        self.concrete_cudagraph_entries.clear()
+
     def __call__(self, *args: Any, **kwargs: Any) -> Any | None:
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
