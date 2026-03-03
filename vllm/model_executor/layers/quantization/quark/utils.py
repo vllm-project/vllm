@@ -17,7 +17,7 @@ def deep_compare(dict1: Any, dict2: Any) -> bool:
             return False
         return all(deep_compare(dict1[k], dict2[k]) for k in dict1)
     elif isinstance(dict1, list):
-        return set(dict1) == set(dict2)
+        return all(deep_compare(dict1[i], dict2[i]) for i in range(len(dict1)))
     else:
         return dict1 == dict2
 
