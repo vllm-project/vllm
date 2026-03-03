@@ -1714,7 +1714,7 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   // Given the above, how many CUs would we need?
   int CuNeeded = rndup_cus * GrpsShrB;
 
-  if (CuNeeded > CuCount) std::runtime_error("Invalid wvSplitKrc size");
+  if (CuNeeded > CuCount) throw std::runtime_error("Invalid wvSplitKrc size");
 
   // Can we increase SplitK by shrinking the K-shared to 256?
   int chunkk = (CuNeeded * 2 <= CuCount) ? 2 : 1;
