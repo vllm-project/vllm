@@ -1007,6 +1007,7 @@ class CompilationConfig:
                 # https://github.com/vllm-project/vllm/issues/33267
                 if not self.use_inductor_graph_partition:
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
+                    self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
             elif len(self.splitting_ops) == 0:
                 if (
