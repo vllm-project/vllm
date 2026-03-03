@@ -2086,9 +2086,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             # RoCM and the latter has an additional parameter to control
             # FA2 vs FA3
             self.flash_attn_varlen_func = flash_attn_varlen_func
-            self.vllm_flash_attn_version = get_flash_attn_version(
-                head_size=self.qk_head_dim
-            )
+            self.vllm_flash_attn_version = get_flash_attn_version()
             if self.vllm_flash_attn_version is not None:
                 self.flash_attn_varlen_func = functools.partial(
                     flash_attn_varlen_func, fa_version=self.vllm_flash_attn_version
