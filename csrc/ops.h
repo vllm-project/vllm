@@ -8,7 +8,7 @@
 
 #include <vector>
 
-torch::Tensor weak_ref_tensor(torch::Tensor& tensor) {
+inline torch::Tensor weak_ref_tensor(torch::Tensor& tensor) {
   // Ensure tensor is on CUDA
   if (!tensor.is_cuda()) {
     throw std::runtime_error("Tensor must be on CUDA device");
