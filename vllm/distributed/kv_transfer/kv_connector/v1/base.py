@@ -92,7 +92,8 @@ class KVCacheTopology:
     """
 
     num_blocks_dim: int
-    num_layers_dim: int
+    # None for tensors not shared across layers (isolated groups).
+    num_layers_dim: int | None = None
     # None for MLA (heads folded into latent dim) and Mamba (no attention).
     num_heads_dim: int | None = None
     # None when tokens-per-block is folded into the page bytes
