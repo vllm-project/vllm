@@ -17,6 +17,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
@@ -44,7 +45,6 @@ class EagleSpeculator:
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
-        self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
         self.vocab_size = self.draft_model_config.get_vocab_size()
         self.dtype = vllm_config.model_config.dtype
 
@@ -77,10 +77,12 @@ class EagleSpeculator:
 
     def set_attn(
         self,
+        model_state: ModelState,
         kv_cache_config: KVCacheConfig,
         attn_groups: list[list[AttentionGroup]],
         block_tables: BlockTables,
     ) -> None:
+        self.model_state = model_state
         self.kv_cache_config = kv_cache_config
         self.attn_groups = attn_groups
         self.block_tables = block_tables
@@ -172,6 +174,7 @@ class EagleSpeculator:
         logger.info("Capturing model for Eagle speculator...")
         self.cudagraph_manager.capture(
             self.generate_draft,
+            self.model_state,
             self.input_buffers,
             self.block_tables,
             self.attn_groups,
@@ -182,6 +185,8 @@ class EagleSpeculator:
     def propose(
         self,
         input_batch: InputBatch,
+        attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
         # [num_tokens, hidden_size]
         last_hidden_states: torch.Tensor,
         # num_layers x [num_tokens, hidden_size]
@@ -229,8 +234,8 @@ class EagleSpeculator:
         # TODO(woosuk): Support CUDA graph for prefill.
         last_hidden_states, hidden_states = self.run_model(
             num_tokens,
-            input_batch.attn_metadata,
-            input_batch.slot_mappings,
+            attn_metadata,
+            slot_mappings,
             num_tokens_across_dp=None,  # FIXME
         )
         sample_hidden_states = last_hidden_states[last_token_indices]

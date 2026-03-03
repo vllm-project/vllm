@@ -65,6 +65,8 @@ from vllm.utils.torch_utils import (
 FP8_DTYPE = current_platform.fp8_dtype()
 
 if current_platform.is_rocm():
+    import threading
+
     from amdsmi import (
         amdsmi_get_gpu_vram_usage,
         amdsmi_get_processor_handles,
@@ -72,13 +74,16 @@ if current_platform.is_rocm():
         amdsmi_shut_down,
     )
 
+    _amdsmi_lock = threading.Lock()
+
     @contextmanager
     def _nvml():
-        try:
-            amdsmi_init()
-            yield
-        finally:
-            amdsmi_shut_down()
+        with _amdsmi_lock:
+            try:
+                amdsmi_init()
+                yield
+            finally:
+                amdsmi_shut_down()
 elif current_platform.is_cuda():
     from vllm.third_party.pynvml import (
         nvmlDeviceGetHandleByIndex,
@@ -895,6 +900,36 @@ def compare_all_settings(
                     )
 
 
+@contextmanager
+def ensure_current_vllm_config():
+    """Ensures a vllm config is set for the duration of the context.
+
+    If a config is already set, this is a no-op. Otherwise, it creates a default
+    VllmConfig and sets it for the duration of the context.
+
+    Used for tests that call functions which require a vllm config but don't
+    need a specific config.
+
+    Example:
+        with ensure_current_vllm_config():
+            init_distributed_environment(...)
+            ensure_model_parallel_initialized(...)
+    """
+    from vllm.config import (
+        VllmConfig,
+        get_current_vllm_config_or_none,
+        set_current_vllm_config,
+    )
+
+    if get_current_vllm_config_or_none() is not None:
+        # Config already set, just yield
+        yield
+    else:
+        # No config set, create a default one for the duration
+        with set_current_vllm_config(VllmConfig()):
+            yield
+
+
 def init_test_distributed_environment(
     tp_size: int,
     pp_size: int,
@@ -921,6 +956,7 @@ def init_test_distributed_environment(
             distributed_init_method=distributed_init_method,
             local_rank=local_rank,
         )
+        ensure_model_parallel_initialized(tp_size, pp_size)
     else:
         # No config set, create a default one for the test
         with set_current_vllm_config(VllmConfig()):
@@ -930,7 +966,7 @@ def init_test_distributed_environment(
                 distributed_init_method=distributed_init_method,
                 local_rank=local_rank,
             )
-    ensure_model_parallel_initialized(tp_size, pp_size)
+            ensure_model_parallel_initialized(tp_size, pp_size)
 
 
 def multi_process_parallel(

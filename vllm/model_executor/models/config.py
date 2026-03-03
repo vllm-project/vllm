@@ -213,7 +213,7 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
                     "Nomic context extension is disabled. "
                     "Changing max_model_len from %s to %s. "
                     "To enable context extension, see: "
-                    "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/context_extension.html",
+                    "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/context_extension.py",
                     max_model_len_before,
                     model_config.max_model_len,
                 )
@@ -327,6 +327,14 @@ class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
             "max_position": config.max_position_embeddings,
             "rope_parameters": config.rope_parameters,
         }
+
+
+class Ernie4_5_VLMoeForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # Ernie4.5-VL conditionally executes text/vision MoE branches, so
+        # fast_moe_cold_start can silently produce incorrect execution order.
+        vllm_config.compilation_config.fast_moe_cold_start = False
 
 
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
@@ -655,11 +663,13 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
+    "LlamaNemotronVLForSequenceClassification": LlamaNemotronVLConfig,
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
     "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
+    "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
     "XLMRobertaModel": JinaRobertaModelConfig,
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
