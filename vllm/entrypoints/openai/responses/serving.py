@@ -528,10 +528,17 @@ class OpenAIServingResponses(OpenAIServing):
                                     )
                                 )
                                 if structural_tag is not None:
-                                    sampling_params.structured_outputs = (
-                                        StructuredOutputsParams(
-                                            structural_tag=structural_tag  # type: ignore[call-arg]
-                                        )
+                                    # Clear content constraints, set
+                                    # structural_tag, but preserve options
+                                    # like disable_any_whitespace.
+                                    sampling_params.structured_outputs = replace(
+                                        struct_out,
+                                        json=None,
+                                        regex=None,
+                                        choice=None,
+                                        grammar=None,
+                                        json_object=None,
+                                        structural_tag=structural_tag,
                                     )
                     elif struct_out is None:
                         # No structured output requested, but still need
