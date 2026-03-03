@@ -247,8 +247,22 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         This function blocks until the copy is finished.
         """
+        # Ensure we wait for the copy to finish before accessing the shape
+        # of the CPU tensor, although it should be valid immediately.
+        # This is mostly to provide a cleaner traceback if synchronization
+        # fails with a CUDA error.
+        try:
+            self.async_copy_ready_event.synchronize()
+        except Exception as e:
+            # If a CUDA error occurs during synchronization, it often means
+            # an illegal memory access or other fatal error happened during
+            # the copy or a previous kernel.
+            if "illegal memory access" in str(e):
+                logger.error("CUDA illegal memory access detected during "
+                             "output copy synchronization.")
+            raise e
+
         max_gen_len = self.sampled_token_ids_cpu.shape[-1]
-        self.async_copy_ready_event.synchronize()
 
         # Release the device tensors once the copy has completed.
         del self._logprobs_tensors
