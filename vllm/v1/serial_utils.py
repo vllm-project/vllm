@@ -8,7 +8,7 @@ from collections.abc import Callable, Sequence
 from functools import partial
 from inspect import isclass
 from types import FunctionType
-from typing import Any, TypeAlias, get_type_hints
+from typing import Any, ClassVar, TypeAlias, get_type_hints
 
 import cloudpickle
 import msgspec
@@ -460,6 +460,19 @@ def run_method(
 
 
 class PydanticMsgspecMixin:
+    """Make a ``msgspec.Struct`` compatible with Pydantic for both
+    **validation** (JSON/dict -> Struct) and **serialization**
+    (Struct -> JSON-safe dict).
+
+    Subclasses may set ``__pydantic_msgspec_exclude__`` (a ``set[str]``)
+    to list non-underscore field names that should also be stripped from
+    serialized output.  Fields whose names start with ``_`` are always
+    excluded automatically.
+    """
+
+    # Subclasses can override to exclude additional public-but-internal keys.
+    __pydantic_msgspec_exclude__: ClassVar[set[str]] = set()
+
     @classmethod
     def __get_pydantic_core_schema__(
         cls, source_type: Any, handler: GetCoreSchemaHandler
@@ -476,6 +489,9 @@ class PydanticMsgspecMixin:
         # Build the Pydantic typed_dict_field for each msgspec field
         fields = {}
         for name, hint in type_hints.items():
+            if name not in msgspec_fields:
+                # Skip ClassVar and other non-struct annotations.
+                continue
             msgspec_field = msgspec_fields[name]
 
             # typed_dict_field using the handler to get the schema
@@ -502,13 +518,20 @@ class PydanticMsgspecMixin:
             core_schema.typed_dict_schema(fields),
         )
 
+        # Build a serializer that strips private / excluded fields.
+        serializer = core_schema.plain_serializer_function_ser_schema(
+            cls._serialize_msgspec,
+            info_arg=False,
+        )
+
         # Accept either an already-constructed msgspec.Struct instance or a
         # JSON/dict-like payload.
         return core_schema.union_schema(
             [
                 core_schema.is_instance_schema(source_type),
                 typed_dict_then_convert,
-            ]
+            ],
+            serialization=serializer,
         )
 
     @classmethod
@@ -519,3 +542,18 @@ class PydanticMsgspecMixin:
         if isinstance(value, dict):
             return cls(**value)
         return msgspec.convert(value, type=cls)
+
+    @staticmethod
+    def _serialize_msgspec(value: Any) -> Any:
+        """Serialize a msgspec.Struct to a JSON-compatible dict, stripping
+        private (``_``-prefixed) and explicitly excluded fields."""
+        raw = msgspec.structs.asdict(value)
+        if not isinstance(raw, dict):
+            return raw
+
+        exclude = getattr(type(value), "__pydantic_msgspec_exclude__", set())
+        for key in list(raw):
+            if key.startswith("_") or key in exclude:
+                del raw[key]
+
+        return msgspec.to_builtins(raw)

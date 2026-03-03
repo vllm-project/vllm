@@ -388,8 +388,8 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(
                 "Internal logic error: Beam search parameters were found, "
                 "but should have been filtered out earlier.",
-                err_type = "InternalServerError",
-                status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
         request_id = (
