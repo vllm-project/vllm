@@ -20,6 +20,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
@@ -85,7 +86,11 @@ class SpecDecodeBaseProposer:
         self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
 
         # Unifying eagle, draft model, and parallel drafting support
-        self.parallel_drafting: bool = self.speculative_config.parallel_drafting
+        # DFlash always uses parallel drafting (all tokens in one pass)
+        self.parallel_drafting: bool = (
+            self.speculative_config.parallel_drafting
+            or self.method == "dflash"
+        )
         self.extra_slots_per_request = (
             1 if not self.parallel_drafting else self.num_speculative_tokens
         )
@@ -306,14 +311,19 @@ class SpecDecodeBaseProposer:
         # for those masked slots.
 
         model_hf_config = self.draft_model_config.hf_config
-        if hasattr(model_hf_config, "pard_token"):
+        # DFlash stores mask_token_id in dflash_config
+        dflash_config = getattr(model_hf_config, "dflash_config", None)
+        if dflash_config and "mask_token_id" in dflash_config:
+            self.parallel_drafting_token_id = dflash_config["mask_token_id"]
+        elif hasattr(model_hf_config, "pard_token"):
             self.parallel_drafting_token_id = model_hf_config.pard_token
         elif hasattr(model_hf_config, "ptd_token_id"):
             self.parallel_drafting_token_id = model_hf_config.ptd_token_id
         else:
             raise ValueError(
                 "For parallel drafting, the draft model config must have "
-                "`pard_token` or `ptd_token_id` specified in its config.json."
+                "`pard_token`, `ptd_token_id`, or "
+                "`dflash_config.mask_token_id` specified in its config.json."
             )
 
         if self.pass_hidden_states_to_model:
@@ -403,9 +413,10 @@ class SpecDecodeBaseProposer:
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
-        if self.method == "eagle3":
+        if self.method in ("eagle3", "dflash"):
             assert isinstance(
-                self.model, (Eagle3LlamaForCausalLM, Eagle3DeepseekV2ForCausalLM)
+                self.model, (Eagle3LlamaForCausalLM, Eagle3DeepseekV2ForCausalLM, 
+                             DFlashQwen3ForCausalLM)
             )
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states
@@ -461,6 +472,27 @@ class SpecDecodeBaseProposer:
         if self.pass_hidden_states_to_model:
             model_kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
 
+        # DFlash: override model kwargs for cross-attention architecture.
+        # The DFlash model expects:
+        # - hidden_states: context (combined target hidden states) only
+        # - input_ids: query tokens (bonus + mask) only
+        # - positions: all positions (context + query) for RoPE
+        if self.method == "dflash":
+            num_context = self._dflash_num_context
+            num_all_positions = self._dflash_num_positions
+            model_kwargs["hidden_states"] = (
+                self.hidden_states[:num_context]
+            )
+            model_kwargs["positions"] = (
+                self._get_positions(num_all_positions)
+            )
+
+        # DFlash slot_mapping needs to cover all K/V tokens (context + query)
+        if self.method == "dflash":
+            slot_mapping_size = self._dflash_num_positions
+        else:
+            slot_mapping_size = num_input_tokens
+
         with set_forward_context(
             per_layer_attn_metadata,
             self.vllm_config,
@@ -468,7 +500,7 @@ class SpecDecodeBaseProposer:
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             slot_mapping=self._get_slot_mapping(
-                num_input_tokens, common_attn_metadata.slot_mapping
+                slot_mapping_size, common_attn_metadata.slot_mapping
             ),
         ):
             ret_hidden_states = self.model(**model_kwargs)
@@ -681,6 +713,123 @@ class SpecDecodeBaseProposer:
             self.hidden_states[:num_tokens] = target_hidden_states
 
             return num_tokens, token_indices_to_sample, cad
+        elif self.method == "dflash":
+            # DFlash cross-attention: context K/V from target hidden states,
+            # Q from query embeddings (bonus + mask tokens).
+            batch_size = cad.batch_size()
+            num_context = target_token_ids.shape[0]
+            num_query_per_req = 1 + self.num_speculative_tokens
+            num_query_total = batch_size * num_query_per_req
+            num_all_positions = num_context + num_query_total
+
+            # Store for propose() to use
+            self._dflash_num_context = num_context
+            self._dflash_num_positions = num_all_positions
+
+            # 1. Set up query input_ids: [next_token, mask, mask, ...] x batch
+            for i in range(batch_size):
+                start = i * num_query_per_req
+                self.input_ids[start] = next_token_ids[i]
+                self.input_ids[start + 1 : start + num_query_per_req] = (
+                    self.parallel_drafting_token_id
+                )
+
+            # 2. Set up positions: [context_positions, query_positions]
+            # Context positions are the target positions
+            self.positions[:num_context] = target_positions
+            # Query positions extend from each request's last position
+            query_start_loc = cad.query_start_loc
+            for i in range(batch_size):
+                ctx_end = query_start_loc[i + 1].item()
+                last_pos = target_positions[ctx_end - 1].item()
+                q_start = num_context + i * num_query_per_req
+                for j in range(num_query_per_req):
+                    self.positions[q_start + j] = last_pos + 1 + j
+
+            # 3. Context hidden states (combined target HS)
+            self.hidden_states[:num_context] = target_hidden_states
+
+            # 4. Compute slot mapping for ALL K/V tokens (context + query)
+            builder = (
+                self._get_attention_metadata_builder()
+                if self.attn_metadata_builder is None
+                else self.attn_metadata_builder
+            )
+            block_size = builder.kv_cache_spec.block_size
+            all_positions = self.positions[:num_all_positions]
+            block_numbers = all_positions // block_size
+            # For context tokens, use the original block table
+            # For query tokens, also use block table (same requests)
+            # Build expanded block table index for gathering
+            slot_mapping = torch.empty(
+                num_all_positions, dtype=torch.int64, device=self.device
+            )
+            for i in range(batch_size):
+                # Context tokens for request i
+                ctx_start = query_start_loc[i].item()
+                ctx_end = query_start_loc[i + 1].item()
+                ctx_block_nums = block_numbers[ctx_start:ctx_end]
+                ctx_block_ids = cad.block_table_tensor[i].gather(
+                    0, ctx_block_nums.long()
+                )
+                slot_mapping[ctx_start:ctx_end] = (
+                    ctx_block_ids * block_size
+                    + all_positions[ctx_start:ctx_end] % block_size
+                )
+                # Query tokens for request i
+                q_start = num_context + i * num_query_per_req
+                q_end = q_start + num_query_per_req
+                q_block_nums = block_numbers[q_start:q_end]
+                q_block_ids = cad.block_table_tensor[i].gather(
+                    0, q_block_nums.long()
+                )
+                slot_mapping[q_start:q_end] = (
+                    q_block_ids * block_size
+                    + all_positions[q_start:q_end] % block_size
+                )
+
+            # 5. Token indices to sample: mask positions in query output
+            # Query output has num_query_per_req tokens per request.
+            # Skip index 0 (bonus token), take indices 1..num_spec_tokens.
+            token_indices_to_sample = torch.empty(
+                batch_size * self.num_speculative_tokens,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            for i in range(batch_size):
+                base = i * num_query_per_req
+                for j in range(self.num_speculative_tokens):
+                    token_indices_to_sample[
+                        i * self.num_speculative_tokens + j
+                    ] = base + 1 + j
+
+            # 6. Build attention metadata for the query tokens.
+            # DFlash uses non-causal attention.
+            new_query_start_loc = (
+                self.arange[: batch_size + 1] * num_query_per_req
+            )
+            new_cad = CommonAttentionMetadata(
+                query_start_loc=new_query_start_loc,
+                seq_lens=cad.seq_lens + num_query_per_req,
+                query_start_loc_cpu=(
+                    torch.from_numpy(
+                        self.token_arange_np[: batch_size + 1]
+                    ).clone()
+                    * num_query_per_req
+                ),
+                _seq_lens_cpu=None,
+                _num_computed_tokens_cpu=None,
+                num_reqs=cad.num_reqs,
+                num_actual_tokens=num_query_total,
+                max_query_len=num_query_per_req,
+                max_seq_len=cad.max_seq_len + num_query_per_req,
+                block_table_tensor=cad.block_table_tensor,
+                slot_mapping=slot_mapping,
+                causal=False,
+            )
+
+            return num_query_total, token_indices_to_sample, new_cad
+
         else:
             assert self.is_rejected_token_mask is not None
             assert self.is_masked_token_mask is not None
@@ -784,7 +933,7 @@ class SpecDecodeBaseProposer:
             return total_num_output_tokens, token_indices_to_sample, new_cad
 
     def model_returns_tuple(self) -> bool:
-        return self.method not in ("mtp", "draft_model")
+        return self.method not in ("mtp", "draft_model", "dflash")
 
     def prepare_next_token_ids_cpu(
         self,
@@ -1300,13 +1449,16 @@ class SpecDecodeBaseProposer:
 
         if self.parallel_drafting and self.pass_hidden_states_to_model:
             assert self.parallel_drafting_hidden_state_tensor is not None
-            self.parallel_drafting_hidden_state_tensor.copy_(
-                self.model.combine_hidden_states(
-                    self.model.mask_hidden.view(3 * self.hidden_size)
+            if self.eagle3_use_aux_hidden_state:
+                # mask_hidden stores the mask for all aux hidden states
+                flat_mask = self.model.mask_hidden.view(-1)
+                self.parallel_drafting_hidden_state_tensor.copy_(
+                    self.model.combine_hidden_states(flat_mask)
                 )
-                if self.eagle3_use_aux_hidden_state
-                else self.model.mask_hidden.view(self.hidden_size)
-            )
+            else:
+                self.parallel_drafting_hidden_state_tensor.copy_(
+                    self.model.mask_hidden.view(self.hidden_size)
+                )
 
     def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
         """
@@ -1477,6 +1629,47 @@ class SpecDecodeBaseProposer:
         is_graph_capturing: bool = False,
         slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
+        # DFlash: single forward pass with PIECEWISE CUDA graphs
+        if self.method == "dflash":
+            num_query = num_tokens
+            num_positions = num_tokens + num_query
+            num_tokens_dp_padded, num_tokens_across_dp = (
+                self._pad_batch_across_dp(
+                    num_tokens_unpadded=num_query,
+                    num_tokens_padded=num_query,
+                )
+            )
+            if use_cudagraphs:
+                cudagraph_runtime_mode, batch_desc = (
+                    self.cudagraph_dispatcher.dispatch(num_tokens_dp_padded)
+                )
+                num_input_tokens = batch_desc.num_tokens
+            else:
+                cudagraph_runtime_mode = CUDAGraphMode.NONE
+                num_input_tokens = num_tokens_dp_padded
+            if num_tokens_across_dp is not None:
+                num_tokens_across_dp[self.dp_rank] = num_input_tokens
+            slot_mapping_dict = slot_mappings or {}
+            with set_forward_context(
+                None,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                slot_mapping=slot_mapping_dict,
+            ):
+                kwargs = dict(
+                    input_ids=self.input_ids[:num_input_tokens],
+                    positions=self._get_positions(num_positions),
+                    inputs_embeds=None,
+                )
+                if self.pass_hidden_states_to_model:
+                    kwargs["hidden_states"] = (
+                        self.hidden_states[:num_tokens]
+                    )
+                self.model(**kwargs)
+            return
+
         # FIXME: when using tree-based specdec, adjust number of forward-passes
         # according to the depth of the tree.
         for fwd_idx in range(
@@ -1525,18 +1718,22 @@ class SpecDecodeBaseProposer:
 
     def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
         """
-        Some eagle3 heads (e.g., nvidia/gpt-oss-120b-Eagle3-v2) do not use auxiliary
-        hidden states and directly uses the last layer output just like eagle1.
-        They might indicate this by setting "use_aux_hidden_state" to False
-        inside the "eagle_config" dict of their hf_config.
+        Some eagle3/dflash heads do not use auxiliary hidden states and
+        directly use the last layer output just like eagle1. They might
+        indicate this by setting "use_aux_hidden_state" to False inside
+        the "eagle_config" or "dflash_config" dict of their hf_config.
         """
-        if self.method != "eagle3":
+        if self.method not in ("eagle3", "dflash"):
             return False
-        # Assume that eagle3 heads use aux hidden states by default
         use_aux_hidden_state = True
         eagle_config = getattr(self.draft_model_config.hf_config, "eagle_config", None)
         if eagle_config is not None:
             use_aux_hidden_state = eagle_config.get("use_aux_hidden_state", True)
+        dflash_config = getattr(
+            self.draft_model_config.hf_config, "dflash_config", None
+        )
+        if dflash_config is not None:
+            use_aux_hidden_state = dflash_config.get("use_aux_hidden_state", True)
         return use_aux_hidden_state
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
