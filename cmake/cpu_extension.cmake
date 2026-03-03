@@ -176,9 +176,12 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
             HINTS ${VLLM_TORCH_GOMP_SHIM_DIR}
             REQUIRED
         )
-        # Set LD_LIBRARY_PATH to include the shim dir at build time to use the same libgomp as PyTorch
+        # Set LD_LIBRARY_PATH to include the directory of the found libgomp at build time
         if (OPEN_MP)
-            set(ENV{LD_LIBRARY_PATH} "${VLLM_TORCH_GOMP_SHIM_DIR}:$ENV{LD_LIBRARY_PATH}")
+            get_filename_component(OPEN_MP_DIR "${OPEN_MP}" DIRECTORY)
+            if(OPEN_MP_DIR)
+                set(ENV{LD_LIBRARY_PATH} "${OPEN_MP_DIR}:$ENV{LD_LIBRARY_PATH}")
+            endif()
         endif()
 
         # Fetch and populate ACL
