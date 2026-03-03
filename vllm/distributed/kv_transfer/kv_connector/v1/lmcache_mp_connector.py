@@ -714,7 +714,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         # which returns ALL blocks for the request (not just newly allocated).
         # This function may be called twice for async-load requests:
         #   1st call: blocks = initial allocation (APC + fresh)
-        #   2nd call: blocks = all blocks (initial + newly allocated for remaining tokens)
+        #   2nd call: blocks = all blocks
+        #  (initial + newly allocated for remaining tokens)
         # We must only append the NEW blocks beyond what's already tracked
         # to avoid duplication, which would corrupt the store path's block indexing.
         tracker = self._get_request_tracker(request.request_id)
