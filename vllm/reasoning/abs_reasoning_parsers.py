@@ -30,7 +30,7 @@ class ReasoningParser:
     It is used to extract reasoning content from the model output.
     """
 
-    def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
+    def __init__(self, tokenizer: "TokenizerLike", *args, **kwargs):
         self.model_tokenizer = tokenizer
 
     @cached_property
@@ -116,7 +116,7 @@ class ReasoningParser:
     def extract_reasoning(
         self,
         model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
+        request: "ChatCompletionRequest | ResponsesRequest",
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from a complete model-generated string.
@@ -125,14 +125,10 @@ class ReasoningParser:
         available before sending to the client.
 
         Parameters:
-        model_output: str
-            The model-generated string to extract reasoning content from.
-
-        request: ChatCompletionRequest
-            The request object that was used to generate the model_output.
+            model_output: The model-generated string to extract reasoning content from.
+            request: The request object that was used to generate the model_output.
 
         Returns:
-        tuple[Optional[str], Optional[str]]
             A tuple containing the reasoning content and the content.
         """
 
@@ -145,7 +141,7 @@ class ReasoningParser:
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> DeltaMessage | None:
+    ) -> "DeltaMessage | None":
         """
         Instance method that should be implemented for extracting reasoning
         from an incomplete response; for use when handling reasoning calls and

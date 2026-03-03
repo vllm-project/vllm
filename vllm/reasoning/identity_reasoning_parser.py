@@ -61,7 +61,7 @@ class IdentityReasoningParser(ReasoningParser):
         return None
 
     def extract_reasoning(
-        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         # No reasoning separation: return None for reasoning,
         # and full model_output as content

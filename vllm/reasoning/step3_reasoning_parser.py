@@ -85,7 +85,7 @@ class Step3ReasoningParser(ReasoningParser):
             return DeltaMessage(reasoning=delta_text)
 
     def extract_reasoning(
-        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         # Check if the model output contains the </think> token
         if self.think_end_token not in model_output:

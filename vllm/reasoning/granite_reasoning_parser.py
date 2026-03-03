@@ -55,7 +55,7 @@ class GraniteReasoningParser(ReasoningParser):
         )
 
     def extract_reasoning(
-        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates

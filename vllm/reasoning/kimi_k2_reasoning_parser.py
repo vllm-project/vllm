@@ -147,7 +147,7 @@ class KimiK2ReasoningParser(ReasoningParser):
         return []
 
     def extract_reasoning(
-        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from the model output.

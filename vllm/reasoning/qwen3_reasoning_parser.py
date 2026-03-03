@@ -2,16 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.entrypoints.openai.responses.protocol import (
-    ResponsesRequest,
-)
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
-from vllm.tokenizers import TokenizerLike
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+    from vllm.tokenizers import TokenizerLike
 
 
 class Qwen3ReasoningParser(BaseThinkingReasoningParser):
@@ -34,7 +33,7 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
     it is stripped before extraction (non-streaming) or skipped (streaming).
     """
 
-    def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
+    def __init__(self, tokenizer: "TokenizerLike", *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
 
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
@@ -53,7 +52,7 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         return "</think>"
 
     def extract_reasoning(
-        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from the model output.

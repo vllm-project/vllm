@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
@@ -15,6 +14,7 @@ from .identity_reasoning_parser import IdentityReasoningParser
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.engine.protocol import DeltaMessage
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 logger = init_logger(__name__)
@@ -52,7 +52,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
         return self._parser.extract_content_ids(input_ids)
 
     def extract_reasoning(
-        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         return self._parser.extract_reasoning(model_output, request)
 
@@ -64,7 +64,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> DeltaMessage | None:
+    ) -> "DeltaMessage | None":
         return self._parser.extract_reasoning_streaming(
             previous_text,
             current_text,
