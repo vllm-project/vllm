@@ -462,8 +462,6 @@ class Scheduler(SchedulerInterface):
                                 preempted_req_id, None
                             )
                             if preempted_encoder_inputs:
-                                # Restore encoder compute budget if the preempted
-                                # request had encoder inputs scheduled in this step.
                                 num_embeds_to_restore = sum(
                                     preempted_req.get_num_encoder_embeds(i)
                                     for i in preempted_encoder_inputs
@@ -476,12 +474,15 @@ class Scheduler(SchedulerInterface):
                     self._preempt_request(preempted_req, scheduled_timestamp)
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
-                        # No more request to preempt. Cannot schedule this request.
+                        # No more request to preempt.
                         break
 
             if new_blocks is None:
-                # Cannot schedule this request.
-                break
+                # This request could not be scheduled even after preempting
+                # others. Instead of stopping the entire loop, continue
+                # scheduling the remaining running requests. This prevents
+                # a single KV-heavy request from blocking all others.
+                continue
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
@@ -533,7 +534,11 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+        # NOTE: We allow scheduling waiting requests even when preemptions
+        # occurred. Preempting a KV-heavy running request frees blocks that
+        # can be used by waiting requests, so skipping this phase would
+        # waste available capacity.
+        if self._pause_state == PauseState.UNPAUSED:
             # Use a temporary RequestQueue to collect requests that need to be
             # skipped and put back at the head of the waiting queue later
             skipped_waiting_requests = create_request_queue(self.policy)
@@ -735,13 +740,15 @@ class Scheduler(SchedulerInterface):
                 )
 
                 if new_blocks is None:
-                    # The request cannot be scheduled.
-
-                    # NOTE: we need to untouch the request from the encode cache
-                    # manager
+                    # The request cannot be scheduled due to KV cache
+                    # pressure. Skip it and try the next waiting request,
+                    # to avoid head-of-line blocking where a KV-heavy
+                    # request prevents lighter requests from being admitted.
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
-                    break
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.add_request(request)
+                    continue
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that

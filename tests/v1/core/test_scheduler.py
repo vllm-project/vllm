@@ -4037,3 +4037,174 @@ def test_eagle3_mm_encoder_cache_with_shift():
         f"shifted_end={scheduled_end_with_shift}) overlapping MM at "
         f"{start_pos}. The fix must schedule encoder inputs."
     )
+
+
+# ---- Tests for KV-cache HOL blocking fix (issue #31731) ----
+
+
+def test_kv_heavy_running_request_does_not_block_others():
+    """When a running request can't allocate KV blocks and exhausts all
+    preemption options, the remaining running requests should still be
+    scheduled rather than being blocked by the failing request.
+
+    Regression test for: https://github.com/vllm-project/vllm/issues/31731
+    """
+    # 20 usable blocks (21 total, block 0 reserved as null).
+    # block_size=16, so each block holds 16 tokens.
+    scheduler = create_scheduler(
+        max_num_batched_tokens=512,
+        block_size=16,
+        num_blocks=21,
+        enable_prefix_caching=False,
+    )
+
+    # R_heavy: 160 tokens = 10 blocks (uses half the cache)
+    heavy_reqs = create_requests(
+        num_requests=1,
+        num_tokens=160,
+        block_size=16,
+        req_ids=["heavy"],
+    )
+    # R_light1, R_light2: 80 tokens = 5 blocks each (10 blocks total)
+    light_reqs = create_requests(
+        num_requests=2,
+        num_tokens=80,
+        block_size=16,
+        req_ids=["light1", "light2"],
+    )
+
+    # Add all three requests. They use 10+5+5=20 blocks = all available.
+    for req in heavy_reqs + light_reqs:
+        scheduler.add_request(req)
+    output0 = scheduler.schedule()
+    assert len(output0.num_scheduled_tokens) == 3
+
+    # Simulate output for all three so they each generate 1 output token.
+    model_output0 = ModelRunnerOutput(
+        req_ids=["heavy", "light1", "light2"],
+        req_id_to_index={"heavy": 0, "light1": 1, "light2": 2},
+        sampled_token_ids=[[0], [0], [0]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output0, model_output0)
+
+    # Now all 20 blocks are used, 0 free.
+    # R_heavy needs 1 new block (161 tokens -> 11 blocks, has 10).
+    # R_light1 needs 0 new blocks (81 tokens -> 6 blocks, has 5... needs 1).
+    # R_light2 needs 0 new blocks (same).
+    # Actually all three need 1 new block, but only 0 free.
+    # The preemption loop will preempt some to make room.
+    # Key assertion: even if R_heavy can't be served, the schedule
+    # step should NOT completely stall — other requests should still run.
+    output1 = scheduler.schedule()
+
+    # At least one request should be scheduled (not a total stall).
+    assert len(output1.num_scheduled_tokens) >= 1, (
+        "KV-heavy request blocked all other running requests"
+    )
+
+
+def test_waiting_requests_admitted_after_preemption():
+    """Waiting requests should still be considered for scheduling even
+    when preemption occurred during the running-request phase.
+
+    Regression test for: https://github.com/vllm-project/vllm/issues/31731
+    """
+    # 10 usable blocks.
+    scheduler = create_scheduler(
+        max_num_batched_tokens=512,
+        block_size=16,
+        num_blocks=11,
+        enable_prefix_caching=False,
+    )
+
+    # R1: 80 tokens = 5 blocks. R2: 80 tokens = 5 blocks. Total = 10.
+    requests = create_requests(
+        num_requests=2,
+        num_tokens=80,
+        block_size=16,
+        req_ids=["r1", "r2"],
+    )
+    scheduler.add_request(requests[0])
+    scheduler.add_request(requests[1])
+    output0 = scheduler.schedule()
+    assert len(output0.num_scheduled_tokens) == 2
+
+    # Simulate output so R1 generates a token (needs 1 new block).
+    model_output0 = ModelRunnerOutput(
+        req_ids=["r1", "r2"],
+        req_id_to_index={"r1": 0, "r2": 1},
+        sampled_token_ids=[[0], [0]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output0, model_output0)
+
+    # Add a small waiting request (16 tokens = 1 block).
+    small_req = create_requests(
+        num_requests=1,
+        num_tokens=16,
+        block_size=16,
+        req_ids=["small"],
+    )
+    scheduler.add_request(small_req[0])
+
+    # Schedule: cache is full, preemption will happen for running requests.
+    # The small waiting request should still be admitted after preemption
+    # frees blocks (not blocked by `if not preempted_reqs`).
+    output1 = scheduler.schedule()
+    assert "small" in output1.num_scheduled_tokens, (
+        "Waiting request was not admitted despite available capacity after preemption"
+    )
+
+
+def test_skip_kv_blocked_waiting_request_allows_light_request():
+    """A KV-heavy request at the head of the waiting queue should not
+    block lighter requests behind it from being scheduled.
+
+    Regression test for: https://github.com/vllm-project/vllm/issues/31731
+    """
+    # 5 usable blocks (6 total, block 0 reserved).
+    scheduler = create_scheduler(
+        max_num_batched_tokens=512,
+        block_size=16,
+        num_blocks=6,
+        enable_prefix_caching=False,
+    )
+
+    # Heavy request: 160 tokens = 10 blocks. Won't fit in 5 usable blocks.
+    heavy_req = create_requests(
+        num_requests=1,
+        num_tokens=160,
+        block_size=16,
+        req_ids=["heavy"],
+    )
+    # Light request: 16 tokens = 1 block. Easily fits.
+    light_req = create_requests(
+        num_requests=1,
+        num_tokens=16,
+        block_size=16,
+        req_ids=["light"],
+    )
+
+    # Add heavy first (it's at the head of the queue).
+    scheduler.add_request(heavy_req[0])
+    scheduler.add_request(light_req[0])
+
+    output = scheduler.schedule()
+
+    # The light request should be scheduled even though the heavy request
+    # at the head of the queue can't fit.
+    assert "light" in output.num_scheduled_tokens, (
+        "Light request was blocked by KV-heavy request at head of waiting queue"
+    )
+
+    # The heavy request should NOT be scheduled (not enough blocks).
+    assert "heavy" not in output.num_scheduled_tokens
+
+    # The heavy request should still be in the waiting queue (not dropped).
+    waiting_ids = [r.request_id for r in scheduler.waiting]
+    assert "heavy" in waiting_ids, "Heavy request was dropped instead of being retried"
