@@ -64,7 +64,9 @@ if TYPE_CHECKING:
     VLLM_XLA_USE_SPMD: bool = False
     # Worker multiprocessing method: fork (default) or spawn
     VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
+    # Cache directory for model assets (weights, tokenizer, etc.)
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
+    # Clean up cached model assets on startup
     VLLM_ASSETS_CACHE_MODEL_CLEAN: bool = False
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
