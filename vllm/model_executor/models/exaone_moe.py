@@ -31,6 +31,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -116,7 +117,22 @@ class ExaoneMoe(nn.Module):
             self.physical_expert_start + self.n_local_physical_experts
         )
 
-        self.experts = FusedMoE(
+        if getattr(config, "num_shared_experts", 0) > 0:
+            intermediate_size = config.moe_intermediate_size * config.num_shared_experts
+            self.shared_experts = ExaoneMoeGatedMLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                reduce_results=False,
+                prefix=f"{prefix}.shared_experts",
+            )
+        else:
+            self.shared_experts = None
+
+        self.experts = SharedFusedMoE(
+            shared_experts=self.shared_experts,
+            gate=self.gate,
             num_experts=self.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -135,34 +151,18 @@ class ExaoneMoe(nn.Module):
             num_redundant_experts=self.n_redundant_experts,
         )
 
-        if getattr(config, "num_shared_experts", 0) > 0:
-            intermediate_size = config.moe_intermediate_size * config.num_shared_experts
-            self.shared_experts = ExaoneMoeGatedMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                reduce_results=self.experts.must_reduce_shared_expert_outputs(),
-                prefix=f"{prefix}.shared_experts",
-            )
-        else:
-            self.shared_experts = None
-
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
         orig_shape = hidden_states.shape
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
-
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
+        shared_output, final_hidden_states = self.experts(
+            hidden_states=hidden_states, router_logits=hidden_states
         )
 
         if self.shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
+            assert shared_output is not None
             final_hidden_states = final_hidden_states + shared_output
 
         if self.tp_size > 1:
