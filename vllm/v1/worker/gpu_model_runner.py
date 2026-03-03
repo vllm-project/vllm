@@ -971,7 +971,7 @@ class GPUModelRunner(
         """
         from itertools import product as iprod
 
-        from vllm.v1.kv_cache_interface import AttentionSpec
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
 
         kernel_block_sizes = self._kernel_block_sizes
 
@@ -983,7 +983,7 @@ class GPUModelRunner(
 
         for group in self._kv_cache_spec_attn_group_iterator():
             spec = group.kv_cache_spec
-            if not isinstance(spec, AttentionSpec):
+            if type(spec) is not FullAttentionSpec:
                 continue
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
