@@ -867,6 +867,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
       "int reg_buffer_sz_bytes) -> ()");
   custom_ar.impl("all_reduce", torch::kCUDA, &all_reduce);
   custom_ar.def(
+      "all_gather(int fa, Tensor inp, Tensor! out, int reg_buffer, "
+      "int reg_buffer_sz_bytes) -> ()");
+  custom_ar.impl("all_gather", torch::kCUDA, &all_gather);
+  custom_ar.def(
       "reduce_scatter(int fa, Tensor inp, Tensor! out, int reg_buffer, "
       "int reg_buffer_sz_bytes) -> ()");
   custom_ar.impl("reduce_scatter", torch::kCUDA, &reduce_scatter);

@@ -105,6 +105,71 @@ void all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
 }
 
 /**
+ * Performs an out-of-place all_gather and stores result in out.
+ *
+ * If
+ * _reg_buffer is null, assumes inp.data_ptr() is already IPC-registered.
+ *
+ * Otherwise, _reg_buffer is assumed to be IPC-registered and inp is first
+ *
+ * copied into _reg_buffer.
+ */
+void all_gather(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
+                fptr_t _reg_buffer, int64_t reg_buffer_sz_bytes) {
+  auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(inp));
+  auto stream = c10::cuda::getCurrentCUDAStream().stream();
+
+  TORCH_CHECK_EQ(inp.scalar_type(), out.scalar_type());
+  TORCH_CHECK(_is_weak_contiguous(out));
+  TORCH_CHECK(_is_weak_contiguous(inp));
+  TORCH_CHECK_EQ(inp.numel() * fa->world_size_, out.numel());
+  TORCH_CHECK(inp.numel() <= std::numeric_limits<int>::max(),
+              "custom all_gather input is too large");
+  int size = static_cast<int>(inp.numel());
+
+  auto input_size = inp.numel() * inp.element_size();
+  auto reg_buffer = reinterpret_cast<void*>(_reg_buffer);
+  if (reg_buffer) {
+    TORCH_CHECK_LE(input_size, reg_buffer_sz_bytes);
+    AT_CUDA_CHECK(cudaMemcpyAsync(reg_buffer, inp.data_ptr(), input_size,
+                                  cudaMemcpyDeviceToDevice, stream));
+  } else {
+    reg_buffer = inp.data_ptr();
+  }
+
+  switch (out.scalar_type()) {
+    case at::ScalarType::Byte: {
+      fa->allgather<uint8_t>(stream, reinterpret_cast<uint8_t*>(reg_buffer),
+                             reinterpret_cast<uint8_t*>(out.data_ptr()), size);
+      break;
+    }
+    case at::ScalarType::Float: {
+      fa->allgather<float>(stream, reinterpret_cast<float*>(reg_buffer),
+                           reinterpret_cast<float*>(out.data_ptr()), size);
+      break;
+    }
+    case at::ScalarType::Half: {
+      fa->allgather<half>(stream, reinterpret_cast<half*>(reg_buffer),
+                          reinterpret_cast<half*>(out.data_ptr()), size);
+      break;
+    }
+#if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
+    case at::ScalarType::BFloat16: {
+      fa->allgather<nv_bfloat16>(
+          stream, reinterpret_cast<nv_bfloat16*>(reg_buffer),
+          reinterpret_cast<nv_bfloat16*>(out.data_ptr()), size);
+      break;
+    }
+#endif
+    default:
+      throw std::runtime_error(
+          "custom all_gather only supports uint8, float32, float16 and "
+          "bfloat16");
+  }
+}
+
+/**
  * Performs an out-of-place reduce_scatter and stores result in out.
  *
  *

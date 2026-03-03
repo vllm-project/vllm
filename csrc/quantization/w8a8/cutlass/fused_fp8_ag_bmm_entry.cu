@@ -1,11 +1,6 @@
-#include <limits>
-
-#include <ATen/cuda/Exceptions.h>
 #include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAStream.h>
 #include <torch/all.h>
 
-#include "custom_all_reduce.cuh"
 #include "cutlass_extensions/common.hpp"
 #include "ops.h"
 
@@ -47,29 +42,18 @@ torch::Tensor fused_all_gather_bmm_fp8(
               sm);
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
-  auto stream = c10::cuda::getCurrentCUDAStream().stream();
 
   auto m = a.size(0);
   auto k = a.size(1);
   auto n = b.size(1);
 
-  TORCH_CHECK(a.numel() <= std::numeric_limits<int>::max(),
-              "A is too large for custom allgather size argument");
-
   int64_t a_bytes = a.numel() * a.element_size();
   TORCH_CHECK(reg_buffer_sz_bytes >= a_bytes,
               "reg_buffer is too small for fused_all_gather_bmm_fp8 staging");
 
-  auto* fa = reinterpret_cast<vllm::CustomAllreduce*>(custom_ar_ptr);
-  auto* staged_local_a = reinterpret_cast<uint8_t*>(reg_buffer);
-
-  AT_CUDA_CHECK(cudaMemcpyAsync(staged_local_a, a.data_ptr(), a_bytes,
-                                cudaMemcpyDeviceToDevice, stream));
-
   auto gathered_a = torch::empty({m * world_size, k}, a.options());
-  fa->allgather<uint8_t>(stream, staged_local_a,
-                         reinterpret_cast<uint8_t*>(gathered_a.data_ptr()),
-                         static_cast<int>(a.numel()));
+  all_gather(custom_ar_ptr, const_cast<torch::Tensor&>(a), gathered_a,
+             reg_buffer, reg_buffer_sz_bytes);
 
   auto out = torch::empty({m * world_size, n}, a.options().dtype(out_dtype));
   cutlass_scaled_mm(out, gathered_a, b, a_scale, b_scale, std::nullopt);
