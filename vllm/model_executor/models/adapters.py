@@ -288,15 +288,38 @@ def as_seq_cls_model(cls: _T) -> _T:
             vllm_config: "VllmConfig",
             prefix: str = "",
         ) -> "Pooler":
-            text_config = vllm_config.model_config.hf_config.get_text_config()
+            hf_config = vllm_config.model_config.hf_config
+            text_config = hf_config.get_text_config()
             model_config = vllm_config.model_config
-            # Don't quantize: dynamic classification head, not in checkpoint
+
+            # Check if score weights are derived online from LM head
+            # (same condition as load_weights branch)
+            tokens = getattr(
+                hf_config,
+                "classifier_from_token",
+                getattr(text_config, "classifier_from_token", None),
+            )
+            method = getattr(
+                hf_config,
+                "method",
+                getattr(text_config, "method", None),
+            )
+
+            # Online conversion: no score weights in checkpoint, don't
+            # quantize (small output_dim breaks FP8/Marlin tile alignment).
+            # Checkpoint-based: respect the model's quant_config.
+            quant_config = (
+                None
+                if (tokens is not None or method is not None)
+                else vllm_config.quant_config
+            )
+
             self.score = ReplicatedLinear(
                 model_config.get_hidden_size(),
                 text_config.num_labels,
                 bias=False,
-                params_dtype=vllm_config.model_config.head_dtype,
-                quant_config=None,
+                params_dtype=model_config.head_dtype,
+                quant_config=quant_config,
                 return_bias=False,
                 prefix=maybe_prefix(prefix, "score"),
             )
