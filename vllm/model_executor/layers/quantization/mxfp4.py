@@ -343,9 +343,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         layer.num_experts = num_experts
         self.intermediate_size = intermediate_size_per_partition
         self.hidden_size = hidden_size
-        self.hidden_pad = extra_weight_attrs.get("hidden_pad", 0)
+        self.hidden_pad = hidden_size - layer.moe_config.hidden_dim_unpadded
         self.intermediate_pad = (
-            intermediate_size_per_partition_after_pad - intermediate_size_per_partition
+            intermediate_size_per_partition - layer.moe_config.intermediate_dim_unpadded
         )
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
