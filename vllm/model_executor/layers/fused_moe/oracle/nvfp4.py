@@ -131,6 +131,9 @@ def select_nvfp4_moe_backend(
     Note: Shape-specific fallbacks may still occur at runtime.
     """
 
+    if config.is_lora_enabled:
+        return NvFp4MoeBackend.MARLIN, backend_to_kernel_cls(NvFp4MoeBackend.MARLIN)
+
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = [
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
