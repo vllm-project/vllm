@@ -182,9 +182,8 @@ TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
     "model_class, enable_quant_fp8_custom_op, force_kernel",
     list(itertools.product([TestSiluMulFp8QuantModel], [True, False], TEST_KERNELS))
     + [
-        (TestSiluMulNvfp4QuantModel, False, None),
         pytest.param(
-            TestSiluMulGroupFp8QuantModel,
+            TestSiluMulNvfp4QuantModel,
             False,
             None,
             marks=pytest.mark.skipif(

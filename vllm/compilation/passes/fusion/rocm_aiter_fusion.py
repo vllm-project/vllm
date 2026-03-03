@@ -14,7 +14,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
-    kFp8Static128BlockSym,
+    kFp8Dynamic128Sym,
 )
 from vllm.platforms import current_platform
 
@@ -337,7 +337,7 @@ class AiterSiluMulFp8GroupQuantPattern(ActivationQuantPattern):
     def __init__(self) -> None:
         self.silu_and_mul_matcher = MatcherSiluAndMul()
         self.quant_matcher = MatcherQuantFP8(
-            quant_key=kFp8Static128BlockSym, match_rocm_aiter=True
+            quant_key=kFp8Dynamic128Sym, match_rocm_aiter=True
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -350,7 +350,7 @@ class AiterSiluMulFp8GroupQuantPattern(ActivationQuantPattern):
             input: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             at1 = self.silu_and_mul_matcher(input)
-            at2 = self.quant_matcher(at1, 128)
+            at2 = self.quant_matcher(at1)
             return at2[0], at2[1]
 
         def replacement(
