@@ -1,6 +1,6 @@
 #include <algorithm>
 
-#include <ATen/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <torch/all.h>
 
 #include "cutlass_extensions/common.hpp"
