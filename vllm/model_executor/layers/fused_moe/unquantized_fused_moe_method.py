@@ -33,12 +33,12 @@ from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     make_unquantized_moe_kernel,
     select_unquantized_moe_backend,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    convert_moe_weights_to_flashinfer_trtllm_block_layout,
-)
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
+from vllm.utils.flashinfer import (
+    convert_moe_weights_to_flashinfer_trtllm_block_layout,
+)
 
 if current_platform.is_cuda_alike() or current_platform.is_xpu():
     from .fused_batched_moe import BatchedTritonExperts
