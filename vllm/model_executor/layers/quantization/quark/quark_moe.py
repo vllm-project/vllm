@@ -739,8 +739,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         self.emulate = (
             not current_platform.supports_mx()
             or not self.ocp_mx_scheme.startswith("w_mxfp4")
+            or not self.ocp_mx_scheme.endswith("a_mxfp4")
         ) and (self.mxfp4_backend is None or not self.use_rocm_aiter_moe)
         self.emulation_dequantize_weights = emulation_dequantize_weights
+        if self.emulation_dequantize_weights:
+            logger.info_once(
+                "QuarkOCP_MX_MoEMethod simulated MOE layers: "
+                "dequantizing weights ahead of time."
+            )
 
         # CK's pre-compiled MXFP4 MoE GEMM kernel instances have dimension
         # alignment requirements. When violated (e.g. MiniMax-M2.1 with
