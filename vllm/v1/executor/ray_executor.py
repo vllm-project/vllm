@@ -382,13 +382,10 @@ class RayDistributedExecutor(Executor):
             all_kwargs.append(kwargs)
         self.collective_rpc("init_worker", args=(all_kwargs,))
 
-        self.collective_rpc("init_device")
-        self.collective_rpc("load_model")
-
-        def _update_block_size(worker):
-            current_platform.update_block_size_for_backend(worker.vllm_config)
-
-        self.collective_rpc(_update_block_size)
+        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
+        if not is_eep_new_worker:
+            self.collective_rpc("init_device")
+            self.collective_rpc("load_model")
 
         for pp_rank in range(self.parallel_config.pipeline_parallel_size):
             self.pp_tp_workers.append([])
