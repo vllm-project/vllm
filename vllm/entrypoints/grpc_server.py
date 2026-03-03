@@ -393,17 +393,22 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             if hf_dict[key].is_floating_point():
                 hf_dict[key] = hf_dict[key].to(dtype=model_dtype)
 
+        cpu_keys = set(mm_proto.keep_on_cpu_keys)
+
         # Field configs are fully determined by the Rust router.
         batched = set(mm_proto.batched_keys)
         flat = dict(mm_proto.flat_keys)
         fields_config: dict[str, MultiModalFieldConfig] = {}
         for key in hf_dict:
+            on_cpu = key in cpu_keys
             if key in batched:
-                fields_config[key] = MultiModalFieldConfig.batched("image")
+                fields_config[key] = MultiModalFieldConfig.batched(
+                    "image", keep_on_cpu=on_cpu
+                )
             elif key in flat:
                 sizes = hf_dict[flat[key]].flatten().to(torch.int64)
                 fields_config[key] = MultiModalFieldConfig.flat_from_sizes(
-                    "image", sizes
+                    "image", sizes, keep_on_cpu=on_cpu
                 )
             else:
                 fields_config[key] = MultiModalFieldConfig.shared("image", num_images)
