@@ -171,3 +171,74 @@ class TestGptOssReasoningParser:
         tag_begins = [tag["begin"] for tag in parsed["format"]["tags"]]
         assert f"<|channel|>commentary to={tool_name}" in tag_begins
         assert f"<|channel|>analysis to={tool_name}" in tag_begins
+
+    def test_prepare_structured_tag_with_json_schema(self, reasoning_parser):
+        """Test that final channel tag has json_schema content constraint."""
+        content_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+            },
+        }
+        result = reasoning_parser.prepare_structured_tag(
+            None, None, final_content_format=content_format
+        )
+        parsed = json.loads(result)
+
+        # Should have analysis tag + final channel tag
+        assert len(parsed["format"]["tags"]) == 2
+
+        # Verify analysis tag is unchanged
+        assert parsed["format"]["tags"][0]["begin"] == "<|channel|>analysis<|message|>"
+        assert parsed["format"]["tags"][0]["content"]["type"] == "any_text"
+
+        # Verify final channel tag has the json_schema content constraint
+        final_tag = parsed["format"]["tags"][1]
+        assert final_tag["begin"] == "<|channel|>final<|message|>"
+        assert final_tag["end"] == "<|end|>"
+        assert final_tag["content"] == content_format
+
+        # Verify triggers include both analysis and final
+        assert "<|channel|>analysis" in parsed["format"]["triggers"]
+        assert "<|channel|>final" in parsed["format"]["triggers"]
+
+    def test_prepare_structured_tag_original_tag_ignores_constraint(
+        self, reasoning_parser
+    ):
+        """When original_tag is provided, final_content_format is ignored."""
+        original_tag = '{"custom": "tag"}'
+        content_format = {"type": "json_schema", "json_schema": {"type": "object"}}
+        result = reasoning_parser.prepare_structured_tag(
+            original_tag, None, final_content_format=content_format
+        )
+
+        # Should return the original tag unchanged
+        assert result == original_tag
+
+    def test_prepare_structured_tag_with_tools_and_constraint(
+        self, reasoning_parser, mock_tool_server_with_browser
+    ):
+        """Test that tools and content constraint coexist in the tag."""
+        content_format = {"type": "json_schema", "json_schema": {"type": "object"}}
+        result = reasoning_parser.prepare_structured_tag(
+            None, mock_tool_server_with_browser, final_content_format=content_format
+        )
+        parsed = json.loads(result)
+
+        # Should have analysis + 2 browser tags + final channel tag = 4
+        assert len(parsed["format"]["tags"]) == 4
+
+        tag_begins = [tag["begin"] for tag in parsed["format"]["tags"]]
+        assert "<|channel|>analysis<|message|>" in tag_begins
+        assert "<|channel|>commentary to=browser" in tag_begins
+        assert "<|channel|>analysis to=browser" in tag_begins
+        assert "<|channel|>final<|message|>" in tag_begins
+
+        # Verify final tag has the constraint
+        final_tag = next(
+            t
+            for t in parsed["format"]["tags"]
+            if t["begin"] == "<|channel|>final<|message|>"
+        )
+        assert final_tag["content"] == content_format
