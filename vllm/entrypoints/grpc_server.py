@@ -96,6 +96,21 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """
         self.async_llm = async_llm
         self.start_time = start_time
+
+        # Cache the multimodal processor to query keep_on_cpu field hints.
+        self._mm_processor = None
+        if async_llm.model_config.is_multimodal_model:
+            try:
+                mm_registry = async_llm.input_processor.input_preprocessor.mm_registry
+                self._mm_processor = mm_registry.create_processor(
+                    async_llm.model_config
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to create multimodal processor for gRPC; "
+                    "keep_on_cpu hints will not be available."
+                )
+
         logger.info("VllmEngineServicer initialized")
 
     async def Generate(
@@ -393,22 +408,36 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             if hf_dict[key].is_floating_point():
                 hf_dict[key] = hf_dict[key].to(dtype=model_dtype)
 
+        batch_feature = BatchFeature(hf_dict, tensor_type="pt")
+
+        # Inherit keep_on_cpu from the model's field config.
+        cpu_keys: set[str] = set()
+        if self._mm_processor is not None:
+            try:
+                model_fields = self._mm_processor._get_mm_fields_config(
+                    batch_feature, {}
+                )
+                cpu_keys = {k for k, v in model_fields.items() if v.field.keep_on_cpu}
+            except Exception:
+                pass
+
         # Field configs are fully determined by the Rust router.
         batched = set(mm_proto.batched_keys)
         flat = dict(mm_proto.flat_keys)
         fields_config: dict[str, MultiModalFieldConfig] = {}
         for key in hf_dict:
+            on_cpu = key in cpu_keys
             if key in batched:
-                fields_config[key] = MultiModalFieldConfig.batched("image")
+                fields_config[key] = MultiModalFieldConfig.batched(
+                    "image", keep_on_cpu=on_cpu
+                )
             elif key in flat:
                 sizes = hf_dict[flat[key]].flatten().to(torch.int64)
                 fields_config[key] = MultiModalFieldConfig.flat_from_sizes(
-                    "image", sizes
+                    "image", sizes, keep_on_cpu=on_cpu
                 )
             else:
                 fields_config[key] = MultiModalFieldConfig.shared("image", num_images)
-
-        batch_feature = BatchFeature(hf_dict, tensor_type="pt")
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(batch_feature, fields_config)
 
         # Build mm_hashes: dict[str, list[str]]
