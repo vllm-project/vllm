@@ -9,6 +9,7 @@
 
 # Changes:
 # - Add support for page size >= 1.
+# - Add support for FP8 quantized KV cache.
 
 # Copyright 2025 vLLM Team
 # Copyright 2023-2024 SGLang Team
@@ -27,10 +28,12 @@
 """
 Memory-efficient attention for decoding.
 It supports page size >= 1.
+It supports FP8 quantized KV cache with on-the-fly dequantization.
 """
 
 import logging
 
+import torch
 from packaging import version
 
 from vllm.platforms import current_platform
@@ -64,6 +67,7 @@ def _fwd_kernel_stage1(
     Req_to_tokens,
     B_Seqlen,
     Att_Out,
+    K_scale,  # FP8 dequantization scale for K/V cache
     stride_req_to_tokens_b,
     stride_qbs,
     stride_qh,
@@ -83,6 +87,7 @@ def _fwd_kernel_stage1(
     logit_cap: tl.constexpr,
     Lk: tl.constexpr,
     Lv: tl.constexpr,
+    USE_FP8: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -129,6 +134,11 @@ def _fwd_kernel_stage1(
                 mask=(offs_n[:, None] < split_kv_end) & (mask_d[None, :]),
                 other=0.0,
             )
+            # Dequantize FP8 KV cache on-the-fly
+            if USE_FP8:
+                k_scale = tl.load(K_scale)
+                k = k.to(tl.float32) * k_scale
+
             qk = tl.sum(q[None, :] * k, 1)
             qk *= sm_scale
 
@@ -147,6 +157,9 @@ def _fwd_kernel_stage1(
                 mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
                 other=0.0,
             )
+            # Dequantize FP8 KV cache on-the-fly
+            if USE_FP8:
+                v = v.to(tl.float32) * k_scale
 
             n_e_max = tl.maximum(tl.max(qk, 0), e_max)
             re_scale = tl.exp(e_max - n_e_max)
@@ -194,6 +207,7 @@ def _decode_att_m_fwd(
     sm_scale,
     page_size,
     logit_cap,
+    k_scale=None,
 ):
     BLOCK = 64 if not is_hip_ else 8
 
@@ -213,6 +227,13 @@ def _decode_att_m_fwd(
     BLOCK_DMODEL = triton.next_power_of_2(Lk)
     BLOCK_DV = triton.next_power_of_2(Lv)
 
+    # Determine if we're using FP8 KV cache
+    use_fp8 = k_scale is not None
+
+    # Create a dummy scale tensor if not using FP8 (Triton requires valid tensor)
+    if k_scale is None:
+        k_scale = torch.empty(1, dtype=torch.float32, device=q.device)
+
     _fwd_kernel_stage1[grid](
         q,
         k_buffer,
@@ -221,6 +242,7 @@ def _decode_att_m_fwd(
         Req_to_tokens,
         B_Seqlen,
         att_out,
+        k_scale,
         Req_to_tokens.stride(0),
         q.stride(0),
         q.stride(1),
@@ -242,6 +264,7 @@ def _decode_att_m_fwd(
         num_stages=2,
         Lk=Lk,
         Lv=Lv,
+        USE_FP8=use_fp8,
     )
 
 
@@ -254,6 +277,7 @@ def _fwd_grouped_kernel_stage1(
     Req_to_tokens,
     B_Seqlen,
     Att_Out,
+    K_scale,  # FP8 dequantization scale for K/V cache
     stride_req_to_tokens_b,
     stride_qbs,
     stride_qh,
@@ -276,6 +300,7 @@ def _fwd_grouped_kernel_stage1(
     logit_cap: tl.constexpr,
     Lk: tl.constexpr,
     Lv: tl.constexpr,
+    USE_FP8: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     cur_head_id = tl.program_id(1)
@@ -336,6 +361,11 @@ def _fwd_grouped_kernel_stage1(
                 mask=(offs_n[None, :] < split_kv_end) & (mask_d[:, None]),
                 other=0.0,
             )
+            # Dequantize FP8 KV cache on-the-fly
+            if USE_FP8:
+                k_scale = tl.load(K_scale)
+                k = k.to(tl.float32) * k_scale
+
             qk = tl.dot(q, k.to(q.dtype))
             if BLOCK_DPE > 0:
                 offs_buf_kpe = (
@@ -348,6 +378,9 @@ def _fwd_grouped_kernel_stage1(
                     mask=(offs_n[None, :] < split_kv_end) & (mask_dpe[:, None]),
                     other=0.0,
                 )
+                # Dequantize FP8 KV cache on-the-fly
+                if USE_FP8:
+                    kpe = kpe.to(tl.float32) * k_scale
                 qk += tl.dot(qpe, kpe.to(qpe.dtype))
             qk *= sm_scale
 
@@ -368,6 +401,9 @@ def _fwd_grouped_kernel_stage1(
                 mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
                 other=0.0,
             )
+            # Dequantize FP8 KV cache on-the-fly
+            if USE_FP8:
+                v = v.to(tl.float32) * k_scale
 
             n_e_max = tl.maximum(tl.max(qk, 1), e_max)
             re_scale = tl.exp(e_max - n_e_max)
@@ -416,6 +452,7 @@ def _decode_grouped_att_m_fwd(
     sm_scale,
     page_size,
     logit_cap,
+    k_scale=None,
 ):
     BLOCK = 32
     Lk = k_buffer.shape[-1]
@@ -455,6 +492,13 @@ def _decode_grouped_att_m_fwd(
         extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
         num_stages = 1
 
+    # Determine if we're using FP8 KV cache
+    use_fp8 = k_scale is not None
+
+    # Create a dummy scale tensor if not using FP8 (Triton requires valid tensor)
+    if k_scale is None:
+        k_scale = torch.empty(1, dtype=torch.float32, device=q.device)
+
     _fwd_grouped_kernel_stage1[grid](
         q,
         k_buffer,
@@ -463,6 +507,7 @@ def _decode_grouped_att_m_fwd(
         Req_to_tokens,
         B_Seqlen,
         att_out,
+        k_scale,
         Req_to_tokens.stride(0),
         q.stride(0),
         q.stride(1),
@@ -487,6 +532,7 @@ def _decode_grouped_att_m_fwd(
         num_stages=num_stages,
         Lk=Lk,
         Lv=Lv,
+        USE_FP8=use_fp8,
         **extra_kargs,
     )
 
@@ -609,6 +655,7 @@ def decode_attention_fwd_normal(
     sm_scale,
     page_size,
     logit_cap=0.0,
+    k_scale=None,
 ):
     _decode_att_m_fwd(
         q,
@@ -621,6 +668,7 @@ def decode_attention_fwd_normal(
         sm_scale,
         page_size,
         logit_cap,
+        k_scale,
     )
     _decode_softmax_reducev_fwd(
         attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
@@ -640,6 +688,7 @@ def decode_attention_fwd_grouped(
     sm_scale,
     page_size,
     logit_cap=0.0,
+    k_scale=None,
 ):
     _decode_grouped_att_m_fwd(
         q,
@@ -652,6 +701,7 @@ def decode_attention_fwd_grouped(
         sm_scale,
         page_size,
         logit_cap,
+        k_scale,
     )
     _decode_softmax_reducev_fwd(
         attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
@@ -671,6 +721,7 @@ def decode_attention_fwd(
     sm_scale,
     page_size=1,
     logit_cap=0.0,
+    k_scale=None,
 ):
     assert num_kv_splits == attn_logits.shape[2]
     kv_group_num = q.shape[1] // v_buffer.shape[-2]
@@ -690,6 +741,7 @@ def decode_attention_fwd(
             sm_scale,
             page_size,
             logit_cap,
+            k_scale,
         )
     else:
         # GQA/MQA/MLA
@@ -706,4 +758,5 @@ def decode_attention_fwd(
             sm_scale,
             page_size,
             logit_cap,
+            k_scale,
         )
