@@ -503,6 +503,17 @@ if is_torch_equal_or_newer("2.11.0.dev"):
     _orig_constrain = _lowering.constrain_to_fx_strides
 
     def _patched_constrain_to_fx_strides(fx_node, *args, **kwargs):
+        # These fused collective FP8 ops have strict runtime kernel checks and
+        # their own graph-side matching conditions. Let them keep original
+        # operand layouts instead of forcing generic ExternKernel stride-order
+        # constraints, which can assert on valid transposed FP8 weight layouts.
+        target_str = str(getattr(fx_node, "target", ""))
+        if target_str in {
+            "vllm.fused_bmm_fp8_reduce_scatter.default",
+            "vllm.fused_all_gather_bmm_fp8.default",
+        }:
+            return args, kwargs
+
         def apply_constraint(arg, fx_arg):
             if isinstance(arg, _ir.IRNode):
                 meta_val = fx_arg.meta.get("val")
