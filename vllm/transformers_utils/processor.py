@@ -236,24 +236,28 @@ def get_processor_kwargs_keys(
     kwargs_cls: type[processing_utils.ProcessingKwargs],
 ) -> set[str]:
     dynamic_kwargs: set[str] = set()
+    modality_kwargs = {"text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"}
 
-    # get kwargs annotations in processor
-    # merge text_kwargs / images_kwargs / videos_kwargs / audio_kwargs
-    kwargs_type_annotations = get_type_hints(kwargs_cls)
-    for kw_type in ("text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"):
-        if kw_type in kwargs_type_annotations:
-            # Use __annotations__ instead of get_type_hints() to avoid
-            # NameError from unresolved forward references (e.g.
-            # PILImageResampling). We only need key names, not types.
-            kw_cls = kwargs_type_annotations[kw_type]
-            kw_annotations: dict[str, Any] = {}
-            for base in reversed(kw_cls.__mro__):
-                kw_annotations.update(getattr(base, "__annotations__", {}))
-            for kw_name in kw_annotations:
-                dynamic_kwargs.add(kw_name)
+    try:
+        # get kwargs annotations in processor
+        # merge text_kwargs / images_kwargs / videos_kwargs / audio_kwargs
+        kwargs_type_annotations = get_type_hints(kwargs_cls)
+        for kw_type in modality_kwargs:
+            if kw_type in kwargs_type_annotations:
+                # Use __annotations__ instead of get_type_hints() to avoid
+                # NameError from unresolved forward references (e.g.
+                # PILImageResampling). We only need key names, not types.
+                kw_cls = kwargs_type_annotations[kw_type]
+                kw_annotations: dict[str, Any] = {}
+                for base in reversed(kw_cls.__mro__):
+                    kw_annotations.update(getattr(base, "__annotations__", {}))
+                for kw_name in kw_annotations:
+                    dynamic_kwargs.add(kw_name)
 
-    dynamic_kwargs |= {"text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"}
-    return dynamic_kwargs
+    except Exception:
+        logger.exception("Failed to collect processor kwargs")
+
+    return dynamic_kwargs | modality_kwargs
 
 
 def cached_get_processor_without_dynamic_kwargs(
