@@ -22,7 +22,6 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.whisper_utils import (
     ISO639_1_SUPPORTED_LANGS,
 )
@@ -117,7 +116,7 @@ class Conv2dSubsampling(nn.Module):
         return x, input_lengths, mask
 
 
-class RelPositionalEncoding(torch.nn.Module):
+class RelPositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
         super().__init__()
         pe_positive = torch.zeros(max_len, d_model, requires_grad=False)
@@ -448,19 +447,6 @@ class FireRedASR2Encoder(nn.Module):
         self.audio_encoder = ConformerEncoder(
             **vllm_config.model_config.hf_config.audio_encoder_conf
         )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load weights with mapping from HuggingFace format."""
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            param = params_dict.get(name)
-            if param is not None:
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
 
 
 class FireRedASR2Model(nn.Module):
@@ -818,7 +804,7 @@ class FireRedASR2ForConditionalGeneration(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
-            self,
+            self, skip_prefixes=["model.encoder.audio_encoder.positional_encoding.pe"]
         )
 
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
