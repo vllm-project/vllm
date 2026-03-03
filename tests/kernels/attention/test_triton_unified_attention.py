@@ -169,20 +169,13 @@ def test_triton_unified_attn(
     BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     block_q_seq_boundaries_tensor = torch.empty(num_seqs + 1, dtype=torch.int32)
-    if max_query_len > 1:
-        block_q_seq_boundaries_tensor[0] = 0
-        block_q_seq_boundaries_tensor[1 : cu_query_lens.numel()].copy_(
-            cu_query_lens[1:]
-        )
-        block_q_seq_boundaries_tensor[1 : cu_query_lens.numel()].sub_(
-            cu_query_lens[:-1]
-        )
-        block_q_seq_boundaries_tensor[1 : cu_query_lens.numel()].add_(BLOCK_Q - 1)
-        block_q_seq_boundaries_tensor[1 : cu_query_lens.numel()].floor_divide_(BLOCK_Q)
-        block_q_seq_boundaries_tensor[: cu_query_lens.numel()].cumsum_(dim=0)
-        num_q_blocks = block_q_seq_boundaries_tensor[cu_query_lens.numel() - 1]
-    else:
-        num_q_blocks = len(seq_lens)
+    block_q_seq_boundaries_tensor[0] = 0
+    block_q_seq_boundaries_tensor[1 : cu_query_lens.numel()].copy_(cu_query_lens[1:])
+    block_q_seq_boundaries_tensor[1 : cu_query_lens.numel()].sub_(cu_query_lens[:-1])
+    block_q_seq_boundaries_tensor[1 : cu_query_lens.numel()].add_(BLOCK_Q - 1)
+    block_q_seq_boundaries_tensor[1 : cu_query_lens.numel()].floor_divide_(BLOCK_Q)
+    block_q_seq_boundaries_tensor[: cu_query_lens.numel()].cumsum_(dim=0)
+    num_q_blocks = block_q_seq_boundaries_tensor[cu_query_lens.numel() - 1]
     num_par_softmax_segments = 16
     head_size_padded = next_power_of_2(head_size)
     softmax_segm_output = torch.empty(
