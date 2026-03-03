@@ -409,9 +409,11 @@ def convert_to_nvfp4_moe_kernel_format(
         w13_scale_2 = 1.0 / w13_scale_2
         w2_scale_2 = 1.0 / w2_scale_2
 
-        a13_scale = a13_scale[0][0]
+        # NOTE: `a13_scale` is of shape (num_experts, 2). Typically, they should all be equal.
+        a13_scale = torch.max(a13_scale)
         a13_scale = 1.0 / a13_scale
 
+        # NOTE: `a2_scale` is of shape (num_experts,). We may use different a2 activation global scales for different experts.
         a2_scale = 1.0 / a2_scale
 
         if emulation_dequantize_weights:

@@ -151,8 +151,10 @@ class QuarkNVFP4(QuarkScheme):
             torch.unique(weight_global_scale).numel() != 1
             and self.backend == NvFp4LinearBackend.EMULATION
         ):
-            raise ValueError("Different weight_global_scale has different values for "
-                "parallel layers (e.g. q_proj, k_proj, v_proj) is not supported.")
+            raise ValueError(
+                "Different weight_global_scale has different values for "
+                "parallel layers (e.g. q_proj, k_proj, v_proj) is not supported."
+            )
 
         weight_global_scale = weight_global_scale.max()
 
