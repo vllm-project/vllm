@@ -45,7 +45,6 @@ from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.processors.fireredasr2_processor import (
     FireRedASR2FeatureExtractor,
 )
-from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -632,12 +631,7 @@ class FireRedASR2MultiModalProcessor(
             audio_output_lengths = fake_token_len.tolist()
 
         def get_replacement_fireredasr2_audio(item_idx: int):
-            if audio_output_lengths:
-                num_features = audio_output_lengths[item_idx]
-            else:
-                audio_embeds = out_mm_data["audio_embeds"][item_idx]
-                assert len(audio_embeds.shape) == 2, "audio_embeds must be a 2D tensor"
-                num_features = audio_embeds.shape[0]
+            num_features = audio_output_lengths[item_idx]
 
             audio_tokens = [audio_token_id] * int(num_features)
 
@@ -813,12 +807,6 @@ class FireRedASR2ForConditionalGeneration(
     ) -> FireRedASR2AudioInputs:
         input_features = kwargs.pop("input_features", None)
         speech_lengths = kwargs.pop("speech_lengths", None)
-
-        if input_features is not None:
-            input_features = json_map_leaves(lambda x: x.to(self.dtype), input_features)
-
-        if speech_lengths is not None:
-            speech_lengths = json_map_leaves(lambda x: x.to(self.dtype), speech_lengths)
 
         return FireRedASR2AudioInputs(
             input_features=input_features, speech_lengths=speech_lengths
