@@ -702,3 +702,9 @@ class Qwen3CoderToolParser(ToolParser):
                 return result
 
         return None
+
+    def parser_should_check_for_unstreamed_tool_arg_tokens(self) -> bool:
+        """
+        Skip unstreamed tool-argument tokens in serving
+        """
+        return False
