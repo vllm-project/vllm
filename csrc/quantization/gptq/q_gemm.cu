@@ -329,8 +329,8 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel(
   {
       half2 result01 = __halves2half2(__float2half_rn(block_c[m][0]), __float2half_rn(block_c[m][1]));
       half2 result23 = __halves2half2(__float2half_rn(block_c[m][2]), __float2half_rn(block_c[m][3]));
-      block_result[0] = __hadd2(block_result[0], result01);
-      block_result[1] = __hadd2(block_result[1], result23);
+      atomicAdd(block_result[0], result01);
+      atomicAdd(block_result[1], result23);
   }
   __syncthreads();
   if (threadIdx.x == 0)
