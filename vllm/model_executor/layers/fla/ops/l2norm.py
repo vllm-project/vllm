@@ -86,7 +86,7 @@ def l2norm_fwd_kernel2(
     cmask = rindex < N
     mask = xmask & cmask
     xs = tl.load(X + (rindex + N * row_idx), mask, other=0.0).to(tl.float32)
-    square = xs * xs
+    square = tl.broadcast_to(xs * xs, [MBLOCK, BD])
     square_sum = tl.sum(tl.where(xmask, square, 0), 1)[:, None]
     rsqrt = tl.rsqrt(square_sum + eps)
     tl.store(Y + (rindex + N * row_idx), xs * rsqrt, mask)
