@@ -217,16 +217,24 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel(
   __shared__ half block_a[m_count][BLOCK_KN_SIZE];
 
   if (offset_k + t < end_k) {
-    for (int m = 0; m < m_count; ++m) {
-      const half* a_ptr = a_.item_ptr(offset_m + m, 0);
-      half* block_a_ptr = block_a[m];
+    for (int m = 0; m < m_count; ++m)
+    {
+        const half* a_ptr = a_.item_ptr(offset_m + m, 0);
+        half* block_a_ptr = block_a[m];
+        __half2 a0_h2;
+        if (b_q_perm)
+        {
+            int idx = b_q_perm[offset_k + t];
+            a0_h2 = *reinterpret_cast<const __half2*>(&a_ptr[idx]);
+        }
+        else
+        {
+            a0_h2 = *reinterpret_cast<const __half2*>(&a_ptr[offset_k + t]);
+        }
 
-      half a0;
-      if (b_q_perm)
-        a0 = a_ptr[b_q_perm[offset_k + t]];
-      else
-        a0 = a_ptr[offset_k + t];
-      block_a_ptr[t] = a0;
+        
+        block_a_ptr[t] = __low2half(a0_h2);  
+        block_a_ptr[t + 1] = __high2half(a0_h2);  
     }
   }
 
@@ -310,14 +318,26 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel(
     k += 32;
   }
 
-  for (int m = 0; m < m_count; m++) {
-    half2* out = (half2*)c_.item_ptr(offset_m + m, n);
-    half2 result01 = __halves2half2(__float2half_rn(block_c[m][0]),
-                                    __float2half_rn(block_c[m][1]));
-    half2 result23 = __halves2half2(__float2half_rn(block_c[m][2]),
-                                    __float2half_rn(block_c[m][3]));
-    atomicAdd(out, result01);
-    atomicAdd(out + 1, result23);
+  __shared__ half2 block_result[2];
+  if (threadIdx.x == 0)
+  {
+      block_result[0] = make_half2(0, 0);
+      block_result[1] = make_half2(0, 0);
+  }
+  __syncthreads();
+  for (int m = 0; m < m_count; m++)
+  {
+      half2 result01 = __halves2half2(__float2half_rn(block_c[m][0]), __float2half_rn(block_c[m][1]));
+      half2 result23 = __halves2half2(__float2half_rn(block_c[m][2]), __float2half_rn(block_c[m][3]));
+      block_result[0] = __hadd2(block_result[0], result01);
+      block_result[1] = __hadd2(block_result[1], result23);
+  }
+  __syncthreads();
+  if (threadIdx.x == 0)
+  {
+      half2 *out = (half2*) c_.item_ptr(offset_m, n);
+      atomicAdd(out   , block_result[0]);
+      atomicAdd(out + 1, block_result[1]);
   }
 }
 
