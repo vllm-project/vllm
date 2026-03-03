@@ -215,11 +215,14 @@ def auto_drop_analysis_messages(msgs: list[Message]) -> list[Message]:
         return msgs
 
     # Drop analysis messages in the current turn that precede the last final.
+    # Also guard against accidentally filtering non-assistant messages.
     return [
         msg
         for i, msg in enumerate(msgs)
         if not (
-            current_turn_start <= i < last_final_in_turn and msg.channel == "analysis"
+            current_turn_start <= i < last_final_in_turn
+            and msg.channel == "analysis"
+            and msg.author.role != "user"
         )
     ]
 
