@@ -516,9 +516,6 @@ class FireRedASR2ProcessingInfo(BaseProcessingInfo):
     def get_target_channels(self) -> int:
         return 1
 
-    def get_num_audio_tokens(self) -> int:
-        return self.get_hf_config().max_source_positions
-
 
 class FireRedASR2DummyInputsBuilder(BaseDummyInputsBuilder[FireRedASR2ProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
@@ -750,9 +747,6 @@ class FireRedASR2ForConditionalGeneration(
             inputs_embeds=inputs_embeds,
         )
         return decoder_outputs
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.model.decoder
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
