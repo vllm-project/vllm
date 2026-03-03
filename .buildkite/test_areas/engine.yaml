@@ -46,7 +46,7 @@ steps:
     - tests/v1/e2e
   commands:
     # Only run tests that need exactly 2 GPUs
-    - pytest -v -s v1/e2e/test_spec_decode.py -k "tensor_parallelism"
+    - pytest -v -s v1/e2e/test_spec_decode.py -k 'tensor_parallelism'
   mirror:
     amd:
       device: mi325_2
@@ -62,7 +62,7 @@ steps:
     - tests/v1/e2e
   commands:
     # Only run tests that need 4 GPUs
-    - pytest -v -s v1/e2e/test_spec_decode.py -k "eagle_correctness_heavy"
+    - pytest -v -s v1/e2e/test_spec_decode.py -k 'eagle_correctness_heavy'
   mirror:
     amd:
       device: mi325_4
