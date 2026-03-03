@@ -260,6 +260,48 @@ def test_ocp_mx_wikitext_correctness(
     ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
 
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_nvfp4_wikitext_correctness(tp_size: int):
+    if torch.cuda.device_count() < tp_size:
+        pytest.skip(
+            f"This test requires >={tp_size} gpus, got only {torch.cuda.device_count()}"
+        )
+
+    model_name = "amd-quark/Qwen3-30B-A3B-nvfp4"
+    expected_value = 12.4  # Adjust this value based on expected perplexity
+    task = "wikitext"
+    rtol = 0.1
+
+    config = AccuracyTestConfig(
+        model_name=model_name,
+        excepted_value=expected_value,
+    )
+
+    # Smaller cudagraph_capture_sizes to speed up the test.
+    results = lm_eval.simple_evaluate(
+        model="vllm",
+        model_args=config.get_model_args(
+            tp_size=tp_size,
+            kwargs={
+                "cudagraph_capture_sizes": [16],
+            },
+        ),
+        tasks=task,
+        batch_size=64,
+    )
+
+    EXPECTED_VALUE = config.excepted_value
+    measured_value = results["results"][task]["word_perplexity,none"]
+    assert (
+        measured_value < EXPECTED_VALUE + rtol
+        and measured_value > EXPECTED_VALUE - rtol
+    ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+
+
 @pytest.mark.parametrize("config", GSM8K_ACCURACY_CONFIGS)
 @pytest.mark.skipif(
     not QUARK_MXFP4_AVAILABLE,

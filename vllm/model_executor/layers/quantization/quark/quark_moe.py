@@ -1397,38 +1397,10 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
 
-        # NOTE: Quark uses inverse global scales compared to ModelOpt,
-        # which already stores inverse scales. So for EMULATION backend,
-        # we need to invert them.
-        if self.nvfp4_backend == NvFp4MoeBackend.EMULATION:
-            layer.w13_weight_scale_2.data = 1.0 / layer.w13_weight_scale_2.data.to(
-                torch.float32
-            )
-            layer.w2_weight_scale_2.data = 1.0 / layer.w2_weight_scale_2.data.to(
-                torch.float32
-            )
-
-        # Check if w13 needs requantization for gate/up projections
-        layer.w13_needs_requantization = False
         if not torch.allclose(
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
         ):
-            if self.nvfp4_backend == NvFp4MoeBackend.EMULATION:
-                layer.w13_needs_requantization = True
-                logger.warning_once(
-                    "In NVFP4 MoE, detected different global scales for w1 and w3 "
-                    "(gate/up). Using NVFP4 requantization which may result in a "
-                    "lower accuracy compared to split parallel layers. Please verify "
-                    "the model accuracy. Consider using a checkpoint "
-                    "with a shared global NVFP4 scale for parallel layers."
-                )
-            else:
-                logger.warning_once(
-                    "In NVFP4 MoE, detected different global scales for w1 and w3 "
-                    "(gate/up). This may result in a lower accuracy, please verify "
-                    "the model accuracy. Consider using a checkpoint with a shared "
-                    "global NVFP4 scale for parallel layers."
-                )
+            raise ValueError("Different global scales for w1 and w3 is not supported.")
 
         # Use a single gscale for w13
         w13_weight_scale_2 = torch.maximum(

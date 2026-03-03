@@ -147,21 +147,12 @@ class QuarkNVFP4(QuarkScheme):
 
         weight_global_scale = layer.weight_scale_2.to(torch.float32)
 
-        layer.needs_requantization = False
         if (
             torch.unique(weight_global_scale).numel() != 1
             and self.backend == NvFp4LinearBackend.EMULATION
         ):
-            logger.warning_once(
-                "In NVFP4 linear, weight_global_scale has different values for "
-                "parallel layers (e.g. q_proj, k_proj, v_proj). Using NVFP4 "
-                "requantization which may result in a lower accuracy compared to "
-                "split parallel layers. Please verify the model accuracy. "
-                "Consider using a checkpoint with a shared global NVFP4 scale "
-                "for parallel layers."
-            )
-
-            layer.needs_requantization = True
+            raise ValueError("Different weight_global_scale has different values for "
+                "parallel layers (e.g. q_proj, k_proj, v_proj) is not supported.")
 
         weight_global_scale = weight_global_scale.max()
 

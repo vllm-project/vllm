@@ -75,10 +75,14 @@ class QuarkConfig(QuantizationConfig):
 
         quant_config = getattr(self.hf_config, "quantization_config", None)
         if quant_config is not None:
-            quant_dtype = quant_config["global_quant_config"]["weight"]["dtype"]
             model_type = self.hf_config.model_type
-            if quant_dtype == "fp4" and model_type == "deepseek_v3":
-                self.dynamic_mxfp4_quant = True
+
+            # global_quant_config's weight may be a list for NVFP4.
+            if not isinstance(quant_config["global_quant_config"]["weight"], list):
+                quant_dtype = quant_config["global_quant_config"]["weight"]["dtype"]
+                model_type = self.hf_config.model_type
+                if quant_dtype == "fp4" and model_type == "deepseek_v3":
+                    self.dynamic_mxfp4_quant = True
 
     def get_linear_method(self) -> "QuarkLinearMethod":
         return QuarkLinearMethod(self)
