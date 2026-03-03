@@ -82,11 +82,8 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
     },
 )
 async def render_chat_completion(request: ChatCompletionRequest, raw_request: Request):
-    """Render chat completion request into a token-in GenerateRequest.
-
-    This endpoint must be a pure preprocessing step: it should not generate
-    text and must return a JSON-serializable structure.
-    """
+    """Render chat completion request and return conversation and engine
+    prompts without generating."""
     handler = chat(raw_request)
     if handler is None:
         base_server = raw_request.app.state.openai_serving_tokenization
