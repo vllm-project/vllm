@@ -44,7 +44,6 @@ class PoolingParams(
 
     ## Internal use only
     task: PoolingTask | None = None
-    tasks: list[PoolingTask] | None = None  # Multiple tasks support
     requires_token_ids: bool = False
     skip_reading_prefix_cache: bool | None = None
     extra_kwargs: dict[str, Any] | None = None
@@ -221,7 +220,6 @@ class PoolingParams(
         return (
             f"PoolingParams("
             f"task={self.task}, "
-            f"tasks={self.tasks}, "
             f"dimensions={self.dimensions}, "
             f"use_activation={self.use_activation}, "
             f"step_tag_id={self.step_tag_id}, "
@@ -237,8 +235,8 @@ class PoolingParams(
         Returns multiple tasks if `tasks` is set, otherwise returns
         a single task from `task` attribute for backward compatibility.
         """
-        if self.tasks is not None:
-            return self.tasks
+        if self.task == "token_classify+embed":
+            return ["token_classify", "embed"]
         if self.task is not None:
             return [self.task]
         return []

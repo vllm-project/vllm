@@ -28,7 +28,6 @@ class PoolingCompletionRequest(
     ClassifyRequestMixin,
 ):
     task: PoolingTask | None = None
-    tasks: list[PoolingTask] | None = None  # Support for multiple tasks
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}
@@ -45,7 +44,6 @@ class PoolingCompletionRequest(
     def to_pooling_params(self):
         return PoolingParams(
             task=self.task,
-            tasks=self.tasks,
             use_activation=self.use_activation,
             dimensions=self.dimensions,
         )
@@ -55,7 +53,6 @@ class PoolingChatRequest(
     PoolingBasicRequestMixin, ChatRequestMixin, EmbedRequestMixin, ClassifyRequestMixin
 ):
     task: PoolingTask | None = None
-    tasks: list[PoolingTask] | None = None  # Support for multiple tasks
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}
@@ -72,7 +69,6 @@ class PoolingChatRequest(
     def to_pooling_params(self):
         return PoolingParams(
             task=self.task,
-            tasks=self.tasks,
             use_activation=self.use_activation,
             dimensions=self.dimensions,
         )
