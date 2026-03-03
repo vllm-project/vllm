@@ -37,7 +37,6 @@ from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -120,7 +119,6 @@ class Dots1MoE(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        self.tp_size = get_tensor_model_parallel_world_size()
         self.routed_scaling_factor = config.routed_scaling_factor
         self.n_shared_experts = config.n_shared_experts
 
@@ -163,7 +161,6 @@ class Dots1MoE(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             use_grouped_topk=True,
@@ -174,6 +171,7 @@ class Dots1MoE(nn.Module):
             # we do scaling outside, set factor to 1.0 to avoid double mul
             routed_scaling_factor=1.0,
             e_score_correction_bias=self.gate.e_score_correction_bias,
+            output_scale=self.routed_scaling_factor,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -182,16 +180,9 @@ class Dots1MoE(nn.Module):
 
         router_logits, _ = self.gate(hidden_states)
 
-        shared_out, routed_out = self.experts(
+        final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-        if self.shared_experts is not None:
-            final_hidden_states = (routed_out + shared_out) * self.routed_scaling_factor
-        else:
-            final_hidden_states = routed_out * self.routed_scaling_factor
-
-        if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 

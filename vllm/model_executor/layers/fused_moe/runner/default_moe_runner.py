@@ -61,8 +61,9 @@ class DefaultMoERunner(MoERunnerBase):
         gate: torch.nn.Module | None,
         shared_experts: SharedExperts | None,
         quant_method: FusedMoEMethodBase,
-        reduce_results: bool,
         enable_dbo: bool,
+        routed_output_transform: torch.nn.Module | None = None,
+        output_scale: float | None = None,
     ):
         super().__init__(
             layer,
@@ -72,13 +73,10 @@ class DefaultMoERunner(MoERunnerBase):
             gate,
             shared_experts,
             quant_method,
-            reduce_results,
             enable_dbo,
+            routed_output_transform=routed_output_transform,
+            output_scale=output_scale,
         )
-
-    @property
-    def reduce_results(self) -> bool:
-        return self._reduce_results
 
     @property
     def do_naive_dispatch_combine(self) -> bool:
