@@ -277,6 +277,31 @@ class HummingFp8WeightConverter(HummingBaseWeightConverter):
         if is_block_quant:
             self.ckpt_weight_scale_name = "weight_scale_inv"
 
+    def convert_weight(
+        self,
+        tensor: torch.Tensor,
+        shape_n: int,
+        shape_k: int,
+        num_experts: int | None = None,
+    ) -> dict[str, torch.Tensor]:
+        assert tensor.dtype == torch.float8_e4m3fn
+        tensor = tensor.view(torch.int32)
+        return super().convert_weight(tensor, shape_n, shape_k, num_experts)
+
+    def convert_weight_scale(
+        self,
+        tensor: torch.Tensor,
+        shape_n: int,
+        shape_k: int,
+        num_experts: int | None = None,
+    ) -> dict[str, torch.Tensor]:
+        if self.quant_config.weight_scale_group_size_n > 1:
+            group_size_n = self.quant_config.weight_scale_group_size_n
+            tensor = tensor.repeat_interleave(group_size_n, -2)
+        tensor = tensor.to(torch.bfloat16)
+        assert tensor.size(0) == shape_n
+        return super().convert_weight_scale(tensor, shape_n, shape_k, num_experts)
+
 
 class HummingModeloptWeightConverter(HummingBaseWeightConverter):
     ckpt_weight_scale_name: str = "weight_global_scale"

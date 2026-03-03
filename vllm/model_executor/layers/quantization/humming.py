@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 import math
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
@@ -48,6 +48,10 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 
 
+if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
+
+
 def get_full_shape_nk(layer: torch.nn.Module, shape_n: int, shape_k: int):
     if isinstance(layer, ColumnParallelLinear):
         return shape_n * layer.tp_size, shape_k
@@ -61,53 +65,93 @@ def get_full_shape_nk(layer: torch.nn.Module, shape_n: int, shape_k: int):
 
 def narrow_tensors(
     tensors: dict[str, torch.Tensor],
-    shape_n: int,
+    stack_shape_n_list: tuple[int, ...] | list[int] | int,
     shape_k: int,
     tp_size: int,
     tp_rank: int,
     is_row_parallel: bool,
+    stack_id: int | None = None,
 ) -> dict[str, torch.Tensor]:
+    tensors = tensors.copy()
     if tp_size == 1:
         return tensors
 
-    full_size = 0
-    for key, tensor in tensors.copy().items():
-        narrow_dim = None
-        if key in ["weight", "weight_scale", "zero_point"]:
-            if not is_row_parallel:
-                narrow_dim = -2
-                full_size = shape_n
-            elif is_row_parallel:
+    if isinstance(stack_shape_n_list, (tuple, list)) and stack_id is None:
+        assert not is_row_parallel
+        assert stack_id is None
+
+        tensors_list = []
+        for stack_id in range(len((stack_shape_n_list))):
+            tensors_new = narrow_tensors(
+                tensors=tensors,
+                stack_shape_n_list=stack_shape_n_list,
+                shape_k=shape_k,
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+                is_row_parallel=False,
+                stack_id=stack_id,
+            )
+            tensors_list.append(tensors_new)
+
+        for key, tensor in tensors.copy().items():
+            if key in ["weight", "weight_scale", "zero_point"]:
+                concat_dim = -2
+            elif key == "bias":
+                concat_dim = -1
+            else:
+                concat_dim = None
+
+            if concat_dim is None:
+                tensors[key] = tensors_list[0][key]
+            else:
+                tensors[key] = torch.cat([x[key] for x in tensors_list], dim=concat_dim)
+
+        return tensors
+    else:
+        part_shape_n = stack_shape_n_list
+        tensor_shape_n = stack_shape_n_list
+        offset_n = 0
+        if isinstance(stack_shape_n_list, (tuple, list)):
+            part_shape_n = stack_shape_n_list[stack_id]
+            tensor_shape_n = sum(stack_shape_n_list)
+            offset_n = sum(stack_shape_n_list[:stack_id])
+
+        full_size = 0
+        for key, tensor in tensors.copy().items():
+            narrow_dim = None
+            if key in ["weight", "weight_scale", "zero_point"]:
+                if not is_row_parallel:
+                    narrow_dim = -2
+                    full_size = tensor_shape_n
+                    split_size = part_shape_n // tp_size
+                elif is_row_parallel:
+                    narrow_dim = -1
+                    full_size = shape_k
+                    split_size = shape_k // tp_size
+            elif key == "bias" and not is_row_parallel:
                 narrow_dim = -1
-                full_size = shape_k
-        elif key == "bias" and not is_row_parallel:
-            narrow_dim = -1
-            full_size = shape_n
+                full_size = tensor_shape_n
+                split_size = part_shape_n // tp_size
 
-        if narrow_dim is None:
-            continue
+            if narrow_dim is None:
+                continue
 
-        size = tensor.size(narrow_dim)
-        if size == 1:
-            continue
+            size = tensor.size(narrow_dim)
+            if size == 1:
+                continue
 
-        assert full_size % tp_size == 0
-        split_size = full_size // tp_size
-        assert size * split_size % full_size == 0
-        new_size = size * split_size // full_size
+            assert full_size % tp_size == 0
+            new_size = size * split_size // full_size
+            new_offset = size * offset_n // full_size
 
-        tensor = tensor.narrow(narrow_dim, new_size * tp_rank, new_size)
-        tensors[key] = tensor.contiguous()
+            tensor = tensor.narrow(
+                dim=narrow_dim,
+                start=new_offset + new_size * tp_rank,
+                length=new_size,
+            )
+            tensors[key] = tensor.contiguous()
 
-    return tensors
-
-
-def get_ignored_layers(config):
-    if "ignored_layers" in config:
-        return config["ignored_layers"]
-    if "modules_to_not_convert" in config:
-        return config["modules_to_not_convert"]
-    return []
+        return tensors
 
 
 def is_layer_skipped(prefix: str, ignore_layers: list[str]):
@@ -267,6 +311,8 @@ class HummingLayerQuantizationConfig(QuantizationConfig):
 class HummingConfig(QuantizationConfig):
     def __init__(self, full_config: dict[str, Any] | None = None) -> None:
         self.full_config: dict[str, Any] = full_config or {}
+        keys = ["ignored_layers", "ignore", "modules_to_not_convert"]
+        self.ignored_layers = self.get_from_keys_or(full_config, keys, [])
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -296,10 +342,11 @@ class HummingConfig(QuantizationConfig):
             return cls.get_name()
         return None
 
-    @classmethod
-    def is_layer_skipped(cls, config: dict[str, Any], prefix: str):
-        keys = ["ignored_layers", "ignore", "modules_to_not_convert"]
-        ignored_layers = cls.get_from_keys_or(config, keys, [])
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        self.ignored_layers = hf_to_vllm_mapper.apply_list(self.ignored_layers)
+
+    def is_layer_skipped(self, config: dict[str, Any], prefix: str):
+        ignored_layers = self.ignored_layers
         if any(module_name in prefix for module_name in ignored_layers):
             return True
         if "lm_head" in prefix:
@@ -313,11 +360,10 @@ class HummingConfig(QuantizationConfig):
 
         return False
 
-    @classmethod
     def get_layer_weight_quant_config(
-        cls, config: dict[str, Any], prefix: str, layer_type: str
+        self, config: dict[str, Any], prefix: str, layer_type: str
     ) -> dict[str, Any] | None:
-        if cls.is_layer_skipped(config, prefix):
+        if self.is_layer_skipped(config, prefix):
             return None
 
         layer_config = parse_single_config(config)
@@ -337,8 +383,7 @@ class HummingConfig(QuantizationConfig):
 
         return layer_config
 
-    @classmethod
-    def get_layer_input_quant_config(cls, prefix: str) -> dict[str, Any]:
+    def get_layer_input_quant_config(self, prefix: str) -> dict[str, Any]:
         config = envs.VLLM_HUMMING_INPUT_QUANT_CONFIG
         if config is None:
             return {}
@@ -558,13 +603,20 @@ class HummingLinearMethod(LinearMethodBase):
             shard_id: str | int | None = None,
         ):
             param_name = param.param_name
+            shape_n = self.meta.shape_n - self.meta.pad_shape_n
+            shape_k = self.meta.shape_k - self.meta.pad_shape_k
             if isinstance(shard_id, str):
                 shard_id = shard_id_map[shard_id]
-            offset_n = sum(layer.logical_widths[: (shard_id or 0)])
-            shape_n = self.meta.shape_n - self.meta.pad_shape_n
-            if isinstance(shard_id, int):
-                shape_n = layer.logical_widths[shard_id]
-            shape_k = self.meta.shape_k - self.meta.pad_shape_k
+            if isinstance(shard_id, tuple):
+                assert shard_id[-1] - shard_id[0] == len(shard_id) - 1
+                offset_n = sum(layer.logical_widths[: shard_id[0]])
+                stack_shape_n_list = tuple(layer.logical_widths[i] for i in shard_id)
+                shape_n = sum(stack_shape_n_list)
+            else:
+                offset_n = sum(layer.logical_widths[: (shard_id or 0)])
+                if isinstance(shard_id, int):
+                    shape_n = layer.logical_widths[shard_id]
+                stack_shape_n_list = shape_n
 
             self.may_fallback_to_unquantized(layer, param, loaded_weight)
             if layer.is_fallback:
@@ -580,7 +632,7 @@ class HummingLinearMethod(LinearMethodBase):
 
             data = narrow_tensors(
                 tensors=data,
-                shape_n=shape_n,
+                stack_shape_n_list=stack_shape_n_list,
                 shape_k=shape_k,
                 tp_size=layer.tp_size,
                 tp_rank=layer.tp_rank,
@@ -781,7 +833,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             if not self.is_loaded_weight_narrowed:
                 data = narrow_tensors(
                     tensors=data,
-                    shape_n=shape_n,
+                    stack_shape_n_list=shape_n,
                     shape_k=shape_k,
                     tp_size=layer.tp_size,
                     tp_rank=layer.tp_rank,
