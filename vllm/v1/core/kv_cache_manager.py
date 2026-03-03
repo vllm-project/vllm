@@ -490,8 +490,11 @@ class KVCacheManager:
         return KVCacheBlocks(blocks) if any(blocks) else self.empty_kv_cache_blocks
 
     def take_new_block_ids(self) -> list[int]:
-        """Drain and return block IDs allocated since the last call."""
-        return self.block_pool.take_new_block_ids()
+        """Drain and return new attention block IDs for zeroing."""
+        ids: list[int] = []
+        for mgr in self.coordinator.single_type_managers:
+            ids.extend(mgr.take_new_block_ids())
+        return ids
 
     def new_step_starts(self) -> None:
         """Called when a new step is started."""
