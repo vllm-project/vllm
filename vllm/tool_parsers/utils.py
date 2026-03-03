@@ -117,7 +117,7 @@ def build_partial_args_json(
     for i, (name, value) in enumerate(param_pairs):
         serialized = json.dumps(value, ensure_ascii=False)
         sep = ", " if i > 0 else ""
-        parts.append(f'{sep}"{name}": {serialized}')
+        parts.append(f"{sep}{json.dumps(name, ensure_ascii=False)}: {serialized}")
 
     result = "{" + "".join(parts)
     if is_complete:
