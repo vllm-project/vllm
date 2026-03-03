@@ -165,13 +165,15 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
             set(NPROC 4)
         endif()
         # locate PyTorch's libgomp (e.g. site-packages/torch.libs/libgomp-947d5fa1.so.1.0.0)
-        # and create a local shim dir with it
+        # and create a local shim dir with it. If PyTorch doesn't vendor libgomp
+        # (e.g., distro builds), fall back to system libgomp.
         vllm_prepare_torch_gomp_shim(VLLM_TORCH_GOMP_SHIM_DIR)
 
+        # Fix for #35896: Use HINTS to prefer PyTorch's vendored libgomp but allow
+        # fallback to system paths for distro-packaged PyTorch (Red Hat, Fedora, etc.)
         find_library(OPEN_MP
             NAMES gomp
-            PATHS ${VLLM_TORCH_GOMP_SHIM_DIR}
-            NO_DEFAULT_PATH
+            HINTS ${VLLM_TORCH_GOMP_SHIM_DIR}
             REQUIRED
         )
         # Set LD_LIBRARY_PATH to include the shim dir at build time to use the same libgomp as PyTorch
