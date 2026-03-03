@@ -72,7 +72,10 @@ class PerRequestStateAdapter(Protocol):
     """Typed callbacks for per-request mutable decode state.
 
     The split callbacks preserve execution ordering across forward, logits
-    computation, and post-sampling state transitions.
+    computation, and post-sampling state transitions. Moondream3 model
+    uses it - for its detect/point state machine that tracks per-request
+    decode state (coordinates, bounding boxes) and overrides output with
+    JSON results.
     """
 
     def on_new_request(
