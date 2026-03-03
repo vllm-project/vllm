@@ -62,7 +62,6 @@ from vllm.v1.attention.backend import (
 
 from .interfaces import (
     MultiModalEmbeddings,
-    PackedEmbeddings,
     SupportsMultiModal,
     SupportsTranscription,
 )
@@ -1979,9 +1978,7 @@ class CohereASRModel(nn.Module):
         positions: torch.Tensor,
         encoder_outputs: list[torch.Tensor],
     ) -> torch.Tensor:
-        enc_states = (
-            torch.stack(encoder_outputs, dim=0) if len(encoder_outputs) else None
-        )
+        enc_states = torch.cat(encoder_outputs, dim=0) if len(encoder_outputs) else None
         decoder_outputs = self.decoder(
             input_ids=input_ids,
             positions=positions,
@@ -2014,7 +2011,6 @@ class CohereASRModel(nn.Module):
                 feat_len = encoder_output_length[i]
                 outs.append(feat[:feat_len, :])
 
-            outs = torch.cat(outs, dim=0)
             return outs
         else:
             raise NotImplementedError("List input_features not supported")
@@ -2400,7 +2396,7 @@ class CohereASRForConditionalGeneration(
         else:
             out = self.model.get_encoder_outputs(audio_input, seq_lens)
 
-        return PackedEmbeddings(embeddings=out)
+        return out
 
     def get_input_embeddings(
         self,

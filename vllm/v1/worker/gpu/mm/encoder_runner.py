@@ -7,7 +7,6 @@ import numpy as np
 import torch
 
 from vllm.model_executor.models.interfaces import (
-    PackedEmbeddings,
     SupportsMultiModal,
 )
 from vllm.multimodal.inputs import MultiModalKwargsItem
@@ -63,19 +62,11 @@ class EncoderRunner:
             mm_kwargs, device=self.device, pin_memory=False
         ):
             curr_group_outputs = self.model.embed_multimodal(**mm_kwargs_group)
-            if isinstance(curr_group_outputs, PackedEmbeddings):
-                is_packed = True
-                curr_group_outputs = curr_group_outputs.embeddings
-            else:
-                is_packed = False
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
                 expected_num_items=num_items,
-                is_packed_outputs=is_packed,
             )
-            encoder_outputs.extend(
-                cast(Iterable[torch.Tensor], curr_group_outputs)
-            )
+            encoder_outputs.extend(cast(Iterable[torch.Tensor], curr_group_outputs))
         return encoder_outputs
 
     def gather_mm_embeddings(

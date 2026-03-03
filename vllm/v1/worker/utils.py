@@ -187,7 +187,6 @@ def prepare_kernel_block_sizes(
 def sanity_check_mm_encoder_outputs(
     mm_embeddings: MultiModalEmbeddings,
     expected_num_items: int,
-    is_packed_outputs: bool = False,
 ) -> None:
     """
     Perform sanity checks for the result of
@@ -200,29 +199,19 @@ def sanity_check_mm_encoder_outputs(
         "of the model's `embed_multimodal` method."
     )
 
-    if is_packed_outputs:
-        assert isinstance(mm_embeddings, torch.Tensor)
-        assert mm_embeddings.ndim == 2, (
-            "Expected multimodal embeddings to be a 2D packed tensor when "
-            "`is_packed_outputs` is True, but got a tensor with "
-            f"shape {mm_embeddings.shape} instead. This is most likely due "
-            "to incorrect implementation of the model's "
-            "`embed_multimodal` method."
-        )
-    else:
-        assert len(mm_embeddings) == expected_num_items, (
-            "Expected number of multimodal embeddings to match number of "
-            f"input items: {expected_num_items}, but got {len(mm_embeddings)=} "
-            "instead. This is most likely due to incorrect implementation "
-            "of the model's `embed_multimodal` method."
-        )
+    assert len(mm_embeddings) == expected_num_items, (
+        "Expected number of multimodal embeddings to match number of "
+        f"input items: {expected_num_items}, but got {len(mm_embeddings)=} "
+        "instead. This is most likely due to incorrect implementation "
+        "of the model's `embed_multimodal` method."
+    )
 
-        assert all(e.ndim == 2 for e in mm_embeddings), (
-            "Expected multimodal embeddings to be a sequence of 2D tensors, "
-            f"but got tensors with shapes {[e.shape for e in mm_embeddings]} "
-            "instead. This is most likely due to incorrect implementation "
-            "of the model's `embed_multimodal` method."
-        )
+    assert all(e.ndim == 2 for e in mm_embeddings), (
+        "Expected multimodal embeddings to be a sequence of 2D tensors, "
+        f"but got tensors with shapes {[e.shape for e in mm_embeddings]} "
+        "instead. This is most likely due to incorrect implementation "
+        "of the model's `embed_multimodal` method."
+    )
 
 
 def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> int:

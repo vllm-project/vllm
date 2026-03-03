@@ -11,7 +11,6 @@ from collections.abc import (
     Sequence,
 )
 from contextlib import ExitStack, contextmanager, nullcontext
-from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     ClassVar,
@@ -55,15 +54,7 @@ else:
 
 logger = init_logger(__name__)
 
-MultiModalEmbeddingsTensor: TypeAlias = list[Tensor] | Tensor | tuple[Tensor, ...]
-
-
-@dataclass(frozen=True)
-class PackedEmbeddings:
-    embeddings: MultiModalEmbeddingsTensor
-
-
-MultiModalEmbeddings: TypeAlias = MultiModalEmbeddingsTensor | PackedEmbeddings
+MultiModalEmbeddings: TypeAlias = list[Tensor] | Tensor | tuple[Tensor, ...]
 """
 The output embeddings must be one of the following formats:
 
