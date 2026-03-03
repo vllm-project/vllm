@@ -2175,7 +2175,6 @@ def test_get_kv_cache_configs_with_mamba():
             KVCacheGroupSpec(
                 ["layer_2", "layer_3"],
                 new_kv_cache_spec(head_size=32, group_size=2),
-                group_size=1,
             ),
         ],
     )
