@@ -353,7 +353,8 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--hip_online_tuning",
         action="store_true",
         default=False,
-        help="Enable AITER hipBLASLt online GEMM tuning. Disabled by default.")
+        help="Enable AITER hipBLASLt online GEMM tuning. Disabled by default."
+    )
     
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
