@@ -292,12 +292,12 @@ class OpenAIServingPooling(OpenAIServing):
         for idx, final_res in enumerate(final_res_batch):
             pooling_rsp_data: str | list[str] | list[float] | list[list[float]]
             if encoding_format == "float":
-                if is_multi_pooling_task:
-                    pooling_rsp_data = encode_multi_tasks_pooling_output_float(
-                        final_res
-                    )
-                else:
-                    pooling_rsp_data = encode_pooling_output_float(final_res)
+                pooling_rsp_data = (
+                    encode_multi_tasks_pooling_output_float(final_res)
+                    if is_multi_pooling_task
+                    else encode_pooling_output_float(final_res)
+                )
+
             elif encoding_format == "base64":
                 pooling_rsp_data = (
                     encode_base64_fn(final_res)
