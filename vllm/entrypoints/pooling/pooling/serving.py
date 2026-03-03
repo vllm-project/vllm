@@ -29,6 +29,8 @@ from vllm.entrypoints.pooling.pooling.protocol import (
     PoolingResponseData,
 )
 from vllm.entrypoints.pooling.utils import (
+    encode_multi_tasks_pooling_output_base64,
+    encode_multi_tasks_pooling_output_float,
     encode_pooling_bytes,
     encode_pooling_output_base64,
     encode_pooling_output_float,
@@ -261,16 +263,21 @@ class OpenAIServingPooling(OpenAIServing):
         endianness: Endianness,
         pooling_params: PoolingParams | None = None,
     ) -> PoolingResponse:
-        encode_float_fn = cast(
-            Callable[[PoolingRequestOutput], list[float]],
-            (encode_pooling_output_float),
-        )
-
         encode_base64_fn = cast(
             Callable[[PoolingRequestOutput], str],
             (
                 partial(
                     encode_pooling_output_base64,
+                    embed_dtype=embed_dtype,
+                    endianness=endianness,
+                )
+            ),
+        )
+        encode_multi_task_base64_fn = cast(
+            Callable[[PoolingRequestOutput], list[str]],
+            (
+                partial(
+                    encode_multi_tasks_pooling_output_base64,
                     embed_dtype=embed_dtype,
                     endianness=endianness,
                 )
@@ -286,14 +293,16 @@ class OpenAIServingPooling(OpenAIServing):
             pooling_rsp_data: str | list[str] | list[float] | list[list[float]]
             if encoding_format == "float":
                 if is_multi_pooling_task:
-                    pooling_rsp_data = [encode_float_fn(res) for res in final_res]
+                    pooling_rsp_data = encode_multi_tasks_pooling_output_float(
+                        final_res
+                    )
                 else:
-                    pooling_rsp_data = encode_float_fn(final_res)
+                    pooling_rsp_data = encode_pooling_output_float(final_res)
             elif encoding_format == "base64":
                 pooling_rsp_data = (
                     encode_base64_fn(final_res)
                     if is_multi_pooling_task
-                    else [encode_base64_fn(res) for res in final_res]
+                    else encode_multi_task_base64_fn(final_res)
                 )
             else:
                 assert_never(encoding_format)
