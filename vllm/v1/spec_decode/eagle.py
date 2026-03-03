@@ -16,7 +16,7 @@ from vllm.config import (
     get_layers_from_vllm_config,
 )
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
@@ -129,7 +129,9 @@ class SpecDecodeBaseProposer:
         # Keys are initialized later via initialize_cudagraph_keys() called from
         # gpu_model_runner._check_and_update_cudagraph_mode after
         # adjust_cudagraph_sizes_for_spec_decode is called.
-        self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
+        self.cudagraph_dispatcher = CudagraphDispatcher(
+            self.vllm_config, is_draft_model=True
+        )
 
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(
@@ -454,16 +456,15 @@ class SpecDecodeBaseProposer:
         num_reqs = len(num_scheduled_tokens)
         max_num_scheduled_tokens = max(num_scheduled_tokens.values(), default=0)
 
-        uniform_decode = is_uniform_decode(
+        uniform_decode = is_uniform_decode(  # noqa: F841
             max_num_scheduled_tokens,
             self.uniform_decode_query_len,
             num_tokens,
             num_reqs,
         )
 
-        cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
-            self._determine_batch_execution_and_padding(num_tokens),
-            uniform_decode,
+        cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp, batch_desc = (
+            self._determine_batch_execution_and_padding(num_tokens)
         )
 
         if self.supports_mm_inputs:
@@ -495,6 +496,7 @@ class SpecDecodeBaseProposer:
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
+            batch_descriptor=batch_desc,
             slot_mapping=self._get_slot_mapping(
                 num_input_tokens, common_attn_metadata.slot_mapping
             ),
@@ -556,9 +558,8 @@ class SpecDecodeBaseProposer:
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
 
-        cudagraph_runtime_mode, input_batch_size, batch_size_across_dp = (
-            self._determine_batch_execution_and_padding(batch_size),
-            uniform_decode,
+        cudagraph_runtime_mode, input_batch_size, batch_size_across_dp, batch_desc = (
+            self._determine_batch_execution_and_padding(batch_size)
         )
 
         common_attn_metadata.num_actual_tokens = batch_size
@@ -689,6 +690,7 @@ class SpecDecodeBaseProposer:
                 num_tokens=input_batch_size,
                 num_tokens_across_dp=batch_size_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                batch_descriptor=batch_desc,
                 slot_mapping=self._get_slot_mapping(
                     input_batch_size, common_attn_metadata.slot_mapping
                 ),
@@ -1586,10 +1588,13 @@ class SpecDecodeBaseProposer:
             self.num_speculative_tokens if not is_graph_capturing else 1
         ):
             if fwd_idx <= 1:
-                cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
-                    self._determine_batch_execution_and_padding(
-                        num_tokens, use_cudagraphs=use_cudagraphs
-                    )
+                (
+                    cudagraph_runtime_mode,
+                    num_input_tokens,
+                    num_tokens_across_dp,
+                    batch_desc,
+                ) = self._determine_batch_execution_and_padding(
+                    num_tokens, use_cudagraphs=use_cudagraphs
                 )
 
             # Make sure to use EAGLE's own buffer during cudagraph capture.
@@ -1623,6 +1628,7 @@ class SpecDecodeBaseProposer:
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                batch_descriptor=batch_desc,
                 slot_mapping=slot_mapping_dict,
             ):
                 if self.supports_mm_inputs:
@@ -1709,7 +1715,7 @@ class SpecDecodeBaseProposer:
         self,
         num_tokens: int,
         use_cudagraphs: bool = True,
-    ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
+    ) -> tuple[CUDAGraphMode, int, torch.Tensor | None, BatchDescriptor]:
         cudagraph_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
             num_tokens,
             valid_modes=({CUDAGraphMode.NONE} if not use_cudagraphs else None),
@@ -1747,7 +1753,7 @@ class SpecDecodeBaseProposer:
                 assert batch_desc.num_tokens == num_tokens_padded
                 num_tokens_across_dp[dp_rank] = num_tokens_padded
 
-        return cudagraph_mode, num_tokens_padded, num_tokens_across_dp
+        return cudagraph_mode, num_tokens_padded, num_tokens_across_dp, batch_desc
 
 
 class EagleProposer(SpecDecodeBaseProposer):
