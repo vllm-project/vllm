@@ -1471,10 +1471,18 @@ class FusedMoE(CustomOp):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.runner.forward(
+        # return self.runner.forward(
+        #     hidden_states,
+        #     router_logits,
+        # )
+        logger.info("jcz FusedMoE before hidden_states: %s", hidden_states)
+        logger.info("jcz FusedMoE before router_logits: %s", router_logits)
+        result = self.runner.forward(
             hidden_states,
             router_logits,
         )
+        logger.info("jcz FusedMoE after hidden_states: %s", result)
+        return result
 
     @property
     def expert_map(self) -> torch.Tensor | None:

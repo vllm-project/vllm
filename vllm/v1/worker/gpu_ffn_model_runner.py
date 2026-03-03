@@ -157,6 +157,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         for layer_idx in range(0, self.num_layers):
             for ubatch_idx in range(num_ubatches):
                 hidden_states, recv_metadata = self.connector.recv_attn_output(ubatch_idx=ubatch_idx)
+                logger.info(f"jcz ffn_forward after recv_attn_output for layer {layer_idx} hidden_states: {hidden_states}")
                 dp_metadata = dp_metadata_list.get(
                     recv_metadata.stage_idx, None
                 )
@@ -209,6 +210,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                     )
 
                 recv_metadata.recv_handle_list = None
+                logger.info(f"jcz ffn_forward before send_ffn_output for layer {layer_idx} rank_ffn_output: {rank_ffn_output}")
                 self.connector.send_ffn_output(rank_ffn_output, recv_metadata)
         self._execute_model_count += 1
         return rank_ffn_output

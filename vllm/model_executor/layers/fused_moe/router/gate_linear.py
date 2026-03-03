@@ -93,7 +93,7 @@ class GateLinear(ReplicatedLinear):
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         import vllm._custom_ops as ops
-
+        print(f"jcz GateLinear forward self.weight: {self.weight}", flush=True)
         # Tier 1: DSV3 specialized kernel
         if self.allow_dsv3_router_gemm and x.shape[0] <= 16:
             output = ops.dsv3_router_gemm(
