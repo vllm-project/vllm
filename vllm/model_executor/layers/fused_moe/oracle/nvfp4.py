@@ -22,7 +22,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     is_supported_config_trtllm,
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.utils.flashinfer import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
 )

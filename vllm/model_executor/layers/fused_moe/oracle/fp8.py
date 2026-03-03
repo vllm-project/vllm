@@ -21,11 +21,13 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
     is_supported_config_trtllm_fp8,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.model_executor.layers.fused_moe.flashinfer_utils import (
+    prepare_fp8_moe_layer_for_fi,
+)
+from vllm.utils.flashinfer import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
     make_fp8_moe_alpha_scales_for_fi,
-    prepare_fp8_moe_layer_for_fi,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     prepare_fp8_moe_layer_for_deepgemm,

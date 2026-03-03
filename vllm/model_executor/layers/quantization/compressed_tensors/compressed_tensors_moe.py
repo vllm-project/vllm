@@ -68,7 +68,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import 
     is_flashinfer_mxint4_moe_available,
     prepare_static_weights_for_trtllm_mxint4_moe,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.model_executor.layers.fused_moe.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
