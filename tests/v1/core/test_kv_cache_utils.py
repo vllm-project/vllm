@@ -2212,12 +2212,10 @@ def test_get_kv_cache_configs_with_mamba():
             KVCacheGroupSpec(
                 ["layer_3", "layer_4", "layer_7"],
                 new_kv_cache_spec(head_size=32, group_size=2),
-                group_size=2,
             ),
             KVCacheGroupSpec(
                 ["layer_5", "layer_6"],
                 new_kv_cache_spec(head_size=32, group_size=2),
-                group_size=1,
             ),
         ],
     )

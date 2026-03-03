@@ -769,7 +769,7 @@ def create_kv_cache_group_specs(
         if isinstance(merged_layer_spec, FullAttentionSpec):
             group_size = cdiv(group_size, merged_layer_spec.group_size)
         kv_cache_groups.append(
-            KVCacheGroupSpec(layer_names_one_group, merged_layer_spec, group_size)
+            KVCacheGroupSpec(layer_names_one_group, merged_layer_spec)
         )
     return kv_cache_groups
 
@@ -1541,9 +1541,7 @@ def _project_kv_cache_groups_to_worker(
                     for layer_name in worker_layer_names
                 },
             )
-        projected_groups.append(
-            KVCacheGroupSpec(worker_layer_names, group_spec, group.group_size)
-        )
+        projected_groups.append(KVCacheGroupSpec(worker_layer_names, group_spec))
     return projected_groups
 
 
