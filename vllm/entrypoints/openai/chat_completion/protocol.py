@@ -490,7 +490,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
@@ -501,6 +500,34 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_response_format(cls, data):
+        response_format = data.get("response_format")
+        if response_format is None:
+            return data
+
+        rf_type = (
+            response_format.get("type")
+            if isinstance(response_format, dict)
+            else getattr(response_format, "type", None)
+        )
+
+        if rf_type == "json_schema":
+            json_schema = (
+                response_format.get("json_schema")
+                if isinstance(response_format, dict)
+                else getattr(response_format, "json_schema", None)
+            )
+            if json_schema is None:
+                raise VLLMValidationError(
+                    "When response_format type is 'json_schema', the "
+                    "'json_schema' field must be provided.",
+                    parameter="response_format",
+                )
+
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -555,8 +582,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
             return data
 
         structured_outputs_kwargs = data["structured_outputs"]
+        # structured_outputs may arrive as a dict (from JSON/raw kwargs) or
+        # as a StructuredOutputsParams dataclass instance.
+        is_dataclass = isinstance(structured_outputs_kwargs, StructuredOutputsParams)
         count = sum(
-            structured_outputs_kwargs.get(k) is not None
+            (
+                getattr(structured_outputs_kwargs, k, None)
+                if is_dataclass
+                else structured_outputs_kwargs.get(k)
+            )
+            is not None
             for k in ("json", "regex", "choice")
         )
         # you can only use one kind of constraints for structured outputs

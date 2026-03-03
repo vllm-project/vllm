@@ -20,6 +20,7 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
+from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -134,6 +135,7 @@ class AsyncLLM(EngineClient):
         self.renderer = renderer = renderer_from_config(self.vllm_config)
         self.io_processor = get_io_processor(
             self.vllm_config,
+            self.renderer,
             self.model_config.io_processor_plugin,
         )
 
@@ -647,7 +649,11 @@ class AsyncLLM(EngineClient):
         engine_core = self.engine_core
         output_processor = self.output_processor
         log_stats = self.log_stats
-        logger_manager = self.logger_manager
+        # We use a mutable list for logger_manager so that it can be updated
+        # during elastic EP scaling (see scale_elastic_ep) without creating
+        # a circular reference via self.
+        self._logger_ref = [self.logger_manager]
+        logger_ref = self._logger_ref
         renderer = self.renderer
         chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 
@@ -691,8 +697,8 @@ class AsyncLLM(EngineClient):
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in
                     # background thread once Prometheus overhead is non-trivial.
-                    if logger_manager:
-                        logger_manager.record(
+                    if logger_ref[0]:
+                        logger_ref[0].record(
                             engine_idx=outputs.engine_index,
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
@@ -753,6 +759,13 @@ class AsyncLLM(EngineClient):
             )
             mode = "wait"
         await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
+        # Small sleep to help ensure that final outputs from any in-flight requests are
+        # returned prior to this method returning. These outputs come out of the engine
+        # prior to the wait-for-idle completion event, but involve additional async
+        # tasks in output processing.
+        # Note that this is not required for correctness, just more intuitive ordering
+        # of events from caller's pov.
+        await asyncio.sleep(0.02)
 
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
@@ -890,10 +903,8 @@ class AsyncLLM(EngineClient):
     async def reset_encoder_cache(self) -> None:
         await self.engine_core.reset_encoder_cache_async()
 
-    async def sleep(self, level: int = 1) -> None:
-        if level > 0:
-            await self.reset_prefix_cache()
-        await self.engine_core.sleep_async(level)
+    async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+        await self.engine_core.sleep_async(level, mode)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
@@ -971,17 +982,13 @@ class AsyncLLM(EngineClient):
                 new_data_parallel_size,
             )
             return
-        logger.info(
-            "Waiting for requests to drain before scaling up to %s engines...",
-            new_data_parallel_size,
-        )
-        await self.wait_for_requests_to_drain(drain_timeout)
-        logger.info(
-            "Requests have been drained, proceeding with scale to %s engines",
-            new_data_parallel_size,
-        )
-        await self.engine_core.scale_elastic_ep(new_data_parallel_size)
-        self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
+
+        if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:
+            logger.info(
+                "VLLM_ELASTIC_EP_DRAIN_REQUESTS is set, "
+                "waiting for requests to drain before scaling"
+            )
+            await self.wait_for_requests_to_drain(drain_timeout)
 
         # recreate stat loggers
         if new_data_parallel_size > old_data_parallel_size and self.log_stats:
@@ -994,6 +1001,18 @@ class AsyncLLM(EngineClient):
                 engine_idxs=list(range(new_data_parallel_size)),
                 custom_stat_loggers=None,
             )
+            # Update the mutable ref so output_handler picks up the
+            # new logger without creating a circular reference via self.
+            if hasattr(self, "_logger_ref"):
+                self._logger_ref[0] = self.logger_manager
+            self.logger_manager.log_engine_initialized()
+
+        set_scaling_elastic_ep(True)
+        try:
+            await self.engine_core.scale_elastic_ep(new_data_parallel_size)
+            self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
+        finally:
+            set_scaling_elastic_ep(False)
 
     @property
     def is_running(self) -> bool:

@@ -1021,7 +1021,13 @@ class KeyeProcessingInfo(BaseProcessingInfo):
         temporal_patch_size = 1
 
         mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
-        size = mm_kwargs.get("size", image_processor.size)
+        size = image_processor.size
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+        if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+            size = size | {"min_pixels": override_min_pixels}
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            size = size | {"max_pixels": override_max_pixels}
 
         if do_resize:
             resized_height, resized_width = smart_resize(
