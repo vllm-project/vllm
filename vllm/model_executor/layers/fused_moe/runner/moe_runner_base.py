@@ -300,8 +300,9 @@ class MoERunnerBase(MoERunner):
             func = trunc
 
         if isinstance(states, tuple):
-            return tuple(
-                [func(s, trunc_size) for s, trunc_size in zip(states, trunc_sizes)]
+            return (
+                trunc(states[0], trunc_sizes[0]),  # shared: already reduced
+                func(states[1], trunc_sizes[1]),  # fused: reduce here
             )
         else:
             assert len(trunc_sizes) == 1

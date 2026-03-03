@@ -161,23 +161,22 @@ class SharedExperts:
 
         return output
 
-    def _maybe_reduce_shared_out(self, shared_out: torch.Tensor) -> torch.Tensor:
-        # Reduce shared expert outputs if necessary, since the MLP
-        # should have been created with reduce_results=False.
+    def _maybe_reduce_shared_output(self, output: torch.Tensor) -> torch.Tensor:
         if (
-            self._reduce_results
-            and self._quant_method.moe_kernel is not None
+            self._quant_method.moe_kernel is not None
             and self._quant_method.moe_kernel.output_is_reduced()
             and get_tensor_model_parallel_world_size() > 1
         ):
-            shared_out = tensor_model_parallel_all_reduce(shared_out)
-        return shared_out
+            output = tensor_model_parallel_all_reduce(output)
+        return output
 
     @property
     def output(self) -> torch.Tensor:
         assert self._output is not None
         output = self._output
         self._output = None
+        if output is not None:
+            output = self._maybe_reduce_shared_output(output)
         return output
 
     def apply(
@@ -195,14 +194,4 @@ class SharedExperts:
         if order == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
             self._output = self._run_in_aux_stream(shared_experts_input)
         else:
-            self._output = self._layer(shared_experts_input)
-
-        if order == SharedExpertsOrder.EXTERNAL:
-            # TODO: figure out how to combine this with maybe_reduce_output?
-            # or get rid of it completely.
-            assert self._output is not None
-            self._output = self._maybe_reduce_shared_out(self._output)
-
-        assert self._output is not None
-
-        # TODO(bnell): potentially do AFTER reduce here instead of in runner.
+            self._output = self._shared_experts(shared_experts_input)
