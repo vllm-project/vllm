@@ -48,7 +48,8 @@ class FilterReusedOffloadingManager(OffloadingManager):
     ):
         if max_tracker_size < 1:
             raise ValueError(
-                f"FilterReusedOffloadingManager max_tracker_size must be >= 1, got {max_tracker_size}"
+                "FilterReusedOffloadingManager max_tracker_size must be >= 1, "
+                f"got {max_tracker_size}"
             )
         self._backing = backing
         self.store_threshold = store_threshold
