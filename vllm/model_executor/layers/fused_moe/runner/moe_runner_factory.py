@@ -32,8 +32,9 @@ def create_moe_runner(
     gate: torch.nn.Module | None,
     shared_experts: SharedExperts | None,
     quant_method: FusedMoEMethodBase,
-    reduce_results: bool,
     enable_dbo: bool,
+    routed_output_transform: torch.nn.Module | None = None,
+    output_scale: float | None = None,
 ) -> MoERunner:
     runner = DefaultMoERunner(
         layer,
@@ -43,8 +44,9 @@ def create_moe_runner(
         gate,
         shared_experts,
         quant_method,
-        reduce_results,
         enable_dbo,
+        routed_output_transform=routed_output_transform,
+        output_scale=output_scale,
     )
     if moe_config.moe_parallel_config.use_dp_chunking:
         return ChunkingMoERunner(runner)

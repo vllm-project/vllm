@@ -137,7 +137,6 @@ class ExaoneMoe(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             use_grouped_topk=True,
@@ -157,18 +156,9 @@ class ExaoneMoe(nn.Module):
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        shared_output, final_hidden_states = self.experts(
+        final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=hidden_states
         )
-
-        if self.shared_experts is not None:
-            assert shared_output is not None
-            final_hidden_states = final_hidden_states + shared_output
-
-        if self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(  # noqa E501
-                final_hidden_states
-            )
 
         return final_hidden_states.view(orig_shape)
 
