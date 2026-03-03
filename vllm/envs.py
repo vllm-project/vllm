@@ -1747,7 +1747,6 @@ def compile_factors() -> dict[str, object]:
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
         "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
-        "VLLM_SLEEP_WHEN_IDLE",
         "VLLM_IMAGE_FETCH_TIMEOUT",
         "VLLM_VIDEO_FETCH_TIMEOUT",
         "VLLM_AUDIO_FETCH_TIMEOUT",
