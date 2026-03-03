@@ -66,6 +66,16 @@ class CudagraphDispatcher:
         # Default cudagraph_mode to NONE until initialize_cudagraph_keys is called
         self.cudagraph_mode = CUDAGraphMode.NONE
 
+        # Seq len buckets for capturing separate FULL graphs per seq_len range.
+        # When set, FULL decode graphs are captured for each bucket value.
+        # At dispatch time, the actual max_seq_len is bucketed to the
+        # smallest bucket >= actual max_seq_len.
+        self.seq_len_buckets: list[int] = []
+
+    def set_seq_len_buckets(self, buckets: list[int]) -> None:
+        """Set seq_len buckets for capturing separate FULL graphs per range."""
+        self.seq_len_buckets = sorted(buckets)
+
     def _compute_bs_to_padded_graph_size(self) -> None:
         """Pre-compute the mapping from batch size to padded graph size."""
         max_size = self.compilation_config.max_cudagraph_capture_size
@@ -125,6 +135,7 @@ class CudagraphDispatcher:
         uniform_decode: bool,
         has_lora: bool,
         num_active_loras: int = 0,
+        max_seq_len: int = 0,
     ) -> BatchDescriptor:
         max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
         uniform_decode_query_len = self.uniform_decode_query_len
@@ -143,6 +154,7 @@ class CudagraphDispatcher:
             uniform=uniform_decode,
             has_lora=has_lora,
             num_active_loras=num_active_loras,
+            max_seq_len=max_seq_len,
         )
 
     def add_cudagraph_key(
@@ -202,17 +214,34 @@ class CudagraphDispatcher:
                 for x in self.compilation_config.cudagraph_capture_sizes
                 if x <= max_num_tokens and x >= uniform_decode_query_len
             ]
-            for bs, num_active_loras in product(
-                cudagraph_capture_sizes_for_decode, lora_cases
+            # When seq_len_buckets is set, capture separate FULL graphs
+            # for each seq_len range so that kernels with seq_len-dependent
+            # selection (e.g., sparse attention topk) use the correct variant.
+            seq_len_variants = self.seq_len_buckets if self.seq_len_buckets else [0]
+            for bs, num_active_loras, max_seq_len in product(
+                cudagraph_capture_sizes_for_decode, lora_cases, seq_len_variants
             ):
                 self.add_cudagraph_key(
                     CUDAGraphMode.FULL,
                     self._create_padded_batch_descriptor(
-                        bs, True, num_active_loras > 0, num_active_loras
+                        bs,
+                        True,
+                        num_active_loras > 0,
+                        num_active_loras,
+                        max_seq_len,
                     ),
                 )
 
         self.keys_initialized = True
+
+    def _bucket_max_seq_len(self, max_seq_len: int) -> int:
+        """Bucket max_seq_len to the smallest bucket >= max_seq_len."""
+        if not self.seq_len_buckets or max_seq_len <= 0:
+            return 0
+        for bucket in self.seq_len_buckets:
+            if max_seq_len <= bucket:
+                return bucket
+        return self.seq_len_buckets[-1]
 
     def dispatch(
         self,
@@ -221,6 +250,7 @@ class CudagraphDispatcher:
         has_lora: bool = False,
         disable_full: bool = False,
         num_active_loras: int = 0,
+        max_seq_len: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor]:
         """
         Given conditions(e.g.,batch descriptor and if using piecewise only),
@@ -237,6 +267,8 @@ class CudagraphDispatcher:
                 return PIECEWISE or NONE only. (can be used for features like
                 cascade attention that are not supported by full cudagraphs)
             num_active_loras: Number of distinct active LoRA adapters.
+            max_seq_len: Maximum sequence length for seq_len-specialized
+                dispatch. Bucketed to the appropriate capture bucket.
         """
         if (
             not self.keys_initialized
@@ -261,8 +293,14 @@ class CudagraphDispatcher:
                 # so we must use max_loras + 1 for dispatch to find a matching graph.
                 effective_num_active_loras = self.vllm_config.lora_config.max_loras + 1
 
+        bucketed_max_seq_len = self._bucket_max_seq_len(max_seq_len)
+
         batch_desc = self._create_padded_batch_descriptor(
-            num_tokens, uniform_decode, has_lora, effective_num_active_loras
+            num_tokens,
+            uniform_decode,
+            has_lora,
+            effective_num_active_loras,
+            bucketed_max_seq_len,
         )
         relaxed_batch_desc = batch_desc.relax_for_mixed_batch_cudagraphs()
 
@@ -300,8 +338,9 @@ class CudagraphDispatcher:
         for mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
             descs = list(self.cudagraph_keys[mode])
             if descs:
-                # Sort by num_tokens descending (largest first)
-                descs.sort(key=lambda d: d.num_tokens, reverse=True)
+                # Sort by (num_tokens, max_seq_len) descending for
+                # deterministic ordering across TP ranks.
+                descs.sort(key=lambda d: (d.num_tokens, d.max_seq_len), reverse=True)
                 result.append((mode, descs))
 
         return result
