@@ -105,11 +105,6 @@ from .utils import (
 logger = init_logger(__name__)
 
 
-def _l2_normalize(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
-    inv_norm = torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
-    return x * inv_norm
-
-
 def _make_conv1d_weight_loader(dim: int, tp_size: int, tp_rank: int):
     """Create a weight loader for conv1d that handles sharding."""
 
@@ -359,9 +354,6 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
             key = key.unsqueeze(3).expand(-1, -1, -1, expand_ratio, -1)
             key = key.reshape(1, key.shape[1], num_v_heads, self.head_k_dim)
 
-        query = _l2_normalize(query, dim=-1)
-        key = _l2_normalize(key, dim=-1)
-
         return query.contiguous(), key.contiguous(), value.contiguous()
 
     def forward(
@@ -561,7 +553,7 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
                 cu_seqlens=spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
                 ssm_state_indices=spec_state_indices_tensor,
                 num_accepted_tokens=num_accepted_tokens,
-                use_qk_l2norm_in_kernel=False,
+                use_qk_l2norm_in_kernel=True,
             )
         else:
             core_attn_out_spec, last_recurrent_state = None, None
@@ -584,7 +576,7 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
                 initial_state=initial_state,
                 output_final_state=True,
                 cu_seqlens=non_spec_query_start_loc,
-                use_qk_l2norm_in_kernel=False,
+                use_qk_l2norm_in_kernel=True,
             )
             ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
                 ssm_state.dtype
@@ -603,7 +595,7 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
                         : attn_metadata.num_decodes + 1
                     ],
                     ssm_state_indices=non_spec_state_indices_tensor,
-                    use_qk_l2norm_in_kernel=False,
+                    use_qk_l2norm_in_kernel=True,
                 )
             )
         else:
