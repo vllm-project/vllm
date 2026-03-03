@@ -171,13 +171,11 @@ def _quantize_dequantize_fp8_ds_mla(
 
 @pytest.mark.parametrize(
     "backend_cls",
-    # [FlashMLASparseBackend, FlashInferMLASparseBackend],
-    [FlashInferMLASparseBackend],
-    # ids=["FlashMLA", "FlashInfer"],
-    ids=["FlashInfer"],
+    [FlashMLASparseBackend, FlashInferMLASparseBackend],
+    ids=["FlashMLA", "FlashInfer"],
 )
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
-@pytest.mark.parametrize("kv_cache_dtype", ["fp8"])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_ds_mla"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 @pytest.mark.parametrize("block_size", [32, 64])
 def test_sparse_backend_decode_correctness(

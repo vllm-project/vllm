@@ -63,8 +63,8 @@ class FlashInferMLASparseBackend(AttentionBackend):
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "bfloat16",
-        "fp8_e4m3",
         "fp8",
+        "fp8_e4m3",
     ]
 
     @staticmethod
