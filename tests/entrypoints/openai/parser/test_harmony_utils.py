@@ -951,9 +951,7 @@ class TestSanitizeHarmonyName:
         assert sanitize_harmony_name("<|start|>") == ""
 
     def test_multiple_tokens_earliest_wins(self) -> None:
-        assert (
-            sanitize_harmony_name("foo<|channel|>bar<|constrain|>baz") == "foo"
-        )
+        assert sanitize_harmony_name("foo<|channel|>bar<|constrain|>baz") == "foo"
 
     def test_empty_string(self) -> None:
         assert sanitize_harmony_name("") == ""
@@ -990,9 +988,7 @@ class TestSanitizeHarmonyRecipient:
     def test_functions_dotted_contaminated(self) -> None:
         """functions.get_weather<|channel|>commentary → functions.get_weather"""
         assert (
-            sanitize_harmony_recipient(
-                "functions.get_weather<|channel|>commentary"
-            )
+            sanitize_harmony_recipient("functions.get_weather<|channel|>commentary")
             == "functions.get_weather"
         )
 
@@ -1123,4 +1119,3 @@ class TestResilientStreamableParser:
                         f"Leaked control token {tok_str!r} "
                         f"in message recipient: {msg.recipient!r}"
                     )
-
