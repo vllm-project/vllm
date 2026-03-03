@@ -887,7 +887,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 w13,
                 w13_scale,
                 shard_size=layer.intermediate_size_per_partition,
-                num_experts=layer.num_local_experts,
+                num_experts=layer.local_num_experts,
                 is_act_and_mul=self.moe.is_act_and_mul,
             )
 
