@@ -1078,6 +1078,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         tokenizer_mode="mistral",
     ),
     # [Encoder-decoder]
+    "CohereASRForConditionalGeneration": _HfExamplesInfo(
+        "/host/engines/vllm/audio/2b-release",
+        tokenizer_mode="cohere_asr",
+    ),
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-Parse-v1.1", trust_remote_code=True
     ),

@@ -22,6 +22,7 @@ from evaluate import load
 
 from vllm.tokenizers import get_tokenizer
 
+from ....models.registry import HF_EXAMPLE_MODELS
 from ....utils import RemoteOpenAIServer
 
 
@@ -62,14 +63,14 @@ async def bound_transcribe(sem, client, tokenizer, audio, reference):
         return result[:2] + (out, ref)
 
 
-async def process_dataset(model, client, data, concurrent_request, tokenizer_mode):
+async def process_dataset(model, client, data, concurrent_request):
     sem = asyncio.Semaphore(concurrent_request)
 
-    # Load tokenizer once outside the loop
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     tokenizer = get_tokenizer(
         model,
-        tokenizer_mode=tokenizer_mode,
-        trust_remote_code=True,
+        tokenizer_mode=model_info.tokenizer_mode,
+        trust_remote_code=model_info.trust_remote_code,
     )
 
     # Warmup call as the first `librosa.load` server-side is quite slow.
@@ -129,15 +130,12 @@ def run_evaluation(
     max_concurrent_reqs: int,
     n_examples: int = -1,
     print_metrics: bool = True,
-    tokenizer_mode: str = "auto",
 ):
     if n_examples > 0:
         dataset = dataset.select(range(n_examples))
     start = time.perf_counter()
     results = asyncio.run(
-        process_dataset(
-            model, client, dataset, max_concurrent_reqs, tokenizer_mode=tokenizer_mode
-        )
+        process_dataset(model, client, dataset, max_concurrent_reqs)
     )
     end = time.perf_counter()
     total_time = end - start
@@ -159,9 +157,9 @@ def run_evaluation(
 @pytest.mark.parametrize(
     "model_config",
     [
-        ("openai/whisper-large-v3", "auto", 12.744980),
+        ("openai/whisper-large-v3", 12.744980),
         # TODO (ekagra): add final model ckpt here
-        ("/host/engines/vllm/audio/2b-release", "cohere_asr", 11.73),
+        ("/host/engines/vllm/audio/2b-release", 11.73),
     ],
 )
 # Original dataset is 20GB+ in size, hence we use a pre-filtered slice.
@@ -171,13 +169,14 @@ def run_evaluation(
 def test_wer_correctness(
     model_config, dataset_repo, n_examples=-1, max_concurrent_request=None
 ):
-    model_name, tokenizer_mode, expected_wer = model_config
+    model_name, expected_wer = model_config
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_name)
     # TODO refactor to use `ASRDataset`
     with RemoteOpenAIServer(
         model_name,
         [
             "--enforce-eager",
-            f"--tokenizer_mode={tokenizer_mode}",
+            f"--tokenizer_mode={model_info.tokenizer_mode}",
         ],
     ) as remote_server:
         dataset = load_hf_dataset(dataset_repo)
@@ -193,7 +192,6 @@ def test_wer_correctness(
             dataset,
             max_concurrent_request,
             n_examples,
-            tokenizer_mode=tokenizer_mode,
         )
 
         print(f"Expected WER: {expected_wer}, Actual WER: {wer}")
