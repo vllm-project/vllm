@@ -3,9 +3,7 @@
 
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateConfig,
-)
+from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
 from vllm.renderers import BaseRenderer
 from vllm.tasks import SupportedTask
