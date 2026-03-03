@@ -284,6 +284,10 @@ _CROSS_ENCODER_MODELS = {
         "llama",
         "LlamaBidirectionalForSequenceClassification",
     ),
+    "LlamaNemotronVLForSequenceClassification": (
+        "nemotron_vl",
+        "LlamaNemotronVLForSequenceClassification",
+    ),
     "ModernBertForSequenceClassification": (
         "modernbert",
         "ModernBertForSequenceClassification",
