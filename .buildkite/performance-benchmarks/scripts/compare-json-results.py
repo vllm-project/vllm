@@ -281,7 +281,9 @@ def split_json_by_tp_pp(
 # Styling helpers
 # -----------------------------
 def _highlight_threshold(
-    df: pd.DataFrame, threshold: float
+    df: pd.DataFrame,
+    threshold: float,
+    slack_pct: float = 0.0,
 ) -> pd.io.formats.style.Styler:
     conc_col = _find_concurrency_col(df)
     key_cols = [
@@ -294,12 +296,24 @@ def _highlight_threshold(
     ]
     conf_cols = [c for c in conf_cols if pd.api.types.is_numeric_dtype(df[c])]
 
-    return df.style.map(
-        lambda v: "background-color:#e6ffe6;font-weight:bold;"
-        if pd.notna(v) and v <= threshold
-        else "",
-        subset=conf_cols,
-    )
+    try:
+        slack_pct = float(slack_pct or 0.0)
+    except Exception:
+        slack_pct = 0.0
+    slack_limit = threshold * (1.0 + slack_pct / 100.0)
+
+    def _cell(v):
+        if pd.isna(v):
+            return ""
+        if v <= threshold:
+            # Strict SLA
+            return "background-color:#e6ffe6;font-weight:bold;"
+        if v <= slack_limit:
+            # Within slack range
+            return "background-color:#ffe5cc;font-weight:bold;"
+        return ""
+
+    return df.style.map(_cell, subset=conf_cols)
 
 
 def highlight_ratio_columns(styler: pd.io.formats.style.Styler):
@@ -515,7 +529,11 @@ def _config_value_columns(df: pd.DataFrame, conc_col: str) -> list[str]:
 
 
 def _max_concurrency_ok(
-    df: pd.DataFrame, conc_col: str, cfg_col: str, threshold: float
+    df: pd.DataFrame,
+    conc_col: str,
+    cfg_col: str,
+    threshold: float,
+    slack_pct: float = 0.0,
 ):
     if df is None or conc_col not in df.columns or cfg_col not in df.columns:
         return pd.NA
@@ -528,7 +546,14 @@ def _max_concurrency_ok(
     if d.empty:
         return pd.NA
 
-    ok = d[d[cfg_col] <= threshold]
+    # Accept values up to (1 + slack_pct%) above the SLA.
+    try:
+        slack_pct = float(slack_pct or 0.0)
+    except Exception:
+        slack_pct = 0.0
+    effective_limit = float(threshold) * (1.0 + slack_pct / 100.0)
+
+    ok = d[d[cfg_col] <= effective_limit]
     if ok.empty:
         return pd.NA
 
@@ -594,15 +619,25 @@ def build_valid_max_concurrency_summary_html(
     if not cfg_cols:
         cfg_cols = sorted(set(ttft_cols) | set(tpot_cols) | set(tput_cols), key=str)
 
+    # Display SLA ranges in the table header (SLA .. SLA*(1+slack))
+    ttft_hi = args.ttft_max_ms * (1.0 + args.ttft_slack_pct / 100.0)
+    tpot_hi = args.tpot_max_ms * (1.0 + args.tpot_slack_pct / 100.0)
+    ttft_range = f"{args.ttft_max_ms:g}–{ttft_hi:g} ms (+{args.ttft_slack_pct:g}%)"
+    tpot_range = f"{args.tpot_max_ms:g}–{tpot_hi:g} ms (+{args.tpot_slack_pct:g}%)"
+
     rows = []
     for cfg in cfg_cols:
         ttft_max = (
-            _max_concurrency_ok(ttft_group_df, conc_col, cfg, args.ttft_max_ms)
+            _max_concurrency_ok(
+                ttft_group_df, conc_col, cfg, args.ttft_max_ms, args.ttft_slack_pct
+            )
             if ttft_group_df is not None
             else pd.NA
         )
         tpot_max = (
-            _max_concurrency_ok(tpot_group_df, conc_col, cfg, args.tpot_max_ms)
+            _max_concurrency_ok(
+                tpot_group_df, conc_col, cfg, args.tpot_max_ms, args.tpot_slack_pct
+            )
             if tpot_group_df is not None
             else pd.NA
         )
@@ -631,8 +666,8 @@ def build_valid_max_concurrency_summary_html(
         rows.append(
             {
                 "Configuration": cfg,
-                f"Max {conc_col} (TTFT ≤ {args.ttft_max_ms:g} ms)": ttft_max,
-                f"Max {conc_col} (TPOT ≤ {args.tpot_max_ms:g} ms)": tpot_max,
+                f"Max {conc_col} (TTFT ≤ {ttft_range})": ttft_max,
+                f"Max {conc_col} (TPOT ≤ {tpot_range})": tpot_max,
                 f"Max {conc_col} (Both)": both,
                 "Output Tput @ Both (tok/s)": tput_at_both,
                 "TTFT @ Both (ms)": ttft_at_both,
@@ -707,15 +742,24 @@ def build_valid_max_concurrency_summary_df(
     if not cfg_cols:
         cfg_cols = sorted(set(ttft_cols) | set(tpot_cols) | set(tput_cols), key=str)
 
+    ttft_hi = args.ttft_max_ms * (1.0 + args.ttft_slack_pct / 100.0)
+    tpot_hi = args.tpot_max_ms * (1.0 + args.tpot_slack_pct / 100.0)
+    ttft_range = f"{args.ttft_max_ms:g}–{ttft_hi:g} ms (+{args.ttft_slack_pct:g}%)"
+    tpot_range = f"{args.tpot_max_ms:g}–{tpot_hi:g} ms (+{args.tpot_slack_pct:g}%)"
+
     rows = []
     for cfg in cfg_cols:
         ttft_max = (
-            _max_concurrency_ok(ttft_group_df, conc_col, cfg, args.ttft_max_ms)
+            _max_concurrency_ok(
+                ttft_group_df, conc_col, cfg, args.ttft_max_ms, args.ttft_slack_pct
+            )
             if ttft_group_df is not None
             else pd.NA
         )
         tpot_max = (
-            _max_concurrency_ok(tpot_group_df, conc_col, cfg, args.tpot_max_ms)
+            _max_concurrency_ok(
+                tpot_group_df, conc_col, cfg, args.tpot_max_ms, args.tpot_slack_pct
+            )
             if tpot_group_df is not None
             else pd.NA
         )
@@ -744,8 +788,8 @@ def build_valid_max_concurrency_summary_df(
         rows.append(
             {
                 "Configuration": cfg,
-                f"Max {conc_col} (TTFT ≤ {args.ttft_max_ms:g} ms)": ttft_max,
-                f"Max {conc_col} (TPOT ≤ {args.tpot_max_ms:g} ms)": tpot_max,
+                f"Max {conc_col} (TTFT ≤ {ttft_range})": ttft_max,
+                f"Max {conc_col} (TPOT ≤ {tpot_range})": tpot_max,
                 f"Max {conc_col} (Both)": both,
                 "Output Tput @ Both (tok/s)": tput_at_both,
                 "TTFT @ Both (ms)": ttft_at_both,
@@ -836,6 +880,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=100.0,
         help="Reference limit for TPOT plots (ms)",
+    )
+
+    # ---- SLA tolerance (slack) options ----
+    parser.add_argument(
+        "--ttft-slack-pct",
+        type=float,
+        default=5.0,
+        help="Allowed percentage above TTFT SLA for valid max concurrency (default: 5).",
+    )
+    parser.add_argument(
+        "--tpot-slack-pct",
+        type=float,
+        default=5.0,
+        help="Allowed percentage above TPOT SLA for valid max concurrency (default: 5).",
     )
 
     # ---- export options ----
@@ -930,9 +988,13 @@ def render_metric_table_html(
 
     metric_name = metric_label.lower()
     if "ttft" in metric_name:
-        styler = _highlight_threshold(display_group, args.ttft_max_ms)
+        styler = _highlight_threshold(
+            display_group, args.ttft_max_ms, args.ttft_slack_pct
+        )
     elif ("tpot" in metric_name) or ("median" in metric_name) or ("p99" in metric_name):
-        styler = _highlight_threshold(display_group, args.tpot_max_ms)
+        styler = _highlight_threshold(
+            display_group, args.tpot_max_ms, args.tpot_slack_pct
+        )
     else:
         styler = display_group.style
 
