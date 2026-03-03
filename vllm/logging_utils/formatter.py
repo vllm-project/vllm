@@ -68,6 +68,9 @@ class NewLineFormatter(logging.Formatter):
         else:
             record.fileinfo = record.filename
 
+        if not hasattr(record, "request_id"):
+            record.request_id = "-"
+
         msg = super().format(record)
         if record.message != "":
             parts = msg.split(record.message)

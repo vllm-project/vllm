@@ -44,6 +44,7 @@ class RequestLogger:
                 prompt,
                 prompt_token_ids,
                 prompt_embeds.shape if prompt_embeds is not None else None,
+                extra={"request_id": request_id},
             )
 
         logger.info(
@@ -51,6 +52,7 @@ class RequestLogger:
             request_id,
             params,
             lora_request,
+            extra={"request_id": request_id},
         )
 
     def log_outputs(
@@ -83,4 +85,5 @@ class RequestLogger:
             outputs,
             output_token_ids,
             finish_reason,
+            extra={"request_id": request_id},
         )
