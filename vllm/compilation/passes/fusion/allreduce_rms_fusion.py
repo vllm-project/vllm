@@ -10,6 +10,7 @@ import torch.fx as fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+from vllm._custom_ops import create_fp4_output_tensors
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
@@ -547,17 +548,8 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
             result_rms = torch.empty_like(input)
             n = input.shape[-1]
             m = input.numel() // n
-            quant_result = torch.empty(
-                (m, n // 2), device=input.device, dtype=torch.uint8
-            )
-            round_up = lambda x, y: (x + y - 1) // y * y
-            rounded_m = round_up(m, 128)
-            scale_n = n // 16
-            rounded_n = round_up(scale_n, 4)
-            output_scale = torch.empty(
-                (rounded_m, rounded_n // 4),
-                device=input.device,
-                dtype=torch.int32,
+            quant_result, output_scale = create_fp4_output_tensors(
+                m, n, input.device, is_sf_swizzled_layout=True
             )
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
@@ -644,17 +636,8 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             n = input.shape[-1]
             m = input.numel() // n
-            quant_result = torch.empty(
-                (m, n // 2), device=input.device, dtype=torch.uint8
-            )
-            round_up = lambda x, y: (x + y - 1) // y * y
-            rounded_m = round_up(m, 128)
-            scale_n = n // 16
-            rounded_n = round_up(scale_n, 4)
-            output_scale = torch.empty(
-                (rounded_m, rounded_n // 4),
-                device=input.device,
-                dtype=torch.int32,
+            quant_result, output_scale = create_fp4_output_tensors(
+                m, n, input.device, is_sf_swizzled_layout=True
             )
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(

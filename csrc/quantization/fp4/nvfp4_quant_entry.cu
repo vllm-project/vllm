@@ -94,7 +94,7 @@ std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_func(
   return {output, output_sf};
 }
 
-// Out variant with PyTorch standard signature: (input, ..., *, out, out_scale)
+// Out variant
 void scaled_fp4_quant_out(torch::Tensor const& input,
                           torch::Tensor const& input_sf,
                           bool is_sf_swizzled_layout, torch::Tensor& output,

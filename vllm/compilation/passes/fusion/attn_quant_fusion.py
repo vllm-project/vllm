@@ -11,6 +11,7 @@ from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+from vllm._custom_ops import create_fp4_scale_tensor
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -20,7 +21,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kStaticTensorScale,
 )
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import round_up
 
 from ..fx_utils import is_func
 from ..inductor_pass import enable_fake_mode
@@ -262,10 +262,8 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             # Allocate output_scale for the fused attention op
             n = self.num_heads * self.head_size
-            output_scale = torch.empty(
-                (round_up(q.shape[0], 128), round_up(n // 16, 4) // 4),
-                device=q.device,
-                dtype=torch.int32,
+            output_scale = create_fp4_scale_tensor(
+                q.shape[0], n, q.device, is_sf_swizzled_layout=True
             )
             # attention output in quant_dtype
             output_attn = torch.ops.aten.full.default(
