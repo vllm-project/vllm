@@ -427,8 +427,11 @@ def harmony_to_response_output(message: Message) -> list[ResponseOutputItem]:
         if recipient.startswith("browser."):
             output_items.append(_parse_browser_tool_call(message, recipient))
 
-        # Function calls (should only happen on commentary channel)
-        elif message.channel == "commentary" and recipient.startswith("functions."):
+        # Function calls (commentary or analysis channel — GPT-OSS models
+        # sometimes emit tool calls on analysis channel)
+        elif message.channel in ("commentary", "analysis") and recipient.startswith(
+            "functions."
+        ):
             output_items.extend(_parse_function_call(message, recipient))
 
         # Built-in MCP tools (python, browser, container)
