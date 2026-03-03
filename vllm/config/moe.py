@@ -30,8 +30,13 @@ class MoEPruningConfig:
     min_batch: int = 0
     """Skip pruning when batch size is below this threshold."""
 
-    max_batch: int = 0
-    """Skip pruning when batch size is above this threshold (0 = no limit)."""
+    max_batch: int = 48
+    """Skip pruning when batch size exceeds this threshold.
+
+    Defaults to 48 to restrict pruning to the decode phase. During prefill,
+    M = prompt length (>> 48), so pruning is skipped, avoiding KV cache
+    corruption. During decode, M = number of concurrent sequences (≤ 48),
+    so pruning fires as intended. Set to 0 to disable this gating."""
 
 
 @config
