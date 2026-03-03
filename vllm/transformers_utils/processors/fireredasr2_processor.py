@@ -63,7 +63,7 @@ class KaldifeatFbank:
 
 class FireRedASR2FeatureExtractor(SequenceFeatureExtractor):
     r"""
-    Constructs a FireRedASR feature extractor.
+    Constructs a FireRedASR2 feature extractor.
 
     This feature extractor inherits from [`~feature_extraction_sequence_
         utils.SequenceFeatureExtractor`] which contains most of the main
