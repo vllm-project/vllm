@@ -151,7 +151,7 @@ re_quote_pytest_markers() {
       # If the token we're about to collect already contains a literal
       # single quote, the expression was already quoted upstream.
       # Flush and stop collecting.
-      if [[ "$word" == *"'"* || "$word" == *\"* ]]; then
+      if [[ "$word" == \'* || "$word" == *\' || "$word" == \"* || "$word" == *\" ]]; then
         if [[ -n "$marker_buf" ]]; then
           # Should not normally happen (partial buf + quote), flush raw
           output+="${marker_buf} "
