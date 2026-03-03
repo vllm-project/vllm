@@ -299,10 +299,6 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
                 device=current_platform.current_device(),
                 dtype=config.torch_dtype if hasattr(config, "torch_dtype") else None,
             )
-            # RMSNormGated.forward_cuda references self.activation but __init__
-            # doesn't define it; set it here to match the default in rmsnorm_fn.
-            self.o_norm.activation = "swish"
-            self.o_norm.forward_cuda = self.o_norm.forward_native
         else:
             self.o_norm = RMSNorm(
                 self.head_v_dim,
