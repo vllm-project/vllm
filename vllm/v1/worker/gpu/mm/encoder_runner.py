@@ -58,8 +58,7 @@ class EncoderRunner:
         ):
             curr_group_outputs = self.model.embed_multimodal(**mm_kwargs_group)
             sanity_check_mm_encoder_outputs(
-                curr_group_outputs,
-                expected_num_items=num_items,
+                curr_group_outputs, expected_num_items=num_items
             )
             encoder_outputs.extend(curr_group_outputs)
         return encoder_outputs
