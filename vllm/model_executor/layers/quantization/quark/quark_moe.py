@@ -102,7 +102,10 @@ class QuarkMoEMethod(FusedMoEMethodBase):
                 )
             else:
                 return QuarkOCP_MX_MoEMethod(
-                    weight_config, input_config, module.moe_config
+                    weight_config,
+                    input_config,
+                    module.moe_config,
+                    emulation_dequantize_weights=quant_config.emulation_dequantize_weights,
                 )
         else:
             raise RuntimeError("Unsupported FusedMoe scheme")
@@ -659,6 +662,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         weight_config: dict[str, Any],
         input_config: dict[str, Any] | None,
         moe: FusedMoEConfig,
+        emulation_dequantize_weights: bool = False,
     ):
         super().__init__(moe)
         self.weight_quant = weight_config
@@ -735,6 +739,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             not current_platform.supports_mx()
             or not self.ocp_mx_scheme.startswith("w_mxfp4")
         ) and (self.mxfp4_backend is None or not self.use_rocm_aiter_moe)
+        self.emulation_dequantize_weights = emulation_dequantize_weights
 
         if self.emulate:
             logger.warning_once(
@@ -936,6 +941,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         # secondly, process mxfp weights
         if self.emulate:
+            if self.emulation_dequantize_weights:
+                w1, w2 = self.dequantize_weights(layer, dtype=torch.get_default_dtype())
+
+                layer.w13_weight = torch.nn.Parameter(w1, requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(w2, requires_grad=False)
+                layer.w13_weight_scale = None
+                layer.w2_weight_scale = None
+
             torch.cuda.empty_cache()
             return
 
@@ -1010,6 +1023,33 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 block_shape=None,
             )
 
+    def dequantize_weights(self, layer, dtype):
+        w1 = layer.w13_weight
+        w2 = layer.w2_weight
+        w1_scale = layer.w13_weight_scale
+        w2_scale = layer.w2_weight_scale
+
+        if self.ocp_mx_scheme in {
+            OCP_MX_Scheme.w_mxfp4_a_mxfp4,
+            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
+            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
+        }:
+            # Weight has to be dequantized for mxfp4 emulation.
+            w1 = dequant_mxfp4(w1, w1_scale, dtype)
+            w2 = dequant_mxfp4(w2, w2_scale, dtype)
+        elif self.ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2:
+            w1 = dequant_mxfp6(w1, w1_scale, quant_dtype="fp6_e3m2", float_dtype=dtype)
+            w2 = dequant_mxfp6(w2, w2_scale, quant_dtype="fp6_e3m2", float_dtype=dtype)
+        elif self.ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3:
+            w1 = dequant_mxfp6(w1, w1_scale, quant_dtype="fp6_e2m3", float_dtype=dtype)
+            w2 = dequant_mxfp6(w2, w2_scale, quant_dtype="fp6_e2m3", float_dtype=dtype)
+        else:
+            raise NotImplementedError(  # noqa: E501
+                f"Unsupported ocp_mx_scheme={self.ocp_mx_scheme}"
+            )
+
+        return w1, w2
+
     def apply(
         self,
         layer: FusedMoE,
@@ -1036,44 +1076,13 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
 
-            w1 = layer.w13_weight
-            w2 = layer.w2_weight
-            w1_scale = layer.w13_weight_scale
-            w2_scale = layer.w2_weight_scale
-
-            if self.ocp_mx_scheme in {
-                OCP_MX_Scheme.w_mxfp4_a_mxfp4,
-                OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
-                OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
-            }:
-                # Weight has to be dequantized for mxfp4 emulation.
-                w1 = dequant_mxfp4(w1, w1_scale, x.dtype)
-                w1_scale = None
-                w2 = dequant_mxfp4(w2, w2_scale, x.dtype)
-                w2_scale = None
-            elif self.ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2:
-                w1 = dequant_mxfp6(
-                    w1, w1_scale, quant_dtype="fp6_e3m2", float_dtype=x.dtype
-                )
-                w1_scale = None
-                w2 = dequant_mxfp6(
-                    w2, w2_scale, quant_dtype="fp6_e3m2", float_dtype=x.dtype
-                )
-                w2_scale = None
-            elif self.ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3:
-                w1 = dequant_mxfp6(
-                    w1, w1_scale, quant_dtype="fp6_e2m3", float_dtype=x.dtype
-                )
-                w1_scale = None
-                w2 = dequant_mxfp6(
-                    w2, w2_scale, quant_dtype="fp6_e2m3", float_dtype=x.dtype
-                )
-                w2_scale = None
+            if not self.emulation_dequantize_weights:
+                w1, w2 = self.dequantize_weights(layer, dtype=x.dtype)
             else:
-                raise NotImplementedError(  # noqa: E501
-                    f"Unsupported ocp_mx_scheme={self.ocp_mx_scheme}"
-                )
+                w1 = layer.w13_weight
+                w2 = layer.w2_weight
 
+            # TODO: Use `TritonExperts` and `TritonExperts.apply` here.
             return fused_experts(
                 x,
                 w1,
