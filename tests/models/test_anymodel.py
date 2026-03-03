@@ -3,7 +3,7 @@
 """Unit tests for AnyModel (NAS heterogeneous architecture support).
 
 These tests exercise the ArchInfo registry, the generic config-override
-and no-op helpers, and the registry integration.
+and no-op helpers, and the _should_use_anymodel detection logic.
 No GPU or model weights are required.
 """
 
@@ -19,13 +19,10 @@ from vllm.model_executor.models.anymodel import (
     ArchInfo,
     NoOpAttention,
     NoOpMLP,
-    NoOpNorm,
+    Same,
     _apply_no_ops,
-    _arch_info_from_config,
     _create_layer_config,
-    _has_overrides,
     _resolve_layer_class,
-    _unregister_layer,
 )
 
 # ---------------------------------------------------------------------------
@@ -34,7 +31,7 @@ from vllm.model_executor.models.anymodel import (
 
 
 def _ns(**kwargs):
-    """Build a SimpleNamespace (mirrors AnyModel config conversion)."""
+    """Build a SimpleNamespace (mirrors AnyModelForCausalLMConfig conversion)."""
     return types.SimpleNamespace(**kwargs)
 
 
@@ -123,30 +120,27 @@ class TestArchRegistry:
     def test_hybrid_archs_registered(self, arch):
         assert arch in _ARCH_REGISTRY
 
-    # Multimodal models
-    def test_qwen3vl_registered(self):
-        """Qwen3VLForConditionalGeneration is supported via dynamic parent."""
-        assert "Qwen3VLForConditionalGeneration" in _ARCH_REGISTRY
+    def test_qwen3vl_not_registered_with_explanation(self):
+        """Qwen3VL is multimodal — needs AnyModelForConditionalGeneration."""
+        assert "Qwen3VLForConditionalGeneration" not in _ARCH_REGISTRY
 
     # --- per-arch field checks ---
 
-    def test_llama_fields(self):
-        info = _ARCH_REGISTRY["LlamaForCausalLM"]
-        assert info.decoder_layer_module == ".llama"
-        assert info.decoder_layer_class == "LlamaDecoderLayer"
+    def test_llama_vllm_config_ctor(self):
+        assert _ARCH_REGISTRY["LlamaForCausalLM"].ctor_style == "vllm_config"
 
-    def test_mistral_correct_module(self):
+    def test_mistral_vllm_config_ctor_and_correct_module(self):
         info = _ARCH_REGISTRY["MistralForCausalLM"]
+        assert info.ctor_style == "vllm_config"
         assert "mistral" in info.decoder_layer_module
         assert info.decoder_layer_class == "MistralDecoderLayer"
 
-    def test_qwen2_fields(self):
-        info = _ARCH_REGISTRY["Qwen2ForCausalLM"]
-        assert info.decoder_layer_module == ".qwen2"
-        assert info.decoder_layer_class == "Qwen2DecoderLayer"
+    def test_qwen2_standard_ctor(self):
+        assert _ARCH_REGISTRY["Qwen2ForCausalLM"].ctor_style == "standard"
 
-    def test_qwen3_fields(self):
+    def test_qwen3_standard_ctor(self):
         info = _ARCH_REGISTRY["Qwen3ForCausalLM"]
+        assert info.ctor_style == "standard"
         assert info.decoder_layer_class == "Qwen3DecoderLayer"
 
     def test_mixtral_block_sparse_moe(self):
@@ -161,6 +155,7 @@ class TestArchRegistry:
 
     def test_nemotronh_hybrid_fields(self):
         info = _ARCH_REGISTRY["NemotronHForCausalLM"]
+        assert info.ctor_style == "nemotron_h"
         assert info.hybrid_pattern_field == "hybrid_override_pattern"
         assert info.decoder_layer_class_map is not None
         assert "*" in info.decoder_layer_class_map
@@ -171,16 +166,17 @@ class TestArchRegistry:
         assert info.ffn_module == "mixer"
         assert info.moe_num_experts_field == "n_routed_experts"
 
-    def test_nemotronh_puzzle_alias_is_same_object(self):
-        """NemotronHPuzzleForCausalLM must be the exact same ArchInfo object
-        as NemotronHForCausalLM — not a copy — so they cannot drift."""
-        assert (
-            _ARCH_REGISTRY["NemotronHPuzzleForCausalLM"]
-            is _ARCH_REGISTRY["NemotronHForCausalLM"]
-        )
+    def test_nemotronh_puzzle_alias_matches_nemotronh(self):
+        """NemotronHPuzzleForCausalLM should be structurally identical."""
+        a = _ARCH_REGISTRY["NemotronHForCausalLM"]
+        b = _ARCH_REGISTRY["NemotronHPuzzleForCausalLM"]
+        assert a.decoder_layer_class_map == b.decoder_layer_class_map
+        assert a.hybrid_pattern_field == b.hybrid_pattern_field
+        assert a.ctor_style == b.ctor_style
 
     def test_gptoss_fields(self):
         info = _ARCH_REGISTRY["GptOssForCausalLM"]
+        assert info.ctor_style == "gpt_oss"
         assert info.attn_module == "attn"
         assert info.moe_num_experts_field == "num_local_experts"
         assert info.decoder_layer_class == "TransformerBlock"
@@ -189,6 +185,7 @@ class TestArchRegistry:
         info = ArchInfo(
             decoder_layer_module=".llama", decoder_layer_class="LlamaDecoderLayer"
         )
+        assert info.ctor_style == "standard"
         assert info.attn_module == "self_attn"
         assert info.attn_norm_module == "input_layernorm"
         assert info.ffn_module == "mlp"
@@ -199,48 +196,6 @@ class TestArchRegistry:
         assert info.moe_intermediate_size_field is None
         assert info.decoder_layer_class_map is None
         assert info.hybrid_pattern_field is None
-        # Dynamic-parent fields
-        assert info.layers_path == "model.layers"
-        assert info.init_prefix is None
-        assert info.layer_hf_config is None
-
-    def test_qwen3vl_dynamic_parent_fields(self):
-        info = _ARCH_REGISTRY["Qwen3VLForConditionalGeneration"]
-        assert info.layers_path == "language_model.model.layers"
-        assert info.init_prefix == "model"
-        assert info.layer_hf_config == "text_config"
-        assert info.decoder_layer_class == "Qwen3DecoderLayer"
-        assert "qwen3" in info.decoder_layer_module
-        # base_model_module must point to qwen3_vl where
-        # Qwen3VLForConditionalGeneration actually lives.
-        assert info.base_model_module == ".qwen3_vl"
-
-    def test_non_vl_archs_have_no_base_model_module(self):
-        """Only VL models that split the model/layer files need this field."""
-        for arch, info in _ARCH_REGISTRY.items():
-            if arch == "Qwen3VLForConditionalGeneration":
-                continue
-            assert info.base_model_module is None, (
-                f"{arch} unexpectedly sets base_model_module"
-            )
-
-    def test_most_archs_use_default_layers_path(self):
-        """All non-VL architectures use the default model.layers path."""
-        for arch, info in _ARCH_REGISTRY.items():
-            if arch == "Qwen3VLForConditionalGeneration":
-                continue
-            assert info.layers_path == "model.layers", (
-                f"{arch} has unexpected layers_path={info.layers_path!r}"
-            )
-
-    def test_most_archs_use_none_init_prefix(self):
-        """All non-VL architectures use the default init_prefix=None."""
-        for arch, info in _ARCH_REGISTRY.items():
-            if arch == "Qwen3VLForConditionalGeneration":
-                continue
-            assert info.init_prefix is None, (
-                f"{arch} has unexpected init_prefix={info.init_prefix!r}"
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +208,7 @@ class TestResolveLayerClass:
         return ArchInfo(
             decoder_layer_module=".nemotron_h",
             decoder_layer_class="NemotronHAttentionDecoderLayer",
+            ctor_style="nemotron_h",
             decoder_layer_class_map={
                 "*": "NemotronHAttentionDecoderLayer",
                 "-": "NemotronHMLPDecoderLayer",
@@ -373,7 +329,7 @@ class TestCreateLayerConfig:
 
     def test_qwen2moe_num_experts_override(self):
         global_cfg = _base_config(num_experts=8, moe_intermediate_size=1024)
-        moe_block = {"num_local_experts": 4, "expert_intermediate_dim": 512}
+        moe_block = {"num_local_experts": 4, "expert_intermediate_size": 512}
         info = ArchInfo(
             decoder_layer_module=".qwen2_moe",
             decoder_layer_class="Qwen2MoeDecoderLayer",
@@ -388,7 +344,7 @@ class TestCreateLayerConfig:
 
     def test_mixtral_moe_falls_back_to_intermediate_size_field(self):
         global_cfg = _base_config(intermediate_size=14336, num_local_experts=8)
-        moe_block = {"num_local_experts": 4, "expert_intermediate_dim": 512}
+        moe_block = {"num_local_experts": 4, "expert_intermediate_size": 512}
         info = ArchInfo(
             decoder_layer_module=".mixtral",
             decoder_layer_class="MixtralDecoderLayer",
@@ -403,7 +359,7 @@ class TestCreateLayerConfig:
 
     def test_nemotronh_moe_fields(self):
         global_cfg = _base_config(n_routed_experts=8, moe_intermediate_size=2048)
-        moe_block = {"num_local_experts": 4, "expert_intermediate_dim": 1024}
+        moe_block = {"num_local_experts": 4, "expert_intermediate_size": 1024}
         info = _ARCH_REGISTRY["NemotronHForCausalLM"]
         result = _create_layer_config(global_cfg, _block(moe=moe_block), info)
         assert result.n_routed_experts == 4
@@ -416,32 +372,6 @@ class TestCreateLayerConfig:
         )
         assert global_cfg.num_key_value_heads == 8
         assert global_cfg.intermediate_size == 14336
-
-    def test_extra_config_fields_applied(self):
-        """extra_config_fields values from block_config are reflected in the
-        returned config copy."""
-        global_cfg = _base_config(hidden_size=4096)
-        info = ArchInfo(
-            decoder_layer_module=".llama",
-            decoder_layer_class="LlamaDecoderLayer",
-            extra_config_fields={"ffn.hidden_size": "hidden_size"},
-        )
-        bc = _ns(
-            attention=_ns(no_op=False),
-            ffn=_ns(no_op=False, hidden_size=1024),
-        )
-        result = _create_layer_config(global_cfg, bc, info)
-        assert result.hidden_size == 1024
-        assert global_cfg.hidden_size == 4096  # not mutated
-
-    def test_hidden_act_triggers_layer_rebuild_via_has_overrides(self):
-        """A layer with only hidden_act overridden must be flagged for rebuild."""
-        info = self._std_info()
-        bc = _block(hidden_act="gelu")
-        assert _has_overrides(bc, info)
-        global_cfg = _base_config(hidden_act="silu")
-        result = _create_layer_config(global_cfg, bc, info)
-        assert result.hidden_act == "gelu"
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +410,7 @@ class TestApplyNoOps:
         )
         _apply_no_ops(layer, _block(attn_no_op=True), info)
         assert isinstance(layer.self_attn, NoOpAttention)
-        assert isinstance(layer.input_layernorm, NoOpNorm)
+        assert isinstance(layer.input_layernorm, Same)
         assert not isinstance(layer.mlp, NoOpMLP)
 
     def test_ffn_noop(self):
@@ -490,7 +420,7 @@ class TestApplyNoOps:
         )
         _apply_no_ops(layer, _block(ffn_no_op=True), info)
         assert isinstance(layer.mlp, NoOpMLP)
-        assert isinstance(layer.post_attention_layernorm, NoOpNorm)
+        assert isinstance(layer.post_attention_layernorm, Same)
         assert not isinstance(layer.self_attn, NoOpAttention)
 
     def test_both_noop(self):
@@ -500,9 +430,9 @@ class TestApplyNoOps:
         )
         _apply_no_ops(layer, _block(attn_no_op=True, ffn_no_op=True), info)
         assert isinstance(layer.self_attn, NoOpAttention)
-        assert isinstance(layer.input_layernorm, NoOpNorm)
+        assert isinstance(layer.input_layernorm, Same)
         assert isinstance(layer.mlp, NoOpMLP)
-        assert isinstance(layer.post_attention_layernorm, NoOpNorm)
+        assert isinstance(layer.post_attention_layernorm, Same)
 
     def test_mixtral_block_sparse_moe_noop(self):
         layer = self._make_layer(ffn_name="block_sparse_moe")
@@ -513,7 +443,7 @@ class TestApplyNoOps:
         )
         _apply_no_ops(layer, _block(ffn_no_op=True), info)
         assert isinstance(layer.block_sparse_moe, NoOpMLP)
-        assert isinstance(layer.post_attention_layernorm, NoOpNorm)
+        assert isinstance(layer.post_attention_layernorm, Same)
 
     def test_gptoss_attn_noop_uses_attn_module(self):
         layer = self._make_layer(attn_name="attn")
@@ -528,7 +458,7 @@ class TestApplyNoOps:
         info = _ARCH_REGISTRY["NemotronHForCausalLM"]
         _apply_no_ops(layer, _block(attn_no_op=True), info)
         assert isinstance(layer.mixer, NoOpAttention)
-        assert isinstance(layer.norm, NoOpNorm)
+        assert isinstance(layer.norm, Same)
 
 
 # ---------------------------------------------------------------------------
@@ -550,282 +480,82 @@ class TestNoOpModules:
         assert out.shape == hidden.shape
         assert out.eq(0).all()
 
-    def test_noop_norm_no_residual(self):
+    def test_same_no_residual(self):
         x = torch.randn(4, 16)
-        assert NoOpNorm()(x) is x
+        assert Same()(x) is x
 
-    def test_noop_norm_with_residual(self):
+    def test_same_with_residual(self):
         x, r = torch.randn(4, 16), torch.randn(4, 16)
-        out_x, out_r = NoOpNorm()(x, r)
+        out_x, out_r = Same()(x, r)
         assert out_x is x
         assert out_r is r
 
 
 # ---------------------------------------------------------------------------
-# _has_overrides — layer recreation decision
+# _should_use_anymodel — registry integration
 # ---------------------------------------------------------------------------
 
 
-class TestHasOverrides:
-    def test_no_overrides_returns_false(self):
-        assert not _has_overrides(_block())
+class TestShouldUseAnymodel:
+    def _mc(self, architectures, block_configs):
+        hf = _ns(architectures=architectures, block_configs=block_configs)
+        return _ns(hf_config=hf)
 
-    def test_kv_heads_override_returns_true(self):
-        assert _has_overrides(_block(kv_heads=2))
-
-    def test_intermediate_size_override_returns_true(self):
-        assert _has_overrides(_block(intermediate_size=4096))
-
-    def test_moe_override_returns_true(self):
-        assert _has_overrides(_block(moe={"num_local_experts": 4}))
-
-    def test_noop_only_returns_false(self):
-        """No-ops do not change weight shapes; no layer recreation needed."""
-        assert not _has_overrides(_block(attn_no_op=True))
-        assert not _has_overrides(_block(ffn_no_op=True))
-        assert not _has_overrides(_block(attn_no_op=True, ffn_no_op=True))
-
-    def test_noop_plus_override_returns_true(self):
-        assert _has_overrides(_block(kv_heads=2, attn_no_op=True))
-
-    def test_hidden_act_only_returns_true(self):
-        """hidden_act requires layer rebuild to take effect."""
-        assert _has_overrides(_block(hidden_act="gelu"))
-
-    def test_extra_config_fields_triggers_rebuild(self):
-        """A block_config field listed in extra_config_fields triggers rebuild."""
-        info = ArchInfo(
-            decoder_layer_module=".llama",
-            decoder_layer_class="LlamaDecoderLayer",
-            extra_config_fields={"ffn.hidden_size": "hidden_size"},
-        )
-        bc = _ns(
-            attention=_ns(no_op=False),
-            ffn=_ns(no_op=False, hidden_size=1024),
-        )
-        assert _has_overrides(bc, info)
-
-    def test_no_extra_config_fields_no_trigger(self):
-        """Empty extra_config_fields does not change the False result."""
-        info = ArchInfo(
-            decoder_layer_module=".llama",
-            decoder_layer_class="LlamaDecoderLayer",
-            extra_config_fields={},
-        )
-        assert not _has_overrides(_block(), info)
-
-
-# ---------------------------------------------------------------------------
-# _unregister_layer — prefix-scoped removal from static_forward_context
-# ---------------------------------------------------------------------------
-
-
-class TestUnregisterLayer:
-    def _mock_vllm_config(self, context_keys):
-        ctx = {k: "dummy" for k in context_keys}
-        compilation_config = _ns(static_forward_context=ctx)
-        return _ns(compilation_config=compilation_config)
-
-    def test_removes_only_target_layer(self):
-        """Unregistering layer 1 must not touch layers 10, 11, etc."""
-        vllm_config = self._mock_vllm_config(
-            [
-                "model.layers.1.self_attn",
-                "model.layers.1.mlp",
-                "model.layers.10.self_attn",
-                "model.layers.10.mlp",
-                "model.layers.11.self_attn",
-            ]
-        )
-        _unregister_layer("model.layers.1", vllm_config)
-        ctx = vllm_config.compilation_config.static_forward_context
-        assert "model.layers.1.self_attn" not in ctx
-        assert "model.layers.1.mlp" not in ctx
-        assert "model.layers.10.self_attn" in ctx
-        assert "model.layers.10.mlp" in ctx
-        assert "model.layers.11.self_attn" in ctx
-
-    def test_removes_nothing_when_no_match(self):
-        vllm_config = self._mock_vllm_config(
-            [
-                "model.layers.0.self_attn",
-                "model.layers.2.self_attn",
-            ]
-        )
-        _unregister_layer("model.layers.1", vllm_config)
-        ctx = vllm_config.compilation_config.static_forward_context
-        assert len(ctx) == 2
-
-    def test_handles_empty_context(self):
-        vllm_config = self._mock_vllm_config([])
-        _unregister_layer("model.layers.0", vllm_config)
-        assert len(vllm_config.compilation_config.static_forward_context) == 0
-
-    def test_removes_deeply_nested_keys(self):
-        """Keys with deeper nesting under the layer prefix are removed."""
-        vllm_config = self._mock_vllm_config(
-            [
-                "model.layers.5.self_attn.o_proj",
-                "model.layers.5.self_attn.qkv_proj",
-                "model.layers.5.mlp.gate_proj",
-                "model.layers.6.self_attn",
-            ]
-        )
-        _unregister_layer("model.layers.5", vllm_config)
-        ctx = vllm_config.compilation_config.static_forward_context
-        assert len(ctx) == 1
-        assert "model.layers.6.self_attn" in ctx
-
-
-# ---------------------------------------------------------------------------
-# AnyModel registry flow
-# ---------------------------------------------------------------------------
-
-
-class TestAnyModelRegistryFlow:
-    """Tests for the standard registry path used by AnyModel checkpoints.
-
-    NAS-optimised configs use ``"architectures": ["AnyModel"]`` so that the
-    normal registry lookup selects AnyModel without any special bypass.
-    ``base_architecture`` carries the name of the underlying model class
-    (used for capability introspection via the verify hook and wrapper
-    construction via ``resolve_wrapper_cls``).
-    """
-
-    def test_anymodel_registered_in_registry(self):
+    def test_triggers_for_known_arch(self):
         from vllm.model_executor.models.registry import ModelRegistry
 
-        assert "AnyModel" in ModelRegistry.models
-
-    def test_resolve_wrapper_cls_returns_wrapper(self):
-        """resolve_wrapper_cls must return a wrapper subclass that inherits
-        from both AnyModel and the base model."""
-        from vllm.model_executor.models.anymodel import AnyModel
-
-        mc = _ns(
-            hf_config=_ns(
-                base_architecture="LlamaForCausalLM",
-                anymodel_arch_info=None,
-            ),
+        assert ModelRegistry._should_use_anymodel(
+            self._mc(["LlamaForCausalLM"], [_block()] * 2)
         )
-        wrapper = AnyModel.resolve_wrapper_cls(mc)
-        assert issubclass(wrapper, AnyModel)
-        assert "AnyModelLlamaForCausalLM" in wrapper.__name__
 
-    def test_resolve_arch_raises_without_base_architecture(self):
-        """_resolve_arch must raise when base_architecture is missing."""
-        from vllm.model_executor.models.anymodel import AnyModel
+    def test_no_block_configs_no_trigger(self):
+        from vllm.model_executor.models.registry import ModelRegistry
 
-        with pytest.raises(ValueError, match="base_architecture"):
-            AnyModel._resolve_arch(_ns())
+        mc = _ns(hf_config=_ns(architectures=["LlamaForCausalLM"], block_configs=None))
+        assert not ModelRegistry._should_use_anymodel(mc)
 
+    def test_unknown_arch_no_trigger(self):
+        from vllm.model_executor.models.registry import ModelRegistry
 
-# ---------------------------------------------------------------------------
-# init_prefix None-vs-string semantics
-# ---------------------------------------------------------------------------
-
-
-class TestInitPrefix:
-    def test_init_prefix_none_inherits_engine_prefix(self):
-        """init_prefix=None means use the engine-provided prefix."""
-        info = ArchInfo(
-            decoder_layer_module=".llama",
-            decoder_layer_class="LlamaDecoderLayer",
-            init_prefix=None,
+        assert not ModelRegistry._should_use_anymodel(
+            self._mc(["UnknownModelForCausalLM"], [_block()])
         )
-        engine_prefix = "engine_prefix"
-        result = info.init_prefix if info.init_prefix is not None else engine_prefix
-        assert result == engine_prefix
 
-    def test_init_prefix_empty_string_forces_blank(self):
-        """init_prefix="" explicitly forces a blank prefix, overriding engine."""
-        info = ArchInfo(
-            decoder_layer_module=".llama",
-            decoder_layer_class="LlamaDecoderLayer",
-            init_prefix="",
+    def test_empty_architectures_no_trigger(self):
+        from vllm.model_executor.models.registry import ModelRegistry
+
+        mc = _ns(hf_config=_ns(architectures=[], block_configs=[_block()]))
+        assert not ModelRegistry._should_use_anymodel(mc)
+
+    def test_no_hf_config_no_trigger(self):
+        from vllm.model_executor.models.registry import ModelRegistry
+
+        assert not ModelRegistry._should_use_anymodel(_ns(hf_config=None))
+
+    @pytest.mark.parametrize(
+        "arch",
+        [
+            # All 9 target model architectures (except Qwen3VL — multimodal)
+            "LlamaForCausalLM",  # llama-3.1-8b, llama-3.2-3b
+            "MistralForCausalLM",  # mistral-small-24b
+            "Qwen2ForCausalLM",  # qwen2.5-7b
+            "Qwen3ForCausalLM",  # qwen3-8b
+            "Qwen2MoeForCausalLM",
+            "MixtralForCausalLM",
+            "NemotronHForCausalLM",  # nemotron-nano-12b-v2, nemotron-30b
+            "NemotronHPuzzleForCausalLM",
+            "GptOssForCausalLM",  # gpt-oss-20b
+        ],
+    )
+    def test_triggers_for_all_registered_archs(self, arch):
+        from vllm.model_executor.models.registry import ModelRegistry
+
+        assert ModelRegistry._should_use_anymodel(self._mc([arch], [_block()]))
+
+    def test_qwen3vl_does_not_trigger(self):
+        """Qwen3VL is multimodal and not yet supported by AnyModelForCausalLM."""
+        from vllm.model_executor.models.registry import ModelRegistry
+
+        assert not ModelRegistry._should_use_anymodel(
+            self._mc(["Qwen3VLForConditionalGeneration"], [_block()])
         )
-        engine_prefix = "engine_prefix"
-        result = info.init_prefix if info.init_prefix is not None else engine_prefix
-        assert result == ""
-
-    def test_init_prefix_model_overrides_engine(self):
-        """init_prefix='model' overrides the engine prefix (Qwen3VL case)."""
-        info = ArchInfo(
-            decoder_layer_module=".llama",
-            decoder_layer_class="LlamaDecoderLayer",
-            init_prefix="model",
-        )
-        engine_prefix = "engine_prefix"
-        result = info.init_prefix if info.init_prefix is not None else engine_prefix
-        assert result == "model"
-
-
-# ---------------------------------------------------------------------------
-# _arch_info_from_config
-# ---------------------------------------------------------------------------
-
-
-class TestArchInfoFromConfig:
-    def _minimal_arch_info_dict(self):
-        return {
-            "decoder_layer_module": ".llama",
-            "decoder_layer_class": "LlamaDecoderLayer",
-        }
-
-    def test_returns_none_when_field_absent(self):
-        cfg = _ns()
-        assert _arch_info_from_config(cfg) is None
-
-    def test_returns_none_when_field_falsy(self):
-        cfg = _ns(anymodel_arch_info=None)
-        assert _arch_info_from_config(cfg) is None
-
-    def test_loads_from_dict(self):
-        cfg = _ns(anymodel_arch_info=self._minimal_arch_info_dict())
-        info = _arch_info_from_config(cfg)
-        assert info is not None
-        assert info.decoder_layer_module == ".llama"
-        assert info.decoder_layer_class == "LlamaDecoderLayer"
-        assert info.attn_module == "self_attn"  # default
-
-    def test_loads_from_namespace(self):
-        data = _ns(**self._minimal_arch_info_dict())
-        cfg = _ns(anymodel_arch_info=data)
-        info = _arch_info_from_config(cfg)
-        assert info is not None
-        assert info.decoder_layer_class == "LlamaDecoderLayer"
-
-    def test_overrides_applied(self):
-        d = self._minimal_arch_info_dict()
-        d["attn_module"] = "attn"
-        d["ffn_module"] = "block_sparse_moe"
-        cfg = _ns(anymodel_arch_info=d)
-        info = _arch_info_from_config(cfg)
-        assert info.attn_module == "attn"
-        assert info.ffn_module == "block_sparse_moe"
-
-    def test_unknown_keys_ignored(self):
-        """Unknown keys in anymodel_arch_info are silently dropped."""
-        d = self._minimal_arch_info_dict()
-        d["ctor_style"] = "nemotron_h"  # removed field — should be ignored
-        d["future_field"] = 42
-        cfg = _ns(anymodel_arch_info=d)
-        info = _arch_info_from_config(cfg)
-        assert info is not None
-        assert not hasattr(info, "ctor_style")
-        assert not hasattr(info, "future_field")
-
-    def test_config_driven_takes_priority_in_new(self):
-        """When anymodel_arch_info is present, AnyModel.__new__ must use it
-        rather than falling back to _ARCH_REGISTRY."""
-        from vllm.model_executor.models.anymodel import _arch_info_from_config
-
-        custom = {
-            "decoder_layer_module": ".llama",
-            "decoder_layer_class": "LlamaDecoderLayer",
-            "attn_module": "mixer",  # deliberately different from default
-        }
-        cfg = _ns(anymodel_arch_info=custom)
-        info = _arch_info_from_config(cfg)
-        assert info is not None
-        assert info.attn_module == "mixer"
