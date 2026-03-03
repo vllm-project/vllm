@@ -47,7 +47,9 @@ class FilterReusedOffloadingManager(OffloadingManager):
         max_tracker_size: int = 64_000,
     ):
         if max_tracker_size < 1:
-            raise ValueError(f"FilterReusedOffloadingManager max_tracker_size must be >= 1, got {max_tracker_size}")
+            raise ValueError(
+                f"FilterReusedOffloadingManager max_tracker_size must be >= 1, got {max_tracker_size}"
+            )
         self._backing = backing
         self.store_threshold = store_threshold
         self.max_tracker_size = max_tracker_size
@@ -81,7 +83,9 @@ class FilterReusedOffloadingManager(OffloadingManager):
         consume any CPU offload capacity.
         """
         block_hashes = list(block_hashes)
-        eligible = [bh for bh in block_hashes if self.counts.get(bh, 0) >= self.store_threshold]
+        eligible = [
+            bh for bh in block_hashes if self.counts.get(bh, 0) >= self.store_threshold
+        ]
 
         # Delegate to the backing manager with only the eligible hashes.
         # Passing an empty list is intentional and safe — both

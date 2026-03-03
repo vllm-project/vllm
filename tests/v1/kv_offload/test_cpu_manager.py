@@ -506,11 +506,12 @@ def test_filter_reused_manager():
     lru_manager = LRUOffloadingManager(cpu_backend, enable_events=True)
 
     from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
+
     manager = FilterReusedOffloadingManager(
         backing=lru_manager, store_threshold=2, max_tracker_size=3
     )
 
-    # Lookup [1, 2] -> 1st time, they are added to tracker but not eligible for store yet
+    # Lookup [1, 2] -> 1st time, added to tracker but not eligible for store yet
     assert manager.lookup(to_hashes([1, 2])) == 0
 
     # prepare store [1, 2] -> should be filtered
@@ -526,7 +527,8 @@ def test_filter_reused_manager():
     assert prepare_store_output is not None
     assert prepare_store_output.block_hashes_to_store == to_hashes([1])
 
-    # Lookup [3, 4] -> 1st time (evicts [2] from tracker since max_size is 3 and tracker has [1])
+    # Lookup [3, 4] -> 1st time
+    # (evicts [2] from tracker since max_size is 3 and tracker has [1])
     assert manager.lookup(to_hashes([3, 4])) == 0
 
     # Lookup [2] again -> (this adds [2] back to the tracker as 1st time)
