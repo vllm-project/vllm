@@ -290,7 +290,6 @@ class RelPosAttention(PluggableLayer):
                 positional parameter size.
         """  # noqa: E501
         super().__init__()
-
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.scale = head_dim**-0.5
@@ -307,10 +306,7 @@ class RelPosAttention(PluggableLayer):
             self.rel_pos_h = nn.Parameter(torch.zeros(2 * input_size[0] - 1, head_dim))
             self.rel_pos_w = nn.Parameter(torch.zeros(2 * input_size[1] - 1, head_dim))
 
-    def forward(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, H, W, _ = x.shape
         # qkv with shape (3, B, nHead, H * W, C)
         qkv = (
@@ -330,7 +326,6 @@ class RelPosAttention(PluggableLayer):
         v = v.view(B, self.num_heads, H * W, -1)
 
         if self.use_rel_pos:
-            assert rel_h is not None and rel_w is not None
             rel_h = rel_h.view(
                 B, self.num_heads, rel_h.size(1), rel_h.size(2), rel_h.size(3)
             )
