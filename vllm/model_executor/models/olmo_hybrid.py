@@ -21,7 +21,6 @@
 # limitations under the License.
 """Inference-only OLMo Hybrid model compatible with HuggingFace weights."""
 
-import contextlib
 from collections.abc import Iterable
 from functools import partial
 from itertools import islice
@@ -102,14 +101,6 @@ from .utils import (
     maybe_prefix,
 )
 
-
-def _triton_pytorch_allocator(size: int, alignment: int, stream: int) -> int:
-    """Allocator that uses PyTorch to allocate memory for Triton kernels."""
-    return torch.empty(size, dtype=torch.int8, device="cuda").data_ptr()
-
-
-with contextlib.suppress(Exception):
-    triton.set_allocator(_triton_pytorch_allocator)
 
 logger = init_logger(__name__)
 
