@@ -253,7 +253,7 @@ def make_local_attention_virtual_batches(
     #   seqlens_q_local = [2, 2, 1, 4, 4, 1, 4, 1]
     #
     # First Get batched arange. (E.g., [2, 4, 2] -> [0, 1, 0, 1, 2, 3, 0, 1])
-    #   (TODO: max a utility to share this code with _prepare_inputs)
+    #   (TODO: make a utility to share this code with _prepare_inputs)
     # arange step 1. [2, 4, 2] -> [2, 6, 8]
     cu_num_blocks = np.cumsum(local_blocks)
     virtual_batches = cu_num_blocks[-1]
