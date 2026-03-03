@@ -231,29 +231,6 @@ class MistralForCausalLM(LlamaForCausalLM):
     # Mistral: We don't support LoRA on the embedding layers.
     embedding_modules: dict[str, str] = {}
 
-    # Maps Mistral-format LoRA weight keys to vLLM's internal naming.
-    # Mistral format uses e.g. `layers.N.attention.wk` while vLLM expects
-    # `model.layers.N.self_attn.k_proj`. This allows loading LoRA checkpoints
-    # saved in the Mistral consolidated format without manual key renaming.
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            "layers.": "model.layers.",
-        },
-        orig_to_new_substr={
-            ".attention_norm.": ".input_layernorm.",
-            ".ffn_norm.": ".post_attention_layernorm.",
-            ".attention.": ".self_attn.",
-            ".feed_forward.": ".mlp.",
-            ".wq.": ".q_proj.",
-            ".wk.": ".k_proj.",
-            ".wv.": ".v_proj.",
-            ".wo.": ".o_proj.",
-            ".w1.": ".gate_proj.",
-            ".w2.": ".down_proj.",
-            ".w3.": ".up_proj.",
-        },
-    )
-
     # Mistral/Llama models can also be loaded with --load-format mistral
     # from consolidated.safetensors checkpoints
     mistral_mapping = {
@@ -279,6 +256,31 @@ class MistralForCausalLM(LlamaForCausalLM):
         "output": "lm_head",
         "norm": "model.norm",
     }
+
+    # Maps Mistral-format LoRA weight keys to vLLM's internal naming (derived
+    # from mistral_mapping to avoid duplication).
+    _lora_substr_keys = (
+        "attention_norm",
+        "ffn_norm",
+        "attention",
+        "feed_forward",
+        "wq",
+        "wk",
+        "wv",
+        "wo",
+        "w1",
+        "w2",
+        "w3",
+    )
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "layers.": f"{mistral_mapping['layers']}.",
+        },
+        orig_to_new_substr={
+            f".{k}.": f".{mistral_mapping[k]}."
+            for k in _lora_substr_keys
+        },
+    )
 
     def __init__(
         self,
