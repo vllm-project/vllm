@@ -149,6 +149,12 @@ kFp8Dynamic128Sym = QuantKey(FP8_DTYPE, kDynamic128Scale, symmetric=True)
 kStatic128BlockScale = ScaleDesc(torch.float32, True, GroupShape(128, 128))
 kFp8Static128BlockSym = QuantKey(FP8_DTYPE, kStatic128BlockScale, symmetric=True)
 
+kMxfp8StaticScale = ScaleDesc(torch.uint8, True, GroupShape(1, 32))
+kMxfp8Static = QuantKey(FP8_DTYPE, kMxfp8StaticScale, symmetric=True)
+
+kMxfp8DynamicScale = ScaleDesc(torch.uint8, False, GroupShape(1, 32))
+kMxfp8Dynamic = QuantKey(FP8_DTYPE, kMxfp8DynamicScale, symmetric=True)
+
 kDynamic64Scale = ScaleDesc(torch.float32, False, GroupShape(1, 64))
 kFp8Dynamic64Sym = QuantKey(FP8_DTYPE, kDynamic64Scale, symmetric=True)
 

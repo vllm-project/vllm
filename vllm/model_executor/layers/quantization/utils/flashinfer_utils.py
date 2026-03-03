@@ -461,7 +461,7 @@ def prepare_fp8_moe_layer_for_fi(
     # (SM 9.0), producing NaN instead of near-zero output. Clamping to a
     # small minimum prevents this without affecting model accuracy since
     # these experts' effective weights are already zero.
-    if block_quant:
+    if block_quant and w13_scale.dtype is not torch.uint8:
         _FI_CUTLASS_MIN_BLOCK_SCALE = 1e-10
         w13_scale.clamp_(min=_FI_CUTLASS_MIN_BLOCK_SCALE)
         w2_scale.clamp_(min=_FI_CUTLASS_MIN_BLOCK_SCALE)

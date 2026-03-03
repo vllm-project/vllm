@@ -31,6 +31,7 @@ QuantizationMethods = Literal[
     "torchao",
     "inc",
     "mxfp4",
+    "mxfp8",
     "petit_nvfp4",
     "cpu_awq",
 ]
@@ -115,7 +116,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .cpu_wna16 import CPUAWQConfig
     from .experts_int8 import ExpertsInt8Config
     from .fbgemm_fp8 import FBGEMMFp8Config
-    from .fp8 import Fp8Config
+    from .fp8 import Fp8Config, Mxfp8Config
     from .fp_quant import FPQuantConfig
     from .gguf import GGUFConfig
     from .gptq import GPTQConfig
@@ -156,6 +157,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "auto-round": INCConfig,
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
+        "mxfp8": Mxfp8Config,
         "petit_nvfp4": PetitNvFp4Config,
         "cpu_awq": CPUAWQConfig,
     }
