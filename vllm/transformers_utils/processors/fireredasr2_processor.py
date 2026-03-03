@@ -177,8 +177,8 @@ class FireRedASR2FeatureExtractor(SequenceFeatureExtractor):
         )
 
         feats = []
-        lengths = []
-        fake_token_lens = []
+        speech_lengths = []
+        fake_token_lengths = []
         for speech in raw_speech:
             """
             We must multiply by 32768 here because FireRedASR2 loads audio data
@@ -190,7 +190,7 @@ class FireRedASR2FeatureExtractor(SequenceFeatureExtractor):
             fbank = torch.from_numpy(fbank).float()
             length = fbank.size(0)
             feats.append(fbank)
-            lengths.append(length)
+            speech_lengths.append(length)
             padded_input2 = fbank
             padded_input2 = F.pad(
                 padded_input2, (0, 0, 0, self.context - 1), "constant", 0.0
@@ -203,7 +203,7 @@ class FireRedASR2FeatureExtractor(SequenceFeatureExtractor):
             input_lengths = mask[:, -1, :].sum(dim=-1)
             input_lengths = input_lengths // self.downsample_rate
             fake_token_len = input_lengths
-            fake_token_lens.append(fake_token_len)
+            fake_token_lengths.append(fake_token_len)
 
         feats = torch.stack(feats, dim=0)
         batched_speech = self.pad(
@@ -218,8 +218,8 @@ class FireRedASR2FeatureExtractor(SequenceFeatureExtractor):
         if return_tensors is not None:
             batched_speech = batched_speech.convert_to_tensors(return_tensors)
 
-        batched_speech["speech_lengths"] = torch.tensor(lengths)
-        batched_speech["fake_token_len"] = torch.concat(fake_token_lens)
+        batched_speech["speech_lengths"] = torch.tensor(speech_lengths)
+        batched_speech["fake_token_lengths"] = torch.concat(fake_token_lengths)
         return batched_speech
 
 
@@ -306,7 +306,7 @@ class FireRedASR2Processor(ProcessorMixin):
             for sample in text:
                 replace_str = []
                 while self.audio_token in sample:
-                    num_audio_tokens = int(inputs["fake_token_len"].item())
+                    num_audio_tokens = int(inputs["fake_token_lengths"].item())
 
                     expanded_audio_token = self.audio_token * num_audio_tokens
 

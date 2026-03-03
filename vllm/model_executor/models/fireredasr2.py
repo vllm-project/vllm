@@ -79,6 +79,10 @@ class FireRedASR2AudioInputs(TensorSchema):
         list[torch.Tensor] | None,
         TensorShape("b"),
     ]
+    fake_token_lengths: Annotated[
+        list[torch.Tensor] | None,
+        TensorShape("b"),
+    ]
 
 
 class Swish(nn.Module):
@@ -580,7 +584,7 @@ class FireRedASR2MultiModalProcessor(
         return dict(
             input_features=MultiModalFieldConfig.batched("audio"),
             speech_lengths=MultiModalFieldConfig.batched("audio"),
-            fake_token_len=MultiModalFieldConfig.batched("audio"),
+            fake_token_lengths=MultiModalFieldConfig.batched("audio"),
         )
 
     def _get_prompt_updates(
@@ -599,13 +603,14 @@ class FireRedASR2MultiModalProcessor(
 
         out_mm_data = out_mm_kwargs.get_data()
 
-        fake_token_len = out_mm_data.get("fake_token_len")
-        if fake_token_len is None:
+        fake_token_lengths = out_mm_data.get("fake_token_lengths")
+
+        if fake_token_lengths is None:
             audio_output_lengths = []
         else:
-            assert isinstance(fake_token_len, torch.Tensor)
+            assert isinstance(fake_token_lengths, torch.Tensor)
 
-            audio_output_lengths = fake_token_len.tolist()
+            audio_output_lengths = fake_token_lengths.tolist()
 
         def get_replacement_fireredasr2_audio(item_idx: int):
             num_features = audio_output_lengths[item_idx]
@@ -781,9 +786,12 @@ class FireRedASR2ForConditionalGeneration(
     ) -> FireRedASR2AudioInputs:
         input_features = kwargs.pop("input_features", None)
         speech_lengths = kwargs.pop("speech_lengths", None)
+        fake_token_lengths = kwargs.pop("fake_token_lengths", None)
 
         return FireRedASR2AudioInputs(
-            input_features=input_features, speech_lengths=speech_lengths
+            input_features=input_features,
+            speech_lengths=speech_lengths,
+            fake_token_lengths=fake_token_lengths,
         )
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
