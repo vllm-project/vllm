@@ -17,24 +17,19 @@ from .utils import supports_pdl, supports_tma
 @triton.jit
 def _get_c_ptrs(
     cur_c_ptr,
-    lora_id,
     pid_m,
     offs,
     offs_token,
     offs_cn,
     stride_cm,
     stride_cn,
-    EM: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     sort_c: tl.constexpr,
 ):
-    # When sort_c is true, store the output in c_ptr using token order defined
-    # in sorted_token_ids_ptr; otherwise, use the original token order from the prompt
     if sort_c:
         offs_token_id = pid_m * BLOCK_SIZE_M + offs
         c_ptrs = (
             cur_c_ptr
-            + lora_id * EM * stride_cm
             + stride_cm * offs_token_id[:, None]
             + stride_cn * offs_cn[None, :]
         )
@@ -228,10 +223,9 @@ def _fused_moe_lora_kernel(
 
     if USE_TMA and a_desc is not None:
         # Expand path - with TMA enabled, load from A using TMA descriptor
+        per_lora_tokens = tl.cdiv(EM, top_k_num) * top_k_num
         offs_am = (
-            slice_id * max_loras * EM
-            + lora_id * EM
-            + pid_m * BLOCK_SIZE_M // token_mapping_factor
+            slice_id * per_lora_tokens + pid_m * BLOCK_SIZE_M // token_mapping_factor
         )
         offs_ak = pid_sk * BLOCK_SIZE_K
     else:
@@ -316,14 +310,12 @@ def _fused_moe_lora_kernel(
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = _get_c_ptrs(
         cur_c_ptr,
-        lora_id,
         pid_m,
         offs,
         offs_token,
         offs_cn,
         stride_cm,
         stride_cn,
-        EM,
         BLOCK_SIZE_M,
         sort_c,
     )
@@ -432,8 +424,8 @@ def _fused_moe_lora_shrink(
         w1_lora_a_stacked.stride(1),
         w1_lora_a_stacked.stride(3),
         w1_lora_a_stacked.stride(2),
-        a_intermediate_cache1.stride(2),
-        a_intermediate_cache1.stride(3),
+        a_intermediate_cache1.stride(-2),
+        a_intermediate_cache1.stride(-1),
         slice_a_size=qcurr_hidden_states.numel(),
         slice_c_size=a_intermediate_cache1.numel() // num_slices,
         num_slice_a=1,
@@ -646,7 +638,7 @@ def _fused_moe_lora(
     # of token id sorting across ranks.
     use_tma = supports_tma(device) and not fully_sharded
 
-    intermediate_cache_shape = (
+    intermediate_cache_shape: tuple[int, ...] = (
         num_slices,
         M,
         top_k_num,
@@ -658,13 +650,13 @@ def _fused_moe_lora(
             # weights within the kernel, which requires us to first set an allocator
             set_triton_allocator(device)
 
-        # When storing intermediate data in sorted order for TMA, we
-        # need an extra 'num_active_loras' dim in the cache to avoid conflicts
+        # Store intermediate data in sorted token order for TMA.
+        # Round up to multiple of top_k_num for alignment.
         if sorted_token_ids is not None:
+            per_lora_tokens = ((EM + top_k_num - 1) // top_k_num) * top_k_num
             intermediate_cache_shape = (
                 num_slices,
-                sorted_token_ids.shape[0],
-                EM,
+                per_lora_tokens,
                 max_lora_rank,
             )
 
