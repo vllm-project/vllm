@@ -745,7 +745,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "FireRedASR2ForConditionalGeneration": _HfExamplesInfo(
         "allendou/FireRedASR2-LLM-vllm",
-        is_available_online=False,
     ),
     "FunASRForConditionalGeneration": _HfExamplesInfo(
         "allendou/Fun-ASR-Nano-2512-vllm",
