@@ -1501,6 +1501,7 @@ class EngineArgs:
         )
 
         cache_config = CacheConfig(
+            block_size=self.block_size,  # type: ignore[arg-type]
             gpu_memory_utilization=self.gpu_memory_utilization,
             kv_cache_memory_bytes=self.kv_cache_memory_bytes,
             swap_space=self.swap_space,
@@ -1519,8 +1520,6 @@ class EngineArgs:
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
-        if self.block_size is not None:
-            cache_config.block_size = self.block_size
 
         ray_runtime_env = None
         if is_ray_initialized():

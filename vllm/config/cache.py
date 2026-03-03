@@ -222,19 +222,20 @@ class CacheConfig:
         # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
 
+    @field_validator("block_size", mode="before")
+    @classmethod
+    def _coerce_block_size(cls, v: object) -> int:
+        if v is None:
+            return cls._BLOCK_SIZE_UNSET
+        return v  # type: ignore[return-value]
+
     @model_validator(mode="after")
     def _detect_user_specified_block_size(self) -> "CacheConfig":
         if self.block_size == self._BLOCK_SIZE_UNSET:
             object.__setattr__(self, "block_size", self.DEFAULT_BLOCK_SIZE)
         else:
             object.__setattr__(self, "user_specified_block_size", True)
-        object.__setattr__(self, "_init_complete", True)
         return self
-
-    def __setattr__(self, name: str, value: object) -> None:
-        super().__setattr__(name, value)
-        if name == "block_size" and getattr(self, "_init_complete", False):
-            super().__setattr__("user_specified_block_size", True)
 
     @field_validator("cache_dtype", mode="after")
     @classmethod
