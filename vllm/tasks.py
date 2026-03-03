@@ -10,7 +10,7 @@ PoolingTask = Literal[
 ]
 POOLING_TASKS: tuple[PoolingTask, ...] = get_args(PoolingTask)
 
-PreprocessingTask = Literal["render"]
-PREPROCESSING_TASKS: tuple[PreprocessingTask, ...] = get_args(PreprocessingTask)
+FrontendTask = Literal["render"]
+FRONTEND_TASKS: tuple[FrontendTask, ...] = get_args(FrontendTask)
 
-SupportedTask = Literal[GenerationTask, PoolingTask, PreprocessingTask]
+SupportedTask = Literal[GenerationTask, PoolingTask, FrontendTask]
