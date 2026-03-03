@@ -44,6 +44,7 @@ class PoolingParams(
 
     ## Internal use only
     task: PoolingTask | None = None
+    tasks: list[PoolingTask] | None = None  # Multiple tasks support
     requires_token_ids: bool = False
     skip_reading_prefix_cache: bool | None = None
     extra_kwargs: dict[str, Any] | None = None
@@ -70,7 +71,8 @@ class PoolingParams(
     def verify(self, model_config: ModelConfig) -> None:
         # plugin task uses io_processor.parse_request to verify inputs,
         # skipping PoolingParams verify
-        if self.task == "plugin":
+        tasks = self.get_tasks()
+        if "plugin" in tasks:
             if self.skip_reading_prefix_cache is None:
                 self.skip_reading_prefix_cache = True
             return
@@ -86,9 +88,13 @@ class PoolingParams(
         pooler_config = model_config.pooler_config
         if pooler_config is None:
             return
+        tasks = self.get_tasks()
+        assert tasks, "task must be set"
 
-        assert self.task is not None, "task must be set"
-        valid_parameters = self.valid_parameters[self.task]
+        # For multi-task, we use parameters from the first task
+        # In the future, we could support per-task parameters
+        task = tasks[0]
+        valid_parameters = self.valid_parameters[task]
 
         for k in valid_parameters:
             if getattr(pooler_config, k, None) is None:
@@ -101,17 +107,18 @@ class PoolingParams(
             # If prefix caching is enabled,
             # the output of all pooling may less than n_prompt_tokens,
             # we need to skip reading cache at this request.
-            if self.task in ["token_embed", "token_classify"]:
+            if any(t in ["token_embed", "token_classify"] for t in tasks):
                 self.skip_reading_prefix_cache = True
             else:
                 self.skip_reading_prefix_cache = False
 
-        self._verify_step_pooling(pooler_config, valid_parameters)
+        self._verify_step_pooling(pooler_config, valid_parameters, task)
 
     def _verify_step_pooling(
         self,
         pooler_config: PoolerConfig,
         valid_parameters: list[str],
+        task: PoolingTask,
     ):
         step_pooling_parameters = ["step_tag_id", "returned_token_ids"]
         if pooler_config.tok_pooling_type != "STEP":
@@ -122,7 +129,7 @@ class PoolingParams(
 
             if invalid_parameters:
                 raise ValueError(
-                    f"Task {self.task} only supports {valid_parameters} "
+                    f"Task {task} only supports {valid_parameters} "
                     f"parameters, does not support "
                     f"{invalid_parameters} parameters"
                 )
@@ -135,7 +142,14 @@ class PoolingParams(
                     setattr(self, k, getattr(pooler_config, k))
 
     def _set_default_parameters(self, model_config: ModelConfig):
-        if self.task in ["embed", "token_embed"]:
+        tasks = self.get_tasks()
+        if not tasks:
+            raise ValueError("At least one task must be set")
+
+        # For multi-task, we check all tasks to set appropriate defaults
+        # Using first task for backward compatibility with single-task behavior
+        task = tasks[0]
+        if task in ["embed", "token_embed"]:
             if self.use_activation is None:
                 self.use_activation = True
 
@@ -159,34 +173,55 @@ class PoolingParams(
                 elif self.dimensions < 1:
                     raise ValueError("Dimensions must be greater than 0")
 
-        elif self.task in ["classify", "score", "token_classify"]:
+        elif task in ["classify", "score", "token_classify"]:
             if self.use_activation is None:
                 self.use_activation = True
         else:
-            raise ValueError(f"Unknown pooling task: {self.task!r}")
+            raise ValueError(f"Unknown pooling task: {task!r}")
 
     def _verify_valid_parameters(self):
-        assert self.task is not None, "task must be set"
-        valid_parameters = self.valid_parameters[self.task]
-        invalid_parameters = []
-        for k in self.all_parameters:
-            if k in valid_parameters:
-                continue
+        tasks = self.get_tasks()
+        if not tasks:
+            raise ValueError("At least one task must be set")
 
-            if getattr(self, k, None) is not None:
-                invalid_parameters.append(k)
+        # For multi-task, we need to ensure parameters are valid for all tasks
+        # We collect all valid parameters across all tasks
+        all_valid_parameters = set()
+        invalid_parameters_for_task = {}
 
-        if invalid_parameters:
-            raise ValueError(
-                f"Task {self.task!r} only supports {valid_parameters} "
-                f"parameters, does not support "
-                f"{invalid_parameters} parameters"
-            )
+        for task in tasks:
+            valid_parameters = set(self.valid_parameters[task])
+            all_valid_parameters.update(valid_parameters)
+
+            # Check if any parameters are invalid for this specific task
+            task_invalid = []
+            for k in self.all_parameters:
+                if k in valid_parameters:
+                    continue
+                if getattr(self, k, None) is not None:
+                    task_invalid.append(k)
+
+            if task_invalid:
+                invalid_parameters_for_task[task] = task_invalid
+        # multi-tasks may have different valid parameters, skip check,
+        # e.g. token_classify&embed
+        if len(tasks) == 1 and invalid_parameters_for_task:
+            # Build an informative error message showing which parameters
+            # are invalid for which tasks
+            errors = []
+            for task, invalid in invalid_parameters_for_task.items():
+                valid_params = self.valid_parameters[task]
+                errors.append(
+                    f"Task {task!r} only supports {valid_params} "
+                    f"parameters, does not support {invalid} parameters"
+                )
+            raise ValueError("\n".join(errors))
 
     def __repr__(self) -> str:
         return (
             f"PoolingParams("
             f"task={self.task}, "
+            f"tasks={self.tasks}, "
             f"dimensions={self.dimensions}, "
             f"use_activation={self.use_activation}, "
             f"step_tag_id={self.step_tag_id}, "
@@ -195,6 +230,18 @@ class PoolingParams(
             f"skip_reading_prefix_cache={self.skip_reading_prefix_cache}, "
             f"extra_kwargs={self.extra_kwargs})"
         )
+
+    def get_tasks(self) -> list[PoolingTask]:
+        """Get the list of pooling tasks for this request.
+
+        Returns multiple tasks if `tasks` is set, otherwise returns
+        a single task from `task` attribute for backward compatibility.
+        """
+        if self.tasks is not None:
+            return self.tasks
+        if self.task is not None:
+            return [self.task]
+        return []
 
     def __post_init__(self) -> None:
         assert self.output_kind == RequestOutputKind.FINAL_ONLY, (

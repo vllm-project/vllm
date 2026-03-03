@@ -275,7 +275,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
 def _copy_pooler_output_to_cpu(
     raw_pooler_output: PoolerOutput, finished_mask: list[bool]
-) -> list[torch.Tensor | None]:
+) -> list[list[torch.Tensor | None] | torch.Tensor | None]:
     num_reqs = len(finished_mask)
 
     if isinstance(raw_pooler_output, torch.Tensor):
@@ -311,10 +311,22 @@ def _copy_pooler_output_to_cpu(
             f"{len(raw_pooler_output)} != {num_reqs}."
         )
 
-    pooler_output: list[torch.Tensor | None] = [None] * num_reqs
+    pooler_output: list[list[torch.Tensor | None] | torch.Tensor | None] = [
+        None
+    ] * num_reqs
     for i, (out, include) in enumerate(zip(raw_pooler_output, finished_mask)):
         if include and out is not None:
-            pooler_output[i] = out.to("cpu", non_blocking=True)
+            if isinstance(out, torch.Tensor):
+                pooler_output[i] = out.to("cpu", non_blocking=True)
+            elif isinstance(out, list):
+                pooler_output[i] = [
+                    t.to("cpu", non_blocking=True)
+                    if isinstance(t, torch.Tensor)
+                    else None
+                    for t in out
+                ]
+            else:
+                raise ValueError(f"Unknown pooler output format{out=}")
     return pooler_output
 
 
@@ -1004,12 +1016,17 @@ class GPUModelRunner(
 
             if self.is_pooling_model:
                 assert pooling_params is not None
-                task = pooling_params.task
-                assert task is not None, "You did not set `task` in the API"
+                tasks = pooling_params.get_tasks()
+                assert tasks, "You did not set `task` in the API"
 
                 model = cast(VllmModelForPooling, self.get_model())
-                to_update = model.pooler.get_pooling_updates(task)
-                to_update.apply(pooling_params)
+                to_update = None
+                for task in tasks:
+                    if not to_update:
+                        to_update = model.pooler.get_pooling_updates(task)
+                    else:
+                        to_update = to_update | model.pooler.get_pooling_updates(task)
+                    to_update.apply(pooling_params)
 
             req_state = CachedRequestState(
                 req_id=req_id,

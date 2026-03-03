@@ -1417,7 +1417,14 @@ class Scheduler(SchedulerInterface):
                         finish_reason=finish_reason,
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
-                        pooling_output=pooler_output,
+                        pooling_output=pooler_output
+                        if request.pooling_params is not None
+                        and len(request.pooling_params.get_tasks()) == 1
+                        else None,
+                        pooling_outputs=pooler_output
+                        if request.pooling_params is not None
+                        and len(request.pooling_params.get_tasks()) > 1
+                        else None,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
                         kv_transfer_params=kv_transfer_params,

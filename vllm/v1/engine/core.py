@@ -305,10 +305,10 @@ class EngineCore:
             supported_pooling_tasks = [
                 task for task in self.get_supported_tasks() if task in POOLING_TASKS
             ]
-
-            if pooling_params.task not in supported_pooling_tasks:
+            tasks = pooling_params.get_tasks()
+            if any(t not in supported_pooling_tasks for t in tasks):
                 raise ValueError(
-                    f"Unsupported task: {pooling_params.task!r} "
+                    f"Unsupported task: {tasks!r} "
                     f"Supported tasks: {supported_pooling_tasks}"
                 )
 

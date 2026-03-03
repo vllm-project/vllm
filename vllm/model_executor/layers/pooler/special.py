@@ -90,20 +90,39 @@ class DispatchPooler(Pooler):
 
         outputs = list[torch.Tensor | None]()
         offset = 0
-        for task, group in groupby(pooling_metadata.tasks):
-            if not (pooler := poolers_by_task.get(task)):
-                raise ValueError(
-                    f"Unsupported task: {task!r} "
-                    f"Supported tasks: {self.get_supported_tasks()}"
-                )
-
+        for tasks, group in groupby(pooling_metadata.tasks):
             num_items = len(list(group))
-            group_output: PoolerOutput = pooler(
-                hidden_states,
-                pooling_metadata[offset : offset + num_items],
-            )
+            if len(tasks) == 1:
+                task = tasks[0]
+                if not (pooler := poolers_by_task.get(task)):
+                    raise ValueError(
+                        f"Unsupported task: {task!r} "
+                        f"Supported tasks: {self.get_supported_tasks()}"
+                    )
 
-            outputs.extend(group_output)
+                group_output: PoolerOutput = pooler(
+                    hidden_states,
+                    pooling_metadata[offset : offset + num_items],
+                )
+                outputs.extend(group_output)
+            else:
+                # multi pooling tasks
+                group_outputs: list[PoolerOutput] = [[] for i in range(num_items)]
+                for task in tasks:
+                    if not (pooler := poolers_by_task.get(task)):
+                        raise ValueError(
+                            f"Unsupported task: {task!r} "
+                            f"Supported tasks: {self.get_supported_tasks()}"
+                        )
+
+                    per_task_group_output: PoolerOutput = pooler(
+                        hidden_states,
+                        pooling_metadata[offset : offset + num_items],
+                    )
+                    # add pooler_output to each prompts' PoolerOutput
+                    for idx, item in enumerate(per_task_group_output):
+                        group_outputs[idx].append(item)
+                outputs.extend(group_outputs)
             offset += num_items
 
         return outputs
