@@ -38,11 +38,15 @@ The class provides the following primitives:
             ids of requests that have completed async sending/recving.
 """
 
+import asyncio
 import enum
+import threading
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, Literal
 
+import aiohttp
 import torch
 
 from vllm.logger import init_logger
@@ -167,6 +171,7 @@ class KVConnectorBase_V1(ABC):
             "Initializing KVConnectorBase_V1. This API is experimental and "
             "subject to change in the future as we iterate the design."
         )
+        self._reqs_need_lease: set[Request] = set()
         self._connector_metadata: KVConnectorMetadata | None = None
         self._vllm_config = vllm_config
         if vllm_config.kv_transfer_config is not None:
@@ -182,6 +187,22 @@ class KVConnectorBase_V1(ABC):
                 "to super().__init__()."
             )
         self._role = role
+
+        if role == KVConnectorRole.SCHEDULER:
+            self._last_lease_refresh_time = time.perf_counter()
+            self._lease_refresh_loop = asyncio.new_event_loop()
+
+            def background_loop(loop: asyncio.AbstractEventLoop):
+                asyncio.set_event_loop(loop)
+                loop.run_forever()
+
+            self._lease_refresh_thread = threading.Thread(
+                target=background_loop,
+                args=(self._lease_refresh_loop,),
+                daemon=True,
+                name="kv-lease-refresh-thread",
+            )
+            self._lease_refresh_thread.start()
 
     @property
     def role(self) -> KVConnectorRole:
@@ -413,6 +434,57 @@ class KVConnectorBase_V1(ABC):
     # Scheduler-side methods
     # ==============================
 
+    def add_request(self, request: "Request"):
+        """
+        Add a request to the connector's state. This is called when a new
+        request is added to the scheduler, and can be used by the connector
+        to track the requests it needs to handle.
+
+        Args:
+            request (Request): the request object.
+        """
+        if request.kv_transfer_params is not None and hasattr(
+            request.kv_transfer_params, "remote_engine_id"
+        ):
+            self._reqs_need_lease.add(request.request_id)
+
+    def refresh_leases(self):
+        """
+        Refresh the leases for requests that need it. This is called periodically
+        by the scheduler to ensure that the connector can maintain any necessary
+        leases for the requests it is handling.
+        """
+
+        LEASE_REFRESH_TIME_S = 5
+        if time.perf_counter() - self._last_lease_refresh_time < LEASE_REFRESH_TIME_S:
+            return
+
+        async def _http_lease_refresh(request_id: str):
+            async with aiohttp.ClientSession() as session:
+                url = "http://localhost:7000/refresh_kv_lease"
+                async with session.post(
+                    url, json={"request_id": request_id}
+                ) as response:
+                    print(f"[BG] [{request_id}] {url} -> {response.status}")
+
+        for request_id in self._reqs_need_lease:
+            # TODO: get result of the future and check if the remote engine
+            # is still running so we can avoid KV transfer failure.
+            _ = asyncio.run_coroutine_threadsafe(
+                _http_lease_refresh(request_id), self._lease_refresh_loop
+            )
+        self._last_lease_refresh_time = time.perf_counter()
+
+    def finish_lease_refresh(self, request_id: str):
+        """
+        Stop lease refresh for a request. This is called when a request is finished
+        to stop refreshing its lease.
+
+        Args:
+            request_id (str): the ID of the request.
+        """
+        self._reqs_need_lease.discard(request_id)
+
     @abstractmethod
     def get_num_new_matched_tokens(
         self,
@@ -513,6 +585,9 @@ class KVConnectorBase_V1(ABC):
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
+        # NOTE(rob): we need to ensure all subclasses call this super() method,
+        # else we will get a leak from not cleaning up _reqs_need_lease.
+        self._reqs_need_lease.discard(request.request_id)
         return False, None
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
@@ -591,14 +666,6 @@ class KVConnectorBase_V1(ABC):
         expose connector transfer stats via Prometheus.
         """
         return None
-
-    def refresh_lease(self, request_ids: list[str]) -> None:
-        """Refresh the KV lease for the given request IDs. No-op by default.
-
-        Called from the P-side API server when D workers POST
-        /internal/nixl/lease_refresh to extend the KV block hold time.
-        """
-        return
 
     def reset_cache(self) -> bool | None:
         """

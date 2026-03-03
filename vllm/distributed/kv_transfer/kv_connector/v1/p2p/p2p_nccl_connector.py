@@ -490,7 +490,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
-
         self.chunked_prefill.pop(request.request_id, None)
 
         return False, None
