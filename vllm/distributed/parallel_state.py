@@ -504,11 +504,6 @@ def _register_inductor_lowering_for_fused_collective_fp8_ops() -> None:
     as extern calls instead of relying on generic/unregistered behavior that is
     brittle for non-standard FP8 strides.
     """
-    from vllm.utils.torch_utils import is_torch_equal_or_newer
-
-    if not is_torch_equal_or_newer("2.11.0.dev"):
-        return
-
     import torch._inductor.lowering as _lowering
 
     ops = (
