@@ -117,3 +117,111 @@ def test_streaming_minimax_m2_multiple_invokes(minimax_m2_tool_parser):
         expected_call = json.dumps(expected_call)
         actual_call = parser.streamed_args_for_tool[index]
         assert expected_call == actual_call
+
+
+def _collect_args_fragments(parser, chunks, request=None):
+    """Feed *chunks* through the streaming parser and return the concatenated
+    argument fragments for each tool call index.
+
+    Each element in *chunks* is either:
+    - a ``str``: used as ``delta_text`` with matching ``current_text``
+    - a ``(current_text, delta_text, delta_token_ids)`` tuple for full control
+    """
+    previous = ""
+    args_by_index: dict[int, str] = {}
+    for chunk in chunks:
+        if isinstance(chunk, tuple):
+            current, delta, delta_ids = chunk
+        else:
+            current = previous + chunk
+            delta = chunk
+            delta_ids = []
+
+        result = parser.extract_tool_calls_streaming(
+            previous_text=previous,
+            current_text=current,
+            delta_text=delta,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=delta_ids,
+            request=request,
+        )
+        if result and result.tool_calls:
+            for tc in result.tool_calls:
+                if tc.function and tc.function.arguments is not None:
+                    args_by_index.setdefault(tc.index, "")
+                    args_by_index[tc.index] += tc.function.arguments
+
+        previous = current
+
+    return args_by_index
+
+
+def test_streaming_stream_interval_gt1(minimax_m2_tool_parser):
+    """Simulate stream_interval > 1: the parameter + closing tags arrive in
+    one big chunk, then the EOS token arrives with delta_text=''.
+
+    The parser must emit the remaining arguments on the empty-delta call.
+    """
+    parser = minimax_m2_tool_parser
+    parser._reset_streaming_state()
+
+    full_text = (
+        '<minimax:tool_call><invoke name="get_weather">'
+        '<parameter name="city">Seattle</parameter>'
+        '<parameter name="days">5</parameter>'
+        "</invoke></minimax:tool_call>"
+    )
+
+    # Chunk 1: tool call start + function header only
+    chunk1 = '<minimax:tool_call><invoke name="get_weather">'
+    # Chunk 2: all parameters + closing tags arrive at once (big interval)
+    chunk2 = (
+        '<parameter name="city">Seattle</parameter>'
+        '<parameter name="days">5</parameter>'
+        "</invoke></minimax:tool_call>"
+    )
+
+    chunks = [
+        chunk1,
+        chunk2,
+        # EOS arrives with empty delta; current_text is the full output
+        (full_text, "", [99]),  # 99 = some non-special EOS token id
+    ]
+
+    args = _collect_args_fragments(parser, chunks)
+
+    # All args must be emitted and form valid JSON
+    assert 0 in args
+    combined = args[0]
+    parsed = json.loads(combined)
+    # No request schema provided, so all values remain strings
+    assert parsed == {"city": "Seattle", "days": "5"}
+
+    # prev_tool_call_arr must be finalized
+    assert len(parser.prev_tool_call_arr) == 1
+    assert parser.prev_tool_call_arr[0]["arguments"] == {
+        "city": "Seattle",
+        "days": "5",
+    }
+
+
+def test_streaming_single_chunk_complete(minimax_m2_tool_parser):
+    """Entire tool call arrives in a single delta (stream_interval very
+    large or short output).  The parser must handle it in one pass.
+    """
+    parser = minimax_m2_tool_parser
+    parser._reset_streaming_state()
+
+    single = (
+        '<minimax:tool_call><invoke name="get_weather">'
+        '<parameter name="city">Seattle</parameter>'
+        "</invoke></minimax:tool_call>"
+    )
+
+    args = _collect_args_fragments(parser, [single])
+
+    assert 0 in args
+    parsed = json.loads(args[0])
+    assert parsed == {"city": "Seattle"}
+    assert parser.prev_tool_call_arr[0]["arguments"] == {"city": "Seattle"}
