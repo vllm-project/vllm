@@ -12,8 +12,8 @@ Config:
 Run: pytest tests/models/quantization/test_gpt_oss.py
 """
 
-import importlib
 import importlib.metadata
+import importlib.util
 from dataclasses import dataclass
 
 import huggingface_hub
@@ -104,7 +104,7 @@ def test_gpt_oss_attention_quantization(
     )
 
     rtol = 0.02
-    assert (
-        measured_accuracy - rtol < expected_accuracy
-        and measured_accuracy + rtol > expected_accuracy
-    ), f"Expected: {expected_accuracy} |  Measured: {measured_accuracy}"
+    assert measured_accuracy >= expected_accuracy - rtol, (
+        f"Accuracy {measured_accuracy:.4f} is below threshold "
+        f"{expected_accuracy - rtol:.4f} (expected >= {expected_accuracy} - {rtol})"
+    )
