@@ -34,11 +34,10 @@ class BudgetGraphMetadata:
 
     CUDA graph replay pattern:
     1. Copy new batch data into input_buffers (pixel_values)
-    2. Compute batch-specific tensors and copy into metadata_buffers:
-       - Sequence metadata: cu_seqlens, sequence_lengths, max_seqlen
-       - Position embeddings: pos_embeds, rotary_pos_emb_cos, rotary_pos_emb_sin
-    3. Replay graph
-    4. Read encoder outputs from output_buffer
+    2. Copy position embeddings into embed_buffers
+    3. Copy sequence metadata into sequence_metadata_buffers
+    4. Replay graph
+    5. Read encoder outputs from output_buffer
     """
 
     token_budget: int
@@ -46,9 +45,10 @@ class BudgetGraphMetadata:
     graph: torch.cuda.CUDAGraph
     # Raw inputs updated before replay
     input_buffers: dict[str, Any]
-    # Batch-specific tensors (sequence metadata + position embeddings)
-    # updated before replay
-    metadata_buffers: dict[str, torch.Tensor]
+    # Position embeddings (pos_embeds, rotary_pos_emb_cos, rotary_pos_emb_sin)
+    embed_buffers: dict[str, torch.Tensor]
+    # Sequence metadata (cu_seqlens, sequence_lengths, max_seqlen)
+    sequence_metadata_buffers: dict[str, torch.Tensor]
     # Output written by graph, read after replay
     output_buffer: torch.Tensor
 
@@ -103,11 +103,11 @@ class EncoderCudaGraphManager:
             len(self.budget_graphs),
         )
 
-    def _compute_encoder_metadata(
+    def _compute_sequence_metadata(
         self,
         grid_thw_list: list[list[int]],
     ) -> dict[str, torch.Tensor | None]:
-        """Compute encoder metadata with tensors padded to max batch size.
+        """Compute sequence metadata with tensors padded to max batch size.
 
         For FlashInfer cuDNN backend, we pad cu_seqlens to max_batch_size,
         then apply FlashInfer transforms (scale + qko/v split).
@@ -188,17 +188,15 @@ class EncoderCudaGraphManager:
             dummy_grid_config
         )
 
-        encoder_metadata = {}
-        encoder_metadata["pos_embeds"] = self.vision_model.fast_pos_embed_interpolate(
+        embed_buffers = {}
+        embed_buffers["pos_embeds"] = self.vision_model.fast_pos_embed_interpolate(
             dummy_grid_thw
         )
         rotary_cos, rotary_sin = self.vision_model.rot_pos_emb(dummy_grid_thw)
-        encoder_metadata["rotary_pos_emb_cos"] = rotary_cos
-        encoder_metadata["rotary_pos_emb_sin"] = rotary_sin
+        embed_buffers["rotary_pos_emb_cos"] = rotary_cos
+        embed_buffers["rotary_pos_emb_sin"] = rotary_sin
 
-        seq_metadata = self._compute_encoder_metadata(dummy_grid_config)
-        encoder_metadata["cu_seqlens"] = seq_metadata["cu_seqlens"]
-        encoder_metadata["sequence_lengths"] = seq_metadata["sequence_lengths"]
+        sequence_metadata = self._compute_sequence_metadata(dummy_grid_config)
         # Override max_seqlen with a safe upper bound for capture.
         # max_seqlen.item() gets baked into the CUDA graph (not replayed),
         # so the capture value must cover any replay scenario.
@@ -206,9 +204,11 @@ class EncoderCudaGraphManager:
         # seq_len = token_budget * spatial_merge_size^2.
         spatial_merge_size = self.vision_model.spatial_merge_size
         max_seqlen_safe = token_budget * (spatial_merge_size**2)
-        encoder_metadata["max_seqlen"] = torch.tensor(
+        sequence_metadata["max_seqlen"] = torch.tensor(
             max_seqlen_safe, dtype=torch.int32
         )
+
+        encoder_metadata = {**embed_buffers, **sequence_metadata}
 
         with torch.inference_mode():
             output = self.vision_model(
@@ -232,7 +232,8 @@ class EncoderCudaGraphManager:
                 "grid_thw": dummy_grid_thw,
             },
             output_buffer=output_buffer,
-            metadata_buffers=encoder_metadata,
+            embed_buffers=embed_buffers,
+            sequence_metadata_buffers=sequence_metadata,
         )
 
     def _generate_grid_config_for_budget(
@@ -306,7 +307,8 @@ class EncoderCudaGraphManager:
         pixel_values: torch.Tensor,
         grid_thw_list: list[list[int]],
         token_budget: int,
-        encoder_metadata: dict[str, torch.Tensor],
+        embed_buffers: dict[str, torch.Tensor],
+        sequence_metadata: dict[str, torch.Tensor],
     ) -> torch.Tensor | None:
         """Execute budget graph.
 
@@ -314,7 +316,8 @@ class EncoderCudaGraphManager:
             pixel_values: Concatenated pixel values
             grid_thw_list: Grid dimensions per image
             token_budget: Token budget to use
-            encoder_metadata: Pre-computed metadata (cu_seqlens, pos_embeds, rotary)
+            embed_buffers: Position embeddings (pos_embeds, rotary)
+            sequence_metadata: Sequence metadata (cu_seqlens, max_seqlen, ...)
 
         Returns:
             Encoder outputs, or None if graph not captured.
@@ -335,23 +338,27 @@ class EncoderCudaGraphManager:
         buf[:n].copy_(pixel_values)
 
         for key in ["pos_embeds", "rotary_pos_emb_cos", "rotary_pos_emb_sin"]:
-            buf = graph_meta.metadata_buffers[key]
-            src = encoder_metadata[key]
+            buf = graph_meta.embed_buffers[key]
+            src = embed_buffers[key]
             n = src.shape[0]
             buf.zero_()
             buf[:n].copy_(src)
 
-        graph_meta.metadata_buffers["cu_seqlens"].copy_(encoder_metadata["cu_seqlens"])
+        graph_meta.sequence_metadata_buffers["cu_seqlens"].copy_(
+            sequence_metadata["cu_seqlens"]
+        )
 
         if (
-            graph_meta.metadata_buffers.get("sequence_lengths") is not None
-            and encoder_metadata.get("sequence_lengths") is not None
+            graph_meta.sequence_metadata_buffers.get("sequence_lengths") is not None
+            and sequence_metadata.get("sequence_lengths") is not None
         ):
-            graph_meta.metadata_buffers["sequence_lengths"].copy_(
-                encoder_metadata["sequence_lengths"]
+            graph_meta.sequence_metadata_buffers["sequence_lengths"].copy_(
+                sequence_metadata["sequence_lengths"]
             )
 
-        graph_meta.metadata_buffers["max_seqlen"].copy_(encoder_metadata["max_seqlen"])
+        graph_meta.sequence_metadata_buffers["max_seqlen"].copy_(
+            sequence_metadata["max_seqlen"]
+        )
 
         graph_meta.graph.replay()
 
@@ -485,25 +492,23 @@ class EncoderCudaGraphManager:
                     token_budget,
                     (token_budget - batch_out_tokens) / token_budget * 100,
                 )
-                encoder_metadata: dict = {}
-                encoder_metadata["pos_embeds"] = (
+                embed_buffers: dict = {}
+                embed_buffers["pos_embeds"] = (
                     self.vision_model.fast_pos_embed_interpolate(batch_grid)
                 )
                 rotary_cos, rotary_sin = self.vision_model.rot_pos_emb(batch_grid)
-                encoder_metadata["rotary_pos_emb_cos"] = rotary_cos
-                encoder_metadata["rotary_pos_emb_sin"] = rotary_sin
+                embed_buffers["rotary_pos_emb_cos"] = rotary_cos
+                embed_buffers["rotary_pos_emb_sin"] = rotary_sin
 
-                seq_metadata = self._compute_encoder_metadata(batch_grid)
-                encoder_metadata["cu_seqlens"] = seq_metadata["cu_seqlens"]
-                encoder_metadata["sequence_lengths"] = seq_metadata["sequence_lengths"]
-                encoder_metadata["max_seqlen"] = seq_metadata["max_seqlen"]
+                sequence_metadata = self._compute_sequence_metadata(batch_grid)
 
                 # graph_hits counted inside _run_budget_graph after replay
                 output = self._run_budget_graph(
                     batch_pixel_values,
                     batch_grid,
                     token_budget,
-                    encoder_metadata,
+                    embed_buffers,
+                    sequence_metadata,
                 )
                 output_offset = 0
                 for orig_idx in batch_orig_indices:
