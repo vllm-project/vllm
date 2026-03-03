@@ -469,9 +469,7 @@ class TestHarmonyOutputSanitization:
     def test_constrain_recipient_treated_as_no_recipient(self):
         """<|constrain|>json as recipient should be sanitized to empty,
         falling through to _parse_message_no_recipient (produces message)."""
-        message = Message.from_role_and_content(
-            Role.ASSISTANT, "Some output text"
-        )
+        message = Message.from_role_and_content(Role.ASSISTANT, "Some output text")
         message = message.with_channel("commentary")
         message = message.with_recipient("<|constrain|>json")
 
@@ -484,13 +482,9 @@ class TestHarmonyOutputSanitization:
 
     def test_contaminated_tool_name_cleaned_in_function_call(self):
         """Function name with leaked <|channel|> should be sanitized."""
-        message = Message.from_role_and_content(
-            Role.ASSISTANT, '{"location": "SF"}'
-        )
+        message = Message.from_role_and_content(Role.ASSISTANT, '{"location": "SF"}')
         message = message.with_channel("commentary")
-        message = message.with_recipient(
-            "functions.get_weather<|channel|>commentary"
-        )
+        message = message.with_recipient("functions.get_weather<|channel|>commentary")
 
         output_items = harmony_to_response_output(message)
 
