@@ -393,7 +393,7 @@ class LLM:
         self.chat_template = load_chat_template(chat_template)
         self.io_processor = self.llm_engine.io_processor
         self.input_processor = self.llm_engine.input_processor
-        self.chat_template_config = ChatTemplateConfig(chat_template=chat_template)
+        self.chat_template_config = ChatTemplateConfig(chat_template=self.chat_template)
         self.init_pooling_io_processors = init_pooling_io_processors(
             supported_tasks=supported_tasks,
             model_config=self.model_config,
