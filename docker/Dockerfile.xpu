@@ -115,9 +115,57 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # install development dependencies (for testing)
 RUN uv pip install -e tests/vllm_test_utils
 
-# install nixl from source code
-ENV NIXL_VERSION=0.7.0
-RUN python /workspace/vllm/tools/install_nixl_from_source_ubuntu.py
+# install NIXL and UCX from source code
+ARG UCX_VERSION=e5d98879705239d254ede40b4a52891850cb5349
+ARG NIXL_VERSION=0.7.0
+
+RUN apt-get update && apt-get install -y \
+    pciutils \
+    net-tools \
+    iproute2 \
+    hwloc \
+    numactl \
+    wget \
+    curl \
+    git \
+    build-essential \
+    autoconf \
+    automake \
+    libtool \
+    pkg-config \
+    rdma-core \
+    libibverbs-dev \
+    ibverbs-utils \
+    libibverbs1 \
+    librdmacm-dev \
+    librdmacm1 \
+    libibumad-dev \
+    libibumad3 \
+    libibmad-dev \
+    libibmad5 \
+    infiniband-diags \
+    perftest \
+    ibutils \
+    libmlx5-1 \
+    libmlx4-1 \
+    ibverbs-providers \
+    librdmacm1t64
+
+ENV PKG_CONFIG_PATH=/tmp/ucx_install/lib/pkgconfig:${PKG_CONFIG_PATH}
+ENV LD_LIBRARY_PATH=/tmp/ucx_install/lib:${LD_LIBRARY_PATH}
+RUN --mount=type=cache,target=/root/.cache/uv \
+    git clone https://github.com/openucx/ucx /tmp/ucx_source && \
+    cd /tmp/ucx_source && git checkout "${UCX_VERSION}" && \
+    bash autogen.sh && \
+    ./configure --prefix=/tmp/ucx_install --with-ze=yes --enable-examples --enable-mt && \
+    make CFLAGS="-Wno-error=incompatible-pointer-types" -j8 && make install && \
+    git clone https://github.com/ai-dynamo/nixl /tmp/nixl_source && \
+    cd /tmp/nixl_source && git checkout "${NIXL_VERSION}" && \
+    cd /tmp/nixl_source && \
+    uv pip install --upgrade meson pybind11 patchelf && \
+    uv pip install -r requirements.txt && \
+    uv pip install . && \
+    rm -rf /tmp/ucx_source /tmp/nixl_source
 
 # FIX triton
 RUN --mount=type=cache,target=/root/.cache/uv \
