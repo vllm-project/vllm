@@ -105,18 +105,23 @@ from .utils import (
 logger = init_logger(__name__)
 
 
-def _make_conv1d_weight_loader(dim: int, tp_size: int, tp_rank: int):
-    """Create a weight loader for conv1d that handles sharding."""
+def _make_fused_conv1d_weight_loader(dims, tp_size, tp_rank):
+    """Weight loader for loading separate HF conv weights into a fused conv1d.
 
-    def weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
-        # loaded_weight shape: (dim, 1, kernel_size) or (dim, kernel_size)
+    dims: list of original (un-sharded) dims per section,
+          e.g. [key_dim, key_dim, value_dim]
+    """
+    sharded_dims = [d // tp_size for d in dims]
+
+    def weight_loader(param, loaded_weight, loaded_shard_id=None):
         if loaded_weight.dim() == 2:
             loaded_weight = loaded_weight.unsqueeze(1)
-        # Shard along the first dimension
+        dim = dims[loaded_shard_id]
         shard_size = dim // tp_size
-        start = tp_rank * shard_size
-        end = start + shard_size
-        param.data.copy_(loaded_weight[start:end])
+        tp_start = tp_rank * shard_size
+        sharded_weight = loaded_weight[tp_start : tp_start + shard_size]
+        offset = sum(sharded_dims[:loaded_shard_id])
+        param.data[offset : offset + shard_size].copy_(sharded_weight)
 
     return weight_loader
 
@@ -176,7 +181,9 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
         self.activation = config.hidden_act
         self.act = ACT2FN[config.hidden_act]
         self.layer_norm_epsilon = config.rms_norm_eps
-        self.use_gate = getattr(config, "linear_use_gate", True)
+        assert getattr(config, "linear_use_gate", True), (
+            "OlmoHybridGatedDeltaNet requires linear_use_gate=True"
+        )
         self.allow_neg_eigval = getattr(config, "linear_allow_neg_eigval", False)
         self.prefix = prefix
 
@@ -191,83 +198,41 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
             else 0
         )
 
-        self.q_proj = ColumnParallelLinear(
+        # Fused QKVG projection: 1 matmul instead of 4
+        self.in_proj_qkvg = MergedColumnParallelLinear(
             input_size=self.hidden_size,
-            output_size=self.key_dim,
+            output_sizes=[self.key_dim, self.key_dim, self.value_dim, self.value_dim],
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.q_proj",
-        )
-        self.k_proj = ColumnParallelLinear(
-            input_size=self.hidden_size,
-            output_size=self.key_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.k_proj",
-        )
-        self.v_proj = ColumnParallelLinear(
-            input_size=self.hidden_size,
-            output_size=self.value_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.v_proj",
+            prefix=f"{prefix}.in_proj_qkvg",
         )
 
-        self.a_proj = ColumnParallelLinear(
+        # Fused BA projection: 1 matmul instead of 2
+        self.in_proj_ba = MergedColumnParallelLinear(
             input_size=self.hidden_size,
-            output_size=self.num_v_heads,
+            output_sizes=[self.num_v_heads] * 2,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.a_proj",
+            prefix=f"{prefix}.in_proj_ba",
         )
-        self.b_proj = ColumnParallelLinear(
-            input_size=self.hidden_size,
-            output_size=self.num_v_heads,
+
+        # Fused conv1d: single parameter instead of 3
+        self.conv_dim = self.key_dim * 2 + self.value_dim
+        self.conv1d = ColumnParallelLinear(
+            input_size=self.conv_kernel_size,
+            output_size=self.conv_dim,
             bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.b_proj",
+            prefix=f"{prefix}.conv1d",
         )
-
-        if self.use_gate:
-            self.g_proj = ColumnParallelLinear(
-                input_size=self.hidden_size,
-                output_size=self.value_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.g_proj",
-            )
-
-        self.q_conv1d_weight = nn.Parameter(
-            torch.empty(self.key_dim // self.tp_size, 1, self.conv_kernel_size)
-        )
-        self.k_conv1d_weight = nn.Parameter(
-            torch.empty(self.key_dim // self.tp_size, 1, self.conv_kernel_size)
-        )
-        self.v_conv1d_weight = nn.Parameter(
-            torch.empty(self.value_dim // self.tp_size, 1, self.conv_kernel_size)
-        )
-
+        self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
+        delattr(self.conv1d.weight, "weight_loader")
         set_weight_attrs(
-            self.q_conv1d_weight,
+            self.conv1d.weight,
             {
-                "weight_loader": _make_conv1d_weight_loader(
-                    self.key_dim, self.tp_size, self.tp_rank
-                )
-            },
-        )
-        set_weight_attrs(
-            self.k_conv1d_weight,
-            {
-                "weight_loader": _make_conv1d_weight_loader(
-                    self.key_dim, self.tp_size, self.tp_rank
-                )
-            },
-        )
-        set_weight_attrs(
-            self.v_conv1d_weight,
-            {
-                "weight_loader": _make_conv1d_weight_loader(
-                    self.value_dim, self.tp_size, self.tp_rank
+                "weight_loader": _make_fused_conv1d_weight_loader(
+                    [self.key_dim, self.key_dim, self.value_dim],
+                    self.tp_size,
+                    self.tp_rank,
                 )
             },
         )
@@ -285,21 +250,14 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
 
         # use eps=1e-5 to match FLA's FusedRMSNormGated
-        o_norm_eps = 1e-5
-        if self.use_gate:
-            self.o_norm = RMSNormGated(
-                self.head_v_dim,
-                eps=o_norm_eps,
-                group_size=None,
-                norm_before_gate=True,
-                device=current_platform.current_device(),
-                dtype=config.torch_dtype if hasattr(config, "torch_dtype") else None,
-            )
-        else:
-            self.o_norm = RMSNorm(
-                self.head_v_dim,
-                eps=o_norm_eps,
-            )
+        self.o_norm = RMSNormGated(
+            self.head_v_dim,
+            eps=1e-5,
+            group_size=None,
+            norm_before_gate=True,
+            device=current_platform.current_device(),
+            dtype=config.torch_dtype if hasattr(config, "torch_dtype") else None,
+        )
 
         self.o_proj = RowParallelLinear(
             self.value_dim,
@@ -314,17 +272,6 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
-
-    def _get_combined_conv_weight(self):
-        """Combine q, k, v conv weights for efficient processing."""
-        return torch.cat(
-            [
-                self.q_conv1d_weight.squeeze(1),
-                self.k_conv1d_weight.squeeze(1),
-                self.v_conv1d_weight.squeeze(1),
-            ],
-            dim=0,
-        )
 
     def rearrange_mixed_qkv(self, mixed_qkv):
         if mixed_qkv is None:
@@ -364,21 +311,19 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
         num_tokens = hidden_states.size(0)
 
         # ============================================================
-        # Part 1: Input Projection
+        # Part 1: Input Projection (2 fused matmuls instead of 6)
         # ============================================================
-        q, _ = self.q_proj(hidden_states)
-        k, _ = self.k_proj(hidden_states)
-        v, _ = self.v_proj(hidden_states)
+        projected_qkvg, _ = self.in_proj_qkvg(hidden_states)
+        conv_dim_sharded = (self.key_dim * 2 + self.value_dim) // self.tp_size
+        mixed_qkv = projected_qkvg[..., :conv_dim_sharded]
+        gate = projected_qkvg[..., conv_dim_sharded:]
 
-        mixed_qkv = torch.cat([q, k, v], dim=-1)
-
-        a, _ = self.a_proj(hidden_states)
-        b, _ = self.b_proj(hidden_states)
-
-        if self.use_gate:
-            gate, _ = self.g_proj(hidden_states)
-        else:
-            gate = None
+        projected_ba, _ = self.in_proj_ba(hidden_states)
+        b, a = torch.split(
+            projected_ba,
+            self.num_v_heads // self.tp_size,
+            dim=-1,
+        )
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
@@ -400,22 +345,13 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        if self.use_gate:
-            gate = gate.view(
-                num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim
-            )
-            core_attn_out_flat = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-            gate_flat = gate.reshape(-1, gate.shape[-1])
-            core_attn_out_normed = self.o_norm(core_attn_out_flat, gate_flat)
-            core_attn_out = core_attn_out_normed.view(
-                num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim
-            )
-        else:
-            core_attn_out_flat = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-            core_attn_out_normed = self.o_norm(core_attn_out_flat)
-            core_attn_out = core_attn_out_normed.view(
-                num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim
-            )
+        gate = gate.view(num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim)
+        core_attn_out_flat = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        gate_flat = gate.reshape(-1, gate.shape[-1])
+        core_attn_out_normed = self.o_norm(core_attn_out_flat, gate_flat)
+        core_attn_out = core_attn_out_normed.view(
+            num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim
+        )
 
         core_attn_out = rearrange(core_attn_out, "l h d -> l (h d)")
         output[:num_tokens], _ = self.o_proj(core_attn_out)
@@ -458,7 +394,9 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
 
-        conv_weights = self._get_combined_conv_weight()
+        conv_weights = self.conv1d.weight.view(
+            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+        )
 
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
@@ -909,11 +847,17 @@ class OlmoHybridModel(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
-        conv_weight_mapping = {
-            "q_conv1d.weight": "q_conv1d_weight",
-            "k_conv1d.weight": "k_conv1d_weight",
-            "v_conv1d.weight": "v_conv1d_weight",
-        }
+        linear_attn_stacked_params_mapping = [
+            ("in_proj_qkvg", "q_proj", 0),
+            ("in_proj_qkvg", "k_proj", 1),
+            ("in_proj_qkvg", "v_proj", 2),
+            ("in_proj_qkvg", "g_proj", 3),
+            ("in_proj_ba", "b_proj", 0),
+            ("in_proj_ba", "a_proj", 1),
+            ("conv1d", "q_conv1d", 0),
+            ("conv1d", "k_conv1d", 1),
+            ("conv1d", "v_conv1d", 2),
+        ]
 
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
@@ -922,30 +866,43 @@ class OlmoHybridModel(nn.Module):
             if is_pp_missing_parameter(name, self):
                 continue
 
-            for hf_name, vllm_name in conv_weight_mapping.items():
-                if hf_name in name:
-                    name = name.replace(hf_name, vllm_name)
-                    break
-
             handled = False
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                # Linear attention layers use separate q/k/v projections
-                # rather than a merged qkv_proj, so stacked param mapping
-                # does not apply.
-                if "linear_attn" in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                handled = True
-                break
+
+            if "linear_attn" in name:
+                for (
+                    param_name,
+                    weight_name,
+                    shard_id,
+                ) in linear_attn_stacked_params_mapping:
+                    if weight_name not in name:
+                        continue
+                    mapped_name = name.replace(weight_name, param_name)
+                    if mapped_name.endswith(".bias") and (
+                        mapped_name not in params_dict
+                    ):
+                        continue
+                    if mapped_name not in params_dict:
+                        continue
+                    param = params_dict[mapped_name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
+                    name = mapped_name
+                    handled = True
+                    break
+            else:
+                for param_name, weight_name, shard_id in stacked_params_mapping:
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    if name not in params_dict:
+                        continue
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
+                    handled = True
+                    break
 
             if not handled:
                 if name.endswith(".bias") and name not in params_dict:
@@ -963,15 +920,10 @@ class OlmoHybridForCausalLM(
     nn.Module, HasInnerState, SupportsPP, SupportsLoRA, IsHybrid
 ):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_proj_qkvg": ["q_proj", "k_proj", "v_proj", "g_proj"],
+        "in_proj_ba": ["b_proj", "a_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
