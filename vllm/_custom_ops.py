@@ -1667,16 +1667,10 @@ def scaled_fp4_quant(
             input, input_global_scale
         )
     else:
-        # Pre-allocate and call .out variant (same behavior as old in-place API)
-        output, output_scale = create_fp4_output_tensors(
-            m, n, input.device, is_sf_swizzled_layout
-        )
-        torch.ops._C.scaled_fp4_quant.out(
-            input,
-            input_global_scale,
-            is_sf_swizzled_layout,
-            output=output,
-            output_scale=output_scale,
+        # Functional variant: C++ allocates output internally.
+        # Inductor auto-converts to .out for buffer reuse (PyTorch 2.12+).
+        output, output_scale = torch.ops._C.scaled_fp4_quant(
+            input, input_global_scale, is_sf_swizzled_layout
         )
 
     output_scale = output_scale.view(torch.float8_e4m3fn)
