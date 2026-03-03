@@ -121,6 +121,7 @@ class TritonAttentionMetadata:
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
     reorder_batch_threshold: int | None = 1
 
     def __init__(
@@ -208,31 +209,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             dtype=torch.float32,
             device=device,
         )
-
-    @classmethod
-    def get_cudagraph_support(
-        cls: type["TritonAttentionMetadataBuilder"],
-        vllm_config: VllmConfig,
-        kv_cache_spec: AttentionSpec,
-    ) -> AttentionCGSupport:
-        # Check if CUDA Graphs are enabled for prefill.
-        prefill_cudagraph_enabled = vllm_config.compilation_config.cudagraph_mode in (
-            CUDAGraphMode.FULL,
-        )
-
-        # Determine number of speculative tokens.
-        speculative_config = vllm_config.speculative_config
-        num_spec_tokens = (
-            speculative_config.num_speculative_tokens
-            if speculative_config is not None
-            else 0
-        )
-
-        # Select the appropriate CUDA graph support mode.
-        if prefill_cudagraph_enabled and (num_spec_tokens > 0):
-            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-        else:
-            return AttentionCGSupport.ALWAYS
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
