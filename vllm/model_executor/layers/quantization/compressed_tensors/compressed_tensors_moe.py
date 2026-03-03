@@ -482,7 +482,7 @@ class CompressedTensorsW4A16Int4MoEMethod(CompressedTensorsMoEMethod):
             torch.empty(
                 num_experts,
                 2 * intermediate_size_per_partition,
-                hidden_size // 8,  # <--- Packed: 2 int4 in 1 uint8
+                hidden_size // 8,  # <--- Packed: 8 int4 weights into one int32
                 dtype=weight_dtype,
             ),
             requires_grad=False,
@@ -561,13 +561,12 @@ class CompressedTensorsW4A16Int4MoEMethod(CompressedTensorsMoEMethod):
         if layer.w2_weight_scale.device != device:
             layer.w2_weight_scale.data = layer.w2_weight_scale.data.to(device)
 
-        # Validation (Optional)
         assert (
             layer.w13_weight_packed.dtype == torch.int32
-        ), "W13 must be uint8 packed for INT4"
+        ), "W13 packed weights must have dtype torch.int32 for INT4"
         assert (
             layer.w2_weight_packed.dtype == torch.int32
-        ), "W2 must be uint8 packed for INT4"
+        ), "W2 packed weights must have dtype torch.int32 for INT4"
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
