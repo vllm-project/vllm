@@ -159,8 +159,7 @@ run_test_for_device() {
       --tensor-parallel-size $PREFILLER_TP_SIZE \
       --kv-transfer-config "$kv_config" \
       --speculative-config "$PREFILL_SPEC_CONFIG" \
-      --attention-backend FLASH_ATTN \
-      --disable-log-requests &
+      --attention-backend FLASH_ATTN &
 
     PREFILL_HOSTS+=("localhost")
     PREFILL_PORTS+=("$PORT")
@@ -192,8 +191,7 @@ run_test_for_device() {
       --tensor-parallel-size $DECODER_TP_SIZE \
       --kv-transfer-config "$kv_config" \
       --speculative-config "$DECODE_SPEC_CONFIG" \
-      --attention-backend FLASH_ATTN \
-      --disable-log-requests &
+      --attention-backend FLASH_ATTN &
 
     DECODE_HOSTS+=("localhost")
     DECODE_PORTS+=("$PORT")
