@@ -592,6 +592,7 @@ class ColumnParallelLinear(LinearBase):
             output = tensor_model_parallel_all_gather(output_parallel)
         else:
             output = output_parallel
+
         if not self.return_bias:
             return output
         output_bias = self.bias if self.skip_bias_add else None

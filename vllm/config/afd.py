@@ -16,6 +16,9 @@ class AFDConfig:
     """Configuration for AFD (Attention FFN Disaggregation) distributed
     computation."""
 
+    afd_extra_config: dict[str, Any] = field(default_factory=dict)
+    """Extra configuration for specific AFD connectors."""
+
     afd_connector: str = "dummy"
     """The AFD connector for vLLM to communicate between attention and FFN
     nodes. Available connectors: 'dummy', 'p2pconnector'"""
@@ -41,9 +44,6 @@ class AFDConfig:
 
     afd_server_rank: int = 0
     """Rank of this AFD server."""
-
-    afd_extra_config: dict[str, Any] = field(default_factory=dict)
-    """Extra configuration for specific AFD connectors."""
 
     def compute_hash(self) -> str:
         """

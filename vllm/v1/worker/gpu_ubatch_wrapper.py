@@ -249,7 +249,7 @@ class UBatchWrapper:
 
             # Capture the cudagraph
             cudagraph_metadata = CUDAGraphMetaData(
-                cudagraph=torch.cuda.CUDAGraph(keep_graph=True),
+                cudagraph=torch.cuda.CUDAGraph(),
                 ubatch_metadata=ubatch_metadata,
             )
             if self.graph_pool is not None:
@@ -340,7 +340,6 @@ class UBatchWrapper:
         for i, ubatch_slice in enumerate(ubatch_slices):
             afd_metadata_clone = afd_metadata.clone()
             afd_metadata_clone.afd_stage_idx = i
-            logger.info(f"jcz _make_ubatch_metadata afd_metadata_clone.afd_stage_idx:{afd_metadata_clone.afd_stage_idx}")
             forward_contexts.append(
                 create_forward_context(
                     attn_metadata[i] if attn_metadata is not None else None,
@@ -425,16 +424,6 @@ class UBatchWrapper:
         batch_descriptor = forward_context.batch_descriptor
         ubatch_slices = forward_context.ubatch_slices
         cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
-        afd_metadata = forward_context.afd_metadata
-
-        attn_metadata = forward_context.attn_metadata
-        input_ids = kwargs["input_ids"]
-        positions = kwargs["positions"]
-        intermediate_tensors = kwargs["intermediate_tensors"]
-        inputs_embeds = kwargs["inputs_embeds"]
-        compute_stream = torch.cuda.current_stream()
-
-        dp_metadata = forward_context.dp_metadata
 
         # If there's no ubatching, just run the runnable object
         if ubatch_slices is None:
@@ -446,6 +435,7 @@ class UBatchWrapper:
             # for this shape during a normal run.
             if cudagraph_runtime_mode is CUDAGraphMode.FULL:
                 assert batch_descriptor is not None
+                # TODO(jcz): check this
                 # if batch_descriptor.num_tokens in self.cudagraphs:
                 #     cudagraph_runtime_mode = CUDAGraphMode.NONE
 

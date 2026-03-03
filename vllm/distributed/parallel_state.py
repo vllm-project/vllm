@@ -341,7 +341,7 @@ class GroupCoordinator:
 
         self_device_group = None
         self_cpu_group = None
-        for i, ranks in enumerate(group_ranks):
+        for ranks in group_ranks:
             device_group = torch.distributed.new_group(
                 ranks, backend=torch_distributed_backend
             )
