@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from transformers import Qwen3Config
 
-from vllm.attention.layer import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -406,19 +406,11 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         )
         self.draft_id_to_target_id = None
 
-        # DFlash always uses parallel drafting
-        dflash_config = getattr(self.config, "dflash_config", {})
-        num_aux = len(dflash_config.get(
-            "target_layer_ids",
-            list(range(self.config.num_hidden_layers)),
-        ))
+        # DFlash mask_hidden is already projected to hidden_size
+        # (unlike EAGLE3 where it stores all aux hidden states)
         self.register_buffer(
             "mask_hidden",
-            torch.zeros(
-                1,
-                (num_aux if self.model.use_aux_hidden_state else 1)
-                * self.config.hidden_size,
-            ),
+            torch.zeros(1, self.config.hidden_size),
             persistent=False,
         )
 
@@ -464,7 +456,13 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
     ) -> torch.Tensor:
         if not self.model.use_aux_hidden_state:
             return hidden_states
-        return self.model.hidden_norm(self.model.fc(hidden_states))
+        needs_squeeze = hidden_states.dim() == 1
+        if needs_squeeze:
+            hidden_states = hidden_states.unsqueeze(0)
+        result = self.model.hidden_norm(self.model.fc(hidden_states))
+        if needs_squeeze:
+            result = result.squeeze(0)
+        return result
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
@@ -488,12 +486,6 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             model_weights[name] = loaded_weight
             process_eagle_weight(self, name)
 
-        if not includes_mask_hidden:
-            logger.warning(
-                "mask_hidden not found in DFlash weights. "
-                "Using zero-initialized mask_hidden."
-            )
-
         skip_substrs = ["mask_hidden"]
         if not includes_draft_id_mapping:
             skip_substrs.append("draft_id_to_target_id")
@@ -507,3 +499,23 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             skip_substrs=skip_substrs,
         )
         loader.load_weights(model_weights.items())
+
+        if not includes_mask_hidden:
+            dflash_config = getattr(self.config, "dflash_config", {})
+            mask_token_id = dflash_config.get("mask_token_id", None)
+            if mask_token_id is None:
+                raise ValueError(
+                    "mask_hidden not found in weights and "
+                    "mask_token_id not set in dflash_config."
+                )
+            with torch.no_grad():
+                token_id = torch.tensor(
+                    [mask_token_id],
+                    device=self.mask_hidden.device,
+                )
+                embed = self.model.embed_tokens(token_id).squeeze(0)
+                self.mask_hidden.copy_(embed.unsqueeze(0))
+            logger.info(
+                "Initialized mask_hidden from embed_tokens[%d].",
+                mask_token_id,
+            )

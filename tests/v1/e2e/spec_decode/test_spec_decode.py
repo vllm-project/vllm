@@ -1031,3 +1031,62 @@ def compute_acceptance_len(metrics: list[Metric]) -> float:
     if n_drafts == 0:
         return 1
     return 1 + (n_accepted_toks / n_drafts)
+
+
+def test_dflash_correctness():
+    """
+    E2E test for DFlash (block diffusion) speculative decoding.
+    Runs GSM8k evaluation and prints sample completions.
+    """
+    target_model = "Qwen/Qwen3-8B"
+    draft_model = "z-lab/Qwen3-8B-DFlash-b16"
+
+    spec_llm = LLM(
+        model=target_model,
+        trust_remote_code=True,
+        speculative_config={
+            "method": "dflash",
+            "model": draft_model,
+            "num_speculative_tokens": 16,
+            "max_model_len": 8192,
+        },
+        max_model_len=8192,
+        max_num_seqs=128,
+        gpu_memory_utilization=0.85,
+        enforce_eager=True,
+        disable_log_stats=False,
+    )
+
+
+    # Print sample completions for manual inspection
+    sample_prompts: list[Messages] = [
+        [{"role": "user", "content": "What is 24 * 17?"}],
+        [{"role": "user", "content": "Write a short poem about the ocean."}],
+        [{"role": "user", "content": "Explain what a neural network is in 2 sentences."}],
+        [{"role": "user", "content": "If a train travels at 60 mph for 2.5 hours, how far does it go?"}],
+        [{"role": "user", "content": "List three prime numbers greater than 50."}],
+    ]
+    sample_params = SamplingParams(temperature=0, max_tokens=256)
+    outputs = spec_llm.chat(sample_prompts, sample_params)
+
+    print("\n===== DFlash Sample Completions =====")
+    for prompt_msgs, output in zip(sample_prompts, outputs):
+        prompt_text = prompt_msgs[0]["content"]
+        completion = output.outputs[0].text
+        print(f"\nPrompt: {prompt_text}")
+        print(f"Completion: {completion}")
+    print("===== End DFlash Samples =====\n")
+
+    # Print spec decode metrics
+    metrics = spec_llm.get_metrics()
+    acceptance_rate = compute_acceptance_rate(metrics)
+    acceptance_len = compute_acceptance_len(metrics)
+    print(f"DFlash acceptance_rate={acceptance_rate:.3f}, "
+          f"acceptance_len={acceptance_len:.3f}")
+
+    # Evaluate GSM8k accuracy (Qwen3-8B ref: ~87-92% on GSM8k)
+    # evaluate_llm_for_gsm8k(spec_llm, expected_accuracy_threshold=0.8)
+
+    del spec_llm
+    torch.cuda.empty_cache()
+    cleanup_dist_env_and_memory()

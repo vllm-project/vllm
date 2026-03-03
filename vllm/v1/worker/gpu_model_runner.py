@@ -3988,6 +3988,13 @@ class GPUModelRunner(
                 spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
                 <= self.effective_drafter_max_model_len
             )
+            if spec_decode_common_attn_metadata.max_seq_len >= self.effective_drafter_max_model_len:
+                logger.warning(
+                    "The input sequence length (%d) exceeds the drafter's max model length (%d). "
+                    "Drafter will not be used for this step.",
+                    spec_decode_common_attn_metadata.max_seq_len,
+                    self.effective_drafter_max_model_len,
+                )
             use_gpu_toks = (
                 spec_config.use_eagle()
                 or spec_config.uses_draft_model()

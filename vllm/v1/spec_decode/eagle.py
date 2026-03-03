@@ -111,6 +111,13 @@ class SpecDecodeBaseProposer:
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.token_arange_np = np.arange(self.max_num_tokens)
 
+        # DFlash needs extra buffer space for context + query positions
+        self._dflash_extra_tokens = (
+            max_batch_size * (1 + self.num_speculative_tokens)
+            if self.method == "dflash"
+            else 0
+        )
+
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
@@ -163,7 +170,9 @@ class SpecDecodeBaseProposer:
         else:
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(
-                self.max_num_tokens, dtype=torch.int64, device=device
+                self.max_num_tokens + self._dflash_extra_tokens,
+                dtype=torch.int64,
+                device=device,
             )
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=device
@@ -214,7 +223,9 @@ class SpecDecodeBaseProposer:
         )
 
         self._slot_mapping_buffer = torch.zeros(
-            self.max_num_tokens, dtype=torch.int64, device=device
+            self.max_num_tokens + self._dflash_extra_tokens,
+            dtype=torch.int64,
+            device=device,
         )
 
         # Determine allowed attention backends once during initialization.
@@ -1449,16 +1460,18 @@ class SpecDecodeBaseProposer:
 
         if self.parallel_drafting and self.pass_hidden_states_to_model:
             assert self.parallel_drafting_hidden_state_tensor is not None
-            if self.eagle3_use_aux_hidden_state:
-                # mask_hidden stores the mask for all aux hidden states
-                flat_mask = self.model.mask_hidden.view(-1)
+            flat_mask = self.model.mask_hidden.view(-1)
+            if flat_mask.shape[0] == self.hidden_size:
+                # Already projected (e.g. DFlash), use directly
+                self.parallel_drafting_hidden_state_tensor.copy_(flat_mask)
+            elif self.eagle3_use_aux_hidden_state:
+                # EAGLE3: mask_hidden stores all aux hidden states,
+                # project through combine_hidden_states
                 self.parallel_drafting_hidden_state_tensor.copy_(
                     self.model.combine_hidden_states(flat_mask)
                 )
             else:
-                self.parallel_drafting_hidden_state_tensor.copy_(
-                    self.model.mask_hidden.view(self.hidden_size)
-                )
+                self.parallel_drafting_hidden_state_tensor.copy_(flat_mask)
 
     def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
         """
@@ -1631,7 +1644,7 @@ class SpecDecodeBaseProposer:
     ) -> None:
         # DFlash: single forward pass with PIECEWISE CUDA graphs
         if self.method == "dflash":
-            num_query = num_tokens
+            num_query = min(num_tokens, self._dflash_extra_tokens)
             num_positions = num_tokens + num_query
             num_tokens_dp_padded, num_tokens_across_dp = (
                 self._pad_batch_across_dp(
