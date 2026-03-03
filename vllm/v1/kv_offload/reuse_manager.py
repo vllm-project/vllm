@@ -3,8 +3,7 @@
 """
 Reuse-frequency gating for CPU KV-cache offload stores.
 
-BlockReuseTracker — O(1) LRU-bounded frequency counter.
-FilteredOffloadingManager — OffloadingManager decorator that skips
+FilterReusedOffloadingManager — OffloadingManager decorator that skips
     storing blocks that have not yet been seen enough times.
 """
 
@@ -22,68 +21,14 @@ from vllm.v1.kv_offload.abstract import (
 )
 
 
-class BlockReuseTracker:
-    """Tracks block-hash reuse frequency to gate CPU offload stores.
-
-    Maintains an LRU-bounded counter mapping block hashes to their observed
-    frequency.  Two separate API entry points allow the caller to integrate
-    tracking at the right call sites:
-
-    * :meth:`record` — call from ``lookup()`` to note that a block hash
-      has been seen.
-    * :meth:`check` — call from ``prepare_store()`` to decide whether the
-      block has been seen often enough to be worth storing.
-
-    Args:
-        max_size: Maximum number of distinct block hashes to track.  When
-            the table is full the least-recently-seen entry is evicted.
-            Must be >= 1.
-        store_threshold: Minimum number of times a block hash must have
-            been seen before ``check()`` returns ``True``.
-    """
-
-    def __init__(self, max_size: int = 64_000, store_threshold: int = 2):
-        if max_size < 1:
-            raise ValueError(f"BlockReuseTracker max_size must be >= 1, got {max_size}")
-        self.max_size = max_size
-        self.store_threshold = store_threshold
-        # Ordered so we can evict the LRU entry in O(1).
-        self.counts: OrderedDict[BlockHash, int] = OrderedDict()
-
-    def record(self, block_hash: BlockHash) -> None:
-        """Record that *block_hash* has been seen.
-
-        Should be called from :meth:`FilteredOffloadingManager.lookup`
-        for each block hash in the lookup sequence.
-        """
-        if block_hash in self.counts:
-            self.counts.move_to_end(block_hash)
-            self.counts[block_hash] += 1
-        else:
-            if len(self.counts) >= self.max_size:
-                self.counts.popitem(last=False)  # evict LRU
-            self.counts[block_hash] = 1
-
-    def check(self, block_hash: BlockHash) -> bool:
-        """Return ``True`` if *block_hash* has been seen ``>= store_threshold``
-        times and is therefore worth storing to CPU.
-
-        Should be called from
-        :meth:`FilteredOffloadingManager.prepare_store` *before* calling
-        the backing manager's ``prepare_store``.
-        """
-        return self.counts.get(block_hash, 0) >= self.store_threshold
-
-
-class FilteredOffloadingManager(OffloadingManager):
+class FilterReusedOffloadingManager(OffloadingManager):
     """An :class:`OffloadingManager` decorator that skips storing blocks
     whose reuse frequency is below *store_threshold*.
 
     All methods are delegated to the *backing* manager.  Two methods are
     intercepted:
 
-    * ``lookup`` — records each visited block hash in the
-      :class:`BlockReuseTracker`.
+    * ``lookup`` — records each visited block hash in an internal LRU counter.
     * ``prepare_store`` — filters out block hashes that have not yet
       crossed the threshold *before* calling the backing
       ``prepare_store``.
@@ -92,7 +37,7 @@ class FilteredOffloadingManager(OffloadingManager):
         backing: The underlying ``OffloadingManager`` to delegate to.
         store_threshold: A block must be seen this many times before
             it is eligible for offloading.
-        max_tracker_size: Maximum entries in the tracker's LRU table.
+        max_tracker_size: Maximum entries in the internal tracker's LRU table.
     """
 
     def __init__(
@@ -101,11 +46,13 @@ class FilteredOffloadingManager(OffloadingManager):
         store_threshold: int = 2,
         max_tracker_size: int = 64_000,
     ):
+        if max_tracker_size < 1:
+            raise ValueError(f"FilterReusedOffloadingManager max_tracker_size must be >= 1, got {max_tracker_size}")
         self._backing = backing
-        self._tracker = BlockReuseTracker(
-            max_size=max_tracker_size,
-            store_threshold=store_threshold,
-        )
+        self.store_threshold = store_threshold
+        self.max_tracker_size = max_tracker_size
+        # Ordered so we can evict the LRU entry in O(1).
+        self.counts: OrderedDict[BlockHash, int] = OrderedDict()
 
     # ------------------------------------------------------------------
     # Intercepted methods
@@ -115,7 +62,13 @@ class FilteredOffloadingManager(OffloadingManager):
         """Record each hash, then delegate lookup to backing manager."""
         block_hashes = list(block_hashes)
         for block_hash in block_hashes:
-            self._tracker.record(block_hash)
+            if block_hash in self.counts:
+                self.counts.move_to_end(block_hash)
+                self.counts[block_hash] += 1
+            else:
+                if len(self.counts) >= self.max_tracker_size:
+                    self.counts.popitem(last=False)  # evict LRU
+                self.counts[block_hash] = 1
         return self._backing.lookup(block_hashes)
 
     def prepare_store(
@@ -123,12 +76,13 @@ class FilteredOffloadingManager(OffloadingManager):
     ) -> PrepareStoreOutput | None:
         """Filter out blocks below threshold, then delegate to backing.
 
-        :meth:`check` is evaluated *before* calling the backing manager's
+        Filtering is evaluated *before* calling the backing manager's
         ``prepare_store`` so that blocks that would be skipped do not
         consume any CPU offload capacity.
         """
         block_hashes = list(block_hashes)
-        eligible = [bh for bh in block_hashes if self._tracker.check(bh)]
+        eligible = [bh for bh in block_hashes if self.counts.get(bh, 0) >= self.store_threshold]
+
         # Delegate to the backing manager with only the eligible hashes.
         # Passing an empty list is intentional and safe — both
         # LRUOffloadingManager and ARCOffloadingManager handle it correctly,
