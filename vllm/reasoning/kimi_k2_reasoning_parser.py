@@ -65,10 +65,6 @@ class KimiK2ReasoningParser(ReasoningParser):
                 "tokens in the tokenizer!"
             )
 
-    def _is_identity_mode(self) -> bool:
-        """Check if parser is in identity mode (no reasoning extraction)."""
-        return self._identity_parser is not None
-
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """
         Check if the reasoning content ends in the input_ids.
