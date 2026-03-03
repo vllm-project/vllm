@@ -108,15 +108,15 @@ class KimiK2ReasoningParser(ReasoningParser):
                 input_ids, delta_ids
             )
 
-        # Materialize for multiple membership checks
-        delta_ids_tuple = tuple(delta_ids)
+        # Materialize iterable for membership checks
+        delta_ids_set = set(delta_ids)
 
         # Check for explicit end token or implicit tool section start in delta
-        if self._end_token_id in delta_ids_tuple:
+        if self._end_token_id in delta_ids_set:
             return True
         return (
             self._tool_section_start_token_id is not None
-            and self._tool_section_start_token_id in delta_ids_tuple
+            and self._tool_section_start_token_id in delta_ids_set
         )
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
