@@ -97,9 +97,7 @@ class Step3ReasoningParser(ReasoningParser):
             reasoning = model_output[:end_index]
 
             # Content after </think> token
-            content: str | None = (
-                model_output[end_index + len(self.think_end_token) :] or None
-            )
+            content = model_output[end_index + len(self.think_end_token) :] or None
 
             return reasoning, content
 
