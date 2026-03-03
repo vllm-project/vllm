@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     # See: https://github.com/vllm-project/vllm/issues/5938
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 16 * 1024
     VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING: bool = True
+    # Ray compiled DAG communication channel type: auto (default), nccl, or shm
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
