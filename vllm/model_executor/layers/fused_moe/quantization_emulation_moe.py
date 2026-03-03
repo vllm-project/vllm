@@ -104,38 +104,48 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
         This dequantizes the weights on the fly and calls fused_experts_impl
         with activation quantization support.
         """
-        # Dequantize weights if they are quantized
-        # For NVFP4, weights are packed in uint8 format
-        # w1 shape: [num_experts, 2*intermediate_size, hidden_size//2]
-        # w2 shape: [num_experts, hidden_size, intermediate_size//2]
-        assert w1.dtype == torch.uint8
-        assert w2.dtype == torch.uint8
+        # Check if weights are already dequantized (same dtype as hidden_states)
+        # If weight dtype matches hidden_states.dtype, it's already dequantized
+        if w1.dtype == hidden_states.dtype and w2.dtype == hidden_states.dtype:
+            # Weights are already dequantized, use them directly
+            w1_dequant = w1
+            w2_dequant = w2
+        else:
+            # Dequantize weights if they are quantized
+            # For NVFP4, weights are packed in uint8 format
+            # w1 shape: [num_experts, 2*intermediate_size, hidden_size//2]
+            # w2 shape: [num_experts, hidden_size, intermediate_size//2]
+            assert w1.dtype == torch.uint8
+            assert w2.dtype == torch.uint8
 
-        # Dequantize w1 from packed NVFP4 to fp16/bf16
-        w13_global_scale = self.quant_config.g1_alphas
+            # Dequantize w1 from packed NVFP4 to fp16/bf16
+            w13_global_scale = self.quant_config.g1_alphas
 
-        w1_dequant = dequantize_to_dtype(
-            tensor_fp4=w1,
-            tensor_sf=self.w1_scale_val,
-            global_scale=w13_global_scale,
-            dtype=hidden_states.dtype,
-            device=w1.device,
-            block_size=16,
-            swizzle=False,
-        )
+            w1_dequant = dequantize_to_dtype(
+                tensor_fp4=w1,
+                tensor_sf=self.w1_scale_val,
+                global_scale=w13_global_scale,
+                dtype=hidden_states.dtype,
+                device=w1.device,
+                block_size=16,
+                swizzle=False,
+            )
 
-        # Dequantize w2 from packed NVFP4 to fp16/bf16
-        w2_global_scale = self.quant_config.g2_alphas
+            # Dequantize w2 from packed NVFP4 to fp16/bf16
+            w2_global_scale = self.quant_config.g2_alphas
 
-        w2_dequant = dequantize_to_dtype(
-            tensor_fp4=w2,
-            tensor_sf=self.w2_scale_val,
-            global_scale=w2_global_scale,
-            dtype=hidden_states.dtype,
-            device=w2.device,
-            block_size=16,
-            swizzle=False,
-        )
+            w2_dequant = dequantize_to_dtype(
+                tensor_fp4=w2,
+                tensor_sf=self.w2_scale_val,
+                global_scale=w2_global_scale,
+                dtype=hidden_states.dtype,
+                device=w2.device,
+                block_size=16,
+                swizzle=False,
+            )
+
+        assert w1_dequant.dtype == hidden_states.dtype
+        assert w2_dequant.dtype == hidden_states.dtype
 
         hidden_states, _ = moe_kernel_quantize_input(
             A=hidden_states,

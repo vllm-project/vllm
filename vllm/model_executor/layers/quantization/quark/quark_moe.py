@@ -32,7 +32,11 @@ from vllm.model_executor.layers.quantization.mxfp4 import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import _swizzle_mxfp4
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    _swizzle_mxfp4,
+    dequant_mxfp4,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
     OCP_MX_Scheme,
@@ -1032,10 +1036,48 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
 
+            w1 = layer.w13_weight
+            w2 = layer.w2_weight
+            w1_scale = layer.w13_weight_scale
+            w2_scale = layer.w2_weight_scale
+
+            if self.ocp_mx_scheme in {
+                OCP_MX_Scheme.w_mxfp4_a_mxfp4,
+                OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
+                OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
+            }:
+                # Weight has to be dequantized for mxfp4 emulation.
+                w1 = dequant_mxfp4(w1, w1_scale, x.dtype)
+                w1_scale = None
+                w2 = dequant_mxfp4(w2, w2_scale, x.dtype)
+                w2_scale = None
+            elif self.ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2:
+                w1 = dequant_mxfp6(
+                    w1, w1_scale, quant_dtype="fp6_e3m2", float_dtype=x.dtype
+                )
+                w1_scale = None
+                w2 = dequant_mxfp6(
+                    w2, w2_scale, quant_dtype="fp6_e3m2", float_dtype=x.dtype
+                )
+                w2_scale = None
+            elif self.ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3:
+                w1 = dequant_mxfp6(
+                    w1, w1_scale, quant_dtype="fp6_e2m3", float_dtype=x.dtype
+                )
+                w1_scale = None
+                w2 = dequant_mxfp6(
+                    w2, w2_scale, quant_dtype="fp6_e2m3", float_dtype=x.dtype
+                )
+                w2_scale = None
+            else:
+                raise NotImplementedError(  # noqa: E501
+                    f"Unsupported ocp_mx_scheme={self.ocp_mx_scheme}"
+                )
+
             return fused_experts(
                 x,
-                layer.w13_weight,
-                layer.w2_weight,
+                w1,
+                w2,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=not self.moe.disable_inplace,

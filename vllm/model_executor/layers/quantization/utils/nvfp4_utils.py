@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_fp4_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_to_dtype,
     kE2M1ToFloat_handle,
     run_nvfp4_emulations,
 )
@@ -132,8 +133,17 @@ def prepare_weights_for_nvfp4_fbgemm(
 def convert_to_nvfp4_linear_kernel_format(
     backend: NvFp4LinearBackend,
     layer: torch.nn.Module,
+    emulation_dequantize_weights: bool | None = None,
 ) -> None:
-    """Convert layer to NVFP4 linear kernel format."""
+    """Convert layer to NVFP4 linear kernel format.
+
+    Args:
+        backend: The NVFP4 backend to use
+        layer: The layer to convert
+        emulation_dequantize_weights: If True and backend is EMULATION,
+            dequantize weights ahead of time
+        group_size: Block size for dequantization (default: 16)
+    """
 
     assert layer.weight_scale.dtype == torch.float8_e4m3fn, (
         "Weight Block scale must be represented as FP8-E4M3"
@@ -171,6 +181,25 @@ def convert_to_nvfp4_linear_kernel_format(
         # We can not call `.to(device)` during cuda graph capture - do it here instead.
         # (operation not permitted when stream is capturing)
         kE2M1ToFloat_handle.val = kE2M1ToFloat_handle.val.to(layer.weight.device)
+
+        if emulation_dequantize_weights:
+            # For emulation backend, optionally dequantize weights ahead of time.
+            target_dtype = torch.get_default_dtype()
+
+            # Dequantize the weight
+            weight_dequantized = dequantize_to_dtype(
+                tensor_fp4=layer.weight.data,
+                tensor_sf=layer.weight_scale.data,
+                global_scale=layer.weight_global_scale,
+                dtype=target_dtype,
+                device=layer.weight.device,
+                block_size=16,
+                swizzle=False,  # No swizzle for emulation backend
+            )
+
+            layer.weight = torch.nn.Parameter(weight_dequantized, requires_grad=False)
+            layer.weight_scale = None
+            layer.weight_global_scale = None
 
 
 def apply_nvfp4_linear(

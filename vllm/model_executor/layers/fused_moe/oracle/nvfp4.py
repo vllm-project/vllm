@@ -29,6 +29,9 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_nvfp4_moe_layer_for_marlin,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_to_dtype,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
@@ -325,6 +328,7 @@ def convert_to_nvfp4_moe_kernel_format(
     w2_scale_2: torch.Tensor,
     a2_scale: torch.Tensor | None,
     is_act_and_mul: bool,
+    emulation_dequantize_weights: bool | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -335,6 +339,11 @@ def convert_to_nvfp4_moe_kernel_format(
     torch.Tensor,
     torch.Tensor,
 ]:
+    """
+    Args:
+        emulation_dequantize_weights: If True and backend is EMULATION,
+            dequantize weights ahead of time
+    """
     if (
         nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS
         or nvfp4_backend == NvFp4MoeBackend.VLLM_CUTLASS
@@ -404,6 +413,39 @@ def convert_to_nvfp4_moe_kernel_format(
         a13_scale = 1.0 / a13_scale
 
         a2_scale = 1.0 / a2_scale
+
+        if emulation_dequantize_weights:
+            # For emulation backend, optionally dequantize weights ahead of time
+            target_dtype = torch.get_default_dtype()
+
+            # Dequantize w13 weights
+            w13_dequantized = dequantize_to_dtype(
+                tensor_fp4=w13,
+                tensor_sf=w13_scale,
+                global_scale=w13_scale_2,
+                dtype=target_dtype,
+                device=w13.device,
+                block_size=16,
+                swizzle=False,
+            )
+            w13 = w13_dequantized
+
+            # Dequantize w2 weights
+            w2_dequantized = dequantize_to_dtype(
+                tensor_fp4=w2,
+                tensor_sf=w2_scale,
+                global_scale=w2_scale_2,
+                dtype=target_dtype,
+                device=w2.device,
+                block_size=16,
+                swizzle=False,
+            )
+            w2 = w2_dequantized
+
+            w13_scale = None
+            w13_scale_2 = None
+            w2_scale = None
+            w2_scale_2 = None
     else:
         raise ValueError(f"Unknown NvFp4 backend for MoE: {nvfp4_backend}")
 
