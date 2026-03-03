@@ -492,12 +492,6 @@ class FireRedASR2Model(nn.Module):
         speech_features, speech_lens = self.encoder_projector(encoder_outs, enc_lengths)
         return speech_features
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-        )
-        return loader.load_weights(weights)
-
 
 class FireRedASR2ProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> Qwen2Config:
