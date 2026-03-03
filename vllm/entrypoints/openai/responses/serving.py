@@ -66,6 +66,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     get_system_message,
     get_user_message,
     has_custom_tools,
+    inject_response_formats,
     render_for_completion,
 )
 from vllm.entrypoints.openai.responses.context import (
@@ -124,6 +125,23 @@ from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
+
+
+def _extract_response_format_schema(request: ResponsesRequest) -> dict | None:
+    """Extract JSON schema from the request's structured output config."""
+    if (
+        request.text is not None
+        and request.text.format is not None
+        and request.text.format.type == "json_schema"
+        and request.text.format.schema_ is not None
+    ):
+        return request.text.format.schema_
+    if (
+        request.structured_outputs is not None
+        and request.structured_outputs.json is not None
+    ):
+        return request.structured_outputs.json
+    return None
 
 
 def _extract_allowed_tools_from_mcp_requests(
@@ -1212,9 +1230,22 @@ class OpenAIServingResponses(OpenAIServing):
                 request, with_custom_tools, tool_types
             )
             messages.append(sys_msg)
-            if with_custom_tools:
+
+            # Determine if we need a developer message.
+            # Per Harmony cookbook: developer message holds instructions,
+            # function tools, AND response format schemas.
+            response_format_schema = _extract_response_format_schema(request)
+            needs_dev_msg = with_custom_tools or response_format_schema is not None
+
+            if needs_dev_msg:
+                dev_instructions = request.instructions
+                if response_format_schema is not None:
+                    dev_instructions = inject_response_formats(
+                        dev_instructions, response_format_schema
+                    )
                 dev_msg = get_developer_message(
-                    instructions=request.instructions, tools=request.tools
+                    instructions=dev_instructions,
+                    tools=request.tools if with_custom_tools else None,
                 )
                 messages.append(dev_msg)
             messages += construct_harmony_previous_input_messages(request)
