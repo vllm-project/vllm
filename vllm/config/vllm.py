@@ -14,7 +14,7 @@ from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, get_args
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
@@ -870,7 +870,7 @@ class VllmConfig:
 
                     tp_size = self.parallel_config.tensor_parallel_size
                     hidden_size = self.model_config.get_hidden_size()
-                    element_size = self.model_config.dtype.itemsize
+                    element_size = cast(torch.dtype, self.model_config.dtype).itemsize
                     pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
                         hidden_size, tp_size, element_size
                     )
@@ -1046,7 +1046,7 @@ class VllmConfig:
 
             is_fullgraph = (
                 self.compilation_config.use_inductor_graph_partition
-                or len(self.compilation_config.splitting_ops) == 0
+                or not self.compilation_config.splitting_ops
             )
             if self.parallel_config.pipeline_parallel_size > 1 or not is_fullgraph:
                 if "-rms_norm" not in self.compilation_config.custom_ops:
@@ -1200,23 +1200,6 @@ class VllmConfig:
                     env_path,
                 )
             self.compilation_config.debug_dump_path = env_path
-
-        def has_blocked_weights():
-            if self.quant_config is not None:
-                if hasattr(self.quant_config, "weight_block_size"):
-                    return self.quant_config.weight_block_size is not None
-                elif hasattr(self.quant_config, "has_blocked_weights"):
-                    return self.quant_config.has_blocked_weights()
-            return False
-
-        # Enable quant_fp8 CUDA ops (TODO disable in follow up)
-        # On H100 the CUDA kernel is faster than
-        # native implementation
-        # https://github.com/vllm-project/vllm/issues/25094
-        if has_blocked_weights():
-            custom_ops = self.compilation_config.custom_ops
-            if "-quant_fp8" not in custom_ops:
-                custom_ops.append("+quant_fp8")
 
         # Handle the KV connector configs
         self._post_init_kv_transfer_config()
@@ -1459,7 +1442,7 @@ class VllmConfig:
             if max_size is not None:
                 max_token_num = max_size // (
                     self.model_config.get_hidden_size()
-                    * self.model_config.dtype.itemsize
+                    * cast(torch.dtype, self.model_config.dtype).itemsize
                 )
                 if compile_range_end is not None and max_token_num < compile_range_end:
                     computed_compile_ranges_endpoints.append(max_token_num)
@@ -1482,7 +1465,7 @@ class VllmConfig:
 
                 tp_size = self.parallel_config.tensor_parallel_size
                 hidden_size = self.model_config.get_hidden_size()
-                element_size = self.model_config.dtype.itemsize
+                element_size = cast(torch.dtype, self.model_config.dtype).itemsize
                 pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
                     hidden_size, tp_size, element_size
                 )

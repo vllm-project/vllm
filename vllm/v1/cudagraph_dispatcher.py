@@ -71,6 +71,9 @@ class CudagraphDispatcher:
     def _compute_bs_to_padded_graph_size(self) -> None:
         """Pre-compute the mapping from batch size to padded graph size."""
         max_size = self.compilation_config.max_cudagraph_capture_size
+        assert max_size is not None, (
+            "max_cudagraph_capture_size must be set when cudagraphs are enabled."
+        )
         capture_sizes = self.compilation_config.cudagraph_capture_sizes
         assert capture_sizes is not None, (
             "Cudagraph capture sizes must be set when cudagraphs are enabled."
@@ -94,7 +97,7 @@ class CudagraphDispatcher:
         ):
             for size in self.compilation_config.compile_sizes:
                 size = int(size)
-                if size <= self.compilation_config.max_cudagraph_capture_size:
+                if size <= max_size:
                     padded = self._bs_to_padded_graph_size[size]
                     if padded != size:
                         raise ValueError(
@@ -266,10 +269,12 @@ class CudagraphDispatcher:
             f"invalid_modes={invalid_modes}"
         )
 
+        max_capture_size = self.compilation_config.max_cudagraph_capture_size
         if (
             not self.keys_initialized
             or self.cudagraph_mode == CUDAGraphMode.NONE
-            or num_tokens > self.compilation_config.max_cudagraph_capture_size
+            or max_capture_size is None
+            or num_tokens > max_capture_size
             or allowed_modes <= {CUDAGraphMode.NONE}
         ):
             return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)

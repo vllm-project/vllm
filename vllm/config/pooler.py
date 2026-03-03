@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Literal, get_args
+from typing import Any, Literal, cast, get_args
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -108,14 +108,14 @@ class PoolerConfig:
                     pooling_type,
                     pooling_type,
                 )
-                self.seq_pooling_type = pooling_type
+                self.seq_pooling_type = cast(SequencePoolingType, pooling_type)
             elif pooling_type in TOK_POOLING_TYPES:
                 logger.debug(
                     "Resolved `pooling_type=%r` to `tok_pooling_type=%r`.",
                     pooling_type,
                     pooling_type,
                 )
-                self.tok_pooling_type = pooling_type
+                self.tok_pooling_type = cast(TokenPoolingType, pooling_type)
             else:
                 raise NotImplementedError(pooling_type)
 

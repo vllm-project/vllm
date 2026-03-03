@@ -72,6 +72,7 @@ from vllm.config.device import Device
 from vllm.config.kernel import MoEBackend
 from vllm.config.lora import MaxLoRARanks
 from vllm.config.model import (
+    ConfigFormat,
     ConvertOption,
     HfOverrides,
     LogprobsMode,
@@ -379,7 +380,7 @@ class EngineArgs:
     download_dir: str | None = LoadConfig.download_dir
     safetensors_load_strategy: str = LoadConfig.safetensors_load_strategy
     load_format: str | LoadFormats = LoadConfig.load_format
-    config_format: str = ModelConfig.config_format
+    config_format: ConfigFormat = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: int = ModelConfig.seed

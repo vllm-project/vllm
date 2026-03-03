@@ -5,7 +5,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast, get_args
 
 import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -14,7 +14,12 @@ import vllm.envs as envs
 from vllm.config.model_arch import (
     ModelArchitectureConfig,
 )
-from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
+from vllm.config.multimodal import (
+    MMCacheType,
+    MMDummyOptions,
+    MMEncoderTPMode,
+    MultiModalConfig,
+)
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
@@ -75,7 +80,7 @@ else:
 logger = init_logger(__name__)
 
 RunnerOption = Literal["auto", RunnerType]
-ConvertType = Literal["none", "embed", "classify"]
+ConvertType = Literal["none", "embed", "classify", "reward"]
 ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
@@ -95,6 +100,25 @@ _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
 AttnTypeStr = Literal[
     "decoder", "encoder", "encoder_only", "encoder_decoder", "attention_free", "hybrid"
 ]
+
+
+class _MMConfigKwargs(TypedDict, total=False):
+    """Typed kwargs for constructing MultiModalConfig in ModelConfig.__post_init__."""
+
+    language_model_only: bool
+    limit_per_prompt: MMDummyOptions
+    enable_mm_embeds: bool
+    media_io_kwargs: dict[str, dict[str, Any]]
+    mm_processor_kwargs: dict[str, object] | None
+    mm_processor_cache_gb: float
+    mm_processor_cache_type: MMCacheType
+    mm_shm_cache_max_object_size_mb: int
+    mm_encoder_only: bool
+    mm_encoder_tp_mode: MMEncoderTPMode
+    mm_encoder_attn_backend: AttentionBackendEnum | None
+    interleave_mm_strings: bool
+    skip_mm_profiling: bool
+    video_pruning_rate: float | None
 
 
 @config(config=ConfigDict(arbitrary_types_allowed=True))
@@ -242,7 +266,7 @@ class ModelConfig:
     that this name(s) will also be used in `model_name` tag content of
     prometheus metrics, if multiple names provided, metrics tag will take the
     first one."""
-    config_format: str | ConfigFormat = "auto"
+    config_format: ConfigFormat = "auto"
     """The format of the model config to load:\n
     - "auto" will try to load the config in hf format if available after trying
     to load in mistral format.\n
@@ -447,7 +471,7 @@ class ModelConfig:
             self.hf_config_path = maybe_model_redirect(self.hf_config_path)
 
         if callable(self.hf_overrides):
-            hf_overrides_kw = {}
+            hf_overrides_kw: dict[str, Any] = {}
             hf_overrides_fn = self.hf_overrides
             dict_overrides: dict[str, Any] = {}
         else:
@@ -595,26 +619,43 @@ class ModelConfig:
                 )
                 mm_encoder_tp_mode = "weights"
 
-            mm_config_kwargs = dict(
-                language_model_only=language_model_only,
-                limit_per_prompt=limit_mm_per_prompt,
-                enable_mm_embeds=enable_mm_embeds,
-                media_io_kwargs=media_io_kwargs,
-                mm_processor_kwargs=mm_processor_kwargs,
-                mm_processor_cache_gb=mm_processor_cache_gb,
-                mm_processor_cache_type=mm_processor_cache_type,
-                mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
-                mm_encoder_only=mm_encoder_only,
-                mm_encoder_tp_mode=mm_encoder_tp_mode,
-                mm_encoder_attn_backend=mm_encoder_attn_backend,
-                interleave_mm_strings=interleave_mm_strings,
-                skip_mm_profiling=skip_mm_profiling,
-                video_pruning_rate=video_pruning_rate,
-            )
-
-            mm_config_kwargs = {
-                k: v for k, v in mm_config_kwargs.items() if v is not None
+            # Fields that accept None as a valid value are always included.
+            # Fields typed as non-optional in MultiModalConfig are only included
+            # when not None so that MultiModalConfig uses its declared defaults.
+            # cast() is used for the two fields whose pydantic mode="before"
+            # validators accept wider input types than the field annotation.
+            mm_config_kwargs: _MMConfigKwargs = {
+                "language_model_only": language_model_only,
+                "mm_processor_kwargs": mm_processor_kwargs,
+                "mm_encoder_attn_backend": cast(
+                    AttentionBackendEnum | None, mm_encoder_attn_backend
+                ),
+                "video_pruning_rate": video_pruning_rate,
             }
+            if limit_mm_per_prompt is not None:
+                mm_config_kwargs["limit_per_prompt"] = cast(
+                    MMDummyOptions, limit_mm_per_prompt
+                )
+            if enable_mm_embeds is not None:
+                mm_config_kwargs["enable_mm_embeds"] = enable_mm_embeds
+            if media_io_kwargs is not None:
+                mm_config_kwargs["media_io_kwargs"] = media_io_kwargs
+            if mm_processor_cache_gb is not None:
+                mm_config_kwargs["mm_processor_cache_gb"] = mm_processor_cache_gb
+            if mm_processor_cache_type is not None:
+                mm_config_kwargs["mm_processor_cache_type"] = mm_processor_cache_type
+            if mm_shm_cache_max_object_size_mb is not None:
+                mm_config_kwargs["mm_shm_cache_max_object_size_mb"] = (
+                    mm_shm_cache_max_object_size_mb
+                )
+            if mm_encoder_only is not None:
+                mm_config_kwargs["mm_encoder_only"] = mm_encoder_only
+            if mm_encoder_tp_mode is not None:
+                mm_config_kwargs["mm_encoder_tp_mode"] = mm_encoder_tp_mode
+            if interleave_mm_strings is not None:
+                mm_config_kwargs["interleave_mm_strings"] = interleave_mm_strings
+            if skip_mm_profiling is not None:
+                mm_config_kwargs["skip_mm_profiling"] = skip_mm_profiling
 
             self.multimodal_config = MultiModalConfig(**mm_config_kwargs)
 
@@ -722,7 +763,11 @@ class ModelConfig:
 
     @property
     def architectures(self) -> list[str]:
-        return self.model_arch_config.architectures
+        archs = self.model_arch_config.architectures
+        assert archs is not None, (
+            "architectures must be set before accessing ModelConfig.architectures"
+        )
+        return archs
 
     @property
     def architecture(self) -> str:
@@ -992,10 +1037,11 @@ class ModelConfig:
         # TODO Remove this when bitsandbytes supports.
         """
         is_bitsandbytes = self.quantization == "bitsandbytes"
-        has_quantization_config = self.model_arch_config.quantization_config is not None
+        quant_config = self.model_arch_config.quantization_config
+        has_quantization_config = quant_config is not None
         is_8bit = (
-            self.model_arch_config.quantization_config.get("load_in_8bit", False)
-            if has_quantization_config
+            quant_config.get("load_in_8bit", False)
+            if quant_config is not None
             else False
         )
         if all(
@@ -1256,16 +1302,11 @@ class ModelConfig:
                 else:
                     return sum(t == block_type for t in layer_types_value[start:end])
 
-            if (
-                layers_block_type_value is None
-                and attn_type_list is None
-                and layer_types_value is None
-            ):
-                raise ValueError(
-                    "The model is an hybrid without a layers_block_type or an "
-                    "attn_type_list, or a layer_types in the hf_config, "
-                    f"cannot determine the num of {block_type} layers"
-                )
+            raise ValueError(
+                "The model is an hybrid without a layers_block_type or an "
+                "attn_type_list, or a layer_types in the hf_config, "
+                f"cannot determine the num of {block_type} layers"
+            )
 
     def get_mamba_chunk_size(self) -> int | None:
         """
@@ -1955,6 +1996,7 @@ def _get_and_verify_max_len(
     encoder_config: dict[str, Any] | None = None,
 ) -> int:
     """Get and verify the model's maximum length."""
+    assert model_arch_config.derived_max_model_len_and_key is not None
     (derived_max_model_len, max_len_key) = (
         model_arch_config.derived_max_model_len_and_key
     )
@@ -2072,4 +2114,5 @@ def _get_and_verify_max_len(
                     f"{msg} To allow overriding this maximum, set "
                     f"the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN=1. {warning}"
                 )
+    assert max_model_len is not None
     return int(max_model_len)

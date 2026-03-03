@@ -198,9 +198,10 @@ class PassConfig:
 
         if not current_platform.is_cuda():
             return {}
-        return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(
-            current_platform.get_device_capability().to_int(), {}
-        )
+        capability = current_platform.get_device_capability()
+        if capability is None:
+            return {}
+        return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(capability.to_int(), {})
 
     def compute_hash(self) -> str:
         """
@@ -350,7 +351,7 @@ class DynamicShapesConfig:
 
         from vllm.config.utils import get_hash_factors, hash_factors
 
-        factors = get_hash_factors(self, {})
+        factors = get_hash_factors(self, set())
         return hash_factors(factors)
 
 
@@ -607,7 +608,7 @@ class CompilationConfig:
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
-    max_cudagraph_capture_size: int = field(default=None)
+    max_cudagraph_capture_size: int | None = field(default=None)
     """The maximum cudagraph capture size.
 
     If cudagraph_capture_sizes is specified, this will be set to the largest
@@ -953,7 +954,7 @@ class CompilationConfig:
         - initialize compile_sizes
         """
 
-        computed_compile_sizes = []
+        computed_compile_sizes: list[int] = []
         if self.compile_sizes is not None:
             # de-duplicate the sizes provided by the config
             self.compile_sizes = list(set(self.compile_sizes))
@@ -963,6 +964,10 @@ class CompilationConfig:
                         "Unrecognized size type in compile_sizes, "
                         f"expect 'cudagraph_capture_sizes', got {x}"
                     )
+                    assert self.cudagraph_capture_sizes is not None, (
+                        "cudagraph_capture_sizes must be set when referenced in "
+                        "compile_sizes"
+                    )
                     computed_compile_sizes.extend(self.cudagraph_capture_sizes)
                 else:
                     assert isinstance(x, int)
@@ -970,6 +975,7 @@ class CompilationConfig:
         self.compile_sizes = computed_compile_sizes  # type: ignore
 
         # make sure the sizes are in ascending order
+        assert self.cudagraph_capture_sizes is not None
         self.cudagraph_capture_sizes.sort()
         if self.cudagraph_capture_sizes:
             assert self.cudagraph_capture_sizes[-1] == self.max_cudagraph_capture_size
