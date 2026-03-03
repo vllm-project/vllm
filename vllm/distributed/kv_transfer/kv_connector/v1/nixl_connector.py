@@ -256,7 +256,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
-        self.reqs_to_refresh: dict[ReqId, float] = {}  # lease refresh expiry updates
+        self.reqs_to_refresh: set[ReqId] = set()
         self.reqs_in_batch: set[ReqId] = set()
         self.reqs_not_processed: set[ReqId] = set()
 
@@ -281,6 +281,12 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_save[request_id] = self._add_new_req(
             local_block_ids, kv_transfer_params
         )
+
+    def add_new_req_to_refresh(
+        self,
+        request_id: ReqId,
+    ):
+        self.reqs_to_refresh.add(request_id)
 
     def add_new_req_to_recv(
         self,
@@ -367,6 +373,12 @@ class NixlConnector(KVConnectorBase_V1):
     # Scheduler Side Methods
     ############################################################
 
+    def handle_refresh_lease(self, request_id: str):
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.handle_refresh_lease(
+            request_id,
+        )
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:
@@ -436,7 +448,8 @@ class NixlConnector(KVConnectorBase_V1):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        return self.connector_worker.get_finished()
+        assert isinstance(self._connector_metadata, NixlConnectorMetadata)
+        return self.connector_worker.get_finished(self._connector_metadata)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get block IDs that failed to load via NIXL."""
@@ -549,6 +562,7 @@ class NixlConnectorScheduler:
         self._reqs_need_save: dict[ReqId, Request] = {}
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
+        self._reqs_need_refresh: set[ReqId] = set()
         self._reqs_in_batch: set[ReqId] = set()
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
@@ -559,6 +573,11 @@ class NixlConnectorScheduler:
         if self._nixl_handshake_listener_t is not None:
             self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
+
+    def handle_refresh_lease(self, request_id: str):
+        # We will refresh the lease by extending the expiration time.
+        # TODO: should check if in reqs_need_send?
+        self._reqs_need_refresh.add(request_id)
 
     def set_xfer_handshake_metadata(
         self, metadata: dict[int, KVConnectorHandshakeMetadata]
@@ -780,6 +799,7 @@ class NixlConnectorScheduler:
         self._reqs_in_batch = set()
         self._reqs_not_processed = set()
         self._reqs_need_send = {}
+        self._reqs_need_refresh = set()
 
         return meta
 
@@ -992,6 +1012,7 @@ class NixlConnectorWorker:
         self._recving_transfers = defaultdict[ReqId, list[TransferHandle]](list)
         # Track the expiration time of requests that are waiting to be sent.
         self._reqs_to_send: dict[ReqId, float] = {}
+        self._reqs_to_refresh: set[ReqId] = set()
         # Set of requests that have been part of a batch, regardless of status.
         self._reqs_to_process: set[ReqId] = set()
 
@@ -1934,7 +1955,9 @@ class NixlConnectorWorker:
                             cache, indices, block_size_ratio
                         )
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_finished(
+        self, connector_metadata: NixlConnectorMetadata
+    ) -> tuple[set[str], set[str]]:
         """
         Get requests that are done sending or recving on this specific worker.
         The scheduler process (via the MultiprocExecutor) will use this output
@@ -1986,10 +2009,17 @@ class NixlConnectorWorker:
         # Full scan (not early-break) since lease refreshes may change expiry
         # order arbitrarily.
         now = time.perf_counter()
-        expired = [
-            req_id for req_id, expires in self._reqs_to_send.items() if now >= expires
-        ]
-        for req_id in expired:
+        for req_id in self._reqs_to_send:
+            # If we have a lease refresh, update it.
+            if req_id in connector_metadata.reqs_to_refresh:
+                self._reqs_to_send[req_id] = now + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
+
+            # Lease not yet expired, continue.
+            expires_t = self._reqs_to_send[req_id]
+            if expires_t > now:
+                continue
+
+            # Lease expired, free it and push back to scheduler.
             count = self.consumer_notification_counts_by_req.pop(req_id, 0)
             self.xfer_stats.record_kv_expired_req()
             logger.warning(

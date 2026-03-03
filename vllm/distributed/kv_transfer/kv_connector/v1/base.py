@@ -443,8 +443,10 @@ class KVConnectorBase_V1(ABC):
         Args:
             request (Request): the request object.
         """
-        if request.kv_transfer_params is not None and hasattr(
-            request.kv_transfer_params, "remote_engine_id"
+        if (
+            request.kv_transfer_params is not None
+            and hasattr(request.kv_transfer_params, "remote_engine_id")
+            and getattr(request.kv_transfer_params, "do_remote_prefill", False)
         ):
             self._reqs_need_lease.add(request.request_id)
 
@@ -484,6 +486,9 @@ class KVConnectorBase_V1(ABC):
             request_id (str): the ID of the request.
         """
         self._reqs_need_lease.discard(request_id)
+
+    def handle_refresh_lease(self, request_id: str):
+        return
 
     @abstractmethod
     def get_num_new_matched_tokens(
