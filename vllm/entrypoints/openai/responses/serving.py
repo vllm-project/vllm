@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import json as json_mod
 import time
 import uuid
 from collections import deque
@@ -162,6 +163,32 @@ def _extract_allowed_tools_from_mcp_requests(
 
         allowed_tools_map[tool.server_label] = allowed_tools_val
     return allowed_tools_map
+
+
+def _constraint_to_content_format(
+    params: StructuredOutputsParams,
+) -> dict | None:
+    """Convert a StructuredOutputsParams constraint into an xgrammar
+    content format dict suitable for embedding in a structural tag."""
+    if params.json is not None:
+        schema = (
+            params.json
+            if isinstance(params.json, dict)
+            else json_mod.loads(params.json)
+        )
+        return {"type": "json_schema", "json_schema": schema}
+    if params.json_object:
+        return {"type": "json_schema", "json_schema": {"type": "object"}}
+    if params.regex is not None:
+        return {"type": "regex", "pattern": params.regex}
+    if params.grammar is not None:
+        return {"type": "grammar", "grammar": params.grammar}
+    if params.choice is not None:
+        return {
+            "type": "or",
+            "elements": [{"type": "const_string", "value": c} for c in params.choice],
+        }
+    return None
 
 
 class OpenAIServingResponses(OpenAIServing):
@@ -470,31 +497,66 @@ class OpenAIServingResponses(OpenAIServing):
                 else:
                     context = SimpleContext()
 
-            if self.parser and self.parser.reasoning_parser_cls is not None:
-                reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
-                if (
-                    isinstance(
-                        struct_out := sampling_params.structured_outputs,
-                        StructuredOutputsParams,
-                    )
-                    and struct_out.all_non_structural_tag_constraints_none()
-                ):
-                    sampling_params.structured_outputs = replace(
-                        struct_out,
-                        structural_tag=reasoning_parser.prepare_structured_tag(
-                            struct_out.structural_tag, self.tool_server
-                        ),
-                    )
-            generator = self._generate_with_builtin_tools(
-                request_id=request.request_id,
-                engine_prompt=engine_prompt,
-                sampling_params=sampling_params,
-                context=context,
-                lora_request=lora_request,
-                priority=request.priority,
-                trace_headers=trace_headers,
-            )
-            generators.append(generator)
+                if self.parser and self.parser.reasoning_parser_cls is not None:
+                    reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
+                    struct_out = sampling_params.structured_outputs
+
+                    if isinstance(struct_out, StructuredOutputsParams):
+                        if struct_out.all_non_structural_tag_constraints_none():
+                            # No content constraint — just apply reasoning
+                            # channel tags
+                            sampling_params.structured_outputs = replace(
+                                struct_out,
+                                structural_tag=(
+                                    reasoning_parser.prepare_structured_tag(
+                                        struct_out.structural_tag,
+                                        self.tool_server,
+                                    )
+                                ),
+                            )
+                        else:
+                            # Content constraint present (json, regex,
+                            # grammar, choice, json_object). Embed it in the
+                            # final channel tag within the structural tag.
+                            content_fmt = _constraint_to_content_format(struct_out)
+                            if content_fmt is not None:
+                                structural_tag = (
+                                    reasoning_parser.prepare_structured_tag(
+                                        None,
+                                        self.tool_server,
+                                        final_content_format=content_fmt,
+                                    )
+                                )
+                                if structural_tag is not None:
+                                    sampling_params.structured_outputs = (
+                                        StructuredOutputsParams(
+                                            structural_tag=structural_tag  # type: ignore[call-arg]
+                                        )
+                                    )
+                    elif struct_out is None:
+                        # No structured output requested, but still need
+                        # reasoning channel tags
+                        tag = reasoning_parser.prepare_structured_tag(
+                            None, self.tool_server
+                        )
+                        if tag is not None:
+                            sampling_params.structured_outputs = (
+                                StructuredOutputsParams(
+                                    structural_tag=tag  # type: ignore[call-arg]
+                                )
+                            )
+                generator = self._generate_with_builtin_tools(
+                    request_id=request.request_id,
+                    engine_prompt=engine_prompt,
+                    sampling_params=sampling_params,
+                    context=context,
+                    lora_request=lora_request,
+                    priority=request.priority,
+                    trace_headers=trace_headers,
+                )
+                generators.append(generator)
+        except ValueError as e:
+            return self.create_error_response(e)
 
         assert len(generators) == 1
         (result_generator,) = generators
@@ -1985,7 +2047,7 @@ class OpenAIServingResponses(OpenAIServing):
                 output=[],
                 status="in_progress",
                 usage=None,
-            ).model_dump()
+            )
             yield _increment_sequence_number_and_return(
                 ResponseCreatedEvent(
                     type="response.created",
