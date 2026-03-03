@@ -461,3 +461,40 @@ def test_parser_state_to_response_output_analysis_channel() -> None:
     assert len(builtin_items) == 1
     assert not isinstance(builtin_items[0], McpCall)
     assert builtin_items[0].type == "reasoning"
+
+
+class TestHarmonyOutputSanitization:
+    """Tests that leaked Harmony control tokens are sanitized in output."""
+
+    def test_constrain_recipient_treated_as_no_recipient(self):
+        """<|constrain|>json as recipient should be sanitized to empty,
+        falling through to _parse_message_no_recipient (produces message)."""
+        message = Message.from_role_and_content(
+            Role.ASSISTANT, "Some output text"
+        )
+        message = message.with_channel("commentary")
+        message = message.with_recipient("<|constrain|>json")
+
+        output_items = harmony_to_response_output(message)
+
+        # Should produce a message (preamble), not an MCP call
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], ResponseOutputMessage)
+        assert output_items[0].type == "message"
+
+    def test_contaminated_tool_name_cleaned_in_function_call(self):
+        """Function name with leaked <|channel|> should be sanitized."""
+        message = Message.from_role_and_content(
+            Role.ASSISTANT, '{"location": "SF"}'
+        )
+        message = message.with_channel("commentary")
+        message = message.with_recipient(
+            "functions.get_weather<|channel|>commentary"
+        )
+
+        output_items = harmony_to_response_output(message)
+
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], ResponseFunctionToolCall)
+        assert output_items[0].name == "get_weather"
+        assert "<|" not in output_items[0].name
