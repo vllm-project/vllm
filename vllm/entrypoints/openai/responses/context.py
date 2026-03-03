@@ -32,6 +32,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     get_streamable_parser_for_assistant,
     render_for_completion,
     sanitize_harmony_name,
+    sanitize_harmony_recipient,
 )
 from vllm.entrypoints.openai.parser.responses_parser import (
     get_responses_parser_for_simple_context,
@@ -671,7 +672,7 @@ class HarmonyContext(ConversationContext):
         last_msg = self.messages[-1]
         recipient = last_msg.recipient
         if recipient is not None:
-            recipient = sanitize_harmony_name(recipient)
+            recipient = sanitize_harmony_recipient(recipient)
         if not recipient:
             return False
         if recipient.startswith("browser."):
@@ -688,7 +689,7 @@ class HarmonyContext(ConversationContext):
         last_msg = self.messages[-1]
         recipient = last_msg.recipient
         if recipient is not None:
-            recipient = sanitize_harmony_name(recipient)
+            recipient = sanitize_harmony_recipient(recipient)
         if recipient:
             if recipient.startswith("browser."):
                 return await self.call_search_tool(
