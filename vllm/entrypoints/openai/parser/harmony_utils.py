@@ -116,7 +116,7 @@ class ResilientStreamableParser:
         if state == StreamState.EXPECT_START and token_id == _TOK_CHANNEL:
             # Inject <|start|> + assistant role token
             self._inner.process(_TOK_START)
-            role_tokens = self._encoding.encode("assistant", allowed_special="all")
+            role_tokens = self._encoding.encode(self._inner.role, allowed_special="all")
             for rt in role_tokens:
                 self._inner.process(rt)
             self._inner.process(token_id)

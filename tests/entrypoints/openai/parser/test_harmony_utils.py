@@ -1086,6 +1086,7 @@ class TestResilientStreamableParser:
         # Should have produced two messages despite the malformed sequence
         assert len(parser.messages) == 2
         assert parser.messages[0].content[0].text == "First."
+        assert parser.messages[1].content[0].text == "Second."
 
     def test_messages_recipients_sanitized(self) -> None:
         """Messages returned by .messages should have sanitized recipients,
