@@ -11,7 +11,6 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.triton_utils import triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -227,9 +226,7 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         # Calculate BLOCK_M and BLOCK_Q
         num_queries_per_kv = self.num_heads_q // self.num_heads_kv
         self.BLOCK_M = (
-            16
-            if num_queries_per_kv <= 16
-            else triton.next_power_of_2(num_queries_per_kv)
+            16 if num_queries_per_kv <= 16 else next_power_of_2(num_queries_per_kv)
         )
         self.BLOCK_Q = self.BLOCK_M // num_queries_per_kv
 
