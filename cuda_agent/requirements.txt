@@ -1,0 +1,35 @@
+# CUDA-Agent reproduction requirements
+# Paper: "CUDA Agent: Large-Scale Agentic RL for High-Performance CUDA Kernel Generation"
+# arXiv: https://arxiv.org/abs/2602.24286
+
+# Core ML
+torch>=2.3.0
+torchvision>=0.18.0
+
+# LLM inference (vllm for serving the CUDA-Agent model)
+vllm>=0.5.0
+openai>=1.30.0          # OpenAI-compatible client for vllm API
+
+# Training infrastructure
+transformers>=4.45.0
+trl>=0.10.0             # PPO + SFT training
+accelerate>=0.34.0
+deepspeed>=0.15.0       # ZeRO optimisation for 128-GPU training
+peft>=0.13.0            # LoRA (optional)
+
+# Dataset
+datasets>=2.20.0        # For CUDA-Agent-Ops-6K from HuggingFace
+
+# Utilities
+numpy>=1.24.0
+scipy>=1.11.0
+pandas>=2.0.0
+tqdm>=4.66.0
+pyyaml>=6.0
+jsonlines>=4.0.0
+
+# CUDA compilation (comes with PyTorch, listed for clarity)
+# torch.utils.cpp_extension — included with torch
+
+# Evaluation
+pytest>=7.4.0
