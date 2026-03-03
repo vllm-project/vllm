@@ -122,11 +122,8 @@ class MinimaxM2ToolParser(ToolParser):
     def _compute_current_args_json(
         self, tool_text: str, request: ChatCompletionRequest | None
     ) -> str:
-        """Build the incremental JSON arguments string from available XML content.
-
-        Extracts all complete ``<parameter>`` pairs from *tool_text*,
-        type-converts them using the request schema, and delegates JSON
-        construction to :func:`build_partial_args_json`.
+        """Extract complete <parameter> pairs from *tool_text* and return
+        a partial or complete JSON object string.
         """
         is_complete = self.invoke_end_token in tool_text
 
@@ -453,13 +450,11 @@ class MinimaxM2ToolParser(ToolParser):
             self._reset_streaming_state()
             self.streaming_request = request
 
-        # If no delta text, check whether there is still work to do.
+        # If no delta text, check whether there is still work to do
         if not delta_text:
             # If we're mid-tool-call, fall through to the main processing
             # logic — current_text may contain content (parameters, closing
-            # tags) from prior deltas that hasn't been fully diffed yet.
-            # This is critical for stream_interval > 1 where the EOS token
-            # arrives before all argument fragments have been emitted.
+            # tags) from prior deltas that hasn't been fully diffed yet
             if self.is_tool_call_started and not self.json_closed:
                 pass  # fall through
             elif delta_token_ids and self.tool_call_end_token_id not in delta_token_ids:
