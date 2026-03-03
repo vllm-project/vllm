@@ -813,6 +813,16 @@ def _is_cpu() -> bool:
     return VLLM_TARGET_DEVICE == "cpu"
 
 
+def _is_amd_epyc() -> bool:
+    """Detect AMD EPYC CPU with AVX-512 via /proc/cpuinfo."""
+    import os
+    if not os.path.exists("/proc/cpuinfo"):
+        return False
+    with open("/proc/cpuinfo") as f:
+        cpuinfo = f.read()
+    return "AuthenticAMD" in cpuinfo and "avx512" in cpuinfo
+
+
 def _is_xpu() -> bool:
     return VLLM_TARGET_DEVICE == "xpu"
 
@@ -950,6 +960,8 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
         requirements = _read_requirements("cpu.txt")
+        if _is_amd_epyc() and envs.VLLM_ZENTORCH_INSTALL:
+            requirements.append("zentorch")
     elif _is_xpu():
         requirements = _read_requirements("xpu.txt")
     else:
@@ -1047,6 +1059,8 @@ setup(
     ext_modules=ext_modules,
     install_requires=get_requirements(),
     extras_require={
+        # AMD Zen CPU optimizations via zentorch
+        "zen": ["zentorch"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.2.2"],

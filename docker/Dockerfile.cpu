@@ -9,6 +9,8 @@
 #
 # Build targets:
 #   vllm-openai (default): used for serving deployment
+#   vllm-openai-amd: AMD Zen optimized serving image with zentorch (pypi)
+#   vllm-openai-amd-source: AMD Zen optimized serving image with zentorch (source build)
 #   vllm-test: used for CI tests
 #   vllm-dev: used for development
 #
@@ -86,6 +88,8 @@ RUN echo 'ulimit -c 0' >> ~/.bashrc
 
 ######################### BUILD IMAGE #########################
 FROM base AS vllm-build
+
+ENV VLLM_ZENTORCH_INSTALL=0
 
 ARG max_jobs=32
 ENV MAX_JOBS=${max_jobs}
@@ -250,5 +254,45 @@ LABEL ai.vllm.build.cpu-avx512vnni="${VLLM_CPU_AVX512VNNI:-false}"
 LABEL ai.vllm.build.cpu-amxbf16="${VLLM_CPU_AMXBF16:-false}"
 LABEL ai.vllm.build.cpu-arm-bf16="${VLLM_CPU_ARM_BF16:-false}"
 LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
+
+ENTRYPOINT ["vllm", "serve"]
+
+######################### AMD RELEASE IMAGE #########################
+FROM vllm-openai AS vllm-openai-amd
+
+ARG TARGETARCH
+RUN if [ "$TARGETARCH" != "amd64" ]; then \
+        echo "ERROR: vllm-openai-amd only supports --platform=linux/amd64"; \
+        exit 1; \
+    fi
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install zentorch
+
+ENTRYPOINT ["vllm", "serve"]
+
+######################### AMD SOURCE BUILD IMAGE #########################
+FROM vllm-openai AS vllm-openai-amd-source
+
+ARG TARGETARCH
+ARG ZENTORCH_REPO=https://github.com/amd/ZenDNN-pytorch-plugin.git
+
+RUN if [ "$TARGETARCH" != "amd64" ]; then \
+        echo "ERROR: vllm-openai-amd-source only supports --platform=linux/amd64"; \
+        exit 1; \
+    fi
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    --mount=type=cache,target=/root/.cache/uv \
+    apt-get update -y && \
+    apt-get install -y --no-install-recommends make && \
+    uv pip install cmake && \
+    git clone "${ZENTORCH_REPO}" /tmp/zentorch && \
+    cd /tmp/zentorch && \
+    ZENTORCH_VLLM_PLUGIN_BUILD=0 python3 setup.py bdist_wheel && \
+    uv pip install dist/*.whl && \
+    cd / && rm -rf /tmp/zentorch && \
+    apt-get purge -y --auto-remove make
 
 ENTRYPOINT ["vllm", "serve"]
