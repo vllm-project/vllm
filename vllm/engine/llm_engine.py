@@ -1357,7 +1357,7 @@ class LLMEngine:
                     execute_model_req=execute_model_req)
                 if self._should_enable_tree_decoding(seq_group_metadata_list):
                     outputs, new_branch_groups = self._process_tree_decoding(
-                        outputs, seq_group_metadata_list)
+                        outputs, seq_group_metadata_list, virtual_engine)
                     for branch_group in new_branch_groups:
                         self._add_branch_to_scheduler(branch_group, virtual_engine)
                 self._skip_scheduling_next_step = False
@@ -1456,7 +1456,7 @@ class LLMEngine:
         )
     
     # todo
-    def _process_tree_decoding(self, outputs, seq_group_metadata_list):
+    def _process_tree_decoding(self, outputs, seq_group_metadata_list, virtual_engine):
         """处理tree decoding逻辑"""
         new_branch_groups = []
     
@@ -1478,6 +1478,7 @@ class LLMEngine:
                     branch_groups = self.tree_decoder.create_branch_sequences(
                         seq_group_metadata, logprobs, sampling_params
                     )
+                    self._delete_branch_from_scheduler(seq_group_metadata, virtual_engine)
                     new_branch_groups.extend(branch_groups)
                     
                     # 标记原序列进入树模式
@@ -1493,6 +1494,14 @@ class LLMEngine:
         # 更新序列ID映射
         self.seq_id_to_seq_group[branch_group.request_id] = branch_group
 
+    def _delete_branch_from_scheduler(self, branch_group, virtual_engine):
+        """从调度器中删除分支序列组"""
+        # 从等待队列中删除
+        self.scheduler[virtual_engine].abort_seq_group(branch_group.request_id)
+        
+        # 更新序列ID映射
+        if branch_group.request_id in self.seq_id_to_seq_group:
+            del self.seq_id_to_seq_group[branch_group.request_id]
 
     def _abort_and_cache_schedule(
             self, request_id: str, virtual_engine: int,
