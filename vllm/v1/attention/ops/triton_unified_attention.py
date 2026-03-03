@@ -789,7 +789,7 @@ def kernel_unified_attention_3d(
             if Q_a.dtype.is_fp8():
                 V = V_load
             else:
-                 V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q_a.dtype)
+                V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q_a.dtype)
         else:
             V = V_load
 

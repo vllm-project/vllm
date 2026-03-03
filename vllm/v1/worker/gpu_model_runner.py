@@ -6,11 +6,13 @@ import gc
 import hashlib
 import itertools
 import os
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from copy import copy, deepcopy
+from dataclasses import dataclass
 from datetime import datetime
 from functools import reduce
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
@@ -83,6 +85,11 @@ from vllm.model_executor.models.interfaces_base import (
     is_text_generation_model,
 )
 from vllm.model_executor.models.utils import PPMissingLayer
+from vllm.model_executor.offloader import (
+    create_offloader,
+    get_offloader,
+    set_offloader,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import (
@@ -1848,8 +1855,6 @@ class GPUModelRunner(
         assert slot_mappings is not None
         block_table_gid_0 = _get_block_table(0)
         slot_mapping_gid_0 = slot_mappings[0]
-
-        block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
 
         if not hasattr(self, "rotate"):
             if not isinstance(self.model.model.layers[0], PPMissingLayer):

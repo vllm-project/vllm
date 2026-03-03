@@ -969,21 +969,45 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     hidden_states = model_output
                     aux_hidden_states = None
 
+        kv_connector_output = self.kv_connector.post_forward(scheduler_output)
         self.execute_model_state = (
-            hidden_states,
             input_batch,
+            model_inputs,
+            attn_metadata,
+            slot_mappings_by_layer,
+            hidden_states,
+            aux_hidden_states,
+            kv_connector_output,
             scheduler_output.virtual_gap_req_ids,
         )
+
+        if not self.is_last_pp_rank:
+            # Non-last PP rank: return IntermediateTensors for sending.
+            assert isinstance(hidden_states, IntermediateTensors)
+            hidden_states.kv_connector_output = kv_connector_output
+            return hidden_states
+        # Last rank (or no PP): hidden_states is a tensor for sampling.
+        assert isinstance(hidden_states, torch.Tensor)
         return None
 
     @torch.inference_mode()
     def sample_tokens(
-        self,
-        grammar_output: GrammarOutput | None,
-    ) -> AsyncOutput | ModelRunnerOutput:
-        assert self.execute_model_state is not None
-        hidden_states, input_batch, virtual_gap_req_ids = self.execute_model_state
-        self.execute_model_state = None  # type: ignore
+        self, grammar_output: GrammarOutput | None
+    ) -> AsyncOutput | ModelRunnerOutput | None:
+        if self.execute_model_state is None:
+            # The prior execute_model call must have failed.
+            return None
+        (
+            input_batch,
+            model_inputs,
+            attn_metadata,
+            slot_mappings_by_layer,
+            hidden_states,
+            aux_hidden_states,
+            kv_connector_output,
+            virtual_gap_req_ids,
+        ) = self.execute_model_state
+        self.execute_model_state = None
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: hidden_states is None because this rank produced
@@ -1081,7 +1105,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # The prior execute_model call must have failed.
             return None
 
-        input_batch, _, _, _, hidden_states, _, kv_connector_output = (
+        input_batch, _, _, _, hidden_states, _, kv_connector_output, _ = (
             self.execute_model_state
         )
         self.execute_model_state = None
