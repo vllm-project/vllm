@@ -261,8 +261,6 @@ If `thinking_token_budget` is not specified, no explicit reasoning limit is appl
 |-------|------|-------------|
 | `think_start_str` | `str \| null` | String that marks the start of reasoning content |
 | `think_end_str` | `str \| null` | String that marks the end of reasoning content. Can be the reasoning parser's think end token alone (e.g., `</think>`), or a phrase that includes it as a suffix (e.g., `I have to give the solution based on the thinking directly now.</think>`). |
-| `think_start_token_ids` | `list[int] \| null` | Token IDs that mark the start of reasoning content. Use to configure the think start boundary via token IDs instead of a string. |
-| `think_end_token_ids` | `list[int] \| null` | Token IDs that mark the end of reasoning content. Use to configure the think end boundary via token IDs instead of a string. |
 
 !!! note
     `think_end_str` can include a transition phrase before the think end token. For example, setting `think_end_str` to `"I have to give the solution based on the thinking directly now.</think>"` instructs the model to emit that phrase when the budget is exhausted, making the reasoning termination more natural.
