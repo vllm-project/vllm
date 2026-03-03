@@ -13,14 +13,13 @@ from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient, StreamingInput
-from vllm.inputs import PromptType
+from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
-from vllm.renderers.inputs import DictPrompt, TokPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.v1.engine import EngineCoreRequest, PauseMode
@@ -48,6 +47,7 @@ class LaunchEngineClient(EngineClient):
         self.renderer = renderer = renderer_from_config(self.vllm_config)
         self.io_processor = get_io_processor(
             self.vllm_config,
+            self.renderer,
             self.model_config.io_processor_plugin,
         )
 
@@ -75,8 +75,7 @@ class LaunchEngineClient(EngineClient):
         self,
         prompt: EngineCoreRequest
         | PromptType
-        | DictPrompt
-        | TokPrompt
+        | ProcessorInputs
         | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
@@ -87,6 +86,7 @@ class LaunchEngineClient(EngineClient):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        reasoning_ended: bool | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         raise NotImplementedError(
             "LaunchEngineClient does not support inference. "
@@ -121,13 +121,14 @@ class LaunchEngineClient(EngineClient):
 
     async def encode(
         self,
-        prompt: PromptType | DictPrompt | TokPrompt,
+        prompt: PromptType | ProcessorInputs,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         tokenization_kwargs: dict[str, Any] | None = None,
+        reasoning_ended: bool | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         raise NotImplementedError(
             "LaunchEngineClient does not support inference. "
@@ -167,7 +168,7 @@ class LaunchEngineClient(EngineClient):
 
     # -- Power management (no-op) --
 
-    async def sleep(self, level: int = 1) -> None:
+    async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
         pass
 
     async def wake_up(self, tags: list[str] | None = None) -> None:

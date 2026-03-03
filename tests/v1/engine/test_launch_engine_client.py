@@ -53,6 +53,7 @@ def test_init_creates_components(mock_vllm_config):
         mock_renderer.assert_called_once_with(mock_vllm_config)
         mock_io.assert_called_once_with(
             mock_vllm_config,
+            mock_renderer.return_value,
             mock_vllm_config.model_config.io_processor_plugin,
         )
         mock_input.assert_called_once_with(mock_vllm_config, mock_renderer.return_value)
