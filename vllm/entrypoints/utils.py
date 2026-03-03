@@ -33,10 +33,11 @@ if TYPE_CHECKING:
     )
     from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 else:
-    StreamOptions = object
-    LoRAModulePath = object
     ErrorResponse = object
     ErrorInfo = object
+    LoRAModulePath = object
+    StreamOptions = object
+
 
 logger = init_logger(__name__)
 
