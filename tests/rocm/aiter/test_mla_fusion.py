@@ -186,47 +186,6 @@ class TestFuseRMSNormQuant:
             assert result == (None, None, None)
 
 
-class TestMlaFusionDetection:
-    """Unit tests for fusion detection in MultiHeadLatentAttentionWrapper."""
-
-    @patch("vllm.model_executor.layers.mla._AITER_AVAILABLE", True)
-    def test_fusion_enabled_for_fp8_config(self):
-        """Test that fusion is enabled when FP8 config is provided."""
-        # Placeholder test - actual implementation needs proper vLLM model setup
-        # Would need to instantiate MultiHeadLatentAttentionWrapper with Fp8Config
-        # and verify self.fuse_qknorm_quant is True
-        pass
-
-    @patch("vllm.model_executor.layers.mla._AITER_AVAILABLE", True)
-    def test_fusion_disabled_for_non_fp8_config(self):
-        """Test that fusion is disabled when quant_config is not FP8."""
-        # Conceptual test - would need proper model setup
-        pass  # Placeholder
-
-    @patch("vllm.model_executor.layers.mla._AITER_AVAILABLE", False)
-    def test_fusion_disabled_when_aiter_unavailable(self):
-        """Test that fusion is disabled when AITER is not available."""
-        # Conceptual test - would need proper model setup
-        pass  # Placeholder
-
-
-@pytest.mark.parametrize(
-    "aiter_available,quant_type,expected_fusion",
-    [
-        (True, "fp8", True),
-        (True, "awq", False),
-        (True, None, False),
-        (False, "fp8", False),
-        (False, None, False),
-    ],
-)
-def test_fusion_matrix(aiter_available, quant_type, expected_fusion):
-    """Test fusion enabled/disabled across different configurations."""
-    # This is a matrix test that checks all combinations
-    # Actual implementation would need proper model setup
-    pass  # Placeholder - demonstrates test pattern
-
-
 # =============================================================================
 # INTEGRATION TESTS - Testing with real DeepSeek models
 # =============================================================================
@@ -236,7 +195,6 @@ def test_fusion_matrix(aiter_available, quant_type, expected_fusion):
     "model",
     [
         "deepseek-ai/DeepSeek-V2-Lite",
-        # Add more DeepSeek models as needed
     ],
 )
 @pytest.mark.parametrize("quantization", ["fp8", None])
