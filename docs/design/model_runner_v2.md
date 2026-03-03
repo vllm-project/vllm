@@ -26,7 +26,7 @@ V1 also had to maintain `CachedRequestState`, a redundant backup copy of request
 
 The result is complex bookkeeping that becomes more difficult under async scheduling.
 
-![Persistent Batch in V1](../assets/design/model_runner_v2_design_doc/page02_img01.png)
+![Persistent Batch in V1](../assets/design/model_runner_v2/page02_img01.png)
 
 ### MRV2's Solution
 
@@ -38,7 +38,7 @@ MRV2 decouples persistent state tensors from per-step input tensors. Given reque
 
 This removes the need for `CachedRequestState` and simplifies bookkeeping. Large state tensors are mostly stored on GPU memory, so gather runs in parallel on the GPU with low overhead.
 
-![Persistent Batch in MRV2](../assets/design/model_runner_v2_design_doc/page02_img02.png)
+![Persistent Batch in MRV2](../assets/design/model_runner_v2/page02_img02.png)
 
 ## 2. Async-First
 
@@ -46,7 +46,7 @@ vLLM now relies heavily on asynchronous scheduling. The scheduler and worker pre
 
 V1 was not originally designed with async scheduling in mind, and support required retrofitted behavior and hacks. MRV2 instead assumes the core model execution loop is a CUDA stream with no CPU synchronization points. CPU entrypoints queue work onto the stream.
 
-![Async execution timeline](../assets/design/model_runner_v2_design_doc/page04_img01.png)
+![Async execution timeline](../assets/design/model_runner_v2/page04_img01.png)
 
 ## 3. Removing Async Barrier
 
@@ -77,7 +77,7 @@ V1 addresses this with an async barrier around critical sections. That avoids ra
 2. Inflexible organization (all CPU work must stay inside barrier).
 3. Potentially less overlap due to synchronization.
 
-![Race condition with shared CPU buffer](../assets/design/model_runner_v2_design_doc/page05_img01.png)
+![Race condition with shared CPU buffer](../assets/design/model_runner_v2/page05_img01.png)
 
 ### MRV2's Solution: Eliminate the Race
 
@@ -99,7 +99,7 @@ class ModelRunner:
 
 Now CPU writes to `self.states` while GPU reads from `tmp_states`, eliminating the race without explicit synchronization.
 
-![No race with temporary pinned copy](../assets/design/model_runner_v2_design_doc/page06_img01.png)
+![No race with temporary pinned copy](../assets/design/model_runner_v2/page06_img01.png)
 
 ## 4. StagedWriteTensor
 
