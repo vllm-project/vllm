@@ -143,10 +143,7 @@ def select_nvfp4_moe_backend(
     # NOTE(rob): this is kind of a hack. We need to peak into
     # the prepare-finalize selection to determine if we are using
     # the batched or standard expert format.
-    use_batched = (
-        config.moe_parallel_config.use_deepep_ll_kernels
-        or config.moe_parallel_config.use_pplx_kernels
-    )
+    use_batched = config.moe_parallel_config.use_deepep_ll_kernels
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if use_batched
@@ -461,7 +458,7 @@ def make_nvfp4_moe_kernel(
         )
 
     # NOTE(rob): we only want the mk to control the shared_expert
-    # if using all2all (for SBO). bnell is making this explict in
+    # if using all2all (for SBO). bnell is making this explicit in
     # the new MoE runner class.
     kernel = mk.FusedMoEModularKernel(
         prepare_finalize,
