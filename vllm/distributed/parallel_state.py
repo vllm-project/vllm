@@ -385,8 +385,6 @@ class GroupCoordinator:
                 self.cpu_group, 1 << 22, 6
             )
 
-        from vllm.platforms import current_platform
-
         self.use_custom_op_call = (
             current_platform.is_cuda_alike() or current_platform.is_tpu()
         )
@@ -853,6 +851,10 @@ class GroupCoordinator:
         if self.world_size <= 1:
             return []
 
+        if dst is None:
+            dst = (self.rank_in_group + 1) % self.world_size
+        assert dst < self.world_size, f"Invalid dst rank ({dst})"
+
         if self.use_cpu_custom_send_recv:
             if self.device_communicator is None:
                 raise ValueError("No device communicator found")
@@ -869,10 +871,6 @@ class GroupCoordinator:
 
         group = self.device_group
         metadata_group = self.cpu_group
-
-        if dst is None:
-            dst = (self.rank_in_group + 1) % self.world_size
-        assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
         metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
         self.send_object(metadata_list, dst=dst)
@@ -950,6 +948,11 @@ class GroupCoordinator:
     ]:
         if not torch.distributed.is_initialized() or self.world_size == 1:
             return None, [], []
+
+        if src is None:
+            src = (self.rank_in_group - 1) % self.world_size
+        assert src < self.world_size, f"Invalid src rank ({src})"
+
         if self.use_cpu_custom_send_recv:
             if self.device_communicator is None:
                 raise ValueError("No device communicator found")
@@ -966,10 +969,6 @@ class GroupCoordinator:
 
         group = self.device_group
         metadata_group = self.cpu_group
-
-        if src is None:
-            src = (self.rank_in_group - 1) % self.world_size
-        assert src < self.world_size, f"Invalid src rank ({src})"
 
         recv_metadata_list = self.recv_object(src=src)
         tensor_dict: dict[str, Any] = {}
