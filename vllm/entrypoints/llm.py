@@ -45,7 +45,7 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     load_chat_template,
 )
-from vllm.entrypoints.pooling.io_processor_factories import init_pooling_io_processor
+from vllm.entrypoints.pooling.io_processor_factories import init_pooling_io_processors
 from vllm.entrypoints.pooling.score.utils import (
     ScoreData,
     ScoreMultiModalParam,
@@ -394,7 +394,7 @@ class LLM:
         self.io_processor = self.llm_engine.io_processor
         self.input_processor = self.llm_engine.input_processor
         self.chat_template_config = ChatTemplateConfig(chat_template=chat_template)
-        self.pooling_io_processor = init_pooling_io_processor(
+        self.init_pooling_io_processors = init_pooling_io_processors(
             supported_tasks=supported_tasks,
             model_config=self.model_config,
             renderer=self.renderer,
@@ -1175,8 +1175,8 @@ class LLM:
                     )
                     raise ValueError(msg)
 
-            if pooling_task in self.pooling_io_processor:
-                io_processor = self.pooling_io_processor[pooling_task]
+            if pooling_task in self.init_pooling_io_processors:
+                io_processor = self.init_pooling_io_processors[pooling_task]
                 processor_inputs = io_processor.pre_process_offline(
                     prompts_seq, tokenization_kwargs
                 )

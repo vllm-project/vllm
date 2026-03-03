@@ -15,17 +15,17 @@ def init_pooling_io_processors(
     renderer: BaseRenderer,
     chat_template_config: ChatTemplateConfig,
 ) -> dict[str, PoolingIOProcessor]:
-    pooling_io_processor: dict[str, PoolingIOProcessor] = {}
+    pooling_io_processors: dict[str, PoolingIOProcessor] = {}
 
     if "classify" in supported_tasks:
         from vllm.entrypoints.pooling.classify.io_processor import (
             ClassifyIOProcessor,
         )
 
-        pooling_io_processor["classify"] = ClassifyIOProcessor(
+        pooling_io_processors["classify"] = ClassifyIOProcessor(
             model_config=model_config,
             renderer=renderer,
             chat_template_config=chat_template_config,
         )
 
-    return pooling_io_processor
+    return pooling_io_processors
