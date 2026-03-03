@@ -546,9 +546,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     f"BitsAndBytes loader does not support {quant_method} quantization"
                 )
 
-        # The quant_states in bnb models cannot work with a split
-        # weight tensor. So TP does not work with bnb models.
-        if get_tensor_model_parallel_world_size() > 1:
+        # The quant_states in pre_quantized models cannot work with a split
+        # weight tensor. So TP does not work with pre_quantized bnb models.
+        if self.pre_quant and get_tensor_model_parallel_world_size() > 1:
             raise ValueError(
                 "BitsAndBytes models with tensor parallelism is not "
                 "supported. Please try with pipeline parallelism."

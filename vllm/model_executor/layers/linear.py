@@ -744,6 +744,15 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             )
             current_shard_offset = 0
             use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
+            if (
+                use_bitsandbytes_4bit
+                and isinstance(loaded_shard_id, tuple)
+                and self.tp_size > 1
+            ):
+                raise NotImplementedError(
+                    "Shard id with multiple indices is not supported "
+                    "for BNB quantization with TP yet."
+                )
             shard_offsets: list[tuple[int, int, int]] = []
             for i, output_size in enumerate(output_sizes):
                 shard_offsets.append((i, current_shard_offset, output_size))
