@@ -157,7 +157,7 @@ if current_platform.is_rocm():
         total_tokens: int,
     ):
         assert kv_cache_layout in ["NHD", "SHUFFLE"], (
-            "kv_cache_layout only support NHD, SHUFFLE"
+            "kv_cache_layout only supports NHD, SHUFFLE"
         )
         head_dim = key.shape[2]
         x = 16 // key_cache.element_size()

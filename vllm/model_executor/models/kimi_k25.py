@@ -358,7 +358,7 @@ class KimiK25ForConditionalGeneration(
         target_dtype = next(self.vision_tower.parameters()).dtype
         pixel_values = pixel_values.to(target_dtype)
         assert isinstance(grid_thws, torch.Tensor), (
-            f"expect grid_thws to be a tensor, get {type(grid_thws)}"
+            f"expect grid_thws to be a tensor, got {type(grid_thws)}"
         )
         # In some cases (e.g. with merger), grid_thws has an extra middle dimension
         grid_thws = grid_thws.reshape(-1, grid_thws.shape[-1])
