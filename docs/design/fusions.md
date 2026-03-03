@@ -2,49 +2,38 @@
 
 # Kernel and Operator Fusions
 
-vLLM applies a set of kernel/operator fusions at compile time (via
-[`torch.compile`](torch_compile.md) Inductor passes) and at the kernel level
-(custom CUDA/Triton/ROCm kernels) to reduce memory traffic and kernel launch
-overhead.  Most fusions are controlled by fields in
-[`PassConfig`](../configuration/engine_args.md) and are automatically enabled
+vLLM applies a set of kernel/operator fusions at compile time (via custom [`torch.compile`](torch_compile.md) Inductor passes)
+to separate optimizations from model definitions and avoid breaking layer abstractions in model code. 
+These fusions are controlled by fields in [`PassConfig`](../configuration/engine_args.md) and are automatically enabled
 at appropriate [optimization levels](optimization_levels.md).
 
 ## Quick Reference
 
 The table below maps each fusion to its controlling flag/config knob, the
-operations it fuses, when it is enabled by default, and an indicative speedup.
-Because speedup depends heavily on model architecture, sequence length, batch
-size, and hardware, numbers marked **TBD** are placeholders pending systematic
-benchmarking.
+operations it fuses, what level enables it by default, and an indicative speedup.
+The last column indicates whether the fusion requires the entire model graph to be
+visible (either via Inductor partition or `splitting_ops=[]`).
 
-| Fusion | `PassConfig` flag | Fused operations | Default at | Speedup (decode) |
-|---|---|---|---|---|
-| [RMSNorm + Quant](#rmsnorm--quantization-fuse_norm_quant) | `fuse_norm_quant` | RMSNorm (+residual add) → FP8/FP4 quant | O1 (conditional) | TBD |
-| [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant) | `fuse_act_quant` | SiLU+Mul gate activation → FP8/FP4 quant | O1 (conditional) | TBD |
-| [Attention + Quant](#attention--quantization-fuse_attn_quant) | `fuse_attn_quant` | Attention output → FP8/NVfp4 quant | O2 (disabled†) | TBD |
-| [AllReduce + RMSNorm](#allreduce--rmsnorm-fuse_allreduce_rms) | `fuse_allreduce_rms` | All-reduce → residual add → RMSNorm (→ quant) | O2 (Hopper/Blackwell + TP > 1) | TBD |
-| [GEMM + Communication Overlap](#gemm--communication-overlap-fuse_gemm_comms) | `fuse_gemm_comms` | GEMM → reduce-scatter / all-gather → GEMM | O2 (disabled†) | TBD |
-| [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion) | `enable_qk_norm_rope_fusion` | Per-head Q/K RMSNorm → rotary embedding | Off by default | TBD |
-| [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache) | `fuse_rope_kvcache` | Rotary embedding → KV cache write | O1 (ROCm/AITER only) | TBD |
-| [RMSNorm + Padding](#rmsnorm--padding-fuse_act_padding) | `fuse_act_padding` | Residual add + RMSNorm → padding | O1 (ROCm/AITER, hidden=2880 only) | TBD |
-| [Fused Add RMSNorm](#fused-add-rmsnorm-kernel) | *(kernel-level)* | Residual add + RMSNorm | Always (CUDA/ROCm) | TBD |
-| [Fused MoE](#fused-mixture-of-experts-fused_moe) | *(custom op)* | Routing + expert GEMMs + activation + reduce | Always (MoE models) | TBD |
+> Note that speedup depends heavily on the exact model, batch size, and hardware. 
+> If tuning performance by hand, always benchmark your exact use-case with and without the fusion to verify the impact.
 
-† `IS_QUANTIZED` and `IS_DENSE` flags are currently hard-coded to `False` in
-the optimization-level defaults; see
-[`vllm/config/vllm.py`](https://github.com/vllm-project/vllm/blob/main/vllm/config/vllm.py).
-
-> **Note on speedup numbers.** Actual speedups depend on model size, batch
-> size, sequence length, GPU generation, and quantization scheme.  Benchmarks
-> can be found under [`benchmarks/kernels/`](https://github.com/vllm-project/vllm/tree/main/benchmarks/kernels).
-> The TBD entries will be filled as systematic numbers become available.
+| Fusion                                                                    | `PassConfig` flag            | Fused operations                               | Default at                     | E2E Speedup        | Requires fullgraph |
+|---------------------------------------------------------------------------|------------------------------|------------------------------------------------|--------------------------------|--------------------|--------------------|
+| [Attention + Quant](#attention--quantization-fuse_attn_quant)             | `fuse_attn_quant`            | Attention output → FP8/NVfp4 quant             | Off by default                 | 3-7%               | Yes                |
+| [AllReduce + RMSNorm](#allreduce--rmsnorm-fuse_allreduce_rms)             | `fuse_allreduce_rms`         | All-reduce → RMSNorm (+residual_add) (→ quant) | O2 (Hopper/Blackwell + TP > 1) | 5-20%              | No                 |
+| [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion)               | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No                 |
+| [Sequence Parallel](#gemm--communication-overlap-fuse_gemm_comms)         | `fuse_gemm_comms`            | GEMM → reduce-scatter / all-gather → GEMM      | Off by default                 | Prereq for AsyncTP | Yes                |
+| [AsyncTP GEMM + collective](#gemm--communication-overlap-fuse_gemm_comms) | `fuse_gemm_comms`            | GEMM → reduce-scatter / all-gather → GEMM      | Off by default                 | 7-10%              | Yes                |
+| [RMSNorm + Quant](#rmsnorm--quantization-fuse_norm_quant)                 | `fuse_norm_quant`            | RMSNorm (+residual add) → FP8/FP4 quant        | O1 (conditional)               | 1-4%               | No                 |
+| [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant)                 | `fuse_act_quant`             | SiLU+Mul activation → FP8/FP4 quant            | O1 (conditional)               | 1-4%               | No                 |
+| [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)        | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O1 (ROCm/AITER only)           | TBD                | No                 |
+| [RMSNorm + Padding](#rmsnorm--padding-fuse_act_padding)                   | `fuse_act_padding`           | Residual add + RMSNorm → padding               | O1 (ROCm/AITER only)           | TBD                | No                 |
 
 ---
 
 ## Enabling / Disabling Fusions
 
-Fusions are exposed through `PassConfig`, which is nested inside
-`CompilationConfig`:
+Fusions are exposed through `PassConfig`, which is nested inside `CompilationConfig`:
 
 ```python
 from vllm import LLM
@@ -52,6 +41,7 @@ from vllm.config import CompilationConfig, PassConfig
 
 llm = LLM(
     model="...",
+    optimization_level=2, # Default optimization level
     compilation_config=CompilationConfig(
         pass_config=PassConfig(
             fuse_norm_quant=True,
@@ -62,65 +52,50 @@ llm = LLM(
 )
 ```
 
-Alternatively, set an [optimization level](optimization_levels.md) and override
-individual flags:
+Fusions can also be enabled using command-line flags with any `vllm ...` command:
 
 ```bash
 # Enable O2 defaults, but turn off allreduce fusion
-vllm serve meta-llama/Llama-3.1-8B-Instruct -O2 \
-  --compilation-config '{"pass_config": {"fuse_allreduce_rms": false}}'
+vllm serve meta-llama/Llama-3.1-8B-Instruct -O2 -cc.pass_config.fuse_allreduce_rms=False
+
+# The above is equivalent to the more verbose:
+vllm serve meta-llama/Llama-3.1-8B-Instruct -O2 --compilation-config '{"pass_config": {"fuse_allreduce_rms": false}}'
+
+# Same syntax in other commands, e.g. vllm bench:
+vllm bench latency --model=meta-llama/Llama-3.1-8B-Instruct -O2 -cc.pass_config.fuse_allreduce_rms=False
 ```
 
-Fields set explicitly by the user always take precedence over optimization-level
-defaults.
+Fields set explicitly by the user always take precedence over optimization-level defaults.
 
 ---
 
 ## Fusion Details
 
 ### RMSNorm + Quantization (`fuse_norm_quant`)
+> [!WARNING]
+> On NVIDIA, Inductor actually generates a faster fused kernel than our custom CUDA kernel.
+> Hence this fusion is only enabled when either rms_norm or quant_fp8 is using a custom kernel.
 
 **What it fuses.** Combines the custom `rms_norm` / `fused_add_rms_norm`
-operations with subsequent FP8 or NVfp4 quantization into a single fused kernel,
+operations with subsequent FP8 quantization into a single fused kernel,
 eliminating an intermediate read/write of the full-precision activation tensor.
 Two variants are fused:
 
-- *Plain RMSNorm + quant*: `rms_norm(x) → quantize(y)`
-- *Fused-add RMSNorm + quant*: `fused_add_rms_norm(x, residual) → quantize(y)` — also updates the residual in-place.
+- *Plain RMSNorm + quant*: `rms_norm(x) → quant_fp8(y)`
+- *Fused-add RMSNorm + quant*: `fused_add_rms_norm(x, residual) → quant_fp8(y)` — also updates the residual in-place.
 
-Supported quantization schemes: FP8 (static tensor scale, dynamic per-token,
-dynamic per-token-group 128 / 64), NVfp4 (dynamic).
+Note that AITER fusions are currently in a separate pass in `vllm.compilation.passes.fusion.rocm_aiter_fusion`.
 
-**How to enable/disable.**
-
-```python
-PassConfig(fuse_norm_quant=True)   # explicit enable
-PassConfig(fuse_norm_quant=False)  # explicit disable
-```
-
-Enabled automatically at **O1 and above** when either the `rms_norm` or the
-`quant_fp8` custom op is active (i.e., not replaced by a Torch built-in).  The
-`enable_norm_fusion` helper in `vllm/config/vllm.py` determines this
-automatically.
-
-**Supported backends / kernels.**
-
-- CUDA (SM70+): custom fused kernels in `csrc/layernorm_quant_kernels.cu`
-- AMD ROCm: standard path; AITER variant available via
-  `RocmAiterRMSNormQuantFusionPass` when AITER is enabled.
-
-**Known limitations / fallbacks.**
-
-- Falls back to unfused ops if the custom ops are disabled (e.g., under
-  `torch.compile` with Inductor handling the fusion natively).
-- The ROCm AITER variant is registered as an additional pass alongside the
-  standard `RMSNormQuantFusionPass`.
+Supported quantization scheme/hardware combinations:
+- FP8 static per-tensor: CUDA & HIP kernel
+- FP8 dynamic per-token: CUDA & HIP kernel, AITER
+- FP8 dynamic per-token-group (128/64): CUDA & HIP kernel, AITER 
 
 **Code locations.**
 
 - Pass: [`vllm/compilation/passes/fusion/rms_quant_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rms_quant_fusion.py)
 - ROCm AITER pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py)
-- CUDA kernels: [`csrc/layernorm_quant_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_quant_kernels.cu)
+- CUDA/HIP kernels: [`csrc/layernorm_quant_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_quant_kernels.cu)
 
 ---
 
