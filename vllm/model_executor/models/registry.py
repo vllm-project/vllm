@@ -1069,8 +1069,8 @@ class _ModelRegistry:
     def _should_use_anymodel(model_config: ModelConfig) -> bool:
         """Check if a model should be handled by AnyModelForCausalLM.
 
-        Returns True when the HF config contains ``block_configs``
-        and the ``model_type`` has a registered architecture descriptor.
+        Returns True when the HF config contains ``block_configs`` and
+        ``architectures[0]`` maps to a known entry in ``_ARCH_REGISTRY``.
         """
         hf_config = getattr(model_config, "hf_config", None)
         if hf_config is None:
@@ -1078,10 +1078,13 @@ class _ModelRegistry:
         block_configs = getattr(hf_config, "block_configs", None)
         if not block_configs:
             return False
-        model_type = getattr(hf_config, "model_type", None)
-        from vllm.model_executor.models.anymodel import DESCRIPTOR_REGISTRY
+        architectures = getattr(hf_config, "architectures", None) or []
+        arch_name = architectures[0] if architectures else None
+        if arch_name is None:
+            return False
+        from vllm.model_executor.models.anymodel import _ARCH_REGISTRY
 
-        return model_type in DESCRIPTOR_REGISTRY
+        return arch_name in _ARCH_REGISTRY
 
     def inspect_model_cls(
         self,
