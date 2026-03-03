@@ -154,7 +154,7 @@ class OpenAIServingPooling(OpenAIServing):
 
             if (
                 pooling_params is not None
-                and len(pooling_params.get_tasks() > 1)
+                and len(pooling_params.get_tasks()) > 1
                 and request.encoding_format not in ["float", "base64"]
             ):
                 return self.create_error_response(
