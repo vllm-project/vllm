@@ -703,6 +703,70 @@ class TestAutoDropAnalysisMessages:
         # Should have dropped the analysis message
         assert cleaned_messages == messages[1:]
 
+    def test_preserves_prior_turn_analysis_messages(self) -> None:
+        """Test that analysis messages from prior turns are preserved.
+
+        Regression test for https://github.com/vllm-project/vllm/issues/35779
+        """
+        messages = [
+            Message.from_role_and_content(Role.USER, "Pick a secret number."),
+            Message.from_role_and_content(
+                Role.ASSISTANT, "I will pick 742."
+            ).with_channel("analysis"),
+            Message.from_role_and_content(
+                Role.ASSISTANT, "OK, I have picked a number."
+            ).with_channel("final"),
+            Message.from_role_and_content(Role.USER, "What is the secret number?"),
+        ]
+        cleaned_messages = auto_drop_analysis_messages(messages)
+        # All messages should be preserved - prior turn analysis is needed
+        assert cleaned_messages == messages
+
+    def test_drops_current_turn_analysis_but_preserves_prior(self) -> None:
+        """Test multi-turn: prior turn analysis kept, current turn analysis dropped."""
+        messages = [
+            Message.from_role_and_content(Role.USER, "First question"),
+            Message.from_role_and_content(
+                Role.ASSISTANT, "Prior reasoning"
+            ).with_channel("analysis"),
+            Message.from_role_and_content(Role.ASSISTANT, "First answer").with_channel(
+                "final"
+            ),
+            Message.from_role_and_content(Role.USER, "Second question"),
+            Message.from_role_and_content(
+                Role.ASSISTANT, "Current reasoning"
+            ).with_channel("analysis"),
+            Message.from_role_and_content(Role.ASSISTANT, "Second answer").with_channel(
+                "final"
+            ),
+        ]
+        cleaned_messages = auto_drop_analysis_messages(messages)
+        # Prior turn analysis[1] is preserved, current turn analysis[4] is dropped
+        assert len(cleaned_messages) == 5
+        assert cleaned_messages[0].content[0].text == "First question"
+        assert cleaned_messages[1].content[0].text == "Prior reasoning"
+        assert cleaned_messages[2].content[0].text == "First answer"
+        assert cleaned_messages[3].content[0].text == "Second question"
+        assert cleaned_messages[4].content[0].text == "Second answer"
+
+    def test_preserves_analysis_when_no_final_in_current_turn(self) -> None:
+        """Current turn has analysis but no final yet - keep everything."""
+        messages = [
+            Message.from_role_and_content(Role.USER, "First question"),
+            Message.from_role_and_content(
+                Role.ASSISTANT, "Prior reasoning"
+            ).with_channel("analysis"),
+            Message.from_role_and_content(Role.ASSISTANT, "First answer").with_channel(
+                "final"
+            ),
+            Message.from_role_and_content(Role.USER, "Second question"),
+            Message.from_role_and_content(
+                Role.ASSISTANT, "Still thinking..."
+            ).with_channel("analysis"),
+        ]
+        cleaned_messages = auto_drop_analysis_messages(messages)
+        assert cleaned_messages == messages
+
 
 class TestParseChatOutput:
     def test_parse_chat_output_interrupted_first_message(self) -> None:

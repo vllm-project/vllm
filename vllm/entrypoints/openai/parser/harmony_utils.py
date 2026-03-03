@@ -188,24 +188,40 @@ def auto_drop_analysis_messages(msgs: list[Message]) -> list[Message]:
     the conversation with multiple assistant messages to the final channel in the
     conversation.
 
-    So, we find the index of the last assistant message to the final channel and drop
-    all analysis messages that precede it, leaving only the analysis messages that
-    are relevant to the current part of the conversation.
+    We only drop analysis messages from the current turn (after the last user message)
+    that precede the last assistant final message in that turn. Analysis messages from
+    prior turns are preserved so the model can see its own prior reasoning when the
+    client explicitly provides reasoning_content.
     """
-    last_assistant_final_index = -1
+    if not msgs:
+        return msgs
+
+    # Find the start of the current turn (after the last user message).
+    current_turn_start = 0
     for i in range(len(msgs) - 1, -1, -1):
-        msg = msgs[i]
-        if msg.author.role == "assistant" and msg.channel == "final":
-            last_assistant_final_index = i
+        if msgs[i].author.role == "user":
+            current_turn_start = i + 1
             break
 
-    cleaned_msgs: list[Message] = []
-    for i, msg in enumerate(msgs):
-        if i < last_assistant_final_index and msg.channel == "analysis":
-            continue
-        cleaned_msgs.append(msg)
+    # Find the last assistant final message in the current turn.
+    last_final_in_turn = -1
+    for i in range(len(msgs) - 1, current_turn_start - 1, -1):
+        if msgs[i].author.role == "assistant" and msgs[i].channel == "final":
+            last_final_in_turn = i
+            break
 
-    return cleaned_msgs
+    if last_final_in_turn < current_turn_start:
+        # No final message in current turn, nothing to drop.
+        return msgs
+
+    # Drop analysis messages in the current turn that precede the last final.
+    return [
+        msg
+        for i, msg in enumerate(msgs)
+        if not (
+            current_turn_start <= i < last_final_in_turn and msg.channel == "analysis"
+        )
+    ]
 
 
 def flatten_chat_text_content(content: str | list | None) -> str | None:
