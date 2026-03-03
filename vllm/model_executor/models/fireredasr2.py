@@ -147,23 +147,26 @@ class RelPositionalEncoding(torch.nn.Module):
 class ConformerFeedForward(nn.Module):
     def __init__(self, d_model):
         super().__init__()
-        pre_layer_norm = nn.LayerNorm(d_model)
-        linear_expand = nn.Linear(d_model, d_model * 4)
-        nonlinear = Swish()
-        linear_project = nn.Linear(d_model * 4, d_model)
-        self.net = nn.Sequential(
-            pre_layer_norm,
-            linear_expand,
-            nonlinear,
-            nn.Identity(),
-            linear_project,
-            nn.Identity(),
+        self.pre_layer_norm = nn.LayerNorm(d_model)
+        self.linear_expand = ReplicatedLinear(
+            input_size=d_model,
+            output_size=d_model * 4,
+            bias=True,
+        )
+        self.nonlinear = Swish()
+        self.linear_project = ReplicatedLinear(
+            input_size=d_model * 4,
+            output_size=d_model,
+            bias=True,
         )
 
     def forward(self, x):
         residual = x
-        output = self.net(x)
-        output = output + residual
+        x = self.pre_layer_norm(x)
+        x, _ = self.linear_expand(x)
+        x = self.nonlinear(x)
+        x, _ = self.linear_project(x)
+        output = x + residual
         return output
 
 
@@ -175,9 +178,15 @@ class EncoderMultiHeadAttention(nn.Module):
         self.d_k = d_model // n_head
         self.d_v = self.d_k
 
-        self.w_qs = nn.Linear(d_model, n_head * self.d_k, bias=False)
-        self.w_ks = nn.Linear(d_model, n_head * self.d_k, bias=False)
-        self.w_vs = nn.Linear(d_model, n_head * self.d_v, bias=False)
+        self.w_qs = ReplicatedLinear(
+            input_size=d_model, output_size=n_head * self.d_k, bias=False
+        )
+        self.w_ks = ReplicatedLinear(
+            input_size=d_model, output_size=n_head * self.d_k, bias=False
+        )
+        self.w_vs = ReplicatedLinear(
+            input_size=d_model, output_size=n_head * self.d_v, bias=False
+        )
 
         self.layer_norm_q = nn.LayerNorm(d_model)
         self.layer_norm_k = nn.LayerNorm(d_model)
@@ -186,7 +195,9 @@ class EncoderMultiHeadAttention(nn.Module):
         self.temperature = self.d_k**0.5
         self.INF = float("inf")
 
-        self.fc = nn.Linear(n_head * self.d_v, d_model, bias=False)
+        self.fc = ReplicatedLinear(
+            input_size=n_head * self.d_v, output_size=d_model, bias=False
+        )
 
     def forward_qkv(self, q, k, v):
         d_k, d_v, n_head = self.d_k, self.d_v, self.n_head
@@ -196,9 +207,9 @@ class EncoderMultiHeadAttention(nn.Module):
         k = self.layer_norm_k(k)
         v = self.layer_norm_v(v)
 
-        q = self.w_qs(q).view(sz_b, len_q, n_head, d_k)
-        k = self.w_ks(k).view(sz_b, len_k, n_head, d_k)
-        v = self.w_vs(v).view(sz_b, len_v, n_head, d_v)
+        q = self.w_qs(q)[0].view(sz_b, len_q, n_head, d_k)
+        k = self.w_ks(k)[0].view(sz_b, len_k, n_head, d_k)
+        v = self.w_vs(v)[0].view(sz_b, len_v, n_head, d_v)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
@@ -206,7 +217,7 @@ class EncoderMultiHeadAttention(nn.Module):
 
     def forward_output(self, output, residual, sz_b, len_q):
         output = output.transpose(1, 2).contiguous().view(sz_b, len_q, -1)
-        fc_out = self.fc(output)
+        fc_out, _ = self.fc(output)
         output = fc_out
         output = output + residual
         return output
@@ -231,7 +242,9 @@ class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
         super().__init__(n_head, d_model)
         d_k = d_model // n_head
         self.scale = 1.0 / (d_k**0.5)
-        self.linear_pos = nn.Linear(d_model, n_head * d_k, bias=False)
+        self.linear_pos = ReplicatedLinear(
+            input_size=d_model, output_size=n_head * d_k, bias=False
+        )
         self.pos_bias_u = nn.Parameter(torch.empty([n_head, d_k]))
         self.pos_bias_v = nn.Parameter(torch.empty([n_head, d_k]))
         torch.nn.init.xavier_uniform_(self.pos_bias_u)
@@ -255,7 +268,7 @@ class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
 
         q = q.transpose(1, 2)
         n_batch_pos = pos_emb.size(0)
-        p = self.linear_pos(pos_emb).view(n_batch_pos, -1, self.n_head, self.d_k)
+        p = self.linear_pos(pos_emb)[0].view(n_batch_pos, -1, self.n_head, self.d_k)
         p = p.transpose(1, 2)
 
         q_with_bias_u = (q + self.pos_bias_u).transpose(1, 2)
@@ -283,7 +296,6 @@ class ConformerConvolution(nn.Module):
         self.pointwise_conv1 = nn.Conv1d(
             d_model, d_model * 4, kernel_size=1, bias=False
         )
-        self.glu = F.glu
         self.padding = (kernel_size - 1) // 2
         self.depthwise_conv = nn.Conv1d(
             d_model * 2,
@@ -665,6 +677,9 @@ class FireRedASR2ForConditionalGeneration(
             "llm.": "model.decoder.",
             "encoder.": "model.encoder.audio_encoder.",
             "encoder_projector.": "model.encoder_projector.",
+            "net.0": "pre_layer_norm",
+            "net.1": "linear_expand",
+            "net.4": "linear_project",
         }
     )
 
