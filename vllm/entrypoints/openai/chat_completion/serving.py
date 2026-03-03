@@ -247,7 +247,7 @@ class OpenAIServingChat(OpenAIServing):
         request: ChatCompletionRequest,
     ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
         """
-        Internal helper: validate and preprocess chat inputs.
+        render chat request by validating and preprocessing inputs.
 
         Returns:
             A tuple of (conversation, engine_prompts) on success,
