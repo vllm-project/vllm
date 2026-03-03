@@ -158,12 +158,16 @@ def test_silu_and_mul_per_block_quant(
     ), f"Scale mismatch: max diff = {max_diff}"
 
     # Check output correctness
-    torch.testing.assert_close(
-        ref_out.to(dtype=torch.float32),
-        ops_out.to(dtype=torch.float32),
-        atol=1.0,
-        rtol=0.0,
-    )
+    # Compare dequantized values since raw FP8 values may differ
+    # due to independent scale computation between reference and kernel
+    ops_scales_row_major = ops_scales.t() if is_scale_transposed else ops_scales
+    ref_scales_expanded = ref_scales.repeat_interleave(group_size, dim=1)
+    ops_scales_expanded = ops_scales_row_major.repeat_interleave(group_size, dim=1)
+
+    ref_deq = ref_out.to(dtype=torch.float32) * ref_scales_expanded
+    ops_deq = ops_out.to(dtype=torch.float32) * ops_scales_expanded
+
+    torch.testing.assert_close(ref_deq, ops_deq, atol=5e-2, rtol=5e-2)
 
     # Test opcheck for correctness verification
     output = torch.empty(num_tokens, hidden_size, device=device, dtype=quant_dtype)
