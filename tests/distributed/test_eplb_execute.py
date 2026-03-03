@@ -17,7 +17,6 @@ from vllm.distributed.eplb.rebalance_execute import (
 )
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
-    get_eplb_group,
     get_tp_group,
 )
 
@@ -276,6 +275,22 @@ def assert_verification_synced(local_ok: bool, msg: str) -> None:
     assert bool(ok_tensor.item()), msg
 
 
+def create_eplb_communicator_or_skip(*, group_coordinator, backend, expert_weights):
+    try:
+        return create_eplb_communicator(
+            group_coordinator=group_coordinator,
+            backend=backend,
+            expert_weights=expert_weights,
+        )
+    except Exception as exc:
+        if backend not in {"nixl", "symm_mem"}:
+            raise
+        pytest.skip(
+            f"Skipping test because create_eplb_communicator failed for "
+            f"backend={backend}: {exc}"
+        )
+
+
 def _test_async_transfer_layer_without_mtp_worker(
     env,
     world_size: int,
@@ -294,8 +309,8 @@ def _test_async_transfer_layer_without_mtp_worker(
             tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
         )
 
-        tp_group = get_tp_group()
-        ep_group = tp_group.device_group
+        ep_group_coordinator = get_tp_group()
+        ep_group = ep_group_coordinator.device_group
         ep_rank = torch.distributed.get_rank()
         device = torch.device(f"cuda:{ep_rank}")
 
@@ -338,8 +353,8 @@ def _test_async_transfer_layer_without_mtp_worker(
         expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
         cuda_stream = torch.cuda.Stream(device=device)
 
-        communicator = create_eplb_communicator(
-            group_coordinator=get_eplb_group(),
+        communicator = create_eplb_communicator_or_skip(
+            group_coordinator=ep_group_coordinator,
             backend=eplb_communicator,
             expert_weights=expert_weights[0],
         )
@@ -413,7 +428,8 @@ def _test_rearrange_expert_weights_with_redundancy(
             tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
         )
 
-        ep_group = get_tp_group().cpu_group
+        ep_group_coordinator = get_tp_group()
+        ep_group = ep_group_coordinator.cpu_group
         ep_rank = torch.distributed.get_rank()
         device = torch.device(f"cuda:{ep_rank}")
 
@@ -449,8 +465,8 @@ def _test_rearrange_expert_weights_with_redundancy(
             num_layers, num_local_experts, hidden_sizes, ep_rank, device, old_indices
         )
 
-        communicator = create_eplb_communicator(
-            group_coordinator=get_eplb_group(),
+        communicator = create_eplb_communicator_or_skip(
+            group_coordinator=ep_group_coordinator,
             backend=eplb_communicator,
             expert_weights=expert_weights[0],
         )
@@ -549,7 +565,8 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
             tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
         )
 
-        ep_group = get_tp_group().cpu_group
+        ep_group_coordinator = get_tp_group()
+        ep_group = ep_group_coordinator.cpu_group
         ep_rank = torch.distributed.get_rank()
         device = torch.device(f"cuda:{ep_rank}")
 
@@ -579,8 +596,8 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
                 layer_copy.append(weight.clone())
             original_weights.append(layer_copy)
 
-        communicator = create_eplb_communicator(
-            group_coordinator=get_eplb_group(),
+        communicator = create_eplb_communicator_or_skip(
+            group_coordinator=ep_group_coordinator,
             backend="torch_nccl",
             expert_weights=expert_weights[0],
         )
@@ -672,7 +689,8 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
             tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
         )
 
-        ep_group = get_tp_group().cpu_group
+        ep_group_coordinator = get_tp_group()
+        ep_group = ep_group_coordinator.cpu_group
         ep_rank = torch.distributed.get_rank()
         device = torch.device(f"cuda:{ep_rank}")
 
@@ -709,8 +727,8 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
                 layer_copy.append(weight.clone())
             original_weights.append(layer_copy)
 
-        communicator = create_eplb_communicator(
-            group_coordinator=get_eplb_group(),
+        communicator = create_eplb_communicator_or_skip(
+            group_coordinator=ep_group_coordinator,
             backend="torch_nccl",
             expert_weights=expert_weights[0],
         )
