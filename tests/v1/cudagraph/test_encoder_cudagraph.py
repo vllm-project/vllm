@@ -17,16 +17,17 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu.mm.encoder_cudagraph import (
     EncoderCudaGraphManager,
     _count_input_patches,
     _count_output_tokens,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     """Create a minimal EncoderCudaGraphManager with only token_budgets set.
@@ -49,26 +50,30 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
 # _find_smallest_fitting_budget_given_tokens
 # ---------------------------------------------------------------------------
 
+
 class TestFindBudgetGraph:
     """Budget greedy selection: smallest budget >= total_tokens."""
 
-    @pytest.mark.parametrize("total_tokens,budgets,expected", [
-        # Exact match
-        (2048, [2048, 4096, 8192], 2048),
-        # Below smallest budget — picks smallest
-        (100,  [2048, 4096, 8192], 2048),
-        # Zero tokens — picks smallest
-        (0,    [2048, 4096, 8192], 2048),
-        # Between budgets — picks next one up
-        (2049, [2048, 4096, 8192], 4096),
-        (4097, [2048, 4096, 8192], 8192),
-        # Exceeds all budgets — returns None (eager fallback)
-        (9000, [2048, 4096, 8192], None),
-        # Single budget, fits
-        (1000, [2048], 2048),
-        # Single budget, does not fit
-        (3000, [2048], None),
-    ])
+    @pytest.mark.parametrize(
+        "total_tokens,budgets,expected",
+        [
+            # Exact match
+            (2048, [2048, 4096, 8192], 2048),
+            # Below smallest budget — picks smallest
+            (100, [2048, 4096, 8192], 2048),
+            # Zero tokens — picks smallest
+            (0, [2048, 4096, 8192], 2048),
+            # Between budgets — picks next one up
+            (2049, [2048, 4096, 8192], 4096),
+            (4097, [2048, 4096, 8192], 8192),
+            # Exceeds all budgets — returns None (eager fallback)
+            (9000, [2048, 4096, 8192], None),
+            # Single budget, fits
+            (1000, [2048], 2048),
+            # Single budget, does not fit
+            (3000, [2048], None),
+        ],
+    )
     def test_find_budget(self, total_tokens, budgets, expected):
         mgr = _make_manager_with_budgets(budgets)
         result = mgr._find_smallest_fitting_budget_given_tokens(total_tokens)
@@ -86,21 +91,25 @@ class TestFindBudgetGraph:
 # Token counting helpers
 # ---------------------------------------------------------------------------
 
+
 class TestCountInputPatches:
     """_count_input_patches: T*H*W per image, no spatial merge."""
 
-    @pytest.mark.parametrize("grid_thw_list,expected", [
-        # Single image
-        ([[1, 14, 14]], 196),
-        # Two images
-        ([[1, 14, 14], [1, 28, 28]], 196 + 784),
-        # Video: T>1
-        ([[2, 14, 14]], 2 * 14 * 14),
-        # Mixed video and image
-        ([[2, 8, 8], [1, 4, 4]], 2 * 64 + 16),
-        # Empty batch
-        ([], 0),
-    ])
+    @pytest.mark.parametrize(
+        "grid_thw_list,expected",
+        [
+            # Single image
+            ([[1, 14, 14]], 196),
+            # Two images
+            ([[1, 14, 14], [1, 28, 28]], 196 + 784),
+            # Video: T>1
+            ([[2, 14, 14]], 2 * 14 * 14),
+            # Mixed video and image
+            ([[2, 8, 8], [1, 4, 4]], 2 * 64 + 16),
+            # Empty batch
+            ([], 0),
+        ],
+    )
     def test_count_input_patches(self, grid_thw_list, expected):
         assert _count_input_patches(grid_thw_list) == expected
 
@@ -108,20 +117,23 @@ class TestCountInputPatches:
 class TestCountOutputTokens:
     """_count_output_tokens: T*(H//m)*(W//m) per image, after spatial merge."""
 
-    @pytest.mark.parametrize("grid_thw_list,spatial_merge_size,expected", [
-        # Single image, merge=2: 1 * (14//2) * (14//2) = 49
-        ([[1, 14, 14]], 2, 49),
-        # Two images: 49 + 196
-        ([[1, 14, 14], [1, 28, 28]], 2, 49 + 196),
-        # No merge (merge=1): same as input patches
-        ([[1, 14, 14]], 1, 196),
-        # Video T=2: 2 * 7 * 7 = 98
-        ([[2, 14, 14]], 2, 98),
-        # Larger merge=4: 1 * 3 * 3 = 9
-        ([[1, 12, 12]], 4, 9),
-        # Empty batch
-        ([], 2, 0),
-    ])
+    @pytest.mark.parametrize(
+        "grid_thw_list,spatial_merge_size,expected",
+        [
+            # Single image, merge=2: 1 * (14//2) * (14//2) = 49
+            ([[1, 14, 14]], 2, 49),
+            # Two images: 49 + 196
+            ([[1, 14, 14], [1, 28, 28]], 2, 49 + 196),
+            # No merge (merge=1): same as input patches
+            ([[1, 14, 14]], 1, 196),
+            # Video T=2: 2 * 7 * 7 = 98
+            ([[2, 14, 14]], 2, 98),
+            # Larger merge=4: 1 * 3 * 3 = 9
+            ([[1, 12, 12]], 4, 9),
+            # Empty batch
+            ([], 2, 0),
+        ],
+    )
     def test_count_output_tokens(self, grid_thw_list, spatial_merge_size, expected):
         assert _count_output_tokens(grid_thw_list, spatial_merge_size) == expected
 
@@ -138,23 +150,29 @@ class TestCountOutputTokens:
     def test_merge_1_equals_input_patches(self):
         """With merge=1, output tokens == input patches exactly."""
         grid_thw_list = [[1, 14, 14], [1, 28, 28]]
-        assert _count_output_tokens(grid_thw_list, 1) == _count_input_patches(grid_thw_list)
+        assert _count_output_tokens(grid_thw_list, 1) == _count_input_patches(
+            grid_thw_list
+        )
 
 
 # ---------------------------------------------------------------------------
 # _generate_grid_config_for_budget
 # ---------------------------------------------------------------------------
 
+
 class TestGenerateGridConfig:
     """Grid config generation for CUDA graph capture."""
 
-    @pytest.mark.parametrize("token_budget,max_batch_size,spatial_merge_size", [
-        (2048, 16, 2),
-        (4096, 8,  2),
-        (8192, 16, 2),
-        (13824, 16, 2),
-        (1024, 4,  4),
-    ])
+    @pytest.mark.parametrize(
+        "token_budget,max_batch_size,spatial_merge_size",
+        [
+            (2048, 16, 2),
+            (4096, 8, 2),
+            (8192, 16, 2),
+            (13824, 16, 2),
+            (1024, 4, 4),
+        ],
+    )
     def test_grid_produces_exact_budget(
         self, token_budget, max_batch_size, spatial_merge_size, monkeypatch
     ):
@@ -169,9 +187,7 @@ class TestGenerateGridConfig:
         assert len(grid_config) == max_batch_size
         # Each entry is [T, H, W]; output tokens = T * (H//m) * (W//m)
         m = spatial_merge_size
-        total_output_tokens = sum(
-            t * (h // m) * (w // m) for t, h, w in grid_config
-        )
+        total_output_tokens = sum(t * (h // m) * (w // m) for t, h, w in grid_config)
         assert total_output_tokens == token_budget
 
     def test_grid_entries_are_rectangular(self):
@@ -193,6 +209,7 @@ class TestGenerateGridConfig:
 # ---------------------------------------------------------------------------
 # get_cumulative_stats
 # ---------------------------------------------------------------------------
+
 
 class TestGetCumulativeStats:
     """Statistics tracking and reporting."""
@@ -240,7 +257,7 @@ class TestGetCumulativeStats:
 # Mock encoder parameters (kept small for fast capture)
 _SPATIAL_MERGE = 2
 _HIDDEN = 32
-_PATCH_SIZE = 4           # H/W per patch in grid_thw units
+_PATCH_SIZE = 4  # H/W per patch in grid_thw units
 _TEMPORAL_PATCH = 1
 _IN_CHANNELS = 3
 # flattened_patch_size = in_channels * temporal_patch * patch_size^2
@@ -256,6 +273,7 @@ class SimpleMockViTEncoder(torch.nn.Module):
 
     Implements the interface expected by EncoderCudaGraphManager:
       - spatial_merge_size, out_hidden_size        (attributes)
+      - attn_backend, hidden_size, tp_size         (for _compute_encoder_metadata)
       - patch_embed.proj.in_channels, .patch_size, .temporal_patch_size
       - fast_pos_embed_interpolate(grid_thw_list)  → [n_out, hidden]
       - rot_pos_emb(grid_thw_list)                 → ([n_out, d], [n_out, d])
@@ -267,17 +285,25 @@ class SimpleMockViTEncoder(torch.nn.Module):
 
     spatial_merge_size = _SPATIAL_MERGE
     out_hidden_size = _HIDDEN
+    hidden_size = _HIDDEN
+    tp_size = 1
 
     def __init__(self):
         super().__init__()
         # Fake patch_embed namespace used by _prepare_dummy_inputs
-        PE = type("PE", (), {
-            "proj": type("P", (), {"in_channels": _IN_CHANNELS})(),
-            "patch_size": _PATCH_SIZE,
-            "temporal_patch_size": _TEMPORAL_PATCH,
-        })()
+        PE = type(
+            "PE",
+            (),
+            {
+                "proj": type("P", (), {"in_channels": _IN_CHANNELS})(),
+                "patch_size": _PATCH_SIZE,
+                "temporal_patch_size": _TEMPORAL_PATCH,
+            },
+        )()
         self.patch_embed = PE
         self.proj = torch.nn.Linear(_FLAT, _HIDDEN)
+        # Use FLASH_ATTN as default backend (non-FlashInfer, no transforms)
+        self.attn_backend = AttentionBackendEnum.FLASH_ATTN
 
     def _n_out(self, grid_thw_list: list[list[int]]) -> int:
         m = self.spatial_merge_size
@@ -287,8 +313,9 @@ class SimpleMockViTEncoder(torch.nn.Module):
         self, grid_thw_list: list[list[int]]
     ) -> torch.Tensor:
         p = next(self.parameters())
-        return torch.zeros(self._n_out(grid_thw_list), _HIDDEN,
-                           device=p.device, dtype=p.dtype)
+        return torch.zeros(
+            self._n_out(grid_thw_list), _HIDDEN, device=p.device, dtype=p.dtype
+        )
 
     def rot_pos_emb(
         self, grid_thw_list: list[list[int]]
@@ -307,10 +334,10 @@ class SimpleMockViTEncoder(torch.nn.Module):
     ) -> torch.Tensor:
         # pixel_values: [n_patches, _FLAT]
         # Simulate spatial merge: every m² input patches → 1 output token
-        m2 = self.spatial_merge_size ** 2
-        out = self.proj(pixel_values)       # [n_patches, hidden]
+        m2 = self.spatial_merge_size**2
+        out = self.proj(pixel_values)  # [n_patches, hidden]
         n_out = out.shape[0] // m2
-        return out[:n_out * m2].view(n_out, m2, _HIDDEN).mean(dim=1)
+        return out[: n_out * m2].view(n_out, m2, _HIDDEN).mean(dim=1)
 
 
 def _make_manager_for_gpu(
@@ -349,9 +376,9 @@ def _make_pixel_values(
 # GPU tests — capture, replay, fallback, counters, chunking
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
 class TestEncoderCudaGraphCaptureReplay:
-
     def setup_method(self):
         self.device = torch.device("cuda:0")
         self.dtype = torch.float16
@@ -410,7 +437,7 @@ class TestEncoderCudaGraphCaptureReplay:
         assert self.mgr.graph_hits == 2
 
     def test_miss_counter_increments_by_num_images(self):
-        grid_thw = [[1, 18, 18]]   # 81 tokens > 64
+        grid_thw = [[1, 18, 18]]  # 81 tokens > 64
         pv = _make_pixel_values(grid_thw, self.device, self.dtype)
         self.mgr.execute(pv, grid_thw)
         assert self.mgr.graph_misses == 1
