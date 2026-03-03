@@ -47,7 +47,6 @@ from vllm.model_executor.layers.quantization.utils.humming_weight_utils import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 
-
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
 
@@ -164,9 +163,56 @@ def parse_single_config(config):
 
     quant_method = config["quant_method"]
 
-    if quant_method == "gptq":
+    if quant_method == "compressed-tensors":
+        actorder = config.get("actorder", None)
+        assert actorder is None, "actorder is not supported by humming"
+        has_global_scale = False
+        has_dynamic_zp = False
+        if config["strategy"] == "group":
+            block_shape = (1, config["group_size"])
+        elif config["strategy"] == "tensor":
+            block_shape = (0, 0)
+        elif config["strategy"] == "tensor_group":
+            block_shape = (1, config["group_size"])
+            has_global_scale = True
+        elif config["strategy"] == "channel":
+            block_shape = (1, 0)
+        elif config["strategy"] == "block":
+            block_shape = tuple(config["block_structure"])
+        else:
+            raise ValueError(f"unsupported strategy: {config['strategy']}")
+
+        if not config["symmetric"]:
+            has_dynamic_zp = True
+            assert config["type"] == "int"
+
+        num_bits = config["num_bits"]
+        if config["type"] == "int":
+            b_dtype = dtypes.DataType.from_str("uint" + str(num_bits))
+        elif config["type"] == "float" and num_bits == 8:
+            b_dtype = dtypes.float8e4m3
+        elif config["type"] == "float" and num_bits == 4:
+            b_dtype = dtypes.float4e2m1
+        else:
+            msg = f"unsupported quant type: {config['type']} + bits: {num_bits}"
+            raise ValueError(msg)
+
+        bs_dtype = None
+        if config["format"].startswith("mxfp"):
+            bs_dtype = dtypes.float8e8m0
+        elif config["format"].startswith("nvfp4"):
+            bs_dtype = dtypes.float8e4m3
+
+        result_dict = {
+            "block_shape": block_shape,
+            "has_dynamic_zp": has_dynamic_zp,
+            "has_global_scale": has_global_scale,
+            "b_dtype": b_dtype,
+            "bs_dtype": bs_dtype,
+        }
+    elif quant_method == "gptq":
         desc_act = config.get("desc_act", False)
-        assert not desc_act, "desc_act is not supported by humming"
+        assert not desc_act, "actorder is not supported by humming"
         result_dict = {
             "has_dynamic_zp": not config.get("sym", True),
             "block_shape": (1, config["group_size"]),
@@ -220,6 +266,7 @@ def parse_single_config(config):
     result_dict["weight_scale_group_size_n"] = result_dict["block_shape"][0]
     result_dict["weight_scale_group_size_k"] = result_dict["block_shape"][1]
     result_dict["ckpt_quant_method"] = quant_method
+    result_dict["weight_origin_config"] = config.copy()
 
     return result_dict
 
@@ -255,6 +302,7 @@ class HummingLayerQuantizationConfig(QuantizationConfig):
         has_dynamic_zp: bool,
         has_global_scale: bool,
         is_online_quantization: bool,
+        weight_origin_config: dict[str, Any],
     ) -> None:
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
@@ -268,6 +316,7 @@ class HummingLayerQuantizationConfig(QuantizationConfig):
         self.has_dynamic_zp = has_dynamic_zp
         self.has_global_scale = has_global_scale
         self.is_online_quantization = is_online_quantization
+        self.weight_origin_config = weight_origin_config
 
     @classmethod
     def from_config(cls, config):
@@ -283,6 +332,7 @@ class HummingLayerQuantizationConfig(QuantizationConfig):
             weight_scale_group_size_k=config.get("weight_scale_group_size_k", 0),
             has_dynamic_zp=config.get("has_dynamic_zp", False),
             has_global_scale=config.get("has_global_scale", False),
+            weight_origin_config=config.get("weight_origin_config", {}),
             is_online_quantization=config.get("is_online_quantization", False),
         )
 
@@ -365,6 +415,20 @@ class HummingConfig(QuantizationConfig):
     ) -> dict[str, Any] | None:
         if self.is_layer_skipped(config, prefix):
             return None
+
+        if config["quant_method"] == "compressed-tensors":
+            target_group_config = None
+            for group_config in config["config_groups"].values():
+                if "Linear" in group_config["targets"]:
+                    target_group_config = group_config["weights"].copy()
+                    break
+
+            if target_group_config is None:
+                return None
+            target_group_config.pop("dynamic", None)
+            target_group_config["quant_method"] = "compressed-tensors"
+            target_group_config["format"] = config["format"]
+            config = target_group_config
 
         layer_config = parse_single_config(config)
         for regex, override_config in config.get("dynamic", {}).items():

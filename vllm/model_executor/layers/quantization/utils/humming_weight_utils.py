@@ -99,7 +99,7 @@ class HummingBaseWeightConverter:
         shape_k: int,
         num_experts: int | None = None,
     ) -> dict[str, torch.Tensor]:
-        assert tensor.dtype == torch.int32
+        assert tensor.dtype == torch.float32
         self._check_shape(tensor, (1,), num_experts)
         return {"global_scale": tensor}
 
@@ -298,6 +298,8 @@ class HummingFp8WeightConverter(HummingBaseWeightConverter):
         if self.quant_config.weight_scale_group_size_n > 1:
             group_size_n = self.quant_config.weight_scale_group_size_n
             tensor = tensor.repeat_interleave(group_size_n, -2)
+        elif self.quant_config.weight_scale_group_size_n == 0:
+            tensor = tensor.repeat_interleave(shape_n, -2)
         tensor = tensor.to(torch.bfloat16)
         assert tensor.size(0) == shape_n
         return super().convert_weight_scale(tensor, shape_n, shape_k, num_experts)
@@ -383,6 +385,57 @@ class HummingBitnetWeightConverter(HummingBaseWeightConverter):
         return super().convert_weight_scale(tensor, shape_n, shape_k, num_experts)
 
 
+class HummingCompressedTensorsWeightConverter(HummingBaseWeightConverter):
+    ckpt_weight_scale_name: str = "weight_scale"
+    ckpt_zero_point_name: str = "weight_zero_point"
+    ckpt_global_scale_name: str = "weight_global_scale"
+    unused_names: tuple[str] = ("weight_g_idx", "weight_shape")
+
+    def __init__(self, quant_config):
+        super().__init__(quant_config)
+        self.format = self.quant_config.weight_origin_config.get("format", "")
+        if "pack" in self.format:
+            self.ckpt_weight_name = "weight_packed"
+
+    def convert_weight(
+        self,
+        tensor: torch.Tensor,
+        shape_n: int,
+        shape_k: int,
+        num_experts: int | None = None,
+    ) -> dict[str, torch.Tensor]:
+        tensor = tensor.view(torch.int32)
+        return super().convert_weight(tensor, shape_n, shape_k, num_experts)
+
+    def convert_weight_scale(
+        self,
+        tensor: torch.Tensor,
+        shape_n: int,
+        shape_k: int,
+        num_experts: int | None = None,
+    ) -> dict[str, torch.Tensor]:
+        if self.format.startswith("mxfp"):
+            tensor = tensor.view(torch.float8_e8m0fnu)
+        elif self.format.startswith("nvfp4"):
+            tensor = tensor.view(torch.float8_e4m3fn)
+        if self.quant_config.weight_scale_group_size_n > 1:
+            group_size_n = self.quant_config.weight_scale_group_size_n
+            tensor = tensor.repeat_interleave(group_size_n, -2)
+        elif self.quant_config.weight_scale_group_size_n == 0:
+            tensor = tensor.repeat_interleave(shape_n, -2)
+        return super().convert_weight_scale(tensor, shape_n, shape_k, num_experts)
+
+    def convert_global_scale(
+        self,
+        tensor: torch.Tensor,
+        shape_n: int,
+        shape_k: int,
+        num_experts: int | None = None,
+    ) -> dict[str, torch.Tensor]:
+        tensor = 1 / tensor
+        return super().convert_global_scale(tensor, shape_n, shape_k, num_experts)
+
+
 WEIGHT_CONVERTER_MAP: dict[str | None, type[HummingBaseWeightConverter]] = {
     "gptq": HummingGPTQWeightConverter,
     "awq": HummingAWQWeightConverter,
@@ -390,5 +443,6 @@ WEIGHT_CONVERTER_MAP: dict[str | None, type[HummingBaseWeightConverter]] = {
     "modelopt": HummingModeloptWeightConverter,
     "mxfp4": HummingMxfp4WeightConverter,
     "bitnet": HummingBitnetWeightConverter,
+    "compressed-tensors": HummingCompressedTensorsWeightConverter,
     None: HummingUnquantizedWeightConverter,
 }
