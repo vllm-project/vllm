@@ -2479,6 +2479,7 @@ class GPUModelRunner(
                         micro_batch_outputs = model.embed_multimodal(
                             **micro_batch_mm_inputs
                         )
+
                         curr_group_outputs_lst.extend(micro_batch_outputs)
 
                 curr_group_outputs = curr_group_outputs_lst
@@ -2490,6 +2491,7 @@ class GPUModelRunner(
                 # 2. A list or tuple (length: num_items) of tensors,
                 # each of shape (feature_size, hidden_size) in case the feature
                 # size is dynamic depending on the input multimodal items.
+
                 with self.timed_encoder_operation(
                     should_time, mm_lora_refs, current_item_idx, num_items
                 ):

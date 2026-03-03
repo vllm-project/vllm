@@ -1,14 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
-from typing import cast
-
 import numpy as np
 import torch
 
-from vllm.model_executor.models.interfaces import (
-    SupportsMultiModal,
-)
+from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
@@ -66,7 +61,7 @@ class EncoderRunner:
                 curr_group_outputs,
                 expected_num_items=num_items,
             )
-            encoder_outputs.extend(cast(Iterable[torch.Tensor], curr_group_outputs))
+            encoder_outputs.extend(curr_group_outputs)
         return encoder_outputs
 
     def gather_mm_embeddings(

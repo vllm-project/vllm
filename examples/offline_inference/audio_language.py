@@ -594,7 +594,6 @@ def main(args):
     )
 
     engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
-
     if args.tensor_parallel_size is not None:
         engine_args["tensor_parallel_size"] = args.tensor_parallel_size
     llm = LLM(**engine_args)
