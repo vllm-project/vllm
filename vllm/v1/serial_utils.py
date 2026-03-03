@@ -8,7 +8,7 @@ from collections.abc import Callable, Sequence
 from functools import partial
 from inspect import isclass
 from types import FunctionType
-from typing import Any, ClassVar, TypeAlias, get_type_hints
+from typing import Any, ClassVar, TypeAlias, cast, get_type_hints
 
 import cloudpickle
 import msgspec
@@ -551,7 +551,10 @@ class PydanticMsgspecMixin:
         if not isinstance(raw, dict):
             return raw
 
-        exclude = getattr(type(value), "__pydantic_msgspec_exclude__", set())
+        exclude: set[str] = cast(
+            set[str],
+            getattr(type(value), "__pydantic_msgspec_exclude__", set()),
+        )
         for key in list(raw):
             if key.startswith("_") or key in exclude:
                 del raw[key]
