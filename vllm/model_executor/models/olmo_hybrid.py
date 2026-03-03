@@ -529,7 +529,7 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
                 None,
                 self.activation,
                 conv_state_indices=non_spec_state_indices_tensor[
-                    : attn_metadata.num_actual_tokens
+                    : attn_metadata.num_decodes
                 ],
                 validate_data=True,
             )
@@ -799,12 +799,11 @@ class OlmoHybridDecoderLayer(nn.Module):
                 speculative_config=speculative_config,
                 prefix=f"{prefix}.linear_attn",
             )
-            # FLA layers use these norm names
-            self.attention_layer_norm = RMSNorm(
+            self.input_layernorm = RMSNorm(
                 config.hidden_size,
                 eps=config.rms_norm_eps,
             )
-            self.feedforward_layer_norm = RMSNorm(
+            self.post_attention_layernorm = RMSNorm(
                 config.hidden_size,
                 eps=config.rms_norm_eps,
             )
@@ -834,30 +833,65 @@ class OlmoHybridDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         if self.layer_type == "linear_attention":
-            residual = hidden_states
-            hidden_states = self.attention_layer_norm(hidden_states)
+            try:
+                residual = hidden_states
+                logger.error("Layer %d: before input_layernorm", self.layer_idx)
+                torch.cuda.synchronize()
+                hidden_states = self.input_layernorm(hidden_states)
+                logger.error("Layer %d: after input_layernorm", self.layer_idx)
+                torch.cuda.synchronize()
+                logger.error("Layer %d: after input_layernorm sync", self.layer_idx)
 
-            attn_output = torch.empty_like(hidden_states)
-            self.linear_attn(
-                hidden_states=hidden_states,
-                output=attn_output,
-            )
-            hidden_states = residual + attn_output
+                attn_output = torch.empty_like(hidden_states)
+                self.linear_attn(
+                    hidden_states=hidden_states,
+                    output=attn_output,
+                )
+                logger.error("Layer %d: after linear_attn", self.layer_idx)
+                torch.cuda.synchronize()
+                logger.error("Layer %d: after linear_attn sync", self.layer_idx)
+                hidden_states = residual + attn_output
 
-            residual = hidden_states
-            hidden_states = self.feedforward_layer_norm(hidden_states)
-            hidden_states = self.mlp(hidden_states)
-            hidden_states = residual + hidden_states
+                residual = hidden_states
+                hidden_states = self.post_attention_layernorm(hidden_states)
+                logger.error("Layer %d: after post_attn_norm", self.layer_idx)
+                torch.cuda.synchronize()
+                logger.error("Layer %d: after post_attn_norm sync", self.layer_idx)
+                hidden_states = self.mlp(hidden_states)
+                logger.error("Layer %d: after mlp", self.layer_idx)
+                torch.cuda.synchronize()
+                logger.error("Layer %d: after mlp sync", self.layer_idx)
+                hidden_states = residual + hidden_states
+            except Exception as e:
+                logger.error(
+                    "Layer %d (linear) forward failed: %s", self.layer_idx, e
+                )
+                raise
         else:
-            residual = hidden_states
-            hidden_states = self.self_attn(positions, hidden_states)
-            hidden_states = self.post_attention_layernorm(hidden_states)
-            hidden_states = residual + hidden_states
+            try:
+                residual = hidden_states
+                torch.cuda.synchronize()
+                hidden_states = self.self_attn(positions, hidden_states)
+                torch.cuda.synchronize()
+                hidden_states = self.post_attention_layernorm(hidden_states)
+                torch.cuda.synchronize()
+                hidden_states = residual + hidden_states
+                torch.cuda.synchronize()
 
-            residual = hidden_states
-            hidden_states = self.mlp(hidden_states)
-            hidden_states = self.post_feedforward_layernorm(hidden_states)
-            hidden_states = residual + hidden_states
+                residual = hidden_states
+                hidden_states = self.mlp(hidden_states)
+                torch.cuda.synchronize()
+                hidden_states = self.post_feedforward_layernorm(hidden_states)
+                torch.cuda.synchronize()
+                hidden_states = residual + hidden_states
+                torch.cuda.synchronize()
+            except Exception as e:
+                logger.error(
+                    "Layer %d (full_attn) forward failed: %s",
+                    self.layer_idx,
+                    e,
+                )
+                raise
         return hidden_states
 
 
