@@ -13,23 +13,25 @@ logger = init_logger(__name__)
 router = APIRouter()
 
 
-@router.post("/internal/nixl/lease_refresh")
-async def nixl_lease_refresh(raw_request: Request) -> Response:
+@router.post("/internal/kv_connector_refresh_lease")
+async def kv_connector_refresh_lease(raw_request: Request) -> Response:
     """Receive KV lease refresh requests from D workers.
 
     D workers POST here periodically while requests are queued, before the
-    NIXL transfer begins, to prevent P from expiring and freeing KV blocks
+    KV transfer begins, to prevent P from expiring and freeing KV blocks
     prematurely.
     """
     try:
         body = await raw_request.json()
-        request_ids: list[str] = body.get("request_ids", [])
+        request_id: str = body.get("request_id")
     except (json.JSONDecodeError, Exception) as e:
-        logger.warning("nixl_lease_refresh: failed to parse request body: %s", e)
+        logger.warning(
+            "kv_connector_refresh_lease: failed to parse request body: %s", e
+        )
         return Response(status_code=400)
 
     engine_client = raw_request.app.state.engine_client
-    await engine_client.call_utility_async("nixl_lease_refresh", request_ids)
+    await engine_client.call_utility_async("kv_connector_refresh_lease", request_id)
     return Response(status_code=200)
 
 
