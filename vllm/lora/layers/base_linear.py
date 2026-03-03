@@ -13,8 +13,7 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.platforms import current_platform
-from vllm.utils.torch_utils import aux_stream, current_stream, direct_register_custom_op
+from vllm.utils.torch_utils import current_stream, direct_register_custom_op
 
 from .base import BaseLayerWithLoRA
 from .utils import _get_lora_device
@@ -39,9 +38,10 @@ def _lora_apply_impl(
         device=x.device,
     )
 
-    layer.lora_stream.wait_stream(current_stream())
-    lora_delta.record_stream(layer.lora_stream)
-    with torch.cuda.stream(layer.lora_stream):
+    lora_stream = layer.punica_wrapper.lora_stream
+    lora_stream.wait_stream(current_stream())
+    lora_delta.record_stream(lora_stream)
+    with torch.cuda.stream(lora_stream):
         output = layer.base_layer.quant_method.apply(layer.base_layer, x, bias)
         output_flat = output.flatten(0, 1) if output.ndim == 3 else output
     layer.punica_wrapper.add_lora_linear(
@@ -53,7 +53,7 @@ def _lora_apply_impl(
         layer.output_slices,
     )
 
-    current_stream().wait_stream(layer.lora_stream)
+    current_stream().wait_stream(lora_stream)
     output_flat.add_(lora_delta)
 
     return output_flat
@@ -98,8 +98,6 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self._layer_key = f"lora_{_layer_counter}"
         _layer_counter += 1
         _lora_layer_registry[self._layer_key] = self
-
-        self.lora_stream = aux_stream()
 
     def create_lora_weights(
         self,
@@ -188,7 +186,6 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             lora_b, non_blocking=True
         )
 
-    """
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         original_shape = x.shape if x.ndim == 3 else None
         x_flat = x.flatten(0, 1) if x.ndim == 3 else x
@@ -225,6 +222,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.reshape(original_shape)
 
         return output
+
+    """
 
     @property
     def weight(self) -> torch.Tensor:
