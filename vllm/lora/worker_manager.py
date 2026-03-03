@@ -130,16 +130,13 @@ class WorkerLoRAManager:
                 skip_prefixes=lora_skip_prefixes,
             )
 
-            # Warn about adapter modules not targeted by the model.
-            # Module names in the adapter are full paths like
-            # "model.layers.0.self_attn.o_proj", while
-            # supported_lora_modules contains short suffixes like
-            # "o_proj", so we check with endswith.
+            # Warn about adapter modules that will be ignored.
+            # Use the same suffix-matching logic as _match_target_modules:
+            # take the last segment of the dot-separated module name.
+            target_modules = self.lora_config.target_modules
             for module_name in lora.loras:
-                if not any(
-                    module_name.endswith(f".{suffix}")
-                    for suffix in supported_lora_modules
-                ):
+                module_suffix = module_name.split(".")[-1]
+                if module_suffix not in supported_lora_modules:
                     logger.warning_once(
                         "LoRA module '%s' in adapter '%s' is not in the "
                         "model's supported LoRA target modules [%s]. "
@@ -148,6 +145,15 @@ class WorkerLoRAManager:
                         module_name,
                         lora_request.lora_path,
                         ", ".join(sorted(supported_lora_modules)),
+                    )
+                elif target_modules is not None and module_suffix not in target_modules:
+                    logger.warning_once(
+                        "LoRA module '%s' in adapter '%s' is not in the "
+                        "deployment-time target_modules restriction [%s]. "
+                        "These parameters will be ignored.",
+                        module_name,
+                        lora_request.lora_path,
+                        ", ".join(sorted(target_modules)),
                     )
 
         except FileNotFoundError as e:
