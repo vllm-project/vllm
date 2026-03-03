@@ -1277,7 +1277,13 @@ class OpenAIServingResponses(OpenAIServing):
                     for m in prev_messages
                 ]
             else:
-                prev_msgs = self.msg_store[prev_response.id]
+                prev_msgs = self.msg_store.get(prev_response.id)
+                if prev_msgs is None:
+                    raise ValueError(
+                        f"No stored messages found for response "
+                        f"'{prev_response.id}'. The response may have "
+                        f"expired or the store may be inconsistent."
+                    )
 
             # FIXME(woosuk): The slice-delete-reappend cycle below is
             # currently a no-op --- it removes messages then puts them all
