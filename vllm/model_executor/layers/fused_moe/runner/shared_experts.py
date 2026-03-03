@@ -104,14 +104,6 @@ class SharedExperts:
             and self._shared_experts is not None
         )
 
-    @property
-    def _must_reduce_shared_expert_outputs(self) -> bool:
-        return (
-            self._reduce_results
-            and self._quant_method.moe_kernel is not None
-            and self._quant_method.moe_kernel.output_is_reduced()
-        )
-
     def _determine_shared_experts_order(
         self,
         hidden_states: torch.Tensor,
@@ -180,21 +172,23 @@ class SharedExperts:
 
         return output
 
-    def _maybe_reduce_shared_out(self, shared_out: torch.Tensor) -> torch.Tensor:
-        # Reduce shared expert outputs if necessary, since the MLP
-        # should have been created with reduce_results=False.
+    def _maybe_reduce_shared_output(self, output: torch.Tensor) -> torch.Tensor:
         if (
-            self._must_reduce_shared_expert_outputs
+            self._reduce_results
+            and not self._moe_config.is_sequence_parallel
+            and not self._use_dp_chunking
             and get_tensor_model_parallel_world_size() > 1
         ):
-            shared_out = tensor_model_parallel_all_reduce(shared_out)
-        return shared_out
+            output = tensor_model_parallel_all_reduce(output)
+        return output
 
     @property
     def output(self) -> torch.Tensor | None:
         assert (self._shared_experts is None) == (self._output is None)
         output = self._output
         self._output = None
+        if output is not None:
+            output = self._maybe_reduce_shared_output(output)
         return output
 
     def apply(
@@ -216,11 +210,3 @@ class SharedExperts:
             self._output = self._call_with_shared_experts_stream(shared_experts_input)
         else:
             self._output = self._shared_experts(shared_experts_input)
-
-        if order == SharedExpertsOrder.EXTERNAL:
-            # TODO: figure out how to combine this with maybe_reduce_output?
-            # or get rid of it completely.
-            assert self._output is not None
-            self._output = self._maybe_reduce_shared_out(self._output)
-
-        # TODO(bnell): potentially do AFTER reduce here instead of in runner.
