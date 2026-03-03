@@ -33,7 +33,8 @@ from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group
+from vllm.distributed.parallel_state import get_attention_tp_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
     Attention,
@@ -139,20 +140,22 @@ class LlamaAttention(nn.Module):
         super().__init__()
         layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
+        # Use attention TP (TPA) for head sharding. When TPA < TP, attention
+        # heads are distributed by TPA while FFN uses full TP.
+        attn_tp_size = get_attention_tp_world_size()
         self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
+        assert self.total_num_heads % attn_tp_size == 0
+        self.num_heads = self.total_num_heads // attn_tp_size
         self.total_num_kv_heads = num_kv_heads
-        if self.total_num_kv_heads >= tp_size:
+        if self.total_num_kv_heads >= attn_tp_size:
             # Number of KV heads is greater than TP size, so we partition
             # the KV heads across multiple tensor parallel GPUs.
-            assert self.total_num_kv_heads % tp_size == 0
+            assert self.total_num_kv_heads % attn_tp_size == 0
         else:
             # Number of KV heads is less than TP size, so we replicate
             # the KV heads across multiple tensor parallel GPUs.
-            assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+            assert attn_tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // attn_tp_size)
 
         head_dim = getattr(config, "head_dim", None)
         self.head_dim = head_dim or self.hidden_size // self.total_num_heads
