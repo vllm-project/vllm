@@ -62,6 +62,22 @@ def sanitize_harmony_name(name: str) -> str:
     return name[:earliest].rstrip()
 
 
+def sanitize_harmony_recipient(recipient: str) -> str:
+    """Sanitize a structured recipient name (e.g. ``browser.search``).
+
+    Splits on ``'.'``, sanitizes each part individually with
+    :func:`sanitize_harmony_name`, filters out parts that became empty,
+    and rejoins.  This preserves the dotted structure while removing
+    control tokens from any component.
+
+    Example: ``browser<|channel|>.search`` → ``browser.search``
+    """
+    parts = recipient.split(".")
+    sanitized_parts = [sanitize_harmony_name(part) for part in parts]
+    sanitized_parts = [p for p in sanitized_parts if p]
+    return ".".join(sanitized_parts)
+
+
 class ResilientStreamableParser:
     """Wrapper around ``StreamableParser`` that recovers from two common
     malformed-output patterns produced by GPT-OSS models:
@@ -117,7 +133,12 @@ class ResilientStreamableParser:
 
     @property
     def messages(self):
-        return self._inner.messages
+        msgs = self._inner.messages
+        for msg in msgs:
+            if msg.recipient is not None:
+                sanitized = sanitize_harmony_recipient(msg.recipient)
+                msg.recipient = sanitized if sanitized else None
+        return msgs
 
     @property
     def current_content(self):
@@ -131,7 +152,7 @@ class ResilientStreamableParser:
     def current_recipient(self):
         raw = self._inner.current_recipient
         if raw is not None:
-            sanitized = sanitize_harmony_name(raw)
+            sanitized = sanitize_harmony_recipient(raw)
             return sanitized if sanitized else None
         return raw
 

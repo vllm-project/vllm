@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_chat_input_to_harmony_message,
     parse_chat_output,
     sanitize_harmony_name,
+    sanitize_harmony_recipient,
 )
 from vllm.entrypoints.openai.responses.harmony import (
     response_input_to_harmony,
@@ -961,6 +962,50 @@ class TestSanitizeHarmonyName:
         assert sanitize_harmony_name("tool_name  <|end|>") == "tool_name"
 
 
+class TestSanitizeHarmonyRecipient:
+    """Tests for sanitize_harmony_recipient()."""
+
+    def test_clean_dotted_name_unchanged(self) -> None:
+        assert sanitize_harmony_recipient("browser.search") == "browser.search"
+
+    def test_clean_simple_name_unchanged(self) -> None:
+        assert sanitize_harmony_recipient("python") == "python"
+
+    def test_contaminated_first_part_preserved_structure(self) -> None:
+        """browser<|channel|>.search → browser.search"""
+        assert (
+            sanitize_harmony_recipient("browser<|channel|>.search") == "browser.search"
+        )
+
+    def test_contaminated_second_part(self) -> None:
+        """browser.search<|end|>garbage → browser.search"""
+        assert (
+            sanitize_harmony_recipient("browser.search<|end|>garbage")
+            == "browser.search"
+        )
+
+    def test_pure_control_token_returns_empty(self) -> None:
+        assert sanitize_harmony_recipient("<|constrain|>json") == ""
+
+    def test_functions_dotted_contaminated(self) -> None:
+        """functions.get_weather<|channel|>commentary → functions.get_weather"""
+        assert (
+            sanitize_harmony_recipient(
+                "functions.get_weather<|channel|>commentary"
+            )
+            == "functions.get_weather"
+        )
+
+    def test_empty_string(self) -> None:
+        assert sanitize_harmony_recipient("") == ""
+
+    def test_container_dotted_contaminated(self) -> None:
+        """container<|channel|>.exec → container.exec"""
+        assert (
+            sanitize_harmony_recipient("container<|channel|>.exec") == "container.exec"
+        )
+
+
 class TestResilientStreamableParser:
     """Tests for ResilientStreamableParser error recovery."""
 
@@ -1046,4 +1091,36 @@ class TestResilientStreamableParser:
         assert len(parser.messages) == 2
         assert parser.messages[0].content[0].text == "First."
 
+    def test_messages_recipients_sanitized(self) -> None:
+        """Messages returned by .messages should have sanitized recipients,
+        preventing contaminated history in multi-turn interactions."""
+        encoding = get_encoding()
+        # Build a tool call message with a contaminated recipient
+        harmony_str = (
+            "<|channel|>commentary"
+            "<|message|>Let me search.<|end|>"
+            "<|start|>assistant to=functions.get_weather<|channel|>commentary"
+            '<|constrain|>json<|message|>{"loc": "SF"}<|end|>'
+        )
+        token_ids = encoding.encode(harmony_str, allowed_special="all")
+
+        parser = get_streamable_parser_for_assistant()
+        for tok in token_ids:
+            parser.process(tok)
+
+        msgs = parser.messages
+        # All recipients should be clean (no control tokens)
+        for msg in msgs:
+            if msg.recipient is not None:
+                for tok_str in (
+                    "<|channel|>",
+                    "<|constrain|>",
+                    "<|start|>",
+                    "<|end|>",
+                    "<|message|>",
+                ):
+                    assert tok_str not in msg.recipient, (
+                        f"Leaked control token {tok_str!r} "
+                        f"in message recipient: {msg.recipient!r}"
+                    )
 

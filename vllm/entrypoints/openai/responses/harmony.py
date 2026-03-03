@@ -33,6 +33,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     BUILTIN_TOOL_TO_MCP_SERVER_LABEL,
     flatten_chat_text_content,
     sanitize_harmony_name,
+    sanitize_harmony_recipient,
 )
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
@@ -424,7 +425,7 @@ def harmony_to_response_output(message: Message) -> list[ResponseOutputItem]:
     output_items: list[ResponseOutputItem] = []
     recipient = message.recipient
     if recipient is not None:
-        recipient = sanitize_harmony_name(recipient)
+        recipient = sanitize_harmony_recipient(recipient)
         if not recipient:
             recipient = None
 
@@ -465,10 +466,6 @@ def parser_state_to_response_output(
     if parser.current_role != Role.ASSISTANT:
         return []
     current_recipient = parser.current_recipient
-    if current_recipient is not None:
-        current_recipient = sanitize_harmony_name(current_recipient)
-        if not current_recipient:
-            current_recipient = None
     if current_recipient is not None and current_recipient.startswith("browser."):
         return []
 
