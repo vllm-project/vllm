@@ -23,7 +23,6 @@ from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
 from vllm.model_executor.models.interfaces import SupportsMultiModal
-from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
@@ -88,8 +87,7 @@ class SpecDecodeBaseProposer:
         # Unifying eagle, draft model, and parallel drafting support
         # DFlash always uses parallel drafting (all tokens in one pass)
         self.parallel_drafting: bool = (
-            self.speculative_config.parallel_drafting
-            or self.method == "dflash"
+            self.speculative_config.parallel_drafting or self.method == "dflash"
         )
         self.extra_slots_per_request = (
             1 if not self.parallel_drafting else self.num_speculative_tokens
@@ -491,12 +489,8 @@ class SpecDecodeBaseProposer:
         if self.method == "dflash":
             num_context = self._dflash_num_context
             num_all_positions = self._dflash_num_positions
-            model_kwargs["hidden_states"] = (
-                self.hidden_states[:num_context]
-            )
-            model_kwargs["positions"] = (
-                self._get_positions(num_all_positions)
-            )
+            model_kwargs["hidden_states"] = self.hidden_states[:num_context]
+            model_kwargs["positions"] = self._get_positions(num_all_positions)
 
         # DFlash slot_mapping needs to cover all K/V tokens (context + query)
         if self.method == "dflash":
@@ -791,12 +785,9 @@ class SpecDecodeBaseProposer:
                 q_start = num_context + i * num_query_per_req
                 q_end = q_start + num_query_per_req
                 q_block_nums = block_numbers[q_start:q_end]
-                q_block_ids = cad.block_table_tensor[i].gather(
-                    0, q_block_nums.long()
-                )
+                q_block_ids = cad.block_table_tensor[i].gather(0, q_block_nums.long())
                 slot_mapping[q_start:q_end] = (
-                    q_block_ids * block_size
-                    + all_positions[q_start:q_end] % block_size
+                    q_block_ids * block_size + all_positions[q_start:q_end] % block_size
                 )
 
             # 5. Token indices to sample: mask positions in query output
@@ -810,22 +801,18 @@ class SpecDecodeBaseProposer:
             for i in range(batch_size):
                 base = i * num_query_per_req
                 for j in range(self.num_speculative_tokens):
-                    token_indices_to_sample[
-                        i * self.num_speculative_tokens + j
-                    ] = base + 1 + j
+                    token_indices_to_sample[i * self.num_speculative_tokens + j] = (
+                        base + 1 + j
+                    )
 
             # 6. Build attention metadata for the query tokens.
             # DFlash uses non-causal attention.
-            new_query_start_loc = (
-                self.arange[: batch_size + 1] * num_query_per_req
-            )
+            new_query_start_loc = self.arange[: batch_size + 1] * num_query_per_req
             new_cad = CommonAttentionMetadata(
                 query_start_loc=new_query_start_loc,
                 seq_lens=cad.seq_lens + num_query_per_req,
                 query_start_loc_cpu=(
-                    torch.from_numpy(
-                        self.token_arange_np[: batch_size + 1]
-                    ).clone()
+                    torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone()
                     * num_query_per_req
                 ),
                 _seq_lens_cpu=None,
@@ -1458,6 +1445,23 @@ class SpecDecodeBaseProposer:
         self._maybe_share_embeddings(target_language_model)
         self._maybe_share_lm_head(target_language_model)
 
+        # Initialize mask_hidden from embed_tokens if deferred during
+        # load_weights (embed_tokens wasn't available until after sharing).
+        mask_token_id = getattr(self.model, "_mask_token_id", None)
+        if mask_token_id is not None:
+            with torch.no_grad():
+                token_id = torch.tensor(
+                    [mask_token_id],
+                    device=self.model.mask_hidden.device,
+                )
+                embed = self.model.model.embed_tokens(token_id).squeeze(0)
+                self.model.mask_hidden.copy_(embed.unsqueeze(0))
+            logger.info(
+                "Initialized mask_hidden from embed_tokens[%d].",
+                mask_token_id,
+            )
+            del self.model._mask_token_id
+
         if self.parallel_drafting and self.pass_hidden_states_to_model:
             assert self.parallel_drafting_hidden_state_tensor is not None
             flat_mask = self.model.mask_hidden.view(-1)
@@ -1646,15 +1650,13 @@ class SpecDecodeBaseProposer:
         if self.method == "dflash":
             num_query = min(num_tokens, self._dflash_extra_tokens)
             num_positions = num_tokens + num_query
-            num_tokens_dp_padded, num_tokens_across_dp = (
-                self._pad_batch_across_dp(
-                    num_tokens_unpadded=num_query,
-                    num_tokens_padded=num_query,
-                )
+            num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
+                num_tokens_unpadded=num_query,
+                num_tokens_padded=num_query,
             )
             if use_cudagraphs:
-                cudagraph_runtime_mode, batch_desc = (
-                    self.cudagraph_dispatcher.dispatch(num_tokens_dp_padded)
+                cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
+                    num_tokens_dp_padded
                 )
                 num_input_tokens = batch_desc.num_tokens
             else:
@@ -1677,9 +1679,7 @@ class SpecDecodeBaseProposer:
                     inputs_embeds=None,
                 )
                 if self.pass_hidden_states_to_model:
-                    kwargs["hidden_states"] = (
-                        self.hidden_states[:num_tokens]
-                    )
+                    kwargs["hidden_states"] = self.hidden_states[:num_tokens]
                 self.model(**kwargs)
             return
 

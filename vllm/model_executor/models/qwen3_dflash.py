@@ -7,10 +7,10 @@ import torch
 from torch import nn
 from transformers import Qwen3Config
 
-from vllm.model_executor.layers.attention import Attention
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -36,7 +36,6 @@ from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen3 import Qwen3ForCausalLM
 from .utils import (
     AutoWeightsLoader,
-    extract_layer_index,
     get_draft_quant_config,
     maybe_prefix,
     process_eagle_weight,
@@ -129,12 +128,8 @@ class DFlashQwen3Attention(nn.Module):
         qkv, _ = self.qkv_proj(concat_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        q_by_head = q.view(
-            *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
-        )
-        k_by_head = k.view(
-            *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
-        )
+        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
         q = self.q_norm(q_by_head).view(q.shape)
         k = self.k_norm(k_by_head).view(k.shape)
 
@@ -184,9 +179,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
@@ -199,9 +192,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is not None:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual
-            )
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
         else:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -212,9 +203,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
             context_states=context_states,
         )
 
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual
-        )
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
@@ -228,19 +217,14 @@ class DFlashQwen3Model(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.config = (
-            vllm_config.speculative_config.draft_model_config.hf_config
-        )
+        self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
 
         drafter_config = getattr(self.config, "eagle_config", {})
         drafter_config.update(getattr(self.config, "dflash_config", {}))
 
-        if (
-            drafter_config is not None
-            and "use_aux_hidden_state" in drafter_config
-        ):
+        if drafter_config is not None and "use_aux_hidden_state" in drafter_config:
             self.use_aux_hidden_state = drafter_config["use_aux_hidden_state"]
         else:
             self.use_aux_hidden_state = True
@@ -257,9 +241,7 @@ class DFlashQwen3Model(nn.Module):
             [
                 DFlashQwen3DecoderLayer(
                     current_vllm_config,
-                    prefix=maybe_prefix(
-                        prefix, f"layers.{layer_idx + start_layer_id}"
-                    ),
+                    prefix=maybe_prefix(prefix, f"layers.{layer_idx + start_layer_id}"),
                     config=self.config,
                 )
                 for layer_idx in range(self.config.num_hidden_layers)
@@ -272,9 +254,7 @@ class DFlashQwen3Model(nn.Module):
             elif "layer_ids" in drafter_config:
                 num_features_to_use = len(drafter_config["layer_ids"])
             if hasattr(self.config, "target_hidden_size"):
-                fc_input_size = (
-                    self.config.target_hidden_size * num_features_to_use
-                )
+                fc_input_size = self.config.target_hidden_size * num_features_to_use
             else:
                 fc_input_size = self.config.hidden_size * num_features_to_use
             self.fc = ReplicatedLinear(
@@ -323,9 +303,7 @@ class DFlashQwen3Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
@@ -342,13 +320,9 @@ class DFlashQwen3Model(nn.Module):
                 scale_name := self.quant_config.get_cache_scale(name)
             ):
                 param = params_dict[scale_name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 loaded_weight = (
-                    loaded_weight
-                    if loaded_weight.dim() == 0
-                    else loaded_weight[0]
+                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
                 )
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
@@ -367,9 +341,7 @@ class DFlashQwen3Model(nn.Module):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -378,13 +350,9 @@ class DFlashQwen3Model(nn.Module):
 class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        self.config = (
-            vllm_config.speculative_config.draft_model_config.hf_config
-        )
+        self.config = vllm_config.speculative_config.draft_model_config.hf_config
         if getattr(self.config, "draft_vocab_size", None) is None:
-            self.config.draft_vocab_size = getattr(
-                self.config, "vocab_size", None
-            )
+            self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
@@ -439,9 +407,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         if self.draft_id_to_target_id is None:
             return logits
 
-        base = torch.arange(
-            self.config.draft_vocab_size, device=logits.device
-        )
+        base = torch.arange(self.config.draft_vocab_size, device=logits.device)
         targets = base + self.draft_id_to_target_id
         logits_new = logits.new_full(
             (logits.shape[0], self.config.vocab_size),
@@ -508,14 +474,6 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
                     "mask_hidden not found in weights and "
                     "mask_token_id not set in dflash_config."
                 )
-            with torch.no_grad():
-                token_id = torch.tensor(
-                    [mask_token_id],
-                    device=self.mask_hidden.device,
-                )
-                embed = self.model.embed_tokens(token_id).squeeze(0)
-                self.mask_hidden.copy_(embed.unsqueeze(0))
-            logger.info(
-                "Initialized mask_hidden from embed_tokens[%d].",
-                mask_token_id,
-            )
+            # Defer initialization until after embeddings are shared
+            # from the target model (see eagle.py load_model).
+            self._mask_token_id = mask_token_id
