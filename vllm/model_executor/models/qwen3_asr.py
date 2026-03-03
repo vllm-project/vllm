@@ -31,6 +31,7 @@ import torch.nn as nn
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.whisper import WhisperFeatureExtractor
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs.data import PromptType, TokensPrompt
@@ -261,6 +262,14 @@ class Qwen3ASRMultiModalProcessor(
     Qwen3ASRMultiModalProcessor,
     info=Qwen3ASRProcessingInfo,
     dummy_inputs=Qwen3ASRDummyInputsBuilder,
+)
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": -1,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    }
 )
 class Qwen3ASRForConditionalGeneration(
     nn.Module,
