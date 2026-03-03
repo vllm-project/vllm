@@ -105,38 +105,28 @@ def kernel_unified_attention_2d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     block_q_seq_boundaries_ptr,  # [num_seqs+1]
-    only_decode,  # bool
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
-    if only_decode:
-        seq_idx = tl.program_id(0)
-        kv_head_idx = tl.program_id(1)
+    q_block_global_idx = tl.program_id(0)
+    kv_head_idx = tl.program_id(1)
 
-        q_block_local_idx = 0
-        cur_batch_in_all_start_index = seq_idx
-        cur_batch_query_len = 1
+    seq_idx = find_seq_idx(
+        block_q_seq_boundaries_ptr, q_block_global_idx, num_seqs, BLOCK_Q, False
+    )
 
-    else:
-        q_block_global_idx = tl.program_id(0)
-        kv_head_idx = tl.program_id(1)
+    q_block_start_idx = tl.load(block_q_seq_boundaries_ptr + seq_idx)
 
-        seq_idx = find_seq_idx(
-            block_q_seq_boundaries_ptr, q_block_global_idx, num_seqs, BLOCK_Q, False
-        )
+    q_block_local_idx = q_block_global_idx - q_block_start_idx
 
-        q_block_start_idx = tl.load(block_q_seq_boundaries_ptr + seq_idx)
+    cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
+    cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx + 1)
 
-        q_block_local_idx = q_block_global_idx - q_block_start_idx
+    cur_batch_query_len = cur_batch_in_all_stop_index - cur_batch_in_all_start_index
 
-        cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
-        cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx + 1)
-
-        cur_batch_query_len = cur_batch_in_all_stop_index - cur_batch_in_all_start_index
-
-        if q_block_local_idx * BLOCK_Q >= cur_batch_query_len:
-            return
+    if q_block_local_idx * BLOCK_Q >= cur_batch_query_len:
+        return
 
     offs_m = tl.arange(0, BLOCK_M)
     offs_d = tl.arange(0, HEAD_SIZE_PADDED)
@@ -1065,7 +1055,6 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             block_q_seq_boundaries_ptr=block_q_seq_boundaries_tensor,
-            only_decode=False,
             USE_FP8=output_scale is not None,
         )
     else:  # Decode
@@ -1075,7 +1064,7 @@ def unified_attention(
         if num_seqs > seq_threshold_3D or is_batch_invariant:
             kernel_unified_attention_2d[
                 (
-                    num_seqs,
+                    num_q_blocks,
                     num_kv_heads,
                 )
             ](
@@ -1127,7 +1116,6 @@ def unified_attention(
                 num_seqs=num_seqs,
                 BLOCK_M=BLOCK_M,
                 block_q_seq_boundaries_ptr=block_q_seq_boundaries_tensor,
-                only_decode=True,
                 USE_FP8=output_scale is not None,
             )
         else:
