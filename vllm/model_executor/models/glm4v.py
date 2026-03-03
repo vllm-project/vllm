@@ -139,7 +139,7 @@ class EVA2CLIPAttention(nn.Module):
             self.num_heads_per_rank,
             self.head_dim,
             self.scale,
-            prefix=prefix,
+            prefix=f"{prefix}.attn",
         )
         self.output_dropout = torch.nn.Dropout(config.dropout_prob)
 
@@ -492,7 +492,7 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.vision_config
@@ -500,7 +500,7 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
         target_width = target_height = vision_config["image_size"]
         num_images = mm_counts.get("image", 0)
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(

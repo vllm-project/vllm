@@ -48,6 +48,8 @@ def test_moe_lora_align_block_size(
     num_virtual_experts = num_experts * max_loras
     max_num_tokens_padded = topk_ids.numel() + num_virtual_experts * (block_size - 1)
     max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
+    if topk_ids.numel() < num_experts:
+        max_num_tokens_padded = topk_ids.numel() * block_size
     max_num_m_blocks = CEILDIV(max_num_tokens_padded, block_size)
 
     # init output tensors

@@ -251,7 +251,7 @@ __global__ void moe_align_block_size_small_batch_expert_kernel(
     }
   }
 
-  // Fill remaining expert_ids with 0
+  // Fill remaining expert_ids with -1
   const size_t fill_start_idx = cumsum[num_experts] / block_size + tid;
   for (size_t i = fill_start_idx; i < max_num_m_blocks; i += stride) {
     expert_ids[i] = 0;

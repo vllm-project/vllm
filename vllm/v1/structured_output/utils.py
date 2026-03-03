@@ -185,14 +185,13 @@ re_llama_byte_token = re.compile(r"^<0x[0-9A-F]{2}>$")
 re_replacement_seq = re.compile(r"^.{0,6}�+.{0,6}$")
 
 
-def _reduced_vocabulary(
-    tokenizer: TokenizerLike, eos_token_id: int
-) -> dict[bytes, list[int]]:
+def _reduced_vocabulary(tokenizer: TokenizerLike) -> dict[bytes, list[int]]:
     """Create a map from vocabulary tokens to lists of equivalent token ids.
 
     Returns:
         A Dict of token string -> equivalent token ids
     """
+    eos_token_id = tokenizer.eos_token_id
 
     unicode_to_bytes = {
         v: k for k, v in convert_slow_tokenizer.bytes_to_unicode().items()
@@ -260,30 +259,13 @@ def get_outlines_vocabulary(tokenizer: TokenizerLike) -> oc.Vocabulary:
     if hasattr(tokenizer, "_outlines_vocabulary"):
         return tokenizer._outlines_vocabulary  # type: ignore
 
-    try:
-        if hasattr(tokenizer, "eos_token_id") and tokenizer.eos_token_id is not None:
-            eos_token_id = tokenizer.eos_token_id
-        else:
-            raise ValueError(
-                "Error during structured outputs setup for outlines: Tokenizer "
-                f"({type(tokenizer)}) has no `eos_token_id` property, but "
-                "`eos_token_id` is required for structured outputs to work properly."
-            )
+    reduced_vocab = _reduced_vocabulary(tokenizer)
+    vocabulary = OutlinesVocabulary(
+        oc.Vocabulary(tokenizer.eos_token_id, reduced_vocab)
+    )
+    tokenizer._outlines_vocabulary = vocabulary  # type: ignore
 
-        reduced_vocab = _reduced_vocabulary(
-            tokenizer,
-            eos_token_id,  # type: ignore
-        )
-        vocabulary = OutlinesVocabulary(oc.Vocabulary(eos_token_id, reduced_vocab))
-        tokenizer._outlines_vocabulary = vocabulary  # type: ignore
-
-        return vocabulary
-    except AttributeError as e:
-        raise ValueError(
-            "Cannot get the vocabulary of the tokenizer "
-            f"({type(tokenizer)}). The tokenizer should have a "
-            "get_vocab method."
-        ) from e
+    return vocabulary
 
 
 def grammar_is_likely_lark(grammar_str: str) -> bool:

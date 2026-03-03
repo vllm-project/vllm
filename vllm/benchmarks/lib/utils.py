@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 import os
+from contextlib import contextmanager
 from typing import Any
 
 
@@ -47,6 +48,12 @@ def convert_to_pytorch_benchmark_format(
         return records
 
     for name, benchmark_values in metrics.items():
+        if not isinstance(benchmark_values, list):
+            raise TypeError(
+                f"benchmark_values for metric '{name}' must be a list, "
+                f"but got {type(benchmark_values).__name__}"
+            )
+
         record = {
             "benchmark": {
                 "name": "vLLM benchmark",
@@ -111,3 +118,14 @@ def write_to_json(filename: str, records: list) -> None:
             cls=InfEncoder,
             default=lambda o: f"<{type(o).__name__} is not JSON serializable>",
         )
+
+
+@contextmanager
+def default_vllm_config():
+    """Set a default VllmConfig for cases that directly test CustomOps or pathways
+    that use get_current_vllm_config() outside of a full engine context.
+    """
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    with set_current_vllm_config(VllmConfig()):
+        yield

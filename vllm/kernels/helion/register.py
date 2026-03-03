@@ -31,8 +31,8 @@ by key matches the config returned by the autotuner.
 
 Key Classes
 -----------
-- HelionKernelWrapper: Wraps raw kernel + config_picker, creates configured ops
-- ConfiguredHelionKernel: Platform-specific kernel registered as PyTorch custom op
+- HelionKernelWrapper: Wraps raw kernel + config_picker, creates configured kernels
+- ConfiguredHelionKernel: Platform-specific kernel with pre-tuned configs
 - PresetConfigSearch: Custom autotuner that returns pre-tuned configs
 """
 
@@ -53,9 +53,26 @@ if not has_helion():
     )
 
 import helion
+from helion._compat import requires_torch_version
 from helion.autotuner.base_search import BaseAutotuner
 from helion.runtime.config import Config
 from helion.runtime.settings import default_autotuner_fn
+
+# TODO(gmagogsfm): Remove CustomOp fallback path (_get_or_register_custom_op,
+# vllm_helion_lib, direct_register_custom_op) once vLLM requires PyTorch >= 2.11.
+_HOP_AVAILABLE = requires_torch_version("2.11")
+
+if _HOP_AVAILABLE:
+    import torch.utils._pytree as pytree
+    from helion._compiler._dynamo.higher_order_ops import (
+        helion_kernel_side_table,
+        helion_kernel_wrapper_mutation,
+    )
+    from helion._compiler._dynamo.variables import infer_output_spec
+    from torch.fx.experimental.proxy_tensor import (
+        disable_proxy_modes_tracing,
+        get_proxy_mode,
+    )
 
 logger = init_logger(__name__)
 
@@ -65,7 +82,6 @@ vllm_helion_lib = Library("vllm_helion", "FRAGMENT")  # noqa
 def validate_helion_settings(
     helion_settings: "helion.Settings | None", op_name: str
 ) -> None:
-    """Validate that helion_settings doesn't contain conflicting options."""
     if helion_settings is None:
         return
 
@@ -91,6 +107,26 @@ def validate_helion_settings(
             "and sequence lengths. Consider removing this setting.",
             op_name,
         )
+
+
+def create_helion_decorated_kernel(
+    raw_kernel_func: Callable,
+    helion_settings: "helion.Settings | None" = None,
+    extra_kwargs: dict[str, Any] | None = None,
+) -> Any:
+    kernel_kwargs: dict[str, Any] = {}
+    if helion_settings:
+        kernel_kwargs.update(helion_settings.to_dict())
+
+    # Set static_shapes=False by default if user didn't explicitly set it
+    # This is needed for dynamic batch sizes and sequence lengths in vLLM
+    if kernel_kwargs.get("static_shapes") is not True:
+        kernel_kwargs["static_shapes"] = False
+
+    if extra_kwargs:
+        kernel_kwargs.update(extra_kwargs)
+
+    return helion.kernel(**kernel_kwargs)(raw_kernel_func)
 
 
 class PresetConfigSearch(BaseAutotuner):
@@ -198,30 +234,23 @@ class ConfiguredHelionKernel:
         key_computer = self._create_key_computer()
         config_selector = self._create_config_selector(key_computer)
 
-        kernel_kwargs = {}
-        if self.helion_settings:
-            kernel_kwargs.update(self.helion_settings.to_dict())
-
-        # Set static_shapes=False by default if user didn't explicitly set it to True
-        # This is needed for dynamic batch sizes and sequence lengths in vLLM
-        if kernel_kwargs.get("static_shapes") is not True:
-            kernel_kwargs["static_shapes"] = False
-
-        kernel_kwargs["autotuner_fn"] = lambda _, args: PresetConfigSearch(
-            args, config_selector
-        )
-        kernel_kwargs["key"] = key_computer
+        extra_kwargs = {
+            "autotuner_fn": lambda _, args: PresetConfigSearch(args, config_selector),
+            "key": key_computer,
+        }
 
         logger.debug(
             "Creating decorated kernel %s with custom autotuner on platform %s",
             self.op_name,
             self.platform,
         )
-        return helion.kernel(**kernel_kwargs)(self.raw_kernel_func)
+        return create_helion_decorated_kernel(
+            self.raw_kernel_func, self.helion_settings, extra_kwargs
+        )
 
 
 class HelionKernelWrapper:
-    """Wrapper for Helion kernels that creates config-specific PyTorch custom ops."""
+    """Wrapper for Helion kernels with pre-tuned config selection and HOP support."""
 
     def __init__(
         self,
@@ -240,10 +269,86 @@ class HelionKernelWrapper:
         self._config_picker: (
             Callable[[tuple[Any, ...], list[str]], str | None] | None
         ) = None
+        self._configured_kernel: ConfiguredHelionKernel | None = None
+        self._input_generator: Callable[[], dict[str, tuple[Any, ...]]] | None = None
 
     def __call__(self, *args, **kwargs):
-        configured_op = self.get_configured_op()
-        return configured_op(*args, **kwargs)
+        # CustomOp fallback: register as torch custom op for torch.compile
+        # compatibility on older PyTorch lacking HOP/EffectType support
+        if not _HOP_AVAILABLE:
+            custom_op = self._get_or_register_custom_op()
+            return custom_op(*args, **kwargs)
+        # HOP tracing: record HigherOrderOp in the FX graph
+        if get_proxy_mode() is not None:
+            return self._call_via_hop(args, kwargs)
+        # Eager: run the configured kernel directly
+        return self.get_configured_op()(*args, **kwargs)
+
+    def _call_via_hop(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
+        kernel = self.get_configured_op()._decorated_kernel
+        kernel_idx = helion_kernel_side_table.add_kernel(kernel)
+
+        constant_args, tensor_args = self._partition_args(kernel, args, kwargs)
+
+        all_named = {**constant_args, **tensor_args}
+        full_args = tuple(
+            all_named.get(n, p.default)
+            for n, p in kernel.signature.parameters.items()  # type: ignore[attr-defined]
+            if n in all_named or p.default is not p.empty
+        )
+
+        with disable_proxy_modes_tracing():
+            output_spec = infer_output_spec(kernel, full_args)
+
+        hop_result = helion_kernel_wrapper_mutation(
+            kernel_idx=kernel_idx,
+            constant_args=constant_args,
+            tensor_args=tensor_args,
+            output_spec=output_spec,
+        )
+
+        tree_spec_str = output_spec.get("tree_spec_str")
+        if tree_spec_str is None:
+            return None
+        tree_spec = pytree.treespec_loads(tree_spec_str)
+
+        hop_iter = iter(hop_result)
+        reconstructed = []
+        for spec in output_spec["leaf_specs"]:
+            is_constant_scalar = spec["type"] == "scalar" and not isinstance(
+                spec.get("scalar_value"), torch.SymInt
+            )
+            if is_constant_scalar:
+                reconstructed.append(spec["scalar_value"])
+            else:
+                reconstructed.append(next(hop_iter))
+        return pytree.tree_unflatten(reconstructed, tree_spec)
+
+    @staticmethod
+    def _partition_args(
+        kernel: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        constant_args: dict[str, Any] = {}
+        tensor_args: dict[str, Any] = {}
+        params = list(kernel.signature.parameters.keys())
+        for i, val in enumerate(args):
+            name = params[i]
+            if isinstance(val, torch.Tensor):
+                tensor_args[name] = val
+            else:
+                constant_args[name] = val
+        for name, val in kwargs.items():
+            if isinstance(val, torch.Tensor):
+                tensor_args[name] = val
+            else:
+                constant_args[name] = val
+        return constant_args, tensor_args
 
     def register_config_picker(
         self, picker_func: Callable[[tuple[Any, ...], list[str]], str | None]
@@ -251,29 +356,77 @@ class HelionKernelWrapper:
         self._config_picker = picker_func
         return picker_func
 
-    def get_configured_op(self) -> Any:
+    def register_input_generator(
+        self, generator_func: Callable[[], dict[str, tuple[Any, ...]]]
+    ) -> Callable[[], dict[str, tuple[Any, ...]]]:
+        """
+        Register a function to generate inputs for autotuning and benchmarking.
+
+        Args:
+            generator_func: Function that returns dict[str, tuple] where:
+                - key: Configuration identifier (e.g., "4096", "hidden_4096")
+                - value: Tuple of arguments to pass to the kernel
+
+        Returns:
+            The registered function (for decorator usage)
+
+        Example:
+            @kernel_wrapper.register_input_generator
+            def generate_inputs():
+                return {
+                    "4096": (torch.randn(4096, device="cuda"), 0.5),
+                    "8192": (torch.randn(8192, device="cuda"), 0.5),
+                }
+        """
+        self._input_generator = generator_func
+        return generator_func
+
+    def get_inputs(self) -> dict[str, tuple[Any, ...]]:
+        if self._input_generator is None:
+            raise NotImplementedError(
+                f"No input generator registered for kernel '{self.op_name}'. "
+                f"Use @{self.op_name}.register_input_generator to register one."
+            )
+        return self._input_generator()
+
+    def run_autotune(
+        self,
+        inputs: tuple[Any, ...],
+        autotune_effort: str = "quick",
+    ) -> Config:
+        """Run autotuning for a single input configuration."""
+        extra_kwargs = {"autotune_effort": autotune_effort}
+        autotune_kernel = create_helion_decorated_kernel(
+            self.raw_kernel_func, self.helion_settings, extra_kwargs
+        )
+        return autotune_kernel.autotune(inputs)
+
+    def get_configured_op(self) -> ConfiguredHelionKernel:
         assert self._config_picker is not None, (
             f"No config picker registered for kernel '{self.op_name}'. "
             f"Use @{self.op_name}.register_config_picker to register one."
         )
 
+        if self._configured_kernel is None:
+            self._configured_kernel = ConfiguredHelionKernel(
+                op_name=self.op_name,
+                config_picker=self._config_picker,
+                raw_kernel_func=self.raw_kernel_func,
+                helion_settings=self.helion_settings,
+            )
+
+        return self._configured_kernel
+
+    def _get_or_register_custom_op(self) -> Any:
         if hasattr(torch.ops.vllm_helion, self.op_name):
-            logger.debug("Op vllm_helion::%s already registered", self.op_name)
             return getattr(torch.ops.vllm_helion, self.op_name)
 
-        configured_kernel = ConfiguredHelionKernel(
-            op_name=self.op_name,
-            config_picker=self._config_picker,
-            raw_kernel_func=self.raw_kernel_func,
-            helion_settings=self.helion_settings,
-        )
+        configured_kernel = self.get_configured_op()
 
         logger.info("Registering op: vllm_helion::%s", self.op_name)
         direct_register_custom_op(
             op_name=self.op_name,
-            op_func=configured_kernel._decorated_kernel,  # Register decorated kernel
-            # TODO(gmagogsfm): Implement automatic mutation/aliasing detection
-            # for Helion kernels.
+            op_func=configured_kernel._decorated_kernel,
             mutates_args=None,
             fake_impl=self._fake_impl,
             target_lib=vllm_helion_lib,

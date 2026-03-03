@@ -4,7 +4,7 @@
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -36,6 +36,7 @@ class MockHFConfig:
 class MockModelConfig:
     task = "generate"
     runner_type = "generate"
+    model = MODEL_NAME
     tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
@@ -44,7 +45,6 @@ class MockModelConfig:
     multimodal_config = MultiModalConfig()
     hf_config = MockHFConfig()
     hf_text_config = MockHFConfig()
-    logits_processor_pattern = None
     logits_processors: list[str] | None = None
     diff_sampling_param: dict | None = None
     allowed_local_media_path: str = ""
@@ -53,16 +53,23 @@ class MockModelConfig:
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     skip_tokenizer_init = False
+    is_encoder_decoder: bool = False
+    is_multimodal_model: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
 
 
+@dataclass
+class MockVllmConfig:
+    model_config: MockModelConfig
+
+
 def _build_renderer(model_config: MockModelConfig):
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
-    return HfRenderer(
-        model_config,
+    return HfRenderer.from_config(
+        MockVllmConfig(model_config),
         tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
     )
 
@@ -226,3 +233,152 @@ async def test_chat_error_stream():
         f"Expected error message in chunks: {chunks}"
     )
     assert chunks[-1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.parametrize(
+    "image_content",
+    [
+        [{"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}],
+        [{"image_url": {"url": "https://example.com/image.jpg"}}],
+    ],
+)
+def test_system_message_warns_on_image(image_content):
+    """Test that system messages with image content trigger a warning."""
+    with patch(
+        "vllm.entrypoints.openai.chat_completion.protocol.logger"
+    ) as mock_logger:
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": image_content,
+                }
+            ],
+        )
+
+    mock_logger.warning_once.assert_called()
+    call_args = str(mock_logger.warning_once.call_args)
+    assert "System messages should only contain text" in call_args
+    assert "image_url" in call_args
+
+
+def test_system_message_accepts_text():
+    """Test that system messages can contain text content."""
+    # Should not raise an exception
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+        ],
+    )
+    assert request.messages[0]["role"] == "system"
+
+
+def test_system_message_accepts_text_array():
+    """Test that system messages can contain an array with text content."""
+    # Should not raise an exception
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "You are a helpful assistant."}],
+            },
+        ],
+    )
+    assert request.messages[0]["role"] == "system"
+
+
+def test_user_message_accepts_image():
+    """Test that user messages can still contain image content."""
+    # Should not raise an exception
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.com/image.jpg"},
+                    },
+                ],
+            },
+        ],
+    )
+    assert request.messages[0]["role"] == "user"
+
+
+@pytest.mark.parametrize(
+    "audio_content",
+    [
+        [
+            {
+                "type": "input_audio",
+                "input_audio": {"data": "base64data", "format": "wav"},
+            }
+        ],
+        [{"input_audio": {"data": "base64data", "format": "wav"}}],
+    ],
+)
+def test_system_message_warns_on_audio(audio_content):
+    """Test that system messages with audio content trigger a warning."""
+    with patch(
+        "vllm.entrypoints.openai.chat_completion.protocol.logger"
+    ) as mock_logger:
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": audio_content,
+                }
+            ],
+        )
+
+    mock_logger.warning_once.assert_called()
+    call_args = str(mock_logger.warning_once.call_args)
+    assert "System messages should only contain text" in call_args
+    assert "input_audio" in call_args
+
+
+@pytest.mark.parametrize(
+    "video_content",
+    [
+        [{"type": "video_url", "video_url": {"url": "https://example.com/video.mp4"}}],
+        [{"video_url": {"url": "https://example.com/video.mp4"}}],
+    ],
+)
+def test_system_message_warns_on_video(video_content):
+    """Test that system messages with video content trigger a warning."""
+    with patch(
+        "vllm.entrypoints.openai.chat_completion.protocol.logger"
+    ) as mock_logger:
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": video_content,
+                }
+            ],
+        )
+
+    mock_logger.warning_once.assert_called()
+    call_args = str(mock_logger.warning_once.call_args)
+    assert "System messages should only contain text" in call_args
+    assert "video_url" in call_args
+
+
+def test_json_schema_response_format_missing_schema():
+    """When response_format type is 'json_schema' but the json_schema field
+    is not provided, request construction should raise a validation error
+    so the API returns 400 instead of 500."""
+    with pytest.raises(Exception, match="json_schema.*must be provided"):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hello"}],
+            response_format={"type": "json_schema"},
+        )

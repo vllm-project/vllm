@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 
 import numpy as np
 import torch
@@ -14,6 +15,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         model_runner_output: ModelRunnerOutput,
         sampler_output: SamplerOutput,
         num_sampled_tokens: torch.Tensor,
+        main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
         copy_event: torch.cuda.Event,
     ):
@@ -25,9 +27,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.num_sampled_tokens = num_sampled_tokens
         self.copy_event = copy_event
 
-        default_stream = torch.cuda.current_stream()
-        with torch.cuda.stream(copy_stream):
-            copy_stream.wait_stream(default_stream)
+        with stream(copy_stream, main_stream):
+            copy_stream.wait_stream(main_stream)
 
             self.sampled_token_ids = async_copy_to_np(sampler_output.sampled_token_ids)
             self.logprobs_tensors: LogprobsTensors | None = None
@@ -69,5 +70,53 @@ class AsyncOutput(AsyncModelRunnerOutput):
         return self.model_runner_output
 
 
+class AsyncPoolingOutput(AsyncModelRunnerOutput):
+    def __init__(
+        self,
+        model_runner_output: ModelRunnerOutput,
+        pooler_output: torch.Tensor,
+        is_valid: torch.Tensor | None,
+        main_stream: torch.cuda.Stream,
+        copy_stream: torch.cuda.Stream,
+        copy_event: torch.cuda.Event,
+    ):
+        self.model_runner_output = model_runner_output
+        self.pooler_output = pooler_output
+        self.is_valid = is_valid
+        self.copy_event = copy_event
+
+        with stream(copy_stream, main_stream):
+            copy_stream.wait_stream(main_stream)
+            self.pooler_output_cpu = self.pooler_output.to("cpu", non_blocking=True)
+            if self.is_valid is not None:
+                self.is_valid_cpu = self.is_valid.to("cpu", non_blocking=True)
+            else:
+                self.is_valid_cpu = None
+            self.copy_event.record(copy_stream)
+
+    def get_output(self) -> ModelRunnerOutput:
+        self.copy_event.synchronize()
+        pooler_output = self.pooler_output_cpu.unbind(dim=0)
+        if self.is_valid_cpu is not None:
+            is_valid_cpu = self.is_valid_cpu.tolist()
+            for i, is_valid in enumerate(is_valid_cpu):
+                if not is_valid:
+                    pooler_output[i] = None
+        self.model_runner_output.pooler_output = pooler_output
+        return self.model_runner_output
+
+
 def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
     return x.to("cpu", non_blocking=True).numpy()
+
+
+@contextlib.contextmanager
+def stream(to_stream: torch.cuda.Stream, from_stream: torch.cuda.Stream):
+    """Lightweight version of torch.cuda.stream() context manager which
+    avoids current_stream and device lookups.
+    """
+    try:
+        torch.cuda.set_stream(to_stream)
+        yield
+    finally:
+        torch.cuda.set_stream(from_stream)

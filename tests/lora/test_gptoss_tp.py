@@ -88,8 +88,8 @@ def test_gpt_oss_lora(
             max_num_seqs=2,
             max_num_batched_tokens=2048,
             specialize_active_lora=specialize_active_lora,
-            compilation_config=vllm.config.CompilationConfig(
-                cudagraph_specialize_lora=False,  # Avoid OOM
+            compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
+                cudagraph_specialize_lora=False,
             ),
         )
 
