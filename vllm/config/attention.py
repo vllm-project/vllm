@@ -1,12 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from typing import Any, Literal
 
 from pydantic import field_validator
 
 from vllm.config.utils import config
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+# FA3's combine kernel supports up to 256 splits (kLogMaxSplits=8).
+_FA3_MAX_SPLITS = 256
+
+# Default num_splits for CUDA graph decode (used as floor by the heuristic).
+_FA3_DEFAULT_NUM_SPLITS = 32
+
+# Minimum max_model_len to apply the heuristic. Below this, the combine
+# kernel overhead outweighs the SM-utilization gain.
+_FA3_HEURISTIC_MIN_CONTEXT = 100000
+
+
+def compute_fa3_num_splits(
+    kv_heads_per_device: int,
+    max_num_seqs: int,
+    num_sms: int,
+) -> int:
+    """Compute num_splits for FA3 CUDA graph mode to maximize SM utilization.
+
+    Returns at least _FA3_DEFAULT_NUM_SPLITS and at most
+    min(num_sms, _FA3_MAX_SPLITS).
+    """
+    ctas_without_splits = kv_heads_per_device * max_num_seqs
+    optimal = math.ceil(num_sms / ctas_without_splits)
+    return min(max(optimal, _FA3_DEFAULT_NUM_SPLITS), num_sms, _FA3_MAX_SPLITS)
 
 
 @config
@@ -24,8 +50,10 @@ class AttentionConfig:
     """Use separate prefill and decode kernels for attention instead of
     the unified triton kernel."""
 
-    flash_attn_max_num_splits_for_cuda_graph: int = 32
-    """Flash Attention max number splits for cuda graph decode."""
+    flash_attn_max_num_splits_for_cuda_graph: int | None = None
+    """Flash Attention max number of splits for cuda graph decode.
+    If None, a heuristic is applied for FA3 on Hopper to maximize SM
+    utilization; otherwise defaults to 32."""
 
     use_cudnn_prefill: bool = False
     """Whether to use cudnn prefill."""

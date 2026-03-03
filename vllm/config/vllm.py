@@ -649,6 +649,38 @@ class VllmConfig:
         # This is the same for all backends
         self.kv_transfer_config.kv_role = "kv_both"
 
+    def _resolve_fa_num_splits(self) -> int:
+        """Resolve flash_attn_max_num_splits_for_cuda_graph when not set.
+
+        For FA3 on Hopper (SM90), compute a value that fills all SMs.
+        Otherwise fall back to _FA3_DEFAULT_NUM_SPLITS.
+        """
+        from vllm.config.attention import (
+            _FA3_DEFAULT_NUM_SPLITS,
+            _FA3_HEURISTIC_MIN_CONTEXT,
+        )
+        from vllm.platforms import current_platform
+
+        if (
+            self.model_config is not None
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability(90)
+            and self.model_config.max_model_len > _FA3_HEURISTIC_MIN_CONTEXT
+        ):
+            fa_version = self.attention_config.flash_attn_version
+            # FA3 is the default on Hopper when not explicitly set
+            if fa_version is None or fa_version == 3:
+                from vllm.config.attention import compute_fa3_num_splits
+
+                kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
+                num_sms = current_platform.num_compute_units()
+                return compute_fa3_num_splits(
+                    kv_heads_per_device=kv_heads,
+                    max_num_seqs=self.scheduler_config.max_num_seqs,
+                    num_sms=num_sms,
+                )
+        return _FA3_DEFAULT_NUM_SPLITS
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -1018,6 +1050,20 @@ class VllmConfig:
                 "to True to enable."
             )
         current_platform.check_and_update_config(self)
+
+        # Resolve flash_attn_max_num_splits_for_cuda_graph if not set by user.
+        if self.attention_config.flash_attn_max_num_splits_for_cuda_graph is None:
+            from vllm.config.attention import _FA3_DEFAULT_NUM_SPLITS
+
+            resolved = self._resolve_fa_num_splits()
+            self.attention_config.flash_attn_max_num_splits_for_cuda_graph = resolved
+            if resolved != _FA3_DEFAULT_NUM_SPLITS:
+                logger.info(
+                    "flash_attn_max_num_splits_for_cuda_graph set to %d "
+                    "by FA3 SM-utilization heuristic (default: %d).",
+                    resolved,
+                    _FA3_DEFAULT_NUM_SPLITS,
+                )
 
         # If DCP, ensure the block size is right.
         if self.parallel_config.decode_context_parallel_size > 1:
