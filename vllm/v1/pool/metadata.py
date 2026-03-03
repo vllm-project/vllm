@@ -60,7 +60,7 @@ class PoolingMetadata:
     def __post_init__(self) -> None:
         pooling_params = self.pooling_params
 
-        tasks: list[PoolingTask] = [
+        tasks: list[list[PoolingTask]] = [
             pooling_tasks
             for pooling_param in pooling_params
             if (pooling_tasks := pooling_param.get_tasks())
