@@ -505,6 +505,10 @@ class Sequence:
         # Input + output tokens
         self.tokens: Optional[list[str]] = None
 
+        # Tree decoding related fields
+        self.tree_branch_id = 0  # 分支标识
+        self.tree_depth = 0
+
     @property
     def n_blocks(self) -> int:
         return (self.get_len() + self.block_size - 1) // self.block_size
@@ -1049,6 +1053,12 @@ class SequenceGroupMetadata(
     # Zero means speculative decoding is disabled for some reasons.
     # TODO: We should maintain this states out of the sequence group.
     num_speculative_tokens: Optional[int] = None
+
+    # Tree decoding related fields
+    is_tree_decoding: bool = False
+    tree_depth: int = 0
+    parent_sequence_id: Optional[int] = None  # 父序列ID
+    branch_sequences: list[int] = []  # 子分支序列列表
 
     def __post_init__(self):
         if self.seq_data is not None and self.token_chunk_size is None:
