@@ -26,6 +26,7 @@ from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import (
     BeamSearchParams,
+    RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
@@ -164,6 +165,16 @@ class CompletionRequest(OpenAIBaseModel):
             "Additional request parameters with string or "
             "numeric values, used by custom extensions."
         ),
+    )
+
+    repetition_detection: RepetitionDetectionParams | None = Field(
+        default=None,
+        description="Parameters for detecting repetitive N-gram patterns "
+        "in output tokens. If such repetition is detected, generation will "
+        "be ended early. LLMs can sometimes generate repetitive, unhelpful "
+        "token patterns, stopping only when they hit the maximum output length "
+        "(e.g. 'abcdabcdabcd...' or '\emoji \emoji \emoji ...'). This feature "
+        "can detect such behavior and terminate early, saving time and tokens.",
     )
 
     # --8<-- [end:completion-extra-params]
@@ -310,6 +321,7 @@ class CompletionRequest(OpenAIBaseModel):
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
+            repetition_detection=self.repetition_detection,
         )
 
     @model_validator(mode="before")
