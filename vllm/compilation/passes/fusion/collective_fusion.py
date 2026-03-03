@@ -31,6 +31,11 @@ VIEW_LIKE_OPS = (
     torch.ops.aten.view.default,
     torch.ops.aten.reshape.default,
     torch.ops.aten._unsafe_view.default,
+)
+
+# These ops may preserve values but can change layout/aliasing.
+# They should not be stripped when extracting GEMM operands.
+LAYOUT_PRESERVING_OPS = (
     torch.ops.aten.contiguous.default,
     torch.ops.aten.clone.default,
 )
@@ -38,6 +43,10 @@ VIEW_LIKE_OPS = (
 
 def _is_view_like(node: fx.Node) -> bool:
     return any(is_func(node, op) for op in VIEW_LIKE_OPS)
+
+
+def _is_passthrough(node: fx.Node) -> bool:
+    return _is_view_like(node) or any(is_func(node, op) for op in LAYOUT_PRESERVING_OPS)
 
 
 def _strip_view_like(node: fx.Node) -> fx.Node:
@@ -174,7 +183,7 @@ def _find_bmm_reduce_scatter(
             rs_matches.append((user, dim, world_size, group_name))
             continue
 
-        if _is_view_like(user):
+        if _is_passthrough(user):
             worklist.extend(user.users)
 
     if len(rs_matches) == 1:
@@ -184,7 +193,9 @@ def _find_bmm_reduce_scatter(
 
 def _find_ag_bmm_replace_target(bmm_node: fx.Node) -> fx.Node | None:
     replace_targets = [
-        user for user in bmm_node.users if _is_view_like(user) and _node_ndim(user) == 2
+        user
+        for user in bmm_node.users
+        if _is_passthrough(user) and _node_ndim(user) == 2
     ]
     if len(replace_targets) != 1:
         return None
