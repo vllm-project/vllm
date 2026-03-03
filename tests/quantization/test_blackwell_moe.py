@@ -10,11 +10,6 @@ import pytest
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 
-if not current_platform.is_device_capability_family(100):
-    pytest.skip(
-        "This test only runs on Blackwell GPUs (SM10x).", allow_module_level=True
-    )
-
 
 @pytest.fixture(scope="module", autouse=True)
 def set_test_environment():
@@ -84,6 +79,10 @@ def can_initialize(
         "'list'."
     )
 )
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
 def test_llama4_fp8_tensor_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
@@ -92,6 +91,10 @@ def test_llama4_fp8_tensor_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatc
     )
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
 def test_llama4_fp8_tensor_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
@@ -100,6 +103,10 @@ def test_llama4_fp8_tensor_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch
     )
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
 def test_llama4_nvfp4_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
@@ -108,6 +115,10 @@ def test_llama4_nvfp4_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
     )
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
 def test_llama4_nvfp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
@@ -118,7 +129,7 @@ def test_llama4_nvfp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
 
 def test_llama4_nvfp4_moe_emulation(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
-        "/shareddata/nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
+        "nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
         hf_overrides=HF_OVERRIDE_MM,
         extra_args=["--moe-backend=emulation", "--gpu-memory-utilization", "0.8"],
     )
@@ -127,6 +138,10 @@ def test_llama4_nvfp4_moe_emulation(monkeypatch: pytest.MonkeyPatch):
 ## DeepSeekV3 ##
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
 def test_deepseek_fp8_block_moe_deep_gemm(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "deepseek-ai/DeepSeek-V3.1",
@@ -141,6 +156,10 @@ def test_deepseek_fp8_block_moe_deep_gemm(monkeypatch: pytest.MonkeyPatch):
         "Expected failure: assert self.block_quant is None"
     )
 )
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
 def test_deepseek_fp8_block_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "deepseek-ai/DeepSeek-V3.1",
@@ -149,6 +168,10 @@ def test_deepseek_fp8_block_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPat
     )
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
 def test_deepseek_fp8_block_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "deepseek-ai/DeepSeek-V3.1",
@@ -157,6 +180,10 @@ def test_deepseek_fp8_block_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatc
     )
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
 def test_deepseek_nvfp4_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/DeepSeek-R1-0528-FP4-v2",
@@ -165,6 +192,10 @@ def test_deepseek_nvfp4_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
     )
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
 def test_deepseek_nvfp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/DeepSeek-R1-0528-FP4-v2",
@@ -176,16 +207,28 @@ def test_deepseek_nvfp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
 ## GPT-OSS ##
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
 def test_gptoss_mxfp4bf16_moe_flashinfer(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "1")
     can_initialize("openai/gpt-oss-20b", hf_overrides=HF_OVERRIDE_TEXT)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
 def test_gptoss_mxfp4mxfp8_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS", "1")
     can_initialize("openai/gpt-oss-20b", hf_overrides=HF_OVERRIDE_TEXT)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
 def test_gptoss_mxfp4mxfp8_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "1")
     can_initialize("openai/gpt-oss-20b", hf_overrides=HF_OVERRIDE_TEXT)
@@ -202,6 +245,10 @@ def test_gptoss_eager(monkeypatch: pytest.MonkeyPatch):
 ## Qwen3 Next ##
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
 def test_qwen3_next_bf16_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "Qwen/Qwen3-Next-80B-A3B-Instruct",
