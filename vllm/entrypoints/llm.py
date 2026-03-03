@@ -41,12 +41,11 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
+    ChatTemplateConfig,
     ChatTemplateContentFormatOption,
     load_chat_template,
 )
-from vllm.entrypoints.pooling.base.io_processor import (
-    init_pooling_io_processor,
-)
+from vllm.entrypoints.pooling.io_processor_factories import init_pooling_io_processor
 from vllm.entrypoints.pooling.score.utils import (
     ScoreData,
     ScoreMultiModalParam,
@@ -394,11 +393,12 @@ class LLM:
         self.chat_template = load_chat_template(chat_template)
         self.io_processor = self.llm_engine.io_processor
         self.input_processor = self.llm_engine.input_processor
+        self.chat_template_config = ChatTemplateConfig(chat_template=chat_template)
         self.pooling_io_processor = init_pooling_io_processor(
             supported_tasks=supported_tasks,
             model_config=self.model_config,
             renderer=self.renderer,
-            chat_template=self.chat_template,
+            chat_template_config=self.chat_template_config,
         )
         # Cache for __repr__ to avoid repeated collective_rpc calls
         self._cached_repr: str | None = None

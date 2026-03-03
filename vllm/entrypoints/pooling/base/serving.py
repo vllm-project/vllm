@@ -20,11 +20,14 @@ from vllm import (
 )
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+from vllm.entrypoints.chat_utils import (
+    ChatTemplateConfig,
+    ChatTemplateContentFormatOption,
+)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.exceptions import create_error_response
+from vllm.entrypoints.pooling.typing import AnyPoolingRequest, AnyPoolingResponse
 from vllm.inputs import ProcessorInputs
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer
@@ -38,8 +41,8 @@ from vllm.tracing import (
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import merge_async_iterators
 
+from ...utils import create_error_response
 from .io_processor import PoolingIOProcessor
-from .typing import AnyPoolingRequest, AnyPoolingResponse
 
 PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
 
@@ -85,23 +88,22 @@ class PoolingServing:
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
         self.log_error_stack = log_error_stack
-
-        self.io_processor = self.init_io_processor(
-            model_config=models.model_config,
-            renderer=models.renderer,
+        self.chat_template_config = ChatTemplateConfig(
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
             trust_request_chat_template=trust_request_chat_template,
+        )
+        self.io_processor = self.init_io_processor(
+            model_config=models.model_config,
+            renderer=models.renderer,
+            chat_template_config=self.chat_template_config,
         )
 
     def init_io_processor(
         self,
         model_config: ModelConfig,
         renderer: BaseRenderer,
-        *,
-        chat_template: str | None = None,
-        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
-        trust_request_chat_template: bool = False,
+        chat_template_config: ChatTemplateConfig,
     ) -> PoolingIOProcessor:
         raise NotImplementedError
 

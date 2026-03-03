@@ -7,7 +7,7 @@ import numpy as np
 
 from vllm import ClassificationOutput
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.pooling.base.serving import PoolingServeContext, PoolingServing
 from vllm.logger import init_logger
@@ -33,17 +33,12 @@ class ServingClassification(PoolingServing):
         self,
         model_config: ModelConfig,
         renderer: BaseRenderer,
-        *,
-        chat_template: str | None = None,
-        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
-        trust_request_chat_template: bool = False,
+        chat_template_config: ChatTemplateConfig,
     ) -> ClassifyIOProcessor:
         return ClassifyIOProcessor(
             model_config=model_config,
             renderer=renderer,
-            chat_template=chat_template,
-            chat_template_content_format=chat_template_content_format,
-            trust_request_chat_template=trust_request_chat_template,
+            chat_template_config=chat_template_config,
         )
 
     async def _build_response(

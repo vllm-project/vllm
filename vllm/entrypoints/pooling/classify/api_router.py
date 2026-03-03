@@ -9,8 +9,11 @@ from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationRequest,
 )
 from vllm.entrypoints.pooling.classify.serving import ServingClassification
-from vllm.entrypoints.utils import load_aware_call, with_cancellation
-from vllm.exceptions import create_error_response
+from vllm.entrypoints.utils import (
+    create_error_response,
+    load_aware_call,
+    with_cancellation,
+)
 
 router = APIRouter()
 

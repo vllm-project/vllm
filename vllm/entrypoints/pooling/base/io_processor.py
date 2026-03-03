@@ -5,32 +5,22 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Final
 
-from vllm import PoolingRequestOutput, PromptType, TokensPrompt
+from vllm import PoolingRequestOutput, PromptType
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
+    ChatTemplateConfig,
     ChatTemplateContentFormatOption,
     ConversationMessage,
 )
 from vllm.entrypoints.openai.engine.serving import RendererChatRequest, RendererRequest
-from vllm.entrypoints.pooling.base.typing import AnyPoolingRequest
-from vllm.entrypoints.pooling.classify.protocol import (
-    ClassificationChatRequest,
-    ClassificationCompletionRequest,
-)
-from vllm.entrypoints.pooling.score.protocol import (
-    ScoreDataRequest,
-    ScoreQueriesDocumentsRequest,
-    ScoreTextRequest,
-)
-from vllm.exceptions import VLLMValidationError
 from vllm.inputs import ProcessorInputs, SingletonPrompt
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs import TokPrompt
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
-from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
+from vllm.utils.mistral import is_mistral_tokenizer
 
 
 class PoolingIOProcessor:
@@ -38,19 +28,20 @@ class PoolingIOProcessor:
         self,
         model_config: ModelConfig,
         renderer: BaseRenderer,
-        *,
-        chat_template: str | None = None,
-        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
-        trust_request_chat_template: bool = False,
+        chat_template_config: ChatTemplateConfig,
     ):
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
         self.model_config = model_config
         self.renderer = renderer
 
-        self.chat_template = chat_template
-        self.chat_template_content_format: Final = chat_template_content_format
-        self.trust_request_chat_template = trust_request_chat_template
+        self.chat_template = chat_template_config.chat_template
+        self.chat_template_content_format: Final = (
+            chat_template_config.chat_template_content_format
+        )
+        self.trust_request_chat_template = (
+            chat_template_config.trust_request_chat_template
+        )
 
     def pre_process_online(self, *args, **kwargs):
         raise NotImplementedError
@@ -76,35 +67,6 @@ class PoolingIOProcessor:
 
     def create_pooling_params(self, request):
         return request.to_pooling_params()
-
-    def _validate_input(
-        self,
-        request: AnyPoolingRequest,
-        input_ids: list[int],
-        input_text: str,
-    ) -> TokensPrompt:
-        token_num = len(input_ids)
-        max_model_len = self.model_config.max_model_len
-        # Note: input length can be up to the entire model context length
-        # since these requests don't generate tokens.
-        if token_num > max_model_len:
-            operations: dict[type[AnyPoolingRequest], str] = {
-                ScoreDataRequest: "score",
-                ScoreTextRequest: "score",
-                ScoreQueriesDocumentsRequest: "score",
-                ClassificationCompletionRequest: "classification",
-                ClassificationChatRequest: "classification",
-            }
-            operation = operations.get(type(request), "embedding generation")
-            raise VLLMValidationError(
-                f"This model's maximum context length is "
-                f"{max_model_len} tokens. However, you requested "
-                f"{token_num} tokens in the input for {operation}. "
-                f"Please reduce the length of the input.",
-                parameter="input_tokens",
-                value=token_num,
-            )
-        return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
     def _preprocess_completion_online(
         self,
@@ -151,15 +113,13 @@ class PoolingIOProcessor:
         tool_dicts: list[dict[str, Any]] | None = None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
     ) -> tuple[list[ConversationMessage], list[TokPrompt]]:
-        from vllm.tokenizers.mistral import MistralTokenizer
-
         renderer = self.renderer
 
         default_template_kwargs = merge_kwargs(
             default_template_kwargs,
             dict(
                 tools=tool_dicts,
-                tokenize=isinstance(renderer.tokenizer, MistralTokenizer),
+                tokenize=is_mistral_tokenizer(renderer.tokenizer),
             ),
         )
 
@@ -227,30 +187,3 @@ class PoolingIOProcessor:
                 "Refused request with untrusted chat template."
             )
         return None
-
-
-def init_pooling_io_processor(
-    supported_tasks: tuple[SupportedTask, ...],
-    model_config: ModelConfig,
-    renderer: BaseRenderer,
-    *,
-    chat_template: str | None = None,
-    chat_template_content_format: ChatTemplateContentFormatOption = "auto",
-    trust_request_chat_template: bool = False,
-) -> dict[str, PoolingIOProcessor]:
-    pooling_io_processor: dict[str, PoolingIOProcessor] = {}
-
-    if "classify" in supported_tasks:
-        from vllm.entrypoints.pooling.classify.io_processor import (
-            ClassifyIOProcessor,
-        )
-
-        pooling_io_processor["classify"] = ClassifyIOProcessor(
-            model_config=model_config,
-            renderer=renderer,
-            chat_template=chat_template,
-            chat_template_content_format=chat_template_content_format,
-            trust_request_chat_template=trust_request_chat_template,
-        )
-
-    return pooling_io_processor
