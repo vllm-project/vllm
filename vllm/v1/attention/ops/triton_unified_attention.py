@@ -865,7 +865,6 @@ def _get_tile_size(
     sliding_window: int,
     element_size: int,
     is_prefill: bool,
-    use_2d_kernel: bool,
 ) -> int:
     """Select tile size with Gemma3-specific optimization.
 
@@ -878,7 +877,7 @@ def _get_tile_size(
         return 32
 
     # Default behavior
-    if is_prefill or use_2d_kernel:
+    if is_prefill:
         return 32
     return 16 if element_size >= 2 else 32
 
@@ -982,21 +981,18 @@ def unified_attention(
         sliding_window_val,
         q.element_size(),
         is_prefill=True,
-        use_2d_kernel=True,
     )
     TILE_SIZE_2D_DECODE = _get_tile_size(
         head_size,
         sliding_window_val,
         q.element_size(),
         is_prefill=False,
-        use_2d_kernel=True,
     )
     TILE_SIZE_3D_DECODE = _get_tile_size(
         head_size,
         sliding_window_val,
         q.element_size(),
         is_prefill=False,
-        use_2d_kernel=False,
     )
 
     # Launch the 2D kernel if batch contains a prefill
