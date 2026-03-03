@@ -8,11 +8,10 @@ from tests.models.utils import GenerateModelInfo
 from .ppl_utils import wikitext_ppl_test
 
 MODELS = [
-    GenerateModelInfo("Qwen/Qwen3-0.6B"),
-    GenerateModelInfo("Qwen/Qwen3-0.6B-FP8"),
-    # transformers:
-    # Loading a GPTQ quantized model requires optimum, gptqmodel
-    # GenerateModelInfo("Qwen/Qwen3-0.6B-GPTQ-Int8"),
+    GenerateModelInfo("Qwen/Qwen3-0.6B", hf_ppl=23.864173889160156),
+    GenerateModelInfo("Qwen/Qwen3-0.6B-FP8", hf_ppl=24.313045501708984),
+
+    GenerateModelInfo("Qwen/Qwen3.5-0.8B", hf_ppl=19.38858413696289)
 ]
 
 
