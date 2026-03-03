@@ -4,17 +4,30 @@ import base64
 from io import BytesIO
 from pathlib import Path
 
-import av
-import librosa
 import numpy as np
 import numpy.typing as npt
 import pybase64
-import soundfile
 import torch
 
+from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.serial_utils import tensor2base64
 
 from .base import MediaIO
+
+try:
+    import librosa
+except ImportError:
+    librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
+
+try:
+    import soundfile
+except ImportError:
+    soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
+
+try:
+    import av
+except ImportError:
+    av = PlaceholderModule("av")  # type: ignore[assignment]
 
 
 def extract_audio_from_video_bytes(
