@@ -11,7 +11,7 @@ MODELS = [
     GenerateModelInfo("Qwen/Qwen3-0.6B", hf_ppl=23.864173889160156),
     GenerateModelInfo("Qwen/Qwen3-0.6B-FP8", hf_ppl=24.313045501708984),
 
-    GenerateModelInfo("Qwen/Qwen3.5-0.8B", hf_ppl=19.38858413696289)
+    GenerateModelInfo("Qwen/Qwen3.5-0.8B", hf_ppl=19.38858413696289),
 ]
 
 
