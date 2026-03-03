@@ -31,6 +31,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
     get_streamable_parser_for_assistant,
     render_for_completion,
+    sanitize_harmony_name,
 )
 from vllm.entrypoints.openai.parser.responses_parser import (
     get_responses_parser_for_simple_context,
@@ -669,7 +670,9 @@ class HarmonyContext(ConversationContext):
     def need_builtin_tool_call(self) -> bool:
         last_msg = self.messages[-1]
         recipient = last_msg.recipient
-        if recipient is None:
+        if recipient is not None:
+            recipient = sanitize_harmony_name(recipient)
+        if not recipient:
             return False
         if recipient.startswith("browser."):
             return "browser" in self.available_tools
@@ -685,6 +688,8 @@ class HarmonyContext(ConversationContext):
         last_msg = self.messages[-1]
         recipient = last_msg.recipient
         if recipient is not None:
+            recipient = sanitize_harmony_name(recipient)
+        if recipient:
             if recipient.startswith("browser."):
                 return await self.call_search_tool(
                     self._tool_sessions["browser"], last_msg
@@ -708,7 +713,7 @@ class HarmonyContext(ConversationContext):
         self.called_tools.add("browser")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
-        tool_name = last_msg.recipient.split(".")[1]
+        tool_name = sanitize_harmony_name(last_msg.recipient.split(".")[1])
         if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
             try:
                 args = json.loads(last_msg.content[0].text)
@@ -795,7 +800,9 @@ class HarmonyContext(ConversationContext):
         self.called_tools.add("container")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
-        tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
+        tool_name = sanitize_harmony_name(
+            last_msg.recipient.split(".")[1].split(" ")[0]
+        )
         if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
             try:
                 args = json.loads(last_msg.content[0].text)
