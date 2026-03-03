@@ -54,7 +54,7 @@ def get_layer_from_name(layer_name: str) -> torch.nn.Module:
             raise AssertionError(
                 "We expected the number of MOE layers in `all_moe_layers` "
                 "to be equal to the number of "
-                "vllm.moe_forward calls."
+                "{vllm.moe_forward, vllm.moe_forward_shared} calls."
             )
         layer_name = all_moe_layers[moe_layer_index]
         forward_context.moe_layer_index += 1
@@ -99,11 +99,43 @@ def _moe_forward_fake(
     shared_experts_input: torch.Tensor | None,
     layer_name: _layer_name_type,
 ) -> torch.Tensor:
-    # For latent MoE with reduce_results=True: output has full hidden_size
-    # (from shared_experts_input), not latent_size (from hidden_states).
-    if shared_experts_input is not None:
-        return torch.empty_like(shared_experts_input)
     return torch.empty_like(hidden_states)
+
+
+def _moe_forward_shared(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    layer_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    layer = get_layer_from_name(layer_name)
+    return layer.runner.forward_dispatch(
+        layer,
+        hidden_states,
+        router_logits,
+        shared_experts_input,
+    )
+
+
+def _moe_forward_shared_fake(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    layer_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Output shapes:
+    # - fused_out: same as hidden_states (routed experts use transformed size)
+    # - shared_out: same as shared_experts_input if provided, else same as
+    #               hidden_states
+    # (For latent MoE: shared experts use original hidden_size, not latent size)
+    fused_out = torch.empty_like(hidden_states)
+
+    if shared_experts_input is not None:
+        shared_out = torch.empty_like(shared_experts_input)
+    else:
+        shared_out = torch.empty_like(hidden_states)
+
+    return shared_out, fused_out
 
 
 def _moe_forward_shared(
@@ -241,7 +273,9 @@ class MoERunnerBase(MoERunner):
             and self.quant_method.moe_kernel.output_is_reduced()
         )
 
-    def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
+    def _maybe_all_reduce_tensor_model_parallel(
+        self, final_hidden_states: torch.Tensor
+    ):
         """
         Some combine kernels reduce across GPU ranks by default.
         """
@@ -258,10 +292,6 @@ class MoERunnerBase(MoERunner):
         This is called by FusedMoE.forward_native. The original hidden_states
         is saved separately so shared experts get [S, hidden_size] while
         routed experts get the transformed [S, moe_latent_size].
-
-        TODO: For latent MoE bandwidth optimization, fc2_latent_proj could be
-        moved inside FusedMoE to all-reduce on the smaller latent
-        dimension.
 
         Returns (possibly transformed) hidden states and the input for shared
         experts (or None if there are no shared experts).
@@ -282,10 +312,9 @@ class MoERunnerBase(MoERunner):
     def _combine_and_reduce(
         self,
         states: torch.Tensor,
-        trunc_sizes: list[int],
+        trunc_size: int,
     ) -> torch.Tensor:
-        assert len(trunc_sizes) == 1
-        result = states[..., : trunc_sizes[0]]
+        result = states[..., :trunc_size]
 
         if self.output_scale is not None:
             result = result * self.output_scale
@@ -293,7 +322,7 @@ class MoERunnerBase(MoERunner):
         if not self.moe_config.is_sequence_parallel and (
             self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1
         ):
-            result = self.maybe_all_reduce_tensor_model_parallel(result)
+            result = self._maybe_all_reduce_tensor_model_parallel(result)
 
         return result
 
@@ -312,7 +341,7 @@ class MoERunnerBase(MoERunner):
         self,
         shared_experts_input: torch.Tensor | None,
         hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, list[int]]:
+    ) -> tuple[torch.Tensor, int]:
         shared_experts_hidden_dim = (
             shared_experts_input.shape[-1] if shared_experts_input is not None else 0
         )
@@ -329,9 +358,9 @@ class MoERunnerBase(MoERunner):
             )
 
         if self.routed_output_transform is not None and shared_experts_hidden_dim > 0:
-            orig_hidden_dims = [shared_experts_hidden_dim]
+            orig_hidden_dims = shared_experts_hidden_dim
         else:
-            orig_hidden_dims = [transformed_hidden_dim]
+            orig_hidden_dims = transformed_hidden_dim
 
         return hidden_states, orig_hidden_dims
 
@@ -460,19 +489,31 @@ class MoERunnerBase(MoERunner):
             hidden_states
         )
 
-        hidden_states, og_hidden_dims = self._maybe_pad_hidden_states(
+        hidden_states, og_hidden_dim = self._maybe_pad_hidden_states(
             shared_experts_input,
             hidden_states,
         )
 
-        fused_output = self.forward_entry(
+        result = self.forward_entry(
             hidden_states,
             router_logits,
             shared_experts_input,
             self._encode_layer_name(),
         )
 
-        result = self._combine_and_reduce(fused_output, og_hidden_dims)
+        if self.shared_experts is not None:
+            assert isinstance(result, tuple)
+            shared_output, fused_output = result
+            # Apply output transform (e.g. latent → full dim)
+            if self.routed_output_transform is not None:
+                r = self.routed_output_transform(fused_output)
+                fused_output = r[0] if isinstance(r, tuple) else r
+            # If combine kernel already reduced fused, reduce shared to match
+            if self._must_reduce_shared_expert_outputs():
+                shared_output = tensor_model_parallel_all_reduce(shared_output)
+            result = shared_output + fused_output
+
+        result = self._combine_and_reduce(result, og_hidden_dim)
 
         return self._maybe_add_zero_expert_output(result)
 
@@ -482,7 +523,7 @@ class MoERunnerBase(MoERunner):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # TODO(bnell): this can be removed after MK migration is complete.
         layer.ensure_moe_quant_config_init()
 
@@ -498,25 +539,12 @@ class MoERunnerBase(MoERunner):
         )
 
         with self._sequence_parallel_context():
-            result = self._forward_impl(
+            return self._forward_impl(
                 layer,
                 hidden_states,
                 router_logits,
                 shared_experts_input,
             )
-
-        if isinstance(result, tuple):
-            shared_output, fused_output = result
-            # Apply output transform (e.g. latent → full dim)
-            if self.routed_output_transform is not None:
-                r = self.routed_output_transform(fused_output)
-                fused_output = r[0] if isinstance(r, tuple) else r
-            # If combine kernel already reduced fused, reduce shared to match
-            if self._must_reduce_shared_expert_outputs():
-                shared_output = tensor_model_parallel_all_reduce(shared_output)
-            result = shared_output + fused_output
-
-        return result
 
     @abstractmethod
     def _forward_impl(
