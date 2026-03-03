@@ -32,89 +32,27 @@ def test_cmd_init_returns_subcommand():
     assert isinstance(result[0], LaunchSubcommand)
 
 
-def test_parse_default_server(launch_parser):
+def test_parse_model(launch_parser):
     args = launch_parser.parse_args(["launch", "--model", "test-model"])
-    assert args.server == "fastapi"
+    assert args.model == "test-model"
 
 
-def test_parse_default_stage(launch_parser):
-    args = launch_parser.parse_args(["launch", "--model", "test-model"])
-    assert args.stage == "all"
-
-
-def test_parse_stage_all(launch_parser):
-    args = launch_parser.parse_args(
-        ["launch", "--model", "test-model", "--stage", "all"]
-    )
-    assert args.stage == "all"
-
-
-def test_parse_invalid_stage_rejected(launch_parser):
-    with pytest.raises(SystemExit):
-        launch_parser.parse_args(
-            ["launch", "--model", "test-model", "--stage", "unknown"]
-        )
-
-
-def test_parse_server_fastapi(launch_parser):
-    args = launch_parser.parse_args(
-        ["launch", "--model", "test-model", "--server", "fastapi"]
-    )
-    assert args.server == "fastapi"
-
-
-def test_parse_server_grpc(launch_parser):
-    args = launch_parser.parse_args(
-        ["launch", "--model", "test-model", "--server", "grpc"]
-    )
-    assert args.server == "grpc"
-
-
-def test_parse_invalid_server_rejected(launch_parser):
-    with pytest.raises(SystemExit):
-        launch_parser.parse_args(
-            ["launch", "--model", "test-model", "--server", "unknown"]
-        )
-
-
-def test_cmd_fastapi_calls_run():
-    args = argparse.Namespace(
-        model_tag=None, model="test-model", server="fastapi", stage="all"
-    )
+def test_cmd_calls_run():
+    args = argparse.Namespace(model_tag=None, model="test-model")
     with patch("vllm.entrypoints.cli.launch.uvloop.run") as mock_uvloop_run:
         LaunchSubcommand.cmd(args)
         mock_uvloop_run.assert_called_once()
 
 
-def test_cmd_unknown_server_raises():
-    args = argparse.Namespace(
-        model_tag=None, model="test-model", server="unknown", stage="all"
-    )
-    with pytest.raises(ValueError, match="Unknown server type"):
-        LaunchSubcommand.cmd(args)
-
-
-def test_cmd_unknown_stage_raises():
-    args = argparse.Namespace(
-        model_tag=None, model="test-model", server="fastapi", stage="unknown"
-    )
-    with pytest.raises(ValueError, match="Unknown stage"):
-        LaunchSubcommand.cmd(args)
-
-
 def test_model_tag_overrides_model():
-    args = argparse.Namespace(
-        model_tag="tag-model", model="original-model", server="fastapi", stage="all"
-    )
+    args = argparse.Namespace(model_tag="tag-model", model="original-model")
     with patch("vllm.entrypoints.cli.launch.uvloop.run"):
         LaunchSubcommand.cmd(args)
         assert args.model == "tag-model"
 
 
 def test_model_tag_none_keeps_model():
-    args = argparse.Namespace(
-        model_tag=None, model="original-model", server="fastapi", stage="all"
-    )
+    args = argparse.Namespace(model_tag=None, model="original-model")
     with patch("vllm.entrypoints.cli.launch.uvloop.run"):
         LaunchSubcommand.cmd(args)
         assert args.model == "original-model"

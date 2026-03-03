@@ -21,11 +21,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 
-DESCRIPTION = """Launch individual vLLM components. Use --stage to select which
-component to start.
-
-  --stage all    Launch the full online serving layer (preprocessing and
-                 postprocessing) without GPU inference.
+DESCRIPTION = """Launch individual vLLM components.
 
 Search by using: `--help=<ConfigGroup>` to explore options by section (e.g.,
 --help=ModelConfig, --help=Frontend)
@@ -43,16 +39,7 @@ class LaunchSubcommand(CLISubcommand):
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
 
-        server = getattr(args, "server", "fastapi")
-        stage = getattr(args, "stage", "all")
-
-        if stage == "all":
-            if server == "fastapi":
-                uvloop.run(run_launch_fastapi(args))
-            else:
-                raise ValueError(f"Unknown server type: {server}")
-        else:
-            raise ValueError(f"Unknown stage: {stage}")
+        uvloop.run(run_launch_fastapi(args))
 
     def validate(self, args: argparse.Namespace) -> None:
         validate_parsed_serve_args(args)
@@ -65,22 +52,6 @@ class LaunchSubcommand(CLISubcommand):
             help="Launch individual vLLM components.",
             description=DESCRIPTION,
             usage="vllm launch [model_tag] [options]",
-        )
-
-        launch_parser.add_argument(
-            "--stage",
-            type=str,
-            choices=["all"],
-            default="all",
-            help="Stage to launch (default: all).",
-        )
-
-        launch_parser.add_argument(
-            "--server",
-            type=str,
-            choices=["fastapi", "grpc"],
-            default="fastapi",
-            help="Server type to run (default: fastapi).",
         )
 
         launch_parser = make_arg_parser(launch_parser)
@@ -100,7 +71,7 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     # 1. Socket binding
     listen_address, sock = setup_server(args)
 
-    # 2. Create OnlineEngineClient (no GPU)
+    # 2. Create LaunchEngineClient (no GPU)
     engine_args = AsyncEngineArgs.from_cli_args(args)
     model_config = engine_args.create_model_config()
     vllm_config = VllmConfig(model_config=model_config)

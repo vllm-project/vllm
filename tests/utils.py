@@ -480,7 +480,7 @@ class RemoteOpenAIServer(RemoteVLLMServer):
 
 
 class RemoteLaunchServer(RemoteVLLMServer):
-    """Launches ``vllm launch --stage all`` for GPU-less serving tests."""
+    """Launches ``vllm launch`` for GPU-less serving tests."""
 
     def _create_cli_subcommand(self):
         return LaunchSubcommand()
@@ -492,7 +492,7 @@ class RemoteLaunchServer(RemoteVLLMServer):
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         if env_dict is not None:
             env.update(env_dict)
-        serve_cmd = ["vllm", "launch", "--stage", "all", model, *vllm_serve_args]
+        serve_cmd = ["vllm", "launch", model, *vllm_serve_args]
         print(f"Launching RemoteLaunchServer with: {' '.join(serve_cmd)}")
         self.proc: subprocess.Popen = subprocess.Popen(
             serve_cmd,
