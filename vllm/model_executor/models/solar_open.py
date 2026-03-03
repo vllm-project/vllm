@@ -25,9 +25,13 @@
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
+
+if TYPE_CHECKING:
+    from transformers.models.solar_open import SolarOpenConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
@@ -74,49 +78,47 @@ logger = init_logger(__name__)
 class SolarOpenDecoderLayer(nn.Module):
     def __init__(
         self,
-        hf_config,
+        config: "SolarOpenConfig",
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ) -> None:
         super().__init__()
-        self.hidden_size = hf_config.hidden_size
-        rope_theta = getattr(hf_config, "rope_theta", 1000000)
-        max_position_embeddings = getattr(hf_config, "max_position_embeddings", 131072)
+        self.hidden_size = config.hidden_size
+        rope_theta = getattr(config, "rope_theta", 1000000)
+        max_position_embeddings = getattr(config, "max_position_embeddings", 131072)
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep=".")[-1])
         self.layer_idx = layer_idx
 
         self.self_attn = SolarOpenAttention(
-            hf_config=hf_config,
+            config=config,
             hidden_size=self.hidden_size,
-            num_heads=hf_config.num_attention_heads,
-            num_kv_heads=hf_config.num_key_value_heads,
+            num_heads=config.num_attention_heads,
+            num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
             max_position_embeddings=max_position_embeddings,
-            head_dim=hf_config.head_dim,
-            qkv_bias=hf_config.attention_bias,
+            head_dim=config.head_dim,
+            qkv_bias=config.attention_bias,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
 
         self.mlp = SolarOpenMoE(
-            hf_config=hf_config,
+            config=config,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
             enable_eplb=enable_eplb,
         )
 
-        self.input_layernorm = RMSNorm(
-            hf_config.hidden_size, eps=hf_config.rms_norm_eps
-        )
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
-            hf_config.hidden_size, eps=hf_config.rms_norm_eps
+            config.hidden_size, eps=config.rms_norm_eps
         )
-        self.routed_scaling_factor = hf_config.routed_scaling_factor
+        self.routed_scaling_factor = config.routed_scaling_factor
 
     def forward(
         self,
@@ -177,35 +179,35 @@ class SolarOpenMLP(nn.Module):
 class SolarOpenMoE(nn.Module):
     def __init__(
         self,
-        hf_config,
+        config: "SolarOpenConfig",
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.routed_scaling_factor = hf_config.routed_scaling_factor
+        self.routed_scaling_factor = config.routed_scaling_factor
 
         self.ep_group = get_ep_group().device_group
         self.ep_rank = self.ep_group.rank()
         self.ep_size = self.ep_group.size()
-        self.n_routed_experts: int = hf_config.n_routed_experts
-        self.n_shared_experts: int = hf_config.n_shared_experts
+        self.n_routed_experts: int = config.n_routed_experts
+        self.n_shared_experts: int = config.n_shared_experts
 
-        if hf_config.hidden_act != "silu":
+        if config.hidden_act != "silu":
             raise ValueError(
-                f"Unsupported activation: {hf_config.hidden_act}. "
+                f"Unsupported activation: {config.hidden_act}. "
                 "Only silu is supported for now."
             )
 
         self.gate = nn.Linear(
-            hf_config.hidden_size,
-            hf_config.n_routed_experts,
+            config.hidden_size,
+            config.n_routed_experts,
             bias=False,
             dtype=torch.float32,
         )
         self.gate.e_score_correction_bias = nn.Parameter(
-            torch.empty(hf_config.n_routed_experts, dtype=torch.float32)
+            torch.empty(config.n_routed_experts, dtype=torch.float32)
         )
 
         # Load balancing settings.
@@ -223,30 +225,28 @@ class SolarOpenMoE(nn.Module):
             self.physical_expert_start + self.n_local_physical_experts
         )
 
-        if hf_config.n_shared_experts is not None:
-            intermediate_size = (
-                hf_config.moe_intermediate_size * hf_config.n_shared_experts
-            )
+        if config.n_shared_experts is not None:
+            intermediate_size = config.moe_intermediate_size * config.n_shared_experts
             self.shared_experts = SolarOpenMLP(
-                hidden_size=hf_config.hidden_size,
+                hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
-                hidden_act=hf_config.hidden_act,
+                hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
             )
             self.experts = SharedFusedMoE(
                 shared_experts=self.shared_experts,
-                num_experts=hf_config.n_routed_experts,
-                top_k=hf_config.num_experts_per_tok,
-                hidden_size=hf_config.hidden_size,
-                intermediate_size=hf_config.moe_intermediate_size,
+                num_experts=config.n_routed_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
                 reduce_results=False,
-                renormalize=hf_config.norm_topk_prob,
+                renormalize=config.norm_topk_prob,
                 quant_config=quant_config,
                 use_grouped_topk=True,
-                num_expert_group=hf_config.n_group,
-                topk_group=hf_config.topk_group,
+                num_expert_group=config.n_group,
+                topk_group=config.topk_group,
                 prefix=f"{prefix}.experts",
                 scoring_func="sigmoid",
                 # we do scaling outside, set factor to 1.0 to avoid double mul
@@ -258,16 +258,16 @@ class SolarOpenMoE(nn.Module):
             )
         else:
             self.experts = FusedMoE(
-                num_experts=hf_config.n_routed_experts,
-                top_k=hf_config.num_experts_per_tok,
-                hidden_size=hf_config.hidden_size,
-                intermediate_size=hf_config.moe_intermediate_size,
+                num_experts=config.n_routed_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
                 reduce_results=False,
-                renormalize=hf_config.norm_topk_prob,
+                renormalize=config.norm_topk_prob,
                 quant_config=quant_config,
                 use_grouped_topk=True,
-                num_expert_group=hf_config.n_group,
-                topk_group=hf_config.topk_group,
+                num_expert_group=config.n_group,
+                topk_group=config.topk_group,
                 prefix=f"{prefix}.experts",
                 scoring_func="sigmoid",
                 # we do scaling outside, set factor to 1.0 to avoid double mul
@@ -308,7 +308,7 @@ class SolarOpenMoE(nn.Module):
 class SolarOpenAttention(nn.Module):
     def __init__(
         self,
-        hf_config,
+        config: "SolarOpenConfig",
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -361,11 +361,11 @@ class SolarOpenAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        hf_config.rope_parameters.setdefault("partial_rotary_factor", 1.0)
+        config.rope_parameters.setdefault("partial_rotary_factor", 1.0)
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=max_position_embeddings,
-            rope_parameters=hf_config.rope_parameters,
+            rope_parameters=config.rope_parameters,
         )
         self.attn = Attention(
             self.num_heads,
@@ -402,27 +402,27 @@ class SolarOpenModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        hf_config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         enable_eplb = vllm_config.parallel_config.enable_eplb
-        self.hf_config = hf_config
+        self.config = config
 
-        self.vocab_size = hf_config.vocab_size
+        self.vocab_size = config.vocab_size
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
-                hf_config.vocab_size,
-                hf_config.hidden_size,
+                config.vocab_size,
+                config.hidden_size,
                 prefix=f"{prefix}.embed_tokens",
             )
         else:
             self.embed_tokens = PPMissingLayer()
 
         self.start_layer, self.end_layer, self.layers = make_layers(
-            hf_config.num_hidden_layers,
+            config.num_hidden_layers,
             lambda prefix: SolarOpenDecoderLayer(
-                hf_config=hf_config,
+                config=config,
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=prefix,
@@ -432,11 +432,11 @@ class SolarOpenModel(nn.Module):
         )
 
         if get_pp_group().is_last_rank:
-            self.norm = RMSNorm(hf_config.hidden_size, eps=hf_config.rms_norm_eps)
+            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], hf_config.hidden_size
+            ["hidden_states", "residual"], config.hidden_size
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -479,7 +479,7 @@ class SolarOpenModel(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.hf_config.n_routed_experts,
+            num_experts=self.config.n_routed_experts,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
