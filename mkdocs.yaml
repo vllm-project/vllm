@@ -42,6 +42,7 @@ theme:
     - navigation.sections
     - navigation.indexes
     - navigation.top
+    - navigation.path
     - search.highlight
     - search.share
     - toc.follow
