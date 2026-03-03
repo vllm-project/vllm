@@ -126,10 +126,15 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert isinstance(q, torch.Tensor)
         B = q.shape[0]
         q_num_heads = q.shape[1]
+        # Cast FP8 q to bfloat16 for Blackwell compatibility (FP8 tl.dot
+        # may produce invalid instructions) and for V up-proj torch.bmm.
+        if use_fp8:
+            q = q.to(torch.bfloat16)
+        out_dtype = q.dtype
         o = torch.zeros(
-            B, q_num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
+            B, q_num_heads, self.kv_lora_rank, dtype=out_dtype, device=q.device
         )
-        lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
+        lse = torch.zeros(B, q_num_heads, dtype=out_dtype, device=q.device)
 
         # For batch invariance, use only 1 split to ensure deterministic reduction
         num_kv_splits = 1 if vllm_is_batch_invariant() else 4
@@ -148,14 +153,11 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             device=q.device,
         )
 
-        # Handle FP8 KV cache: view as FP8 dtype and get dequantization scale
+        # View as FP8 and pass scale for in-kernel dequantization.
         if use_fp8:
             kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
                 current_platform.fp8_dtype()
             )
-            # Get dequantization scale from the attention layer
-            # For MLA, we use k_scale for both K and V (they share the same
-            # latent representation)
             k_scale = layer._k_scale
         else:
             k_scale = None
@@ -165,7 +167,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
         PAGE_SIZE = kv_c_and_k_pe_cache.size(1)
 
-        # Run MQA with optional FP8 dequantization
         decode_attention_fwd(
             q,
             kv_c_and_k_pe_cache,

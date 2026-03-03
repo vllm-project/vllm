@@ -234,6 +234,8 @@ def _decode_att_m_fwd(
     if k_scale is None:
         k_scale = torch.empty(1, dtype=torch.float32, device=q.device)
 
+    num_stages = 1 if use_fp8 else 2
+
     _fwd_kernel_stage1[grid](
         q,
         k_buffer,
@@ -261,7 +263,7 @@ def _decode_att_m_fwd(
         PAGE_SIZE=page_size,
         logit_cap=logit_cap,
         num_warps=num_warps,
-        num_stages=2,
+        num_stages=num_stages,
         Lk=Lk,
         Lv=Lv,
         USE_FP8=use_fp8,
@@ -494,6 +496,11 @@ def _decode_grouped_att_m_fwd(
 
     # Determine if we're using FP8 KV cache
     use_fp8 = k_scale is not None
+
+    # Reduce pipeline stages for FP8 to avoid shared memory overflow
+    # from float32 intermediates during dequantization.
+    if use_fp8:
+        num_stages = 1
 
     # Create a dummy scale tensor if not using FP8 (Triton requires valid tensor)
     if k_scale is None:
