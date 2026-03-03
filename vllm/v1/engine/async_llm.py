@@ -418,8 +418,11 @@ class AsyncLLM(EngineClient):
         await self.engine_core.add_request_async(request)
 
         if self.log_requests:
-            logger.info("Added request %s.", request.request_id,
-                        extra={"request_id": request.request_id})
+            logger.info(
+                "Added request %s.",
+                request.request_id,
+                extra={"request_id": request.request_id},
+            )
 
     async def _add_streaming_input_request(
         self,
@@ -724,8 +727,7 @@ class AsyncLLM(EngineClient):
 
         if self.log_requests:
             for rid in request_ids:
-                logger.info("Aborted request %s.", rid,
-                            extra={"request_id": rid})
+                logger.info("Aborted request %s.", rid, extra={"request_id": rid})
 
     async def pause_generation(
         self,

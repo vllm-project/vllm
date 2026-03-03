@@ -512,9 +512,7 @@ def test_streaming_complete_logs_full_text_content():
 
 
 def test_request_logger_includes_structured_request_id():
-    """Test that log_inputs and log_outputs include request_id as structured field.
-
-    """
+    """Test that log_inputs and log_outputs include request_id as structured field."""
     mock_logger = MagicMock()
 
     with patch("vllm.entrypoints.logger.logger", mock_logger):
