@@ -21,7 +21,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     make_moe_prepare_and_finalize_naive_dp_ep,
     make_moe_prepare_and_finalize_no_dp_ep,
 )
-from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_a2a_prepare_finalize import (  # noqa: E501
+from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_a2a import (
     FlashInferA2APrepareAndFinalize,
 )
 from vllm.platforms import current_platform
