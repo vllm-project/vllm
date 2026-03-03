@@ -287,7 +287,7 @@ class OpenAIServingPooling(OpenAIServing):
         items: list[PoolingResponseData] = []
         num_prompt_tokens = 0
         is_multi_pooling_task = (
-            pooling_params is None or len(pooling_params.get_tasks()) == 1
+            pooling_params is not None and len(pooling_params.get_tasks()) > 1
         )
         for idx, final_res in enumerate(final_res_batch):
             pooling_rsp_data: str | list[str] | list[float] | list[list[float]]
@@ -300,9 +300,9 @@ class OpenAIServingPooling(OpenAIServing):
 
             elif encoding_format == "base64":
                 pooling_rsp_data = (
-                    encode_base64_fn(final_res)
+                    encode_multi_task_base64_fn(final_res)
                     if is_multi_pooling_task
-                    else encode_multi_task_base64_fn(final_res)
+                    else encode_base64_fn(final_res)
                 )
             else:
                 assert_never(encoding_format)
