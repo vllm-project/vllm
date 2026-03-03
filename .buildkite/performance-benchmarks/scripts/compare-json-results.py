@@ -391,25 +391,44 @@ def _sanitize_sheet_name(name: str) -> str:
 
 def _group_to_sheet_base(group_cols: list[str], gkey_tuple) -> str:
     d = dict(zip(group_cols, gkey_tuple))
-    model = d.get("Model", "model")
-    model_short = str(model).split("/")[-1]
+
+    # Always keep input/output lengths (these are important).
     ilen = d.get("Input Len", "")
     olen = d.get("Output Len", "")
     lens = f"_{ilen}x{olen}" if ilen != "" and olen != "" else ""
+
+    # Shorten model name aggressively to make room for lens.
+    model = d.get("Model", "model")
+    leaf = str(model).split("/")[-1]
+
+    max_model_len = max(1, 31 - len(lens))
+    model_short = leaf[:max_model_len]
+
     return _sanitize_sheet_name(f"{model_short}{lens}")
 
 
 def _write_tables_to_excel_sheet(
     writer: pd.ExcelWriter, sheet: str, blocks: list[tuple[str, pd.DataFrame]]
 ):
-    startrow = 0
+    """Write all blocks to a sheet with a single to_excel() call.
+
+    Pandas+openpyxl can be extremely slow when called many times per sheet.
+    We flatten blocks into one table with a 'Section' column to keep structure
+    while making Excel generation fast and deterministic.
+    """
+    if not blocks:
+        pd.DataFrame().to_excel(writer, sheet_name=sheet, index=False)
+        return
+
+    combined_parts: list[pd.DataFrame] = []
     for title, df in blocks:
-        pd.DataFrame([[title]]).to_excel(
-            writer, sheet_name=sheet, index=False, header=False, startrow=startrow
-        )
-        startrow += 1
-        df.to_excel(writer, sheet_name=sheet, index=False, startrow=startrow)
-        startrow += len(df) + 3
+        df2 = df.copy()
+        # Put the section label as the first column for readability.
+        df2.insert(0, "Section", title)
+        combined_parts.append(df2)
+
+    combined = pd.concat(combined_parts, axis=0, ignore_index=True, sort=False)
+    combined.to_excel(writer, sheet_name=sheet, index=False)
 
 
 def _safe_filename(s: str) -> str:
@@ -1112,10 +1131,25 @@ def write_report_group_first(
 
     excel_path = args.excel_out or "perf_comparison.xlsx"
     disable_excel = os.getenv("VLLM_COMPARE_DISABLE_EXCEL", "0") == "1"
+
+    # Prefer xlsxwriter for speed; fallback to openpyxl if unavailable.
+    excel_engine = (
+        os.getenv("VLLM_COMPARE_EXCEL_ENGINE", "xlsxwriter").strip() or "xlsxwriter"
+    )
+    if excel_engine == "xlsxwriter" and util.find_spec("xlsxwriter") is None:
+        excel_engine = "openpyxl"
+
+    excel_engine_kwargs = {}
+    if excel_engine == "xlsxwriter":
+        # Reduce memory pressure & usually faster writes.
+        excel_engine_kwargs = {"options": {"constant_memory": True}}
+
     xw_ctx = (
         nullcontext(None)
         if disable_excel
-        else pd.ExcelWriter(excel_path, engine="openpyxl")
+        else pd.ExcelWriter(
+            excel_path, engine=excel_engine, engine_kwargs=excel_engine_kwargs
+        )
     )
     with xw_ctx as xw:
         used_sheets: set[str] = set()
@@ -1158,7 +1192,11 @@ def write_report_group_first(
                     dedup_i = 1
                     while sheet in used_sheets:
                         dedup_i += 1
-                        sheet = _sanitize_sheet_name(f"{sheet_base}_{dedup_i}")
+                        suffix = f"_{dedup_i}"
+                        # Ensure uniqueness even when sheet names are truncated to 31 chars.
+                        base = str(sheet_base)
+                        keep = max(1, 31 - len(suffix))
+                        sheet = _sanitize_sheet_name(base[:keep] + suffix)
                     used_sheets.add(sheet)
 
                 excel_blocks: list[tuple[str, pd.DataFrame]] = []
@@ -1220,7 +1258,7 @@ def write_report_group_first(
                         )
 
                         excel_blocks.append(
-                            (metric_label, display_group.reset_index(drop=True))
+                            (metric_label, group_df.reset_index(drop=True))
                         )
                         if csv_dir:
                             fn = _safe_filename(
@@ -1228,7 +1266,7 @@ def write_report_group_first(
                                     "/", "_"
                                 )
                             )
-                            display_group.to_csv(csv_dir / f"{fn}.csv", index=False)
+                            group_df.to_csv(csv_dir / f"{fn}.csv", index=False)
 
                     summary_html = build_valid_max_concurrency_summary_html(
                         tput_group_df=tput_group_df,
