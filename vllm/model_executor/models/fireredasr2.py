@@ -410,7 +410,7 @@ class ConformerEncoder(nn.Module):
 
 
 class FireRedASR2Adapter(nn.Module):
-    def __init__(self, encoder_dim, llm_dim, downsample_rate=2, prefix: str = ""):
+    def __init__(self, encoder_dim, llm_dim, downsample_rate=2):
         super().__init__()
         self.ds = downsample_rate
         self.linear1 = ReplicatedLinear(
@@ -445,7 +445,9 @@ class FireRedASR2Adapter(nn.Module):
 
 class FireRedASR2Encoder(nn.Module):
     def __init__(
-        self, *, vllm_config: VllmConfig, prefix: str = "", init_in_fp32: bool = False
+        self,
+        *,
+        vllm_config: VllmConfig,
     ):
         super().__init__()
         self.audio_encoder = ConformerEncoder(
@@ -457,7 +459,7 @@ class FireRedASR2Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.encoder = FireRedASR2Encoder(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "encoder")
+            vllm_config=vllm_config,
         )
         encoder_dim = self.encoder.audio_encoder.odim
         llm_dim = vllm_config.model_config.hf_config.hidden_size
@@ -465,7 +467,6 @@ class FireRedASR2Model(nn.Module):
             encoder_dim,
             llm_dim,
             vllm_config.model_config.hf_config.encoder_downsample_rate,
-            prefix=maybe_prefix(prefix, "encoder_projector"),
         )
 
         self.decoder = Qwen2ForCausalLM(
