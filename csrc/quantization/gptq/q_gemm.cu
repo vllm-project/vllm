@@ -217,24 +217,16 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel(
   __shared__ half block_a[m_count][BLOCK_KN_SIZE];
 
   if (offset_k + t < end_k) {
-    for (int m = 0; m < m_count; ++m)
-    {
-        const half* a_ptr = a_.item_ptr(offset_m + m, 0);
-        half* block_a_ptr = block_a[m];
-        __half2 a0_h2;
-        if (b_q_perm)
-        {
-            int idx = b_q_perm[offset_k + t];
-            a0_h2 = *reinterpret_cast<const __half2*>(&a_ptr[idx]);
-        }
-        else
-        {
-            a0_h2 = *reinterpret_cast<const __half2*>(&a_ptr[offset_k + t]);
-        }
+    for (int m = 0; m < m_count; ++m) {
+      const half* a_ptr = a_.item_ptr(offset_m + m, 0);
+      half* block_a_ptr = block_a[m];
 
-        
-        block_a_ptr[t] = __low2half(a0_h2);  
-        block_a_ptr[t + 1] = __high2half(a0_h2);  
+      half a0;
+      if (b_q_perm)
+        a0 = a_ptr[b_q_perm[offset_k + t]];
+      else
+        a0 = a_ptr[offset_k + t];
+      block_a_ptr[t] = a0;
     }
   }
 
