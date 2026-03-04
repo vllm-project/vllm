@@ -272,7 +272,7 @@ class Granite4ToolParser(ToolParser):
         self.streamed_tool_names = list[str]()
 
         self.tool_names = list[str]()
-        self.tool_calls = list[tuple[str, dict[str, Any]]]()
+        self.tool_calls = list[dict[str, dict[str, Any]]]()
 
         self.parser = HermesToolCallParser(
             lambda x: self.tool_names.append(x),
@@ -329,8 +329,8 @@ class Granite4ToolParser(ToolParser):
                 logger.exception("Error in extracting tool call from response.")
         return msg
 
-    def collect_tool_calls(self):
-        tool_calls = []
+    def collect_tool_calls(self) -> list[DeltaToolCall]:
+        tool_calls = list[DeltaToolCall]()
 
         n_parsed_names = len(self.tool_names)
         n_streamed_names = len(self.streamed_tool_names)
@@ -356,7 +356,7 @@ class Granite4ToolParser(ToolParser):
                 tc = self.tool_calls[i]
                 self.prev_tool_call_arr.append(tc)
                 function.arguments = dump_args(tc.get("arguments"))
-                self.streamed_args_for_tool.append(function.arguments)
+                self.streamed_args_for_tool.append(function.arguments or "")
 
             delta = DeltaToolCall(
                 index=self.current_tool_id,
