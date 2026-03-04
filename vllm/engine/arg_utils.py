@@ -402,6 +402,8 @@ class EngineArgs:
     master_port: int = ParallelConfig.master_port
     nnodes: int = ParallelConfig.nnodes
     node_rank: int = ParallelConfig.node_rank
+    numa_node: list[int] | None = ParallelConfig.numa_node
+    numa_node_auto: bool = ParallelConfig.numa_node_auto
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -812,6 +814,10 @@ class EngineArgs:
         parallel_group.add_argument("--master-port", **parallel_kwargs["master_port"])
         parallel_group.add_argument("--nnodes", "-n", **parallel_kwargs["nnodes"])
         parallel_group.add_argument("--node-rank", "-r", **parallel_kwargs["node_rank"])
+        parallel_group.add_argument("--numa-node", **parallel_kwargs["numa_node"])
+        parallel_group.add_argument(
+            "--numa-node-auto", **parallel_kwargs["numa_node_auto"]
+        )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
         )
@@ -1724,6 +1730,8 @@ class EngineArgs:
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
+            numa_node=self.numa_node,
+            numa_node_auto=self.numa_node_auto,
         )
 
         speculative_config = self.create_speculative_config(

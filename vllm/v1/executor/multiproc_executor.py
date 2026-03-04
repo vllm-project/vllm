@@ -43,6 +43,7 @@ from vllm.distributed.parallel_state import (
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.tracing import instrument, maybe_init_worker_tracer
+from vllm.utils import numa_utils
 from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_ip,
@@ -636,7 +637,10 @@ class WorkerProc:
             daemon=True,
         )
 
-        proc.start()
+        # Apply NUMA binding if configured
+        with numa_utils.configure_subprocess(vllm_config, local_rank):
+            proc.start()
+
         writer.close()
         # Keep death_writer open in parent - when parent exits,
         # death_reader in child will get EOFError
