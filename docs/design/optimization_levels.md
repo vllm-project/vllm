@@ -5,6 +5,7 @@
 ## Overview
 
 vLLM provides 4 optimization levels (`-O0`, `-O1`, `-O2`, `-O3`) that allow users to trade off startup time for performance:
+
 - `-O0`: No optimization. Fastest startup time, but lowest performance.
 - `-O1`: Fast optimization. Simple compilation and fast fusions, and PIECEWISE cudagraphs.
 - `-O2`: Default optimization. Additional compilation ranges, additional fusions, FULL_AND_PIECEWISE cudagraphs.
@@ -31,6 +32,7 @@ Startup as fast as possible - no autotuning, no compilation, and no cudagraphs.
 This level is good for initial phases of development and debugging.
 
 Settings:
+
 - `-cc.cudagraph_mode=NONE`
 - `-cc.mode=NONE` (also resulting in `-cc.custom_ops=["none"]`)
 - `-cc.pass_config.fuse_...=False` (all fusions disabled)
@@ -43,14 +45,17 @@ This level is a good balance for most development scenarios where you want faste
 still make sure your code does not break cudagraphs or compilation.
 
 Settings:
+
 - `-cc.cudagraph_mode=PIECEWISE`
 - `-cc.mode=VLLM_COMPILE`
 - `--kernel-config.enable_flashinfer_autotune=True`
-- Fusions:
-  - `-cc.pass_config.fuse_norm_quant=True`*
-  - `-cc.pass_config.fuse_act_quant=True`*
-  - `-cc.pass_config.fuse_act_padding=True`†
-  - `-cc.pass_config.fuse_rope_kvcache=True`† (will be moved to O2)
+
+Fusions:
+
+- `-cc.pass_config.fuse_norm_quant=True`*
+- `-cc.pass_config.fuse_act_quant=True`*
+- `-cc.pass_config.fuse_act_padding=True`†
+- `-cc.pass_config.fuse_rope_kvcache=True`† (will be moved to O2)
 
 * These fusions are only enabled when either op is using a custom kernel, otherwise Inductor fusion is better.
 † These fusions are ROCm-only and require AITER.
@@ -61,9 +66,9 @@ This level is recommended for production workloads and is hence the default.
 Fusions in this level _may_ take longer due to additional compile ranges. 
 
 Settings (on top of `-O1`):
+
 - `-cc.cudagraph_mode=FULL_AND_PIECEWISE`
-- Fusions:
-  - `-cc.pass_config.fuse_allreduce_rms=True`
+- `-cc.pass_config.fuse_allreduce_rms=True`
 
 ### `-O3`: Aggressive Optimization
 This level is currently the same as `-O2`, but may include additional optimizations 
