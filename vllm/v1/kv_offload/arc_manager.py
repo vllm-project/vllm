@@ -123,8 +123,10 @@ class ARCOffloadingManager(OffloadingManager):
     def prepare_store(
         self, block_hashes: Iterable[BlockHash]
     ) -> PrepareStoreOutput | None:
+        block_hashes_list = list(block_hashes)
+
         block_hashes_to_store = []
-        for block_hash in block_hashes:
+        for block_hash in block_hashes_list:
             if block_hash not in self.t1 and block_hash not in self.t2:
                 block_hashes_to_store.append(block_hash)
 
@@ -140,12 +142,16 @@ class ARCOffloadingManager(OffloadingManager):
         )
 
         to_evict = []
+        if num_blocks_to_evict > 0:
+            # Blocks from the original input are excluded from eviction candidates:
+            # a block that was already stored must remain in the cache after this call.
+            protected = set(block_hashes_list)
         while num_blocks_to_evict > 0:
             block_to_evict = None
             if len(self.t1) >= int(self.target_t1_size):
                 # try to evict the least recently used (oldest) block from T1
                 for block_hash, block in self.t1.items():
-                    if block.ref_cnt == 0:
+                    if block.ref_cnt == 0 and block_hash not in protected:
                         block_to_evict = (block_hash, block)
                         eviction_t = self.t1
                         eviction_b = self.b1
@@ -153,7 +159,7 @@ class ARCOffloadingManager(OffloadingManager):
             if not block_to_evict:
                 # try to evict the least recently used (oldest) block from T2
                 for block_hash, block in self.t2.items():
-                    if block.ref_cnt == 0:
+                    if block.ref_cnt == 0 and block_hash not in protected:
                         block_to_evict = (block_hash, block)
                         eviction_t = self.t2
                         eviction_b = self.b2
