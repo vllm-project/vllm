@@ -1180,12 +1180,14 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             )
 
         # Rename ModelOpt checkpoint names to standardized names
-        input_global_scale = layer.input_scale.max().to(torch.float32)
+
+        # NOTE: modelopt stores the inverse scales so that
+        # `x_fp8_range = x * 1 / global_scale`, and `global_scale` is small.
+        # Taking the min is not enough: the fp8 scales should be recomputed accordingly!
+        input_global_scale = layer.input_scale.min().to(torch.float32)
         layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
         del layer.input_scale
-        
-        # NOTE: modelopt stores the inverse scales so that `x_fp8_range = x * 1 / global_scale)`, that are small values.
-        # Taking the min is not enough here: the fp8 scales should be recomputed accordingly!
+
         weight_global_scale = layer.weight_scale_2.min().to(torch.float32)
         layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
         del layer.weight_scale_2
