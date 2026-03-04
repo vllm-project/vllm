@@ -150,6 +150,14 @@ def test_deepseek_fp8_block_moe_deep_gemm(monkeypatch: pytest.MonkeyPatch):
     )
 
 
+def test_deepseek_fp8_block_moe_vllm_triton(monkeypatch: pytest.MonkeyPatch):
+    can_initialize(
+        "deepseek-ai/DeepSeek-V3.1",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=["--moe-backend=triton"],
+    )
+
+
 @pytest.mark.skip(
     reason=(
         "Known issue: lack of kernel support. "
@@ -177,6 +185,18 @@ def test_deepseek_fp8_block_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatc
         "deepseek-ai/DeepSeek-V3.1",
         hf_overrides=HF_OVERRIDE_TEXT,
         extra_args=["--moe-backend=flashinfer_trtllm"],
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
+def test_deepseek_nvfp4_moe_flashinfer_vllm(monkeypatch: pytest.MonkeyPatch):
+    can_initialize(
+        "nvidia/DeepSeek-R1-0528-FP4-v2",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=["--moe-backend=cutlass"],
     )
 
 
@@ -252,6 +272,90 @@ def test_gptoss_eager(monkeypatch: pytest.MonkeyPatch):
 def test_qwen3_next_bf16_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "Qwen/Qwen3-Next-80B-A3B-Instruct",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=["--moe-backend=flashinfer_trtllm"],
+    )
+
+
+## NemoTron ##
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
+def test_nemotron_fp8_moe_flashinfer_throughput(monkeypatch: pytest.MonkeyPatch):
+    can_initialize(
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=["--moe-backend=flashinfer_cutlass"],
+    )
+
+
+@pytest.mark.skip(
+    reason=(
+        "FP8 MoE backend FLASHINFER_TRTLLM does not support the "
+        "deployment configuration since kernel does not support "
+        "no act_and_mul MLP layer."
+    )
+)
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
+def test_nemotron_fp8_moe_flashinfer_latency(monkeypatch: pytest.MonkeyPatch):
+    can_initialize(
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=["--moe-backend=flashinfer_trtllm"],
+    )
+
+
+@pytest.mark.skip(
+    reason=(
+        "FP8 MoE backend TRITON does not support the "
+        "deployment configuration since kernel does not support "
+        "no act_and_mul MLP layer."
+    )
+)
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
+def test_nemotron_fp8_moe_vllm_triton(monkeypatch: pytest.MonkeyPatch):
+    can_initialize(
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=["--moe-backend=triton"],
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
+def test_nemotron_fp4_moe_flashinfer_throughput(monkeypatch: pytest.MonkeyPatch):
+    can_initialize(
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=["--moe-backend=flashinfer_cutlass"],
+    )
+
+
+@pytest.mark.skip(
+    reason=(
+        "FP4 MoE backend FLASHINFER_TRTLLM does not support the "
+        "deployment configuration since kernel does not support "
+        "hidden_dim % 512 != 0."
+    )
+)
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="This test only runs on Blackwell GPUs (SM10x).",
+)
+def test_nemotron_fp4_moe_flashinfer_latency(monkeypatch: pytest.MonkeyPatch):
+    can_initialize(
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
         hf_overrides=HF_OVERRIDE_TEXT,
         extra_args=["--moe-backend=flashinfer_trtllm"],
     )

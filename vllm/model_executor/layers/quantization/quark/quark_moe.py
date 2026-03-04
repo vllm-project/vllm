@@ -40,6 +40,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    CK_MXFP4_MOE_DIM_ALIGNMENT,
     _swizzle_mxfp4,
     dequant_mxfp4,
 )
@@ -53,6 +54,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d,
     normalize_e4m3fn_to_e4m3fnuz,
@@ -762,6 +764,32 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 "QuarkOCP_MX_MoEMethod simulated MOE layers: "
                 "dequantizing weights ahead of time."
             )
+
+        # CK's pre-compiled MXFP4 MoE GEMM kernel instances have dimension
+        # alignment requirements. When violated (e.g. MiniMax-M2.1 with
+        # TP=4 yields intermediate_size_per_partition=384), AITER raises:
+        # "device_gemm ... does not support this GEMM problem".
+        # Fall back to emulation in that case.
+        if (
+            not self.emulate
+            and self.use_rocm_aiter_moe
+            and self.ocp_mx_scheme is not None
+            and self.ocp_mx_scheme.startswith("w_mxfp4")
+            and moe.intermediate_size_per_partition % CK_MXFP4_MOE_DIM_ALIGNMENT != 0
+        ):
+            logger.warning_once(
+                "AITER CK MXFP4 MoE GEMM does not support "
+                "intermediate_size_per_partition=%d (not a multiple of %d). "
+                "This typically happens when intermediate_size / "
+                "tensor_parallel_size produces an incompatible dimension. "
+                "Falling back to emulation mode. To avoid this overhead, "
+                "use a compatible tensor_parallel_size or set "
+                "VLLM_ROCM_USE_AITER_MOE=0.",
+                moe.intermediate_size_per_partition,
+                CK_MXFP4_MOE_DIM_ALIGNMENT,
+            )
+            self.use_rocm_aiter_moe = False
+            self.emulate = True
 
         if self.emulate:
             logger.warning_once(
