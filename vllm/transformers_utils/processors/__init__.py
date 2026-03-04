@@ -8,16 +8,19 @@ reasons:
 - There is a need to override the existing processor to support vLLM.
 """
 
-from vllm.transformers_utils.processors.bagel import BagelProcessor
-from vllm.transformers_utils.processors.deepseek_vl2 import DeepseekVLV2Processor
-from vllm.transformers_utils.processors.fireredasr2_processor import (
-    FireRedASR2Processor,
-)
-from vllm.transformers_utils.processors.funasr_processor import FunASRProcessor
-from vllm.transformers_utils.processors.hunyuan_vl import HunYuanVLProcessor
-from vllm.transformers_utils.processors.hunyuan_vl_image import HunYuanVLImageProcessor
-from vllm.transformers_utils.processors.ovis import OvisProcessor
-from vllm.transformers_utils.processors.ovis2_5 import Ovis2_5Processor
+import importlib
+
+_CLASS_TO_MODULE: dict[str, str] = {
+    "BagelProcessor": "vllm.transformers_utils.processors.bagel",
+    "DeepseekVLV2Processor": "vllm.transformers_utils.processors.deepseek_vl2",
+    "FireRedASR2Processor": "vllm.transformers_utils.processors.fireredasr2_processor",
+    "FunASRProcessor": "vllm.transformers_utils.processors.funasr_processor",
+    "HunYuanVLProcessor": "vllm.transformers_utils.processors.hunyuan_vl",
+    "HunYuanVLImageProcessor": "vllm.transformers_utils.processors.hunyuan_vl_image",
+    "OvisProcessor": "vllm.transformers_utils.processors.ovis",
+    "Ovis2_5Processor": "vllm.transformers_utils.processors.ovis2_5",
+}
+
 
 __all__ = [
     "BagelProcessor",
@@ -29,3 +32,16 @@ __all__ = [
     "OvisProcessor",
     "Ovis2_5Processor",
 ]
+
+
+def __getattr__(name: str):
+    if name in _CLASS_TO_MODULE:
+        module_name = _CLASS_TO_MODULE[name]
+        module = importlib.import_module(module_name)
+        return getattr(module, name)
+
+    raise AttributeError(f"module 'processors' has no attribute '{name}'")
+
+
+def __dir__():
+    return sorted(list(__all__))
