@@ -462,6 +462,19 @@ class PyNcclCommunicator:
                     exc_info=True,
                 )
 
+    def batch_isend_irecv(self, p2p_ops: list, stream=None):
+        if self.disabled:
+            return
+        if stream is None:
+            stream = current_stream()
+        self.group_start()
+        for op in p2p_ops:
+            if op.op is torch.distributed.isend:
+                self.send(op.tensor, op.group_peer, stream)
+            elif op.op is torch.distributed.irecv:
+                self.recv(op.tensor, op.group_peer, stream)
+        self.group_end()
+
 
 # ===================== Legacy implementation fallback =====================
 
@@ -686,10 +699,19 @@ if envs.VLLM_DISABLE_NCCL4PY:
             assert tensor.device == self.device
             if stream is None:
                 stream = current_stream()
+            if tensor.dtype in [
+                torch.float8_e5m2,
+                torch.float8_e4m3fn,
+                torch.float8_e4m3fnuz,
+                torch.float8_e5m2fnuz,
+            ]:
+                nccl_dtype = ncclDataTypeEnum.from_torch(torch.uint8)
+            else:
+                nccl_dtype = ncclDataTypeEnum.from_torch(tensor.dtype)
             self.nccl.ncclSend(
                 buffer_type(tensor.data_ptr()),
                 tensor.numel(),
-                ncclDataTypeEnum.from_torch(tensor.dtype),
+                nccl_dtype,
                 dst,
                 self.comm,
                 cudaStream_t(stream.cuda_stream),
@@ -701,10 +723,19 @@ if envs.VLLM_DISABLE_NCCL4PY:
             assert tensor.device == self.device
             if stream is None:
                 stream = current_stream()
+            if tensor.dtype in [
+                torch.float8_e5m2,
+                torch.float8_e4m3fn,
+                torch.float8_e4m3fnuz,
+                torch.float8_e5m2fnuz,
+            ]:
+                nccl_dtype = ncclDataTypeEnum.from_torch(torch.uint8)
+            else:
+                nccl_dtype = ncclDataTypeEnum.from_torch(tensor.dtype)
             self.nccl.ncclRecv(
                 buffer_type(tensor.data_ptr()),
                 tensor.numel(),
-                ncclDataTypeEnum.from_torch(tensor.dtype),
+                nccl_dtype,
                 src,
                 self.comm,
                 cudaStream_t(stream.cuda_stream),
@@ -754,20 +785,18 @@ if envs.VLLM_DISABLE_NCCL4PY:
         def deregister_comm_window(self, window):
             return self.nccl.ncclCommWindowDeregister(self.comm, window)
 
+        def batch_isend_irecv(self, p2p_ops: list, stream=None):
+            if self.disabled:
+                return
+            if stream is None:
+                stream = current_stream()
+            self.group_start()
+            for op in p2p_ops:
+                if op.op is torch.distributed.isend:
+                    self.send(op.tensor, op.group_peer, stream)
+                elif op.op is torch.distributed.irecv:
+                    self.recv(op.tensor, op.group_peer, stream)
+            self.group_end()
+
     # Replace PyNcclCommunicator with legacy version
     PyNcclCommunicator = PyNcclCommunicatorLegacy  # type: ignore[misc,assignment]
-        return self.nccl.ncclCommWindowDeregister(self.comm, window)
-
-    def batch_isend_irecv(self, p2p_ops: list, stream=None):
-        if self.disabled:
-            return
-        if stream is None:
-            stream = current_stream()
-        self.group_start()
-        for op in p2p_ops:
-            if op.op is torch.distributed.isend:
-                self.send(op.tensor, op.group_peer, stream)
-            elif op.op is torch.distributed.irecv:
-                self.recv(op.tensor, op.group_peer, stream)
-
-        self.group_end()
