@@ -604,7 +604,9 @@ class GPUModelRunner(
 
         # Persistent buffers for CUDA graphs.
         self.input_ids = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
-        self.positions = self._make_buffer(self.max_num_tokens, dtype=torch.int64)
+        self.positions = torch.zeros(
+            self.max_num_tokens, dtype=torch.int64, device=self.device
+        )
         self.query_start_loc = self._make_buffer(
             self.max_num_reqs + 1, dtype=torch.int32
         )
@@ -847,13 +849,13 @@ class GPUModelRunner(
                 return self.mrope_positions.gpu[:, :num_tokens]
             if self.uses_xdrope_dim > 0:
                 return self.xdrope_positions.gpu[:, :num_tokens]
-            return self.positions.gpu[:num_tokens]
+            return self.positions[:num_tokens]
         else:
             if self.uses_mrope:
                 return self.mrope_positions.gpu[:, num_tokens]
             if self.uses_xdrope_dim > 0:
                 return self.xdrope_positions.gpu[:, num_tokens]
-            return self.positions.gpu[num_tokens]
+            return self.positions[num_tokens]
 
     def _make_buffer(
         self, *size: int | torch.SymInt, dtype: torch.dtype, numpy: bool = True
@@ -1769,7 +1771,7 @@ class GPUModelRunner(
         self.num_scheduled_tokens_buf.np[:num_reqs] = num_scheduled_tokens
         self.num_scheduled_tokens_buf.copy_to_gpu(num_reqs)
         num_scheduled_tokens_gpu = self.num_scheduled_tokens_buf.gpu[:num_reqs]
-        self.positions.gpu[:total_num_scheduled_tokens] = (
+        self.positions[:total_num_scheduled_tokens] = (
             self.num_computed_tokens[req_indices_gpu].to(torch.int64)
             + self.query_pos.gpu[:total_num_scheduled_tokens]
         )
@@ -1781,7 +1783,7 @@ class GPUModelRunner(
         self.input_batch.block_table.compute_slot_mapping(
             num_reqs,
             self.query_start_loc.gpu[: num_reqs + 1],
-            self.positions.gpu[:total_num_scheduled_tokens],
+            self.positions[:total_num_scheduled_tokens],
         )
 
         # Copy the tensors to the GPU.
@@ -3024,7 +3026,7 @@ class GPUModelRunner(
         elif self.uses_xdrope_dim > 0:
             positions = self.xdrope_positions.gpu[:, :num_input_tokens]
         else:
-            positions = self.positions.gpu[:num_input_tokens]
+            positions = self.positions[:num_input_tokens]
 
         if is_first_rank:
             intermediate_tensors = None
@@ -5050,7 +5052,7 @@ class GPUModelRunner(
             elif self.uses_xdrope_dim > 0:
                 positions = self.xdrope_positions.gpu[:, :num_tokens_padded]
             else:
-                positions = self.positions.gpu[:num_tokens_padded]
+                positions = self.positions[:num_tokens_padded]
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
