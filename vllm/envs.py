@@ -713,7 +713,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CPU_SGL_KERNEL": lambda: bool(int(os.getenv("VLLM_CPU_SGL_KERNEL", "0"))),
     # (Zen CPU backend) eagerly prepack weights into ZenDNN blocked layout
     # at model load time. Eliminates per-inference layout conversion overhead.
-    "VLLM_ZENTORCH_WEIGHT_PREPACK": lambda: bool(int(os.getenv("VLLM_ZENTORCH_WEIGHT_PREPACK", "1"))),
+    "VLLM_ZENTORCH_WEIGHT_PREPACK": lambda: bool(
+        int(os.getenv("VLLM_ZENTORCH_WEIGHT_PREPACK", "1"))
+    ),
     # (Zen CPU backend) whether to include zentorch as a pip requirement
     # during setup.py install. Disabled in Docker where zentorch is
     # built from source or installed separately.

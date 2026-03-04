@@ -187,9 +187,9 @@ def cpu_platform_plugin() -> str | None:
     if _is_amd_zen_cpu():
         try:
             import zentorch  # noqa: F401
+
             logger.debug(
-                "AMD Zen CPU detected with zentorch installed, "
-                "using ZenCpuPlatform."
+                "AMD Zen CPU detected with zentorch installed, using ZenCpuPlatform."
             )
             return "vllm.platforms.zen_cpu.ZenCpuPlatform"
         except ImportError:
@@ -296,5 +296,11 @@ def __setattr__(name: str, value):
         raise AttributeError(f"No attribute named '{name}' exists in {__name__}.")
 
 
-__all__ = ["Platform", "PlatformEnum", "current_platform", "CpuArchEnum", "_init_trace",
-           "_is_amd_zen_cpu"]
+__all__ = [
+    "Platform",
+    "PlatformEnum",
+    "current_platform",
+    "CpuArchEnum",
+    "_init_trace",
+    "_is_amd_zen_cpu",
+]

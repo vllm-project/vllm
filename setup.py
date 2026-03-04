@@ -38,6 +38,10 @@ logger = logging.getLogger(__name__)
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
 envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm", "envs.py"))
+platforms = load_module_from_path(
+    "platforms", os.path.join(ROOT_DIR, "vllm", "platforms", "__init__.py")
+)
+_is_amd_zen_cpu = platforms._is_amd_zen_cpu
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
@@ -813,16 +817,6 @@ def _is_cpu() -> bool:
     return VLLM_TARGET_DEVICE == "cpu"
 
 
-def _is_amd_epyc() -> bool:
-    """Detect AMD EPYC CPU with AVX-512 via /proc/cpuinfo."""
-    import os
-    if not os.path.exists("/proc/cpuinfo"):
-        return False
-    with open("/proc/cpuinfo") as f:
-        cpuinfo = f.read()
-    return "AuthenticAMD" in cpuinfo and "avx512" in cpuinfo
-
-
 def _is_xpu() -> bool:
     return VLLM_TARGET_DEVICE == "xpu"
 
@@ -960,7 +954,7 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
         requirements = _read_requirements("cpu.txt")
-        if _is_amd_epyc() and envs.VLLM_ZENTORCH_INSTALL:
+        if _is_amd_zen_cpu() and envs.VLLM_ZENTORCH_INSTALL:
             requirements.append("zentorch")
     elif _is_xpu():
         requirements = _read_requirements("xpu.txt")

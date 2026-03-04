@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for CPU unquantized GEMM dispatch behavior."""
 
 import torch
@@ -30,9 +32,10 @@ def _ensure_test_zentorch_linear_unary() -> None:
     lib_impl = torch.library.Library("zentorch", "IMPL", "CPU")
     lib_impl.impl(
         "zentorch_linear_unary",
-        lambda input, weight, bias, is_weight_prepacked=False: torch.nn.functional.linear(
-            input, weight, bias
-        ),
+        lambda input,
+        weight,
+        bias,
+        is_weight_prepacked=False: torch.nn.functional.linear(input, weight, bias),
     )
 
     _TEST_ZENTORCH_LIBS.extend((lib_def, lib_impl))

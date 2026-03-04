@@ -61,8 +61,10 @@ class ZenCpuPlatform(CpuPlatform):
             return
 
         def patched_dumps_method(self, obj):
-            from torch._inductor.codecache import BypassFxGraphCache
             import logging as _logging
+
+            from torch._inductor.codecache import BypassFxGraphCache
+
             _logger = _logging.getLogger("torch._inductor.codecache")
             try:
                 self.dump(obj)
@@ -74,6 +76,6 @@ class ZenCpuPlatform(CpuPlatform):
                 self._stream.seek(0)
                 self._stream.truncate(0)
 
-        patched_dumps_method._zen_patched = True
+        patched_dumps_method._zen_patched = True  # type: ignore[attr-defined]
         FxGraphCachePickler.dumps = patched_dumps_method
         logger.info("[zen_cpu] Patched FxGraphCachePickler.dumps (ValueError fix)")
