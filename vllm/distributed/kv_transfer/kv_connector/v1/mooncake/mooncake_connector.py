@@ -223,6 +223,7 @@ class MooncakeConnector(KVConnectorBase_V1):
         return self.connector_worker.get_finished()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+        return
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, MooncakeConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
@@ -286,7 +287,7 @@ class MooncakeConnectorScheduler:
             * true if the external KV cache tokens will be loaded
               asynchronously (between scheduler steps).
         """
-
+        return len(request.prompt_token_ids) - 1, False
         params = request.kv_transfer_params
         logger.debug(
             "MooncakeConnector get_num_new_matched_tokens: "

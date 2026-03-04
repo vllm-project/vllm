@@ -105,6 +105,8 @@ def _moe_forward_shared(
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     # TODO(bnell): this can be removed after MK migration is complete.
     layer.ensure_moe_quant_config_init()
+    logger.info(f"jcz _moe_forward_shared before hidden_states:{hidden_states}")
+    logger.info(f"jcz _moe_forward_shared before router_logits:{router_logits}")
     return layer.runner.forward_impl(
         layer, hidden_states, router_logits, shared_experts_input
     )
@@ -419,12 +421,15 @@ class DefaultMoERunner(MoERunner):
                 value=0.0,
             )
 
+        logger.info(f"jcz self.moe_forward before hidden_states:{hidden_states}")
+        logger.info(f"jcz self.moe_forward before router_logits:{router_logits}")
         fused_output = self.moe_forward(
             hidden_states,
             router_logits,
             original_hidden_states,
             self._encode_layer_name(),
         )
+        logger.info(f"jcz self.moe_forward after fused_output:{fused_output}")
 
         if self.shared_experts is not None:
             orig_hidden_dims = [original_hidden_dim, transformed_hidden_dim]
@@ -615,7 +620,9 @@ class DefaultMoERunner(MoERunner):
         #        parallel execution of shared experts with the FusedMoE via
         #        separate cuda stream)
         if self.gate is not None:
+            logger.info("jcz runner forward_impl before self.gate router_logits: %s", router_logits)
             router_logits, _ = self.gate(hidden_states)
+            logger.info("jcz runner forward_impl after self.gate router_logits: %s", router_logits)
 
         if use_chunked_impl:
             return self.forward_impl_chunked(
@@ -638,7 +645,7 @@ class DefaultMoERunner(MoERunner):
             if ctx.dp_metadata
             else nullcontext()
         )
-
+        logger.info("jcz runner forward_impl before sp_ctx hidden_states: %s", hidden_states)
         with sp_ctx:
             # Run shared experts before matrix multiply.
             # because matrix multiply maybe modify the hidden_states.
@@ -675,17 +682,25 @@ class DefaultMoERunner(MoERunner):
 
             # Matrix multiply.
             if self.quant_method.is_monolithic:
+                logger.info("jcz runner forward_impl quant_method before x: %s", x)
                 final_hidden_states = self.quant_method.apply_monolithic(
                     layer=layer,
                     x=hidden_states,
                     router_logits=router_logits,
                 )
+                logger.info("jcz runner forward_impl quant_method after final_hidden_states: %s", final_hidden_states)
             else:
                 topk_weights, topk_ids = self.router.select_experts(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
                 )
-
+                logger.info("jcz runner forward_impl quant_method before self.router: %s", self.router)
+                logger.info("jcz runner forward_impl quant_method before x: %s", x)
+                logger.info("jcz runner forward_impl quant_method before x_orig: %s", x_orig)
+                logger.info("jcz runner forward_impl quant_method before router_logits: %s", router_logits)
+                logger.info("jcz runner forward_impl quant_method before topk_ids: %s", topk_ids)
+                logger.info("jcz runner forward_impl quant_method before topk_weights: %s", topk_weights)
+                logger.info("jcz runner forward_impl quant_method before shared_input: %s", shared_input)
                 final_hidden_states = self.quant_method.apply(
                     layer=layer,
                     x=hidden_states,
@@ -693,6 +708,7 @@ class DefaultMoERunner(MoERunner):
                     topk_ids=topk_ids,
                     shared_experts_input=shared_input,
                 )
+                logger.info("jcz runner forward_impl quant_method after final_hidden_states: %s", final_hidden_states)
 
             if has_separate_shared_experts:
                 assert self.shared_experts is not None
@@ -729,9 +745,12 @@ class DefaultMoERunner(MoERunner):
                 return states
 
             if self.shared_experts is not None:
+                logger.info("jcz runner forward_impl before combine_output final_hidden_states[0]: %s", final_hidden_states[0])
+                logger.info("jcz runner forward_impl before combine_output final_hidden_states[1]: %s", final_hidden_states[1])
                 return (
                     final_hidden_states[0],
                     combine_output(final_hidden_states[1]),
                 )
             else:
+                logger.info("jcz runner forward_impl before combine_output final_hidden_states: %s", final_hidden_states)
                 return combine_output(final_hidden_states)

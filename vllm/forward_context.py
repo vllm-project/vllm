@@ -11,9 +11,11 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
+from vllm.distributed.afd_transfer import AFDConnectorBase
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.sequence import IntermediateTensors
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ubatch_utils import UBatchSlices
 
@@ -185,6 +187,20 @@ class DPMetadata:
 
 
 @dataclass
+class AFDMetadata:
+    afd_tokens_start_loc: list[int]
+    afd_reqs_start_loc: list[int]
+    afd_stage_idx: int
+    afd_connector: "AFDConnectorBase"
+    afd_tokens_lens: list[int]  # padded lengths for tensor slicing
+    num_of_stages: int
+
+    def clone(self) -> "AFDMetadata":
+        import copy
+        return copy.copy(self)
+
+
+@dataclass
 class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
     no_compile_layers: dict[str, Any]
@@ -201,6 +217,7 @@ class ForwardContext:
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
     dp_metadata: DPMetadata | None = None
+    afd_metadata: AFDMetadata | None = None
     # determine the cudagraph style at runtime to be FULL, PIECEWISE, or NONE.
     # by default NONE, no cudagraph is used.
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE
@@ -273,6 +290,7 @@ def create_forward_context(
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
+    afd_metadata: AFDMetadata | None = None,
 ):
     if vllm_config.compilation_config.fast_moe_cold_start:
         all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
@@ -291,6 +309,7 @@ def create_forward_context(
         ubatch_slices=ubatch_slices,
         skip_compiled=skip_compiled,
         additional_kwargs=additional_kwargs or {},
+        afd_metadata=afd_metadata,
     )
 
 
@@ -321,6 +340,7 @@ def set_forward_context(
     ubatch_slices: UBatchSlices | None = None,
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
+    afd_metadata: AFDMetadata | None = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -382,6 +402,7 @@ def set_forward_context(
         slot_mapping,
         additional_kwargs,
         skip_compiled,
+        afd_metadata=afd_metadata,
     )
 
     try:
