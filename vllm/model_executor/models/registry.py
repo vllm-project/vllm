@@ -341,6 +341,10 @@ _MULTIMODAL_MODELS = {
         "ernie45_vl",
         "Ernie4_5_VLMoeForConditionalGeneration",
     ),
+    "FireRedASR2ForConditionalGeneration": (
+        "fireredasr2",
+        "FireRedASR2ForConditionalGeneration",
+    ),
     "FunASRForConditionalGeneration": ("funasr", "FunASRForConditionalGeneration"),  # noqa: E501
     "FunAudioChatForConditionalGeneration": (
         "funaudiochat",
