@@ -20,9 +20,7 @@ TRTLLM_GEN_MXFP4_AVAILABLE = (
     current_platform.is_cuda() and current_platform.is_device_capability_family(100)
 )
 
-TRTLLM_GEN_MXFP8_AVAILABLE = (
-    current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-)
+TRTLLM_GEN_MXFP8_AVAILABLE = TRTLLM_GEN_MXFP4_AVAILABLE
 
 HOPPER_MXFP4_BF16_AVAILABLE = (
     current_platform.is_cuda()
