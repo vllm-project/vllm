@@ -293,6 +293,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     ZENTORCH_VLLM_PLUGIN_BUILD=0 python3 setup.py bdist_wheel && \
     uv pip install dist/*.whl && \
     cd / && rm -rf /tmp/zentorch && \
+    uv pip uninstall cmake && \
     apt-get purge -y --auto-remove make
 
 ENTRYPOINT ["vllm", "serve"]
