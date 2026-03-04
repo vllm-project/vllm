@@ -1117,7 +1117,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # The prior execute_model call must have failed.
             return None
 
-        input_batch, _, _, _, hidden_states, _, kv_connector_output = (
+        input_batch, _, _, _, hidden_states, _, kv_connector_output, _ = (
             self.execute_model_state
         )
         self.execute_model_state = None
