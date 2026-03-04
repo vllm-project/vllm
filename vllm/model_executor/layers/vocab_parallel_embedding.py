@@ -311,6 +311,26 @@ class VocabParallelEmbedding(CustomOp):
             weight_loader=self.weight_loader,
         )
 
+        self._attach_sharding_metadata()
+
+    def _attach_sharding_metadata(self) -> None:
+        from vllm.model_executor.layers.sharding import (
+            Sharding,
+            ShardingType,
+            _attach_sharding,
+        )
+
+        weight = getattr(self, "weight", None)
+        if weight is not None:
+            _attach_sharding(
+                weight,
+                Sharding(
+                    shape=(self.num_embeddings_padded, self.embedding_dim),
+                    nd_num_shards=(self.tp_size, 1),
+                    sharding_type=ShardingType.VOCAB_PARALLEL,
+                ),
+            )
+
     @classmethod
     def _get_indices(
         cls,
