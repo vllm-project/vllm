@@ -19,6 +19,7 @@ Network access is required for all tests (to download HF configs).
 from __future__ import annotations
 
 import json
+import tempfile
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -29,7 +30,7 @@ import pytest
 import torch
 from transformers import AutoConfig, PretrainedConfig
 
-from vllm import LLM, SamplingParams
+from vllm import LLM, SamplingParams, platforms
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_utils import (
@@ -692,10 +693,11 @@ def _run_anymodel_size_reduction():
     base_gpu_delta = torch.cuda.memory_allocated() - mem_before_base
 
     del base_llm
-    torch.cuda.empty_cache()
     cleanup_dist_env_and_memory()
 
-    mem_before_any = torch.cuda.memory_allocated()
+    mem_before_any = platforms.cuda.CudaPlatformBase.get_current_memory_usage(
+        torch.device("cuda")
+    )
 
     with patch.object(
         V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_stub
@@ -734,3 +736,84 @@ def test_anymodel_size_reduction():
     then verify the AnyModel version has fewer parameters and uses less
     GPU memory."""
     _run_anymodel_size_reduction()
+
+
+# ---------------------------------------------------------------------------
+# Puzzletron NAS config → AnyModel E2E test
+# ---------------------------------------------------------------------------
+# Verifies the full pipeline: load a real Puzzletron nas_config.json,
+# build the model via LLM(), and validate every layer.
+# ---------------------------------------------------------------------------
+
+_NAS_CONFIG_PATH = (
+    Path(__file__).resolve().parents[2] / "puzzletron_configs" / "nas_config.json"
+)
+
+
+@create_new_process_for_each_test()
+def _run_puzzletron_nas_config():
+    from vllm.model_executor.models.anymodel import (
+        NoOpAttention,
+        NoOpMLP,
+        Same,
+    )
+
+    with open(_NAS_CONFIG_PATH) as f:
+        config = json.load(f)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "config.json").write_text(json.dumps(config))
+        with patch.object(
+            V1EngineCore,
+            "_initialize_kv_caches",
+            _initialize_kv_caches_stub,
+        ):
+            llm = LLM(
+                tmp,
+                tokenizer="meta-llama/Llama-3.2-1B-Instruct",
+                load_format="dummy",
+                enforce_eager=True,
+                max_model_len=1024,
+                gpu_memory_utilization=0.90,
+            )
+
+    model = _get_model_from_llm(llm)
+    layers = model.model.layers
+    bcs = config["block_configs"]
+    assert len(layers) == len(bcs) == config["num_hidden_layers"]
+
+    hs = config["hidden_size"]
+    hd = config["head_dim"]
+    nh = config["num_attention_heads"]
+    gkv = config["num_key_value_heads"]
+
+    for i, (layer, bc) in enumerate(zip(layers, bcs)):
+        a_noop = bc["attention"]["no_op"]
+        f_noop = bc["ffn"]["no_op"]
+
+        assert isinstance(layer.self_attn, NoOpAttention) == a_noop, f"L{i} attn"
+        assert isinstance(layer.input_layernorm, Same) == a_noop, f"L{i} attn norm"
+        assert isinstance(layer.mlp, NoOpMLP) == f_noop, f"L{i} ffn"
+        assert isinstance(layer.post_attention_layernorm, Same) == f_noop, (
+            f"L{i} ffn norm"
+        )
+
+        if not a_noop:
+            kv = bc["attention"].get("num_key_value_heads") or gkv
+            expect_qkv = (nh + 2 * kv) * hd
+            assert layer.self_attn.qkv_proj.weight.shape == (expect_qkv, hs), (
+                f"L{i} qkv"
+            )
+
+        if not f_noop:
+            isize = bc["ffn"]["intermediate_size"]
+            assert layer.mlp.down_proj.weight.shape == (hs, isize), f"L{i} down"
+            assert layer.mlp.gate_up_proj.weight.shape == (2 * isize, hs), (
+                f"L{i} gate_up"
+            )
+
+
+def test_puzzletron_nas_config():
+    """Load Puzzletron's nas_config.json → AnyModel → verify
+    every layer's no-ops and weight shapes match the config."""
+    _run_puzzletron_nas_config()
