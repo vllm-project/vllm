@@ -21,7 +21,7 @@ from vllm.utils.import_utils import LazyLoader
 if TYPE_CHECKING:
     import kaldi_native_fbank as knf
 else:
-    knf = LazyLoader("kaldi_native_fbank")
+    knf = LazyLoader("knf", globals(), "kaldi_native_fbank")
 
 
 logger = init_logger(__name__)
