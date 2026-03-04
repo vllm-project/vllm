@@ -205,6 +205,10 @@ class CUDAGraphWrapper:
         # in case we need to access the original runnable.
         return self.runnable
 
+    @property
+    def cudagraph_wrapper(self) -> "CUDAGraphWrapper":
+        return self
+
     def clear_graphs(self) -> None:
         self.concrete_cudagraph_entries.clear()
 

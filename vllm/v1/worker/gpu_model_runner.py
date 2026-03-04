@@ -5400,10 +5400,15 @@ class GPUModelRunner(
             ),
         )
 
+        # Use a temporary pool for profiling to avoid fragmentation in the main pool
+        profiling_pool = current_platform.graph_pool_handle()
+        original_pool = self.model.cudagraph_wrapper.graph_pool
+        self.model.cudagraph_wrapper.graph_pool = profiling_pool
+
         set_cudagraph_capturing_enabled(True)
         with self._freeze_gc(), graph_capture(device=self.device):
-            shared_memory_estimate = 0
-            per_graph_estimate = 0
+            shared_memory_estimate = {}
+            per_graph_estimate = {}
             piecewise_graphs_captured = 0
             current_platform.synchronize()
             current_platform.empty_cache()
@@ -5434,8 +5439,8 @@ class GPUModelRunner(
                 # Use at least 1 MiB per graph for driver overhead
                 per_graph = max(mem_samples[1] if len(mem_samples) > 1 else 0, 1 << 20)
 
-                shared_memory_estimate += first_capture
-                per_graph_estimate += per_graph * (len(descs) - 1)
+                shared_memory_estimate[mode] = first_capture
+                per_graph_estimate[mode] = per_graph * (len(descs) - 1)
                 if mode == CUDAGraphMode.PIECEWISE:
                     # Track all PIECEWISE graphs captured (including inner layers)
                     piecewise_graphs_captured = (
@@ -5453,8 +5458,8 @@ class GPUModelRunner(
                 )
 
         set_cudagraph_capturing_enabled(False)
-        if isinstance(self.model, (CUDAGraphWrapper, UBatchWrapper)):
-            self.model.clear_graphs()
+        self.model.clear_graphs()
+        self.model.cudagraph_wrapper.graph_pool = original_pool
         self.maybe_remove_all_loras(self.lora_config)
         self._cleanup_profiling_kv_cache()
 
@@ -5463,7 +5468,12 @@ class GPUModelRunner(
             saved_num_cudagraph_captured + piecewise_graphs_captured
         )
 
-        total_estimate = shared_memory_estimate + per_graph_estimate
+        # FULL and PIECEWISE graphs share the global pool at runtime and are
+        # never replayed concurrently, so the pool overlays their memory.
+        # Take the max to avoid double-counting the overlap.
+        total_estimate = max(shared_memory_estimate.values()) + sum(
+            per_graph_estimate.values()
+        )
         logger.info(
             "Estimated CUDA graph memory: %.2f GiB total",
             total_estimate / (1 << 30),
