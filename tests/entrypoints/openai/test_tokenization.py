@@ -220,13 +220,13 @@ async def test_tokenize_with_return_token_strs(
     response.raise_for_status()
 
     tokens = tokenizer.encode(prompt, add_special_tokens=True)
-    tokens_str = tokenizer.convert_ids_to_tokens(tokens)
+    expected_token_strs = [tokenizer.decode(token_id) for token_id in tokens]
 
     result = response.json()
     assert result["tokens"] == tokens
     assert result["count"] == len(tokens)
     assert result["max_model_len"] == 8192
-    assert result["token_strs"] == tokens_str
+    assert result["token_strs"] == expected_token_strs
 
 
 @pytest.mark.asyncio
