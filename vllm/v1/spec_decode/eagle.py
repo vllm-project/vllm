@@ -809,8 +809,10 @@ class SpecDecodeBaseProposer:
                         dtype=target_positions[0].dtype,
                         device=self.device,
                     )
-                    seq_pos[cad.query_start_loc[:batch_size].long()] = (
-                        num_computed.to(target_positions[0].dtype)
+                    seq_pos.scatter_(
+                        0,
+                        cad.query_start_loc[:batch_size].long(),
+                        num_computed.to(target_positions[0].dtype),
                     )
                     kernel_positions = seq_pos
                 else:
