@@ -851,6 +851,10 @@ class GroupCoordinator:
         if self.world_size <= 1:
             return []
 
+        if dst is None:
+            dst = (self.rank_in_group + 1) % self.world_size
+        assert dst < self.world_size, f"Invalid dst rank ({dst})"
+
         if self.use_cpu_custom_send_recv:
             if self.device_communicator is None:
                 raise ValueError("No device communicator found")
@@ -867,10 +871,6 @@ class GroupCoordinator:
 
         group = self.device_group
         metadata_group = self.cpu_group
-
-        if dst is None:
-            dst = (self.rank_in_group + 1) % self.world_size
-        assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
         metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
         self.send_object(metadata_list, dst=dst)
@@ -948,6 +948,11 @@ class GroupCoordinator:
     ]:
         if not torch.distributed.is_initialized() or self.world_size == 1:
             return None, [], []
+
+        if src is None:
+            src = (self.rank_in_group - 1) % self.world_size
+        assert src < self.world_size, f"Invalid src rank ({src})"
+
         if self.use_cpu_custom_send_recv:
             if self.device_communicator is None:
                 raise ValueError("No device communicator found")
@@ -964,10 +969,6 @@ class GroupCoordinator:
 
         group = self.device_group
         metadata_group = self.cpu_group
-
-        if src is None:
-            src = (self.rank_in_group - 1) % self.world_size
-        assert src < self.world_size, f"Invalid src rank ({src})"
 
         recv_metadata_list = self.recv_object(src=src)
         tensor_dict: dict[str, Any] = {}
@@ -1915,14 +1916,14 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     gc.collect()
     from vllm.platforms import current_platform
 
-    empty_cache = current_platform.empty_cache
-    if empty_cache is not None:
-        empty_cache()
-    try:
-        if not current_platform.is_cpu():
+    if not current_platform.is_cpu():
+        torch.accelerator.empty_cache()
+        try:
             torch._C._host_emptyCache()
-    except AttributeError:
-        logger.warning("torch._C._host_emptyCache() only available in Pytorch >=2.5")
+        except AttributeError:
+            logger.warning(
+                "torch._C._host_emptyCache() only available in Pytorch >=2.5"
+            )
 
 
 def in_the_same_node_as(
