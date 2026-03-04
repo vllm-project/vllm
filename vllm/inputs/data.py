@@ -74,7 +74,6 @@ class TokensPrompt(_PromptOptions):
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
 
-
     mm_processor_kwargs: NotRequired[dict[str, Any] | None]
     """
     Optional multi-modal processor kwargs to be forwarded to the

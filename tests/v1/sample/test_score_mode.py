@@ -11,7 +11,6 @@ from vllm.logprobs import create_prompt_logprobs
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.sampler import Sampler
 
-
 # ---------------------------------------------------------------------------
 # 1. SamplingParams validation
 # ---------------------------------------------------------------------------
@@ -23,9 +22,7 @@ class TestSamplingParamsValidation:
             SamplingParams(score_mode=True, max_tokens=1)
 
     def test_score_mode_valid(self):
-        params = SamplingParams(
-            score_mode=True, prompt_logprobs=1, max_tokens=1
-        )
+        params = SamplingParams(score_mode=True, prompt_logprobs=1, max_tokens=1)
         assert params.score_mode is True
         assert params.prompt_logprobs == 1
 
@@ -48,9 +45,7 @@ class TestSamplingParamsValidation:
         assert params.return_prompt_logits is True
 
     def test_kld_mode_valid(self):
-        params = SamplingParams(
-            kld_mode=True, prompt_logprobs=1, max_tokens=1
-        )
+        params = SamplingParams(kld_mode=True, prompt_logprobs=1, max_tokens=1)
         assert params.kld_mode is True
 
 
@@ -90,9 +85,7 @@ class TestGatherTargetLogprobs:
         logprobs = _make_logprobs_tensor(num_tokens, vocab_size)
         target_ids = torch.randint(0, vocab_size, (num_tokens,), dtype=torch.int64)
 
-        indices, lps, ranks, _ = Sampler.gather_target_logprobs(
-            logprobs, target_ids
-        )
+        indices, lps, ranks, _ = Sampler.gather_target_logprobs(logprobs, target_ids)
 
         assert indices.shape == (num_tokens, 1)
         assert lps.shape == (num_tokens, 1)
@@ -102,9 +95,7 @@ class TestGatherTargetLogprobs:
         logprobs = _make_logprobs_tensor(4, 50)
         target_ids = torch.tensor([1, 2, 3, 4], dtype=torch.int64)
 
-        indices, lps, ranks, _ = Sampler.gather_target_logprobs(
-            logprobs, target_ids
-        )
+        indices, lps, ranks, _ = Sampler.gather_target_logprobs(logprobs, target_ids)
 
         assert indices.dtype == torch.int32
         assert lps.dtype == torch.float32
@@ -147,14 +138,10 @@ class TestFastPathLogprobs:
         processor = self._make_processor(target_ids)
 
         token_ids_tensor = torch.tensor([[10], [20], [30]], dtype=torch.int32)
-        logprobs_tensor = torch.tensor(
-            [[-1.5], [-2.0], [-0.5]], dtype=torch.float32
-        )
+        logprobs_tensor = torch.tensor([[-1.5], [-2.0], [-0.5]], dtype=torch.float32)
         ranks_tensor = torch.tensor([[3], [7], [0]], dtype=torch.int64)
 
-        tensors = LogprobsTensors(
-            token_ids_tensor, logprobs_tensor, ranks_tensor
-        )
+        tensors = LogprobsTensors(token_ids_tensor, logprobs_tensor, ranks_tensor)
         processor._update_prompt_logprobs_fast_path(tensors, target_ids)
 
         prompt_lps = processor.prompt_logprobs
@@ -172,14 +159,10 @@ class TestFastPathLogprobs:
         processor = self._make_processor(target_ids)
 
         wrong_ids_tensor = torch.tensor([[10], [99], [30]], dtype=torch.int32)
-        logprobs_tensor = torch.tensor(
-            [[-1.0], [-1.0], [-1.0]], dtype=torch.float32
-        )
+        logprobs_tensor = torch.tensor([[-1.0], [-1.0], [-1.0]], dtype=torch.float32)
         ranks_tensor = torch.tensor([[0], [0], [0]], dtype=torch.int64)
 
-        tensors = LogprobsTensors(
-            wrong_ids_tensor, logprobs_tensor, ranks_tensor
-        )
+        tensors = LogprobsTensors(wrong_ids_tensor, logprobs_tensor, ranks_tensor)
 
         with pytest.raises(ValueError, match="Token ID mismatch at position 1"):
             processor._update_prompt_logprobs_fast_path(tensors, target_ids)

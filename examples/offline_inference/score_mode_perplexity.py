@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Perplexity calculation script using vLLM's score mode.
 
@@ -24,6 +26,7 @@ import time
 from typing import Any
 
 from datasets import load_dataset
+
 from vllm import LLM, SamplingParams
 from vllm.inputs.data import TokensPrompt
 
@@ -129,9 +132,7 @@ def calculate_perplexity(
             logprob_sum += window_sum
             logprob_count += window_count
     else:
-        for start_idx in range(
-            0, num_tokens - context_length + stride, stride
-        ):
+        for start_idx in range(0, num_tokens - context_length + stride, stride):
             end_idx = start_idx + context_length
             if end_idx > num_tokens:
                 break
@@ -166,7 +167,8 @@ def calculate_perplexity(
 
     logger.debug(
         "Evaluation complete: %d windows, %d tokens",
-        windows_processed, logprob_count,
+        windows_processed,
+        logprob_count,
     )
 
     mean_log_prob = logprob_sum / logprob_count
@@ -219,9 +221,7 @@ def load_dataset_texts(
             messages = example["messages"]
             if isinstance(messages, list):
                 text = "\n".join(
-                    msg.get("content", "")
-                    for msg in messages
-                    if isinstance(msg, dict)
+                    msg.get("content", "") for msg in messages if isinstance(msg, dict)
                 )
                 if text and text.strip():
                     texts.append(text)
@@ -296,7 +296,8 @@ def main():
         help="Trust remote code when loading model",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Enable verbose (DEBUG) logging",
     )
@@ -324,7 +325,7 @@ def main():
     print(f"Initializing LLM with model: {args.model}")
     llm = LLM(model=args.model, **llm_kwargs)
 
-    print(f"\nCalculating perplexity...")
+    print("\nCalculating perplexity...")
     print(f"  Context length: {args.context_length}")
     print(f"  Stride: {args.stride}")
     print(f"  Samples: {args.num_samples or len(texts)}")
@@ -339,7 +340,7 @@ def main():
     )
     elapsed_time = time.time() - start_time
 
-    print(f"\nResults:")
+    print("\nResults:")
     print(f"  Perplexity: {perplexity:.4f}")
     print(f"  Total tokens: {total_tokens}")
     print(f"  Time elapsed: {elapsed_time:.2f} seconds")

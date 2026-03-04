@@ -517,9 +517,7 @@ class SamplingParams(
                 "Set detokenize=True to use stop."
             )
         if self.score_mode and self.prompt_logprobs is None:
-            raise ValueError(
-                "score_mode requires prompt_logprobs to be set."
-            )
+            raise ValueError("score_mode requires prompt_logprobs to be set.")
         if self.return_prompt_logits and self.kld_mode:
             raise ValueError(
                 "return_prompt_logits and kld_mode are mutually exclusive."

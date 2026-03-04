@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 KLD (Kullback-Leibler Divergence) calculation script using vLLM's score mode
 
@@ -82,9 +84,7 @@ def load_dataset_texts(
             messages = example["messages"]
             if isinstance(messages, list):
                 text = "\n".join(
-                    msg.get("content", "")
-                    for msg in messages
-                    if isinstance(msg, dict)
+                    msg.get("content", "") for msg in messages if isinstance(msg, dict)
                 )
                 if text and text.strip():
                     texts.append(text)
@@ -174,9 +174,7 @@ def calculate_kld(
             print(f"Phase 1: Generating reference logits from {reference_model_path}")
             ref_llm = LLM(model=reference_model_path, **(llm_kwargs or {}))
             window_idx = 0
-            for start_idx in range(
-                0, num_tokens - context_length + stride, stride
-            ):
+            for start_idx in range(0, num_tokens - context_length + stride, stride):
                 end_idx = start_idx + context_length
                 if end_idx > num_tokens:
                     break
@@ -203,8 +201,7 @@ def calculate_kld(
                     window_idx += 1
             del ref_llm
             gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            torch.accelerator.empty_cache()
             print(f"Saved {window_idx} reference logits to {ref_logits_dir}/")
 
     if reference_logits_path is None:
@@ -286,12 +283,8 @@ def calculate_kld(
                 device = model_logits.device
                 ref_logits = ref_logits.to(device)
                 vs = min(model_logits.shape[-1], ref_logits.shape[-1])
-                log_probs_model = F.log_softmax(
-                    model_logits[..., :vs].float(), dim=-1
-                )
-                log_probs_ref = F.log_softmax(
-                    ref_logits[..., :vs].float(), dim=-1
-                )
+                log_probs_model = F.log_softmax(model_logits[..., :vs].float(), dim=-1)
+                log_probs_ref = F.log_softmax(ref_logits[..., :vs].float(), dim=-1)
                 kld_per_pos = F.kl_div(
                     log_probs_model,
                     log_probs_ref,
@@ -304,7 +297,9 @@ def calculate_kld(
         window_idx += 1
         logger.debug(
             "Window %d: kld_sum=%.6f, kld_count=%d",
-            window_idx, kld_sum, kld_count,
+            window_idx,
+            kld_sum,
+            kld_count,
         )
 
     if kld_count == 0:
@@ -388,7 +383,8 @@ def main():
         help="Trust remote code when loading model",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Enable verbose (DEBUG) logging",
     )

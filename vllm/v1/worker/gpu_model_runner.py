@@ -1026,15 +1026,13 @@ class GPUModelRunner(
             )
             self.requests[req_id] = req_state
 
-            needs_prompt_output = (
-                sampling_params
-                and (
-                    sampling_params.prompt_logprobs is not None
-                    or sampling_params.return_prompt_logits
-                    or sampling_params.kld_mode
-                )
+            needs_prompt_output = sampling_params and (
+                sampling_params.prompt_logprobs is not None
+                or sampling_params.return_prompt_logits
+                or sampling_params.kld_mode
             )
             if needs_prompt_output:
+                assert sampling_params is not None
                 if sampling_params.prompt_logprobs is not None:
                     self.num_prompt_logprobs[req_id] = (
                         self.input_batch.vocab_size
@@ -4574,12 +4572,9 @@ class GPUModelRunner(
             )
 
             sampling_params = request.sampling_params
-            is_score_mode = (
-                sampling_params is not None and sampling_params.score_mode
-            )
+            is_score_mode = sampling_params is not None and sampling_params.score_mode
             is_return_prompt_logits = (
-                sampling_params is not None
-                and sampling_params.return_prompt_logits
+                sampling_params is not None and sampling_params.return_prompt_logits
             )
             is_kld_mode = (
                 sampling_params is not None
@@ -4614,20 +4609,14 @@ class GPUModelRunner(
                     framework="pt",
                     device=str(self.device),
                 ) as f:
-                    ref_logits_full = f.get_tensor(
-                        request.reference_logits_key
-                    ).to(self.device)
+                    ref_logits_full = f.get_tensor(request.reference_logits_key).to(
+                        self.device
+                    )
                 # Slice ref_logits for this chunk (chunked prefill)
-                ref_logits = ref_logits_full[
-                    start_idx : start_idx + num_logits
-                ]
+                ref_logits = ref_logits_full[start_idx : start_idx + num_logits]
                 vs = min(logits.shape[-1], ref_logits.shape[-1])
-                log_probs_model = F.log_softmax(
-                    logits[..., :vs].float(), dim=-1
-                )
-                log_probs_ref = F.log_softmax(
-                    ref_logits[..., :vs].float(), dim=-1
-                )
+                log_probs_model = F.log_softmax(logits[..., :vs].float(), dim=-1)
+                log_probs_ref = F.log_softmax(ref_logits[..., :vs].float(), dim=-1)
                 kld_per_pos = F.kl_div(
                     log_probs_model,
                     log_probs_ref,
@@ -4637,11 +4626,15 @@ class GPUModelRunner(
                 kld_sum = kld_per_pos.sum().item()
                 kld_count = kld_per_pos.numel()
                 if req_id in kld_result_dict:
-                    prev_sum, prev_count = kld_result_dict[req_id]
-                    kld_result_dict[req_id] = (
-                        prev_sum + kld_sum,
-                        prev_count + kld_count,
-                    )
+                    prev = kld_result_dict[req_id]
+                    if prev is not None:
+                        prev_sum, prev_count = prev
+                        kld_result_dict[req_id] = (
+                            prev_sum + kld_sum,
+                            prev_count + kld_count,
+                        )
+                    else:
+                        kld_result_dict[req_id] = (kld_sum, kld_count)
                 else:
                     kld_result_dict[req_id] = (kld_sum, kld_count)
                 continue
@@ -4677,10 +4670,8 @@ class GPUModelRunner(
 
             if is_score_mode:
                 tgt_token_ids_int64 = tgt_token_ids.to(torch.int64)
-                token_ids, logprobs, ranks, _ = (
-                    self.sampler.gather_target_logprobs(
-                        logprobs, tgt_token_ids_int64
-                    )
+                token_ids, logprobs, ranks, _ = self.sampler.gather_target_logprobs(
+                    logprobs, tgt_token_ids_int64
                 )
             else:
                 token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs(
@@ -4691,9 +4682,7 @@ class GPUModelRunner(
             logprobs_tensors.logprob_token_ids[chunk_slice].copy_(
                 token_ids, non_blocking=True
             )
-            logprobs_tensors.logprobs[chunk_slice].copy_(
-                logprobs, non_blocking=True
-            )
+            logprobs_tensors.logprobs[chunk_slice].copy_(logprobs, non_blocking=True)
             logprobs_tensors.selected_token_ranks[chunk_slice].copy_(
                 ranks, non_blocking=True
             )

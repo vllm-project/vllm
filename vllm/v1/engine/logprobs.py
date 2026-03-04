@@ -210,7 +210,7 @@ class LogprobsProcessor:
         assert self.num_prompt_logprobs is not None
         assert self.prompt_logprobs is not None
 
-        token_ids, logprobs, ranks = prompt_logprobs_tensors
+        token_ids, logprobs, ranks, _ = prompt_logprobs_tensors
 
         # Recover shapes - should be [N, 1] for score mode
         num_positions, num_logprobs_cols = logprobs.shape
@@ -228,7 +228,9 @@ class LogprobsProcessor:
         token_ids_list = token_ids.squeeze(-1).tolist()
 
         # Verify that token_ids match target_token_ids
-        for pos, (token_id, target_id) in enumerate(zip(token_ids_list, target_token_ids)):
+        for pos, (token_id, target_id) in enumerate(
+            zip(token_ids_list, target_token_ids)
+        ):
             if token_id != target_id:
                 raise ValueError(
                     f"Token ID mismatch at position {pos}: "
