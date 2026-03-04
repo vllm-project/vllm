@@ -57,10 +57,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
-from vllm.v1.worker.gpu.dp_utils import (
-    get_cudagraph_and_dp_padding,
-    make_num_tokens_across_dp,
-)
+from vllm.v1.worker.gpu.dp_utils import get_cudagraph_and_dp_padding
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
@@ -265,7 +262,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         prepare_communication_buffer_for_model(self.model)
         if self.speculator is not None:
-            prepare_communication_buffer_for_model(self.speculator)
+            prepare_communication_buffer_for_model(self.speculator.model)
 
         # Initialize the components that require the model.
         self.model_state = init_model_state(
@@ -382,8 +379,41 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return None, None
 
         assert self.execute_model_state is not None
-        input_batch, _, _, _, hidden_states, _, _ = self.execute_model_state
+        (
+            input_batch,
+            model_inputs,
+            attn_metadata,
+            slot_mappings_by_layer,
+            hidden_states,
+            aux_hidden_states,
+            kv_connector_output,
+            num_tokens_across_dp,
+        ) = self.execute_model_state
         self.execute_model_state = None
+
+        # dummy run the eagle speculator's propose to ensure DP/EP sync.
+        if self.speculator is not None:
+            self.speculator.propose(
+                input_batch=input_batch,
+                attn_metadata=attn_metadata,
+                slot_mappings=slot_mappings_by_layer,
+                last_hidden_states=hidden_states,
+                aux_hidden_states=aux_hidden_states,
+                num_sampled=torch.ones(
+                    input_batch.num_reqs, dtype=torch.int32, device=self.device
+                ),
+                num_rejected=torch.zeros(
+                    input_batch.num_reqs, dtype=torch.int32, device=self.device
+                ),
+                last_sampled=self.req_states.last_sampled_tokens,
+                next_prefill_tokens=self.req_states.next_prefill_tokens,
+                temperature=self.sampler.sampling_states.temperature.gpu,
+                seeds=self.sampler.sampling_states.seeds.gpu,
+                num_tokens_across_dp=num_tokens_across_dp,
+                dummy_run=True,
+                skip_attn_for_dummy_run=skip_attn,
+            )
+
         assert hidden_states is not None  # Last PP rank always has hidden_states
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
@@ -431,17 +461,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 self._dummy_pooler_run(hidden_states)
 
-            if self.speculator is not None:
-                num_tokens_across_dp = make_num_tokens_across_dp(
-                    self.parallel_config.data_parallel_size, self.max_num_tokens
-                )
-                self.speculator.run_model(
-                    self.max_num_tokens,
-                    attn_metadata=None,
-                    slot_mappings=None,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                )
-
         torch.cuda.synchronize()
         del hidden_states, sample_hidden_states
         gc.collect()
@@ -477,7 +496,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         start_time = time.perf_counter()
         gc.collect()
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
@@ -907,9 +926,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         inputs_embeds = None
-        if self.supports_mm_inputs and self.is_first_pp_rank and not dummy_run:
+        if self.supports_mm_inputs and self.is_first_pp_rank:
             # Run MM encoder (if needed) and get multimodal embeddings.
             # Only first PP rank prepares multimodal embeddings.
+            # NOTE(woosuk): We must call get_mm_embeddings even during dummy runs
+            # to obtain inputs_embeds, because the compiled model expects this input.
             inputs_embeds = self.model_state.get_mm_embeddings(
                 scheduler_output.scheduled_encoder_inputs,
                 input_batch,
@@ -977,6 +998,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states,
             aux_hidden_states,
             kv_connector_output,
+            num_tokens_across_dp,
         )
 
         if not self.is_last_pp_rank:
@@ -1003,6 +1025,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states,
             aux_hidden_states,
             kv_connector_output,
+            num_tokens_across_dp,
         ) = self.execute_model_state
         self.execute_model_state = None
 
@@ -1076,6 +1099,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.req_states.next_prefill_tokens,
                 self.sampler.sampling_states.temperature.gpu,
                 self.sampler.sampling_states.seeds.gpu,
+                num_tokens_across_dp=num_tokens_across_dp,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
@@ -1093,7 +1117,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # The prior execute_model call must have failed.
             return None
 
-        input_batch, _, _, _, hidden_states, _, kv_connector_output = (
+        input_batch, _, _, _, hidden_states, _, kv_connector_output, _ = (
             self.execute_model_state
         )
         self.execute_model_state = None
