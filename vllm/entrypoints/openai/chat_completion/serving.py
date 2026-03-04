@@ -1011,25 +1011,59 @@ class OpenAIServingChat(OpenAIServing):
                                     current_text = ""
 
                         else:
-                            # either finished reasoning or no reasoning at all
-                            content = current_text
-
-                            delta_message, function_name_returned[i] = (
-                                self.extract_tool_call_required_streaming(
-                                    previous_text=previous_text,
-                                    current_text=content,
-                                    delta_text=delta_text,
-                                    function_name_returned=fn_name_returned,
-                                    tool_call_idx=history_tool_call_cnt,
+                            # Either finished reasoning or no reasoning
+                            # at all. Use the configured tool_parser
+                            # (e.g. qwen3_coder) when available — it
+                            # handles non-JSON formats such as XML tool
+                            # calls. Fall back to the JSON-only
+                            # extract_tool_call_required_streaming()
+                            # for backward compatibility when no
+                            # tool_parser is configured.
+                            if tool_parser is not None and self.enable_auto_tools:
+                                # Mirror the auto+reasoning branch
+                                # (lines below): on the first call after
+                                # reasoning ends, reset previous_text and
+                                # previous_token_ids so the tool_parser
+                                # sees only the post-reasoning content.
+                                assert added_content_delta_arr is not None
+                                delta_token_ids = output_token_ids
+                                if not added_content_delta_arr[i]:
+                                    added_content_delta_arr[i] = True
+                                    previous_text = ""
+                                    previous_token_ids = []
+                                    delta_text = current_text
+                                    delta_token_ids = current_token_ids
+                                delta_message = (
+                                    tool_parser.extract_tool_calls_streaming(
+                                        previous_text=previous_text,
+                                        current_text=current_text,
+                                        delta_text=delta_text,
+                                        previous_token_ids=(previous_token_ids),
+                                        current_token_ids=(current_token_ids),
+                                        delta_token_ids=delta_token_ids,
+                                        request=request,
+                                    )
                                 )
-                            )
-                            if (
-                                delta_message
-                                and delta_message.tool_calls
-                                and delta_message.tool_calls[0].id is not None
-                            ):
-                                history_tool_call_cnt += 1
-                                tools_streamed[i] = True
+                                if delta_message and delta_message.tool_calls:
+                                    tools_streamed[i] = True
+                            else:
+                                content = current_text
+                                delta_message, function_name_returned[i] = (
+                                    self.extract_tool_call_required_streaming(
+                                        previous_text=previous_text,
+                                        current_text=content,
+                                        delta_text=delta_text,
+                                        function_name_returned=(fn_name_returned),
+                                        tool_call_idx=(history_tool_call_cnt),
+                                    )
+                                )
+                                if (
+                                    delta_message
+                                    and delta_message.tool_calls
+                                    and delta_message.tool_calls[0].id is not None
+                                ):
+                                    history_tool_call_cnt += 1
+                                    tools_streamed[i] = True
 
                     # handle streaming deltas for tools with "auto" tool choice
                     # and reasoning parser
