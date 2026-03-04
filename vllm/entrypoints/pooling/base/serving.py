@@ -19,7 +19,7 @@ from vllm import (
     envs,
 )
 from vllm.config import ModelConfig
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateConfig,
     ChatTemplateContentFormatOption,
@@ -70,6 +70,7 @@ class PoolingServing:
 
     def __init__(
         self,
+        renderer_client: RendererClient,
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
@@ -81,6 +82,7 @@ class PoolingServing:
         log_error_stack: bool = False,
     ):
         super().__init__()
+        self.renderer_client = renderer_client
         self.engine_client = engine_client
         self.models = models
         self.model_config = models.model_config
@@ -274,7 +276,7 @@ class PoolingServing:
         self,
         headers: Headers,
     ) -> Mapping[str, str] | None:
-        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
+        is_tracing_enabled = await self.renderer_client.is_tracing_enabled()
 
         if is_tracing_enabled:
             return extract_trace_headers(headers)

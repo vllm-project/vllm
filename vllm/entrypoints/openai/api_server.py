@@ -288,7 +288,7 @@ def build_app(
 
 
 async def init_app_state(
-    engine_client: EngineClient | None,
+    engine_client: EngineClient,
     state: State,
     args: Namespace,
     supported_tasks: tuple["SupportedTask", ...] | None = None,
