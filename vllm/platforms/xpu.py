@@ -7,11 +7,10 @@ from typing import TYPE_CHECKING
 
 import torch
 
-# import custom ops, trigger op registration
 with contextlib.suppress(ImportError):
-  import vllm_xpu_kernels._C  # noqa
-  import vllm_xpu_kernels._moe_C  # noqa
-  import vllm_xpu_kernels._xpu_C  # noqa
+    import vllm_xpu_kernels._xpu_C  # noqa
+    import vllm_xpu_kernels._C  # noqa
+    import vllm_xpu_kernels._moe_C  # noqa
 
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import supports_xpu_graph

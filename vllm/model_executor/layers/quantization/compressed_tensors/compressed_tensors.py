@@ -380,14 +380,15 @@ class CompressedTensorsConfig(QuantizationConfig):
     ) -> bool:
         if not current_platform.is_xpu():
             return False
-
+            
         is_8_bits = weight_quant.num_bits == 8
 
         is_fp8_type = (
-            weight_quant.type == "float" or weight_quant.zp_dtype == torch.float8_e4m3fn
+            weight_quant.type == "float" 
+            or weight_quant.zp_dtype == torch.float8_e4m3fn
         )
-
-        is_weight_only = input_quant is None
+        
+        is_weight_only = (input_quant is None)
 
         return is_8_bits and is_fp8_type and is_weight_only
 
