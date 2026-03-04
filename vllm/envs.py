@@ -906,6 +906,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Set to true for rollback if nccl4py causes issues
     "VLLM_DISABLE_NCCL4PY": lambda: (
         os.getenv("VLLM_DISABLE_NCCL4PY", "False").lower() in ("true", "1")
+    ),
     # Optional: enable external Oink custom ops (e.g., Blackwell RMSNorm).
     # Disabled by default.
     "VLLM_USE_OINK_OPS": lambda: (
