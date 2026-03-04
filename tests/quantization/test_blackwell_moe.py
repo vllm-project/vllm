@@ -199,6 +199,7 @@ def test_deepseek_nvfp4_moe_flashinfer_vllm(monkeypatch: pytest.MonkeyPatch):
         extra_args=["--moe-backend=cutlass"],
     )
 
+
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
     reason="This test only runs on Blackwell GPUs (SM10x).",

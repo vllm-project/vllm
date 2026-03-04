@@ -252,7 +252,6 @@ def select_nvfp4_moe_backend(
         )
 
     # Select kernels in order of backend.
-    unsupported_reasons = {}
     for backend in AVAILABLE_BACKENDS:
         for k_cls in backend_to_kernel_cls(backend):
             supported, reason = k_cls.is_supported_config(
@@ -272,7 +271,6 @@ def select_nvfp4_moe_backend(
     raise NotImplementedError(
         "No NvFp4 MoE backend supports the deployment configuration."
     )
-    raise NotImplementedError(message)
 
 
 def convert_to_nvfp4_moe_kernel_format(
