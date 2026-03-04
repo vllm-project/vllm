@@ -9,6 +9,7 @@ import pytest
 
 from vllm.entrypoints.cli.launch import (
     LaunchSubcommand,
+    _cmd_launch_render,
     cmd_init,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -32,30 +33,60 @@ def test_cmd_init_returns_subcommand():
     assert isinstance(result[0], LaunchSubcommand)
 
 
-def test_parse_model(launch_parser):
-    args = launch_parser.parse_args(["launch", "--model", "test-model"])
-    assert args.model == "test-model"
+# -- Parsing: `vllm launch render` --
 
 
-def test_cmd_calls_run():
+def test_parse_launch_render(launch_parser):
+    args = launch_parser.parse_args(["launch", "render", "--model", "test-model"])
+    assert args.launch_component == "render"
+
+
+def test_parse_launch_requires_component(launch_parser):
+    with pytest.raises(SystemExit):
+        launch_parser.parse_args(["launch", "--model", "test-model"])
+
+
+def test_parse_launch_invalid_component(launch_parser):
+    with pytest.raises(SystemExit):
+        launch_parser.parse_args(["launch", "unknown", "--model", "test-model"])
+
+
+# -- Dispatch --
+
+
+def test_cmd_launch_render_calls_run():
     args = argparse.Namespace(model_tag=None, model="test-model")
     with patch("vllm.entrypoints.cli.launch.uvloop.run") as mock_uvloop_run:
-        LaunchSubcommand.cmd(args)
+        _cmd_launch_render(args)
         mock_uvloop_run.assert_called_once()
 
 
-def test_model_tag_overrides_model():
+def test_cmd_launch_render_model_tag_overrides():
     args = argparse.Namespace(model_tag="tag-model", model="original-model")
     with patch("vllm.entrypoints.cli.launch.uvloop.run"):
-        LaunchSubcommand.cmd(args)
+        _cmd_launch_render(args)
         assert args.model == "tag-model"
 
 
-def test_model_tag_none_keeps_model():
+def test_cmd_launch_render_model_tag_none():
     args = argparse.Namespace(model_tag=None, model="original-model")
     with patch("vllm.entrypoints.cli.launch.uvloop.run"):
-        LaunchSubcommand.cmd(args)
+        _cmd_launch_render(args)
         assert args.model == "original-model"
+
+
+def test_cmd_dispatches():
+    called = {}
+
+    def fake_dispatch(args):
+        called["args"] = args
+
+    args = argparse.Namespace(dispatch_function=fake_dispatch)
+    LaunchSubcommand.cmd(args)
+    assert "args" in called
+
+
+# -- Module registration --
 
 
 def test_subparser_init_returns_parser():

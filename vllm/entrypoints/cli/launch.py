@@ -21,25 +21,21 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 
-DESCRIPTION = """Launch individual vLLM components.
-
-Search by using: `--help=<ConfigGroup>` to explore options by section (e.g.,
---help=ModelConfig, --help=Frontend)
-  Use `--help=all` to show all available flags at once.
-"""
+DESCRIPTION = "Launch individual vLLM components."
 
 
 class LaunchSubcommand(CLISubcommand):
-    """The `launch` subcommand for the vLLM CLI."""
+    """The `launch` subcommand for the vLLM CLI.
+
+    Uses nested sub-subcommands so each component can define its own
+    arguments independently (e.g. ``vllm launch render``).
+    """
 
     name = "launch"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
-        if hasattr(args, "model_tag") and args.model_tag is not None:
-            args.model = args.model_tag
-
-        uvloop.run(run_launch_fastapi(args))
+        args.dispatch_function(args)
 
     def validate(self, args: argparse.Namespace) -> None:
         validate_parsed_serve_args(args)
@@ -49,14 +45,38 @@ class LaunchSubcommand(CLISubcommand):
     ) -> FlexibleArgumentParser:
         launch_parser = subparsers.add_parser(
             self.name,
-            help="Launch individual vLLM components.",
+            help=DESCRIPTION,
             description=DESCRIPTION,
-            usage="vllm launch [model_tag] [options]",
+            usage=f"vllm {self.name} <component> [options]",
+        )
+        launch_subparsers = launch_parser.add_subparsers(
+            required=True, dest="launch_component"
         )
 
-        launch_parser = make_arg_parser(launch_parser)
-        launch_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
+        # -- vllm launch render --
+        render_parser = launch_subparsers.add_parser(
+            "render",
+            help="Launch a GPU-less rendering server "
+            "(preprocessing and postprocessing only).",
+            description="Launch a GPU-less rendering server "
+            "(preprocessing and postprocessing only).",
+            usage=f"vllm {self.name} render [model_tag] [options]",
+        )
+        render_parser.set_defaults(dispatch_function=_cmd_launch_render)
+        render_parser = make_arg_parser(render_parser)
+        render_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(
+            subcmd=f"{self.name} render"
+        )
+
         return launch_parser
+
+
+def _cmd_launch_render(args: argparse.Namespace) -> None:
+    """Dispatch for ``vllm launch render``."""
+    if hasattr(args, "model_tag") and args.model_tag is not None:
+        args.model = args.model_tag
+
+    uvloop.run(run_launch_fastapi(args))
 
 
 def cmd_init() -> list[CLISubcommand]:
