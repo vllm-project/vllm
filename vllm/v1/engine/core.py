@@ -1539,18 +1539,18 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         # Configure GPUs and stateless process group for data parallel.
-        dp_rank = vllm_config.parallel_config.data_parallel_rank
-        dp_size = vllm_config.parallel_config.data_parallel_size
-        local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+        parallel_config = vllm_config.parallel_config
+        dp_rank = parallel_config.data_parallel_rank
+        dp_size = parallel_config.data_parallel_size
+        local_dp_rank = parallel_config.data_parallel_rank_local
 
         assert dp_size > 1
         assert local_dp_rank is not None
         assert 0 <= local_dp_rank <= dp_rank < dp_size
 
         self.dp_rank = dp_rank
-        self.dp_group, self.dp_store = (
-            vllm_config.parallel_config.stateless_init_dp_group(return_store=True)
-        )
+        dp_group, dp_store = parallel_config.stateless_init_dp_group(return_store=True)
+        self.dp_group, self.dp_store = dp_group, dp_store
 
     def shutdown(self):
         super().shutdown()
