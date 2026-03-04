@@ -6,7 +6,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from ...utils import RemoteLaunchServer
+from ...utils import RemoteLaunchRenderServer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
@@ -14,7 +14,7 @@ MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 @pytest.fixture(scope="module")
 def server():
     args: list[str] = []
-    with RemoteLaunchServer(MODEL_NAME, args, max_wait_seconds=120) as srv:
+    with RemoteLaunchRenderServer(MODEL_NAME, args, max_wait_seconds=120) as srv:
         yield srv
 
 

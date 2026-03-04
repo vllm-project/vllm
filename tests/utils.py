@@ -479,7 +479,7 @@ class RemoteOpenAIServer(RemoteVLLMServer):
         )
 
 
-class RemoteLaunchServer(RemoteVLLMServer):
+class RemoteLaunchRenderServer(RemoteVLLMServer):
     """Launches ``vllm launch render`` for GPU-less serving tests."""
 
     def _create_cli_subcommand(self):
@@ -493,7 +493,7 @@ class RemoteLaunchServer(RemoteVLLMServer):
         if env_dict is not None:
             env.update(env_dict)
         serve_cmd = ["vllm", "launch", "render", model, *vllm_serve_args]
-        print(f"Launching RemoteLaunchServer with: {' '.join(serve_cmd)}")
+        print(f"Launching RemoteLaunchRenderServer with: {' '.join(serve_cmd)}")
         self.proc: subprocess.Popen = subprocess.Popen(
             serve_cmd,
             env=env,
