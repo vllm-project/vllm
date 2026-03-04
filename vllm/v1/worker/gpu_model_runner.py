@@ -5328,7 +5328,7 @@ class GPUModelRunner(
         # can reuse the memory pool allocated for the large shapes.
         set_cudagraph_capturing_enabled(True)
         with freeze_gc(), graph_capture(device=self.device):
-            start_free_gpu_memory = torch.cuda.mem_get_info()[0]
+            start_reserved_gpu_memory = torch.cuda.memory_reserved()
 
             for (
                 runtime_mode,
@@ -5340,7 +5340,7 @@ class GPUModelRunner(
                 )
 
             torch.cuda.synchronize()
-            end_free_gpu_memory = torch.cuda.mem_get_info()[0]
+            end_reserved_gpu_memory = torch.cuda.memory_reserved()
 
         # Disable cudagraph capturing globally, so any unexpected cudagraph
         # capturing will be detected and raise an error after here.
@@ -5355,7 +5355,7 @@ class GPUModelRunner(
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
-        cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
+        cuda_graph_size = end_reserved_gpu_memory - start_reserved_gpu_memory
         # This usually takes 5~20 seconds.
         logger.info_once(
             "Graph capturing finished in %.0f secs, took %.2f GiB",
