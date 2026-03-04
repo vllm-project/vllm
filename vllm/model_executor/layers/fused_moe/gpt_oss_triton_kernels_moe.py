@@ -415,17 +415,15 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
         "w2_precision in quant config can't be None"
     )
 
-    hidden_states = downcast_to_static_fp8(
-        hidden_states, quant_config.w1_precision.flex_ctx.lhs_data.scale
-    )
+    hidden_states = downcast_to_static_fp8(hidden_states, quant_config.a1_scale)
 
     intermediate_cache1 = moe_gemm_a8w4(
         hidden_states,
         w1.storage.data,
         None,
         quant_config.w1_precision.weight_scale.storage.data,
-        quant_config.w1_precision.flex_ctx.lhs_data.scale,
-        quant_config.w2_precision.flex_ctx.lhs_data.scale,
+        quant_config.a1_scale,
+        quant_config.a2_scale,
         quant_config.w1_bias,
         routing_data,
         gather_indx=gather_indx,
@@ -444,7 +442,7 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
         w2.storage.data,
         None,
         quant_config.w2_precision.weight_scale.storage.data,
-        quant_config.w2_precision.flex_ctx.lhs_data.scale,
+        quant_config.a2_scale,
         None,
         quant_config.w2_bias,
         routing_data,
