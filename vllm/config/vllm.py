@@ -663,6 +663,12 @@ class VllmConfig:
         self.try_verify_and_update_config()
 
         if self.model_config is not None:
+            # Compute EPLB num_redundant_experts before verification
+            if self.model_config.is_moe:
+                num_experts = self.model_config.get_num_experts()
+                if num_experts is not None:
+                    self.parallel_config.compute_eplb_num_redundant_experts(num_experts)
+
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
