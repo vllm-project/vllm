@@ -4,7 +4,7 @@ import enum
 import time
 import weakref
 from datetime import timedelta
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import torch.distributed
 
@@ -61,6 +61,14 @@ class ScaleDownRemovingEngineState(enum.IntEnum):
     COMPLETE = 2
 
 
+EngineState: TypeAlias = (
+    ScaleUpExistingEngineState
+    | ScaleUpNewEngineState
+    | ScaleDownRemainingEngineState
+    | ScaleDownRemovingEngineState
+)
+
+
 class _BarrierTimeoutError(RuntimeError):
     """
     Exception raised for timeout
@@ -87,14 +95,13 @@ class ElasticEPScalingState:
         self.old_dp_group = self.engine_core.dp_group if worker_type != "new" else None
         self.old_dp_store = self.engine_core.dp_store if worker_type != "new" else None
         self.new_parallel_config: ParallelConfig = new_parallel_config
-        self.new_dp_group: torch.distributed.ProcessGroup | None = (
-            self.engine_core.dp_group if worker_type == "new" else None
-        )
+        self.new_dp_group = self.engine_core.dp_group if worker_type == "new" else None
         self.new_dp_store = self.engine_core.dp_store if worker_type == "new" else None
         self.worker_type = worker_type
         self.scale_type = scale_type
         self.reconfig_request = reconfig_request
 
+        self.state: EngineState
         if scale_type == "scale_up":
             self.state = (
                 ScaleUpNewEngineState.PREPARE
@@ -182,9 +189,9 @@ class ElasticEPScalingState:
         engine step, and will synchronize with the other EngineCores in the
         next step with a barrier without timeout.
         """
-        dp_store = self.new_dp_store if use_new_group else self.old_dp_store
         dp_group = self.new_dp_group if use_new_group else self.old_dp_group
-        assert dp_group is not None
+        dp_store = self.new_dp_store if use_new_group else self.old_dp_store
+        assert dp_group is not None and dp_store is not None
 
         group_rank = dp_group.rank()
         group_size = dp_group.size()
@@ -212,6 +219,7 @@ class ElasticEPScalingState:
 
     def _progress_existing_engine(self) -> bool:
         state = self.state
+        assert self.old_dp_group is not None and self.old_dp_store is not None
 
         if state == ScaleUpExistingEngineState.WAIT_NEW_CORE_ENGINES_INIT:
             return False
@@ -265,11 +273,12 @@ class ElasticEPScalingState:
         elif state == ScaleUpExistingEngineState.SWITCH_AND_PREPARE:
             self._switch_and_prepare()
             self.state = ScaleUpExistingEngineState.EPLB_RESHUFFLE
+            assert self.new_dp_store is not None
             self.new_dp_store.add("eep_barrier_engine_count", 1)
             return True
 
         elif state == ScaleUpExistingEngineState.EPLB_RESHUFFLE:
-            assert self.new_dp_group is not None
+            assert self.new_dp_group is not None and self.new_dp_store is not None
             if (
                 int(self.new_dp_store.get("eep_barrier_engine_count"))
                 < self.new_dp_group.size()
@@ -292,7 +301,7 @@ class ElasticEPScalingState:
 
     def _progress_new_engine(self) -> bool:
         state = self.state
-        assert self.new_dp_group is not None
+        assert self.new_dp_group is not None and self.new_dp_store is not None
 
         if state == ScaleUpNewEngineState.PREPARE:
             tensor = torch.tensor([0, 0, 0], dtype=torch.int32, device="cpu")
@@ -330,6 +339,7 @@ class ElasticEPScalingState:
 
     def _progress_remaining_engine(self) -> bool:
         state = self.state
+        assert self.old_dp_group is not None and self.old_dp_store is not None
 
         if state == ScaleDownRemainingEngineState.PREPARE:
             self.state = ScaleDownRemainingEngineState.EPLB_RESHUFFLE
@@ -369,6 +379,7 @@ class ElasticEPScalingState:
 
     def _progress_removing_engine(self) -> bool:
         state = self.state
+        assert self.old_dp_group is not None and self.old_dp_store is not None
 
         if state == ScaleDownRemovingEngineState.PREPARE:
             self.state = ScaleDownRemovingEngineState.EPLB_RESHUFFLE
@@ -401,6 +412,7 @@ class ElasticEPScalingState:
 
     def handle_notification(self, notification_type: EEPNotificationType):
         assert self.worker_type != "new"
+        assert self.old_dp_store is not None
         if (
             notification_type == EEPNotificationType.NEW_CORE_ENGINES_INIT_READY
             and self.state == ScaleUpExistingEngineState.WAIT_NEW_CORE_ENGINES_INIT
@@ -429,6 +441,7 @@ class ElasticEPScalingState:
         )
 
     def _create_standby_groups(self):
+        assert self.old_dp_group is not None
         self.new_dp_group, self.new_dp_store = (
             self.new_parallel_config.stateless_init_dp_group(return_store=True)
         )
@@ -439,7 +452,7 @@ class ElasticEPScalingState:
             logger.info("[Elastic EP] Created standby communication groups")
 
     def _transfer_weights(self):
-        assert self.reconfig_request is not None
+        assert self.reconfig_request is not None and self.old_dp_group is not None
         old_dp_size = self.old_dp_group.size()
         new_dp_size = self.reconfig_request.new_data_parallel_size
 
@@ -450,6 +463,7 @@ class ElasticEPScalingState:
             logger.info("[Elastic EP] Transferred weights to new workers")
 
     def _transfer_expert_mapping(self):
+        assert self.old_dp_group is not None
         self.model_executor.collective_rpc(
             "elastic_ep_execute", args=("broadcast_expert_mapping",)
         )
@@ -458,7 +472,7 @@ class ElasticEPScalingState:
 
     def _sync_kv_cache_memory_size(self):
         assert self.engine_core.available_gpu_memory_for_kv_cache > 0
-        assert self.new_dp_group is not None
+        assert self.new_dp_group is not None and self.old_dp_group is not None
         ParallelConfig.sync_kv_cache_memory_size(
             self.new_dp_group,
             self.engine_core.available_gpu_memory_for_kv_cache,
@@ -507,7 +521,7 @@ class ElasticEPScalingState:
             logger.info("[Elastic EP] EPLB reshuffle completed")
 
     def _eplb_reshuffle_before_scale_down(self):
-        assert self.reconfig_request is not None
+        assert self.reconfig_request is not None and self.old_dp_group is not None
         self.model_executor.collective_rpc(
             "elastic_ep_execute",
             args=(
