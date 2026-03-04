@@ -245,7 +245,7 @@ def test_fp8_vs_baseline(vllm_runner, example_prompts):
     # Explicit cleanup to free GPU memory before loading second model
     cleanup_dist_env_and_memory()
     gc.collect()
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
 
     # With FP8 (fusion should be enabled on ROCm)
     with vllm_runner(
@@ -386,7 +386,7 @@ def test_logprobs_match_baseline(vllm_runner, example_prompts, model, max_tokens
     # Explicit cleanup to free GPU memory before loading second model
     cleanup_dist_env_and_memory()
     gc.collect()
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
 
     # Test: FP8 quantization (fusion enabled on ROCm with AITER)
     with vllm_runner(
@@ -449,7 +449,7 @@ def test_deterministic_outputs(vllm_runner, model):
         if i == 0:  # After first run
             cleanup_dist_env_and_memory()
             gc.collect()
-            torch.cuda.empty_cache()
+            torch.accelerator.empty_cache()
 
     # Outputs should be identical
     assert len(outputs_list) == 2

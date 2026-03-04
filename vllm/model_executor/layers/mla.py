@@ -5,9 +5,12 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import CacheConfig
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
+
+logger = init_logger(__name__)
 
 # Try to import AITER ops for fused kernels
 try:
@@ -73,7 +76,10 @@ def _fuse_rmsnorm_quant(
 
         return q_c_quantized, q_c_scale, kv_c_normed
 
-    except Exception:
+    except (RuntimeError, TypeError, ValueError, AttributeError) as e:
+        # Fallback to unfused path if AITER kernel fails
+        # This can happen due to unsupported shapes, dtypes, or platform issues
+        logger.debug("AITER MLA fusion failed, falling back to unfused path: %s", e)
         return None, None, None
 
 
@@ -262,8 +268,9 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                     # If we got here, use fused kv_c_normed
                     kv_c_normed = kv_c_normed_fused
                     fused_succeeded = True
-                except Exception:
-                    # Any error in fused path (including dequant), fall back
+                except (RuntimeError, TypeError, ValueError, AttributeError) as e:
+                    # Fused path failed, fall back to unfused
+                    logger.debug("Fused MLA forward failed, using unfused path: %s", e)
                     fused_succeeded = False
 
             if not fused_succeeded:
