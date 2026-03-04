@@ -687,7 +687,8 @@ class OpenAIServingChat(OpenAIServing):
 
         # Prepare the tool parser if it's needed
         try:
-            if tool_choice_auto and self.tool_parser:
+            need_tool_parser = tool_choice_auto or request.tool_choice == "required"
+            if need_tool_parser and self.tool_parser:
                 if tokenizer is None:
                     raise ValueError(
                         "Tokenizer not available when `skip_tokenizer_init=True`"
@@ -989,6 +990,7 @@ class OpenAIServingChat(OpenAIServing):
                             and prompt_is_reasoning_end_arr[i]
                         ):
                             reasoning_end_arr[i] = True
+                            current_token_ids = output_token_ids
 
                         if reasoning_parser and not reasoning_end_arr[i]:
                             delta_message = (
@@ -1003,30 +1005,44 @@ class OpenAIServingChat(OpenAIServing):
                             )
                             if reasoning_parser.is_reasoning_end(output_token_ids):
                                 reasoning_end_arr[i] = True
+                                # Strip reasoning-related token ids so
+                                # the tool parser only sees content ids.
+                                current_token_ids = (
+                                    reasoning_parser.extract_content_ids(
+                                        output_token_ids
+                                    )
+                                )
                                 if delta_message and delta_message.content:
                                     current_text = delta_message.content
                                     delta_message.content = None
                                 else:
-                                    # reasoning ended
                                     current_text = ""
 
-                        else:
-                            # Either finished reasoning or no reasoning
-                            # at all. Use the configured tool_parser
-                            # (e.g. qwen3_coder) when available — it
-                            # handles non-JSON formats such as XML tool
-                            # calls. Fall back to the JSON-only
-                            # extract_tool_call_required_streaming()
-                            # for backward compatibility when no
-                            # tool_parser is configured.
+                        # Process tool calls after reasoning is done.
+                        # IMPORTANT: This is a separate `if` (not
+                        # `else`) so that when reasoning ends and tool
+                        # call tokens arrive in the same chunk (common
+                        # with MTP/speculative decoding), the tool
+                        # parser runs immediately in the same iteration.
+                        # Using `else` here would skip tool parsing on
+                        # the chunk where reasoning ends, and if that
+                        # chunk also carries finish_reason (the last
+                        # chunk), the tool parser would never run.
+                        if reasoning_end_arr[i] if reasoning_parser else True:
+                            # With MTP/speculative decoding, models may
+                            # non-deterministically produce JSON or XML
+                            # tool calls. Try both parsers:
+                            # 1) tool_parser (handles XML, e.g.
+                            #    qwen3_coder)
+                            # 2) JSON-only fallback
+                            # (extract_tool_call_required_streaming)
                             if tool_parser is not None and self.enable_auto_tools:
-                                # Mirror the auto+reasoning branch
-                                # (lines below): on the first call after
-                                # reasoning ends, reset previous_text and
-                                # previous_token_ids so the tool_parser
-                                # sees only the post-reasoning content.
                                 assert added_content_delta_arr is not None
                                 delta_token_ids = output_token_ids
+                                # On the first call after reasoning
+                                # ends, reset previous_text and
+                                # previous_token_ids so the tool parser
+                                # sees only post-reasoning content.
                                 if not added_content_delta_arr[i]:
                                     added_content_delta_arr[i] = True
                                     previous_text = ""
@@ -1046,6 +1062,29 @@ class OpenAIServingChat(OpenAIServing):
                                 )
                                 if delta_message and delta_message.tool_calls:
                                     tools_streamed[i] = True
+                                # If tool_parser didn't produce tool
+                                # calls, also try the JSON-only parser
+                                # as fallback. With MTP, the model may
+                                # produce JSON instead of XML format.
+                                if not tools_streamed[i]:
+                                    content = current_text
+                                    json_msg, function_name_returned[i] = (
+                                        self.extract_tool_call_required_streaming(
+                                            previous_text=previous_text,
+                                            current_text=content,
+                                            delta_text=delta_text,
+                                            function_name_returned=(fn_name_returned),
+                                            tool_call_idx=(history_tool_call_cnt),
+                                        )
+                                    )
+                                    if (
+                                        json_msg
+                                        and json_msg.tool_calls
+                                        and json_msg.tool_calls[0].id is not None
+                                    ):
+                                        delta_message = json_msg
+                                        history_tool_call_cnt += 1
+                                        tools_streamed[i] = True
                             else:
                                 content = current_text
                                 delta_message, function_name_returned[i] = (
