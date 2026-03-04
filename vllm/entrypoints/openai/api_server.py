@@ -355,13 +355,9 @@ async def init_app_state(
         base_model_paths=base_model_paths,
         lora_modules=lora_modules,
     )
-
-    if engine_client is not None:
-        await state.openai_serving_models.init_static_loras()
-
+    await state.openai_serving_models.init_static_loras()
     state.openai_serving_tokenization = OpenAIServingTokenization(
         renderer_client=renderer_client,
-        engine_client=engine_client,
         models=state.openai_serving_models,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
@@ -419,6 +415,58 @@ async def init_app_state(
             request_logger,
             supported_tasks,
         )
+
+    state.enable_server_load_tracking = args.enable_server_load_tracking
+    state.server_load_metrics = 0
+
+
+async def init_renderer_state(
+    renderer_client: RendererClient,
+    state: State,
+    args: Namespace,
+) -> None:
+    """Initialize app state for a render-only server (no EngineClient).
+
+    Sets up only the services that are meaningful without an inference engine:
+    models listing, tokenization, and chat/completion rendering.
+    """
+    vllm_config = renderer_client.vllm_config
+
+    if args.served_model_name is not None:
+        served_model_names = args.served_model_name
+    else:
+        served_model_names = [args.model]
+
+    if args.enable_log_requests:
+        request_logger = RequestLogger(max_log_len=args.max_log_len)
+    else:
+        request_logger = None
+
+    base_model_paths = [
+        BaseModelPath(name=name, model_path=args.model) for name in served_model_names
+    ]
+
+    state.renderer_client = renderer_client
+    state.engine_client = None
+    state.log_stats = not args.disable_log_stats
+    state.vllm_config = vllm_config
+    state.args = args
+    resolved_chat_template = load_chat_template(args.chat_template)
+
+    state.openai_serving_models = OpenAIServingModels(
+        renderer_client=renderer_client,
+        engine_client=None,
+        base_model_paths=base_model_paths,
+    )
+    state.openai_serving_tokenization = OpenAIServingTokenization(
+        renderer_client=renderer_client,
+        models=state.openai_serving_models,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        trust_request_chat_template=args.trust_request_chat_template,
+        log_error_stack=args.log_error_stack,
+    )
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
@@ -508,7 +556,7 @@ def setup_server(args):
 
 async def build_and_serve(
     renderer_client: RendererClient,
-    engine_client: EngineClient,
+    engine_client: EngineClient | None,
     listen_address: str,
     sock: socket.socket,
     args: Namespace,
@@ -524,13 +572,23 @@ async def build_and_serve(
     if log_config is not None:
         uvicorn_kwargs["log_config"] = log_config
 
-    supported_tasks = await engine_client.get_supported_tasks()
+    if engine_client is not None:
+        supported_tasks = await engine_client.get_supported_tasks()
+    else:
+        supported_tasks = ("render",)
     logger.info("Supported tasks: %s", supported_tasks)
 
     app = build_app(args, supported_tasks)
-    await init_app_state(
-        engine_client, app.state, args, supported_tasks, renderer_client=renderer_client
-    )
+    if engine_client is not None:
+        await init_app_state(
+            engine_client,
+            app.state,
+            args,
+            supported_tasks,
+            renderer_client=renderer_client,
+        )
+    else:
+        await init_renderer_state(renderer_client, app.state, args)
 
     logger.info("Starting vLLM server on %s", listen_address)
 

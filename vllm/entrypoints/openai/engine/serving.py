@@ -221,7 +221,7 @@ class OpenAIServing:
     def __init__(
         self,
         renderer_client: RendererClient,
-        engine_client: EngineClient,
+        engine_client: EngineClient | None,
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
@@ -296,6 +296,8 @@ class OpenAIServing:
             tasks = []
             request_id_batch = f"{request_id}-{random_uuid()}"
 
+            if self.engine_client is None:
+                raise RuntimeError("beam_search requires an EngineClient")
             for i, beam in enumerate(all_beams):
                 prompt_item = beam.get_prompt()
                 lora_request_item = beam.lora_request
@@ -541,6 +543,11 @@ class OpenAIServing:
 
             if ctx.engine_prompts is None:
                 return self.create_error_response("Engine prompts not available")
+
+            if self.engine_client is None:
+                return self.create_error_response(
+                    "This endpoint requires an inference engine"
+                )
 
             for i, engine_prompt in enumerate(ctx.engine_prompts):
                 request_id_item = f"{ctx.request_id}-{i}"
@@ -1069,6 +1076,10 @@ class OpenAIServing:
                 lora_request=lora_request,
             )
 
+            if self.engine_client is None:
+                raise RuntimeError(
+                    "_generate_with_builtin_tools requires an EngineClient"
+                )
             generator = self.engine_client.generate(
                 engine_prompt,
                 sampling_params,
