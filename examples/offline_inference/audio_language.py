@@ -61,7 +61,7 @@ def run_audioflamingo3(question: str, audio_count: int) -> ModelRequestData:
         "You are a helpful assistant.<|im_end|>\n"
         "<|im_start|>user\n"
         f"{audio_placeholder}{question}<|im_end|>\n"
-        "<|im_start|>assistant\n"examples/offline_inference/audio_language.py
+        "<|im_start|>assistant\n"
     )
 
     return ModelRequestData(
@@ -144,6 +144,7 @@ def run_glmasr(question: str, audio_count: int) -> ModelRequestData:
         prompt=prompt,
     )
 
+
 # FunAudioChat
 def run_funaudiochat(question: str, audio_count: int) -> ModelRequestData:
     # NOTE: FunAudioChat is not available on the HuggingFace Hub at the time of
@@ -167,6 +168,7 @@ def run_funaudiochat(question: str, audio_count: int) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
     )
+
 
 # Granite Speech
 def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:

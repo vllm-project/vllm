@@ -284,9 +284,6 @@ class ModelConfig:
     definitions"""
     io_processor_plugin: str | None = None
     """IOProcessor plugin name to load at model startup"""
-    audio_parser: str | None = None
-    """Set custom parser for model deps."""
-
     # Pooler config
     pooler_config: PoolerConfig | None = None
     """Pooler config which controls the behaviour of output pooling in pooling
@@ -344,7 +341,6 @@ class ModelConfig:
             "override_attention_dtype",
             "logits_processors",
             "io_processor_plugin",
-            "audio_parser",
             "pooler_config",
             "multimodal_config",
             "limit_mm_per_prompt",

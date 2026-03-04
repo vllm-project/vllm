@@ -123,6 +123,8 @@ class BaseFrontendArgs:
     """Special the tool parser plugin write to parse the model-generated tool
     into OpenAI API format, the name register in this plugin can be used in
     `--tool-call-parser`."""
+    audio_parser: str | None = None
+    """Set custom parser for model deps."""
     tool_server: str | None = None
     """Comma-separated list of host:port pairs (IPv4, IPv6, or hostname).
     Examples: 127.0.0.1:8000, [::1]:8000, localhost:1234. Or `demo` for

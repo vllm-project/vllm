@@ -175,6 +175,12 @@ def resolve_tokenizer_args(
     if tokenizer_mode == "auto":
         tokenizer_mode = "hf"
 
+    # StepAudio2 models bundle a tokenizer JSON that can trigger the
+    # known mistral regex compatibility warning in recent Transformers.
+    # Enable the upstream compatibility fix by default.
+    if tokenizer_mode == "step_audio_2":
+        kwargs.setdefault("fix_mistral_regex", True)
+
     return tokenizer_mode, tokenizer_name, args, kwargs
 
 

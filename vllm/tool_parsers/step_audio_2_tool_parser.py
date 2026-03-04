@@ -4,8 +4,10 @@
 import json
 from collections.abc import Sequence
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -95,7 +97,7 @@ class StepAudio2ToolParser(ToolParser):
         function_type, function_name, arguments = action_parts
 
         try:
-            tool_call_arr = {"name": function_name}
+            tool_call_arr: dict[str, object] = {"name": function_name}
 
             try:
                 if arguments:
@@ -282,48 +284,3 @@ class StepAudio2ToolParser(ToolParser):
         return ExtractedToolCallInformation(
             tools_called=False, tool_calls=[], content=text
         )
-
-
-if __name__ == "__main__":
-    parser = StepAudio2ToolParser(tokenizer=None)
-    request = ChatCompletionRequest(
-        model="step_audio_2",
-        messages=[{"role": "user", "content": "你好"}],
-    )
-    stream_output = [
-        "xxx",
-        "yyy",
-        "<tool_call>",
-        "function\n",
-        "forecast",
-        "_weather\n",
-        '{"location":',
-        ' "shanghai"}',
-        "</tool_call>",
-        "<tool_call>",
-        "function\n",
-        "forecast",
-        "_temperature\n",
-        '{"location": ',
-        '"beijing"}',
-        "</tool_call>",
-        "zzz",
-        "",
-    ]
-    non_stream_output = "".join(stream_output)
-    print("****************")
-    print(parser.extract_tool_calls(non_stream_output, request))
-    print("****************")
-    current_text = ""
-    for delta_text in stream_output:
-        current_text += delta_text
-        delta = parser.extract_tool_calls_streaming(
-            previous_text="",
-            current_text=current_text,
-            delta_text=delta_text,
-            previous_token_ids=[],
-            current_token_ids=[],
-            delta_token_ids=[],
-            request=request,
-        )
-        print(delta)

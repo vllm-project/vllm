@@ -21,6 +21,7 @@ _VLLM_RENDERERS = {
     "grok2": ("grok2", "Grok2Renderer"),
     "mistral": ("mistral", "MistralRenderer"),
     "qwen_vl": ("qwen_vl", "QwenVLRenderer"),
+    "step_audio_2": ("step_audio_2", "StepAudio2Renderer"),
     "terratorch": ("terratorch", "TerratorchRenderer"),
 }
 

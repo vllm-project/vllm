@@ -24,11 +24,6 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
     ConversationMessage,
-    apply_hf_chat_template,
-    apply_mistral_chat_template,
-    apply_step_audio_2_chat_template,
-    parse_chat_messages_futures,
-    resolve_chat_template_content_format,
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -109,14 +104,7 @@ from vllm.renderers.inputs.preprocess import (
 )
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
-<<<<<<< HEAD
 from vllm.tool_parsers import ToolParser
-=======
-from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
-from vllm.tokenizers.mistral import MistralTokenizer
-from vllm.tokenizers.step_audio_2 import StepAudio2Tokenizer
-from vllm.tool_parsers import ToolParser, ToolParserManager
->>>>>>> c8ce87cd0 (add support for step-audio-2-mini/step-audio-2-mini-think/step-audio-r1/step-audio-r1.1.)
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
@@ -856,68 +844,11 @@ class OpenAIServing:
         renderer = self.renderer
         model_config = self.model_config
 
-<<<<<<< HEAD
         parsed_prompts = [
             (
                 prompt
                 if isinstance(prompt, bytes)
                 else parse_model_prompt(model_config, prompt)
-=======
-        resolved_content_format = resolve_chat_template_content_format(
-            chat_template,
-            tool_dicts,
-            chat_template_content_format,
-            tokenizer,
-            model_config=model_config,
-        )
-        conversation, mm_data_future, mm_uuids = parse_chat_messages_futures(
-            messages,
-            model_config,
-            content_format=resolved_content_format,
-        )
-
-        _chat_template_kwargs: dict[str, Any] = dict(
-            chat_template=chat_template,
-            add_generation_prompt=add_generation_prompt,
-            continue_final_message=continue_final_message,
-            tools=tool_dicts,
-            documents=documents,
-        )
-        _chat_template_kwargs |= self._prepare_extra_chat_template_kwargs(
-            chat_template_kwargs,
-            default_chat_template_kwargs,
-        )
-
-        request_prompt: str | list[int]
-
-        if tokenizer is None:
-            request_prompt = "placeholder"
-        elif isinstance(tokenizer, MistralTokenizer):
-            request_prompt = await self._apply_mistral_chat_template_async(
-                tokenizer,
-                messages=messages,
-                **_chat_template_kwargs,
-            )
-        elif isinstance(tokenizer, DeepseekV32Tokenizer):
-            request_prompt = tokenizer.apply_chat_template(
-                conversation=conversation,
-                messages=messages,
-                model_config=model_config,
-                **_chat_template_kwargs,
-            )
-        elif isinstance(tokenizer, StepAudio2Tokenizer):
-            request_prompt = apply_step_audio_2_chat_template(
-                tokenizer,
-                conversation=conversation,
-                **_chat_template_kwargs,
-            )
-        else:
-            request_prompt = apply_hf_chat_template(
-                tokenizer=tokenizer,
-                conversation=conversation,
-                model_config=model_config,
-                **_chat_template_kwargs,
->>>>>>> c8ce87cd0 (add support for step-audio-2-mini/step-audio-2-mini-think/step-audio-r1/step-audio-r1.1.)
             )
             for prompt in prompts
         ]
