@@ -728,12 +728,12 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                     # No retrieve needed — free ALL locked chunks
                     free_end = tracker.num_lmcache_hit_blocks * self.vllm_block_size
                 else:
-                    # Note(Roy): Bounday misalignment between vLLM blocks and LMCache
+                    # Note(Roy): Boundary misalignment between vLLM blocks and LMCache
                     # blocks is handled in free_lookup_locks. It makes sure that if
-                    # the last vLLM computed blocks end in the middle of a LMCache
-                    # block, the end block is not freed (i.e., floor division) since
-                    # it will still be needed by vLLM and such block's lock will be
-                    # freed by vLLM's retrieve.
+                    # the last vLLM computed block ends in the middle of a LMCache
+                    # block, the end LMCache block is not freed (i.e., floor division)
+                    # since it will still be needed by vLLM and such block's lock will
+                    # be freed by vLLM's retrieve.
                     free_end = tracker.num_vllm_hit_blocks * self.vllm_block_size
 
                 if free_end > 0:
@@ -744,8 +744,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                         request_id=request.request_id,
                     )
                     logger.debug(
-                        "Freed from token %d to %d since it will never be touched "
-                        "by vLLM",
+                        "Free locks of tokens %d-%d since it is cached by vLLM.",
                         0,
                         free_end,
                     )
