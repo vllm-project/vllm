@@ -980,6 +980,19 @@ class GPUModelRunner(
 
         kernel_block_sizes = self._kernel_block_sizes
 
+        def find_block_dim(group, kernel_bs, spec) -> int:
+            """Use a sentinel value to discover which tensor dim is the
+            block index, since different backends lay out dims differently."""
+            _S = 1234567
+            shape = group.backend.get_kv_cache_shape(
+                _S,
+                kernel_bs,
+                spec.num_kv_heads,
+                spec.head_size,
+                cache_dtype_str=self.cache_config.cache_dtype,
+            )
+            return shape.index(_S)
+
         seen_ptrs: set[int] = set()
         seg_addrs: list[int] = []
         page_size_el: int | None = None
@@ -993,15 +1006,7 @@ class GPUModelRunner(
             kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
             mgr_bs = spec.block_size
             ratio = mgr_bs // kernel_bs
-            _S = 1234567
-            shape = group.backend.get_kv_cache_shape(
-                _S,
-                kernel_bs,
-                spec.num_kv_heads,
-                spec.head_size,
-                cache_dtype_str=self.cache_config.cache_dtype,
-            )
-            block_dim = shape.index(_S)
+            block_dim = find_block_dim(group, kernel_bs, spec)
 
             for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
@@ -1028,6 +1033,8 @@ class GPUModelRunner(
                         f"Non-uniform page sizes: {page_size_el} vs {cur_page_el}"
                     )
 
+                # Enumerate dims with stride larger than a block to find
+                # independent contiguous segments, then record each base addr.
                 block_stride_bytes = cur_bytes
                 outer_dims = [
                     d
@@ -1043,6 +1050,8 @@ class GPUModelRunner(
             self._kv_zero_meta = None
             return
 
+        # Pick largest power-of-2 dividing page_size_el as Triton BLOCK_SIZE
+        # (capped at 1024), and pre-allocate pinned + GPU buffers for block IDs.
         alignment = page_size_el & (-page_size_el)
         blk_size = min(alignment, 1024)
         self._kv_zero_id_cap = 8192
