@@ -209,7 +209,7 @@ class BenchmarkDataset(ABC):
         if max_loras is None or lora_path is None:
             return None
 
-        # Deterministic round-robin: cycle through [1, max_loras].
+        # Deterministic round-robin: cycle through [1, max_loras]
         lora_id = index % max_loras + 1
         lora_request = LoRARequest(
             lora_name=str(lora_id),
