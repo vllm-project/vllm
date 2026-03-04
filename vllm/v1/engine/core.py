@@ -640,6 +640,36 @@ class EngineCore:
         """Return whether the scheduler is in any pause state."""
         return self.scheduler.pause_state != PauseState.UNPAUSED
 
+    def suspend(self) -> None:
+        """Suspend engine for snapshotting: pause scheduler, tear down NCCL.
+
+        Weights stay on GPU so cuda-checkpoint can snapshot them natively.
+        Only NCCL IPC memory (which cuda-checkpoint cannot handle) is
+        torn down.
+        """
+        if (
+            self.vllm_config.parallel_config.tensor_parallel_size > 1
+            and self.vllm_config.compilation_config.cudagraph_mode
+            .has_full_cudagraphs()
+        ):
+            logger.warning(
+                "suspend()/resume() with tensor_parallel_size > 1 and full "
+                "CUDA graphs may fail: NCCL communicator handles baked into "
+                "captured graphs become stale after NCCL is rebuilt on "
+                "resume. Use --enforce-eager or a piecewise cudagraph mode "
+                "to avoid this."
+            )
+        if not self.is_scheduler_paused():
+            self.pause_scheduler(mode="abort")
+        self.model_executor.suspend()
+
+    def resume(self) -> None:
+        """Resume engine after snapshot restore: rebuild NCCL,
+        resume scheduler."""
+        self.model_executor.resume()
+        if self.is_scheduler_paused():
+            self.resume_scheduler()
+
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None | Future:
         """Put the engine to sleep at the specified level.
 

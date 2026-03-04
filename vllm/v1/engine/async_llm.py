@@ -902,6 +902,14 @@ class AsyncLLM(EngineClient):
     async def reset_encoder_cache(self) -> None:
         await self.engine_core.reset_encoder_cache_async()
 
+    async def suspend(self) -> None:
+        """Suspend engine for CRIU-safe snapshots."""
+        await self.engine_core.call_utility_async("suspend")
+
+    async def resume(self) -> None:
+        """Resume engine after snapshot restore."""
+        await self.engine_core.call_utility_async("resume")
+
     async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
         await self.engine_core.sleep_async(level, mode)
 

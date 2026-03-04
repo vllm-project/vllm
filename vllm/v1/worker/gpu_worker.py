@@ -154,6 +154,35 @@ class Worker(WorkerBase):
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
 
+    def suspend_distributed(self) -> None:
+        """Tear down NCCL for CRIU-safe snapshots.
+
+        Weights stay on GPU so cuda-checkpoint can snapshot them natively.
+        Only NCCL IPC memory (which cuda-checkpoint cannot handle) is
+        torn down.
+        """
+        from vllm.distributed.parallel_state import (
+            destroy_distributed_environment,
+            destroy_model_parallel,
+            reset_distributed_state,
+        )
+
+        destroy_model_parallel()
+        destroy_distributed_environment()
+        reset_distributed_state()
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def resume_distributed(self) -> None:
+        """Rebuild NCCL after snapshot restore."""
+        init_worker_distributed_environment(
+            self.vllm_config,
+            self.rank,
+            self.distributed_init_method,
+            self.local_rank,
+            current_platform.dist_backend,
+        )
+
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
 
