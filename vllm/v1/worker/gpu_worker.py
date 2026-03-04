@@ -174,7 +174,21 @@ class Worker(WorkerBase):
         current_platform.empty_cache()
 
     def resume_distributed(self) -> None:
-        """Rebuild NCCL after snapshot restore."""
+        """Rebuild NCCL after snapshot restore.
+
+        Regenerates distributed_init_method with a fresh loopback
+        address because the original TCP address is stale after CRIU
+        restore (container IP changes across checkpoint/restore).
+        """
+        from vllm.utils.network_utils import (
+            get_distributed_init_method,
+            get_loopback_ip,
+            get_open_port,
+        )
+
+        self.distributed_init_method = get_distributed_init_method(
+            get_loopback_ip(), get_open_port()
+        )
         init_worker_distributed_environment(
             self.vllm_config,
             self.rank,
