@@ -30,11 +30,11 @@ function resolve_gpu_archs() {
 # Repo and Hash picked from Dockerfile.rocm_base
 MORI_COMMIT_HASH="2d02c6a9"
 MORI_REPO="https://github.com/ROCm/mori.git"
-MORI_GPU_ARCHS=${MORI_GPU_ARCHS:-"$(resolve_gpu_archs)"}
+MORI_GPU_ARCHS=${GPU_ARCHS:-"$(resolve_gpu_archs)"}
 
 AITER_COMMIT_HASH="v0.1.10.post2"
 AITER_REPO="https://github.com/ROCm/aiter.git"
-AITER_GPU_ARCHS=${AITER_GPU_ARCHS:-"$(resolve_gpu_archs)"}
+AITER_GPU_ARCHS=${GPU_ARCHS:-"$(resolve_gpu_archs)"}
 
 WORKSPACE=${WORKSPACE:-$(pwd)/ep_kernels_workspace}
 FORCE_INSTALL=False
@@ -148,7 +148,7 @@ do_build() {
     fi
 
     echo "Installing $package_name into environment"
-    eval "$cmake_args $extra_env" uv pip install --no-build-isolation -vvv .
+    eval "$extra_env" uv pip install --no-build-isolation -vvv .
 }
 
 do_build_mori() {
@@ -192,9 +192,7 @@ do_build_aiter() {
     # Set cmake python executable to uv so it finds the right includes / libraries.
     cmake_args="CMAKE_ARGS=\"-DPython3_EXECUTABLE=$(uv python find)\""
 
-    export HIP_CLANG_PATH=./sccache-wrappers
     do_build "amd-aiter" "$cmake_args $extra_env"
-    unset HIP_CLANG_PATH
 
     popd
 }
@@ -205,7 +203,7 @@ do_build_aiter \
     "aiter" \
     "setup.py" \
     "$AITER_COMMIT_HASH" \
-    "GPU_ARCHS=${AITER_GPU_ARCHS}"
+    "GPU_ARCHS=\"${AITER_GPU_ARCHS}\""
 
 # build MoRI
 do_build_mori \
@@ -213,4 +211,4 @@ do_build_mori \
     "mori" \
     "setup.py" \
     "$MORI_COMMIT_HASH" \
-    "MORI_GPU_ARCHS=${MORI_GPU_ARCHS}"
+    "MORI_GPU_ARCHS=\"${MORI_GPU_ARCHS}\""
