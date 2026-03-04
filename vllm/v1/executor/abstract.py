@@ -308,6 +308,19 @@ class Executor(ABC):
         """Reset the encoder cache in each worker to clear cached encoder outputs."""
         self.collective_rpc("reset_encoder_cache")
 
+    def suspend(self) -> None:
+        """Tear down NCCL for CRIU-safe snapshots.
+
+        Weights stay on GPU so cuda-checkpoint can snapshot them
+        natively. Only NCCL IPC memory (which cuda-checkpoint cannot
+        handle) is torn down.
+        """
+        self.collective_rpc("suspend_distributed")
+
+    def resume(self) -> None:
+        """Rebuild NCCL after snapshot restore."""
+        self.collective_rpc("resume_distributed")
+
     def sleep(self, level: int = 1):
         if self.is_sleeping:
             logger.warning("Executor is already sleeping.")
