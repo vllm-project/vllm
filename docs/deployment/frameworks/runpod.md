@@ -47,7 +47,7 @@ A `502 Bad Gateway` error from the RunPod proxy typically means the server is no
 
 Once the server is running, test it with a curl request:
 
-??? console "Command"
+!!! console "Command"
 
     ```bash
     curl https://<pod-id>-8000.proxy.runpod.net/v1/chat/completions \
@@ -61,7 +61,7 @@ Once the server is running, test it with a curl request:
         }'
     ```
 
-??? console "Response"
+!!! console "Response"
 
     ```json
     {
