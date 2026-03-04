@@ -3649,6 +3649,36 @@ def test_prepend_skipped_requests_order():
     assert waiting_reqs == expected_waiting_reqs
 
 
+def test_remote_kv_promotion_keeps_fcfs_with_fsm_prefix():
+    scheduler = create_scheduler(max_num_seqs=1)
+    scheduler.connector = Mock()
+    scheduler.connector.get_num_new_matched_tokens.return_value = (0, False)
+
+    requests = create_requests(num_requests=3)
+    for request in requests:
+        scheduler.add_request(request)
+
+    req_fsm, req_remote, _ = list(scheduler.waiting)
+
+    # simulate an FSM request at the waiting head that becomes ready now.
+    req_fsm.status = RequestStatus.WAITING_FOR_FSM
+    req_fsm.structured_output_request = Mock(grammar=object())
+
+    # simulate a remote-KV request that is ready to be promoted now.
+    req_remote.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.waiting.remove_request(req_remote)
+    scheduler.waiting_for_remote_kvs.add_request(req_remote)
+    scheduler.finished_recving_kv_req_ids.add(req_remote.request_id)
+    scheduler._update_waiting_for_remote_kv = Mock()
+
+    output = scheduler.schedule()
+
+    # FCFS should be preserved: FSM-head request is still scheduled first.
+    assert output.scheduled_new_reqs
+    assert output.scheduled_new_reqs[0].req_id == req_fsm.request_id
+    scheduler._update_waiting_for_remote_kv.assert_called_once_with(req_remote)
+
+
 def test_abort_request_waiting_for_remote_kvs():
     scheduler = create_scheduler(use_kv_connector=True)
 

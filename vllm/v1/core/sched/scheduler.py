@@ -2021,7 +2021,30 @@ class Scheduler(SchedulerInterface):
         self.waiting_for_remote_kvs = pending_remote_kv_requests
 
         if ready_requests:
-            self.waiting.prepend_requests(ready_requests)
+            self._prepend_promoted_waiting_requests(ready_requests)
+
+    def _prepend_promoted_waiting_requests(self, promoted_requests) -> None:
+        """Prepend promoted requests while preserving FCFS blocked-prefix order."""
+        if not promoted_requests:
+            return
+
+        if self.policy != SchedulingPolicy.FCFS or not self.waiting:
+            self.waiting.prepend_requests(promoted_requests)
+            return
+
+        blocked_prefix = create_request_queue(self.policy)
+        while self.waiting:
+            request = self.waiting.peek_request()
+            if request.status not in (
+                RequestStatus.WAITING_FOR_FSM,
+                RequestStatus.WAITING_FOR_STREAMING_REQ,
+            ):
+                break
+            blocked_prefix.add_request(self.waiting.pop_request())
+
+        self.waiting.prepend_requests(promoted_requests)
+        if blocked_prefix:
+            self.waiting.prepend_requests(blocked_prefix)
 
     def _update_from_kv_xfer_finished(self, kv_connector_output: KVConnectorOutput):
         """
