@@ -166,13 +166,13 @@ void rms_norm_dynamic_per_token_quant_dispatch(
   });
 }
 
-void rms_norm_dynamic_per_token_quant(
-    torch::Tensor& out,           // [..., hidden_size]
-    torch::Tensor const& input,   // [..., hidden_size]
-    torch::Tensor const& weight,  // [hidden_size]
-    torch::Tensor& scales,        // [num_tokens]
-    double const var_epsilon,     // Variance epsilon used in norm calculation
-    std::optional<at::Tensor> scale_ub, std::optional<at::Tensor> residual) {
+// Shared implementation for rms_norm_dynamic_per_token_quant
+template <bool is_gemma>
+static void rms_norm_dynamic_per_token_quant_impl(
+    torch::Tensor& out, torch::Tensor const& input,
+    torch::Tensor const& weight, torch::Tensor& scales,
+    double const var_epsilon, std::optional<at::Tensor> scale_ub,
+    std::optional<at::Tensor> residual) {
   static c10::ScalarType kFp8Type = is_fp8_ocp()
                                         ? c10::ScalarType::Float8_e4m3fn
                                         : c10::ScalarType::Float8_e4m3fnuz;
@@ -190,9 +190,20 @@ void rms_norm_dynamic_per_token_quant(
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "rms_norm_dynamic_per_token_quant_dispatch", [&] {
-        rms_norm_dynamic_per_token_quant_dispatch<scalar_t, /*is_gemma=*/false>(
+        rms_norm_dynamic_per_token_quant_dispatch<scalar_t, is_gemma>(
             out, input, weight, scales, var_epsilon, scale_ub, residual);
       });
+}
+
+void rms_norm_dynamic_per_token_quant(
+    torch::Tensor& out,           // [..., hidden_size]
+    torch::Tensor const& input,   // [..., hidden_size]
+    torch::Tensor const& weight,  // [hidden_size]
+    torch::Tensor& scales,        // [num_tokens]
+    double const var_epsilon,     // Variance epsilon used in norm calculation
+    std::optional<at::Tensor> scale_ub, std::optional<at::Tensor> residual) {
+  rms_norm_dynamic_per_token_quant_impl</*is_gemma=*/false>(
+      out, input, weight, scales, var_epsilon, scale_ub, residual);
 }
 
 // Residual add + RMS norm + dynamic per token
@@ -245,70 +256,9 @@ void rms_norm_per_block_quant_dispatch(
       });
 }
 
-void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
-                              torch::Tensor const& weight,
-                              torch::Tensor& scales, double const var_epsilon,
-                              std::optional<torch::Tensor> scale_ub,
-                              std::optional<torch::Tensor> residual,
-                              int64_t group_size, bool is_scale_transposed) {
-  static c10::ScalarType kFp8Type = is_fp8_ocp()
-                                        ? c10::ScalarType::Float8_e4m3fn
-                                        : c10::ScalarType::Float8_e4m3fnuz;
-  TORCH_CHECK(out.dtype() == kFp8Type || out.dtype() == torch::kInt8);
-  TORCH_CHECK(out.is_contiguous() && input.is_contiguous());
-
-  if (scale_ub.has_value()) {
-    TORCH_CHECK(out.dtype() == kFp8Type);
-  }
-  TORCH_CHECK(weight.dtype() == input.dtype());
-  TORCH_CHECK(scales.dtype() == torch::kFloat32);
-  if (residual) {
-    TORCH_CHECK(residual->scalar_type() == input.scalar_type());
-  }
-
-  TORCH_CHECK(group_size == 128 || group_size == 64,
-              "Unsupported group size: ", group_size);
-
-  if (scales.stride(1) > 1) {
-    TORCH_CHECK(is_scale_transposed,
-                "Outer scale stride must be 1 when scales are not transposed");
-  }
-
-  rms_norm_per_block_quant_dispatch<false>(out, input, weight, scales,
-                                          group_size, var_epsilon, scale_ub,
-                                          residual, is_scale_transposed);
-}
-
-// Gemma variants: use weight as (1 + weight) instead of weight
-void gemma_rms_norm_dynamic_per_token_quant(
-    torch::Tensor& out, torch::Tensor const& input,
-    torch::Tensor const& weight, torch::Tensor& scales,
-    double const var_epsilon, std::optional<at::Tensor> scale_ub,
-    std::optional<at::Tensor> residual) {
-  static c10::ScalarType kFp8Type = is_fp8_ocp()
-                                        ? c10::ScalarType::Float8_e4m3fn
-                                        : c10::ScalarType::Float8_e4m3fnuz;
-  TORCH_CHECK(out.dtype() == kFp8Type || out.dtype() == torch::kInt8);
-  TORCH_CHECK(out.is_contiguous() && input.is_contiguous());
-
-  if (scale_ub.has_value()) {
-    TORCH_CHECK(out.dtype() == kFp8Type);
-  }
-  TORCH_CHECK(weight.dtype() == input.dtype());
-  TORCH_CHECK(scales.dtype() == torch::kFloat32);
-  if (residual) {
-    TORCH_CHECK(residual->scalar_type() == input.scalar_type());
-  }
-
-  VLLM_DISPATCH_FLOATING_TYPES(
-      input.scalar_type(),
-      "gemma_rms_norm_dynamic_per_token_quant_dispatch", [&] {
-        rms_norm_dynamic_per_token_quant_dispatch<scalar_t, /*is_gemma=*/true>(
-            out, input, weight, scales, var_epsilon, scale_ub, residual);
-      });
-}
-
-void gemma_rms_norm_per_block_quant(
+// Shared implementation for rms_norm_per_block_quant
+template <bool is_gemma>
+static void rms_norm_per_block_quant_impl(
     torch::Tensor& out, torch::Tensor const& input,
     torch::Tensor const& weight, torch::Tensor& scales,
     double const var_epsilon, std::optional<torch::Tensor> scale_ub,
@@ -337,7 +287,39 @@ void gemma_rms_norm_per_block_quant(
                 "Outer scale stride must be 1 when scales are not transposed");
   }
 
-  rms_norm_per_block_quant_dispatch</*is_gemma=*/true>(
-      out, input, weight, scales, group_size, var_epsilon, scale_ub, residual,
+  rms_norm_per_block_quant_dispatch<is_gemma>(out, input, weight, scales,
+                                              group_size, var_epsilon, scale_ub,
+                                              residual, is_scale_transposed);
+}
+
+void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
+                              torch::Tensor const& weight,
+                              torch::Tensor& scales, double const var_epsilon,
+                              std::optional<torch::Tensor> scale_ub,
+                              std::optional<torch::Tensor> residual,
+                              int64_t group_size, bool is_scale_transposed) {
+  rms_norm_per_block_quant_impl</*is_gemma=*/false>(
+      out, input, weight, scales, var_epsilon, scale_ub, residual, group_size,
+      is_scale_transposed);
+}
+
+// Gemma variants: use weight as (1 + weight) instead of weight
+void gemma_rms_norm_dynamic_per_token_quant(
+    torch::Tensor& out, torch::Tensor const& input,
+    torch::Tensor const& weight, torch::Tensor& scales,
+    double const var_epsilon, std::optional<at::Tensor> scale_ub,
+    std::optional<at::Tensor> residual) {
+  rms_norm_dynamic_per_token_quant_impl</*is_gemma=*/true>(
+      out, input, weight, scales, var_epsilon, scale_ub, residual);
+}
+
+void gemma_rms_norm_per_block_quant(
+    torch::Tensor& out, torch::Tensor const& input,
+    torch::Tensor const& weight, torch::Tensor& scales,
+    double const var_epsilon, std::optional<torch::Tensor> scale_ub,
+    std::optional<torch::Tensor> residual, int64_t group_size,
+    bool is_scale_transposed) {
+  rms_norm_per_block_quant_impl</*is_gemma=*/true>(
+      out, input, weight, scales, var_epsilon, scale_ub, residual, group_size,
       is_scale_transposed);
 }
