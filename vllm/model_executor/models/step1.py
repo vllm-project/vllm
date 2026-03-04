@@ -10,7 +10,6 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
-from vllm.attention.layer import Attention, AttentionType
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,

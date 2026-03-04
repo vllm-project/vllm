@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from transformers import PreTrainedTokenizerBase
 
 from vllm.audio_parser import AudioParser, AudioParserManager
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -15,6 +15,9 @@ logger = init_logger(__name__)
 class StepAudio2TTSTA4Parser(AudioParser):
     audio_start_token_id: int
     audio_end_token_id: int
+    first_audio_token_id: int
+    tts_pad_token_id: int
+    audio_pad_token_id: int
 
     audio_start_token: str = "<tts_start>"
     audio_end_token: str = "<tts_end>"
@@ -32,32 +35,45 @@ class StepAudio2TTSTA4Parser(AudioParser):
                 "constructor during construction."
             )
 
-        self.audio_start_token_id = self.vocab.get(self.audio_start_token)
-        self.audio_end_token_id = self.vocab.get(self.audio_end_token)
-        if self.audio_start_token_id is None or self.audio_end_token_id is None:
+        audio_start_token_id = self.vocab.get(self.audio_start_token)
+        audio_end_token_id = self.vocab.get(self.audio_end_token)
+        if audio_start_token_id is None or audio_end_token_id is None:
             raise RuntimeError(
                 "Step audio parser could not locate think start/end "
                 "tokens in the tokenizer!"
             )
+        self.audio_start_token_id = audio_start_token_id
+        self.audio_end_token_id = audio_end_token_id
 
-        self.first_audio_token_id = self.vocab.get(self.first_audio_token)
-        self.tts_pad_token_id = self.vocab.get(self.tts_pad_token)
-        self.audio_pad_token_id = self.vocab.get(self.audio_pad_token)
+        first_audio_token_id = self.vocab.get(self.first_audio_token)
+        tts_pad_token_id = self.vocab.get(self.tts_pad_token)
+        audio_pad_token_id = self.vocab.get(self.audio_pad_token)
+        if (
+            first_audio_token_id is None
+            or tts_pad_token_id is None
+            or audio_pad_token_id is None
+        ):
+            raise RuntimeError(
+                "Step audio parser could not locate audio/pad tokens in the tokenizer!"
+            )
+        self.first_audio_token_id = first_audio_token_id
+        self.tts_pad_token_id = tts_pad_token_id
+        self.audio_pad_token_id = audio_pad_token_id
 
-    def is_step_audio_token(self, token_id: int):
+    def is_step_audio_token(self, token_id: int) -> bool:
         return token_id >= self.first_audio_token_id
 
     def extract_tts_content(
         self,
         input_token_ids: Sequence[int],
-        has_tts_start,
-        has_tts_end,
-        is_text_audio_section=True,
-        include_pad_token=False,
-    ):
-        other_token_ids = []
-        tts_text_token_ids = []
-        tts_audio_token_ids = []
+        has_tts_start: bool,
+        has_tts_end: bool,
+        is_text_audio_section: bool = True,
+        include_pad_token: bool = False,
+    ) -> tuple[list[int], list[int], list[int]]:
+        other_token_ids: list[int] = []
+        tts_text_token_ids: list[int] = []
+        tts_audio_token_ids: list[int] = []
         in_tts_content_section = False
 
         if has_tts_start and has_tts_end:
@@ -68,7 +84,7 @@ class StepAudio2TTSTA4Parser(AudioParser):
             #    tts_audio_token_ids: [<audio_0><audio_1>]
             #    other_token_ids: [abc]
 
-            for i, token_id in enumerate(input_token_ids):
+            for token_id in input_token_ids:
                 if token_id == self.audio_start_token_id:
                     in_tts_content_section = True
                     continue
@@ -100,7 +116,7 @@ class StepAudio2TTSTA4Parser(AudioParser):
             #    tts_audio_token_ids: [<audio_0><audio_1>]
             #    other_token_ids: [abc]
 
-            for i, token_id in enumerate(input_token_ids):
+            for token_id in input_token_ids:
                 if token_id == self.audio_start_token_id:
                     in_tts_content_section = True
                     continue
@@ -127,7 +143,7 @@ class StepAudio2TTSTA4Parser(AudioParser):
             #    tts_audio_token_ids: [<audio_0><audio_1>]
             #    other_token_ids: [abc]
             in_tts_content_section = True
-            for i, token_id in enumerate(input_token_ids):
+            for token_id in input_token_ids:
                 if token_id == self.audio_end_token_id:
                     in_tts_content_section = False
                     continue
@@ -154,7 +170,7 @@ class StepAudio2TTSTA4Parser(AudioParser):
                 # return:
                 #    tts_text_token_ids: [def]
                 #    tts_audio_token_ids: [<audio_0><audio_1>]
-                for i, token_id in enumerate(input_token_ids):
+                for token_id in input_token_ids:
                     if not include_pad_token and (
                         token_id == self.audio_pad_token_id
                         or token_id == self.tts_pad_token_id
@@ -172,50 +188,46 @@ class StepAudio2TTSTA4Parser(AudioParser):
                 #    tts_text_token_ids: []
                 #    tts_audio_token_ids: []
                 #    other_token_ids: []
-                return [], [], input_token_ids
+                return [], [], list(input_token_ids)
 
-    def is_tts_ta4_output(self, input_token_ids: Sequence[int]):
-        """
-        Check the last prompt token id is '<tts_start>' or not. If True, use ta4 output format. Otherwise, use text output format.
-        """  # noqa: E501
-        return input_token_ids[-1] == self.audio_start_token_id
+    def is_audio_output(self, prompt_token_ids: Sequence[int]) -> bool:
+        """Check if the last prompt token is '<tts_start>', indicating
+        TA4 audio output format."""
+        return prompt_token_ids[-1] == self.audio_start_token_id
 
-    def extract_tts_content_nonstreaming(
+    def extract_audio_content_nonstreaming(
         self,
         output_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-        is_tts_ta4_output: bool = False,
-    ):
+        is_audio_output: bool = False,
+    ) -> tuple[list[int], list[int], list[int]]:
         """
-        Extract reasoning content from the model output.
+        Extract audio content from the model output.
 
-        For text <tts_start>abc<audio_1475><audio_1978><audio_4218><audio_4218><tts_end>:
+        For text <tts_start>abc<audio_1475><audio_1978><audio_4218><tts_end>:
         - 'abc' goes to text content
-        - '<audio_1475><audio_1978><audio_4218><audio_4218>' goes to audio content
+        - '<audio_1475><audio_1978><audio_4218>' goes to audio content
 
         Returns:
-            tuple[Optional[str], Optional[str]]: text content and audio content
-        """  # noqa: E501
+            (text_token_ids, audio_token_ids, other_token_ids)
+        """
 
-        if not is_tts_ta4_output:
-            return [], [], output_token_ids
+        if not is_audio_output:
+            return [], [], list(output_token_ids)
         else:
-            tts_text_token_ids, tts_audio_token_ids, other_token_ids = (
-                self.extract_tts_content(  # noqa: E501
-                    output_token_ids, has_tts_start=False, has_tts_end=True
-                )
+            return self.extract_tts_content(
+                output_token_ids, has_tts_start=False, has_tts_end=True
             )
-            return tts_text_token_ids, tts_audio_token_ids, other_token_ids
 
-    def extract_tts_content_streaming(
+    def extract_audio_content_streaming(
         self,
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-        is_tts_ta4_output: False,
-    ) -> tuple[list, list, list]:
-        if not is_tts_ta4_output:
-            return [], [], delta_token_ids
+        is_audio_output: bool = False,
+    ) -> tuple[list[int], list[int], list[int]]:
+        if not is_audio_output:
+            return [], [], list(delta_token_ids)
 
         # Skip single special tokens
         if len(delta_token_ids) == 1 and (
@@ -225,7 +237,7 @@ class StepAudio2TTSTA4Parser(AudioParser):
 
         if self.audio_end_token_id in previous_token_ids:
             # <tts_end> in previous, extract text/audio content
-            return [], [], delta_token_ids
+            return [], [], list(delta_token_ids)
         elif self.audio_end_token_id in delta_token_ids:
             # <tts_end> in delta, extract text/audio content
             return self.extract_tts_content(

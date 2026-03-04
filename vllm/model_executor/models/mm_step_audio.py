@@ -22,13 +22,13 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import TokenizerLike
 
@@ -200,6 +200,10 @@ class Step1fAudioProcessingInfo(BaseProcessingInfo):
             self.get_tokenizer(),
         )
 
+    def get_data_parser(self) -> MultiModalDataParser:
+        # StepAudio expects audio waveforms normalized to 16kHz tuples.
+        return MultiModalDataParser(target_sr=16000)
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
 
@@ -322,9 +326,6 @@ class Step1fAudioDummyInputsBuilder(BaseDummyInputsBuilder[Step1fAudioProcessing
 class Step1fAudioMultiModalProcessor(
     BaseMultiModalProcessor[Step1fAudioProcessingInfo]
 ):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return MultiModalDataParser(target_sr=16000)
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,

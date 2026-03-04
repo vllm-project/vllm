@@ -4,10 +4,11 @@ import os
 from collections.abc import Callable, Sequence
 from functools import cached_property
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import import_from_path, is_list_of
+from vllm.tokenizers import TokenizerLike
+from vllm.utils.collection_utils import is_list_of
+from vllm.utils.import_utils import import_from_path
 
 logger = init_logger(__name__)
 
@@ -15,12 +16,11 @@ logger = init_logger(__name__)
 class AudioParser:
     """
     Abstract audio parser class that should not be used directly.
-    Provided and methods should be used in derived classes.
-
-    It is used to extract audio content from the model output.
+    Subclasses implement model-specific audio extraction logic while
+    the serving layer only calls these generic interface methods.
     """
 
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: TokenizerLike):
         self.model_tokenizer = tokenizer
 
     @cached_property
@@ -29,31 +29,42 @@ class AudioParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
-    def extract_text_audio_content(self):
-        raise NotImplementedError(
-            "AbstractAudioParser.extract_audio_content has not been implemented!"  # noqa: E501
-        )
+    def is_audio_output(self, prompt_token_ids: Sequence[int]) -> bool:
+        """Check whether the model output should be treated as audio.
 
-    def extract_tts_content_nonstreaming(
+        Each subclass implements its own detection logic (e.g. checking
+        for a special start token at the end of the prompt).  The serving
+        layer calls this once per request and passes the result into the
+        extraction methods.
+        """
+        raise NotImplementedError
+
+    def extract_audio_content_nonstreaming(
         self,
         output_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-        is_tts_ta4_output: bool = False,
-    ):
-        raise NotImplementedError(
-            "AbstractAudioParser.extract_tts_content_nonstreaming has not been implemented!"  # noqa: E501
-        )
+        is_audio_output: bool = False,
+    ) -> tuple[list[int], list[int], list[int]]:
+        """Extract audio content from full output token ids.
 
-    def extract_tts_content_streaming(
+        Returns:
+            (text_token_ids, audio_token_ids, other_token_ids)
+        """
+        raise NotImplementedError
+
+    def extract_audio_content_streaming(
         self,
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-        is_tts_ta4_output: bool = False,
-    ) -> tuple[list, list, list]:
-        raise NotImplementedError(
-            "AbstractAudioParser.extract_tts_content_streaming has not been implemented!"  # noqa: E501
-        )
+        is_audio_output: bool = False,
+    ) -> tuple[list[int], list[int], list[int]]:
+        """Extract audio content from streaming delta token ids.
+
+        Returns:
+            (text_token_ids, audio_token_ids, other_token_ids)
+        """
+        raise NotImplementedError
 
 
 class AudioParserManager:

@@ -60,7 +60,7 @@ from vllm.utils.import_utils import LazyLoader
 if TYPE_CHECKING:
     import torch
     import transformers
-    from vllm.tokenizers.mistral import MistralTokenizer
+
     from vllm.tokenizers.step_audio_2 import StepAudio2Tokenizer
 else:
     transformers = LazyLoader("transformers", globals(), "transformers")
