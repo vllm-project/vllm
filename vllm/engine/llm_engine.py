@@ -1358,10 +1358,12 @@ class LLMEngine:
                 outputs = self.model_executor.execute_model(
                     execute_model_req=execute_model_req)
                 if self._should_enable_tree_decoding(seq_group_metadata_list):
-                    new_branch_groups = self._process_tree_decoding(
+                    new_branch_groups, branch_groups_to_delete = self._process_tree_decoding(
                         outputs, seq_group_metadata_list)
                     for branch_group in new_branch_groups:
                         self._add_branch_to_scheduler(branch_group, virtual_engine)
+                    for branch_group in branch_groups_to_delete:
+                        self._delete_branch_from_scheduler(branch_group, virtual_engine)
                 self._skip_scheduling_next_step = False
             except InputProcessingError as e:
                 # The input for this request cannot be processed, so we must
@@ -1461,6 +1463,7 @@ class LLMEngine:
     def _process_tree_decoding(self, outputs, seq_group_metadata_list):
         """处理tree decoding逻辑"""
         seq_groups = []
+        seq_groups_to_delete = []
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             sampling_params = seq_group_metadata.sampling_params
             
@@ -1474,6 +1477,7 @@ class LLMEngine:
                 if request_id not in self.seq_id_to_seq_group:
                     continue
                 original_seq_group = self.seq_id_to_seq_group[request_id]
+                print("group length:", len(original_seq_group.seqs))
                 if self.tree_decoder.should_create_branches(
                     original_seq_group, logprobs[i], sampling_params):
                     # 创建分支序列组
@@ -1482,8 +1486,9 @@ class LLMEngine:
                         original_seq_group, logprobs[i], sampling_params
                     )
                     seq_groups.extend(new_branch_seq_groups)
+                    seq_groups_to_delete.append(original_seq_group)
 
-        return seq_groups
+        return seq_groups, seq_groups_to_delete
 
     def _add_branch_to_scheduler(self, branch_group, virtual_engine):
         """将分支序列组添加到调度器"""
