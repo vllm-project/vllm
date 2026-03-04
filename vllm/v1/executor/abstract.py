@@ -318,8 +318,24 @@ class Executor(ABC):
         self.collective_rpc("suspend_distributed")
 
     def resume(self) -> None:
-        """Rebuild NCCL after snapshot restore."""
-        self.collective_rpc("resume_distributed")
+        """Rebuild NCCL after snapshot restore.
+
+        Generates a single fresh TCP rendezvous address and passes it
+        to all workers so they coordinate on the same TCPStore.  The
+        pre-snapshot address is stale after CRIU restore (container IP
+        changes).
+        """
+        from vllm.utils.network_utils import (
+            get_distributed_init_method,
+            get_loopback_ip,
+            get_open_port,
+        )
+
+        init_method = get_distributed_init_method(get_loopback_ip(), get_open_port())
+        self.collective_rpc(
+            "resume_distributed",
+            kwargs=dict(distributed_init_method=init_method),
+        )
 
     def sleep(self, level: int = 1):
         if self.is_sleeping:

@@ -647,20 +647,17 @@ class EngineCore:
         Weights stay on GPU so cuda-checkpoint can snapshot them natively.
         Only NCCL IPC memory (which cuda-checkpoint cannot handle) and
         the OTel tracer (gRPC channels won't survive CRIU) are torn down.
-
-        Currently only supports TP=1. For TP>1, each worker would
-        independently generate a different TCP rendezvous address on
-        resume, breaking the TCPStore coordination that
-        torch.distributed requires.
         """
-        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        if tp_size > 1:
-            raise NotImplementedError(
-                f"suspend()/resume() requires tensor_parallel_size=1, "
-                f"got {tp_size}. With TP>1, workers cannot coordinate "
-                f"a fresh TCP rendezvous address after CRIU restore. "
-                f"See https://github.com/vllm-project/vllm/pull/35934 "
-                f"for details."
+        if (
+            self.vllm_config.parallel_config.tensor_parallel_size > 1
+            and self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ):
+            logger.warning(
+                "suspend()/resume() with tensor_parallel_size > 1 and full "
+                "CUDA graphs may fail: NCCL communicator handles baked into "
+                "captured graphs become stale after NCCL is rebuilt on "
+                "resume. Use --enforce-eager or a piecewise cudagraph mode "
+                "to avoid this."
             )
         if not self.is_scheduler_paused():
             self.pause_scheduler(mode="abort")
