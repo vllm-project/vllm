@@ -475,18 +475,25 @@ class GemmaRMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if torch.compiler.is_compiling():
-            return self.forward_native(x, residual)
+        from vllm import _custom_ops as ops
 
-        if not getattr(self, "_is_compiled", False):
-            self._forward_static_no_residual = torch.compile(  # type: ignore
-                self._forward_static_no_residual
+        if residual is not None:
+            ops.gemma_fused_add_rms_norm(
+                x,
+                residual,
+                self.weight.data,
+                self.variance_epsilon,
             )
-            self._forward_static_with_residual = torch.compile(  # type: ignore
-                self._forward_static_with_residual
+            return x, residual
+        else:
+            out = torch.empty_like(x)
+            ops.gemma_rms_norm(
+                out,
+                x,
+                self.weight.data,
+                self.variance_epsilon,
             )
-            self._is_compiled = True
-        return self.forward_native(x, residual)
+            return out
 
 
 # --8<-- [start:rms_norm_gated]

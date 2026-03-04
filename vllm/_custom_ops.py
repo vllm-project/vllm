@@ -339,6 +339,18 @@ def fused_add_rms_norm(
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
+def gemma_rms_norm(
+    out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, epsilon: float
+) -> None:
+    torch.ops._C.gemma_rms_norm(out, input, weight, epsilon)
+
+
+def gemma_fused_add_rms_norm(
+    input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, epsilon: float
+) -> None:
+    torch.ops._C.gemma_fused_add_rms_norm(input, residual, weight, epsilon)
+
+
 def fused_qk_norm_rope(
     qkv: torch.Tensor,
     num_heads_q: int,
@@ -484,6 +496,115 @@ def rms_norm_per_block_quant(
     )
 
     torch.ops._C.rms_norm_per_block_quant(
+        output,
+        input,
+        weight,
+        scales,
+        epsilon,
+        scale_ub,
+        residual,
+        group_size[1],
+        is_scale_transposed,
+    )
+    return output, scales
+
+
+# Gemma fused quant layer norm ops
+# Gemma applies weight as (1 + weight) instead of weight
+def gemma_rms_norm_static_fp8_quant(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.gemma_rms_norm_static_fp8_quant(
+        out, input, weight, scale, epsilon
+    )
+
+
+def gemma_fused_add_rms_norm_static_fp8_quant(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.gemma_fused_add_rms_norm_static_fp8_quant(
+        out, input, residual, weight, scale, epsilon
+    )
+
+
+def gemma_rms_norm_dynamic_per_token_quant(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    quant_dtype: torch.dtype,
+    scale_ub: torch.Tensor | None = None,
+    residual: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    output = torch.empty_like(input, dtype=quant_dtype)
+    scales = torch.empty(
+        (input.numel() // input.shape[-1], 1),
+        device=input.device,
+        dtype=torch.float32,
+    )
+
+    torch.ops._C.gemma_rms_norm_dynamic_per_token_quant(
+        output, input, weight, scales, epsilon, scale_ub, residual
+    )
+    return output, scales
+
+
+def gemma_rms_norm_per_block_quant(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    quant_dtype: torch.dtype,
+    group_size: list[int],
+    scale_ub: torch.Tensor | None = None,
+    residual: torch.Tensor | None = None,
+    is_scale_transposed: bool = False,
+    tma_alignment: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert len(group_size) == 2
+    output = torch.empty_like(input, dtype=quant_dtype)
+    if is_scale_transposed:
+        if tma_alignment == 0:
+            scales = torch.empty(
+                (input.shape[-1] // group_size[1],
+                 input.numel() // input.shape[-1]),
+                device=input.device,
+                dtype=torch.float32,
+            ).transpose(0, 1)
+        else:
+            m = input.shape[-2]
+            sf_k = input.shape[-1] // group_size[1]
+            tma_aligned_m = ((m + tma_alignment - 1)
+                             // tma_alignment * tma_alignment)
+            shape = input.shape[:-2] + (m, sf_k)
+            stride = (
+                (1, tma_aligned_m)
+                if input.dim() == 2
+                else (tma_aligned_m * sf_k, 1, tma_aligned_m)
+            )
+            scales = torch.empty_strided(
+                shape, stride, device=input.device, dtype=torch.float32
+            )
+    else:
+        scales = torch.empty(
+            (input.numel() // input.shape[-1],
+             input.shape[-1] // group_size[1]),
+            device=input.device,
+            dtype=torch.float32,
+        )
+
+    assert tma_alignment in [0, 4], (
+        "Expected TMA alignment 0 or 4, but got " + str(tma_alignment)
+    )
+
+    torch.ops._C.gemma_rms_norm_per_block_quant(
         output,
         input,
         weight,
