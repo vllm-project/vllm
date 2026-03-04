@@ -1918,7 +1918,7 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     gc.collect()
     from vllm.platforms import current_platform
 
-    if not current_platform.is_cpu():
+    if not current_platform.is_cpu() and not current_platform.is_mps():
         torch.accelerator.empty_cache()
         try:
             torch._C._host_emptyCache()

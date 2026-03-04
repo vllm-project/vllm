@@ -1143,7 +1143,7 @@ def initialize_single_dummy_weight(
     seed: int = 1234,
 ) -> None:
     if torch.is_floating_point(param):
-        if current_platform.is_tpu():
+        if current_platform.is_tpu() or current_platform.is_mps():
             generator = torch.Generator(device="cpu")
             generator.manual_seed(seed)
             # Note: The param.uniform_ function cannot be used in this
@@ -1163,7 +1163,8 @@ def initialize_single_dummy_weight(
                 )
                 + low
             )
-            torch._sync(param)
+            if current_platform.is_tpu():
+                torch._sync(param)
             return
 
         generator = torch.Generator(device=param.data.device)

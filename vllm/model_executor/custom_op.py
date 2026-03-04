@@ -148,6 +148,11 @@ class CustomOp(nn.Module):
         # PyTorch-native implementation.
         return self.forward_native(*args, **kwargs)
 
+    def forward_mps(self, *args, **kwargs):
+        # By default, we assume that MPS ops are compatible with the
+        # PyTorch-native implementation.
+        return self.forward_native(*args, **kwargs)
+
     def forward_cpu(self, *args, **kwargs):
         # By default, we assume that CPU ops are compatible with the
         # PyTorch-native implementation.
@@ -188,6 +193,8 @@ class CustomOp(nn.Module):
 
         if current_platform.is_rocm():
             return self.forward_hip
+        elif current_platform.is_mps():
+            return self.forward_mps
         elif current_platform.is_cpu():
             return self.forward_cpu
         elif current_platform.is_tpu():

@@ -10,7 +10,7 @@ from pydantic import ConfigDict, SkipValidation
 from vllm.config.utils import config
 from vllm.utils.hashing import safe_hash
 
-Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
+Device = Literal["auto", "cuda", "cpu", "tpu", "xpu", "mps"]
 
 
 @config(config=ConfigDict(arbitrary_types_allowed=True))
