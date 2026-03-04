@@ -962,14 +962,16 @@ class EplbState:
                 new_indices=new_indices,
                 ep_rank=ep_group.rank(),
             )
+
+            transferred_layer = model_state.layer_to_transfer
+            self._update_layer_mapping_from_new(model_state, transferred_layer)
+
             # Record event after consuming buffer to signal async thread
             # that it's safe to overwrite the intermediate buffer
             consumed_event = torch.cuda.Event()
             consumed_event.record()
             model_state.buffer_consumed_event = consumed_event
 
-            transferred_layer = model_state.layer_to_transfer
-            self._update_layer_mapping_from_new(model_state, transferred_layer)
             # After the main thread consumes, advance layer_to_transfer
             model_state.layer_to_transfer += 1
             model_state.ep_buffer_ready = 0
