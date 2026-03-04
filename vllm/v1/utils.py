@@ -140,20 +140,37 @@ class CpuGpuBuffer:
         return self.cpu[:n].copy_(self.gpu[:n], non_blocking=True)
 
 
-def get_engine_client_zmq_addr(local_only: bool, host: str, port: int = 0) -> str:
+def get_engine_client_zmq_addr(
+    local_only: bool, host: str, port: int = 0, late_binding: bool = True
+) -> str:
     """Assign a new ZMQ socket address.
 
     If local_only is True, participants are colocated and so a unique IPC
     address will be returned.
 
     Otherwise, the provided host and port will be used to construct a TCP
-    address (port == 0 means assign an available port)."""
+    address. When late_binding is True and port is 0, a wildcard address
+    (tcp://host:0) is returned so that the OS assigns an available port at
+    bind time, avoiding port conflicts (see issue #28498).
 
-    return (
-        get_open_zmq_ipc_path()
-        if local_only
-        else (get_tcp_uri(host, port or get_open_port()))
-    )
+    Args:
+        local_only: If True, return an IPC address.
+        host: Hostname or IP for TCP addresses.
+        port: Specific port to use. 0 means auto-assign.
+        late_binding: If True and port is 0, return wildcard address for
+            late binding. If False, pre-allocate a port via get_open_port().
+    """
+
+    if local_only:
+        return get_open_zmq_ipc_path()
+    if port:
+        return get_tcp_uri(host, port)
+    if late_binding:
+        # Use wildcard port 0 for late binding. The actual port is
+        # determined when make_zmq_socket() binds with return_address=True.
+        return get_tcp_uri(host, 0)
+    # Pre-allocate a port (legacy behavior, has TOCTOU risk).
+    return get_tcp_uri(host, get_open_port())
 
 
 class APIServerProcessManager:
