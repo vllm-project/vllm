@@ -408,7 +408,7 @@ class ElasticEPScalingExecutor:
 
         gc.collect()
         torch.cuda.synchronize()
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         unlock_workspace()
         self.worker.compile_or_warm_up_model()
         lock_workspace()

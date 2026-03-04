@@ -62,7 +62,7 @@ class XPUWorker(Worker):
             self.device = torch.device(f"xpu:{self.local_rank}")
             current_platform.set_device(self.device)
             current_platform.check_if_supports_dtype(self.model_config.dtype)
-            torch.xpu.empty_cache()
+            torch.accelerator.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(
                 self.local_rank
             ).total_memory
@@ -90,7 +90,7 @@ class XPUWorker(Worker):
 
         # Now take memory snapshot after NCCL is initialized
         gc.collect()
-        torch.xpu.empty_cache()
+        torch.accelerator.empty_cache()
 
         # take current memory snapshot
         self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
