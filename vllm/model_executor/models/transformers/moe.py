@@ -204,6 +204,15 @@ class MoEMixin(MixtureOfExperts):
         )
         assert intermediate_size is not None
 
+        num_shared_experts = getattr_iter(
+            text_config,
+            [
+                "n_shared_experts",  # DeepSeek, Docs, GLM
+                "moe_num_shared_experts",  # Aria, Ernie
+            ],
+            0,
+        )
+
         # Unused kwargs since we use custom_routing_function:
         # - `scoring_func` and `e_score_correction_bias` only used for grouped
         #    topk routing inside vLLM and are non-trivial to infer
@@ -243,7 +252,7 @@ class MoEMixin(MixtureOfExperts):
         self.num_physical_experts = num_experts + num_redundant_experts
         self.num_local_physical_experts = self.num_physical_experts // ep_size
         self.num_routed_experts = num_experts
-        self.num_shared_experts = 0
+        self.num_shared_experts = num_shared_experts
         self.num_redundant_experts = num_redundant_experts
 
         # Recursively fuse MoE layers
@@ -267,7 +276,8 @@ class MoEMixin(MixtureOfExperts):
                         if "bias" in experts_param_name:
                             has_bias = True
                             break
-                    # Detect shared experts if config doesn't specify
+                    # If the config does not specify num_shared_experts, but
+                    # the model has shared experts, we assume there is one.
                     if self.num_shared_experts == 0:
                         for mlp_param_name, _ in mlp.named_parameters():
                             if "shared_expert" in mlp_param_name:
