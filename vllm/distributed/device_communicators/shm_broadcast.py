@@ -425,7 +425,7 @@ class MessageQueue:
             self.remote_socket.bind(wildcard_addr)
             # Discover the actual bound port from the socket.
             actual_endpoint = self.remote_socket.last_endpoint.decode("utf-8")
-            remote_subscribe_port = int(actual_endpoint.split(":")[-1])
+            remote_subscribe_port = int(split_zmq_path(actual_endpoint)[2])
             remote_subscribe_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
         else:
             remote_subscribe_addr = None
