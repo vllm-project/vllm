@@ -488,9 +488,7 @@ class TestIPCWeightTransferUpdateInfoValidation:
                 names=[],
                 dtype_names=[],
                 shapes=[],
-                ipc_handles_pickled=base64.b64encode(pickle.dumps([])).decode(
-                    "utf-8"
-                ),
+                ipc_handles_pickled=base64.b64encode(pickle.dumps([])).decode("utf-8"),
             )
 
     def test_both_handles_and_pickled_raises(self):
