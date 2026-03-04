@@ -38,6 +38,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
+from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.utils.async_utils import merge_async_iterators
@@ -248,15 +249,6 @@ async def run_vllm_async(
         return end - start
 
 
-def get_current_device():
-    if torch.cuda.is_available():
-        return "cuda"
-    elif hasattr(torch, "xpu") and torch.xpu.is_available():
-        return "xpu"
-    else:
-        return "cpu"
-
-
 def run_hf(
     requests: list[SampleRequest],
     model: str,
@@ -277,7 +269,7 @@ def run_hf(
     if llm.config.model_type == "llama":
         # To enable padding in the HF backend.
         tokenizer.pad_token = tokenizer.eos_token
-    llm = llm.to(get_current_device())
+    llm = llm.to(current_platform.device_type)
     if enable_torch_compile:
         llm = torch.compile(llm)
 
@@ -308,7 +300,7 @@ def run_hf(
         # Generate the sequences.
         input_ids = tokenizer(batch, return_tensors="pt", padding=True).input_ids
         llm_outputs = llm.generate(
-            input_ids=input_ids.to(get_current_device()),
+            input_ids=input_ids.to(current_platform.device_type),
             do_sample=True,
             num_return_sequences=n,
             temperature=1.0,
