@@ -5,6 +5,7 @@ import dataclasses
 import io
 import json
 import pickle
+import time
 from collections.abc import Callable
 from pickle import Pickler
 from typing import Any
@@ -164,7 +165,16 @@ class PiecewiseBackend:
         if self.is_last_graph and not self.to_be_compiled_ranges:
             # no specific sizes to compile
             # save the hash of the inductor graph for the next run
+            time_before_saving = time.perf_counter()
             self.vllm_backend.compiler_manager.save_to_file()
+            elapsed = time.perf_counter() - time_before_saving
+            if elapsed > 1:
+                logger.info_once(
+                    "Saved compiler manager cache in %.2f seconds.",
+                    elapsed,
+                    scope="local",
+                )
+
             end_monitoring_torch_compile(self.vllm_config)
             # Call the completion callback (e.g., to save AOT compiled function)
             if self.on_compilation_complete is not None:

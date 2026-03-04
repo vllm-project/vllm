@@ -108,6 +108,7 @@ class ServeSubcommand(CLISubcommand):
             run_multi_api_server(args)
         else:
             # Single API server (this process).
+            args.api_server_count = None
             uvloop.run(run_server(args))
 
     def validate(self, args: argparse.Namespace) -> None:
@@ -219,6 +220,12 @@ def run_multi_api_server(args: argparse.Namespace):
     num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
 
+    if num_api_servers > 1 and getattr(args, "use_gpu_for_pooling_score", False):
+        # TODO(wentao): remove this once well tested
+        raise ValueError(
+            "--use-gpu-for-pooling-score cannot be used with api_server_count > 1 now"
+        )
+
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
 
@@ -245,8 +252,12 @@ def run_multi_api_server(args: argparse.Namespace):
 
     api_server_manager: APIServerProcessManager | None = None
 
+    from vllm.v1.engine.utils import get_engine_zmq_addresses
+
+    addresses = get_engine_zmq_addresses(vllm_config, num_api_servers)
+
     with launch_core_engines(
-        vllm_config, executor_class, log_stats, num_api_servers
+        vllm_config, executor_class, log_stats, addresses, num_api_servers
     ) as (local_engine_manager, coordinator, addresses):
         # Construct common args for the APIServerProcessManager up-front.
         api_server_manager_kwargs = dict(

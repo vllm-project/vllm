@@ -73,9 +73,6 @@ class RayDistributedExecutor(Executor):
         "ROCR_VISIBLE_DEVICES",
     }
 
-    # These non-vLLM env vars are copied from the driver to workers
-    ADDITIONAL_ENV_VARS = {"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"}
-
     uses_ray: bool = True
     supports_pp: bool = True
 
@@ -339,9 +336,7 @@ class RayDistributedExecutor(Executor):
         # Environment variables to copy from driver to workers
         env_vars_to_copy = get_env_vars_to_copy(
             exclude_vars=self.WORKER_SPECIFIC_ENV_VARS,
-            additional_vars=set(current_platform.additional_env_vars).union(
-                self.ADDITIONAL_ENV_VARS
-            ),
+            additional_vars=set(current_platform.additional_env_vars),
             destination="workers",
         )
 
@@ -387,8 +382,10 @@ class RayDistributedExecutor(Executor):
             all_kwargs.append(kwargs)
         self.collective_rpc("init_worker", args=(all_kwargs,))
 
-        self.collective_rpc("init_device")
-        self.collective_rpc("load_model")
+        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
+        if not is_eep_new_worker:
+            self.collective_rpc("init_device")
+            self.collective_rpc("load_model")
 
         for pp_rank in range(self.parallel_config.pipeline_parallel_size):
             self.pp_tp_workers.append([])
