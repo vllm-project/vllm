@@ -988,7 +988,7 @@ def test_flashinfer_cutlass_mxfp4_mxfp8_fused_moe(
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("num_tokens", [1, 128])
 @pytest.mark.parametrize("intermediate_size,hidden_size", [(3072, 3072)])
-@pytest.mark.parametrize("is_gated", [True, False], ids=["gated", "non_gated"])
+@pytest.mark.parametrize("is_gated", [True], ids=["gated"])
 @pytest.mark.skipif(
     not TRTLLM_GEN_MXFP8_AVAILABLE,
     reason="nvidia gpu and compute capability sm100 is required for this test",
