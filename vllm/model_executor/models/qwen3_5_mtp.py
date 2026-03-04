@@ -120,6 +120,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
             if inputs_embeds is None:
+                input_ids = input_ids.clamp(0, self.vocab_size - 1)
                 inputs_embeds = self.embed_input_ids(input_ids)
             assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
             inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
