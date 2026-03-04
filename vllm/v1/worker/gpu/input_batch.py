@@ -1,12 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
 
 class InputBuffers:
@@ -37,6 +43,7 @@ class InputBatch:
     # batch_idx -> req_id
     req_ids: list[str]
     num_reqs: int
+    num_reqs_after_padding: int
 
     # batch_idx -> req_state_idx
     idx_mapping: torch.Tensor
@@ -79,10 +86,11 @@ class InputBatch:
     @classmethod
     def make_dummy(
         cls,
-        num_reqs: int,
-        num_tokens: int,
+        batch_desc: BatchExecutionDescriptor,
         input_buffers: InputBuffers,
-    ) -> "InputBatch":
+    ) -> InputBatch:
+        num_reqs = batch_desc.num_reqs
+        num_tokens = batch_desc.num_tokens
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
 
@@ -123,6 +131,7 @@ class InputBatch:
         return cls(
             req_ids=req_ids,
             num_reqs=num_reqs,
+            num_reqs_after_padding=num_reqs,
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
             expanded_idx_mapping=expanded_idx_mapping,
