@@ -1140,6 +1140,15 @@ class VllmRunner:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        # Explicitly shutdown the engine core to release GPU resources
+        if hasattr(self.llm, "llm_engine") and hasattr(
+            self.llm.llm_engine, "engine_core"
+        ):
+            try:
+                self.llm.llm_engine.engine_core.shutdown()
+            except Exception:
+                # Ignore shutdown errors as cleanup will still proceed
+                pass
         del self.llm
         cleanup_dist_env_and_memory()
 
