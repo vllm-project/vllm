@@ -42,6 +42,7 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseBackend,
     triton_convert_req_index_to_global_index,
 )
+from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
 from vllm.v1.attention.backends.utils import split_prefill_chunks
 from vllm.v1.attention.ops import flashmla
 
@@ -706,6 +707,68 @@ def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_s
 )
 def test_split_prefill_chunks(seq_lens, max_buf, expected):
     out = split_prefill_chunks(seq_lens, max_buf)
+    assert out == expected
+
+
+@pytest.mark.parametrize(
+    "seq_lens,query_lens,workspace,max_logits_bytes,expected",
+    [
+        # All fit in one chunk (both constraints satisfied)
+        (
+            torch.tensor([100, 200, 300]),
+            torch.tensor([10, 20, 30]),
+            10000,
+            600 * 60 * 4,  # M*N = 60*600 = 36000, budget = 36000
+            [(0, 3)],
+        ),
+        # Logits constraint splits: M*N too large for all together
+        (
+            torch.tensor([1000, 1000]),
+            torch.tensor([500, 500]),
+            10000,  # workspace is fine
+            500 * 1000 * 4,  # budget allows M=500, N=1000 only
+            [(0, 1), (1, 2)],
+        ),
+        # Workspace constraint splits (same as split_prefill_chunks)
+        (
+            torch.tensor([2, 3, 4, 2]),
+            torch.tensor([1, 1, 1, 1]),
+            5,
+            10000000,  # logits budget is very large
+            [(0, 2), (2, 3), (3, 4)],
+        ),
+        # Single request exceeding both constraints (forced into its own chunk)
+        (
+            torch.tensor([50000]),
+            torch.tensor([1000]),
+            10000,  # workspace exceeded
+            100 * 4,  # logits budget exceeded
+            [(0, 1)],
+        ),
+        # request_offset shifts indices
+        (
+            torch.tensor([100, 200]),
+            torch.tensor([10, 20]),
+            10000,
+            10000000,
+            [(5, 7)],  # offset=5 applied
+        ),
+    ],
+    ids=[
+        "all_fit",
+        "logits_split",
+        "workspace_split",
+        "single_oversized",
+        "with_offset",
+    ],
+)
+def test_split_indexer_prefill_chunks(
+    seq_lens, query_lens, workspace, max_logits_bytes, expected
+):
+    offset = 5 if expected == [(5, 7)] else 0
+    out = split_indexer_prefill_chunks(
+        seq_lens, query_lens, workspace, max_logits_bytes, request_offset=offset
+    )
     assert out == expected
 
 

@@ -4,6 +4,7 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -29,6 +30,13 @@ elif current_platform.is_xpu():
     from vllm._xpu_ops import xpu_ops as ops
 
 logger = init_logger(__name__)
+
+# Maximum logits tensor size for the sparse attention indexer prefill path.
+# When the full-chunk [M, N] logits would exceed this budget, we sub-chunk
+# the query dimension to keep each sub-chunk's logits within budget.
+# See: https://github.com/vllm-project/vllm/issues/34553
+_MAX_LOGITS_BYTES = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+_MAX_LOGITS_ELEMS = _MAX_LOGITS_BYTES // 4  # float32
 
 
 def sparse_attn_indexer(
@@ -113,60 +121,62 @@ def sparse_attn_indexer(
                 chunk.block_table,
                 chunk.cu_seq_lens,
             )
-            if is_deep_gemm_supported():
-                logits = fp8_mqa_logits(
-                    q_fp8[chunk.token_start : chunk.token_end],
-                    (k_fp8, k_scale.view(torch.float32).flatten()),
-                    weights[chunk.token_start : chunk.token_end],
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    clean_logits=False,
-                )
-            else:
-                logits = fp8_mqa_logits_torch(
-                    q_fp8[chunk.token_start : chunk.token_end],
-                    (k_fp8, k_scale.view(torch.float32).flatten()),
-                    weights[chunk.token_start : chunk.token_end],
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                )
-            num_rows = logits.shape[0]
+            chunk_m = chunk.token_end - chunk.token_start
+            chunk_n = chunk.total_seq_lens
+            kv = (k_fp8, k_scale.view(torch.float32).flatten())
 
-            topk_indices = topk_indices_buffer[
-                chunk.token_start : chunk.token_end, :topk_tokens
-            ]
-
-            if current_platform.is_xpu():
-                ops.top_k_per_row_prefill(
-                    logits,
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
-            else:
-                torch.ops._C.top_k_per_row_prefill(
-                    logits,
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
-
-            # Compute lengths from row spans
-            # lengths = (chunk.cu_seqlen_ke - chunk.cu_seqlen_ks).to(torch.int32)
-            # torch.ops._C.large_context_topk(
-            #    logits,
-            #    topk_indices,
-            #    lengths,
-            #    chunk.cu_seqlen_ks,  # row_starts
-            # )
+            # Sub-chunk the query dimension when the [M, N] logits
+            # tensor would exceed the memory budget. When it fits,
+            # max_q == chunk_m so this loop runs exactly once.
+            # See: https://github.com/vllm-project/vllm/issues/34553
+            max_q = (
+                max(1, _MAX_LOGITS_ELEMS // chunk_n)
+                if chunk_m * chunk_n > _MAX_LOGITS_ELEMS
+                else chunk_m
+            )
+            for sub_s in range(0, chunk_m, max_q):
+                sub_e = min(sub_s + max_q, chunk_m)
+                g_s = chunk.token_start + sub_s
+                g_e = chunk.token_start + sub_e
+                if is_deep_gemm_supported():
+                    logits = fp8_mqa_logits(
+                        q_fp8[g_s:g_e],
+                        kv,
+                        weights[g_s:g_e],
+                        chunk.cu_seqlen_ks[sub_s:sub_e],
+                        chunk.cu_seqlen_ke[sub_s:sub_e],
+                        clean_logits=False,
+                    )
+                else:
+                    logits = fp8_mqa_logits_torch(
+                        q_fp8[g_s:g_e],
+                        kv,
+                        weights[g_s:g_e],
+                        chunk.cu_seqlen_ks[sub_s:sub_e],
+                        chunk.cu_seqlen_ke[sub_s:sub_e],
+                    )
+                if current_platform.is_xpu():
+                    ops.top_k_per_row_prefill(
+                        logits,
+                        chunk.cu_seqlen_ks[sub_s:sub_e],
+                        chunk.cu_seqlen_ke[sub_s:sub_e],
+                        topk_indices_buffer[g_s:g_e, :topk_tokens],
+                        logits.shape[0],
+                        logits.stride(0),
+                        logits.stride(1),
+                        topk_tokens,
+                    )
+                else:
+                    torch.ops._C.top_k_per_row_prefill(
+                        logits,
+                        chunk.cu_seqlen_ks[sub_s:sub_e],
+                        chunk.cu_seqlen_ke[sub_s:sub_e],
+                        topk_indices_buffer[g_s:g_e, :topk_tokens],
+                        logits.shape[0],
+                        logits.stride(0),
+                        logits.stride(1),
+                        topk_tokens,
+                    )
 
     if has_decode:
         decode_metadata = attn_metadata.decode
