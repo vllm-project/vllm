@@ -1800,9 +1800,7 @@ class GPUModelRunner(
             # Default is -1 (matches mamba PAD_SLOT_ID for reshape_and_cache),
             # but some backends (e.g. FlashMLA FP8) need >= 0 to avoid
             # illegal memory access in their kernels.
-            blk_table_tensor[num_reqs:num_reqs_padded].fill_(
-                self.cg_pad_block_table
-            )
+            blk_table_tensor[num_reqs:num_reqs_padded].fill_(self.cg_pad_block_table)
             return blk_table_tensor
 
         assert slot_mappings is not None

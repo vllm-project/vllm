@@ -72,8 +72,7 @@ class TestFlashMLAPaddingOverrides:
         vllm_config.model_config.get_num_attention_heads.return_value = 128
         # Disable full cudagraphs so CG buffer allocation (which needs a
         # real CUDA device) is skipped.
-        vllm_config.compilation_config.cudagraph_mode \
-            .has_full_cudagraphs.return_value = False
+        vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs.return_value = False
         vllm_config.scheduler_config.max_num_seqs = 256
 
         device = torch.device("cuda:0")
@@ -81,15 +80,19 @@ class TestFlashMLAPaddingOverrides:
 
         # Patch the heavy parent __init__ (MLACommonMetadataBuilder) so it
         # only sets the few attributes that FlashMLAMetadataBuilder reads.
-        def _lightweight_init(self, kv_cache_spec, layer_names,
-                              vllm_config, device, metadata_cls=None,
-                              **kwargs):
+        def _lightweight_init(
+            self,
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            metadata_cls=None,
+            **kwargs,
+        ):
             self.compilation_config = vllm_config.compilation_config
             self.device = device
 
-        with mock.patch.object(
-            MLACommonMetadataBuilder, "__init__", _lightweight_init
-        ):
+        with mock.patch.object(MLACommonMetadataBuilder, "__init__", _lightweight_init):
             builder = FlashMLAMetadataBuilder(
                 kv_cache_spec=kv_cache_spec,
                 layer_names=["model.layers.0.self_attn"],
@@ -147,9 +150,7 @@ class TestConsolidatedPaddingComputation:
         cg_pad_block_table = -1
         for builder in builders:
             cg_pad_seq_lens = max(cg_pad_seq_lens, builder.cg_pad_seq_lens)
-            cg_pad_block_table = max(
-                cg_pad_block_table, builder.cg_pad_block_table
-            )
+            cg_pad_block_table = max(cg_pad_block_table, builder.cg_pad_block_table)
         return cg_pad_seq_lens, cg_pad_block_table
 
     def test_all_defaults(self):
@@ -212,9 +213,7 @@ class TestPreparePosSqlLensPadding:
         idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
 
         # query_start_loc: each request has query_len=1 (decode)
-        query_start_loc = torch.arange(
-            num_reqs + 1, dtype=torch.int32, device=device
-        )
+        query_start_loc = torch.arange(num_reqs + 1, dtype=torch.int32, device=device)
 
         # num_computed_tokens: each request already has some context
         num_computed_tokens = torch.full(
@@ -223,9 +222,7 @@ class TestPreparePosSqlLensPadding:
 
         # Output tensors
         pos = torch.zeros(num_reqs, dtype=torch.int64, device=device)
-        seq_lens = torch.full(
-            (max_num_reqs,), -999, dtype=torch.int32, device=device
-        )
+        seq_lens = torch.full((max_num_reqs,), -999, dtype=torch.int32, device=device)
 
         prepare_pos_seq_lens(
             idx_mapping=idx_mapping,
@@ -290,4 +287,3 @@ class TestPreparePosSqlLensPadding:
 
         for i in range(num_reqs, max_num_reqs):
             assert seq_lens[i].item() == pad_value
-
