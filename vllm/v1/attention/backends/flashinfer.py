@@ -1193,22 +1193,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # drafting with fp8 KV cache + head_dim=256. Force the prefill path by
         # temporarily setting decode_threshold=0 so that 1-token steps are
         # classified as prefills (computationally identical to decode).
+        original_threshold = self.reorder_batch_threshold
         if not self.use_trtllm_decode_attention:
-            orig = self.reorder_batch_threshold
             self.reorder_batch_threshold = 0
-            try:
-                return self.build(
-                    common_prefix_len=0,
-                    common_attn_metadata=common_attn_metadata,
-                    fast_build=True,
-                )
-            finally:
-                self.reorder_batch_threshold = orig
-        return self.build(
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
-            fast_build=True,
-        )
+        try:
+            return self.build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+                fast_build=True,
+            )
+        finally:
+            self.reorder_batch_threshold = original_threshold
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         if self.kv_cache_spec.dtype != self.vllm_config.model_config.dtype:
