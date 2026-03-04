@@ -14,7 +14,7 @@ import sys
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Set
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -70,7 +70,7 @@ logger = init_logger(__name__)
 _TEXT_GENERATION_MODELS = {
     # [Decoder-only]
     "AfmoeForCausalLM": ("afmoe", "AfmoeForCausalLM"),
-    "AnyModelForCausalLM": ("anymodel", "AnyModelForCausalLM"),
+    "AnyModel": ("anymodel", "AnyModel"),
     "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
@@ -1066,25 +1066,26 @@ class _ModelRegistry:
         return architecture
 
     @staticmethod
-    def _should_use_anymodel(model_config: ModelConfig) -> bool:
-        """Check if a model should be handled by AnyModelForCausalLM.
+    def _anymodel_base_arch(model_config: ModelConfig) -> str | None:
+        """Return the base architecture name for an AnyModel checkpoint.
 
-        Returns True when the HF config contains ``block_configs`` and
-        ``architectures[0]`` maps to a known entry in ``_ARCH_REGISTRY``.
+        NAS-optimised checkpoints that use ``"architectures": ["AnyModel"]``
+        must also set ``base_architectures`` in their config so that vLLM can
+        derive the correct model capabilities (supports_multimodal, etc.) from
+        the original model class::
+
+            {
+                "architectures": ["AnyModel"],
+                "base_architectures": ["Qwen3VLForConditionalGeneration"],
+                "anymodel_arch_info": {...},
+                "block_configs": [...],
+            }
         """
         hf_config = getattr(model_config, "hf_config", None)
         if hf_config is None:
-            return False
-        block_configs = getattr(hf_config, "block_configs", None)
-        if not block_configs:
-            return False
-        architectures = getattr(hf_config, "architectures", None) or []
-        arch_name = architectures[0] if architectures else None
-        if arch_name is None:
-            return False
-        from vllm.model_executor.models.anymodel import _ARCH_REGISTRY
-
-        return arch_name in _ARCH_REGISTRY
+            return None
+        base_archs = getattr(hf_config, "base_architectures", None) or []
+        return base_archs[0] if base_archs else None
 
     def inspect_model_cls(
         self,
@@ -1095,12 +1096,6 @@ class _ModelRegistry:
             architectures = [architectures]
         if not architectures:
             raise ValueError("No model architectures are specified")
-
-        # Auto-detect NAS-optimized models with block_configs
-        if self._should_use_anymodel(model_config):
-            model_info = self._try_inspect_model_cls("AnyModelForCausalLM")
-            if model_info is not None:
-                return (model_info, architectures[0])
 
         # Require transformers impl
         if model_config.model_impl == "transformers":
@@ -1127,6 +1122,20 @@ class _ModelRegistry:
 
         for arch in architectures:
             normalized_arch = self._normalize_arch(arch, model_config)
+            if normalized_arch == "AnyModel":
+                # Derive capabilities from the base architecture so that
+                # VL models (supports_multimodal, etc.) are reported
+                # accurately, then overlay has_noops=True.
+                base_arch = self._anymodel_base_arch(model_config)
+                if base_arch:
+                    orig_info = self._try_inspect_model_cls(base_arch)
+                    if orig_info is not None:
+                        return (replace(orig_info, has_noops=True), arch)
+                # Fallback: use AnyModel's own capabilities
+                anymodel_info = self._try_inspect_model_cls(normalized_arch)
+                if anymodel_info is not None:
+                    return (anymodel_info, arch)
+                continue
             model_info = self._try_inspect_model_cls(normalized_arch)
             if model_info is not None:
                 return (model_info, arch)
@@ -1153,12 +1162,6 @@ class _ModelRegistry:
             architectures = [architectures]
         if not architectures:
             raise ValueError("No model architectures are specified")
-
-        # Auto-detect NAS-optimized models with block_configs
-        if self._should_use_anymodel(model_config):
-            anymodel_cls = self._try_load_model_cls("AnyModelForCausalLM")
-            if anymodel_cls is not None:
-                return (anymodel_cls, architectures[0])
 
         # Require transformers impl
         if model_config.model_impl == "transformers":
