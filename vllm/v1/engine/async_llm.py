@@ -907,6 +907,7 @@ class AsyncLLM(EngineClient):
         await self.engine_core.call_utility_async("suspend")
         # Shut down client-side tracer (gRPC channel won't survive CRIU)
         from vllm.tracing import shutdown_tracer
+
         try:
             shutdown_tracer()
         except Exception:
@@ -918,11 +919,11 @@ class AsyncLLM(EngineClient):
         endpoint = self.observability_config.otlp_traces_endpoint
         if endpoint:
             from vllm.tracing import init_tracer
+
             try:
                 init_tracer("vllm.llm_engine", endpoint)
             except Exception:
-                logger.warning("Failed to re-init client tracer",
-                               exc_info=True)
+                logger.warning("Failed to re-init client tracer", exc_info=True)
         await self.engine_core.call_utility_async("resume")
 
     async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:

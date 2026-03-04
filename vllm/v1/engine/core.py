@@ -650,8 +650,7 @@ class EngineCore:
         """
         if (
             self.vllm_config.parallel_config.tensor_parallel_size > 1
-            and self.vllm_config.compilation_config.cudagraph_mode
-            .has_full_cudagraphs()
+            and self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
             logger.warning(
                 "suspend()/resume() with tensor_parallel_size > 1 and full "
@@ -675,6 +674,7 @@ class EngineCore:
 
     def _shutdown_tracer(self) -> None:
         from vllm.tracing import shutdown_tracer
+
         try:
             shutdown_tracer()
         except Exception:
@@ -684,6 +684,7 @@ class EngineCore:
         endpoint = self.vllm_config.observability_config.otlp_traces_endpoint
         if endpoint:
             from vllm.tracing import init_tracer
+
             try:
                 init_tracer("vllm.engine_core", endpoint)
             except Exception:
