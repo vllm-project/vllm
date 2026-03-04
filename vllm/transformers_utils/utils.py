@@ -3,7 +3,6 @@
 
 import json
 import os
-import struct
 from functools import cache
 from os import PathLike
 from pathlib import Path
@@ -103,10 +102,28 @@ def maybe_model_redirect(model: str) -> str:
 
 
 def parse_safetensors_file_metadata(path: str | PathLike) -> dict[str, Any]:
-    with open(path, "rb") as f:
-        length_of_metadata = struct.unpack("<Q", f.read(8))[0]
-        metadata = json.loads(f.read(length_of_metadata).decode("utf-8"))
-        return metadata
+    """Parse tensor metadata from a safetensors file.
+
+    Uses safetensors.safe_open() to efficiently extract tensor metadata
+    (name, dtype, shape) without loading the entire header JSON into Python
+    memory. This avoids MemoryError for models with extremely large headers
+    (e.g., some AWQ quantized models).
+
+    Returns:
+        A dict mapping tensor names to their metadata dicts, each containing
+        "dtype" (str) and "shape" (list[int]) keys.
+    """
+    from safetensors import safe_open
+
+    metadata: dict[str, Any] = {}
+    with safe_open(path, framework="pt") as f:
+        for key in f.keys():  # noqa: SIM118
+            sl = f.get_slice(key)
+            metadata[key] = {
+                "dtype": sl.get_dtype(),
+                "shape": sl.get_shape(),
+            }
+    return metadata
 
 
 def convert_model_repo_to_path(model_repo: str) -> str:
