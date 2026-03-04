@@ -817,12 +817,12 @@ async def run_batch(
 
 
 async def main(args: Namespace):
-    from vllm.entrypoints.openai.api_server import build_async_engine_client
+    from vllm.entrypoints.openai.api_server import build_async_clients
     from vllm.usage.usage_lib import UsageContext
 
     validate_run_batch_args(args)
 
-    async with build_async_engine_client(
+    async with build_async_clients(
         args,
         usage_context=UsageContext.OPENAI_BATCH_RUNNER,
         disable_frontend_multiprocessing=False,

@@ -56,8 +56,7 @@ class AsyncRenderer(RendererClient):
         pass  # no background process to check
 
     def shutdown(self) -> None:
-        if renderer := getattr(self, "renderer", None):
-            renderer.shutdown()
+        self.renderer.shutdown()
 
     @property
     def tokenizer(self) -> TokenizerLike | None:
