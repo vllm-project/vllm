@@ -16,13 +16,12 @@ from vllm.v1.worker.gpu.attn_utils import (
     build_slot_mappings_by_layer,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import (
-    CudaGraphManager,
-)
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import sync_cudagraph_and_dp_padding
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -78,8 +77,8 @@ class EagleSpeculator:
         )
 
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode.decode_mode()
-        self.cudagraph_manager = CudaGraphManager(
-            vllm_config, device, cudagraph_mode, uniform_decode_query_len=1
+        self.cudagraph_manager = EagleCudaGraphManager(
+            vllm_config, device, cudagraph_mode, self.draft_tokens
         )
 
     def load_model(self, target_model: nn.Module) -> None:
@@ -97,29 +96,13 @@ class EagleSpeculator:
         self.attn_groups = attn_groups
         self.block_tables = block_tables
 
-    @torch.inference_mode()
-    def run_model(
-        self,
-        num_tokens: int,
-        attn_metadata: dict[str, Any] | None,
-        slot_mappings: dict[str, torch.Tensor] | None,
-        num_tokens_across_dp: torch.Tensor | None,
-        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        with set_forward_context(
-            attn_metadata,
-            self.vllm_config,
-            num_tokens=num_tokens,
-            cudagraph_runtime_mode=cudagraph_runtime_mode,
-            num_tokens_across_dp=num_tokens_across_dp,
-            slot_mapping=slot_mappings,
-            batch_descriptor=BatchDescriptor(num_tokens=num_tokens),
-        ):
-            ret_hidden_states = self.model(
-                input_ids=self.input_buffers.input_ids[:num_tokens],
-                positions=self.input_buffers.positions[:num_tokens],
-                hidden_states=self.hidden_states[:num_tokens],
-            )
+    def run_model(self, num_tokens: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the model forward. Caller must set up forward context."""
+        ret_hidden_states = self.model(
+            input_ids=self.input_buffers.input_ids[:num_tokens],
+            positions=self.input_buffers.positions[:num_tokens],
+            hidden_states=self.hidden_states[:num_tokens],
+        )
         if self.method == "mtp":
             last_hidden_states = ret_hidden_states
             hidden_states = ret_hidden_states
@@ -127,27 +110,23 @@ class EagleSpeculator:
             last_hidden_states, hidden_states = ret_hidden_states
         return last_hidden_states, hidden_states
 
-    def generate_draft(
-        self,
-        num_reqs: int,
-        num_tokens_padded: int,
-        attn_metadata: dict[str, Any] | None,
-        slot_mappings: dict[str, torch.Tensor] | None,
-        num_tokens_across_dp: torch.Tensor | None,
-        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-    ) -> None:
+    def generate_draft(self, desc: BatchExecutionDescriptor) -> None:
+        """Callback for CUDA graph capture. Forward context is set by caller."""
+        from vllm.forward_context import get_forward_context
+
+        num_reqs = desc.num_reqs
+        num_tokens_padded = desc.num_tokens
         pos = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
         idx_mapping = self.idx_mapping[:num_reqs]
+
+        # Get attn_metadata from forward context (set by _capture_graph).
+        ctx = get_forward_context()
+        attn_metadata = ctx.attn_metadata
+
         for step in range(1, self.num_speculative_steps):
             # Run the eagle model.
-            last_hidden_states, hidden_states = self.run_model(
-                num_tokens_padded,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-            )
+            last_hidden_states, hidden_states = self.run_model(num_tokens_padded)
             last_hidden_states = last_hidden_states[:num_reqs]
             hidden_states = hidden_states[:num_reqs]
             logits = self.model.compute_logits(last_hidden_states)
@@ -189,7 +168,6 @@ class EagleSpeculator:
             self.attn_groups,
             self.kv_cache_config,
             self.generate_draft,
-            dp_size=self.dp_size,
             progress_bar_desc="Capturing eagle CUDA graphs",
         )
 
@@ -247,12 +225,15 @@ class EagleSpeculator:
 
         # Prefill: Run the eagle speculator with eager mode.
         # TODO(woosuk): Support CUDA graph for prefill.
-        last_hidden_states, hidden_states = self.run_model(
-            num_tokens,
+        with set_forward_context(
             attn_metadata,
-            slot_mappings,
+            self.vllm_config,
+            num_tokens=num_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
-        )
+            slot_mapping=slot_mappings,
+            batch_descriptor=BatchDescriptor(num_tokens=num_tokens),
+        ):
+            last_hidden_states, hidden_states = self.run_model(num_tokens)
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
 
@@ -314,8 +295,7 @@ class EagleSpeculator:
             self.cudagraph_manager, batch_desc, num_reqs, self.dp_size, self.dp_rank
         )
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            self.cudagraph_manager.run_fullgraph(batch_desc)
-            return self.draft_tokens[:num_reqs]
+            return self.cudagraph_manager.run_fullgraph(batch_desc)
 
         # Run eager or piecewise CUDA graph.
         attn_metadata_updated = None
@@ -346,14 +326,23 @@ class EagleSpeculator:
                 slot_mappings, self.kv_cache_config
             )
 
-        self.generate_draft(
-            num_reqs,
-            batch_desc.num_tokens,
-            attn_metadata_updated,
-            slot_mappings_updated,
-            num_tokens_across_dp=num_tokens_across_dp,
-            cudagraph_runtime_mode=batch_desc.cg_mode,
+        batch_descriptor = (
+            BatchDescriptor(num_tokens=batch_desc.num_tokens)
+            if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE
+            else None
         )
+        with set_forward_context(
+            attn_metadata_updated
+            if batch_desc.cg_mode != CUDAGraphMode.PIECEWISE
+            else None,
+            self.vllm_config,
+            num_tokens=batch_desc.num_tokens,
+            cudagraph_runtime_mode=batch_desc.cg_mode,
+            num_tokens_across_dp=num_tokens_across_dp,
+            slot_mapping=slot_mappings_updated,
+            batch_descriptor=batch_descriptor,
+        ):
+            self.generate_draft(batch_desc)
         return self.draft_tokens[:num_reqs]
 
 
