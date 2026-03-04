@@ -95,8 +95,8 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
             self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
+        pooler_output = list(self.pooler_output_cpu.unbind(dim=0))
         self.copy_event.synchronize()
-        pooler_output = self.pooler_output_cpu.unbind(dim=0)
         if self.is_valid_cpu is not None:
             is_valid_cpu = self.is_valid_cpu.tolist()
             for i, is_valid in enumerate(is_valid_cpu):
