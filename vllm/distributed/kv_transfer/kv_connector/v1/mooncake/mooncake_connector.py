@@ -541,6 +541,7 @@ class MooncakeConnectorWorker:
 
         self.finished_sending_reqs: set[ReqId] = set()
         self.finished_recving_reqs: set[ReqId] = set()
+        self.reqs_to_recv: dict[EngineId, dict[ReqId, PullReqMeta]] = defaultdict(dict)
 
         self.block_size = vllm_config.cache_config.block_size
         self.model_config = vllm_config.model_config
@@ -979,7 +980,7 @@ class MooncakeConnectorWorker:
         now = time.perf_counter()
 
         expired_req_ids = []
-        for remote_engine_id, pull_metas in self.metadata.reqs_to_recv.items():
+        for remote_engine_id, pull_metas in self.reqs_to_recv.items():
             for req_id, pull_meta in pull_metas.items():
                 if pull_meta.expire_time < now:
                     logger.warning(
@@ -994,7 +995,7 @@ class MooncakeConnectorWorker:
 
         # Remove expired requests from tracking
         for remote_engine_id, req_id in expired_req_ids:
-            del self.metadata.reqs_to_recv[remote_engine_id][req_id]
+            del self.reqs_to_recv[remote_engine_id][req_id]
 
         return finished_recving_reqs
 
@@ -1111,7 +1112,7 @@ class MooncakeConnectorWorker:
             logger.debug("ZMQ context terminated, exiting Mooncake receiver thread.")
         except Exception as e:
             logger.error("MooncakeXferMetadata transfer failed for %s: %s", req_ids, e)
-            # Add failed requests to finished_recving_reqs so scheduler can clean them up
+            # Add failed requests to finished_recving_reqs for scheduler cleanup
             for req_id, pull_meta in pull_metas.items():
                 self.finished_recving_reqs.add(pull_meta.d_req_id)
             return
@@ -1139,7 +1140,7 @@ class MooncakeConnectorWorker:
                 response.err_reqs,
                 response.err_msg,
             )
-            # Add failed requests to finished_recving_reqs so scheduler can clean them up
+            # Add failed requests to finished_recving_reqs for scheduler cleanup
             for req_id in response.err_reqs:
                 if req_id in pull_metas:
                     pull_meta = pull_metas[req_id]
@@ -1262,6 +1263,8 @@ class MooncakeConnectorWorker:
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         if not self.is_kv_producer and metadata.reqs_to_recv:
+            # Store requests to receive for timeout tracking
+            self.reqs_to_recv.update(metadata.reqs_to_recv)
             asyncio.run_coroutine_threadsafe(
                 self._start_load_kv(metadata.reqs_to_recv), self.receiver_loop
             )
