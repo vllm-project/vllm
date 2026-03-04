@@ -29,15 +29,18 @@ def _make_common_attn_metadata(
 
     seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32)
 
-    nct = None
+    has_context = None
     if num_computed_tokens is not None:
-        nct = torch.tensor(num_computed_tokens, dtype=torch.int32)
+        has_context = torch.tensor(
+            [nct > 0 for nct in num_computed_tokens], dtype=torch.bool
+        )
 
     return CommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc,
         seq_lens=seq_lens_t,
-        _num_computed_tokens_cpu=nct,
+        _seq_lens_cpu=seq_lens_t,
+        has_context=has_context,
         num_reqs=num_reqs,
         num_actual_tokens=num_tokens,
         max_query_len=max_query_len,

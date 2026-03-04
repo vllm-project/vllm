@@ -1802,6 +1802,9 @@ class GPUModelRunner(
 
         if self.model_config.enable_return_routed_experts:
             self.slot_mapping = slot_mapping_gid_0[:num_tokens].cpu().numpy()
+        has_context = torch.from_numpy(
+            self.input_batch.num_computed_tokens_cpu[:num_reqs_padded] > 0
+        )
         cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
@@ -1810,6 +1813,7 @@ class GPUModelRunner(
             _num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[
                 :num_reqs_padded
             ],
+            has_context=has_context,
             num_reqs=num_reqs_padded,
             num_actual_tokens=num_tokens_padded,
             max_query_len=max_query_len,
@@ -4843,8 +4847,8 @@ class GPUModelRunner(
                     seq_lens = max_query_len  # type: ignore[assignment]
                 self.seq_lens.np[:num_reqs] = seq_lens
                 # Mark all dummy requests as having prior context so
-                # split_decodes_and_prefills won't misclassify them
-                # as new prefill requests.
+                # has_context is True and split_decodes_and_prefills
+                # won't misclassify them as new prefill requests.
                 self.input_batch.num_computed_tokens_cpu[:num_reqs] = 1
                 self.seq_lens.np[num_reqs:] = 0
                 self.seq_lens.copy_to_gpu()

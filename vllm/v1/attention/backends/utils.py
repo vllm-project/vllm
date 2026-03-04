@@ -356,6 +356,7 @@ def make_local_attention_virtual_batches(
         causal=True,
         _seq_lens_cpu=seq_lens_cpu,
         _num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),
+        has_context=torch.from_numpy(num_computed_tokens_local > 0),
     ), make_block_table
 
 
@@ -412,6 +413,7 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         block_table_tensor=common_attn_metadata.block_table_tensor,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
+        has_context=common_attn_metadata.has_context,
         _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
         _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
     )
@@ -512,18 +514,15 @@ def split_decodes_and_prefills(
     num_reqs = common_attn_metadata.num_reqs
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
-    seq_lens = common_attn_metadata.seq_lens_cpu
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
 
     # A new request has no prior context (num_computed_tokens == 0).
     # New requests need prefill treatment even if
     # query_lens <= decode_threshold (e.g., for Mamba state init).
-    num_computed = common_attn_metadata._num_computed_tokens_cpu
-    if num_computed is not None:
-        is_new_request = (num_computed[:num_reqs] == 0) & (query_lens > 0)
-    else:
-        is_new_request = (seq_lens == query_lens) & (query_lens > 0)
+    has_context = common_attn_metadata.has_context
+    assert has_context is not None
+    is_new_request = ~has_context[:num_reqs] & (query_lens > 0)
 
     if (
         max_query_len <= decode_threshold
