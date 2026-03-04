@@ -299,34 +299,27 @@ when the hidden size is 2880 and AITER Triton GEMMs *not* enabled.
 
 ## Support Matrix
 
-The matrix below shows which fusions are supported on each hardware/software
-combination for common numerical precisions.  **Yes** = fully supported;
-**Partial** = supported with limitations noted; **No** = not supported;
-**—** = not applicable.
+The table below lists the quantization schemes supported by each fusion on each platform.
+**—** means the fusion is not available on that platform.
 
-### Compilation-Time Fusions
+| Fusion | SM100 (Blackwell) | SM90 (Hopper) | SM89 (Ada) | SM80 (Ampere) | ROCm |
+|--------|-------------------|---------------|------------|---------------|------|
+| `fuse_norm_quant` | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | — | FP8 static, FP8 per-token, FP8 per-group |
+| `fuse_act_quant` | FP8 static, NVfp4 | FP8 static | FP8 static | — | FP8 per-group |
+| `fuse_attn_quant`* | FP8 static*, NVfp4* | FP8 static* | FP8 static* | — | FP8 static* |
+| `fuse_allreduce_rms` | FP16/BF16, FP8 static, NVfp4 | FP16/BF16, FP8 static | — | — | — |
+| `enable_sp` | FP16/BF16, FP8 static† | FP16/BF16, FP8 static | — | — | — |
+| `fuse_gemm_comms` | FP16/BF16, FP8† | FP16/BF16, FP8 | — | — | — |
+| `enable_qk_norm_rope_fusion` | FP16/BF16 | FP16/BF16 | FP16/BF16 | FP16/BF16 | — |
+| `fuse_rope_kvcache` | — | — | — | — | FP16/BF16 |
+| `fuse_act_padding` | — | — | — | — | FP16/BF16 |
 
-| Fusion | NVIDIA SM70–89 (Volta–Ada) FP16/BF16 | NVIDIA SM90 (Hopper) FP8 | NVIDIA SM100 (Blackwell) FP8/NVfp4 | AMD ROCm / CDNA FP16/BF16 | AMD ROCm / CDNA FP8 | CPU |
-|---|---|---|---|---|---|---|
-| `fuse_norm_quant` (RMSNorm+quant) | Partial (no quant) | Yes | Yes | Yes | Yes | No |
-| `fuse_act_quant` (SiLU+Mul+quant) | Partial (no quant) | Yes | Yes | Yes | Yes | No |
-| `fuse_attn_quant` (Attn+quant) | No | Yes | Yes (NVfp4) | No | No | No |
-| `fuse_allreduce_rms` | No | Yes | Yes | No | No | No |
-| `enable_sp` (Sequence Parallelism) | No | Yes | No† | No | No | No |
-| `fuse_gemm_comms` (AsyncTP) | No | Yes | No† | No | No | No |
-| `enable_qk_norm_rope_fusion` | Yes | Yes | Yes | No | No | No |
-| `fuse_rope_kvcache` (ROCm/AITER) | No | No | No | Yes | Yes | No |
-| `fuse_act_padding` (ROCm/AITER) | No | No | No | Yes | Yes | No |
+\* `fuse_attn_quant` support depends on the attention backend in use; not all backends support
+fused quantization output. See the [`fuse_attn_quant` section](#attention--quantization-fuse_attn_quant)
+for per-backend details.
 
 † `enable_sp` and `fuse_gemm_comms` are only auto-configured for SM90 today;
 SM100 support requires setting `PassConfig.sp_min_token_num` explicitly.
-
-### Quantization-Scheme Columns
-
-For quick reference, the FP16 and BF16 columns in the compilation-time fusion
-table above indicate that the *activation* dtype is FP16/BF16; those fusions
-produce quantised *outputs* (FP8 or FP4).  Where labelled "Partial (no quant)"
-the RMSNorm or SiLU+Mul kernel fires but without the output quantization step.
 
 ---
 
