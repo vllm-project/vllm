@@ -17,6 +17,8 @@ from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
 )
 from tests.kernels.moe.utils import TestMLP, make_test_weights, moe_quantize_weights
 from vllm.config import (
+    CompilationConfig,
+    CompilationMode,
     ParallelConfig,
     VllmConfig,
     get_current_vllm_config,
@@ -530,8 +532,8 @@ def _test_loop(
         )
 
         # What?
-        if moe_layer.expert_map is not None:
-            moe_layer.expert_map = moe_layer.expert_map.to(torch.cuda.current_device())
+        if moe_layer._expert_map is not None:
+            moe_layer._expert_map = moe_layer._expert_map.to(torch.cuda.current_device())
 
         # output should be completely reduced at this point
         num_tokens = m
@@ -621,7 +623,14 @@ def test_moe_layer(
         all2all_backend=backend,
     )
 
-    vllm_config = VllmConfig(parallel_config=parallel_config)
+    compilation_config = CompilationConfig()
+    #compilation_config.mode = CompilationMode.NONE  # for now
+    compilation_config.pass_config.fuse_allreduce_rms = False # for now
+
+    vllm_config = VllmConfig(
+        parallel_config=parallel_config,
+        compilation_config=compilation_config
+    )
 
     in_dtype = torch.bfloat16
 
