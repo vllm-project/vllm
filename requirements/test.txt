@@ -418,6 +418,8 @@ jsonschema-specifications==2024.10.1
     # via jsonschema
 junit-xml==1.9
     # via schemathesis
+kaldi-native-fbank==1.22.3
+    # via -r requirements/test.in
 kaleido==0.2.1
     # via genai-perf
 kiwisolver==1.4.7
@@ -1227,7 +1229,7 @@ tqdm==4.67.3
     #   tacoreader
     #   terratorch
     #   transformers
-transformers @ git+https://github.com/huggingface/transformers.git@24c5bc4b1b6186a5d95e6e7359a21e48a4e9def2
+transformers @ git+https://github.com/huggingface/transformers.git@fd6bc380c8854a370fbc9f68a157895d84dce7d7
     # via
     #   -r requirements/test.in
     #   genai-perf
