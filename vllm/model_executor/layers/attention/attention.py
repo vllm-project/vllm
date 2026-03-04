@@ -223,12 +223,10 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = cache_config.cache_dtype
             block_size = cache_config.block_size
             calculate_kv_scales = cache_config.calculate_kv_scales
-            self.num_attn_pages = cache_config.mamba_num_attn_pages
         else:
             kv_cache_dtype = "auto"
             block_size = 16
             calculate_kv_scales = False
-            self.num_attn_pages = 1
 
         # llm-compressor mdls need to set cache_dtype to "fp8" manually.
         if getattr(quant_config, "kv_cache_scheme", None) is not None:
@@ -513,6 +511,7 @@ class Attention(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # Block size may get updated after model loading, refresh it
         block_size = vllm_config.cache_config.block_size
+        attn_group_size = vllm_config.cache_config.mamba_num_attn_pages
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER
         if self.sliding_window is not None:
@@ -533,7 +532,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
-                group_size=self.num_attn_pages,
+                group_size=attn_group_size,
             )
 
 
