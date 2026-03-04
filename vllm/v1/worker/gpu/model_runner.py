@@ -59,6 +59,7 @@ from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
+    is_uniform_batch,
 )
 from vllm.v1.worker.gpu.dp_utils import sync_cudagraph_and_dp_padding
 from vllm.v1.worker.gpu.input_batch import (
@@ -199,10 +200,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
 
         # CUDA graphs.
+        self.uniform_decode_query_len = self.num_speculative_steps + 1
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
             self.device,
             self.compilation_config.cudagraph_mode,
+            self.uniform_decode_query_len,
         )
         # Structured outputs worker.
         self.structured_outputs_worker = StructuredOutputsWorker(
@@ -504,12 +507,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         with self.maybe_setup_dummy_loras(self.lora_config):
             self.cudagraph_manager.capture(
-                model=self.model,
-                model_state=self.model_state,
-                input_buffers=self.input_buffers,
-                block_tables=self.block_tables,
-                attn_groups=self.attn_groups,
-                kv_cache_config=self.kv_cache_config,
+                self.model_state,
+                self.input_buffers,
+                self.block_tables,
+                self.attn_groups,
+                self.kv_cache_config,
+                self.model,
                 has_lora=self.lora_config is not None,
                 use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
                 dp_size=self.parallel_config.data_parallel_size,
@@ -871,10 +874,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 return empty_output
 
         # Get batch descriptor and sync across DP ranks.
+        num_reqs = len(scheduler_output.num_scheduled_tokens)
+        num_tokens = scheduler_output.total_num_scheduled_tokens
+        max_query_len = max(scheduler_output.num_scheduled_tokens.values())
+        is_uniform = is_uniform_batch(
+            num_reqs, num_tokens, max_query_len, self.uniform_decode_query_len
+        )
         batch_desc = self.cudagraph_manager.get_cudagraph_desc(
-            num_reqs=len(scheduler_output.num_scheduled_tokens),
-            num_tokens=scheduler_output.total_num_scheduled_tokens,
-            max_query_len=max(scheduler_output.num_scheduled_tokens.values()),
+            num_reqs, num_tokens, is_uniform
         )
         batch_desc, num_tokens_across_dp = sync_cudagraph_and_dp_padding(
             self.cudagraph_manager,

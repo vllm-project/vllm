@@ -33,23 +33,32 @@ class EagleSpeculator:
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.device = device
+
         self.speculative_config = vllm_config.speculative_config
         assert self.speculative_config is not None
         self.method = self.speculative_config.method
         self.num_speculative_steps = self.speculative_config.num_speculative_tokens
         self.draft_model_config = self.speculative_config.draft_model_config
+
         self.scheduler_config = vllm_config.scheduler_config
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_model_len = vllm_config.model_config.max_model_len
+        # We need to get the hidden size from the draft model config because
+        # the draft model's hidden size can be different from the target model's
+        # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
         self.vocab_size = self.draft_model_config.get_vocab_size()
         self.dtype = vllm_config.model_config.dtype
+
+        # DP configuration
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
         self.input_buffers = InputBuffers(
-            self.max_num_reqs, self.max_num_tokens, device
+            max_num_reqs=self.max_num_reqs,
+            max_num_tokens=self.max_num_tokens,
+            device=device,
         )
         self.hidden_states = torch.zeros(
             self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
@@ -131,6 +140,7 @@ class EagleSpeculator:
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
         idx_mapping = self.idx_mapping[:num_reqs]
         for step in range(1, self.num_speculative_steps):
+            # Run the eagle model.
             last_hidden_states, hidden_states = self.run_model(
                 num_tokens_padded,
                 attn_metadata,
@@ -141,6 +151,9 @@ class EagleSpeculator:
             last_hidden_states = last_hidden_states[:num_reqs]
             hidden_states = hidden_states[:num_reqs]
             logits = self.model.compute_logits(last_hidden_states)
+
+            # NOTE(woosuk): We must add 1 to the positions to match the Gumbel
+            # noise used for draft and target sampling.
             draft_tokens = gumbel_sample(
                 logits,
                 idx_mapping,
@@ -168,12 +181,12 @@ class EagleSpeculator:
             return
         logger.info("Capturing model for Eagle speculator...")
         self.cudagraph_manager.capture(
-            model_state=self.model_state,
-            input_buffers=self.input_buffers,
-            block_tables=self.block_tables,
-            attn_groups=self.attn_groups,
-            kv_cache_config=self.kv_cache_config,
-            capture_fn=self.generate_draft,
+            self.model_state,
+            self.input_buffers,
+            self.block_tables,
+            self.attn_groups,
+            self.kv_cache_config,
+            self.generate_draft,
             dp_size=self.dp_size,
             progress_bar_desc="Capturing eagle CUDA graphs",
         )
@@ -293,7 +306,7 @@ class EagleSpeculator:
         # Get batch descriptor and sync across DP ranks.
         # Eagle is always uniform decode with query_len=1, so num_tokens=num_reqs.
         batch_desc = self.cudagraph_manager.get_cudagraph_desc(
-            num_reqs, num_reqs, max_query_len=1
+            num_reqs, num_reqs, is_uniform=True
         )
         batch_desc, num_tokens_across_dp = sync_cudagraph_and_dp_padding(
             self.cudagraph_manager, batch_desc, num_reqs, self.dp_size, self.dp_rank

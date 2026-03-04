@@ -42,6 +42,18 @@ class BatchExecutionDescriptor:
         return self.num_tokens if self.is_cudagraph else None
 
 
+def is_uniform_batch(
+    num_reqs: int,
+    num_tokens: int,
+    max_query_len: int,
+    uniform_decode_query_len: int,
+) -> bool:
+    """Check if a batch qualifies as uniform decode for cudagraph selection."""
+    return (max_query_len == uniform_decode_query_len) and (
+        num_tokens == max_query_len * num_reqs
+    )
+
+
 # Type alias for capture callback function
 CaptureCallback = Callable[
     [
@@ -71,7 +83,7 @@ class CudaGraphManager:
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        uniform_decode_query_len: int | None = None,
+        uniform_decode_query_len: int,
     ):
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
@@ -82,14 +94,7 @@ class CudaGraphManager:
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
         self.cudagraph_mode = cudagraph_mode
-
-        if uniform_decode_query_len is not None:
-            self.uniform_decode_query_len = uniform_decode_query_len
-        else:
-            self.uniform_decode_query_len = 1
-            spec_config = vllm_config.speculative_config
-            if spec_config is not None:
-                self.uniform_decode_query_len += spec_config.num_speculative_tokens
+        self.uniform_decode_query_len = uniform_decode_query_len
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
         self.pool = (
@@ -114,9 +119,9 @@ class CudaGraphManager:
         max_uniform_tokens = self.max_num_reqs * self.uniform_decode_query_len
         decode_mode = self.cudagraph_mode.decode_mode()
         mixed_mode = self.cudagraph_mode.mixed_mode()
-        use_separate_uniform = self.cudagraph_mode.separate_routine()
+        separate_decode_routine = self.cudagraph_mode.separate_routine()
 
-        candidates_by_padded: dict[int, list[BatchExecutionDescriptor]] = {}
+        candidates_by_padded_token_count: dict[int, list[BatchExecutionDescriptor]] = {}
         for padded in capture_sizes:
             candidates: list[BatchExecutionDescriptor] = []
             if (
@@ -128,10 +133,12 @@ class CudaGraphManager:
                         cg_mode=decode_mode,
                         num_tokens=padded,
                         num_reqs=padded // self.uniform_decode_query_len,
-                        uniform=True,
+                        # if separate decode routine, we assume the decode graphs needs
+                        # to be uniform (otherwise, a mixed mode graph would be fine)
+                        uniform=separate_decode_routine,
                     )
                 )
-            if mixed_mode != CUDAGraphMode.NONE and use_separate_uniform:
+            if mixed_mode != CUDAGraphMode.NONE:
                 candidates.append(
                     BatchExecutionDescriptor(
                         cg_mode=mixed_mode,
@@ -141,20 +148,22 @@ class CudaGraphManager:
                     )
                 )
             if candidates:
-                candidates_by_padded[padded] = candidates
+                candidates_by_padded_token_count[padded] = candidates
 
-        if candidates_by_padded:
-            max_capture_size = max(candidates_by_padded.keys())
-            sorted_padded = sorted(candidates_by_padded.keys())
+        if candidates_by_padded_token_count:
+            max_capture_size = max(candidates_by_padded_token_count.keys())
+            sorted_padded = sorted(candidates_by_padded_token_count.keys())
             self._candidates = [[] for _ in range(max_capture_size + 1)]
             for num_tokens in range(1, max_capture_size + 1):
                 for padded in sorted_padded:
                     if num_tokens <= padded:
-                        self._candidates[num_tokens] = candidates_by_padded[padded]
+                        self._candidates[num_tokens] = candidates_by_padded_token_count[
+                            padded
+                        ]
                         break
 
         descs_by_mode: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
-        for candidates in candidates_by_padded.values():
+        for candidates in candidates_by_padded_token_count.values():
             for desc in candidates:
                 descs_by_mode.setdefault(desc.cg_mode, []).append(desc)
         for mode, descs in descs_by_mode.items():
@@ -173,14 +182,9 @@ class CudaGraphManager:
         self,
         num_reqs: int,
         num_tokens: int,
-        max_query_len: int,
-        is_uniform: bool | None = None,
+        is_uniform: bool,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
-        if is_uniform is None:
-            is_uniform = (max_query_len == self.uniform_decode_query_len) and (
-                num_tokens == max_query_len * num_reqs
-            )
         if 0 < num_tokens < len(self._candidates):
             for desc in self._candidates[num_tokens]:
                 if desc.uniform and not is_uniform:
@@ -299,7 +303,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        uniform_decode_query_len: int | None = None,
+        uniform_decode_query_len: int,
     ):
         super().__init__(vllm_config, device, cudagraph_mode, uniform_decode_query_len)
         self.hidden_states: torch.Tensor | None = None
@@ -321,10 +325,53 @@ class ModelCudaGraphManager(CudaGraphManager):
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
+        from functools import partial
+
         capture_descs = self.get_capture_descs()
         if not capture_descs:
             return
         self.use_aux_hidden_state_outputs = use_aux_hidden_state_outputs
+
+        def run_capture(
+            model_inputs: dict[str, torch.Tensor],
+            num_reqs: int,
+            num_tokens: int,
+            attn_metadata: dict[str, Any],
+            slot_mappings: dict[str, torch.Tensor],
+            num_tokens_across_dp: torch.Tensor,
+            cudagraph_mode: CUDAGraphMode,
+        ) -> None:
+            batch_descriptor = (
+                BatchDescriptor(num_tokens=num_tokens, has_lora=has_lora)
+                if cudagraph_mode == CUDAGraphMode.PIECEWISE
+                else None
+            )
+            with set_forward_context(
+                attn_metadata if cudagraph_mode != CUDAGraphMode.PIECEWISE else None,
+                self.vllm_config,
+                num_tokens=num_tokens,
+                cudagraph_runtime_mode=cudagraph_mode,
+                num_tokens_across_dp=num_tokens_across_dp,
+                slot_mapping=slot_mappings,
+                batch_descriptor=batch_descriptor,
+            ):
+                model_output = model(**model_inputs)
+            if self.use_aux_hidden_state_outputs:
+                hidden_states, aux_hidden_states = model_output
+            else:
+                hidden_states = model_output
+                aux_hidden_states = []
+            # Allocate output buffers if not already done.
+            if self.hidden_states is None:
+                self.hidden_states = torch.empty_like(hidden_states)
+            if self.use_aux_hidden_state_outputs and not self.aux_hidden_states:
+                self.aux_hidden_states = [
+                    torch.empty_like(x) for x in aux_hidden_states
+                ]
+            # Copy outputs to static buffers.
+            self.hidden_states[:num_tokens] = hidden_states
+            for i, aux in enumerate(aux_hidden_states):
+                self.aux_hidden_states[i][:num_tokens] = aux
 
         with graph_capture(device=self.device):
             for mode, descs in capture_descs:
@@ -345,55 +392,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                         "positions": input_buffers.positions[:num_tokens],
                         **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
                     }
-                    first_run = [True]
-
-                    def capture_fn(
-                        num_reqs: int,
-                        num_tokens: int,
-                        attn_metadata: dict[str, Any],
-                        slot_mappings: dict[str, torch.Tensor],
-                        num_tokens_across_dp: torch.Tensor,
-                        cudagraph_mode: CUDAGraphMode,
-                        model_inputs: dict[str, torch.Tensor] = model_inputs,
-                        first_run: list[bool] = first_run,
-                    ) -> None:
-                        batch_descriptor = (
-                            BatchDescriptor(num_tokens=num_tokens, has_lora=has_lora)
-                            if cudagraph_mode == CUDAGraphMode.PIECEWISE
-                            else None
-                        )
-                        with set_forward_context(
-                            attn_metadata
-                            if cudagraph_mode != CUDAGraphMode.PIECEWISE
-                            else None,
-                            self.vllm_config,
-                            num_tokens=num_tokens,
-                            cudagraph_runtime_mode=cudagraph_mode,
-                            num_tokens_across_dp=num_tokens_across_dp,
-                            slot_mapping=slot_mappings,
-                            batch_descriptor=batch_descriptor,
-                        ):
-                            model_output = model(**model_inputs)
-                        if self.use_aux_hidden_state_outputs:
-                            hidden_states, aux_hidden_states = model_output
-                        else:
-                            hidden_states = model_output
-                            aux_hidden_states = None
-                        # Initialize static output buffers on first run.
-                        if first_run[0]:
-                            first_run[0] = False
-                            self.hidden_states = torch.empty_like(hidden_states)
-                            if aux_hidden_states is not None:
-                                self.aux_hidden_states = [
-                                    torch.empty_like(x) for x in aux_hidden_states
-                                ]
-                        # Copy outputs to static buffers.
-                        assert self.hidden_states is not None
-                        self.hidden_states[:num_tokens] = hidden_states
-                        if aux_hidden_states is not None:
-                            for i, aux in enumerate(aux_hidden_states):
-                                self.aux_hidden_states[i][:num_tokens] = aux
-
+                    capture_fn = partial(run_capture, model_inputs)
                     self._capture_graph(
                         desc, capture_fn, attn_metadata, slot_mappings, dp_size
                     )

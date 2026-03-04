@@ -75,13 +75,9 @@ def sync_cudagraph_and_dp_padding(
 
     # Redispatch to get correct descriptor if using cudagraph.
     if synced_cg_mode != CUDAGraphMode.NONE:
+        # max_query_len is unused when is_uniform is explicitly passed.
         synced_desc = cudagraph_manager.get_cudagraph_desc(
-            synced_num_reqs,
-            synced_num_tokens,
-            cudagraph_manager.uniform_decode_query_len
-            if synced_uniform
-            else synced_num_tokens,
-            synced_uniform,
+            synced_num_reqs, synced_num_tokens, synced_uniform
         )
     else:
         synced_desc = BatchExecutionDescriptor(
