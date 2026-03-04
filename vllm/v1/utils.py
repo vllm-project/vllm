@@ -294,13 +294,25 @@ def wait_for_completion_or_failure(
 
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the object.
-def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
+def shutdown(
+    procs: list[BaseProcess],
+    death_writers: list[connection.Connection] | None = None,
+    timeout: float | None = None,
+) -> None:
     """Shutdown processes with timeout.
 
     Args:
         procs: List of processes to shutdown
+        death_writers: Death pipe writers to close (signals child processes)
         timeout: Maximum time in seconds to wait for graceful shutdown
     """
+    # Close death pipe writers first to signal child processes
+    # to exit before sending SIGTERM. This allows for graceful shutdown.
+    if death_writers:
+        for writer in death_writers:
+            with contextlib.suppress(OSError):
+                writer.close()
+
     if timeout is None:
         timeout = 0.0
 
