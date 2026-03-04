@@ -1155,7 +1155,9 @@ def causal_conv1d_update(
         if conv_state_indices is None:
             assert conv_state.size(0) >= batch
         else:
-            assert (batch,) == conv_state_indices.shape
+            assert batch == conv_state_indices.shape[0], (
+                f"ERROR: conv_state_indices should have shape ({batch},*) but got {conv_state_indices.shape}"
+            )
 
         assert num_cache_lines >= batch
         assert weight.stride(1) == 1  # Need this
