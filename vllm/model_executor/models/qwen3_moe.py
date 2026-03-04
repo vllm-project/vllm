@@ -543,7 +543,7 @@ class Qwen3MoeModel(nn.Module):
             "_weight_scale",
             ".input_scale",
             "_input_scale",
-            ".weight_shape",  # 忽略 weight_shape
+            ".weight_shape",
             "_weight_shape",
             ".shape",
             "_shape",

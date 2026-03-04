@@ -378,19 +378,19 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _is_xpu_w8a16_fp8(
         weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
-        if not current_platform.is_xpu():
+        if (
+            not current_platform.is_xpu()
+            or input_quant is not None
+            or weight_quant is None
+        ):
             return False
-            
-        is_8_bits = weight_quant.num_bits == 8
 
         is_fp8_type = (
-            weight_quant.type == "float" 
-            or weight_quant.zp_dtype == torch.float8_e4m3fn
+            weight_quant.type == QuantizationType.FLOAT
+            or getattr(weight_quant, "zp_dtype", None) == torch.float8_e4m3fn
         )
-        
-        is_weight_only = (input_quant is None)
 
-        return is_8_bits and is_fp8_type and is_weight_only
+        return weight_quant.num_bits == 8 and is_fp8_type
 
     @staticmethod
     def _is_xpu_w4a16_int4(
@@ -400,42 +400,31 @@ class CompressedTensorsConfig(QuantizationConfig):
         Detects standard INT4 Weight-Only quantization.
         Config: num_bits=4, type=int
         """
-        if not current_platform.is_xpu():
+        if (
+            not current_platform.is_xpu()
+            or input_quant is not None
+            or weight_quant is None
+        ):
             return False
 
-        is_4_bits = weight_quant.num_bits == 4
-
-        # INT4 check: type must be integer
-        is_int_type = weight_quant.type == "int"
-
-        is_weight_only = input_quant is None
-
-        return is_4_bits and is_int_type and is_weight_only
+        return (
+            weight_quant.num_bits == 4
+            and weight_quant.type == QuantizationType.INT  # 假设你有这个 Enum
+        )
 
     @staticmethod
     def _is_xpu_w4a16_mxfp4(
         weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
         """
-        Detects MXFP4 (Microscaling FP4) Weight-Only quantization.
-        Config: num_bits=4, type=float
+        Detects XPU W4A16 MXFP4 Weight-Only quantization scenario.
         """
         if not current_platform.is_xpu():
             return False
 
-        is_4_bits = weight_quant.num_bits == 4
-
-        # MXFP4 is effectively a 4-bit Float format (E2M1)
-        # So the config usually specifies type="float"
-        is_float_type = weight_quant.type == "float"
-
         is_weight_only = input_quant is None
 
-        # Optional: You might want to check group_size == 32 here if you want to be stricter
-        # is_block_32 = getattr(weight_quant, "group_size", -1) == 32
-        # return is_4_bits and is_float_type and is_weight_only and is_block_32
-
-        return is_4_bits and is_float_type and is_weight_only
+        return is_weight_only and CompressedTensorsConfig._is_mxfp4(weight_quant)
 
     @staticmethod
     def _is_mxfp4(quant_args: QuantizationArgs) -> bool:
@@ -1110,7 +1099,8 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 if layer.num_kv_heads * tp_size == self.quant_config.total_num_kv_heads:  # type: ignore[attr-defined]
                     # heads evenly distributed
                     loaded_weight = loaded_weight[
-                        tp_rank * layer.num_kv_heads : (tp_rank + 1)
+                        tp_rank
+                        * layer.num_kv_heads : (tp_rank + 1)
                         * layer.num_kv_heads
                     ]
                 else:

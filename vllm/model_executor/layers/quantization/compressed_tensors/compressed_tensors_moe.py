@@ -253,7 +253,7 @@ class CompressedTensorsW4A16Mxfp4MoEMethod(CompressedTensorsMoEMethod):
     MoE method for W4A16 MXFP4 (Microscaling) quantization on Intel XPU hardware.
 
     Specs:
-    - Weights: 4-bit integers packed into uint8 (2 weights per byte).
+    - Weights: 4-bit floats packed into uint8 (2 weights per byte).
     - Scales:  8-bit E8M0 floats stored as uint8.
     - Block Size: Strictly 32.
     """
@@ -286,12 +286,12 @@ class CompressedTensorsW4A16Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         # --- Dimension Validation ---
         # MXFP4 kernels rely on strict alignment.
         if hidden_size % self.group_size != 0:
-            raise ValueError(
-                f"Hidden size {hidden_size} must be divisible by MXFP4 block size {self.group_size}"
-            )
+            raise ValueError(f"Hidden size {hidden_size} must be divisible \
+                    by MXFP4 block size {self.group_size}")
         if intermediate_size_per_partition % self.group_size != 0:
             raise ValueError(
-                f"Intermediate size {intermediate_size_per_partition} must be divisible by MXFP4 block size {self.group_size}"
+                f"Intermediate size {intermediate_size_per_partition} must be divisible \
+                    by MXFP4 block size {self.group_size}"
             )
 
         layer.intermediate_size_per_partition = intermediate_size_per_partition
@@ -386,14 +386,12 @@ class CompressedTensorsW4A16Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         # Strict Type Checking
         # This prevents scenarios where a loader might accidentally cast scales to float
         if layer.w13_weight_scale.dtype != torch.uint8:
-            raise ValueError(
-                f"W13 scales expected torch.uint8 for MXFP4, got {layer.w13_weight_scale.dtype}"
-            )
+            raise ValueError(f"W13 scales expected torch.uint8 for MXFP4, \
+                got {layer.w13_weight_scale.dtype}")
 
         if layer.w2_weight_scale.dtype != torch.uint8:
-            raise ValueError(
-                f"W2 scales expected torch.uint8 for MXFP4, got {layer.w2_weight_scale.dtype}"
-            )
+            raise ValueError(f"W2 scales expected torch.uint8 for MXFP4, \
+                got {layer.w2_weight_scale.dtype}")
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -411,15 +409,7 @@ class CompressedTensorsW4A16Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         """
         Execute the MoE Layer with MXFP4 XPU Kernel.
         """
-        # Lazy import
         from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
-
-        # layer.w13_weight_packed = ((layer.w13_weight_packed & 0x0F) << 4) | ((layer.w13_weight_packed & 0xF0) >> 4)
-        # layer.w2_weight_packed = ((layer.w2_weight_packed & 0x0F) << 4) | ((layer.w2_weight_packed & 0xF0) >> 4)
-
-        # if torch.distributed.get_rank() == 0:
-        #     mem_scale = layer.w13_weight_scale.flatten()[:5].tolist()
-        #     print(f"\n W13 Scale: {mem_scale}")
 
         return xpu_fused_moe(
             hidden_states=x,
@@ -432,7 +422,7 @@ class CompressedTensorsW4A16Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             n_experts_per_token=layer.top_k,
-            activation=layer.activation,
+            activation=layer.activation.value,
             num_experts=layer.global_num_experts
             // self.moe.moe_parallel_config.ep_size,
             ep_rank=self.moe.moe_parallel_config.ep_rank,
@@ -515,7 +505,6 @@ class CompressedTensorsW4A16Int4MoEMethod(CompressedTensorsMoEMethod):
         # --- Scale Allocation (Group-wise) ---
 
         # Calculate number of groups for the K dimension
-        # Ensure divisible, otherwise padding logic would be needed (omitted here for brevity)
         num_groups_w13 = hidden_size // self.group_size
         num_groups_w2 = intermediate_size_per_partition // self.group_size
 
@@ -587,28 +576,9 @@ class CompressedTensorsW4A16Int4MoEMethod(CompressedTensorsMoEMethod):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
-        # routing_weights, selected_experts = select_experts(
-        #     hidden_states=x, router_logits=router_logits
-        # )
-
         # int32 (K/8) -> uint8 (K/2)
         w13_uint8 = layer.w13_weight_packed.view(torch.uint8)
         w2_uint8 = layer.w2_weight_packed.view(torch.uint8)
-
-        # if torch.distributed.get_rank() == 0:
-        #     print(f"\n[DEBUG XPU MoE] Group Size Check:")
-        #     print(f"  W13 Weight (uint8): {w13_uint8.shape}")
-        #     print(f"  W13 Scale:          {layer.w13_weight_scale.shape}")
-
-        #     w13_k = w13_uint8.shape[-1] * 2  # uint8 * 2 = 实际参数量
-        #     w13_g = layer.w13_weight_scale.shape[-1]
-        #     if w13_g > 0:
-        #         print(f"  -> W13 Infer: {w13_k} / {w13_g} = {w13_k / w13_g}")
-
-        #     print(f"  W2 Weight (uint8):  {w2_uint8.shape}")
-        #     print(f"  W2 Scale:           {layer.w2_weight_scale.shape}")
-        #     # ...
-        # # =======================
 
         return xpu_fused_moe(
             hidden_states=x,
@@ -621,7 +591,7 @@ class CompressedTensorsW4A16Int4MoEMethod(CompressedTensorsMoEMethod):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             n_experts_per_token=layer.top_k,
-            activation=layer.activation,
+            activation=layer.activation.value,
             num_experts=layer.global_num_experts
             // self.moe.moe_parallel_config.ep_size,
             ep_rank=self.moe.moe_parallel_config.ep_rank,
@@ -695,7 +665,6 @@ class CompressedTensorsW8A16Fp8MoEMethod(CompressedTensorsMoEMethod):
         # --- Scale Allocation ---
         # allocate 2 scales for W13 (Gate+Up)
         # with checkpoints where W1 and W3 are quantized separately.
-        # These will be merged into a single unified scale during `process_weights_after_loading`.
         w13_weight_scale = torch.nn.Parameter(
             torch.ones(num_experts, 2, dtype=torch.float32), requires_grad=False
         )
@@ -748,7 +717,7 @@ class CompressedTensorsW8A16Fp8MoEMethod(CompressedTensorsMoEMethod):
             unified_scales_expanded = unified_scales.reshape(num_experts, 1, 1)
 
             # 3. Calculate Correction Factors
-            # Logic: We must adjust the weight values to compensate for the scale change.
+            # Logic: adjust the weight values to compensate for the scale change.
             # Real_Value = FP8_Old * Old_Scale
             # New_FP8    = Real_Value / New_Scale
             # Therefore: New_FP8 = FP8_Old * (Old_Scale / New_Scale)
@@ -820,7 +789,7 @@ class CompressedTensorsW8A16Fp8MoEMethod(CompressedTensorsMoEMethod):
             topk_weights=topk_weights,
             topk_ids=topk_ids,  # Contains the selected expert indices
             n_experts_per_token=layer.top_k,
-            activation=layer.activation,
+            activation=layer.activation.value,
             # Calculate local number of experts per partition
             num_experts=layer.global_num_experts
             // self.moe.moe_parallel_config.ep_size,
