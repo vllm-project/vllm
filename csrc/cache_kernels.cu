@@ -7,7 +7,8 @@
 #include "cuda_utils.h"
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
-#include "quantization/vectorization_utils.cuh"
+
+#include "libtorch_stable/quantization/vectorization_utils.cuh"
 #include "concat_mla_q.cuh"
 
 #ifdef USE_ROCM
