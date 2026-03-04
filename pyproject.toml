@@ -139,6 +139,7 @@ NOOPs = "NOOPs"
 nin_shortcut = "nin_shortcut"
 cudaDevAttrMaxSharedMemoryPerBlockOptin = "cudaDevAttrMaxSharedMemoryPerBlockOptin"
 
+depthwise_seperable_out_channel = "depthwise_seperable_out_channel"
 pard_token = "pard_token"
 ptd_token_id = "ptd_token_id"
 ser_de = "ser_de"
