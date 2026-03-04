@@ -305,6 +305,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_config, self.vllm_config, self.device
         )
         check_attention_cp_compatibility(self.vllm_config)
+
+        # Compute CG padding values that are safe for ALL builders.
+        # Different backends may require different safe padding values for
+        # unused (padded) entries in CUDA graph mode. We take the max across
+        # all builders to find values that satisfy every backend.
+        self.cg_pad_seq_lens = 0
+        self.cg_pad_block_table = -1
+        for kv_cache_groups in self.attn_groups:
+            for attn_group in kv_cache_groups:
+                for builder in attn_group.metadata_builders:
+                    self.cg_pad_seq_lens = max(
+                        self.cg_pad_seq_lens, builder.cg_pad_seq_lens
+                    )
+                    self.cg_pad_block_table = max(
+                        self.cg_pad_block_table, builder.cg_pad_block_table
+                    )
         if self.speculator is not None:
             # HACK(woosuk)
             self.speculator.set_attn(
@@ -675,6 +691,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.num_computed_tokens.gpu,
             self.input_buffers.positions,
             self.input_buffers.seq_lens,
+            pad_value=self.cg_pad_seq_lens,
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs]
 

@@ -100,6 +100,7 @@ class InputBatch:
         input_buffers.seq_lens[:num_reqs] = num_tokens // num_reqs
         input_buffers.seq_lens[num_reqs - 1] += num_tokens % num_reqs
         # Pad for full CUDA graph mode.
+        # Default 0; overridden by backends that need safe padding.
         input_buffers.seq_lens[num_reqs:] = 0
         seq_lens = input_buffers.seq_lens[:num_reqs]
 
@@ -212,16 +213,20 @@ def _prepare_pos_seq_lens_kernel(
     query_start_loc_ptr,
     num_computed_tokens_ptr,
     max_num_reqs,
+    pad_value,
     BLOCK_SIZE: tl.constexpr,
 ):
     req_id = tl.program_id(0)
     num_reqs = tl.num_programs(0) - 1
     if req_id == num_reqs:
-        # Pad unused seq_lens as 0 for full CUDA graphs.
+        # Pad unused seq_lens for full CUDA graphs.
+        # The pad_value is determined by the attention backends:
+        # default 0, but some backends (e.g. FlashMLA FP8) need >= 1
+        # to avoid illegal memory access in their kernels.
         for i in tl.range(num_reqs, max_num_reqs, BLOCK_SIZE):
             block = i + tl.arange(0, BLOCK_SIZE)
             mask = block < max_num_reqs
-            tl.store(seq_lens_ptr + block, 0, mask=mask)
+            tl.store(seq_lens_ptr + block, pad_value, mask=mask)
         return
 
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
@@ -247,10 +252,11 @@ def prepare_pos_seq_lens(
     num_computed_tokens: torch.Tensor,
     pos: torch.Tensor,
     seq_lens: torch.Tensor,
+    pad_value: int = 0,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
     # NOTE(woosuk): We do +1 because the last thread block is used
-    # to pad unused seq_lens as 0 for full CUDA graphs.
+    # to pad unused seq_lens for full CUDA graphs.
     _prepare_pos_seq_lens_kernel[(num_reqs + 1,)](
         pos,
         seq_lens,
@@ -258,6 +264,7 @@ def prepare_pos_seq_lens(
         query_start_loc,
         num_computed_tokens,
         seq_lens.shape[0],
+        pad_value,
         BLOCK_SIZE=1024,
     )
 

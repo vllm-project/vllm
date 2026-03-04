@@ -449,6 +449,15 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     # metadata
     supports_update_block_table: bool = False
 
+    # Padding values for unused entries in CUDA graph mode.
+    # When CG captures graphs at padded batch sizes, the unused (padded)
+    # entries in seq_lens and block_table need safe values that won't cause
+    # illegal memory access in the backend's kernels.
+    # Backends may override these (e.g. in __init__) if their kernels
+    # require specific padding values.
+    cg_pad_seq_lens: int = 0
+    cg_pad_block_table: int = -1
+
     @abstractmethod
     def __init__(
         self,

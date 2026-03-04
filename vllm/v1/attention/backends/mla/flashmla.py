@@ -131,6 +131,15 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         self.cg_buf_num_splits = None
         self.is_fp8_kvcache = vllm_config.cache_config.cache_dtype.startswith("fp8")
 
+        if self.is_fp8_kvcache:
+            # The FlashMLA FP8 kernel does NOT guard against seq_lens=0
+            # (causes n_block=-1 → block_table[-1] illegal access) or
+            # block_table=-1 (causes negative kcache offset).
+            # Override padding values so the model runner fills safe values
+            # for padded CG entries.
+            self.cg_pad_seq_lens = 1
+            self.cg_pad_block_table = 0
+
         num_sms = num_compute_units(self.device.index)
 
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
