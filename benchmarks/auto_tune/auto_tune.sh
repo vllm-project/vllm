@@ -93,7 +93,7 @@ start_server() {
         "--tensor-parallel-size" "$TP"
         "--enable-prefix-caching"
         "--load-format" "dummy"
-        "--download-dir" "$DOWNLOAD_DIR"
+        ${DOWNLOAD_DIR:+"--download-dir" "$DOWNLOAD_DIR"} # only when it's not blank
         "--max-model-len" "$MAX_MODEL_LEN"
     )
 
