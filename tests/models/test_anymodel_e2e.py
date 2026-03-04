@@ -19,6 +19,7 @@ Network access is required for all tests (to download HF configs).
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from dataclasses import dataclass, field
 from functools import partial
@@ -303,6 +304,7 @@ def _initialize_kv_caches_stub(self, vllm_config):
 
 @create_new_process_for_each_test()
 def _run_anymodel_e2e(case: _AnyModelE2ECase):
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     hf_overrides_fn = partial(_anymodel_hf_overrides, case=case)
 
     attention_config = (
@@ -575,9 +577,10 @@ def _identity_anymodel_overrides(hf_config: PretrainedConfig) -> PretrainedConfi
 
 @create_new_process_for_each_test()
 def _run_anymodel_parity():
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     sampling = SamplingParams(temperature=0, max_tokens=64)
 
-    base_llm = LLM(_PARITY_MODEL, enforce_eager=True)
+    base_llm = LLM(_PARITY_MODEL, enforce_eager=False, gpu_memory_utilization=0.4)
     base_text = base_llm.generate([_PARITY_PROMPT], sampling)[0].outputs[0].text
     del base_llm
     torch.accelerator.empty_cache()
@@ -586,7 +589,8 @@ def _run_anymodel_parity():
     anymodel_llm = LLM(
         _PARITY_MODEL,
         hf_overrides=_identity_anymodel_overrides,
-        enforce_eager=True,
+        enforce_eager=False,
+        gpu_memory_utilization=0.4,
     )
     anymodel_text = anymodel_llm.generate([_PARITY_PROMPT], sampling)[0].outputs[0].text
 
@@ -672,6 +676,7 @@ def _get_model_from_llm(llm: LLM):
 
 @create_new_process_for_each_test()
 def _run_anymodel_size_reduction():
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     mem_before_base = torch.cuda.memory_allocated()
 
     with patch.object(
@@ -746,12 +751,13 @@ def test_anymodel_size_reduction():
 # ---------------------------------------------------------------------------
 
 _NAS_CONFIG_PATH = (
-    Path(__file__).resolve().parents[2] / "puzzletron_configs" / "nas_config.json"
+    Path(__file__).resolve().parents[0] / "fixtures" / "nas_config.json"
 )
 
 
 @create_new_process_for_each_test()
 def _run_puzzletron_nas_config():
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     from vllm.model_executor.models.anymodel import (
         NoOpAttention,
         NoOpMLP,
