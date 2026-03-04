@@ -10,10 +10,10 @@ __all__ = ["ToolParser", "ToolParserManager"]
 
 
 """
-Register a lazy module mapping.
+Register a module mapping.
 
 Example:
-    ToolParserManager.register_lazy_module(
+    ToolParserManager.register_module(
         name="kimi_k2",
         module_path="vllm.tool_parsers.kimi_k2_parser",
         class_name="KimiK2ToolParser",
@@ -153,10 +153,10 @@ _TOOL_PARSERS_TO_REGISTER = {
 }
 
 
-def register_lazy_tool_parsers():
+def register_tool_parsers():
     for name, (file_name, class_name) in _TOOL_PARSERS_TO_REGISTER.items():
         module_path = f"vllm.tool_parsers.{file_name}"
-        ToolParserManager.register_lazy_module(name, module_path, class_name)
+        ToolParserManager.register_module(name, module_path, class_name)
 
 
-register_lazy_tool_parsers()
+register_tool_parsers()

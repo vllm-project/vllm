@@ -507,7 +507,7 @@ Here is a summary of a plugin file:
                                                 tool_calls=[],
                                                 content=text)
     # register the tool parser to ToolParserManager
-    ToolParserManager.register_lazy_module(
+    ToolParserManager.register_module(
         name="example",
         module_path="vllm.tool_parsers.example",
         class_name="ExampleToolParser",
