@@ -63,7 +63,8 @@ class DefaultMoERunner(MoERunnerBase):
         quant_method: FusedMoEMethodBase,
         enable_dbo: bool,
         routed_output_transform: torch.nn.Module | None = None,
-        output_scale: float | None = None,
+        apply_scale_to_output: bool = False,
+        routed_scaling_factor: float = 1.0,
     ):
         super().__init__(
             layer,
@@ -75,7 +76,8 @@ class DefaultMoERunner(MoERunnerBase):
             quant_method,
             enable_dbo,
             routed_output_transform=routed_output_transform,
-            output_scale=output_scale,
+            apply_scale_to_output=apply_scale_to_output,
+            routed_scaling_factor=routed_scaling_factor,
         )
 
     @property

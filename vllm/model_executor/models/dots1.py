@@ -171,7 +171,7 @@ class Dots1MoE(nn.Module):
             # we do scaling outside, set factor to 1.0 to avoid double mul
             routed_scaling_factor=1.0,
             e_score_correction_bias=self.gate.e_score_correction_bias,
-            output_scale=self.routed_scaling_factor,
+            apply_scale_to_output=True,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
