@@ -31,8 +31,9 @@ class CudagraphDispatcher:
     runnable without cudagraph (if the mode does not match or mode is NONE).
     """
 
-    def __init__(self, vllm_config: VllmConfig):
+    def __init__(self, vllm_config: VllmConfig, is_draft_model: bool = False):
         self.vllm_config = vllm_config
+        self.is_draft_model = is_draft_model
         self.compilation_config = vllm_config.compilation_config
         self.uniform_decode_query_len = (
             1
@@ -194,7 +195,10 @@ class CudagraphDispatcher:
                 )
                 # Only relax for PIECEWISE mode. FULL mode needs exact num_reqs
                 # because FA3's scheduler_metadata computation depends on it.
-                if cudagraph_mode.mixed_mode() == CUDAGraphMode.PIECEWISE:
+                if (
+                    cudagraph_mode.mixed_mode() == CUDAGraphMode.PIECEWISE
+                    or self.is_draft_model
+                ):
                     batch_desc = replace(batch_desc, num_reqs=None, uniform=False)
                 self.add_cudagraph_key(cudagraph_mode.mixed_mode(), batch_desc)
 
@@ -219,12 +223,12 @@ class CudagraphDispatcher:
             for bs, num_active_loras in product(
                 cudagraph_capture_sizes_for_decode, lora_cases
             ):
-                self.add_cudagraph_key(
-                    CUDAGraphMode.FULL,
-                    self._create_padded_batch_descriptor(
-                        bs, True, num_active_loras > 0, num_active_loras
-                    ),
+                batch_desc = self._create_padded_batch_descriptor(
+                    bs, True, num_active_loras > 0, num_active_loras
                 )
+                if self.is_draft_model:
+                    batch_desc = replace(batch_desc, num_reqs=None, uniform=False)
+                self.add_cudagraph_key(CUDAGraphMode.FULL, batch_desc)
 
         self.keys_initialized = True
 
@@ -303,6 +307,10 @@ class CudagraphDispatcher:
             batch_desc_to_check = batch_desc
             if self.cudagraph_mode == CUDAGraphMode.FULL:
                 batch_desc_to_check = replace(batch_desc, uniform=False)
+            if self.is_draft_model:
+                batch_desc_to_check = replace(
+                    batch_desc_to_check, num_reqs=None, uniform=False
+                )
             if batch_desc_to_check in self.cudagraph_keys[CUDAGraphMode.FULL]:
                 return CUDAGraphMode.FULL, batch_desc_to_check
 
