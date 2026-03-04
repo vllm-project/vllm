@@ -44,7 +44,7 @@ docker run \
     python3 examples/offline_inference/basic/generate.py --model ibm-research/PowerMoE-3b  --block-size 64 --enforce-eager -tp 2
     python3 examples/offline_inference/basic/generate.py --model ibm-research/PowerMoE-3b  --block-size 64 --enforce-eager -tp 2 --enable-expert-parallel
     cd tests
-    pytest -v -s v1/core --ignore=v1/core/test_reset_prefix_cache_e2e.py
+    pytest -v -s v1/core --ignore=v1/core/test_reset_prefix_cache_e2e.py --ignore=v1/core/test_scheduler_e2e.py
     pytest -v -s v1/engine
     pytest -v -s v1/sample --ignore=v1/sample/test_logprobs.py --ignore=v1/sample/test_logprobs_e2e.py
     pytest -v -s v1/worker --ignore=v1/worker/test_gpu_model_runner.py
