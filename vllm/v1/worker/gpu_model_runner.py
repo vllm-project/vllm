@@ -6250,8 +6250,6 @@ class GPUModelRunner(
             kv_cache_config, kernel_block_sizes
         )
 
-        self._init_kv_zero_meta()
-
         if self.speculative_config and (
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
