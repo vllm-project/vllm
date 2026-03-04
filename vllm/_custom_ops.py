@@ -178,9 +178,7 @@ def mla_decode_kvcache_cpu(
     block_tables: torch.Tensor,
     seq_lens: torch.Tensor,
 ) -> None:
-    torch.ops._C_cpu.mla_decode_kvcache(
-        out, query, kv_cache, scale, block_tables, seq_lens
-    )
+    torch.ops._C.mla_decode_kvcache(out, query, kv_cache, scale, block_tables, seq_lens)
 
 
 # merge attn states ops
@@ -1104,6 +1102,76 @@ def cutlass_fp4_moe_mm(
     )
 
 
+def mxfp8_experts_quant(
+    input_tensor: torch.Tensor,
+    problem_sizes: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+    quant_output: torch.Tensor,
+    scale_factor: torch.Tensor,
+) -> None:
+    torch.ops._C.mxfp8_experts_quant(
+        input_tensor,
+        problem_sizes,
+        expert_offsets,
+        blockscale_offsets,
+        quant_output,
+        scale_factor,
+    )
+
+
+def cutlass_mxfp8_grouped_mm(
+    a_tensors: torch.Tensor,
+    b_tensors: torch.Tensor,
+    a_scales: torch.Tensor,
+    b_scales: torch.Tensor,
+    out_tensors: torch.Tensor,
+    problem_sizes: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+) -> None:
+    torch.ops._C.cutlass_mxfp8_grouped_mm(
+        a_tensors,
+        b_tensors,
+        a_scales,
+        b_scales,
+        out_tensors,
+        problem_sizes,
+        expert_offsets,
+        blockscale_offsets,
+    )
+
+
+if hasattr(torch.ops._C, "mxfp8_experts_quant"):
+
+    @register_fake("_C::mxfp8_experts_quant")
+    def _mxfp8_experts_quant_fake(
+        input_tensor: torch.Tensor,
+        problem_sizes: torch.Tensor,
+        expert_offsets: torch.Tensor,
+        blockscale_offsets: torch.Tensor,
+        quant_output: torch.Tensor,
+        scale_factor: torch.Tensor,
+    ) -> None:
+        return None
+
+
+if hasattr(torch.ops._C, "cutlass_mxfp8_grouped_mm"):
+
+    @register_fake("_C::cutlass_mxfp8_grouped_mm")
+    def _cutlass_mxfp8_grouped_mm_fake(
+        a_tensors: torch.Tensor,
+        b_tensors: torch.Tensor,
+        a_scales: torch.Tensor,
+        b_scales: torch.Tensor,
+        out_tensors: torch.Tensor,
+        problem_sizes: torch.Tensor,
+        expert_offsets: torch.Tensor,
+        blockscale_offsets: torch.Tensor,
+    ) -> None:
+        return None
+
+
 # gptq_marlin
 def gptq_marlin_repack(
     b_q_weight: torch.Tensor,
@@ -2023,6 +2091,8 @@ def selective_scan_fwd(
     block_idx_first_scheduled_token: torch.Tensor | None = None,
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
+    cu_chunk_seqlen: torch.Tensor | None = None,
+    last_chunk_indices: torch.Tensor | None = None,
 ):
     torch.ops._C.selective_scan_fwd(
         u,
@@ -2043,6 +2113,8 @@ def selective_scan_fwd(
         block_idx_first_scheduled_token,
         block_idx_last_scheduled_token,
         initial_state_idx,
+        cu_chunk_seqlen,
+        last_chunk_indices,
     )
 
 
@@ -2188,6 +2260,23 @@ def moe_wna16_gemm(
         BLOCK_SIZE_K,
         bit,
     )
+
+
+def router_gemm_bf16_fp32(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """bf16 x bf16 -> fp32 GEMM via cuBLAS. weight shape: (N, K)."""
+    return torch.ops._moe_C.router_gemm_bf16_fp32(input, weight)
+
+
+if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "router_gemm_bf16_fp32"):
+
+    @register_fake("_moe_C::router_gemm_bf16_fp32")
+    def router_gemm_bf16_fp32_fake(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.empty(
+            input.shape[0], weight.shape[0], dtype=torch.float32, device=input.device
+        )
 
 
 def dsv3_router_gemm(

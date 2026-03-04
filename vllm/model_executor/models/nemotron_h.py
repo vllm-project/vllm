@@ -34,7 +34,7 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    GateLinear,
     SharedFusedMoE,
     activation_without_mul,
 )
@@ -148,13 +148,11 @@ class NemotronHMoE(nn.Module):
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
-        router_logits_dtype = torch.float32
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
-            bias=False,
-            params_dtype=router_logits_dtype,
-            quant_config=None,
+            out_dtype=torch.float32,
+            force_fp32_compute=True,
             prefix=f"{prefix}.gate",
         )
 
@@ -232,7 +230,6 @@ class NemotronHMoE(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
-            router_logits_dtype=router_logits_dtype,
             routed_input_transform=self.fc1_latent_proj,
         )
 
@@ -244,7 +241,7 @@ class NemotronHMoE(nn.Module):
             hidden_states = sequence_parallel_chunk(hidden_states)
 
         # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states.to(dtype=torch.float32))
+        router_logits, _ = self.gate(hidden_states)
 
         # SharedFusedMoE handles:
         #   - shared experts (with original hidden_states)
@@ -675,7 +672,7 @@ class NemotronHModel(nn.Module):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         if self.has_moe:
             # (param_name, weight_name, expert_id, shard_id)
-            expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
                 # - FusedMoe.w1 (aka gate_proj) should be up_proj since that's
                 #   what the activation is applied to
                 # - FusedMoe.w3 (aka up_proj) should be ignored since we're

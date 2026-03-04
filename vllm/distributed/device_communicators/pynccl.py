@@ -756,3 +756,18 @@ if envs.VLLM_DISABLE_NCCL4PY:
 
     # Replace PyNcclCommunicator with legacy version
     PyNcclCommunicator = PyNcclCommunicatorLegacy  # type: ignore[misc,assignment]
+        return self.nccl.ncclCommWindowDeregister(self.comm, window)
+
+    def batch_isend_irecv(self, p2p_ops: list, stream=None):
+        if self.disabled:
+            return
+        if stream is None:
+            stream = current_stream()
+        self.group_start()
+        for op in p2p_ops:
+            if op.op is torch.distributed.isend:
+                self.send(op.tensor, op.group_peer, stream)
+            elif op.op is torch.distributed.irecv:
+                self.recv(op.tensor, op.group_peer, stream)
+
+        self.group_end()

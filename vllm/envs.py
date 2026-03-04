@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     VLLM_USAGE_STATS_SERVER: str = "https://stats.vllm.ai"
     VLLM_NO_USAGE_STATS: bool = False
     VLLM_DO_NOT_TRACK: bool = False
-    VLLM_USAGE_SOURCE: str = ""
+    VLLM_USAGE_SOURCE: str = "production"
     VLLM_CONFIGURE_LOGGING: bool = True
     VLLM_LOGGING_LEVEL: str = "INFO"
     VLLM_LOGGING_PREFIX: str = ""
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_SAMPLER: bool | None = None
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
-    VLLM_CPU_OMP_THREADS_BIND: str = ""
+    VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
     VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
@@ -89,7 +89,7 @@ if TYPE_CHECKING:
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
     VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
     VLLM_USE_AOT_COMPILE: bool = False
-    VLLM_USE_BYTECODE_HOOK: bool = False
+    VLLM_USE_BYTECODE_HOOK: bool = True
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
@@ -107,7 +107,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
-    VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = True
+    VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
@@ -169,7 +169,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "masked_gemm"] = (
         "latency"
     )
-    VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
+    VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "trtllm"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -180,7 +180,6 @@ if TYPE_CHECKING:
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
-    VLLM_SLEEP_WHEN_IDLE: bool = False
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
@@ -244,6 +243,8 @@ if TYPE_CHECKING:
     VLLM_LORA_DISABLE_PDL: bool = False
     VLLM_ENABLE_CUDA_COMPATIBILITY: bool = False
     VLLM_CUDA_COMPATIBILITY_PATH: str | None = None
+    VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
+    VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
 
 
 def get_default_cache_root():
@@ -953,9 +954,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_AITER_FP4_ASM_GEMM", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter rope.
-    # By default is enabled.
+    # By default is disabled.
     "VLLM_ROCM_USE_AITER_TRITON_ROPE": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "True").lower() in ("true", "1")
+        os.getenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter triton fp8 bmm kernel
     # By default is enabled.
@@ -1301,9 +1302,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Flashinfer fused allreduce backend.
     # "auto" will default to "mnnvl", which performs mostly same/better than "trtllm".
     # But "mnnvl" backend does not support fuse with quantization.
+    # TODO: Default is "trtllm" right now because "mnnvl" has issues with cudagraph:
+    # https://github.com/vllm-project/vllm/issues/35772
+    # Should switch back to "auto" if the issue is resolved.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
         "VLLM_FLASHINFER_ALLREDUCE_BACKEND",
-        "auto",
+        "trtllm",
         ["auto", "trtllm", "mnnvl"],
     ),
     # Control the workspace buffer size for the FlashInfer backend.
@@ -1339,9 +1343,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS": lambda: int(
         os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")
     ),
-    # Reduce CPU usage when vLLM is idle. Enabling this will incur small
-    # latency penalty when a request eventually comes.
-    "VLLM_SLEEP_WHEN_IDLE": lambda: bool(int(os.getenv("VLLM_SLEEP_WHEN_IDLE", "0"))),
     # Control the max chunk bytes (in MB) for the rpc message queue.
     # Object larger than this threshold will be broadcast to worker
     # processes via zmq.
@@ -1623,6 +1624,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CUDA_COMPATIBILITY_PATH": lambda: os.environ.get(
         "VLLM_CUDA_COMPATIBILITY_PATH", None
     ),
+    # Whether it is a scale up launch engine for elastic EP,
+    # Should only be set by EngineCoreClient.
+    "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": lambda: bool(
+        int(os.getenv("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH", "0"))
+    ),
+    # Whether to wait for all requests to drain before sending the
+    # scaling command in elastic EP.
+    "VLLM_ELASTIC_EP_DRAIN_REQUESTS": lambda: bool(
+        int(os.getenv("VLLM_ELASTIC_EP_DRAIN_REQUESTS", "0"))
+    ),
 }
 
 
@@ -1742,7 +1753,6 @@ def compile_factors() -> dict[str, object]:
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
         "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
-        "VLLM_SLEEP_WHEN_IDLE",
         "VLLM_IMAGE_FETCH_TIMEOUT",
         "VLLM_VIDEO_FETCH_TIMEOUT",
         "VLLM_AUDIO_FETCH_TIMEOUT",
@@ -1758,10 +1768,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_ENABLE_V1_MULTIPROCESSING",
         "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE",
         "VLLM_CPU_KVCACHE_SPACE",
-        "VLLM_CPU_OMP_THREADS_BIND",
-        "VLLM_CPU_NUM_OF_RESERVED_CPU",
         "VLLM_CPU_MOE_PREPACK",
-        "VLLM_CPU_SGL_KERNEL",
         "VLLM_TEST_FORCE_LOAD_FORMAT",
         "VLLM_ENABLE_CUDA_COMPATIBILITY",
         "VLLM_CUDA_COMPATIBILITY_PATH",
