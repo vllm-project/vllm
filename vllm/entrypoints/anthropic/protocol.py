@@ -77,7 +77,7 @@ class AnthropicTool(BaseModel):
 class AnthropicToolChoice(BaseModel):
     """Tool Choice definition"""
 
-    type: Literal["auto", "any", "tool"]
+    type: Literal["auto", "any", "tool", "none"]
     name: str | None = None
 
     @model_validator(mode="after")
