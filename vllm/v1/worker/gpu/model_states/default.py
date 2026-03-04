@@ -225,11 +225,7 @@ class DefaultModelState(ModelState):
 
         attn_dcp_local_seq_lens = None
         if input_batch.dcp_local_seq_lens is not None:
-            attn_dcp_local_seq_lens = torch.zeros(
-                attn_num_reqs,
-                dtype=input_batch.dcp_local_seq_lens.dtype,
-                device=input_batch.dcp_local_seq_lens.device,
-            )
+            attn_dcp_local_seq_lens = input_batch.dcp_local_seq_lens.new_zeros(attn_num_reqs)
             attn_dcp_local_seq_lens[:num_reqs] = input_batch.dcp_local_seq_lens
 
         return AttnMetadataInputs(
