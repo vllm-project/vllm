@@ -80,6 +80,26 @@ class TestBuildBuckets:
         assert build_1_2_5_buckets(1) == [1]
         assert build_1_2_5_buckets(1000) == [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000]
 
+    def test_build_buckets_empty_mantissa(self):
+        """Test bucket building with empty mantissa list."""
+        result = build_buckets([], 100)
+        assert result == []
+
+    def test_build_buckets_no_duplicates(self):
+        """Test that build_buckets produces unique values."""
+        result = build_buckets([1, 10], 100)
+        assert len(result) == len(set(result))
+
+    def test_build_buckets_handles_unsorted_mantissa(self):
+        """Test bucket building with unsorted mantissa."""
+        result = build_buckets([5, 1, 2], 100)
+        assert result == sorted(result)
+
+    def test_build_buckets_skips_non_positive(self):
+        """Test that non-positive mantissa values are skipped."""
+        result = build_buckets([0, 1, -1, 2], 10)
+        assert result == [1, 2, 10]
+
 
 class TestGetBuckets:
     """Tests for bucket retrieval function."""

@@ -5,18 +5,14 @@ Histogram bucket definitions for Prometheus metrics.
 
 This module centralizes all histogram bucket configurations used across
 vLLM's metrics system. Each bucket set is designed for a specific class
-of measurements with documented rationale.
+of measurements.
 """
 
 from enum import Enum
 
 
 class BucketType(str, Enum):
-    """Named bucket types for histogram metrics.
-
-    Each bucket type is optimized for a specific class of measurements
-    with appropriate granularity and range.
-    """
+    """Named bucket types for histogram metrics."""
 
     TOKEN_STEP_LATENCY = "token_step_latency"
     """For inter-token latency and time_per_output_token metrics (seconds).
@@ -121,8 +117,7 @@ DEFAULT_BUCKETS: dict[BucketType, tuple[float, ...]] = {
         2560.0,
     ),
     # ACCUMULATED_PHASE_LATENCY: Request phase timings (300ms to 7680s)
-    # Coarser granularity suitable for total request time,
-    # extending to ~2 hours for batch processing
+    # Coarser granularity suitable for total request time.
     BucketType.ACCUMULATED_PHASE_LATENCY: (
         0.3,
         0.5,
@@ -147,8 +142,7 @@ DEFAULT_BUCKETS: dict[BucketType, tuple[float, ...]] = {
         7680.0,
     ),
     # CACHE_RESIDENCY: KV cache block lifetime (1ms to 1800s)
-    # Fine granularity at millisecond level for cache hits,
-    # extending to 30 minutes for long-lived blocks
+    # Fine granularity at millisecond level for cache hits
     BucketType.CACHE_RESIDENCY: (
         0.001,
         0.002,
@@ -173,7 +167,6 @@ DEFAULT_BUCKETS: dict[BucketType, tuple[float, ...]] = {
         1800,
     ),
     # BATCH_SIZE: Tokens per iteration (1 to 16384)
-    # Powers of 2 matching common batch sizes and GPU memory constraints
     BucketType.BATCH_SIZE: (
         1,
         8,
@@ -190,7 +183,6 @@ DEFAULT_BUCKETS: dict[BucketType, tuple[float, ...]] = {
         16384,
     ),
     # COMPLETION_COUNT: Request n parameter (1 to 20)
-    # Small integers following common API usage patterns
     BucketType.COMPLETION_COUNT: (1, 2, 5, 10, 20),
 }
 
@@ -205,18 +197,29 @@ def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
         max_value: Maximum bucket value to include
 
     Returns:
-        List of bucket boundary values
+        Sorted list of unique bucket boundary values
     """
+    if not mantissa_lst:
+        return []
+
+    buckets: set[int] = set()
     exponent = 0
-    buckets: list[int] = []
     while True:
+        smallest_val_in_exp = float("inf")
         for m in mantissa_lst:
+            if m <= 0:
+                continue
             value = m * 10**exponent
+            if value < smallest_val_in_exp:
+                smallest_val_in_exp = value
             if value <= max_value:
-                buckets.append(value)
-            else:
-                return buckets
+                buckets.add(value)
+
+        if smallest_val_in_exp > max_value:
+            break
         exponent += 1
+
+    return sorted(buckets)
 
 
 def build_1_2_5_buckets(max_value: int) -> list[int]:
@@ -275,7 +278,7 @@ METRIC_BUCKET_MAPPING: dict[str, BucketType] = {
     "vllm:kv_block_lifetime_seconds": BucketType.CACHE_RESIDENCY,
     "vllm:kv_block_idle_before_evict_seconds": BucketType.CACHE_RESIDENCY,
     "vllm:kv_block_reuse_gap_seconds": BucketType.CACHE_RESIDENCY,
-    # REQUEST_TOKEN_COUNT metrics (dynamic)
+    # REQUEST_TOKEN_COUNT metrics
     "vllm:request_prompt_tokens": BucketType.REQUEST_TOKEN_COUNT,
     "vllm:request_generation_tokens": BucketType.REQUEST_TOKEN_COUNT,
     "vllm:request_max_num_generation_tokens": BucketType.REQUEST_TOKEN_COUNT,
