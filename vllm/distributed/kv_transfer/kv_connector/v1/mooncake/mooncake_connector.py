@@ -980,8 +980,11 @@ class MooncakeConnectorWorker:
         now = time.perf_counter()
 
         expired_req_ids = []
-        for remote_engine_id, pull_metas in self.reqs_to_recv.items():
-            for req_id, pull_meta in pull_metas.items():
+        # Create a copy of items to avoid concurrent modification issues
+        reqs_to_recv_items = list(self.reqs_to_recv.items())
+        for remote_engine_id, pull_metas in reqs_to_recv_items:
+            pull_metas_items = list(pull_metas.items())
+            for req_id, pull_meta in pull_metas_items:
                 if pull_meta.expire_time < now:
                     logger.warning(
                         "Request %s timed out after %d seconds without "
@@ -995,7 +998,8 @@ class MooncakeConnectorWorker:
 
         # Remove expired requests from tracking
         for remote_engine_id, req_id in expired_req_ids:
-            del self.reqs_to_recv[remote_engine_id][req_id]
+            if remote_engine_id in self.reqs_to_recv and req_id in self.reqs_to_recv[remote_engine_id]:
+                del self.reqs_to_recv[remote_engine_id][req_id]
 
         return finished_recving_reqs
 
@@ -1188,12 +1192,13 @@ class MooncakeConnectorWorker:
             raise NotImplementedError(
                 "Mooncake: Heterogeneous TP is not supported yet."
             )
+        expire_time = time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
         for pull_meta in pull_metas.values():
             pull_meta.pull_tasks_count = count
             # Set expire time to avoid infinitely waiting for remote KV transfer
-            pull_meta.expire_time = (
-                time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
-            )
+            # Only set if not already set to avoid race conditions
+            if pull_meta.expire_time == float("inf"):
+                pull_meta.expire_time = expire_time
         for remote_tp_rank in remote_tp_ranks:
             worker_addr = self._remote_agents[remote_engine_id][remote_tp_rank][0]
             asyncio.create_task(
