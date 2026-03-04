@@ -738,19 +738,24 @@ def _prefetch_all_checkpoints(sorted_files: list[str]) -> None:
 
         async def prefetch_one(path: str) -> None:
             nonlocal completed, next_log_pct
-            async with semaphore:
-                await asyncio.to_thread(_prefetch_checkpoint, path)
-            completed += 1
-            if total_for_rank > 0 and next_log_pct <= 100:
-                pct = 100 * completed / total_for_rank
-                if pct >= next_log_pct:
-                    logger.info(
-                        "Prefetching checkpoint files: %d%% (%d/%d)",
-                        next_log_pct,
-                        completed,
-                        total_for_rank,
-                    )
-                    next_log_pct += 10
+            try:
+                async with semaphore:
+                    await asyncio.to_thread(_prefetch_checkpoint, path)
+                completed += 1
+                if total_for_rank > 0 and next_log_pct <= 100:
+                    pct = 100 * completed / total_for_rank
+                    if pct >= next_log_pct:
+                        logger.info(
+                            "Prefetching checkpoint files: %d%% (%d/%d)",
+                            next_log_pct,
+                            completed,
+                            total_for_rank,
+                        )
+                        next_log_pct += 10
+            except Exception:
+                logger.warning("Failed to prefetch checkpoint file %r.",
+                               path,
+                               exc_info=True)
 
         await asyncio.gather(*(prefetch_one(p) for p in paths_to_prefetch))
 
