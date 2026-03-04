@@ -32,7 +32,10 @@ from vllm.model_executor.layers.quantization.mxfp4 import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import _swizzle_mxfp4
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    CK_MXFP4_MOE_DIM_ALIGNMENT,
+    _swizzle_mxfp4,
+)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
     OCP_MX_Scheme,
@@ -732,6 +735,32 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             or not self.ocp_mx_scheme.startswith("w_mxfp4")
         ) and (self.mxfp4_backend is None or not self.use_rocm_aiter_moe)
 
+        # CK's pre-compiled MXFP4 MoE GEMM kernel instances have dimension
+        # alignment requirements. When violated (e.g. MiniMax-M2.1 with
+        # TP=4 yields intermediate_size_per_partition=384), AITER raises:
+        # "device_gemm ... does not support this GEMM problem".
+        # Fall back to emulation in that case.
+        if (
+            not self.emulate
+            and self.use_rocm_aiter_moe
+            and self.ocp_mx_scheme is not None
+            and self.ocp_mx_scheme.startswith("w_mxfp4")
+            and moe.intermediate_size_per_partition % CK_MXFP4_MOE_DIM_ALIGNMENT != 0
+        ):
+            logger.warning_once(
+                "AITER CK MXFP4 MoE GEMM does not support "
+                "intermediate_size_per_partition=%d (not a multiple of %d). "
+                "This typically happens when intermediate_size / "
+                "tensor_parallel_size produces an incompatible dimension. "
+                "Falling back to emulation mode. To avoid this overhead, "
+                "use a compatible tensor_parallel_size or set "
+                "VLLM_ROCM_USE_AITER_MOE=0.",
+                moe.intermediate_size_per_partition,
+                CK_MXFP4_MOE_DIM_ALIGNMENT,
+            )
+            self.use_rocm_aiter_moe = False
+            self.emulate = True
+
         if self.emulate:
             logger.warning_once(
                 f"The current mode (supports_mx={current_platform.supports_mx()}, "
@@ -932,7 +961,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         # secondly, process mxfp weights
         if self.emulate:
-            torch.cuda.empty_cache()
+            torch.accelerator.empty_cache()
             return
 
         from aiter.utility.fp4_utils import e8m0_shuffle
@@ -966,7 +995,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
         layer.w13_weight.is_shuffled = True
         layer.w2_weight.is_shuffled = True
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -1087,7 +1116,7 @@ class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):
         del layer.w2_weight
         layer.w13_weight = None
         layer.w2_weight = None
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
         if self.static_input_scales:
             if layer.w13_input_scale is None or layer.w2_input_scale is None:
