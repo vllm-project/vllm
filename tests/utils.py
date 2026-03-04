@@ -41,7 +41,6 @@ from vllm.distributed import (
     init_distributed_environment,
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.cli.launch import LaunchSubcommand
 from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.model_executor.kernels.linear import (
     FP8ScaledMMLinearKernel,
@@ -483,7 +482,7 @@ class RemoteLaunchRenderServer(RemoteVLLMServer):
     """Launches ``vllm launch render`` for GPU-less serving tests."""
 
     def _create_cli_subcommand(self):
-        return LaunchSubcommand()
+        return ServeSubcommand()
 
     def _start_server(
         self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None

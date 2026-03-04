@@ -24,6 +24,36 @@ logger = init_logger(__name__)
 DESCRIPTION = "Launch individual vLLM components."
 
 
+class LaunchSubcommandBase(CLISubcommand):
+    """The base class of subcommands for `vllm launch`."""
+
+    help: str
+
+    @classmethod
+    def add_cli_args(cls, parser: argparse.ArgumentParser) -> None:
+        """Add the CLI arguments to the parser.
+
+        By default, adds the standard vLLM serving arguments.
+        Subclasses can override to add component-specific arguments.
+        """
+        make_arg_parser(parser)
+
+    @staticmethod
+    def cmd(args: argparse.Namespace) -> None:
+        raise NotImplementedError
+
+
+class RenderSubcommand(LaunchSubcommandBase):
+    """The `render` subcommand for `vllm launch`."""
+
+    name = "render"
+    help = "Launch a GPU-less rendering server (preprocessing and postprocessing only)."
+
+    @staticmethod
+    def cmd(args: argparse.Namespace) -> None:
+        uvloop.run(run_launch_fastapi(args))
+
+
 class LaunchSubcommand(CLISubcommand):
     """The `launch` subcommand for the vLLM CLI.
 
@@ -35,7 +65,10 @@ class LaunchSubcommand(CLISubcommand):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
-        args.dispatch_function(args)
+        if hasattr(args, "model_tag") and args.model_tag is not None:
+            args.model = args.model_tag
+
+        args.launch_command(args)
 
     def validate(self, args: argparse.Namespace) -> None:
         validate_parsed_serve_args(args)
@@ -53,30 +86,20 @@ class LaunchSubcommand(CLISubcommand):
             required=True, dest="launch_component"
         )
 
-        # -- vllm launch render --
-        render_parser = launch_subparsers.add_parser(
-            "render",
-            help="Launch a GPU-less rendering server "
-            "(preprocessing and postprocessing only).",
-            description="Launch a GPU-less rendering server "
-            "(preprocessing and postprocessing only).",
-            usage=f"vllm {self.name} render [model_tag] [options]",
-        )
-        render_parser.set_defaults(dispatch_function=_cmd_launch_render)
-        render_parser = make_arg_parser(render_parser)
-        render_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(
-            subcmd=f"{self.name} render"
-        )
+        for cmd_cls in LaunchSubcommandBase.__subclasses__():
+            cmd_subparser = launch_subparsers.add_parser(
+                cmd_cls.name,
+                help=cmd_cls.help,
+                description=cmd_cls.help,
+                usage=f"vllm {self.name} {cmd_cls.name} [options]",
+            )
+            cmd_subparser.set_defaults(launch_command=cmd_cls.cmd)
+            cmd_cls.add_cli_args(cmd_subparser)
+            cmd_subparser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(
+                subcmd=f"{self.name} {cmd_cls.name}"
+            )
 
         return launch_parser
-
-
-def _cmd_launch_render(args: argparse.Namespace) -> None:
-    """Dispatch for ``vllm launch render``."""
-    if hasattr(args, "model_tag") and args.model_tag is not None:
-        args.model = args.model_tag
-
-    uvloop.run(run_launch_fastapi(args))
 
 
 def cmd_init() -> list[CLISubcommand]:

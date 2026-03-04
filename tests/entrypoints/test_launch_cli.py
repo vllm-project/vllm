@@ -9,7 +9,7 @@ import pytest
 
 from vllm.entrypoints.cli.launch import (
     LaunchSubcommand,
-    _cmd_launch_render,
+    RenderSubcommand,
     cmd_init,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -57,22 +57,28 @@ def test_parse_launch_invalid_component(launch_parser):
 def test_cmd_launch_render_calls_run():
     args = argparse.Namespace(model_tag=None, model="test-model")
     with patch("vllm.entrypoints.cli.launch.uvloop.run") as mock_uvloop_run:
-        _cmd_launch_render(args)
+        RenderSubcommand.cmd(args)
         mock_uvloop_run.assert_called_once()
 
 
-def test_cmd_launch_render_model_tag_overrides():
-    args = argparse.Namespace(model_tag="tag-model", model="original-model")
-    with patch("vllm.entrypoints.cli.launch.uvloop.run"):
-        _cmd_launch_render(args)
-        assert args.model == "tag-model"
+def test_cmd_launch_model_tag_overrides():
+    args = argparse.Namespace(
+        model_tag="tag-model",
+        model="original-model",
+        launch_command=lambda a: None,
+    )
+    LaunchSubcommand.cmd(args)
+    assert args.model == "tag-model"
 
 
-def test_cmd_launch_render_model_tag_none():
-    args = argparse.Namespace(model_tag=None, model="original-model")
-    with patch("vllm.entrypoints.cli.launch.uvloop.run"):
-        _cmd_launch_render(args)
-        assert args.model == "original-model"
+def test_cmd_launch_model_tag_none():
+    args = argparse.Namespace(
+        model_tag=None,
+        model="original-model",
+        launch_command=lambda a: None,
+    )
+    LaunchSubcommand.cmd(args)
+    assert args.model == "original-model"
 
 
 def test_cmd_dispatches():
@@ -81,7 +87,7 @@ def test_cmd_dispatches():
     def fake_dispatch(args):
         called["args"] = args
 
-    args = argparse.Namespace(dispatch_function=fake_dispatch)
+    args = argparse.Namespace(launch_command=fake_dispatch)
     LaunchSubcommand.cmd(args)
     assert "args" in called
 
