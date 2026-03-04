@@ -481,11 +481,11 @@ class CompilationConfig:
     specify the sizes for cudagraph capture."""
 
     compile_ranges_endpoints: list[int] | None = None
-    """Split points that represent compile ranges for inductor.
+    """Endpoints for Inductor compile ranges.
     The compile ranges are
-    [1, split_points[0]],
-    [split_points[0] + 1, split_points[1]], ...,
-    [split_points[-1] + 1, max_num_batched_tokens].
+    [1, endpoints[0]],
+    [endpoints[0] + 1, endpoints[1]], ...,
+    [endpoints[-1] + 1, max_num_batched_tokens].
     Compile sizes are also used single element ranges,
     the range is represented as [compile_sizes[i], compile_sizes[i]].
 
@@ -1246,8 +1246,8 @@ class CompilationConfig:
         """Get the compile ranges for the compilation config."""
         if self.compile_ranges_endpoints is None:
             return []
-        split_points = sorted(set(self.compile_ranges_endpoints))
+        endpoints = sorted(set(self.compile_ranges_endpoints))
         return [
             Range(start=s + 1, end=e)
-            for s, e in zip([0] + split_points[:-1], split_points)
+            for s, e in zip([0] + endpoints[:-1], endpoints)
         ]

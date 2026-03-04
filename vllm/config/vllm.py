@@ -1536,7 +1536,7 @@ class VllmConfig:
                 and min_token_num < max_num_batched_tokens
                 and min_token_num > 1
             ):
-                # Add split point at min_token_num - 1 to ensure SP applies
+                # Add endpoint at min_token_num - 1 to ensure SP applies
                 # starting from min_token_num
                 # This creates ranges: [1, min-1] (no SP), [min, max] (SP applies)
                 computed_compile_ranges_endpoints.append(min_token_num - 1)
@@ -1558,7 +1558,7 @@ class VllmConfig:
         if compilation_config.compile_ranges_endpoints is not None:
             for x in compilation_config.compile_ranges_endpoints:
                 assert isinstance(x, int)
-                assert x > 0, f"Invalid compile range split point: {x}"
+                assert x > 0, f"Invalid compile range endpoint: {x}"
                 if compile_range_end is not None and x < compile_range_end and x > 1:
                     computed_compile_ranges_endpoints.append(x)
         compilation_config.compile_ranges_endpoints = sorted(
