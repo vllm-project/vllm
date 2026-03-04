@@ -674,6 +674,7 @@ class precompiled_wheel_utils:
             with zipfile.ZipFile(wheel_path) as wheel:
                 files_to_copy = [
                     "vllm/_C.abi3.so",
+                    "vllm/_C_stable_libtorch.abi3.so",
                     "vllm/_moe_C.abi3.so",
                     "vllm/_flashmla_C.abi3.so",
                     "vllm/_flashmla_extension_C.abi3.so",
@@ -1003,6 +1004,10 @@ if _is_cpu():
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
+    # also _is_hip() once https://github.com/vllm-project/vllm/issues/35163 is
+    # fixed
+    if _is_cuda():
+        ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))
 
 package_data = {
     "vllm": [
