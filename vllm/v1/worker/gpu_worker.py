@@ -171,7 +171,7 @@ class Worker(WorkerBase):
         destroy_distributed_environment()
         reset_distributed_state()
         gc.collect()
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
 
     def resume_distributed(self) -> None:
         """Rebuild NCCL after snapshot restore."""
