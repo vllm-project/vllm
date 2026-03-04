@@ -233,6 +233,7 @@ class NemotronHMoE(nn.Module):
             routed_output_transform=self.fc2_latent_proj
             if self.use_latent_moe
             else None,
+            routed_scaling_factor=self.routed_scaling_factor,
             apply_scale_to_output=True,
         )
 

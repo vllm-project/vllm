@@ -500,7 +500,9 @@ class FusedMoE(CustomOp):
             topk_group=topk_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
+            routed_scaling_factor=routed_scaling_factor
+            if not apply_scale_to_output
+            else 1.0,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=self.num_fused_shared_experts,
             enable_eplb=enable_eplb,
