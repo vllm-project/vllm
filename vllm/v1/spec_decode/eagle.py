@@ -194,11 +194,16 @@ class SpecDecodeBaseProposer:
                 (self.max_num_tokens,), dtype=torch.bool, device=device
             )
 
-        self.inputs_embeds = torch.zeros(
-            (self.max_num_tokens, self.inputs_embeds_size),
-            dtype=self.dtype,
-            device=device,
-        )
+        # Only allocate inputs_embeds buffer for multimodal models.
+        # For text-only models, the buffer is never used since all code paths
+        # that access it are guarded by `if self.supports_mm_inputs:`.
+        # See: https://github.com/vllm-project/vllm/issues/35023
+        if self.supports_mm_inputs:
+            self.inputs_embeds = torch.zeros(
+                (self.max_num_tokens, self.inputs_embeds_size),
+                dtype=self.dtype,
+                device=device,
+            )
 
         self.backup_next_token_ids = CpuGpuBuffer(
             max_batch_size,

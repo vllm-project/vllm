@@ -664,12 +664,22 @@ class GPUModelRunner(
             self.dcp_local_seq_lens = self._make_buffer(
                 self.max_num_reqs, dtype=torch.int32
             )
-        # Because inputs_embeds may be bfloat16 and we don't need a numpy
-        # version of this tensor, avoid a RuntimeError by not creating a
-        # numpy buffer.
-        self.inputs_embeds = self._make_buffer(
-            self.max_num_tokens, self.inputs_embeds_size, dtype=self.dtype, numpy=False
-        )
+        # Only allocate the inputs_embeds buffer when the model actually needs
+        # embeddings as input (multimodal models or prompt_embeds feature).
+        # For pure text-only models, this saves significant GPU and pinned CPU
+        # memory (~64-256 MiB each depending on hidden size and max tokens).
+        # See: https://github.com/vllm-project/vllm/issues/35023
+        self.needs_embeds_buffer = self.supports_mm_inputs or self.enable_prompt_embeds
+        if self.needs_embeds_buffer:
+            # Because inputs_embeds may be bfloat16 and we don't need a numpy
+            # version of this tensor, avoid a RuntimeError by not creating a
+            # numpy buffer.
+            self.inputs_embeds = self._make_buffer(
+                self.max_num_tokens,
+                self.inputs_embeds_size,
+                dtype=self.dtype,
+                numpy=False,
+            )
         self.is_token_ids = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
         self.discard_request_mask = self._make_buffer(
             self.max_num_reqs, dtype=torch.bool
