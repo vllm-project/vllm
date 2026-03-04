@@ -22,12 +22,11 @@ from vllm.utils.torch_utils import current_stream, direct_register_custom_op
 from .base import BaseLayerWithLoRA
 from .utils import _get_lora_device
 
-_aux_stream: torch.cuda.Stream | None = None
-
 if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
-    # aux_stream() is shared for:
-    #   - LoRA dual-stream: base linear and LoRA compute on different CUDA streams
+    _aux_stream: torch.cuda.Stream | None = None
 
+    # aux_stream() is shared for:
+    #  - LoRA dual-stream: base linear and LoRA compute on different CUDA streams
     def aux_stream() -> torch.cuda.Stream | None:
         """
         Returns the auxiliary CUDA stream for overlapping compute.
@@ -240,6 +239,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             device=self.device,
             dtype=x.dtype,
         )
+        lora_output.record_stream(self._lora_stream)
         with torch.cuda.stream(self._lora_stream):
             self.punica_wrapper.add_lora_linear(
                 lora_output,
@@ -261,7 +261,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
         # We need to add op to get the final result.
-        output = output + lora_output
+        output.add_(lora_output)
 
         # Reshape the flattened output back to its original shape,
         # as some MM encoders cannot handle flattened inputs.
