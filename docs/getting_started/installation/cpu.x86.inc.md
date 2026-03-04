@@ -161,13 +161,20 @@ uv pip install dist/*.whl
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:pre-built-images]
 
-You can pull the latest available CPU image here via:
+You can pull the latest available CPU image from Docker Hub:
 
 ```bash
-docker pull public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest
+docker pull vllm/vllm-openai-cpu:latest-x86_64
 ```
 
-If you want a more specific build you can find all published CPU based images here: [https://gallery.ecr.aws/q9t5s3a7/vllm-cpu-release-repo](https://gallery.ecr.aws/q9t5s3a7/vllm-cpu-release-repo)
+To pull an image for a specific vLLM version:
+
+```bash
+export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
+docker pull vllm/vllm-openai-cpu:v${VLLM_VERSION}-x86_64
+```
+
+All available image tags are here: [https://hub.docker.com/r/vllm/vllm-openai-cpu/tags](https://hub.docker.com/r/vllm/vllm-openai-cpu/tags)
 
 You can run these images via:
 
@@ -176,7 +183,7 @@ docker run \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -p 8000:8000 \
     --env "HF_TOKEN=<secret>" \
-    public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:<tag> <args...>
+vllm/vllm-openai-cpu:latest-x86_64 <args...>
 ```
 
 !!! warning
