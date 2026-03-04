@@ -102,7 +102,7 @@ def reset_memory_stats():
     """Reset peak memory statistics."""
     reset_buffer_cache()
     torch.cuda.reset_peak_memory_stats()
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     gc.collect()
 
 
