@@ -47,7 +47,7 @@ from vllm.outputs import (PoolingRequestOutput, RequestOutput,
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
+from vllm.sequence import (ExecuteModelRequest, Logprob, ParallelSampleSequenceGroup,
                            PoolingSequenceGroupOutput, Sequence, SequenceGroup,
                            SequenceGroupBase, SequenceGroupMetadata,
                            SequenceGroupOutput, SequenceStatus)
@@ -626,6 +626,8 @@ class LLMEngine:
         ]
         min_cost_scheduler = self.scheduler[costs.index(min(costs))]
         min_cost_scheduler.add_seq_group(seq_group)
+
+        self.seq_id_to_seq_group[request_id] = seq_group
 
         return seq_group
 
@@ -2167,28 +2169,30 @@ class TreeDecoder:
     
     def create_branch_sequences(self, parent_seq, logprobs, sampling_params):
         """Create new branch sequence groups based on the model output and sampling parameters."""
+        logprobs_dict = {token_id.item(): Logprob(logprob=logprob.item()) for token_id, logprob in zip(torch.arange(logprobs.shape[-1]), logprobs)}
+
         num_branches = sampling_params.tree_search_params.branching_factor
         probs = torch.exp(logprobs)
-        top_k_probs, top_k_indices = torch.topk(
+        _, top_k_indices = torch.topk(
             probs, num_branches, dim=-1
         )
         branch_seqs = []
-        for (token_id, prob) in zip(top_k_indices, top_k_probs):
+        for token_id in top_k_indices:
             # 创建新的序列组作为分支
             branch_seq = self._clone_sequence_for_branch(
-                parent_seq, token_id.item(), prob.item()
+                parent_seq, token_id.item(), logprobs_dict
             )
             branch_seqs.append(branch_seq)
             
         return branch_seqs
     
-    def _clone_sequence_for_branch(self, original_seq, token_id, prob):
+    def _clone_sequence_for_branch(self, original_seq, token_id, logprobs_dict):
         """克隆序列组创建分支"""
         # 深度复制原序列组
         branch_seq = copy.deepcopy(original_seq)
 
         # 更新分支特有属性
         branch_seq.tree_depth = original_seq.tree_depth + 1
-        branch_seq.append_token_id(token_id, logprob=math.log(prob))
+        branch_seq.append_token_id(token_id, logprobs=logprobs_dict)
             
         return branch_seq
