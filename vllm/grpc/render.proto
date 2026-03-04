@@ -1,0 +1,152 @@
+syntax = "proto3";
+
+package vllm.grpc.render;
+
+import "google/protobuf/struct.proto";
+
+// RenderService provides chat template rendering and tokenization.
+// This is a lightweight service that only handles input preprocessing,
+// without any LLM inference capabilities.
+service RenderService {
+  // Render chat messages and tokenize (render_messages_async + tokenize_prompt_async)
+  rpc RenderChat(RenderChatRequest) returns (RenderChatResponse);
+
+  // Tokenize a completion prompt (tokenize_prompt_async)
+  rpc RenderCompletion(RenderCompletionRequest) returns (RenderCompletionResponse);
+
+  // Health check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// =====================
+// Renderer Params (1:1 mapping to vllm/renderers/params.py)
+// =====================
+
+// Maps to vllm.renderers.params.ChatParams
+message ChatParams {
+  // The chat template to apply (None → model default)
+  optional string chat_template = 1;
+
+  // "auto" | "string" | "openai" (default: "auto")
+  optional string chat_template_content_format = 2;
+
+  // dict[str, Any] — e.g. {"add_generation_prompt": true, "tools": [...]}
+  google.protobuf.Struct chat_template_kwargs = 3;
+}
+
+// Maps to vllm.renderers.params.TokenizeParams
+// All fields are optional — unset fields use Python defaults.
+// Error-message-only fields (*_param) are excluded.
+message TokenizeParams {
+  optional int32 max_total_tokens = 1;        // default: None (model context len)
+  optional int32 max_output_tokens = 2;       // default: 0
+  optional int32 pad_prompt_tokens = 3;       // default: None
+  optional int32 truncate_prompt_tokens = 4;  // default: None
+  optional bool do_lower_case = 5;            // default: false
+  optional bool add_special_tokens = 6;       // default: true (differs from proto default!)
+  optional bool needs_detokenization = 7;     // default: false
+}
+
+// =====================
+// Chat Message Types
+// =====================
+
+// Maps to ChatCompletionMessageParam (dict form)
+message ChatMessage {
+  string role = 1;  // "system", "user", "assistant", "tool"
+
+  oneof content_type {
+    string text_content = 2;       // string content
+    ContentPartList parts = 3;     // multipart content
+  }
+
+  optional string name = 4;
+  optional string tool_call_id = 5;
+  repeated ToolCall tool_calls = 6;
+  optional string reasoning = 7;
+}
+
+message ContentPartList {
+  repeated ContentPart parts = 1;
+}
+
+message ContentPart {
+  string type = 1;                // "text", "image_url", etc.
+  optional string text = 2;
+  optional string image_url = 3;
+}
+
+message ToolCall {
+  string id = 1;
+  string type = 2;  // "function"
+  ToolCallFunction function = 3;
+}
+
+message ToolCallFunction {
+  string name = 1;
+  string arguments = 2;  // JSON string
+}
+
+// Maps to ConversationMessage (TypedDict)
+message ConversationMessage {
+  string role = 1;
+
+  oneof content_type {
+    string text_content = 2;
+    ContentPartList parts = 3;
+  }
+
+  optional string name = 4;
+  optional string tool_call_id = 5;
+  repeated ToolCall tool_calls = 6;
+  optional string reasoning = 7;
+}
+
+// =====================
+// RenderChat RPC
+// =====================
+
+message RenderChatRequest {
+  repeated ChatMessage messages = 1;
+  ChatParams chat_params = 2;      // optional — defaults to ChatParams()
+  TokenizeParams tok_params = 3;   // optional — defaults to renderer.default_chat_tok_params
+}
+
+message RenderChatResponse {
+  repeated int32 prompt_token_ids = 1;
+  string prompt_text = 2;
+  int32 num_tokens = 3;
+  repeated ConversationMessage conversation = 4;
+}
+
+// =====================
+// RenderCompletion RPC
+// =====================
+
+message RenderCompletionRequest {
+  oneof prompt {
+    string text_prompt = 1;
+    TokenIds token_ids_prompt = 2;
+  }
+  TokenizeParams tok_params = 3;   // optional — defaults to renderer.default_cmpl_tok_params
+}
+
+message TokenIds {
+  repeated int32 token_ids = 1;
+}
+
+message RenderCompletionResponse {
+  repeated int32 prompt_token_ids = 1;
+  int32 num_tokens = 2;
+}
+
+// =====================
+// Health
+// =====================
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string message = 2;
+}
