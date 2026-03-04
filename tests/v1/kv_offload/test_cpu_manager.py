@@ -530,9 +530,13 @@ def test_filter_reused_manager():
     # Lookup [3, 4] -> 1st time
     # (evicts [2] from tracker since max_size is 3 and tracker has [1])
     assert manager.lookup(to_hashes([3, 4])) == 0
+    # Verify [2] was evicted from the tracker (tracker now has: [1], [3], [4])
+    assert to_hashes([2])[0] not in manager.counts
 
     # Lookup [2] again -> (this adds [2] back to the tracker as 1st time)
     assert manager.lookup(to_hashes([2])) == 0
+    # Verify [2] was re-added with count=1 (not eligible yet)
+    assert manager.counts.get(to_hashes([2])[0]) == 1
 
     # prepare store [2] -> should still be filtered out since count was reset
     prepare_store_output = manager.prepare_store(to_hashes([2]))

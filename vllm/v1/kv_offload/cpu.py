@@ -85,11 +85,11 @@ class CPUOffloadingSpec(OffloadingSpec):
                     f"Supported policies: lru, arc"
                 )
 
-            # The store_threshold extra config controls how many times a block must
-            # be seen before it is eligible for CPU offloading. This gates offloading
-            # to only blocks that show some reuse probability.
+            # store_threshold: how many times a block must appear in lookup()
+            # before it is eligible for CPU offloading.  Values < 2 disable
+            # filtering (a threshold of 1 equals no filter; 0 is the default).
             store_threshold = int(self.extra_config.get("store_threshold", 0))
-            if store_threshold > 1:
+            if store_threshold >= 2:
                 max_tracker_size = int(
                     self.extra_config.get("max_tracker_size", 64_000)
                 )

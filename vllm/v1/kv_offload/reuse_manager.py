@@ -35,8 +35,9 @@ class FilterReusedOffloadingManager(OffloadingManager):
 
     Args:
         backing: The underlying ``OffloadingManager`` to delegate to.
-        store_threshold: A block must be seen this many times before
-            it is eligible for offloading.
+        store_threshold: A block must be seen at least this many times in
+            ``lookup()`` before it is eligible for offloading.  Must be >= 2
+            (a value of 1 would be equivalent to no filtering).
         max_tracker_size: Maximum entries in the internal tracker's LRU table.
     """
 
@@ -46,6 +47,11 @@ class FilterReusedOffloadingManager(OffloadingManager):
         store_threshold: int = 2,
         max_tracker_size: int = 64_000,
     ):
+        if store_threshold < 2:
+            raise ValueError(
+                "FilterReusedOffloadingManager store_threshold must be >= 2, "
+                f"got {store_threshold}"
+            )
         if max_tracker_size < 1:
             raise ValueError(
                 "FilterReusedOffloadingManager max_tracker_size must be >= 1, "
