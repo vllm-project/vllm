@@ -23,7 +23,7 @@ if current_platform.is_xpu():
     from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
 
-class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class XPUExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
