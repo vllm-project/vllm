@@ -1354,8 +1354,10 @@ def _max_memory_usage_bytes_from_groups(
     page_size = get_uniform_page_size(
         [group.kv_cache_spec for group in kv_cache_groups]
     )
-    any_spec = kv_cache_groups[0].kv_cache_spec
-    blocks_needed = cdiv(any_spec.max_memory_usage_bytes(vllm_config), page_size)
+    blocks_needed = sum(
+        cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), page_size)
+        for group in kv_cache_groups
+    )
 
     return group_size * page_size * blocks_needed
 
