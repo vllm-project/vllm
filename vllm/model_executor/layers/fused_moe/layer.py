@@ -316,14 +316,14 @@ class FusedMoE(CustomOp):
         shared_experts: torch.nn.Module | None = None,
         routed_input_transform: torch.nn.Module | None = None,
         routed_output_transform: torch.nn.Module | None = None,
-        output_scale: float | None = None,
+        apply_scale_to_output: bool = False,
         zero_expert_type: str | None = None,
     ):
         super().__init__()
 
         self._routed_input_transform = routed_input_transform
         self._routed_output_transform = routed_output_transform
-        self._output_scale = output_scale
+        self._apply_scale_to_output = apply_scale_to_output
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -686,7 +686,8 @@ class FusedMoE(CustomOp):
             quant_method=self.quant_method,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
             routed_output_transform=self._routed_output_transform,
-            output_scale=self._output_scale,
+            apply_scale_to_output=self._apply_scale_to_output,
+            routed_scaling_factor=self.routed_scaling_factor,
         )
 
     # TODO(bnell): This method is provided as a hook so vllm/lora/layers/fused_moe.py

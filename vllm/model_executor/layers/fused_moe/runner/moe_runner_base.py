@@ -220,7 +220,8 @@ class MoERunnerBase(MoERunner):
         quant_method: FusedMoEMethodBase,
         enable_dbo: bool,
         routed_output_transform: torch.nn.Module | None = None,
-        output_scale: float | None = None,
+        apply_scale_to_output: bool = False,
+        routed_scaling_factor: float = 1.0,
     ):
         super().__init__()
         self.moe_config = moe_config
@@ -232,7 +233,8 @@ class MoERunnerBase(MoERunner):
         self.enable_dbo = enable_dbo
         self.enable_eplb = moe_config.moe_parallel_config.enable_eplb
         self.routed_output_transform = routed_output_transform
-        self.output_scale = output_scale
+        self.apply_scale_to_output = apply_scale_to_output
+        self.routed_scaling_factor = routed_scaling_factor
 
         # Needed for string -> FusedMoE layer lookup in custom ops.
         self.layer_name = layer.layer_name
@@ -315,9 +317,6 @@ class MoERunnerBase(MoERunner):
         trunc_size: int,
     ) -> torch.Tensor:
         result = states[..., :trunc_size]
-
-        if self.output_scale is not None:
-            result = result * self.output_scale
 
         if not self.moe_config.is_sequence_parallel and (
             self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1
@@ -512,6 +511,9 @@ class MoERunnerBase(MoERunner):
             if self._must_reduce_shared_expert_outputs():
                 shared_output = tensor_model_parallel_all_reduce(shared_output)
             result = shared_output + fused_output
+
+        if self.apply_scale_to_output:
+            result = result * self.routed_scaling_factor
 
         result = self._combine_and_reduce(result, og_hidden_dim)
 
