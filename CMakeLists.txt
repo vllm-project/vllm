@@ -344,9 +344,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/fp4/nvfp4_quant_entry.cu"
     "csrc/quantization/fp4/nvfp4_scaled_mm_entry.cu"
     "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
-    "csrc/cutlass_extensions/common.cpp"
-    "csrc/quantization/w8a8/fp8/per_token_group_quant.cu"
-    "csrc/quantization/w8a8/int8/per_token_group_quant.cu")
+    "csrc/cutlass_extensions/common.cpp")
 
   set_gencode_flags_for_srcs(
     SRCS "${VLLM_EXT_SRC}"
@@ -995,7 +993,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/stable/torch_bindings.cpp")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
-    list(APPEND VLLM_STABLE_EXT_SRC "csrc/stable/permute_cols.cu")
+    list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/stable/permute_cols.cu"
+      "csrc/stable/quantization/w8a8/fp8/per_token_group_quant.cu"
+      "csrc/stable/quantization/w8a8/int8/per_token_group_quant.cu")
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")

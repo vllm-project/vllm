@@ -1,6 +1,6 @@
 #pragma once
 
-#include "quantization/vectorization.cuh"
+#include "stable/quantization/vectorization.cuh"
 #include "quantization/utils.cuh"
 
 #include <cmath>
