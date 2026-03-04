@@ -306,7 +306,8 @@ class ReasoningParserManager:
             if isinstance(name, str):
                 names = [name]
             elif is_list_of(name, str):
-                names = name
+                assert name is not None
+                names = list(name)
             else:
                 names = [class_name]
 

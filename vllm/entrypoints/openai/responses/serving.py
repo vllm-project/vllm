@@ -140,7 +140,10 @@ def _extract_response_format_schema(request: ResponsesRequest) -> dict | None:
         request.structured_outputs is not None
         and request.structured_outputs.json is not None
     ):
-        return request.structured_outputs.json
+        val = request.structured_outputs.json
+        if isinstance(val, str):
+            return json_mod.loads(val)
+        return val
     return None
 
 
@@ -463,113 +466,114 @@ class OpenAIServingResponses(OpenAIServing):
         else:
             assert len(builtin_tool_list) == 0
             available_tools = []
-        tokenizer = self.renderer.get_tokenizer()
+        try:
+            tokenizer = self.renderer.get_tokenizer()
 
-        for engine_prompt in engine_prompts:
-            maybe_error = self._validate_generator_input(engine_prompt)
-            if maybe_error is not None:
-                return maybe_error
+            for engine_prompt in engine_prompts:
+                maybe_error = self._validate_generator_input(engine_prompt)
+                if maybe_error is not None:
+                    return maybe_error
 
-            default_max_tokens = get_max_tokens(
-                max_model_len,
-                request.max_output_tokens,
-                self._extract_prompt_len(engine_prompt),
-                self.default_sampling_params,
-                self.override_max_tokens,
-            )
+                default_max_tokens = get_max_tokens(
+                    max_model_len,
+                    request.max_output_tokens,
+                    self._extract_prompt_len(engine_prompt),
+                    self.default_sampling_params,
+                    self.override_max_tokens,
+                )
 
-            sampling_params = request.to_sampling_params(
-                default_max_tokens, self.default_sampling_params
-            )
+                sampling_params = request.to_sampling_params(
+                    default_max_tokens, self.default_sampling_params
+                )
 
-            trace_headers = (
-                None
-                if raw_request is None
-                else await self._get_trace_headers(raw_request.headers)
-            )
+                trace_headers = (
+                    None
+                    if raw_request is None
+                    else await self._get_trace_headers(raw_request.headers)
+                )
 
-            context: ConversationContext
-            if self.use_harmony:
-                if request.stream:
-                    context = StreamingHarmonyContext(messages, available_tools)
+                context: ConversationContext
+                if self.use_harmony:
+                    if request.stream:
+                        context = StreamingHarmonyContext(messages, available_tools)
+                    else:
+                        context = HarmonyContext(messages, available_tools)
                 else:
-                    context = HarmonyContext(messages, available_tools)
-            else:
-                if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
-                    # This is a feature in development for parsing
-                    # tokens during generation instead of at the end
-                    context = ParsableContext(
-                        response_messages=messages,
-                        tokenizer=tokenizer,
-                        reasoning_parser_cls=self.parser.reasoning_parser_cls
-                        if self.parser
-                        else None,
-                        request=request,
-                        tool_parser_cls=self.parser.tool_parser_cls
-                        if self.parser
-                        else None,
-                        available_tools=available_tools,
-                        chat_template=self.chat_template,
-                        chat_template_content_format=self.chat_template_content_format,
-                    )
-                else:
-                    context = SimpleContext()
-
-                if self.parser and self.parser.reasoning_parser_cls is not None:
-                    reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
-                    struct_out = sampling_params.structured_outputs
-
-                    if isinstance(struct_out, StructuredOutputsParams):
-                        if struct_out.all_non_structural_tag_constraints_none():
-                            # No content constraint — just apply reasoning
-                            # channel tags
-                            sampling_params.structured_outputs = replace(
-                                struct_out,
-                                structural_tag=(
-                                    reasoning_parser.prepare_structured_tag(
-                                        struct_out.structural_tag,
-                                        self.tool_server,
-                                    )
-                                ),
-                            )
-                        else:
-                            # Content constraint present (json, regex,
-                            # grammar, choice, json_object). Embed it in the
-                            # final channel tag within the structural tag.
-                            content_fmt = _constraint_to_content_format(struct_out)
-                            if content_fmt is not None:
-                                structural_tag = (
-                                    reasoning_parser.prepare_structured_tag(
-                                        None,
-                                        self.tool_server,
-                                        final_content_format=content_fmt,
-                                    )
-                                )
-                                if structural_tag is not None:
-                                    # Clear content constraints, set
-                                    # structural_tag, but preserve options
-                                    # like disable_any_whitespace.
-                                    sampling_params.structured_outputs = replace(
-                                        struct_out,
-                                        json=None,
-                                        regex=None,
-                                        choice=None,
-                                        grammar=None,
-                                        json_object=None,
-                                        structural_tag=structural_tag,
-                                    )
-                    elif struct_out is None:
-                        # No structured output requested, but still need
-                        # reasoning channel tags
-                        tag = reasoning_parser.prepare_structured_tag(
-                            None, self.tool_server
+                    if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
+                        # This is a feature in development for parsing
+                        # tokens during generation instead of at the end
+                        context = ParsableContext(
+                            response_messages=messages,
+                            tokenizer=tokenizer,
+                            reasoning_parser_cls=self.parser.reasoning_parser_cls
+                            if self.parser
+                            else None,
+                            request=request,
+                            tool_parser_cls=self.parser.tool_parser_cls
+                            if self.parser
+                            else None,
+                            available_tools=available_tools,
+                            chat_template=self.chat_template,
+                            chat_template_content_format=self.chat_template_content_format,
                         )
-                        if tag is not None:
-                            sampling_params.structured_outputs = (
-                                StructuredOutputsParams(
-                                    structural_tag=tag  # type: ignore[call-arg]
+                    else:
+                        context = SimpleContext()
+
+                    if self.parser and self.parser.reasoning_parser_cls is not None:
+                        reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
+                        struct_out = sampling_params.structured_outputs
+
+                        if isinstance(struct_out, StructuredOutputsParams):
+                            if struct_out.all_non_structural_tag_constraints_none():
+                                # No content constraint — just apply reasoning
+                                # channel tags
+                                sampling_params.structured_outputs = replace(
+                                    struct_out,
+                                    structural_tag=(
+                                        reasoning_parser.prepare_structured_tag(
+                                            struct_out.structural_tag,
+                                            self.tool_server,
+                                        )
+                                    ),
                                 )
+                            else:
+                                # Content constraint present (json, regex,
+                                # grammar, choice, json_object). Embed it in the
+                                # final channel tag within the structural tag.
+                                content_fmt = _constraint_to_content_format(struct_out)
+                                if content_fmt is not None:
+                                    structural_tag = (
+                                        reasoning_parser.prepare_structured_tag(
+                                            None,
+                                            self.tool_server,
+                                            final_content_format=content_fmt,
+                                        )
+                                    )
+                                    if structural_tag is not None:
+                                        # Clear content constraints, set
+                                        # structural_tag, but preserve options
+                                        # like disable_any_whitespace.
+                                        sampling_params.structured_outputs = replace(
+                                            struct_out,
+                                            json=None,
+                                            regex=None,
+                                            choice=None,
+                                            grammar=None,
+                                            json_object=None,
+                                            structural_tag=structural_tag,
+                                        )
+                        elif struct_out is None:
+                            # No structured output requested, but still need
+                            # reasoning channel tags
+                            tag = reasoning_parser.prepare_structured_tag(
+                                None, self.tool_server
                             )
+                            if tag is not None:
+                                sampling_params.structured_outputs = (
+                                    StructuredOutputsParams(
+                                        structural_tag=tag  # type: ignore[call-arg]
+                                    )
+                                )
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
                     engine_prompt=engine_prompt,

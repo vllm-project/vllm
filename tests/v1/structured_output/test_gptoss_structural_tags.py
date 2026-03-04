@@ -12,7 +12,7 @@ from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.reasoning.gptoss_reasoning_parser import (
     GptOssReasoningParser,
     from_builtin_tool_to_tag,
-    no_func_reaonsing_tag,
+    no_func_reasoning_tag,
     tag_with_builtin_funcs,
 )
 
@@ -26,6 +26,7 @@ class TestGptOssReasoningParser:
         tokenizer = Mock()
         tokenizer.encode = Mock(return_value=[1, 2, 3, 4, 5])
         tokenizer.vocab = {"<|end|>": 6}
+        tokenizer.get_vocab = Mock(return_value={"<|end|>": 6})
         return tokenizer
 
     @pytest.fixture
@@ -59,7 +60,7 @@ class TestGptOssReasoningParser:
     def test_prepare_structured_tag_no_tool_server(self, reasoning_parser):
         """Test prepare_structured_tag with no tool server."""
         result = reasoning_parser.prepare_structured_tag(None, None)
-        expected = json.dumps(no_func_reaonsing_tag)
+        expected = json.dumps(no_func_reasoning_tag)
 
         assert result == expected
 
@@ -113,7 +114,7 @@ class TestGptOssReasoningParser:
     def test_tag_with_builtin_funcs(self):
         """Test tag_with_builtin_funcs function."""
         builtin_tools = ["browser", "python"]
-        result = tag_with_builtin_funcs(no_func_reaonsing_tag, builtin_tools)
+        result = tag_with_builtin_funcs(no_func_reasoning_tag, builtin_tools)
 
         assert result["type"] == "structural_tag"
         # Should have original analysis tag + 2 tags per tool
@@ -125,13 +126,13 @@ class TestGptOssReasoningParser:
 
     def test_tag_structure_invariants(self):
         """Test that the basic tag structure follows expected format."""
-        # Test the base no_func_reaonsing_tag structure
-        assert no_func_reaonsing_tag["type"] == "structural_tag"
-        assert no_func_reaonsing_tag["format"]["type"] == "triggered_tags"
-        assert no_func_reaonsing_tag["format"]["stop_after_first"] is False
+        # Test the base no_func_reasoning_tag structure
+        assert no_func_reasoning_tag["type"] == "structural_tag"
+        assert no_func_reasoning_tag["format"]["type"] == "triggered_tags"
+        assert no_func_reasoning_tag["format"]["stop_after_first"] is False
 
         # Verify analysis tag structure
-        analysis_tag = no_func_reaonsing_tag["format"]["tags"][0]
+        analysis_tag = no_func_reasoning_tag["format"]["tags"][0]
         assert analysis_tag["begin"] == "<|channel|>analysis<|message|>"
         assert analysis_tag["content"]["type"] == "any_text"
         assert analysis_tag["end"] == "<|end|>"

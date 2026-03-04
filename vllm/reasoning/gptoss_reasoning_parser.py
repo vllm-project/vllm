@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import json
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from transformers import PreTrainedTokenizerBase
 
@@ -167,10 +168,9 @@ class GptOssReasoningParser(ReasoningParser):
             # There is potential risk for appending the tag to the original tag
             return original_tag
 
-        import copy
-
+        tag: dict[str, Any]
         if tool_server is None:
-            tag = copy.deepcopy(no_func_reaonsing_tag)
+            tag = copy.deepcopy(no_func_reasoning_tag)
         else:
             builtin_tool_list: list[str] = []
             if tool_server.has_tool("browser"):
@@ -182,10 +182,10 @@ class GptOssReasoningParser(ReasoningParser):
 
             if len(builtin_tool_list) > 0:
                 logger.info("Builtin_tool_list: %s", builtin_tool_list)
-                tag = tag_with_builtin_funcs(no_func_reaonsing_tag, builtin_tool_list)
+                tag = tag_with_builtin_funcs(no_func_reasoning_tag, builtin_tool_list)
             else:
                 logger.info("Builtin_tool_list is empty")
-                tag = copy.deepcopy(no_func_reaonsing_tag)
+                tag = copy.deepcopy(no_func_reasoning_tag)
 
         # If a content constraint is requested for the final channel,
         # add a triggered tag for <|channel|>final with that constraint.
