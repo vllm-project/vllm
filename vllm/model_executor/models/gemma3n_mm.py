@@ -778,6 +778,7 @@ class Gemma3nForConditionalGeneration(
         task_type: Literal["transcribe", "translate"],
         request_prompt: str,
         to_language: str | None,
+        response_prefix: str = "",
     ) -> PromptType:
         """
         Gemma3n supports "free-form" transcription.
