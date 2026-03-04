@@ -222,11 +222,8 @@ class DefaultModelState(ModelState):
         for block_table in attn_block_tables:
             block_table[num_reqs:attn_num_reqs].zero_()
 
-        attn_slot_mappings = torch.full(
-            (slot_mappings.shape[0], attn_num_tokens),
-            PAD_SLOT_ID,
-            dtype=slot_mappings.dtype,
-            device=slot_mappings.device,
+        attn_slot_mappings = slot_mappings.new_full(
+            (slot_mappings.shape[0], attn_num_tokens), PAD_SLOT_ID
         )
         attn_slot_mappings[:, :num_tokens] = slot_mappings[:, :num_tokens]
 
