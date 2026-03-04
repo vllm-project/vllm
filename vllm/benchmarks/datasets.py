@@ -1567,10 +1567,10 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
     speed_bench_group.add_argument(
         "--speed-bench-output-len",
         type=int,
-        default=1024,
+        default=4096,
         help="Num of output tokens per request, used only for speed bench dataset.",
     )
-    spec_bench_group.add_argument(
+    speed_bench_group.add_argument(
         "--speed-bench-category",
         type=str,
         default=None,
