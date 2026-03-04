@@ -1,0 +1,36 @@
+steps:
+  - label: "Intel GPU Test"
+    depends_on: []
+    soft_fail: true
+    agents:
+     queue: "intel-xpu-kubevirt"
+    commands: 
+    - sh .buildkite/scripts/hardware_ci/run-xpu-test.sh
+    env:
+      DOCKER_HOST: tcp://localhost:2375
+      REGISTRY_USER: ${REGISTRY_USER}
+      REGISTRY: ${REGISTRY}
+    secrets:
+      - REGISTRY_TOKEN
+      - HF_TOKEN
+    plugins:
+      - kubernetes:
+          podSpecPatch:
+            imagePullSecrets: # <-- This is the only required field for imagePullSecrets.
+              - name: sharvilshah-1-pull-secret
+            containers:
+            - name: container-0    # <-- Specify this exactly as `container-0`.
+              image: quay.io/sharvilshah-1/vllm-ci:845ee348ef82d12b5d106384070f7578c843d3cd
+              resources:           #     Currently under experimentation to make this more ergonomic.
+                requests:
+                  "gpu.intel.com/i915": "2"
+                  cpu: "32"
+                  memory: "16Gi"
+                limits:
+                  "gpu.intel.com/i915": "2"
+              hostIPC: true
+              volumeMounts:
+              - mountPath: /buildkite/workspace
+                name: workspace
+              #command: [""]
+
