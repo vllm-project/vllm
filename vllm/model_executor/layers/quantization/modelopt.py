@@ -1709,8 +1709,10 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
-        self.mxfp8_backend = select_mxfp8_moe_backend(self.moe)
         assert self.quant_config.is_checkpoint_mxfp8_serialized
+
+        # Select MXFP8 MoE backend
+        self.mxfp8_backend = select_mxfp8_moe_backend(self.moe)
 
     def create_weights(
         self,
@@ -1833,16 +1835,6 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         num_experts = layer.w13_weight.shape[0]
         is_gated = self.moe.is_act_and_mul
         intermediate_size_factor = 2 if is_gated else 1
-
-        logger.debug(
-            "MXFP8 MoE: activation=%s is_act_and_mul=%s "
-            "w13_weight_shape=%s w13_scale_shape=%s w2_weight_shape=%s",
-            self.moe.activation,
-            is_gated,
-            tuple(layer.w13_weight.shape),
-            tuple(layer.w13_weight_scale.shape),
-            tuple(layer.w2_weight.shape),
-        )
 
         w13_weight = layer.w13_weight.data
         w13_scale = layer.w13_weight_scale.data
