@@ -8,6 +8,7 @@ This guide covers optimization strategies and performance tuning for vLLM V1.
 ## Optimization Levels
 
 vLLM provides 4 optimization levels (`-O0`, `-O1`, `-O2`, `-O3`) that allow users to trade off startup time for performance:
+
 - `-O0`: No optimizations. Fastest startup time, but lowest performance.
 - `-O1`: Fast optimization. Simple compilation and fast fusions, and PIECEWISE cudagraphs.
 - `-O2`: Default optimization. Additional compilation ranges, additional fusions, FULL_AND_PIECEWISE cudagraphs.
