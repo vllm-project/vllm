@@ -199,6 +199,7 @@ class WorkerWrapperBase:
         users can launch 2 engines/executors, each with only 1 worker.
         All workers have rpc_rank=0, but they have different ranks in the TP
         group.
+        rpc_rank and global_rank may be updated later in `adjust_rank`.
         """
         self.rpc_rank = rpc_rank
         self.global_rank = self.rpc_rank if global_rank is None else global_rank
@@ -218,7 +219,13 @@ class WorkerWrapperBase:
         to adjust the rpc_rank of workers after we create all workers.
         """
         if self.rpc_rank in rank_mapping:
-            self.rpc_rank = rank_mapping[self.rpc_rank]
+            new_rank = rank_mapping[self.rpc_rank]
+            if self.global_rank == self.rpc_rank:
+                # Currently, only the Ray executor initiates adjust_rank;
+                # in this case, global_rank is identical to rpc_rank,
+                # so global_rank is updated synchronously as well.
+                self.global_rank = new_rank
+            self.rpc_rank = new_rank
 
     def update_environment_variables(
         self,
