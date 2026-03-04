@@ -7,6 +7,7 @@ import warnings
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass
 from functools import cached_property, lru_cache, partial
 from itertools import accumulate
 from pathlib import Path
@@ -528,7 +529,17 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         else:
             num_items = len(self._items_by_modality[original_modality]) + 1
 
-        self.mm_processor.info.validate_num_items(input_modality, num_items)
+        mm_config = self.model_config.multimodal_config
+        if (
+            mm_config is not None
+            and mm_config.enable_mm_embeds
+            and mm_config.get_limit_per_prompt(input_modality) == 0
+            and original_modality.endswith("_embeds")
+        ):
+            # Skip validation: embeddings bypass limit when enable_mm_embeds=True
+            pass
+        else:
+            self.mm_processor.info.validate_num_items(input_modality, num_items)
 
         # Track original modality for vision_chunk items
         if use_vision_chunk:
@@ -1014,6 +1025,13 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("video", placeholder)
 
 
+@dataclass
+class ChatTemplateConfig:
+    chat_template: str | None = None
+    chat_template_content_format: ChatTemplateContentFormatOption = "auto"
+    trust_request_chat_template: bool = False
+
+
 def validate_chat_template(chat_template: Path | str | None):
     """Raises if the provided chat template appears invalid."""
     if chat_template is None:
@@ -1164,7 +1182,10 @@ def _get_full_multimodal_text_prompt(
 
     # NOTE: Default behaviour: we always add missing placeholders
     # at the front of the prompt, if interleave_strings=False
-    return "\n".join(missing_placeholders + [text_prompt])
+    if text_prompt:
+        return "\n".join(missing_placeholders + [text_prompt])
+    else:
+        return "\n".join(missing_placeholders)
 
 
 # No need to validate using Pydantic again

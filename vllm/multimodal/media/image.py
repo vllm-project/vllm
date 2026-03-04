@@ -8,12 +8,10 @@ import pybase64
 import torch
 from PIL import Image
 
-from vllm.logger import init_logger
+from vllm.utils.serial_utils import tensor2base64
 
 from ..image import convert_image_mode, rgba_to_rgb
 from .base import MediaIO, MediaWithBytes
-
-logger = init_logger(__file__)
 
 
 class ImageMediaIO(MediaIO[Image.Image]):
@@ -77,17 +75,8 @@ class ImageMediaIO(MediaIO[Image.Image]):
         self,
         media: Image.Image,
         *,
-        image_format: str | None = None,
+        image_format: str = "PNG",
     ) -> str:
-        if image_format is None:
-            logger.warning_once(
-                "The default format of `ImageMediaIO.encode_base64` will be changed "
-                'from "JPEG" to "PNG" in v0.15 to avoid lossy compression. '
-                "To continue using the old default, "
-                'pass `format="JPEG"` explicitly to silence this warning.'
-            )
-            image_format = "JPEG"
-
         image = media
 
         with BytesIO() as buffer:
@@ -121,4 +110,4 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
             return tensor.to_dense()
 
     def encode_base64(self, media: torch.Tensor) -> str:
-        return pybase64.b64encode(media.numpy()).decode("utf-8")
+        return tensor2base64(media)

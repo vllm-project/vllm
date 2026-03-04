@@ -48,7 +48,7 @@ th:not(:first-child) {
 |-----------------------|---------|----------|----------|-------|----------|-----------|-------------|-----------|
 | AWQ                   | ❌      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ✅︎          | ✅︎        |
 | GPTQ                  | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ✅︎          | ✅︎        |
-| Marlin (GPTQ/AWQ/FP8) | ❌      | ❌       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌        |
+| Marlin (GPTQ/AWQ/FP8/FP4) | ❌      | ✅︎*       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌        |
 | INT8 (W8A8)           | ❌      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ✅︎        |
 | FP8 (W8A8)            | ❌      | ❌       | ❌       | ✅︎    | ✅︎       | ✅︎         | ❌          | ❌        |
 | bitsandbytes          | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌        |
@@ -59,6 +59,7 @@ th:not(:first-child) {
 - ✅︎ indicates that the quantization method is supported on the specified hardware.
 - ❌ indicates that the quantization method is not supported on the specified hardware.
 - All Intel Gaudi quantization support has been migrated to [vLLM-Gaudi](https://github.com/vllm-project/vllm-gaudi).
+- *Turing does not support Marlin MXFP4.
 
 !!! note
     For information on quantization support on Google TPU, please refer to the [TPU-Inference Recommended Models and Features](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models_features/) documentation.
