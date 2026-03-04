@@ -3409,7 +3409,7 @@ class GPUModelRunner(
             # Update persistent batch states.
             self._update_states(scheduler_output)
 
-            if has_ec_transfer() and get_ec_transfer().is_producer:
+            if has_ec_transfer() and not get_ec_transfer().is_consumer:
                 with self.maybe_get_ec_connector_output(
                     scheduler_output,
                     encoder_cache=self.encoder_cache,
@@ -5700,6 +5700,22 @@ class GPUModelRunner(
                 self.uniform_decode_query_len, self.parallel_config.tensor_parallel_size
             )
 
+        # If the model has Mamba layers and cudagraph mode includes FULL
+        # decode, cap cudagraph capture sizes to the number of available
+        # Mamba cache blocks. Each decode request needs one conv_state
+        # cache line, so capture batch sizes cannot exceed num_blocks.
+        # Only FULL decode graphs are affected because PIECEWISE captures
+        # run GDN/Mamba ops eagerly (prefill path, no causal_conv1d_update).
+        # See: https://github.com/vllm-project/vllm/issues/34094
+        if cudagraph_mode.has_full_cudagraphs():
+            has_mamba = any(
+                isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_groups
+            )
+            if has_mamba and self.kv_cache_config is not None:
+                self.compilation_config.adjust_cudagraph_sizes_for_mamba_cache(
+                    self.kv_cache_config.num_blocks
+                )
+
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.
         self.compilation_config.cudagraph_mode = cudagraph_mode
@@ -6166,7 +6182,7 @@ class GPUModelRunner(
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
-        if has_ec_transfer() and get_ec_transfer().is_producer:
+        if has_ec_transfer() and not get_ec_transfer().is_consumer:
             return {}
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         layer_type = cast(type[Any], AttentionLayerBase)
