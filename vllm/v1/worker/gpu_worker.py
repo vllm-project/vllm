@@ -340,11 +340,83 @@ class Worker(WorkerBase):
             )
             self.model_runner.eep_eplb_suppressed = True
 
+        # Set up compile threads and warm the pool before the first
+        # torch.compile (which happens in determine_available_memory).
+        self._maybe_warm_up_compile_pool()
+
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
     def reload_weights(self, *args, **kwargs) -> None:
         self.model_runner.reload_weights(*args, **kwargs)
+
+    @property
+    def _num_parallel_compile_processes(self) -> int:
+        """Return the number of parallel compile processes if applicable,
+        or 0 if parallel compilation is not in use."""
+        using_inductor = (
+            self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and not self.model_config.enforce_eager
+        )
+        if not using_inductor:
+            return 0
+        # Verify the PyTorch version supports quiesce — we need it
+        # to stop the pool before cudagraph capture. If missing,
+        # fall back to single-threaded compilation.
+        from torch._inductor.compile_worker.subproc_pool import (
+            SubprocPool,
+        )
+
+        if not hasattr(SubprocPool, "quiesce"):
+            return 0
+        compile_processes = envs.VLLM_COMPILE_PROCESSES
+        if compile_processes is not None:
+            return compile_processes
+        # Auto-compute parallel compile processes.
+        # - Cap at 8: vLLM's graph splitting typically does not produce
+        #   many inductor triton kernels
+        # - Divide CPUs by GPU count: each GPU worker spawns its own
+        #   compile pool, so we split the machine's CPUs
+        # - Reserve 1 core per worker for the main thread which runs
+        #   Dynamo tracing and graph lowering concurrently.
+        cpu_count = (
+            len(os.sched_getaffinity(0))
+            if hasattr(os, "sched_getaffinity")
+            else os.cpu_count() or 1
+        )
+        num_gpus = max(torch.cuda.device_count(), 1)
+        cpus_per_gpu = cpu_count // num_gpus
+        return max(1, min(8, cpus_per_gpu - 1))
+
+    def _maybe_warm_up_compile_pool(self) -> None:
+        """Set up parallel compile threads and pre-warm the inductor
+        compile worker pool. Must be called before first torch.compile."""
+        num_procs = self._num_parallel_compile_processes
+        # Always set compile_threads to ensure a safe value, even if
+        # env_override.py set a higher value at import time but the
+        # current environment can't support it (e.g., old PyTorch).
+        torch._inductor.config.compile_threads = max(1, num_procs)
+        if num_procs <= 1:
+            return
+        logger.info("Using %d parallel compile processes", num_procs)
+        from torch._inductor.async_compile import AsyncCompile
+
+        AsyncCompile.warm_pool()
+
+    def _maybe_quiesce_compile_pool(self) -> None:
+        """Quiesce the compile worker pool before cudagraph capture.
+
+        Uses quiesce() instead of shutdown() — it's instant vs 6+ seconds.
+        Quiesce stops the internal ProcessPoolExecutor but keeps the
+        sidecar subprocess alive (sleeping, 0% CPU) for potential reuse.
+        """
+        if self._num_parallel_compile_processes <= 1:
+            return
+        from torch._inductor.async_compile import _pool_set
+
+        logger.info("Quiescing compile worker pools")
+        for pool in _pool_set:
+            pool.quiesce()
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -602,6 +674,9 @@ class Worker(WorkerBase):
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
         kernel_warmup(self)
+
+        # Quiesce the compile worker pool before cudagraph capture.
+        self._maybe_quiesce_compile_pool()
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:

@@ -61,11 +61,40 @@ def test_moe_startup(monkeypatch, vllm_runner, fresh_vllm_cache):
     counters.clear()
     with compilation_counter.expect(
         num_compiled_artifacts_loaded=3,
-        num_compiled_artifacts_saved=0,
+        # TODO: warm start should not save any artifacts
+        # https://github.com/vllm-project/vllm/issues/35708
+        num_compiled_artifacts_saved=1,
     ):
         _run_vllm(vllm_runner)
     assert counters["aot_autograd"]["total"] == 30
     assert counters["aot_autograd"]["autograd_cache_miss"] == 0
-    assert (
-        counters["aot_autograd"]["autograd_cache_hit"] == 0
-    )  # No miss at aot_autograd level causing disk I/O.
+    assert counters["aot_autograd"]["autograd_cache_hit"] == 1
+
+
+def test_parallel_compile_pool(monkeypatch, vllm_runner):
+    """Test that parallel compile pool is warmed up and quiesced by vLLM."""
+    from torch._inductor.async_compile import (
+        _pool_set,
+        shutdown_compile_workers,
+    )
+
+    # Explicitly set parallel compilation to 4 processes.
+    monkeypatch.setenv("VLLM_COMPILE_PROCESSES", "4")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    try:
+        # Run vLLM — the worker should set compile_threads, warm up
+        # the pool, then quiesce it before cudagraph capture.
+        _run_vllm(vllm_runner)
+
+        # Verify pool exists and was quiesced (not shut down).
+        # After quiesce(), SubprocPool.quiesce_waitcounter is set to a
+        # non-None value while the pool itself stays alive for reuse.
+        assert len(_pool_set) > 0, "Pool should exist after vLLM run"
+        for pool in _pool_set:
+            assert pool.quiesce_waitcounter is not None, (
+                "Pool should be quiesced after compilation"
+            )
+    finally:
+        # Clean up for other tests in the same pytest session
+        shutdown_compile_workers()

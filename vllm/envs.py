@@ -225,6 +225,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_DUMP_PATH: str | None = None
     VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
     VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING: bool = True
+    VLLM_COMPILE_PROCESSES: int | None = None
     VLLM_USE_NCCL_SYMM_MEM: bool = False
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_USE_FBGEMM: bool = False
@@ -1551,6 +1552,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default, this is enabled (1)
     "VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING": lambda: bool(
         int(os.getenv("VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING", "1"))
+    ),
+    # Number of parallel compile processes for torch.inductor.
+    # None (default) = auto-compute based on CPU/GPU count.
+    # Set to 1 to disable parallel compilation.
+    "VLLM_COMPILE_PROCESSES": lambda: (
+        int(v) if (v := os.getenv("VLLM_COMPILE_PROCESSES")) is not None else None
     ),
     # Flag to enable NCCL symmetric memory allocation and registration
     "VLLM_USE_NCCL_SYMM_MEM": lambda: bool(
