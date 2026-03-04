@@ -14,9 +14,6 @@ from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
-    mxfp8_e4m3_quantize,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -213,7 +210,10 @@ def flashinfer_fused_moe_blockscale_fp8(
 ) -> torch.Tensor:
     from flashinfer.fused_moe import Fp8QuantizationType
 
-    from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
+    from vllm.utils.flashinfer import (
+        flashinfer_mxfp8_quantize,
+        flashinfer_trtllm_fp8_block_scale_moe,
+    )
 
     num_expert_group = num_expert_group if num_expert_group is not None else 0
     topk_group = topk_group if topk_group is not None else 0
@@ -238,17 +238,22 @@ def flashinfer_fused_moe_blockscale_fp8(
 
     if fp8_quantization_type == Fp8QuantizationType.DeepSeekFp8:
         a_q, a_sf = per_token_group_quant_fp8(x, block_shape[1])
+        # DeepSeek FP8 scales must be transposed for the kernel.
+        a_sf = a_sf.t().contiguous()
         use_shuffled_weight = False
     else:
-        a_q, a_sf = mxfp8_e4m3_quantize(x)
+        # a_q, a_sf = mxfp8_e4m3_quantize(x)
+        a_q, a_sf = flashinfer_mxfp8_quantize(x, False)
+        a_sf = a_sf.view(torch.uint8).reshape(x.size(0), -1)
+        # MXFP8 scales are already in [num_tokens, hidden_size // 32];
+        # no transpose needed.
         use_shuffled_weight = True
-    # NOTE: scales of hidden states have to be transposed!
-    a_sf_t = a_sf.t().contiguous()
+
     return flashinfer_trtllm_fp8_block_scale_moe(
         routing_logits=routing_logits,
         routing_bias=routing_bias,
-        hidden_states=a_q,
-        hidden_states_scale=a_sf_t,
+        hidden_states=a_q.to(torch.float8_e4m3fn),
+        hidden_states_scale=a_sf,
         gemm1_weights=w13_weight,
         gemm1_weights_scale=w13_weight_scale_inv,
         gemm2_weights=w2_weight,

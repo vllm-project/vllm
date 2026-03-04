@@ -115,7 +115,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .cpu_wna16 import CPUAWQConfig
     from .experts_int8 import ExpertsInt8Config
     from .fbgemm_fp8 import FBGEMMFp8Config
-    from .fp8 import Fp8Config, Mxfp8Config
+    from .fp8 import Fp8Config
     from .fp_quant import FPQuantConfig
     from .gguf import GGUFConfig
     from .gptq import GPTQConfig
@@ -124,6 +124,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .modelopt import ModelOptFp8Config, ModelOptMxFp8Config, ModelOptNvFp4Config
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import Mxfp4Config
+    from .mxfp8 import Mxfp8Config
     from .petit import PetitNvFp4Config
     from .ptpc_fp8 import PTPCFp8Config
     from .torchao import TorchAOConfig
