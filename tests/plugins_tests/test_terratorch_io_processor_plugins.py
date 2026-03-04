@@ -103,6 +103,7 @@ async def test_prithvi_mae_plugin_online(
     )
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name, image_url, plugin, expected_hash",
     [
