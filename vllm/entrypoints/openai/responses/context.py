@@ -845,6 +845,7 @@ class StreamingHarmonyContext(HarmonyContext):
         self.last_tok = None
         self.first_tok_of_message = True
         self.last_content_delta = None
+        self.channel_deltas: list[tuple[str | None, str | None, str]] = []
 
     @property
     def messages(self) -> list:
@@ -854,6 +855,7 @@ class StreamingHarmonyContext(HarmonyContext):
         # append_output is called for each output token in streaming case,
         # so we only want to add the prompt tokens once for each message.
         self.last_content_delta = None
+        self.channel_deltas = []
         if self.first_tok_of_message:
             self._update_prefill_token_usage(output)
         # Reset self.first_tok_of_message if needed:
@@ -864,7 +866,21 @@ class StreamingHarmonyContext(HarmonyContext):
         last_delta_text = ""
         for tok in output.outputs[0].token_ids:
             self.parser.process(tok)
-            last_delta_text += self.parser.last_content_delta or ""
+            tok_delta = self.parser.last_content_delta
+            if tok_delta:
+                channel = self.parser.current_channel
+                recipient = self.parser.current_recipient
+                # Coalesce consecutive tokens in the same channel+recipient
+                if (
+                    self.channel_deltas
+                    and self.channel_deltas[-1][0] == channel
+                    and self.channel_deltas[-1][1] == recipient
+                ):
+                    ch, rcp, prev = self.channel_deltas[-1]
+                    self.channel_deltas[-1] = (ch, rcp, prev + tok_delta)
+                else:
+                    self.channel_deltas.append((channel, recipient, tok_delta))
+                last_delta_text += tok_delta
         if last_delta_text:
             self.last_content_delta = last_delta_text
         self._update_decode_token_usage(output)
