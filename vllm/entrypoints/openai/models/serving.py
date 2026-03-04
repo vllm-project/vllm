@@ -39,7 +39,7 @@ class OpenAIServingModels:
     def __init__(
         self,
         renderer_client: RendererClient,
-        engine_client: EngineClient,
+        engine_client: EngineClient | None,
         base_model_paths: list[BaseModelPath],
         *,
         lora_modules: list[LoRAModulePath] | None = None,
@@ -126,6 +126,14 @@ class OpenAIServingModels:
     async def load_lora_adapter(
         self, request: LoadLoRAAdapterRequest, base_model_name: str | None = None
     ) -> ErrorResponse | str:
+        if self.engine_client is None:
+            return create_error_response(
+                message="LoRA adapters cannot be loaded "
+                "because the engine client is not initialized.",
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
         lora_name = request.lora_name
 
         # Ensure atomicity based on the lora name
@@ -242,6 +250,14 @@ class OpenAIServingModels:
             ErrorResponse (404) if no resolver finds the adapter.
             ErrorResponse (400) if adapter(s) are found but none load.
         """
+        if self.engine_client is None:
+            return create_error_response(
+                message="LoRA adapters cannot be resolved "
+                "because the engine client is not initialized.",
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
         async with self.lora_resolver_lock[lora_name]:
             # First check if this LoRA is already loaded
             if lora_name in self.lora_requests:
