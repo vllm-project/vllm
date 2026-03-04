@@ -1397,6 +1397,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
             patch_attention_mask=patch_attn_mask.unsqueeze(1),
             tgt_sizes=None,
         )
+
         return self.resampler(vision_embedding, tgt_sizes)
 
 
@@ -1487,6 +1488,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
             patch_attention_mask=patch_attn_mask.unsqueeze(1),
             tgt_sizes=tgt_sizes,
         )
+
         return self.resampler(vision_embedding, tgt_sizes)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1683,6 +1685,7 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
             patch_attention_mask=patch_attn_mask.unsqueeze(1),
             tgt_sizes=tgt_sizes,
         )
+
         return self.resampler(vision_embedding, tgt_sizes, all_temporal_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
