@@ -424,6 +424,8 @@ def prepare_inputs_to_capture(
     slot_mappings_by_layer = build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
     )
+
+    # HACK(woosuk): Special handling for DCP.
     if block_tables.cp_size > 1:
         prepare_dcp_local_seq_lens(
             input_buffers.dcp_local_seq_lens,
@@ -434,6 +436,7 @@ def prepare_inputs_to_capture(
             block_tables.cp_interleave,
         )
         input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
+
     attn_metadata = model_state.prepare_attn(
         input_batch,
         input_block_tables,

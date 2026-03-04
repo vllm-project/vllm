@@ -152,8 +152,8 @@ class EagleSpeculator:
             hidden_states = hidden_states[:num_reqs]
             logits = self.model.compute_logits(last_hidden_states)
 
-            # NOTE(woosuk): We must add 1 to the positions to match the Gumbel
-            # noise used for draft and target sampling.
+            # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
+            # used for draft and target sampling.
             draft_tokens = gumbel_sample(
                 logits,
                 idx_mapping,
@@ -163,7 +163,9 @@ class EagleSpeculator:
                 apply_temperature=True,
             )
             self.draft_tokens[:num_reqs, step] = draft_tokens
+
             if step < self.num_speculative_steps - 1:
+                # Update the inputs for the next step.
                 update_eagle_inputs(
                     draft_tokens,
                     hidden_states,
