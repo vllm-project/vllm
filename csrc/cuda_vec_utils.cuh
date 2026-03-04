@@ -196,7 +196,6 @@ __forceinline__ __device__ u32x8_t ld256_cs(const u32x8_t* addr) {
   return val;
 #else
   assert(false && "ld256_cs requires SM100+ with CUDA 12.9+");
-  return {};
 #endif
 }
 
@@ -240,7 +239,6 @@ __forceinline__ __device__ int4 ld128_cs(const int4* addr) {
   return val;
 #else
   assert(false && "ld128_cs is not supported on ROCm");
-  return {};
 #endif
 }
 
@@ -301,7 +299,6 @@ __device__ __forceinline__ void ld128_cg_or_zero(uint4& val, const void* ptr,
   val = uint4{r0, r1, r2, r3};
 #else
   assert(false && "ld128_cg_or_zero is not supported on ROCm");
-  return {};
 #endif
 }
 
