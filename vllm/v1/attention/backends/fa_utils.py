@@ -55,9 +55,6 @@ elif current_platform.is_rocm():
 def get_flash_attn_version(
     requires_alibi: bool = False, head_size: int | None = None
 ) -> int | None:
-    # import here to avoid circular dependencies
-    from vllm.platforms import current_platform
-
     if current_platform.is_xpu():
         return 2
     if current_platform.is_rocm():
