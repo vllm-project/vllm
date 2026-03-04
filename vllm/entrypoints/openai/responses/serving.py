@@ -11,6 +11,7 @@ from copy import copy
 from http import HTTPStatus
 from typing import Any, Final
 
+import jinja2
 from fastapi import Request
 from openai.types.responses import (
     ResponseContentPartAddedEvent,
@@ -1333,11 +1334,17 @@ class OpenAIServingResponses(OpenAIServing):
         event_deque: deque[StreamingResponsesResponse] = deque()
         new_event_signal = asyncio.Event()
         self.event_store[request.request_id] = (event_deque, new_event_signal)
-        generator = self.responses_stream_generator(request, *args, **kwargs)
+        response = None
         try:
+            generator = self.responses_stream_generator(request, *args, **kwargs)
             async for event in generator:
                 event_deque.append(event)
                 new_event_signal.set()  # Signal new event available
+        except GenerationError as e:
+            response = self._convert_generation_error_to_response(e)
+        except Exception as e:
+            logger.exception("Background request failed for %s", request.request_id)
+            response = self.create_error_response(e)
         finally:
             new_event_signal.set()
 
@@ -1348,7 +1355,6 @@ class OpenAIServingResponses(OpenAIServing):
                 "failed",
                 allowed_current_statuses={"queued", "in_progress"},
             )
-
 
     async def _run_background_request(
         self,
@@ -1552,7 +1558,6 @@ class OpenAIServingResponses(OpenAIServing):
             status_code=HTTPStatus.BAD_REQUEST,
             param="store",
         )
-
 
     async def _process_simple_streaming_events(
         self,
