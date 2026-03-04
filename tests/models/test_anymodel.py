@@ -634,7 +634,7 @@ class TestAnyModelRegistryFlow:
             base_architectures=base_architectures or [],
             block_configs=block_configs or [_block()],
         )
-        return _ns(hf_config=hf)
+        return _ns(hf_config=hf, model_impl="auto")
 
     # --- _anymodel_base_arch helper ---
 

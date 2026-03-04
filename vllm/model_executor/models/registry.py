@@ -1087,6 +1087,49 @@ class _ModelRegistry:
         base_archs = getattr(hf_config, "base_architectures", None) or []
         return base_archs[0] if base_archs else None
 
+    def _resolve_anymodel_wrapper_cls(
+        self,
+        model_config: ModelConfig,
+    ) -> "type[nn.Module] | None":
+        """Build (or retrieve from cache) the concrete AnyModel wrapper class.
+
+        The wrapper inherits from both :class:`AnyModel` and the target base
+        model (e.g. ``NemotronHForCausalLM``), giving callers access to all
+        class-level methods and attributes defined on the base model
+        (``get_mamba_state_shape_from_config``, ``_processor_factory``, etc.).
+
+        Returns ``None`` when the base architecture is unknown or not
+        registered in :data:`_ARCH_REGISTRY`.
+        """
+        # Deferred import to avoid circular dependency at module load time.
+        from vllm.model_executor.models.anymodel import (
+            _ARCH_REGISTRY,
+            AnyModel,
+            _arch_info_from_config,
+            _make_wrapper_cls,
+        )
+
+        base_arch = self._anymodel_base_arch(model_config)
+        if not base_arch:
+            return None
+
+        hf_config = getattr(model_config, "hf_config", None)
+        arch_info_override = _arch_info_from_config(hf_config) if hf_config else None
+        arch_info = arch_info_override or _ARCH_REGISTRY.get(base_arch)
+        if arch_info is None:
+            return None
+
+        # Use the same cache-key logic as AnyModel.__new__ so both code paths
+        # share the exact same wrapper class object.
+        cache_key: str = (
+            f"config:{repr(arch_info_override)}"
+            if arch_info_override is not None
+            else base_arch
+        )
+        if cache_key not in AnyModel._wrapper_cache:
+            AnyModel._wrapper_cache[cache_key] = _make_wrapper_cls(base_arch, arch_info)
+        return AnyModel._wrapper_cache[cache_key]
+
     def inspect_model_cls(
         self,
         architectures: str | list[str],
@@ -1190,6 +1233,15 @@ class _ModelRegistry:
 
         for arch in architectures:
             normalized_arch = self._normalize_arch(arch, model_config)
+            if normalized_arch == "AnyModel":
+                # Return the concrete wrapper subclass so that callers
+                # (e.g. HybridAttentionMambaModelConfig, multimodal registry)
+                # receive a class that inherits the full base-model capabilities:
+                # class methods (get_mamba_state_shape_from_config, …) and
+                # attributes (_processor_factory for VL models).
+                wrapper_cls = self._resolve_anymodel_wrapper_cls(model_config)
+                if wrapper_cls is not None:
+                    return (wrapper_cls, arch)
             model_cls = self._try_load_model_cls(normalized_arch)
             if model_cls is not None:
                 return (model_cls, arch)

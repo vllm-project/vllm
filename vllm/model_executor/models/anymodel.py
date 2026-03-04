@@ -60,7 +60,7 @@ from torch import nn
 
 from vllm.config import VllmConfig
 
-from .interfaces import HasNoOps, SupportsPP
+from .interfaces import HasNoOps
 from .utils import PPMissingLayer, maybe_prefix
 
 # ---------------------------------------------------------------------------
@@ -488,6 +488,21 @@ def _has_overrides(block_config, info: ArchInfo | None = None) -> bool:
     return False
 
 
+def _unregister_layer(layer_prefix: str, vllm_config: VllmConfig) -> None:
+    """Remove entries registered by the old layer from static_forward_context.
+
+    Attention modules register themselves in ``compilation_config
+    .static_forward_context`` during ``__init__``.  When a layer is about
+    to be replaced, those entries must be removed first so the new layer
+    can register under the same keys without triggering a
+    "Duplicate layer name" error.
+    """
+    ctx = vllm_config.compilation_config.static_forward_context
+    stale = [k for k in ctx if k.startswith(layer_prefix)]
+    for k in stale:
+        del ctx[k]
+
+
 def _patch_anymodel_layers(
     model: nn.Module,
     vllm_config: VllmConfig,
@@ -509,7 +524,6 @@ def _patch_anymodel_layers(
             used to reconstruct per-layer weight-name prefixes.
     """
     config = vllm_config.model_config.hf_config
-    block_configs = config.block_configs
 
     # Use a sub-config as the base for per-layer config copies when specified
     # (e.g. Qwen3VL passes text_config to its LM layers, not the VL config).
@@ -518,6 +532,10 @@ def _patch_anymodel_layers(
         if arch_info.layer_hf_config
         else config
     )
+
+    # block_configs lives on the same config as the layer parameters: the
+    # sub-config for VL models (e.g. text_config), top-level otherwise.
+    block_configs = layer_base_config.block_configs
 
     # Navigate from the model root to the nn.ModuleList of decoder layers.
     obj = model
@@ -547,6 +565,13 @@ def _patch_anymodel_layers(
             # to the pruned checkpoint tensors.
             layer_cls = _resolve_layer_class(arch_info, layer_base_config, layer_idx)
             layer_prefix = f"{layers_prefix}.{layer_idx}"
+
+            # The original layer registered its attention modules in the
+            # compilation config's static_forward_context.  Remove those
+            # entries before creating the replacement to avoid
+            # "Duplicate layer name" errors.
+            _unregister_layer(layer_prefix, vllm_config)
+
             new_layer = _instantiate_layer(
                 layer_cls,
                 vllm_config,
@@ -631,7 +656,7 @@ def _make_wrapper_cls(
 # ---------------------------------------------------------------------------
 
 
-class AnyModel(nn.Module, SupportsPP, HasNoOps):
+class AnyModel(nn.Module, HasNoOps):
     """Entry point for NAS-optimized heterogeneous models.
 
     Handles both text-only (``ForCausalLM``) and vision-language
