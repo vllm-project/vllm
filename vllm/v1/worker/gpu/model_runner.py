@@ -496,7 +496,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         start_time = time.perf_counter()
         gc.collect()
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
+        start_free_gpu_memory = torch.cuda.mem_get_info()[0]
+
         with self.maybe_setup_dummy_loras(self.lora_config):
             start_reserved_gpu_memory = torch.cuda.memory_reserved()
             self.cudagraph_manager.capture(
