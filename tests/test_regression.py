@@ -65,7 +65,7 @@ def test_model_from_modelscope(monkeypatch: pytest.MonkeyPatch):
         # Don't use HF_TOKEN for ModelScope repos, otherwise it will fail
         # with 400 Client Error: Bad Request.
         m.setenv("HF_TOKEN", "")
-        llm = LLM(model="qwen/Qwen1.5-0.5B-Chat")
+        llm = LLM(model="qwen/Qwen1.5-0.5B-Chat", attention_backend="TRITON_ATTN")
 
         prompts = [
             "Hello, my name is",
