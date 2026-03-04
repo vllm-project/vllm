@@ -26,9 +26,11 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+import torch
 from transformers import AutoConfig, PretrainedConfig
 
-from vllm import LLM
+from vllm import LLM, SamplingParams
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
@@ -315,7 +317,7 @@ def _run_anymodel_e2e(case: _AnyModelE2ECase):
             hf_overrides=hf_overrides_fn,
             trust_remote_code=case.trust_remote_code,
             max_model_len=case.max_model_len,
-            enforce_eager=True,
+            enforce_eager=False,
             gpu_memory_utilization=0.80,
             attention_config=attention_config,
         )
@@ -424,18 +426,29 @@ def _full_moe_block_configs(
 
 
 def _full_nemotronh_block_configs(text_cfg: PretrainedConfig) -> list[dict]:
-    """Realistic block_configs for NemotronH, matching pattern."""
+    """Realistic block_configs for NemotronH, matching pattern.
+
+    Uses ``num_hidden_layers`` as the total number of blocks so the output
+    always has the correct length even when ``hybrid_override_pattern`` has
+    been overridden to a shorter test value.  The pattern is cycled if it is
+    shorter than the layer count.
+    """
     pattern = getattr(text_cfg, "hybrid_override_pattern", "*-")
-    n = len(pattern)
+    n = getattr(text_cfg, "num_hidden_layers", len(pattern))
     kv = getattr(text_cfg, "num_key_value_heads", 8)
     half_kv = max(1, kv // 2)
     cut = int(n * 0.75)
 
+    # Cycle pattern to cover all n layers if it is shorter.
+    if pattern and n > len(pattern):
+        pattern = (pattern * (n // len(pattern) + 1))[:n]
+
     cfgs: list[dict] = []
     for i in range(n):
+        char = pattern[i] if i < len(pattern) else "*"
         if i < cut:
             cfgs.append({"attention": {"no_op": False}, "ffn": {"no_op": False}})
-        elif pattern[i] == "*":
+        elif char == "*":
             cfgs.append(
                 {
                     "attention": {
@@ -494,6 +507,7 @@ def _generate_config(case: _AnyModelE2ECase, output_dir: Path) -> Path:
     out_dir = output_dir / case.id
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "config.json"
+    print(f"Writing config to: {out_path}")
 
     config_dict = json.loads(hf_config.to_json_string())
     with open(out_path, "w") as f:
@@ -529,3 +543,194 @@ def test_generate_anymodel_configs(case: _AnyModelE2ECase, tmp_path: Path):
     assert len(block_configs) == expected_layers
 
     print(f"\n  [{case.id}] config written to: {config_path}")
+
+
+# ---------------------------------------------------------------------------
+# Weight-loading parity test
+# ---------------------------------------------------------------------------
+
+_PARITY_MODEL = "Qwen/Qwen2-0.5B-Instruct"
+_PARITY_BASE_ARCH = "Qwen2ForCausalLM"
+_PARITY_PROMPT = "The capital of France is"
+
+
+def _identity_anymodel_overrides(hf_config: PretrainedConfig) -> PretrainedConfig:
+    """Wrap a base model config into AnyModel format with identity block_configs.
+
+    Every layer gets a trivial block_config (no overrides, no no-ops) so the
+    model structure and weights are identical to the original.
+    """
+    text_cfg = hf_config.get_text_config()
+    n_layers = getattr(text_cfg, "num_hidden_layers", 1)
+
+    hf_config.architectures = ["AnyModel"]
+    hf_config.base_architectures = [_PARITY_BASE_ARCH]
+    text_cfg.block_configs = [
+        {"attention": {"no_op": False}, "ffn": {"no_op": False}}
+        for _ in range(n_layers)
+    ]
+    return hf_config
+
+
+@create_new_process_for_each_test()
+def _run_anymodel_parity():
+    sampling = SamplingParams(temperature=0, max_tokens=64)
+
+    base_llm = LLM(_PARITY_MODEL, enforce_eager=True)
+    base_text = base_llm.generate([_PARITY_PROMPT], sampling)[0].outputs[0].text
+    del base_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+    anymodel_llm = LLM(
+        _PARITY_MODEL,
+        hf_overrides=_identity_anymodel_overrides,
+        enforce_eager=True,
+    )
+    anymodel_text = anymodel_llm.generate([_PARITY_PROMPT], sampling)[0].outputs[0].text
+
+    assert base_text == anymodel_text, (
+        f"Parity mismatch:\n  base:     {base_text!r}\n  anymodel: {anymodel_text!r}"
+    )
+
+
+def test_anymodel_weight_loading_parity():
+    """Load a real model both directly and through AnyModel with identity
+    block_configs and verify the generated output is identical."""
+    _run_anymodel_parity()
+
+
+# ---------------------------------------------------------------------------
+# Model size reduction test
+# ---------------------------------------------------------------------------
+
+_REDUCTION_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
+_REDUCTION_BASE_ARCH = "LlamaForCausalLM"
+_REDUCTION_NUM_LAYERS = 4
+
+
+def _base_llama_overrides(hf_config: PretrainedConfig) -> PretrainedConfig:
+    """Shrink Llama to a few layers without AnyModel wrapping."""
+    hf_config = dummy_hf_overrides(hf_config, model_arch=_REDUCTION_BASE_ARCH)
+    hf_config.get_text_config().num_hidden_layers = _REDUCTION_NUM_LAYERS
+    return hf_config
+
+
+def _reduced_anymodel_llama_overrides(
+    hf_config: PretrainedConfig,
+) -> PretrainedConfig:
+    """Same base shrinking, then wrap as AnyModel with aggressive reductions.
+
+    Layout (_REDUCTION_NUM_LAYERS = 4):
+      L0  halved intermediate_size
+      L1  halved KV heads + halved intermediate_size
+      L2  attention no-op + halved intermediate_size
+      L3  both attention and FFN no-ops
+    """
+    hf_config = dummy_hf_overrides(hf_config, model_arch=_REDUCTION_BASE_ARCH)
+    text_cfg = hf_config.get_text_config()
+    text_cfg.num_hidden_layers = _REDUCTION_NUM_LAYERS
+
+    hf_config.architectures = ["AnyModel"]
+    hf_config.base_architectures = [_REDUCTION_BASE_ARCH]
+
+    isize = getattr(text_cfg, "intermediate_size", 1024)
+    kv = getattr(
+        text_cfg,
+        "num_key_value_heads",
+        getattr(text_cfg, "num_attention_heads", 4),
+    )
+    half_isize = max(64, isize // 2)
+    half_kv = max(1, kv // 2)
+
+    text_cfg.block_configs = [
+        {
+            "attention": {"no_op": False},
+            "ffn": {"no_op": False, "intermediate_size": half_isize},
+        },
+        {
+            "attention": {"no_op": False, "num_key_value_heads": half_kv},
+            "ffn": {"no_op": False, "intermediate_size": half_isize},
+        },
+        {
+            "attention": {"no_op": True},
+            "ffn": {"no_op": False, "intermediate_size": half_isize},
+        },
+        {
+            "attention": {"no_op": True},
+            "ffn": {"no_op": True},
+        },
+    ]
+    return hf_config
+
+
+def _get_model_from_llm(llm: LLM):
+    """Extract the underlying nn.Module from a vLLM LLM instance."""
+    return llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
+
+
+@create_new_process_for_each_test()
+def _run_anymodel_size_reduction():
+    mem_before_base = torch.cuda.memory_allocated()
+
+    with patch.object(
+        V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_stub
+    ):
+        base_llm = LLM(
+            _REDUCTION_MODEL,
+            load_format="dummy",
+            hf_overrides=_base_llama_overrides,
+            enforce_eager=True,
+            gpu_memory_utilization=0.80,
+        )
+
+    base_model = _get_model_from_llm(base_llm)
+    base_num_params = sum(p.numel() for p in base_model.parameters())
+    base_param_bytes = sum(
+        p.numel() * p.element_size() for p in base_model.parameters()
+    )
+    base_gpu_delta = torch.cuda.memory_allocated() - mem_before_base
+
+    del base_llm
+    torch.cuda.empty_cache()
+    cleanup_dist_env_and_memory()
+
+    mem_before_any = torch.cuda.memory_allocated()
+
+    with patch.object(
+        V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_stub
+    ):
+        anymodel_llm = LLM(
+            _REDUCTION_MODEL,
+            load_format="dummy",
+            hf_overrides=_reduced_anymodel_llama_overrides,
+            enforce_eager=True,
+            gpu_memory_utilization=0.80,
+        )
+
+    anymodel_model = _get_model_from_llm(anymodel_llm)
+    anymodel_num_params = sum(p.numel() for p in anymodel_model.parameters())
+    anymodel_param_bytes = sum(
+        p.numel() * p.element_size() for p in anymodel_model.parameters()
+    )
+    anymodel_gpu_delta = torch.cuda.memory_allocated() - mem_before_any
+
+    assert anymodel_num_params < base_num_params, (
+        f"AnyModel should have fewer parameters than base model: "
+        f"{anymodel_num_params:,} >= {base_num_params:,}"
+    )
+    assert anymodel_param_bytes < base_param_bytes, (
+        f"AnyModel parameter memory should be smaller: "
+        f"{anymodel_param_bytes:,}B >= {base_param_bytes:,}B"
+    )
+    assert anymodel_gpu_delta < base_gpu_delta, (
+        f"AnyModel should use less GPU memory: "
+        f"{anymodel_gpu_delta:,}B >= {base_gpu_delta:,}B"
+    )
+
+
+def test_anymodel_size_reduction():
+    """Load a base Llama and an AnyModel variant with reduced dimensions,
+    then verify the AnyModel version has fewer parameters and uses less
+    GPU memory."""
+    _run_anymodel_size_reduction()

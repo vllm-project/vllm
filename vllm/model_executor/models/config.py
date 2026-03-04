@@ -716,18 +716,44 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
         model_config.hf_config.embedding_size = model_config.hf_config.num_labels
 
 
+class _AttrDict(dict):
+    """A JSON-serializable dict that also supports attribute access.
+
+    Used for ``block_configs`` entries so they can be accessed as
+    ``bc.attention.no_op`` (attribute style) while remaining serializable
+    by :func:`json.dumps` (needed for config hashing via
+    ``to_json_string()``).
+    """
+
+    def __getattr__(self, key: str):
+        try:
+            return self[key]
+        except KeyError:
+            raise AttributeError(key)
+
+    def __setattr__(self, key: str, value):
+        self[key] = value
+
+    def __delattr__(self, key: str):
+        try:
+            del self[key]
+        except KeyError:
+            raise AttributeError(key)
+
+
 class AnyModelForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
-        """Validate block_configs and normalize entries to namespace objects.
+        """Validate block_configs and normalize entries to attr-accessible dicts.
 
         HuggingFace deserializes unknown nested fields as plain dicts.
         Code in ``model.py`` (e.g. ``get_num_layers_by_block_type``)
         accesses ``bc.attention.no_op`` via attribute access, so we
-        convert dicts to ``types.SimpleNamespace`` here.
+        convert dicts to :class:`_AttrDict` here.  Unlike
+        ``types.SimpleNamespace``, ``_AttrDict`` is a ``dict`` subclass
+        and therefore remains JSON-serializable (required for config
+        hashing via ``to_json_string()``).
         """
-        import types
-
         hf_config = model_config.hf_config
         block_configs = getattr(hf_config, "block_configs", None)
         if not block_configs:
@@ -738,14 +764,14 @@ class AnyModelForCausalLMConfig(VerifyAndUpdateConfig):
             f"num_hidden_layers ({hf_config.num_hidden_layers})"
         )
 
-        def _to_ns(obj):
+        def _to_attrdict(obj):
             if isinstance(obj, dict):
-                return types.SimpleNamespace(**{k: _to_ns(v) for k, v in obj.items()})
+                return _AttrDict({k: _to_attrdict(v) for k, v in obj.items()})
             if isinstance(obj, list):
-                return [_to_ns(item) for item in obj]
+                return [_to_attrdict(item) for item in obj]
             return obj
 
-        hf_config.block_configs = [_to_ns(bc) for bc in block_configs]
+        hf_config.block_configs = [_to_attrdict(bc) for bc in block_configs]
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
