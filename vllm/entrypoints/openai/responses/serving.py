@@ -133,7 +133,10 @@ def _extract_response_format_schema(request: ResponsesRequest) -> dict | None:
         request.structured_outputs is not None
         and request.structured_outputs.json is not None
     ):
-        return request.structured_outputs.json
+        val = request.structured_outputs.json
+        if isinstance(val, str):
+            return json_mod.loads(val)
+        return val
     return None
 
 
