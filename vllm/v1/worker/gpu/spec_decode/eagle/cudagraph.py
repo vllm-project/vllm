@@ -7,6 +7,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.offloader.base import get_offloader
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -16,6 +17,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -58,6 +60,7 @@ class EagleCudaGraphManager:
         num_tokens: int,
         capture_cg_mode: CUDAGraphMode,
         generate_fn: Callable,
+        model_state: ModelState,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
@@ -75,12 +78,11 @@ class EagleCudaGraphManager:
         attn_metadata, slot_mappings = prepare_inputs_to_capture(
             num_reqs,
             num_tokens,
+            model_state,
             input_buffers,
             block_tables,
             attn_groups,
-            self.max_model_len,
             kv_cache_config,
-            uniform_decode_query_len=1,
         )
         num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
 
@@ -115,6 +117,11 @@ class EagleCudaGraphManager:
     ) -> None:
         assert num_tokens not in self.graphs
         graph = torch.cuda.CUDAGraph()
+
+        # Sync offloader's copy stream before capture.
+        # Ensure any pre-capture prefetches from offloader are complete.
+        get_offloader().sync_prev_onload()
+
         with torch.cuda.graph(graph, self.pool):
             generate_fn(
                 num_reqs,
@@ -124,6 +131,10 @@ class EagleCudaGraphManager:
                 num_tokens_across_dp,
                 CUDAGraphMode.NONE,
             )
+            # Join offloader's copy stream after forward to avoid unjoined
+            # stream error. The last layer's start_prefetch forks copy_stream,
+            # but wait_prefetch only happens in the next forward pass.
+            get_offloader().join_after_forward()
         self.graphs[num_tokens] = graph
 
     def _capture_piecewise_graph(
@@ -148,6 +159,7 @@ class EagleCudaGraphManager:
     def capture(
         self,
         generate_fn: Callable,
+        model_state: ModelState,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
@@ -163,6 +175,7 @@ class EagleCudaGraphManager:
             capture_cudagraph_mode=self.cudagraph_mode,
             desc=f"Capturing eagle CUDA graphs ({self.cudagraph_mode.name})",
             generate_fn=generate_fn,
+            model_state=model_state,
             input_buffers=input_buffers,
             block_tables=block_tables,
             attn_groups=attn_groups,
@@ -171,4 +184,11 @@ class EagleCudaGraphManager:
 
     def run_fullgraph(self, num_tokens: int) -> None:
         assert num_tokens in self.graphs
+        # Sync offloader before replay - needed when transitioning from
+        # eager/piecewise to full cudagraph (e.g., prefill → decode).
+        # The previous eager iteration's start_prefetch may have queued
+        # H2D copies on copy_stream that the graph's captured events
+        # cannot see. Without this, replay could overwrite static buffers
+        # while those copies are still in flight.
+        get_offloader().sync_prev_onload()
         self.graphs[num_tokens].replay()
