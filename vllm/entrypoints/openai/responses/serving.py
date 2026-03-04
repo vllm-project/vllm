@@ -4,7 +4,7 @@
 import asyncio
 import time
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
@@ -213,11 +213,12 @@ class OpenAIServingResponses(OpenAIServing):
         # behavior in OpenAI's Responses API is to store the response, but
         # vLLM's default behavior is not.
         self.enable_store = envs.VLLM_ENABLE_RESPONSES_API_STORE
+        self.store_max_size = envs.VLLM_RESPONSES_API_STORE_MAX_SIZE
         if self.enable_store:
-            logger.warning_once(
-                "`VLLM_ENABLE_RESPONSES_API_STORE` is enabled. This may "
-                "cause a memory leak since we never remove responses from "
-                "the store."
+            logger.info(
+                "Responses API store is enabled (max_size=%d). "
+                "Oldest entries will be evicted when the limit is reached.",
+                self.store_max_size,
             )
 
         self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
@@ -245,23 +246,18 @@ class OpenAIServingResponses(OpenAIServing):
             self.tool_call_id_type = "random"
 
         self.enable_auto_tools = enable_auto_tools
-        # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: If enable_store=True, this may cause a memory leak since we
-        # never remove responses from the store.
-        self.response_store: dict[str, ResponsesResponse] = {}
+        # In-memory stores with LRU eviction to bound memory usage.
+        # Oldest entries are evicted when store_max_size is exceeded.
+        self.response_store: OrderedDict[str, ResponsesResponse] = OrderedDict()
         self.response_store_lock = asyncio.Lock()
 
-        # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: If enable_store=True, this may cause a memory leak since we
-        # never remove messages from the store.
-        self.msg_store: dict[str, list[ChatCompletionMessageParam]] = {}
+        self.msg_store: OrderedDict[str, list[ChatCompletionMessageParam]] = (
+            OrderedDict()
+        )
 
-        # HACK(wuhang): This is a hack. We should use a better store.
-        # FIXME: If enable_store=True, this may cause a memory leak since we
-        # never remove events from the store.
-        self.event_store: dict[
+        self.event_store: OrderedDict[
             str, tuple[deque[StreamingResponsesResponse], asyncio.Event]
-        ] = {}
+        ] = OrderedDict()
 
         self.background_tasks: dict[str, asyncio.Task] = {}
 
@@ -525,6 +521,7 @@ class OpenAIServingResponses(OpenAIServing):
             )
             async with self.response_store_lock:
                 self.response_store[response.id] = response
+                self._evict_oldest_store_entries()
 
             # Run the request in the background.
             if request.stream:
@@ -1215,6 +1212,9 @@ class OpenAIServingResponses(OpenAIServing):
     ):
         async with self.response_store_lock:
             response = self.response_store.get(response_id)
+            if response is not None:
+                # Move to end so recently accessed entries are kept.
+                self.response_store.move_to_end(response_id)
 
         if response is None:
             return self._make_not_found_error(response_id)
@@ -1275,6 +1275,40 @@ class OpenAIServingResponses(OpenAIServing):
             status_code=HTTPStatus.BAD_REQUEST,
             param="store",
         )
+
+    def _evict_oldest_store_entries(self) -> None:
+        """Evict oldest entries from all stores when capacity is exceeded.
+
+        Must be called while holding response_store_lock.
+        """
+        while len(self.response_store) > self.store_max_size:
+            evicted_id, _ = self.response_store.popitem(last=False)
+            self.msg_store.pop(evicted_id, None)
+            self.event_store.pop(evicted_id, None)
+
+            # Cancel background task if it exists
+            if task := self.background_tasks.pop(evicted_id, None):
+                task.cancel()
+
+            logger.debug("Evicted response %s from store (LRU)", evicted_id)
+
+    async def delete_response(
+        self,
+        response_id: str,
+    ) -> ErrorResponse | ResponsesResponse:
+        async with self.response_store_lock:
+            response = self.response_store.pop(response_id, None)
+            if response is None:
+                return self._make_not_found_error(response_id)
+            self.msg_store.pop(response_id, None)
+            self.event_store.pop(response_id, None)
+
+        # Cancel any background task for this response.
+        if task := self.background_tasks.pop(response_id, None):
+            task.cancel()
+
+        response.status = "cancelled"
+        return response
 
     async def _process_simple_streaming_events(
         self,
