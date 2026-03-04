@@ -20,6 +20,7 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
+from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from typing import Any, NamedTuple
 
@@ -314,6 +315,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_kv_cache_spec(self):
         return get_kv_cache_spec(self.vllm_config)
 
+    def _kv_cache_memory_pool_context(self) -> AbstractContextManager:
+        """Return a context manager that tags GPU allocations as 'kv_cache'
+        when sleep mode is enabled, or a no-op context otherwise."""
+        if self.model_config.enable_sleep_mode:
+            from vllm.device_allocator.cumem import CuMemAllocator
+
+            allocator = CuMemAllocator.get_instance()
+            return allocator.use_memory_pool(tag="kv_cache")
+        return nullcontext()
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
@@ -356,13 +367,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         self.kv_caches: list[torch.Tensor] = []
-        kv_caches_dict = init_kv_cache(
-            self.kv_caches,
-            self.compilation_config.static_forward_context,
-            self.kv_cache_config,
-            self.attn_backends,
-            self.device,
-        )
+        # Wrap only the actual KV cache tensor allocation with the
+        # kv_cache mempool tag, so that metadata setup above doesn't
+        # inherit the tag (which would cause issues with sleep/wake).
+        with self._kv_cache_memory_pool_context():
+            kv_caches_dict = init_kv_cache(
+                self.kv_caches,
+                self.compilation_config.static_forward_context,
+                self.kv_cache_config,
+                self.attn_backends,
+                self.device,
+            )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
     @torch.inference_mode()

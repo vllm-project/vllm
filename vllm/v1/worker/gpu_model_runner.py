@@ -8,7 +8,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import reduce
@@ -6401,6 +6401,16 @@ class GPUModelRunner(
                         stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
                     )
 
+    def _kv_cache_memory_pool_context(self) -> AbstractContextManager:
+        """Return a context manager that tags GPU allocations as 'kv_cache'
+        when sleep mode is enabled, or a no-op context otherwise."""
+        if self.model_config.enable_sleep_mode:
+            from vllm.device_allocator.cumem import CuMemAllocator
+
+            allocator = CuMemAllocator.get_instance()
+            return allocator.use_memory_pool(tag="kv_cache")
+        return nullcontext()
+
     def initialize_kv_cache_tensors(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
     ) -> dict[str, torch.Tensor]:
@@ -6512,9 +6522,15 @@ class GPUModelRunner(
 
         # Reinitialize need to after initialize_attn_backend
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
-        kv_caches = self.initialize_kv_cache_tensors(
-            kv_cache_config, kernel_block_sizes
-        )
+
+        # Wrap only the actual KV cache tensor allocation with the
+        # kv_cache mempool tag, so that metadata builders and other
+        # initialization above don't inherit the tag (which would
+        # cause issues with sleep/wake).
+        with self._kv_cache_memory_pool_context():
+            kv_caches = self.initialize_kv_cache_tensors(
+                kv_cache_config, kernel_block_sizes
+            )
 
         if (
             self.speculative_config
