@@ -25,16 +25,33 @@ logger = init_logger(__name__)
 
 
 __all__ = ["CompressedTensorsW4A4Fp4"]
+logger = init_logger(__name__)
 
 
 class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
-    def __init__(self):
+    def __init__(self, emulation_dequantize_weights: bool | None = None):
         self.backend = select_nvfp4_linear_backend()
         self.group_size = 16
 
         self.swizzle = None
         if self.backend == NvFp4LinearBackend.EMULATION:
             self.swizzle = False
+
+        self.emulation_dequantize_weights = emulation_dequantize_weights
+        if self.emulation_dequantize_weights:
+            if self.backend != NvFp4LinearBackend.EMULATION:
+                raise ValueError(
+                    f"emulation_dequantize_weights="
+                    f"{self.emulation_dequantize_weights} "
+                    f"has an effect only with backend "
+                    f"NvFp4LinearBackend.EMULATION, "
+                    f"but currently backend={self.backend}."
+                )
+
+            logger.info_once(
+                "CompressedTensorsW4A4Fp4 simulated dense linear: "
+                "dequantizing weights ahead of time."
+            )
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -132,7 +149,11 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         )
 
         # Convert layer to NVFP4 linear kernel format
-        convert_to_nvfp4_linear_kernel_format(self.backend, layer)
+        convert_to_nvfp4_linear_kernel_format(
+            self.backend,
+            layer,
+            emulation_dequantize_weights=self.emulation_dequantize_weights,
+        )
 
     def apply_weights(
         self,

@@ -978,6 +978,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         kv_cache_quant_algo: str | None,
         exclude_modules: list[str],
         group_size: int = 16,
+        emulation_dequantize_weights: bool | None = None,
     ) -> None:
         super().__init__(exclude_modules)
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
@@ -989,6 +990,8 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
             self.group_size = group_size
             self.kv_cache_quant_algo = kv_cache_quant_algo
+
+        self.emulation_dequantize_weights = emulation_dequantize_weights
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_fp4"
@@ -1039,11 +1042,16 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
                     f"hf_quant_config.json: {missing_fields}"
                 )
 
+        emulation_dequantize_weights: bool | None = original_config.get(
+            "emulation_dequantize_weights"
+        )
+
         return cls(
             is_checkpoint_nvfp4_serialized,
             kv_cache_quant_method,
             exclude_modules,
             group_size,
+            emulation_dequantize_weights=emulation_dequantize_weights,
         )
 
 
@@ -1066,6 +1074,22 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         self.swizzle = None
         if self.backend == NvFp4LinearBackend.EMULATION:
             self.swizzle = False
+
+        self.emulation_dequantize_weights = quant_config.emulation_dequantize_weights
+        if self.emulation_dequantize_weights:
+            if self.backend != NvFp4LinearBackend.EMULATION:
+                raise ValueError(
+                    f"emulation_dequantize_weights="
+                    f"{self.emulation_dequantize_weights} "
+                    f"has an effect only with backend "
+                    f"NvFp4LinearBackend.EMULATION, "
+                    f"but currently backend={self.backend}."
+                )
+
+            logger.info_once(
+                "ModelOptNvFp4LinearMethod simulated dense linear: "
+                "dequantizing weights ahead of time."
+            )
 
     def create_weights(
         self,
@@ -1176,7 +1200,11 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         )
 
         # Convert layer to NVFP4 linear kernel format
-        convert_to_nvfp4_linear_kernel_format(self.backend, layer)
+        convert_to_nvfp4_linear_kernel_format(
+            self.backend,
+            layer,
+            emulation_dequantize_weights=self.emulation_dequantize_weights,
+        )
 
     def apply(
         self,
@@ -1217,6 +1245,22 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
+
+        # Validate emulation_dequantize_weights
+        if quant_config.emulation_dequantize_weights:
+            if self.nvfp4_backend != NvFp4MoeBackend.EMULATION:
+                raise ValueError(
+                    f"emulation_dequantize_weights="
+                    f"{quant_config.emulation_dequantize_weights} "
+                    f"has an effect only with backend "
+                    f"NvFp4MoeBackend.EMULATION, "
+                    f"but currently backend={self.nvfp4_backend}."
+                )
+
+            logger.info_once(
+                "ModelOptNvFp4FusedMoE simulated MoE: "
+                "dequantizing weights ahead of time."
+            )
 
     def maybe_make_prepare_finalize(
         self,
@@ -1385,6 +1429,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             w2_scale_2=layer.w2_weight_scale_2,
             a2_scale=layer.w2_input_scale,
             is_act_and_mul=self.moe.is_act_and_mul,
+            emulation_dequantize_weights=self.quant_config.emulation_dequantize_weights,
         )
 
         replace_parameter(layer, "w13_weight", w13)
