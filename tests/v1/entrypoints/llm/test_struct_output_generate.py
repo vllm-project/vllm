@@ -611,6 +611,11 @@ Make the response as short as possible.
                     f"Invalid function call format: {generated_text!r}\nError: {str(e)}"
                 )
 
+    if current_platform.is_rocm():
+        del llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
+
 
 @pytest.mark.parametrize(
     "model_name, backend, tokenizer_mode, reasoning_parser, speculative_config, async_scheduling",  # noqa: E501
@@ -699,6 +704,11 @@ def test_structured_output_with_reasoning_matrices(
         output_json = json.loads(content)
         jsonschema.validate(instance=output_json, schema=reasoning_schema)
 
+    if current_platform.is_rocm():
+        del llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
+
 
 @pytest.mark.parametrize("model_name, tokenizer_mode", PARAMS_MODELS_TOKENIZER_MODE)
 def test_structured_output_auto_mode(
@@ -746,6 +756,11 @@ def test_structured_output_auto_mode(
         # Parse to verify it is valid JSON
         parsed_json = json.loads(generated_text)
         assert isinstance(parsed_json, dict)
+
+    if current_platform.is_rocm():
+        del llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
 
 
 def test_guidance_no_additional_properties():
@@ -805,6 +820,11 @@ def test_guidance_no_additional_properties():
     assert "a5" not in generated
     assert "a6" not in generated
 
+    if current_platform.is_rocm():
+        del llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
+
 
 @pytest.mark.parametrize("backend", ["guidance", "xgrammar", "outlines"])
 def test_structured_output_batched_with_non_structured_outputs_requests(
@@ -854,11 +874,10 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
 
     assert outputs is not None
 
-    # Free memory as soon as possible as failed assertions
-    # will short circuit and not free up memory
-    del llm
-    torch.cuda.empty_cache()
-    cleanup_dist_env_and_memory()
+    if current_platform.is_rocm():
+        del llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
 
     for index, output in enumerate(outputs):
         assert output is not None
