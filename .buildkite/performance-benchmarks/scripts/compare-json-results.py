@@ -235,9 +235,11 @@ def _highlight_threshold(
     conf_cols = [c for c in conf_cols if pd.api.types.is_numeric_dtype(df[c])]
 
     return df.style.map(
-        lambda v: "background-color:#e6ffe6;font-weight:bold;"
-        if pd.notna(v) and v <= threshold
-        else "",
+        lambda v: (
+            "background-color:#e6ffe6;font-weight:bold;"
+            if pd.notna(v) and v <= threshold
+            else ""
+        ),
         subset=conf_cols,
     )
 
