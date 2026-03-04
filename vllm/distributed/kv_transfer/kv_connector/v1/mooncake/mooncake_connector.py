@@ -974,6 +974,28 @@ class MooncakeConnectorWorker:
     async def fetch_finished_recving_reqs(self) -> set[ReqId]:
         finished_recving_reqs = self.finished_recving_reqs
         self.finished_recving_reqs = set()
+
+        # Handle timeout to avoid stranding blocks on remote
+        now = time.perf_counter()
+
+        expired_req_ids = []
+        for remote_engine_id, pull_metas in self.metadata.reqs_to_recv.items():
+            for req_id, pull_meta in pull_metas.items():
+                if pull_meta.expire_time < now:
+                    logger.warning(
+                        "Request %s timed out after %d seconds without "
+                        "finishing KV transfer from remote engine %s",
+                        pull_meta.d_req_id,
+                        envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+                        remote_engine_id,
+                    )
+                    finished_recving_reqs.add(pull_meta.d_req_id)
+                    expired_req_ids.append((remote_engine_id, req_id))
+
+        # Remove expired requests from tracking
+        for remote_engine_id, req_id in expired_req_ids:
+            del self.metadata.reqs_to_recv[remote_engine_id][req_id]
+
         return finished_recving_reqs
 
     async def fetch_finished_sending_reqs(self) -> set[ReqId]:
@@ -1089,6 +1111,9 @@ class MooncakeConnectorWorker:
             logger.debug("ZMQ context terminated, exiting Mooncake receiver thread.")
         except Exception as e:
             logger.error("MooncakeXferMetadata transfer failed for %s: %s", req_ids, e)
+            # Add failed requests to finished_recving_reqs so scheduler can clean them up
+            for req_id, pull_meta in pull_metas.items():
+                self.finished_recving_reqs.add(pull_meta.d_req_id)
             return
 
     def process_pulling_result(
@@ -1114,6 +1139,11 @@ class MooncakeConnectorWorker:
                 response.err_reqs,
                 response.err_msg,
             )
+            # Add failed requests to finished_recving_reqs so scheduler can clean them up
+            for req_id in response.err_reqs:
+                if req_id in pull_metas:
+                    pull_meta = pull_metas[req_id]
+                    self.finished_recving_reqs.add(pull_meta.d_req_id)
 
     async def _connect_to_prefiller_bootstrap(self, remote_bootstrap_addr: str):
         url = remote_bootstrap_addr + "/query"
@@ -1159,6 +1189,10 @@ class MooncakeConnectorWorker:
             )
         for pull_meta in pull_metas.values():
             pull_meta.pull_tasks_count = count
+            # Set expire time to avoid infinitely waiting for remote KV transfer
+            pull_meta.expire_time = (
+                time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
+            )
         for remote_tp_rank in remote_tp_ranks:
             worker_addr = self._remote_agents[remote_engine_id][remote_tp_rank][0]
             asyncio.create_task(
