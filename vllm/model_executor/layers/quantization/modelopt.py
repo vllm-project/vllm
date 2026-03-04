@@ -5,7 +5,6 @@ from fnmatch import fnmatch
 from typing import TYPE_CHECKING, Any
 
 import torch
-from flashinfer.fused_moe.core import ActivationType, Fp8QuantizationType
 from torch.nn.parameter import Parameter
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -1959,6 +1958,11 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        from flashinfer.fused_moe.core import (
+            ActivationType,
+            Fp8QuantizationType,
+        )
+
         assert self.mxfp8_backend == MxFp8MoeBackend.FLASHINFER_TRTLLM
 
         if layer.enable_eplb:
