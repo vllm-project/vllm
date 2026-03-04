@@ -104,7 +104,7 @@ def run_benchmark(
 
     # free tensors to mitigate OOM when sweeping
     del key, value, key_cache, value_cache, slot_mapping
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
 
     return lat
 
