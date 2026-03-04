@@ -91,7 +91,7 @@ def dequantize_to_dtype(
 
     if is_3d:
         tensor_sf = tensor_sf.reshape(dim0, m, k // block_size)
-    tensor_sf_dtype = tensor_sf.to(torch.float32) / global_scale
+    tensor_sf_dtype = tensor_sf.to(torch.float32) * global_scale
 
     if is_3d:
         tensor_f32 = tensor_f32.reshape(dim0, m, -1, block_size)

@@ -1183,17 +1183,10 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         input_global_scale = layer.input_scale.max().to(torch.float32)
         layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
         del layer.input_scale
-
-        weight_global_scale = layer.weight_scale_2.to(torch.float32)
-
-        # NOTE: if the checkpoint shares the same global scale over parallel
-        # layers (q/k/v, gate/up), this inversion may be fine to do after
-        # taking the max.
-        if self.backend == NvFp4LinearBackend.EMULATION:
-            weight_global_scale = 1.0 / weight_global_scale
-
-        weight_global_scale = weight_global_scale.max()
-
+        
+        # NOTE: modelopt stores the inverse scales so that `x_fp8_range = x * 1 / global_scale)`, that are small values.
+        # Taking the min is not enough here: the fp8 scales should be recomputed accordingly!
+        weight_global_scale = layer.weight_scale_2.min().to(torch.float32)
         layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
         del layer.weight_scale_2
 
