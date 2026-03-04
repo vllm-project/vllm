@@ -242,6 +242,7 @@ class EagleSpeculator:
         logits = self.model.compute_logits(sample_hidden_states)
 
         num_reqs = input_batch.num_reqs
+        num_reqs_padded = input_batch.num_reqs_after_padding
         # NOTE(woosuk): For draft sampling, we only consider the temperature
         # and ignore the other sampling parameters such as top_k and top_p,
         # for simplicity and performance.
@@ -306,19 +307,21 @@ class EagleSpeculator:
         slot_mappings_updated = None
         if not (dummy_run and skip_attn_for_dummy_run):
             query_start_loc_cpu = torch.arange(
-                num_reqs + 1, dtype=torch.int32, device="cpu"
+                num_reqs_padded + 1, dtype=torch.int32, device="cpu"
             )
-            block_tables = [x[:num_reqs] for x in self.block_tables.input_block_tables]
+            block_tables = [
+                x[:num_reqs_padded] for x in self.block_tables.input_block_tables
+            ]
 
             # FIXME(woosuk): This is UNSAFE!!
             attn_metadata_updated = build_attn_metadata(
                 attn_groups=self.attn_groups,
-                num_reqs=num_reqs,
-                num_tokens=num_reqs,
+                num_reqs=num_reqs_padded,
+                num_tokens=num_reqs_padded,
                 query_start_loc_gpu=query_start_loc,
                 query_start_loc_cpu=query_start_loc_cpu,
                 max_query_len=1,
-                seq_lens=self.input_buffers.seq_lens[:num_reqs],
+                seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
                 max_seq_len=self.max_model_len,
                 block_tables=block_tables,
                 slot_mappings=slot_mappings,

@@ -652,6 +652,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         # Get query_start_loc.
+        num_reqs_padded = batch_desc.num_reqs
         query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1 : num_reqs + 1])
@@ -659,8 +660,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
         async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
-        query_start_loc_np = query_start_loc_np[: num_reqs + 1]
-        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+        query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs_padded + 1]
 
         # Get prefill tokens if any.
         if self.req_states.any_prefills(idx_mapping_np):
@@ -682,7 +683,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_buffers.positions,
             self.input_buffers.seq_lens,
         )
-        seq_lens = self.input_buffers.seq_lens[:num_reqs]
+        seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
         dcp_local_seq_lens = None
         if self.use_dcp:
@@ -695,7 +696,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.dcp_rank,
                 self.cp_interleave,
             )
-            dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs]
+            # Zero out padded entries.
+            self.input_buffers.dcp_local_seq_lens[num_reqs:num_reqs_padded].zero_()
+            dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs_padded]
 
         # Some input token ids are directly read from the last sampled tokens
         # and draft tokens. Also, get the logits indices to sample tokens from.
@@ -738,13 +741,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def prepare_attn(
         self, input_batch: InputBatch
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-        # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
-        block_tables = self.block_tables.gather_block_tables(input_batch.idx_mapping)
-        # Compute slot mappings: [num_kv_cache_groups, num_tokens]
+        # Block tables: num_kv_cache_groups x [num_reqs_padded, max_num_blocks].
+        block_tables = self.block_tables.gather_block_tables(
+            input_batch.idx_mapping,
+            num_reqs_padded=input_batch.num_reqs_after_padding,
+        )
+        # Slot mappings: [num_kv_cache_groups, num_tokens_padded].
+        # Kernel pads beyond num_tokens with PAD_SLOT_ID.
         slot_mappings = self.block_tables.compute_slot_mappings(
             input_batch.idx_mapping,
             input_batch.query_start_loc,
             input_batch.positions,
+            num_tokens_padded=input_batch.num_tokens_after_padding,
         )
         return block_tables, slot_mappings
 
