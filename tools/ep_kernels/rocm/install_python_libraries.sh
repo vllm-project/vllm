@@ -5,9 +5,10 @@ set -ex
 #   --workspace <dir>    workspace directory (default: ./ep_kernels_workspace)
 #   --mode <mode>        "install" (default) or "wheel"
 #   --mori-ref <commit> MoRI commit hash
+#   --aiter-ref <commit> Aiter commit hash
 
-function resolve_mori_gpu_archs() {
-    arch=${MORI_GPU_ARCHS:-""}
+function resolve_gpu_archs() {
+    arch=""
 
     # attempt to get arch from rocm-info
     if [ -z "$arch" ] && command -v rocminfo >/dev/null 2>&1; then
@@ -28,7 +29,11 @@ function resolve_mori_gpu_archs() {
 
 MORI_COMMIT_HASH="2d02c6a9"
 MORI_REPO="https://github.com/ROCm/mori.git"
-MORI_GPU_ARCHS=$(resolve_mori_gpu_archs)
+MORI_GPU_ARCHS=${MORI_GPU_ARCHS:-"$(resolve_gpu_archs)"}
+
+AITER_COMMIT_HASH="v0.1.10.post2"
+AITER_REPO="https://github.com/ROCm/aiter.git"
+AITER_GPU_ARCHS=${AITER_GPU_ARCHS:-"$(resolve_gpu_archs)"}
 
 WORKSPACE=${WORKSPACE:-$(pwd)/ep_kernels_workspace}
 MODE=${MODE:-install}
@@ -58,6 +63,14 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             MORI_COMMIT_HASH="$2"
+            shift 2
+            ;;
+        --aiter-ref)
+            if [[ -z "$2" || "$2" =~ ^- ]]; then
+                echo "Error: --aiter-ref requires an argument." >&2
+                exit 1
+            fi
+            AITER_COMMIT_HASH="$2"
             shift 2
             ;;
         *)
@@ -127,7 +140,7 @@ clone_repo() {
     fi
 }
 
-do_build() {
+do_build_mori() {
     local repo=$1
     local name=$2
     local key=$3
@@ -138,7 +151,12 @@ do_build() {
     clone_repo "$repo" "$name" "$key" "$commit"
     cd "$name"
 
-    cmake_args="CMAKE_ARGS=\"-DPython3_EXECUTABLE=$(uv python find) -DPYTHON_EXECUTABLE=$(uv python find)\""
+    # Patch MoRI to let it find uv's python
+    sed -i 's/find_package(PythonLibs REQUIRED)/find_package(Python3 COMPONENTS Interpreter Development REQUIRED)/g' src/pybind/CMakeLists.txt
+    sed -i 's/\${PYTHON_INCLUDE_DIRS}/${Pthon3_INCLUDE_DIRS}/g' src/pybind/CMakeLists.txt
+
+    # Set cmake python executable to uv so it finds the right includes / libraries.
+    cmake_args="CMAKE_ARGS=\"-DPython3_EXECUTABLE=$(uv python find)\""
 
     if [ "$MODE" = "install" ]; then
         echo "Installing $name into environment"
@@ -150,14 +168,54 @@ do_build() {
     popd
 }
 
+do_build_aiter() {
+
+    local repo=$1
+    local name=$2
+    local key=$3
+    local commit=$4
+    local extra_env=$5
+
+    pushd "$WORKSPACE"
+    clone_repo "$repo" "$name" "$key" "$commit"
+    cd "$name"
+
+    # aiter requirements
+    uv pip install -r requirements.txt 
+    uv pip install pyyaml
+    export HIP_CLANG_PATH=./sccache-wrappers
+    
+    # Set cmake python executable to uv so it finds the right includes / libraries.
+    cmake_args="CMAKE_ARGS=\"-DPython3_EXECUTABLE=$(uv python find)\""
+
+    if [ "$MODE" = "install" ]; then
+        echo "Installing $name into environment"
+        eval "$cmake_args $extra_env" uv pip install --no-build-isolation -vvv .
+    else
+        echo "Building $name wheel into $WHEEL_DIR"
+        eval "$cmake_args $extra_env" uv build --wheel --no-build-isolation -vvv --out-dir "$WHEEL_DIR" .
+    fi
+
+    unset HIP_CLANG_PATH
+    popd
+}
+
+# build Aiter
+do_build_aiter \
+    "$AITER_REPO" \
+    "aiter" \
+    "setup.py" \
+    "$AITER_COMMIT_HASH" \
+    "GPU_ARCHS=${AITER_GPU_ARCHS}"
+
 # build MoRI
-do_build \
+do_build_mori \
     "$MORI_REPO" \
     "mori" \
     "setup.py" \
     "$MORI_COMMIT_HASH" \
     "MORI_GPU_ARCHS=${MORI_GPU_ARCHS}"
-    
+
 if [ "$MODE" = "wheel" ]; then
     echo "All wheels written to $WHEEL_DIR"
     ls -l "$WHEEL_DIR"
