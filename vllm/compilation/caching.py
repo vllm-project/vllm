@@ -313,30 +313,26 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
 
             return fn
 
-        # Fall back to standard VllmBackend
+        # Fall back to standard VllmBackend.
+        # Use a lazy closure: the backend needs traced_files for cache
+        # dir computation, but those are only populated after
+        # _verify_source_unchanged runs in decorators.py (which happens
+        # after deserialization completes).
         from vllm.compilation.backends import VllmBackend
 
         is_encoder = state.get("is_encoder", False)
-        vllm_backend: VllmBackend = VllmBackend(
-            get_current_vllm_config(), state["prefix"], is_encoder
-        )
+        vllm_config = get_current_vllm_config()
+        compile_inputs = list(state["example_inputs"])
 
         def optimized_call(*example_inputs: Any) -> Any:
-            """
-            On the first run of the optimized call, we rerun the compiler
-            backend which should result in a cache hit. After the backend
-            call returns, we just do a one-time replacement of the optimized
-            call with the compiled function, so that subsequent calls are on
-            the AOT compiled path.
-            """
-            compile_inputs = [
-                inp if inp is not None else example_inputs[i]
-                for i, inp in enumerate(fn.example_inputs)
-            ]
+            vllm_backend: VllmBackend = VllmBackend(
+                vllm_config, state["prefix"], is_encoder
+            )
             with tracing(TracingContext(fake_mode)):
                 fn.optimized_call = vllm_backend(
                     state["graph_module"], compile_inputs
                 ).optimized_call
+                fn.vllm_backend = vllm_backend
             return fn.optimized_call(*example_inputs)
 
         fn = cls(**state, optimized_call=optimized_call)

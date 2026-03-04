@@ -33,7 +33,7 @@ def end_monitoring_torch_compile(vllm_config: VllmConfig) -> None:
     total_compile_time: float = time.perf_counter() - torch_compile_start_time
     if compilation_config.mode == CompilationMode.VLLM_COMPILE:
         logger.info_once(
-            "torch.compile takes %.2f s in total",
+            "torch.compile and initial profiling run took %.2f s in total",
             total_compile_time,
             scope="local",
         )

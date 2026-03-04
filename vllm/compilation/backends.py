@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
-import contextvars
 import dataclasses
 import hashlib
 import json
@@ -18,7 +17,7 @@ from typing import Any
 
 import torch
 import torch.fx as fx
-from torch._dispatch.python import enable_python_dispatcher
+from torch._dynamo.utils import dynamo_timed
 from torch._logging._internal import trace_structured
 
 import vllm.envs as envs
@@ -510,9 +509,9 @@ def wrap_with_cudagraph_if_needed(
 
 class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
     """Code adapted from `torch.fx.passes.shape_prop.ShapeProp`.
-    It runs the given graph with fake inputs, and compile some
-    submodules specified by `compile_submod_names` with the given
-    compilation configs.
+    It runs the given split graph interpreter, and for each submodule in
+    `compile_submod_names`, creates a PiecewiseBackend and compiles all
+    ranges up front.
 
     NOTE: the order in `compile_submod_names` matters, because
     it will be used to determine the order of the compiled piecewise
@@ -540,9 +539,6 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
         vllm_backend: "VllmBackend",
     ) -> None:
         super().__init__(module)
-        from torch._guards import detect_fake_mode
-
-        self.fake_mode = detect_fake_mode()
         self.compile_submod_names = compile_submod_names
         self.compilation_config = vllm_config.compilation_config
         self.vllm_config = vllm_config
@@ -552,13 +548,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
 
     @instrument(span_name="Inductor compilation")
     def run(self, *args: Any) -> Any:
-        # maybe instead just assert inputs are fake?
-        fake_args = [
-            self.fake_mode.from_tensor(t) if isinstance(t, torch.Tensor) else t
-            for t in args
-        ]
-        with self.fake_mode, enable_python_dispatcher():
-            return super().run(*fake_args)
+        return super().run(*args)
 
     def call_module(
         self,
@@ -613,21 +603,6 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
 # e.g. backbone/eagle_head
 model_tag: str = "backbone"
 model_is_encoder: bool = False
-
-_on_compilation_complete_callback: contextvars.ContextVar[Callable[[], None] | None] = (
-    contextvars.ContextVar("on_compilation_complete_callback", default=None)
-)
-
-
-@contextmanager
-def set_on_compilation_complete(
-    callback: Callable[[], None],
-) -> Generator[None, None, None]:
-    token = _on_compilation_complete_callback.set(callback)
-    try:
-        yield
-    finally:
-        _on_compilation_complete_callback.reset(token)
 
 
 @contextmanager
@@ -846,6 +821,7 @@ class VllmBackend:
             ),
         )
 
+    @dynamo_timed("vllm_backend")
     def __call__(self, graph: fx.GraphModule, example_inputs: Sequence[Any]) -> Any:
         from .caching import (
             VllmSerializableFunction,
@@ -1036,10 +1012,23 @@ class VllmBackend:
         ]
 
         # propagate the split graph to the piecewise backend,
-        # compile submodules with symbolic shapes
+        # compile submodules with symbolic shapes, and compile all ranges
+        # up front so that compilation is complete before the callable
+        # is returned.
         PiecewiseCompileInterpreter(
             self.split_gm, submod_names_to_compile, self.vllm_config, self
         ).run(*fake_args)
+
+        # All compilation is done. Save the cache.
+        time_before_saving = time.perf_counter()
+        self.compiler_manager.save_to_file()
+        elapsed = time.perf_counter() - time_before_saving
+        if elapsed > 1:
+            logger.info_once(
+                "Saved compiler manager cache in %.2f seconds.",
+                elapsed,
+                scope="local",
+            )
 
         from torch._guards import detect_fake_mode
 
