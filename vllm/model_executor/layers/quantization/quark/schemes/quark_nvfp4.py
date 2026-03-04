@@ -46,7 +46,7 @@ class QuarkNVFP4(QuarkScheme):
         if self.backend != NvFp4LinearBackend.EMULATION:
             logger.warning_once(
                 "Only the backend NvFp4LinearBackend.EMULATION is tested with"
-                " QuarkNVFP4, got backend={self.backend}. Use at your own risk."
+                f" QuarkNVFP4, got backend={self.backend}. Use at your own risk."
             )
             self.swizzle: bool | None = None
         else:
@@ -136,14 +136,6 @@ class QuarkNVFP4(QuarkScheme):
         input_global_scale = layer.input_scale_2.max().to(torch.float32)
         layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
         del layer.input_scale_2
-
-        # NOTE: if the checkpoint shares the same global scale over parallel
-        # layers (q/k/v, gate/up), this inversion may be fine to do after
-        # taking the max.
-        if self.backend == NvFp4LinearBackend.EMULATION:
-            layer.weight_scale_2.data = 1.0 / layer.weight_scale_2.data.to(
-                torch.float32
-            )
 
         weight_global_scale = layer.weight_scale_2.to(torch.float32)
 
