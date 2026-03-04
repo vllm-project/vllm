@@ -17,17 +17,17 @@ visible (either via Inductor partition or `splitting_ops=[]`).
 > Note that speedup depends heavily on the exact model, batch size, and hardware. 
 > If tuning performance by hand, always benchmark your exact use-case with and without the fusion to verify the impact.
 
-| Fusion                                                                    | `PassConfig` flag            | Fused operations                               | Default at                     | E2E Speedup        | Requires fullgraph |
-|---------------------------------------------------------------------------|------------------------------|------------------------------------------------|--------------------------------|--------------------|--------------------|
-| [Attention + Quant](#attention--quantization-fuse_attn_quant)             | `fuse_attn_quant`            | Attention output → FP8/NVfp4 quant             | Off by default                 | 3-7%               | Yes                |
-| [AllReduce + RMSNorm](#allreduce--rmsnorm-fuse_allreduce_rms)             | `fuse_allreduce_rms`         | All-reduce → RMSNorm (+residual_add) (→ quant) | O2 (Hopper/Blackwell + TP > 1) | 5-20%              | No                 |
-| [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion)               | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No                 |
-| [Sequence Parallelism](#sequence-parallelism-enable_sp)                   | `enable_sp`                  | AllReduce → ReduceScatter + AllGather          | Off by default                 | Prereq for AsyncTP | Yes                |
-| [AsyncTP GEMM + collective](#asynctp-gemm--collective-overlap-fuse_gemm_comms) | `fuse_gemm_comms`       | GEMM → reduce-scatter / all-gather → GEMM      | Off by default                 | 7-10%              | Yes                |
-| [RMSNorm + Quant](#rmsnorm--quantization-fuse_norm_quant)                 | `fuse_norm_quant`            | RMSNorm (+residual add) → FP8/FP4 quant        | O1 (conditional)               | 1-4%               | No                 |
-| [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant)                 | `fuse_act_quant`             | SiLU+Mul activation → FP8/FP4 quant            | O1 (conditional)               | 1-4%               | No                 |
-| [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)        | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O1 (ROCm/AITER only)           | TBD                | No                 |
-| [RMSNorm + Padding](#rmsnorm--padding-fuse_act_padding)                   | `fuse_act_padding`           | Residual add + RMSNorm → padding               | O1 (ROCm/AITER only)           | TBD                | No                 |
+| Fusion                                                                           | `PassConfig` flag            | Fused operations                               | Default at                     | E2E Speedup        | Requires fullgraph |
+|----------------------------------------------------------------------------------|------------------------------|------------------------------------------------|--------------------------------|--------------------|--------------------|
+| [Attention + Quant](#attention--quantization-fuse_attn_quant)                    | `fuse_attn_quant`            | Attention output → FP8/NVfp4 quant             | Off by default                 | 3-7%               | Yes                |
+| [AllReduce + RMSNorm](#allreduce--rmsnorm-fuse_allreduce_rms)                    | `fuse_allreduce_rms`         | All-reduce → RMSNorm (+residual_add) (→ quant) | O2 (Hopper/Blackwell + TP > 1) | 5-20%              | No                 |
+| [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion)                      | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No                 |
+| [Sequence Parallelism](#sequence-parallelism-enable_sp)                          | `enable_sp`                  | AllReduce → ReduceScatter + AllGather          | Off by default                 | Prereq for AsyncTP | Yes                |
+| [AsyncTP GEMM + collective](#asynctp-gemm--collective-overlap-fuse_gemm_comms)   | `fuse_gemm_comms`            | GEMM → reduce-scatter / all-gather → GEMM      | Off by default                 | 7-10%              | Yes                |
+| [RMSNorm + Quant](#rmsnorm--quantization-fuse_norm_quant)                        | `fuse_norm_quant`            | RMSNorm (+residual add) → FP8/FP4 quant        | O1 (conditional)               | 1-4%               | No                 |
+| [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant)                        | `fuse_act_quant`             | SiLU+Mul activation → FP8/FP4 quant            | O1 (conditional)               | 1-4%               | No                 |
+| [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)               | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O1 (ROCm/AITER only)           | TBD                | No                 |
+| [RMSNorm + Padding](#rmsnorm--padding-fuse_act_padding)                          | `fuse_act_padding`           | Residual add + RMSNorm → padding               | O1 (ROCm/AITER only)           | TBD                | No                 |
 
 ---
 
@@ -177,16 +177,16 @@ on SM90/SM100) and configurable via `PassConfig.fi_allreduce_fusion_max_size_mb`
 ---
 
 ### Sequence Parallelism (`enable_sp`)
-> [!NOTE]
-> Sequence Parallelism itself does not directly improve performance; it is a prerequisite for the
-> AsyncTP pass (`fuse_gemm_comms`). SP is only applied above a minimum token threshold that is
-> auto-configured based on device capability and model `hidden_size`. Currently only active on
-> H100/SM90 for models with `hidden_size >= 8192`. The threshold is configurable via
-> `PassConfig.sp_min_token_num`.
 
 **What it fuses.** Replaces all-reduce collectives with reduce-scatter + local RMSNorm + all-gather,
 splitting the sequence dimension across TP ranks. This restructures the graph so the subsequent AsyncTP
 pass can fuse the reduce-scatter / all-gather with the surrounding GEMMs.
+
+Sequence Parallelism itself does not directly improve performance; it is a prerequisite for the
+AsyncTP pass (`fuse_gemm_comms`). SP is only applied above a minimum token threshold that is
+auto-configured based on device capability and model `hidden_size`. Currently only active on
+H100/SM90 for models with `hidden_size >= 8192`. The threshold is configurable via
+`PassConfig.sp_min_token_num`.
 
 The general transformation:
 
@@ -214,19 +214,26 @@ Supported hardware: Only tested on NVIDIA CUDA, possibly works on ROCm. FP8 all-
 
 ### AsyncTP GEMM + Collective Overlap (`fuse_gemm_comms`)
 > [!WARNING]
-> Requires `enable_sp=True`. This pass is a no-op if Sequence Parallelism has not been applied.
+> Requires `enable_sp=True` (enabled automatically). This pass is a no-op if Sequence Parallelism has not been applied.
 > Requires symmetric-memory support (`torch.distributed._symmetric_memory`) on CUDA.
 
 **What it fuses.** After Sequence Parallelism transforms the graph, fuses GEMM kernels with the
 surrounding reduce-scatter (output projection) and all-gather (input projection) using
 `torch.ops.symm_mem` symmetric-memory primitives, overlapping communication and computation.
+This overlap is only profitable for large `num_tokens`, so the fusion (and preceeding SP)
+is only performed in the higher compiled range above `PassConfig.sp_min_token_num`.
 
 Patterns covered:
 - `GEMM → reduce-scatter` → `fused_matmul_reduce_scatter`
 - `all-gather → GEMM` → `all_gather_matmul`
-- FP8 scaled variants of both patterns (CUTLASS)
+- FP8 scaled variants of both patterns
 
-Supported hardware: NVIDIA CUDA (requires `tensor_parallel_size > 1`).
+Supported hardware: NVIDIA CUDA (requires `torch.distributed._symmetric_memory`).
+
+On B200, pattern-matching fp8 FlashInfer scaled MM is not supported, so it must be disabled:
+```shell
+VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel ...
+```
 
 **Code locations.**
 
@@ -302,24 +309,25 @@ when the hidden size is 2880 and AITER Triton GEMMs *not* enabled.
 The table below lists the quantization schemes supported by each fusion on each platform.
 **—** means the fusion is not available on that platform.
 
-| Fusion | SM100 (Blackwell) | SM90 (Hopper) | SM89 (Ada) | SM80 (Ampere) | ROCm |
-|--------|-------------------|---------------|------------|---------------|------|
-| `fuse_norm_quant` | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | — | FP8 static, FP8 per-token, FP8 per-group |
-| `fuse_act_quant` | FP8 static, NVfp4 | FP8 static | FP8 static | — | FP8 per-group |
-| `fuse_attn_quant`* | FP8 static*, NVfp4* | FP8 static* | FP8 static* | — | FP8 static* |
-| `fuse_allreduce_rms` | FP16/BF16, FP8 static, NVfp4 | FP16/BF16, FP8 static | — | — | — |
-| `enable_sp` | FP16/BF16, FP8 static† | FP16/BF16, FP8 static | — | — | — |
-| `fuse_gemm_comms` | FP16/BF16, FP8† | FP16/BF16, FP8 | — | — | — |
-| `enable_qk_norm_rope_fusion` | FP16/BF16 | FP16/BF16 | FP16/BF16 | FP16/BF16 | — |
-| `fuse_rope_kvcache` | — | — | — | — | FP16/BF16 |
-| `fuse_act_padding` | — | — | — | — | FP16/BF16 |
+| Fusion                       | SM100 (Blackwell)                        | SM90 (Hopper)                            | SM89 (Ada)                               | SM80 (Ampere) | ROCm                                     |
+|------------------------------|------------------------------------------|------------------------------------------|------------------------------------------|---------------|------------------------------------------|
+| `fuse_norm_quant`            | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | —             | FP8 static, FP8 per-token, FP8 per-group |
+| `fuse_act_quant`             | FP8 static, NVfp4                        | FP8 static                               | FP8 static                               | —             | FP8 per-group                            |
+| `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVfp4             | FP16/BF16, FP8 static                    | —                                        | —             | —                                        |
+| `fuse_attn_quant`*           | FP8 static*, NVfp4*                      | FP8 static*                              | FP8 static*                              | —             | FP8 static*                              |
+| `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
+| `fuse_act_padding`           | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
+| `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16                                | FP16/BF16     | —                                        |
+| `enable_sp`                  | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16                                | FP16/BF16     | —                                        |
+| `fuse_gemm_comms`            | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16                                | FP16/BF16     | —                                        |
 
 \* `fuse_attn_quant` support depends on the attention backend in use; not all backends support
 fused quantization output. See the [`fuse_attn_quant` section](#attention--quantization-fuse_attn_quant)
 for per-backend details.
 
-† `enable_sp` and `fuse_gemm_comms` are only auto-configured for SM90 today;
-SM100 support requires setting `PassConfig.sp_min_token_num` explicitly.
+† `enable_sp` and `fuse_gemm_comms` are only autoconfigured for SM90 today;
+other architectures support requires setting `PassConfig.sp_min_token_num` explicitly.
+SM100 support also requires setting `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel`.
 
 ---
 
