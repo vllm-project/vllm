@@ -406,14 +406,14 @@ class CompressedTensorsW4A16Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-    ) -> torch.Tensor:
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         Execute the MoE Layer with MXFP4 XPU Kernel.
         """
         # Lazy import
         from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
-        # # 原理： (x 左移4位) 位或 (x 右移4位)
         # layer.w13_weight_packed = ((layer.w13_weight_packed & 0x0F) << 4) | ((layer.w13_weight_packed & 0xF0) >> 4)
         # layer.w2_weight_packed = ((layer.w2_weight_packed & 0x0F) << 4) | ((layer.w2_weight_packed & 0xF0) >> 4)
 
@@ -583,7 +583,8 @@ class CompressedTensorsW4A16Int4MoEMethod(CompressedTensorsMoEMethod):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-    ) -> torch.Tensor:
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
         # routing_weights, selected_experts = select_experts(
@@ -796,18 +797,15 @@ class CompressedTensorsW8A16Fp8MoEMethod(CompressedTensorsMoEMethod):
         self,
         layer: FusedMoE,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor:
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         Execute the MoE Layer: Router -> Expert Computation (XPU Kernel).
         """
 
-        # 1. Router: Select the top-k experts for each token
-        routing_weights, selected_experts = select_experts(
-            hidden_states=x, router_logits=router_logits
-        )
-
-        # 2. Expert Computation: Invoke the XPU Fused MoE Kernel
+        # 1. Expert Computation: Invoke the XPU Fused MoE Kernel
         # Lazy import to prevent ImportError on non-XPU environments
         from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
@@ -819,8 +817,8 @@ class CompressedTensorsW8A16Fp8MoEMethod(CompressedTensorsMoEMethod):
             w2=layer.w2_weight,
             w2_scales=layer.w2_weight_scale,
             w2_bias=layer.w2_bias if self.moe.has_bias else None,
-            topk_weights=routing_weights,
-            topk_ids=selected_experts,  # Contains the selected expert indices
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,  # Contains the selected expert indices
             n_experts_per_token=layer.top_k,
             activation=layer.activation,
             # Calculate local number of experts per partition
