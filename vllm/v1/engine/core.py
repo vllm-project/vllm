@@ -647,18 +647,8 @@ class EngineCore:
         Weights stay on GPU so cuda-checkpoint can snapshot them natively.
         Only NCCL IPC memory (which cuda-checkpoint cannot handle) and
         the OTel tracer (gRPC channels won't survive CRIU) are torn down.
+        CUDA graphs are recaptured on resume with fresh NCCL handles.
         """
-        if (
-            self.vllm_config.parallel_config.tensor_parallel_size > 1
-            and self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        ):
-            logger.warning(
-                "suspend()/resume() with tensor_parallel_size > 1 and full "
-                "CUDA graphs may fail: NCCL communicator handles baked into "
-                "captured graphs become stale after NCCL is rebuilt on "
-                "resume. Use --enforce-eager or a piecewise cudagraph mode "
-                "to avoid this."
-            )
         if not self.is_scheduler_paused():
             self.pause_scheduler(mode="abort")
         self.model_executor.suspend()
