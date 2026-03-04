@@ -7,7 +7,6 @@
 
 import json
 import logging
-import time
 import uuid
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
@@ -42,6 +41,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     StreamOptions,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.utils import random_uuid
 
 if TYPE_CHECKING:
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
@@ -239,7 +239,7 @@ class AnthropicServingMessages(OpenAIServingChat):
     def _convert_tool_use_block(cls, block, tool_calls: list[dict[str, Any]]) -> None:
         """Convert tool_use block to OpenAI function call format"""
         tool_call = {
-            "id": block.id or f"call_{int(time.time())}",
+            "id": block.id or f"call_{random_uuid()}",
             "type": "function",
             "function": {
                 "name": block.name or "",
