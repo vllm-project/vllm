@@ -1571,7 +1571,11 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def resume_scheduler(self):
         super().resume_scheduler()
-        if not self.engines_running and self.scheduler.has_unfinished_requests():
+        if (
+            self.has_coordinator
+            and not self.engines_running
+            and self.scheduler.has_unfinished_requests()
+        ):
             # Wake up other DP engines.
             self.output_queue.put_nowait(
                 (-1, EngineCoreOutputs(start_wave=self.current_wave))
