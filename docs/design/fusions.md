@@ -74,10 +74,10 @@ Fields set explicitly by the user always take precedence over optimization-level
 ### RMSNorm + Quantization (`fuse_norm_quant`)
 > [!WARNING]
 > On NVIDIA, Inductor actually generates a faster fused kernel than our custom CUDA kernel.
-> Hence this fusion is only enabled when either rms_norm or quant_fp8 is using a custom kernel.
+> Hence this fusion is only enabled when either `rms_norm` or `quant_fp8` is using a custom kernel.
 
 **What it fuses.** Combines the custom `rms_norm` / `fused_add_rms_norm`
-operations with subsequent FP8 quantization into a single fused kernel,
+operations with subsequent quantization into a single fused kernel,
 eliminating an intermediate read/write of the full-precision activation tensor.
 Two variants are fused:
 
@@ -102,18 +102,17 @@ Supported quantization scheme/hardware combinations:
 ### SiLU+Mul + Quantization (`fuse_act_quant`)
 > [!WARNING]
 > Same as `fuse_norm_quant`: on NVIDIA, Inductor generates a faster fused kernel than our custom ops.
-> This fusion is only enabled when either `silu_and_mul` or `quant_fp8` custom ops are active,
+> This fusion is only enabled when either `silu_and_mul` or `quant_fp8` are using a custom kernel,
 > or for NVfp4-quantized models (where FP4 quant is always a custom op).
 
-**What it fuses.** Fuses the `silu_and_mul` gate-up projection activation (used in LLaMA/Mistral FFN
-layers) with a subsequent quantization step into a single kernel, avoiding materialization of the
-full-precision post-activation tensor.
+**What it fuses.** Fuses the `silu_and_mul` gate-up projection activation with subsequent quantization into a single kernel,
+avoiding materialization of the full-precision post-activation tensor.
 
 Note that AITER fusions are in a separate pass in `vllm.compilation.passes.fusion.rocm_aiter_fusion`.
 
 Supported quantization scheme/hardware combinations:
 - FP8 static per-tensor: CUDA & HIP kernel
-- NVfp4 dynamic: CUDA only (requires `scaled_fp4_quant`)
+- NVfp4 dynamic: CUDA sm100+ only with flashinfer
 - FP8 per-token-group (128): ROCm AITER only
 
 **Code locations.**
@@ -127,22 +126,25 @@ Supported quantization scheme/hardware combinations:
 ### Attention + Quantization (`fuse_attn_quant`)
 > [!WARNING]
 > `fuse_attn_quant` is currently not enabled at any optimization level by default and must be set
-> explicitly. It requires the full model graph to be visible (fullgraph compilation or Inductor
-> partition) and `CompilationConfig.static_forward_context` to contain attention layer metadata.
+> explicitly. It requires the full model graph to be visible (Inductor partition or `splitting_ops=[]`).
 
 **What it fuses.** Fuses the attention output quantization directly after the attention computation,
-removing an extra full pass over the output tensor. Patterns covered:
+eliminating a full-precision memory round-trip of the attention output. Patterns covered:
 
 - `Attention → FP8 static quant`
-- `Attention → NVfp4 dynamic quant` (CUDA only, requires `scaled_fp4_quant`)
+  - `TRITON_ATTN`: CUDA, ROCm
+  - `FLASHINFER`: CUDA sm100+ with FlashInfer installed
+  - `ROCM_ATTN`: ROCm
+  - `ROCM_AITER_UNIFIED_ATTN`: ROCm with AITER
+- `Attention → NVfp4 dynamic quant`
+  - `FLASHINFER`: CUDA sm100+ with FlashInfer installed
 
-FlexAttentionImpl does not yet support fused output quantization.
-
-Supported hardware: CUDA (SM70+ for FP8; SM90+ recommended for NVfp4).
+Other attention backends do not support fused output quantization yet.
 
 **Code locations.**
 
 - Pass: [`vllm/compilation/passes/fusion/attn_quant_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/attn_quant_fusion.py)
+- Attention backends: [`vllm/v1/attention/backends/`](https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/)
 
 ---
 
@@ -154,13 +156,14 @@ Supported hardware: CUDA (SM70+ for FP8; SM90+ recommended for NVfp4).
 > Only supported on NVIDIA Hopper (SM90) and Blackwell (SM100) with FlashInfer installed.
 
 **What it fuses.** Fuses the tensor-parallel all-reduce collective with the subsequent residual add,
-RMSNorm, and optionally a quantization step into a single FlashInfer / TRT-LLM communication kernel,
-reducing the number of synchronisation barriers per transformer layer.
+RMSNorm, and optionally a quantization step into a single FlashInfer / TRT-LLM communication kernel.
+This fusion is only profitable for small `num_tokens`, 
+so the fusion is only performed in the lower compiled range.
 
 Patterns covered:
-- `AllReduce → RMSNorm`
-- `AllReduce → residual add → RMSNorm`
-- Both with optional suffix: `→ FP8 static quant` or `→ NVfp4 dynamic quant`
+- `AllReduce → RMSNorm(+residual_add)`: CUDA sm90+ with FlashInfer
+- `AllReduce → RMSNorm(+residual_add) → FP8 static quant`: CUDA sm90+ with FlashInfer
+- `AllReduce → RMSNorm(+residual_add) → NVfp4 dynamic quant`: CUDA sm100+ with FlashInfer
 
 The maximum tensor size below which the fused kernel is used is hardware-dependent (64 MB for TP=2
 on SM90/SM100) and configurable via `PassConfig.fi_allreduce_fusion_max_size_mb`.
@@ -198,11 +201,10 @@ Patterns covered:
 - Middle blocks: `AllReduce → fused_add_RMSNorm` → `ReduceScatter → fused_add_RMSNorm → AllGather`
 - Both with optional `→ FP8 static quant` suffix
 
-Requires: `use_inductor_graph_partition=True` **or** piecewise compilation with batch sizes
+Requires: `use_inductor_graph_partition=True` **or** piecewise compilation with static sizes
 divisible by `tensor_parallel_size`.
 
-Supported hardware: NVIDIA CUDA only (SM90 enabled by default; other capabilities require explicit
-`sp_min_token_num` configuration).
+Supported hardware: Only tested on NVIDIA CUDA, possibly works on ROCm. FP8 all-gather requires sm90+. 
 
 **Code locations.**
 
@@ -234,9 +236,9 @@ Supported hardware: NVIDIA CUDA (requires `tensor_parallel_size > 1`).
 ---
 
 ### QK Norm + RoPE (`enable_qk_norm_rope_fusion`)
-> [!NOTE]
 > Only applicable to models that apply per-head RMSNorm to Q and K before rotary positional
-> embedding (e.g. some Gemma or Cohere variants). Not enabled by default at any optimization level.
+> embedding (e.g. Qwen). Not enabled by default at any optimization level due to perf issues on B200:
+> 
 
 **What it fuses.** Fuses the sequence: split QKV → reshape → Q/K RMSNorm → reshape → rotary
 embedding into a single `fused_qk_norm_rope` CUDA kernel.
@@ -262,17 +264,17 @@ Supported hardware: CUDA (SM70+) only.
 ---
 
 ### RoPE + KV-Cache Update (`fuse_rope_kvcache`)
-> [!NOTE]
-> ROCm/AITER-only. Not available on NVIDIA CUDA or CPU.
-> The fusion only fires when `num_tokens ≤ rope_kvcache_fusion_max_token_num` (default: 256);
-> larger batches fall back to unfused kernels.
-
+> ROCm/AITER-only. Not available on NVIDIA CUDA or CPU. The fusion is only enabled for 
+> `num_tokens ≤ 256` by default due to AITER fused kernel performance issues.
+> This threshold is configurable via `PassConfig.rope_kvcache_fusion_max_token_num`.
+> 
 **What it fuses.** Fuses the rotary positional embedding kernel with the KV-cache scatter/write into
 a single kernel, avoiding separate reads and writes of the key and value tensors.
 
-Requires: AMD ROCm with AITER enabled, the `rotary_embedding` custom op active, and
-`use_inductor_graph_partition=True`. The token threshold is configurable via
-`PassConfig.rope_kvcache_fusion_max_token_num`.
+Requires: AMD ROCm with AITER enabled, the `rotary_embedding` custom op active (automatic),
+and the `kv_cache` update op visible in the graph: either by using Inductor graph partition
+or removed from `splitting_ops`. 
+If these conditions are set, the fusion is enabled automatically for optimization level O1 and above.
 
 **Code locations.**
 
@@ -281,92 +283,17 @@ Requires: AMD ROCm with AITER enabled, the `rotary_embedding` custom op active, 
 ---
 
 ### RMSNorm + Padding (`fuse_act_padding`)
-> [!NOTE]
-> ROCm/AITER-only. Targeted at models with `hidden_size=2880` (GPT-OSS variants).
-> Not available on NVIDIA CUDA or CPU.
+> ROCm/AITER-only. Targeted at GPT-OSS models.
 
 **What it fuses.** Fuses a residual add + RMSNorm with a subsequent padding operation that pads
 the hidden dimension to a multiple required by downstream AITER Triton GEMM kernels.
 
-Requires: AMD ROCm with AITER RMSNorm enabled and AITER Triton GEMMs *not* enabled
-(the padding is only needed without them), and `model_config.hidden_size == 2880`.
+Requires: AMD ROCm with AITER RMSNorm enabled. Enabled by default in optimization level O1 and above
+when the hidden size is 2880 and AITER Triton GEMMs *not* enabled.
 
 **Code locations.**
 
 - Pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py) (`RocmAiterTritonAddRMSNormPadFusionPass`)
-
----
-
-### Fused Add RMSNorm (kernel-level)
-> [!NOTE]
-> This is a kernel-level fusion (not a compilation pass) that is always active when
-> `RMSNorm.forward_cuda` is called with a non-`None` residual argument. Not user-configurable.
-
-**What it fuses.** Performs residual addition and RMSNorm normalization in a single kernel pass,
-avoiding an intermediate materialization of the residual-added tensor.
-
-```python
-# Equivalent unfused:
-residual = residual + x
-x = rms_norm(residual, weight)
-
-# Fused (in-place, single kernel):
-ops.fused_add_rms_norm(x, residual, weight, epsilon)
-# x → normalised output; residual → updated residual
-```
-
-On SM100 (Blackwell) with the Oink library, an alternative `oink.fused_add_rms_norm` path is taken
-when the tensor layout is compatible.
-
-Supported hardware/kernels:
-- CUDA (SM70+): `torch.ops._C.fused_add_rms_norm` (`csrc/layernorm_kernels.cu`)
-- CUDA SM100 (Blackwell): `torch.ops.oink.fused_add_rms_norm` (Oink fast path)
-- AMD ROCm: equivalent HIP kernel
-
-Alignment requirements: input, residual, and weight pointers must be 16-byte aligned and
-`hidden_size` a multiple of 8 for the vectorised (width-8) path; otherwise a scalar fallback is used.
-
-**Code locations.**
-
-- Layer: [`vllm/model_executor/layers/layernorm.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/layernorm.py)
-- Python op: [`vllm/_custom_ops.py`](https://github.com/vllm-project/vllm/blob/main/vllm/_custom_ops.py) (`fused_add_rms_norm`)
-- CUDA kernel: [`csrc/layernorm_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu)
-- Benchmark: [`benchmarks/kernels/benchmark_rmsnorm.py`](https://github.com/vllm-project/vllm/blob/main/benchmarks/kernels/benchmark_rmsnorm.py)
-
----
-
-### Fused Mixture-of-Experts (`fused_moe`)
-> [!NOTE]
-> Always active for MoE models. Controlled by the `CustomOp` system
-> (see [`VLLM_CUSTOM_OPS`](../configuration/env_vars.md)).
-
-**What it fuses.** The `FusedMoE` custom op implements the entire MoE forward pass — token routing,
-batched expert GEMMs (gate+up projections), activation (SiLU/GELU), down projection, and weighted
-expert reduction — as a single fused unit. Multiple backend implementations are selected
-automatically based on hardware and quantization.
-
-| Backend | Quant schemes | Hardware |
-|---|---|---|
-| Triton (default) | FP16, BF16, FP8 (dynamic / static) | NVIDIA CUDA SM70+, AMD ROCm |
-| CUTLASS | FP8 (block / tensor scale) | NVIDIA SM90+ |
-| FlashInfer CuteDSL | FP8, NVfp4 | NVIDIA SM90+ |
-| FlashInfer TRT-LLM | FP8, NVfp4 | NVIDIA SM90+ |
-| ROCm AITER | FP16, BF16, FP8 (group / token), INT8 | AMD CDNA (gfx940+) |
-| GGUF | GGUF quantized types | NVIDIA CUDA |
-
-ROCm AITER backend requires `rocm_aiter_ops` to be enabled; falls back to Triton otherwise.
-FlashInfer-based backends require FlashInfer to be installed.
-CUTLASS FP8 path requires SM90+ and the compiled CUTLASS extension.
-
-**Code locations.**
-
-- Layer: [`vllm/model_executor/layers/fused_moe/layer.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/layer.py)
-- Triton kernel: [`vllm/model_executor/layers/fused_moe/fused_moe.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/fused_moe.py)
-- ROCm AITER: [`vllm/model_executor/layers/fused_moe/rocm_aiter_fused_moe.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/rocm_aiter_fused_moe.py)
-- FlashInfer CuteDSL: [`vllm/model_executor/layers/fused_moe/flashinfer_cutedsl_moe.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/flashinfer_cutedsl_moe.py)
-- FlashInfer TRT-LLM: [`vllm/model_executor/layers/fused_moe/flashinfer_trtllm_moe.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/flashinfer_trtllm_moe.py)
-- GGUF: [`vllm/model_executor/layers/quantization/gguf.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gguf.py)
-- Design doc: [Fused MoE Modular Kernel](fused_moe_modular_kernel.md)
 
 ---
 
@@ -394,16 +321,6 @@ combination for common numerical precisions.  **Yes** = fully supported;
 † `enable_sp` and `fuse_gemm_comms` are only auto-configured for SM90 today;
 SM100 support requires setting `PassConfig.sp_min_token_num` explicitly.
 
-### Kernel-Level Fusions
-
-| Fusion | NVIDIA SM70–89 | NVIDIA SM90 | NVIDIA SM100 | AMD ROCm | CPU |
-|---|---|---|---|---|---|
-| Fused Add RMSNorm (kernel) | Yes | Yes | Yes (+ Oink fast path) | Yes | No |
-| Fused MoE — Triton | Yes (FP16/BF16) | Yes (FP8) | Yes (FP8) | Yes (FP16/BF16/FP8) | No |
-| Fused MoE — CUTLASS | No | Yes (FP8) | Yes (FP8) | No | No |
-| Fused MoE — FlashInfer CuteDSL | No | Yes (FP8/NVfp4) | Yes (FP8/NVfp4) | No | No |
-| Fused MoE — ROCm AITER | No | No | No | Yes (FP8/INT8) | No |
-
 ### Quantization-Scheme Columns
 
 For quick reference, the FP16 and BF16 columns in the compilation-time fusion
@@ -421,6 +338,3 @@ the RMSNorm or SiLU+Mul kernel fires but without the output quantization step.
   works.
 - [Attention Backends](attention_backends.md) — attention-specific kernel
   selection.
-- [Fused MoE Modular Kernel design](fused_moe_modular_kernel.md) — deep-dive
-  into the MoE fusion architecture.
-- [`PassConfig` API reference](../configuration/engine_args.md)
