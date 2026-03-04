@@ -569,13 +569,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
 
         vllm_config = get_current_vllm_config()
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        self.q_concat_buffer = torch.empty(
-            max_tokens,
-            num_heads,
-            head_size,
-            dtype=torch.bfloat16,
-            device=current_platform.device_type,
-        )
+        q_concat_shape = (max_tokens, num_heads, head_size)
 
         if kv_cache_dtype == "fp8_ds_mla":
             # Reserve workspace during initialization
@@ -584,10 +578,15 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
                 vllm_config.model_config.max_model_len
             )
             self.prefill_workspace_shape = (prefill_workspace_size, head_size)
-            (self.prefill_bf16_workspace,) = (
+            self.q_concat_buffer, self.prefill_bf16_workspace = (
                 current_workspace_manager().get_simultaneous(
-                    (self.prefill_workspace_shape, torch.bfloat16)
+                    (q_concat_shape, torch.bfloat16),
+                    (self.prefill_workspace_shape, torch.bfloat16),
                 )
+            )
+        else:
+            (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
+                (q_concat_shape, torch.bfloat16),
             )
 
     def _forward_bf16_kv(
