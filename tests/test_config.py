@@ -65,13 +65,14 @@ def test_enable_allreduce_rms_fusion_disabled_for_pp():
             tensor_parallel_size=2,
             pipeline_parallel_size=1,
             data_parallel_size=1,
-        ))
+        )
+    )
 
-    with patch("vllm.utils.flashinfer.has_flashinfer", return_value=True), \
-            patch.object(current_platform, "is_cuda", return_value=True), \
-            patch.object(current_platform,
-                         "is_device_capability",
-                         return_value=True):
+    with (
+        patch("vllm.utils.flashinfer.has_flashinfer", return_value=True),
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_device_capability", return_value=True),
+    ):
         assert enable_allreduce_rms_fusion(cfg)
 
         cfg.parallel_config.pipeline_parallel_size = 2
