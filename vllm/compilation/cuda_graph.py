@@ -260,7 +260,9 @@ class CUDAGraphWrapper:
                     # therefore, we only run gc for the first graph,
                     # and disable gc for the rest of the graphs.
                     stack.enter_context(patch("gc.collect", lambda: None))
-                    stack.enter_context(patch("torch.cuda.empty_cache", lambda: None))
+                    stack.enter_context(
+                        patch("torch.accelerator.empty_cache", lambda: None)
+                    )
 
                 if self.graph_pool is not None:
                     set_graph_pool_id(self.graph_pool)

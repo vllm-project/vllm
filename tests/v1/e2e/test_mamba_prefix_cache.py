@@ -440,7 +440,7 @@ def _run_ref_mamba_state_worker():
         torch.save(cpu_state_ref, "mamba_kv_cache_dict_ref.pth")
         mamba_kv_cache_dict.clear()
         del engine
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
     except Exception:
         traceback.print_exc()
@@ -805,5 +805,5 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
         check_mamba_state_equal(mamba_state_ref, mamba_kv_cache_dict, keys_to_check)
         mamba_kv_cache_dict.clear()
     del engine
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()

@@ -127,6 +127,13 @@ repos:
     language: python
     types: [python]
     additional_dependencies: [regex]
+  # prevent use torch.cuda APIs
+  - id: check-torch-cuda-call
+    name: "Prevent new 'torch.cuda' APIs call"
+    entry: python tools/pre_commit/check_torch_cuda.py
+    language: python
+    types: [python]
+    additional_dependencies: [regex]
   - id: validate-config
     name: Validate configuration has default values and that each field has a docstring
     entry: python tools/pre_commit/validate_config.py

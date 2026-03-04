@@ -24,7 +24,7 @@ LORA_PATH = "davzoku/finqa_adapter_1b"
 
 def _cleanup():
     gc.collect()
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
 
 
 @pytest.fixture(autouse=True)

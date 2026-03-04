@@ -95,7 +95,7 @@ def test_batch_inference_correctness(
             prompts, sampling_params, lora_request=lora_request
         )
         del ref_llm
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
 
         lora_spec_llm = LLM(
@@ -135,5 +135,5 @@ def test_batch_inference_correctness(
         print(f"match ratio: {matches}/{len(ref_outputs)}")
         assert matches > int(0.90 * len(ref_outputs))
         del lora_spec_llm
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
