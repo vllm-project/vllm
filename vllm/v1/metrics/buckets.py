@@ -29,14 +29,14 @@ class BucketType(str, Enum):
 
     ACCUMULATED_PHASE_LATENCY = "accumulated_phase_latency"
     """For end-to-end and phase-specific request latencies (seconds).
-    Range: 300ms to 7680s (2+ hours) for long-running requests.
+    Range: 100ms to 7680s (2+ hours) for long-running requests.
     Used by: e2e_request_latency, queue_time, inference_time,
              prefill_time, decode_time
     """
 
     CACHE_RESIDENCY = "cache_residency"
     """For KV cache block lifecycle metrics (seconds).
-    Range: 1ms to 1800s (30 minutes) for cache timing.
+    Range: 1ms to 3600s (1 hour) for cache timing.
     Used by: kv_block_lifetime, kv_block_idle_before_evict, kv_block_reuse_gap
     """
 
@@ -50,7 +50,7 @@ class BucketType(str, Enum):
 
     BATCH_SIZE = "batch_size"
     """For iteration token counts (tokens per scheduler step).
-    Powers of 2 from 1 to 16384 for batch processing metrics.
+    Dynamic 1-2-5 buckets scaling to max_num_batched_tokens.
     Used by: iteration_tokens_total
     """
 
@@ -116,9 +116,11 @@ DEFAULT_BUCKETS: dict[BucketType, tuple[float, ...]] = {
         640.0,
         2560.0,
     ),
-    # ACCUMULATED_PHASE_LATENCY: Request phase timings (300ms to 7680s)
+    # ACCUMULATED_PHASE_LATENCY: Request phase timings (100ms to 7680s)
     # Coarser granularity suitable for total request time.
     BucketType.ACCUMULATED_PHASE_LATENCY: (
+        0.1,
+        0.2,
         0.3,
         0.5,
         0.8,
@@ -141,7 +143,7 @@ DEFAULT_BUCKETS: dict[BucketType, tuple[float, ...]] = {
         1920.0,
         7680.0,
     ),
-    # CACHE_RESIDENCY: KV cache block lifetime (1ms to 1800s)
+    # CACHE_RESIDENCY: KV cache block lifetime (1ms to 3600s)
     # Fine granularity at millisecond level for cache hits
     BucketType.CACHE_RESIDENCY: (
         0.001,
@@ -165,23 +167,9 @@ DEFAULT_BUCKETS: dict[BucketType, tuple[float, ...]] = {
         600,
         1200,
         1800,
+        3600,
     ),
-    # BATCH_SIZE: Tokens per iteration (1 to 16384)
-    BucketType.BATCH_SIZE: (
-        1,
-        8,
-        16,
-        32,
-        64,
-        128,
-        256,
-        512,
-        1024,
-        2048,
-        4096,
-        8192,
-        16384,
-    ),
+    # BATCH_SIZE: Dynamic (see get_buckets with max_num_batched_tokens)
     # COMPLETION_COUNT: Request n parameter (1 to 20)
     BucketType.COMPLETION_COUNT: (1, 2, 5, 10, 20),
 }
@@ -236,6 +224,7 @@ def build_1_2_5_buckets(max_value: int) -> list[int]:
 def get_buckets(
     bucket_type: BucketType,
     max_model_len: int | None = None,
+    max_num_batched_tokens: int | None = None,
 ) -> tuple[float, ...]:
     """
     Get bucket values for a given bucket type.
@@ -243,6 +232,7 @@ def get_buckets(
     Args:
         bucket_type: The type of buckets to retrieve.
         max_model_len: Required for REQUEST_TOKEN_COUNT type.
+        max_num_batched_tokens: Optional for BATCH_SIZE type (defaults to 16384).
 
     Returns:
         Tuple of bucket boundary values.
@@ -256,6 +246,10 @@ def get_buckets(
                 "max_model_len is required for REQUEST_TOKEN_COUNT buckets"
             )
         return tuple(build_1_2_5_buckets(max_model_len))
+
+    if bucket_type == BucketType.BATCH_SIZE:
+        max_batch = max_num_batched_tokens or 16384
+        return tuple(build_1_2_5_buckets(max_batch))
 
     return DEFAULT_BUCKETS[bucket_type]
 

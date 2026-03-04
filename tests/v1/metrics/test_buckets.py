@@ -42,9 +42,10 @@ class TestBucketDefinitions:
 
     def test_all_bucket_types_have_defaults(self):
         """Verify all BucketType enum values have default buckets defined."""
+        dynamic_types = {BucketType.REQUEST_TOKEN_COUNT, BucketType.BATCH_SIZE}
         for bucket_type in BucketType:
-            if bucket_type != BucketType.REQUEST_TOKEN_COUNT:
-                # REQUEST_TOKEN_COUNT is dynamic, others should have defaults
+            if bucket_type not in dynamic_types:
+                # Dynamic types use build_1_2_5_buckets, others have defaults
                 assert bucket_type in DEFAULT_BUCKETS, (
                     f"{bucket_type.value} missing from DEFAULT_BUCKETS"
                 )
@@ -106,8 +107,9 @@ class TestGetBuckets:
 
     def test_get_buckets_static_types(self):
         """Test retrieval of static bucket types."""
+        dynamic_types = {BucketType.REQUEST_TOKEN_COUNT, BucketType.BATCH_SIZE}
         for bucket_type in BucketType:
-            if bucket_type == BucketType.REQUEST_TOKEN_COUNT:
+            if bucket_type in dynamic_types:
                 continue
             buckets = get_buckets(bucket_type)
             assert buckets == DEFAULT_BUCKETS[bucket_type]
@@ -129,23 +131,31 @@ class TestGetBuckets:
     def test_get_buckets_accumulated_phase_latency(self):
         """Test ACCUMULATED_PHASE_LATENCY buckets."""
         buckets = get_buckets(BucketType.ACCUMULATED_PHASE_LATENCY)
-        # Should start at 300ms and extend to 7680s
-        assert buckets[0] == 0.3
+        # Should start at 100ms and extend to 7680s
+        assert buckets[0] == 0.1
         assert buckets[-1] == 7680.0
 
     def test_get_buckets_cache_residency(self):
         """Test CACHE_RESIDENCY buckets."""
         buckets = get_buckets(BucketType.CACHE_RESIDENCY)
-        # Should start at 1ms and extend to 1800s
+        # Should start at 1ms and extend to 3600s (1 hour)
         assert buckets[0] == 0.001
-        assert buckets[-1] == 1800
+        assert buckets[-1] == 3600
 
-    def test_get_buckets_batch_size(self):
-        """Test BATCH_SIZE buckets."""
+    def test_get_buckets_batch_size_default(self):
+        """Test BATCH_SIZE buckets with default max."""
         buckets = get_buckets(BucketType.BATCH_SIZE)
-        # Should be powers of 2 from 1 to 16384
+        # Should use 1-2-5 pattern up to default 16384
         assert buckets[0] == 1
-        assert buckets[-1] == 16384
+        assert max(buckets) <= 16384
+
+    def test_get_buckets_batch_size_dynamic(self):
+        """Test BATCH_SIZE buckets with custom max_num_batched_tokens."""
+        buckets = get_buckets(BucketType.BATCH_SIZE, max_num_batched_tokens=1000)
+        assert buckets[0] == 1
+        assert max(buckets) <= 1000
+        # Should follow 1-2-5 pattern
+        assert buckets == tuple(build_1_2_5_buckets(1000))
 
     def test_get_buckets_completion_count(self):
         """Test COMPLETION_COUNT buckets."""
