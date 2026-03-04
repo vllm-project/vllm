@@ -1635,7 +1635,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # When enabled, freed KV cache blocks are buffered and sorted by block_id
     # before re-entering the free list, improving physical memory contiguity
-    # on allocation. Only useful when prefix caching is disabled.
+    # on allocation. Compatible with prefix caching (eviction order degrades
+    # from LRU to block_id order, but cache hits still work correctly).
     "VLLM_CONTIGUOUS_BLOCK_ALLOC": lambda: bool(
         int(os.getenv("VLLM_CONTIGUOUS_BLOCK_ALLOC", "0"))
     ),
