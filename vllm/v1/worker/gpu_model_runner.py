@@ -206,33 +206,29 @@ def _update_num_computed_tokens_for_batch_change(
     num_accepted_tokens: torch.Tensor,
     prev_positions: torch.Tensor,
     valid_sampled_token_count: torch.Tensor,
+    prev_num_draft_tokens: torch.Tensor,
     cpu_num_computed_tokens: torch.Tensor,
 ) -> None:
-    """Update num_computed_tokens when batch has changed (new/reordered reqs).
+    """Correct num_computed_tokens for async spec decode drift.
 
-    For continuing requests: prev GPU value + valid_counts
-    For new requests: use CPU value
+    Requests that had drafts (D > 0): corrected = prev_gpu + V.
+    New requests or non-draft (e.g. prefills): use CPU value directly.
     """
-    continuing_mask = prev_positions >= 0
     gather_indices = prev_positions.clamp(min=0)
 
-    prev_gpu_values = num_computed_tokens[gather_indices]
     valid_counts = valid_sampled_token_count[gather_indices]
+    prev_computed = num_computed_tokens[gather_indices]
+    prev_drafts = prev_num_draft_tokens[gather_indices]
 
-    num_computed_tokens.copy_(
-        torch.where(
-            continuing_mask,
-            prev_gpu_values + valid_counts.int(),
-            cpu_num_computed_tokens,
-        )
+    participating = (prev_positions >= 0) & (prev_drafts > 0)
+    corrected = prev_computed + valid_counts.int()
+
+    n = prev_positions.shape[0]
+    num_computed_tokens[:n].copy_(
+        torch.where(participating, corrected, cpu_num_computed_tokens)
     )
-
     num_accepted_tokens.copy_(
-        torch.where(
-            continuing_mask,
-            valid_counts,
-            num_accepted_tokens,
-        )
+        torch.where(participating, valid_counts, num_accepted_tokens)
     )
 
 
@@ -622,6 +618,9 @@ class GPUModelRunner(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
         self.has_prev_draft_tokens = False
+        self.prev_num_draft_tokens = self._make_buffer(
+            self.max_num_reqs, dtype=torch.int32
+        )
         self.req_indices = self._make_buffer(self.max_num_tokens, dtype=torch.int64)
         # Maps current batch position -> previous batch position (-1 for new reqs)
         self.prev_positions = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
@@ -1732,38 +1731,30 @@ class GPUModelRunner(
         self.num_accepted_tokens.copy_to_gpu()
 
         # Update num_computed_tokens on GPU.
-        # For async spec decode, the CPU values have one-iteration drift
-        # because the scheduler optimistically assumes all draft tokens are
-        # accepted. Correct by: cpu + valid_count - prev_draft - 1, which
-        # exactly cancels the (1 + D - V) over-count.
-        # For non-async paths, the CPU values are already corrected and can
-        # be copied directly.
+        # For async spec decode, the CPU values are optimistic (assume all
+        # draft tokens accepted). For requests that had drafts (D > 0), we
+        # correct via: prev_gpu + V. For requests without previous drafts
+        # (e.g. prefills, D = 0), CPU values are already correct.
+        # For non-async paths, all CPU values are already corrected.
         if (
             self.use_async_spec_decode
             and self.valid_sampled_token_count_gpu is not None
             and self.has_prev_draft_tokens
             and prev_req_id_to_index
         ):
-            if indices_match:
-                # Fast path: batch unchanged, GPU values already correct.
-                # Just add the accepted token count from the previous iteration.
-                valid_counts = self.valid_sampled_token_count_gpu[:num_reqs]
-                self.num_computed_tokens[:num_reqs] += valid_counts.int()
-                self.num_accepted_tokens.gpu[:num_reqs] = valid_counts
-            else:
-                # General case: batch changed (new requests or reordering).
-                self.prev_positions.copy_to_gpu(num_reqs)
-                cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[
-                    :num_reqs
-                ].to(device=self.device, non_blocking=True)
+            self.prev_positions.copy_to_gpu(num_reqs)
+            cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
+                device=self.device, non_blocking=True
+            )
 
-                _update_num_computed_tokens_for_batch_change(
-                    self.num_computed_tokens[:num_reqs],
-                    self.num_accepted_tokens.gpu[:num_reqs],
-                    self.prev_positions.gpu[:num_reqs],
-                    self.valid_sampled_token_count_gpu,
-                    cpu_values,
-                )
+            _update_num_computed_tokens_for_batch_change(
+                self.num_computed_tokens,
+                self.num_accepted_tokens.gpu[:num_reqs],
+                self.prev_positions.gpu[:num_reqs],
+                self.valid_sampled_token_count_gpu,
+                self.prev_num_draft_tokens.gpu,
+                cpu_values,
+            )
         else:
             self.num_computed_tokens[:num_reqs].copy_(
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
@@ -1869,6 +1860,8 @@ class GPUModelRunner(
             self.num_decode_draft_tokens.copy_to_gpu()
 
             if self.use_async_spec_decode:
+                self.prev_num_draft_tokens.np[:num_reqs] = num_draft_tokens
+                self.prev_num_draft_tokens.copy_to_gpu(num_reqs)
                 self.has_prev_draft_tokens = True
 
         # Hot-Swap lora model
