@@ -15,6 +15,9 @@ class MxFp8MoeBackend(Enum):
 def select_mxfp8_moe_backend(
     config: FusedMoEConfig,
 ) -> MxFp8MoeBackend:
+    if config.is_lora_enabled:
+        raise NotImplementedError("LoRA is not supported for MXFP8 MoE.")
+
     AVAILABLE_BACKENDS = [
         MxFp8MoeBackend.FLASHINFER_TRTLLM,
     ]

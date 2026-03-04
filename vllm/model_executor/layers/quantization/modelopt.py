@@ -5,7 +5,6 @@ from fnmatch import fnmatch
 from typing import TYPE_CHECKING, Any
 
 import torch
-from flashinfer.fused_moe.core import ActivationType, Fp8QuantizationType
 from torch.nn.parameter import Parameter
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -1710,8 +1709,10 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
-        self.mxfp8_backend = select_mxfp8_moe_backend(self.moe)
         assert self.quant_config.is_checkpoint_mxfp8_serialized
+
+        # Select MXFP8 MoE backend
+        self.mxfp8_backend = select_mxfp8_moe_backend(self.moe)
 
     def create_weights(
         self,
@@ -1835,16 +1836,6 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         is_gated = self.moe.is_act_and_mul
         intermediate_size_factor = 2 if is_gated else 1
 
-        logger.debug(
-            "MXFP8 MoE: activation=%s is_act_and_mul=%s "
-            "w13_weight_shape=%s w13_scale_shape=%s w2_weight_shape=%s",
-            self.moe.activation,
-            is_gated,
-            tuple(layer.w13_weight.shape),
-            tuple(layer.w13_weight_scale.shape),
-            tuple(layer.w2_weight.shape),
-        )
-
         w13_weight = layer.w13_weight.data
         w13_scale = layer.w13_weight_scale.data
         if is_gated:
@@ -1927,7 +1918,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalize | None:
+    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel initialization "
             "logic. This function should not be called."
@@ -1935,7 +1926,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
 
     def select_gemm_impl(
         self,
-        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
+        prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEExpertsModular:
         raise ValueError(
@@ -1959,6 +1950,11 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        from flashinfer.fused_moe.core import (
+            ActivationType,
+            Fp8QuantizationType,
+        )
+
         assert self.mxfp8_backend == MxFp8MoeBackend.FLASHINFER_TRTLLM
 
         if layer.enable_eplb:
