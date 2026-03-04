@@ -248,6 +248,15 @@ async def run_vllm_async(
         return end - start
 
 
+def get_current_device():
+    if torch.cuda.is_available():
+        return "cuda"
+    elif hasattr(torch, "xpu") and torch.xpu.is_available():
+        return "xpu"
+    else:
+        return "cpu"
+
+
 def run_hf(
     requests: list[SampleRequest],
     model: str,
@@ -268,6 +277,7 @@ def run_hf(
     if llm.config.model_type == "llama":
         # To enable padding in the HF backend.
         tokenizer.pad_token = tokenizer.eos_token
+    llm = llm.to(get_current_device())
     if enable_torch_compile:
         llm = torch.compile(llm)
 
@@ -298,7 +308,7 @@ def run_hf(
         # Generate the sequences.
         input_ids = tokenizer(batch, return_tensors="pt", padding=True).input_ids
         llm_outputs = llm.generate(
-            input_ids=input_ids,
+            input_ids=input_ids.to(get_current_device()),
             do_sample=True,
             num_return_sequences=n,
             temperature=1.0,
