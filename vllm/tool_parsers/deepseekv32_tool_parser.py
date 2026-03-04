@@ -218,7 +218,7 @@ class DeepSeekV32ToolParser(ToolParser):
         end = input_str.find('"', start)
         return input_str[start:end] if start > 0 and end > start else input_str
 
-    def _convert_param_value(self, value: str, param_type: str) -> Any:
+    def _convert_param_value(self, value: str, param_type: str | list[str]) -> Any:
         """Convert parameter value to the correct type."""
         if value.lower() == "null":
             return None
