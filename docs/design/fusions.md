@@ -72,9 +72,10 @@ Fields set explicitly by the user always take precedence over optimization-level
 ## Fusion Details
 
 ### RMSNorm + Quantization (`fuse_norm_quant`)
-> [!WARNING]
-> On NVIDIA, Inductor actually generates a faster fused kernel than our custom CUDA kernel.
-> Hence this fusion is only enabled when either `rms_norm` or `quant_fp8` is using a custom kernel.
+```{warning}
+On NVIDIA, Inductor actually generates a faster fused kernel than our custom CUDA kernel.
+Hence this fusion is only enabled when either `rms_norm` or `quant_fp8` is using a custom kernel.
+```
 
 **What it fuses.** Combines the custom `rms_norm` / `fused_add_rms_norm`
 operations with subsequent quantization into a single fused kernel,
