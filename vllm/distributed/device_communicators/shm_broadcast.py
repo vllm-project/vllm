@@ -31,7 +31,6 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import (
     get_ip,
-    get_open_port,
     get_open_zmq_ipc_path,
     is_valid_ipv6_address,
 )
@@ -42,6 +41,25 @@ if TYPE_CHECKING:
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
 from_bytes_big = functools.partial(int.from_bytes, byteorder="big")
+
+
+def _parse_port_range(port_range: str) -> tuple[int, int]:
+    s = port_range.strip()
+    sep = "-" if "-" in s else (":" if ":" in s else None)
+    if sep is None:
+        raise ValueError(
+            f"Invalid VLLM_ZMQ_PORT_RANGE={port_range!r}; expected 'start-end' or "
+            "'start:end'"
+        )
+    start_s, end_s = s.split(sep, 1)
+    start_port = int(start_s)
+    end_port = int(end_s)
+    if not (1 <= start_port <= end_port <= 65535):
+        raise ValueError(
+            f"Invalid VLLM_ZMQ_PORT_RANGE={port_range!r}; expected "
+            "1 <= start <= end <= 65535"
+        )
+    return start_port, end_port
 
 
 # Memory fence for cross-process shared memory visibility.
@@ -324,14 +342,30 @@ class MessageQueue:
                 connect_ip = get_ip()
             self.remote_socket = context.socket(XPUB)
             self.remote_socket.setsockopt(XPUB_VERBOSE, True)
-            remote_subscribe_port = get_open_port()
             if is_valid_ipv6_address(connect_ip):
                 self.remote_socket.setsockopt(IPV6, 1)
                 remote_addr_ipv6 = True
                 connect_ip = f"[{connect_ip}]"
-            socket_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
-            self.remote_socket.bind(socket_addr)
-            remote_subscribe_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
+            # NOTE: Using `get_open_port()` (check) followed by `bind()` (act) is
+            # race-prone under multiprocess start: multiple writers can pick the
+            # same port and crash with "Address already in use". Bind atomically
+            # and optionally constrain the port range via `VLLM_ZMQ_PORT_RANGE`.
+            remote_base_addr = f"tcp://{connect_ip}"
+            port_range = envs.VLLM_ZMQ_PORT_RANGE
+            if port_range:
+                start_port, end_port = _parse_port_range(port_range)
+                max_tries = max(1, end_port - start_port + 1)
+                remote_subscribe_port = self.remote_socket.bind_to_random_port(
+                    remote_base_addr,
+                    min_port=start_port,
+                    max_port=end_port,
+                    max_tries=max_tries,
+                )
+            else:
+                remote_subscribe_port = self.remote_socket.bind_to_random_port(
+                    remote_base_addr
+                )
+            remote_subscribe_addr = f"{remote_base_addr}:{remote_subscribe_port}"
         else:
             remote_subscribe_addr = None
             self.remote_socket = None
