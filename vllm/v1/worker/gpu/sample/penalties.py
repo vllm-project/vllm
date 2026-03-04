@@ -83,15 +83,10 @@ class PenaltiesState:
         self,
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
-        idx_mapping_np: np.ndarray,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
         num_speculative_tokens: int,
     ) -> None:
-        if not np.any(self.use_penalty[idx_mapping_np]):
-            # No request uses penalties. Skip the kernel launch.
-            return
-
         apply_penalties(
             logits,
             expanded_idx_mapping,
