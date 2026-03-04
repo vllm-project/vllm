@@ -970,11 +970,7 @@ class EngineArgs:
             "--calculate-kv-scales", **cache_kwargs["calculate_kv_scales"]
         )
         cache_group.add_argument(
-            "--kv-cache-dtype-skip-layers",
-            nargs="*",
-            default=[],
-            help="Layer patterns to skip KV cache quantization. Accepts layer "
-            "indices (e.g., 0 2 4) or attention types (sliding_window).",
+            "--kv-cache-dtype-skip-layers", **cache_kwargs["kv_cache_dtype_skip_layers"]
         )
         cache_group.add_argument(
             "--kv-sharing-fast-prefill", **cache_kwargs["kv_sharing_fast_prefill"]
