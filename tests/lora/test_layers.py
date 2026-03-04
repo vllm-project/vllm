@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import random
 import importlib
+import random
 from copy import deepcopy
 from dataclasses import dataclass
 from unittest.mock import patch
@@ -1445,12 +1445,8 @@ def test_variable_slice_lora_class_selection(default_vllm_config, dist_init):
 
 
 def test_vocab_parallel_embedding_module_rename_compatibility():
-    new_module = importlib.import_module(
-        "vllm.lora.layers.vocab_parallel_embedding"
-    )
-    old_module = importlib.import_module(
-        "vllm.lora.layers.vocal_parallel_embedding"
-    )
+    new_module = importlib.import_module("vllm.lora.layers.vocab_parallel_embedding")
+    old_module = importlib.import_module("vllm.lora.layers.vocal_parallel_embedding")
 
     assert hasattr(new_module, "VocabParallelEmbeddingWithLoRA")
     assert hasattr(old_module, "VocabParallelEmbeddingWithLoRA")
