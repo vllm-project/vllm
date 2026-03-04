@@ -131,7 +131,7 @@ async def build_async_clients_from_engine_args(
     client_index = client_config.pop("client_index", 0)
 
     try:
-        async_renderer = AsyncRenderer(vllm_config)
+        async_renderer = AsyncRenderer.from_vllm_config(vllm_config=vllm_config)
         async_llm = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,
             usage_context=usage_context,

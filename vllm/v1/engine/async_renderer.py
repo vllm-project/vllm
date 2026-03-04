@@ -18,6 +18,14 @@ class AsyncRenderer(RendererClient):
     that talks to a dedicated renderer process over the network.
     """
 
+    @classmethod
+    def from_vllm_config(
+        cls,
+        vllm_config: VllmConfig,
+    ) -> "AsyncRenderer":
+        """Create an AsyncRenderer directly from a VllmConfig."""
+        return cls(vllm_config)
+
     def __init__(self, vllm_config: VllmConfig) -> None:
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config

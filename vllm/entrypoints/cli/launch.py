@@ -95,7 +95,7 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     engine_args = AsyncEngineArgs.from_cli_args(args)
     model_config = engine_args.create_model_config()
     vllm_config = VllmConfig(model_config=model_config)
-    renderer_client = AsyncRenderer(vllm_config)
+    renderer_client = AsyncRenderer.from_vllm_config(vllm_config=vllm_config)
 
     # 3. Build app, initialize state, and start serving
     shutdown_task = await build_and_serve(
