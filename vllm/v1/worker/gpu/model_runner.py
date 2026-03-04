@@ -507,12 +507,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         with self.maybe_setup_dummy_loras(self.lora_config):
             self.cudagraph_manager.capture(
+                self.model,
                 self.model_state,
                 self.input_buffers,
                 self.block_tables,
                 self.attn_groups,
                 self.kv_cache_config,
-                self.model,
                 has_lora=self.lora_config is not None,
                 use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
                 dp_size=self.parallel_config.data_parallel_size,

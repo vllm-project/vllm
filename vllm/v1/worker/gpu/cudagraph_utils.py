@@ -189,6 +189,10 @@ class CudaGraphManager:
             for desc in self._candidates[num_tokens]:
                 if desc.uniform and not is_uniform:
                     continue
+                # If graph wasn't captured yet, fall back to eager.
+                # This might happen when the dummy run is called before capture.
+                if desc.cg_mode == CUDAGraphMode.FULL and desc not in self.graphs:
+                    continue
                 return desc
         return BatchExecutionDescriptor(
             cg_mode=CUDAGraphMode.NONE,
@@ -313,12 +317,12 @@ class ModelCudaGraphManager(CudaGraphManager):
     @torch.inference_mode()
     def capture(
         self,
+        model: nn.Module,
         model_state: ModelState,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
-        model: nn.Module,
         has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
         dp_size: int = 1,
