@@ -735,14 +735,15 @@ async def benchmark(
         if lora_assignment == "round-robin":
             # Deterministic round-robin assignment across requests.
             lora_modules = iter(
-                [lora_modules_list[i % len(lora_modules_list)]
-                 for i in range(len(input_requests))]
+                [
+                    lora_modules_list[i % len(lora_modules_list)]
+                    for i in range(len(input_requests))
+                ]
             )
         else:
             # For each input request, choose a LoRA module at random.
             lora_modules = iter(
-                [random.choice(lora_modules_list)
-                 for _ in range(len(input_requests))]
+                [random.choice(lora_modules_list) for _ in range(len(input_requests))]
             )
 
     if profile:

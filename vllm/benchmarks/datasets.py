@@ -243,9 +243,7 @@ class BenchmarkDataset(ABC):
             return self.get_round_robin_lora_request(
                 index=index, max_loras=max_loras, lora_path=lora_path
             )
-        return self.get_random_lora_request(
-            max_loras=max_loras, lora_path=lora_path
-        )
+        return self.get_random_lora_request(max_loras=max_loras, lora_path=lora_path)
 
     @abstractmethod
     def sample(
@@ -1341,7 +1339,9 @@ class ShareGPTDataset(BenchmarkDataset):
             )
 
             lora_request = self.get_lora_request(
-                index=ind, max_loras=max_loras, lora_path=lora_path,
+                index=ind,
+                max_loras=max_loras,
+                lora_path=lora_path,
                 lora_assignment=lora_assignment,
             )
             prompt_ids = tokenizer(prompt).input_ids
@@ -2488,7 +2488,9 @@ class BurstGPTDataset(BenchmarkDataset):
             input_len = int(data[i][2])
             output_len = int(data[i][3])
             lora_req = self.get_lora_request(
-                index=i, max_loras=max_loras, lora_path=lora_path,
+                index=i,
+                max_loras=max_loras,
+                lora_path=lora_path,
                 lora_assignment=lora_assignment,
             )
             vocab_size = tokenizer.vocab_size
