@@ -426,3 +426,14 @@ async def test_abort_request(grpc_client):
     assert was_aborted and received_chunks < 500, (
         "Request should have been aborted before generating all 500 tokens"
     )
+
+
+@pytest.mark.asyncio
+async def test_subscribe_kv_events_disabled_by_default(grpc_client):
+    """Backwards compatibility: KV event stream stays disabled unless configured."""
+    request = vllm_engine_pb2.SubscribeKvEventsRequest(start_sequence_number=0)
+
+    with pytest.raises(grpc.RpcError) as exc_info:
+        _ = [r async for r in grpc_client.SubscribeKvEvents(request)]
+
+    assert exc_info.value.code() == grpc.StatusCode.UNIMPLEMENTED

@@ -30,6 +30,7 @@ from grpc_reflection.v1alpha import reflection
 
 from vllm import SamplingParams, TextPrompt, TokensPrompt
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.entrypoints.grpc_kv_events import GrpcKVEventBridge
 from vllm.entrypoints.utils import log_version_and_model
 from vllm.grpc import vllm_engine_pb2, vllm_engine_pb2_grpc
 from vllm.logger import init_logger
@@ -47,13 +48,14 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
     """
     gRPC servicer implementing the VllmEngine service.
 
-    Handles 6 RPCs:
+    Handles 7 RPCs:
     - Generate: Streaming text generation
     - Embed: Embeddings (TODO)
     - HealthCheck: Health probe
     - Abort: Cancel requests out-of-band
     - GetModelInfo: Model metadata
     - GetServerInfo: Server state
+    - SubscribeKvEvents: KV cache event stream
     """
 
     def __init__(self, async_llm: AsyncLLM, start_time: float):
@@ -66,6 +68,11 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """
         self.async_llm = async_llm
         self.start_time = start_time
+        dp_rank = async_llm.vllm_config.parallel_config.data_parallel_index
+        self.kv_event_bridge = GrpcKVEventBridge(
+            async_llm.vllm_config.kv_events_config,
+            data_parallel_rank=dp_rank,
+        )
         logger.info("VllmEngineServicer initialized")
 
     async def Generate(
@@ -241,6 +248,36 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             uptime_seconds=time.time() - self.start_time,
             server_type="vllm-grpc",
         )
+
+    async def SubscribeKvEvents(
+        self,
+        request: vllm_engine_pb2.SubscribeKvEventsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> AsyncGenerator[vllm_engine_pb2.KvEventBatch, None]:
+        """Handle KV cache event subscriptions."""
+        if not self.kv_event_bridge.enabled:
+            await context.abort(
+                grpc.StatusCode.UNIMPLEMENTED,
+                "KV event streaming disabled. Enable --kv-events-config with "
+                "enable_kv_cache_events=true and publisher=zmq.",
+            )
+            return
+
+        logger.info(
+            "SubscribeKvEvents connected: start_sequence_number=%s",
+            request.start_sequence_number,
+        )
+        try:
+            async for batch in self.kv_event_bridge.stream(
+                request.start_sequence_number, context
+            ):
+                yield batch
+        except asyncio.CancelledError:
+            logger.debug("SubscribeKvEvents cancelled by client")
+            raise
+        except Exception as e:
+            logger.exception("Error in SubscribeKvEvents")
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))
 
     # ========== Helper methods ==========
 

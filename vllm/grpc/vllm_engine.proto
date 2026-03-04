@@ -23,6 +23,10 @@ service VllmEngine {
 
   // Get server information
   rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+
+  // Subscribe to KV cache events (server-streaming)
+  rpc SubscribeKvEvents(SubscribeKvEventsRequest)
+      returns (stream KvEventBatch);
 }
 
 // =====================
@@ -193,3 +197,48 @@ message GetServerInfoResponse {
   double uptime_seconds = 4;
   string server_type = 5;  // "vllm-grpc"
 }
+
+// =====================
+// KV Cache Events
+// =====================
+
+message SubscribeKvEventsRequest {
+  // Resume from this sequence number (0 = start from current state).
+  uint64 start_sequence_number = 1;
+}
+
+message KvEventBatch {
+  uint64 sequence_number = 1;
+  double timestamp = 2;
+  repeated KvCacheEvent events = 3;
+  optional int32 dp_rank = 4;
+}
+
+message KvCacheEvent {
+  uint64 event_id = 1;
+  oneof data {
+    KvBlocksStored stored = 2;
+    KvBlocksRemoved removed = 3;
+    KvCacheCleared cleared = 4;
+  }
+}
+
+message KvBlocksStored {
+  repeated KvBlock blocks = 1;
+  optional int64 parent_block_hash = 2;
+}
+
+message KvBlock {
+  int64 block_hash = 1;
+  repeated uint32 token_ids = 2;
+  int32 block_size = 3;
+  optional int64 lora_id = 4;
+  optional int32 cache_level = 5;
+}
+
+message KvBlocksRemoved {
+  repeated int64 block_hashes = 1;
+  optional int32 cache_level = 2;
+}
+
+message KvCacheCleared {}
