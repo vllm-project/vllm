@@ -58,7 +58,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     MRotaryEmbedding,
     XDRotaryEmbedding,
 )
-from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
@@ -194,7 +194,6 @@ from .utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
@@ -596,15 +595,6 @@ class GPUModelRunner(
         if self.use_async_scheduling:
             self.async_output_copy_stream = torch.cuda.Stream()
             self.prepare_inputs_event = torch.Event()
-
-        # self.cudagraph_batch_sizes sorts in ascending order.
-        if (
-            self.compilation_config.cudagraph_capture_sizes
-            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
-            self.cudagraph_batch_sizes = sorted(
-                self.compilation_config.cudagraph_capture_sizes
-            )
 
         # Cache the device properties.
         self._init_device_properties()
@@ -1200,13 +1190,14 @@ class GPUModelRunner(
             return
 
         # Find the number of accepted tokens for each sequence.
-        num_accepted_tokens = (
+        num_reqs = output_token_ids.size(0)
+        self.num_accepted_tokens.gpu[:num_reqs] = (
             (
                 torch.cat(
                     [
                         output_token_ids,
                         torch.full(
-                            (output_token_ids.size(0), 1),
+                            (num_reqs, 1),
                             -1,
                             device=output_token_ids.device,
                         ),
@@ -1217,12 +1208,13 @@ class GPUModelRunner(
             )
             .int()
             .argmax(-1)
-            .cpu()
-            .numpy()
         )
-        for i, num_tokens in enumerate(num_accepted_tokens):
-            self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
         if self.cache_config.mamba_cache_mode == "align":
+            for i, num_tokens in enumerate(
+                self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
+            ):
+                self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+
             mamba_utils.postprocess_mamba(
                 scheduler_output,
                 self.kv_cache_config,
@@ -1232,6 +1224,10 @@ class GPUModelRunner(
                 self.compilation_config.static_forward_context,
                 self.model.get_mamba_state_copy_func(),
                 self._get_mamba_copy_bufs(),
+            )
+        else:
+            self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
+                self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
             )
 
     def _update_streaming_request(
@@ -1939,7 +1935,7 @@ class GPUModelRunner(
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter, EagleProposer):
-                    if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
+                    if self.drafter.kv_cache_gid == kv_cache_gid:
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
@@ -4513,16 +4509,6 @@ class GPUModelRunner(
                     weights_not_loaded,
                 )
 
-    def save_tensorized_model(
-        self,
-        tensorizer_config: "TensorizerConfig",
-    ) -> None:
-        TensorizerLoader.save_model(
-            self.get_model(),
-            tensorizer_config=tensorizer_config,
-            model_config=self.model_config,
-        )
-
     def _get_prompt_logprobs_dict(
         self,
         hidden_states: torch.Tensor,
@@ -5562,6 +5548,14 @@ class GPUModelRunner(
         # because some of them change the threshold at init time.
         self.calculate_reorder_batch_threshold()
 
+        # Initialize drafter attention backend
+        if self.speculative_config and (
+            self.speculative_config.use_eagle()
+            or self.speculative_config.uses_draft_model()
+        ):
+            assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+            self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
+
     def _check_and_update_cudagraph_mode(
         self,
         attention_backends: list[set[type[AttentionBackend]]],
@@ -5704,10 +5698,6 @@ class GPUModelRunner(
         ):
             self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
                 self.uniform_decode_query_len, self.parallel_config.tensor_parallel_size
-            )
-            capture_sizes = self.compilation_config.cudagraph_capture_sizes
-            self.cudagraph_batch_sizes = (
-                capture_sizes if capture_sizes is not None else []
             )
 
         # Trigger cudagraph dispatching keys initialization after
@@ -6086,15 +6076,11 @@ class GPUModelRunner(
             kv_cache_config, kernel_block_sizes
         )
 
-        if self.speculative_config and (
-            self.speculative_config.use_eagle()
-            or self.speculative_config.uses_draft_model()
-            or self.speculative_config.uses_extract_hidden_states()
+        if (
+            self.speculative_config
+            and self.speculative_config.uses_extract_hidden_states()
         ):
-            assert isinstance(
-                self.drafter,
-                EagleProposer | DraftModelProposer | ExtractHiddenStatesProposer,
-            )
+            assert isinstance(self.drafter, ExtractHiddenStatesProposer)
             # validate all draft model layers belong to the same kv cache
             # group
             self.drafter.validate_same_kv_cache_group(kv_cache_config)
