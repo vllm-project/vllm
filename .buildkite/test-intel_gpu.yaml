@@ -24,7 +24,7 @@ steps:
   - tests/detokenizer
   - tests/multimodal
   - tests/utils_
-  - .buildkite/test-intel_gpu.yaml
+  - .buildkite/
   commands:
   - pytest -v -s detokenizer
   - pytest -v -s -m 'not cpu_test' multimodal
