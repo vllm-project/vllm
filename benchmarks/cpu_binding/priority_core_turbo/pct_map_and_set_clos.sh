@@ -1,27 +1,38 @@
 #!/usr/bin/env bash
-# pct_map_and_set_clos_v3.sh
+# pct_map_and_set_clos.sh
 #
-# Auto-detect HP_PER_DOMAIN from:
-#   intel-speed-select perf-profile info
-# by reading: speed-select-turbo-freq-properties -> bucket-X -> high-priority-cores-count
+# SET mode (default):
+#   - Auto-detect HP_PER_DOMAIN from:
+#       intel-speed-select perf-profile info
+#     reading: speed-select-turbo-freq-properties -> bucket-X -> high-priority-cores-count
+#   - Build HP CPU list per NUMA node (domain approximation via numactl -H)
+#   - Close HP set under HT siblings (required on your platform)
+#   - Compute Non-HP = All online CPUs - HP_effective
+#   - Apply CLOS:
+#       HP_effective -> HP_CLOS (default 0)
+#       Non-HP       -> OTHER_CLOS (default 2)
 #
-# Then:
-#  - Build HP CPU list per NUMA node (domain approximation via numactl -H)
-#  - Close HP set under HT siblings (required on your platform)
-#  - Compute Non-HP = All online CPUs - HP_effective
-#  - Optionally apply CLOS:
-#        HP_effective -> HP_CLOS (default 0)
-#        Non-HP       -> OTHER_CLOS (default 2)
-#
-# Output control:
-#   Quiet by default: suppresses verbose intel-speed-select structural output.
-#   DEBUG_VERBOSE=1 shows raw intel-speed-select outputs.
+# UNSET mode:
+#   - Set ALL CPUs -> OTHER_CLOS (default 2)
+#   - Disable core-power / CLOS (best-effort across intel-speed-select builds)
 #
 # Modes:
 #   DEBUG_MODE=1 : compute-only (no writes, no verification)
 #   DRY_RUN=1    : print commands only (no writes)
 #
+# Usage:
+#   # Apply PCT mapping (HP->0, others->2)
+#   ./pct_map_and_set_clos.sh
+#
+#   # Unset PCT: all cores -> CLOS2 and disable core-power
+#   ACTION=unset ./pct_map_and_set_clos.sh
+#
+#   # Common knobs:
+#   HP_BUCKET=0 HP_CLOS=0 OTHER_CLOS=2 INCLUDE_HT=0 SHOW_VERIFY_LINES=40 ./pct_map_and_set_clos.sh
+#
 set -euo pipefail
+
+ACTION="${ACTION:-set}"               # set | unset
 
 HP_PER_DOMAIN="${HP_PER_DOMAIN:-}"
 HP_BUCKET="${HP_BUCKET:-0}"
@@ -50,6 +61,7 @@ print_header() {
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# ------------------------ parse HP_PER_DOMAIN --------------------------------
 detect_hp_per_domain() {
   local want_bucket="${1:-0}"
   local out
@@ -86,9 +98,11 @@ detect_hp_per_domain() {
   )"
   [[ -n "$sel" ]] && { echo "$sel"; return 0; }
 
+  # fallback: smallest HP count across buckets
   echo "$pairs" | awk -F: 'BEGIN{m=999999}{v=$2+0; if(v<m)m=v}END{print m}'
 }
 
+# ------------------------ cpu list helpers -----------------------------------
 compress_ranges_from_list() {
   python3 -c '
 import sys
@@ -159,7 +173,44 @@ print(",".join(res))
 PY
 }
 
-apply_assoc() {
+# ------------------------ intel-speed-select operations -----------------------
+enable_clos_or_die() {
+  # Some builds require this once before any assoc/get-assoc works correctly.
+  # Keep it quiet unless DEBUG_VERBOSE=1.
+  if [[ "$DEBUG_VERBOSE" == "1" ]]; then
+    $ISS core-power enable --clos
+  else
+    $ISS core-power enable --clos >/dev/null 2>&1 || true
+  fi
+}
+
+disable_core_power_best_effort() {
+  # Different intel-speed-select builds differ in syntax.
+  # Try several candidates; ignore failures but report if none worked.
+  local ok=0
+  local cmd
+
+  for cmd in \
+    "$ISS core-power disable --clos" \
+    "$ISS core-power disable"
+  do
+    if [[ "$DEBUG_VERBOSE" == "1" ]]; then
+      echo "Trying: $cmd"
+    fi
+    if eval "$cmd" >/dev/null 2>&1; then
+      ok=1
+      [[ "$DEBUG_VERBOSE" == "1" ]] && echo "OK: $cmd"
+      break
+    fi
+  done
+
+  if [[ "$ok" -ne 1 ]]; then
+    echo "WARN: Could not disable core-power via intel-speed-select on this build." >&2
+    echo "      You can still consider PCT 'unset' because all CPUs were moved to CLOS${OTHER_CLOS}." >&2
+  fi
+}
+
+apply_assoc_quiet_or_die() {
   # IMPORTANT: cpu_list first, clos second
   local cpu_list="$1"
   local clos="$2"
@@ -167,17 +218,14 @@ apply_assoc() {
   [[ -n "$cpu_list" ]] || die "apply_assoc got empty cpu_list (clos=$clos)"
   [[ "$clos" =~ ^[0-9]+$ ]] || die "apply_assoc got non-numeric clos='$clos'"
 
-  local out rc
   if [[ "$DEBUG_VERBOSE" == "1" ]]; then
     $ISS -c "$cpu_list" core-power assoc --clos "$clos"
     return 0
   fi
-  ## IMPORTANT: need to enable CLOS feature first in OS before assoc
-  $ISS core-power enable --clos
-  out="$($ISS -c "$cpu_list" core-power assoc --clos "$clos" 2>&1 >/dev/null)" || rc=$?
-  rc="${rc:-0}"
 
-  # Some builds print errors but still return 0; catch both.
+  local out rc=0
+  out="$($ISS -c "$cpu_list" core-power assoc --clos "$clos" 2>&1 >/dev/null)" || rc=$?
+
   if (( rc != 0 )) || echo "$out" | grep -qiE 'malformed arguments|Error:'; then
     echo "$out" >&2
     die "intel-speed-select assoc failed (clos=$clos cpu_list=$cpu_list)"
@@ -197,11 +245,54 @@ get_assoc_pairs() {
     }'
 }
 
-# ---- checks
+# ------------------------ sanity checks ------------------------------------
 command -v numactl >/dev/null 2>&1 || die "numactl not found"
 command -v lscpu >/dev/null 2>&1 || die "lscpu not found"
 command -v python3 >/dev/null 2>&1 || die "python3 not found"
 command -v intel-speed-select >/dev/null 2>&1 || die "intel-speed-select not found"
+
+ALL_CPUS_CSV="$(lscpu -p=CPU | grep -v '^#' | cut -d, -f1 | sort -n | uniq | paste -sd, -)"
+[[ -n "$ALL_CPUS_CSV" ]] || die "Could not enumerate online CPUs"
+
+# ------------------------ UNSET flow ---------------------------------------
+if [[ "$ACTION" == "unset" ]]; then
+  print_header "UNSET: move all CPUs to OTHER_CLOS and disable core-power"
+  echo "OTHER_CLOS=$OTHER_CLOS"
+  echo
+
+  if [[ "$DEBUG_MODE" == "1" ]]; then
+    print_header "DEBUG_MODE=1 (read-only)"
+    echo "Would run:"
+    echo "  $ISS core-power enable --clos"
+    echo "  $ISS -c \"$ALL_CPUS_CSV\" core-power assoc --clos $OTHER_CLOS"
+    echo "  $ISS core-power disable --clos   (or disable)"
+    exit 0
+  fi
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    print_header "DRY_RUN=1 (no changes)"
+    echo "Would run:"
+    echo "  $ISS core-power enable --clos"
+    echo "  $ISS -c \"$ALL_CPUS_CSV\" core-power assoc --clos $OTHER_CLOS"
+    echo "  $ISS core-power disable --clos   (or disable)"
+    exit 0
+  fi
+
+  enable_clos_or_die
+  apply_assoc_quiet_or_die "$ALL_CPUS_CSV" "$OTHER_CLOS"
+  disable_core_power_best_effort
+
+  echo
+  print_header "Verification (sample CPU->CLOS after UNSET)"
+  get_assoc_pairs "$ALL_CPUS_CSV" | head -n "$SHOW_VERIFY_LINES" || true
+  echo "… (showing first $SHOW_VERIFY_LINES lines)"
+  echo
+  echo "Done."
+  exit 0
+fi
+
+# ------------------------ SET flow (original behavior) -----------------------
+[[ "$ACTION" == "set" ]] || die "Unknown ACTION='$ACTION' (use set|unset)"
 
 # ---- NUMA
 TMP_NUMA="$(mktemp)"
@@ -226,6 +317,7 @@ if [[ -z "${HP_PER_DOMAIN}" || "${HP_PER_DOMAIN}" == "0" ]]; then
 fi
 
 print_header "Config"
+echo "ACTION=$ACTION"
 echo "HP_PER_DOMAIN=$HP_PER_DOMAIN (HP_BUCKET=$HP_BUCKET)"
 echo "INCLUDE_HT=$INCLUDE_HT"
 echo "HP_CLOS=$HP_CLOS  OTHER_CLOS=$OTHER_CLOS"
@@ -239,6 +331,7 @@ for node in $(printf '%s\n' "${!NODE_CPUS[@]}" | sort -n); do
   len="${#arr[@]}"
   phys=("${arr[@]}"); ht=()
 
+  # Infer "physical half + HT half" if second half = first half + constant offset
   if (( len >= 2 && len % 2 == 0 )); then
     half=$((len/2))
     offset=$(( arr[half] - arr[0] ))
@@ -272,7 +365,6 @@ echo "HP initial ranges      : $HP_RANGES"
 echo "HP effective (with HT) : $HP_EFFECTIVE"
 echo
 
-ALL_CPUS_CSV="$(lscpu -p=CPU | grep -v '^#' | cut -d, -f1 | sort -n | uniq | paste -sd, -)"
 NON_HP_RANGES="$(
   HP_LIST="$HP_EFFECTIVE" ALL_CPUS="$ALL_CPUS_CSV" python3 - <<'PY'
 import os
@@ -313,6 +405,7 @@ fi
 if [[ "$DRY_RUN" == "1" ]]; then
   print_header "DRY_RUN=1 (no changes)"
   echo "Would run:"
+  echo "  $ISS core-power enable --clos"
   echo "  $ISS -c \"$HP_EFFECTIVE\" core-power assoc --clos $HP_CLOS"
   echo "  $ISS -c \"$NON_HP_RANGES\" core-power assoc --clos $OTHER_CLOS"
   exit 0
@@ -321,8 +414,9 @@ fi
 print_header "Apply CLOS assignments (quiet)"
 echo "Setting HP -> CLOS${HP_CLOS}, Non-HP -> CLOS${OTHER_CLOS}"
 
-apply_assoc "$HP_EFFECTIVE" "$HP_CLOS"
-apply_assoc "$NON_HP_RANGES" "$OTHER_CLOS"
+enable_clos_or_die
+apply_assoc_quiet_or_die "$HP_EFFECTIVE" "$HP_CLOS"
+apply_assoc_quiet_or_die "$NON_HP_RANGES" "$OTHER_CLOS"
 
 echo "Applied."
 echo
