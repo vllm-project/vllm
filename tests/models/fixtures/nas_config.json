@@ -2,7 +2,9 @@
     "architectures": [
       "AnyModel"
     ],
-    "base_architecture": "LlamaForCausalLM",
+    "base_architectures": [
+      "LlamaForCausalLM"
+    ],
     "attention_bias": false,
     "attention_dropout": 0.0,
     "block_configs": [
@@ -661,7 +663,7 @@
     "intermediate_size": 14336,
     "max_position_embeddings": 131072,
     "mlp_bias": false,
-    "model_type": "anymodel",
+    "model_type": "llama",
     "num_attention_heads": 32,
     "num_hidden_layers": 32,
     "num_key_value_heads": 8,
