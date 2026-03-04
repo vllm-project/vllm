@@ -213,12 +213,16 @@ class WorkerWrapperBase:
 
     def adjust_rank(self, rank_mapping: dict[int, int]) -> None:
         """
-        Adjust the rpc_rank based on the given mapping.
-        It is only used during the initialization of the executor,
-        to adjust the rpc_rank of workers after we create all workers.
+        Adjust the worker's rpc_rank and global_rank using a remapping table.
+
+        This is used during executor initialization after all workers are
+        created, when the initial rpc ranks assigned by the backend (e.g. Ray)
+        do not match the final pipeline or tensor parallel rank layout.
+        The provided mapping translates the original rpc_rank to the correct
+        global rank expected by the distributed execution logic.
         """
         if self.rpc_rank in rank_mapping:
-            self.rpc_rank = rank_mapping[self.rpc_rank]
+            self.global_rank = self.rpc_rank = rank_mapping[self.rpc_rank]
 
     def update_environment_variables(
         self,
