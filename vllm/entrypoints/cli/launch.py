@@ -30,7 +30,7 @@ class LaunchSubcommandBase(CLISubcommand):
     help: str
 
     @classmethod
-    def add_cli_args(cls, parser: argparse.ArgumentParser) -> None:
+    def add_cli_args(cls, parser: FlexibleArgumentParser) -> None:
         """Add the CLI arguments to the parser.
 
         By default, adds the standard vLLM serving arguments.
