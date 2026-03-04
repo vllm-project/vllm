@@ -418,14 +418,20 @@ class OffloadingConnectorScheduler:
             new_tokens = scheduler_output.num_scheduled_tokens[req_id]
             total_tokens = req.num_computed_tokens + new_tokens
             num_blocks = total_tokens // self.offloaded_block_size
+
+            # Clamp to blocks that have confirmed hashes. In async
+            # scheduling or speculative decoding, num_scheduled_tokens
+            # may include unverified tokens, inflating num_blocks beyond
+            # the hashes available. block_hashes is the ground truth
+            # since it is only updated after tokens are confirmed.
+            max_hashable_blocks = len(req.block_hashes) // self.block_size_factor
+            num_blocks = min(num_blocks, max_hashable_blocks)
+
             start_block_idx = self._next_stored_block_idx.get(req_id, 0)
             num_new_blocks = num_blocks - start_block_idx
 
             if num_new_blocks <= 0:
                 continue
-
-            # NOTE: In async scheduling, placeholders may temporarily make
-            # len(req.block_hashes) < num_blocks * self.block_size_factor.
 
             new_block_hashes = self._get_block_hashes(
                 req, start_idx=start_block_idx, end_idx=num_blocks
