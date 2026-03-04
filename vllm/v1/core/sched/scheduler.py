@@ -396,6 +396,29 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
+            if num_new_tokens < 0:
+                # num_computed_tokens has been over-counted, which can happen
+                # when speculative decoding token rejection adjustments leave
+                # num_computed_tokens higher than the actual token count.
+                # Correct it so that the last real token will be recomputed
+                # as the query token for the next decode step.
+                logger.warning(
+                    "Request %s has num_computed_tokens (%d) exceeding "
+                    "num_tokens_with_spec (%d) + num_output_placeholders "
+                    "(%d). Correcting num_computed_tokens.",
+                    request.request_id,
+                    request.num_computed_tokens,
+                    request.num_tokens_with_spec,
+                    request.num_output_placeholders,
+                )
+                request.num_computed_tokens = (
+                    request.num_tokens + request.num_output_placeholders - 1
+                )
+                num_new_tokens = (
+                    request.num_tokens_with_spec
+                    + request.num_output_placeholders
+                    - request.num_computed_tokens
+                )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
@@ -429,7 +452,7 @@ class Scheduler(SchedulerInterface):
                     request, num_new_tokens
                 )
 
-            if num_new_tokens == 0:
+            if num_new_tokens <= 0:
                 # The request cannot be scheduled because one of the following
                 # reasons:
                 # 1. No new tokens to schedule. This may happen when
