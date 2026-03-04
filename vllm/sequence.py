@@ -505,10 +505,6 @@ class Sequence:
         # Input + output tokens
         self.tokens: Optional[list[str]] = None
 
-        # Tree decoding related fields
-        self.tree_branch_id = 0  # 分支标识
-        self.tree_depth = 0
-
     @property
     def n_blocks(self) -> int:
         return (self.get_len() + self.block_size - 1) // self.block_size
@@ -767,6 +763,10 @@ class SequenceGroup:
         self.priority = priority
 
         self.cached_request_output = None
+
+        # Tree decoding related fields
+        self.tree_branch_id = 0  # 分支标识
+        self.tree_depth = 0
 
     @property
     def prompt(self) -> Optional[str]:

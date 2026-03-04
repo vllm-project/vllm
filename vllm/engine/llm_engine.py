@@ -1358,8 +1358,10 @@ class LLMEngine:
                 outputs = self.model_executor.execute_model(
                     execute_model_req=execute_model_req)
                 if self._should_enable_tree_decoding(seq_group_metadata_list):
-                    self._process_tree_decoding(
+                    new_branch_groups = self._process_tree_decoding(
                         outputs, seq_group_metadata_list)
+                    for branch_group in new_branch_groups:
+                        self._add_branch_to_scheduler(branch_group, virtual_engine)
                 self._skip_scheduling_next_step = False
             except InputProcessingError as e:
                 # The input for this request cannot be processed, so we must
@@ -1458,7 +1460,7 @@ class LLMEngine:
     # todo
     def _process_tree_decoding(self, outputs, seq_group_metadata_list):
         """处理tree decoding逻辑"""
-    
+        seq_groups = []
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             sampling_params = seq_group_metadata.sampling_params
             
@@ -1466,29 +1468,39 @@ class LLMEngine:
                 continue
                 
             # 获取当前序列组的logprobs
-            if i < len(outputs) and hasattr(outputs[i], 'logprobs'):
-                logprobs = outputs[i].logprobs
+            if hasattr(outputs[0], 'logprobs'):
+                logprobs = outputs[0].logprobs
                 request_id = seq_group_metadata.request_id
                 if request_id not in self.seq_id_to_seq_group:
                     continue
                 original_seq_group = self.seq_id_to_seq_group[request_id]
-                remove_seqs = []
-                add_seqs = []
-                for j, original_seq in enumerate(original_seq_group.seqs):
-                    if self.tree_decoder.should_create_branches(
-                        original_seq, logprobs[j], sampling_params):
-                        # 创建分支序列组
-                        remove_seqs.append(original_seq)
-                        new_branch_seqs = self.tree_decoder.create_branch_sequences(
-                            original_seq, logprobs[j], sampling_params
-                        )
-                        add_seqs.extend(new_branch_seqs)
-                for seq in remove_seqs:
-                    original_seq_group.seqs.remove(seq)
-                for seq in add_seqs:
-                    original_seq_group.seqs.append(seq)
+                if self.tree_decoder.should_create_branches(
+                    original_seq_group, logprobs[i], sampling_params):
+                    # 创建分支序列组
+                    # remove_seqs.append(original_seq)
+                    new_branch_seq_groups = self.tree_decoder.create_branch_sequences(
+                        original_seq_group, logprobs[i], sampling_params
+                    )
+                    seq_groups.extend(new_branch_seq_groups)
 
-        return
+        return seq_groups
+
+    def _add_branch_to_scheduler(self, branch_group, virtual_engine):
+        """将分支序列组添加到调度器"""
+        # 添加到等待队列
+        self.scheduler[virtual_engine].add_seq_group(branch_group)
+        
+        # 更新序列ID映射
+        self.seq_id_to_seq_group[branch_group.request_id] = branch_group
+
+    def _delete_branch_from_scheduler(self, branch_group, virtual_engine):
+        """从调度器中删除分支序列组"""
+        # 从等待队列中删除
+        self.scheduler[virtual_engine].abort_seq_group(branch_group.request_id)
+        
+        # 更新序列ID映射
+        if branch_group.request_id in self.seq_id_to_seq_group:
+            del self.seq_id_to_seq_group[branch_group.request_id]
 
     def _abort_and_cache_schedule(
             self, request_id: str, virtual_engine: int,
@@ -2153,8 +2165,8 @@ class TreeDecoder:
     is already quite complex. The TreeDecoder class can be used by the
     LLMEngine to process tree decoding logic when enabled in the sampling
     parameters."""
-    def should_create_branches(self, seq, logprobs, sampling_params):
-        if seq.tree_depth >= sampling_params.tree_search_params.max_tree_depth:
+    def should_create_branches(self, seq_group, logprobs, sampling_params):
+        if seq_group.tree_depth >= sampling_params.tree_search_params.max_tree_depth:
             return False
         entropy = self._calculate_entropy(logprobs)
         return entropy > sampling_params.tree_search_params.entropy_threshold
@@ -2167,7 +2179,7 @@ class TreeDecoder:
         entropy = -torch.sum(probs * logprobs, dim=-1)
         return entropy.item()
     
-    def create_branch_sequences(self, parent_seq, logprobs, sampling_params):
+    def create_branch_sequences(self, parent_seq_group, logprobs, sampling_params):
         """Create new branch sequence groups based on the model output and sampling parameters."""
         logprobs_dict = {token_id.item(): Logprob(logprob=logprob.item()) for token_id, logprob in zip(torch.arange(logprobs.shape[-1]), logprobs)}
 
@@ -2176,23 +2188,23 @@ class TreeDecoder:
         _, top_k_indices = torch.topk(
             probs, num_branches, dim=-1
         )
-        branch_seqs = []
+        branch_seq_groups = []
         for token_id in top_k_indices:
             # 创建新的序列组作为分支
-            branch_seq = self._clone_sequence_for_branch(
-                parent_seq, token_id.item(), logprobs_dict
+            branch_seq_group = self._clone_sequence_for_branch(
+                parent_seq_group, token_id.item(), logprobs_dict
             )
-            branch_seqs.append(branch_seq)
+            branch_seq_groups.append(branch_seq_group)
             
-        return branch_seqs
+        return branch_seq_groups
     
-    def _clone_sequence_for_branch(self, original_seq, token_id, logprobs_dict):
+    def _clone_sequence_for_branch(self, original_seq_group, token_id, logprobs_dict):
         """克隆序列组创建分支"""
         # 深度复制原序列组
-        branch_seq = copy.deepcopy(original_seq)
+        new_seq_group = copy.deepcopy(original_seq_group)
 
         # 更新分支特有属性
-        branch_seq.tree_depth = original_seq.tree_depth + 1
-        branch_seq.append_token_id(token_id, logprobs=logprobs_dict)
+        new_seq_group.tree_depth = original_seq_group.tree_depth + 1
+        new_seq_group.seqs[0].append_token_id(token_id, logprobs=logprobs_dict)
             
-        return branch_seq
+        return new_seq_group
