@@ -1153,13 +1153,25 @@ def causal_conv1d_update(
         # when above happens, we don't shift-left to keep any records in conv_state
         assert dim == conv_state.size(1)
         if conv_state_indices is None:
-            assert conv_state.size(0) >= batch
+            # When conv_state_indices is None, conv_state[0] is the batch dimension
+            # num_cache_lines is the first dim of conv_state, which should be >= batch
+            assert num_cache_lines >= batch, (
+                f"ERROR: conv_state batch dimension ({num_cache_lines}) should be >= "
+                f"batch size ({batch}) when conv_state_indices is None"
+            )
         else:
+            # When conv_state_indices is provided, conv_state is a shared cache pool
+            # conv_state_indices selects which cache entries to use for each sequence
+            # num_cache_lines is the size of the cache pool (not batch dimension),
+            # so we should NOT check num_cache_lines >= batch
             assert batch == conv_state_indices.shape[0], (
                 f"ERROR: conv_state_indices should have shape ({batch},*) but got {conv_state_indices.shape}"
             )
+            # Note: We skip runtime bounds checking on conv_state_indices because:
+            # 1. This function is called during CUDA Graph capture where tensor ops are not allowed
+            # 2. The Triton kernels handle invalid indices safely via pad_slot_id masking
+            # Invalid indices (== pad_slot_id) are simply ignored by the kernels.
 
-        assert num_cache_lines >= batch
         assert weight.stride(1) == 1  # Need this
 
     # adopt the strategy in vLLM that overwrite on 'x' directly, rather than creating a new tensor 'o'
