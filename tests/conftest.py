@@ -1141,6 +1141,9 @@ class VllmRunner:
 
     def __exit__(self, exc_type, exc_value, traceback):
         # Explicitly shutdown the engine core to release GPU resources
+        # This is needed because when executing consecutive tests, the GC
+        # might not be fast enough in shutting down the llm engine. This can lead to OOMs
+        # because when the next test starts some GPU memory is still in use.
         try:
             self.llm.llm_engine.engine_core.shutdown()
         except Exception:
