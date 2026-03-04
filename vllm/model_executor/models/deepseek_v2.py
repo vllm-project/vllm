@@ -82,7 +82,13 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
-from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
+from .interfaces import (
+    MixtureOfExperts,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     PPMissingLayer,
     is_pp_missing_parameter,
@@ -1166,6 +1172,10 @@ class DeepseekV2Model(nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+
+        # Eagle3 support: track which layers should output auxiliary hidden states
+        self.aux_hidden_state_layers = tuple[int, ...]()
+
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
@@ -1179,7 +1189,7 @@ class DeepseekV2Model(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -1205,7 +1215,16 @@ class DeepseekV2Model(nn.Module):
         else:
             llama_4_scaling = None
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        # Eagle3 support: collect auxiliary hidden states from specified layers
+        aux_hidden_states = []
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer)
+        ):
+            # Save hidden states before layer processing if this layer is marked
+            if idx in self.aux_hidden_state_layers:
+                # Store pre-normalization state (hidden_states + residual)
+                aux_hidden_states.append(hidden_states + residual)
+
             hidden_states, residual = layer(
                 positions, hidden_states, residual, llama_4_scaling
             )
@@ -1216,6 +1235,11 @@ class DeepseekV2Model(nn.Module):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        # Eagle3 support: return auxiliary hidden states if collected
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
+
         return hidden_states
 
 
@@ -1261,7 +1285,7 @@ class DeepseekV2MixtureOfExperts(MixtureOfExperts):
 
 
 class DeepseekV2ForCausalLM(
-    nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle
+    nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle, SupportsEagle3
 ):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -1342,6 +1366,32 @@ class DeepseekV2ForCausalLM(
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        """Set which layers should output auxiliary hidden states for Eagle3.
+
+        Args:
+            layers: Tuple of layer indices that should output auxiliary hidden states.
+        """
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        """Get default auxiliary layer indices for DeepseekV2.
+
+        Returns default layer selection based on model size. These defaults
+        can be overridden by speculative config if the draft model specifies
+        eagle_aux_hidden_state_layer_ids in its config.
+
+        Returns:
+            Tuple of layer indices (typically: early, middle, late layers)
+        """
+        num_layers = len(self.model.layers)
+        # Select 3 representative layers: early, middle, and late
+        return (
+            2,                  # Early layer (captures low-level features)
+            num_layers // 2,    # Middle layer (captures mid-level semantics)
+            num_layers - 3      # Late layer (captures high-level semantics)
+        )
 
     def forward(
         self,

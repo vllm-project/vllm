@@ -1301,6 +1301,10 @@ class SpecDecodeBaseProposer:
                 self.model.config.image_token_index = (
                     target_model.config.vision_config.image_token_id
                 )
+            elif self.get_model_name(target_model) == "KimiK25ForConditionalGeneration":
+                self.model.config.image_token_index = getattr(
+                    target_model.config, "media_placeholder_token_id", None
+                )
             else:
                 self.model.config.image_token_index = (
                     target_model.config.image_token_index
