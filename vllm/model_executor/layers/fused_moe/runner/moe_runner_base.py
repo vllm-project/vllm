@@ -233,7 +233,9 @@ class MoERunnerBase(MoERunner):
         self.enable_dbo = enable_dbo
         self.enable_eplb = moe_config.moe_parallel_config.enable_eplb
         self.routed_output_transform = routed_output_transform
-        self.apply_scale_to_output = apply_scale_to_output
+        self.apply_scale_to_output = (
+            apply_scale_to_output and routed_scaling_factor != 1.0
+        )
         self.routed_scaling_factor = routed_scaling_factor
 
         # Needed for string -> FusedMoE layer lookup in custom ops.
@@ -268,7 +270,8 @@ class MoERunnerBase(MoERunner):
         early.
         """
         return (
-            self.quant_method.moe_kernel is not None
+            self.shared_experts is not None
+            and self.quant_method.moe_kernel is not None
             and self.quant_method.moe_kernel.output_is_reduced()
         )
 
@@ -308,7 +311,7 @@ class MoERunnerBase(MoERunner):
             hidden_states if self.shared_experts is not None else None,
         )
 
-    def _combine_and_reduce(
+    def _maybe_reduce_output(
         self,
         states: torch.Tensor,
         trunc_size: int,
@@ -492,22 +495,43 @@ class MoERunnerBase(MoERunner):
             self._encode_layer_name(),
         )
 
+        ##############################################################
+
+        # Extract outputs from result
         if self.shared_experts is not None:
             assert isinstance(result, tuple)
             shared_output, fused_output = result
-            # Apply output transform (e.g. latent → full dim)
-            if self.routed_output_transform is not None:
-                r = self.routed_output_transform(fused_output)
-                fused_output = r[0] if isinstance(r, tuple) else r
-            # If combine kernel already reduced fused, reduce shared to match
-            if self._must_reduce_shared_expert_outputs():
-                shared_output = tensor_model_parallel_all_reduce(shared_output)
-            result = shared_output + fused_output
+        else:
+            shared_output = None
+            fused_output = result
+
+        # Apply output transform (e.g. latent → full dim)
+        if self.routed_output_transform is not None:
+            r = self.routed_output_transform(fused_output)
+            fused_output = r[0] if isinstance(r, tuple) else r
+
+        # If combine kernel already reduced fused, reduce shared to match
+        if self._must_reduce_shared_expert_outputs():
+            assert shared_output is not None
+            shared_output = tensor_model_parallel_all_reduce(shared_output)
 
         if self.apply_scale_to_output:
-            result = result * self.routed_scaling_factor
+            # FP16 overflow protection: instead of (shared + fused) * scale,
+            # compute shared/scale + fused. The decoder layer compensates
+            # with matching divisions (see DeepseekV2DecoderLayer).
+            if fused_output.dtype != torch.float16:
+                fused_output *= self.routed_scaling_factor
+            elif shared_output is not None:
+                shared_output *= 1.0 / self.routed_scaling_factor
 
-        result = self._combine_and_reduce(result, og_hidden_dim)
+        if shared_output is not None:
+            result = shared_output + fused_output
+        else:
+            result = fused_output
+
+        ##############################################################
+
+        result = self._maybe_reduce_output(result, og_hidden_dim)
 
         return self._maybe_add_zero_expert_output(result)
 
