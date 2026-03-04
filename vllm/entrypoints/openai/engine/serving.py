@@ -21,7 +21,7 @@ from starlette.datastructures import Headers
 import vllm.envs as envs
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import ModelConfig
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -220,7 +220,8 @@ class OpenAIServing:
 
     def __init__(
         self,
-        engine_client: EngineClient,
+        renderer_client: RendererClient,
+        engine_client: EngineClient | None,
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
@@ -229,6 +230,7 @@ class OpenAIServing:
     ):
         super().__init__()
 
+        self.renderer_client = renderer_client
         self.engine_client = engine_client
 
         self.models = models
@@ -238,10 +240,10 @@ class OpenAIServing:
 
         self.log_error_stack = log_error_stack
 
-        self.model_config = engine_client.model_config
-        self.renderer = engine_client.renderer
-        self.io_processor = engine_client.io_processor
-        self.input_processor = engine_client.input_processor
+        self.model_config = renderer_client.model_config
+        self.renderer = renderer_client.renderer
+        self.io_processor = renderer_client.io_processor
+        self.input_processor = renderer_client.input_processor
 
     async def beam_search(
         self,
@@ -294,6 +296,8 @@ class OpenAIServing:
             tasks = []
             request_id_batch = f"{request_id}-{random_uuid()}"
 
+            if self.engine_client is None:
+                raise RuntimeError("beam_search requires an EngineClient")
             for i, beam in enumerate(all_beams):
                 prompt_item = beam.get_prompt()
                 lora_request_item = beam.lora_request
@@ -539,6 +543,11 @@ class OpenAIServing:
 
             if ctx.engine_prompts is None:
                 return self.create_error_response("Engine prompts not available")
+
+            if self.engine_client is None:
+                return self.create_error_response(
+                    "This endpoint requires an inference engine"
+                )
 
             for i, engine_prompt in enumerate(ctx.engine_prompts):
                 request_id_item = f"{ctx.request_id}-{i}"
@@ -1067,6 +1076,10 @@ class OpenAIServing:
                 lora_request=lora_request,
             )
 
+            if self.engine_client is None:
+                raise RuntimeError(
+                    "_generate_with_builtin_tools requires an EngineClient"
+                )
             generator = self.engine_client.generate(
                 engine_prompt,
                 sampling_params,
@@ -1146,7 +1159,7 @@ class OpenAIServing:
         self,
         headers: Headers,
     ) -> Mapping[str, str] | None:
-        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
+        is_tracing_enabled = await self.renderer_client.is_tracing_enabled()
 
         if is_tracing_enabled:
             return extract_trace_headers(headers)

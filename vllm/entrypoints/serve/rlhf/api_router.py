@@ -13,7 +13,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.logger import init_logger
 from vllm.v1.engine import PauseMode
 
@@ -22,6 +22,10 @@ logger = init_logger(__name__)
 
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
+
+
+def renderer_client(request: Request) -> RendererClient:
+    return request.app.state.renderer_client
 
 
 router = APIRouter()
@@ -158,7 +162,7 @@ async def get_world_size(
             data parallelism (TP * PP * DP). If False, returns the world
             size without data parallelism (TP * PP).
     """
-    parallel_config = engine_client(raw_request).vllm_config.parallel_config
+    parallel_config = renderer_client(raw_request).vllm_config.parallel_config
     if include_dp:
         world_size = parallel_config.world_size_across_dp
     else:

@@ -14,6 +14,7 @@ from openai.types.responses.tool import (
 )
 
 import vllm.envs as envs
+from vllm.engine.protocol import RendererClient
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
@@ -131,17 +132,18 @@ class TestInitializeToolSessions:
     async def serving_responses_instance(self):
         """Create a real OpenAIServingResponses instance for testing"""
         # Create minimal mocks for required dependencies
+        renderer_client = MagicMock(spec=RendererClient)
         engine_client = MagicMock()
 
         model_config = MagicMock()
         model_config.max_model_len = 100
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
-        engine_client.model_config = model_config
+        renderer_client.model_config = model_config
 
-        engine_client.input_processor = MagicMock()
-        engine_client.io_processor = MagicMock()
-        engine_client.renderer = MagicMock()
+        renderer_client.input_processor = MagicMock()
+        renderer_client.io_processor = MagicMock()
+        renderer_client.renderer = MagicMock()
 
         models = MagicMock()
 
@@ -149,6 +151,7 @@ class TestInitializeToolSessions:
 
         # Create the actual instance
         instance = OpenAIServingResponses(
+            renderer_client=renderer_client,
             engine_client=engine_client,
             models=models,
             request_logger=None,
@@ -219,22 +222,24 @@ class TestValidateGeneratorInput:
     async def serving_responses_instance(self):
         """Create a real OpenAIServingResponses instance for testing"""
         # Create minimal mocks for required dependencies
+        renderer_client = MagicMock(spec=RendererClient)
         engine_client = MagicMock()
 
         model_config = MagicMock()
         model_config.max_model_len = 100
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
-        engine_client.model_config = model_config
+        renderer_client.model_config = model_config
 
-        engine_client.input_processor = MagicMock()
-        engine_client.io_processor = MagicMock()
-        engine_client.renderer = MagicMock()
+        renderer_client.input_processor = MagicMock()
+        renderer_client.io_processor = MagicMock()
+        renderer_client.renderer = MagicMock()
 
         models = MagicMock()
 
         # Create the actual instance
         instance = OpenAIServingResponses(
+            renderer_client=renderer_client,
             engine_client=engine_client,
             models=models,
             request_logger=None,
@@ -282,22 +287,24 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
     # Force non-harmony, SimpleContext path
     monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
 
+    renderer_client = MagicMock(spec=RendererClient)
     engine_client = MagicMock()
     model_config = MagicMock()
     model_config.hf_config.model_type = "test"
     model_config.hf_text_config = MagicMock()
     model_config.get_diff_sampling_param.return_value = {}
-    engine_client.model_config = model_config
-    engine_client.input_processor = MagicMock()
-    engine_client.io_processor = MagicMock()
-    engine_client.renderer = MagicMock()
+    renderer_client.model_config = model_config
+    renderer_client.input_processor = MagicMock()
+    renderer_client.io_processor = MagicMock()
+    renderer_client.renderer = MagicMock()
 
     tokenizer = FakeTokenizer()
-    engine_client.renderer.get_tokenizer.return_value = tokenizer
+    renderer_client.renderer.get_tokenizer.return_value = tokenizer
 
     models = MagicMock()
 
     serving = OpenAIServingResponses(
+        renderer_client=renderer_client,
         engine_client=engine_client,
         models=models,
         request_logger=None,

@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
     from starlette.datastructures import State
 
-    from vllm.engine.protocol import EngineClient
+    from vllm.engine.protocol import EngineClient, RendererClient
     from vllm.entrypoints.logger import RequestLogger
     from vllm.tasks import SupportedTask
 else:
@@ -48,6 +48,7 @@ def register_pooling_api_routers(
 
 
 def init_pooling_state(
+    renderer_client: "RendererClient",
     engine_client: "EngineClient",
     state: "State",
     args: "Namespace",
@@ -66,8 +67,9 @@ def init_pooling_state(
     state.openai_serving_pooling = (
         (
             OpenAIServingPooling(
-                engine_client,
-                state.openai_serving_models,
+                renderer_client=renderer_client,
+                engine_client=engine_client,
+                models=state.openai_serving_models,
                 request_logger=request_logger,
                 chat_template=resolved_chat_template,
                 chat_template_content_format=args.chat_template_content_format,
@@ -80,8 +82,9 @@ def init_pooling_state(
     )
     state.openai_serving_embedding = (
         OpenAIServingEmbedding(
-            engine_client,
-            state.openai_serving_models,
+            renderer_client=renderer_client,
+            engine_client=engine_client,
+            models=state.openai_serving_models,
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
@@ -93,8 +96,9 @@ def init_pooling_state(
     )
     state.openai_serving_classification = (
         ServingClassification(
-            engine_client,
-            state.openai_serving_models,
+            renderer_client=renderer_client,
+            engine_client=engine_client,
+            models=state.openai_serving_models,
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
@@ -110,8 +114,9 @@ def init_pooling_state(
     # - "token_embed" task (late interaction models like ColBERT)
     state.openai_serving_scores = (
         ServingScores(
-            engine_client,
-            state.openai_serving_models,
+            renderer_client=renderer_client,
+            engine_client=engine_client,
+            models=state.openai_serving_models,
             request_logger=request_logger,
             score_template=resolved_chat_template,
             log_error_stack=args.log_error_stack,

@@ -6,7 +6,7 @@ from typing import Any, Final
 import jinja2
 from fastapi import Request
 
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import RendererClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
@@ -30,7 +30,7 @@ logger = init_logger(__name__)
 class OpenAIServingTokenization(OpenAIServing):
     def __init__(
         self,
-        engine_client: EngineClient,
+        renderer_client: RendererClient,
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
@@ -40,7 +40,8 @@ class OpenAIServingTokenization(OpenAIServing):
         log_error_stack: bool = False,
     ) -> None:
         super().__init__(
-            engine_client=engine_client,
+            renderer_client=renderer_client,
+            engine_client=None,
             models=models,
             request_logger=request_logger,
             log_error_stack=log_error_stack,

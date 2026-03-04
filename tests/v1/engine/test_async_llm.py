@@ -28,6 +28,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.async_renderer import AsyncRenderer
 from vllm.v1.metrics.loggers import (
     AggregatedLoggingStatLogger,
     LoggingStatLogger,
@@ -499,6 +500,8 @@ async def test_dp_rank_argument():
 async def test_header_dp_rank_argument():
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
+            vllm_config = TEXT_ENGINE_ARGS.create_engine_config()
+            renderer_client = AsyncRenderer.from_vllm_config(vllm_config=vllm_config)
             engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
         after.callback(engine.shutdown)
 
@@ -507,12 +510,14 @@ async def test_header_dp_rank_argument():
 
         # Create models first
         models = OpenAIServingModels(
+            renderer_client=renderer_client,
             engine_client=engine,
             base_model_paths=BASE_MODEL_PATHS,
         )
 
         # Create serving chat instance
         serving_chat = OpenAIServingChat(
+            renderer_client=renderer_client,
             engine_client=engine,
             models=models,
             response_role="assistant",

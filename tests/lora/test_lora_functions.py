@@ -8,7 +8,7 @@ import pytest
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.openai.api_server import (
-    build_async_engine_client_from_engine_args,
+    build_async_clients_from_engine_args,
 )
 from vllm.lora.request import LoRARequest
 from vllm.v1.engine.llm_engine import LLMEngine
@@ -88,7 +88,7 @@ async def test_lora_functions_async():
         await fn(args)
         assert set(await llm.list_loras()) == set(expected)
 
-    async with build_async_engine_client_from_engine_args(engine_args) as llm:
+    async with build_async_clients_from_engine_args(engine_args) as (_, llm):
         await run_check(llm.add_lora, make_lora_request(1), [1])
         await run_check(llm.add_lora, make_lora_request(2), [1, 2])
 

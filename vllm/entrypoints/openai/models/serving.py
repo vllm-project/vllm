@@ -5,7 +5,7 @@ from asyncio import Lock
 from collections import defaultdict
 from http import HTTPStatus
 
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
@@ -38,13 +38,15 @@ class OpenAIServingModels:
 
     def __init__(
         self,
-        engine_client: EngineClient,
+        renderer_client: RendererClient,
+        engine_client: EngineClient | None,
         base_model_paths: list[BaseModelPath],
         *,
         lora_modules: list[LoRAModulePath] | None = None,
     ):
         super().__init__()
 
+        self.renderer_client = renderer_client
         self.engine_client = engine_client
         self.base_model_paths = base_model_paths
 
@@ -59,10 +61,10 @@ class OpenAIServingModels:
             )
         self.lora_resolver_lock: dict[str, Lock] = defaultdict(Lock)
 
-        self.model_config = self.engine_client.model_config
-        self.renderer = self.engine_client.renderer
-        self.io_processor = self.engine_client.io_processor
-        self.input_processor = self.engine_client.input_processor
+        self.model_config = self.renderer_client.model_config
+        self.renderer = self.renderer_client.renderer
+        self.io_processor = self.renderer_client.io_processor
+        self.input_processor = self.renderer_client.input_processor
 
     async def init_static_loras(self):
         """Loads all static LoRA modules.
@@ -124,6 +126,14 @@ class OpenAIServingModels:
     async def load_lora_adapter(
         self, request: LoadLoRAAdapterRequest, base_model_name: str | None = None
     ) -> ErrorResponse | str:
+        if self.engine_client is None:
+            return create_error_response(
+                message="LoRA adapters cannot be loaded "
+                "because the engine client is not initialized.",
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
         lora_name = request.lora_name
 
         # Ensure atomicity based on the lora name
@@ -240,6 +250,14 @@ class OpenAIServingModels:
             ErrorResponse (404) if no resolver finds the adapter.
             ErrorResponse (400) if adapter(s) are found but none load.
         """
+        if self.engine_client is None:
+            return create_error_response(
+                message="LoRA adapters cannot be resolved "
+                "because the engine client is not initialized.",
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
         async with self.lora_resolver_lock[lora_name]:
             # First check if this LoRA is already loaded
             if lora_name in self.lora_requests:

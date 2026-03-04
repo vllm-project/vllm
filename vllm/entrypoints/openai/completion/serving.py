@@ -10,7 +10,7 @@ from typing import cast
 import jinja2
 from fastapi import Request
 
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
@@ -49,6 +49,7 @@ logger = init_logger(__name__)
 class OpenAIServingCompletion(OpenAIServing):
     def __init__(
         self,
+        renderer_client: RendererClient,
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
@@ -59,6 +60,7 @@ class OpenAIServingCompletion(OpenAIServing):
         log_error_stack: bool = False,
     ):
         super().__init__(
+            renderer_client=renderer_client,
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
