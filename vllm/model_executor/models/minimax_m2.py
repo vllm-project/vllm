@@ -219,10 +219,10 @@ class MiniMaxM2Attention(nn.Module):
         )
 
         self.q_norm = MiniMaxText01RMSNormTP(
-            self.head_dim * self.total_num_heads, eps=rms_norm_eps
+            self.head_dim * self.num_heads * tp_size, eps=rms_norm_eps
         )
         self.k_norm = MiniMaxText01RMSNormTP(
-            self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps
+            self.head_dim * self.num_kv_heads * tp_size, eps=rms_norm_eps
         )
 
     def forward(
