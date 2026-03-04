@@ -357,9 +357,7 @@ def convert_to_nvfp4_moe_kernel_format(
                 f" a13_scale={a13_scale}, a2_scale={a2_scale}"
             )
 
-        w13_scale_2 = 1.0 / w13_scale_2
-        w2_scale_2 = 1.0 / w2_scale_2
-
+        # moe_kernel_quantize_input -> ref_nvfp4_quant_dequant use the inverse scale.
         a13_scale = a13_scale[0][0]
         a13_scale = 1.0 / a13_scale
 
