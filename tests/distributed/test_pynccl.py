@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import multiprocessing
 import os
 
+import multiprocess as mp
 import numpy as np
 import pytest
 import torch
 import torch.distributed
 
+from tests.utils import ensure_current_vllm_config
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
@@ -18,12 +19,14 @@ from vllm.distributed.parallel_state import (
     graph_capture,
     init_distributed_environment,
 )
-from vllm.utils import update_environment_variables
+from vllm.utils.system_utils import update_environment_variables
+
+mp.set_start_method("spawn", force=True)
 
 
 def distributed_run(fn, world_size):
     number_of_processes = world_size
-    processes: list[multiprocessing.Process] = []
+    processes: list[mp.Process] = []
     for i in range(number_of_processes):
         env: dict[str, str] = {}
         env["RANK"] = str(i)
@@ -32,7 +35,7 @@ def distributed_run(fn, world_size):
         env["LOCAL_WORLD_SIZE"] = str(number_of_processes)
         env["MASTER_ADDR"] = "localhost"
         env["MASTER_PORT"] = "12345"
-        p = multiprocessing.Process(target=fn, args=(env,))
+        p = mp.Process(target=fn, args=(env,))
         processes.append(p)
         p.start()
 
@@ -110,7 +113,8 @@ def test_pynccl_multiple_allreduce():
 @worker_fn_wrapper
 def multiple_allreduce_with_vllm_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
-    ensure_model_parallel_initialized(2, 2)
+    with ensure_current_vllm_config():
+        ensure_model_parallel_initialized(2, 2)
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
     with graph_capture(device=device):
         # two tp groups can communicate independently

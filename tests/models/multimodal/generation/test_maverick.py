@@ -186,6 +186,8 @@ def create_reduced_config(
     if "text_config" in config_dict:
         original_text_layers = config_dict["text_config"]["num_hidden_layers"]
         config_dict["text_config"]["num_hidden_layers"] = text_layers
+        original_layer_types = config_dict["text_config"]["layer_types"]
+        config_dict["text_config"]["layer_types"] = original_layer_types[:text_layers]
         print(f"Reduced text layers from {original_text_layers} to {text_layers}")
 
         original_num_experts = config_dict["text_config"]["num_local_experts"]
@@ -303,10 +305,10 @@ def create_text_model_weights(text_config: dict[str, Any]) -> dict[str, torch.Te
 
         # Self-attention weights (separate q, k, v projections)
         weights[f"{layer_prefix}.self_attn.q_proj.weight"] = torch.randn(
-            hidden_size, num_attention_heads * head_dim, dtype=torch.bfloat16
+            num_attention_heads * head_dim, hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.self_attn.k_proj.weight"] = torch.randn(
-            hidden_size, num_key_value_heads * head_dim, dtype=torch.bfloat16
+            num_key_value_heads * head_dim, hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.self_attn.v_proj.weight"] = torch.randn(
             num_key_value_heads * head_dim, hidden_size, dtype=torch.bfloat16

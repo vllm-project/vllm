@@ -18,9 +18,7 @@ SUPPORTED_SCHEMES = ["s3://", "gs://"]
 try:
     from runai_model_streamer import list_safetensors as runai_list_safetensors
     from runai_model_streamer import pull_files as runai_pull_files
-except (ImportError, OSError):
-    # see https://github.com/run-ai/runai-model-streamer/issues/26
-    # OSError will be raised on arm64 platform
+except ImportError:
     runai_model_streamer = PlaceholderModule("runai_model_streamer")  # type: ignore[assignment]
     runai_pull_files = runai_model_streamer.placeholder_attr("pull_files")
     runai_list_safetensors = runai_model_streamer.placeholder_attr("list_safetensors")
@@ -66,9 +64,7 @@ class ObjectStorageModel:
             "model_streamer",
             hashlib.sha256(str(url).encode()).hexdigest()[:8],
         )
-        if os.path.exists(dir_name):
-            shutil.rmtree(dir_name)
-        os.makedirs(dir_name)
+        os.makedirs(dir_name, exist_ok=True)
         self.dir = dir_name
         logger.debug("Init object storage, model cache path is: %s", dir_name)
 

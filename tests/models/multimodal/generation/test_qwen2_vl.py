@@ -128,12 +128,7 @@ def batch_make_image_embeddings(
             visual = model.visual
 
             pixel_values_on_device = pixel_values.to(visual.device, dtype=visual.dtype)
-            image_grid_thw_on_device = image_grid_thw.to(
-                visual.device, dtype=torch.int64
-            )
-            return visual(
-                pixel_values_on_device, grid_thw=image_grid_thw_on_device
-            ).cpu()
+            return visual(pixel_values_on_device, grid_thw=image_grid_thw).cpu()
 
     image_embeds = torch.concat(llm.apply_model(get_image_embeds))
 
@@ -203,10 +198,10 @@ def batch_make_video_embeddings(
         videos += video_batch
 
     # video to pixel values
-    image_processor = processor.image_processor
+    video_processor = processor.video_processor
 
-    preprocess_result = image_processor.preprocess(
-        images=None, videos=videos, return_tensors="pt"
+    preprocess_result = video_processor.preprocess(
+        videos=videos, return_tensors="pt"
     ).data
     pixel_values = preprocess_result["pixel_values_videos"]
     video_grid_thw = preprocess_result["video_grid_thw"]
@@ -217,12 +212,7 @@ def batch_make_video_embeddings(
             visual = model.visual
 
             pixel_values_on_device = pixel_values.to(visual.device, dtype=visual.dtype)
-            video_grid_thw_on_device = video_grid_thw.to(
-                visual.device, dtype=torch.int64
-            )
-            return visual(
-                pixel_values_on_device, grid_thw=video_grid_thw_on_device
-            ).cpu()
+            return visual(pixel_values_on_device, grid_thw=video_grid_thw).cpu()
 
     video_embeds = torch.concat(llm.apply_model(get_image_embeds))
 
@@ -232,7 +222,7 @@ def batch_make_video_embeddings(
     embed_counter = 0
     for video_batch in video_batches_:
         cur_batch_video_count = len(video_batch)
-        merge_size = image_processor.merge_size
+        merge_size = video_processor.merge_size
         cur_batch_embed_len = sum(
             grid_thw.prod(-1) // merge_size // merge_size
             for grid_thw in video_grid_thw[
@@ -277,7 +267,7 @@ def run_embedding_input_test(
     """Inference result should be the same between
     original image/video input and image/video embeddings input.
     """
-    from transformers import AutoProcessor  # noqa: F401
+    from transformers import AutoProcessor
 
     processor = AutoProcessor.from_pretrained(model)
 
@@ -385,7 +375,6 @@ def test_qwen2_vl_image_embeddings_input(
 @pytest.mark.parametrize(
     "size_factors",
     [
-        [],
         # Single-scale
         [0.5],
         # Single-scale, batched

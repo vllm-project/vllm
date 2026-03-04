@@ -32,7 +32,7 @@ def sample_data(num_experts, max_loras, num_tokens, topk_num):
 
 @pytest.mark.parametrize("num_tokens", [100, 200, 1024, 4096])  # 81920
 @pytest.mark.parametrize("topk_num", [6])
-@pytest.mark.parametrize("num_experts", [64, 128])
+@pytest.mark.parametrize("num_experts", [64, 128, 256, 512])
 @pytest.mark.parametrize("max_loras", [2, 32])
 @pytest.mark.parametrize("block_size", [16])
 def test_moe_lora_align_block_size(
@@ -47,6 +47,8 @@ def test_moe_lora_align_block_size(
     # compute paddings
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
+    if topk_ids.numel() < num_experts:
+        max_num_tokens_padded = topk_ids.numel() * block_size
     max_num_m_blocks = CEILDIV(max_num_tokens_padded, block_size)
 
     # init output tensors
@@ -60,6 +62,8 @@ def test_moe_lora_align_block_size(
         (max_loras * max_num_m_blocks,), num_experts, dtype=torch.int32, device="cuda"
     )
     num_tokens_post_pad = torch.zeros((max_loras,), dtype=torch.int32, device="cuda")
+    adapter_enabled = torch.ones((max_loras + 1,), dtype=torch.int32, device="cuda")
+    lora_ids = torch.arange(max_loras + 2, dtype=torch.int32, device="cuda")
 
     # call kernel
     ops.moe_lora_align_block_size(
@@ -73,6 +77,8 @@ def test_moe_lora_align_block_size(
         sorted_token_ids,
         expert_ids,
         num_tokens_post_pad,
+        adapter_enabled,
+        lora_ids,
     )
 
     # verify values

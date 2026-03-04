@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import copy
-from typing import Optional
+from typing import cast
 
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import IterationStats
 
 
@@ -17,6 +18,7 @@ class ParentRequest:
     """
 
     request_id: str
+    external_req_id: str
     sampling_params: SamplingParams
 
     # To track the completion of child requests
@@ -31,13 +33,16 @@ class ParentRequest:
     # To efficiently obtain child sampling params
     cached_child_sampling_params: SamplingParams | None
 
-    def __init__(self, request_id: str, sampling_params: SamplingParams) -> None:
-        self.request_id = request_id
+    def __init__(self, request: EngineCoreRequest) -> None:
+        assert request.external_req_id is not None
+        sampling_params = request.params
+        self.request_id = request.request_id
+        self.external_req_id = request.external_req_id
         self.sampling_params = sampling_params
 
         self.child_requests = set()
         self.output_aggregator = (
-            [None] * sampling_params.n
+            [cast(CompletionOutput, None)] * sampling_params.n
             if (sampling_params.output_kind == RequestOutputKind.FINAL_ONLY)
             else []
         )
@@ -96,20 +101,29 @@ class ParentRequest:
         self,
         child_request_id: str,
         completion_output: CompletionOutput,
-    ) -> tuple[str, list[CompletionOutput], bool]:
+    ) -> tuple[list[CompletionOutput], bool]:
+        already_finished_and_returned: bool = False
         if completion_output.finished():
-            self.child_requests.remove(child_request_id)
+            if child_request_id in self.child_requests:
+                self.child_requests.remove(child_request_id)
+            else:
+                # child request ID is not available in child_requests
+                # which means the request had finished in previous
+                # batch step and returned to the client earlier
+                already_finished_and_returned = True
 
         if self.sampling_params.output_kind != RequestOutputKind.FINAL_ONLY:
-            # If streaming, just return the current output.
-            outputs = [completion_output]
+            # If streaming, just return the current output
+            #
+            # DO NOT output finished and already returned child request to client again
+            outputs = [] if already_finished_and_returned else [completion_output]
         else:
             # If not streaming, aggregate the n final outputs.
             self.output_aggregator[completion_output.index] = completion_output
             outputs = [] if self.child_requests else self.output_aggregator
 
         finished = not self.child_requests
-        return self.request_id, outputs, finished
+        return outputs, finished
 
     def observe_num_generation_tokens(self, num_generation_tokens: int):
         self.max_num_generation_tokens = max(
@@ -119,7 +133,7 @@ class ParentRequest:
 
     @staticmethod
     def observe_finished_request(
-        parent_req: Optional["ParentRequest"],
+        parent_req: "ParentRequest | None",
         iteration_stats: IterationStats,
         num_generation_tokens: int,
     ):

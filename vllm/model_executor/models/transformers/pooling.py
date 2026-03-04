@@ -14,19 +14,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Transformers backend mixins for pooling models."""
+"""Transformers modeling backend mixins for pooling models."""
 
 from typing import TYPE_CHECKING
 
 import torch
 from transformers import AutoModelForSequenceClassification
 
-from vllm.model_executor.layers.pooler import (
-    ClassifierPooler,
-    CLSPool,
-    DispatchPooler,
-    Pooler,
-)
+from vllm.config.utils import getattr_iter
+from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.models.interfaces_base import VllmModelForPooling
 
@@ -35,7 +31,7 @@ if TYPE_CHECKING:
 
 
 class EmbeddingMixin(VllmModelForPooling):
-    default_pooling_type = "CLS"
+    default_seq_pooling_type = "CLS"
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip VllmModelForPooling.__init__ and call the next class in MRO
@@ -46,16 +42,11 @@ class EmbeddingMixin(VllmModelForPooling):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler(
-            {
-                "token_embed": Pooler.for_token_embed(pooler_config),
-                "embed": Pooler.for_embed(pooler_config),
-            }
-        )
+        self.pooler = DispatchPooler.for_embedding(pooler_config)
 
 
 class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling):
-    default_pooling_type = "CLS"
+    default_seq_pooling_type = "CLS"
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip VllmModelForPooling.__init__ and call the next class in MRO
@@ -82,19 +73,21 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling):
             if hasattr(module, "pooler") and module.pooler is None:
                 self.model.pooler = None
                 break
-        if self.model.pooler is not None:
-            raise ValueError(
-                "Sequence classification models with pooling layers are not "
-                "supported yet in the Transformers backend."
-            )
 
         # Unlike `lm_head`, `classifier` is not always `nn.Linear`.
-        self.classifier = seq_cls_model.classifier
+        self.classifier = getattr_iter(seq_cls_model, ["classifier", "score"], None)
+        if self.classifier is None:
+            raise ValueError(
+                "Could not find `classifier` or `score` layer in the "
+                "`AutoModelForSequenceClassification` instance."
+            )
         self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
 
         class ClassifierWithReshape(self.classifier.__class__):
-            """CLSPool has already been applied in `pooling`.
-            Add dim to match expected input shape of `classifier.forward`."""
+            """
+            Token extraction has already been applied in `pooler.pooling`.
+            Add dim to match expected input shape of `classifier.forward`.
+            """
 
             def forward(self, *args, **kwargs):
                 if len(args) > 0:
@@ -103,16 +96,7 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling):
 
         self.classifier.__class__ = ClassifierWithReshape
 
-        self.pooler = DispatchPooler(
-            {
-                "token_classify": Pooler.for_token_classify(
-                    pooler_config, classifier=self.classifier
-                ),
-                "classify": ClassifierPooler(
-                    pooling=CLSPool(), classifier=self.classifier, act_fn="classify"
-                ),
-                "score": ClassifierPooler(
-                    pooling=CLSPool(), classifier=self.classifier, act_fn="score"
-                ),
-            }
+        self.pooler = DispatchPooler.for_seq_cls(
+            pooler_config,
+            classifier=self.classifier,
         )

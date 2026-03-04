@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import fnmatch
-from typing import Any, Optional, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -32,7 +33,12 @@ from vllm.model_executor.layers.quantization.quark.utils import (
     deep_compare,
     should_ignore_layer,
 )
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
+from vllm.transformers_utils.config import get_config
+
+if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
 
 __all__ = ["QuarkLinearMethod"]
 
@@ -54,6 +60,22 @@ class QuarkConfig(QuantizationConfig):
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
+        self.dynamic_mxfp4_quant = False
+
+    def maybe_update_config(self, model_name: str, revision: str | None = None):
+        self.hf_config = get_config(
+            model=model_name,
+            trust_remote_code=False,  # or get from model_config if available
+            revision=revision,
+            config_format="auto",
+        )
+
+        quant_config = getattr(self.hf_config, "quantization_config", None)
+        if quant_config is not None:
+            quant_dtype = quant_config["global_quant_config"]["weight"]["dtype"]
+            model_type = self.hf_config.model_type
+            if quant_dtype == "fp4" and model_type == "deepseek_v3":
+                self.dynamic_mxfp4_quant = True
 
     def get_linear_method(self) -> "QuarkLinearMethod":
         return QuarkLinearMethod(self)
@@ -68,17 +90,55 @@ class QuarkConfig(QuantizationConfig):
     def get_name(self) -> QuantizationMethods:
         return "quark"
 
+    def apply_vllm_mapper(  # noqa: B027
+        self, hf_to_vllm_mapper: "WeightsMapper"
+    ):
+        """
+        Interface for models to update module names referenced in
+        quantization configs in order to reflect the vllm model structure
+
+        :param hf_to_vllm_mapper: maps from hf model structure (the assumed
+            structure of the qconfig) to vllm model structure
+        """
+        quant_config_with_hf_to_vllm_mapper = {}
+
+        for k, v in self.quant_config.items():
+            if isinstance(v, list):
+                quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_list(v)
+            elif isinstance(v, dict):
+                quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_dict(v)
+            else:
+                if isinstance(v, str):
+                    mapped_v_list = hf_to_vllm_mapper.apply_list([v])
+                    if mapped_v_list:
+                        quant_config_with_hf_to_vllm_mapper[k] = mapped_v_list[0]
+                else:
+                    quant_config_with_hf_to_vllm_mapper[k] = v
+
+        self.quant_config = quant_config_with_hf_to_vllm_mapper
+
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
-
+    ) -> "QuantizeMethodBase | None":
         # Check if the layer is skipped for quantization.
         exclude_layers = cast(list[str], self.quant_config.get("exclude"))
         if should_ignore_layer(
             prefix, ignore=exclude_layers, fused_mapping=self.packed_modules_mapping
         ):
-            return UnquantizedLinearMethod()
+            if (
+                "self_attn" not in prefix  # only quantize attention projections
+                or not getattr(self, "dynamic_mxfp4_quant", False)
+                or not isinstance(layer, LinearBase)  # Ignore other methods
+            ):
+                return UnquantizedLinearMethod()
+
+            scheme = self.get_scheme(
+                layer=layer,
+                layer_name=prefix,
+                dynamic_mxfp4_quant=True,
+            )
+            layer.scheme = scheme
+            return QuarkLinearMethod(self)
         if isinstance(layer, LinearBase):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
             layer.scheme = scheme
@@ -114,7 +174,14 @@ class QuarkConfig(QuantizationConfig):
             layer_quant_names = list(layer_quant_config.keys())
             layer_quant_set = set(layer_quant_names)
 
-            if not kv_cache_set.issubset(layer_quant_set):
+            if not (
+                kv_cache_set.issubset(layer_quant_set)
+                or any(
+                    fnmatch.fnmatchcase(layer_quant, pat)
+                    for layer_quant in list(layer_quant_set)
+                    for pat in list(kv_cache_set)
+                )
+            ):
                 raise ValueError(
                     "The Quark quantized model has the "
                     "kv_cache_group parameter setting, "
@@ -124,10 +191,15 @@ class QuarkConfig(QuantizationConfig):
                 )
 
             q_configs = [
-                cast(dict[str, Any], layer_quant_config.get(name))
-                for name in kv_cache_group
+                quant_cfg
+                for name, quant_cfg in layer_quant_config.items()
+                if any(fnmatch.fnmatchcase(name, pattern) for pattern in kv_cache_group)
             ]
-            if not all(deep_compare(q_config, q_configs[0]) for q_config in q_configs):
+
+            if not all(
+                deep_compare(q_config["output_tensors"], q_configs[0]["output_tensors"])
+                for q_config in q_configs
+            ):
                 raise ValueError(
                     "The quantization method used for kv_cache should "
                     "be the same, but the quantization method for the "
@@ -175,6 +247,49 @@ class QuarkConfig(QuantizationConfig):
             return supported
         else:
             return False
+
+    def _is_fp8_w4a8(
+        self,
+        weight_quant: list[dict[str, Any]] | None,
+        input_quant: dict[str, Any] | None,
+    ) -> bool:
+        # Confirm weights and input quantized.
+        if weight_quant is None or input_quant is None:
+            return False
+
+        if not isinstance(weight_quant, list) or len(weight_quant) != 2:
+            return False
+
+        # Confirm weight scheme is supported
+        is_w4a8_dtype = (
+            weight_quant[0].get("dtype") == "fp8_e4m3"
+            and weight_quant[1].get("dtype") == "int4"
+            and input_quant.get("dtype") == "fp8_e4m3"
+        )
+        is_static_weight = not weight_quant[0].get("is_dynamic") and not weight_quant[
+            1
+        ].get("is_dynamic")
+        is_per_tensor_fp8_and_per_channel_int4_weight = (
+            weight_quant[0].get("qscheme") == "per_tensor"
+            and weight_quant[1].get("qscheme") == "per_channel"
+            and weight_quant[1].get("symmetric") is True
+            and weight_quant[1].get("ch_axis") == 0
+        )
+
+        if not (
+            is_w4a8_dtype
+            and is_static_weight
+            and is_per_tensor_fp8_and_per_channel_int4_weight
+        ):
+            return False
+
+        # Dynamic quantization is always supported if weights supported.
+        if input_quant.get("is_dynamic"):
+            return True
+
+        # Confirm activation scheme is supported.
+        is_per_tensor_activation = input_quant.get("qscheme") == "per_tensor"
+        return is_per_tensor_activation
 
     def _is_fp8_w8a8(
         self,
@@ -235,38 +350,52 @@ class QuarkConfig(QuantizationConfig):
         # Only symmetric weight quantization supported.
         return is_int8_dtype and is_tensor and is_weight_symmetric and is_static
 
-    def _is_ocp_mx(
-        self,
-        weight_quant: dict[str, Any] | None,
-        input_quant: dict[str, Any] | None,
+    def _is_w_ocp_mx_a_x(
+        self, weight_quant: dict[str, Any] | None, input_quant: dict[str, Any] | None
     ) -> bool:
-        # Confirm weights and input quantized.
-        if weight_quant is None or input_quant is None:
+        """
+        This check returns True only if it is an OCP-MX weight quantization.
+        The activation can be any data type (e.g., FP16/BF16, FP8, or OCP-MX format).
+        The rationale for checking only the weight type is that
+        the model loading concept and process primarily concerns the weights themselves.
+        """
+        # Confirm weights quantized.
+        if weight_quant is None:
             logger.debug(
-                "Quark model is not in OCP MX format: "
-                "weight_quant or input_quant not set"
+                "Quark model's weight quantization is incompatible with OCP_MX format: "
+                "weight_quant is not set."
+            )
+            return False
+
+        if isinstance(weight_quant, list):
+            logger.debug(
+                "Quark model's weight quantization is incompatible with OCP_MX format: "
+                "weight_quant is a list (e.g. fp8_w4a8), OCP_MX requires a single dict."
             )
             return False
 
         # Input and weight qscheme needs to be per group.
-        if (
-            weight_quant.get("qscheme") != "per_group"
-            or input_quant.get("qscheme") != "per_group"
-        ):
-            logger.debug("Quark model is not in OCP MX format: not per_group")
+        if weight_quant.get("qscheme") != "per_group":
+            logger.debug(
+                "Quark model's weight quantization is incompatible with OCP MX format: "
+                "weight is not per_group."
+            )
             return False
 
         # Input and weight group size needs to be 32.
-        if weight_quant.get("group_size") != 32 or input_quant.get("group_size") != 32:
-            logger.debug("Quark model is not in OCP MX format: not group_size=32")
+        if weight_quant.get("group_size") != 32:
+            logger.debug(
+                "Quark model's weight quantization is incompatible with OCP MX format: "
+                "group_size of weight is not 32."
+            )
             return False
 
         # Activations and weight scales need to be in e8m0 format.
-        if (
-            weight_quant.get("scale_format") != "e8m0"
-            or input_quant.get("scale_format") != "e8m0"
-        ):
-            logger.debug("Quark model is not in OCP MX format: not scale_format e8m0")
+        if weight_quant.get("scale_format") != "e8m0":
+            logger.debug(
+                "Quark model's weight quantization is incompatible with OCP MX format: "
+                "scale_format of weight is not e8m0."
+            )
             return False
 
         # Input and weight dtypes need to be any of fp4,
@@ -275,13 +404,30 @@ class QuarkConfig(QuantizationConfig):
             "fp4",
             "fp6_e3m2",
             "fp6_e2m3",
-        } or input_quant.get("dtype") not in {"fp4", "fp6_e3m2", "fp6_e2m3"}:
+        }:
             logger.debug(
-                "Quark model is not in OCP MX format: dtype not fp4, fp6_e3m2, fp6_e2m3"
+                "Quark model's weight quantization is incompatible with OCP MX format: "
+                "dtype is not in {fp4, fp6_e3m2, fp6_e2m3}."
             )
             return False
 
         return True
+
+    def is_mxfp4_quant(self, prefix: str, layer: torch.nn.Module) -> bool:
+        """
+        For Quark, determine if it's OCP MXFP4 by checking config directly.
+        This allows hidden_size rounding to happen before moe_config creation.
+        """
+        layer_quant_config = self._find_matched_config(prefix, layer)
+        weight_config = layer_quant_config.get("weight")
+        input_config = layer_quant_config.get("input_tensors")
+
+        return (
+            self._is_w_ocp_mx_a_x(weight_config, input_config)
+            and weight_config is not None
+            and weight_config.get("dtype") == "fp4"
+            and getattr(torch, "float4_e2m1fn_x2", None) is not None
+        )
 
     def _find_matched_config(
         self, layer_name: str, module: torch.nn.Module
@@ -312,9 +458,15 @@ class QuarkConfig(QuantizationConfig):
             layer_quant_config = cast(
                 dict[str, Any], self.quant_config.get("layer_quant_config")
             )
-            for name_pattern in layer_quant_config:
-                if fnmatch.fnmatch(layer_name, name_pattern):
-                    return layer_quant_config[name_pattern]
+
+            def _matches_pattern(layer_name, pattern):
+                if "*" not in pattern:
+                    return layer_name in pattern
+                return fnmatch.fnmatch(layer_name, pattern)
+
+            for name_pattern, config in layer_quant_config.items():
+                if _matches_pattern(layer_name, name_pattern):
+                    return config
 
             layer_type = cast(str, type(module))
             layer_type_quant_config = cast(
@@ -328,7 +480,9 @@ class QuarkConfig(QuantizationConfig):
             )
             return global_quant_config
 
-    def _get_scheme_from_config(self, config: dict[str, Any]) -> "QuarkScheme":
+    def _get_scheme_from_config(
+        self, config: dict[str, Any], dynamic_mxfp4_quant: bool = False
+    ) -> "QuarkScheme":
         if config.get("output_tensors") or config.get("bias"):
             raise NotImplementedError(
                 "Currently, Quark models with output_tensors "
@@ -350,8 +504,10 @@ class QuarkConfig(QuantizationConfig):
                 is_static_input_scheme=True,
                 input_symmetric=input_config.get("symmetric"),
             )
-        elif self._is_ocp_mx(weight_config, input_config):
-            return QuarkOCP_MX(weight_config, input_config)
+        elif self._is_w_ocp_mx_a_x(weight_config, input_config):
+            return QuarkOCP_MX(
+                weight_config, input_config, dynamic_mxfp4_quant=dynamic_mxfp4_quant
+            )
 
         raise NotImplementedError(
             "No quark compatible scheme was found. "
@@ -359,11 +515,15 @@ class QuarkConfig(QuantizationConfig):
             f"Input config: {input_config}"
         )
 
-    def get_scheme(self, layer: torch.nn.Module, layer_name: str) -> "QuarkScheme":
+    def get_scheme(
+        self, layer: torch.nn.Module, layer_name: str, dynamic_mxfp4_quant: bool = False
+    ) -> "QuarkScheme":
         layer_quant_config = self._find_matched_config(layer_name, layer)
 
         # Find the quant_scheme
-        scheme = self._get_scheme_from_config(layer_quant_config)
+        scheme = self._get_scheme_from_config(
+            layer_quant_config, dynamic_mxfp4_quant=dynamic_mxfp4_quant
+        )
         # Raise error if device does not support the scheme
         # (e.g. fp8 needs ada lovelace)
         self._check_scheme_supported(scheme.get_min_capability())

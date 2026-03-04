@@ -4,6 +4,7 @@
 import collections
 import glob
 import os
+import time
 from collections.abc import Generator
 from typing import Any
 
@@ -109,8 +110,8 @@ class ShardedStateLoader(BaseModelLoader):
         from vllm.distributed import get_tensor_model_parallel_rank
 
         model_weights = model_config.model
-        if hasattr(model_config, "model_weights"):
-            model_weights = model_config.model_weights
+        if model_weights_override := model_config.model_weights:
+            model_weights = model_weights_override
         local_model_path = model_weights
 
         rank = get_tensor_model_parallel_rank()
@@ -132,6 +133,7 @@ class ShardedStateLoader(BaseModelLoader):
                 f"pre-sharded checkpoints are currently supported!"
             )
         state_dict = self._filter_subtensors(model.state_dict())
+        counter_before_loading_weights = time.perf_counter()
         for key, tensor in self.iterate_over_files(filepaths):
             # If loading with LoRA enabled, additional padding may
             # be added to certain parameters. We only load into a
@@ -150,6 +152,12 @@ class ShardedStateLoader(BaseModelLoader):
                 )
             param_data.copy_(tensor)
             state_dict.pop(key)
+        counter_after_loading_weights = time.perf_counter()
+        logger.info_once(
+            "Loading weights took %.2f seconds",
+            counter_after_loading_weights - counter_before_loading_weights,
+            scope="local",
+        )
         if state_dict:
             raise ValueError(f"Missing keys {tuple(state_dict)} in loaded state!")
 

@@ -17,12 +17,16 @@ IO_PROCESSOR_PLUGINS_GROUP = "vllm.io_processor_plugins"
 # Platform plugins group will be loaded in all processes when
 # `vllm.platforms.current_platform` is called and the value not initialized,
 PLATFORM_PLUGINS_GROUP = "vllm.platform_plugins"
+# Stat logger plugins group will be loaded in process0 only when serve vLLM with
+# async mode.
+STAT_LOGGER_PLUGINS_GROUP = "vllm.stat_logger_plugins"
 
 # make sure one process only loads plugins once
 plugins_loaded = False
 
 
 def load_plugins_by_group(group: str) -> dict[str, Callable[[], Any]]:
+    """Load plugins registered under the given entry point group."""
     from importlib.metadata import entry_points
 
     allowed_plugins = envs.VLLM_PLUGINS

@@ -9,9 +9,12 @@ from vllm.model_executor.custom_op import CustomOp
 from .common import rotate_gptj, rotate_neox
 
 
+# --8<-- [start:dual_chunk_rotary_embedding]
 @CustomOp.register("dual_chunk_rotary_embedding")
 class DualChunkRotaryEmbedding(CustomOp):
     """Rotary positional embedding for Dual Chunk Attention."""
+
+    # --8<-- [end:dual_chunk_rotary_embedding]
 
     def __init__(
         self,

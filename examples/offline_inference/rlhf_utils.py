@@ -30,8 +30,8 @@ class WorkerExtension:
     """
     The class for vLLM's worker to inherit from.
     By defining an extension class, the code can work no matter what is
-    the underlying worker class. This way, the code can be compatible
-    with both vLLM V0 and V1.
+    the underlying worker class.
+
     NOTE: we define this class in a separate module, and the main module
     should pass the full qualified name as `worker_extension_cls` argument.
     """
@@ -96,8 +96,8 @@ class ColocateWorkerExtension:
     """
     The class for vLLM's worker to inherit from, in the colocate setting.
     By defining an extension class, the code can work no matter what is
-    the underlying worker class. This way, the code can be compatible
-    with both vLLM V0 and V1.
+    the underlying worker class.
+
     NOTE: we define this class in a separate module, and the main module
     should pass the full qualified name as `worker_extension_cls` argument.
     """
@@ -150,7 +150,7 @@ class ColocateWorkerExtension:
         socket.close()
         del buffer
         gc.collect()
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
     def report_device_id(self) -> str:
         from vllm.platforms import current_platform

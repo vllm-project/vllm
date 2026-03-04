@@ -2,17 +2,15 @@
 
 vLLM initially supports basic model inference and serving on Intel GPU platform.
 
-!!! warning
-    There are no pre-built wheels for this device, so you need build vLLM from source. Or you can use pre-built images which are based on vLLM released versions.
-
 # --8<-- [end:installation]
 # --8<-- [start:requirements]
 
 - Supported Hardware: Intel Data Center GPU, Intel ARC GPU
-- OneAPI requirements: oneAPI 2025.1
+- OneAPI requirements: oneAPI 2025.3
+- Dependency: [vllm-xpu-kernels](https://github.com/vllm-project/vllm-xpu-kernels): a package provide all necessary vllm custom kernel when running vLLM on Intel GPU platform, 
 - Python: 3.12
 !!! warning
-    The provided IPEX whl is Python3.12 specific so this version is a MUST.
+    The provided vllm-xpu-kernels whl is Python3.12 specific so this version is a MUST.
 
 # --8<-- [end:requirements]
 # --8<-- [start:set-up-using-python]
@@ -27,7 +25,7 @@ Currently, there are no pre-built XPU wheels.
 # --8<-- [end:pre-built-wheels]
 # --8<-- [start:build-wheel-from-source]
 
-- First, install required [driver](https://dgpu-docs.intel.com/driver/installation.html#installing-gpu-drivers) and [Intel OneAPI](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html) 2025.1 or later.
+- First, install required [driver](https://dgpu-docs.intel.com/driver/installation.html#installing-gpu-drivers) and [Intel OneAPI](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html) 2025.3 or later.
 - Second, install Python packages for vLLM XPU backend building:
 
 ```bash
@@ -40,7 +38,7 @@ pip install -v -r requirements/xpu.txt
 - Then, build and install vLLM XPU backend:
 
 ```bash
-VLLM_TARGET_DEVICE=xpu python setup.py install
+VLLM_TARGET_DEVICE=xpu pip install --no-build-isolation -e . -v
 ```
 
 # --8<-- [end:build-wheel-from-source]
@@ -56,8 +54,10 @@ docker build -f docker/Dockerfile.xpu -t vllm-xpu-env --shm-size=4g .
 docker run -it \
              --rm \
              --network=host \
-             --device /dev/dri \
+             --device /dev/dri:/dev/dri \
              -v /dev/dri/by-path:/dev/dri/by-path \
+             --ipc=host \
+             --privileged \
              vllm-xpu-env
 ```
 

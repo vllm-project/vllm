@@ -4,7 +4,9 @@
 
 from collections.abc import Callable, Iterable
 from pathlib import PosixPath
+from typing import Any
 
+import numpy.typing as npt
 import torch
 
 from vllm.multimodal.audio import AudioResampler
@@ -236,6 +238,7 @@ def build_video_inputs_from_test_info(
     video_assets: VideoTestAssets,
     size_wrapper: ImageSizeWrapper,
     num_frames: int,
+    needs_video_metadata: bool,
 ) -> list[PromptWithMultiModalInput]:
     if test_info.prompt_formatter is None:
         raise ValueError("Prompt formatter must be set to build video inputs")
@@ -248,7 +251,10 @@ def build_video_inputs_from_test_info(
     )
 
     sampled_vids = [
-        sample_frames_from_video(asset.np_ndarrays, num_frames)
+        sample_frames_with_video_metadata(
+            (asset.np_ndarrays, asset.metadata),
+            num_frames,
+        )
         for asset in video_assets
     ]
 
@@ -259,10 +265,31 @@ def build_video_inputs_from_test_info(
     return [
         PromptWithMultiModalInput(
             prompts=[prompt for _ in size_wrapper.data],
-            video_data=[video_scaler(video, size) for size in size_wrapper.data],
+            video_data=[
+                (
+                    video_scaler(video, size)
+                    if not needs_video_metadata
+                    else (video_scaler(video, size), meta)
+                )
+                for size in size_wrapper.data
+            ],
         )
-        for video, prompt in zip(sampled_vids, model_prompts)
+        for (video, meta), prompt in zip(sampled_vids, model_prompts)
     ]
+
+
+def sample_frames_with_video_metadata(
+    video_with_meta: tuple[npt.NDArray, dict[str, Any]],
+    num_frames: int,
+) -> tuple[npt.NDArray, dict[str, Any]]:
+    video, meta = video_with_meta
+    video = sample_frames_from_video(video, num_frames)
+
+    meta["do_sample_frames"] = meta["total_num_frames"] == num_frames
+    meta["total_num_frames"] = num_frames
+    meta["fps"] = meta["duration"] / num_frames
+    meta["frames_indices"] = list(range(num_frames))
+    return video, meta
 
 
 def apply_image_size_scaling(image, size: float | tuple[int, int], size_type: SizeType):

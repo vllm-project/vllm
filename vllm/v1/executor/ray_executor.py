@@ -19,7 +19,7 @@ from vllm.utils.network_utils import (
     get_ip,
     get_open_port,
 )
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.ray_utils import (
@@ -40,6 +40,9 @@ if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
 logger = init_logger(__name__)
+
+COMPLETED_NONE_FUTURE: Future[ModelRunnerOutput | None] = Future()
+COMPLETED_NONE_FUTURE.set_result(None)
 
 
 @dataclass
@@ -66,10 +69,9 @@ class RayDistributedExecutor(Executor):
         "VLLM_HOST_PORT",
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
+        "HIP_VISIBLE_DEVICES",
+        "ROCR_VISIBLE_DEVICES",
     }
-
-    # These non-vLLM env vars are copied from the driver to workers
-    ADDITIONAL_ENV_VARS = {"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"}
 
     uses_ray: bool = True
     supports_pp: bool = True
@@ -96,14 +98,20 @@ class RayDistributedExecutor(Executor):
         # KV connector setup
         self.has_connector = self.vllm_config.kv_transfer_config is not None
 
+        self.uses_sampler = self.vllm_config.model_config.runner_type != "pooling" and (
+            self.vllm_config.ec_transfer_config is None
+            or self.vllm_config.ec_transfer_config.is_ec_consumer
+        )
+
+        self.scheduler_output: SchedulerOutput | None = None
+
     @property
     def max_concurrent_batches(self) -> int:
         """Ray distributed executor supports pipeline parallelism,
         meaning that it allows PP size batches to be executed concurrently.
         """
-        if self.scheduler_config.async_scheduling:
-            return 2
-        return self.parallel_config.pipeline_parallel_size
+        pp_size = self.parallel_config.pipeline_parallel_size
+        return 2 if pp_size <= 1 and self.scheduler_config.async_scheduling else pp_size
 
     def shutdown(self) -> None:
         if logger:
@@ -137,6 +145,14 @@ class RayDistributedExecutor(Executor):
 
         return ray_remote_kwargs
 
+    def _update_noset_device_env_vars(self, ray_remote_kwargs):
+        runtime_env = ray_remote_kwargs.setdefault("runtime_env", {})
+        env_vars = runtime_env.setdefault("env_vars", {})
+        env_vars.update(
+            {env_var: "1" for env_var in current_platform.ray_noset_device_env_vars}
+        )
+        return ray_remote_kwargs
+
     # child class could overwrite this to return actual env vars.
     def _get_env_vars_to_be_updated(self):
         return self._env_vars_for_all_workers
@@ -159,6 +175,11 @@ class RayDistributedExecutor(Executor):
             ray_remote_kwargs = self._configure_ray_workers_use_nsight(
                 ray_remote_kwargs
             )
+
+        # The way ray actors are setup in vllm is that the visible devices are
+        # not set by actors, they are left unset by ray. Internally we index
+        # the right gpu with local_rank. This is similar to how mp mode works.
+        self._update_noset_device_env_vars(ray_remote_kwargs)
 
         # Create the workers.
         bundle_indices: list[int]
@@ -198,9 +219,7 @@ class RayDistributedExecutor(Executor):
                     num_gpus=num_gpus,
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
-                )(RayWorkerWrapper).remote(  # type: ignore[attr-defined]
-                    vllm_config=self.vllm_config, rpc_rank=rank
-                )
+                )(RayWorkerWrapper).remote(rpc_rank=rank)
             else:
                 worker = ray.remote(
                     num_cpus=0,
@@ -208,9 +227,8 @@ class RayDistributedExecutor(Executor):
                     resources={current_platform.ray_device_key: num_gpus},
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
-                )(RayWorkerWrapper).remote(  # type: ignore[attr-defined]
-                    vllm_config=self.vllm_config, rpc_rank=rank
-                )
+                )(RayWorkerWrapper).remote(rpc_rank=rank)
+
             worker_metadata.append(RayWorkerMetaData(worker=worker, created_rank=rank))
 
         worker_ips = ray.get(
@@ -297,6 +315,15 @@ class RayDistributedExecutor(Executor):
             )
 
         # Set environment variables for the driver and workers.
+        # We set CUDA_VISIBLE_DEVICES to ALL GPUs on the node for each worker.
+        # This is needed because:
+        # 1. Ray's compiled DAG needs to find the allocated GPU in
+        #    CUDA_VISIBLE_DEVICES.
+        # 2. vLLM's communication layer (NCCL, CustomAllreduce) needs to see
+        #    all GPUs for P2P checks and communication setup. Though if it was
+        #    just this reason, we could have also just kept the visible devices
+        #    unset.
+        # Each worker will use local_rank to index into the visible devices.
         all_args_to_update_environment_variables = [
             {
                 current_platform.device_control_env_var: ",".join(
@@ -309,9 +336,7 @@ class RayDistributedExecutor(Executor):
         # Environment variables to copy from driver to workers
         env_vars_to_copy = get_env_vars_to_copy(
             exclude_vars=self.WORKER_SPECIFIC_ENV_VARS,
-            additional_vars=set(current_platform.additional_env_vars).union(
-                self.ADDITIONAL_ENV_VARS
-            ),
+            additional_vars=set(current_platform.additional_env_vars),
             destination="workers",
         )
 
@@ -357,8 +382,10 @@ class RayDistributedExecutor(Executor):
             all_kwargs.append(kwargs)
         self.collective_rpc("init_worker", args=(all_kwargs,))
 
-        self.collective_rpc("init_device")
-        self.collective_rpc("load_model")
+        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
+        if not is_eep_new_worker:
+            self.collective_rpc("init_device")
+            self.collective_rpc("load_model")
 
         for pp_rank in range(self.parallel_config.pipeline_parallel_size):
             self.pp_tp_workers.append([])
@@ -381,22 +408,60 @@ class RayDistributedExecutor(Executor):
             self.shutdown()
 
     def execute_model(  # type: ignore[override]
-        self, scheduler_output: SchedulerOutput, non_block: bool = False
-    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+        self,
+        scheduler_output: SchedulerOutput,
+        non_block: bool = False,
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        if self.scheduler_output is not None:
+            raise RuntimeError(
+                "State error: sample_tokens() must be called "
+                "after execute_model() returns None."
+            )
+
+        if not self.uses_sampler or not scheduler_output.total_num_scheduled_tokens:
+            # Model will not execute, call model runner immediately.
+            return self._execute_dag(scheduler_output, None, non_block)
+
+        # Model will execute, defer to sample_tokens() call.
+        self.scheduler_output = scheduler_output
+        return COMPLETED_NONE_FUTURE if non_block else None
+
+    def sample_tokens(  # type: ignore[override]
+        self,
+        grammar_output: "GrammarOutput | None",
+        non_block: bool = False,
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         """Execute the model on the Ray workers.
 
+        The scheduler output to use should have been provided in
+        a prior call to execute_model().
+
         Args:
-            scheduler_output: The scheduler output to execute.
+            grammar_output: The structured outputs grammar bitmask, if applicable.
             non_block: If True, the method will return a Future.
 
         Returns:
             The model runner output.
         """
+        scheduler_output = self.scheduler_output
+        if scheduler_output is None:
+            return COMPLETED_NONE_FUTURE if non_block else None
+
+        self.scheduler_output = None
+
+        return self._execute_dag(scheduler_output, grammar_output, non_block)
+
+    def _execute_dag(
+        self,
+        scheduler_output: SchedulerOutput,
+        grammar_output: "GrammarOutput | None",
+        non_block: bool = False,
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         # Build the compiled DAG for the first time.
         if self.forward_dag is None:  # type: ignore
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
-        refs = self.forward_dag.execute(scheduler_output)  # type: ignore
+        refs = self.forward_dag.execute((scheduler_output, grammar_output))  # type: ignore
 
         if not self.has_connector:
             # Get output only from a single worker (output_rank)
@@ -406,26 +471,25 @@ class RayDistributedExecutor(Executor):
 
             # When PP is used, we return a FutureWrapper immediately so that
             # the scheduler can yield to the next batch.
-            return FutureWrapper(refs)
+            return FutureWrapper(refs[0])
 
         # Get output from all workers when connector is present
         assert self.kv_output_aggregator is not None
         if not non_block:
             # Block and get results from all workers
-            outputs = [ref.get() for ref in refs]
-            return self.kv_output_aggregator.aggregate(outputs)
+            return self.kv_output_aggregator.aggregate(ray.get(refs))
 
         # Return a future that will aggregate outputs from all workers
         return FutureWrapper(refs, self.kv_output_aggregator)
 
-    def collective_rpc(
+    def collective_rpc(  # type: ignore[override]
         self,
         method: str | Callable,
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
         non_block: bool = False,
-    ) -> list[Any]:
+    ) -> list[Any] | Future[list[Any]]:
         """Runs the given method on all workers."""
         sent_method = method if isinstance(method, str) else cloudpickle.dumps(method)
         del method
@@ -441,7 +505,7 @@ class RayDistributedExecutor(Executor):
 
         # Get the results of the ray workers.
         if non_block:
-            return [FutureWrapper((output,)) for output in ray_worker_outputs]
+            return FutureWrapper(ray_worker_outputs)
 
         return ray.get(ray_worker_outputs, timeout=timeout)
 

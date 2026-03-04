@@ -138,3 +138,23 @@ async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
                 "structured_outputs": {"grammar": invalid_simplified_sql_grammar}
             },
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_empty_grammar(client: openai.AsyncOpenAI, model_name: str) -> None:
+    prompt = "Say hello"
+    with pytest.raises((openai.BadRequestError, openai.APIError)):
+        await client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            extra_body={"structured_outputs": {"grammar": ""}},
+        )

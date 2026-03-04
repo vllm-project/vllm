@@ -33,7 +33,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     quantize_weights,
 )
 from vllm.scalar_type import ScalarType, scalar_types
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 DEFAULT_MODELS = ["meta-llama/Llama-3-8b", "meta-llama/Llama-2-70b-hf"]
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512, 1024]
@@ -231,12 +231,13 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
         assert bt.w_tok_s is None
         assert bt.group_size is not None
 
-        fn = lambda: ops.gptq_marlin_gemm(
+        fn = lambda: ops.marlin_gemm(
             a=bt.a,
             c=None,
             b_q_weight=w_q,
             b_bias=None,
             b_scales=w_s,
+            a_scales=None,
             global_scale=None,
             b_zeros=w_zp,
             g_idx=g_idx,

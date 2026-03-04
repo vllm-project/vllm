@@ -9,7 +9,6 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -70,14 +69,11 @@ class Medusa(nn.Module):
         )
         self.orig_vocab_size = config.vocab_size
         self.truncated_vocab_size = config.truncated_vocab_size
-        self.unpadded_vocab_size = self.truncated_vocab_size
 
         if getattr(config, "original_lm_head", False):
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
+                self.truncated_vocab_size,
                 config.hidden_size,
-                org_num_embeddings=self.truncated_vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             self.lm_heads = [self.lm_head for _ in range(self.config.num_heads)]
@@ -85,10 +81,8 @@ class Medusa(nn.Module):
             self.lm_heads = nn.ModuleList(
                 [
                     ParallelLMHead(
-                        self.unpadded_vocab_size,
+                        config.vocab_size,
                         config.hidden_size,
-                        org_num_embeddings=self.truncated_vocab_size,
-                        padding_size=DEFAULT_VOCAB_PADDING_SIZE,
                         prefix=maybe_prefix(prefix, f"lm_heads.{i}"),
                     )
                     for i in range(self.config.num_heads)
@@ -97,7 +91,7 @@ class Medusa(nn.Module):
 
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, self.truncated_vocab_size, logit_scale
+            config.vocab_size, self.truncated_vocab_size, logit_scale
         )
 
         # Token map is a idx to token mapping to reduce the vocab size for

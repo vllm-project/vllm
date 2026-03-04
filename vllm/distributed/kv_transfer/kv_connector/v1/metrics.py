@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeAlias, TypeVar
 
-from vllm.config.kv_transfer import KVTransferConfig
+from prometheus_client import Counter, Gauge, Histogram
+
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
-from vllm.distributed.kv_transfer.kv_transfer_state import has_kv_transfer_group
 from vllm.logger import init_logger
+
+PromMetric: TypeAlias = Gauge | Counter | Histogram
+PromMetricT = TypeVar("PromMetricT", bound=PromMetric)
 
 logger = init_logger(__name__)
 
@@ -47,13 +51,11 @@ class KVConnectorStats:
 
 
 class KVConnectorLogging:
-    def __init__(self, kv_tranfer_config: KVTransferConfig):
-        # This should be called on frontend process.
-        assert not has_kv_transfer_group()
+    def __init__(self, kv_transfer_config: KVTransferConfig | None):
         # Instantiate the connector's stats class.
-        if kv_tranfer_config and kv_tranfer_config.kv_connector:
+        if kv_transfer_config and kv_transfer_config.kv_connector:
             self.connector_cls = KVConnectorFactory.get_connector_class(
-                kv_tranfer_config
+                kv_transfer_config
             )
         self.reset()
 
@@ -102,3 +104,83 @@ class KVConnectorLogging:
 
             # Reset metrics for next interval
             self.reset()
+
+
+class KVConnectorPromMetrics:
+    """
+    A base class for per-connector Prometheus metric registration
+    and recording.
+    """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ):
+        self._kv_transfer_config = vllm_config.kv_transfer_config
+        self._gauge_cls = metric_types[Gauge]
+        self._counter_cls = metric_types[Counter]
+        self._histogram_cls = metric_types[Histogram]
+        self._labelnames = labelnames
+        self.per_engine_labelvalues = per_engine_labelvalues
+
+    def make_per_engine(self, metric: PromMetric) -> dict[int, PromMetric]:
+        """
+        Create a per-engine child of a prometheus_client.Metric with
+        the appropriate labels set. The parent metric must be created
+        using the labelnames list.
+        """
+        return {
+            idx: metric.labels(*labelvalues)
+            for idx, labelvalues in self.per_engine_labelvalues.items()
+        }
+
+    def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
+        """
+        Record the supplied transfer statistics to Prometheus metrics. These
+        statistics are engine-specific, and should be recorded to a metric
+        with the appropriate 'engine' label. These metric instances can be
+        created using the make_per_engine() helper method.
+        """
+        raise NotImplementedError
+
+
+class KVConnectorPrometheus:
+    """
+    Support for registering per-connector Prometheus metrics, and
+    recording transfer statistics to those metrics. Uses
+    KVConnectorBase.build_prom_metrics().
+    """
+
+    _gauge_cls = Gauge
+    _counter_cls = Counter
+    _histogram_cls = Histogram
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ):
+        self.prom_metrics: KVConnectorPromMetrics | None = None
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config and kv_transfer_config.kv_connector:
+            connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
+            metric_types = {
+                Gauge: self._gauge_cls,
+                Counter: self._counter_cls,
+                Histogram: self._histogram_cls,
+            }
+            self.prom_metrics = connector_cls.build_prom_metrics(
+                vllm_config,
+                metric_types,
+                labelnames,
+                per_engine_labelvalues,
+            )
+
+    def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
+        if self.prom_metrics is None:
+            return
+        self.prom_metrics.observe(transfer_stats_data, engine_idx)

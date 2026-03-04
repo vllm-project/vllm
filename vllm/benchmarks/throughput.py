@@ -14,19 +14,24 @@ from typing import Any
 import torch
 import uvloop
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (
     AIMODataset,
     BurstGPTDataset,
     ConversationDataset,
     InstructCoderDataset,
+    MultiModalConversationDataset,
     PrefixRepetitionRandomDataset,
     RandomDataset,
+    RandomDatasetForReranking,
+    RandomMultiModalDataset,
     SampleRequest,
     ShareGPTDataset,
     SonnetDataset,
     VisionArenaDataset,
+    add_random_dataset_base_args,
+    add_random_multimodal_dataset_args,
 )
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
@@ -34,6 +39,7 @@ from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
+from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.utils.async_utils import merge_async_iterators
 
 
@@ -221,6 +227,7 @@ async def run_vllm_async(
                     detokenize=not disable_detokenize,
                 )
             )
+            prompts.append(prompt)
             lora_requests.append(request.lora_request)
 
         generators = []
@@ -244,12 +251,15 @@ async def run_vllm_async(
 def run_hf(
     requests: list[SampleRequest],
     model: str,
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: TokenizerLike,
     n: int,
     max_batch_size: int,
     trust_remote_code: bool,
     disable_detokenize: bool = False,
 ) -> float:
+    assert isinstance(tokenizer, PreTrainedTokenizerBase), (
+        "the hf backend only supports HF tokenizers"
+    )
     llm = AutoModelForCausalLM.from_pretrained(
         model, dtype=torch.float16, trust_remote_code=trust_remote_code
     )
@@ -336,18 +346,33 @@ def get_requests(args, tokenizer):
         "lora_path": args.lora_path,
         "max_loras": args.max_loras,
         "num_requests": args.num_prompts,
-        "input_len": args.input_len,
-        "output_len": args.output_len,
     }
 
-    if args.dataset_path is None or args.dataset_name == "random":
+    if args.dataset_name == "random" or (
+        args.dataset_path is None
+        and args.dataset_name not in {"prefix_repetition", "random-mm", "random-rerank"}
+    ):
         sample_kwargs["range_ratio"] = args.random_range_ratio
-        sample_kwargs["prefix_len"] = args.prefix_len
+        # prefer random_* arguments, fall back to regular arguments
+        random_prefix_len = getattr(args, "random_prefix_len", None)
+        sample_kwargs["prefix_len"] = (
+            random_prefix_len if random_prefix_len is not None else args.prefix_len
+        )
+        random_input_len = getattr(args, "random_input_len", None)
+        sample_kwargs["input_len"] = (
+            random_input_len if random_input_len is not None else args.input_len
+        )
+        random_output_len = getattr(args, "random_output_len", None)
+        sample_kwargs["output_len"] = (
+            random_output_len if random_output_len is not None else args.output_len
+        )
         dataset_cls = RandomDataset
     elif args.dataset_name == "sharegpt":
         dataset_cls = ShareGPTDataset
         if args.backend == "vllm-chat":
             sample_kwargs["enable_multimodal_chat"] = True
+        if args.output_len is not None:
+            sample_kwargs["output_len"] = args.output_len
     elif args.dataset_name == "sonnet":
         assert tokenizer.chat_template or tokenizer.default_chat_template, (
             "Tokenizer/model must have chat template for sonnet dataset."
@@ -355,9 +380,15 @@ def get_requests(args, tokenizer):
         dataset_cls = SonnetDataset
         sample_kwargs["prefix_len"] = args.prefix_len
         sample_kwargs["return_prompt_formatted"] = True
+        if args.input_len is not None:
+            sample_kwargs["input_len"] = args.input_len
+        if args.output_len is not None:
+            sample_kwargs["output_len"] = args.output_len
     elif args.dataset_name == "burstgpt":
         dataset_cls = BurstGPTDataset
     elif args.dataset_name == "hf":
+        if args.output_len is not None:
+            sample_kwargs["output_len"] = args.output_len
         if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
             dataset_cls = VisionArenaDataset
             common_kwargs["dataset_subset"] = None
@@ -366,6 +397,11 @@ def get_requests(args, tokenizer):
         elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
             dataset_cls = InstructCoderDataset
             common_kwargs["dataset_split"] = "train"
+        elif args.dataset_path in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = MultiModalConversationDataset
+            common_kwargs["dataset_subset"] = args.hf_subset
+            common_kwargs["dataset_split"] = args.hf_split
+            sample_kwargs["enable_multimodal_chat"] = True
         elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
             dataset_cls = ConversationDataset
             common_kwargs["dataset_subset"] = args.hf_subset
@@ -381,6 +417,56 @@ def get_requests(args, tokenizer):
         sample_kwargs["suffix_len"] = args.prefix_repetition_suffix_len
         sample_kwargs["num_prefixes"] = args.prefix_repetition_num_prefixes
         sample_kwargs["output_len"] = args.prefix_repetition_output_len
+    elif args.dataset_name == "random-mm":
+        dataset_cls = RandomMultiModalDataset
+        # prefer random_* arguments, fall back to regular arguments
+        random_input_len = getattr(args, "random_input_len", None)
+        sample_kwargs["input_len"] = (
+            random_input_len
+            if random_input_len is not None
+            else getattr(args, "input_len", None)
+        )
+        random_output_len = getattr(args, "random_output_len", None)
+        sample_kwargs["output_len"] = (
+            random_output_len
+            if random_output_len is not None
+            else getattr(args, "output_len", None)
+        )
+        sample_kwargs["base_items_per_request"] = getattr(
+            args, "random_mm_base_items_per_request", None
+        )
+        sample_kwargs["num_mm_items_range_ratio"] = getattr(
+            args, "random_mm_num_mm_items_range_ratio", None
+        )
+        sample_kwargs["limit_mm_per_prompt"] = getattr(
+            args, "random_mm_limit_mm_per_prompt", None
+        )
+        sample_kwargs["bucket_config"] = getattr(args, "random_mm_bucket_config", None)
+        sample_kwargs["enable_multimodal_chat"] = True
+        random_prefix_len = getattr(args, "random_prefix_len", None)
+        prefix_len = getattr(args, "prefix_len", None)
+        sample_kwargs["prefix_len"] = (
+            random_prefix_len if random_prefix_len is not None else prefix_len
+        )
+        sample_kwargs["range_ratio"] = args.random_range_ratio
+    elif args.dataset_name == "random-rerank":
+        dataset_cls = RandomDatasetForReranking
+        # prefer random_* arguments, fall back to regular arguments
+        random_input_len = getattr(args, "random_input_len", None)
+        sample_kwargs["input_len"] = (
+            random_input_len
+            if random_input_len is not None
+            else getattr(args, "input_len", None)
+        )
+        random_output_len = getattr(args, "random_output_len", None)
+        sample_kwargs["output_len"] = (
+            random_output_len
+            if random_output_len is not None
+            else getattr(args, "output_len", None)
+        )
+        sample_kwargs["batchsize"] = getattr(args, "random_batch_size", 1)
+        sample_kwargs["is_reranker"] = not getattr(args, "no_reranker", False)
+        sample_kwargs["range_ratio"] = args.random_range_ratio
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
     # Remove None values
@@ -437,8 +523,12 @@ def validate_args(args):
     ):
         print("When dataset path is not set, it will default to random dataset")
         args.dataset_name = "random"
-        if args.input_len is None:
-            raise ValueError("input_len must be provided for a random dataset")
+        random_input_len = getattr(args, "random_input_len", None)
+        if args.input_len is None and random_input_len is None:
+            raise ValueError(
+                "Either --input-len or --random-input-len must be provided "
+                "for a random dataset"
+            )
 
     # === Dataset Name Specific Checks ===
     # --hf-subset and --hf-split: only used
@@ -455,6 +545,7 @@ def validate_args(args):
     elif args.dataset_name == "hf":
         if args.dataset_path in (
             VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
+            | MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
             | ConversationDataset.SUPPORTED_DATASET_PATHS
         ):
             assert args.backend == "vllm-chat", (
@@ -470,25 +561,78 @@ def validate_args(args):
         else:
             raise ValueError(f"{args.dataset_path} is not supported by hf dataset.")
 
-    # --random-range-ratio: only used when dataset_name is 'random'
-    if args.dataset_name != "random" and args.random_range_ratio is not None:
+    # --random-range-ratio: only used when dataset_name is 'random',
+    # 'random-mm', or 'random-rerank'
+    if (
+        args.dataset_name not in {"random", "random-mm", "random-rerank"}
+        and args.random_range_ratio is not None
+    ):
         warnings.warn(
             "--random-range-ratio will be ignored since \
-                --dataset-name is not 'random'.",
+                --dataset-name is not 'random', 'random-mm', or 'random-rerank'.",
             stacklevel=2,
         )
 
-    # --prefix-len: only used when dataset_name is 'random', 'sonnet', or not
-    # set.
+    # --random-batch-size: only used when dataset_name is 'random-rerank'
     if (
-        args.dataset_name not in {"random", "sonnet", None}
+        args.dataset_name != "random-rerank"
+        and getattr(args, "random_batch_size", None) is not None
+    ) and args.random_batch_size != 1:
+        warnings.warn(
+            "--random-batch-size will be ignored since \
+                    --dataset-name is not 'random-rerank'.",
+            stacklevel=2,
+        )
+
+    # --no-reranker: only used when dataset_name is 'random-rerank'
+    if args.dataset_name != "random-rerank" and getattr(args, "no_reranker", False):
+        warnings.warn(
+            "--no-reranker will be ignored since \
+                --dataset-name is not 'random-rerank'.",
+            stacklevel=2,
+        )
+
+    # --prefix-len: only used when dataset_name is 'random', 'random-mm',
+    # 'sonnet', or not set.
+    if (
+        args.dataset_name not in {"random", "random-mm", "sonnet", None}
         and args.prefix_len is not None
     ):
         warnings.warn(
             "--prefix-len will be ignored since --dataset-name\
-                 is not 'random', 'sonnet', or not set.",
+                 is not 'random', 'random-mm', 'sonnet', or not set.",
             stacklevel=2,
         )
+
+    # === Random Dataset Argument Conflict Detection ===
+    # Check for conflicts between regular and random arguments when using
+    # random datasets
+    if args.dataset_name in {"random", "random-mm", "random-rerank"}:
+        random_input_len = getattr(args, "random_input_len", None)
+        random_output_len = getattr(args, "random_output_len", None)
+        random_prefix_len = getattr(args, "random_prefix_len", None)
+
+        if args.input_len is not None and random_input_len is not None:
+            warnings.warn(
+                "Both --input-len and --random-input-len are specified. "
+                "The random version (--random-input-len) will be preferred "
+                "in this run.",
+                stacklevel=2,
+            )
+        if args.output_len is not None and random_output_len is not None:
+            warnings.warn(
+                "Both --output-len and --random-output-len are specified. "
+                "The random version (--random-output-len) will be preferred "
+                "in this run.",
+                stacklevel=2,
+            )
+        if args.prefix_len is not None and random_prefix_len is not None:
+            warnings.warn(
+                "Both --prefix-len and --random-prefix-len are specified. "
+                "The random version (--random-prefix-len) will be preferred "
+                "in this run.",
+                stacklevel=2,
+            )
 
     # === LoRA Settings ===
     if getattr(args, "enable_lora", False) and args.backend != "vllm":
@@ -539,7 +683,16 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--dataset-name",
         type=str,
-        choices=["sharegpt", "random", "sonnet", "burstgpt", "hf", "prefix_repetition"],
+        choices=[
+            "sharegpt",
+            "random",
+            "sonnet",
+            "burstgpt",
+            "hf",
+            "prefix_repetition",
+            "random-mm",
+            "random-rerank",
+        ],
         help="Name of the dataset to benchmark on.",
         default="sharegpt",
     )
@@ -621,58 +774,50 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Number of fixed prefix tokens before the random "
         "context in a request (default: 0).",
     )
-    # random dataset
-    parser.add_argument(
-        "--random-range-ratio",
-        type=float,
-        default=0.0,
-        help="Range ratio for sampling input/output length, "
-        "used only for RandomDataset. Must be in the range [0, 1) to define "
-        "a symmetric sampling range "
-        "[length * (1 - range_ratio), length * (1 + range_ratio)].",
-    )
 
     # hf dtaset
     parser.add_argument(
-        "--hf-subset", type=str, default=None, help="Subset of the HF dataset."
+        "--hf-subset",
+        type=str,
+        default=None,
+        help="Subset of the HF dataset.",
     )
     parser.add_argument(
-        "--hf-split", type=str, default=None, help="Split of the HF dataset."
+        "--hf-split",
+        type=str,
+        default=None,
+        help="Split of the HF dataset.",
     )
     parser.add_argument(
         "--profile",
         action="store_true",
         default=False,
-        help="Use Torch Profiler. The env variable "
-        "VLLM_TORCH_PROFILER_DIR must be set to enable profiler.",
+        help="Use vLLM Profiling. --profiler-config must be provided on the server.",
     )
 
     # prefix repetition dataset
-    prefix_repetition_group = parser.add_argument_group(
-        "prefix repetition dataset options"
-    )
-    prefix_repetition_group.add_argument(
+    parser.add_argument(
         "--prefix-repetition-prefix-len",
         type=int,
         default=None,
         help="Number of prefix tokens per request, used only for prefix "
         "repetition dataset.",
     )
-    prefix_repetition_group.add_argument(
+    parser.add_argument(
         "--prefix-repetition-suffix-len",
         type=int,
         default=None,
         help="Number of suffix tokens per request, used only for prefix "
         "repetition dataset. Total input length is prefix_len + suffix_len.",
     )
-    prefix_repetition_group.add_argument(
+    parser.add_argument(
         "--prefix-repetition-num-prefixes",
         type=int,
         default=None,
         help="Number of prefixes to generate, used only for prefix repetition "
         "dataset. Prompts per prefix is num_requests // num_prefixes.",
     )
-    prefix_repetition_group.add_argument(
+    parser.add_argument(
         "--prefix-repetition-output-len",
         type=int,
         default=None,
@@ -680,19 +825,29 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "repetition dataset.",
     )
 
+    # (random, random-mm, random-rerank)
+    add_random_dataset_base_args(parser)
+    add_random_multimodal_dataset_args(parser)
+
     parser = AsyncEngineArgs.add_cli_args(parser)
 
 
 def main(args: argparse.Namespace):
-    if args.tokenizer is None:
-        args.tokenizer = args.model
     validate_args(args)
     if args.seed is None:
         args.seed = 0
     random.seed(args.seed)
     # Sample the requests.
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.tokenizer, trust_remote_code=args.trust_remote_code
+    if (
+        args.backend == "hf" or args.backend == "mii"
+    ) and args.tokenizer_mode == "auto":
+        # mistral_common tokenizer is only supported on vllm and vllm-chat backends;
+        # for hf and mii backends, we use hf tokenizer
+        args.tokenizer_mode = "hf"
+    tokenizer = get_tokenizer(
+        args.tokenizer,
+        tokenizer_mode=args.tokenizer_mode,
+        trust_remote_code=args.trust_remote_code,
     )
     requests = get_requests(args, tokenizer)
     is_multi_modal = any(request.multi_modal_data is not None for request in requests)

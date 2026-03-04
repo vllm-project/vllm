@@ -1,5 +1,6 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/all.h>
+#include <c10/cuda/CUDAGuard.h>
 
 #include <cmath>
 
@@ -275,6 +276,7 @@ void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
   int const num_tokens = input.numel() / hidden_size;
   dim3 const grid(num_tokens);
   dim3 const block(std::min(hidden_size, 256));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "static_scaled_int8_quant_kernel", [&] {
@@ -306,6 +308,7 @@ void dynamic_scaled_int8_quant(
   int const num_tokens = input.numel() / hidden_size;
   dim3 const grid(num_tokens);
   dim3 const block(std::min(hidden_size, 256));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "dynamic_scaled_int8_quant_kernel", [&] {

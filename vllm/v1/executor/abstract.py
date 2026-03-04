@@ -9,11 +9,15 @@ from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
+)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
+from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
@@ -81,6 +85,7 @@ class Executor(ABC):
             )
         return executor_class
 
+    @instrument(span_name="Executor init")
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -110,7 +115,15 @@ class Executor(ABC):
         underlying workers.
         """
         self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
-        self.collective_rpc("compile_or_warm_up_model")
+        compilation_times: list[float] = self.collective_rpc("compile_or_warm_up_model")
+        # Propagate compilation time from workers back to the main process.
+        # With TP>1, compilation happens in worker processes, so the main
+        # process config is never updated. Use max across workers since they
+        # compile in parallel.
+        if compilation_times:
+            self.vllm_config.compilation_config.compilation_time = max(
+                compilation_times
+            )
 
     def register_failure_callback(self, callback: FailureCallback):  # noqa: B027
         """
@@ -168,7 +181,7 @@ class Executor(ABC):
         args: tuple = (),
         kwargs: dict | None = None,
         non_block: Literal[True] = True,
-    ) -> list[Future[_R]]:
+    ) -> Future[list[_R]]:
         pass
 
     @abstractmethod
@@ -177,27 +190,48 @@ class Executor(ABC):
     ):
         raise NotImplementedError
 
+    def get_kv_connector_handshake_metadata(
+        self,
+    ) -> list[dict[int, KVConnectorHandshakeMetadata]]:
+        return self.collective_rpc("get_kv_connector_handshake_metadata")
+
     @overload
     def execute_model(
-        self,
-        scheduler_output: SchedulerOutput,
-        non_block: Literal[False] = False,
-    ) -> ModelRunnerOutput:
+        self, scheduler_output: SchedulerOutput, non_block: Literal[False] = False
+    ) -> ModelRunnerOutput | None:
         pass
 
     @overload
     def execute_model(
-        self,
-        scheduler_output: SchedulerOutput,
-        non_block: Literal[True] = True,
-    ) -> Future[ModelRunnerOutput]:
+        self, scheduler_output: SchedulerOutput, non_block: Literal[True] = True
+    ) -> Future[ModelRunnerOutput | None]:
         pass
 
     def execute_model(
         self, scheduler_output: SchedulerOutput, non_block: bool = False
-    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         output = self.collective_rpc(  # type: ignore[call-overload]
             "execute_model", args=(scheduler_output,), non_block=non_block
+        )
+        return output[0]
+
+    @overload
+    def sample_tokens(
+        self, grammar_output: GrammarOutput | None, non_block: Literal[False] = False
+    ) -> ModelRunnerOutput:
+        pass
+
+    @overload
+    def sample_tokens(
+        self, grammar_output: GrammarOutput | None, non_block: Literal[True] = True
+    ) -> Future[ModelRunnerOutput]:
+        pass
+
+    def sample_tokens(
+        self, grammar_output: GrammarOutput | None, non_block: bool = False
+    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+        output = self.collective_rpc(  # type: ignore[call-overload]
+            "sample_tokens", args=(grammar_output,), non_block=non_block
         )
         return output[0]
 
@@ -212,8 +246,8 @@ class Executor(ABC):
     def max_concurrent_batches(self) -> int:
         return 1
 
-    def profile(self, is_start: bool = True):
-        self.collective_rpc("profile", args=(is_start,))
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+        self.collective_rpc("profile", args=(is_start, profile_prefix))
 
     def save_sharded_state(
         self,
@@ -270,11 +304,9 @@ class Executor(ABC):
         """Reset the multi-modal cache in each worker."""
         self.collective_rpc("reset_mm_cache")
 
-    def start_profile(self) -> None:
-        self.collective_rpc("start_profile")
-
-    def stop_profile(self) -> None:
-        self.collective_rpc("stop_profile")
+    def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache in each worker to clear cached encoder outputs."""
+        self.collective_rpc("reset_encoder_cache")
 
     def sleep(self, level: int = 1):
         if self.is_sleeping:

@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 import pickle
+import sys
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
 from pickle import PickleBuffer
-from threading import Event
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 import torch
@@ -17,6 +18,7 @@ import zmq
 from torch.distributed import ProcessGroup
 from zmq import (  # type: ignore
     IPV6,  # type: ignore
+    PUB,
     SUB,
     SUBSCRIBE,
     XPUB,
@@ -27,9 +29,11 @@ from zmq import (  # type: ignore
 import vllm.envs as envs
 from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import (
     get_ip,
     get_open_port,
+    get_open_zmq_inproc_path,
     get_open_zmq_ipc_path,
     is_valid_ipv6_address,
 )
@@ -42,6 +46,33 @@ VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 from_bytes_big = functools.partial(int.from_bytes, byteorder="big")
 
 
+# Memory fence for cross-process shared memory visibility.
+# Required for correct producer-consumer synchronization when using
+# shared memory without locks.
+_memory_fence_lock = threading.Lock()
+
+
+def memory_fence():
+    """
+    Full memory barrier for shared memory synchronization.
+
+    Ensures all prior memory writes are visible to other processes before
+    any subsequent reads. This is critical for lock-free producer-consumer
+    patterns using shared memory.
+
+    Implementation acquires and immediately releases a lock. Python's
+    threading.Lock provides sequentially consistent memory barrier semantics
+    across all major platforms (POSIX, Windows). This is a lightweight
+    operation (~20ns) that guarantees:
+    - All stores before the barrier are visible to other threads/processes
+    - All loads after the barrier see the latest values
+    """
+    # Lock acquire/release provides full memory barrier semantics.
+    # Using context manager ensures lock release even on exceptions.
+    with _memory_fence_lock:
+        pass
+
+
 def to_bytes_big(value: int, size: int) -> bytes:
     return value.to_bytes(size, byteorder="big")
 
@@ -49,40 +80,125 @@ def to_bytes_big(value: int, size: int) -> bytes:
 logger = init_logger(__name__)
 
 
-class SpinTimer:
-    def record_activity(self):
-        pass
+LONG_WAIT_TIME_LOG_MSG = (
+    "No available shared memory broadcast block found "
+    "in %d seconds. This typically happens "
+    "when some processes are hanging or doing some "
+    "time-consuming work (e.g. compilation, "
+    "weight/kv cache quantization)."
+)
 
-    def spin(self):
-        sched_yield()
 
-
-class SpinSleepTimer(SpinTimer):
+class SpinCondition:
     """
-    In setups which have long inactivity periods it is desirable to reduce
-    system power consumption when vllm does nothing. This would lead to more
-    CPU thermal headroom when a request eventually comes, especially when
-    multiple GPUs are connected as each GPU would otherwise pin one thread at
-    100% CPU usage.
+    This class implements an interface similar to a threading.Condition. It
+    allows a writer to notify readers to wake up and read from the shared memory
+    buffer. This notification is done over a zmq socket.
 
-    The simplest solution is to reduce polling frequency when there is no
-    activity for a certain period of time.
+    For optimal performance under load we don't want the readers to need to poll
+    the zmq socket for every read. So the `wait` method here will return
+    immediately when reads are frequent, and will only enter "idle mode" and
+    await a notification on the zmq socket after a period of inactivity. This
+    allows the readers to spin quickly, hence "SpinCondition".
+
+    To support clean shutdown, a separate thread in the reader's process must be
+    able to wake the reader so that it can exit. A separate cancel() method is
+    implemented with an in-process socket to allow this interruption.
     """
 
-    def __init__(self, busy_loop_s: float = 3.0, wait_sleep_s: float = 0.1):
-        self.last_activity = time.monotonic()
-        self.busy_loop_s = busy_loop_s
-        self.wait_sleep_s = wait_sleep_s
+    def __init__(
+        self,
+        is_reader: bool,
+        context: zmq.Context,
+        notify_address: str,
+        busy_loop_s: float = 1,
+    ):
+        self.is_reader = is_reader
 
-    def record_activity(self):
-        self.last_activity = time.monotonic()
+        if is_reader:
+            # Time of last shm buffer read
+            self.last_read = time.monotonic()
 
-    def spin(self):
-        curr_time = time.monotonic()
-        if curr_time >= self.last_activity + self.busy_loop_s:
-            time.sleep(self.wait_sleep_s)
+            # Time to keep busy-looping on the shm buffer before going idle
+            self.busy_loop_s = busy_loop_s
+
+            # Readers subscribe to write notifications
+            self.local_notify_socket: zmq.Socket = context.socket(SUB)
+            # Set zmq.CONFLATE to only keep the last message that the socket
+            # receives. This prevents us from piling up notification messages
+            # under high load when we aren't polling the socket.
+            self.local_notify_socket.setsockopt(zmq.CONFLATE, 1)
+            # Subscribe to all messages on the socket
+            self.local_notify_socket.setsockopt_string(SUBSCRIBE, "")
+            self.local_notify_socket.connect(notify_address)
+
+            # Readers require a process-local socket to poll for cancellation
+            cancel_path = get_open_zmq_inproc_path()
+            self.write_cancel_socket: zmq.Socket = context.socket(zmq.PAIR)
+            self.write_cancel_socket.bind(cancel_path)
+            self.read_cancel_socket: zmq.Socket = context.socket(zmq.PAIR)
+            self.read_cancel_socket.connect(cancel_path)
+
+            # Poller allows waiting on either `.notify()` or `.cancel()`
+            self.poller = zmq.Poller()
+            self.poller.register(self.read_cancel_socket, zmq.POLLIN)
+            self.poller.register(self.local_notify_socket, zmq.POLLIN)
         else:
+            # Writer side publishes write notifications
+            self.local_notify_socket: zmq.Socket = context.socket(PUB)  # type: ignore
+            # Set high water mark to 1 - we don't need to send a massive amount of
+            # pings during busy operation. PUB sockets will silently drop subsequent
+            # messages after the high water mark is reached.
+            self.local_notify_socket.setsockopt(zmq.SNDHWM, 1)
+            self.local_notify_socket.bind(notify_address)
+
+            self.last_read = 0
+            self.busy_loop_s = 0
+            self.read_cancel_socket = None
+            self.write_cancel_socket = None
+            self.poller = None
+
+    def record_read(self):
+        self.last_read = time.monotonic()
+
+    def cancel(self):
+        # Sends cancellation ping that will cause the reader to wake up.
+        # This is done from a monitor thread in the same process as the reader.
+        if self.is_reader:
+            logger.debug("Canceling waiting reads on SHM Buffer")
+            self.write_cancel_socket.send(b"\x00")
+
+    def wait(self, timeout_ms: int | None = None) -> None:
+        """Wait for data on the shared memory buffer.
+
+        Yields the scheduler then returns immediately if it has been less than
+        self.busy_loop_s since the last read.
+
+        Otherwise, enters idle mode and awaits a socket ping for at most
+        `timeout_ms` milliseconds, or indefinitely if timeout_ms is None.
+        """
+        assert self.is_reader, "Only readers can wait"
+
+        current_time = time.monotonic()
+        if current_time <= self.last_read + self.busy_loop_s:
             sched_yield()
+        else:
+            events = dict(self.poller.poll(timeout=timeout_ms))
+
+            if self.read_cancel_socket in events:
+                logger.debug("Poller received cancel event")
+            elif self.local_notify_socket in events:
+                logger.debug("Poller received notify event")
+                # Since zmq.CONFLATE is set, there will only be one notification
+                # to read from the socket
+                self.local_notify_socket.recv(flags=zmq.NOBLOCK, copy=False)
+            else:
+                logger.debug("Poller timed out")
+
+    def notify(self):
+        """Notifies all readers to wake up"""
+        assert not self.is_reader, "Only writers can notify"
+        self.local_notify_socket.send(b"\x00")
 
 
 class ShmRingBuffer:
@@ -226,6 +342,7 @@ class Handle:
 
     buffer_handle: tuple[int, int, int, str] | None = None
     local_subscribe_addr: str | None = None
+    local_notify_addr: str | None = None
     remote_subscribe_addr: str | None = None
     remote_addr_ipv6: bool = False
 
@@ -249,7 +366,7 @@ class MessageQueue:
         self.n_local_reader = n_local_reader
         n_remote_reader = n_reader - n_local_reader
         self.n_remote_reader = n_remote_reader
-
+        self.shutting_down = False
         context = Context()
 
         if n_local_reader > 0:
@@ -271,11 +388,19 @@ class MessageQueue:
             self.local_socket.bind(local_subscribe_addr)
 
             self.current_idx = 0
+
+            # Create the notification side of the SpinCondition
+            local_notify_addr = get_open_zmq_ipc_path()
+            self._spin_condition = SpinCondition(
+                is_reader=False, context=context, notify_address=local_notify_addr
+            )
         else:
             self.buffer = None  # type: ignore
             local_subscribe_addr = None
             self.local_socket = None
             self.current_idx = -1
+            local_notify_addr = None
+            self._spin_condition = None  # type: ignore
 
         remote_addr_ipv6 = False
         if n_remote_reader > 0:
@@ -302,17 +427,17 @@ class MessageQueue:
         self.local_reader_rank = -1
         # rank does not matter for remote readers
         self._is_remote_reader = False
-        self._read_spin_timer = SpinTimer()
 
         self.handle = Handle(
             local_reader_ranks=local_reader_ranks,
             buffer_handle=self.buffer.handle() if self.buffer is not None else None,
             local_subscribe_addr=local_subscribe_addr,
+            local_notify_addr=local_notify_addr,
             remote_subscribe_addr=remote_subscribe_addr,
             remote_addr_ipv6=remote_addr_ipv6,
         )
 
-        logger.info("vLLM message queue communication handle: %s", self.handle)
+        logger.debug("vLLM message queue communication handle: %s", self.handle)
 
     def export_handle(self) -> Handle:
         return self.handle
@@ -340,9 +465,9 @@ class MessageQueue:
             self.local_socket.connect(socket_addr)
 
             self.remote_socket = None
-
-            self._read_spin_timer = (
-                SpinSleepTimer() if envs.VLLM_SLEEP_WHEN_IDLE else SpinTimer()
+            assert isinstance(handle.local_notify_addr, str)
+            self._spin_condition = SpinCondition(
+                is_reader=True, context=context, notify_address=handle.local_notify_addr
             )
         else:
             self.buffer = None  # type: ignore
@@ -360,7 +485,9 @@ class MessageQueue:
             socket_addr = handle.remote_subscribe_addr
             logger.debug("Connecting to %s", socket_addr)
             self.remote_socket.connect(socket_addr)
+            self._spin_condition = None  # type: ignore
 
+        self.shutting_down = False
         return self
 
     def wait_until_ready(self):
@@ -396,6 +523,13 @@ class MessageQueue:
             recv = self.remote_socket.recv()
             assert recv == b"READY"
 
+    def shutdown(self):
+        """If this is an idle reader, wakes it up so it can clean up and shut
+        down"""
+        self.shutting_down = True
+        if self._spin_condition is not None:
+            self._spin_condition.cancel()
+
     @contextmanager
     def acquire_write(self, timeout: float | None = None):
         assert self._is_writer, "Only writers can acquire write"
@@ -403,6 +537,10 @@ class MessageQueue:
         n_warning = 1
         while True:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
+                # Memory fence ensures we see the latest read flags from readers.
+                # Without this, we may read stale flags from our CPU cache and
+                # spin indefinitely even though readers have completed.
+                memory_fence()
                 read_count = sum(metadata_buffer[1:])
                 written_flag = metadata_buffer[0]
                 if written_flag and read_count != self.buffer.n_reader:
@@ -422,11 +560,7 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if elapsed > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:
                         logger.info(
-                            "No available shared memory broadcast block found"
-                            " in %s seconds. This typically happens when some"
-                            " processes are hanging or doing some"
-                            " time-consuming work (e.g. compilation)",
-                            VLLM_RINGBUFFER_WARNING_INTERVAL,
+                            LONG_WAIT_TIME_LOG_MSG, VLLM_RINGBUFFER_WARNING_INTERVAL
                         )
                         n_warning += 1
 
@@ -449,23 +583,81 @@ class MessageQueue:
                 for i in range(1, self.buffer.n_reader + 1):
                     # set read flag to 0, meaning it is not read yet
                     metadata_buffer[i] = 0
+                # Memory fence here ensures the order of the buffer and flag
+                # writes. This guarantees that when `metadata_buffer[0] = 1` is
+                # visible to readers, `buf` can be completely ready. Without
+                # this, some CPU architectures with weak ordering may incur
+                # memory inconsistency.
+                memory_fence()
                 # mark the block as written
                 metadata_buffer[0] = 1
+                # Memory fence ensures the write is visible to readers on other cores
+                # before we proceed. Without this, readers may spin indefinitely
+                # waiting for a write that's stuck in our CPU's store buffer.
+                memory_fence()
                 self.current_idx = (self.current_idx + 1) % self.buffer.max_chunks
                 break
+
+    class ReadTimeoutWithWarnings:
+        def __init__(self, timeout: float | None, should_warn: bool) -> None:
+            self.started = time.monotonic()
+            self.deadline = sys.maxsize if timeout is None else self.started + timeout
+
+            # if should_warn, we need to wake up periodically to log
+            self.warning_wait_time_ms: int | None = (
+                VLLM_RINGBUFFER_WARNING_INTERVAL * 1000 if should_warn else None
+            )
+
+            self._should_warn = should_warn
+            self.n_warning = 1
+            self.timeout = timeout
+
+        def timeout_ms(self) -> int | None:
+            """Returns a timeout that is:
+            - min(time to deadline, time to next warning) if we're logging warnings
+            - time to deadline, if we're not logging warnings
+            - None if the timeout is None and we're not logging warnings
+            - raise TimeoutError if we are past the deadline
+            """
+            warning_wait_time = self.warning_wait_time_ms
+            if self.timeout is None:
+                return warning_wait_time
+
+            time_left_ms = int((self.deadline - time.monotonic()) * 1000)
+            if time_left_ms <= 0:
+                raise TimeoutError
+
+            if warning_wait_time and warning_wait_time < time_left_ms:
+                return warning_wait_time
+
+            return time_left_ms
+
+        def should_warn(self) -> bool:
+            """Returns true if it's time to log a warning for a timeout that is not
+            indefinite"""
+            if self._should_warn:
+                elapsed = time.monotonic() - self.started
+                if elapsed >= VLLM_RINGBUFFER_WARNING_INTERVAL * self.n_warning:
+                    self.n_warning += 1
+                    return True
+            return False
 
     @contextmanager
     def acquire_read(
         self,
         timeout: float | None = None,
-        cancel: Event | None = None,
         indefinite: bool = False,
     ):
         assert self._is_local_reader, "Only readers can acquire read"
-        start_time = time.monotonic()
-        n_warning = 1
-        while True:
-            with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
+        read_timeout = self.ReadTimeoutWithWarnings(
+            timeout=timeout, should_warn=not indefinite
+        )
+        with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
+            while True:
+                # Memory fence ensures we see the latest writes from the writer.
+                # Without this, we may read stale flags from our CPU cache
+                # and spin indefinitely even though writer has updated them.
+                memory_fence()
                 read_flag = metadata_buffer[self.local_reader_rank + 1]
                 written_flag = metadata_buffer[0]
                 if not written_flag or read_flag:
@@ -476,30 +668,16 @@ class MessageQueue:
                     # for readers, `self.current_idx` is the next block to read
                     # if this block is not ready,
                     # we need to wait until it is written
+                    self._spin_condition.wait(timeout_ms=read_timeout.timeout_ms())
 
-                    # Release the processor to other threads
-                    self._read_spin_timer.spin()
-
-                    if cancel is not None and cancel.is_set():
+                    if self.shutting_down:
                         raise RuntimeError("cancelled")
 
-                    # if we time out, raise an exception
-                    elapsed = time.monotonic() - start_time
-                    if timeout is not None and elapsed > timeout:
-                        raise TimeoutError
-
                     # if we wait for a long time, log a message
-                    if not indefinite and (
-                        elapsed > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning
-                    ):
+                    if read_timeout.should_warn():
                         logger.info(
-                            "No available shared memory broadcast block found"
-                            " in %s seconds. This typically happens when some"
-                            " processes are hanging or doing some"
-                            " time-consuming work (e.g. compilation).",
-                            VLLM_RINGBUFFER_WARNING_INTERVAL,
+                            LONG_WAIT_TIME_LOG_MSG, VLLM_RINGBUFFER_WARNING_INTERVAL
                         )
-                        n_warning += 1
 
                     continue
                 # found a block that is not read by this reader
@@ -510,9 +688,13 @@ class MessageQueue:
                 # caller has read from the buffer
                 # set the read flag
                 metadata_buffer[self.local_reader_rank + 1] = 1
+                # Memory fence ensures the read flag is visible to the writer.
+                # Without this, writer may not see our read completion and
+                # could wait indefinitely for all readers to finish.
+                memory_fence()
                 self.current_idx = (self.current_idx + 1) % self.buffer.max_chunks
 
-                self._read_spin_timer.record_activity()
+                self._spin_condition.record_read()
                 break
 
     def enqueue(self, obj, timeout: float | None = None):
@@ -555,18 +737,19 @@ class MessageQueue:
                         buf[offset:buf_offset] = to_bytes_big(buf_len, 4)
                         buf[buf_offset : (offset := buf_offset + buf_len)] = buffer
 
+            self._spin_condition.notify()
+
         if self.n_remote_reader > 0:
             self.remote_socket.send_multipart(all_buffers, copy=False)
 
     def dequeue(
         self,
         timeout: float | None = None,
-        cancel: Event | None = None,
         indefinite: bool = False,
     ):
         """Read from message queue with optional timeout (in seconds)"""
         if self._is_local_reader:
-            with self.acquire_read(timeout, cancel, indefinite) as buf:
+            with self.acquire_read(timeout, indefinite) as buf:
                 overflow = buf[0] == 1
                 if not overflow:
                     offset = 3
@@ -601,12 +784,86 @@ class MessageQueue:
         return self.dequeue()
 
     @staticmethod
+    def create_from_process_group_single_reader(
+        pg: ProcessGroup,
+        max_chunk_bytes,
+        max_chunks,
+        reader_rank: int = 0,
+        blocking: bool = False,
+    ) -> tuple["MessageQueue", list[Handle]]:
+        """
+        Creates a MessageQueue for a process group with a single reader.
+
+        This method is designed for scenarios where only one process (the reader)
+        will consume messages, and all other processes are writers. It sets up
+        the shared memory buffer and communication handles accordingly, and
+        gathers the handles from all processes to the reader.
+
+        Args:
+            pg (ProcessGroup): The torch distributed process group.
+            max_chunk_bytes (int): Maximum size in bytes for each chunk in the buffer.
+            max_chunks (int): Maximum number of chunks in the buffer.
+            reader_rank (int, optional): The global rank that will act as the reader.
+                Defaults to 0.
+            blocking (bool, optional): If True, blocks until all processes are ready.
+                Defaults to False.
+
+        Returns:
+            tuple[MessageQueue, list[Handle]]:
+            The MessageQueue instance for the calling process,
+            and a list of handles (only non-empty for the reader process).
+        """
+        local_size = current_platform.device_count()
+        rank = dist.get_rank()
+        same_node = rank // local_size == reader_rank // local_size
+        buffer_io = MessageQueue(
+            n_reader=1,
+            n_local_reader=1 if same_node else 0,
+            max_chunk_bytes=max_chunk_bytes,
+            max_chunks=max_chunks,
+        )
+        handle = buffer_io.export_handle()
+        handles = [None] * dist.get_world_size(pg) if rank == reader_rank else None
+        dist.gather_object(handle, handles, dst=reader_rank, group=pg)
+        if blocking:
+            buffer_io.wait_until_ready()
+        return buffer_io, cast(list[Handle], handles or [])
+
+    @staticmethod
     def create_from_process_group(
         pg: ProcessGroup | StatelessProcessGroup,
         max_chunk_bytes,
         max_chunks,
-        writer_rank=0,
+        writer_rank: int = 0,
+        external_writer_handle=None,
+        blocking: bool = True,
     ) -> "MessageQueue":
+        """
+        Creates a MessageQueue for a distributed process group with one writer and
+        multiple readers.
+
+        This method is designed for scenarios where one process (the writer) sends
+        messages, and all other processes (the readers) receive messages. It sets up
+        the shared memory buffer and socket communication handles accordingly, and
+        broadcasts the handle from the writer to all readers.
+
+        Args:
+            pg (ProcessGroup | StatelessProcessGroup): The torch distributed process
+                group.
+            max_chunk_bytes (int): Maximum size in bytes for each chunk in the buffer.
+            max_chunks (int): Maximum number of chunks in the buffer.
+            writer_rank (int, optional): The global rank that will act as the writer.
+                Defaults to 0.
+            external_writer_handle (Handle, optional): Used when there is a handle
+                from an external Message Queue. If provided, use this handle to init
+                PG writer message queue instead of creating a new one. Defaults to None.
+            blocking (bool, optional): If True, blocks until all processes are ready.
+                Defaults to True.
+
+        Returns:
+            MessageQueue: The MessageQueue instance for the calling process.
+
+        """
         if isinstance(pg, ProcessGroup):
             group_rank = dist.get_rank(pg)
             group_world_size = dist.get_world_size(pg)
@@ -615,23 +872,26 @@ class MessageQueue:
             group_rank = pg.rank
             group_world_size = pg.world_size
             global_ranks = list(range(pg.world_size))
-
         from vllm.distributed.parallel_state import in_the_same_node_as
 
         status = in_the_same_node_as(pg, source_rank=writer_rank)
-        same_node_ranks = [i for i, s in enumerate(status) if s]
-        n_reader = group_world_size - 1
-        n_local_reader = len(same_node_ranks) - 1
-        local_reader_ranks = [i for i in same_node_ranks if i != writer_rank]
-        buffer_io: MessageQueue
         if group_rank == writer_rank:
-            buffer_io = MessageQueue(
-                n_reader=n_reader,
-                n_local_reader=n_local_reader,
-                local_reader_ranks=local_reader_ranks,
-                max_chunk_bytes=max_chunk_bytes,
-                max_chunks=max_chunks,
-            )
+            if external_writer_handle is not None:
+                buffer_io = MessageQueue.create_from_handle(
+                    external_writer_handle, group_rank
+                )
+            else:
+                same_node_ranks = [i for i, s in enumerate(status) if s]
+                n_reader = group_world_size - 1
+                n_local_reader = len(same_node_ranks) - 1
+                local_reader_ranks = [i for i in same_node_ranks if i != writer_rank]
+                buffer_io = MessageQueue(
+                    n_reader=n_reader,
+                    n_local_reader=n_local_reader,
+                    local_reader_ranks=local_reader_ranks,
+                    max_chunk_bytes=max_chunk_bytes,
+                    max_chunks=max_chunks,
+                )
             handle = buffer_io.export_handle()
             if isinstance(pg, ProcessGroup):
                 dist.broadcast_object_list(
@@ -649,5 +909,6 @@ class MessageQueue:
             else:
                 handle = pg.broadcast_obj(None, writer_rank)
             buffer_io = MessageQueue.create_from_handle(handle, group_rank)
-        buffer_io.wait_until_ready()
+        if blocking:
+            buffer_io.wait_until_ready()
         return buffer_io

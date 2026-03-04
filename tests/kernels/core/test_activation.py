@@ -17,8 +17,10 @@ from vllm.model_executor.layers.activation import (
     QuickGELU,
     SiluAndMul,
     SwigluOAIAndMul,
+    SwigluStepAndMul,
+    swiglustep_and_mul_triton,
 )
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
@@ -36,6 +38,7 @@ CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 e
         "gelu_tanh",
         "fatrelu",
         "swigluoai_and_mul",
+        "swiglustep_and_mul",
     ],
 )
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -45,6 +48,7 @@ CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 e
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_act_and_mul(
+    default_vllm_config,
     activation: str,
     num_tokens: int,
     d: int,
@@ -52,11 +56,11 @@ def test_act_and_mul(
     seed: int,
     device: str,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     x = torch.randn(num_tokens, 2 * d, dtype=dtype)
     if activation == "silu_and_mul":
-        layer = SiluAndMul()
+        layer = SiluAndMul(compile_native=False)
         fn = torch.ops._C.silu_and_mul
     if activation == "mul_and_silu":
         layer = MulAndSilu()
@@ -74,9 +78,12 @@ def test_act_and_mul(
     elif activation == "swigluoai_and_mul":
         layer = SwigluOAIAndMul()
         fn = torch.ops._C.swigluoai_and_mul
+    elif activation == "swiglustep_and_mul":
+        layer = SwigluStepAndMul()
+        fn = swiglustep_and_mul_triton
     out = layer(x)
     ref_out = layer.forward_native(x)
-    if activation == "swigluoai_and_mul":
+    if activation in ["swigluoai_and_mul", "swiglustep_and_mul"]:
         rtol = {
             # For fp16, change the relative tolerance from 1e-3 to 2e-3
             torch.float16: 2e-3,
@@ -103,7 +110,7 @@ def test_act_and_mul(
         opcheck(fn, (out, x, threshold))
     elif activation == "swigluoai_and_mul":
         opcheck(fn, (out, x, layer.alpha, layer.limit))
-    else:
+    elif activation != "swiglustep_and_mul":
         opcheck(fn, (out, x))
 
 
@@ -122,6 +129,7 @@ def test_act_and_mul(
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_activation(
+    default_vllm_config,
     activation: type[torch.nn.Module],
     num_tokens: int,
     d: int,
@@ -129,7 +137,7 @@ def test_activation(
     seed: int,
     device: str,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     x = torch.randn(num_tokens, d, dtype=dtype)
     layer = activation[0]()

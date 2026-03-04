@@ -11,7 +11,7 @@ from huggingface_hub import snapshot_download
 import vllm._custom_ops as ops
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.gguf import _fused_moe_gguf
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 GGUF_SAMPLE = snapshot_download("Isotr0py/test-gguf-sample")
 GGUF_SAMPLE_MOE = snapshot_download("SzymonOzog/test-gguf-moe-sample")
@@ -91,7 +91,7 @@ def test_dequantize(
 @pytest.mark.parametrize("quant_type", QUANT_TYPES)
 @torch.inference_mode()
 def test_mmvq(hidden_size: int, dtype: torch.dtype, quant_type: GGMLQuantizationType):
-    current_platform.seed_everything(0)
+    set_random_seed(0)
 
     tensors = get_gguf_sample_tensors(hidden_size, quant_type)
     x = torch.rand((1, hidden_size), dtype=dtype, device="cuda")
@@ -134,7 +134,7 @@ def test_mmq(
     dtype: torch.dtype,
     quant_type: GGMLQuantizationType,
 ):
-    current_platform.seed_everything(0)
+    set_random_seed(0)
 
     tensors = get_gguf_sample_tensors(hidden_size, quant_type)
     x = torch.rand((num_tokens, hidden_size), dtype=dtype, device="cuda")
@@ -169,7 +169,7 @@ def test_moe(
     quant_type: GGMLQuantizationType,
     top_k: int,
 ):
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     H, E = 1024, 256
 
     x = torch.rand((num_tokens, H), dtype=dtype, device="cuda")

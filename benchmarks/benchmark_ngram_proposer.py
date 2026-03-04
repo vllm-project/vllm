@@ -19,7 +19,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.platforms import current_platform
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -32,12 +32,11 @@ def benchmark_propose(args):
 
         model_config = ModelConfig(
             model="facebook/opt-125m",
-            task="generate",
             max_model_len=args.num_token + args.num_spec_token,
             tokenizer="facebook/opt-125m",
             tokenizer_mode="auto",
             dtype="auto",
-            seed=None,
+            seed=0,
             trust_remote_code=False,
         )
         proposer = NgramProposer(
@@ -108,7 +107,10 @@ def benchmark_batched_propose(args):
         device_config=DeviceConfig(device=current_platform.device_type),
         parallel_config=ParallelConfig(),
         load_config=LoadConfig(),
-        scheduler_config=SchedulerConfig(),
+        scheduler_config=SchedulerConfig(
+            max_model_len=model_config.max_model_len,
+            is_encoder_decoder=model_config.is_encoder_decoder,
+        ),
     )
 
     # monkey patch vllm.v1.worker.gpu_model_runner.get_pp_group
@@ -133,7 +135,6 @@ def benchmark_batched_propose(args):
             block_sizes=[16],
         )
         dummy_input_batch._req_ids = list(str(id) for id in range(args.num_req))
-        dummy_input_batch.spec_decode_unsupported_reqs = ()
         dummy_input_batch.num_tokens_no_spec = [args.num_token] * args.num_req
         dummy_input_batch.token_ids_cpu = np.random.randint(
             0, 20, (args.num_req, args.num_token)
@@ -149,10 +150,8 @@ def benchmark_batched_propose(args):
             start = time.time()
             runner.drafter.propose(
                 sampled_token_ids,
-                dummy_input_batch.req_ids,
                 dummy_input_batch.num_tokens_no_spec,
                 dummy_input_batch.token_ids_cpu,
-                dummy_input_batch.spec_decode_unsupported_reqs,
             )
             end = time.time()
             print(f"Iteration time (s): {end - start}")

@@ -7,7 +7,7 @@ First start serving your model
 ```bash
 export MODEL_PATH=/models/meta-llama/Meta-Llama-3.1-8B-Instruct/
 
-vllm serve $MODEL_PATH --served-model-name Llama --disable-log-requests
+vllm serve $MODEL_PATH --served-model-name Llama
 ```
 
 The variable `MODEL_PATH` should be a path to the model files (e.g. downloaded from huggingface).
@@ -54,6 +54,10 @@ output_num_tokens  166.0   100.01   11.80    80.00    91.00    99.00   109.75   
 output_num_chunks  166.0    99.01   11.80    79.00    90.00    98.00   108.75   115.00   119.00   119.00
 ----------------------------------------------------------------------------------------------------
 ```
+
+If you run with `--warmup-step`, the summary will also include `warmup_runtime_sec`
+and `total_runtime_incl_warmup_sec` (while `runtime_sec` continues to reflect the
+benchmark-only runtime so the reported throughput stays comparable).
 
 ### JSON configuration file for synthetic conversations generation
 

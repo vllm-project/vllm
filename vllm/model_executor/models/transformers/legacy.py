@@ -14,7 +14,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Transformers backend mixin for legacy models."""
+"""Transformers modeling backend mixin for legacy models."""
 
 from typing import TYPE_CHECKING
 
@@ -34,13 +34,6 @@ class LegacyMixin:
             # Handle BERT-like models
             "roberta": "model",
             "bert": "model",
-            # Add `model.` prefix for base model checkpoints
-            "": "model.",
-            # Remove `model.` prefix if it was already there
-            "model.model.": "model.",
-            # Classifier/scoring heads will be adjacent to `model`
-            "model.score": "classifier",
-            "model.classifier": "classifier",
         },
         orig_to_new_suffix={
             # Replace legacy suffixes used for norms

@@ -1,63 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import multiprocessing
-import os
+import asyncio
 import random
 
 import pytest
 import torch
 import torch.distributed
 
-from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.eplb.rebalance_execute import (
+    move_from_buffer,
+    rearrange_expert_weights_inplace,
+    transfer_layer,
+)
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
     get_tp_group,
-    init_distributed_environment,
 )
-from vllm.utils import update_environment_variables
 
-
-def distributed_run(fn, world_size):
-    number_of_processes = world_size
-    processes: list[multiprocessing.Process] = []
-    for i in range(number_of_processes):
-        env: dict[str, str] = {}
-        env["RANK"] = str(i)
-        env["LOCAL_RANK"] = str(i)
-        env["WORLD_SIZE"] = str(number_of_processes)
-        env["LOCAL_WORLD_SIZE"] = str(number_of_processes)
-        env["MASTER_ADDR"] = "localhost"
-        env["MASTER_PORT"] = "12345"
-        p = multiprocessing.Process(target=fn, args=(env,))
-        processes.append(p)
-        p.start()
-
-    for p in processes:
-        p.join()
-
-    for p in processes:
-        assert p.exitcode == 0
-
-
-def worker_fn_wrapper(fn):
-    # `multiprocessing.Process` cannot accept environment variables directly
-    # so we need to pass the environment variables as arguments
-    # and update the environment variables in the function
-    def wrapped_fn(env):
-        update_environment_variables(env)
-        local_rank = os.environ["LOCAL_RANK"]
-        device = torch.device(f"cuda:{local_rank}")
-        torch.cuda.set_device(device)
-        init_distributed_environment()
-
-        # Ensure each worker process has the same random seed
-        random.seed(42)
-        torch.manual_seed(42)
-
-        fn()
-
-    return wrapped_fn
+from .eplb_utils import distributed_run, set_env_vars_and_device
 
 
 def create_expert_indices_with_redundancy(
@@ -275,41 +237,116 @@ def verify_redundant_experts_have_same_weights(
                     )
 
 
-@pytest.mark.parametrize(
-    "world_size,num_layers,num_local_experts,num_logical_experts",
-    [
-        # 2 GPU, 2 experts per GPU
-        # 3 logical experts, 4 physical experts, 1 redundant experts
-        (2, 1, 2, 3),
-        # 2 GPU, 3 experts per GPU
-        # 4 logical experts, 6 physical experts, 2 redundant experts
-        (2, 2, 3, 4),
-        # 2 GPU, 8 experts per GPU
-        # 16 logical experts, 16 physical experts, 0 redundant experts
-        (2, 4, 8, 16),
-        # 4 GPU, 2 experts per GPU
-        # 6 logical experts, 8 physical experts, 2 redundant experts
-        (4, 1, 2, 6),
-        # 4 GPU, 2 experts per GPU
-        # 5 logical experts, 8 physical experts, 3 redundant experts
-        (4, 2, 2, 5),
-        # 4 GPU, 8 experts per GPU
-        # 16 logical experts, 32 physical experts, 16 redundant experts
-        (4, 8, 8, 16),
-    ],
-)
-def test_rearrange_expert_weights_with_redundancy(
-    world_size, num_layers, num_local_experts, num_logical_experts
-):
-    """Test the functionality of rearranging expert weights with redundancy."""
+def _test_async_transfer_layer_without_mtp_worker(
+    env,
+    world_size: int,
+    num_layers: int,
+    num_local_experts: int,
+    num_logical_experts: int,
+) -> None:
+    set_env_vars_and_device(env)
 
-    if torch.cuda.device_count() < world_size:
-        pytest.skip(f"Need at least {world_size} GPUs to run the test")
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.tensor_parallel_size = world_size
 
-    @worker_fn_wrapper
-    def worker_fn():
-        # Initialize model parallel (using tensor parallel as an entrypoint
-        # to expert parallel)
+    with set_current_vllm_config(vllm_config):
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
+        )
+
+        tp_group = get_tp_group()
+        ep_group = tp_group.device_group
+        ep_rank = torch.distributed.get_rank()
+        device = torch.device(f"cuda:{ep_rank}")
+
+        total_physical_experts = world_size * num_local_experts
+        hidden_sizes = [16, 32]
+
+        redundancy_config = create_redundancy_config(
+            num_logical_experts,
+            total_physical_experts,
+        )
+        old_indices = create_expert_indices_with_redundancy(
+            num_layers,
+            num_logical_experts,
+            total_physical_experts,
+            redundancy_config,
+        )
+
+        new_redundancy_config = create_redundancy_config(
+            num_logical_experts,
+            total_physical_experts,
+        )
+        new_indices = create_expert_indices_with_redundancy(
+            num_layers,
+            num_logical_experts,
+            total_physical_experts,
+            new_redundancy_config,
+        )
+
+        expert_weights = create_expert_weights(
+            num_layers,
+            num_local_experts,
+            hidden_sizes,
+            ep_rank,
+            device,
+            old_indices,
+        )
+        old_indices_cpu = old_indices.cpu()
+        new_indices_cpu = new_indices.cpu()
+
+        expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
+        cuda_stream = torch.cuda.Stream(device=device)
+
+        for layer_idx in range(num_layers):
+            is_unchanged, is_received_locally, recv_metadata = asyncio.run(
+                transfer_layer(
+                    old_layer_indices=old_indices_cpu[layer_idx],
+                    new_layer_indices=new_indices_cpu[layer_idx],
+                    expert_weights=expert_weights[layer_idx],
+                    expert_weights_buffer=expert_buffer,
+                    ep_group=ep_group,
+                    cuda_stream=cuda_stream,
+                )
+            )
+            cuda_stream.synchronize()
+            move_from_buffer(
+                expert_weights=expert_weights[layer_idx],
+                expert_weights_buffers=expert_buffer,
+                is_unchanged=is_unchanged,
+                is_received_locally=is_received_locally,
+                recv_metadata=recv_metadata,
+                new_indices=new_indices_cpu[layer_idx].numpy(),
+                ep_rank=ep_rank,
+            )
+
+        verify_expert_weights_after_shuffle(
+            expert_weights,
+            new_indices,
+            hidden_sizes,
+            ep_rank,
+            num_local_experts,
+        )
+        verify_redundant_experts_have_same_weights(
+            expert_weights,
+            new_indices,
+            hidden_sizes,
+            world_size,
+            num_local_experts,
+        )
+
+
+def _test_rearrange_expert_weights_with_redundancy(
+    env, world_size, num_layers, num_local_experts, num_logical_experts
+) -> None:
+    # Initialize model parallel (using tensor parallel as an entrypoint
+    # to expert parallel)
+    set_env_vars_and_device(env)
+
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.tensor_parallel_size = world_size
+
+    with set_current_vllm_config(vllm_config):
         ensure_model_parallel_initialized(
             tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
         )
@@ -376,21 +413,53 @@ def test_rearrange_expert_weights_with_redundancy(
             num_local_experts,
         )
 
-    distributed_run(worker_fn, world_size)
 
-
-@pytest.mark.parametrize("world_size", [2, 4])
-def test_rearrange_expert_weights_no_change(world_size):
-    """
-    Test that when the indices do not change, the weights should remain
-    unchanged.
-    """
+@pytest.mark.parametrize(
+    "world_size,num_layers,num_local_experts,num_logical_experts",
+    [
+        # 2 GPU, 2 experts per GPU
+        # 3 logical experts, 4 physical experts, 1 redundant experts
+        (2, 1, 2, 3),
+        # 2 GPU, 3 experts per GPU
+        # 4 logical experts, 6 physical experts, 2 redundant experts
+        (2, 2, 3, 4),
+        # 2 GPU, 8 experts per GPU
+        # 16 logical experts, 16 physical experts, 0 redundant experts
+        (2, 4, 8, 16),
+        # 4 GPU, 2 experts per GPU
+        # 6 logical experts, 8 physical experts, 2 redundant experts
+        (4, 1, 2, 6),
+        # 4 GPU, 2 experts per GPU
+        # 5 logical experts, 8 physical experts, 3 redundant experts
+        (4, 2, 2, 5),
+        # 4 GPU, 8 experts per GPU
+        # 16 logical experts, 32 physical experts, 16 redundant experts
+        (4, 8, 8, 16),
+    ],
+)
+def test_rearrange_expert_weights_with_redundancy(
+    world_size, num_layers, num_local_experts, num_logical_experts
+):
+    """Test the functionality of rearranging expert weights with redundancy."""
 
     if torch.cuda.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
+    distributed_run(
+        _test_rearrange_expert_weights_with_redundancy,
+        world_size,
+        num_layers,
+        num_local_experts,
+        num_logical_experts,
+    )
 
-    @worker_fn_wrapper
-    def worker_fn():
+
+def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
+    set_env_vars_and_device(env)
+
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.tensor_parallel_size = world_size
+
+    with set_current_vllm_config(vllm_config):
         ensure_model_parallel_initialized(
             tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
         )
@@ -440,21 +509,56 @@ def test_rearrange_expert_weights_no_change(world_size):
                 torch.testing.assert_close(
                     expert_weights[layer][weight_idx],
                     original_weights[layer][weight_idx],
-                    msg=f"Layer {layer}, weight {weight_idx} should remain unchanged",
+                    msg=f"""Layer {layer}, weight {weight_idx}
+ should remain unchanged""",
                 )
 
-    distributed_run(worker_fn, world_size)
 
-
-@pytest.mark.parametrize("world_size", [2, 4])
-def test_rearrange_expert_weights_profile_mode(world_size):
-    """Test profile mode (should not copy actual weights)"""
+@pytest.mark.parametrize(
+    "world_size,num_layers,num_local_experts,num_logical_experts",
+    [
+        (2, 2, 2, 3),
+    ],
+)
+def test_async_transfer_layer_without_mtp(
+    world_size: int,
+    num_layers: int,
+    num_local_experts: int,
+    num_logical_experts: int,
+):
+    """Exercise async EPLB transfer path without MTP/spec decode."""
 
     if torch.cuda.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
 
-    @worker_fn_wrapper
-    def worker_fn():
+    distributed_run(
+        _test_async_transfer_layer_without_mtp_worker,
+        world_size,
+        num_layers,
+        num_local_experts,
+        num_logical_experts,
+    )
+
+
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_rearrange_expert_weights_no_change(world_size):
+    """
+    Test that when the indices do not change, the weights should remain
+    unchanged.
+    """
+
+    if torch.cuda.device_count() < world_size:
+        pytest.skip(f"Need at least {world_size} GPUs to run the test")
+    distributed_run(_test_rearrange_expert_weights_no_change, world_size)
+
+
+def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
+    set_env_vars_and_device(env)
+
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.tensor_parallel_size = world_size
+
+    with set_current_vllm_config(vllm_config):
         ensure_model_parallel_initialized(
             tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
         )
@@ -514,4 +618,11 @@ def test_rearrange_expert_weights_profile_mode(world_size):
                     msg="In profile mode, the weights should remain unchanged",
                 )
 
-    distributed_run(worker_fn, world_size)
+
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_rearrange_expert_weights_profile_mode(world_size):
+    """Test profile mode (should not copy actual weights)"""
+
+    if torch.cuda.device_count() < world_size:
+        pytest.skip(f"Need at least {world_size} GPUs to run the test")
+    distributed_run(_test_rearrange_expert_weights_profile_mode, world_size)

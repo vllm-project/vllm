@@ -9,21 +9,32 @@ import json
 import httpx
 import librosa
 import numpy as np
+import openai
 import pytest
 import pytest_asyncio
 import soundfile as sf
 
 from ...utils import RemoteOpenAIServer
+from .conftest import add_attention_backend
 
 SERVER_ARGS = ["--enforce-eager"]
+
+
+def _get_server_args(attention_config):
+    """Get server args with attention backend if specified."""
+    args = SERVER_ARGS.copy()
+    add_attention_backend(args, attention_config)
+    return args
 
 
 @pytest.fixture(
     scope="module", params=["openai/whisper-small", "google/gemma-3n-E2B-it"]
 )
-def server(request):
+def server(request, rocm_aiter_fa_attention):
     # Parametrize over model name
-    with RemoteOpenAIServer(request.param, SERVER_ARGS) as remote_server:
+    with RemoteOpenAIServer(
+        request.param, _get_server_args(rocm_aiter_fa_attention)
+    ) as remote_server:
         yield remote_server, request.param
 
 
@@ -35,17 +46,59 @@ async def client_and_model(server):
 
 
 @pytest.mark.asyncio
-async def test_non_asr_model(foscolo):
+async def test_non_asr_model(foscolo, rocm_aiter_fa_attention):
     # text to text model
     model_name = "JackFram/llama-68m"
-    with RemoteOpenAIServer(model_name, SERVER_ARGS) as remote_server:
+    with RemoteOpenAIServer(
+        model_name, _get_server_args(rocm_aiter_fa_attention)
+    ) as remote_server:
         client = remote_server.get_async_client()
-        res = await client.audio.translations.create(
-            model=model_name, file=foscolo, temperature=0.0
+
+        with pytest.raises(openai.NotFoundError):
+            await client.audio.translations.create(
+                model=model_name, file=foscolo, temperature=0.0
+            )
+
+
+@pytest.mark.asyncio
+async def test_basic_audio_with_lora(mary_had_lamb, rocm_aiter_fa_attention):
+    """Ensure STT (translate) requests can pass LoRA through to generate."""
+    # ROCm SPECIFIC CONFIGURATION:
+    # To ensure the test passes on ROCm, we modify the max model length to 512.
+    # We DO NOT apply this to other platforms to maintain strict upstream parity.
+    from vllm.platforms import current_platform
+
+    # NOTE - careful to call this test before the module scoped server
+    # fixture, otherwise it'll OOMkill the CI
+    model_name = "ibm-granite/granite-speech-3.3-2b"
+    lora_model_name = "speech"
+    server_args = [
+        "--enforce-eager",
+        "--enable-lora",
+        "--max-lora-rank",
+        "64",
+        "--lora-modules",
+        f"{lora_model_name}={model_name}",
+        "--max-model-len",
+        "512" if current_platform.is_rocm() else "2048",
+        "--max-num-seqs",
+        "1",
+    ]
+
+    add_attention_backend(server_args, rocm_aiter_fa_attention)
+
+    # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        translation = await client.audio.translations.create(
+            model=lora_model_name,
+            file=mary_had_lamb,
+            extra_body=dict(language="en", to_language="es"),
+            response_format="text",
+            temperature=0.0,
         )
-        err = res.error
-        assert err["code"] == 400 and not res.text
-        assert err["message"] == "The model does not support Translations API"
+    out = json.loads(translation)["text"].strip().lower()
+    assert "pequeño" in out.split(" ")
 
 
 # NOTE: (NickLucche) the large-v3-turbo model was not trained on translation!
@@ -193,3 +246,40 @@ async def test_long_audio_request(foscolo, client_and_model):
     )
     out = json.loads(translation)["text"].strip().lower()
     assert out.count("greek sea") == 2
+
+
+@pytest.mark.asyncio
+async def test_audio_with_max_tokens(mary_had_lamb, client_and_model):
+    client, model_name = client_and_model
+    transcription = await client.audio.translations.create(
+        model=model_name,
+        file=mary_had_lamb,
+        response_format="text",
+        temperature=0.0,
+        extra_body={"max_completion_tokens": 1},
+    )
+    out = json.loads(transcription)
+    out_text = out["text"]
+    print(out_text)
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(model_name)
+    out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
+    assert len(out_tokens) == 1
+    # max_completion_tokens > max_model_len
+    # max_model_len=32768 for Gemma-3n-E2B-it
+    transcription = await client.audio.transcriptions.create(
+        model=model_name,
+        file=mary_had_lamb,
+        response_format="text",
+        temperature=0.0,
+        extra_body={
+            "max_completion_tokens": int(1e6),
+            "repetition_penalty": 1.3,
+        },
+    )
+    out = json.loads(transcription)
+    out_text = out["text"]
+    print(out_text)
+    out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
+    assert len(out_tokens) < 450  # ~Whisper max output len

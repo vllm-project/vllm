@@ -1,0 +1,25 @@
+name: vllm_ci
+job_dirs:
+  - ".buildkite/image_build"
+  - ".buildkite/test_areas"
+  - ".buildkite/hardware_tests"
+run_all_patterns:
+  - "docker/Dockerfile"
+  - "CMakeLists.txt"
+  - "requirements/common.txt"
+  - "requirements/cuda.txt"
+  - "requirements/build.txt"
+  - "requirements/test.txt"
+  - "setup.py"
+  - "csrc/"
+  - "cmake/"
+run_all_exclude_patterns:
+  - "docker/Dockerfile."
+  - "csrc/cpu/"
+  - "csrc/rocm/"
+  - "cmake/hipify.py"
+  - "cmake/cpu_extension.cmake"
+registries: public.ecr.aws/q9t5s3a7
+repositories:
+  main: "vllm-ci-postmerge-repo"
+  premerge: "vllm-ci-test-repo"

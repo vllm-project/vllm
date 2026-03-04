@@ -9,9 +9,10 @@ import torch
 import torch.nn as nn
 from transformers import Blip2VisionConfig, BlipVisionConfig
 
-from vllm.attention.layer import MultiHeadAttention
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -47,7 +48,7 @@ class BlipVisionEmbeddings(nn.Module):
 
         self.class_embedding = nn.Parameter(torch.randn(1, 1, self.embed_dim))
 
-        self.patch_embedding = nn.Conv2d(
+        self.patch_embedding = Conv2dLayer(
             in_channels=3,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
@@ -121,8 +122,11 @@ class BlipAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        self.attn = MultiHeadAttention(
-            self.num_heads_per_partition, self.head_dim, self.scale
+        self.attn = MMEncoderAttention(
+            self.num_heads_per_partition,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
         )
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):

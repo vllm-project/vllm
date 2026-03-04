@@ -8,7 +8,6 @@ See also `tests/kernels/moe/test_ocp_mx_moe.py`.
 """
 
 import importlib.metadata
-import os
 from dataclasses import dataclass
 from importlib.util import find_spec
 
@@ -27,9 +26,12 @@ from vllm.platforms import current_platform
 
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
+# Minimum amd-quark version for MXFP4/OCP_MX tests (single source of truth).
+QUARK_MXFP4_MIN_VERSION = "0.8.99"
+
 QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
     importlib.metadata.version("amd-quark")
-) >= version.parse("0.8.99")
+) >= version.parse(QUARK_MXFP4_MIN_VERSION)
 
 if QUARK_MXFP4_AVAILABLE:
     from quark.torch.export.nn.modules.realquantizer import StaticScaledRealQuantizer
@@ -201,7 +203,10 @@ WIKITEXT_ACCURACY_CONFIGS = [
 ]
 
 
-@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
 @pytest.mark.parametrize("config", WIKITEXT_ACCURACY_CONFIGS)
 @pytest.mark.parametrize("tp_size", [1, 2])
 def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
@@ -213,11 +218,11 @@ def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
     task = "wikitext"
     rtol = 0.1
 
-    # Smaller cuda_graph_sizes to speed up the test.
+    # Smaller cudagraph_capture_sizes to speed up the test.
     results = lm_eval.simple_evaluate(
         model="vllm",
         model_args=config.get_model_args(
-            tp_size=tp_size, kwargs={"cuda_graph_sizes": [16]}
+            tp_size=tp_size, kwargs={"cudagraph_capture_sizes": [16]}
         ),
         tasks=task,
         batch_size=64,
@@ -232,7 +237,10 @@ def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
 
 
 @pytest.mark.parametrize("config", GSM8K_ACCURACY_CONFIGS)
-@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
 @pytest.mark.skipif(
     not HF_HUB_AMD_ORG_ACCESS,
     reason="Read access to huggingface.co/amd is required for this test.",
@@ -245,8 +253,6 @@ def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
 
     task = "gsm8k"
     rtol = 0.03
-
-    os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
     results = lm_eval.simple_evaluate(
         model="vllm",
@@ -263,10 +269,11 @@ def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
         and measured_value + rtol > EXPECTED_VALUE
     ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
-    del os.environ["VLLM_USE_TRITON_FLASH_ATTN"]
 
-
-@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
 @pytest.mark.parametrize("float_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("scalings", [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
 def test_mxfp4_fused_qdq_match_quark(float_dtype: torch.dtype, scalings: list[int]):
@@ -294,7 +301,10 @@ def test_mxfp4_fused_qdq_match_quark(float_dtype: torch.dtype, scalings: list[in
         )
 
 
-@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
 @pytest.mark.parametrize("float_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("scalings", [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
 def test_mxfp4_dequant_kernel_match_quark(

@@ -8,3 +8,4 @@ tasks:
     value: 0.80
 limit: 250 # will run on 250 * 14 subjects = 3500 samples
 num_fewshot: 5
+rtol: 0.05

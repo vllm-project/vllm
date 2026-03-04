@@ -24,6 +24,16 @@ MODEL_CONFIGS = [
         "tensor_parallel_size": 1,
     },
     {
+        "model": "Qwen/Qwen3-0.6B",
+        "enforce_eager": True,
+        "gpu_memory_utilization": 0.50,
+        "max_model_len": 64,
+        "max_num_batched_tokens": 64,
+        "max_num_seqs": 64,
+        "tensor_parallel_size": 1,
+        "tokenizer": "Qwen/Qwen3-4B",
+    },
+    {
         "model": "mistralai/Mistral-7B-Instruct-v0.1",
         "enforce_eager": True,
         "gpu_memory_utilization": 0.95,
@@ -99,8 +109,15 @@ def _re_import_modules():
         if k.startswith("transformers") and not k.startswith("transformers_modules")
     ]
 
+    # These modules are aliased in Transformers v5 and so cannot be reloaded directly
+    aliased_modules = ["tokenization_utils", "tokenization_utils_fast"]
+
     reload_exception = None
     for module_name in hf_hub_module_names + transformers_module_names:
+        if any(module_name.endswith(f".{alias}") for alias in aliased_modules):
+            # Remove from sys.modules so they are re-aliased on next import
+            del sys.modules[module_name]
+            continue
         try:
             importlib.reload(sys.modules[module_name])
         except Exception as e:

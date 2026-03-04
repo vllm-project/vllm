@@ -9,9 +9,15 @@ import time
 import openai
 import pytest
 
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+
+# GPU initialization might take take longer
+_IS_ROCM = current_platform.is_rocm()
+_SERVER_STARTUP_TIMEOUT = 120
+_PROCESS_EXIT_TIMEOUT = 15
 
 
 @pytest.mark.asyncio
@@ -45,9 +51,11 @@ async def test_shutdown_on_engine_failure():
             "2",
             "--disable-frontend-multiprocessing",
         ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+        # ROCm: Disable stdout/stderr pipe capture. Subprocess hangs when
+        # stdout/stderr pipes are enabled during ROCm GPU initialization.
+        stdout=None if _IS_ROCM else subprocess.PIPE,
+        stderr=None if _IS_ROCM else subprocess.PIPE,
+        text=None if _IS_ROCM else True,
         preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN),
     )
 
@@ -61,7 +69,7 @@ async def test_shutdown_on_engine_failure():
     )
 
     # Poll until server is ready
-    while time.time() - start_time < 30:
+    while time.time() - start_time < _SERVER_STARTUP_TIMEOUT:
         try:
             await client.completions.create(
                 model=MODEL_NAME, prompt="Hello", max_tokens=1
@@ -70,14 +78,18 @@ async def test_shutdown_on_engine_failure():
         except Exception:
             time.sleep(0.5)
             if proc.poll() is not None:
-                stdout, stderr = proc.communicate(timeout=1)
-                pytest.fail(
-                    f"Server died during startup. stdout: {stdout}, stderr: {stderr}"
-                )
+                if _IS_ROCM:
+                    pytest.fail(f"Server died during startup: {proc.returncode}")
+                else:
+                    stdout, stderr = proc.communicate(timeout=1)
+                    pytest.fail(
+                        f"Server died during startup. "
+                        f"stdout: {stdout}, stderr: {stderr}"
+                    )
     else:
         proc.terminate()
-        proc.wait(timeout=5)
-        pytest.fail("Server failed to start in 30 seconds")
+        proc.wait(timeout=_PROCESS_EXIT_TIMEOUT)
+        pytest.fail(f"Server failed to start in {_SERVER_STARTUP_TIMEOUT} seconds")
 
     # Kill server to simulate crash
     proc.terminate()
@@ -89,5 +101,5 @@ async def test_shutdown_on_engine_failure():
             model=MODEL_NAME, prompt="This should fail", max_tokens=1
         )
 
-    return_code = proc.wait(timeout=5)
+    return_code = proc.wait(timeout=_PROCESS_EXIT_TIMEOUT)
     assert return_code is not None

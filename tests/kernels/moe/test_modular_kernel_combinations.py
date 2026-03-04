@@ -14,8 +14,9 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
-from vllm.utils.import_utils import has_deep_ep, has_deep_gemm, has_pplx
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.utils.import_utils import has_deep_ep, has_deep_gemm
+from vllm.utils.torch_utils import cuda_device_count_stateless, set_random_seed
+from vllm.v1.worker.workspace import init_workspace_manager
 
 from .modular_kernel_tools.common import (
     Config,
@@ -38,13 +39,19 @@ from .modular_kernel_tools.parallel_utils import (
 )
 
 has_any_multi_gpu_package = (
-    has_deep_ep() or has_deep_gemm() or has_pplx() or has_flashinfer_cutlass_fused_moe()
+    has_deep_ep() or has_deep_gemm() or has_flashinfer_cutlass_fused_moe()
 )
 
 meets_multi_gpu_requirements = pytest.mark.skipif(
     not has_any_multi_gpu_package,
-    reason="Requires deep_ep or deep_gemm or pplx or flashinfer packages",
+    reason="Requires deep_ep or deep_gemm or flashinfer packages",
 )
+
+if current_platform.is_fp8_fnuz():
+    pytest.skip(
+        "Tests in this file require float8_e4m3fn and platform does not support",
+        allow_module_level=True,
+    )
 
 
 def format_result(verbose, msg, ex=None):
@@ -71,7 +78,11 @@ def rank_worker(
     weights: WeightTensors,
     verbose: bool,
 ):
-    current_platform.seed_everything(pgi.rank)
+    # Initialize workspace manager in child process
+    device = torch.device(f"cuda:{pgi.local_rank}")
+    init_workspace_manager(device)
+
+    set_random_seed(pgi.rank)
 
     # sanity check
     from vllm import envs
@@ -157,7 +168,6 @@ FUSED_MOE_CHUNK_SIZEs = [None, 16]
 def is_nyi_config(config: Config) -> bool:
     # We know these configs to be legitimate. but still fail.
     info = expert_info(config.fused_experts_type)
-
     if info.needs_matching_quant:
         # The triton kernels expect both per-act-token-quant and
         # per-out-ch-quant or neither.
@@ -248,7 +258,7 @@ def test_modular_kernel_combinations_multigpu(
     dtype: torch.dtype,
     quant_config: TestMoEQuantConfig | None,
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
-    fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
+    fused_experts_type: mk.FusedMoEExperts,
     chunk_size: int | None,
     world_size: int,
     pytestconfig,
@@ -290,11 +300,14 @@ def test_modular_kernel_combinations_singlegpu(
     dtype: torch.dtype,
     quant_config: TestMoEQuantConfig | None,
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
-    fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
+    fused_experts_type: mk.FusedMoEExperts,
     chunk_size: int | None,
     world_size: int,
     pytestconfig,
+    workspace_init,
 ):
+    """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
+    and those tests will be skipped on unsupported hardware."""
     config = Config(
         Ms=Ms,
         K=k,
@@ -309,6 +322,12 @@ def test_modular_kernel_combinations_singlegpu(
         world_size=world_size,
     )
 
+    if (
+        quant_config is not None and quant_config.quant_dtype == torch.float8_e4m3fn
+    ) and not current_platform.has_device_capability(89):
+        pytest.skip(
+            "Triton limitation: fp8e4nv data type is not supported on CUDA arch < 89"
+        )
     verbosity = pytestconfig.getoption("verbose")
     run(config, verbosity > 0)
 
@@ -321,7 +340,7 @@ if __name__ == "__main__":
         description=(
             "Run single prepare-finalize & fused-experts combination test"
             "Example : python3 -m tests.kernels.moe.test_modular_kernel_combinations "
-            "--pf-type PplxPrepareAndFinalize --experts-type BatchedTritonExperts"
+            "--pf-type DeepEPLLPrepareAndFinalize --experts-type BatchedTritonExperts"
         )
     )
     args = parser.parse_args()

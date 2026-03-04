@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from pydantic.dataclasses import dataclass
+from typing import Literal
+
+from pydantic import Field
 
 from vllm.config.utils import config
 
 
 @config
-@dataclass
 class KVEventsConfig:
     """Configuration for KV event publishing."""
 
@@ -17,7 +18,7 @@ class KVEventsConfig:
     Events can be published externally by zmq using the event publisher config.
     """
 
-    publisher: str = "null"
+    publisher: Literal["null", "zmq"] = Field(default=None)
     """The publisher to use for publishing kv events. Can be "null", "zmq".
     """
 
@@ -47,3 +48,7 @@ class KVEventsConfig:
     """The topic to use for the event publisher. Consumers can subscribe to
     this topic to receive events.
     """
+
+    def __post_init__(self):
+        if self.publisher is None:
+            self.publisher = "zmq" if self.enable_kv_cache_events else "null"
