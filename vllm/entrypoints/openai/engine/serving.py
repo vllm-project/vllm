@@ -15,7 +15,7 @@ from fastapi import Request
 from openai.types.responses import (
     ToolChoiceFunction,
 )
-from pydantic import ConfigDict, TypeAdapter
+from pydantic import ConfigDict, TypeAdapter, ValidationError
 from starlette.datastructures import Headers
 
 import vllm.envs as envs
@@ -1223,16 +1223,48 @@ class OpenAIServing:
             content = None  # Clear content since tool is called.
         elif request.tool_choice == "required":
             assert content is not None
-            tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(content)
-            function_calls.extend(
-                [
-                    FunctionCall(
-                        name=tool_call.name,
-                        arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
+            try:
+                tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(
+                    content
+                )
+                function_calls.extend(
+                    [
+                        FunctionCall(
+                            name=tool_call.name,
+                            arguments=json.dumps(
+                                tool_call.parameters, ensure_ascii=False
+                            ),
+                        )
+                        for tool_call in tool_calls
+                    ]
+                )
+            except (ValidationError, json.JSONDecodeError):
+                # JSON validation failed — fall back to the configured
+                # tool parser (e.g. qwen3_coder) which may understand
+                # non-JSON formats such as XML tool calls.
+                if tool_parser_cls and enable_auto_tools and tokenizer is not None:
+                    try:
+                        tool_parser = tool_parser_cls(tokenizer)
+                    except RuntimeError as e:
+                        logger.exception("Error in tool parser creation.")
+                        raise e
+                    tool_call_info = tool_parser.extract_tool_calls(
+                        content,
+                        request=request,  # type: ignore
                     )
-                    for tool_call in tool_calls
-                ]
-            )
+                    if tool_call_info is not None and tool_call_info.tools_called:
+                        function_calls.extend(
+                            FunctionCall(
+                                id=tool_call.id,
+                                name=tool_call.function.name,
+                                arguments=tool_call.function.arguments,
+                            )
+                            for tool_call in tool_call_info.tool_calls
+                        )
+                    else:
+                        raise
+                else:
+                    raise
             content = None  # Clear content since tool is called.
         elif (
             tool_parser_cls
