@@ -1,29 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import asyncio
 import json
 import os
 import subprocess
-import tempfile
-import time
 
-import openai
 import pytest
 import pytest_asyncio
-from typing import Dict, Any, Optional
 
-from vllm.platforms import current_platform
 import vllm
-
-from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k
 from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.utils import RemoteOpenAIServer
+from vllm.platforms import current_platform
 
-
-AITER_MODEL_LIST = [
-    "openai/gpt-oss-120b"
-]
+AITER_MODEL_LIST = ["openai/gpt-oss-120b"]
 
 MODEL_NAME = "openai/gpt-oss-120b"
 
@@ -34,17 +24,22 @@ THRESHOLD = 0.20
 @pytest.fixture(scope="module")
 def default_server_args():
     attention_backend = (
-        "ROCM_AITER_UNIFIED_ATTN" if current_platform.is_rocm()
-        else "TRITON_ATTN"
+        "ROCM_AITER_UNIFIED_ATTN" if current_platform.is_rocm() else "TRITON_ATTN"
     )
     return [
         "--enforce-eager",
-        "--max-model-len", "1024",
-        "--max-num-seqs", "256",
-        "--gpu-memory-utilization", "0.85",
-        "--reasoning-parser", "openai_gptoss",
-        "--tensor-parallel-size", "2",
-        "--attention-backend", attention_backend,
+        "--max-model-len",
+        "1024",
+        "--max-num-seqs",
+        "256",
+        "--gpu-memory-utilization",
+        "0.85",
+        "--reasoning-parser",
+        "openai_gptoss",
+        "--tensor-parallel-size",
+        "2",
+        "--attention-backend",
+        attention_backend,
     ]
 
 
@@ -54,13 +49,15 @@ def server(default_server_args):
     model_info = HF_EXAMPLE_MODELS.find_hf_info(MODEL_NAME)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
-    
+
     # Handle ROCm AITER if needed
     env_dict = None
     if current_platform.is_rocm() and MODEL_NAME in AITER_MODEL_LIST:
         env_dict = {"VLLM_ROCM_USE_AITER": "1"}
-    
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args, env_dict=env_dict) as remote_server:
+
+    with RemoteOpenAIServer(
+        MODEL_NAME, default_server_args, env_dict=env_dict
+    ) as remote_server:
         yield remote_server
 
 
@@ -71,13 +68,12 @@ async def client(server):
         yield async_client
 
 
-
 def _run_guidellm_benchmark(
     server: RemoteOpenAIServer,
     model_name: str,
     num_requests: int = 100,
-    max_concurrency: Optional[int] = None,
-    request_rate: Optional[float] = None,
+    max_concurrency: int | None = None,
+    request_rate: float | None = None,
     prompt_tokens: int = 100,
     output_tokens: int = 100,
     timeout: int = 600,
@@ -94,13 +90,20 @@ def _run_guidellm_benchmark(
     cmd = [
         "guidellm",
         "benchmark",
-        "--target", server_url,
-        "--model", model_name,
-        "--data", f"prompt_tokens={prompt_tokens},output_tokens={output_tokens}",
-        "--rate-type", "concurrent",
-        "--max-seconds", str(timeout),
-        "--max-requests", str(num_requests),
-        "--output-path", output_filename,
+        "--target",
+        server_url,
+        "--model",
+        model_name,
+        "--data",
+        f"prompt_tokens={prompt_tokens},output_tokens={output_tokens}",
+        "--rate-type",
+        "concurrent",
+        "--max-seconds",
+        str(timeout),
+        "--max-requests",
+        str(num_requests),
+        "--output-path",
+        output_filename,
     ]
 
     if request_rate is not None:
@@ -124,7 +127,7 @@ def _run_guidellm_benchmark(
         print(f"Benchmark complete. Results saved to {output_filename}")
 
         # Read and print JSON output
-        with open(output_filename, "r") as f:
+        with open(output_filename) as f:
             raw_output = f.read()
         print("GUIDELLM OUTPUT: \n", raw_output)
 
@@ -162,7 +165,7 @@ def _get_metric_percentile(benchmark: dict, metric_name: str, percentile: str) -
     return benchmark["metrics"][metric_name]["successful"]["percentiles"][percentile]
 
 
-def _extract_benchmark_metrics(benchmark: dict) -> Dict[str, float]:
+def _extract_benchmark_metrics(benchmark: dict) -> dict[str, float]:
     """Extract key metrics from a guidellm benchmark for display."""
     run_stats = benchmark.get("run_stats", {})
     totals = benchmark.get("request_totals", run_stats.get("requests_made", {}))
@@ -192,9 +195,7 @@ def _extract_benchmark_metrics(benchmark: dict) -> Dict[str, float]:
         if "requests_per_second" in benchmark.get("metrics", {})
         else (successful / duration_s if duration_s > 0 else 0)
     )
-    out_tok_per_s = (
-        total_output / duration_s if duration_s > 0 else 0
-    )
+    out_tok_per_s = total_output / duration_s if duration_s > 0 else 0
 
     metrics = benchmark.get("metrics", {})
     m = lambda name: metrics.get(name, {}).get("successful", {})
@@ -202,7 +203,9 @@ def _extract_benchmark_metrics(benchmark: dict) -> Dict[str, float]:
 
     return {
         "successful_requests": float(successful),
-        "failed_requests": float(totals.get("errored", 0) + totals.get("incomplete", 0)),
+        "failed_requests": float(
+            totals.get("errored", 0) + totals.get("incomplete", 0)
+        ),
         "benchmark_duration_s": duration_s,
         "total_input_tokens": float(total_input),
         "total_output_tokens": float(total_output),
@@ -239,7 +242,12 @@ def _print_benchmark_comparison_table(
         ("Total input tokens", "total_input_tokens", ".0f", False),
         ("Total output tokens", "total_output_tokens", ".0f", False),
         ("Request throughput (req/s)", "request_throughput_req_s", ".2f", False),
-        ("Output token throughput (tok/s)", "output_token_throughput_tok_s", ".2f", False),
+        (
+            "Output token throughput (tok/s)",
+            "output_token_throughput_tok_s",
+            ".2f",
+            False,
+        ),
         ("", "", "", True),  # separator
         ("Mean TTFT (ms)", "mean_ttft_ms", ".2f", True),
         ("Median TTFT (ms)", "median_ttft_ms", ".2f", True),
@@ -276,8 +284,12 @@ def _print_benchmark_comparison_table(
         c_val = curr[key]
         b_str = format(b_val, fmt)
         c_str = format(c_val, fmt)
-        if b_val != 0 and key not in ("successful_requests", "failed_requests",
-                                       "total_input_tokens", "total_output_tokens"):
+        if b_val != 0 and key not in (
+            "successful_requests",
+            "failed_requests",
+            "total_input_tokens",
+            "total_output_tokens",
+        ):
             diff_pct = (c_val - b_val) / b_val * 100
             diff_str = f"{diff_pct:+.1f}%"
         else:
@@ -311,9 +323,7 @@ def test_compare_guidellm_results(
     baseline_path = os.path.join(
         os.path.dirname(__file__), "output", "gptoss120b_0.15.2rc1.json"
     )
-    assert os.path.exists(baseline_path), (
-        f"Baseline file not found: {baseline_path}"
-    )
+    assert os.path.exists(baseline_path), f"Baseline file not found: {baseline_path}"
 
     with open(current_path) as f:
         current_data = json.load(f)
@@ -333,8 +343,12 @@ def test_compare_guidellm_results(
 
     failures = []
 
-    def check(metric_label: str, current_val: float, baseline_val: float,
-               lower_is_better: bool = True) -> None:
+    def check(
+        metric_label: str,
+        current_val: float,
+        baseline_val: float,
+        lower_is_better: bool = True,
+    ) -> None:
         """Assert current value is within ±10% of baseline."""
         if baseline_val == 0:
             return  # skip division by zero
@@ -348,14 +362,14 @@ def test_compare_guidellm_results(
                 failures.append(
                     f"REGRESSION [{metric_label}]: "
                     f"current={current_val:.4f}, baseline={baseline_val:.4f}, "
-                    f"degraded by {diff_pct*100:.1f}% (threshold: +{THRESHOLD*100:.0f}%)"
+                    f"degraded by {diff_pct * 100:.1f}% (threshold: +{THRESHOLD * 100:.0f}%)"
                 )
         else:
             if diff_pct < -THRESHOLD:
                 failures.append(
                     f"REGRESSION [{metric_label}]: "
                     f"current={current_val:.4f}, baseline={baseline_val:.4f}, "
-                    f"degraded by {abs(diff_pct)*100:.1f}% (threshold: -{THRESHOLD*100:.0f}%)"
+                    f"degraded by {abs(diff_pct) * 100:.1f}% (threshold: -{THRESHOLD * 100:.0f}%)"
                 )
 
     # --- Correctness check: 100% success rate ---
@@ -432,11 +446,13 @@ def test_compare_guidellm_results(
     if failures:
         failure_msg = "\n".join(failures)
         pytest.fail(
-            f"\n{'='*60}\n"
+            f"\n{'=' * 60}\n"
             f"Guidellm benchmark regression detected "
             f"(vLLM {vllm_version} vs baseline):\n\n"
             f"{failure_msg}\n"
-            f"{'='*60}"
+            f"{'=' * 60}"
         )
 
-    print(f"\n✓ All metrics within ±{THRESHOLD*100:.0f}% of baseline (vLLM {vllm_version})")
+    print(
+        f"\n✓ All metrics within ±{THRESHOLD * 100:.0f}% of baseline (vLLM {vllm_version})"
+    )
