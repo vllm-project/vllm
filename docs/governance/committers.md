@@ -55,6 +55,7 @@ Sorted alphabetically by GitHub handle:
 - [@ywang96](https://github.com/ywang96): Multimodality, benchmarks
 - [@zhuohan123](https://github.com/zhuohan123): Project lead, RL integration, numerics
 - [@zou3519](https://github.com/zou3519): Compilation
+- [@BoyuanFeng](https://github.com/BoyuanFeng): Compilation, CUDAGraph
 
 ### Emeritus Committers
 
@@ -113,7 +114,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 - Multi-modal Input Processing: Components that load and process image/video/audio data into feature tensors
     - @DarkLight1337, @ywang96, @Isotr0py
 - torch compile: The torch.compile integration in vLLM, custom passes & transformations
-    - @ProExpertProg, @zou3519, @youkaichao
+    - @ProExpertProg, @zou3519, @youkaichao, @BoyuanFeng
 - State space models: The state space models implementation in vLLM
     - @tdoublep, @tlrmchlsmth
 - Reasoning and tool calling parsers
@@ -154,7 +155,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 - FlashAttention: @LucasWilkinson
 - FlashInfer: @LucasWilkinson, @mgoin, @WoosukKwon
 - Blackwell Kernels: @mgoin, @yewentao256
-- DeepEP/DeepGEMM/pplx: @mgoin, @yewentao256
+- DeepEP/DeepGEMM: @mgoin, @yewentao256
 
 ### Integrations
 
