@@ -98,8 +98,7 @@ class EncoderCudaGraphManager:
             self._capture_budget_graph(token_budget)
 
         logger.info(
-            "Encoder CUDA graph capture complete. "
-            "Captured %d budget graphs.",
+            "Encoder CUDA graph capture complete. Captured %d budget graphs.",
             len(self.budget_graphs),
         )
 
@@ -301,6 +300,7 @@ class EncoderCudaGraphManager:
         for budget in self.token_budgets:
             if budget >= total_tokens:
                 return budget
+        return None
 
     def _run_budget_graph(
         self,
@@ -510,6 +510,7 @@ class EncoderCudaGraphManager:
                     embed_buffers,
                     sequence_metadata,
                 )
+                assert output is not None
                 output_offset = 0
                 for orig_idx in batch_orig_indices:
                     n_tok = per_image_out_tokens[orig_idx]
@@ -559,7 +560,7 @@ class EncoderCudaGraphManager:
             outputs = dp_gather_vision_outputs(
                 local_outputs, dp_meta, self.device, self.dtype, hidden_size
             )
-            result = list(outputs)
+            result: list[torch.Tensor] | None = list(outputs)
         else:
             result = self._execute_local(pixel_values, grid_thw_list)
 

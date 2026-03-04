@@ -196,6 +196,7 @@ from .utils import (
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+    from vllm.v1.worker.gpu.mm.encoder_cudagraph import EncoderCudaGraphManager
 
 logger = init_logger(__name__)
 
@@ -484,7 +485,7 @@ class GPUModelRunner(
         self.encoder_cache: dict[str, torch.Tensor] = {}
 
         # Encoder CUDA graph manager (initialized after model load if enabled)
-        self.encoder_cudagraph_manager = None
+        self.encoder_cudagraph_manager: EncoderCudaGraphManager | None = None
 
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
@@ -5322,12 +5323,15 @@ class GPUModelRunner(
             return 0
 
         # Initialize encoder CUDA graph manager if enabled
-        if (self.compilation_config.cudagraph_mm_encoder
+        if (
+            self.compilation_config.cudagraph_mm_encoder
             and self.supports_mm_inputs
-            and self.encoder_cudagraph_manager is None):
+            and self.encoder_cudagraph_manager is None
+        ):
             from vllm.v1.worker.gpu.mm.encoder_cudagraph import EncoderCudaGraphManager
+
             model = cast(SupportsMultiModal, self.model)
-            if hasattr(model, 'visual'):
+            if hasattr(model, "visual"):
                 self.encoder_cudagraph_manager = EncoderCudaGraphManager(
                     vllm_config=self.vllm_config,
                     device=self.device,

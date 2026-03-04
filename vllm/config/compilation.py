@@ -476,9 +476,10 @@ class CompilationConfig:
 
     # Vision encoder CUDA graph
     cudagraph_mm_encoder: bool = False
-    """Enable CUDA graph capture for multimodal encoder (ViT) using budget-batch mode.
-    When enabled, captures full encoder forward as CUDA graph for each token budget level.
-    Requires encoder_cudagraph_token_budgets to be specified."""
+    """Enable CUDA graph capture for multimodal encoder (ViT)
+    using budget-batch mode. When enabled, captures full encoder
+    forward as CUDA graph for each token budget level. Requires
+    encoder_cudagraph_token_budgets to be specified."""
 
     encoder_cudagraph_token_budgets: list[int] = field(default_factory=list)
     """Token budget levels for encoder CUDA graph capture.

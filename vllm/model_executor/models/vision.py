@@ -391,6 +391,7 @@ class DPVisionShardingMeta:
 
     Used when mm_encoder_tp_mode="data" and tp_size > 1.
     """
+
     image_rank_assignment: list[int]
     images_per_rank: list[int]
     input_patches_per_rank: list[int]
@@ -449,7 +450,9 @@ def dp_shard_vision_inputs(
             dtype=pixel_values.dtype,
         )
 
-    max_output_tokens_per_rank = max(input_patches_per_rank) // spatial_merge_size_squared
+    max_output_tokens_per_rank = (
+        max(input_patches_per_rank) // spatial_merge_size_squared
+    )
     local_grid_thw_list = [grid_thw_list[i] for i in local_image_indices]
 
     meta = DPVisionShardingMeta(
@@ -539,9 +542,7 @@ def dp_gather_vision_outputs(
                 embed_start += img_tokens
             current_idx += count
 
-    return tuple(
-        embed for embed in original_order_embeddings if embed is not None
-    )
+    return tuple(embed for embed in original_order_embeddings if embed is not None)
 
 
 def run_dp_sharded_mrope_vision_model(
