@@ -98,6 +98,7 @@ from vllm.utils.math_utils import round_up
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
     SupportsMRoPE,
@@ -1161,9 +1162,7 @@ class Qwen3LLMModel(Qwen3Model):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = self._maybe_add_hidden_state(
-            [], self.start_layer, hidden_states, residual
-        )
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in islice(
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
@@ -1239,6 +1238,7 @@ class Qwen3VLForConditionalGeneration(
     SupportsLoRA,
     SupportsPP,
     SupportsMRoPE,
+    SupportsEagle,
     SupportsEagle3,
     SupportsMultiModalPruning,
 ):
@@ -1335,13 +1335,6 @@ class Qwen3VLForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.language_model.model.aux_hidden_state_layers = layers
-
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        num_layers = len(self.language_model.model.layers)
-        return (2, num_layers // 2, num_layers - 3)
 
     def _get_deepstack_input_embeds(
         self,

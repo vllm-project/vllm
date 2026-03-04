@@ -1304,9 +1304,7 @@ def supports_any_eagle(
 
 
 class EagleModelMixin:
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.aux_hidden_state_layers = tuple[int, ...]()
+    aux_hidden_state_layers: tuple[int, ...] = ()
 
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.aux_hidden_state_layers = layers
@@ -1377,13 +1375,18 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
             layers: Tuple of layer indices that should output auxiliary
                 hidden states.
         """
-        assert hasattr(self, "model"), (
+        parent_ref = self
+        if hasattr(self, "get_language_model"):
+            parent_ref = self.get_language_model()
+        elif hasattr(self, "language_model"):
+            parent_ref = self.language_model
+        assert hasattr(parent_ref, "model"), (
             "Model instance must have 'model' attribute to set number of layers"
         )
-        assert isinstance(self.model, EagleModelMixin), (
+        assert isinstance(parent_ref.model, EagleModelMixin), (
             "Model instance must inherit from EagleModelMixin to set auxiliary layers"
         )
-        self.model._set_aux_hidden_state_layers(layers)
+        parent_ref.model._set_aux_hidden_state_layers(layers)
 
     def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
         """
@@ -1395,13 +1398,18 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
         Returns:
             Tuple of layer indices for auxiliary hidden state outputs.
         """
-        assert hasattr(self, "model"), (
+        parent_ref = self
+        if hasattr(self, "get_language_model"):
+            parent_ref = self.get_language_model()
+        elif hasattr(self, "language_model"):
+            parent_ref = self.language_model
+        assert hasattr(parent_ref, "model"), (
             "Model instance must have 'model' attribute to get number of layers"
         )
-        assert hasattr(self.model, "layers"), (
+        assert hasattr(parent_ref.model, "layers"), (
             "Model instance must have 'layers' attribute to get number of layers"
         )
-        num_layers = len(self.model.layers)
+        num_layers = len(parent_ref.model.layers)
         return (2, num_layers // 2, num_layers - 3)
 
 

@@ -532,6 +532,6 @@ class Base(
             self.model._can_record_outputs[layer_key] = aux_hidden_state_i
             self._output_aux_hidden_states_kwargs[f"output_{layer_key}"] = True
 
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+    def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = self.text_config.num_hidden_layers
         return (2, num_layers // 2, num_layers - 3)
