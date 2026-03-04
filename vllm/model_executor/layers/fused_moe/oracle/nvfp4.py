@@ -368,7 +368,10 @@ def convert_to_nvfp4_moe_kernel_format(
 
         # NOTE: `a13_scale` is of shape (num_experts, 2).
         # Typically, they should all be equal.
-        a13_scale = torch.max(a13_scale)
+        # NOTE: at this point, global scales are such that
+        # `x_fp8_range = x * 1 / global_scale`, and `global_scale` is small.
+        # TODO: taking the min should be the correct choice here, double check.
+        a13_scale = torch.min(a13_scale)
         a13_scale = 1.0 / a13_scale
 
         # NOTE: `a2_scale` is of shape (num_experts,). We may use different
