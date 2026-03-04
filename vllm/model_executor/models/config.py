@@ -678,7 +678,7 @@ class _AttrDict(dict):
         try:
             return self[key]
         except KeyError:
-            raise AttributeError(key)
+            raise AttributeError(key) from None
 
     def __setattr__(self, key: str, value):
         self[key] = value
@@ -687,7 +687,7 @@ class _AttrDict(dict):
         try:
             del self[key]
         except KeyError:
-            raise AttributeError(key)
+            raise AttributeError(key) from None
 
 
 class AnyModelForCausalLMConfig(VerifyAndUpdateConfig):
