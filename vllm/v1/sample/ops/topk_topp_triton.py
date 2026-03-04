@@ -13,6 +13,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.platform_utils import num_compute_units
 
 _TRITON_TABLE_CACHE: dict[tuple[torch.device], tuple[torch.Tensor, torch.Tensor]] = {}
 _TRITON_BUFFER_CACHE: dict[tuple[torch.device, torch.dtype, int], torch.Tensor] = {}
@@ -967,7 +968,6 @@ def apply_top_k_top_p_triton(
     """
     assert logits.ndim == 2
     assert logits.dtype == torch.float32
-    assert logits.is_cuda
 
     batch_size, vocab_size = logits.shape
 
@@ -978,18 +978,18 @@ def apply_top_k_top_p_triton(
         return logits
 
     if k is not None:
-        assert k.ndim == 1 and k.shape[0] == batch_size and k.is_cuda
+        assert k.ndim == 1 and k.shape[0] == batch_size
         k_ptr = k.to(torch.int32)
     else:
         k_ptr = logits  # Dummy pointer (won't be read)
 
     if p is not None:
-        assert p.ndim == 1 and p.shape[0] == batch_size and p.is_cuda
+        assert p.ndim == 1 and p.shape[0] == batch_size
         p_ptr = p.to(torch.float32)
     else:
         p_ptr = logits  # Dummy pointer (won't be read)
 
-    num_sm = torch.cuda.get_device_properties(logits.device).multi_processor_count
+    num_sm = num_compute_units(logits.device.index)
     NUM_PROGRAMS = min(num_sm, batch_size)
 
     # Cache per-Triton Program buffer on each device.

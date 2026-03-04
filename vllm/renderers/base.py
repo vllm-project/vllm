@@ -85,13 +85,13 @@ class BaseRenderer(ABC, Generic[_T]):
         self._mm_cache_stats: MultiModalCacheStats | None = None
         if config.model_config.is_multimodal_model:
             from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
+            from vllm.multimodal.registry import MultiModalTimingRegistry
 
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
 
             with set_default_torch_num_threads():
                 self.mm_processor = mm_registry.create_processor(
                     config.model_config,
-                    config.observability_config,
                     tokenizer=tokenizer,
                     cache=mm_processor_cache,
                 )
@@ -102,6 +102,9 @@ class BaseRenderer(ABC, Generic[_T]):
             # This is used to generate internal request ID for MM processing
             # It has no relation to the request ID for engine core
             self._mm_req_counter = AtomicCounter()
+            self._mm_timing_registry = MultiModalTimingRegistry(
+                config.observability_config
+            )
 
     def get_tokenizer(self) -> _T:
         tokenizer = self.tokenizer
@@ -534,7 +537,7 @@ class BaseRenderer(ABC, Generic[_T]):
         tokenization_kwargs: dict[str, Any] | None,
     ) -> "MultiModalInputs":
         from vllm.multimodal.parse import parse_mm_uuids
-        from vllm.multimodal.processing.context import set_request_id
+        from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 
         mm_req_id = f"renderer-mm-{self._mm_req_counter.inc(1)}"
 
@@ -543,18 +546,21 @@ class BaseRenderer(ABC, Generic[_T]):
         mm_data_items = mm_processor.info.parse_mm_data(mm_data)
         mm_uuid_items = parse_mm_uuids(mm_uuids)
 
-        mm_uuids = self._process_mm_uuids(
+        mm_uuid_items = self._process_mm_uuids(
             mm_data, mm_data_items, mm_uuid_items, mm_req_id
         )
 
-        with set_request_id(mm_req_id), set_default_torch_num_threads():
-            mm_inputs = mm_processor.apply(
-                prompt,
-                mm_data_items,
-                mm_uuid_items,
-                hf_processor_mm_kwargs=mm_processor_kwargs,
-                tokenization_kwargs=tokenization_kwargs,
-            )
+        mm_processor_inputs = MMProcessorInputs(
+            prompt,
+            mm_data_items,
+            mm_uuid_items,
+            hf_processor_mm_kwargs=mm_processor_kwargs or {},
+            tokenization_kwargs=tokenization_kwargs or {},
+        )
+        mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
+
+        with set_default_torch_num_threads():
+            mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
 
         self.update_mm_cache_stats()
 
