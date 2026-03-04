@@ -108,7 +108,11 @@ def select_unquantized_moe_backend(
     flashinfer_cutlass_moe_enabled = (
         flashinfer_cutlass_available and envs.VLLM_USE_FLASHINFER_MOE_FP16
     )
-    rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
+    # AITER only supports gated activations (silu/gelu), so disable it
+    # for non-gated MoE (is_act_and_mul=False)
+    rocm_aiter_moe_enabled = (
+        rocm_aiter_ops.is_fused_moe_enabled() and moe_config.is_act_and_mul
+    )
 
     # Handle explicit moe_backend from user.
     runner_backend = moe_config.moe_backend
