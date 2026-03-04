@@ -209,11 +209,7 @@ class DefaultModelState(ModelState):
         attn_query_start_loc[: num_reqs + 1] = input_batch.query_start_loc
         attn_query_start_loc[num_reqs + 1 :] = num_tokens
 
-        attn_seq_lens = torch.zeros(
-            attn_num_reqs,
-            dtype=input_batch.seq_lens.dtype,
-            device=input_batch.seq_lens.device,
-        )
+        attn_seq_lens = input_batch.seq_lens.new_zeros(attn_num_reqs)
         attn_seq_lens[:num_reqs] = input_batch.seq_lens
 
         attn_block_tables = tuple(
