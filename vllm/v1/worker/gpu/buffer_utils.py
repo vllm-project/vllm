@@ -84,9 +84,6 @@ class UvaBackedTensor:
     def __init__(
         self, size: int | Sequence[int], dtype: torch.dtype, max_concurrency: int = 2
     ):
-        self.dtype = dtype
-        self.max_concurrency = max_concurrency
-
         # Source of truth
         self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=False)
         self.np = self.cpu.numpy()
@@ -99,6 +96,37 @@ class UvaBackedTensor:
         # CPU-to-CPU copy
         self.gpu = self.pool.copy_to_uva(self.np[:n] if n is not None else self.np)
         return self.gpu
+
+
+class CpuGpuBuffer:
+    """Pre-allocated GPU tensor with a corresponding ring of
+    pinned CPU tensors for concurrent async CPU->GPU copies."""
+
+    def __init__(
+        self,
+        *size: int | torch.SymInt,
+        dtype: torch.dtype | None = None,
+        device: torch.device | None = None,
+        gpu: torch.Tensor | None = None,
+        max_concurrency: int = 2,
+    ) -> None:
+        self.gpu = (
+            gpu if gpu is not None else torch.zeros(*size, dtype=dtype, device=device)
+        )
+        self._index = 0
+        self._cpus = []
+        for _ in range(max_concurrency):
+            cpu = torch.zeros_like(self.gpu, device="cpu", pin_memory=True)
+            self._cpus.append((cpu, cpu.numpy()))
+        self.cpu, self.np = self._cpus[self._index]
+
+    def copy_to_gpu(self, n: int | None = None) -> torch.Tensor:
+        cpu = self.cpu
+        self._index = (self._index + 1) % len(self._cpus)
+        self.cpu, self.np = self._cpus[self._index]
+        if n is None:
+            return self.gpu.copy_(cpu, non_blocking=True)
+        return self.gpu[:n].copy_(cpu[:n], non_blocking=True)
 
 
 class StagedWriteTensor:

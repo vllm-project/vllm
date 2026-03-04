@@ -46,26 +46,18 @@ def rejection_sample(
     # [num_reqs + 1]
     cu_num_logits: torch.Tensor,
     num_speculative_steps: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    num_reqs = cu_num_logits.shape[0] - 1
-    sampled = torch.empty(
-        num_reqs,
-        num_speculative_steps + 1,
-        dtype=target_sampled.dtype,
-        device=target_sampled.device,
-    )
-    num_sampled = torch.empty(
-        num_reqs,
-        dtype=torch.int32,
-        device=target_sampled.device,
-    )
+    # [num_reqs]
+    num_sampled_out: torch.Tensor,
+) -> torch.Tensor:
+    num_reqs = num_sampled_out.shape[0]
+    sampled = target_sampled.new_empty(num_reqs, num_speculative_steps + 1)
     _rejection_sample_kernel[(num_reqs,)](
         sampled,
         sampled.stride(0),
-        num_sampled,
+        num_sampled_out,
         target_sampled,
         input_ids,
         cu_num_logits,
         num_warps=1,
     )
-    return sampled, num_sampled
+    return sampled
