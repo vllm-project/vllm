@@ -62,8 +62,13 @@ class Qwen3CoderToolParser(ToolParser):
         self.tool_call_function_regex = re.compile(
             r"<function=(.*?)</function>|<function=(.*)$", re.DOTALL
         )
+        # Do NOT use </parameter> as a terminator here — it can appear
+        # inside parameter values (e.g. XML content like <item></parameter>).
+        # Use only structural boundaries: next <parameter=, </function>, or
+        # end-of-string. The trailing </parameter> delimiter is stripped in
+        # post-processing inside _parse_xml_function_call.
         self.tool_call_parameter_regex = re.compile(
-            r"<parameter=(.*?)(?:</parameter>|(?=<parameter=)|(?=</function>)|$)",
+            r"<parameter=(.*?)(?:(?=<parameter=)|(?=</function>)|$)",
             re.DOTALL,
         )
 
@@ -252,11 +257,13 @@ class Qwen3CoderToolParser(ToolParser):
             idx = match_text.index(">")
             param_name = match_text[:idx]
             param_value = str(match_text[idx + 1 :])
-            # Remove prefix and trailing \n
+            # Remove leading \n, strip the structural </parameter>
+            # delimiter (which the regex no longer consumes so that
+            # </parameter> inside values isn't mistaken for end), then
+            # strip any surrounding whitespace left by that delimiter.
             if param_value.startswith("\n"):
                 param_value = param_value[1:]
-            if param_value.endswith("\n"):
-                param_value = param_value[:-1]
+            param_value = re.sub(r"\s*</parameter>\s*$", "", param_value)
 
             param_dict[param_name] = self._convert_param_value(
                 param_value, param_name, param_config, function_name
@@ -701,33 +708,37 @@ class Qwen3CoderToolParser(ToolParser):
                 if value_text.startswith("\n"):
                     value_text = value_text[1:]
 
-                # Find where this parameter ends
-                param_end_idx = value_text.find(self.parameter_end_token)
-                if param_end_idx == -1:
-                    next_param_idx = value_text.find(
-                        self.parameter_prefix
-                    )
-                    func_end_idx = value_text.find(
-                        self.function_end_token
-                    )
-                    if next_param_idx != -1 and (
-                        func_end_idx == -1
-                        or next_param_idx < func_end_idx
-                    ):
-                        param_end_idx = next_param_idx
-                    elif func_end_idx != -1:
-                        param_end_idx = func_end_idx
-                    elif self.tool_call_end_token in tool_text:
-                        param_end_idx = len(value_text)
-                    else:
-                        break  # Still streaming, wait for more
+                # Find where this parameter ends using structural
+                # boundaries only — never use </parameter> as the
+                # primary delimiter here, because it can appear inside
+                # parameter values (e.g. XML/HTML content).  If neither
+                # <parameter= nor </function> is visible yet, break and
+                # wait for more tokens; the authoritative parse triggered
+                # by </function> will emit the correct final value.
+                next_param_idx = value_text.find(self.parameter_prefix)
+                func_end_idx = value_text.find(self.function_end_token)
+                if next_param_idx != -1 and (
+                    func_end_idx == -1 or next_param_idx < func_end_idx
+                ):
+                    param_end_idx = next_param_idx
+                elif func_end_idx != -1:
+                    param_end_idx = func_end_idx
+                elif self.tool_call_end_token in tool_text:
+                    # Malformed XML: </function> missing but </tool_call>
+                    # present — treat end of value_text as boundary.
+                    param_end_idx = len(value_text)
+                else:
+                    break  # Wait for </function> or next <parameter=
 
                 if param_end_idx == -1:
                     break
 
                 param_value = value_text[:param_end_idx]
-                if param_value.endswith("\n"):
-                    param_value = param_value[:-1]
+                # Strip any trailing </parameter> delimiter left by the
+                # boundary detection (including surrounding whitespace).
+                param_value = re.sub(
+                    r"\s*</parameter>\s*$", "", param_value
+                )
 
                 # Store converted value (not raw string) so
                 # json.dumps matches _parse_xml_function_call output
