@@ -8,18 +8,25 @@ initialises the model with ``load_format="dummy"`` (random weights).  This
 validates the full AnyModel → base-model → patch pipeline for every registered
 architecture without requiring real checkpoints.
 
-GPU access and network access (to download HF configs) are required.
+``test_generate_anymodel_configs`` produces example ``config.json`` files
+(one per architecture) that can be shared with the Puzzletron team as a
+reference for the expected checkpoint format.
+
+GPU access is required for the E2E initialization tests.
+Network access is required for all tests (to download HF configs).
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from functools import partial
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
-from transformers import PretrainedConfig
+from transformers import AutoConfig, PretrainedConfig
 
 from vllm import LLM
 from vllm.utils.mem_constants import GiB_bytes
@@ -318,3 +325,207 @@ def _run_anymodel_e2e(case: _AnyModelE2ECase):
 def test_anymodel_e2e(case: _AnyModelE2ECase):
     """Verify that AnyModel initialises correctly for each architecture."""
     _run_anymodel_e2e(case)
+
+
+# ---------------------------------------------------------------------------
+# Example config.json generation (for Puzzletron reference)
+# ---------------------------------------------------------------------------
+
+
+def _full_dense_block_configs(text_cfg: PretrainedConfig) -> list[dict]:
+    """Realistic heterogeneous block_configs for a dense model.
+
+    Uses the real model dimensions.  Roughly:
+      - first 60 %  normal
+      - next  20 %  reduced intermediate_size (half)
+      - next  10 %  reduced num_key_value_heads (half)
+      - last  10 %  attention no-op + reduced FFN
+    """
+    n = getattr(text_cfg, "num_hidden_layers", 32)
+    isize = getattr(text_cfg, "intermediate_size", 14336)
+    kv = getattr(
+        text_cfg,
+        "num_key_value_heads",
+        getattr(text_cfg, "num_attention_heads", 32),
+    )
+    half_isize = max(64, isize // 2)
+    half_kv = max(1, kv // 2)
+
+    cut1 = int(n * 0.6)
+    cut2 = int(n * 0.8)
+    cut3 = int(n * 0.9)
+
+    cfgs: list[dict] = []
+    for i in range(n):
+        if i < cut1:
+            cfgs.append({"attention": {"no_op": False}, "ffn": {"no_op": False}})
+        elif i < cut2:
+            cfgs.append(
+                {
+                    "attention": {"no_op": False},
+                    "ffn": {"no_op": False, "intermediate_size": half_isize},
+                }
+            )
+        elif i < cut3:
+            cfgs.append(
+                {
+                    "attention": {
+                        "no_op": False,
+                        "num_key_value_heads": half_kv,
+                    },
+                    "ffn": {"no_op": False},
+                }
+            )
+        else:
+            cfgs.append(
+                {
+                    "attention": {"no_op": True},
+                    "ffn": {"no_op": False, "intermediate_size": half_isize},
+                }
+            )
+    return cfgs
+
+
+def _full_moe_block_configs(
+    text_cfg: PretrainedConfig,
+    *,
+    experts_field: str = "num_local_experts",
+    expert_size_field: str | None = None,
+) -> list[dict]:
+    """Realistic heterogeneous block_configs for an MoE model."""
+    n = getattr(text_cfg, "num_hidden_layers", 32)
+    n_experts = getattr(text_cfg, experts_field, 8)
+    exp_isize = (
+        getattr(text_cfg, expert_size_field, None) if expert_size_field else None
+    )
+
+    reduced_experts = max(2, n_experts // 2)
+    moe_override: dict[str, Any] = {"num_local_experts": reduced_experts}
+    if exp_isize is not None:
+        moe_override["expert_intermediate_size"] = max(64, exp_isize // 2)
+
+    cut1 = int(n * 0.6)
+    cut2 = int(n * 0.8)
+
+    cfgs: list[dict] = []
+    for i in range(n):
+        if i < cut1:
+            cfgs.append({"attention": {"no_op": False}, "ffn": {"no_op": False}})
+        elif i < cut2:
+            cfgs.append(
+                {
+                    "attention": {"no_op": False},
+                    "ffn": {"no_op": False, "moe": moe_override},
+                }
+            )
+        else:
+            cfgs.append({"attention": {"no_op": True}, "ffn": {"no_op": False}})
+    return cfgs
+
+
+def _full_nemotronh_block_configs(text_cfg: PretrainedConfig) -> list[dict]:
+    """Realistic block_configs for NemotronH, matching pattern."""
+    pattern = getattr(text_cfg, "hybrid_override_pattern", "*-")
+    n = len(pattern)
+    kv = getattr(text_cfg, "num_key_value_heads", 8)
+    half_kv = max(1, kv // 2)
+    cut = int(n * 0.75)
+
+    cfgs: list[dict] = []
+    for i in range(n):
+        if i < cut:
+            cfgs.append({"attention": {"no_op": False}, "ffn": {"no_op": False}})
+        elif pattern[i] == "*":
+            cfgs.append(
+                {
+                    "attention": {
+                        "no_op": False,
+                        "num_key_value_heads": half_kv,
+                    },
+                    "ffn": {"no_op": False},
+                }
+            )
+        else:
+            cfgs.append({"attention": {"no_op": False}, "ffn": {"no_op": True}})
+    return cfgs
+
+
+_CONFIG_GENERATORS: dict[str, Any] = {
+    "llama": _full_dense_block_configs,
+    "mistral": _full_dense_block_configs,
+    "qwen2": _full_dense_block_configs,
+    "qwen3": _full_dense_block_configs,
+    "qwen2moe": partial(
+        _full_moe_block_configs,
+        experts_field="num_experts",
+        expert_size_field="moe_intermediate_size",
+    ),
+    "mixtral": partial(
+        _full_moe_block_configs,
+        experts_field="num_local_experts",
+    ),
+    "gptoss": partial(
+        _full_moe_block_configs,
+        experts_field="num_local_experts",
+    ),
+    "nemotronh": _full_nemotronh_block_configs,
+    "qwen3vl": _full_dense_block_configs,
+}
+
+
+def _generate_config(case: _AnyModelE2ECase, output_dir: Path) -> Path:
+    """Download real HF config, apply AnyModel overrides, write JSON."""
+    hf_config = AutoConfig.from_pretrained(
+        case.hf_model,
+        trust_remote_code=case.trust_remote_code,
+    )
+    text_cfg = hf_config.get_text_config()
+
+    for key, val in case.extra_hf_overrides.items():
+        setattr(text_cfg, key, val)
+
+    gen = _CONFIG_GENERATORS[case.id]
+    block_configs = gen(text_cfg)
+
+    hf_config.architectures = ["AnyModel"]
+    hf_config.base_architectures = [case.base_arch]
+    text_cfg.block_configs = block_configs
+
+    out_dir = output_dir / case.id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "config.json"
+
+    config_dict = json.loads(hf_config.to_json_string())
+    with open(out_path, "w") as f:
+        json.dump(config_dict, f, indent=2)
+
+    return out_path
+
+
+@pytest.mark.parametrize("case", _CASES, ids=lambda c: c.id)
+def test_generate_anymodel_configs(case: _AnyModelE2ECase, tmp_path: Path):
+    """Generate example AnyModel config.json for each architecture.
+
+    The output is written to a temp directory.  Run with ``-s`` to see
+    the paths printed, or use ``--basetemp=./generated_test_assets``
+    to collect them in a known location::
+
+        pytest tests/models/test_anymodel_e2e.py -k generate -s \\
+               --basetemp=./generated_test_assets
+    """
+    config_path = _generate_config(case, tmp_path)
+    assert config_path.exists()
+
+    with open(config_path) as f:
+        data = json.load(f)
+
+    assert data["architectures"] == ["AnyModel"]
+    assert data["base_architectures"] == [case.base_arch]
+
+    text_data = data.get("text_config", data)
+    assert "block_configs" in text_data or "block_configs" in data
+    block_configs = text_data.get("block_configs", data.get("block_configs"))
+    expected_layers = text_data.get("num_hidden_layers", data.get("num_hidden_layers"))
+    assert len(block_configs) == expected_layers
+
+    print(f"\n  [{case.id}] config written to: {config_path}")
