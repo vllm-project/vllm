@@ -127,11 +127,6 @@ steps:
   - pytest -v -s detokenizer
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
-  mirror:
-    amd:
-      device: mi325_1
-      depends_on:
-      - image-build-amd
 
 - label: Async Engine, Inputs, Utils, Worker, Config (CPU)
   depends_on: 
