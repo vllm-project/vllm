@@ -912,6 +912,7 @@ async def test_serving_chat_could_load_correct_generation_config():
     assert mock_engine.generate.call_args.args[1].temperature == 0.0
     assert mock_engine.generate.call_args.args[1].repetition_penalty == 1.05
 
+
 @pytest.mark.asyncio
 async def test_serving_chat_override_presence_and_frequency_penalty():
     mock_model_config = MockModelConfig()
@@ -960,6 +961,7 @@ async def test_serving_chat_override_presence_and_frequency_penalty():
 
     assert mock_engine.generate.call_args.args[1].presence_penalty == 0.0
     assert mock_engine.generate.call_args.args[1].frequency_penalty == 0.0
+
 
 @pytest.mark.parametrize("model_type", ["gpt_oss", "any"])
 @pytest.mark.asyncio
