@@ -1054,12 +1054,6 @@ class SequenceGroupMetadata(
     # TODO: We should maintain this states out of the sequence group.
     num_speculative_tokens: Optional[int] = None
 
-    # Tree decoding related fields
-    is_tree_decoding: bool = False
-    tree_depth: int = 0
-    parent_sequence_id: Optional[int] = None  # 父序列ID
-    branch_sequences: list[int] = []  # 子分支序列列表
-
     def __post_init__(self):
         if self.seq_data is not None and self.token_chunk_size is None:
             if self.is_prompt:
