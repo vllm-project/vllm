@@ -366,9 +366,6 @@ def convert_to_nvfp4_moe_kernel_format(
                 f" a13_scale={a13_scale}, a2_scale={a2_scale}"
             )
 
-        w13_scale_2 = 1.0 / w13_scale_2
-        w2_scale_2 = 1.0 / w2_scale_2
-
         # NOTE: `a13_scale` is of shape (num_experts, 2).
         # Typically, they should all be equal.
         a13_scale = torch.max(a13_scale)
