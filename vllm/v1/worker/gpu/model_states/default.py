@@ -205,11 +205,7 @@ class DefaultModelState(ModelState):
         attn_query_start_loc_cpu[: num_reqs + 1] = query_start_loc_cpu
         attn_query_start_loc_cpu[num_reqs + 1 :] = num_tokens
 
-        attn_query_start_loc = torch.empty(
-            attn_num_reqs + 1,
-            dtype=input_batch.query_start_loc.dtype,
-            device=input_batch.query_start_loc.device,
-        )
+        attn_query_start_loc = input_batch.query_start_loc.new_empty(attn_num_reqs + 1)
         attn_query_start_loc[: num_reqs + 1] = input_batch.query_start_loc
         attn_query_start_loc[num_reqs + 1 :] = num_tokens
 
