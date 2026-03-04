@@ -15,9 +15,12 @@ steps:
   - pytest -v -s plugins_tests/test_platform_plugins.py
   - pip uninstall vllm_add_dummy_platform -y
   # end platform plugin tests
-  # begin io_processor plugins test, all the code in between uses the prithvi_io_processor plugin
+  # begin io_processor plugins test
+  # test generic io_processor plugins functions
+  - pytest -v -s ./plugins_tests/test_io_processor_plugins.py
+  # test Terratorch io_processor plugins
   - pip install -e ./plugins/prithvi_io_processor_plugin
-  - pytest -v -s plugins_tests/test_io_processor_plugins.py
+  - pytest -v -s plugins_tests/test_terratorch_io_processor_plugins.py
   - pip uninstall prithvi_io_processor_plugin -y
   # test bge_m3_sparse io_processor plugin
   - pip install -e ./plugins/bge_m3_sparse_plugin
