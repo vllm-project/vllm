@@ -547,22 +547,13 @@ def emit_mcp_completion_events(
 # =====================================================================
 
 
-def emit_content_delta_events(
-    ctx: StreamingHarmonyContext,
+def _emit_delta_for_channel(
+    channel: str | None,
+    recipient: str | None,
+    delta: str,
     state: StreamingState,
 ) -> list[StreamingResponsesResponse]:
-    """Emit events for content delta streaming based on channel type.
-
-    This is a Harmony-specific dispatcher that extracts values from the
-    Harmony context and delegates to shared leaf helpers.
-    """
-    delta = ctx.last_content_delta
-    if not delta:
-        return []
-
-    channel = ctx.parser.current_channel
-    recipient = ctx.parser.current_recipient
-
+    """Emit events for a single (channel, recipient, delta) triple."""
     if channel in ("final", "commentary") and recipient is None:
         # Preambles (commentary with no recipient) and final messages
         # are both user-visible text.
@@ -582,6 +573,29 @@ def emit_content_delta_events(
             return emit_mcp_delta_events(delta, state, recipient)
 
     return []
+
+
+def emit_content_delta_events(
+    ctx: StreamingHarmonyContext,
+    state: StreamingState,
+) -> list[StreamingResponsesResponse]:
+    """Emit events for content delta streaming based on channel type.
+
+    This is a Harmony-specific dispatcher that extracts values from the
+    Harmony context and delegates to shared leaf helpers.
+
+    When a token batch crosses a channel boundary (e.g. analysis ->
+    commentary), ctx.channel_deltas contains one entry per contiguous
+    (channel, recipient) run so each segment is emitted with the correct
+    event type.
+    """
+    if not ctx.channel_deltas:
+        return []
+
+    events: list[StreamingResponsesResponse] = []
+    for channel, recipient, delta in ctx.channel_deltas:
+        events.extend(_emit_delta_for_channel(channel, recipient, delta, state))
+    return events
 
 
 def emit_previous_item_done_events(
