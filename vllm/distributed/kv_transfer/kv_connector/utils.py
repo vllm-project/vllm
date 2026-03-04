@@ -336,6 +336,7 @@ class TpKVTopology:
             self._cross_layers_blocks = (
                 len(self.tensor_shape) == len(kv_cache_shape) + 1
             )
+            self.tensor_shape: torch.Size
 
         if self._cross_layers_blocks:
             logger.debug("Using cross-layer KV cache")
