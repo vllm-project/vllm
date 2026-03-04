@@ -44,6 +44,9 @@ class WorkerLoRAManager:
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self.vocab_size = vllm_config.model_config.get_vocab_size()
+        assert vllm_config.lora_config is not None, (
+            "LoRA config must be provided in vLLM config when using LoRA support."
+        )
         self.lora_config = vllm_config.lora_config
 
         # Use get_text_config() in case of multimodal models
@@ -69,7 +72,7 @@ class WorkerLoRAManager:
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        vllm_config: VllmConfig | None = None,
+        vllm_config: VllmConfig,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,
@@ -222,7 +225,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        vllm_config: VllmConfig | None = None,
+        vllm_config: VllmConfig,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,

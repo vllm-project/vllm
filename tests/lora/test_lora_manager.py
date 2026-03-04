@@ -122,6 +122,7 @@ def test_replace_submodules(default_vllm_config, dist_init, dummy_model):
             max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
         ),
         torch.device(DEVICES[0]),
+        default_vllm_config,
     )
     model = manager.model
     assert isinstance(model.get_submodule("dense1"), ColumnParallelLinearWithLoRA)
@@ -149,6 +150,7 @@ def test_lora_model_manager(default_vllm_config, dist_init, dummy_model, device)
             max_lora_rank=8, max_cpu_loras=3, max_loras=2, lora_dtype=DEFAULT_DTYPE
         ),
         device=device,
+        vllm_config=default_vllm_config,
     )
     assert all(x is None for x in manager.lora_index_to_id)
     assert manager.add_adapter(model_lora1)
@@ -217,6 +219,7 @@ def test_lora_lru_cache_model_manager(
             max_lora_rank=8, max_cpu_loras=3, max_loras=2, lora_dtype=DEFAULT_DTYPE
         ),
         device=device,
+        vllm_config=default_vllm_config,
     )
     assert all(x is None for x in manager.lora_index_to_id)
     assert manager.add_adapter(model_lora1)
@@ -310,6 +313,7 @@ def test_lru_lora_model_manager(default_vllm_config, dist_init, dummy_model, dev
             max_lora_rank=8, max_cpu_loras=2, max_loras=2, lora_dtype=DEFAULT_DTYPE
         ),
         device=device,
+        vllm_config=default_vllm_config,
     )
     assert all(x is None for x in manager.lora_index_to_id)
 
@@ -445,7 +449,7 @@ def test_lru_cache_worker_adapter_manager(
     worker_adapter_manager.max_num_seqs = 4
     worker_adapter_manager.max_num_batched_tokens = 2
 
-    worker_adapter_manager.create_lora_manager(dummy_model)
+    worker_adapter_manager.create_lora_manager(dummy_model, vllm_config)
 
     mapping = LoRAMapping([], [])
     worker_adapter_manager.set_active_adapters(
@@ -549,7 +553,7 @@ def test_worker_adapter_manager(
 
     worker_adapter_manager = WorkerLoRAManager(vllm_config, device, EMBEDDING_MODULES)
     worker_adapter_manager.vocab_size = dummy_model_gate_up.unpadded_vocab_size
-    worker_adapter_manager.create_lora_manager(dummy_model_gate_up)
+    worker_adapter_manager.create_lora_manager(dummy_model_gate_up, vllm_config)
 
     dummy_lora_files = f"{tmp_path}/lora_adapter"
     os.makedirs(dummy_lora_files, exist_ok=True)
@@ -669,6 +673,7 @@ def test_packed_loras(default_vllm_config, dist_init, dummy_model_gate_up, devic
             max_lora_rank=8, max_cpu_loras=2, max_loras=2, lora_dtype=DEFAULT_DTYPE
         ),
         device=device,
+        vllm_config=default_vllm_config,
     )
     model = manager.model
 
