@@ -168,9 +168,8 @@ class Dots1MoE(nn.Module):
             topk_group=config.topk_group,
             prefix=f"{prefix}.experts",
             scoring_func=config.scoring_func,
-            # we do scaling outside, set factor to 1.0 to avoid double mul
-            routed_scaling_factor=1.0,
             e_score_correction_bias=self.gate.e_score_correction_bias,
+            routed_scaling_factor=self.routed_scaling_factor,
             apply_scale_to_output=True,
         )
 
