@@ -3,7 +3,6 @@ set -ex
 
 # usage: ./install_python_libraries.sh [options]
 #   --workspace <dir>    workspace directory (default: ./ep_kernels_workspace).
-#   --mode <mode>        "install" (default) or "wheel".
 #   --mori-ref <commit>  MoRI commit hash.
 #   --aiter-ref <commit> Aiter commit hash.
 #   --force-install      Avoids installs when an installation exists already.
@@ -38,7 +37,6 @@ AITER_REPO="https://github.com/ROCm/aiter.git"
 AITER_GPU_ARCHS=${AITER_GPU_ARCHS:-"$(resolve_gpu_archs)"}
 
 WORKSPACE=${WORKSPACE:-$(pwd)/ep_kernels_workspace}
-MODE=${MODE:-install}
 FORCE_INSTALL=False
 
 # Parse arguments
@@ -50,14 +48,6 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             WORKSPACE="$2"
-            shift 2
-            ;;
-        --mode)
-            if [[ -z "$2" || "$2" =~ ^- ]]; then
-                echo "Error: --mode requires an argument." >&2
-                exit 1
-            fi
-            MODE="$2"
             shift 2
             ;;
         --mori-ref)
@@ -154,18 +144,16 @@ do_build() {
     ORANGE='\033[38;5;208m'
     NC='\033[0m'
 
-    if [ "$MODE" = "install" ]; then
-        # Check if the package is already installed
-        if python3 -c "import $package_name" > /dev/null 2>&1; then 
-            echo -e "${ORANGE} Package $name is already installed. Skipping installation. Use --force-install to install again.${NC}"
-        else
-            echo "Installing $name into environment"
-            eval "$cmake_args $extra_env" uv pip install --no-build-isolation -vvv .
+    # Check if the package is already installed
+    if [ "$FORCE_INSTALL" != "True" ]; then
+        if uv pip show $package_name > /dev/null 2>&1; then 
+            echo -e "${ORANGE} Package $package_name is already installed. Skipping installation. Use --force-install to install again.${NC}"
+            return 0
         fi
-    else
-        echo "Building $name wheel into $WHEEL_DIR"
-        eval "$cmake_args $extra_env" uv build --wheel --no-build-isolation -vvv --out-dir "$WHEEL_DIR" .
     fi
+
+    echo "Installing $package_name into environment"
+    eval "$cmake_args $extra_env" uv pip install --no-build-isolation -vvv .
 }
 
 do_build_mori() {
@@ -181,7 +169,7 @@ do_build_mori() {
 
     # Patch MoRI to let it find uv's python
     sed -i 's/find_package(PythonLibs REQUIRED)/find_package(Python3 COMPONENTS Interpreter Development REQUIRED)/g' src/pybind/CMakeLists.txt
-    sed -i 's/\${PYTHON_INCLUDE_DIRS}/${Pthon3_INCLUDE_DIRS}/g' src/pybind/CMakeLists.txt
+    sed -i 's/\${PYTHON_INCLUDE_DIRS}/${Python3_INCLUDE_DIRS}/g' src/pybind/CMakeLists.txt
     # Set cmake python executable to uv so it finds the right includes / libraries.
     cmake_args="CMAKE_ARGS=\"-DPython3_EXECUTABLE=$(uv python find)\""
 
@@ -210,7 +198,7 @@ do_build_aiter() {
     cmake_args="CMAKE_ARGS=\"-DPython3_EXECUTABLE=$(uv python find)\""
 
     export HIP_CLANG_PATH=./sccache-wrappers
-    do_build "mori" "$cmake_args $extra_env"
+    do_build "amd-aiter" "$cmake_args $extra_env"
     unset HIP_CLANG_PATH
 
     popd
