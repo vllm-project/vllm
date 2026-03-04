@@ -1104,17 +1104,6 @@ class OpenAIServingChat(OpenAIServing):
                                     history_tool_call_cnt += 1
                                     tools_streamed[i] = True
 
-                            # Suppress content for "required" — by
-                            # definition the response must be a tool
-                            # call, not text. Without this, the
-                            # tool_parser may emit partial text as
-                            # content before detecting the tool call
-                            # pattern (e.g. qwen3_coder looks for XML
-                            # but sees JSON "[{\"name\":" first),
-                            # causing content to leak alongside
-                            # tool_calls in the SSE stream.
-                            if delta_message and delta_message.content:
-                                delta_message.content = None
 
                     # handle streaming deltas for tools with "auto" tool choice
                     # and reasoning parser
