@@ -690,7 +690,7 @@ class AnyModelForCausalLMConfig(VerifyAndUpdateConfig):
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
-    "AnyModelForCausalLM": AnyModelForCausalLMConfig,
+    "AnyModel": AnyModelForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
