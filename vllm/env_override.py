@@ -101,9 +101,13 @@ logger = init_logger(__name__)
 os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] = "1"
 
 # see https://github.com/vllm-project/vllm/issues/10480
-os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 # see https://github.com/vllm-project/vllm/issues/10619
-torch._inductor.config.compile_threads = 1
+# Safe default of 1 at import time. The GPU worker will override this
+# with an auto-computed value (or explicit VLLM_COMPILE_PROCESSES) once
+# device info is available.
+_compile_processes = int(os.environ.get("VLLM_COMPILE_PROCESSES", "1"))
+os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = str(_compile_processes)
+torch._inductor.config.compile_threads = _compile_processes
 
 # ===================================================
 # torch 2.9 Inductor PythonWrapperCodegen monkeypatch
