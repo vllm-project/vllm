@@ -72,7 +72,8 @@ class TestFlashMLAPaddingOverrides:
         vllm_config.model_config.get_num_attention_heads.return_value = 128
         # Disable full cudagraphs so CG buffer allocation (which needs a
         # real CUDA device) is skipped.
-        vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs.return_value = False
+        cg_mode = vllm_config.compilation_config.cudagraph_mode
+        cg_mode.has_full_cudagraphs.return_value = False
         vllm_config.scheduler_config.max_num_seqs = 256
 
         device = torch.device("cuda:0")
