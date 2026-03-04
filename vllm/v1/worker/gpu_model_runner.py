@@ -58,7 +58,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     MRotaryEmbedding,
     XDRotaryEmbedding,
 )
-from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
@@ -194,7 +194,6 @@ from .utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
@@ -1191,13 +1190,14 @@ class GPUModelRunner(
             return
 
         # Find the number of accepted tokens for each sequence.
-        num_accepted_tokens = (
+        num_reqs = output_token_ids.size(0)
+        self.num_accepted_tokens.gpu[:num_reqs] = (
             (
                 torch.cat(
                     [
                         output_token_ids,
                         torch.full(
-                            (output_token_ids.size(0), 1),
+                            (num_reqs, 1),
                             -1,
                             device=output_token_ids.device,
                         ),
@@ -1208,12 +1208,13 @@ class GPUModelRunner(
             )
             .int()
             .argmax(-1)
-            .cpu()
-            .numpy()
         )
-        for i, num_tokens in enumerate(num_accepted_tokens):
-            self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
         if self.cache_config.mamba_cache_mode == "align":
+            for i, num_tokens in enumerate(
+                self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
+            ):
+                self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+
             mamba_utils.postprocess_mamba(
                 scheduler_output,
                 self.kv_cache_config,
@@ -1223,6 +1224,10 @@ class GPUModelRunner(
                 self.compilation_config.static_forward_context,
                 self.model.get_mamba_state_copy_func(),
                 self._get_mamba_copy_bufs(),
+            )
+        else:
+            self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
+                self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
             )
 
     def _update_streaming_request(
@@ -1930,7 +1935,7 @@ class GPUModelRunner(
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter, EagleProposer):
-                    if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
+                    if self.drafter.kv_cache_gid == kv_cache_gid:
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
@@ -3404,7 +3409,7 @@ class GPUModelRunner(
             # Update persistent batch states.
             self._update_states(scheduler_output)
 
-            if has_ec_transfer() and get_ec_transfer().is_producer:
+            if has_ec_transfer() and not get_ec_transfer().is_consumer:
                 with self.maybe_get_ec_connector_output(
                     scheduler_output,
                     encoder_cache=self.encoder_cache,
@@ -4504,16 +4509,6 @@ class GPUModelRunner(
                     weights_not_loaded,
                 )
 
-    def save_tensorized_model(
-        self,
-        tensorizer_config: "TensorizerConfig",
-    ) -> None:
-        TensorizerLoader.save_model(
-            self.get_model(),
-            tensorizer_config=tensorizer_config,
-            model_config=self.model_config,
-        )
-
     def _get_prompt_logprobs_dict(
         self,
         hidden_states: torch.Tensor,
@@ -5553,6 +5548,14 @@ class GPUModelRunner(
         # because some of them change the threshold at init time.
         self.calculate_reorder_batch_threshold()
 
+        # Initialize drafter attention backend
+        if self.speculative_config and (
+            self.speculative_config.use_eagle()
+            or self.speculative_config.uses_draft_model()
+        ):
+            assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+            self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
+
     def _check_and_update_cudagraph_mode(
         self,
         attention_backends: list[set[type[AttentionBackend]]],
@@ -5696,6 +5699,22 @@ class GPUModelRunner(
             self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
                 self.uniform_decode_query_len, self.parallel_config.tensor_parallel_size
             )
+
+        # If the model has Mamba layers and cudagraph mode includes FULL
+        # decode, cap cudagraph capture sizes to the number of available
+        # Mamba cache blocks. Each decode request needs one conv_state
+        # cache line, so capture batch sizes cannot exceed num_blocks.
+        # Only FULL decode graphs are affected because PIECEWISE captures
+        # run GDN/Mamba ops eagerly (prefill path, no causal_conv1d_update).
+        # See: https://github.com/vllm-project/vllm/issues/34094
+        if cudagraph_mode.has_full_cudagraphs():
+            has_mamba = any(
+                isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_groups
+            )
+            if has_mamba and self.kv_cache_config is not None:
+                self.compilation_config.adjust_cudagraph_sizes_for_mamba_cache(
+                    self.kv_cache_config.num_blocks
+                )
 
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.
@@ -6073,15 +6092,11 @@ class GPUModelRunner(
             kv_cache_config, kernel_block_sizes
         )
 
-        if self.speculative_config and (
-            self.speculative_config.use_eagle()
-            or self.speculative_config.uses_draft_model()
-            or self.speculative_config.uses_extract_hidden_states()
+        if (
+            self.speculative_config
+            and self.speculative_config.uses_extract_hidden_states()
         ):
-            assert isinstance(
-                self.drafter,
-                EagleProposer | DraftModelProposer | ExtractHiddenStatesProposer,
-            )
+            assert isinstance(self.drafter, ExtractHiddenStatesProposer)
             # validate all draft model layers belong to the same kv cache
             # group
             self.drafter.validate_same_kv_cache_group(kv_cache_config)
@@ -6167,7 +6182,7 @@ class GPUModelRunner(
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
-        if has_ec_transfer() and get_ec_transfer().is_producer:
+        if has_ec_transfer() and not get_ec_transfer().is_consumer:
             return {}
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         layer_type = cast(type[Any], AttentionLayerBase)
