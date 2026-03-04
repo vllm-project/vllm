@@ -26,7 +26,6 @@
 
 import typing
 from collections.abc import Callable, Iterable
-from itertools import islice
 
 import torch
 from torch import nn
@@ -1217,11 +1216,11 @@ class DeepseekV2Model(nn.Module):
 
         # Eagle3 support: collect auxiliary hidden states from specified layers
         aux_hidden_states = []
-        for idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer)
-        ):
+        for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
+            # Calculate global layer index for pipeline parallelism
+            global_layer_idx = self.start_layer + idx
             # Save hidden states before layer processing if this layer is marked
-            if idx in self.aux_hidden_state_layers:
+            if global_layer_idx in self.aux_hidden_state_layers:
                 # Store pre-normalization state (hidden_states + residual)
                 aux_hidden_states.append(hidden_states + residual)
 
@@ -1285,7 +1284,12 @@ class DeepseekV2MixtureOfExperts(MixtureOfExperts):
 
 
 class DeepseekV2ForCausalLM(
-    nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle, SupportsEagle3
+    nn.Module,
+    SupportsPP,
+    DeepseekV2MixtureOfExperts,
+    SupportsLoRA,
+    SupportsEagle,
+    SupportsEagle3,
 ):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -1385,12 +1389,25 @@ class DeepseekV2ForCausalLM(
         Returns:
             Tuple of layer indices (typically: early, middle, late layers)
         """
-        num_layers = len(self.model.layers)
+        # Use total number of layers from config, not len(layers) which
+        # only reflects the current pipeline parallel rank
+        num_layers = self.model.config.num_hidden_layers
+
+        # Handle small models gracefully
+        if num_layers < 4:
+            # For very small models, return middle layer only (or empty if no layers)
+            return (num_layers // 2,) if num_layers > 0 else ()
+
         # Select 3 representative layers: early, middle, and late
-        return (
-            2,                  # Early layer (captures low-level features)
-            num_layers // 2,    # Middle layer (captures mid-level semantics)
-            num_layers - 3      # Late layer (captures high-level semantics)
+        # Use set to avoid duplicates in edge cases, then sort
+        return tuple(
+            sorted(
+                {
+                    2,  # Early layer (captures low-level features)
+                    num_layers // 2,  # Middle layer (captures mid-level semantics)
+                    num_layers - 3,  # Late layer (captures high-level semantics)
+                }
+            )
         )
 
     def forward(
