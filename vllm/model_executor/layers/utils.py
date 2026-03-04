@@ -226,6 +226,11 @@ def dispatch_cpu_unquantized_gemm(
         layer.cpu_linear = torch.nn.functional.linear
         return
 
+    # skip optimization for non-2D weights (e.g., conv1d in hybrid models)
+    if layer.weight.ndim != 2:
+        layer.cpu_linear = torch.nn.functional.linear
+        return
+
     N, K = layer.weight.size()
     dtype = layer.weight.dtype
 
