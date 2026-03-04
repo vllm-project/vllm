@@ -217,7 +217,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.pooling_runner: PoolingRunner | None = None
 
         # For transferring state from execute_model to subsequent sample_tokens call.
-        self.execute_model_state: tuple | None = None
+        self.execute_model_state: dict | None = None
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -379,16 +379,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return None, None
 
         assert self.execute_model_state is not None
-        (
-            input_batch,
-            model_inputs,
-            attn_metadata,
-            slot_mappings_by_layer,
-            hidden_states,
-            aux_hidden_states,
-            kv_connector_output,
-            num_tokens_across_dp,
-        ) = self.execute_model_state
+        input_batch = self.execute_model_state["input_batch"]
+        attn_metadata = self.execute_model_state["attn_metadata"]
+        slot_mappings_by_layer = self.execute_model_state["slot_mappings_by_layer"]
+        hidden_states = self.execute_model_state["hidden_states"]
+        aux_hidden_states = self.execute_model_state["aux_hidden_states"]
+        num_tokens_across_dp = self.execute_model_state["num_tokens_across_dp"]
         self.execute_model_state = None
 
         # dummy run the eagle speculator's propose to ensure DP/EP sync.
@@ -990,16 +986,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     aux_hidden_states = None
 
         kv_connector_output = self.kv_connector.post_forward(scheduler_output)
-        self.execute_model_state = (
-            input_batch,
-            model_inputs,
-            attn_metadata,
-            slot_mappings_by_layer,
-            hidden_states,
-            aux_hidden_states,
-            kv_connector_output,
-            num_tokens_across_dp,
-        )
+        self.execute_model_state = {
+            "input_batch": input_batch,
+            "model_inputs": model_inputs,
+            "attn_metadata": attn_metadata,
+            "slot_mappings_by_layer": slot_mappings_by_layer,
+            "hidden_states": hidden_states,
+            "aux_hidden_states": aux_hidden_states,
+            "kv_connector_output": kv_connector_output,
+            "num_tokens_across_dp": num_tokens_across_dp,
+        }
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
@@ -1017,16 +1013,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.execute_model_state is None:
             # The prior execute_model call must have failed.
             return None
-        (
-            input_batch,
-            model_inputs,
-            attn_metadata,
-            slot_mappings_by_layer,
-            hidden_states,
-            aux_hidden_states,
-            kv_connector_output,
-            num_tokens_across_dp,
-        ) = self.execute_model_state
+
+        input_batch = self.execute_model_state["input_batch"]
+        attn_metadata = self.execute_model_state["attn_metadata"]
+        slot_mappings_by_layer = self.execute_model_state["slot_mappings_by_layer"]
+        hidden_states = self.execute_model_state["hidden_states"]
+        aux_hidden_states = self.execute_model_state["aux_hidden_states"]
+        kv_connector_output = self.execute_model_state["kv_connector_output"]
+        num_tokens_across_dp = self.execute_model_state["num_tokens_across_dp"]
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1117,9 +1111,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # The prior execute_model call must have failed.
             return None
 
-        input_batch, _, _, _, hidden_states, _, kv_connector_output = (
-            self.execute_model_state
-        )
+        input_batch = self.execute_model_state["input_batch"]
+        hidden_states = self.execute_model_state["hidden_states"]
+        kv_connector_output = self.execute_model_state["kv_connector_output"]
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
