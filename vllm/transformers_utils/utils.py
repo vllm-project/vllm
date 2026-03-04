@@ -117,6 +117,8 @@ def parse_safetensors_file_metadata(path: str | PathLike) -> dict[str, Any]:
 
     metadata: dict[str, Any] = {}
     with safe_open(path, framework="pt") as f:
+        if file_metadata := f.metadata():
+            metadata["__metadata__"] = file_metadata
         for key in f.keys():  # noqa: SIM118
             sl = f.get_slice(key)
             metadata[key] = {
