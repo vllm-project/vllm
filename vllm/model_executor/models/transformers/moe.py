@@ -279,7 +279,6 @@ class MoEMixin(MixtureOfExperts):
                         top_k=top_k,
                         hidden_size=hidden_size,
                         intermediate_size=intermediate_size,
-                        reduce_results=True,
                         renormalize=renormalize,
                         # Hard coded because topk happens in Transformers
                         use_grouped_topk=False,
