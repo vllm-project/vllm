@@ -55,13 +55,7 @@ def build_tool_call(func_name: str, params: dict[str, str]) -> str:
     param_strs = "".join(
         f'{PARAM_START}{k}" string="true">{v}{PARAM_END}' for k, v in params.items()
     )
-    return (
-        f"{FC_START}\n"
-        f'{INV_START}{func_name}">\n'
-        f"{param_strs}\n"
-        f"{INV_END}\n"
-        f"{FC_END}"
-    )
+    return f'{FC_START}\n{INV_START}{func_name}">\n{param_strs}\n{INV_END}\n{FC_END}'
 
 
 # ---------------------------------------------------------------------------
@@ -128,8 +122,7 @@ class TestComputeCurrentArgsJson:
 
     def _tool_text(self, func_name: str, params: dict[str, str], complete=True) -> str:
         param_strs = "".join(
-            f'{PARAM_START}{k}" string="true">{v}{PARAM_END}'
-            for k, v in params.items()
+            f'{PARAM_START}{k}" string="true">{v}{PARAM_END}' for k, v in params.items()
         )
         text = f'{INV_START}{func_name}">\n{param_strs}\n'
         if complete:
@@ -198,12 +191,7 @@ class TestExtractToolCalls:
         assert result.content == "just some text"
 
     def test_single_tool_no_params(self, parser):
-        model_output = (
-            f"{FC_START}\n"
-            f'{INV_START}get_time">\n'
-            f"{INV_END}\n"
-            f"{FC_END}"
-        )
+        model_output = f'{FC_START}\n{INV_START}get_time">\n{INV_END}\n{FC_END}'
         result = parser.extract_tool_calls(model_output, None)
         assert result.tools_called
         assert len(result.tool_calls) == 1
@@ -252,9 +240,7 @@ class TestExtractToolCalls:
         result = parser.extract_tool_calls(model_output, None)
         assert result.tools_called
         assert len(result.tool_calls) == 2
-        assert json.loads(result.tool_calls[0].function.arguments) == {
-            "location": "SF"
-        }
+        assert json.loads(result.tool_calls[0].function.arguments) == {"location": "SF"}
         assert json.loads(result.tool_calls[1].function.arguments) == {
             "location": "NYC"
         }
@@ -317,11 +303,7 @@ class TestExtractToolCallsStreaming:
         for d in deltas:
             if d.tool_calls:
                 for tc in d.tool_calls:
-                    if (
-                        tc.index == tool_index
-                        and tc.function
-                        and tc.function.arguments
-                    ):
+                    if tc.index == tool_index and tc.function and tc.function.arguments:
                         fragments.append(tc.function.arguments)
         return "".join(fragments)
 
