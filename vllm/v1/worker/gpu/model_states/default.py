@@ -195,15 +195,10 @@ class DefaultModelState(ModelState):
             and num_reqs > 0
             and bool((query_lens_np == self.uniform_decode_query_len).all())
         )
+        attn_num_reqs = input_batch.num_tokens_after_padding
         if is_uniform_full_decode:
-            attn_num_reqs = min(
-                cdiv(
-                    input_batch.num_tokens_after_padding, self.uniform_decode_query_len
-                ),
-                self.max_num_reqs,
-            )
-        else:
-            attn_num_reqs = min(input_batch.num_tokens_after_padding, self.max_num_reqs)
+            attn_num_reqs = cdiv(attn_num_reqs, self.uniform_decode_query_len)
+        attn_num_reqs = min(attn_num_reqs, self.max_num_reqs)
         attn_num_tokens = input_batch.num_tokens_after_padding
 
         attn_query_start_loc_cpu = torch.empty(attn_num_reqs + 1, dtype=torch.int32)
