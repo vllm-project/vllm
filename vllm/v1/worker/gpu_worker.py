@@ -192,6 +192,13 @@ class Worker(WorkerBase):
             current_platform.dist_backend,
         )
 
+        # Recapture CUDA graphs so they record the new NCCL handles.
+        # With TP>1, captured graphs embed NCCL collective ops that
+        # reference specific communicator handles — stale after rebuild.
+        if not self.model_config.enforce_eager:
+            logger.info("Recapturing CUDA graphs with fresh NCCL handles")
+            self.model_runner.capture_model()
+
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
 
