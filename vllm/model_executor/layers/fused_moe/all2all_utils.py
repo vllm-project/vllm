@@ -15,10 +15,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_a2a_prepare_finalize import (
-    FlashInferA2APrepareAndFinalize,
-    FlashInferMoeA2APrepareAndFinalize,
-)
+from vllm.model_executor.layers.fused_moe.flashinfer_a2a_prepare_finalize import FlashInferA2APrepareAndFinalize
+from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_moe_a2a import FlashInferMoeA2APrepareAndFinalize
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
