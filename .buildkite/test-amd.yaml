@@ -1339,6 +1339,7 @@ steps:
   - tests/v1/entrypoints/openai/test_multi_api_servers.py
   - tests/v1/shutdown
   - tests/v1/worker/test_worker_memory_snapshot.py
+  - examples/offline_inference/new_weight_syncing/
   commands:
   # Work around HIP bug tracked here: https://github.com/ROCm/hip/issues/3876
   # TODO: Remove when the bug is fixed in a future ROCm release
@@ -1970,8 +1971,10 @@ steps:
 
 - label: Distributed Tests (4 GPUs) # 35min
   timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_4
+  optional: true
+  # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   source_file_dependencies:
@@ -2025,7 +2028,8 @@ steps:
   - popd
   # NEW rlhf examples
   - pushd ../examples/offline_inference/new_weight_syncing
-  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_nccl.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_ipc.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_async_new_apis.py
   - popd
 
@@ -2989,8 +2993,10 @@ steps:
 
 - label: Distributed Tests (2 GPUs) # 68min
   timeout_in_minutes: 90
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_2
+  optional: true
+  # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
