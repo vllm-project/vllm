@@ -292,7 +292,7 @@ def rocm_aiter_fused_experts(
         )
 
 
-class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class AiterExperts(mk.FusedMoEExpertsModular):
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True
@@ -381,7 +381,6 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # TODO(rob): rocm_aiter_fused_experts uses self.quant_config's
         # a_scales for static quantization. Update this to fit better
         # with the interface once all quant integrations are complete.
-        assert a2_scale == self.quant_config.a2_scale
 
         if expert_tokens_meta is not None:
             num_local_tokens = expert_tokens_meta.expert_num_tokens
