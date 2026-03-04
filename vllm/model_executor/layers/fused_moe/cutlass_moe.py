@@ -398,6 +398,7 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
         return not (
             moe_parallel_config.use_fi_all2allv_kernels
             or moe_parallel_config.use_deepep_ht_kernels
+            or moe_parallel_config.use_fi_moe_a2a_kernels
         )
 
     def supports_chunking(self) -> bool:
