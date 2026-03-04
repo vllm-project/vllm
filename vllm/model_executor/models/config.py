@@ -622,6 +622,15 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
             cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
 
 
+class NemotronHNanoVLV2Config(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        mm_config = model_config.multimodal_config
+        if mm_config is not None:
+            video_kwargs = mm_config.media_io_kwargs.setdefault("video", {})
+            video_kwargs.setdefault("video_backend", "nemotron_vl")
+
+
 class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -661,6 +670,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteNewModel": GteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
+    "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
