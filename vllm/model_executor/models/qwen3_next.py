@@ -115,7 +115,6 @@ def fi_chunk_gated_delta_rule(
     initial_state: torch.Tensor,
     output_final_state: bool,
     cu_seqlens: torch.LongTensor | None = None,
-    head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = True,
 ):
     from flashinfer.gdn_prefill import (
@@ -172,7 +171,6 @@ class ChunkGatedDeltaRule(CustomOp):
         initial_state: torch.Tensor,
         output_final_state: bool,
         cu_seqlens: torch.LongTensor | None = None,
-        head_first: bool = False,
         use_qk_l2norm_in_kernel: bool = True,
     ):
         return fi_chunk_gated_delta_rule(
@@ -184,7 +182,6 @@ class ChunkGatedDeltaRule(CustomOp):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
-            head_first=head_first,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         )
 
@@ -198,7 +195,6 @@ class ChunkGatedDeltaRule(CustomOp):
         initial_state: torch.Tensor,
         output_final_state: bool,
         cu_seqlens: torch.LongTensor | None = None,
-        head_first: bool = False,
         use_qk_l2norm_in_kernel: bool = True,
     ):
         return fla_chunk_gated_delta_rule(
@@ -210,7 +206,6 @@ class ChunkGatedDeltaRule(CustomOp):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
-            head_first=head_first,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         )
 
@@ -257,7 +252,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             config.hidden_size,
             config.num_experts,
             bias=False,
-            quant_config=quant_config,
+            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
@@ -417,6 +412,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             prefix=f"{prefix}.in_proj_qkvz",
         )
         # ba_proj doesn't support blockwise fp8 quantization.
+        # # in_proj_ba is defined as MergedColumnParallelLinear for
+        # compatibility with Qwen3_5.
         self.in_proj_ba = MergedColumnParallelLinear(
             input_size=self.hidden_size,
             output_sizes=[self.num_v_heads] * 2,
@@ -466,7 +463,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             group_size=None,
             norm_before_gate=True,
             device=current_platform.current_device(),
-            dtype=config.dtype,
         )
 
         self.out_proj = RowParallelLinear(
@@ -495,10 +491,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
     ) -> MergedColumnParallelLinear:
         return MergedColumnParallelLinear(
             input_size=hidden_size,
-            output_sizes=[sum((key_dim, key_dim, value_dim)), value_dim],
+            output_sizes=[sum((key_dim, key_dim, value_dim, value_dim))],
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.in_proj_qkvz",
+            prefix=prefix,
         )
 
     def fix_query_key_value_ordering(
@@ -790,7 +786,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 initial_state=initial_state,
                 output_final_state=True,
                 cu_seqlens=non_spec_query_start_loc,
-                head_first=False,
                 use_qk_l2norm_in_kernel=True,
             )
             # Init cache
@@ -1022,7 +1017,6 @@ class Qwen3NextDecoderLayer(nn.Module):
                     1,
                     1,
                     config.hidden_size,
-                    dtype=config.dtype,
                 ),
             )
             self.ffn_layer_scale = torch.nn.Parameter(
@@ -1030,7 +1024,6 @@ class Qwen3NextDecoderLayer(nn.Module):
                     1,
                     1,
                     config.hidden_size,
-                    dtype=config.dtype,
                 ),
             )
 
@@ -1332,6 +1325,8 @@ class Qwen3NextForCausalLM(
             "v_proj",
         ],
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_proj_qkvz": ["in_proj_qkvz"],
+        "in_proj_ba": ["in_proj_ba"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

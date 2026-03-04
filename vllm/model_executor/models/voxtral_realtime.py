@@ -41,6 +41,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .utils import (
     _flatten_embeddings,
@@ -299,13 +300,29 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         # Multi-modal token ID may exceed vocab size
         handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
-        """Pass post-conv embeddings directly as input"""
-        # for realtime we simply flatten the multimodal embeddings
-        # to be in tensor format, we treat the input ids later
-        assert multimodal_embeddings is not None
-        assert len(multimodal_embeddings) > 0, (
-            "For realtime you must provide a multimodal_embedding at every step."
-        )
+        """Pass post-conv embeddings directly as input.
+
+        For realtime models, multimodal embeddings are required at every
+        decode step.  If they are missing (e.g. due to an empty audio
+        commit, encoder-cache eviction under GPU memory pressure, or a
+        client disconnect), return zero embeddings instead of crashing
+        the engine so that all other in-flight requests stay alive.
+        """
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            logger.warning(
+                "Realtime model received empty multimodal embeddings "
+                "for %d input tokens. Returning zero embeddings to "
+                "avoid engine crash.",
+                input_ids.shape[0],
+            )
+            pool_size = self.config.audio_config.block_pool_size
+            embed_dim = self.config.audio_config.d_model * pool_size
+            return torch.zeros(
+                input_ids.shape[0],
+                embed_dim,
+                dtype=self.whisper_encoder.dtype,
+                device=input_ids.device,
+            )
         mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
         return mm_embeds_flat
 
@@ -321,9 +338,21 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         assert input_ids is not None
 
         pool_size = self.config.audio_config.block_pool_size
-        inputs_embeds = inputs_embeds.view(
-            inputs_embeds.shape[0] * pool_size, inputs_embeds.shape[1] // pool_size
-        )
+        if is_torch_equal_or_newer("2.11"):
+            inputs_embeds = inputs_embeds.view(
+                inputs_embeds.shape[0] * pool_size, inputs_embeds.shape[1] // pool_size
+            )
+        else:
+            # TODO Use reshape + clone to break the view chain and avoid output
+            # aliasing input bug in torch.compile's AOT autograd cache.
+            # Without clone(), if any downstream operation returns a view that's
+            # connected to this view of inputs_embeds, the AOT autograd cache
+            # fails to pickle the ViewMetaSequence containing SymInt shapes.
+            # This will be fixed in pytorch 2.11 and beyond.
+            # issue: https://github.com/pytorch/pytorch/issues/174299
+            inputs_embeds = inputs_embeds.reshape(
+                inputs_embeds.shape[0] * pool_size, inputs_embeds.shape[1] // pool_size
+            ).clone()
 
         whisper_positions = _expand_tensor(positions, pool_size)
         audio_hidden_states = self.whisper_encoder.whisper_encoder(
@@ -367,9 +396,12 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         """Transform audio waveforms -> initial whisper post-conv embeddings"""
         audio_inputs = self._parse_and_validate_audio_arrays(**kwargs)
 
-        assert audio_inputs is not None, (
-            "For realtime you must provide an audio input at every step."
-        )
+        if audio_inputs is None:
+            logger.warning(
+                "Realtime model received no audio inputs in "
+                "embed_multimodal. Returning empty embeddings."
+            )
+            return []
 
         def _truncate_left(
             sample: torch.Tensor, mult_of: int, pos: int

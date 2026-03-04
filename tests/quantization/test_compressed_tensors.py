@@ -816,3 +816,26 @@ def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
         # Verify the model can generate output
         output = llm.generate_greedy("Hello, my name is", max_tokens=4)
         assert output
+
+
+def test_w4a16_moe_torch_compile(vllm_runner):
+    """Regression test: MoE quant_config must be initialized inside the
+    moe_forward custom op, not just in forward_native which is compiled by
+    Dynamo (attribute mutations are not replayed at runtime).
+
+    Without the fix in _moe_forward/_moe_forward_shared, this hits:
+        AssertionError: Hidden size mismatch 2048 != 1024
+    because use_int4_w4a16 is False (moe_quant_config stays None).
+    """
+    model_path = "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"
+
+    with vllm_runner(
+        model_path,
+        enforce_eager=False,
+        max_model_len=256,
+        compilation_config={
+            "cudagraph_mode": "NONE",
+        },
+    ) as llm:
+        output = llm.generate_greedy("Hi", max_tokens=1)
+        assert output

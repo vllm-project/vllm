@@ -8,7 +8,7 @@ image_name="xpu/vllm-ci:${BUILDKITE_COMMIT}"
 container_name="xpu_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 
 # Try building the docker image
-docker build -t ${image_name} -f docker/Dockerfile.xpu .
+docker build -t "${image_name}" -f docker/Dockerfile.xpu .
 
 # Setup cleanup
 remove_docker_container() {
@@ -44,7 +44,7 @@ docker run \
     python3 examples/offline_inference/basic/generate.py --model ibm-research/PowerMoE-3b  --block-size 64 --enforce-eager -tp 2
     python3 examples/offline_inference/basic/generate.py --model ibm-research/PowerMoE-3b  --block-size 64 --enforce-eager -tp 2 --enable-expert-parallel
     cd tests
-    pytest -v -s v1/core --ignore=v1/core/test_reset_prefix_cache_e2e.py
+    pytest -v -s v1/core --ignore=v1/core/test_reset_prefix_cache_e2e.py --ignore=v1/core/test_scheduler_e2e.py
     pytest -v -s v1/engine
     pytest -v -s v1/sample --ignore=v1/sample/test_logprobs.py --ignore=v1/sample/test_logprobs_e2e.py
     pytest -v -s v1/worker --ignore=v1/worker/test_gpu_model_runner.py

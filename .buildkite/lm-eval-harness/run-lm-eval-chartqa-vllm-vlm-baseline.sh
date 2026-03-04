@@ -41,4 +41,4 @@ lm_eval --model vllm-vlm \
   --tasks chartqa \
   --batch_size auto \
   --apply_chat_template \
-  --limit $LIMIT
+  --limit "$LIMIT"
