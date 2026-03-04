@@ -240,12 +240,11 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
     ) -> torch.Tensor:
         # Delay import for non-CUDA.
         import flashinfer
-        from flashinfer.fused_moe.core import ActivationType
 
         # Confirm supported activation function.
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
-        activation_type = ActivationType(activation_to_flashinfer_int(activation))
+        activation_type = activation_to_flashinfer_int(activation)
 
         # Confirm Llama-4 routing is proper.
         if self.routing_method_type == RoutingMethodType.Llama4:
