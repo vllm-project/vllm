@@ -18,8 +18,9 @@ from vllm.v1.executor.abstract import Executor
 from ...utils import create_new_process_for_each_test, multi_gpu_test
 
 if not current_platform.is_cuda() and not current_platform.is_rocm():
-    pytest.skip(reason="V1 currently only supported on CUDA/ROCm.",
-                allow_module_level=True)
+    pytest.skip(
+        reason="V1 currently only supported on CUDA/ROCm.", allow_module_level=True
+    )
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
