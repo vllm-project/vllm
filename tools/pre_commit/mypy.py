@@ -42,7 +42,6 @@ EXCLUDE = [
     "vllm/benchmarks",
     "vllm/config",
     "vllm/reasoning",
-    "vllm/tool_parser",
 ]
 
 
