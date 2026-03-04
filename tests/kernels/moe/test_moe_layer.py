@@ -31,7 +31,7 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.utils.import_utils import has_deep_ep, has_pplx
+from vllm.utils.import_utils import has_deep_ep
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import cuda_device_count_stateless, set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -59,9 +59,6 @@ PARALLEL_COMBOS = [
 ]
 
 BACKENDS = ["naive"]
-
-if has_pplx():
-    BACKENDS += ["pplx"]
 
 if False and has_deep_ep():
     BACKENDS += ["deepep_low_latency", "deepep_high_throughput"]
