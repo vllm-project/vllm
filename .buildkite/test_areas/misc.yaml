@@ -57,6 +57,11 @@ steps:
   - pip install modelscope
   - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: Examples
   timeout_in_minutes: 45
@@ -122,6 +127,11 @@ steps:
   - pytest -v -s detokenizer
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: Async Engine, Inputs, Utils, Worker, Config (CPU)
   depends_on: 

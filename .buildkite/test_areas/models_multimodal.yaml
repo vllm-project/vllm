@@ -45,6 +45,11 @@ steps:
   - vllm/v1/core/
   commands:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: Multi-Modal Models (Extended) 1
   optional: true
@@ -54,6 +59,11 @@ steps:
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: Multi-Modal Models (Extended) 2
   optional: true
@@ -63,6 +73,11 @@ steps:
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: Multi-Modal Models (Extended) 3
   optional: true
@@ -72,3 +87,8 @@ steps:
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd

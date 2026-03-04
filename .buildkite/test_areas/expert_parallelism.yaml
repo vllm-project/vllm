@@ -10,6 +10,11 @@ steps:
   - tests/distributed/test_eplb_algo.py
   commands:
   - pytest -v -s distributed/test_eplb_algo.py
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: EPLB Execution
   timeout_in_minutes: 20
@@ -21,6 +26,11 @@ steps:
   commands:
   - pytest -v -s distributed/test_eplb_execute.py
   - pytest -v -s distributed/test_eplb_spec_decode.py
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: Elastic EP Scaling Test
   timeout_in_minutes: 20
