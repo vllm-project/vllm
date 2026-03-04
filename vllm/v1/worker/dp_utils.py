@@ -37,7 +37,6 @@ def _get_device_and_group(parallel_config: ParallelConfig):
 
 def _run_ar(
     should_ubatch: bool,
-    should_dp_pad: bool,
     orig_num_tokens_per_ubatch: int,
     padded_num_tokens_per_ubatch: int,
     cudagraph_mode: int,
@@ -46,12 +45,11 @@ def _run_ar(
     dp_size = parallel_config.data_parallel_size
     dp_rank = parallel_config.data_parallel_rank
     device, group = _get_device_and_group(parallel_config)
-    tensor = torch.zeros(5, dp_size, device=device, dtype=torch.int32)
+    tensor = torch.zeros(4, dp_size, device=device, dtype=torch.int32)
     tensor[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor[2][dp_rank] = 1 if should_ubatch else 0
-    tensor[3][dp_rank] = 1 if should_dp_pad else 0
-    tensor[4][dp_rank] = cudagraph_mode
+    tensor[3][dp_rank] = cudagraph_mode
     dist.all_reduce(tensor, group=group)
     return tensor
 
@@ -97,14 +95,13 @@ def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
     If any rank has NONE (0), all ranks use NONE.
     This ensures all ranks send consistent values (all padded or all unpadded).
     """
-    return int(tensor[4, :].min().item())
+    return int(tensor[3, :].min().item())
 
 
 def _synchronize_dp_ranks(
     num_tokens_unpadded: int,
     num_tokens_padded: int,
     should_attempt_ubatching: bool,
-    should_attempt_dp_padding: bool,
     cudagraph_mode: int,
     parallel_config: ParallelConfig,
 ) -> tuple[bool, torch.Tensor | None, int]:
@@ -113,8 +110,8 @@ def _synchronize_dp_ranks(
     run with microbatching or none of them do.
 
     2. Determines the total number of tokens that each rank will run.
-    When running microbatched or if should_attempt_dp_padding is True, all
-    ranks will be padded out so that the run with the same number of tokens
+    When running microbatched or if cudagraph is enabled (synced across ranks),
+    all ranks will be padded out so that they run with the same number of tokens.
 
     3. Synchronizes cudagraph_mode across ranks by taking the minimum.
 
@@ -133,29 +130,26 @@ def _synchronize_dp_ranks(
     # will run and if we are using ubatching or not.
     tensor = _run_ar(
         should_ubatch=should_attempt_ubatching,
-        should_dp_pad=should_attempt_dp_padding,
         orig_num_tokens_per_ubatch=num_tokens_unpadded,
         padded_num_tokens_per_ubatch=num_tokens_padded,
         cudagraph_mode=cudagraph_mode,
         parallel_config=parallel_config,
     )
 
-    should_dp_pad = bool(torch.all(tensor[3] == 1).item())
-
-    # DP ranks should all have the same value for should_attempt_dp_padding.
-    assert should_attempt_dp_padding == should_dp_pad
+    # Synchronize cudagraph_mode across ranks first (take min).
+    # This is needed before DP padding decision since we use the synced
+    # cudagraph mode to determine whether DP padding is needed.
+    synced_cudagraph_mode = _post_process_cudagraph_mode(tensor)
 
     # Check conditions for microbatching
     should_ubatch = _post_process_ubatch(tensor, parallel_config.num_ubatches)
 
-    if should_ubatch and not should_dp_pad:
-        logger.debug_once(
-            "Microbatching has been triggered and requires DP padding. "
-            "Enabling DP padding even though it has been explicitly "
-            "disabled.",
-            scope="global",
-        )
-        should_dp_pad = True
+    # DP padding is needed when cudagraph is enabled (synced across ranks)
+    # or when ubatching/DBO is active (ubatching requires uniform batch
+    # sizes across DP ranks currently).
+    # Use the synced runtime cudagraph mode rather than the compilation config
+    # so we can avoid padding when cudagraph is not enabled for this step.
+    should_dp_pad = synced_cudagraph_mode != 0 or should_ubatch
 
     # Pad all DP ranks up to the maximum token count across ranks if
     # should_dp_pad is True
@@ -164,16 +158,12 @@ def _synchronize_dp_ranks(
         should_dp_pad,
     )
 
-    # Synchronize cudagraph_mode across ranks (take min)
-    synced_cudagraph_mode = _post_process_cudagraph_mode(tensor)
-
     return should_ubatch, num_tokens_after_padding, synced_cudagraph_mode
 
 
 def coordinate_batch_across_dp(
     num_tokens_unpadded: int,
     allow_microbatching: bool,
-    allow_dp_padding: bool,
     parallel_config: ParallelConfig,
     num_tokens_padded: int | None = None,
     uniform_decode: bool | None = None,
@@ -187,7 +177,6 @@ def coordinate_batch_across_dp(
     Args:
         num_tokens_unpadded: Number of tokens without accounting for padding
         allow_microbatching: If microbatching should be attempted
-        allow_dp_padding: If all DP ranks should be padded up to the same value
         parallel_config: The parallel config
         num_tokens_padded: Number of tokens including any non-DP padding (CUDA graphs,
             TP, etc)
@@ -195,15 +184,15 @@ def coordinate_batch_across_dp(
             only contains single token decodes
         num_scheduled_tokens_per_request: Only used if allow_microbatching is True. The
             number of tokens per request.
-        cudagraph_mode: The cudagraph mode for this rank (0=NONE, 1=PIECEWISE, 2=FULL)
+        cudagraph_mode: The cudagraph mode for this rank (0=NONE, 1=PIECEWISE, 2=FULL).
+            DP padding is enabled when synced cudagraph mode across ranks is not NONE.
 
     Returns: tuple[
         ubatch_slices: if this is set then all DP ranks have agreed to
         microbatch
         num_tokens_after_padding: A tensor containing the total number of
         tokens per-microbatch for each DP rank including padding. Will be
-        padded up to the max value across all DP ranks when allow_dp_padding
-        is True.
+        padded up to the max value across all DP ranks when cudagraph is enabled.
         synced_cudagraph_mode: The synchronized cudagraph mode (min across ranks)
     ]
 
@@ -231,7 +220,6 @@ def coordinate_batch_across_dp(
             num_tokens_unpadded,
             num_tokens_padded,
             should_attempt_ubatching,
-            allow_dp_padding,
             cudagraph_mode,
             parallel_config,
         )

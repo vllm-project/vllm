@@ -195,6 +195,8 @@ class Qwen2_5_VLVideoPixelInputs(TensorSchema):
         - second_per_grid_ts: The video time interval (in seconds) for each
           grid along the temporal dimension in the 3D position IDs. Returned
           when `videos` is not `None`.
+        - timestamps: List of timestamp values (in seconds) for each frame
+          after merging. Length equals the temporal dimension after merging.
     """
 
     type: Literal["pixel_values_videos"]
@@ -214,6 +216,8 @@ class Qwen2_5_VLVideoPixelInputs(TensorSchema):
         TensorShape("nv"),
     ]
 
+    timestamps: list[list[float]] | None = None
+
 
 class Qwen2_5_VLVideoEmbeddingInputs(TensorSchema):
     """
@@ -232,6 +236,8 @@ class Qwen2_5_VLVideoEmbeddingInputs(TensorSchema):
         - second_per_grid_ts: The video time interval (in seconds) for each
           grid along the temporal dimension in the 3D position IDs. Returned
           when `videos` is not `None`.
+        - timestamps: List of timestamp values (in seconds) for each frame
+          after merging. Length equals the temporal dimension after merging.
     """
 
     type: Literal["video_embeds"]
@@ -250,6 +256,7 @@ class Qwen2_5_VLVideoEmbeddingInputs(TensorSchema):
         torch.Tensor | None,
         TensorShape("nv"),
     ] = None
+    timestamps: list[list[float]] | None = None
 
 
 Qwen2_5_VLVideoInputs: TypeAlias = (
