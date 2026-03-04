@@ -18,7 +18,6 @@ from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
 from tests.kernels.moe.utils import TestMLP, make_test_weights, moe_quantize_weights
 from vllm.config import (
     CompilationConfig,
-    CompilationMode,
     ParallelConfig,
     VllmConfig,
     get_current_vllm_config,
@@ -477,7 +476,12 @@ def _test_loop(
     if tp_size > 1:
         # hidden_states = chunk_by_rank(hidden_states, tp_rank, tp_size, dim=1, device=device)
         # router_logits = chunk_by_rank(router_logits, tp_rank, tp_size, dim=1, device=device)
-        w1 = chunk_by_rank(w1, tp_rank, tp_size, dim=1, device=device)
+        # w1 is the combined [gate; up] tensor with shape (E, 2*N, K).
+        # Split each half separately so each TP rank gets a portion of both.
+        half = w1.shape[1] // 2
+        w1_gate = chunk_by_rank(w1[:, :half, :], tp_rank, tp_size, dim=1, device=device)
+        w1_up = chunk_by_rank(w1[:, half:, :], tp_rank, tp_size, dim=1, device=device)
+        w1 = torch.cat([w1_gate, w1_up], dim=1)
         w2 = chunk_by_rank(w2, tp_rank, tp_size, dim=2, device=device)
         # w1 = w1.to(device)
         # w2 = w2.to(device)
@@ -533,7 +537,9 @@ def _test_loop(
 
         # What?
         if moe_layer._expert_map is not None:
-            moe_layer._expert_map = moe_layer._expert_map.to(torch.cuda.current_device())
+            moe_layer._expert_map = moe_layer._expert_map.to(
+                torch.cuda.current_device()
+            )
 
         # output should be completely reduced at this point
         num_tokens = m
@@ -624,12 +630,11 @@ def test_moe_layer(
     )
 
     compilation_config = CompilationConfig()
-    #compilation_config.mode = CompilationMode.NONE  # for now
-    compilation_config.pass_config.fuse_allreduce_rms = False # for now
+    # compilation_config.mode = CompilationMode.NONE  # for now
+    compilation_config.pass_config.fuse_allreduce_rms = False  # for now
 
     vllm_config = VllmConfig(
-        parallel_config=parallel_config,
-        compilation_config=compilation_config
+        parallel_config=parallel_config, compilation_config=compilation_config
     )
 
     in_dtype = torch.bfloat16
