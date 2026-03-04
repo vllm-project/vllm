@@ -1,4 +1,4 @@
-# Classification
+# Classification Models
 
 Classification is the task of predicting which of predefined categories or classes or labels the input data belongs to.
 
