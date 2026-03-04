@@ -265,19 +265,15 @@ def wait_for_completion_or_failure(
         # start monitor for engine liveness
         if engine_manager:
             engine_dead_event = threading.Event()
-            dead_msg: str | None = None
 
-            def engine_down_callback(dead_proc, all_processes: list):
-                nonlocal dead_msg
+            def shutdown_callback(*_, **__):
                 assert engine_manager is not None
                 engine_dead_event.set()
-                dead_engine_index = all_processes.index(dead_proc)
-                dead_msg = f"Engine core process {dead_engine_index} is dead."
                 engine_manager.shutdown_monitor = True
 
             monitor_thread = threading.Thread(
                 target=engine_manager.monitor_engine_liveness,
-                args=(engine_down_callback,),
+                args=(shutdown_callback,),
                 daemon=True,
             )
             monitor_thread.start()
@@ -285,8 +281,7 @@ def wait_for_completion_or_failure(
         # Check if any process terminates
         while sentinel_to_proc:
             if engine_manager is not None and engine_dead_event.is_set():
-                assert dead_msg is not None
-                raise RuntimeError(dead_msg)
+                raise RuntimeError("Engine core process is dead.")
             # Wait for any process to terminate
             ready_sentinels: list[Any] = connection.wait(sentinel_to_proc, timeout=5)
 

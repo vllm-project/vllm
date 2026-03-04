@@ -864,7 +864,10 @@ class CoreEngineActorManager:
             refs_to_watch = list(actor_run_refs - processed_done_refs)
             actor_done_refs, _ = ray.wait(refs_to_watch, timeout=5)
             for actor_ref in actor_done_refs:
-                logger.error("Engine core actor died: %s", actor_ref)
+                try:
+                    ray.get(actor_ref)
+                except ray.exceptions.RayActorError:
+                    logger.error("Engine core actor died: %s", actor_ref)
                 if engine_down_callback is not None:
                     engine_down_callback(
                         dead_proc=actor_ref, all_processes=list(actor_run_refs)
