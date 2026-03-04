@@ -417,6 +417,8 @@ jsonschema-specifications==2024.10.1
     # via jsonschema
 junit-xml==1.9
     # via schemathesis
+kaldi-native-fbank==1.22.3
+    # via -r requirements/test.in
 kaleido==0.2.1
     # via genai-perf
 kiwisolver==1.4.7
