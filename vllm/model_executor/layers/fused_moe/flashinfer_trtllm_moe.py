@@ -252,7 +252,7 @@ def flashinfer_fused_moe_blockscale_fp8(
     return flashinfer_trtllm_fp8_block_scale_moe(
         routing_logits=routing_logits,
         routing_bias=routing_bias,
-        hidden_states=a_q.to(torch.float8_e4m3fn),
+        hidden_states=a_q,
         hidden_states_scale=a_sf,
         gemm1_weights=w13_weight,
         gemm1_weights_scale=w13_weight_scale_inv,
