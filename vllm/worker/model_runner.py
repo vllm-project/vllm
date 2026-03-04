@@ -1903,6 +1903,12 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             if model_input.inputs_embeds is not None:
                 self.sampler.include_gpu_probs_tensor = True
 
+            # 检查是否有启用tree decoding的请求
+            if (model_input.sampling_metadata is not None and 
+                any(seq_group.sampling_params.tree_search_params.enable_tree_search 
+                    for seq_group in model_input.sampling_metadata.seq_groups)):
+                self.sampler.include_gpu_probs_tensor = True
+
             output: SamplerOutput = self.sampler(
                 logits=logits,
                 sampling_metadata=model_input.sampling_metadata,
