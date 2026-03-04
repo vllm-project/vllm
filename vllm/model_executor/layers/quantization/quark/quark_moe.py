@@ -54,7 +54,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d,
     normalize_e4m3fn_to_e4m3fnuz,
@@ -1505,7 +1504,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         shared_experts_input: Any | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.moe_mk is not None
-        return self.moe_mk(
+        return self.moe_mk.apply(
             x,
             layer.w13_weight,
             layer.w2_weight,
