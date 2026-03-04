@@ -70,9 +70,9 @@ class FunctionGemmaToolParser(ToolParser):
 
         self.buffered_delta_text = ""
 
-    def _parse_arguments(self, args_str: str) -> dict[str, object]:
+    def _parse_arguments(self, args_str: str) -> dict:
         """Parse FunctionGemma argument string into a dictionary."""
-        arguments: dict[str, object] = {}
+        arguments: dict = {}
         if not args_str:
             return arguments
 
