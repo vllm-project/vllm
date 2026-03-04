@@ -122,7 +122,7 @@ For a deployment with `N` GPUs, `TP` tensor parallel size, `DP` data parallel si
 |---|---|---|
 | API Server | `A` (default `DP`) | Handles HTTP requests and input processing |
 | Engine Core | `DP` (default 1) | Scheduler and KV cache management |
-| GPU Worker | `N` (= `DP x TP`) | One per GPU, executes model forward passes |
+| GPU Worker | `N` (= `DP x PP x TP`) | One per GPU, executes model forward passes |
 | DP Coordinator | 1 if `DP > 1`, else 0 | Load balancing across DP ranks |
 | **Total** | **`A + DP + N` (+ 1 if DP > 1)** | |
 
