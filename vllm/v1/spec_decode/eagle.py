@@ -107,15 +107,6 @@ class SpecDecodeBaseProposer:
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.token_arange_np = np.arange(self.max_num_tokens)
 
-        # Multi-modal data support
-        # Based on the DRAFT model config so that:
-        #   - EAGLE + VLM draft (pass_hidden_states_to_model=True):
-        #       supports_mm_inputs=True → inject target's mm_embeds into draft.
-        #   - draft_model + VLM draft (pass_hidden_states_to_model=False):
-        #       supports_mm_inputs=True, but the condition in propose() gates on
-        #       pass_hidden_states_to_model, so input_ids are used instead.
-        #   - Cross-modal (VLM target + text-only draft):
-        #       supports_mm_inputs=False → input_ids path, no injection.
         self.mm_registry = MULTIMODAL_REGISTRY
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             self.draft_model_config
@@ -148,8 +139,6 @@ class SpecDecodeBaseProposer:
         self.draft_uses_xdrope_dim = self.draft_model_config.uses_xdrope_dim
         # 1D positions buffer: always created because the kernel
         # (copy_and_expand_eagle_inputs_kernel) always writes 1D positions here.
-        # When draft uses M-RoPE or XDRoPE, this buffer is used as an intermediate
-        # and then expanded into mrope_positions / xdrope_positions afterward.
         self.positions = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=device
         )
@@ -338,12 +327,6 @@ class SpecDecodeBaseProposer:
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
             self.xdrope_positions[:, :num_tokens] = positions
         else:
-            # Cross-modal (target M-RoPE, draft 1D RoPE): extract the time
-            # dimension from the 3D target positions [3, N] → [N].
-            # Guard on ndim > 1 so that when this is called from the
-            # speculative-decoding proposal loop with an already-1D tensor
-            # [batch_size], positions[0] does NOT reduce it to a scalar and
-            # accidentally broadcast request-0's position to all requests.
             if self.vllm_config.model_config.uses_mrope and positions.ndim > 1:
                 positions = positions[0]
             self.positions[:num_tokens] = positions
@@ -465,8 +448,7 @@ class SpecDecodeBaseProposer:
 
         if self.supports_mm_inputs and self.pass_hidden_states_to_model:
             # EAGLE with VLM draft: the draft IS the full VLM (same architecture
-            # as the target). Inject the target's cached mm_embeds so that image
-            # placeholder positions are correctly embedded.
+            # as the target).
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
 
             self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
@@ -479,10 +461,7 @@ class SpecDecodeBaseProposer:
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
         else:
             # draft_model (standalone): always use input_ids regardless of
-            # whether the draft is multimodal.  Image placeholder tokens are
-            # treated as regular tokens; image content is already in the
-            # target's KV cache.  M-RoPE positions are handled separately
-            # based on the draft model's own config.
+            # whether the draft is multimodal.
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
 
@@ -786,19 +765,11 @@ class SpecDecodeBaseProposer:
             if num_rejected_tokens_gpu is not None:
                 query_end_loc = query_end_loc - num_rejected_tokens_gpu
             # Determine positions to pass to the kernel.
-            # The kernel reads one scalar per request (tl.load(ptr + query_start_loc))
-            # and generates sequential positions starting from that value.
             kernel_positions = target_positions
             if self.vllm_config.model_config.uses_mrope:
                 if not self.uses_mrope:
-                    # Cross-modal: target uses M-RoPE, draft uses 1D sequential RoPE.
-                    # M-RoPE time positions are COMPRESSED for image tokens:
-                    #   M-RoPE time = sequential_1D + mrope_position_delta
-                    # where mrope_position_delta < 0 for image-containing sequences.
-                    # Using target_positions[0] directly gives wrong draft positions
-                    # during decode (and chunked prefill after image).
-                    # Compute correct sequential 1D start position for each request:
-                    #   num_computed = seq_lens - extend_len = first sequential position
+                    # Cross-modal: target (M-RoPE) compresses image token positions, so reconstruct
+                    # 1D sequential positions for the draft model.
                     extend_lens = (
                         cad.query_start_loc[1 : batch_size + 1]
                         - cad.query_start_loc[:batch_size]
@@ -863,15 +834,6 @@ class SpecDecodeBaseProposer:
             # Populate mrope_positions for draft models that use M-RoPE.
             if self.uses_mrope:
                 if self.vllm_config.model_config.uses_mrope:
-                    # Both draft and target use M-RoPE.
-                    # The kernel only writes 1D sequential positions, which is
-                    # wrong for image tokens (height/width dims ≠ time dim).
-                    # Instead, copy the actual 3D M-RoPE positions from the
-                    # target directly.
-                    #
-                    # Kernel output slot layout (shift_input_ids=False):
-                    #   output_start_i = query_start_loc_i + i * extra_slots
-                    # So: out_flat_idx = in_flat_idx + request_rank_of_token
                     extend_lens_batch = (
                         cad.query_start_loc[1 : batch_size + 1]
                         - cad.query_start_loc[:batch_size]
@@ -901,8 +863,6 @@ class SpecDecodeBaseProposer:
                     )
                     # Rejected slots remain 0 (already zero-initialised).
                 else:
-                    # Draft uses M-RoPE but target does not (unusual).
-                    # All spec tokens are text tokens so all dims are equal.
                     self.mrope_positions[:, :total_num_output_tokens] = (
                         self.positions[:total_num_output_tokens]
                     )
