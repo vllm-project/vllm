@@ -387,8 +387,8 @@ class Resampler4_5(Resampler2_5):
             pos_embed_2d, batch_first=True, padding_value=0.0
         ).permute(1, 0, 2)  # BLD => L * B * D
 
-        k = x
-        v = x + pos_embed_2d
+        k = x + pos_embed_2d
+        v = x
         if pos_embed_temporal:
             k += torch.stack(pos_embed_temporal, dim=0)
             bs = len(temporal_ids)
