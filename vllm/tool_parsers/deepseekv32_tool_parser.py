@@ -196,7 +196,6 @@ class DeepSeekV32ToolParser(ToolParser):
             return name_str[1:-1]
         return name_str
 
-
     def _compute_current_args_json(
         self, tool_text: str, request: ChatCompletionRequest | None
     ) -> str:
@@ -235,9 +234,9 @@ class DeepSeekV32ToolParser(ToolParser):
         """Mark the current tool call complete and persist final arguments."""
         if self.current_tool_index < len(self.prev_tool_call_arr):
             try:
-                self.prev_tool_call_arr[self.current_tool_index][
-                    "arguments"
-                ] = json.loads(complete_args_json)
+                self.prev_tool_call_arr[self.current_tool_index]["arguments"] = (
+                    json.loads(complete_args_json)
+                )
             except json.JSONDecodeError:
                 logger.warning(
                     "[V32_STREAMING] Failed to parse complete args JSON: %s",
@@ -406,7 +405,9 @@ class DeepSeekV32ToolParser(ToolParser):
                     initial_args = self._compute_current_args_json(tool_text, request)
                     self.streamed_args_for_tool[self.current_tool_index] = initial_args
 
-                    if self.invoke_end_token in tool_text and initial_args.endswith("}"):
+                    if self.invoke_end_token in tool_text and initial_args.endswith(
+                        "}"
+                    ):
                         self._finalize_tool_call(initial_args)
 
                     return DeltaMessage(
@@ -432,7 +433,7 @@ class DeepSeekV32ToolParser(ToolParser):
             if self.current_tool_index < len(self.streamed_args_for_tool)
             else ""
         )
-        args_delta = current_args[len(already_sent):]
+        args_delta = current_args[len(already_sent) :]
 
         if not args_delta:
             return None
