@@ -1309,16 +1309,15 @@ class NemoConvSubsampling(torch.nn.Module):
             raise ValueError(f"Not valid sub-sampling: {subsampling}!")
 
         if subsampling in ["dw_striding", "striding"]:
-            in_length = torch.tensor(feat_in, dtype=torch.float)
-            out_length = calc_length(
-                lengths=in_length,
+            out_length = calc_length_int(
+                lengths=feat_in,
                 all_paddings=self._left_padding + self._right_padding,
                 kernel_size=self._kernel_size,
                 stride=self._stride,
                 ceil_mode=self._ceil_mode,
                 repeat_num=self._sampling_num,
             )
-            self.out = torch.nn.Linear(conv_channels * int(out_length), feat_out)
+            self.out = torch.nn.Linear(conv_channels * out_length, feat_out)
             self.conv2d_subsampling = True
         elif subsampling in ["striding_conv1d", "dw_striding_conv1d"]:
             self.out = None
@@ -1559,6 +1558,29 @@ def calc_length(
         lengths = torch.div(lengths.to(dtype=torch.float) + add_pad, stride) + one
         lengths = torch.ceil(lengths) if ceil_mode else torch.floor(lengths)
     return lengths.to(dtype=torch.int)
+
+
+def calc_length_int(
+    lengths: int,
+    all_paddings: int,
+    kernel_size: int,
+    stride: int,
+    ceil_mode: bool,
+    repeat_num: int = 1,
+) -> int:
+    """Integer-only variant of calc_length for meta-safe shape computation.
+
+    Computes the output length of a 1D convolution / pooling stack using
+    the same formula as calc_length, but operates purely on Python numbers
+    so it can be safely used during meta tensor initialization.
+    """
+    add_pad: float = all_paddings - kernel_size
+    one: float = 1.0
+    length_f: float = float(lengths)
+    for _ in range(repeat_num):
+        length_f = (length_f + add_pad) / stride + one
+        length_f = math.ceil(length_f) if ceil_mode else math.floor(length_f)
+    return int(length_f)
 
 
 ####  multihead attention starts here
