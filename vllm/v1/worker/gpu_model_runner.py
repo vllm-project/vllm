@@ -1047,7 +1047,9 @@ class GPUModelRunner(
         blk_size = min(alignment, 1024)
         self._kv_zero_id_cap = 8192
         self._kv_zero_ids_pinned = torch.empty(
-            self._kv_zero_id_cap, dtype=torch.int64, pin_memory=True
+            self._kv_zero_id_cap,
+            dtype=torch.int64,
+            pin_memory=self.pin_memory,
         )
         self._kv_zero_ids_gpu = torch.empty(
             self._kv_zero_id_cap, dtype=torch.int64, device=self.device
@@ -1068,7 +1070,9 @@ class GPUModelRunner(
         if n_blocks > self._kv_zero_id_cap:
             self._kv_zero_id_cap = n_blocks * 2
             self._kv_zero_ids_pinned = torch.empty(
-                self._kv_zero_id_cap, dtype=torch.int64, pin_memory=True
+                self._kv_zero_id_cap,
+                dtype=torch.int64,
+                pin_memory=self.pin_memory,
             )
             self._kv_zero_ids_gpu = torch.empty(
                 self._kv_zero_id_cap, dtype=torch.int64, device=self.device
