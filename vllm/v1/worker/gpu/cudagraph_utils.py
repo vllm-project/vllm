@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -33,23 +34,17 @@ class BatchExecutionDescriptor:
     uniform: bool = False
     # Future LoRA support: num_active_loras: int = 0
 
-    @property
-    def is_cudagraph(self) -> bool:
-        return self.cg_mode != CUDAGraphMode.NONE
-
-    @property
-    def cudagraph_size(self) -> int | None:
-        return self.num_tokens if self.is_cudagraph else None
-
 
 def is_uniform_batch(
     num_reqs: int,
     num_tokens: int,
     max_query_len: int,
-    uniform_decode_query_len: int,
 ) -> bool:
-    """Check if a batch qualifies as uniform decode for cudagraph selection."""
-    return (max_query_len == uniform_decode_query_len) and (
+    """
+    Check if a batch "uniform"
+    i.e. all requests have the same number of tokens (max_query_len)
+    """
+    return (max_query_len == num_tokens // num_reqs) and (
         num_tokens == max_query_len * num_reqs
     )
 
@@ -122,51 +117,55 @@ class CudaGraphManager:
         mixed_mode = self.cudagraph_mode.mixed_mode()
         separate_decode_routine = self.cudagraph_mode.separate_routine()
 
-        candidates_by_padded_token_count: dict[int, list[BatchExecutionDescriptor]] = {}
+        descs_by_token_count: dict[int, list[BatchExecutionDescriptor]] = defaultdict(
+            list
+        )
+        descs_by_mode: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = (
+            defaultdict(list)
+        )
+
         for padded in capture_sizes:
             candidates: list[BatchExecutionDescriptor] = []
             if (
                 decode_mode != CUDAGraphMode.NONE
                 and self.uniform_decode_query_len <= padded <= max_uniform_tokens
             ):
-                candidates.append(
-                    BatchExecutionDescriptor(
-                        cg_mode=decode_mode,
-                        num_tokens=padded,
-                        num_reqs=padded // self.uniform_decode_query_len,
-                        # if separate decode routine, we assume the decode graphs needs
-                        # to be uniform (otherwise, a mixed mode graph would be fine)
-                        uniform=separate_decode_routine,
-                    )
+                desc = BatchExecutionDescriptor(
+                    cg_mode=decode_mode,
+                    num_tokens=padded,
+                    num_reqs=padded // self.uniform_decode_query_len,
+                    # if separate decode routine, we assume the decode graphs needs
+                    # to be uniform (otherwise, a mixed mode graph would be fine)
+                    uniform=separate_decode_routine,
                 )
+                descs_by_mode[decode_mode].append(desc)
+                descs_by_token_count[padded].append(desc)
+
             if mixed_mode != CUDAGraphMode.NONE:
-                candidates.append(
-                    BatchExecutionDescriptor(
-                        cg_mode=mixed_mode,
-                        num_tokens=padded,
-                        num_reqs=min(padded, self.max_num_reqs),
-                        uniform=False,
-                    )
+                desc = BatchExecutionDescriptor(
+                    cg_mode=mixed_mode,
+                    num_tokens=padded,
+                    num_reqs=min(padded, self.max_num_reqs),
+                    uniform=False,
                 )
+                descs_by_mode[mixed_mode].append(desc)
+                descs_by_token_count[padded].append(desc)
+
             if candidates:
-                candidates_by_padded_token_count[padded] = candidates
+                descs_by_token_count[padded] = candidates
 
-        if candidates_by_padded_token_count:
-            max_capture_size = max(candidates_by_padded_token_count.keys())
-            sorted_padded = sorted(candidates_by_padded_token_count.keys())
-            self._candidates = [[] for _ in range(max_capture_size + 1)]
-            for num_tokens in range(1, max_capture_size + 1):
-                for padded in sorted_padded:
-                    if num_tokens <= padded:
-                        self._candidates[num_tokens] = candidates_by_padded_token_count[
-                            padded
-                        ]
-                        break
+        if not descs_by_token_count:
+            return
 
-        descs_by_mode: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
-        for candidates in candidates_by_padded_token_count.values():
-            for desc in candidates:
-                descs_by_mode.setdefault(desc.cg_mode, []).append(desc)
+        sorted_padded = sorted(descs_by_token_count.keys())
+        self._candidates = [[] for _ in range(sorted_padded[-1] + 1)]
+
+        current_range_start = 0
+        for cg_size in sorted_padded:
+            for i in range(current_range_start, cg_size):
+                self._candidates[i] = descs_by_token_count[cg_size]
+            current_range_start += cg_size
+
         for mode, descs in descs_by_mode.items():
             descs.sort(key=lambda d: d.num_tokens, reverse=True)
             self._capture_descs.append((mode, descs))

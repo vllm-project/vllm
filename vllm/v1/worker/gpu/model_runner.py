@@ -507,12 +507,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         with self.maybe_setup_dummy_loras(self.lora_config):
             self.cudagraph_manager.capture(
-                self.model,
-                self.model_state,
-                self.input_buffers,
-                self.block_tables,
-                self.attn_groups,
-                self.kv_cache_config,
+                model=self.model,
+                model_state=self.model_state,
+                input_buffers=self.input_buffers,
+                block_tables=self.block_tables,
+                attn_groups=self.attn_groups,
+                kv_cache_config=self.kv_cache_config,
                 has_lora=self.lora_config is not None,
                 use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
                 dp_size=self.parallel_config.data_parallel_size,
@@ -877,9 +877,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_reqs = len(scheduler_output.num_scheduled_tokens)
         num_tokens = scheduler_output.total_num_scheduled_tokens
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
-        is_uniform = is_uniform_batch(
-            num_reqs, num_tokens, max_query_len, self.uniform_decode_query_len
-        )
+        is_uniform = is_uniform_batch(num_reqs, num_tokens, max_query_len)
+
         batch_desc = self.cudagraph_manager.get_cudagraph_desc(
             num_reqs, num_tokens, is_uniform
         )
