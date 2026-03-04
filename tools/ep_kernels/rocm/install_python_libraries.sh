@@ -80,11 +80,6 @@ done
 
 mkdir -p "$WORKSPACE"
 
-WHEEL_DIR="$WORKSPACE/dist"
-mkdir -p "$WHEEL_DIR"
-
-pushd "$WORKSPACE"
-
 is_git_dirty() {
     local dir=$1
     pushd "$dir" > /dev/null
@@ -219,8 +214,3 @@ do_build_mori \
     "setup.py" \
     "$MORI_COMMIT_HASH" \
     "MORI_GPU_ARCHS=${MORI_GPU_ARCHS}"
-
-if [ "$MODE" = "wheel" ]; then
-    echo "All wheels written to $WHEEL_DIR"
-    ls -l "$WHEEL_DIR"
-fi
