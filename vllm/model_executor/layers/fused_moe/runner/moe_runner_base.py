@@ -78,6 +78,8 @@ def _resolve_layer_name(layer_name: str | ModuleName) -> str:
 # Note: _moe_forward and _moe_forward_shared should not contain any
 # implementation details, They should merely pass along control to
 # the runner's '_forward_dispatch' method.
+# These functions should never be called directly since they do not
+# include all the functionality of the MoE layer.
 def _moe_forward(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
@@ -250,7 +252,7 @@ class MoERunnerBase(MoERunner):
         # Needed for string -> FusedMoE layer lookup in custom ops.
         self.layer_name = layer.layer_name
 
-        self.forward_entry = self._select_forward(layer)
+        self._forward_entry = self._select_forward(layer)
 
     def _select_forward(self, layer: torch.nn.Module) -> Callable:
         if current_platform.is_tpu() or current_platform.is_cpu():
@@ -563,7 +565,7 @@ class MoERunnerBase(MoERunner):
 
         Calling sequence
         - forward
-          - self.forward_entry (_moe_forward or _moe_forward_shared custom op)
+          - self._forward_entry (_moe_forward or _moe_forward_shared custom op)
             - _forward_dispatch
               - _forward_impl
 
@@ -590,7 +592,14 @@ class MoERunnerBase(MoERunner):
             hidden_states,
         )
 
-        result = self.forward_entry(
+        router_logits = self._maybe_gate(hidden_states, router_logits)
+
+        self._maybe_apply_shared_experts(
+            shared_experts_input,
+            SharedExpertsOrder.EXTERNAL,
+        )
+
+        result = self._forward_entry(
             hidden_states,
             router_logits,
             shared_experts_input,
@@ -644,14 +653,6 @@ class MoERunnerBase(MoERunner):
         """
         # TODO(bnell): this can be removed after MK migration is complete.
         layer.ensure_moe_quant_config_init()
-
-        # TODO: move _maybe_gate and _maybe_apply_shared_experts to forward?
-        router_logits = self._maybe_gate(hidden_states, router_logits)
-
-        self._maybe_apply_shared_experts(
-            shared_experts_input,
-            SharedExpertsOrder.EXTERNAL,
-        )
 
         with self._sequence_parallel_context():
             return self._forward_impl(
