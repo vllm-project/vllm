@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from abc import ABCMeta
+
 import torch
 
 from vllm.logger import init_logger
@@ -20,7 +22,7 @@ logger = init_logger(__name__)
 
 
 # --8<-- [start:modular_fused_moe]
-class FusedMoEModularMethod(FusedMoEMethodBase, torch.nn.Module):
+class FusedMoEModularMethod(FusedMoEMethodBase, torch.nn.Module, metaclass=ABCMeta):
     # --8<-- [end:modular_fused_moe]
 
     def __init__(
