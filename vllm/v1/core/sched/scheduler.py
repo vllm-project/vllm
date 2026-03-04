@@ -871,7 +871,11 @@ class Scheduler(SchedulerInterface):
         self.prev_step_scheduled_req_ids.clear()
         self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
-        new_block_ids_to_zero = self.kv_cache_manager.take_new_block_ids() or None
+        new_block_ids_to_zero = (
+            (self.kv_cache_manager.take_new_block_ids() or None)
+            if self.has_mamba_layers
+            else None
+        )
 
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
