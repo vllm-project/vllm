@@ -4622,16 +4622,17 @@ class GPUModelRunner(
                     start_idx : start_idx + num_logits
                 ]
                 vs = min(logits.shape[-1], ref_logits.shape[-1])
-                probs_model = F.softmax(
-                    logits[..., :vs].float() + 1e-10, dim=-1
+                log_probs_model = F.log_softmax(
+                    logits[..., :vs].float(), dim=-1
                 )
-                probs_ref = F.softmax(
-                    ref_logits[..., :vs].float() + 1e-10, dim=-1
+                log_probs_ref = F.log_softmax(
+                    ref_logits[..., :vs].float(), dim=-1
                 )
                 kld_per_pos = F.kl_div(
-                    torch.log(probs_model + 1e-10),
-                    probs_ref,
+                    log_probs_model,
+                    log_probs_ref,
                     reduction="none",
+                    log_target=True,
                 ).sum(dim=-1)
                 kld_sum = kld_per_pos.sum().item()
                 kld_count = kld_per_pos.numel()
