@@ -376,8 +376,7 @@ class ExecuteModelState(NamedTuple):
 
 @triton.jit
 def _zero_kv_blocks_kernel(
-    raw_ptr,
-    seg_offsets_ptr,
+    seg_addrs_ptr,
     block_ids_ptr,
     n_blocks,
     N_SEGS: tl.constexpr,
@@ -391,6 +390,9 @@ def _zero_kv_blocks_kernel(
     buffer.  For backends where K/V is outermost (block_dim=1) there are
     two segments per buffer (one for K, one for V).
 
+    seg_addrs_ptr holds absolute byte addresses (int64) for each segment,
+    allowing segments to live in different CUDA allocations.
+
     Programs are mapped as (block_index, seg_index, chunk_index).
     """
     pid = tl.program_id(0)
@@ -403,14 +405,13 @@ def _zero_kv_blocks_kernel(
     seg_index = remainder // chunks
     chunk_index = remainder % chunks
     block_id = tl.load(block_ids_ptr + block_index)
-    seg_offset = tl.load(seg_offsets_ptr + seg_index)
-    base = (
-        seg_offset
-        + block_id.to(tl.int64) * PAGE_SIZE_EL
-        + chunk_index.to(tl.int64) * BLOCK_SIZE
+    seg_addr = tl.load(seg_addrs_ptr + seg_index)
+    ptr = tl.cast(seg_addr, tl.pointer_type(tl.int32))
+    offset = (
+        block_id.to(tl.int64) * PAGE_SIZE_EL + chunk_index.to(tl.int64) * BLOCK_SIZE
     )
     cols = tl.arange(0, BLOCK_SIZE).to(tl.int64)
-    tl.store(raw_ptr + base + cols, tl.zeros([BLOCK_SIZE], dtype=tl.int32))
+    tl.store(ptr + offset + cols, tl.zeros([BLOCK_SIZE], dtype=tl.int32))
 
 
 class GPUModelRunner(
@@ -962,10 +963,14 @@ class GPUModelRunner(
     def _init_kv_zero_meta(self) -> None:
         """One-time precomputation for _zero_block_ids.
 
-        Builds a segment-offset table for the Triton zeroing kernel.
-        A "segment" is one contiguous slice of a block's data inside the
-        raw buffer.  The block dimension and segment layout are derived
-        from get_kv_cache_shape (via sentinel) and the tensor's strides.
+        Builds absolute-address table for the Triton zeroing kernel.
+        Each entry is the absolute byte address of a segment start on the
+        GPU, so segments in different CUDA allocations work correctly.
+
+        Block IDs from the scheduler reference logical blocks whose size
+        may differ from the kernel block size (virtual block splitting).
+        PAGE_SIZE_EL accounts for this ratio so that
+        ``block_id * PAGE_SIZE_EL`` lands at the correct offset.
 
         Only AttentionSpec layers are processed; Mamba layers are skipped.
         """
@@ -976,10 +981,8 @@ class GPUModelRunner(
         kernel_block_sizes = self._kernel_block_sizes
 
         seen_ptrs: set[int] = set()
-        first_storage: torch.UntypedStorage | None = None
-        base_ptr = 0
-        seg_offsets: list[int] = []
-        seg_size_el: int | None = None
+        seg_addrs: list[int] = []
+        page_size_el: int | None = None
 
         for group in self._kv_cache_spec_attn_group_iterator():
             spec = group.kv_cache_spec
@@ -988,6 +991,8 @@ class GPUModelRunner(
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
             kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
+            mgr_bs = spec.block_size
+            ratio = mgr_bs // kernel_bs
             _S = 1234567
             shape = group.backend.get_kv_cache_shape(
                 _S,
@@ -1010,23 +1015,20 @@ class GPUModelRunner(
                 if dp in seen_ptrs:
                     continue
                 seen_ptrs.add(dp)
-                if first_storage is None:
-                    first_storage = kv.untyped_storage()
-                    base_ptr = dp
 
                 el = kv.element_size()
                 cur_bytes = kv.stride(block_dim) * el
                 assert cur_bytes % 4 == 0
-                cur_el = cur_bytes // 4
-                if seg_size_el is None:
-                    seg_size_el = cur_el
+                kernel_block_el = cur_bytes // 4
+                cur_page_el = kernel_block_el * ratio
+                if page_size_el is None:
+                    page_size_el = cur_page_el
                 else:
-                    assert seg_size_el == cur_el, (
-                        f"Non-uniform segment sizes: {seg_size_el} vs {cur_el}"
+                    assert page_size_el == cur_page_el, (
+                        f"Non-uniform page sizes: {page_size_el} vs {cur_page_el}"
                     )
 
-                buf_base = dp - base_ptr
-                block_stride_bytes = kv.stride(block_dim) * el
+                block_stride_bytes = cur_bytes
                 outer_dims = [
                     d
                     for d in range(block_dim)
@@ -1034,15 +1036,14 @@ class GPUModelRunner(
                 ]
                 outer_strides = [kv.stride(d) * el for d in outer_dims]
                 for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
-                    off = buf_base + sum(i * s for i, s in zip(outer, outer_strides))
-                    assert off % 4 == 0
-                    seg_offsets.append(off // 4)
+                    off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
+                    seg_addrs.append(dp + off_bytes)
 
-        if not seg_offsets or first_storage is None or seg_size_el is None:
+        if not seg_addrs or page_size_el is None:
             self._kv_zero_meta = None
             return
 
-        alignment = seg_size_el & (-seg_size_el)
+        alignment = page_size_el & (-page_size_el)
         blk_size = min(alignment, 1024)
         self._kv_zero_id_cap = 8192
         self._kv_zero_ids_pinned = torch.empty(
@@ -1051,21 +1052,18 @@ class GPUModelRunner(
         self._kv_zero_ids_gpu = torch.empty(
             self._kv_zero_id_cap, dtype=torch.int64, device=self.device
         )
-        self._kv_zero_raw_i32 = torch.tensor(
-            [], dtype=torch.int32, device=self.device
-        ).set_(first_storage)
         self._kv_zero_meta = (
-            torch.tensor(seg_offsets, dtype=torch.int64, device=self.device),
-            seg_size_el,
+            torch.tensor(seg_addrs, dtype=torch.int64, device=self.device),
+            page_size_el,
             blk_size,
-            len(seg_offsets),
+            len(seg_addrs),
         )
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
         """Zero the KV cache memory for the given block IDs."""
         if not block_ids or self._kv_zero_meta is None:
             return
-        seg_offsets, page_size_el, blk_size, n_segs = self._kv_zero_meta
+        seg_addrs, page_size_el, blk_size, n_segs = self._kv_zero_meta
         n_blocks = len(block_ids)
         if n_blocks > self._kv_zero_id_cap:
             self._kv_zero_id_cap = n_blocks * 2
@@ -1080,8 +1078,7 @@ class GPUModelRunner(
         idx.copy_(self._kv_zero_ids_pinned[:n_blocks], non_blocking=True)
         grid = (n_blocks * n_segs * (page_size_el // blk_size),)
         _zero_kv_blocks_kernel[grid](
-            self._kv_zero_raw_i32,
-            seg_offsets,
+            seg_addrs,
             idx,
             n_blocks,
             N_SEGS=n_segs,
