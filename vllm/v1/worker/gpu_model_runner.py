@@ -1799,26 +1799,20 @@ class GPUModelRunner(
                 self.mrope_positions.cpu[:, :total_num_scheduled_tokens],
                 non_blocking=True,
             )
-            if self.use_async_spec_decode:
-                drift = self.num_computed_tokens[req_indices_gpu].to(
-                    torch.int64
-                ) - self.input_batch.num_computed_tokens_cpu_tensor[req_indices].to(
-                    device=self.device, dtype=torch.int64, non_blocking=True
-                )
-                self.mrope_positions.gpu[:, :total_num_scheduled_tokens] += drift
         elif self.uses_xdrope_dim > 0:
             # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
             self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
                 self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
                 non_blocking=True,
             )
-            if self.use_async_spec_decode:
-                drift = self.num_computed_tokens[req_indices_gpu].to(
-                    torch.int64
-                ) - self.input_batch.num_computed_tokens_cpu_tensor[req_indices].to(
-                    device=self.device, dtype=torch.int64, non_blocking=True
-                )
-                self.xdrope_positions.gpu[:, :total_num_scheduled_tokens] += drift
+        if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
+            drift = self.num_computed_tokens[req_indices_gpu].to(
+                torch.int64
+            ) - self.input_batch.num_computed_tokens_cpu_tensor[req_indices].to(
+                device=self.device, dtype=torch.int64, non_blocking=True
+            )
+            target = self.mrope_positions if self.uses_mrope else self.xdrope_positions
+            target.gpu[:, :total_num_scheduled_tokens] += drift
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
