@@ -537,9 +537,6 @@ class NixlEplbCommunicator(EplbCommunicator):
             # READ is receiver-initiated; synchronize all ranks before transfer.
             torch.distributed.barrier(group=self._cpu_group)
 
-            if not recv_transfers:
-                return
-
             # Phase 2: communicate/unpack for each dtype.
             for (
                 dtype,
