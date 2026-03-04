@@ -27,12 +27,12 @@ from torch import nn
 from transformers import AutoModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.attention.layer import Attention
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.encoder_only_attention import (
+from vllm.model_executor.layers.attention import (
+    Attention,
     EncoderOnlyAttention,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -191,6 +191,7 @@ class Base(
         self.attention_instances = self.create_attention_instances()
 
         # Input embeddings
+        self.embed_scale = None
         input_embeddings = self.model.get_input_embeddings()
         if not isinstance(input_embeddings, PPMissingLayer):
             # Some models scale embeddings inside the input embedding layer
@@ -249,7 +250,8 @@ class Base(
         # Layers before module list
         for name in pp_plan[:module_list_idx]:
             if self.pp_group.is_first_rank or (
-                self.text_config.tie_word_embeddings and self.pp_group.is_last_rank
+                getattr(self.text_config, "tie_word_embeddings", False)
+                and self.pp_group.is_last_rank
             ):
                 continue
             setattr(self.model, name, PPMissingLayer())
@@ -298,14 +300,26 @@ class Base(
             for child_name, child_module in module.named_children():
                 new_module = child_module
                 qual_name = maybe_prefix(prefix, child_name)
-                # Populate Eagle3 attrs
                 if (
                     isinstance(module, nn.ModuleList)
                     and len(module) == self.text_config.num_hidden_layers
                 ):
+                    # Populate Eagle3 attrs
                     self._target_class = type(child_module)
                     layer_name = qual_name.removeprefix("model.")
                     self._layer_names[int(child_name)] = layer_name
+                    # MTP weights should not be loaded into the base model
+                    num_hidden_layers = self.text_config.num_hidden_layers
+                    names = (
+                        "n_predict",  # Override from SpeculativeConfig
+                        "num_nextn_predict_layers",  # Most models
+                        "mtp_num_hidden_layers",  # Qwen 3.5
+                    )
+                    n_predict = getattr_iter(self.text_config, names, 0)
+                    for i in range(num_hidden_layers, num_hidden_layers + n_predict):
+                        mtp_prefix = f"{prefix}.{i}."
+                        if mtp_prefix not in self.ignore_unexpected_prefixes:
+                            self.ignore_unexpected_prefixes.append(mtp_prefix)
                 # Replace modules as needed
                 if isinstance(child_module, nn.Linear):
                     generator = (p for p in tp_plan if re.match(p, qual_name))
@@ -350,7 +364,7 @@ class Base(
         # vLLM does not support encoder-decoder models, so if any encoder layer is
         # found in a text only model, we assume the whole model is an encoder model
         if has_encoder(self.model) and not is_multimodal(self.config):
-            self.check_version("5.0.0.dev0", "encoder models support")
+            self.check_version("5.0.0", "encoder models support")
             attn_type = AttentionType.ENCODER_ONLY
         else:
             attn_type = AttentionType.DECODER
@@ -502,7 +516,7 @@ class Base(
             )
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.check_version("5.0.0.dev0", "Eagle3 support")
+        self.check_version("5.0.0", "Eagle3 support")
         from transformers.utils.generic import OutputRecorder
 
         # The default value in PreTrainedModel is None

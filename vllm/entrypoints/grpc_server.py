@@ -30,6 +30,7 @@ from grpc_reflection.v1alpha import reflection
 
 from vllm import SamplingParams, TextPrompt, TokensPrompt
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.entrypoints.utils import log_version_and_model
 from vllm.grpc import vllm_engine_pb2, vllm_engine_pb2_grpc
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -100,11 +101,15 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             sampling_params = self._sampling_params_from_proto(
                 request.sampling_params, stream=request.stream
             )
+            tokenization_kwargs = self._tokenization_kwargs_from_proto(
+                request.sampling_params
+            )
 
             async for output in self.async_llm.generate(
                 prompt=prompt,
                 sampling_params=sampling_params,
                 request_id=request_id,
+                tokenization_kwargs=tokenization_kwargs,
             ):
                 # Convert vLLM output to protobuf
                 # For streaming, always send chunks
@@ -307,9 +312,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             seed=params.seed if params.HasField("seed") else None,
             include_stop_str_in_output=params.include_stop_str_in_output,
             logit_bias=dict(params.logit_bias) if params.logit_bias else None,
-            truncate_prompt_tokens=params.truncate_prompt_tokens
-            if params.HasField("truncate_prompt_tokens")
-            else None,
             structured_outputs=structured_outputs,
             # detokenize must be True if stop strings are used
             detokenize=bool(stop),
@@ -317,6 +319,14 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             if stream
             else RequestOutputKind.FINAL_ONLY,
         )
+
+    @staticmethod
+    def _tokenization_kwargs_from_proto(
+        params: vllm_engine_pb2.SamplingParams,
+    ) -> dict[str, int] | None:
+        if params.HasField("truncate_prompt_tokens"):
+            return {"truncate_prompt_tokens": params.truncate_prompt_tokens}
+        return None
 
     @staticmethod
     def _chunk_response(output: RequestOutput) -> vllm_engine_pb2.GenerateResponse:
@@ -408,8 +418,8 @@ async def serve_grpc(args: argparse.Namespace):
     Args:
         args: Parsed command line arguments
     """
-    logger.info("vLLM gRPC server version %s", VLLM_VERSION)
-    logger.info("args: %s", args)
+    log_version_and_model(logger, VLLM_VERSION, args.model)
+    logger.info("vLLM gRPC server args: %s", args)
 
     start_time = time.time()
 

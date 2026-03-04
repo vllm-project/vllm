@@ -180,7 +180,7 @@ void tinygemm_kernel(
         // mb_size = 4
         case 0x42: LAUNCH_TINYGEMM_KERNEL_NN(4, 32); break;
         case 0x44: LAUNCH_TINYGEMM_KERNEL_NN(4, 64); break;
-        default: TORCH_CHECK(false, "Unexpected block size, ", mb_size, "x", "nb_size");
+        default: TORCH_CHECK(false, "Unexpected block size, ", mb_size, "x", nb_size);
       }
     }
   }

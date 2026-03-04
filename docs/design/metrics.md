@@ -49,7 +49,7 @@ The subset of metrics exposed in the Grafana dashboard gives us an indication of
 - `vllm:e2e_request_latency_seconds_bucket` - End to end request latency measured in seconds.
 - `vllm:prompt_tokens` - Prompt tokens.
 - `vllm:generation_tokens` - Generation tokens.
-- `vllm:time_per_output_token_seconds` - Inter-token latency (Time Per Output Token, TPOT) in seconds.
+- `vllm:inter_token_latency_seconds` - Inter-token latency (Time Per Output Token, TPOT) in seconds.
 - `vllm:time_to_first_token_seconds` - Time to First Token (TTFT) latency in seconds.
 - `vllm:num_requests_running` (also, `_swapped` and `_waiting`) - Number of requests in the RUNNING, WAITING, and SWAPPED states.
 - `vllm:kv_cache_usage_perc` - Percentage of used cache blocks by vLLM.
@@ -656,7 +656,7 @@ vLLM has support for OpenTelemetry tracing:
 - Added by <https://github.com/vllm-project/vllm/pull/4687> and reinstated by <https://github.com/vllm-project/vllm/pull/20372>
 - Configured with `--oltp-traces-endpoint` and `--collect-detailed-traces`
 - [OpenTelemetry blog post](https://opentelemetry.io/blog/2024/llm-observability/)
-- [User-facing docs](../examples/online_serving/opentelemetry.md)
+- [User-facing docs](../../examples/online_serving/opentelemetry/README.md)
 - [Blog post](https://medium.com/@ronen.schaffer/follow-the-trail-supercharging-vllm-with-opentelemetry-distributed-tracing-aa655229b46f)
 - [IBM product docs](https://www.ibm.com/docs/en/instana-observability/current?topic=mgaa-monitoring-large-language-models-llms-vllm-public-preview)
 

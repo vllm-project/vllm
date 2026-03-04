@@ -58,7 +58,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .qwen import QWenBaseModel, QWenModel
+from .qwen import QWenBaseModel, QWenBlock, QWenModel
 
 
 class QwenImagePixelInputs(TensorSchema):
@@ -617,7 +617,7 @@ class QwenVLDummyInputsBuilder(BaseDummyInputsBuilder[QwenVLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.visual
@@ -625,7 +625,7 @@ class QwenVLDummyInputsBuilder(BaseDummyInputsBuilder[QwenVLProcessingInfo]):
         target_width = target_height = vision_config["image_size"]
         num_images = mm_counts.get("image", 0)
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -731,6 +731,8 @@ class QwenVLForConditionalGeneration(
         ],
     }
 
+    embed_input_ids = SupportsMultiModal.embed_input_ids
+
     def get_mm_mapping(self) -> MultiModelKeys:
         """
         Get the module prefix in multimodal models
@@ -755,11 +757,16 @@ class QwenVLForConditionalGeneration(
         prefix: str = "",
         transformer_type: type[QwenVLModel] = QwenVLModel,
     ) -> None:
-        super().__init__(
-            vllm_config=vllm_config,
-            prefix=prefix,
-            transformer_type=transformer_type,
-        )
+        with self._mark_composite_model(
+            vllm_config,
+            language_targets=QWenBlock,
+            tower_targets={"image": VisionTransformer},
+        ):
+            super().__init__(
+                vllm_config=vllm_config,
+                prefix=prefix,
+                transformer_type=transformer_type,
+            )
 
         self.transformer: QwenVLModel
 
@@ -793,9 +800,6 @@ class QwenVLForConditionalGeneration(
 
         return self.transformer.visual(image_input["data"])
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.transformer
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -806,7 +810,7 @@ class QwenVLForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

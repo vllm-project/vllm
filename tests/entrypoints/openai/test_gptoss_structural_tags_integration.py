@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from vllm.entrypoints.tool_server import ToolServer
+from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.reasoning.gptoss_reasoning_parser import (
     GptOssReasoningParser,
 )
@@ -23,6 +23,7 @@ class TestGptOssStructuralTagsIntegration:
         """Create a mock tokenizer."""
         tokenizer = Mock()
         tokenizer.encode = Mock(return_value=[1, 2, 3, 4, 5])
+        tokenizer.vocab = {"<|end|>": 6}
         return tokenizer
 
     @pytest.fixture

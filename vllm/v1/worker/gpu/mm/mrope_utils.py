@@ -11,22 +11,37 @@ class MRopeState:
     def __init__(
         self,
         max_num_reqs: int,
+        max_num_tokens: int,
         max_model_len: int,
         device: torch.device,
     ):
         self.max_num_reqs = max_num_reqs
+        self.max_num_tokens = max_num_tokens
         self.max_model_len = max_model_len
         self.device = device
 
         # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
         # wasting a lot of CPU memory.
         self.prefill_mrope_positions = StagedWriteTensor(
-            (max_num_reqs, 3 * max_model_len),
+            (max_num_reqs * 3, max_model_len),
             dtype=torch.int32,
             device=device,
             uva_instead_of_gpu=True,
         )
         self.prefill_mrope_delta = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
+
+        # NOTE: `mrope_positions` is implemented with one additional dummy
+        # position on purpose to make it non-contiguous so that it can work
+        # with torch compile.
+        # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
+        # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
+        # the modality of inputs. For text-only inputs, each dimension has
+        # identical position IDs, making M-RoPE functionally equivalent to
+        # 1D-RoPE.
+        # See page 5 of https://arxiv.org/abs/2409.12191
+        self.mrope_positions = torch.zeros(
+            (3, max_num_tokens + 1), dtype=torch.int64, device=device
+        )
 
     def init_prefill_mrope_positions(
         self,
@@ -36,16 +51,11 @@ class MRopeState:
         mm_features: list,
     ) -> None:
         prefill_mrope_positions, prefill_mrope_delta = (
-            mrope_model.get_mrope_input_positions(
-                prefill_token_ids,
-                mm_features,
-            )
+            mrope_model.get_mrope_input_positions(prefill_token_ids, mm_features)
         )
         for i in range(3):
             pos = prefill_mrope_positions[i].tolist()
-            self.prefill_mrope_positions.stage_write(
-                req_idx, i * self.max_model_len, pos
-            )
+            self.prefill_mrope_positions.stage_write(3 * req_idx + i, 0, pos)
         self.prefill_mrope_delta.np[req_idx] = prefill_mrope_delta
 
     def apply_staged_writes(self) -> None:
@@ -58,14 +68,13 @@ class MRopeState:
         query_start_loc: torch.Tensor,
         prefill_lens: torch.Tensor,
         num_computed_tokens: torch.Tensor,
-        mrope_positions: torch.Tensor,
     ) -> None:
         num_reqs = idx_mapping.shape[0]
         _prepare_mrope_positions_kernel[(num_reqs,)](
-            mrope_positions,
-            mrope_positions.stride(0),
+            self.mrope_positions,
+            self.mrope_positions.stride(0),
             self.prefill_mrope_positions.gpu,
-            self.prefill_mrope_positions.gpu.stride(0),
+            3 * self.max_model_len,
             self.max_model_len,
             self.prefill_mrope_delta.gpu,
             idx_mapping,

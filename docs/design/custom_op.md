@@ -8,15 +8,6 @@ This document will introduce how CustomOp works in vLLM and how to implement a n
 
 `CustomOp` manages two dictionaries of all custom ops (i.e., op classes, indexed by registered name) in its class, for vLLM and OOT plugins respectively.
 
-??? code
-
-    ```python
-    class CustomOp(nn.Module):
-
-        op_registry: dict[str, type["CustomOp"]] = {}
-        op_registry_oot: dict[str, type["CustomOp"]] = {}
-    ```
-
 We can use `@CustomOp.register("op_name")` to register an op class to the `CustomOp` system. After this, the `op_name` and its class will be added into the `op_registry` dictionary. In addition, We can also register an OOT op by `@CustomOp.register_oot("op_name")`. We will introduce this mechanism in detail later.
 
 When a `CustomOp` is called (i.e., call its `forward()` method), if it is enabled (i.e., with `--compilation_config.custom_ops '["+op_name"]'`), it will automatically dispatch the forward method to the appropriate backend according to `current_platform`. Otherwise (i.e., it is disabled), it will only call the `forward_native()` method to use PyTorch-native implementation of this forward method.
@@ -37,7 +28,7 @@ Furthermore, vLLM decides whether to enable or disable a `CustomOp` based on `co
 !!! note
     Note that `all` and `none` cannot coexist in `compilation_config.custom_ops`.
 
-By default, if `compilation_config.backend == "inductor"` and `compilation_config.mode != CompilationMode.NONE`, a `none` will be appended into `compilation_config.custom_ops`, otherwise a `all` will be appended. In other words, this means `CustomOp` will be disabled in some platforms (i.e., those use `inductor` as dafault backend for `torch.compile`) when running with torch compile mode. In this case, Inductor generates (fused) Triton kernels for those disabled custom ops.
+By default, if `compilation_config.backend == "inductor"` and `compilation_config.mode != CompilationMode.NONE`, a `none` will be appended into `compilation_config.custom_ops`, otherwise a `all` will be appended. In other words, this means `CustomOp` will be disabled in some platforms (i.e., those use `inductor` as default backend for `torch.compile`) when running with torch compile mode. In this case, Inductor generates (fused) Triton kernels for those disabled custom ops.
 
 !!! note
     For multi-modal models, vLLM has enforced the enabling of some custom ops to use device-specific deep-optimized kernels for better performance in ViT part, such as `MMEncoderAttention` and `ApplyRotaryEmb`. We can also pass a `enforce_enable=True` param to the `__init__()` method of the `CustomOp` to enforce enable itself at object-level.
@@ -280,7 +271,7 @@ Taking `MMEncoderAttention` as an example:
 ??? code
 
     ```python
-    from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
+    from vllm.model_executor.layers.attention import MMEncoderAttention
     from vllm.model_executor.custom_op import CustomOp
 
 

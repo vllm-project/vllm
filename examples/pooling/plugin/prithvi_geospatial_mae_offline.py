@@ -59,8 +59,10 @@ class PrithviMAE:
             input_data = input_data[0]
 
         mm_data = {
-            "pixel_values": input_data,
-            "location_coords": location_coords,
+            "image": {
+                "pixel_values": input_data,
+                "location_coords": location_coords,
+            }
         }
 
         prompt = {"prompt_token_ids": [1], "multi_modal_data": mm_data}
@@ -389,7 +391,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM",
+        default="ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
         help="Path to a checkpoint file to load from.",
     )
     parser.add_argument(

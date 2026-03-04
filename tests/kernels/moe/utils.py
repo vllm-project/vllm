@@ -7,17 +7,69 @@ import vllm._custom_ops as ops
 from tests.kernels.quant_utils import per_block_cast_to_int8
 from tests.kernels.quantization.nvfp4_utils import FLOAT4_E2M1_MAX, FLOAT8_E4M3_MAX
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+    RoutingMethodType,
+)
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize,
     BatchedTritonExperts,
     NaiveBatchedExperts,
 )
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    TritonExperts,
+    fused_experts,
+)
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.utils.math_utils import round_up
+
+
+def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
+    """Fold weights to adjacent locations for Triton MoE / SwiGLU kernel layout."""
+    shape = w.shape
+    n = shape[-1]
+    first = w[..., : n // 2]
+    second = w[..., n // 2 :]
+    stacked = torch.stack((first, second), dim=-1)
+    return stacked.reshape(shape)
+
+
+def make_dummy_moe_config(
+    num_experts: int = 1,
+    experts_per_token: int = 1,
+    hidden_dim: int = 1,
+    intermediate_size_per_partition: int = 1,
+    in_dtype: torch.dtype = torch.bfloat16,
+) -> FusedMoEConfig:
+    """
+    This is a dummy config for the mk constructor interface
+    as most kernels like DeepGEMM, CUTLASSFp4, Triton, MARLIN
+    do not actually use this config.
+
+    CUTLASSFp8 needs to set some params for workshapes.
+    """
+    return FusedMoEConfig(
+        num_experts=num_experts,
+        experts_per_token=experts_per_token,
+        hidden_dim=hidden_dim,
+        intermediate_size_per_partition=intermediate_size_per_partition,
+        num_local_experts=num_experts,
+        num_logical_experts=num_experts,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SILU,
+        in_dtype=in_dtype,
+        device="cuda",
+        routing_method=RoutingMethodType.TopK,
+    )
 
 
 def triton_moe(
@@ -73,7 +125,9 @@ def batched_moe(
         a2_scale=a2_scale,
     )
 
-    fused_experts = FusedMoEModularKernel(
+    moe_config = make_dummy_moe_config()
+
+    fused_experts = FusedMoEKernel(
         BatchedPrepareAndFinalize(
             max_num_tokens, num_dispatchers=1, num_local_experts=w1.shape[0], rank=0
         ),
@@ -81,10 +135,22 @@ def batched_moe(
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,
             quant_config=quant_config,
+            moe_config=moe_config,
         ),
+        inplace=False,
     )
 
-    return fused_experts(a, w1, w2, topk_weight, topk_ids)
+    return fused_experts.apply(
+        a,
+        w1,
+        w2,
+        topk_weight,
+        topk_ids,
+        global_num_experts=w1.shape[0],
+        activation=moe_config.activation,
+        apply_router_weight_on_input=False,
+        expert_map=None,
+    )
 
 
 def naive_batched_moe(
@@ -112,8 +178,9 @@ def naive_batched_moe(
         a1_scale=a1_scale,
         a2_scale=a2_scale,
     )
+    moe_config = make_dummy_moe_config()
 
-    fused_experts = FusedMoEModularKernel(
+    fused_experts = FusedMoEKernel(
         BatchedPrepareAndFinalize(
             max_num_tokens, num_dispatchers=1, num_local_experts=w1.shape[0], rank=0
         ),
@@ -121,10 +188,22 @@ def naive_batched_moe(
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,
             quant_config=quant_config,
+            moe_config=moe_config,
         ),
+        inplace=False,
     )
 
-    return fused_experts(a, w1, w2, topk_weight, topk_ids)
+    return fused_experts.apply(
+        a,
+        w1,
+        w2,
+        topk_weight,
+        topk_ids,
+        global_num_experts=w1.shape[0],
+        activation=moe_config.activation,
+        apply_router_weight_on_input=False,
+        expert_map=None,
+    )
 
 
 def chunk_scales(
@@ -519,3 +598,21 @@ def make_shared_experts(
         return RealMLP(K, N, w1, w2, "silu", quant_config, w1_s=w1_s, w2_s=w2_s)
     finally:
         torch.set_default_dtype(old_dtype)
+
+
+def modular_triton_fused_moe(
+    moe_config: FusedMoEConfig,
+    quant_config: FusedMoEQuantConfig,
+    shared_experts: torch.nn.Module | None = None,
+) -> FusedMoEKernel:
+    return FusedMoEKernel(
+        maybe_make_prepare_finalize(
+            moe=moe_config,
+            quant_config=quant_config,
+            allow_new_interface=True,
+            use_monolithic=False,
+        ),
+        TritonExperts(moe_config, quant_config),
+        shared_experts,
+        inplace=False,
+    )

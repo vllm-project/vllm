@@ -59,10 +59,10 @@ class OpenAIServingModels:
             )
         self.lora_resolver_lock: dict[str, Lock] = defaultdict(Lock)
 
-        self.input_processor = self.engine_client.input_processor
-        self.io_processor = self.engine_client.io_processor
         self.model_config = self.engine_client.model_config
-        self.max_model_len = self.model_config.max_model_len
+        self.renderer = self.engine_client.renderer
+        self.io_processor = self.engine_client.io_processor
+        self.input_processor = self.engine_client.input_processor
 
     async def init_static_loras(self):
         """Loads all static LoRA modules.
@@ -95,12 +95,13 @@ class OpenAIServingModels:
         return self.base_model_paths[0].name
 
     async def show_available_models(self) -> ModelList:
-        """Show available models. This includes the base model and all
-        adapters"""
+        """Show available models. This includes the base model and all adapters."""
+        max_model_len = self.model_config.max_model_len
+
         model_cards = [
             ModelCard(
                 id=base_model.name,
-                max_model_len=self.max_model_len,
+                max_model_len=max_model_len,
                 root=base_model.model_path,
                 permission=[ModelPermission()],
             )
@@ -132,9 +133,16 @@ class OpenAIServingModels:
                 return error_check_ret
 
             lora_path = request.lora_path
-            unique_id = self.lora_id_counter.inc(1)
+            lora_int_id = (
+                self.lora_requests[lora_name].lora_int_id
+                if lora_name in self.lora_requests
+                else self.lora_id_counter.inc(1)
+            )
             lora_request = LoRARequest(
-                lora_name=lora_name, lora_int_id=unique_id, lora_path=lora_path
+                lora_name=lora_name,
+                lora_int_id=lora_int_id,
+                lora_path=lora_path,
+                load_inplace=request.load_inplace,
             )
             if base_model_name is not None and self.is_base_model(base_model_name):
                 lora_request.base_model_name = base_model_name
@@ -187,11 +195,13 @@ class OpenAIServingModels:
                 status_code=HTTPStatus.BAD_REQUEST,
             )
 
+        # If not loading inplace
         # Check if the lora adapter with the given name already exists
-        if request.lora_name in self.lora_requests:
+        if not request.load_inplace and request.lora_name in self.lora_requests:
             return create_error_response(
                 message=f"The lora adapter '{request.lora_name}' has already been "
-                "loaded.",
+                "loaded. If you want to load the adapter in place, set 'load_inplace'"
+                " to True.",
                 err_type="InvalidUserInput",
                 status_code=HTTPStatus.BAD_REQUEST,
             )

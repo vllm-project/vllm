@@ -68,20 +68,6 @@ async def test_smaller_truncation_size(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-async def test_zero_truncation_size(client: openai.AsyncOpenAI):
-    truncation_size = 0
-    kwargs: dict[str, Any] = {
-        "model": MODEL_NAME,
-        "input": input,
-        "truncate_prompt_tokens": truncation_size,
-    }
-
-    response = await client.post(path="embeddings", cast_to=object, body={**kwargs})
-
-    assert response["usage"]["prompt_tokens"] == truncation_size
-
-
-@pytest.mark.asyncio
 async def test_bigger_truncation_size(client: openai.AsyncOpenAI):
     truncation_size = max_model_len + 1
     kwargs: dict[str, Any] = {

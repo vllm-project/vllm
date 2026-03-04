@@ -8,26 +8,25 @@ import time
 from typing import Annotated, Any, Literal
 
 import torch
-from pydantic import (
-    Field,
-    model_validator,
-)
+from pydantic import Field, model_validator
 
+from vllm.config import ModelConfig
+from vllm.config.utils import replace
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     LegacyStructuralTagResponseFormat,
-    LogitsProcessors,
     OpenAIBaseModel,
     StreamOptions,
     StructuralTagResponseFormat,
     UsageInfo,
-    get_logits_processors,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.renderers import TokenizeParams
 from vllm.sampling_params import (
     BeamSearchParams,
+    RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
@@ -44,7 +43,13 @@ class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
     model: str | None = None
-    prompt: list[int] | list[list[int]] | str | list[str] | None = None
+    prompt: (
+        list[Annotated[int, Field(ge=0)]]
+        | list[list[Annotated[int, Field(ge=0)]]]
+        | str
+        | list[str]
+        | None
+    ) = None
     echo: bool | None = False
     frequency_penalty: float | None = 0.0
     logit_bias: dict[str, float] | None = None
@@ -117,19 +122,6 @@ class CompletionRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
-    logits_processors: LogitsProcessors | None = Field(
-        default=None,
-        description=(
-            "A list of either qualified names of logits processors, or "
-            "constructor objects, to apply when sampling. A constructor is "
-            "a JSON object with a required 'qualname' field specifying the "
-            "qualified name of the processor class/factory, and optional "
-            "'args' and 'kwargs' fields containing positional and keyword "
-            "arguments. For example: {'qualname': "
-            "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
-            "{'param': 'value'}}."
-        ),
-    )
 
     return_tokens_as_token_ids: bool | None = Field(
         default=None,
@@ -175,7 +167,28 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    repetition_detection: RepetitionDetectionParams | None = Field(
+        default=None,
+        description="Parameters for detecting repetitive N-gram patterns "
+        "in output tokens. If such repetition is detected, generation will "
+        "be ended early. LLMs can sometimes generate repetitive, unhelpful "
+        "token patterns, stopping only when they hit the maximum output length "
+        "(e.g. 'abcdabcdabcd...' or '\emoji \emoji \emoji ...'). This feature "
+        "can detect such behavior and terminate early, saving time and tokens.",
+    )
+
     # --8<-- [end:completion-extra-params]
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=self.max_tokens or 0,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            add_special_tokens=self.add_special_tokens,
+            needs_detokenization=bool(self.echo and not self.return_token_ids),
+            max_total_tokens_param="max_model_len",
+            max_output_tokens_param="max_tokens",
+        )
 
     # Default sampling parameters for completion requests
     _DEFAULT_SAMPLING_PARAMS: dict = {
@@ -210,7 +223,6 @@ class CompletionRequest(OpenAIBaseModel):
     def to_sampling_params(
         self,
         max_tokens: int,
-        logits_processor_pattern: str | None,
         default_sampling_params: dict | None = None,
     ) -> SamplingParams:
         if default_sampling_params is None:
@@ -247,21 +259,18 @@ class CompletionRequest(OpenAIBaseModel):
 
         response_format = self.response_format
         if response_format is not None:
-            # If structured outputs wasn't already enabled,
-            # we must enable it for these features to work
-            if self.structured_outputs is None:
-                self.structured_outputs = StructuredOutputsParams()
+            structured_outputs_kwargs = dict[str, Any]()
 
             # Set structured output params for response format
             if response_format.type == "json_object":
-                self.structured_outputs.json_object = True
+                structured_outputs_kwargs["json_object"] = True
             elif response_format.type == "json_schema":
                 json_schema = response_format.json_schema
                 assert json_schema is not None
-                self.structured_outputs.json = json_schema.json_schema
+                structured_outputs_kwargs["json"] = json_schema.json_schema
             elif response_format.type == "structural_tag":
                 structural_tag = response_format
-                assert structural_tag is not None and isinstance(
+                assert isinstance(
                     structural_tag,
                     (
                         LegacyStructuralTagResponseFormat,
@@ -269,7 +278,16 @@ class CompletionRequest(OpenAIBaseModel):
                     ),
                 )
                 s_tag_obj = structural_tag.model_dump(by_alias=True)
-                self.structured_outputs.structural_tag = json.dumps(s_tag_obj)
+                structured_outputs_kwargs["structural_tag"] = json.dumps(s_tag_obj)
+
+            # If structured outputs wasn't already enabled,
+            # we must enable it for these features to work
+            if len(structured_outputs_kwargs) > 0:
+                self.structured_outputs = (
+                    StructuredOutputsParams(**structured_outputs_kwargs)
+                    if self.structured_outputs is None
+                    else replace(self.structured_outputs, **structured_outputs_kwargs)
+                )
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -295,10 +313,6 @@ class CompletionRequest(OpenAIBaseModel):
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            logits_processors=get_logits_processors(
-                self.logits_processors, logits_processor_pattern
-            ),
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
@@ -307,7 +321,36 @@ class CompletionRequest(OpenAIBaseModel):
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
+            repetition_detection=self.repetition_detection,
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_response_format(cls, data):
+        response_format = data.get("response_format")
+        if response_format is None:
+            return data
+
+        rf_type = (
+            response_format.get("type")
+            if isinstance(response_format, dict)
+            else getattr(response_format, "type", None)
+        )
+
+        if rf_type == "json_schema":
+            json_schema = (
+                response_format.get("json_schema")
+                if isinstance(response_format, dict)
+                else getattr(response_format, "json_schema", None)
+            )
+            if json_schema is None:
+                raise VLLMValidationError(
+                    "When response_format type is 'json_schema', the "
+                    "'json_schema' field must be provided.",
+                    parameter="response_format",
+                )
+
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -316,8 +359,16 @@ class CompletionRequest(OpenAIBaseModel):
             return data
 
         structured_outputs_kwargs = data["structured_outputs"]
+        # structured_outputs may arrive as a dict (from JSON/raw kwargs) or
+        # as a StructuredOutputsParams dataclass instance.
+        is_dataclass = isinstance(structured_outputs_kwargs, StructuredOutputsParams)
         count = sum(
-            structured_outputs_kwargs.get(k) is not None
+            (
+                getattr(structured_outputs_kwargs, k, None)
+                if is_dataclass
+                else structured_outputs_kwargs.get(k)
+            )
+            is not None
             for k in ("json", "regex", "choice")
         )
         if count > 1:
