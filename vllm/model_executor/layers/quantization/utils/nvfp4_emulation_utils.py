@@ -70,7 +70,7 @@ def dequantize_to_dtype(
 
     if swizzle:
         tensor_sf = convert_swizzled_to_linear(tensor_sf, m, k, block_size)
-    tensor_sf_dtype = tensor_sf.to(torch.float32) / global_scale
+    tensor_sf_dtype = tensor_sf.to(torch.float32) * global_scale
 
     # scale the tensor
     out = (tensor_f32 * tensor_sf_dtype.unsqueeze(-1)).reshape(m, k)

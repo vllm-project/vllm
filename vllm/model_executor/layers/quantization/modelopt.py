@@ -1160,10 +1160,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         del layer.input_scale
 
         weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
-
-        if self.backend == NvFp4LinearBackend.EMULATION:
-            weight_global_scale = 1 / weight_global_scale
-
         layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
         del layer.weight_scale_2
 
