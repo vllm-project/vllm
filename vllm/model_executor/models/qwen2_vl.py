@@ -755,6 +755,7 @@ def _create_qwen2vl_field_factory(
                 "video", video_embed_grid_sizes
             ),
             video_grid_thw=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+            timestamps=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
     return _qwen2vl_field_config
