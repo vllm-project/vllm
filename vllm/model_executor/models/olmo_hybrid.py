@@ -308,6 +308,42 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
         hidden_states: torch.Tensor,
         output: torch.Tensor,
     ):
+        # NOTE: We wrap the ENTIRE linear attention forward (projections +
+        # core recurrence + output norm + output projection) in a single
+        # custom op, rather than just wrapping the recurrent core like
+        # other GDN models (e.g. Qwen3Next) do.
+        #
+        # Why: torch.compile with inductor generates fused kernels for
+        # matmuls and pointwise ops. These fused kernels can differ in
+        # floating-point accumulation order from eager-mode cuBLAS,
+        # introducing small numerical differences (~1e-7 per op). For
+        # standard transformer attention this is harmless because each
+        # position is computed independently. But for the GDN recurrent
+        # state, these tiny input differences compound at every timestep
+        # across the full sequence length, causing severe logprob
+        # divergence (e.g. ~15% top-1 agreement with eager baseline).
+        #
+        # By making the full forward opaque to inductor, the projections
+        # and output norm run with eager-mode kernels (cuBLAS, triton),
+        # preserving numerical consistency. The tradeoff is reduced
+        # compilation speedup (~1.5x vs ~3x), but logprob agreement
+        # improves from ~15% to ~83% top-1 vs eager.
+        #
+        # The remaining ~17% divergence comes from inductor compiling
+        # the MLP and transformer attention layers that are NOT wrapped
+        # in custom ops -- their small precision differences propagate
+        # as inputs to the GDN layers from outside.
+        torch.ops.vllm.olmo_hybrid_gdn_full_forward(
+            hidden_states,
+            output,
+            self.prefix,
+        )
+
+    def _full_forward(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+    ):
         num_tokens = hidden_states.size(0)
 
         # ============================================================
@@ -326,7 +362,7 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
         )
 
         # ============================================================
-        # Part 2: Core Attention (Custom Op)
+        # Part 2: Core Attention
         # ============================================================
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
@@ -334,12 +370,11 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
             device=hidden_states.device,
         )
 
-        torch.ops.vllm.olmo_hybrid_gdn_attention_core(
-            mixed_qkv,
-            b,
-            a,
-            core_attn_out,
-            self.prefix,
+        self._forward_core(
+            mixed_qkv=mixed_qkv,
+            b=b,
+            a=a,
+            core_attn_out=core_attn_out,
         )
 
         # ============================================================
@@ -1024,28 +1059,28 @@ class OlmoHybridForCausalLM(
         return loader.load_weights(weights)
 
 
-def olmo_hybrid_gdn_attention_core(
-    mixed_qkv: torch.Tensor,
-    b: torch.Tensor,
-    a: torch.Tensor,
-    core_attn_out: torch.Tensor,
+def olmo_hybrid_gdn_full_forward(
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
     layer_name: str,
 ) -> None:
+    """Full linear attention forward wrapped as a custom op.
+
+    Prevents inductor from compiling the projections around the GDN core,
+    which would introduce numerical divergence that compounds through
+    the recurrent state.
+    """
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self._forward_core(
-        mixed_qkv=mixed_qkv,
-        b=b,
-        a=a,
-        core_attn_out=core_attn_out,
+    self._full_forward(
+        hidden_states=hidden_states,
+        output=output,
     )
 
 
-def olmo_hybrid_gdn_attention_core_fake(
-    mixed_qkv: torch.Tensor,
-    b: torch.Tensor,
-    a: torch.Tensor,
-    core_attn_out: torch.Tensor,
+def olmo_hybrid_gdn_full_forward_fake(
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
     layer_name: str,
 ) -> None:
     """Fake implementation for torch.compile."""
@@ -1053,10 +1088,10 @@ def olmo_hybrid_gdn_attention_core_fake(
 
 
 direct_register_custom_op(
-    op_name="olmo_hybrid_gdn_attention_core",
-    op_func=olmo_hybrid_gdn_attention_core,
-    mutates_args=["core_attn_out"],
-    fake_impl=olmo_hybrid_gdn_attention_core_fake,
+    op_name="olmo_hybrid_gdn_full_forward",
+    op_func=olmo_hybrid_gdn_full_forward,
+    mutates_args=["output"],
+    fake_impl=olmo_hybrid_gdn_full_forward_fake,
 )
 
 

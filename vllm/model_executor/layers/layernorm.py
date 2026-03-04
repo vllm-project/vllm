@@ -590,18 +590,33 @@ class RMSNormGated(CustomOp):
     def forward_cuda(
         self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fla.ops.layernorm_guard import rmsnorm_fn
+        from vllm.model_executor.layers.fla.ops.layernorm_guard import (
+            layer_norm_fwd,
+        )
 
-        return rmsnorm_fn(
+        # Call the triton kernel directly, bypassing the autograd Function
+        # wrapper (LayerNormFn.apply) which uses staticmethod patterns that
+        # torch.compile / dynamo cannot trace.
+        x_shape_og = x.shape
+        x = x.reshape(-1, x.shape[-1])
+        if x.stride(-1) != 1:
+            x = x.contiguous()
+        if z is not None:
+            z = z.reshape(-1, z.shape[-1])
+            if z.stride(-1) != 1:
+                z = z.contiguous()
+        out, _, _ = layer_norm_fwd(
             x,
-            self.weight,
+            self.weight.contiguous(),
             self.bias,
+            self.eps,
             z=z,
-            eps=self.eps,
             group_size=self.group_size,
             norm_before_gate=self.norm_before_gate,
+            is_rms_norm=True,
             activation=self.activation,
         )
+        return out.reshape(x_shape_og)
 
 
 class LayerNorm(nn.Module):
