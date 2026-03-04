@@ -189,6 +189,15 @@ direct_register_custom_op(
 )
 
 
+def _unpack(
+    result: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+) -> tuple[torch.Tensor | None, torch.Tensor]:
+    if isinstance(result, tuple):
+        return result
+    else:
+        return (None, result)
+
+
 class MoERunnerBase(MoERunner):
     """
     Abstract base class providing common functionality for MoE runner implementations.
@@ -256,36 +265,6 @@ class MoERunnerBase(MoERunner):
             else torch.ops.vllm.moe_forward_shared
         )
 
-    def _must_reduce_shared_expert_outputs(self) -> bool:
-        """
-        The shared_experts are typically computed using the RowParallelLinear
-        layer. The result of this function is typically used as
-        the reduce_results argument to the module.
-        When just tensor-parallel is used, it is not required to reduce
-        the shared_experts results immediately. Instead we reduce at the
-        once at the end of the MoE op. (Refer to DeepSeekV2MoE module)
-        With EP and all2all kernels - this is no longer viable as all
-        GPU ranks in DP, produce the complete set of hidden_states.
-        Therefore it is required that we reduce the shared_experts output
-        early.
-        """
-        return (
-            self.shared_experts is not None
-            and self.quant_method.moe_kernel is not None
-            and self.quant_method.moe_kernel.output_is_reduced()
-        )
-
-    def _maybe_all_reduce_tensor_model_parallel(
-        self, final_hidden_states: torch.Tensor
-    ):
-        """
-        Some combine kernels reduce across GPU ranks by default.
-        """
-        if self._must_reduce_shared_expert_outputs():
-            return final_hidden_states
-        else:
-            return tensor_model_parallel_all_reduce(final_hidden_states)
-
     def apply_routed_input_transform(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -311,6 +290,58 @@ class MoERunnerBase(MoERunner):
             hidden_states if self.shared_experts is not None else None,
         )
 
+    def apply_routed_output_transform(
+        self,
+        fused_output: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.routed_output_transform is not None:
+            r = self.routed_output_transform(fused_output)
+            fused_output = r[0] if isinstance(r, tuple) else r
+        return fused_output
+
+    def _maybe_apply_output_scale(
+        self,
+        shared_output: torch.Tensor | None,
+        fused_output: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        if self.apply_scale_to_output:
+            # FP16 overflow protection: instead of (shared + fused) * scale,
+            # compute shared/scale + fused. The decoder layer compensates
+            # with matching divisions (see DeepseekV2DecoderLayer).
+            if fused_output.dtype != torch.float16:
+                fused_output *= self.routed_scaling_factor
+            elif shared_output is not None:
+                shared_output *= 1.0 / self.routed_scaling_factor
+        return shared_output, fused_output
+
+    def _must_reduce_shared_expert_output(self) -> bool:
+        """
+        The shared_experts are typically computed using the RowParallelLinear
+        layer. The result of this function is typically used as
+        the reduce_results argument to the module.
+        When just tensor-parallel is used, it is not required to reduce
+        the shared_experts results immediately. Instead we reduce at the
+        once at the end of the MoE op. (Refer to DeepSeekV2MoE module)
+        With EP and all2all kernels - this is no longer viable as all
+        GPU ranks in DP, produce the complete set of hidden_states.
+        Therefore it is required that we reduce the shared_experts output
+        early.
+        """
+        return (
+            self.shared_experts is not None
+            and self.quant_method.moe_mk is not None
+            and self.quant_method.moe_mk.output_is_reduced()
+        )
+
+    def _maybe_reduce_shared_expert_output(
+        self,
+        shared_output: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if self._must_reduce_shared_expert_output():
+            assert shared_output is not None
+            shared_output = tensor_model_parallel_all_reduce(shared_output)
+        return shared_output
+
     def _maybe_reduce_output(
         self,
         states: torch.Tensor,
@@ -318,10 +349,12 @@ class MoERunnerBase(MoERunner):
     ) -> torch.Tensor:
         result = states[..., :trunc_size]
 
-        if not self.moe_config.is_sequence_parallel and (
-            self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1
+        if (
+            not self.moe_config.is_sequence_parallel
+            and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
+            and not self._must_reduce_shared_expert_output()
         ):
-            result = self._maybe_all_reduce_tensor_model_parallel(result)
+            result = tensor_model_parallel_all_reduce(result)
 
         return result
 
@@ -495,41 +528,33 @@ class MoERunnerBase(MoERunner):
             self._encode_layer_name(),
         )
 
-        ##############################################################
+        #
+        # Note: there are two all-reduce points below. They are mutually
+        # exclusive, controlled by _must_reduce_shared_expert_output():
+        #  - When True: the combine kernel already reduced fused_output,
+        #    so we reduce shared_output here to match, then skip the
+        #    all-reduce in _maybe_reduce_output.
+        #  - When False: neither output is reduced yet, so we combine
+        #    them first and all-reduce the sum in _maybe_reduce_output.
 
         # Extract outputs from result
-        if self.shared_experts is not None:
-            assert isinstance(result, tuple)
-            shared_output, fused_output = result
-        else:
-            shared_output = None
-            fused_output = result
+        shared_output, fused_output = _unpack(result)
 
         # Apply output transform (e.g. latent → full dim)
-        if self.routed_output_transform is not None:
-            r = self.routed_output_transform(fused_output)
-            fused_output = r[0] if isinstance(r, tuple) else r
+        fused_output = self.apply_routed_output_transform(fused_output)
 
-        # If combine kernel already reduced fused, reduce shared to match
-        if self._must_reduce_shared_expert_outputs():
-            assert shared_output is not None
-            shared_output = tensor_model_parallel_all_reduce(shared_output)
+        # If combine kernel already reduced fused, reduce shared to match.
+        # See note above re: the two all-reduce points.
+        shared_output = self._maybe_reduce_shared_expert_output(shared_output)
 
-        if self.apply_scale_to_output:
-            # FP16 overflow protection: instead of (shared + fused) * scale,
-            # compute shared/scale + fused. The decoder layer compensates
-            # with matching divisions (see DeepseekV2DecoderLayer).
-            if fused_output.dtype != torch.float16:
-                fused_output *= self.routed_scaling_factor
-            elif shared_output is not None:
-                shared_output *= 1.0 / self.routed_scaling_factor
+        shared_output, fused_output = self._maybe_apply_output_scale(
+            shared_output, fused_output
+        )
 
         if shared_output is not None:
             result = shared_output + fused_output
         else:
             result = fused_output
-
-        ##############################################################
 
         result = self._maybe_reduce_output(result, og_hidden_dim)
 
@@ -545,6 +570,7 @@ class MoERunnerBase(MoERunner):
         # TODO(bnell): this can be removed after MK migration is complete.
         layer.ensure_moe_quant_config_init()
 
+        # TODO: move _maybe_gate and _maybe_apply_shared_experts to forward?
         router_logits = self._maybe_gate(hidden_states, router_logits)
 
         self._maybe_apply_shared_experts(
