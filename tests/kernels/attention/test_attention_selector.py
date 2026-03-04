@@ -293,6 +293,48 @@ def test_invalid_backend():
         AttentionConfig(backend=AttentionBackendEnum["INVALID"])
 
 
+@pytest.mark.parametrize("auto_value", ["auto", "AUTO", "Auto"])
+def test_auto_backend_string(auto_value: str):
+    """Test that 'auto' string value triggers automatic backend selection."""
+    # Using "auto" should result in backend=None (automatic selection)
+    attention_config = AttentionConfig(backend=auto_value)
+    assert attention_config.backend is None
+
+
+def test_auto_backend_selection_behavior():
+    """Test that 'auto' backend behaves same as None (automatic selection)."""
+    # Create config with explicit "auto"
+    auto_config = AttentionConfig(backend="auto")
+
+    # Create config with None (default)
+    none_config = AttentionConfig(backend=None)
+
+    # Both should have backend=None
+    assert auto_config.backend is None
+    assert none_config.backend is None
+
+    # Both configs should result in the same automatic backend selection
+    vllm_config_auto = VllmConfig(attention_config=auto_config)
+    vllm_config_none = VllmConfig(attention_config=none_config)
+
+    with (
+        set_current_vllm_config(vllm_config_auto),
+        patch("vllm.platforms.current_platform", CpuPlatform()),
+    ):
+        backend_auto = get_attn_backend(16, torch.float16, None, 16)
+
+    _cached_get_attn_backend.cache_clear()
+
+    with (
+        set_current_vllm_config(vllm_config_none),
+        patch("vllm.platforms.current_platform", CpuPlatform()),
+    ):
+        backend_none = get_attn_backend(16, torch.float16, None, 16)
+
+    # Both should select the same backend
+    assert backend_auto.get_name() == backend_none.get_name()
+
+
 @pytest.mark.parametrize(
     "backend_name,flash_attn_version,should_succeed",
     [

@@ -1816,13 +1816,10 @@ class EngineArgs:
                     "attention_backend and attention_config.backend "
                     "are mutually exclusive"
                 )
-            # Convert string to enum if needed (CLI parsing returns a string)
-            if isinstance(self.attention_backend, str):
-                attention_config.backend = AttentionBackendEnum[
-                    self.attention_backend.upper()
-                ]
-            else:
-                attention_config.backend = self.attention_backend
+            # Reuse the validator to handle "auto" and string-to-enum conversion
+            attention_config.backend = AttentionConfig.validate_backend_before(
+                self.attention_backend
+            )
 
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)
