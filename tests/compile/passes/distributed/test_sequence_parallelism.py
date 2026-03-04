@@ -36,6 +36,8 @@ from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
+pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+
 FP8_DTYPE = current_platform.fp8_dtype()
 prompts = [
     "Hello, my name is",
