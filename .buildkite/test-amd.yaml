@@ -2797,7 +2797,7 @@ steps:
   - vllm/v1/attention/selector.py
   - vllm/platforms/cuda.py
   commands:
-    # rocm-smi
+    rocm-smi
     - python3 examples/offline_inference/basic/chat.py
     # Attention
     # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
@@ -3287,6 +3287,7 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
+
 
 - label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy
   timeout_in_minutes: 60
