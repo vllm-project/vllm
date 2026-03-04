@@ -619,7 +619,6 @@ class GPUModelRunner(
         self.num_computed_tokens = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
-        self.has_prev_draft_tokens = False
         self.prev_num_draft_tokens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
         )
@@ -1741,7 +1740,6 @@ class GPUModelRunner(
         if (
             self.use_async_spec_decode
             and self.valid_sampled_token_count_gpu is not None
-            and self.has_prev_draft_tokens
             and prev_req_id_to_index
         ):
             self.prev_positions.copy_to_gpu(num_reqs)
@@ -1855,10 +1853,12 @@ class GPUModelRunner(
             self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
             self.num_decode_draft_tokens.copy_to_gpu()
 
-            if self.use_async_spec_decode:
+        if self.use_async_spec_decode:
+            if use_spec_decode:
                 self.prev_num_draft_tokens.np[:num_reqs] = num_draft_tokens
-                self.prev_num_draft_tokens.copy_to_gpu(num_reqs)
-                self.has_prev_draft_tokens = True
+            else:
+                self.prev_num_draft_tokens.np[:num_reqs].fill(0)
+            self.prev_num_draft_tokens.copy_to_gpu(num_reqs)
 
         # Hot-Swap lora model
         if self.lora_config:
