@@ -776,7 +776,13 @@ def get_engine_zmq_addresses(
     vllm_config: VllmConfig,
     num_api_servers: int = 1,
 ) -> EngineZmqAddresses:
-    """Allocate ZMQ addresses for engine-client communication."""
+    """Allocate ZMQ addresses for engine-client communication.
+
+    When num_api_servers == 1, uses late binding (wildcard port 0) so that
+    the actual port is assigned at socket bind time, avoiding port conflicts
+    (issue #28498). When num_api_servers > 1, pre-allocates ports because
+    the binding and port discovery happen in different processes.
+    """
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
     local_start_index = parallel_config.data_parallel_rank_local
@@ -798,13 +804,23 @@ def get_engine_zmq_addresses(
     if parallel_config.enable_elastic_ep:
         client_local_only = False
 
+    # Use late binding (wildcard port) when the binding and address
+    # discovery happen in the same process (single API server).
+    # For multi-server, ports must be pre-allocated since workers
+    # bind in separate processes from where addresses are distributed.
+    use_late_binding = num_api_servers == 1
+
     return EngineZmqAddresses(
         inputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
+            get_engine_client_zmq_addr(
+                client_local_only, host, late_binding=use_late_binding
+            )
             for _ in range(num_api_servers)
         ],
         outputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
+            get_engine_client_zmq_addr(
+                client_local_only, host, late_binding=use_late_binding
+            )
             for _ in range(num_api_servers)
         ],
     )
