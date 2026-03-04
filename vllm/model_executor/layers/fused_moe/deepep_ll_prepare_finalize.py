@@ -82,9 +82,14 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             f"maximum supported hidden size {_supported_hs[-1]}"
         )
 
+from collections import deque
+from itertools import cycle
+
+# ...
+
     def __init__(
         self,
-        buffer: deep_ep.Buffer,
+        buffer: deep_ep.Buffer | list[deep_ep.Buffer],
         max_tokens_per_rank: int,
         num_dispatchers: int,
         use_fp8_dispatch: bool = False,
@@ -94,13 +99,17 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     ):
         super().__init__()
 
-        self.buffer = buffer
+        self.buffers = buffer if isinstance(buffer, list) else [buffer]
+        self.num_buffers = len(self.buffers)
+        self.buffer_cycler = cycle(range(self.num_buffers))
         self.max_tokens_per_rank = max_tokens_per_rank
         self.use_fp8_dispatch = use_fp8_dispatch
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
-        self.handles: list[tuple | None] = [None, None]
+        # We use a deque per ubatch_id to support pipelined chunks.
+        # handles[ubatch_id] -> deque[(handle, buffer_idx)]
+        self.handles: dict[int, deque] = {}
         self.num_dispatchers_ = num_dispatchers
 
         topk_indices_dtype = self.topk_indices_dtype()
@@ -295,7 +304,16 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         # Dispatch
         dispatch_topk_ids = self._map_global_to_physical_ids(topk_ids)
-        expert_x, expert_num_tokens, handle, _, hook = self.buffer.low_latency_dispatch(
+        
+        a2a_idx = dbo_current_ubatch_id()
+        if a2a_idx not in self.handles:
+             self.handles[a2a_idx] = deque()
+             
+        # Cycle buffer
+        buffer_idx = next(self.buffer_cycler)
+        current_buffer = self.buffers[buffer_idx]
+        
+        expert_x, expert_num_tokens, handle, _, hook = current_buffer.low_latency_dispatch(
             a1,
             dispatch_topk_ids,
             self.max_tokens_per_rank,
@@ -312,7 +330,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             async_finish=False,
             return_recv_hook=True,
         )
-        self.handles[a2a_idx] = handle
+        self.handles[a2a_idx].append((handle, buffer_idx))
 
         return (
             hook,
@@ -385,8 +403,15 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         a2a_idx = dbo_current_ubatch_id()
         do_recv_hook = dbo_enabled() or do_async
-        handle = self.handles[a2a_idx]
-        assert handle is not None
+        
+        handle = None
+        current_buffer = None
+        
+        if a2a_idx in self.handles and self.handles[a2a_idx]:
+             handle, buffer_idx = self.handles[a2a_idx].popleft()
+             current_buffer = self.buffers[buffer_idx]
+        
+        assert handle is not None and current_buffer is not None, f"Handle not found for a2a_idx {a2a_idx}"
 
         combine_topk_weights = topk_weights
         if apply_router_weight_on_input:
@@ -396,7 +421,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         combine_topk_ids = self._map_global_to_physical_ids(topk_ids)
         # TODO (varun) : Enable zero copy mode
         dbo_maybe_run_recv_hook()
-        _, _, recv_hook = self.buffer.low_latency_combine(
+        _, _, recv_hook = current_buffer.low_latency_combine(
             fused_expert_output,
             combine_topk_ids,
             combine_topk_weights,

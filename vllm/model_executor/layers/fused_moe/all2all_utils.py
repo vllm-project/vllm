@@ -146,7 +146,20 @@ def maybe_make_prepare_finalize(
             num_global_experts=moe.num_experts,
             num_local_experts=moe.num_experts // all2all_manager.world_size,
         )
-        handle = all2all_manager.get_handle(all_to_all_args)
+
+        # Handle double buffering if chunking is enabled
+        use_chunking = (
+             hasattr(envs, "VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING")
+             and envs.VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING
+        )
+        
+        handles = []
+        num_buffers = 2 if use_chunking else 1
+        
+        for i in range(num_buffers):
+             args = all_to_all_args.copy()
+             args['buffer_index'] = i
+             handles.append(all2all_manager.get_handle(args))
 
         # Note: We may want to use FP8 dispatch just to reduce
         # data movement.
@@ -156,7 +169,7 @@ def maybe_make_prepare_finalize(
         )
 
         prepare_finalize = DeepEPLLPrepareAndFinalize(
-            handle,
+            handles if num_buffers > 1 else handles[0],
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
             use_fp8_dispatch=use_fp8_dispatch,
