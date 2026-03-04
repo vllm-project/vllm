@@ -313,6 +313,8 @@ def test_fix_functionalization(
         model_no_func = copy.deepcopy(model)
         model_func = torch.compile(model_func, backend=backend_func)
         model_no_func = torch.compile(model_no_func, backend=backend_no_func)
+
+        # deepcopy inputs to prevent potential in place mutation
         outputs_func = model_func(*copy.deepcopy(inputs_func))
         outputs_no_func = model_no_func(*copy.deepcopy(inputs_no_func))
         torch.testing.assert_close(outputs_func, outputs_no_func)
