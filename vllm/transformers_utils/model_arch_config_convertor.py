@@ -412,31 +412,26 @@ class AnyModelArchConfigConvertor(ModelArchConfigConvertorBase):
     """
 
     def get_total_num_kv_heads(self) -> int:
+        # block_configs are normalized to SimpleNamespace by
+        # AnyModelForCausalLMConfig.verify_and_update_model_config before
+        # this method is called.
+        #
+        # Return the *maximum* KV head count across non-no-op layers so
+        # that the KV cache is allocated large enough for every layer.
         block_configs = getattr(self.hf_text_config, "block_configs", None)
         if block_configs:
+            max_kv = 0
             for bc in block_configs:
-                attn = bc if not isinstance(bc, dict) else bc
-                attn_section = (
-                    attn.get("attention")
-                    if isinstance(attn, dict)
-                    else getattr(attn, "attention", None)
-                )
+                attn_section = getattr(bc, "attention", None)
                 if attn_section is None:
                     continue
-                no_op = (
-                    attn_section.get("no_op", False)
-                    if isinstance(attn_section, dict)
-                    else getattr(attn_section, "no_op", False)
-                )
-                if no_op:
+                if getattr(attn_section, "no_op", False):
                     continue
-                kv = (
-                    attn_section.get("num_key_value_heads")
-                    if isinstance(attn_section, dict)
-                    else getattr(attn_section, "num_key_value_heads", None)
-                )
+                kv = getattr(attn_section, "num_key_value_heads", None)
                 if kv is not None:
-                    return kv
+                    max_kv = max(max_kv, kv)
+            if max_kv > 0:
+                return max_kv
         return super().get_total_num_kv_heads()
 
     def get_num_experts(self) -> int:
@@ -444,24 +439,13 @@ class AnyModelArchConfigConvertor(ModelArchConfigConvertorBase):
         if block_configs:
             max_experts = 0
             for bc in block_configs:
-                ffn = (
-                    bc.get("ffn") if isinstance(bc, dict) else getattr(bc, "ffn", None)
-                )
+                ffn = getattr(bc, "ffn", None)
                 if ffn is None:
                     continue
-                moe = (
-                    ffn.get("moe")
-                    if isinstance(ffn, dict)
-                    else getattr(ffn, "moe", None)
-                )
+                moe = getattr(ffn, "moe", None)
                 if moe is None:
                     continue
-                n = (
-                    moe.get("num_local_experts", 0)
-                    if isinstance(moe, dict)
-                    else getattr(moe, "num_local_experts", 0)
-                )
-                max_experts = max(max_experts, n)
+                max_experts = max(max_experts, getattr(moe, "num_local_experts", 0))
             if max_experts > 0:
                 return max_experts
         return super().get_num_experts()

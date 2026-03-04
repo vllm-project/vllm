@@ -2,15 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Generic AnyModel for NAS-optimized heterogeneous architectures.
 
-AnyModel reuses existing decoder layer classes (LlamaDecoderLayer,
-Qwen2DecoderLayer, etc.) directly, feeding them a per-layer config
-derived from block_configs.
+AnyModel uses a **dynamic parent** approach: :class:`AnyModel`
+changes its own ``__class__`` at runtime to a dynamically created subclass
+of the target base model (e.g. ``LlamaForCausalLM``).  The base model's
+``__init__`` then builds the full model structure with the *global* config.
+Afterwards, :func:`_patch_anymodel_layers` replaces layers whose per-layer
+config (from ``block_configs``) differs from the global config — changing
+the weight shapes — and injects no-op modules where required.
 
-Each supported architecture is described by a lightweight :class:`ArchInfo`
-dataclass that lives in :data:`_ARCH_REGISTRY`, keyed by the HuggingFace
-``architectures`` class name (e.g. ``"LlamaForCausalLM"``).  Adding support
-for a new architecture requires only a new :class:`ArchInfo` entry — no
-subclassing needed.
+This design means:
+
+* No separate ``AnyModelForConditionalGeneration`` is needed; VL models
+  (e.g. Qwen3VL) are supported automatically because their vision tower,
+  ``forward``, and ``load_weights`` are inherited from the base class.
+* Adding a new architecture requires only a single :class:`ArchInfo` entry
+  in :data:`_ARCH_REGISTRY` — no subclassing.
 
 **Canonical block_configs schema (Stage 1)**::
 
@@ -30,16 +36,6 @@ subclassing needed.
       }
     }
 
-**Constructor styles** (``ArchInfo.ctor_style``):
-
-* ``"standard"`` — ``cls(config, cache_config, quant_config, prefix)``
-* ``"vllm_config"`` — ``cls(vllm_config, prefix, config)``
-* ``"nemotron_h"`` — ``cls(config, layer_idx, model_config,
-  cache_config, quant_config, parallel_config, prefix)``
-* ``"gpt_oss"`` — ``cls(vllm_config*, quant_config, prefix)``
-  where ``vllm_config*`` is a shallow copy with ``hf_config`` replaced
-  by the per-layer config.
-
 **Hybrid architectures** (NemotronH):
 
 When ``ArchInfo.decoder_layer_class_map`` is set, the layer class is
@@ -54,32 +50,18 @@ from __future__ import annotations
 
 import copy
 import importlib
-from collections.abc import Iterable
+import inspect
 from dataclasses import dataclass, field
-from itertools import islice
+from dataclasses import fields as dataclass_fields
+from typing import ClassVar
 
 import torch
 from torch import nn
 
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
-from vllm.sequence import IntermediateTensors
 
 from .interfaces import HasNoOps, SupportsPP
-from .utils import (
-    AutoWeightsLoader,
-    PPMissingLayer,
-    extract_layer_index,
-    make_empty_intermediate_tensors_factory,
-    make_layers,
-    maybe_prefix,
-)
+from .utils import PPMissingLayer, maybe_prefix
 
 # ---------------------------------------------------------------------------
 # Block config access helpers
@@ -121,7 +103,10 @@ class NoOpAttention(nn.Module):
     preserved when added back (zeros + residual = residual)."""
 
     def forward(
-        self, positions: torch.Tensor, hidden_states: torch.Tensor
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor:
         return torch.zeros_like(hidden_states)
 
@@ -130,7 +115,7 @@ class NoOpMLP(nn.Module):
     """No-op replacement for MLP / MoE block. Returns zeros so residual
     is preserved when added back."""
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
         return torch.zeros_like(hidden_states)
 
 
@@ -171,19 +156,6 @@ class ArchInfo:
     decoder_layer_class: str
     """Default class name within ``decoder_layer_module``.
     Used when ``decoder_layer_class_map`` is absent or has no match."""
-
-    # Constructor calling convention ----------------------------------------
-    ctor_style: str = "standard"
-    """How to call the decoder layer constructor.  One of:
-
-    * ``"standard"`` — ``cls(config, cache_config, quant_config, prefix)``
-    * ``"vllm_config"`` — ``cls(vllm_config, prefix, config)``
-    * ``"nemotron_h"`` — ``cls(config, layer_idx, model_config,
-      cache_config, quant_config, parallel_config, prefix)``
-    * ``"gpt_oss"`` — ``cls(vllm_config*, quant_config, prefix)`` where
-      ``vllm_config*`` is a shallow copy with ``hf_config`` substituted
-      by the per-layer config.
-    """
 
     # Hybrid / multi-type layer support -------------------------------------
     decoder_layer_class_map: dict[str, str] | None = None
@@ -229,6 +201,33 @@ class ArchInfo:
     """Reserved for Stage 2 (hidden size, latent dim, window size, …).
     Maps canonical block_config field paths to config attribute names."""
 
+    # Dynamic-parent support ------------------------------------------------
+    base_model_module: str | None = None
+    """Dotted module path for the *base model* class.
+    ``None`` means fall back to ``decoder_layer_module``.  Set this when
+    the base model class lives in a different file from the decoder layer
+    (e.g. Qwen3VL: layers in ``\".qwen3\"``, model in ``\".qwen3_vl\"``)."""
+
+    layers_path: str = "model.layers"
+    """Dotted attribute path from the model root to the decoder layers
+    ``nn.ModuleList``.  Examples: ``"model.layers"`` (most architectures),
+    ``"language_model.model.layers"`` (Qwen3VL)."""
+
+    init_prefix: str | None = None
+    """Prefix to pass to ``base_cls.__init__`` instead of the outer
+    ``prefix``.
+
+    * ``None`` (default) — inherit the engine-provided prefix.
+    * ``""`` — explicitly pass an empty string (forces blank prefix).
+    * ``"model"`` — used by Qwen3VL whose checkpoint weights are stored
+      under a ``model`` sub-key."""
+
+    layer_hf_config: str | None = None
+    """Attribute path on ``hf_config`` to use as the *base* for per-layer
+    config shallow-copies.  ``None`` means use ``hf_config`` directly.
+    Set to ``"text_config"`` for Qwen3VL where the language model layers
+    are configured by the text sub-config, not the top-level VL config."""
+
 
 # ---------------------------------------------------------------------------
 # Architecture registry
@@ -239,14 +238,10 @@ _ARCH_REGISTRY: dict[str, ArchInfo] = {
     "LlamaForCausalLM": ArchInfo(
         decoder_layer_module=".llama",
         decoder_layer_class="LlamaDecoderLayer",
-        ctor_style="vllm_config",
     ),
-    # MistralForCausalLM is dense (no MoE).  Uses the same vllm_config ctor
-    # as Llama via MistralDecoderLayer(LlamaDecoderLayer).
     "MistralForCausalLM": ArchInfo(
         decoder_layer_module=".mistral",
         decoder_layer_class="MistralDecoderLayer",
-        ctor_style="vllm_config",
     ),
     # ---- Dense: Qwen2/3 family ----------------------------------------------
     "Qwen2ForCausalLM": ArchInfo(
@@ -286,27 +281,6 @@ _ARCH_REGISTRY: dict[str, ArchInfo] = {
     "NemotronHForCausalLM": ArchInfo(
         decoder_layer_module=".nemotron_h",
         decoder_layer_class="NemotronHAttentionDecoderLayer",  # fallback
-        ctor_style="nemotron_h",
-        decoder_layer_class_map={
-            "*": "NemotronHAttentionDecoderLayer",
-            "-": "NemotronHMLPDecoderLayer",
-            "E": "NemotronHMoEDecoderLayer",
-            "M": "NemotronHMambaDecoderLayer",
-        },
-        hybrid_pattern_field="hybrid_override_pattern",
-        attn_module="mixer",
-        attn_norm_module="norm",
-        ffn_module="mixer",
-        ffn_norm_module="norm",
-        moe_num_experts_field="n_routed_experts",
-        moe_intermediate_size_field="moe_intermediate_size",
-    ),
-    # NemotronHPuzzleForCausalLM is an alias used by some Puzzletron
-    # checkpoints; it resolves to the same vLLM class.
-    "NemotronHPuzzleForCausalLM": ArchInfo(
-        decoder_layer_module=".nemotron_h",
-        decoder_layer_class="NemotronHAttentionDecoderLayer",
-        ctor_style="nemotron_h",
         decoder_layer_class_map={
             "*": "NemotronHAttentionDecoderLayer",
             "-": "NemotronHMLPDecoderLayer",
@@ -322,22 +296,31 @@ _ARCH_REGISTRY: dict[str, ArchInfo] = {
         moe_intermediate_size_field="moe_intermediate_size",
     ),
     # ---- MoE: GptOss --------------------------------------------------------
-    # gpt-oss-20b: TransformerBlock(vllm_config, quant_config, prefix).
-    # The per-layer config is injected by substituting hf_config in a
-    # shallow copy of vllm_config (ctor_style="gpt_oss").
     "GptOssForCausalLM": ArchInfo(
         decoder_layer_module=".gpt_oss",
         decoder_layer_class="TransformerBlock",
-        ctor_style="gpt_oss",
         attn_module="attn",
         moe_num_experts_field="num_local_experts",
     ),
-    # ---- NOT YET SUPPORTED --------------------------------------------------
-    # Qwen3VLForConditionalGeneration is a multimodal (vision-language) model.
-    # AnyModelForCausalLM only handles text-only LMs.  Supporting Qwen3VL
-    # requires a separate AnyModelForConditionalGeneration wrapper that also
-    # manages the vision encoder.  Tracked as future work.
+    # ---- Multimodal: Qwen3VL ------------------------------------------------
+    # qwen3-vl-30b: language-model layers are Qwen3DecoderLayer instances
+    # (via Qwen3LLMModel < Qwen3Model inside Qwen3LLMForCausalLM).
+    # Weights are stored under "model.*" in the checkpoint, so init_prefix
+    # must be "model".  Per-layer configs are based on config.text_config
+    # (the Qwen3 language model sub-config, not the top-level VL config).
+    "Qwen3VLForConditionalGeneration": ArchInfo(
+        decoder_layer_module=".qwen3",
+        decoder_layer_class="Qwen3DecoderLayer",
+        base_model_module=".qwen3_vl",
+        layers_path="language_model.model.layers",
+        init_prefix="model",
+        layer_hf_config="text_config",
+    ),
 }
+
+# NemotronHPuzzleForCausalLM is an alias used by some Puzzletron checkpoints;
+# it is identical to NemotronHForCausalLM so we share the same object.
+_ARCH_REGISTRY["NemotronHPuzzleForCausalLM"] = _ARCH_REGISTRY["NemotronHForCausalLM"]
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +386,16 @@ def _create_layer_config(global_config, block_config, info: ArchInfo):
             if s is not None:
                 setattr(config, moe_size_field, s)
 
+    # Stage-2 / extra fields (e.g. {"hidden_size": "hidden_size"})
+    for block_path, config_attr in info.extra_config_fields.items():
+        parts = block_path.split(".", 1)
+        if len(parts) == 2:
+            val = _get_block_attr(block_config, parts[0], parts[1])
+        else:
+            val = _get_attr(_get_block_section(block_config, parts[0]), parts[0])
+        if val is not None:
+            setattr(config, config_attr, val)
+
     return config
 
 
@@ -417,46 +410,219 @@ def _apply_no_ops(layer: nn.Module, block_config, info: ArchInfo) -> None:
 
 
 def _instantiate_layer(
-    info: ArchInfo,
     layer_cls: type[nn.Module],
     vllm_config: VllmConfig,
     prefix: str,
     per_layer_config,
     layer_idx: int,
 ) -> nn.Module:
-    """Instantiate a decoder layer using the calling convention in *info*."""
-    if info.ctor_style == "vllm_config":
-        return layer_cls(
-            vllm_config=vllm_config, prefix=prefix, config=per_layer_config
+    """Instantiate a decoder layer via signature introspection.
+
+    A patched ``vllm_config`` (with ``model_config.hf_config`` swapped to
+    ``per_layer_config``) is included in the pool so that classes which read
+    config through ``vllm_config.model_config.hf_config`` (e.g.
+    ``TransformerBlock``) receive the per-layer config automatically.
+    Classes with an explicit ``config`` kwarg use that instead.
+    """
+    mock_mc = copy.copy(vllm_config.model_config)
+    mock_mc.hf_config = per_layer_config
+    mock_vc = copy.copy(vllm_config)
+    mock_vc.model_config = mock_mc
+
+    _pool = {
+        "config": per_layer_config,
+        "vllm_config": mock_vc,
+        "cache_config": vllm_config.cache_config,
+        "quant_config": vllm_config.quant_config,
+        "parallel_config": vllm_config.parallel_config,
+        "model_config": mock_mc,
+        "prefix": prefix,
+        "layer_idx": layer_idx,
+    }
+    params = inspect.signature(layer_cls.__init__).parameters
+    kwargs = {k: v for k, v in _pool.items() if k in params}
+    return layer_cls(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Post-init patching helpers
+# ---------------------------------------------------------------------------
+
+
+def _has_overrides(block_config, info: ArchInfo | None = None) -> bool:
+    """Return True if block_config contains overrides that require the layer
+    to be rebuilt (KV heads, FFN size, activation function, MoE fields, or
+    any extra_config_fields declared in *info*).
+
+    No-ops alone do not require layer recreation — they are handled by
+    :func:`_apply_no_ops` which simply replaces sub-modules in place.
+
+    .. note::
+
+       This checks for *presence* (non-None) of override fields, not whether
+       they differ from the global config.  Layers whose block_config carries
+       the same value as the global config will still be rebuilt.  This is
+       intentional for simplicity; comparing against global is a potential
+       future optimisation.
+    """
+    attn = _get_block_section(block_config, "attention")
+    ffn = _get_block_section(block_config, "ffn")
+    has_base = (
+        _get_attr(attn, "num_key_value_heads") is not None
+        or _get_attr(ffn, "intermediate_size") is not None
+        or _get_attr(ffn, "hidden_act") is not None
+        or _get_attr(ffn, "moe") is not None
+    )
+    if has_base:
+        return True
+    if info and info.extra_config_fields:
+        for block_path in info.extra_config_fields:
+            parts = block_path.split(".", 1)
+            if len(parts) == 2:
+                val = _get_block_attr(block_config, parts[0], parts[1])
+            else:
+                section_data = _get_block_section(block_config, parts[0])
+                val = _get_attr(section_data, parts[0])
+            if val is not None:
+                return True
+    return False
+
+
+def _patch_anymodel_layers(
+    model: nn.Module,
+    vllm_config: VllmConfig,
+    arch_info: ArchInfo,
+    base_init_prefix: str,
+) -> None:
+    """Post-init: replace layers that have per-layer config overrides and
+    apply no-op module substitutions.
+
+    Must be called *after* ``base_cls.__init__`` so that all layers are
+    already built.  vLLM's subsequent profiling and memory estimation will
+    then observe the correct (per-layer) weight shapes.
+
+    Args:
+        model: The model instance (already initialised by base_cls.__init__).
+        vllm_config: VllmConfig used during initialisation.
+        arch_info: ArchInfo for the current architecture.
+        base_init_prefix: The prefix that was passed to base_cls.__init__,
+            used to reconstruct per-layer weight-name prefixes.
+    """
+    config = vllm_config.model_config.hf_config
+    block_configs = config.block_configs
+
+    # Use a sub-config as the base for per-layer config copies when specified
+    # (e.g. Qwen3VL passes text_config to its LM layers, not the VL config).
+    layer_base_config = (
+        getattr(config, arch_info.layer_hf_config)
+        if arch_info.layer_hf_config
+        else config
+    )
+
+    # Navigate from the model root to the nn.ModuleList of decoder layers.
+    obj = model
+    for part in arch_info.layers_path.split("."):
+        obj = getattr(obj, part)
+    layers: nn.ModuleList = obj
+
+    # Full dotted prefix for the layers list; used to construct the
+    # weight-name prefix when instantiating replacement layers.
+    layers_prefix = maybe_prefix(base_init_prefix, arch_info.layers_path)
+
+    for layer_idx, block_config in enumerate(block_configs):
+        if layer_idx >= len(layers):
+            break
+        layer = layers[layer_idx]
+        # Skip pipeline-parallel placeholder layers on other ranks.
+        if isinstance(layer, PPMissingLayer):
+            continue
+
+        per_layer_config = _create_layer_config(
+            layer_base_config, block_config, arch_info
         )
-    if info.ctor_style == "nemotron_h":
-        return layer_cls(
-            config=per_layer_config,
-            layer_idx=layer_idx,
-            model_config=vllm_config.model_config,
-            cache_config=vllm_config.cache_config,
-            quant_config=vllm_config.quant_config,
-            parallel_config=vllm_config.parallel_config,
-            prefix=prefix,
-        )
-    if info.ctor_style == "gpt_oss":
-        # TransformerBlock reads config from vllm_config.model_config.hf_config,
-        # so inject the per-layer config via a shallow copy.
-        mock_mc = copy.copy(vllm_config.model_config)
-        mock_mc.hf_config = per_layer_config
-        mock_vc = copy.copy(vllm_config)
-        mock_vc.model_config = mock_mc
-        return layer_cls(
-            vllm_config=mock_vc,
-            quant_config=vllm_config.quant_config,
-            prefix=prefix,
-        )
-    # "standard" (default)
-    return layer_cls(
-        config=per_layer_config,
-        cache_config=vllm_config.cache_config,
-        quant_config=vllm_config.quant_config,
-        prefix=prefix,
+
+        if _has_overrides(block_config, arch_info):
+            # Weight shapes differ from the global config — rebuild the
+            # layer with the per-layer config so load_weights maps correctly
+            # to the pruned checkpoint tensors.
+            layer_cls = _resolve_layer_class(arch_info, layer_base_config, layer_idx)
+            layer_prefix = f"{layers_prefix}.{layer_idx}"
+            new_layer = _instantiate_layer(
+                layer_cls,
+                vllm_config,
+                layer_prefix,
+                per_layer_config,
+                layer_idx,
+            )
+            layers[layer_idx] = new_layer
+            layer = new_layer
+
+        _apply_no_ops(layer, block_config, arch_info)
+
+
+# ---------------------------------------------------------------------------
+# Config-driven ArchInfo loading
+# ---------------------------------------------------------------------------
+
+
+def _arch_info_from_config(hf_config) -> ArchInfo | None:
+    """Load an :class:`ArchInfo` from ``hf_config.anymodel_arch_info``.
+
+    Returns ``None`` when the field is absent or falsy.  Accepts both plain
+    dicts (as deserialized from JSON) and namespace/object representations.
+    Unknown keys are silently ignored so that configs remain forward-compatible
+    as ``ArchInfo`` fields are added or removed.
+
+    Example ``config.json`` snippet::
+
+        {
+            "architectures": ["MyCustomForCausalLM"],
+            "anymodel_arch_info": {
+                "decoder_layer_module": ".llama",
+                "decoder_layer_class": "LlamaDecoderLayer",
+            },
+            "block_configs": [...],
+        }
+    """
+    data = getattr(hf_config, "anymodel_arch_info", None)
+    if not data:
+        return None
+    if not isinstance(data, dict):
+        data = vars(data)
+    known = {f.name for f in dataclass_fields(ArchInfo)}
+    return ArchInfo(**{k: v for k, v in data.items() if k in known})
+
+
+# ---------------------------------------------------------------------------
+# Named wrapper class factory
+# ---------------------------------------------------------------------------
+
+
+def _make_wrapper_cls(
+    arch_name: str,
+    arch_info: ArchInfo,
+) -> type:
+    """Create a named wrapper class for *arch_name*.
+
+    The wrapper inherits from both :class:`AnyModel` and the target base
+    model class (e.g. ``LlamaForCausalLM``), giving it the name
+    ``AnyModel{arch_name}`` (e.g. ``AnyModelLlamaForCausalLM``).
+
+    MRO example for Llama::
+
+        AnyModelLlamaForCausalLM
+          ├── AnyModel            ← defines __init__ with post-init patching
+          └── LlamaForCausalLM   ← base model; super().__init__() resolves here
+
+    Imports are deferred to this function so the module stays fast to import.
+    """
+    base_mod_path = arch_info.base_model_module or arch_info.decoder_layer_module
+    mod = importlib.import_module(base_mod_path, package=__package__)
+    base_cls = getattr(mod, arch_name)
+    return type(
+        f"AnyModel{arch_name}",
+        (AnyModel, base_cls),
+        {"_anymodel_arch_info": arch_info, "has_noops": True},
     )
 
 
@@ -465,112 +631,30 @@ def _instantiate_layer(
 # ---------------------------------------------------------------------------
 
 
-class AnyModel(nn.Module):
-    """Generic transformer container that creates heterogeneous decoder
-    layers from ``block_configs`` using the appropriate :class:`ArchInfo`."""
+class AnyModel(nn.Module, SupportsPP, HasNoOps):
+    """Entry point for NAS-optimized heterogeneous models.
 
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        arch_info: ArchInfo,
-    ):
-        super().__init__()
+    Handles both text-only (``ForCausalLM``) and vision-language
+    (``ForConditionalGeneration``) architectures — no separate class needed.
 
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
+    When instantiated, :meth:`__new__` acts as a *factory*: it creates (and
+    caches) a named **wrapper subclass** that inherits from both this class
+    and the target base model.  For example, for a Llama checkpoint the
+    wrapper is ``AnyModelLlamaForCausalLM(AnyModel, LlamaForCausalLM)``.
 
-        self.config = config
-        self.quant_config = quant_config
-        self.vocab_size = config.vocab_size
+    :meth:`__init__` then calls ``super().__init__()`` which, thanks to the
+    wrapper's MRO, resolves to the base model's ``__init__``
+    (e.g. ``LlamaForCausalLM.__init__``).  This builds the full model
+    structure with the *global* HF config.  Afterwards,
+    :func:`_patch_anymodel_layers` replaces any decoder layers whose per-
+    layer ``block_configs`` differ in weight shape and applies no-op
+    module substitutions.  All patching completes before vLLM starts
+    profiling or memory estimation.
 
-        if get_pp_group().is_first_rank or (
-            config.tie_word_embeddings and get_pp_group().is_last_rank
-        ):
-            self.embed_tokens = VocabParallelEmbedding(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-            )
-        else:
-            self.embed_tokens = PPMissingLayer()
-
-        self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers,
-            lambda prefix: self._create_layer(prefix, vllm_config, arch_info),
-            prefix=f"{prefix}.layers",
-        )
-
-        if get_pp_group().is_last_rank:
-            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        else:
-            self.norm = PPMissingLayer()
-
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
-        )
-
-    @staticmethod
-    def _create_layer(
-        prefix: str,
-        vllm_config: VllmConfig,
-        arch_info: ArchInfo,
-    ) -> nn.Module:
-        layer_idx = extract_layer_index(prefix)
-        config = vllm_config.model_config.hf_config
-        block_config = config.block_configs[layer_idx]
-        per_layer_config = _create_layer_config(config, block_config, arch_info)
-        layer_cls = _resolve_layer_class(arch_info, config, layer_idx)
-        layer = _instantiate_layer(
-            arch_info,
-            layer_cls,
-            vllm_config,
-            prefix,
-            per_layer_config,
-            layer_idx,
-        )
-        _apply_no_ops(layer, block_config, arch_info)
-        return layer
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
-        if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
-                hidden_states = inputs_embeds
-            else:
-                hidden_states = self.embed_input_ids(input_ids)
-            residual = None
-        else:
-            assert intermediate_tensors is not None
-            hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
-
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(positions, hidden_states, residual)
-
-        if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
-
-        hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
-
-
-class AnyModelForCausalLM(nn.Module, SupportsPP, HasNoOps):
-    """Top-level causal LM wrapper for NAS-optimized heterogeneous models.
-
-    Auto-detected when ``block_configs`` is present in the HF config and
-    ``architectures[0]`` maps to a known entry in :data:`_ARCH_REGISTRY`.
+    The resulting instance inherits every method from the base model
+    (``forward``, ``compute_logits``, ``load_weights``, the vision tower
+    for VL models, etc.) — no separate ``AnyModelForConditionalGeneration``
+    is needed.
 
     To add support for a new architecture, add a single :class:`ArchInfo`
     entry to :data:`_ARCH_REGISTRY` — no subclassing required.
@@ -578,67 +662,68 @@ class AnyModelForCausalLM(nn.Module, SupportsPP, HasNoOps):
 
     has_noops = True
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
+    # Set on each named wrapper subclass by __new__ / _make_wrapper_cls.
+    _anymodel_arch_info: ClassVar[ArchInfo | None] = None
+
+    # Cache of arch_name → named wrapper class (lazily populated).
+    _wrapper_cache: ClassVar[dict[str, type[AnyModel]]] = {}
+
+    def __new__(cls, *, vllm_config: VllmConfig, prefix: str = ""):
+        if cls is not AnyModel:
+            # Already a named wrapper subclass — plain instantiation.
+            return super().__new__(cls)
 
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        self.config = config
 
+        # base_architectures carries the real model class name when the
+        # config uses "architectures": ["AnyModel"].  Fall back to the
+        # first entry of "architectures" for configs that still use the
+        # original arch name (e.g. "LlamaForCausalLM") directly.
         architectures = getattr(config, "architectures", None) or []
-        arch_name = architectures[0] if architectures else None
-        arch_info = _ARCH_REGISTRY.get(arch_name) if arch_name else None
+        base_architectures = getattr(config, "base_architectures", None) or []
+        arch_name = (
+            base_architectures[0]
+            if base_architectures
+            else (architectures[0] if architectures else None)
+        )
+
+        # Config-driven descriptor takes priority over the hardcoded registry,
+        # allowing checkpoints to ship their own ArchInfo in config.json.
+        arch_info = _arch_info_from_config(config)
+        if arch_info is not None:
+            # Use repr as cache key so distinct descriptors get distinct
+            # wrapper classes even for the same architecture name.
+            cache_key = f"config:{repr(arch_info)}"
+        else:
+            arch_info = _ARCH_REGISTRY.get(arch_name) if arch_name else None
+            cache_key = arch_name  # type: ignore[assignment]
+
         if arch_info is None:
             raise ValueError(
                 f"No AnyModel support for architecture {arch_name!r}. "
                 f"Supported: {sorted(_ARCH_REGISTRY)}"
             )
 
-        self.model = AnyModel(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
-            arch_info=arch_info,
+        if cache_key not in cls._wrapper_cache:
+            cls._wrapper_cache[cache_key] = _make_wrapper_cls(
+                arch_name,
+                arch_info,  # type: ignore[arg-type]
+            )
+
+        return object.__new__(cls._wrapper_cache[cache_key])
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        arch_info = type(self)._anymodel_arch_info
+        base_init_prefix = (
+            arch_info.init_prefix if arch_info.init_prefix is not None else prefix
         )
 
-        if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
-            if config.tie_word_embeddings:
-                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+        # super() resolves to the base model class (e.g. LlamaForCausalLM)
+        # because it is the next entry after AnyModel in the wrapper's MRO.
+        # This builds the full model: embeddings, all layers with the *global*
+        # config, LM head, weight-tying, etc.
+        super().__init__(vllm_config=vllm_config, prefix=base_init_prefix)
 
-            logit_scale = getattr(config, "logit_scale", 1.0)
-            self.logits_processor = LogitsProcessor(
-                config.vocab_size, scale=logit_scale
-            )
-        else:
-            self.lm_head = PPMissingLayer()
-
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
-
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
-        return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
-        return self.logits_processor(self.lm_head, hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = None
-        if self.config.tie_word_embeddings:
-            skip_prefixes = ["lm_head."]
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights)
+        # Post-init: replace layers with shape-changing overrides and inject
+        # no-op modules.  Completes before vLLM profiling / memory estimation.
+        _patch_anymodel_layers(self, vllm_config, arch_info, base_init_prefix)
