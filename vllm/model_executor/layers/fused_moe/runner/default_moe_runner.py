@@ -164,7 +164,7 @@ class DefaultMoERunner(MoERunnerBase):
         else:
             return hidden_states
 
-    def forward_impl(
+    def _forward_impl(
         self,
         layer: torch.nn.Module,
         hidden_states: torch.Tensor,

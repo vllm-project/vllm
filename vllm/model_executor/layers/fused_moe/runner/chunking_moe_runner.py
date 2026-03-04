@@ -121,7 +121,7 @@ class ChunkingMoERunner(MoERunnerBase):
         out_slice.copy_(orig_slice, non_blocking=True)
         return out_slice
 
-    def forward_impl(
+    def _forward_impl(
         self,
         layer: torch.nn.Module,
         hidden_states: torch.Tensor,
@@ -180,7 +180,7 @@ class ChunkingMoERunner(MoERunnerBase):
                 )
 
                 # Delegate per-chunk computation to the inner runner.
-                chunk_result = self._inner.forward_impl(
+                chunk_result = self._inner._forward_impl(
                     layer=layer,
                     hidden_states=hidden_states_chunk,
                     router_logits=router_logits_chunk,
