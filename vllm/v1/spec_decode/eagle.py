@@ -741,8 +741,9 @@ class SpecDecodeBaseProposer:
             kernel_positions = target_positions
             if self.vllm_config.model_config.uses_mrope:
                 if not self.uses_mrope:
-                    # Cross-modal: target (M-RoPE) compresses image token positions, so reconstruct
-                    # 1D sequential positions for the draft model.
+                    # Cross-modal: target (M-RoPE) compresses image token
+                    # positions, so reconstruct 1D sequential positions for
+                    # the draft model.
                     extend_lens = (
                         cad.query_start_loc[1 : batch_size + 1]
                         - cad.query_start_loc[:batch_size]
@@ -812,9 +813,7 @@ class SpecDecodeBaseProposer:
                         - cad.query_start_loc[:batch_size]
                     )
                     req_ranks = torch.repeat_interleave(
-                        torch.arange(
-                            batch_size, dtype=torch.long, device=self.device
-                        ),
+                        torch.arange(batch_size, dtype=torch.long, device=self.device),
                         extend_lens_batch.long(),
                     )
                     out_indices_for_input = (
@@ -825,9 +824,9 @@ class SpecDecodeBaseProposer:
                         )
                         + req_ranks
                     )
-                    self.mrope_positions[:, out_indices_for_input] = (
-                        target_positions[:, :total_num_input_tokens]
-                    )
+                    self.mrope_positions[:, out_indices_for_input] = target_positions[
+                        :, :total_num_input_tokens
+                    ]
                     # Bonus tokens are new text tokens: all 3 M-RoPE dims equal
                     # to (last valid input token's time dim) + 1.
                     last_valid_times = target_positions[0, query_end_loc]
@@ -836,9 +835,9 @@ class SpecDecodeBaseProposer:
                     )
                     # Rejected slots remain 0 (already zero-initialised).
                 else:
-                    self.mrope_positions[:, :total_num_output_tokens] = (
-                        self.positions[:total_num_output_tokens]
-                    )
+                    self.mrope_positions[:, :total_num_output_tokens] = self.positions[
+                        :total_num_output_tokens
+                    ]
 
             # 2.
             # Recompute the slot mapping based on the new positions and
