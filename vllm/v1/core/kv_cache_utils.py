@@ -3,6 +3,7 @@
 """KV-Cache Utilities."""
 
 import copy
+import heapq
 import hashlib
 import os
 from collections import defaultdict
@@ -180,7 +181,7 @@ class FreeKVCacheBlockQueue:
     def __init__(self, blocks: list[KVCacheBlock]) -> None:
         self.num_free_blocks = len(blocks)
         self._contiguous_alloc = envs.VLLM_CONTIGUOUS_BLOCK_ALLOC
-        self._pending_free: list[KVCacheBlock] = []
+        self._pending_free: set[KVCacheBlock] = set()
         self._num_linked = len(blocks)
 
         # Initialize doubly links of consecutive blocks
@@ -216,19 +217,18 @@ class FreeKVCacheBlockQueue:
         if not self._pending_free:
             return
 
-        # Collect remaining linked-list blocks
-        all_blocks: list[KVCacheBlock] = []
+        # Collect remaining linked-list blocks (already sorted by block_id)
+        linked: list[KVCacheBlock] = []
         curr = self.fake_free_list_head.next_free_block
         while curr is not None and curr is not self.fake_free_list_tail:
-            all_blocks.append(curr)
+            linked.append(curr)
             curr = curr.next_free_block
 
-        # Add pending
-        all_blocks.extend(self._pending_free)
-        self._pending_free = []
-
-        # Sort by block_id for physical contiguity
-        all_blocks.sort(key=lambda b: b.block_id)
+        # Sort only the pending set, then merge two sorted sequences
+        sorted_pending = sorted(self._pending_free, key=lambda b: b.block_id)
+        self._pending_free = set()
+        all_blocks = list(heapq.merge(
+            linked, sorted_pending, key=lambda b: b.block_id))
 
         # Rebuild linked list
         prev = self.fake_free_list_head
@@ -322,20 +322,18 @@ class FreeKVCacheBlockQueue:
         Args:
             block: The block to remove.
         """
-        if block.prev_free_block is None or block.next_free_block is None:
-            # This should not happen if the block is from the free list.
-            # It indicates a bug in the caller's logic.
+        if block.prev_free_block is not None and block.next_free_block is not None:
+            # Block is in the linked list — O(1) unlink.
+            block.prev_free_block.next_free_block = block.next_free_block
+            block.next_free_block.prev_free_block = block.prev_free_block
+            block.prev_free_block = block.next_free_block = None
+            self._num_linked -= 1
+        elif self._contiguous_alloc and block in self._pending_free:
+            # Block is in the pending set — O(1) discard.
+            self._pending_free.discard(block)
+        else:
             raise RuntimeError(f"remove() called on an invalid block: {block}")
-
-        # Link the previous block to the next block.
-        block.prev_free_block.next_free_block = block.next_free_block
-        # Link the next block to the previous block.
-        block.next_free_block.prev_free_block = block.prev_free_block
-
-        # Remove the block from the linked list.
-        block.prev_free_block = block.next_free_block = None
         self.num_free_blocks -= 1
-        self._num_linked -= 1
 
     def append(self, block: KVCacheBlock) -> None:
         """Put a block back into the free list and increase
@@ -347,7 +345,7 @@ class FreeKVCacheBlockQueue:
         if self._contiguous_alloc:
             block.prev_free_block = None
             block.next_free_block = None
-            self._pending_free.append(block)
+            self._pending_free.add(block)
         else:
             if self.fake_free_list_tail.prev_free_block is None:
                 raise RuntimeError(
@@ -374,7 +372,7 @@ class FreeKVCacheBlockQueue:
             for block in blocks:
                 block.prev_free_block = None
                 block.next_free_block = None
-            self._pending_free.extend(blocks)
+            self._pending_free.update(blocks)
         else:
             last_block = self.fake_free_list_tail.prev_free_block
             assert last_block is not None, (
