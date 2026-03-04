@@ -355,10 +355,7 @@ class Glm4MoeModelToolParser(ToolParser):
                     self._buffer = self._buffer[val_end + len(self.arg_val_end) :]
                     self._pending_key = None
 
-                    frag_or_none = self._append_arg_fragment(
-                        key=key,
-                        raw_val=raw_val,
-                    )
+                    frag_or_none = self._append_arg_fragment(key=key, raw_val=raw_val)
                     if frag_or_none:
                         return self._emit_tool_args_delta(frag_or_none)
                     continue
