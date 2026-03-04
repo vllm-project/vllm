@@ -242,10 +242,10 @@ def move_to_buffer(
             expert = new_local_expert_ids[dst]
             src_local = expert_to_src_map.get(expert, -1)
             if src_local != -1:
-                for w, b in zip(expert_weights, expert_weights_buffers):
-                    b[dst].copy_(w[src_local], non_blocking=True)
+                with torch.cuda.stream(cuda_stream):
+                    for w, b in zip(expert_weights, expert_weights_buffers):
+                        b[dst].copy_(w[src_local], non_blocking=True)
 
-    communicator.set_stream(cuda_stream)
     if isinstance(get_ep_group(), StatelessGroupCoordinator):
         is_stateless = True
     else:
