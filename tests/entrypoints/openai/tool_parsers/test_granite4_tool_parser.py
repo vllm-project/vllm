@@ -200,7 +200,7 @@ def test_tool_call_parser_complex():
 MODEL = "ibm-granite/granite-4.0-h-tiny"
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def server():
     model = MODEL
     args_for_model = [

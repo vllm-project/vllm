@@ -279,6 +279,8 @@ class Granite4ToolParser(ToolParser):
             lambda x: self.tool_calls.append(x),
         )
         self.start_found = False
+        self.start_regex = re.compile(self.parser.start_token)
+        self.look_ahead = ""
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         request = super().adjust_request(request)
@@ -365,7 +367,8 @@ class Granite4ToolParser(ToolParser):
             if function.name:
                 delta.type = "function"
                 delta.id = make_tool_call_id()
-            tool_calls.append(delta)
+            if function.name or function.arguments:
+                tool_calls.append(delta)
         return tool_calls
 
     def extract_tool_calls_streaming(
@@ -378,25 +381,51 @@ class Granite4ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        start_token_pos = current_text.find(self.parser.start_token)
-        end_token_pos: int | None = current_text.find(self.parser.end_token)
-        end_token_pos = None if end_token_pos == -1 else end_token_pos
+        if self.look_ahead:
+            delta_text = self.look_ahead + delta_text
+            previous_text = previous_text[: -len(self.look_ahead)]
+            current_text = previous_text + delta_text
+            self.look_ahead = ""
+
+        start_token_pos = -1
+        if start_match := self.start_regex.search(current_text, partial=True):
+            match_length = start_match.end() - start_match.start()
+            if not start_match.partial:
+                start_token_pos = start_match.start()
+            elif match_length > 0:
+                start_token_pos = -2
+        end_token_pos = (
+            None if (pos := current_text.find(self.parser.end_token)) == -1 else pos
+        )
 
         try:
             msg = DeltaMessage()
 
-            if start_token_pos == -1:
+            if start_token_pos < 0:
                 # just streaming text so far
                 msg.content = delta_text
+                if start_token_pos == -2:
+                    # There is a partial match
+                    msg.content = delta_text[:-match_length]
+                    self.look_ahead = current_text[:-match_length]
+                else:
+                    msg.content = delta_text
 
             elif not self.start_found:
                 # this is the first time we find the beginning
                 self.start_found = True
                 self.parser.feed(current_text[start_token_pos:end_token_pos])
+                remainder = ""
                 if end_token_pos is not None:
                     self.parser.finish()
+                    remainder = current_text[
+                        end_token_pos + len(self.parser.end_token) :
+                    ]
                 msg.tool_calls = self.collect_tool_calls()
-                msg.content = current_text[:start_token_pos]
+                # append the remainder here instead of pushing to lookahead
+                # because it's not clear if chat completion server will call this
+                # method again.
+                msg.content = current_text[:start_token_pos] + remainder
 
             elif end_token_pos is None:
                 # we're in between the start and the end token
@@ -419,6 +448,7 @@ class Granite4ToolParser(ToolParser):
                 msg.content = delta_text
 
             msg.tool_calls = self.collect_tool_calls()
+            assert len(self.look_ahead) <= len(delta_text)
             if msg.content or msg.tool_calls:
                 return msg
             else:

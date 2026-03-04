@@ -98,7 +98,7 @@ def server_config(request):
     yield CONFIGS[request.param]
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def server(request, server_config: ServerConfig):
     model = server_config["model"]
     args_for_model = server_config["arguments"]
