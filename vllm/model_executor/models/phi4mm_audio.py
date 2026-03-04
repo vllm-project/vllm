@@ -586,9 +586,8 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
             seq_len, batch_size, self.chunk_size, self.left_chunk
         )
         device = xs_pad.device
-        if device.type != "cpu":
-            enc_streaming_mask = enc_streaming_mask.to(device)
-            xs_pad = xs_pad.to(device)
+        enc_streaming_mask = enc_streaming_mask.to(device)
+        xs_pad = xs_pad.to(device)
 
         input_tensor = xs_pad
         input_tensor, masks = self._forward_embeddings_core(input_tensor, masks)

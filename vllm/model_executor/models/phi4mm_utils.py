@@ -1542,24 +1542,6 @@ class NemoConvSubsampling(torch.nn.Module):
         self.subsampling_conv_chunking_factor = subsampling_conv_chunking_factor
 
 
-def calc_length(
-    lengths: Tensor,
-    all_paddings: int,
-    kernel_size: int,
-    stride: int,
-    ceil_mode: bool,
-    repeat_num: int = 1,
-) -> Tensor:
-    """Calculates the output length of a Tensor passed through a convolution or
-    max pooling layer"""
-    add_pad: float = all_paddings - kernel_size
-    one: float = 1.0
-    for i in range(repeat_num):
-        lengths = torch.div(lengths.to(dtype=torch.float) + add_pad, stride) + one
-        lengths = torch.ceil(lengths) if ceil_mode else torch.floor(lengths)
-    return lengths.to(dtype=torch.int)
-
-
 def calc_length_int(
     lengths: int,
     all_paddings: int,
