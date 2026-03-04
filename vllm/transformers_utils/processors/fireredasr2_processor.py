@@ -21,17 +21,17 @@ logger = init_logger(__name__)
 
 
 class CMVN:
-    def __init__(self, dim, means, inverse_std_variences):
-        self.dim, self.means, self.inverse_std_variences = (
+    def __init__(self, dim, means, inverse_std_variances):
+        self.dim, self.means, self.inverse_std_variances = (
             dim,
             np.array(means),
-            np.array(inverse_std_variences),
+            np.array(inverse_std_variances),
         )
 
     def __call__(self, x):
         assert x.shape[-1] == self.dim, "CMVN dim mismatch"
         out = x - self.means
-        out = out * self.inverse_std_variences
+        out = out * self.inverse_std_variances
         return out
 
 
@@ -106,7 +106,7 @@ class FireRedASR2FeatureExtractor(SequenceFeatureExtractor):
         return_attention_mask=False,
         dim=80,
         means=None,
-        inverse_std_variences=None,
+        inverse_std_variances=None,
         num_mel_bins=80,
         frame_length=25,
         frame_shift=10,
@@ -128,7 +128,7 @@ class FireRedASR2FeatureExtractor(SequenceFeatureExtractor):
         self.max_length = max_length
         self.dim = dim
         self.means = means
-        self.inverse_std_variences = inverse_std_variences
+        self.inverse_std_variances = inverse_std_variances
         self.num_mel_bins = num_mel_bins
         self.frame_length = frame_length
         self.frame_shift = frame_shift
@@ -168,7 +168,7 @@ class FireRedASR2FeatureExtractor(SequenceFeatureExtractor):
             return mask.to(torch.uint8)
 
         # initialize the CMVN and Fbank objects
-        self.cmvn = CMVN(self.dim, self.means, self.inverse_std_variences)
+        self.cmvn = CMVN(self.dim, self.means, self.inverse_std_variances)
         self.fbank = KaldifeatFbank(
             num_mel_bins=self.num_mel_bins,
             frame_length=self.frame_length,
