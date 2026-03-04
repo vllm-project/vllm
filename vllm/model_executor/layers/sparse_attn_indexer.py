@@ -5,6 +5,11 @@
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.distributed.kv_transfer import (
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+    is_v1_kv_transfer_group,
+)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -241,6 +246,12 @@ def sparse_attn_indexer(
             topk_indices_buffer[:num_decode_tokens, : topk_indices.shape[-1]] = (
                 topk_indices
             )
+
+    # KV transfer: save indexer KV cache layer after forward
+    if has_kv_transfer_group() and is_v1_kv_transfer_group():
+        connector = get_kv_transfer_group()
+        if connector.has_connector_metadata():
+            connector.save_kv_layer(k_cache_prefix, kv_cache, attn_metadata)
 
     return topk_indices_buffer
 
