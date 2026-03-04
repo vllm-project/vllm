@@ -147,6 +147,7 @@ shared_memory_per_block_optin = "shared_memory_per_block_optin"
 FoPE = "FoPE"
 k_ot = "k_ot"
 view_seperator = "view_seperator"
+inverse_std_variences = "inverse_std_variences"
 
 [tool.typos.default.extend-words]
 iy = "iy"
