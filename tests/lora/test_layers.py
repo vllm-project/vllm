@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+import importlib
 from copy import deepcopy
 from dataclasses import dataclass
 from unittest.mock import patch
@@ -1440,4 +1441,20 @@ def test_variable_slice_lora_class_selection(default_vllm_config, dist_init):
     ), (
         "MergedColumnParallelLinearVariableSliceWithLoRA "
         "should NOT handle 2 slices even with empty packed_modules_list"
+    )
+
+
+def test_vocab_parallel_embedding_module_rename_compatibility():
+    new_module = importlib.import_module(
+        "vllm.lora.layers.vocab_parallel_embedding"
+    )
+    old_module = importlib.import_module(
+        "vllm.lora.layers.vocal_parallel_embedding"
+    )
+
+    assert hasattr(new_module, "VocabParallelEmbeddingWithLoRA")
+    assert hasattr(old_module, "VocabParallelEmbeddingWithLoRA")
+    assert (
+        old_module.VocabParallelEmbeddingWithLoRA
+        is new_module.VocabParallelEmbeddingWithLoRA
     )
