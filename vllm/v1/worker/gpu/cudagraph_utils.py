@@ -97,6 +97,7 @@ class CudaGraphManager:
         self.uniform_decode_query_len = uniform_decode_query_len
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
+        self._graphs_captured = False
         self.pool = (
             torch.cuda.graph_pool_handle()
             if self.cudagraph_mode != CUDAGraphMode.NONE
@@ -185,20 +186,13 @@ class CudaGraphManager:
         is_uniform: bool,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
-        if 0 < num_tokens < len(self._candidates):
+        if self._graphs_captured and 0 < num_tokens < len(self._candidates):
             for desc in self._candidates[num_tokens]:
                 if desc.uniform and not is_uniform:
                     continue
-                # If graph wasn't captured yet, fall back to eager.
-                # This might happen when the dummy run is called before capture.
-                if desc.cg_mode == CUDAGraphMode.FULL and desc not in self.graphs:
-                    continue
                 return desc
         return BatchExecutionDescriptor(
-            cg_mode=CUDAGraphMode.NONE,
-            num_tokens=num_tokens,
-            num_reqs=num_reqs,
-            uniform=is_uniform,
+            cg_mode=CUDAGraphMode.NONE, num_tokens=num_tokens, num_reqs=num_reqs
         )
 
     @torch.inference_mode()
@@ -233,6 +227,7 @@ class CudaGraphManager:
                     self._capture_graph(
                         desc, capture_fn, attn_metadata, slot_mappings, dp_size
                     )
+        self._graphs_captured = True
 
     def _capture_graph(
         self,
@@ -400,6 +395,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     self._capture_graph(
                         desc, capture_fn, attn_metadata, slot_mappings, dp_size
                     )
+        self._graphs_captured = True
 
     def run_fullgraph(
         self, desc: BatchExecutionDescriptor
