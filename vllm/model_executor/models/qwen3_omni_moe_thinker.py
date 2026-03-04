@@ -391,6 +391,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
         }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
@@ -647,6 +648,7 @@ class Qwen3_VisionBlock(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor | None,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor | None,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
         x = x + self.attn(
             self.norm1(x),
@@ -654,6 +656,7 @@ class Qwen3_VisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
 
         x = x + self.mlp(self.norm2(x))
@@ -919,6 +922,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
         }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
@@ -973,6 +977,20 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         rotary_pos_emb_sin = rotary_pos_emb_sin.to(hidden_states.device)
         max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
 
+        # Recompute cu_seqlens in numpy from grid_thw to avoid GPU->CPU sync
+        grid_thw_np = grid_thw.cpu().numpy()
+        cu_seqlens_np = np.repeat(
+            grid_thw_np[:, 1] * grid_thw_np[:, 2], grid_thw_np[:, 0]
+        ).cumsum(axis=0, dtype=np.int32)
+        cu_seqlens_np = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens_np])
+        sequence_lengths = MMEncoderAttention.maybe_compute_sequence_lengths(
+            self.attn_backend, cu_seqlens_np
+        )
+        if sequence_lengths is not None:
+            sequence_lengths = torch.from_numpy(sequence_lengths).to(
+                self.device, non_blocking=True
+            )
+
         hidden_states_list = []
         deepstack_visual_indexes = self.deepstack_visual_indexes
 
@@ -983,6 +1001,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen,
+                sequence_lengths=sequence_lengths,
             )
             if (
                 deepstack_visual_indexes is not None
@@ -1169,7 +1188,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             return x
 
         # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
-        feature_extractor = self.info.get_feature_extractor()
+        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
         hop_length = feature_extractor.hop_length
         if audios:
             # NOTE: Qwen3-Omni processor accept "audio"
@@ -1902,14 +1921,16 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 num_audio,
             )
 
-        # Default: standard merge (no interleaving)
-        inputs_embeds = _merge_multimodal_embeddings(
-            inputs_embeds=inputs_embeds,
+        # Default: standard merge (no interleaving), same as parent class.
+        # multimodal_embeddings may have been updated above (deepstack
+        # main-scale). Use super() to stay consistent with the parent
+        # implementation and avoid issues seen in Qwen2.5-Omni (#34506).
+        return super().embed_input_ids(
+            input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
         )
-
-        return inputs_embeds
 
     def forward(
         self,

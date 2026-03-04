@@ -4,17 +4,15 @@ set -ex
 # usage: ./install_python_libraries.sh [options]
 #   --workspace <dir>    workspace directory (default: ./ep_kernels_workspace)
 #   --mode <mode>        "install" (default) or "wheel"
-#   --pplx-ref <commit>  pplx-kernels commit hash
 #   --deepep-ref <commit> DeepEP commit hash
 #   --nvshmem-ver <ver>  NVSHMEM version 
 
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
-PPLX_COMMIT_HASH=${PPLX_COMMIT_HASH:-"12cecfd"}
 DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"73b6ea4"}
 NVSHMEM_VER=${NVSHMEM_VER:-"3.3.24"}  # Default supports both CUDA 12 and 13
 WORKSPACE=${WORKSPACE:-$(pwd)/ep_kernels_workspace}
 MODE=${MODE:-install}
-CUDA_VERSION_MAJOR=$(${CUDA_HOME}/bin/nvcc --version | egrep -o "release [0-9]+" | cut -d ' ' -f 2)
+CUDA_VERSION_MAJOR=$("${CUDA_HOME}"/bin/nvcc --version | grep -E -o "release [0-9]+" | cut -d ' ' -f 2)
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -33,14 +31,6 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             MODE="$2"
-            shift 2
-            ;;
-        --pplx-ref)
-            if [[ -z "$2" || "$2" =~ ^- ]]; then
-                echo "Error: --pplx-ref requires an argument." >&2
-                exit 1
-            fi
-            PPLX_COMMIT_HASH="$2"
             shift 2
             ;;
         --deepep-ref)
@@ -187,14 +177,6 @@ do_build() {
     fi
     popd
 }
-
-# build pplx-kernels
-do_build \
-    "https://github.com/ppl-ai/pplx-kernels" \
-    "pplx-kernels" \
-    "setup.py" \
-    "$PPLX_COMMIT_HASH" \
-    ""
 
 # build DeepEP
 do_build \

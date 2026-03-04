@@ -64,7 +64,7 @@ async def create_embedding(
     try:
         generator = await handler.create_embedding(request, raw_request)
     except Exception as e:
-        return handler.create_error_response(e)
+        generator = handler.create_error_response(e)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(

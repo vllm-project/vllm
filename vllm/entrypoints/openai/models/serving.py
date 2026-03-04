@@ -59,11 +59,10 @@ class OpenAIServingModels:
             )
         self.lora_resolver_lock: dict[str, Lock] = defaultdict(Lock)
 
-        self.input_processor = self.engine_client.input_processor
-        self.io_processor = self.engine_client.io_processor
-        self.renderer = self.engine_client.renderer
         self.model_config = self.engine_client.model_config
-        self.max_model_len = self.model_config.max_model_len
+        self.renderer = self.engine_client.renderer
+        self.io_processor = self.engine_client.io_processor
+        self.input_processor = self.engine_client.input_processor
 
     async def init_static_loras(self):
         """Loads all static LoRA modules.
@@ -96,12 +95,13 @@ class OpenAIServingModels:
         return self.base_model_paths[0].name
 
     async def show_available_models(self) -> ModelList:
-        """Show available models. This includes the base model and all
-        adapters"""
+        """Show available models. This includes the base model and all adapters."""
+        max_model_len = self.model_config.max_model_len
+
         model_cards = [
             ModelCard(
                 id=base_model.name,
-                max_model_len=self.max_model_len,
+                max_model_len=max_model_len,
                 root=base_model.model_path,
                 permission=[ModelPermission()],
             )

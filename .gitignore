@@ -3,6 +3,8 @@
 
 # vllm-flash-attn built from source
 vllm/vllm_flash_attn/*
+!vllm/vllm_flash_attn/__init__.py
+!vllm/vllm_flash_attn/flash_attn_interface.py
 
 # OpenAI triton kernels copied from source
 vllm/third_party/triton_kernels/*
@@ -238,3 +240,6 @@ ep_kernels_workspace/
 vllm/grpc/vllm_engine_pb2.py
 vllm/grpc/vllm_engine_pb2_grpc.py
 vllm/grpc/vllm_engine_pb2.pyi
+
+# Ignore generated cpu headers 
+csrc/cpu/cpu_attn_dispatch_generated.h

@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, NamedTuple
+from typing import Any
 
 import torch
 
@@ -26,7 +26,8 @@ batchsize_logging_interval: float = envs.VLLM_LOG_BATCHSIZE_INTERVAL
 batchsize_forward_time: defaultdict = defaultdict(list)
 
 
-class BatchDescriptor(NamedTuple):
+@dataclass(frozen=True)
+class BatchDescriptor:
     """
     Batch descriptor for cudagraph dispatching. We should keep the num of
     items as minimal as possible to properly and uniquely describe the padded
@@ -55,19 +56,6 @@ class BatchDescriptor(NamedTuple):
     (like fused_moe_lora) whose grid size depends on num_active_loras
     to be properly captured.
     """
-
-    def relax_for_mixed_batch_cudagraphs(self) -> "BatchDescriptor":
-        """
-        Return a relaxed version of current batch descriptor that is still compatible
-        with PIECEWISE cudagraphs (or mixed prefill-decode FA cudagraphs).
-        """
-        return BatchDescriptor(
-            self.num_tokens,
-            num_reqs=None,
-            uniform=False,
-            has_lora=self.has_lora,
-            num_active_loras=self.num_active_loras,
-        )
 
 
 def _compute_sp_num_tokens(
@@ -253,7 +241,7 @@ class ForwardContext:
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
-        assert self.cudagraph_runtime_mode.valid_runtime_modes(), (
+        assert self.cudagraph_runtime_mode.is_valid_runtime_mode(), (
             f"Invalid cudagraph runtime mode: {self.cudagraph_runtime_mode}"
         )
 
@@ -359,7 +347,6 @@ def set_forward_context(
                 num_tokens_unpadded=num_tokens,
                 parallel_config=vllm_config.parallel_config,
                 allow_microbatching=False,
-                allow_dp_padding=False,
             )
             assert num_tokens_across_dp is not None
         dp_metadata = DPMetadata.make(

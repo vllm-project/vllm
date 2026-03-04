@@ -15,11 +15,12 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import BatchedTritonExperts
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -134,7 +135,7 @@ def make_modular_kernel(
     q_dtype: torch.dtype | None,
     use_fp8_dispatch: bool,
     quant_config: FusedMoEQuantConfig,
-) -> FusedMoEModularKernel:
+) -> FusedMoEKernel:
     ht_args: DeepEPHTArgs | None = None
     ll_args: DeepEPLLArgs | None = None
 
@@ -179,7 +180,7 @@ def make_modular_kernel(
             quant_config=quant_config,
         )
 
-    mk = FusedMoEModularKernel(
+    mk = FusedMoEKernel(
         prepare_finalize=a2a,
         fused_experts=fused_experts,
         inplace=False,
@@ -241,7 +242,7 @@ def deep_ep_moe_impl(
         )
 
         # Make modular kernel
-        mk: FusedMoEModularKernel = make_modular_kernel(
+        mk: FusedMoEKernel = make_modular_kernel(
             pg,
             pgi,
             low_latency_mode,
@@ -254,13 +255,13 @@ def deep_ep_moe_impl(
             quant_config,
         )
 
-        out = mk.forward(
+        out = mk.apply(
             hidden_states=rank_tokens_chunk,
             w1=w1,
             w2=w2,
             topk_weights=topk_weights_chunk,
             topk_ids=topk_chunk,
-            activation="silu",
+            activation=MoEActivation.SILU,
             global_num_experts=num_experts,
             expert_map=build_expert_map(),
             apply_router_weight_on_input=False,

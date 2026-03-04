@@ -17,6 +17,8 @@ QuantizationMethods = Literal[
     "fp_quant",
     "modelopt",
     "modelopt_fp4",
+    "modelopt_mxfp8",
+    "modelopt_mixed",
     "gguf",
     "gptq_marlin",
     "awq_marlin",
@@ -119,7 +121,12 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .gptq import GPTQConfig
     from .gptq_marlin import GPTQMarlinConfig
     from .inc import INCConfig
-    from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
+    from .modelopt import (
+        ModelOptFp8Config,
+        ModelOptMixedPrecisionConfig,
+        ModelOptMxFp8Config,
+        ModelOptNvFp4Config,
+    )
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import Mxfp4Config
     from .petit import PetitNvFp4Config
@@ -133,6 +140,8 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "fp_quant": FPQuantConfig,
         "modelopt": ModelOptFp8Config,
         "modelopt_fp4": ModelOptNvFp4Config,
+        "modelopt_mxfp8": ModelOptMxFp8Config,
+        "modelopt_mixed": ModelOptMixedPrecisionConfig,
         "gguf": GGUFConfig,
         "gptq_marlin": GPTQMarlinConfig,
         "awq_marlin": AWQMarlinConfig,

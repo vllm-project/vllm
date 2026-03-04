@@ -305,7 +305,6 @@ class Jais2Model(nn.Module):
 
         self.config = config
         self.quant_config = quant_config
-        self.padding_idx = config.pad_token_id
 
         self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
