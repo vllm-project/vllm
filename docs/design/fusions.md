@@ -88,6 +88,7 @@ Two variants are fused:
 Note that AITER fusions are currently in a separate pass in `vllm.compilation.passes.fusion.rocm_aiter_fusion`.
 
 Supported quantization scheme/hardware combinations:
+
 - FP8 static per-tensor: CUDA & HIP kernel
 - FP8 dynamic per-token: CUDA & HIP kernel, AITER
 - FP8 dynamic per-token-group (128/64): CUDA & HIP kernel, AITER 
@@ -112,6 +113,7 @@ avoiding materialization of the full-precision post-activation tensor.
 Note that AITER fusions are in a separate pass in `vllm.compilation.passes.fusion.rocm_aiter_fusion`.
 
 Supported quantization scheme/hardware combinations:
+
 - FP8 static per-tensor: CUDA & HIP kernel
 - NVfp4 dynamic: CUDA sm100+ only with flashinfer
 - FP8 per-token-group (128): ROCm AITER only
@@ -132,13 +134,16 @@ Supported quantization scheme/hardware combinations:
 **What it fuses.** Fuses the attention output quantization directly after the attention computation,
 eliminating a full-precision memory round-trip of the attention output. Patterns covered:
 
-- `Attention → FP8 static quant`
-  - `TRITON_ATTN`: CUDA, ROCm
-  - `FLASHINFER`: CUDA sm100+ with FlashInfer installed
-  - `ROCM_ATTN`: ROCm
-  - `ROCM_AITER_UNIFIED_ATTN`: ROCm with AITER
-- `Attention → NVfp4 dynamic quant`
-  - `FLASHINFER`: CUDA sm100+ with FlashInfer installed
+`Attention → FP8 static quant`:
+
+- `TRITON_ATTN`: CUDA, ROCm
+- `FLASHINFER`: CUDA sm100+ with FlashInfer installed
+- `ROCM_ATTN`: ROCm
+- `ROCM_AITER_UNIFIED_ATTN`: ROCm with AITER
+
+`Attention → NVfp4 dynamic quant`:
+
+- `FLASHINFER`: CUDA sm100+ with FlashInfer installed
 
 Other attention backends do not support fused output quantization yet.
 
@@ -162,6 +167,7 @@ This fusion is only profitable for small `num_tokens`,
 so the fusion is only performed in the lower compiled range.
 
 Patterns covered:
+
 - `AllReduce → RMSNorm(+residual_add)`: CUDA sm90+ with FlashInfer
 - `AllReduce → RMSNorm(+residual_add) → FP8 static quant`: CUDA sm90+ with FlashInfer
 - `AllReduce → RMSNorm(+residual_add) → NVfp4 dynamic quant`: CUDA sm100+ with FlashInfer
@@ -198,6 +204,7 @@ Input → ReduceScatter → local RMSNorm → AllGather → Output
 ```
 
 Patterns covered:
+
 - First block: `AllReduce → RMSNorm` → `ReduceScatter → RMSNorm → AllGather`
 - Middle blocks: `AllReduce → fused_add_RMSNorm` → `ReduceScatter → fused_add_RMSNorm → AllGather`
 - Both with optional `→ FP8 static quant` suffix
@@ -225,6 +232,7 @@ This overlap is only profitable for large `num_tokens`, so the fusion (and prece
 is only performed in the higher compiled range above `PassConfig.sp_min_token_num`.
 
 Patterns covered:
+
 - `GEMM → reduce-scatter` → `fused_matmul_reduce_scatter`
 - `all-gather → GEMM` → `all_gather_matmul`
 - FP8 scaled variants of both patterns
@@ -315,7 +323,7 @@ The table below lists the quantization schemes supported by each fusion on each 
 | `fuse_norm_quant`            | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | —             | FP8 static, FP8 per-token, FP8 per-group |
 | `fuse_act_quant`             | FP8 static, NVfp4                        | FP8 static                               | FP8 static                               | —             | FP8 per-group                            |
 | `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVfp4             | FP16/BF16, FP8 static                    | —                                        | —             | —                                        |
-| `fuse_attn_quant`*           | FP8 static*, NVfp4*                      | FP8 static*                              | FP8 static*                              | —             | FP8 static*                              |
+| `fuse_attn_quant`\*          | FP8 static\*, NVfp4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                             |
 | `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
 | `fuse_act_padding`           | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
 | `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16                                | FP16/BF16     | —                                        |
