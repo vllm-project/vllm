@@ -27,6 +27,7 @@ function resolve_gpu_archs() {
     echo "${arch}"
 }
 
+# Repo and Hash picked from Dockerfile.rocm_base
 MORI_COMMIT_HASH="2d02c6a9"
 MORI_REPO="https://github.com/ROCm/mori.git"
 MORI_GPU_ARCHS=${MORI_GPU_ARCHS:-"$(resolve_gpu_archs)"}
