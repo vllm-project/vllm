@@ -193,7 +193,7 @@ def parse_fine_tuned_lora_name(
     raise ValueError(f"{name} is unsupported LoRA weight")
 
 
-def is_base_embeddding_weights(name: str) -> bool:
+def is_base_embedding_weights(name: str) -> bool:
     # hardcoded subfixes for input & output embedding weights
     embedding_suffixes = (
         ".embed_tokens.base_layer.weight",

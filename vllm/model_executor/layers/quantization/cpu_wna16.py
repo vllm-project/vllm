@@ -261,7 +261,7 @@ class CPUAWQLinearMethod(LinearMethodBase):
 
         zeros = pack_cols(zeros, bits, group_num, output_size).contiguous()
         # make 16 output channel as a block and transpose to
-        # the make the block contigous
+        # the make the block contiguous
         weight = pack_cols(weight, bits, input_size, output_size)
         weight = (
             weight.view(input_size, -1, 16 // pack_factor)
