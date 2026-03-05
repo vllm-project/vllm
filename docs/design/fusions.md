@@ -151,8 +151,6 @@ Supported quantization scheme/hardware combinations:
 - ROCm AITER pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py)
 - CUDA/HIP kernels: [`csrc/quantization/`](https://github.com/vllm-project/vllm/blob/main/csrc/quantization/)
 
----
-
 ### Attention + Quantization (`fuse_attn_quant`)
 
 !!! warning
