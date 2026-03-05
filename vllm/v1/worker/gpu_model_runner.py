@@ -1426,16 +1426,10 @@ class GPUModelRunner(
         cumsum_dtype: np.dtype | None = None,
     ) -> np.ndarray:
         """Get the cumulative sum and batched arange of the given array.
-
-        The arange result is written into arange_out.
-        E.g., [2, 5, 3] -> cumsum=[2, 7, 10], arange written to
+        E.g., [2, 5, 3] -> [2, 7, 10], arange written to
         arange_out[:10] as [0, 1, 0, 1, 2, 3, 4, 0, 1, 2].
-
         Equivalent to but faster than:
         np.concatenate([np.arange(n) for n in num_tokens])
-
-        Returns:
-            cu_num_tokens: The cumulative sum array
         """
         # Step 1. [2, 5, 3] -> [2, 7, 10]
         cu_num_tokens = np.cumsum(num_tokens, dtype=cumsum_dtype)
