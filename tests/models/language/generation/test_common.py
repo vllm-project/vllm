@@ -6,7 +6,7 @@ import torch
 
 from vllm.platforms import current_platform
 
-from ....utils import large_gpu_mark
+from ....utils import disable_aiter_plain_rmsnorm, large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
@@ -126,6 +126,10 @@ def test_models(
 
     if use_rocm_aiter and (model in AITER_MODEL_LIST):
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+        if model == "TitanML/tiny-mixtral":
+            # Untrained model: near-uniform logits make argmax sensitive to
+            # AITER's bfloat16 rounding error in plain rms_norm.
+            disable_aiter_plain_rmsnorm(monkeypatch)
     elif use_rocm_aiter and model not in AITER_MODEL_LIST:
         # Skip model that are not using AITER tests.
         # When more AITER kernels are added, this list will not be
