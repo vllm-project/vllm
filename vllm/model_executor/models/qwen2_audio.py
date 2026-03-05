@@ -189,11 +189,9 @@ class Qwen2AudioProcessingInfo(BaseProcessingInfo):
             return {}
 
         feature_extractor = self.get_feature_extractor()
-        chunk_length = min(getattr(feature_extractor, "chunk_length", 30), 30)
-        audio_len = int(
-            chunk_length * getattr(feature_extractor, "sampling_rate", 16000)
-        )
-        hop_length = getattr(feature_extractor, "hop_length", 160)
+        chunk_length = min(feature_extractor.chunk_length, 30)
+        audio_len = int(chunk_length * feature_extractor.sampling_rate)
+        hop_length = feature_extractor.hop_length
         max_mel_seq_len = audio_len // hop_length
 
         input_lengths = torch.tensor([max_mel_seq_len], dtype=torch.long)

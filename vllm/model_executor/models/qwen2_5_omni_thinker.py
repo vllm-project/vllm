@@ -360,10 +360,6 @@ class Qwen2_5OmniThinkerProcessingInfo(
     ) -> Mapping[str, int] | None:
         mm_counts = mm_counts or {}
         requested_modalities = {m for m, c in mm_counts.items() if c > 0}
-
-        if not requested_modalities:
-            return None
-
         mm_max_tokens: dict[str, int] = {}
 
         if requested_modalities & {"image", "video"}:
