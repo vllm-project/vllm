@@ -322,7 +322,6 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
             phy2log: [layers, num_replicas], the expert
                 index of each replica
         """
-        num_layers, num_logical_experts = weight.shape
         weight_np = weight.float().cpu().numpy()
         old_phy2log_np = (
             old_global_expert_indices.cpu().numpy()
@@ -332,17 +331,13 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
 
         if num_groups % num_nodes == 0:
             # use hierarchical load-balance policy
-            phy2log_np, phy_replicas_idx_np, logcnt_np = (
-                cls.rebalance_experts_hierarchical(
-                    weight_np, num_replicas, num_groups, num_nodes, num_ranks
-                )
+            phy2log_np, phy_replicas_idx_np, _ = cls.rebalance_experts_hierarchical(
+                weight_np, num_replicas, num_groups, num_nodes, num_ranks
             )
         else:
             # use global load-balance policy
-            phy2log_np, phy_replicas_idx_np, logcnt_np = (
-                cls.rebalance_experts_hierarchical(
-                    weight_np, num_replicas, 1, 1, num_ranks
-                )
+            phy2log_np, phy_replicas_idx_np, _ = cls.rebalance_experts_hierarchical(
+                weight_np, num_replicas, 1, 1, num_ranks
             )
 
         # Optional postprocessing to preserve slots for experts moving
@@ -354,16 +349,6 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
             phy2log_np, phy_replicas_idx_np = cls.preserve_intragpu_slots(
                 phy2log_np, phy_replicas_idx_np, num_ranks, old_phy2log_np
             )
-        num_redundant_experts = num_replicas - num_logical_experts
-        maxlogcnt = num_redundant_experts + 1
-        log2phy_np = np.full(
-            (num_layers, num_logical_experts, maxlogcnt), -1, dtype=np.int64
-        )
-        layer_indices = np.arange(num_layers)[:, None]
-        replica_indices = np.tile(
-            np.arange(num_replicas, dtype=np.int64), (num_layers, 1)
-        )
-        log2phy_np[layer_indices, phy2log_np, phy_replicas_idx_np] = replica_indices
 
         phy2log = torch.from_numpy(phy2log_np)
         return phy2log
