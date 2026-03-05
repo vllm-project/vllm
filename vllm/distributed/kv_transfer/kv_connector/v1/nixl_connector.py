@@ -59,7 +59,11 @@ from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import (
+    MambaSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -310,10 +314,12 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 class NixlConnector(KVConnectorBase_V1, SupportsHMA):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
-        if any([
-            isinstance(group.kv_cache_spec, MambaSpec)
-            for group in self.kv_cache_config.kv_cache_groups
-        ]):
+        if any(
+            [
+                isinstance(group.kv_cache_spec, MambaSpec)
+                for group in self.kv_cache_config.kv_cache_groups
+            ]
+        ):
             # Hybrid SSM models do not yet support cross-layer layout
             return False
 
@@ -1483,9 +1489,9 @@ class NixlConnectorWorker:
         # block size: 400, the one from the FA spec
         print(f"block size: {self.block_size}\n\n")
         print("NUM_BLOCKS: ", self.num_blocks, "\n\n", flush=True)
-        vs = next(iter(kv_caches.values()))
+        # vs = next(iter(kv_caches.values()))
         # len(vs)=2, [torch.Size([18525, 3, 3328]), torch.Size([18525, 48, 64, 128])]
-        print(f"{next(iter(kv_caches.keys()))}:{len(vs)=}, {[v.shape for v in vs]}\n\n")
+        # print(f"{next(iter(kv_caches.keys()))}:{len(vs)=}, {[v.shape for v in vs]}\n\n")
         self.kv_topo = TpKVTopology(
             tp_rank=self.tp_rank,
             engine_id=self.engine_id,
@@ -1542,15 +1548,17 @@ class NixlConnectorWorker:
 
         # Enable different block lengths for different layers *only* when MLA is used.
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
-        # TODO (NickLucche) We should refactor this MLA DSv32 Indexer case with HMA.
         self.block_len_per_layer = list[int]()
         for layer_name, cache_or_caches in xfer_buffers.items():
-            # NOTE (NickLucche) Hybrid SSM models assume a layout that is similar to 
+            # NOTE (NickLucche) Hybrid SSM models assume a layout that is similar to
             # that of FI, with block laid out as in `get_backend_aware_kv_block_len`.
-            # However, physical page_size may differ when kernel requires a specific 
+            # However, physical page_size may differ when kernel requires a specific
             # block size. This leads to SSM and FA layers having different num_blocks.
             # `_physical_blocks_per_logical_kv_block` ratio is used to adjust for this.
             layer_spec = self._layer_specs[layer_name]
+            if isinstance(layer_spec, UniformTypeKVCacheSpecs):
+                # MLA DSv32 Indexer case: UniformTypeKVCacheSpecs merges kv_cache_specs
+                layer_spec = layer_spec.kv_cache_specs[layer_name]
             cache_list = self.kv_topo.get_transfer_cache_regions(
                 cache_or_caches, layer_spec
             )
@@ -1569,14 +1577,12 @@ class NixlConnectorWorker:
             )
             # `page_size`` accounts for physical blocks, st KVCache is always [`num_blocks` * `page_size`]
             if not isinstance(layer_spec, MambaSpec):
-                # TODO check if this works for DSv32
                 self.block_len_per_layer.append(page_size)
             curr_tensor_size_bytes = num_blocks * page_size
             if tensor_size_bytes is None:
                 tensor_size_bytes = curr_tensor_size_bytes
 
             print(f"{layer_name=}, {[v.shape for v in cache_list]}")
-            print(f"{layer_name=} strides, {[v.stride() for v in cache_list]}")
 
             # TODO (NickLucche) we could eventually unify how we handle FA/FI regions,
             # registering a single tensor for both K/V and splitting logically like FI.
@@ -1626,7 +1632,7 @@ class NixlConnectorWorker:
             flush=True,
         )
         # TODO (NickLucche) Adapt to different descs views (engine_id->tp_rank) to
-        # support heterogeneous TP. 
+        # support heterogeneous TP.
         # `seen_base_addresses*num_blocks=num_descs` we register below.
         # x2 factor is for when a region is registered packed or unpacked with descs.
         self.num_descs = (
