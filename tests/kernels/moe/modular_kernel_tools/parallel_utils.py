@@ -36,7 +36,8 @@ def _set_vllm_config(
 
     temp_file = tempfile.mkstemp()[1]
 
-    # When DP is enabled, processes are organized as: rank = dp_rank * tp_pp_world_size + tp_pp_rank
+    # When DP is enabled, processes are organized as:
+    #  rank = dp_rank * tp_pp_world_size + tp_pp_rank
     tp_pp_world_size = vllm_config.parallel_config.world_size
     vllm_config.parallel_config.data_parallel_rank = rank // tp_pp_world_size
     tp_pp_rank = rank % tp_pp_world_size

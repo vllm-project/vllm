@@ -307,7 +307,8 @@ def moe_quantize_weights(
     w_gs_l = [None] * e
     for idx in range(e):
         w_l[idx], w_s_l[idx], w_gs_l[idx] = moe_quantize_weights_2d(
-            w[idx], None, quant_dtype, per_token_quant, block_shape)
+            w[idx], None, quant_dtype, per_token_quant, block_shape
+        )
 
     w = torch.stack(w_l)
     w_s = torch.stack(w_s_l)
@@ -338,8 +339,9 @@ def make_test_weight(
     w_16 = torch.randn((e, rows, cols), device="cuda", dtype=in_dtype) / 15
 
     if quant_dtype is not None:
-        w, w_s, w_gs = moe_quantize_weights(w_16, None, quant_dtype,
-                                            per_out_ch_quant, block_shape)
+        w, w_s, w_gs = moe_quantize_weights(
+            w_16, None, quant_dtype, per_out_ch_quant, block_shape
+        )
     else:
         w = w_16
         w_s = None
@@ -592,6 +594,7 @@ def make_shared_experts_with_weights(
         torch.set_default_dtype(in_dtype)
         if quant_dtype == torch.float8_e4m3fn:
             from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
             quant_config = Fp8Config(True)
         else:
             quant_config = None
@@ -631,11 +634,6 @@ def make_shared_experts(
         quant_dtype=quant_dtype,
     )
 
-    return make_shared_experts_with_weights(N,
-                                            K,
-                                            in_dtype,
-                                            w1,
-                                            w2,
-                                            w1_s=w1_s,
-                                            w2_s=w2_s,
-                                            quant_dtype=quant_dtype)
+    return make_shared_experts_with_weights(
+        N, K, in_dtype, w1, w2, w1_s=w1_s, w2_s=w2_s, quant_dtype=quant_dtype
+    )
