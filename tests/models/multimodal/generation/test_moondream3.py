@@ -21,9 +21,9 @@ import tempfile
 import warnings
 
 import pytest
-import torch
 
 from tests.models.registry import HF_EXAMPLE_MODELS
+from vllm.platforms import current_platform
 
 from ....conftest import IMAGE_ASSETS, ImageTestAssets
 from ....utils import large_gpu_mark
@@ -572,7 +572,8 @@ def test_mixed_batch(llm, image_assets: ImageTestAssets):
 
 @pytest.mark.skip(reason="Run separately: pytest -k test_tensor_parallel --forked")
 @pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="Requires at least 2 GPUs for TP=2"
+    current_platform.device_count() < 2,
+    reason="Requires at least 2 GPUs for TP=2",
 )
 @large_gpu_mark(min_gb=80)
 def test_tensor_parallel(image_assets: ImageTestAssets):
@@ -589,7 +590,7 @@ def test_tensor_parallel(image_assets: ImageTestAssets):
     # Clean up any existing model parallel state
     destroy_model_parallel()
     gc.collect()
-    torch.cuda.empty_cache()
+    current_platform.empty_cache()
 
     llm = LLM(
         model=MOONDREAM3_MODEL_ID,
@@ -618,4 +619,4 @@ def test_tensor_parallel(image_assets: ImageTestAssets):
         # Clean up to release GPU memory
         del llm
         gc.collect()
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
