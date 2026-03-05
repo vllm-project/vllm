@@ -5,7 +5,6 @@ import math
 from collections.abc import Callable
 from typing import TypeVar
 
-import regex as re
 import torch
 from torch import nn
 
@@ -25,7 +24,9 @@ from vllm.lora.utils import (
     from_layer,
     from_layer_logits_processor,
     get_supported_lora_modules,
+    is_in_target_modules,
     is_moe_model,
+    is_supported_lora_module,
     process_packed_modules_mapping,
     replace_submodule,
 )
@@ -552,24 +553,9 @@ class LoRAModelManager:
         Returns:
             True if LoRA should be applied to this module, False otherwise.
         """
-        # First check if module is in vLLM's supported LoRA modules
-        is_supported = any(
-            re.match(
-                r".*\.{target_module}$".format(target_module=target_module), module_name
-            )
-            or target_module == module_name
-            for target_module in self.supported_lora_modules
-        )
-        if not is_supported:
+        if not is_supported_lora_module(module_name, self.supported_lora_modules):
             return False
-
-        # Apply deployment-time restrictions from config
-        if self.lora_config.target_modules is None:
-            return True
-
-        # Restrict to allowed suffixes (e.g. only o_proj)
-        module_suffix = module_name.split(".")[-1]
-        return module_suffix in set(self.lora_config.target_modules)
+        return is_in_target_modules(module_name, self.lora_config.target_modules)
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
         """

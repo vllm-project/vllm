@@ -16,7 +16,11 @@ from vllm.lora.model_manager import (
 )
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
-from vllm.lora.utils import get_adapter_absolute_path
+from vllm.lora.utils import (
+    get_adapter_absolute_path,
+    is_in_target_modules,
+    is_supported_lora_module,
+)
 
 logger = init_logger(__name__)
 
@@ -131,12 +135,9 @@ class WorkerLoRAManager:
             )
 
             # Warn about adapter modules that will be ignored.
-            # Use the same suffix-matching logic as _match_target_modules:
-            # take the last segment of the dot-separated module name.
             target_modules = self.lora_config.target_modules
             for module_name in lora.loras:
-                module_suffix = module_name.split(".")[-1]
-                if module_suffix not in supported_lora_modules:
+                if not is_supported_lora_module(module_name, supported_lora_modules):
                     logger.warning_once(
                         "LoRA module '%s' in adapter '%s' is not in the "
                         "model's supported LoRA target modules [%s]. "
@@ -146,11 +147,11 @@ class WorkerLoRAManager:
                         lora_request.lora_path,
                         ", ".join(sorted(supported_lora_modules)),
                     )
-                elif target_modules is not None and module_suffix not in target_modules:
+                elif not is_in_target_modules(module_name, target_modules):
                     logger.warning_once(
                         "LoRA module '%s' in adapter '%s' is not in the "
-                        "deployment-time target_modules restriction [%s]. "
-                        "These parameters will be ignored.",
+                        "deployment-time target_modules restriction [%s]."
+                        " These parameters will be ignored.",
                         module_name,
                         lora_request.lora_path,
                         ", ".join(sorted(target_modules)),
