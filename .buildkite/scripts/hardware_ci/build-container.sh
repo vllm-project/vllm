@@ -36,6 +36,7 @@ EOF
 echo "Building image: ${IMAGE_NAME}"
 echo "Context:        ${CONTEXT}"
 echo "Dockerfile:     ${DOCKERFILE}"
+ls "${CONTEXT}"/docker
 
 buildctl \
   --addr "${BUILDKIT_ADDR}" \
