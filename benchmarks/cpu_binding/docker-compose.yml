@@ -52,10 +52,10 @@ services:
       MODE: "${MODE:-benchmark}"
 
       # Deploy-mode parameters (ignored by benchmark mode unless your script reads them)
-      MODEL: "${MODEL:-meta-llama/Meta-Llama-3.1-405B-Instruct}"
+      MODEL: "${MODEL:-meta-llama/Meta-Llama-3.1-8B-Instruct}"
       HOST: "${HOST:-0.0.0.0}"
       PORT: "${PORT:-8000}"
-      EXTRA_ARGS: "${EXTRA_ARGS:---tensor-parallel-size 8 --swap-space 16 --disable-log-stats --gpu-memory-utilization 0.85 --max-model-len 2048}"
+      EXTRA_ARGS: "${EXTRA_ARGS:---swap-space 16 --disable-log-stats --gpu-memory-utilization 0.85 --max-model-len 2048}"
 
     entrypoint:
       - bash
@@ -68,12 +68,12 @@ services:
           # Deploy profile: OpenAI-compatible server via vLLM CLI
           HOST_EFFECTIVE="$${HOST:-0.0.0.0}"
           PORT_EFFECTIVE="$${PORT:-8000}"
-          MODEL_EFFECTIVE="$${MODEL:-meta-llama/Meta-Llama-3.1-405B-Instruct}"
+          MODEL_EFFECTIVE="$${MODEL:-meta-llama/Meta-Llama-3.1-8B-Instruct}"
 
           # Handle set-but-empty (e.g. PORT=)
           if [ -z "$${HOST_EFFECTIVE}" ]; then HOST_EFFECTIVE="0.0.0.0"; fi
           if [ -z "$${PORT_EFFECTIVE}" ]; then PORT_EFFECTIVE="8000"; fi
-          if [ -z "$${MODEL_EFFECTIVE}" ]; then MODEL_EFFECTIVE="meta-llama/Meta-Llama-3.1-405B-Instruct"; fi
+          if [ -z "$${MODEL_EFFECTIVE}" ]; then MODEL_EFFECTIVE="meta-llama/Meta-Llama-3.1-8B-Instruct"; fi
 
           echo "[vllm-server] Starting deploy via: vllm serve $${MODEL_EFFECTIVE} --host $${HOST_EFFECTIVE} --port $${PORT_EFFECTIVE} $${EXTRA_ARGS:-}"
           # shellcheck disable=SC2086
