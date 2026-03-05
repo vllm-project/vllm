@@ -306,6 +306,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_b_proj = kv_b_proj
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
+        self.rotary_emb = extra_impl_args.get("rotary_emb")
         self.indexer = indexer
 
         self.num_kv_heads = 1
@@ -426,17 +427,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         output_shape: torch.Size | None = None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # Apply RoPE here if rotary_emb is available on the impl.
-        # The PR moved RoPE from mla.py into the attention layer to enable
-        # fused RoPE+quant in the impl. When the fused path is active,
+        # Apply RoPE here when the fused path is not active.
+        # RoPE was moved from mla.py into this layer to enable
+        # fused RoPE+quant. When the fused path is active,
         # skip upfront RoPE -- it will be applied per-path in forward_impl.
-        rotary_emb = getattr(self.impl, "rotary_emb", None)
+
         use_fused = getattr(self.impl, "use_fused_rope_quant", False)
-        if rotary_emb is not None and positions is not None and not use_fused:
+        if self.rotary_emb is not None and positions is not None and not use_fused:
             q_nope, q_pe = q.split(
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
             )
-            q_pe, k_pe = rotary_emb(positions, q_pe, k_pe)
+            q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
             q = torch.cat([q_nope, q_pe], dim=-1)
 
         if self.calculate_kv_scales:
@@ -543,7 +544,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         use_fused = (
             fp8_attention
             and getattr(self.impl, "use_fused_rope_quant", False)
-            and getattr(self.impl, "rotary_emb", None) is not None
+            and self.rotary_emb is not None
             and positions is not None
         )
 
@@ -598,7 +599,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
                 prefill_q_nope = prefill_q[..., : self.qk_nope_head_dim]
                 prefill_q_pe = prefill_q[..., self.qk_nope_head_dim :]
-                prefill_q_pe, prefill_k_pe = self.impl.rotary_emb(
+                assert self.rotary_emb is not None
+                prefill_q_pe, prefill_k_pe = self.rotary_emb(
                     prefill_positions, prefill_q_pe, prefill_k_pe
                 )
                 prefill_q = torch.cat([prefill_q_nope, prefill_q_pe], dim=-1)
