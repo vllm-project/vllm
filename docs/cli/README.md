@@ -130,6 +130,31 @@ vllm bench serve \
     --num-prompts  5
 ```
 
+Use `--eval` to run [lm_eval](https://github.com/EleutherAI/lm-evaluation-harness) accuracy scoring in the same pass, producing a merged JSONL report with accuracy, performance, and environment data:
+
+```bash
+vllm bench serve \
+    --model meta-llama/Meta-Llama-3-8B-Instruct \
+    --host localhost --port 8000 \
+    --eval --eval-tasks gsm8k \
+    --eval-limit 1024 --eval-num-fewshot 8 \
+    --eval-output results.jsonl
+```
+
+Each run appends a JSON line with this structure:
+
+```json
+{
+  "metadata":    { "run_id": "...", "model": "...", "tasks": "...",
+                   "bench_type": "serve", "base_url": "...", "timestamp": "..." },
+  "accuracy":    { "gsm8k": { "exact_match,strict-match": 0.78, ... } },
+  "performance": { "request_throughput": 84.7, "output_throughput": 8494.1,
+                   "mean_ttft_ms": 4214.9, "mean_tpot_ms": 55.5, ... },
+  "environment": { "system_info": {...}, "pytorch_info": {...},
+                   "cuda_gpu_info": {...}, "vllm_info": {...}, ... }
+}
+```
+
 See [vllm bench serve](./bench/serve.md) for the full reference of all available arguments.
 
 ### throughput
