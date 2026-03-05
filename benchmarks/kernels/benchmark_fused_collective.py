@@ -984,7 +984,7 @@ def main():
     world_size = int(os.environ["WORLD_SIZE"])
 
     device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 
     init_distributed_environment()

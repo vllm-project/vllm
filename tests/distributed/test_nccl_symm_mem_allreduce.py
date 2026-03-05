@@ -38,7 +38,7 @@ def nccl_symm_mem_allreduce_worker(local_rank: int, world_size: int):
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         dtype = torch.bfloat16
         device = torch.device(f"cuda:{local_rank}")
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
         torch.set_default_device(device)
         torch.set_default_dtype(dtype)
         update_environment_variables(

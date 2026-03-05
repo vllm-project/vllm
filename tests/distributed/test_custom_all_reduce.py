@@ -35,7 +35,7 @@ def graph_allreduce(
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         m.delenv("HIP_VISIBLE_DEVICES", raising=False)
         device = torch.device(f"cuda:{rank}")
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
         group = get_tp_group().device_group
@@ -103,7 +103,7 @@ def eager_allreduce(
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         m.delenv("HIP_VISIBLE_DEVICES", raising=False)
         device = torch.device(f"cuda:{rank}")
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
         # we use the first group to communicate once

@@ -285,7 +285,7 @@ def tune_on_gpu(args_dict):
     weight_shapes = args_dict["weight_shapes"]
     args = args_dict["args"]
 
-    torch.cuda.set_device(gpu_id)
+    torch.accelerator.set_device_index(gpu_id)
     print(f"Starting tuning on GPU {gpu_id} with batch sizes {batch_sizes}")
 
     block_n = args.block_n

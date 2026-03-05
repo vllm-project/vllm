@@ -92,7 +92,7 @@ If GPU/CPU communication cannot be established, you can use the following Python
     import torch.distributed as dist
     dist.init_process_group(backend="nccl")
     local_rank = dist.get_rank() % torch.accelerator.device_count()
-    torch.cuda.set_device(local_rank)
+    torch.accelerator.set_device_index(local_rank)
     data = torch.FloatTensor([1,] * 128).to("cuda")
     dist.all_reduce(data, op=dist.ReduceOp.SUM)
     torch.accelerator.synchronize()

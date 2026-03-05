@@ -137,7 +137,7 @@ def test_contexted_kv_attention(
     # for GPU 1 would run on both GPU0 and GPU1 and things would hang
     #
     # see also similar issue: https://github.com/Dao-AILab/flash-attention/issues/523
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     MAX_SEQ_LEN = 1024
     MAX_CTX_LEN = 1024
@@ -358,7 +358,7 @@ def test_contexted_kv_attention_alibi(
     # for GPU 1 would run on both GPU0 and GPU1 and things would hang
     #
     # see also similar issue: https://github.com/Dao-AILab/flash-attention/issues/523
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
         # Fork from: vllm/vllm/model_executor/models/bloom.py#L44

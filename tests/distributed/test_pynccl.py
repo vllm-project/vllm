@@ -54,7 +54,7 @@ def worker_fn_wrapper(fn):
         update_environment_variables(env)
         local_rank = os.environ["LOCAL_RANK"]
         device = torch.device(f"cuda:{local_rank}")
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
         init_distributed_environment()
         fn()
 
