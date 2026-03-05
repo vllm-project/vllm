@@ -355,6 +355,18 @@ async def run_compilation_warmup(
             for resp in responses:
                 if not isinstance(resp, Exception):
                     await resp.read()
+            # Drain engine: send a 1-token probe request that will only
+            # complete after the engine's batch queue is fully processed.
+            # Without this, large batches that span multiple engine steps
+            # may still be in-flight when the next warmup or benchmark starts,
+            # causing scheduler KeyError crashes.
+            probe_endpoint = rotator.next()
+            probe_resp = await session.post(
+                f"{probe_endpoint}/v1/completions",
+                json={"model": model, "prompt": "drain",
+                      "max_tokens": 1, "stream": False},
+            )
+            await probe_resp.read()
             logger.info("  Compiled %d tokens OK (%d/%d)",
                          total_tokens, success, num_reqs)
         except Exception as e:
