@@ -3,6 +3,7 @@
 
 import json
 from collections.abc import Sequence
+from typing import Any
 
 import partial_json_parser
 import regex as re
@@ -316,10 +317,10 @@ class Hermes2ProToolParser(ToolParser):
                 return delta
 
             try:
-                current_tool_call = (
+                current_tool_call: dict[str, Any] = (
                     partial_json_parser.loads(tool_call_portion or "{}", flags)
                     if tool_call_portion
-                    else None
+                    else {}
                 )
                 logger.debug("Parsed tool call %s", current_tool_call)
             except partial_json_parser.core.exceptions.MalformedJSON:
