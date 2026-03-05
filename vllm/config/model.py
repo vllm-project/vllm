@@ -529,6 +529,12 @@ class ModelConfig:
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
 
+        # Run model-specific config verification/patching early so that
+        # hooks (e.g. AnyModelConfig) can override _model_info before
+        # downstream code reads it (multimodal config, pooler config, etc.).
+        self.config_updated = False
+        self._try_verify_and_update_model_config()
+
         # Init pooler config if needed
         if self.runner_type == "pooling":
             if self.pooler_config is None:
@@ -612,9 +618,6 @@ class ModelConfig:
             # can be correctly capped to sliding window size
             self.hf_text_config.sliding_window = None
 
-        # Avoid running try_verify_and_update_config multiple times
-        self.config_updated = False
-        self._try_verify_and_update_model_config()
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()

@@ -687,82 +687,37 @@ class TestAnyModelRegistryFlow:
 
     NAS-optimised configs use ``"architectures": ["AnyModel"]`` so that the
     normal registry lookup selects AnyModel without any special bypass.
-    ``base_architectures`` carries the name of the underlying model class
-    (used for capability introspection and wrapper construction).
+    ``base_architecture`` carries the name of the underlying model class
+    (used for capability introspection via the verify hook and wrapper
+    construction via ``resolve_wrapper_cls``).
     """
-
-    def _mc(self, architectures, base_architectures=None, block_configs=None):
-        hf = _ns(
-            architectures=architectures,
-            base_architectures=base_architectures or [],
-            block_configs=block_configs or [_block()],
-        )
-        return _ns(hf_config=hf, model_impl="auto")
-
-    # --- _anymodel_base_arch helper ---
-
-    def test_base_arch_reads_base_architectures(self):
-        from vllm.model_executor.models.registry import ModelRegistry
-
-        mc = self._mc(["AnyModel"], base_architectures=["LlamaForCausalLM"])
-        assert ModelRegistry._anymodel_base_arch(mc) == "LlamaForCausalLM"
-
-    def test_base_arch_returns_none_when_absent(self):
-        from vllm.model_executor.models.registry import ModelRegistry
-
-        mc = self._mc(["AnyModel"])  # no base_architectures
-        assert ModelRegistry._anymodel_base_arch(mc) is None
-
-    def test_base_arch_returns_none_without_hf_config(self):
-        from vllm.model_executor.models.registry import ModelRegistry
-
-        assert ModelRegistry._anymodel_base_arch(_ns(hf_config=None)) is None
-
-    def test_base_arch_uses_first_entry(self):
-        from vllm.model_executor.models.registry import ModelRegistry
-
-        mc = self._mc(
-            ["AnyModel"],
-            base_architectures=["Qwen3VLForConditionalGeneration", "Other"],
-        )
-        assert (
-            ModelRegistry._anymodel_base_arch(mc) == "Qwen3VLForConditionalGeneration"
-        )
-
-    # --- regular models are not misrouted ---
-
-    def test_regular_llama_config_without_anymodel_arch_is_not_routed(self):
-        """A plain LlamaForCausalLM config (no 'AnyModel' in architectures)
-        must NOT be silently redirected to AnyModel, even with block_configs."""
-        from vllm.model_executor.models.registry import ModelRegistry
-
-        # Normal Llama config that happens to have block_configs
-        mc = self._mc(["LlamaForCausalLM"])
-        # _anymodel_base_arch returns None → AnyModel branch not taken
-        assert ModelRegistry._anymodel_base_arch(mc) is None
-
-    # --- AnyModel is registered under "AnyModel" ---
 
     def test_anymodel_registered_in_registry(self):
         from vllm.model_executor.models.registry import ModelRegistry
 
         assert "AnyModel" in ModelRegistry.models
 
-    # --- VL capabilities (requires subprocess / full vLLM env) ---
+    def test_resolve_wrapper_cls_returns_wrapper(self):
+        """resolve_wrapper_cls must return a wrapper subclass that inherits
+        from both AnyModel and the base model."""
+        from vllm.model_executor.models.anymodel import AnyModel
 
-    def test_vl_model_info_has_correct_capabilities(self):
-        """inspect_model_cls for an AnyModel+Qwen3VL config must return
-        supports_multimodal=True and has_noops=True."""
-        from vllm.model_executor.models.registry import ModelRegistry
-
-        base_arch = "Qwen3VLForConditionalGeneration"
-        model_config = self._mc(["AnyModel"], base_architectures=[base_arch])
-        model_info, returned_arch = ModelRegistry.inspect_model_cls(
-            ["AnyModel"], model_config
+        mc = _ns(
+            hf_config=_ns(
+                base_architecture="LlamaForCausalLM",
+                anymodel_arch_info=None,
+            ),
         )
-        assert returned_arch == "AnyModel"
-        assert model_info.has_noops is True
-        assert model_info.supports_multimodal is True
+        wrapper = AnyModel.resolve_wrapper_cls(mc)
+        assert issubclass(wrapper, AnyModel)
+        assert "AnyModelLlamaForCausalLM" in wrapper.__name__
+
+    def test_resolve_arch_raises_without_base_architecture(self):
+        """_resolve_arch must raise when base_architecture is missing."""
+        from vllm.model_executor.models.anymodel import AnyModel
+
+        with pytest.raises(ValueError, match="base_architecture"):
+            AnyModel._resolve_arch(_ns())
 
 
 # ---------------------------------------------------------------------------
