@@ -297,12 +297,15 @@ class CudagraphDispatcher:
             num_tokens, uniform_decode, has_lora, effective_num_active_loras
         )
 
+        normalized_uniform = uniform_decode and self.cudagraph_mode.separate_routine()
+        batch_desc = self._create_padded_batch_descriptor(
+                    num_tokens, normalized_uniform, has_lora, effective_num_active_loras
+        )
+
         if CUDAGraphMode.FULL in allowed_modes:
             # check if key exists for full cudagraph
             # For pure FULL mode, keys are registered with uniform=False.
             batch_desc_to_check = batch_desc
-            if self.cudagraph_mode == CUDAGraphMode.FULL:
-                batch_desc_to_check = replace(batch_desc, uniform=False)
             if batch_desc_to_check in self.cudagraph_keys[CUDAGraphMode.FULL]:
                 return CUDAGraphMode.FULL, batch_desc_to_check
 
