@@ -467,7 +467,7 @@ class CompilationConfig:
     on selected platforms. Disabled by default until more models
     are supported/tested to work."""
 
-    vllm_enable_compile_cache: bool = True
+    enable_vllm_compile_cache: bool = True
     """Enable compile cache. When enabled, vLLM caches compiled graphs to
     speed up subsequent runs. Set to False to disable caching for debugging
     compilation issues or suspected cache corruption. Defaults to True.
@@ -784,7 +784,7 @@ class CompilationConfig:
             )
         return value
 
-    @field_validator("vllm_enable_compile_cache", mode="after")
+    @field_validator("enable_vllm_compile_cache", mode="after")
     @classmethod
     def handle_env_var_override(cls, value: Any, info: Any) -> Any:
         """Allow VLLM_DISABLE_COMPILE_CACHE env var to override config."""
