@@ -1961,8 +1961,10 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             is_rocm_on_gfx9 = False
             is_rocm_on_gfx12 = False
 
-        device_supports_fp8 = is_rocm_on_gfx9 or is_rocm_on_gfx12 or (
-            p.is_cuda() and p.has_device_capability((8, 9))
+        device_supports_fp8 = (
+            is_rocm_on_gfx9
+            or is_rocm_on_gfx12
+            or (p.is_cuda() and p.has_device_capability((8, 9)))
         )
 
         if not device_supports_fp8:
@@ -2058,7 +2060,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         E, num_tokens, N, K, top_k_num = self.moe_problem_size(
             hidden_states, w1, w2, topk_ids
         )
-
+        # print("weight N=", N)
+        # print("weight M=", E)
+        # print('weight dtype:', hidden_states.dtype)
         if global_num_experts == -1:
             global_num_experts = E
 
