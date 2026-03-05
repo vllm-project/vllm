@@ -182,8 +182,8 @@ def get_processor(
         # Use registered processor class when it's available
         # and explicit processor_cls is not set.
         if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
-            processor_cls = registered_processor_cls or AutoProcessor
-            processor = processor_cls.from_pretrained(
+            _processor_cls = registered_processor_cls or AutoProcessor
+            processor = _processor_cls.from_pretrained(
                 processor_name,
                 *args,
                 revision=revision,
