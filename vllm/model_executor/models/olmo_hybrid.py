@@ -207,13 +207,22 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
             prefix=f"{prefix}.in_proj_qkvg",
         )
 
-        # Fused BA projection: 1 matmul instead of 2
-        self.in_proj_ba = MergedColumnParallelLinear(
+        # Separate B and A projections to preserve numerical precision.
+        # Fusing these into one matmul changes FP accumulation order for the
+        # gating scalars, which compounds through the GDN recurrent state.
+        self.b_proj = ColumnParallelLinear(
             input_size=self.hidden_size,
-            output_sizes=[self.num_v_heads] * 2,
+            output_size=self.num_v_heads,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.in_proj_ba",
+            prefix=f"{prefix}.b_proj",
+        )
+        self.a_proj = ColumnParallelLinear(
+            input_size=self.hidden_size,
+            output_size=self.num_v_heads,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.a_proj",
         )
 
         # Fused conv1d: single parameter instead of 3
@@ -358,12 +367,8 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
         mixed_qkv = projected_qkvg[..., :conv_dim_sharded]
         gate = projected_qkvg[..., conv_dim_sharded:]
 
-        projected_ba, _ = self.in_proj_ba(hidden_states)
-        b, a = torch.split(
-            projected_ba,
-            self.num_v_heads // self.tp_size,
-            dim=-1,
-        )
+        b, _ = self.b_proj(hidden_states)
+        a, _ = self.a_proj(hidden_states)
 
         # ============================================================
         # Part 2: Core Attention
@@ -888,8 +893,6 @@ class OlmoHybridModel(nn.Module):
             ("in_proj_qkvg", "k_proj", 1),
             ("in_proj_qkvg", "v_proj", 2),
             ("in_proj_qkvg", "g_proj", 3),
-            ("in_proj_ba", "b_proj", 0),
-            ("in_proj_ba", "a_proj", 1),
             ("conv1d", "q_conv1d", 0),
             ("conv1d", "k_conv1d", 1),
             ("conv1d", "v_conv1d", 2),
@@ -959,7 +962,6 @@ class OlmoHybridForCausalLM(
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
         "in_proj_qkvg": ["q_proj", "k_proj", "v_proj", "g_proj"],
-        "in_proj_ba": ["b_proj", "a_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
