@@ -1774,7 +1774,7 @@ class rocm_aiter_ops:
 
     @staticmethod
     def is_triton_gemm_w8a8_tuned(n: int, k: int) -> bool:
-        return (n, k) in [
+        shapes = [
             (1024, 8192),
             (2112, 7168),
             (3072, 1536),
@@ -1924,15 +1924,19 @@ class rocm_aiter_ops:
                 and (window_size is None or window_size == (-1, -1))
                 and not return_lse  # mha_v3 doesn't support returning LSE
             )
-            
-            if can_use_mha_v3 :
+
+            if can_use_mha_v3:
                 try:
-                    from aiter.ops.triton.attention.mha_v3 import flash_attn_varlen_func as mha_v3_varlen_func
-                    
+                    from aiter.ops.triton.attention.mha_v3 import (
+                        flash_attn_varlen_func as mha_v3_varlen_func,
+                    )
+
                     # mha_v3 has a different signature - convert parameters
                     # mha_v3 expects window_size as a tuple, default is (-1, -1) for infinite window
-                    mha_v3_window_size = (-1, -1) if window_size is None else window_size
-                    
+                    mha_v3_window_size = (
+                        (-1, -1) if window_size is None else window_size
+                    )
+
                     mha_v3_out = mha_v3_varlen_func(
                         q=q,
                         k=k,
@@ -1952,19 +1956,24 @@ class rocm_aiter_ops:
                         deterministic=False,
                         sm_margin=0,
                     )
-                    
+
                     if out is not None:
                         out.copy_(mha_v3_out)
                         return out
                     return mha_v3_out
-                    
+
                 except Exception as e:
                     # Fall through to default implementation if mha_v3 fails
                     # Log the error for debugging (only once to avoid spam)
                     import warnings
-                    warnings.warn(f"mha_v3 failed, falling back to default: {e}", RuntimeWarning, stacklevel=2)
+
+                    warnings.warn(
+                        f"mha_v3 failed, falling back to default: {e}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
                     pass
-        
+
         # Default: use standard flash_attn_varlen_func (CK-based or Triton-based)
         from aiter import flash_attn_varlen_func
 
