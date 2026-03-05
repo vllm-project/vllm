@@ -72,7 +72,7 @@ class TopKTopPSampler(nn.Module):
                 self.forward = self.forward_cpu
         elif (
             logprobs_mode not in ("processed_logits", "processed_logprobs")
-            and rocm_aiter_ops.is_enabled()
+            and rocm_aiter_ops.is_sampling_enabled()
         ):
             try:
                 import aiter.ops.sampling  # noqa: F401
