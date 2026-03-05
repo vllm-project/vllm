@@ -248,7 +248,7 @@ def group_and_batch_mm_kwargs(
 
 
 @deprecated(
-    "`group_mm_kwargs_by_modality` has been renamed to `group_and_batch_mm_kwargs` "
+    "`group_mm_kwargs_by_modality` has been renamed to `group_and_batch_mm_kwargs`. "
     "The old name will be removed in v0.19."
 )
 def group_mm_kwargs_by_modality(
