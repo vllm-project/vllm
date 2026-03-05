@@ -32,8 +32,7 @@ example_prompts = [first_prompt, "In one word, the capital of France is "] + [
 default_params = dict(
     temperature=0.0,  # greedy
     max_tokens=30,
-    # spec decoding currently doesn't support min_tokens
-    # min_tokens=28,
+    min_tokens=28,
 )
 
 

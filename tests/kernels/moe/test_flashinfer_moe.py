@@ -16,6 +16,9 @@ from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -25,11 +28,8 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
     is_valid_flashinfer_cutlass_fused_moe,
 )
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
-)
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     flashinfer_trtllm_fp4_moe,
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
@@ -114,19 +114,27 @@ def test_flashinfer_fp4_moe_no_graph(
             routing_method=RoutingMethodType.TopK,
         )
 
-        flashinfer_experts = FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+        flashinfer_experts = FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
             FlashInferExperts(moe_config=moe_config, quant_config=quant_config),
             inplace=False,
         )
 
-        flashinfer_output = flashinfer_experts(
+        flashinfer_output = flashinfer_experts.apply(
             hidden_states=a,
             w1=w1_q,
             w2=w2_q,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=activation,
+            global_num_experts=e,
+            expert_map=None,
+            apply_router_weight_on_input=False,
         )
 
         # Reference check:
