@@ -550,6 +550,8 @@ class EngineArgs:
     speculative_config: SpeculativeConfig = get_field(
         VllmConfig, "speculative_config"
     )
+    speculative_config_help: bool = False
+    """Print detailed help for --speculative-config and exit"""
 
     show_hidden_metrics_for_version: str | None = (
         ObservabilityConfig.show_hidden_metrics_for_version
@@ -1278,6 +1280,11 @@ class EngineArgs:
             "--speculative-config", **vllm_kwargs["speculative_config"]
         )
         vllm_group.add_argument(
+            "--speculative-config-help",
+            action="store_true",
+            help=vllm_kwargs["speculative_config_help"]["help"],
+        )
+        vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
         )
         vllm_group.add_argument("--kv-events-config", **vllm_kwargs["kv_events_config"])
@@ -1331,6 +1338,11 @@ class EngineArgs:
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
+        # Handle --speculative-config-help flag
+        if hasattr(args, 'speculative_config_help') and args.speculative_config_help:
+            cls._print_speculative_config_help()
+            sys.exit(0)
+
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
@@ -1338,6 +1350,44 @@ class EngineArgs:
             **{attr: getattr(args, attr) for attr in attrs if hasattr(args, attr)}
         )
         return engine_args
+
+    @staticmethod
+    def _print_speculative_config_help():
+        """Print detailed help for --speculative-config"""
+        from dataclasses import fields as dc_fields
+
+        print("\n" + "="*80)
+        print("SPECULATIVE DECODING CONFIGURATION HELP")
+        print("="*80 + "\n")
+
+        print("The --speculative-config flag accepts a JSON object with the following keys:\n")
+
+        # Get SpeculativeConfig fields
+        for field in dc_fields(SpeculativeConfig):
+            # Skip internal fields
+            if field.name.startswith('_') or field.name in ['target_model_config', 'target_parallel_config', 'draft_model_config', 'draft_parallel_config']:
+                continue
+
+            field_type = str(field.type).replace('typing.', '').replace('|', ' or ')
+            default = field.default if field.default is not dataclasses.MISSING else field.default_factory() if field.default_factory is not dataclasses.MISSING else "None"
+
+            print(f"  {field.name}:")
+            print(f"    Type: {field_type}")
+            print(f"    Default: {default}")
+
+            # Get docstring if available
+            if field.metadata:
+                doc = field.metadata.get('description', '')
+                if doc:
+                    print(f"    Description: {doc}")
+
+            print()
+
+        print("\nFor complete documentation with examples, see:")
+        print("  https://docs.vllm.ai/en/latest/api/vllm/config/#vllm.config.SpeculativeConfig")
+        print("\nExample usage:")
+        print('  vllm serve model --speculative-config \'{"method": "ngram", "num_speculative_tokens": 5}\'')
+        print("\n" + "="*80 + "\n")
 
     def create_model_config(self) -> ModelConfig:
         # gguf file needs a specific model loader
