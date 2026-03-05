@@ -106,8 +106,9 @@ class NoOpMLP(nn.Module):
 
 
 class NoOpNorm(nn.Module):
-    """Identity norm; handles vLLM's fused RMSNorm calling convention
-    ``(hidden_states[, residual]) -> (hidden_states[, residual])``."""
+    """No-op replacement for layer norms adjacent to no-op attention/MLP.
+
+    vLLM fuses the residual add into the norm:"""
 
     def forward(
         self,
@@ -115,7 +116,8 @@ class NoOpNorm(nn.Module):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if residual is not None:
-            return hidden_states, residual
+            hidden_states = hidden_states + residual
+            return hidden_states, hidden_states
         return hidden_states
 
 
