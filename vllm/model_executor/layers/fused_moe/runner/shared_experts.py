@@ -108,8 +108,8 @@ class SharedExperts:
     def _must_reduce_shared_expert_outputs(self) -> bool:
         return (
             self._reduce_results
-            and self._quant_method.moe_mk is not None
-            and self._quant_method.moe_mk.output_is_reduced()
+            and self._quant_method.moe_kernel is not None
+            and self._quant_method.moe_kernel.output_is_reduced()
         )
 
     def _determine_shared_experts_order(
