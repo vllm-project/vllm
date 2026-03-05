@@ -15,7 +15,13 @@ from vllm.model_executor.layers.attention.attention import (
     Attention,
     get_attention_context,
 )
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import (
+    _USE_LAYERNAME,
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
@@ -37,7 +43,7 @@ def fused_rope_and_unified_kv_cache_update_impl(
     positions: torch.Tensor,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
-    layer_name: str = "",
+    layer_name: LayerNameType,
 ) -> torch.Tensor:
     """
     This impl fetches the KV cache and slot mapping from the forward context,
@@ -46,6 +52,7 @@ def fused_rope_and_unified_kv_cache_update_impl(
     that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
     """
+    layer_name = _resolve_layer_name(layer_name)
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
         attn_layer.impl.do_rope_and_kv_cache_update(
@@ -70,7 +77,7 @@ def fused_rope_and_unified_kv_cache_update_fake(
     positions: torch.Tensor,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
-    layer_name: str = "",
+    layer_name: LayerNameType,
 ) -> torch.Tensor:
     return torch.empty(0, device=query.device, dtype=query.dtype)
 
@@ -120,38 +127,30 @@ class RopeReshapeKVCachePattern:
             num_kv_heads=self.num_kv_heads,
         )
 
-    def get_inputs(self) -> list[torch.Tensor]:
+    def get_inputs(self) -> list:
         # Sample inputs to help pattern tracing
         T = 5
         L = 4096
         qkv = empty_bf16(T, self.q_size + self.k_size + self.v_size)
         positions = empty_i64(T)
         cos_sin_cache = empty_bf16(L, self.head_size)
-        return [
-            qkv,
-            positions,
-            cos_sin_cache,
-        ]
+        inputs: list = [qkv, positions, cos_sin_cache]
+        if _USE_LAYERNAME:
+            inputs.append(_encode_layer_name(self.layer_name))
+        return inputs
 
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(
-            qkv: torch.Tensor,
-            positions: torch.Tensor,
-            cos_sin_cache: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _mk_pattern_with_layer_name_input(self, _ln):
+        """Pattern/replacement with layer_name as an explicit input."""
+
+        def pattern(qkv, positions, cos_sin_cache, layer_name):
             q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
             q, k = self.rope_matcher(positions, q, k, cos_sin_cache)
             q = q.view(-1, self.num_heads, self.head_size)
             k = k.view(-1, self.num_kv_heads, self.head_size)
             v = v.view(-1, self.num_kv_heads, self.head_size_v)
-            dummy = torch.ops.vllm.unified_kv_cache_update(k, v, self.layer_name)
-            return dummy, q, k, v
+            return torch.ops.vllm.unified_kv_cache_update(k, v, layer_name), q, k, v
 
-        def replacement(
-            qkv: torch.Tensor,
-            positions: torch.Tensor,
-            cos_sin_cache: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        def replacement(qkv, positions, cos_sin_cache, layer_name):
             q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
             q = q.view(-1, self.num_heads, self.head_size)
             k = k.view(-1, self.num_kv_heads, self.head_size)
@@ -164,9 +163,49 @@ class RopeReshapeKVCachePattern:
                 positions=positions,
                 cos_sin_cache=cos_sin_cache,
                 is_neox=self.is_neox,
-                layer_name=self.layer_name,
+                layer_name=layer_name,
             )
             return results[0], results[1], results[2], v
+
+        return pattern, replacement
+
+    def _mk_pattern_with_layer_name_closure(self, _ln):
+        """Pattern/replacement with layer_name as a closure constant."""
+
+        def pattern(qkv, positions, cos_sin_cache):
+            q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+            q, k = self.rope_matcher(positions, q, k, cos_sin_cache)
+            q = q.view(-1, self.num_heads, self.head_size)
+            k = k.view(-1, self.num_kv_heads, self.head_size)
+            v = v.view(-1, self.num_kv_heads, self.head_size_v)
+            return torch.ops.vllm.unified_kv_cache_update(k, v, _ln), q, k, v
+
+        def replacement(qkv, positions, cos_sin_cache):
+            q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+            q = q.view(-1, self.num_heads, self.head_size)
+            k = k.view(-1, self.num_kv_heads, self.head_size)
+            v = v.view(-1, self.num_kv_heads, self.head_size_v)
+            results = auto_functionalized(
+                self.FUSED_OP,
+                query=q,
+                key=k,
+                value=v,
+                positions=positions,
+                cos_sin_cache=cos_sin_cache,
+                is_neox=self.is_neox,
+                layer_name=_ln,
+            )
+            return results[0], results[1], results[2], v
+
+        return pattern, replacement
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        _ln = _encode_layer_name(self.layer_name)
+
+        if _USE_LAYERNAME:
+            pattern, replacement = self._mk_pattern_with_layer_name_input(_ln)
+        else:
+            pattern, replacement = self._mk_pattern_with_layer_name_closure(_ln)
 
         # NOTE: use view_to_reshape to unify view/reshape to simplify
         # pattern and increase matching opportunities
@@ -176,7 +215,11 @@ class RopeReshapeKVCachePattern:
             return gm
 
         pm.register_replacement(
-            pattern, replacement, self.get_inputs(), fwd_and_view_to_reshape, pm_pass
+            pattern,
+            replacement,
+            self.get_inputs(),
+            fwd_and_view_to_reshape,
+            pm_pass,
         )
 
 

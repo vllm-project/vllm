@@ -126,6 +126,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
+    VLLM_USE_LAYERNAME: bool = True
     Q_SCALE_CONSTANT: int = 200
     K_SCALE_CONSTANT: int = 200
     V_SCALE_CONSTANT: int = 100
@@ -1070,6 +1071,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")
     ),
     "VLLM_DISABLE_COMPILE_CACHE": disable_compile_cache,
+    # If set to "0", disable LayerName opaque type for layer_name
+    # parameters in custom ops.  Defaults to enabled on torch >= 2.11.
+    "VLLM_USE_LAYERNAME": lambda: bool(int(os.getenv("VLLM_USE_LAYERNAME", "1"))),
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`

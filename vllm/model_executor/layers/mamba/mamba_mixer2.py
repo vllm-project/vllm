@@ -43,7 +43,12 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 
@@ -535,7 +540,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         torch.ops.vllm.mamba_mixer2(
             projected_states,
             ssm_output,
-            self.prefix,
+            _encode_layer_name(self.prefix),
         )
 
         # 4. gated MLP
@@ -921,8 +926,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
 def mamba_mixer2(
     projected_states: torch.Tensor,
     output: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
+    layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     self.conv_ssm_forward(projected_states=projected_states, output=output)
@@ -931,7 +937,7 @@ def mamba_mixer2(
 def mamba_mixer2_fake(
     projected_states: torch.Tensor,
     output: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
     return
 

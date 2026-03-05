@@ -240,6 +240,9 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer, has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
 )
@@ -467,7 +470,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         output_shape: torch.Size | None = None,
     ) -> torch.Tensor:
         if self.calculate_kv_scales:
-            torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
+            torch.ops.vllm.maybe_calc_kv_scales(
+                q,
+                kv_c_normed,
+                k_pe,
+                _encode_layer_name(self.layer_name),
+            )
 
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
@@ -504,10 +512,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
                 )
         else:
+            encoded = _encode_layer_name(self.layer_name)
             kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed,
                 k_pe,
-                self.layer_name,
+                encoded,
                 self.kv_cache_dtype,
                 self._k_scale,
             )
@@ -518,7 +527,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     kv_c_normed,
                     k_pe,
                     output,
-                    self.layer_name,
+                    encoded,
                     kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
                 return output
@@ -527,7 +536,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     q,
                     kv_c_normed,
                     k_pe,
-                    self.layer_name,
+                    encoded,
                     kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
 
@@ -885,13 +894,14 @@ def unified_mla_attention(
     q: torch.Tensor,
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
     kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # kv_cache_dummy_dep is not used but accepting it creates a data dependency
     # that ensures torch.compile preserves ordering between KV cache update and
     # attention forward.
     del kv_cache_dummy_dep
+    layer_name = _resolve_layer_name(layer_name)
     attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
     output = layer.forward_impl(q, kv_c_normed, k_pe, kv_cache, attn_metadata)
 
@@ -902,7 +912,7 @@ def unified_mla_attention_fake(
     q: torch.Tensor,
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
     kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(q).contiguous()
@@ -920,7 +930,7 @@ direct_register_custom_op(
 def unified_mla_kv_cache_update(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
 ) -> torch.Tensor:
@@ -928,6 +938,7 @@ def unified_mla_kv_cache_update(
     Returns a dummy that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
     """
+    layer_name = _resolve_layer_name(layer_name)
     forward_context = get_forward_context()
     attn_layer = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache
@@ -959,7 +970,7 @@ def unified_mla_kv_cache_update(
 def unified_mla_kv_cache_update_fake(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
 ) -> torch.Tensor:
@@ -979,7 +990,7 @@ def unified_mla_attention_with_output(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     output: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
@@ -988,6 +999,7 @@ def unified_mla_attention_with_output(
     # that ensures torch.compile preserves ordering between KV cache update and
     # attention forward.
     del kv_cache_dummy_dep
+    layer_name = _resolve_layer_name(layer_name)
     attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
     layer.forward_impl(
         q,
@@ -1006,7 +1018,7 @@ def unified_mla_attention_with_output_fake(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     output: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,

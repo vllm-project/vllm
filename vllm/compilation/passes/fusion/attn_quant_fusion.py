@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import _USE_LAYERNAME, _encode_layer_name
 
 from ..vllm_inductor_pass import VllmFusionPatternMatcherPass, VllmPatternReplacement
 from .matcher_utils import MatcherQuantFP8
@@ -53,21 +54,43 @@ class AttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
 
     @property
     def pattern(self) -> Callable[..., torch.Tensor]:
-        def _pattern(
-            q: torch.Tensor,
-            k: torch.Tensor,
-            v: torch.Tensor,
-            output_attn: torch.Tensor,
-            scale: torch.Tensor,
-            kv_cache_dummy_dep: torch.Tensor,
-        ) -> torch.Tensor:
+        # When _USE_LAYERNAME is enabled (torch >= 2.11), layer_name is
+        # passed as an explicit pattern input so the pattern matcher
+        # treats it as a wildcard matching hoisted LayerName placeholders.
+        # Otherwise it stays as a closure constant (original behavior).
+        _ln = _encode_layer_name(self._layer_name)
+
+        if _USE_LAYERNAME:
+
+            def _pattern_with_ln(  # type: ignore[misc]
+                q, k, v, output_attn, scale, kv_cache_dummy_dep, layer_name
+            ):
+                at1 = auto_functionalized(
+                    ATTN_OP,
+                    query=q,
+                    key=k,
+                    value=v,
+                    output=output_attn,
+                    layer_name=layer_name,
+                    output_scale=None,
+                    output_block_scale=None,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
+                )
+                attn_out_view = RESHAPE_OP(
+                    at1[1], [q.shape[0], self._num_heads * self._head_size]
+                )
+                return self._quant_matcher(attn_out_view, scale)[0]
+
+            return _pattern_with_ln
+
+        def _pattern(q, k, v, output_attn, scale, kv_cache_dummy_dep):
             at1 = auto_functionalized(
                 ATTN_OP,
                 query=q,
                 key=k,
                 value=v,
                 output=output_attn,
-                layer_name=self._layer_name,
+                layer_name=_ln,
                 output_scale=None,
                 output_block_scale=None,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
@@ -81,14 +104,34 @@ class AttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
 
     @property
     def replacement(self) -> Callable[..., torch.Tensor]:
-        def _replacement(
-            q: torch.Tensor,
-            k: torch.Tensor,
-            v: torch.Tensor,
-            output_attn: torch.Tensor,
-            scale: torch.Tensor,
-            kv_cache_dummy_dep: torch.Tensor,
-        ) -> torch.Tensor:
+        _ln = _encode_layer_name(self._layer_name)
+
+        if _USE_LAYERNAME:
+
+            def _replacement_with_ln(  # type: ignore[misc]
+                q, k, v, output_attn, scale, kv_cache_dummy_dep, layer_name
+            ):
+                output_attn = torch.empty(
+                    [q.shape[0], self._num_heads, self._head_size],
+                    dtype=FP8_DTYPE,
+                    device=q.device,
+                )
+                at1 = auto_functionalized(
+                    ATTN_OP,
+                    query=q,
+                    key=k,
+                    value=v,
+                    output=output_attn,
+                    layer_name=layer_name,
+                    output_scale=scale,
+                    output_block_scale=None,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
+                )
+                return RESHAPE_OP(at1[1], [-1, self._num_heads * self._head_size])
+
+            return _replacement_with_ln
+
+        def _replacement(q, k, v, output_attn, scale, kv_cache_dummy_dep):
             output_attn = torch.empty(
                 [q.shape[0], self._num_heads, self._head_size],
                 dtype=FP8_DTYPE,
@@ -100,7 +143,7 @@ class AttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
                 key=k,
                 value=v,
                 output=output_attn,
-                layer_name=self._layer_name,
+                layer_name=_ln,
                 output_scale=scale,
                 output_block_scale=None,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
@@ -113,7 +156,7 @@ class AttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
         dtype = self._dtype
         num_heads = self._num_heads
         head_size = self._head_size
-        return [
+        inputs: list = [
             self.empty(5, num_heads, head_size, dtype=dtype),  # q
             self.empty(5, num_heads, head_size, dtype=dtype),  # k
             self.empty(5, num_heads, head_size, dtype=dtype),  # v
@@ -121,6 +164,9 @@ class AttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
             self.empty_fp32(1, 1),  # scale
             self.empty(0, dtype=dtype),  # kv_cache_dummy_dep
         ]
+        if _USE_LAYERNAME:
+            inputs.append(_encode_layer_name(self._layer_name))
+        return inputs
 
 
 class AttnNvfp4QuantPattern(
@@ -144,23 +190,64 @@ class AttnNvfp4QuantPattern(
 
     @property
     def pattern(self) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
+        _ln = _encode_layer_name(self._layer_name)
+
+        if _USE_LAYERNAME:
+
+            def _pattern_with_ln(  # type: ignore[misc]
+                q,
+                k,
+                v,
+                output_attn,
+                output_quant,
+                output_scale,
+                input_scale,
+                kv_cache_dummy_dep,
+                layer_name,
+            ):
+                at1 = auto_functionalized(
+                    ATTN_OP,
+                    query=q,
+                    key=k,
+                    value=v,
+                    output=output_attn,
+                    layer_name=layer_name,
+                    output_scale=None,
+                    output_block_scale=None,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
+                )
+                attn_out_view = RESHAPE_OP(
+                    at1[1], [q.shape[0], self._num_heads * self._head_size]
+                )
+                at2 = auto_functionalized(
+                    self._QUANT_OP,
+                    input=attn_out_view,
+                    input_scale=input_scale,
+                    is_sf_swizzled_layout=True,
+                    output=output_quant,
+                    output_scale=output_scale,
+                )
+                return at2[1], torch.ops.aten.view.dtype(at2[2], FP8_DTYPE)
+
+            return _pattern_with_ln
+
         def _pattern(
-            q: torch.Tensor,
-            k: torch.Tensor,
-            v: torch.Tensor,
-            output_attn: torch.Tensor,
-            output_quant: torch.Tensor,
-            output_scale: torch.Tensor,
-            input_scale: torch.Tensor,
-            kv_cache_dummy_dep: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
+            q,
+            k,
+            v,
+            output_attn,
+            output_quant,
+            output_scale,
+            input_scale,
+            kv_cache_dummy_dep,
+        ):
             at1 = auto_functionalized(
                 ATTN_OP,
                 query=q,
                 key=k,
                 value=v,
                 output=output_attn,
-                layer_name=self._layer_name,
+                layer_name=_ln,
                 output_scale=None,
                 output_block_scale=None,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
@@ -176,42 +263,80 @@ class AttnNvfp4QuantPattern(
                 output=output_quant,
                 output_scale=output_scale,
             )
-            output_scale_view = torch.ops.aten.view.dtype(at2[2], FP8_DTYPE)
-            return at2[1], output_scale_view
+            return at2[1], torch.ops.aten.view.dtype(at2[2], FP8_DTYPE)
 
         return _pattern
 
     @property
     def replacement(self) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
+        _ln = _encode_layer_name(self._layer_name)
+
+        if _USE_LAYERNAME:
+
+            def _replacement_with_ln(  # type: ignore[misc]
+                q,
+                k,
+                v,
+                output_attn,
+                _output_quant,
+                output_scale,
+                input_scale,
+                kv_cache_dummy_dep,
+                layer_name,
+            ):
+                output_attn = torch.empty(
+                    [q.shape[0], self._num_heads, self._head_size // 2],
+                    dtype=FP4_DTYPE,
+                    device=q.device,
+                )
+                osv = torch.ops.aten.view.dtype(output_scale, FP8_DTYPE)
+                at2 = auto_functionalized(
+                    ATTN_OP,
+                    query=q,
+                    key=k,
+                    value=v,
+                    output=output_attn,
+                    layer_name=layer_name,
+                    output_scale=input_scale,
+                    output_block_scale=osv,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
+                )
+                return RESHAPE_OP(
+                    at2[1], [-1, self._num_heads * self._head_size // 2]
+                ), at2[2]
+
+            return _replacement_with_ln
+
         def _replacement(
-            q: torch.Tensor,
-            k: torch.Tensor,
-            v: torch.Tensor,
-            output_attn: torch.Tensor,
-            _output_quant: torch.Tensor,
-            output_scale: torch.Tensor,
-            input_scale: torch.Tensor,
-            kv_cache_dummy_dep: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
+            q,
+            k,
+            v,
+            output_attn,
+            _output_quant,
+            output_scale,
+            input_scale,
+            kv_cache_dummy_dep,
+        ):
             output_attn = torch.empty(
                 [q.shape[0], self._num_heads, self._head_size // 2],
                 dtype=FP4_DTYPE,
                 device=q.device,
             )
-            output_scale_view = torch.ops.aten.view.dtype(output_scale, FP8_DTYPE)
+            osv = torch.ops.aten.view.dtype(output_scale, FP8_DTYPE)
             at2 = auto_functionalized(
                 ATTN_OP,
                 query=q,
                 key=k,
                 value=v,
                 output=output_attn,
-                layer_name=self._layer_name,
+                layer_name=_ln,
                 output_scale=input_scale,
-                output_block_scale=output_scale_view,
+                output_block_scale=osv,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
-            output = RESHAPE_OP(at2[1], [-1, self._num_heads * self._head_size // 2])
-            return output, at2[2]
+            return RESHAPE_OP(
+                at2[1], [-1, self._num_heads * self._head_size // 2]
+            ), at2[2]
 
         return _replacement
 
@@ -219,18 +344,19 @@ class AttnNvfp4QuantPattern(
         dtype = self._dtype
         num_heads = self._num_heads
         head_size = self._head_size
-        return [
+        inputs: list = [
             self.empty_bf16(5, num_heads, head_size),  # q
             self.empty_bf16(5, num_heads, head_size),  # k
             self.empty_bf16(5, num_heads, head_size),  # v
             self.empty_bf16(5, num_heads, head_size),  # output_attn
-            self.empty(5, num_heads * head_size // 2, dtype=FP4_DTYPE),  # output_quant
-            self.empty_i32(
-                128, round_up(num_heads * head_size // 16, 4)
-            ),  # output_scale
+            self.empty(5, num_heads * head_size // 2, dtype=FP4_DTYPE),
+            self.empty_i32(128, round_up(num_heads * head_size // 16, 4)),
             self.empty_fp32(1, 1),  # input_scale
             self.empty(0, dtype=dtype),  # kv_cache_dummy_dep
         ]
+        if _USE_LAYERNAME:
+            inputs.append(_encode_layer_name(self._layer_name))
+        return inputs
 
 
 class AttnQuantFusionPass(VllmFusionPatternMatcherPass):
