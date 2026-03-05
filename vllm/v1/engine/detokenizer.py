@@ -72,14 +72,10 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         # Stop strings
         params = request.sampling_params
         assert params is not None
-        stop_list: list[str]
-        if params.stop is None:
-            stop_list = []
-        elif isinstance(params.stop, str):
-            stop_list = [params.stop]
+        if isinstance(params.stop, str):
+            self.stop = [params.stop]
         else:
-            stop_list = params.stop
-        self.stop = stop_list
+            self.stop = params.stop
         self.min_tokens = params.min_tokens
         self.include_stop_str_in_output = params.include_stop_str_in_output
 
