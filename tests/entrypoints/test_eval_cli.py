@@ -18,7 +18,7 @@ MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
 _SERVER_ARGS = [
     "--max-model-len",
-    "1024",
+    "4096",
     "--enforce-eager",
     "--load-format",
     "dummy",
@@ -48,6 +48,8 @@ def _bench_serve_eval_cmd(server, output_path, extra_args=None):
         "gsm8k",
         "--eval-limit",
         "3",
+        "--eval-num-fewshot",
+        "8",
         "--eval-output",
         str(output_path),
     ]
@@ -164,12 +166,12 @@ def test_eval_not_on_bench_throughput():
         "vllm",
         "bench",
         "throughput",
-        "--eval",
         "--help",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
-    assert result.returncode != 0, (
-        "--eval should not be a valid flag on bench throughput"
+    assert result.returncode == 0
+    assert "--eval" not in result.stdout, (
+        "--eval should not appear in bench throughput help"
     )
 
 
@@ -180,8 +182,10 @@ def test_eval_not_on_bench_latency():
         "vllm",
         "bench",
         "latency",
-        "--eval",
         "--help",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
-    assert result.returncode != 0, "--eval should not be a valid flag on bench latency"
+    assert result.returncode == 0
+    assert "--eval" not in result.stdout, (
+        "--eval should not appear in bench latency help"
+    )
