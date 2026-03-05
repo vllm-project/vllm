@@ -36,9 +36,7 @@ def sync_cudagraph_and_dp_padding(
 
     # See which CG mode this rank wants to run, namely checking if any rank wants to run
     # eager mode
-    batch_desc = cudagraph_manager.get_cudagraph_desc(
-        num_reqs, num_tokens, uniform_token_count
-    )
+    batch_desc = cudagraph_manager.dispatch(num_reqs, num_tokens, uniform_token_count)
     group = get_dp_group().cpu_group
     tensor = torch.zeros(3, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
@@ -74,7 +72,7 @@ def sync_cudagraph_and_dp_padding(
         synced_uniform_token_count = None
 
     # Dispatch for the final synced values
-    synced_desc = cudagraph_manager.get_cudagraph_desc(
+    synced_desc = cudagraph_manager.dispatch(
         num_reqs, synced_num_tokens, synced_uniform_token_count
     )
 

@@ -300,10 +300,10 @@ class EagleSpeculator:
         # Get batch descriptor and sync across DP ranks.
         # Eagle is always uniform decode with query_len=1, so num_tokens=num_reqs.
         if self.dp_size == 1:
-            batch_desc = self.cudagraph_manager.get_cudagraph_desc(
-                num_reqs, num_reqs, uniform_token_count=1
+            batch_desc, num_tokens_across_dp = (
+                self.cudagraph_manager.dispatch(num_reqs, num_reqs, 1),
+                None,
             )
-            num_tokens_across_dp = None
         else:
             batch_desc, num_tokens_across_dp = sync_cudagraph_and_dp_padding(
                 self.cudagraph_manager,

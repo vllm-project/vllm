@@ -879,19 +879,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
-        num_tokens = scheduler_output.total_num_scheduled_tokens
+        num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
-        uniform_tok_count = get_uniform_token_count(num_reqs, num_tokens, max_query_len)
+        uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
 
         if self.dp_size == 1:
-            num_tokens_across_dp = None
-            batch_desc = self.cudagraph_manager.get_cudagraph_desc(
-                num_reqs, num_tokens, uniform_tok_count
+            batch_desc, num_tokens_across_dp = (
+                self.cudagraph_manager.dispatch(num_reqs, num_toks, uniform_tok_count),
+                None,
             )
         else:
             batch_desc, num_tokens_across_dp = sync_cudagraph_and_dp_padding(
                 self.cudagraph_manager,
-                num_tokens,
+                num_toks,
                 num_reqs,
                 uniform_tok_count,
                 self.dp_size,

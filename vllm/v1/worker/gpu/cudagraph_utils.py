@@ -200,7 +200,7 @@ class CudaGraphManager:
                         self.graphs[desc] = graph
         self._graphs_captured = True
 
-    def get_cudagraph_desc(
+    def dispatch(
         self,
         num_reqs: int,
         num_tokens: int,
