@@ -47,7 +47,7 @@ def mock_on_gfx9():
         (
             {},
             None,
-            AttentionBackendEnum.TRITON_ATTN.get_path(),
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
         ),
         # Test Case 2: Explicit TRITON_ATTN backend
         (
@@ -74,11 +74,10 @@ def mock_on_gfx9():
             AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
         ),
         # Test Case 6: VLLM_ROCM_USE_AITER=1
-        # (defaults to AITER FA when MHA not explicitly disabled)
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             None,
-            AttentionBackendEnum.ROCM_AITER_FA.get_path(),
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
         ),
         # Test Case 7: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_MHA=1
         (
@@ -102,11 +101,10 @@ def mock_on_gfx9():
             AttentionBackendEnum.TRITON_ATTN.get_path(),
         ),
         # Test Case 10: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_MHA=0
-        # (explicitly disabled)
         (
             {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "0"},
             None,
-            AttentionBackendEnum.TRITON_ATTN.get_path(),
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
         ),
         # Test Case 11: VLLM_ROCM_USE_AITER=1 + explicit ROCM_ATTN
         (
