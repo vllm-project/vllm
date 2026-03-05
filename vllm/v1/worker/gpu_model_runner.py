@@ -729,9 +729,7 @@ class GPUModelRunner(
         # every step. Keep in int64 to avoid overflow with long context.
         # - arange_np: immutable [0, 1, 2, ...] used as source for batched computation
         # - query_pos: CpuGpuBuffer for the computed batched arange result
-        arange_size = max(
-            self.max_num_reqs + 1, self.max_model_len, self.max_num_tokens
-        )
+        arange_size = max(self.max_num_reqs + 1, self.max_num_tokens)
         self.arange_np = np.arange(arange_size, dtype=np.int64)
         self.query_pos = self._make_buffer(arange_size, dtype=torch.int64)
         self._arange_scratch = np.empty(arange_size, dtype=np.int64)
