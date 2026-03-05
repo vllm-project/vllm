@@ -76,10 +76,8 @@ class EagleSpeculator:
         )
 
         # currently we don't  support PIECEWISE for Eagle.
-        if (
-            vllm_config.compilation_config.cudagraph_mode.decode_mode()
-            == CUDAGraphMode.FULL
-        ):
+        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+        if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
             cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
         else:
             cudagraph_mode = CUDAGraphMode.NONE
