@@ -286,15 +286,6 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
             "Should either be a valid JSON string or JSON keys passed individually."
         )
         if dataclass_cls is not None:
-
-            def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
-                try:
-                    return TypeAdapter(cls).validate_json(val)
-                except ValidationError as e:
-                    raise argparse.ArgumentTypeError(repr(e)) from e
-
-            kwargs[name]["type"] = parse_dataclass
-
             # Add documentation link for config classes
             config_module = dataclass_cls.__module__
             config_name = dataclass_cls.__name__
@@ -304,6 +295,24 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
             # Anchor uses parent module + class name (e.g., vllm.config.SpeculativeConfig)
             anchor = f"{parent_module}.{config_name}"
             doc_link = f"https://docs.vllm.ai/en/latest/api/{doc_path}/#{anchor}"
+
+            def parse_dataclass(val: str, cls=dataclass_cls, link=doc_link) -> Any:
+                try:
+                    return TypeAdapter(cls).validate_json(val)
+                except ValidationError as e:
+                    # Extract field errors for better error messages
+                    error_msg = f"Invalid configuration for --{name.replace('_', '-')}:\n"
+                    if hasattr(e, 'errors'):
+                        for error in e.errors():
+                            field = '.'.join(str(loc) for loc in error['loc'])
+                            msg = error['msg']
+                            error_msg += f"  - {field}: {msg}\n"
+                    else:
+                        error_msg += f"  {str(e)}\n"
+                    error_msg += f"\nFor all accepted keys and their types, see: {link}"
+                    raise argparse.ArgumentTypeError(error_msg) from e
+
+            kwargs[name]["type"] = parse_dataclass
             kwargs[name]["help"] += f"\n\nFor all accepted keys, see: {doc_link}\n\n{json_tip}"
         elif contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
