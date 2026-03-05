@@ -8,8 +8,7 @@ from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import Field, TypeAdapter, field_validator, model_validator
-from typing_extensions import Self
+from pydantic import Field, TypeAdapter, field_validator
 
 import vllm.envs as envs
 from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
@@ -785,14 +784,15 @@ class CompilationConfig:
             )
         return value
 
-    @model_validator(mode="after")
-    def handle_env_var_override(self) -> Self:
+    @field_validator("vllm_enable_compile_cache", mode="after")
+    @classmethod
+    def handle_env_var_override(cls, value: Any, info: Any) -> Any:
         """Allow VLLM_DISABLE_COMPILE_CACHE env var to override config."""
         import vllm.envs as envs
 
         if envs.VLLM_DISABLE_COMPILE_CACHE:
-            self.vllm_enable_compile_cache = False
-        return self
+            return False
+        return value
 
     @field_validator(
         "level",
