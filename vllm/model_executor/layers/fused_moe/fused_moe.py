@@ -572,12 +572,6 @@ def fused_moe_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-def pp(msg, t):
-    #print(f"{msg} {t.shape}")
-    #print(f"{msg} {t.shape} {t}")
-    pass
-
-
 # NOTE(zyongye): we can remove all the wna16 kernel
 # once we drop off sm75 support
 def invoke_fused_moe_wna16_cuda_kernel(
@@ -753,9 +747,6 @@ def invoke_fused_moe_triton_kernel(
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
     assert sorted_token_ids is None or sorted_token_ids.stride(0) == 1
-
-    pp("A = ", A)
-    pp("B = ", B)
 
     if use_fp8_w8a8 or use_int8_w8a8:
         assert B_scale is not None
@@ -943,8 +934,6 @@ def dispatch_fused_moe_kernel(
             block_shape,
             B_bias,
         )
-
-    pp("C = ", C)
 
 
 @triton.jit
