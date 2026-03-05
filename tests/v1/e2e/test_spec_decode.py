@@ -208,7 +208,6 @@ def test_ngram_gpu_default_with_async_scheduling(
     )
     evaluate_llm_for_gsm8k(spec_llm, expected_accuracy_threshold=0.8)
     del spec_llm
-    torch.cuda.empty_cache()
     cleanup_dist_env_and_memory()
 
 
