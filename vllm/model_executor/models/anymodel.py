@@ -394,9 +394,9 @@ def _resolve_layer_class(
 
 
 def _create_layer_config(global_config, block_config, info: ArchInfo):
-    """Return a shallow copy of *global_config* with per-layer overrides
+    """Return a deep copy of *global_config* with per-layer overrides
     from *block_config* applied, using the field names in *info*."""
-    config = copy.copy(global_config)
+    config = copy.deepcopy(global_config)
 
     attn = _get_block_section(block_config, "attention")
     ffn = _get_block_section(block_config, "ffn")

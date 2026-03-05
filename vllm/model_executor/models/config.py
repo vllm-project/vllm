@@ -46,13 +46,16 @@ class AnyModelConfig(VerifyAndUpdateConfig):
         from vllm.model_executor.models.anymodel import _AttrDict
 
         hf_config = model_config.hf_config
+        text_config = hf_config.get_text_config()
 
         # --- 1. Normalize block_configs to _AttrDict ----------------------
-        block_configs = getattr(hf_config, "block_configs", None)
+        # For VL models (e.g. Qwen3VL), block_configs lives on text_config
+        # rather than the top-level hf_config.
+        block_configs = getattr(text_config, "block_configs", None)
         if block_configs:
-            assert len(block_configs) == hf_config.num_hidden_layers, (
+            assert len(block_configs) == text_config.num_hidden_layers, (
                 f"block_configs length ({len(block_configs)}) must match "
-                f"num_hidden_layers ({hf_config.num_hidden_layers})"
+                f"num_hidden_layers ({text_config.num_hidden_layers})"
             )
 
             def _to_attrdict(obj):
@@ -62,7 +65,7 @@ class AnyModelConfig(VerifyAndUpdateConfig):
                     return [_to_attrdict(item) for item in obj]
                 return obj
 
-            hf_config.block_configs = [_to_attrdict(bc) for bc in block_configs]
+            text_config.block_configs = [_to_attrdict(bc) for bc in block_configs]
 
         # --- 2. Patch _model_info from base architecture ------------------
         base_arch = getattr(hf_config, "base_architecture", None)
