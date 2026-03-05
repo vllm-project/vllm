@@ -5,7 +5,7 @@ from collections.abc import Callable
 from functools import partial
 from typing import Literal, TypeAlias, cast
 
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from typing_extensions import assert_never
 
 from vllm.config import ModelConfig
@@ -29,7 +29,7 @@ from vllm.outputs import PoolingRequestOutput
 from vllm.renderers import BaseRenderer
 from vllm.utils.serial_utils import EmbedDType, Endianness
 
-JSONResponse = get_json_response_cls()
+JSONResponseCLS = get_json_response_cls()
 
 EmbeddingServeContext: TypeAlias = PoolingServeContext[EmbeddingRequest]
 
@@ -136,7 +136,7 @@ class ServingEmbedding(PoolingServing):
             data=items,
             usage=usage,
         )
-        return JSONResponse(content=response.model_dump())
+        return JSONResponseCLS(content=response.model_dump())
 
     def _request_output_to_to_embed_bytes_response(
         self,

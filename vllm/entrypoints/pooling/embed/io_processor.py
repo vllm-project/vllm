@@ -16,6 +16,7 @@ from vllm.renderers.inputs import TokPrompt
 class EmbedIOProcessor(PoolingIOProcessor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        assert self.model_config.pooler_config is not None
 
         self.pooler_config = self.model_config.pooler_config
         self.enable_chunked_processing = self.pooler_config.enable_chunked_processing
@@ -57,9 +58,13 @@ class EmbedIOProcessor(PoolingIOProcessor):
         )
 
     #################################################################
-    # chunked processing
+    # Long Text Embedding with Chunked Processing
+    # PTAL: examples/pooling/embed/openai_embedding_long_text
+
     def _maybe_apply_chunked_processing_pre_process_online(
         self, engine_prompts: list[TokPrompt]
     ) -> list[TokPrompt]:
         if not self.enable_chunked_processing:
             return engine_prompts
+
+        return engine_prompts
