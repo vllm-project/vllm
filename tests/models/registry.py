@@ -421,11 +421,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Olmo2ForCausalLM": _HfExamplesInfo("allenai/OLMo-2-0425-1B"),
     "Olmo3ForCausalLM": _HfExamplesInfo("allenai/Olmo-3-7B-Instruct"),
     "OlmoeForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924-Instruct"),
-    "OpenPanguMTPModel": _HfExamplesInfo(
-        "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
-        trust_remote_code=True,
-        is_available_online=False,
-    ),
     "OPTForCausalLM": _HfExamplesInfo(
         "facebook/opt-125m", {"1b": "facebook/opt-iml-max-1.3b"}
     ),
@@ -1018,14 +1013,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Qwen/Qwen3.5-35B-A3B",
         max_model_len=4096,
     ),
-    "Qwen3_5MTP": _HfExamplesInfo(
-        "Qwen/Qwen3.5-0.8B",
-        speculative_model="Qwen/Qwen3.5-0.8B",
-    ),
-    "Qwen3_5MoeMTP": _HfExamplesInfo(
-        "Qwen/Qwen3.5-35B-A3B",
-        speculative_model="Qwen/Qwen3.5-35B-A3B",
-    ),
     "Qwen3OmniMoeForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         max_model_len=4096,
@@ -1093,6 +1080,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
 
 
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
+    # [Medusa]
     "MedusaModel": _HfExamplesInfo(
         "JackFram/llama-68m", speculative_model="abhigoyal/vllm-medusa-llama-68m-random"
     ),
@@ -1102,11 +1090,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     #     "JackFram/llama-160m",
     #     speculative_model="ibm-ai-platform/llama-160m-accelerator"
     # ),
-    "DeepSeekMTPModel": _HfExamplesInfo(
-        "luccafong/deepseek_mtp_main_random",
-        speculative_model="luccafong/deepseek_mtp_draft_random",
-        trust_remote_code=True,
-    ),
+    # [Eagle]
     "EagleDeepSeekMTPModel": _HfExamplesInfo(
         "eagle618/deepseek-v3-random",
         speculative_model="eagle618/eagle-deepseek-v3-random",
@@ -1152,6 +1136,20 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_method="eagle",
         tokenizer="openbmb/MiniCPM-2B-sft-bf16",
     ),
+    "Eagle3Qwen2_5vlForCausalLM": _HfExamplesInfo(
+        "Qwen/Qwen2.5-VL-7B-Instruct",
+        speculative_model="Rayzl/qwen2.5-vl-7b-eagle3-sgl",
+    ),
+    "Eagle3Qwen3vlForCausalLM": _HfExamplesInfo(
+        "Qwen/Qwen3-VL-8B-Instruct",
+        speculative_model="taobao-mnn/Qwen3-VL-8B-Instruct-Eagle3",
+    ),
+    # [MTP]
+    "DeepSeekMTPModel": _HfExamplesInfo(
+        "luccafong/deepseek_mtp_main_random",
+        speculative_model="luccafong/deepseek_mtp_draft_random",
+        trust_remote_code=True,
+    ),
     "ErnieMTPModel": _HfExamplesInfo(
         "baidu/ERNIE-4.5-21B-A3B-PT",
         trust_remote_code=True,
@@ -1191,16 +1189,26 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         speculative_model="XiaomiMiMo/MiMo-7B-RL",
     ),
-    "Eagle3Qwen2_5vlForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen2.5-VL-7B-Instruct",
-        speculative_model="Rayzl/qwen2.5-vl-7b-eagle3-sgl",
+    "NemotronHMTPModel": _HfExamplesInfo(
+        "nvidia/Nemotron-Super-Placeholder",
+        speculative_model="nvidia/Nemotron-Super-Placeholder",
+        is_available_online=False,
     ),
-    "Eagle3Qwen3vlForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-VL-8B-Instruct",
-        speculative_model="taobao-mnn/Qwen3-VL-8B-Instruct-Eagle3",
+    "OpenPanguMTPModel": _HfExamplesInfo(
+        "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "Qwen3NextMTP": _HfExamplesInfo(
         "Qwen/Qwen3-Next-80B-A3B-Instruct", min_transformers_version="4.56.3"
+    ),
+    "Qwen3_5MTP": _HfExamplesInfo(
+        "Qwen/Qwen3.5-0.8B",
+        speculative_model="Qwen/Qwen3.5-0.8B",
+    ),
+    "Qwen3_5MoeMTP": _HfExamplesInfo(
+        "Qwen/Qwen3.5-35B-A3B",
+        speculative_model="Qwen/Qwen3.5-35B-A3B",
     ),
     "Step3p5MTP": _HfExamplesInfo(
         "stepfun-ai/Step-3.5-Flash",
@@ -1210,11 +1218,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         hf_overrides={
             "num_hidden_layers": 4,
         },
-        is_available_online=False,
-    ),
-    "NemotronHMTPModel": _HfExamplesInfo(
-        "nvidia/Nemotron-Super-Placeholder",
-        speculative_model="nvidia/Nemotron-Super-Placeholder",
         is_available_online=False,
     ),
 }
