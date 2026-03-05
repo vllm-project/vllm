@@ -47,15 +47,16 @@ from vllm.multimodal.parse import (
     ImageProcessorItems,
     ImageSize,
     MultiModalDataItems,
-    MultiModalUUIDItems,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    ProcessorInputs,
     PromptIndexTargets,
     PromptReplacement,
     PromptUpdate,
+    TimingContext,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -190,23 +191,20 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
 
     def apply(
         self,
-        prompt: str | list[int],
-        mm_items: MultiModalDataItems,
-        mm_uuid_items: MultiModalUUIDItems | None = None,
-        hf_processor_mm_kwargs: Mapping[str, object] | None = None,
-        tokenization_kwargs: Mapping[str, object] | None = None,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> MultiModalInputs:
-        if mm_items:
-            if isinstance(prompt, str):
-                if len(prompt) > 0:
+        if inputs.mm_data_items:
+            if isinstance(inputs.prompt, str):
+                if len(inputs.prompt) > 0:
                     raise ValueError(
                         "SigLIP accepts text-only or image-only inputs, not both! "
                         "You must pass an image with an empty text prompt."
                     )
             else:
                 special_tokens = self.info.get_tokenizer().all_special_ids
-                if all(tok in special_tokens for tok in prompt):
-                    prompt = []
+                if all(tok in special_tokens for tok in inputs.prompt):
+                    inputs.prompt = []
                 else:
                     raise ValueError(
                         "SigLIP accepts text-only or image-only inputs, not both! "
@@ -214,19 +212,13 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
                     )
 
             # For multi-modal data, the prompt after processing should
-            # only contain the image token
-            tokenization_kwargs = {
-                **(tokenization_kwargs or {}),
+            # only contain the dummy image tokens
+            inputs.tokenization_kwargs = {
+                **inputs.tokenization_kwargs,
                 "add_special_tokens": False,
             }
 
-        return super().apply(
-            prompt=prompt,
-            mm_items=mm_items,
-            mm_uuid_items=mm_uuid_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-        )
+        return super().apply(inputs, timing_ctx)
 
     def _hf_processor_applies_updates(
         self,
