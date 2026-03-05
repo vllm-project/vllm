@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
+from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -32,6 +33,11 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.transformers_utils.config import get_safetensors_params_metadata
+from vllm.utils.collection_utils import is_list_of
+
+if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
 
 
 class MoeWNA16Config(QuantizationConfig):
@@ -45,6 +51,7 @@ class MoeWNA16Config(QuantizationConfig):
         has_zp: bool,
         lm_head_quantized: bool,
         modules_to_not_convert: list[str] | None,
+        modules_in_block_to_quantize: list[str] | None,
         full_config: dict[str, Any],
     ) -> None:
         super().__init__()
@@ -54,6 +61,7 @@ class MoeWNA16Config(QuantizationConfig):
         self.bit8_pack_factor = 8 // self.weight_bits
         self.lm_head_quantized = lm_head_quantized
         self.linear_quant_method = linear_quant_method
+        self.modules_in_block_to_quantize = modules_in_block_to_quantize or []
         self.full_config = full_config
         self.use_marlin = False
         # Avoid circular import
@@ -117,6 +125,9 @@ class MoeWNA16Config(QuantizationConfig):
             )
         else:
             raise ValueError("moe_wna16 only support gptq and awq.")
+        modules_in_block_to_quantize = cls.get_from_keys_or(
+            config, ["modules_in_block_to_quantize"], default=None
+        )
 
         return cls(
             linear_quant_method,
@@ -125,8 +136,37 @@ class MoeWNA16Config(QuantizationConfig):
             has_zp,
             lm_head_quantized,
             modules_to_not_convert,
+            modules_in_block_to_quantize,
             config,
         )
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        if self.modules_in_block_to_quantize is not None:
+            self.modules_in_block_to_quantize = hf_to_vllm_mapper.apply_list(
+                self.modules_in_block_to_quantize
+            )
+
+    def maybe_update_config(self, model_name: str, revision: str | None = None):
+        if self.modules_in_block_to_quantize:
+            if is_list_of(self.modules_in_block_to_quantize, list):
+                # original modules_in_block_to_quantize: list[list[str]]
+                # flatten original modules_in_block_to_quantize
+                self.modules_in_block_to_quantize = [
+                    item
+                    for sublist in self.modules_in_block_to_quantize
+                    for item in sublist
+                ]
+            return
+
+        unquant_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+        metadata = get_safetensors_params_metadata(model_name, revision=revision)
+        quant_layers: set[str] = {
+            param_name.rsplit(".", 1)[0]
+            for param_name, info in metadata.items()
+            if (dtype := info.get("dtype", None))
+            and _SAFETENSORS_TO_TORCH_DTYPE[dtype] not in unquant_dtypes
+        }
+        self.modules_in_block_to_quantize = list(quant_layers)
 
     @classmethod
     def override_quantization_method(
@@ -180,28 +220,27 @@ class MoeWNA16Config(QuantizationConfig):
                 GPTQMarlinConfig,
             )
 
+            linear_quant_config: QuantizationConfig
             if self.linear_quant_method == "gptq":
                 if self.use_marlin:
-                    return GPTQMarlinConfig.from_config(
-                        self.full_config
-                    ).get_quant_method(layer, prefix)
+                    linear_quant_config = GPTQMarlinConfig.from_config(self.full_config)
                 else:
-                    return GPTQConfig.from_config(self.full_config).get_quant_method(
-                        layer, prefix
-                    )
+                    linear_quant_config = GPTQConfig.from_config(self.full_config)
             elif self.linear_quant_method in ("awq", "awq_marlin"):
                 if self.use_marlin and check_marlin_supports_layer(
                     layer, self.group_size
                 ):
-                    return AWQMarlinConfig.from_config(
-                        self.full_config
-                    ).get_quant_method(layer, prefix)
+                    linear_quant_config = AWQMarlinConfig.from_config(self.full_config)
                 else:
-                    return AWQConfig.from_config(self.full_config).get_quant_method(
-                        layer, prefix
-                    )
+                    linear_quant_config = AWQConfig.from_config(self.full_config)
             else:
                 raise ValueError("moe_wna16 only support gptq and awq.")
+            if hasattr(linear_quant_config, "modules_in_block_to_quantize"):
+                linear_quant_config.modules_in_block_to_quantize = (
+                    self.modules_in_block_to_quantize
+                )
+            linear_quant_config.packed_modules_mapping = self.packed_modules_mapping
+            return linear_quant_config.get_quant_method(layer, prefix)
         elif isinstance(layer, FusedMoE):
             return MoeWNA16Method(self, layer.moe_config)
         return None
