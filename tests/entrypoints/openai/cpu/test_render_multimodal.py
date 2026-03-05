@@ -7,9 +7,8 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from vllm.multimodal.utils import encode_image_url
-
 from tests.utils import RemoteLaunchRenderServer
+from vllm.multimodal.utils import encode_image_url
 
 VISION_MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
 

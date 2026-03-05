@@ -7,7 +7,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from tests.utils import RemoteOpenAIServer
+from tests.utils import RemoteLaunchRenderServer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
@@ -16,7 +16,7 @@ MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 def server():
     args: list[str] = []
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteLaunchRenderServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
