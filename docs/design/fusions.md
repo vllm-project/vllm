@@ -28,9 +28,6 @@ visible (either via Inductor partition or `splitting_ops=[]`).
 | [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)               | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O1 (ROCm/AITER only)           | TBD                | No                 |
 | [RMSNorm + Padding](#rmsnorm--padding-fuse_act_padding)                          | `fuse_act_padding`           | Residual add + RMSNorm → padding               | O1 (ROCm/AITER only)           | TBD                | No                 |
 
-
----
-
 ## Support Matrix
 
 The table below lists the quantization schemes supported by each fusion on each platform.
