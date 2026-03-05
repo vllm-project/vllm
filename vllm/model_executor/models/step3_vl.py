@@ -459,14 +459,14 @@ class Step3VLProcessor:
             image_inputs = {}
             text_inputs = self.tokenizer(text)
         else:
-            splitted_images_data = self._split_images(images)
+            split_images_data = self._split_images(images)
             pixel_values_lst = []
             patch_pixel_values_lst = []
             patch_newline_mask_lst = []
             image_repl_str_lst = []
             image_repl_ids_lst = []
             num_patches = []
-            for raw_img, img_patches, patch_newline_mask in splitted_images_data:
+            for raw_img, img_patches, patch_newline_mask in split_images_data:
                 pixel_values_lst.extend(self._convert_images_to_pixel_values([raw_img]))
 
                 if len(img_patches) > 0:
