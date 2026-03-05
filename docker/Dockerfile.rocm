@@ -190,6 +190,7 @@ ARG ROCSHMEM_BRANCH="ba0bf0f3"
 ARG ROCSHMEM_REPO="https://github.com/ROCm/rocm-systems.git"
 ARG DEEPEP_BRANCH="e84464ec"
 ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
+ARG DEEPEP_NIC="cx7"
 ENV ROCSHMEM_DIR=/opt/rocshmem
 
 RUN git clone ${ROCSHMEM_REPO} \
@@ -210,7 +211,7 @@ RUN git clone ${ROCSHMEM_REPO} \
 RUN git clone ${DEEPEP_REPO} \
  && cd DeepEP \
  && git checkout ${DEEPEP_BRANCH} \
- && python3 setup.py --variant rocm --nic cx7 bdist_wheel --dist-dir=/app/deep_install
+ && python3 setup.py --variant rocm --nic ${DEEPEP_NIC} bdist_wheel --dist-dir=/app/deep_install
 
 # -----------------------
 # vLLM wheel release build stage (for building distributable wheels)
