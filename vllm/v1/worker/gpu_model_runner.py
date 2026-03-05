@@ -1053,11 +1053,13 @@ class GPUModelRunner(
         req_data = scheduler_output.scheduled_cached_reqs
         scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
 
-        # Wait until valid_sampled_tokens_count is copied to cpu,
-        # then use it to update actual num_computed_tokens of each request.
-        valid_sampled_token_count = []
-        if not self.use_async_spec_decode:
-            valid_sampled_token_count = self._get_valid_sampled_token_count()
+        # Get valid_sampled_tokens_count from cpu to correct
+        # num_computed_tokens. Non-blocking for async spec decode
+        # to avoid adding a sync point.
+        valid_sampled_token_count = self._get_valid_sampled_token_count(
+            blocking=not self.use_async_spec_decode
+        )
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
 
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
@@ -1088,18 +1090,24 @@ class GPUModelRunner(
                     num_rejected = 0
 
                     if not self.use_async_spec_decode:
-                        # Non-async: wait for acceptance count.
-                        assert self.input_batch.prev_req_id_to_index is not None
-                        prev_req_index = self.input_batch.prev_req_id_to_index[req_id]
+                        # Non-async: correct with actual acceptance count.
+                        assert prev_req_id_to_index is not None
+                        prev_req_index = prev_req_id_to_index[req_id]
                         num_accepted = valid_sampled_token_count[prev_req_index] - 1
                         num_rejected = req_state.prev_num_draft_len - num_accepted
-                        num_computed_tokens -= num_rejected
+                    elif prev_req_id_to_index is not None and valid_sampled_token_count:
+                        # Async: correct num_computed_tokens to prevent
+                        # CPU drift, but keep num_accepted optimistic
+                        # for placeholder logic below.
+                        prev_req_index = prev_req_id_to_index[req_id]
+                        actual = valid_sampled_token_count[prev_req_index] - 1
+                        num_rejected = req_state.prev_num_draft_len - actual
 
-                    # Add draft token placeholders. For non-async,
-                    # num_accepted is the actual count; for async,
-                    # it's optimistic (assumes all accepted).
-                    # update_async_output_token_ids will replace
-                    # placeholders with actual tokens and trim excess.
+                    num_computed_tokens -= num_rejected
+
+                    # For async spec decode, update_async_output_token_ids
+                    # will replace placeholders with actual tokens and
+                    # trim excess.
                     if num_accepted > 0:
                         req_state.output_token_ids.extend([-1] * num_accepted)
 
@@ -4140,16 +4148,18 @@ class GPUModelRunner(
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
-    def _get_valid_sampled_token_count(self) -> list[int]:
-        # Wait until valid_sampled_tokens_count is copied to cpu,
+    def _get_valid_sampled_token_count(self, blocking: bool = True) -> list[int]:
         prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
         sampled_count_event = self.valid_sampled_token_count_event
         if sampled_count_event is None or prev_sampled_token_ids is None:
             return []
+        if blocking:
+            sampled_count_event.synchronize()
+        elif not sampled_count_event.query():
+            return []
 
         counts_cpu = self.valid_sampled_token_count_cpu
         assert counts_cpu is not None
-        sampled_count_event.synchronize()
         return counts_cpu[: prev_sampled_token_ids.shape[0]].tolist()
 
     def propose_draft_token_ids(
