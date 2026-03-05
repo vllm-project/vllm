@@ -7,7 +7,7 @@ import torch
 from vllm.config import CacheConfig, VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import Attention
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -106,8 +106,8 @@ def create_static_sink_attention_backend(
     return attn_backend
 
 
-@CustomOp.register("static_sink_attention")
-class StaticSinkAttention(Attention, CustomOp):
+@PluggableLayer.register("static_sink_attention")
+class StaticSinkAttention(Attention, PluggableLayer):
     """
     Attention with static sink tokens
     """
@@ -146,7 +146,6 @@ class StaticSinkAttention(Attention, CustomOp):
             attn_backend=attn_backend,
             **kwargs,
         )
-        CustomOp.__init__(self)
 
         self.sink_len = sink_len
         self.sink_populated = False
@@ -157,7 +156,7 @@ class StaticSinkAttention(Attention, CustomOp):
         self.sink_key = sink_key
         self.sink_value = sink_value
 
-    def forward_native(
+    def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
@@ -172,18 +171,6 @@ class StaticSinkAttention(Attention, CustomOp):
             torch.ops.vllm.maybe_populate_sink(self_kv_cache, self.layer_name)
 
         return super().forward(query, key, value, output_shape)
-
-    def forward_cuda(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        output_shape: torch.Size | None = None,
-    ) -> torch.Tensor:
-        return self.forward_native(query, key, value, output_shape)
-
-    def forward(self, *args, **kwargs):
-        return self._forward_method(*args, **kwargs)
 
     def populate_sink_kv(self, self_kv_cache):
         sink_kv_slot_mapping = torch.arange(
