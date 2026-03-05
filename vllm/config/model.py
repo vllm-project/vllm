@@ -1992,6 +1992,8 @@ def _get_and_verify_max_len(
 
                 if rope_type == "yarn":
                     derived_max_model_len = rp["original_max_position_embeddings"]
+        if scaling_factor is None:
+            scaling_factor = 1.0
         # Do this outside loop since all layer types should have the same scaling
         derived_max_model_len *= scaling_factor
 
