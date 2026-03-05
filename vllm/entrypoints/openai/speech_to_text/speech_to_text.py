@@ -39,7 +39,7 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs import ProcessorInputs
+from vllm.inputs import EncoderDecoderInputs, ProcessorInputs
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import (
@@ -414,8 +414,12 @@ class OpenAISpeechToText(OpenAIServing):
         encoder/decoder caching is implemented.
         """
         input_len = 0
-        if engine_prompts and engine_prompts[0].get("type") == "enc_dec":
-            input_len = len(engine_prompts[0]["decoder_prompt"]["prompt_token_ids"])
+        assert len(engine_prompts) > 0
+        first_eng_prompt = engine_prompts[0]
+
+        if first_eng_prompt.get("type") == "enc_dec":
+            first_eng_prompt = cast(EncoderDecoderInputs, first_eng_prompt)
+            input_len = len(first_eng_prompt["decoder_prompt"]["prompt_token_ids"])
         return input_len
 
     def _get_verbose_segments(

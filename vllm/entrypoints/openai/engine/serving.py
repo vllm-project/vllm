@@ -255,8 +255,8 @@ class OpenAIServing:
         decoder_prompt = (
             prompt if prompt["type"] != "enc_dec" else prompt["decoder_prompt"]
         )
-        prompt_token_ids = decoder_prompt.get("prompt_token_ids")
         prompt_text = decoder_prompt.get("prompt")
+        prompt_token_ids = decoder_prompt["prompt_token_ids"]
 
         tokenized_length = len(prompt_token_ids)
 
