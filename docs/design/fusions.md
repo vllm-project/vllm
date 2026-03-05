@@ -199,8 +199,6 @@ on SM90/SM100) and configurable via `PassConfig.fi_allreduce_fusion_max_size_mb`
 - FlashInfer all-reduce: [`vllm/distributed/device_communicators/flashinfer_all_reduce.py`](https://github.com/vllm-project/vllm/blob/main/vllm/distributed/device_communicators/flashinfer_all_reduce.py)
 - Benchmark: [`benchmarks/kernels/benchmark_fused_collective.py`](https://github.com/vllm-project/vllm/blob/main/benchmarks/kernels/benchmark_fused_collective.py)
 
----
-
 ### Sequence Parallelism (`enable_sp`)
 
 **What it fuses.** Replaces all-reduce collectives with reduce-scatter + local RMSNorm + all-gather,
