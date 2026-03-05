@@ -12,6 +12,12 @@ from vllm.reasoning import ReasoningParser
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
+THINK_END_TOKEN = 99
+REASONING_TOKEN_A = 10
+REASONING_TOKEN_B = 11
+JSON_TOKEN_A = 20
+JSON_TOKEN_B = 21
+
 
 class TestReasoningStructuredOutput:
     """Test reasoning-aware structured output functionality."""
@@ -207,3 +213,171 @@ class TestReasoningStructuredOutput:
 
         # Should return True since reasoning has ended
         assert result is True
+
+    def _make_manager_for_bitmask_test(
+        self, mock_vllm_config, mock_reasoning_parser, num_spec_tokens=5
+    ):
+        """Helper: create a StructuredOutputManager wired up for bitmask
+        tests with a mock backend and pre-allocated bitmask tensor."""
+        import torch
+
+        mock_vllm_config.speculative_config = Mock()
+        mock_vllm_config.speculative_config.num_speculative_tokens = num_spec_tokens
+        manager = StructuredOutputManager(mock_vllm_config)
+        manager.reasoner = mock_reasoning_parser
+
+        max_entries = mock_vllm_config.scheduler_config.max_num_seqs * (
+            1 + num_spec_tokens
+        )
+        manager._grammar_bitmask = torch.zeros(max_entries, 1, dtype=torch.int32)
+        manager.backend = Mock()
+        return manager
+
+    def _make_grammar_mock(self):
+        """Helper: create a mock grammar that tracks calls."""
+        grammar = Mock()
+        grammar.is_terminated.return_value = False
+        grammar.accept_tokens.return_value = True
+        grammar.fill_bitmask = Mock()
+        grammar.rollback = Mock()
+        return grammar
+
+    def test_grammar_bitmask_regression_think_end_in_spec_tokens(
+        self,
+        mock_vllm_config,
+        mock_reasoning_parser,
+    ):
+        """Regression test for production crash: when reasoning_ended=True
+        and spec tokens contain </think>, grammar must NOT try to accept
+        the </think> token.
+
+        Production scenario: previous step set reasoning_ended=True,
+        should_fill_bitmask returns True, spec tokens = [</think>],
+        grammar.accept_tokens(</think>) crashes because </think> is not
+        valid structured output."""
+        manager = self._make_manager_for_bitmask_test(
+            mock_vllm_config, mock_reasoning_parser, num_spec_tokens=1
+        )
+        grammar = self._make_grammar_mock()
+
+        def mock_streaming(all_ids, delta):
+            return delta == [THINK_END_TOKEN]
+
+        mock_reasoning_parser.is_reasoning_end_streaming.side_effect = mock_streaming
+        mock_reasoning_parser.is_reasoning_end.return_value = True
+
+        request = Mock(spec=Request)
+        request.structured_output_request = Mock()
+        request.structured_output_request.reasoning_ended = True
+        request.structured_output_request.grammar = grammar
+        request.use_structured_output = True
+        request.prompt_token_ids = [1, 2, 3]
+
+        req_id = "req-crash-test"
+
+        result = manager.grammar_bitmask(
+            requests={req_id: request},
+            structured_output_request_ids=[req_id],
+            scheduled_spec_decode_tokens={req_id: [THINK_END_TOKEN]},
+        )
+
+        # grammar.accept_tokens must NOT have been called with </think>
+        for call in grammar.accept_tokens.call_args_list:
+            _, tokens = call[0]
+            assert THINK_END_TOKEN not in tokens, (
+                f"grammar.accept_tokens was called with </think> token "
+                f"{THINK_END_TOKEN}, which should be skipped"
+            )
+        assert result is not None
+
+    def test_grammar_bitmask_reasoning_ends_mid_speculation(
+        self,
+        mock_vllm_config,
+        mock_reasoning_parser,
+    ):
+        """When reasoning_end appears mid-speculation, only post-reasoning
+        tokens should be grammar-constrained and accepted (then rolled
+        back)."""
+        manager = self._make_manager_for_bitmask_test(
+            mock_vllm_config, mock_reasoning_parser, num_spec_tokens=5
+        )
+        grammar = self._make_grammar_mock()
+
+        def mock_streaming(all_ids, delta):
+            return delta == [THINK_END_TOKEN]
+
+        mock_reasoning_parser.is_reasoning_end_streaming.side_effect = mock_streaming
+        mock_reasoning_parser.is_reasoning_end.return_value = False
+
+        request = Mock(spec=Request)
+        request.structured_output_request = Mock()
+        request.structured_output_request.reasoning_ended = False
+        request.structured_output_request.grammar = grammar
+        request.use_structured_output = True
+        request.prompt_token_ids = [1, 2, 3]
+
+        req_id = "req-mid-spec"
+        spec_tokens = [
+            REASONING_TOKEN_A,
+            THINK_END_TOKEN,
+            JSON_TOKEN_A,
+            JSON_TOKEN_B,
+        ]
+
+        result = manager.grammar_bitmask(
+            requests={req_id: request},
+            structured_output_request_ids=[req_id],
+            scheduled_spec_decode_tokens={req_id: spec_tokens},
+        )
+
+        assert result is not None
+        assert request.structured_output_request.reasoning_ended is True
+
+        # Only post-reasoning tokens should have been accepted
+        accepted_tokens = [
+            call[0][1][0] for call in grammar.accept_tokens.call_args_list
+        ]
+        assert THINK_END_TOKEN not in accepted_tokens
+        assert REASONING_TOKEN_A not in accepted_tokens
+        assert JSON_TOKEN_A in accepted_tokens
+        assert JSON_TOKEN_B in accepted_tokens
+
+        # Grammar advancements should be rolled back
+        if grammar.accept_tokens.call_count > 0:
+            grammar.rollback.assert_called_once_with(grammar.accept_tokens.call_count)
+
+    def test_grammar_bitmask_no_reasoning_end_in_spec_tokens(
+        self,
+        mock_vllm_config,
+        mock_reasoning_parser,
+    ):
+        """When reasoning hasn't ended and spec tokens don't contain
+        the end marker, all positions should be unconstrained."""
+        manager = self._make_manager_for_bitmask_test(
+            mock_vllm_config, mock_reasoning_parser, num_spec_tokens=3
+        )
+        grammar = self._make_grammar_mock()
+
+        mock_reasoning_parser.is_reasoning_end_streaming.return_value = False
+        mock_reasoning_parser.is_reasoning_end.return_value = False
+
+        request = Mock(spec=Request)
+        request.structured_output_request = Mock()
+        request.structured_output_request.reasoning_ended = False
+        request.structured_output_request.grammar = grammar
+        request.use_structured_output = True
+        request.prompt_token_ids = [1, 2, 3]
+
+        req_id = "req-no-end"
+        spec_tokens = [REASONING_TOKEN_A, REASONING_TOKEN_B]
+
+        result = manager.grammar_bitmask(
+            requests={req_id: request},
+            structured_output_request_ids=[req_id],
+            scheduled_spec_decode_tokens={req_id: spec_tokens},
+        )
+
+        assert result is not None
+        grammar.accept_tokens.assert_not_called()
+        grammar.fill_bitmask.assert_not_called()
+        assert request.structured_output_request.reasoning_ended is False
