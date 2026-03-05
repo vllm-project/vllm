@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 
 from vllm.inputs import EncoderDecoderInputs, TokenInputs, token_inputs
+from vllm.inputs.data import DecoderInputs
 from vllm.logprobs import Logprob
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalInputs, mm_inputs
@@ -54,7 +55,9 @@ class BeamSearchSequence:
             cache_salt=cache_salt,
         )
 
-    def _build_encoder_decoder_inputs(self, prompt):
+    def _build_encoder_decoder_inputs(
+        self, prompt: EncoderDecoderInputs
+    ) -> EncoderDecoderInputs:
         """Rebuild the encoder-decoder inputs with the current beam search
         sequence's tokens.
 
@@ -67,6 +70,7 @@ class BeamSearchSequence:
 
         # Rebuild decoder prompt with updated tokens,
         # but keep everything else the same.
+        new_dec_prompt: DecoderInputs
         if dec_prompt["type"] == "multimodal":
             new_dec_prompt = mm_inputs(
                 self.tokens,
