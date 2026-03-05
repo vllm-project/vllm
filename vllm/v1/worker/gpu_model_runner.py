@@ -58,7 +58,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     MRotaryEmbedding,
     XDRotaryEmbedding,
 )
-from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
@@ -159,6 +159,7 @@ from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
@@ -193,7 +194,6 @@ from .utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
@@ -495,6 +495,7 @@ class GPUModelRunner(
                 | EagleProposer
                 | DraftModelProposer
                 | MedusaProposer
+                | ExtractHiddenStatesProposer
             )
             if self.speculative_config.method == "ngram":
                 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -518,6 +519,11 @@ class GPUModelRunner(
                 self.drafter = MedusaProposer(
                     vllm_config=self.vllm_config, device=self.device
                 )
+            elif self.speculative_config.method == "extract_hidden_states":
+                self.drafter = ExtractHiddenStatesProposer(
+                    vllm_config=self.vllm_config, device=self.device
+                )
+                self.use_aux_hidden_state_outputs = True
             else:
                 raise ValueError(
                     "Unknown speculative decoding method: "
@@ -589,15 +595,6 @@ class GPUModelRunner(
         if self.use_async_scheduling:
             self.async_output_copy_stream = torch.cuda.Stream()
             self.prepare_inputs_event = torch.Event()
-
-        # self.cudagraph_batch_sizes sorts in ascending order.
-        if (
-            self.compilation_config.cudagraph_capture_sizes
-            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
-            self.cudagraph_batch_sizes = sorted(
-                self.compilation_config.cudagraph_capture_sizes
-            )
 
         # Cache the device properties.
         self._init_device_properties()
@@ -730,8 +727,10 @@ class GPUModelRunner(
         self.draft_token_ids_copy_stream: torch.cuda.Stream | None = None
         self.valid_sampled_token_count_cpu: torch.Tensor | None = None
         self.draft_token_ids_cpu: torch.Tensor | None = None
+        self.num_accepted_tokens_event: torch.Event | None = None
         if self.num_spec_tokens:
             self.draft_token_ids_event = torch.Event()
+            self.num_accepted_tokens_event = torch.Event()
             self.draft_token_ids_copy_stream = torch.cuda.Stream()
             self.draft_token_ids_cpu = torch.empty(
                 (self.max_num_reqs, self.num_spec_tokens),
@@ -1193,13 +1192,14 @@ class GPUModelRunner(
             return
 
         # Find the number of accepted tokens for each sequence.
-        num_accepted_tokens = (
+        num_reqs = output_token_ids.size(0)
+        self.num_accepted_tokens.gpu[:num_reqs] = (
             (
                 torch.cat(
                     [
                         output_token_ids,
                         torch.full(
-                            (output_token_ids.size(0), 1),
+                            (num_reqs, 1),
                             -1,
                             device=output_token_ids.device,
                         ),
@@ -1210,12 +1210,13 @@ class GPUModelRunner(
             )
             .int()
             .argmax(-1)
-            .cpu()
-            .numpy()
         )
-        for i, num_tokens in enumerate(num_accepted_tokens):
-            self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
         if self.cache_config.mamba_cache_mode == "align":
+            for i, num_tokens in enumerate(
+                self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
+            ):
+                self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+
             mamba_utils.postprocess_mamba(
                 scheduler_output,
                 self.kv_cache_config,
@@ -1226,6 +1227,12 @@ class GPUModelRunner(
                 self.model.get_mamba_state_copy_func(),
                 self._get_mamba_copy_bufs(),
             )
+        else:
+            self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
+                self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
+            )
+            assert self.num_accepted_tokens_event is not None
+            self.num_accepted_tokens_event.record()
 
     def _update_streaming_request(
         self, req_id: str, new_req_data: NewRequestData
@@ -1770,6 +1777,8 @@ class GPUModelRunner(
             max_seq_len = self.seq_lens.np[:num_reqs].max().item()
 
         if use_spec_decode:
+            if self.num_accepted_tokens_event is not None:
+                self.num_accepted_tokens_event.synchronize()
             self.num_accepted_tokens.np[:num_reqs] = (
                 self.input_batch.num_accepted_tokens_cpu[:num_reqs]
             )
@@ -1932,7 +1941,7 @@ class GPUModelRunner(
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter, EagleProposer):
-                    if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
+                    if self.drafter.kv_cache_gid == kv_cache_gid:
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
@@ -3406,7 +3415,7 @@ class GPUModelRunner(
             # Update persistent batch states.
             self._update_states(scheduler_output)
 
-            if has_ec_transfer() and get_ec_transfer().is_producer:
+            if has_ec_transfer() and not get_ec_transfer().is_consumer:
                 with self.maybe_get_ec_connector_output(
                     scheduler_output,
                     encoder_cache=self.encoder_cache,
@@ -3693,10 +3702,9 @@ class GPUModelRunner(
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
-        kv_connector_output = self.kv_connector_output
-        self.kv_connector_output = None
-
         if self.execute_model_state is None:
+            kv_connector_output = self.kv_connector_output
+            self.kv_connector_output = None
             # receive sampled token ids from the last PP rank.
             if self.use_async_scheduling and get_pp_group().world_size > 1:
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
@@ -3778,12 +3786,17 @@ class GPUModelRunner(
                 <= self.effective_drafter_max_model_len
             )
             use_gpu_toks = (
-                spec_config.use_eagle() or spec_config.uses_draft_model()
+                spec_config.use_eagle()
+                or spec_config.uses_draft_model()
+                or spec_config.uses_extract_hidden_states()
             ) and not spec_config.disable_padded_drafter_batch
             if use_gpu_toks:
                 # EAGLE/DraftModel speculative decoding can use the GPU sampled tokens
                 # as inputs, and does not need to wait for bookkeeping to finish.
-                assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+                assert isinstance(
+                    self.drafter,
+                    EagleProposer | DraftModelProposer | ExtractHiddenStatesProposer,
+                )
                 sampled_token_ids = sampler_output.sampled_token_ids
                 if input_fits_in_drafter:
                     propose_draft_token_ids(sampled_token_ids)
@@ -3841,6 +3854,10 @@ class GPUModelRunner(
 
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
+
+        # self.kv_connector_output may be modified during drafting
+        kv_connector_output = self.kv_connector_output
+        self.kv_connector_output = None
 
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
             if self.model_config.enable_return_routed_experts:
@@ -4068,6 +4085,48 @@ class GPUModelRunner(
                 sampling_metadata=sampling_metadata,
                 slot_mappings=slot_mappings,
             )
+        elif spec_config.uses_extract_hidden_states():
+            assert isinstance(self.drafter, ExtractHiddenStatesProposer)
+            assert isinstance(sampled_token_ids, torch.Tensor), (
+                "sampled_token_ids should be a torch.Tensor for "
+                "extract_hidden_states method."
+            )
+            if not self.use_aux_hidden_state_outputs or aux_hidden_states is None:
+                raise ValueError(
+                    "aux_hidden_states are required when using `extract_hidden_states`"
+                )
+            target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
+
+            draft_token_ids, drafter_kv_connector_output = self.drafter.propose(
+                sampled_token_ids=sampled_token_ids,
+                target_hidden_states=target_hidden_states,
+                common_attn_metadata=common_attn_metadata,
+                scheduler_output=scheduler_output,
+                slot_mappings=slot_mappings,
+            )
+            # Combine KVConnectorOutputs or select the non-empty one
+            if self.kv_connector_output and drafter_kv_connector_output:
+                self.kv_connector_output = KVConnectorOutput.merge(
+                    self.kv_connector_output, drafter_kv_connector_output
+                )
+            else:
+                self.kv_connector_output = (
+                    self.kv_connector_output or drafter_kv_connector_output
+                )
+
+            next_token_ids, valid_sampled_tokens_count = (
+                self.drafter.prepare_next_token_ids_padded(
+                    common_attn_metadata,
+                    sampled_token_ids,
+                    self.requests,
+                    self.input_batch,
+                    self.discard_request_mask.gpu,
+                )
+            )
+            self._copy_valid_sampled_token_count(
+                next_token_ids, valid_sampled_tokens_count
+            )
+
         elif spec_config.use_eagle() or spec_config.uses_draft_model():
             assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
 
@@ -4455,16 +4514,6 @@ class GPUModelRunner(
                     "Following weights were not loaded from checkpoint: %s",
                     weights_not_loaded,
                 )
-
-    def save_tensorized_model(
-        self,
-        tensorizer_config: "TensorizerConfig",
-    ) -> None:
-        TensorizerLoader.save_model(
-            self.get_model(),
-            tensorizer_config=tensorizer_config,
-            model_config=self.model_config,
-        )
 
     def _get_prompt_logprobs_dict(
         self,
@@ -4946,8 +4995,12 @@ class GPUModelRunner(
             if self.speculative_config and (
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_draft_model()
+                or self.speculative_config.uses_extract_hidden_states()
             ):
-                assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+                assert isinstance(
+                    self.drafter,
+                    EagleProposer | DraftModelProposer | ExtractHiddenStatesProposer,
+                )
                 assert self.speculative_config is not None
                 # Eagle currently only supports PIECEWISE cudagraphs.
                 # Therefore only use cudagraphs if the main model uses PIECEWISE
@@ -5501,6 +5554,14 @@ class GPUModelRunner(
         # because some of them change the threshold at init time.
         self.calculate_reorder_batch_threshold()
 
+        # Initialize drafter attention backend
+        if self.speculative_config and (
+            self.speculative_config.use_eagle()
+            or self.speculative_config.uses_draft_model()
+        ):
+            assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+            self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
+
     def _check_and_update_cudagraph_mode(
         self,
         attention_backends: list[set[type[AttentionBackend]]],
@@ -5644,10 +5705,22 @@ class GPUModelRunner(
             self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
                 self.uniform_decode_query_len, self.parallel_config.tensor_parallel_size
             )
-            capture_sizes = self.compilation_config.cudagraph_capture_sizes
-            self.cudagraph_batch_sizes = (
-                capture_sizes if capture_sizes is not None else []
+
+        # If the model has Mamba layers and cudagraph mode includes FULL
+        # decode, cap cudagraph capture sizes to the number of available
+        # Mamba cache blocks. Each decode request needs one conv_state
+        # cache line, so capture batch sizes cannot exceed num_blocks.
+        # Only FULL decode graphs are affected because PIECEWISE captures
+        # run GDN/Mamba ops eagerly (prefill path, no causal_conv1d_update).
+        # See: https://github.com/vllm-project/vllm/issues/34094
+        if cudagraph_mode.has_full_cudagraphs():
+            has_mamba = any(
+                isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_groups
             )
+            if has_mamba and self.kv_cache_config is not None:
+                self.compilation_config.adjust_cudagraph_sizes_for_mamba_cache(
+                    self.kv_cache_config.num_blocks
+                )
 
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.
@@ -5656,9 +5729,12 @@ class GPUModelRunner(
             cudagraph_mode, self.uniform_decode_query_len
         )
 
-        # Initialize eagle's cudagraph dispatcher if using eagle spec decode.
-        if self.speculative_config and self.speculative_config.use_eagle():
-            assert isinstance(self.drafter, EagleProposer)
+        # Initialize drafter's cudagraph dispatcher if using spec decode.
+        if self.speculative_config and (
+            self.speculative_config.use_eagle()
+            or self.speculative_config.uses_extract_hidden_states()
+        ):
+            assert isinstance(self.drafter, EagleProposer | ExtractHiddenStatesProposer)
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
     def calculate_reorder_batch_threshold(self) -> None:
@@ -6022,11 +6098,11 @@ class GPUModelRunner(
             kv_cache_config, kernel_block_sizes
         )
 
-        if self.speculative_config and (
-            self.speculative_config.use_eagle()
-            or self.speculative_config.uses_draft_model()
+        if (
+            self.speculative_config
+            and self.speculative_config.uses_extract_hidden_states()
         ):
-            assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+            assert isinstance(self.drafter, ExtractHiddenStatesProposer)
             # validate all draft model layers belong to the same kv cache
             # group
             self.drafter.validate_same_kv_cache_group(kv_cache_config)
@@ -6112,7 +6188,7 @@ class GPUModelRunner(
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
-        if has_ec_transfer() and get_ec_transfer().is_producer:
+        if has_ec_transfer() and not get_ec_transfer().is_consumer:
             return {}
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         layer_type = cast(type[Any], AttentionLayerBase)

@@ -85,7 +85,6 @@ class UvaBackedTensor:
         self, size: int | Sequence[int], dtype: torch.dtype, max_concurrency: int = 2
     ):
         self.dtype = dtype
-        self.max_concurrency = max_concurrency
 
         # Source of truth
         self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=False)
