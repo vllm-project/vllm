@@ -95,8 +95,6 @@ vllm bench latency --model=meta-llama/Llama-3.1-8B-Instruct -O2 -cc.pass_config.
 
 Fields set explicitly by the user always take precedence over optimization-level defaults.
 
----
-
 ## Fusion Details
 
 ### RMSNorm + Quantization (`fuse_norm_quant`)
