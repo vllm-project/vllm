@@ -343,8 +343,6 @@ when the hidden size is 2880 and AITER Triton GEMMs *not* enabled.
 
 - Pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py) (`RocmAiterTritonAddRMSNormPadFusionPass`)
 
----
-
 ## See Also
 
 - [Optimization Levels](optimization_levels.md) — high-level presets that set
