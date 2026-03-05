@@ -313,7 +313,7 @@ def test_attention_quant_pattern(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops_list,
-            vllm_enable_compile_cache=False,
+            enable_vllm_compile_cache=False,
         ),
         cache_config=CacheConfig(cache_dtype="fp8"),
         attention_config=AttentionConfig(backend=backend),

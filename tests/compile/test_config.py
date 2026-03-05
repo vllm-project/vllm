@@ -93,8 +93,8 @@ def test_VLLM_DISABLE_COMPILE_CACHE_overrides_config(monkeypatch):
     envs.disable_envs_cache()
 
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-    cfg = CompilationConfig(vllm_enable_compile_cache=True)
-    assert cfg.vllm_enable_compile_cache is False
+    cfg = CompilationConfig(enable_vllm_compile_cache=True)
+    assert cfg.enable_vllm_compile_cache is False
 
     # Cleanup / isolation: remove env var and reset any caching wrappers.
     monkeypatch.delenv("VLLM_DISABLE_COMPILE_CACHE", raising=False)
@@ -109,22 +109,22 @@ def test_is_compile_cache_enabled_respects_config_flag(monkeypatch):
     envs.disable_envs_cache()
     monkeypatch.delenv("VLLM_DISABLE_COMPILE_CACHE", raising=False)
 
-    assert is_compile_cache_enabled({}, vllm_enable_compile_cache=False) is False
+    assert is_compile_cache_enabled({}, enable_vllm_compile_cache=False) is False
 
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
-# NB: We don't test vllm_enable_compile_cache=True because that depends
+# NB: We don't test enable_vllm_compile_cache=True because that depends
 # on the state of the cache directory on the current machine, which
 # may be influenced by other tests.
 @pytest.mark.parametrize("val", [False])
-def test_vllm_enable_compile_cache_disabled(vllm_runner, monkeypatch, val):
+def test_enable_vllm_compile_cache_disabled(vllm_runner, monkeypatch, val):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
     compilation_config = {
         "cudagraph_mode": CUDAGraphMode.NONE,  # speed things up a bit
-        "vllm_enable_compile_cache": val,
+        "enable_vllm_compile_cache": val,
     }
     with (
         compilation_counter.expect(

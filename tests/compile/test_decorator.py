@@ -82,7 +82,7 @@ def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatc
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
             use_inductor_graph_partition=use_inductor_graph_partition,
-            vllm_enable_compile_cache=False,
+            enable_vllm_compile_cache=False,
         )
     )
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
@@ -216,7 +216,7 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
             use_inductor_graph_partition=use_inductor_graph_partition,
-            vllm_enable_compile_cache=False,
+            enable_vllm_compile_cache=False,
         ),
     )
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE

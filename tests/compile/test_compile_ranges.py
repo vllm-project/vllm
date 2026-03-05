@@ -150,7 +150,7 @@ def test_inductor_cache_compile_ranges(monkeypatch, use_fresh_inductor_cache):
                 inductor_compile_config={
                     "post_grad_custom_post_pass": post_grad_range_checker,
                 },
-                vllm_enable_compile_cache=False,
+                enable_vllm_compile_cache=False,
             ),
         )
 

@@ -170,14 +170,14 @@ def get_inductor_factors() -> list[Any]:
 def is_compile_cache_enabled(
     vllm_additional_inductor_config_or_compilation_config: CompilationConfig
     | dict[str, Any],
-    vllm_enable_compile_cache: bool = True,
+    enable_vllm_compile_cache: bool = True,
 ) -> bool:
     if isinstance(
         vllm_additional_inductor_config_or_compilation_config, CompilationConfig
     ):
         compilation_config = vllm_additional_inductor_config_or_compilation_config
         vllm_additional_inductor_config = compilation_config.inductor_compile_config
-        vllm_enable_compile_cache = compilation_config.vllm_enable_compile_cache
+        enable_vllm_compile_cache = compilation_config.enable_vllm_compile_cache
     else:
         vllm_additional_inductor_config = (
             vllm_additional_inductor_config_or_compilation_config
@@ -191,7 +191,7 @@ def is_compile_cache_enabled(
     # with torch.compiler.config.force_disable_caches when minimum PyTorch
     # version reaches 2.10
     return (
-        vllm_enable_compile_cache
+        enable_vllm_compile_cache
         and not torch._inductor.config.force_disable_caches
         and not vllm_inductor_config_disable_cache
     )
@@ -360,7 +360,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
                     "filing a bug report, "
                     "or suppressing this error by "
                     "disabling vLLM's compilation cache via "
-                    "CompilationConfig(vllm_enable_compile_cache=False) or "
+                    "CompilationConfig(enable_vllm_compile_cache=False) or "
                     "VLLM_DISABLE_COMPILE_CACHE=1 "
                     "(this will greatly increase vLLM server warm start times)."
                 )

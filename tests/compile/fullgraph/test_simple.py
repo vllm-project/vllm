@@ -98,7 +98,7 @@ def _run_simple_model(
             use_inductor_graph_partition=use_inductor_graph_partition,
             cudagraph_copy_inputs=True,
             cudagraph_capture_sizes=[1, 2],
-            vllm_enable_compile_cache=False,
+            enable_vllm_compile_cache=False,
         )
     )
     with set_current_vllm_config(vllm_config):

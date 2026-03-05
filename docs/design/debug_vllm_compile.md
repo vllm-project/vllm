@@ -289,7 +289,7 @@ If this is not the case, then it will error out on save. Usually the fixes are t
 - rewrite the non-serializable pieces (perhaps difficult because it's difficult to
   tell right now what is serializable and what isn't)
 - file a bug report
-- ignore the error by setting `vllm_enable_compile_cache=False` in `CompilationConfig`
+- ignore the error by setting `enable_vllm_compile_cache=False` in `CompilationConfig`
   or `VLLM_DISABLE_COMPILE_CACHE=1` (note that this will make warm server starts a lot slower).
 
 ## Debugging CUDAGraphs

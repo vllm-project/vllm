@@ -365,7 +365,7 @@ def test_toy_llama(
         cudagraph_mode=CUDAGraphMode.PIECEWISE,
         backend=backend,
         cudagraph_capture_sizes=[1, 2],
-        vllm_enable_compile_cache=False,
+        enable_vllm_compile_cache=False,
     )
 
     compile_config_split = deepcopy(compile_config_no_split)
