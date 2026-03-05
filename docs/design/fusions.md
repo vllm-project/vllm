@@ -14,7 +14,7 @@ operations it fuses, what level enables it by default, and an indicative speedup
 The last column indicates whether the fusion requires the entire model graph to be
 visible (either via Inductor partition or `splitting_ops=[]`).
 
-> Note that speedup depends heavily on the exact model, batch size, and hardware. 
+> Speedup depends heavily on the exact model, batch size, and hardware. 
 > If tuning performance by hand, always benchmark your exact use-case with and without the fusion to verify the impact.
 
 | Fusion                                                                           | `PassConfig` flag            | Fused operations                               | Default at                     | E2E Speedup        | Requires fullgraph |
@@ -28,6 +28,35 @@ visible (either via Inductor partition or `splitting_ops=[]`).
 | [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant)                        | `fuse_act_quant`             | SiLU+Mul activation → FP8/FP4 quant            | O1 (conditional)               | 1-4%               | No                 |
 | [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)               | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O1 (ROCm/AITER only)           | TBD                | No                 |
 | [RMSNorm + Padding](#rmsnorm--padding-fuse_act_padding)                          | `fuse_act_padding`           | Residual add + RMSNorm → padding               | O1 (ROCm/AITER only)           | TBD                | No                 |
+
+
+---
+
+## Support Matrix
+
+The table below lists the quantization schemes supported by each fusion on each platform.
+**—** means the fusion is not available on that platform. The latest and in-progress work is available in the tracking issue: 
+[#36066](https://github.com/vllm-project/vllm/issues/36066)
+
+| Fusion                       | SM100 (Blackwell)                        | SM90 (Hopper)                            | SM89 (Ada)                               | SM80 (Ampere) | ROCm                                     |
+|------------------------------|------------------------------------------|------------------------------------------|------------------------------------------|---------------|------------------------------------------|
+| `fuse_norm_quant`            | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | —             | FP8 static, FP8 per-token, FP8 per-group |
+| `fuse_act_quant`             | FP8 static, NVfp4                        | FP8 static                               | FP8 static                               | —             | FP8 per-group                            |
+| `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVfp4             | FP16/BF16, FP8 static                    | —                                        | —             | —                                        |
+| `fuse_attn_quant`\*          | FP8 static\*, NVfp4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                             |
+| `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
+| `fuse_act_padding`           | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
+| `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16†                               | FP16/BF16†    | —                                        |
+| `enable_sp`                  | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
+| `fuse_gemm_comms`            | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
+
+\* `fuse_attn_quant` support depends on the attention backend in use; not all backends support
+fused quantization output. See the [`fuse_attn_quant` section](#attention--quantization-fuse_attn_quant)
+for per-backend details.
+
+† `enable_sp` and `fuse_gemm_comms` are only autoconfigured for SM90 today;
+other architectures support requires setting `PassConfig.sp_min_token_num` explicitly.
+SM100 support also requires setting `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel`.
 
 ---
 
@@ -310,33 +339,6 @@ when the hidden size is 2880 and AITER Triton GEMMs *not* enabled.
 **Code locations.**
 
 - Pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py) (`RocmAiterTritonAddRMSNormPadFusionPass`)
-
----
-
-## Support Matrix
-
-The table below lists the quantization schemes supported by each fusion on each platform.
-**—** means the fusion is not available on that platform.
-
-| Fusion                       | SM100 (Blackwell)                        | SM90 (Hopper)                            | SM89 (Ada)                               | SM80 (Ampere) | ROCm                                     |
-|------------------------------|------------------------------------------|------------------------------------------|------------------------------------------|---------------|------------------------------------------|
-| `fuse_norm_quant`            | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | —             | FP8 static, FP8 per-token, FP8 per-group |
-| `fuse_act_quant`             | FP8 static, NVfp4                        | FP8 static                               | FP8 static                               | —             | FP8 per-group                            |
-| `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVfp4             | FP16/BF16, FP8 static                    | —                                        | —             | —                                        |
-| `fuse_attn_quant`\*          | FP8 static\*, NVfp4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                             |
-| `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
-| `fuse_act_padding`           | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
-| `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16                                | FP16/BF16     | —                                        |
-| `enable_sp`                  | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16                                | FP16/BF16     | —                                        |
-| `fuse_gemm_comms`            | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16                                | FP16/BF16     | —                                        |
-
-\* `fuse_attn_quant` support depends on the attention backend in use; not all backends support
-fused quantization output. See the [`fuse_attn_quant` section](#attention--quantization-fuse_attn_quant)
-for per-backend details.
-
-† `enable_sp` and `fuse_gemm_comms` are only autoconfigured for SM90 today;
-other architectures support requires setting `PassConfig.sp_min_token_num` explicitly.
-SM100 support also requires setting `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel`.
 
 ---
 
