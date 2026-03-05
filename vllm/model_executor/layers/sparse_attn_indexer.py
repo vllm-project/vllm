@@ -11,7 +11,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import fp8_mqa_logits, fp8_paged_mqa_logits, has_deep_gemm
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
@@ -30,7 +35,7 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
-    k_cache_prefix: str,
+    k_cache_prefix: LayerNameType,
     kv_cache: torch.Tensor,
     q_fp8: torch.Tensor,
     k: torch.Tensor,
@@ -46,6 +51,7 @@ def sparse_attn_indexer(
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
+    k_cache_prefix = _resolve_layer_name(k_cache_prefix)
 
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
@@ -253,7 +259,7 @@ def sparse_attn_indexer(
 
 def sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
-    k_cache_prefix: str,
+    k_cache_prefix: LayerNameType,
     kv_cache: torch.Tensor,
     q_fp8: torch.Tensor,
     k: torch.Tensor,
@@ -342,7 +348,7 @@ class SparseAttnIndexer(CustomOp):
     ):
         return torch.ops.vllm.sparse_attn_indexer(
             hidden_states,
-            self.k_cache.prefix,
+            _encode_layer_name(self.k_cache.prefix),
             self.k_cache.kv_cache,
             q_fp8,
             k,
@@ -366,7 +372,7 @@ class SparseAttnIndexer(CustomOp):
         if rocm_aiter_ops.is_enabled():
             return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
                 hidden_states,
-                self.k_cache.prefix,
+                _encode_layer_name(self.k_cache.prefix),
                 self.k_cache.kv_cache,
                 q_fp8,
                 k,

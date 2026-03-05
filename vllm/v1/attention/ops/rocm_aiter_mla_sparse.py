@@ -9,6 +9,7 @@ import torch
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import LayerNameType
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 
@@ -459,7 +460,7 @@ def rocm_fp8_mqa_logits(
 
 def rocm_aiter_sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
-    k_cache_prefix: str,
+    k_cache_prefix: LayerNameType,
     kv_cache: torch.Tensor,
     q_fp8: torch.Tensor,
     k: torch.Tensor,
@@ -486,7 +487,7 @@ def rocm_aiter_sparse_attn_indexer_fake(
 
 def rocm_aiter_sparse_attn_indexer(
     hidden_states: torch.Tensor,
-    k_cache_prefix: str,
+    k_cache_prefix: LayerNameType,
     kv_cache: torch.Tensor,
     q_fp8: torch.Tensor,
     k: torch.Tensor,
@@ -502,6 +503,9 @@ def rocm_aiter_sparse_attn_indexer(
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
+    from vllm.utils.torch_utils import _resolve_layer_name
+
+    k_cache_prefix = _resolve_layer_name(k_cache_prefix)
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
         return rocm_aiter_sparse_attn_indexer_fake(
