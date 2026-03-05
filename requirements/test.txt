@@ -376,6 +376,8 @@ inflect==5.6.2
     # via datamodel-code-generator
 iniconfig==2.0.0
     # via pytest
+instanttensor==0.1.4
+    # via -r requirements/test.in
 isoduration==20.11.0
     # via jsonschema
 isort==5.13.2
@@ -1168,6 +1170,7 @@ torch==2.10.0+cu129
     #   accelerate
     #   bitsandbytes
     #   encodec
+    #   instanttensor
     #   kornia
     #   lightly
     #   lightning
