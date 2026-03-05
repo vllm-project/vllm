@@ -300,9 +300,7 @@ class AiterRMSNormStaticQuantPattern(AiterRMSNormQuantPattern):
                 self.quant_dtype,
             )
 
-            if self.quant_matcher.enabled:
-                return result, scale.reshape((1,))
-            return result
+            return result, scale.reshape((1,))
 
         inputs = [
             # input, weight
@@ -357,8 +355,7 @@ class AiterFusedAddRMSNormStaticQuantPattern(AiterRMSNormQuantPattern):
                 self.quant_dtype,
                 residual,
             )
-            if self.quant_matcher.enabled:
-                return at[0], at[1], scale.reshape((1,))
+            return at[0], at[1], scale.reshape((1,))
 
             return at[0], at[1]
 
