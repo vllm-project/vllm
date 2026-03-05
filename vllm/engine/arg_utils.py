@@ -294,7 +294,17 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                     raise argparse.ArgumentTypeError(repr(e)) from e
 
             kwargs[name]["type"] = parse_dataclass
-            kwargs[name]["help"] += f"\n\n{json_tip}"
+
+            # Add documentation link for config classes
+            config_module = dataclass_cls.__module__
+            config_name = dataclass_cls.__name__
+            # Extract the parent module path (e.g., vllm.config.speculative -> vllm/config)
+            parent_module = ".".join(config_module.split(".")[:-1])
+            doc_path = parent_module.replace(".", "/")
+            # Anchor uses parent module + class name (e.g., vllm.config.SpeculativeConfig)
+            anchor = f"{parent_module}.{config_name}"
+            doc_link = f"https://docs.vllm.ai/en/latest/api/{doc_path}/#{anchor}"
+            kwargs[name]["help"] += f"\n\nFor all accepted keys, see: {doc_link}\n\n{json_tip}"
         elif contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
             kwargs[name]["action"] = argparse.BooleanOptionalAction
@@ -528,13 +538,9 @@ class EngineArgs:
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
     reasoning_parser_plugin: str | None = None
 
-    speculative_config: dict[str, Any] | None = None
-    """JSON object configuring speculative decoding. Key parameters include:
-    method (speculation method, e.g. 'eagle', 'draft_model', 'ngram',
-    'suffix'), model (draft model name/path), and num_speculative_tokens
-    (number of tokens to speculate per step). See
-    https://docs.vllm.ai/en/latest/features/speculative_decoding/configuration/
-    for the full list of accepted keys."""
+    speculative_config: SpeculativeConfig = get_field(
+        VllmConfig, "speculative_config"
+    )
 
     show_hidden_metrics_for_version: str | None = (
         ObservabilityConfig.show_hidden_metrics_for_version
