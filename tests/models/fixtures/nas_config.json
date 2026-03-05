@@ -2,9 +2,7 @@
     "architectures": [
       "AnyModel"
     ],
-    "base_architectures": [
-      "LlamaForCausalLM"
-    ],
+    "base_architecture": "LlamaForCausalLM",
     "attention_bias": false,
     "attention_dropout": 0.0,
     "block_configs": [

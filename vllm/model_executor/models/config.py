@@ -5,7 +5,6 @@ from math import lcm
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -26,6 +25,51 @@ class VerifyAndUpdateConfig:
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         return
+
+
+class AnyModelConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        """Normalize block_configs and patch ``_model_info`` from base arch.
+
+        1. Convert ``block_configs`` entries from plain dicts to
+           :class:`_AttrDict` so downstream code can use attribute access
+           (e.g. ``bc.attention.no_op``).
+        2. Override ``model_config._model_info`` with the capabilities of
+           the base architecture (``base_architecture`` in the HF config)
+           so that the rest of ``ModelConfig.__init__`` sees correct flags
+           (``supports_multimodal``, ``is_hybrid``, etc.) with
+           ``has_noops=True``.
+        """
+        from dataclasses import replace
+
+        from vllm.model_executor.models.anymodel import _AttrDict
+
+        hf_config = model_config.hf_config
+
+        # --- 1. Normalize block_configs to _AttrDict ----------------------
+        block_configs = getattr(hf_config, "block_configs", None)
+        if block_configs:
+            assert len(block_configs) == hf_config.num_hidden_layers, (
+                f"block_configs length ({len(block_configs)}) must match "
+                f"num_hidden_layers ({hf_config.num_hidden_layers})"
+            )
+
+            def _to_attrdict(obj):
+                if isinstance(obj, dict):
+                    return _AttrDict({k: _to_attrdict(v) for k, v in obj.items()})
+                if isinstance(obj, list):
+                    return [_to_attrdict(item) for item in obj]
+                return obj
+
+            hf_config.block_configs = [_to_attrdict(bc) for bc in block_configs]
+
+        # --- 2. Patch _model_info from base architecture ------------------
+        base_arch = getattr(hf_config, "base_architecture", None)
+        if base_arch:
+            base_info = model_config.registry._try_inspect_model_cls(base_arch)
+            if base_info is not None:
+                model_config._model_info = replace(base_info, has_noops=True)
 
 
 class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
@@ -166,10 +210,9 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 dtype=kv_cache_dtype,
             ).page_size_bytes
 
-        model_cls, _ = ModelRegistry.resolve_model_cls(
-            model_config.architecture,
-            model_config=model_config,
-        )
+        from vllm.model_executor.model_loader import get_model_architecture
+
+        model_cls, _ = get_model_architecture(model_config)
 
         # get mamba page size
         mamba_page_size = MambaSpec(

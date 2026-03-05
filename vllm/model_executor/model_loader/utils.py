@@ -181,6 +181,11 @@ def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module],
         model_config=model_config,
     )
 
+    # Allow models to provide a config-aware wrapper class (e.g. AnyModel
+    # dynamically inherits from the base architecture).
+    if hasattr(model_cls, "resolve_wrapper_cls"):
+        model_cls = model_cls.resolve_wrapper_cls(model_config)
+
     if arch == model_config._get_transformers_backend_cls():
         assert model_config.model_impl != "vllm"
         if model_config.model_impl == "auto":

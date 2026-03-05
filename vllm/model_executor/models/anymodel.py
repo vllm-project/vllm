@@ -752,35 +752,36 @@ class AnyModel(nn.Module, HasNoOps):
     # Cache of arch_name → named wrapper class (lazily populated).
     _wrapper_cache: ClassVar[dict[str, type[AnyModel]]] = {}
 
-    def __new__(cls, *, vllm_config: VllmConfig, prefix: str = ""):
-        if cls is not AnyModel:
-            # Already a named wrapper subclass — plain instantiation.
-            return super().__new__(cls)
+    @staticmethod
+    def _resolve_arch(config) -> tuple[str, ArchInfo, bool]:
+        """Determine the base architecture name and :class:`ArchInfo`.
 
-        config = vllm_config.model_config.hf_config
+        Reads ``base_architecture`` from the HF config to identify the
+        underlying model class, then resolves the corresponding
+        :class:`ArchInfo` (config-driven descriptor takes priority over
+        the hardcoded :data:`_ARCH_REGISTRY`).
 
-        # base_architectures carries the real model class name when the
-        # config uses "architectures": ["AnyModel"].  Fall back to the
-        # first entry of "architectures" for configs that still use the
-        # original arch name (e.g. "LlamaForCausalLM") directly.
-        architectures = getattr(config, "architectures", None) or []
-        base_architectures = getattr(config, "base_architectures", None) or []
-        arch_name = (
-            base_architectures[0]
-            if base_architectures
-            else (architectures[0] if architectures else None)
-        )
+        Returns:
+            ``(arch_name, arch_info, from_config)`` — *from_config* is
+            ``True`` when the descriptor was loaded from the HF config's
+            ``anymodel_arch_info`` field rather than the hardcoded registry.
 
-        # Config-driven descriptor takes priority over the hardcoded registry,
-        # allowing checkpoints to ship their own ArchInfo in config.json.
+        Raises:
+            ValueError: if the architecture is not supported.
+        """
+        arch_name = getattr(config, "base_architecture", None)
+        if not arch_name:
+            raise ValueError(
+                "AnyModel config must set 'base_architecture' to the name "
+                "of the underlying model class (e.g. 'LlamaForCausalLM')."
+            )
+
+        from_config = False
         arch_info = _arch_info_from_config(config)
         if arch_info is not None:
-            # Use repr as cache key so distinct descriptors get distinct
-            # wrapper classes even for the same architecture name.
-            cache_key = f"config:{repr(arch_info)}"
+            from_config = True
         else:
-            arch_info = _ARCH_REGISTRY.get(arch_name) if arch_name else None
-            cache_key = arch_name  # type: ignore[assignment]
+            arch_info = _ARCH_REGISTRY.get(arch_name)
 
         if arch_info is None:
             raise ValueError(
@@ -788,13 +789,59 @@ class AnyModel(nn.Module, HasNoOps):
                 f"Supported: {sorted(_ARCH_REGISTRY)}"
             )
 
-        if cache_key not in cls._wrapper_cache:
-            cls._wrapper_cache[cache_key] = _make_wrapper_cls(
-                arch_name,
-                arch_info,  # type: ignore[arg-type]
-            )
+        return arch_name, arch_info, from_config
 
-        return object.__new__(cls._wrapper_cache[cache_key])
+    @staticmethod
+    def _get_or_create_wrapper(
+        arch_name: str,
+        arch_info: ArchInfo,
+        *,
+        from_config: bool = False,
+    ) -> type[AnyModel]:
+        """Return (or lazily create) the named wrapper class for *arch_name*.
+
+        Args:
+            from_config: True when *arch_info* was loaded from the HF config
+                (``anymodel_arch_info`` field) rather than the hardcoded
+                :data:`_ARCH_REGISTRY`.  Config-driven descriptors use a
+                repr-based cache key so that distinct descriptors produce
+                distinct wrapper classes even for the same architecture name.
+        """
+        cache_key: str = f"config:{repr(arch_info)}" if from_config else arch_name
+        if cache_key not in AnyModel._wrapper_cache:
+            AnyModel._wrapper_cache[cache_key] = _make_wrapper_cls(arch_name, arch_info)
+        return AnyModel._wrapper_cache[cache_key]
+
+    @classmethod
+    def resolve_wrapper_cls(
+        cls,
+        model_config,
+    ) -> type[AnyModel]:
+        """Return the concrete wrapper class for *model_config*.
+
+        The wrapper inherits from both :class:`AnyModel` and the target
+        base model (e.g. ``LlamaForCausalLM``), giving callers access to
+        all class-level methods and attributes defined on the base model
+        (``get_mamba_state_shape_from_config``, ``_processor_factory``,
+        etc.).
+
+        This is the public API consumed by the model loader and other
+        subsystems that need the wrapper class *before* instantiation.
+        """
+        config = model_config.hf_config
+        arch_name, arch_info, from_config = cls._resolve_arch(config)
+        return cls._get_or_create_wrapper(arch_name, arch_info, from_config=from_config)
+
+    def __new__(cls, *, vllm_config: VllmConfig, prefix: str = ""):
+        if cls is not AnyModel:
+            return super().__new__(cls)
+
+        config = vllm_config.model_config.hf_config
+        arch_name, arch_info, from_config = AnyModel._resolve_arch(config)
+        wrapper_cls = AnyModel._get_or_create_wrapper(
+            arch_name, arch_info, from_config=from_config
+        )
+        return object.__new__(wrapper_cls)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         arch_info = type(self)._anymodel_arch_info
