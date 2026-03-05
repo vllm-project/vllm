@@ -1,0 +1,79 @@
+# docker-compose.cpu.yml (Compose V2+)
+#
+# Single-service CPU compose:
+# - benchmark profile: runs the benchmark script (which brings up the server internally)
+# - deploy profile: runs `vllm serve` (OpenAI-compatible server)
+#
+# Env vars are CPU-scoped to avoid collisions with GPU docker-compose.yml:
+#   CPU_MODEL, CPU_HOST, CPU_PORT, CPU_EXTRA_ARGS
+#
+# Examples:
+#   # CPU benchmark (script manages server lifecycle)
+#   docker compose -f docker-compose.cpu.yml --profile benchmark up
+#
+#   # CPU deploy server
+#   docker compose -f docker-compose.cpu.yml --profile deploy up
+#
+#   # Run CPU+GPU deploy together (GPU uses MODE/MODEL/HOST/PORT/EXTRA_ARGS from docker-compose.yml)
+#   CPU_PORT=8001 docker compose -f docker-compose.yml -f docker-compose.cpu.yml --profile deploy up
+
+services:
+  vllm-cpu-server:
+    image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:b8b302cde434df8c9289a2b465406b47ebab1c2d-cpu
+    container_name: vllm-cpu-server
+
+    profiles: ["benchmark", "deploy"]
+
+    shm_size: 128g
+
+    volumes:
+      - /mnt/hf_cache:/mnt/hf_cache
+      # Benchmark plan used by the CPU benchmark script (kept from your original CPU yaml)
+      - "./tests/serving-tests-cpu.json:/workspace/.buildkite/nightly-benchmarks/tests/serving-tests-cpu.json:ro"
+      - "./results-cpu:/workspace/benchmarks/results"
+
+    environment:
+      no_proxy: ${no_proxy}
+      http_proxy: ${http_proxy}
+      https_proxy: ${https_proxy}
+      HF_TOKEN: ${HF_TOKEN}
+
+      # CPU runtime knobs
+      HF_HOME: /mnt/hf_cache
+      ON_CPU: "1"
+      VLLM_CPU_KVCACHE_SPACE: "${VLLM_CPU_KVCACHE_SPACE:-40}"
+
+      # Switch behavior (default keeps original benchmark behavior)
+      MODE: "${MODE:-benchmark}"
+      # Deploy-mode knobs (GPU compose keeps using MODEL/HOST/PORT/EXTRA_ARGS)
+      CPU_MODEL: "${CPU_MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
+      CPU_HOST: "${CPU_HOST:-0.0.0.0}"
+      CPU_PORT: "${CPU_PORT:-8001}"
+      CPU_EXTRA_ARGS: "${CPU_EXTRA_ARGS:-}"
+
+    entrypoint:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+
+        echo "MODE=$${MODE:-benchmark}"
+        echo "CPU_PORT=$${CPU_PORT:-8001}"
+
+        if [ "$${MODE:-benchmark}" = "deploy" ]; then
+          CPU_HOST_EFFECTIVE="${CPU_HOST:-0.0.0.0}"
+          CPU_PORT_EFFECTIVE="${CPU_PORT:-8001}"
+          CPU_MODEL_EFFECTIVE="${CPU_MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
+
+          # Handle set-but-empty (e.g., CPU_PORT=)
+          if [ -z "$${CPU_HOST_EFFECTIVE}" ]; then CPU_HOST_EFFECTIVE="0.0.0.0"; fi
+          if [ -z "$${CPU_PORT_EFFECTIVE}" ]; then CPU_PORT_EFFECTIVE="8001"; fi
+
+          echo "[vllm-cpu-server] DEPLOY profile: starting vLLM CPU server"
+          echo "vllm serve $${CPU_MODEL_EFFECTIVE} --host $${CPU_HOST_EFFECTIVE} --port $${CPU_PORT_EFFECTIVE} $${CPU_EXTRA_ARGS:-}"
+          # shellcheck disable=SC2086
+          exec vllm serve "$${CPU_MODEL_EFFECTIVE}" --host "$${CPU_HOST_EFFECTIVE}" --port "$${CPU_PORT_EFFECTIVE}" $${CPU_EXTRA_ARGS:-}
+        fi
+
+        echo "[vllm-cpu-server] BENCHMARK profile: running benchmark script (server is managed by the script)"
+        exec bash /workspace/.buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
