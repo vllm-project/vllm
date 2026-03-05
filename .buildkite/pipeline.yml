@@ -45,7 +45,7 @@ steps:
               - name: sharvilshah-1-pull-secret
             containers:
             - name: container-0
-              image: ${REGISTRY}/${REGISTRY_USER}/vllm-ci:${BUILDKITE_COMMIT}   # built by build-container step
+              image: quay.io/sharvilshah-1/vllm-ci:${BUILDKITE_COMMIT}   # built by build-container step
               resources:           #     Currently under experimentation to make this more ergonomic.
                 requests:
                   "gpu.intel.com/i915": "2"
