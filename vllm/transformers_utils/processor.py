@@ -141,14 +141,17 @@ def _merge_mm_kwargs(
     return allowed_kwargs
 
 
-def get_processor_cls_name_from_config(processor_name: str) -> str | None:
+def get_processor_cls_name_from_config(
+    processor_name: str,
+    revision: str | None = "main",
+) -> str | None:
     config_file = [
         "processor_config.json",
         "preprocessor_config.json",
         "tokenizer_config.json",
     ]
     for file in config_file:
-        config = get_hf_file_to_dict(file, processor_name)
+        config = get_hf_file_to_dict(file, processor_name, revision=revision)
         if config and "processor_class" in config:
             return config["processor_class"]
     return None
@@ -167,7 +170,9 @@ def get_processor(
         revision = "main"
     try:
         processor_name = convert_model_repo_to_path(processor_name)
-        registered_cls_name = get_processor_cls_name_from_config(processor_name)
+        registered_cls_name = get_processor_cls_name_from_config(
+            processor_name, revision=revision
+        )
         registered_processor_cls = (
             getattr(processors, registered_cls_name, None)
             if registered_cls_name
