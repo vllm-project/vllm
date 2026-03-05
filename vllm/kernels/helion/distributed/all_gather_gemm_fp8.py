@@ -47,13 +47,13 @@ def helion_matmul_w_progress_fp8(
             signal=1,
         )
         # Load scales once per tile
-        sa = scale_a[tile_m, :].to(torch.float32)  # [tile_m, 1]
-        sb = scale_b[:, tile_n].to(torch.float32)  # [1, tile_n]
+        sa = scale_a[tile_m, :] # [tile_m, 1]
+        sb = scale_b[:, tile_n]  # [1, tile_n]
 
         for tile_k in hl.tile(K):
-            # Cast FP8 -> FP32 for accumulation
-            acc = torch.addmm(acc, a[tile_m, tile_k].to(torch.float32), 
-                                   b[tile_k, tile_n].to(torch.float32))
+            x_tile = a[tile_m, tile_k]
+            y_tile = b[tile_k, tile_n]
+            acc = hl.dot(x_tile, y_tile, acc=acc) 
 
         # Convert result back to bfloat16
         out[tile_m, tile_n] = (acc * sa * sb).to(torch.bfloat16)
@@ -203,7 +203,7 @@ def copy_engine_all_gather_w_progress(
     assert list(output.shape) == output_shape, "Mismatch in output shape"
     chunks = output.chunk(world_size * splits_per_rank)
 
-    symm_mem_hdl.barrier()
+    #symm_mem_hdl.barrier()
     backend_stream.wait_stream(torch.cuda.current_stream())
 
     with torch.cuda.stream(backend_stream):
@@ -213,14 +213,14 @@ def copy_engine_all_gather_w_progress(
                 src_buf = symm_mem_hdl.get_buffer(
                     src_rank, chunks[0].shape, inp.dtype, chunks[0].numel() * split_id
                 )
-                chunks[src_rank * splits_per_rank + split_id].copy_(src_buf)
+                chunks[src_rank * splits_per_rank + split_id].copy_(src_buf,non_blocking=True)
                 # Write progress signal
                 symm_mem_hdl.stream_write_value32(
                     progress,
                     offset=src_rank * splits_per_rank + split_id,
                     val=1,
                 )
-        symm_mem_hdl.barrier()
+        #symm_mem_hdl.barrier()
 
     return backend_stream
 
