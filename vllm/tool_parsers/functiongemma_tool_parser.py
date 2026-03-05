@@ -72,7 +72,7 @@ class FunctionGemmaToolParser(ToolParser):
 
     def _parse_arguments(self, args_str: str) -> dict:
         """Parse FunctionGemma argument string into a dictionary."""
-        arguments = {}
+        arguments: dict = {}
         if not args_str:
             return arguments
 
