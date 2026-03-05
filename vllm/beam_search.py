@@ -67,14 +67,21 @@ class BeamSearchSequence:
 
         # Rebuild decoder prompt with updated tokens,
         # but keep everything else the same.
-        new_dec_prompt = mm_inputs(
-            self.tokens,
-            prompt=dec_prompt.get("prompt"),
-            cache_salt=dec_prompt.get("cache_salt"),
-            mm_kwargs=dec_prompt.get("mm_kwargs"),
-            mm_hashes=dec_prompt.get("mm_hashes", {}),
-            mm_placeholders=dec_prompt.get("mm_placeholders", {}),
-        )
+        if dec_prompt["type"] == "multimodal":
+            new_dec_prompt = mm_inputs(
+                self.tokens,
+                mm_kwargs=dec_prompt["mm_kwargs"],
+                mm_hashes=dec_prompt["mm_hashes"],
+                mm_placeholders=dec_prompt["mm_placeholders"],
+                prompt=dec_prompt.get("prompt"),
+                cache_salt=dec_prompt.get("cache_salt"),
+            )
+        else:
+            new_dec_prompt = token_inputs(
+                self.tokens,
+                prompt=dec_prompt.get("prompt"),
+                cache_salt=dec_prompt.get("cache_salt"),
+            )
 
         return EncoderDecoderInputs(
             type="enc_dec",
