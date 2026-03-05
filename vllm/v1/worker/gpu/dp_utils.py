@@ -2,21 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 import torch.distributed as dist
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_dp_group
-from vllm.v1.worker.gpu.cudagraph_utils import (
-    BatchExecutionDescriptor,
-    CudaGraphManager,
-)
 
-
-def make_num_tokens_across_dp(dp_size: int, num_tokens: int) -> torch.Tensor | None:
-    if dp_size == 1:
-        return None
-    return torch.full((dp_size,), num_tokens, dtype=torch.int32, device="cpu")
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.cudagraph_utils import (
+        BatchExecutionDescriptor,
+        CudaGraphManager,
+    )
 
 
 def sync_cudagraph_and_dp_padding(
@@ -32,6 +30,8 @@ def sync_cudagraph_and_dp_padding(
 
     Returns (synced_batch_desc, num_tokens_across_dp).
     """
+    from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+
     assert dp_size > 1, "DP size must be greater than 1"
 
     # See which CG mode this rank wants to run, namely checking if any rank wants to run

@@ -18,7 +18,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
-from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
@@ -50,6 +49,12 @@ def get_uniform_token_count(
     return None
 
 
+def make_num_tokens_across_dp(dp_size: int, num_tokens: int) -> torch.Tensor | None:
+    if dp_size == 1:
+        return None
+    return torch.full((dp_size,), num_tokens, dtype=torch.int32, device="cpu")
+
+
 class CudaGraphManager:
     def __init__(
         self,
@@ -75,9 +80,7 @@ class CudaGraphManager:
             else None
         )
         self._candidates: list[list[BatchExecutionDescriptor]] = []
-        self._capture_descs: list[
-            tuple[CUDAGraphMode, list[BatchExecutionDescriptor]]
-        ] = []
+        self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
         self._init_candidates()
 
     def _init_candidates(self) -> None:
@@ -139,15 +142,10 @@ class CudaGraphManager:
 
         for mode, descs in descs_by_mode.items():
             descs.sort(key=lambda d: d.num_tokens, reverse=True)
-            self._capture_descs.append((mode, descs))
+            self._capture_descs[mode] = descs
 
     def needs_capture(self) -> bool:
         return len(self._capture_descs) > 0
-
-    def get_capture_descs(
-        self,
-    ) -> list[tuple[CUDAGraphMode, list[BatchExecutionDescriptor]]]:
-        return self._capture_descs
 
     @torch.inference_mode()
     def capture(
@@ -162,11 +160,16 @@ class CudaGraphManager:
         - PIECEWISE: piecewise cudagraph capture
         - FULL: inside torch.cuda.graph() capture (but mode is NONE)
         """
-        capture_descs = self.get_capture_descs()
-        if not capture_descs:
-            return
         with graph_capture(device=self.device):
-            for mode, descs in capture_descs:
+            # Capture in order: PIECEWISE first, then FULL, PIECEWISE has larger
+            # activations so in theory the FULL activations should fit in the already
+            # allocated buffers in the graph pool. More experiments are needed to
+            # to confirm this.
+            for mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
+                if mode not in self._capture_descs:
+                    continue
+
+                descs = self._capture_descs[mode]
                 if is_global_first_rank():
                     descs = tqdm(descs, desc=f"{progress_bar_desc} ({mode.name})")
                 for desc in descs:
