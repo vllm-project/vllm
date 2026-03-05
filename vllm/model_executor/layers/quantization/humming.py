@@ -167,7 +167,7 @@ def parse_single_config(config):
         actorder = config.get("actorder", None)
         assert actorder is None, "actorder is not supported by humming"
         has_global_scale = False
-        has_dynamic_zp = False
+        has_zero_point = False
         if config["strategy"] == "group":
             block_shape = (1, config["group_size"])
         elif config["strategy"] == "tensor":
@@ -183,7 +183,7 @@ def parse_single_config(config):
             raise ValueError(f"unsupported strategy: {config['strategy']}")
 
         if not config["symmetric"]:
-            has_dynamic_zp = True
+            has_zero_point = True
             assert config["type"] == "int"
 
         num_bits = config["num_bits"]
@@ -205,7 +205,7 @@ def parse_single_config(config):
 
         result_dict = {
             "block_shape": block_shape,
-            "has_dynamic_zp": has_dynamic_zp,
+            "has_zero_point": has_zero_point,
             "has_global_scale": has_global_scale,
             "b_dtype": b_dtype,
             "bs_dtype": bs_dtype,
@@ -214,13 +214,13 @@ def parse_single_config(config):
         desc_act = config.get("desc_act", False)
         assert not desc_act, "actorder is not supported by humming"
         result_dict = {
-            "has_dynamic_zp": not config.get("sym", True),
+            "has_zero_point": not config.get("sym", True),
             "block_shape": (1, config["group_size"]),
             "b_dtype": dtypes.DataType.from_str("uint" + str(config["bits"])),
         }
     elif quant_method == "awq":
         result_dict = {
-            "has_dynamic_zp": config.get("zero_point", False),
+            "has_zero_point": config.get("zero_point", False),
             "block_shape": (1, config["group_size"]),
             "b_dtype": dtypes.DataType.from_str("uint" + str(config["bits"])),
         }
@@ -299,7 +299,7 @@ class HummingLayerQuantizationConfig(QuantizationConfig):
         input_scale_group_size_k: int,
         weight_scale_group_size_n: int,
         weight_scale_group_size_k: int,
-        has_dynamic_zp: bool,
+        has_zero_point: bool,
         has_global_scale: bool,
         is_online_quantization: bool,
         weight_origin_config: dict[str, Any],
@@ -313,7 +313,7 @@ class HummingLayerQuantizationConfig(QuantizationConfig):
         self.input_scale_group_size_k = input_scale_group_size_k
         self.weight_scale_group_size_n = weight_scale_group_size_n
         self.weight_scale_group_size_k = weight_scale_group_size_k
-        self.has_dynamic_zp = has_dynamic_zp
+        self.has_zero_point = has_zero_point
         self.has_global_scale = has_global_scale
         self.is_online_quantization = is_online_quantization
         self.weight_origin_config = weight_origin_config
@@ -330,7 +330,7 @@ class HummingLayerQuantizationConfig(QuantizationConfig):
             input_scale_group_size_k=config.get("input_scale_group_size_k", 0),
             weight_scale_group_size_n=config.get("weight_scale_group_size_n", 0),
             weight_scale_group_size_k=config.get("weight_scale_group_size_k", 0),
-            has_dynamic_zp=config.get("has_dynamic_zp", False),
+            has_zero_point=config.get("has_zero_point", False),
             has_global_scale=config.get("has_global_scale", False),
             weight_origin_config=config.get("weight_origin_config", {}),
             is_online_quantization=config.get("is_online_quantization", False),
@@ -564,7 +564,7 @@ class HummingLinearMethod(LinearMethodBase):
             pad_shape_k=pad_shape_k,
             has_bias=layer.has_bias,
             weight_scale_group_size=self.quant_config.weight_scale_group_size_k,
-            has_dynamic_zp=self.quant_config.has_dynamic_zp,
+            has_zero_point=self.quant_config.has_zero_point,
             has_global_scale=self.quant_config.has_global_scale,
         )
         self.meta = meta
@@ -777,8 +777,10 @@ class HummingMoEMethod(FusedMoEMethodBase):
             shape_k=0,
             has_bias=self.moe.has_bias,
             weight_scale_group_size=self.quant_config.weight_scale_group_size_k,
-            has_dynamic_zp=self.quant_config.has_dynamic_zp,
+            has_zero_point=self.quant_config.has_zero_point,
             has_global_scale=self.quant_config.has_global_scale,
+            num_experts=num_experts,
+            top_k=self.moe.experts_per_token,
         )
 
         shape_n, shape_k = intermediate_size_per_partition * 2, hidden_size
@@ -790,7 +792,6 @@ class HummingMoEMethod(FusedMoEMethodBase):
             shape_k=shape_k,
             pad_shape_n=pad_shape_n,
             pad_shape_k=pad_shape_k,
-            num_experts=num_experts,
             sublayer_name="w13",
         )
         self.meta1 = meta1
@@ -804,8 +805,8 @@ class HummingMoEMethod(FusedMoEMethodBase):
             shape_k=shape_k,
             pad_shape_n=pad_shape_n,
             pad_shape_k=pad_shape_k,
-            num_experts=num_experts,
             sublayer_name="w2",
+            is_moe_down=True,
         )
         self.meta2 = meta2
 
@@ -969,9 +970,6 @@ class HummingMoEMethod(FusedMoEMethodBase):
             sublayer_name="w13",
             use_stream_k=use_stream_k,
             use_f16_accum=self.use_f16_accum,
-            is_moe=True,
-            top_k=layer.top_k,
-            is_moe_down=False,
             **self.prepare_activation_kwargs(layer),
         )
         HummingMethod.prepare_default_kernel_configs(
@@ -979,9 +977,6 @@ class HummingMoEMethod(FusedMoEMethodBase):
             sublayer_name="w2",
             use_stream_k=use_stream_k,
             use_f16_accum=self.use_f16_accum,
-            is_moe=True,
-            top_k=layer.top_k,
-            is_moe_down=True,
         )
 
     def apply(
