@@ -36,6 +36,8 @@ steps:
     secrets:
       - REGISTRY_TOKEN
       - HF_TOKEN
+      - REGISTRY_USER
+      - REGISTRY
     plugins:
       - kubernetes:
           podSpecPatch:
