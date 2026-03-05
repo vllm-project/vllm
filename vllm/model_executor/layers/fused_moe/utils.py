@@ -195,11 +195,12 @@ def _mxfp8_e4m3_quantize(
     A_scale: torch.Tensor | None,
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
+    is_sf_swizzled_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert A_scale is None
     assert not per_act_token_quant
     assert block_shape is None
-    return mxfp8_e4m3_quantize(A)
+    return mxfp8_e4m3_quantize(A, is_sf_swizzled_layout)
 
 
 def _mxfp6_e3m2_quantize(
@@ -275,7 +276,13 @@ def moe_kernel_quantize_input(
     elif quant_dtype == "mxfp8":
         # TODO: `quant_dtype == "mxfp8"` is ambiguous,
         # should be fp8_e4m3. OCP MX also defines `fp8_e5m2`.
-        return _mxfp8_e4m3_quantize(A, A_scale, per_act_token_quant, block_shape)
+        return _mxfp8_e4m3_quantize(
+            A,
+            A_scale,
+            per_act_token_quant,
+            block_shape,
+            is_sf_swizzled_layout=is_fp4_scale_swizzled,
+        )
     elif quant_dtype == "mxfp6_e3m2":
         return _mxfp6_e3m2_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp6_e2m3":
