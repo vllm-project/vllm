@@ -964,7 +964,7 @@ class GPUModelRunner(
         Args:
             scheduler_output: The scheduler output.
         """
-        # Attention free models have zero kv_cache_goups, however models
+        # Attention free models have zero kv_cache_groups, however models
         # like Mamba are also attention free but use the kv_cache for
         # keeping its internal state. This is why we check the number
         # of kv_cache groups instead of solely checking
@@ -1128,7 +1128,7 @@ class GPUModelRunner(
                 # of the request. for example:
                 # fist step: num_computed_tokens = 0, spec_tokens = [],
                 # prev_num_draft_len = 0.
-                # second step: num_computed_tokens = 100(prompt lenth),
+                # second step: num_computed_tokens = 100(prompt length),
                 # spec_tokens = [a,b], prev_num_draft_len = 0.
                 # third step: num_computed_tokens = 100 + 2, spec_tokens = [c,d],
                 # prev_num_draft_len = 2.
@@ -4604,7 +4604,7 @@ class GPUModelRunner(
             self.model.compile(fullgraph=True, backend=backend)
             return
         # for other compilation modes, cudagraph behavior is controlled by
-        # CudagraphWraper and CudagraphDispatcher of vllm.
+        # CudagraphWrapper and CudagraphDispatcher of vllm.
 
         # wrap the model with full cudagraph wrapper if needed.
         cudagraph_mode = self.compilation_config.cudagraph_mode
@@ -4665,7 +4665,7 @@ class GPUModelRunner(
         :param weights_path: path to load weights from if weights_iterator is not
             provided. Use path of original model if neither is provided.
         :param is_checkpoint_format: set to False if weights have already been processed
-            into kernel format (repacking, renaming, ect.)
+            into kernel format (repacking, renaming, etc.)
         """
         # TODO(@kylesayrs): generalize to all runners and loaders
         # argument validation

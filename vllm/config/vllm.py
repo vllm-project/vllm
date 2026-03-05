@@ -592,7 +592,7 @@ class VllmConfig:
 
         If the user configuration does not specify a value for a default field
         and if the default field is still None after all user selections are
-        applied, then default values will be applied to the field. User speciied
+        applied, then default values will be applied to the field. User specified
         fields will not be overridden by the default.
 
         Args:
