@@ -9,6 +9,8 @@ import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 
+from vllm.platforms import current_platform
+
 # downloading lora to test lora requests
 from ...utils import RemoteOpenAIServer
 
@@ -139,7 +141,18 @@ def server():
         "qwen3",
         "--gpu-memory-utilization",
         "0.4",
+        "--enforce-eager",
     ]
+
+    rocm_args = {
+        "--max-num-seqs": "1",
+        "--no-enable-prefix-caching": None,
+    }
+    if current_platform.is_rocm():
+        for k, v in rocm_args.items():
+            args.append(k)
+            if v is not None:
+                args.append(v)
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -294,7 +307,10 @@ async def test_no_args_tool_call(
             "type": "function",
             "function": {
                 "name": "get_current_time",
-                "description": "Get the current date and time. No parameters needed.",
+                "description": (
+                    "Get the current date and time. Call this when the user "
+                    "asks what time or date it is. No parameters needed."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {},  # No parameters
@@ -303,10 +319,28 @@ async def test_no_args_tool_call(
             },
         }
     ]
-    messages = [{"role": "user", "content": "What time is it now?"}]
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a helpful assistant. Always use the available tools "
+                "when relevant, and reply with a short sentence after "
+                "receiving a tool result."
+            ),
+        },
+        {"role": "user", "content": "What time is it now?"},
+    ]
+
+    shared_kwargs = dict(
+        model=model_name,
+        temperature=0.0,
+        seed=42,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+
     # Step 2: Send user message and let model decide whether to call the tool
     response = await client.chat.completions.create(
-        model=model_name,
+        **shared_kwargs,
         messages=messages,
         tools=tools,
         tool_choice="auto",  # Let model choose automatically
@@ -334,11 +368,15 @@ async def test_no_args_tool_call(
             )
             # Step 5: Send tool result back to model to continue conversation
             final_response = await client.chat.completions.create(
-                model=model_name,
+                **shared_kwargs,
                 messages=messages,
+                max_completion_tokens=128,
             )
             # Output final natural language response
-            assert final_response.choices[0].message.content is not None
+            assert (
+                final_response.choices[0].message.content is not None
+                and final_response.choices[0].message.content.strip() != ""
+            )
 
     else:
         # No tool called — just print model's direct reply
