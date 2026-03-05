@@ -109,7 +109,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             scale (float): Scaling factor for the operation
         """
 
-        x = x.view(-1, x.shape[-1]).contiguous()
+        x = x.view(-1, x.shape[-1])
         lora_shrink(
             x,
             lora_a_stacked,
