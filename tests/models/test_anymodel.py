@@ -19,12 +19,13 @@ from vllm.model_executor.models.anymodel import (
     ArchInfo,
     NoOpAttention,
     NoOpMLP,
-    Same,
+    NoOpNorm,
     _apply_no_ops,
     _arch_info_from_config,
     _create_layer_config,
     _has_overrides,
     _resolve_layer_class,
+    _unregister_layer,
 )
 
 # ---------------------------------------------------------------------------
@@ -479,7 +480,7 @@ class TestApplyNoOps:
         )
         _apply_no_ops(layer, _block(attn_no_op=True), info)
         assert isinstance(layer.self_attn, NoOpAttention)
-        assert isinstance(layer.input_layernorm, Same)
+        assert isinstance(layer.input_layernorm, NoOpNorm)
         assert not isinstance(layer.mlp, NoOpMLP)
 
     def test_ffn_noop(self):
@@ -489,7 +490,7 @@ class TestApplyNoOps:
         )
         _apply_no_ops(layer, _block(ffn_no_op=True), info)
         assert isinstance(layer.mlp, NoOpMLP)
-        assert isinstance(layer.post_attention_layernorm, Same)
+        assert isinstance(layer.post_attention_layernorm, NoOpNorm)
         assert not isinstance(layer.self_attn, NoOpAttention)
 
     def test_both_noop(self):
@@ -499,9 +500,9 @@ class TestApplyNoOps:
         )
         _apply_no_ops(layer, _block(attn_no_op=True, ffn_no_op=True), info)
         assert isinstance(layer.self_attn, NoOpAttention)
-        assert isinstance(layer.input_layernorm, Same)
+        assert isinstance(layer.input_layernorm, NoOpNorm)
         assert isinstance(layer.mlp, NoOpMLP)
-        assert isinstance(layer.post_attention_layernorm, Same)
+        assert isinstance(layer.post_attention_layernorm, NoOpNorm)
 
     def test_mixtral_block_sparse_moe_noop(self):
         layer = self._make_layer(ffn_name="block_sparse_moe")
@@ -512,7 +513,7 @@ class TestApplyNoOps:
         )
         _apply_no_ops(layer, _block(ffn_no_op=True), info)
         assert isinstance(layer.block_sparse_moe, NoOpMLP)
-        assert isinstance(layer.post_attention_layernorm, Same)
+        assert isinstance(layer.post_attention_layernorm, NoOpNorm)
 
     def test_gptoss_attn_noop_uses_attn_module(self):
         layer = self._make_layer(attn_name="attn")
@@ -527,7 +528,7 @@ class TestApplyNoOps:
         info = _ARCH_REGISTRY["NemotronHForCausalLM"]
         _apply_no_ops(layer, _block(attn_no_op=True), info)
         assert isinstance(layer.mixer, NoOpAttention)
-        assert isinstance(layer.norm, Same)
+        assert isinstance(layer.norm, NoOpNorm)
 
 
 # ---------------------------------------------------------------------------
@@ -549,13 +550,13 @@ class TestNoOpModules:
         assert out.shape == hidden.shape
         assert out.eq(0).all()
 
-    def test_same_no_residual(self):
+    def test_noop_norm_no_residual(self):
         x = torch.randn(4, 16)
-        assert Same()(x) is x
+        assert NoOpNorm()(x) is x
 
-    def test_same_with_residual(self):
+    def test_noop_norm_with_residual(self):
         x, r = torch.randn(4, 16), torch.randn(4, 16)
-        out_x, out_r = Same()(x, r)
+        out_x, out_r = NoOpNorm()(x, r)
         assert out_x is x
         assert out_r is r
 
@@ -612,6 +613,68 @@ class TestHasOverrides:
             extra_config_fields={},
         )
         assert not _has_overrides(_block(), info)
+
+
+# ---------------------------------------------------------------------------
+# _unregister_layer — prefix-scoped removal from static_forward_context
+# ---------------------------------------------------------------------------
+
+
+class TestUnregisterLayer:
+    def _mock_vllm_config(self, context_keys):
+        ctx = {k: "dummy" for k in context_keys}
+        compilation_config = _ns(static_forward_context=ctx)
+        return _ns(compilation_config=compilation_config)
+
+    def test_removes_only_target_layer(self):
+        """Unregistering layer 1 must not touch layers 10, 11, etc."""
+        vllm_config = self._mock_vllm_config(
+            [
+                "model.layers.1.self_attn",
+                "model.layers.1.mlp",
+                "model.layers.10.self_attn",
+                "model.layers.10.mlp",
+                "model.layers.11.self_attn",
+            ]
+        )
+        _unregister_layer("model.layers.1", vllm_config)
+        ctx = vllm_config.compilation_config.static_forward_context
+        assert "model.layers.1.self_attn" not in ctx
+        assert "model.layers.1.mlp" not in ctx
+        assert "model.layers.10.self_attn" in ctx
+        assert "model.layers.10.mlp" in ctx
+        assert "model.layers.11.self_attn" in ctx
+
+    def test_removes_nothing_when_no_match(self):
+        vllm_config = self._mock_vllm_config(
+            [
+                "model.layers.0.self_attn",
+                "model.layers.2.self_attn",
+            ]
+        )
+        _unregister_layer("model.layers.1", vllm_config)
+        ctx = vllm_config.compilation_config.static_forward_context
+        assert len(ctx) == 2
+
+    def test_handles_empty_context(self):
+        vllm_config = self._mock_vllm_config([])
+        _unregister_layer("model.layers.0", vllm_config)
+        assert len(vllm_config.compilation_config.static_forward_context) == 0
+
+    def test_removes_deeply_nested_keys(self):
+        """Keys with deeper nesting under the layer prefix are removed."""
+        vllm_config = self._mock_vllm_config(
+            [
+                "model.layers.5.self_attn.o_proj",
+                "model.layers.5.self_attn.qkv_proj",
+                "model.layers.5.mlp.gate_proj",
+                "model.layers.6.self_attn",
+            ]
+        )
+        _unregister_layer("model.layers.5", vllm_config)
+        ctx = vllm_config.compilation_config.static_forward_context
+        assert len(ctx) == 1
+        assert "model.layers.6.self_attn" in ctx
 
 
 # ---------------------------------------------------------------------------
