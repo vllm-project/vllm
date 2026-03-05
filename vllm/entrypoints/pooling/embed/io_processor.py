@@ -3,14 +3,13 @@
 from collections.abc import Sequence
 from typing import Any
 
-from vllm import PromptType
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
 )
-from vllm.inputs import ProcessorInputs
-from vllm.renderers.inputs import TokPrompt
+from vllm.inputs.data import EngineInputs, ProcessorInputs, PromptType, TokensPrompt
+from vllm.utils.collection_utils import chunk_list
 
 
 class EmbedIOProcessor(PoolingIOProcessor):
@@ -23,7 +22,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
     def pre_process_online(
         self, request: EmbeddingCompletionRequest | EmbeddingChatRequest
-    ) -> list[TokPrompt] | None:
+    ) -> list[EngineInputs] | None:
         if isinstance(request, EmbeddingChatRequest):
             self._validate_chat_template(
                 request_chat_template=request.chat_template,
@@ -46,7 +45,9 @@ class EmbedIOProcessor(PoolingIOProcessor):
         else:
             raise ValueError("Invalid classification request type")
 
-        return self._maybe_apply_chunked_processing_pre_process_online(engine_prompts)
+        return self._maybe_apply_chunked_processing_pre_process_online(
+            request_id=request.request_id, engine_prompts=engine_prompts
+        )
 
     def pre_process_offline(
         self,
@@ -62,9 +63,26 @@ class EmbedIOProcessor(PoolingIOProcessor):
     # PTAL: examples/pooling/embed/openai_embedding_long_text
 
     def _maybe_apply_chunked_processing_pre_process_online(
-        self, engine_prompts: list[TokPrompt]
-    ) -> list[TokPrompt]:
+        self,
+        request_id: str,
+        engine_prompts: list[ProcessorInputs],
+    ) -> list[EngineInputs]:
         if not self.enable_chunked_processing:
-            return engine_prompts
+            return [EngineInputs(engine_prompt=prompt) for prompt in engine_prompts]
 
-        return engine_prompts
+        max_model_len = self.model_config.max_model_len
+        chunked_engine_prompts: list[EngineInputs] = []
+        for prompt_idx, engine_prompt in enumerate(engine_prompts):
+            prompt_token_ids = engine_prompt["prompt_token_ids"]
+
+            for chunk_idx, chunk_tokens in enumerate(
+                chunk_list(prompt_token_ids, max_model_len)
+            ):
+                chunked_engine_prompts.append(
+                    EngineInputs(
+                        engine_prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
+                        request_id_item=f"{request_id}-prompt-{prompt_idx}-chunk-{chunk_idx}",
+                    )
+                )
+
+        return chunked_engine_prompts

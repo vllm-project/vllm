@@ -28,9 +28,10 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.typing import AnyPoolingRequest
-from vllm.inputs import ProcessorInputs
+from vllm.entrypoints.utils import create_error_response
+from vllm.inputs.data import EngineInputs, ProcessorInputs
 from vllm.lora.request import LoRARequest
-from vllm.renderers import BaseRenderer
+from vllm.renderers.base import BaseRenderer
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import BeamSearchParams
 from vllm.tracing import (
@@ -41,7 +42,6 @@ from vllm.tracing import (
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import merge_async_iterators
 
-from ...utils import create_error_response
 from .io_processor import PoolingIOProcessor
 
 PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
@@ -55,7 +55,7 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     request_id: str
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
-    engine_prompts: list[ProcessorInputs] | None = None
+    engine_inputs: list[EngineInputs] | None = None
 
     result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
         None
@@ -144,7 +144,7 @@ class PoolingServing:
         self,
         ctx: PoolingServeContext,
     ):
-        ctx.engine_prompts = await self.io_processor.pre_process_online_async(
+        ctx.engine_inputs = await self.io_processor.pre_process_online_async(
             ctx.request
         )
 
@@ -152,8 +152,8 @@ class PoolingServing:
         self,
         ctx: PoolingServeContext,
     ):
-        if ctx.engine_prompts is None:
-            raise ValueError("Engine prompts not available")
+        if ctx.engine_inputs is None:
+            raise ValueError("Engine inputs not available")
 
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
@@ -165,8 +165,9 @@ class PoolingServing:
 
         pooling_params = self.io_processor.create_pooling_params(ctx.request)
 
-        for i, engine_prompt in enumerate(ctx.engine_prompts):
-            request_id_item = f"{ctx.request_id}-{i}"
+        for i, engine_input in enumerate(ctx.engine_inputs):
+            engine_prompt = engine_input.engine_prompt
+            request_id_item = engine_input.request_id_item or f"{ctx.request_id}-{i}"
 
             self._log_inputs(
                 request_id_item,
@@ -192,15 +193,15 @@ class PoolingServing:
         self,
         ctx: PoolingServeContext,
     ):
-        if ctx.engine_prompts is None:
-            raise ValueError("Engine prompts not available")
+        if ctx.engine_inputs is None:
+            raise ValueError("Engine inputs not available")
 
         if ctx.result_generator is None:
             raise ValueError("Result generator not available")
 
-        num_prompts = len(ctx.engine_prompts)
+        num_inputs = len(ctx.engine_inputs)
         final_res_batch: list[PoolingRequestOutput | None]
-        final_res_batch = [None] * num_prompts
+        final_res_batch = [None] * num_inputs
 
         async for i, res in ctx.result_generator:
             final_res_batch[i] = res

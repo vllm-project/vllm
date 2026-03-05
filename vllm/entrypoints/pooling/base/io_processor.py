@@ -14,7 +14,7 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
 )
 from vllm.entrypoints.openai.engine.serving import RendererChatRequest, RendererRequest
-from vllm.inputs import ProcessorInputs, SingletonPrompt
+from vllm.inputs.data import ProcessorInputs, SingletonPrompt
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs import TokPrompt
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq

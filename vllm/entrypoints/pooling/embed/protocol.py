@@ -5,7 +5,6 @@ from typing import TypeAlias
 
 from pydantic import Field
 
-from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
@@ -14,6 +13,7 @@ from vllm.entrypoints.pooling.base.protocol import (
     EmbedRequestMixin,
     PoolingBasicRequestMixin,
 )
+from vllm.pooling_params import PoolingParams
 from vllm.renderers import TokenizeParams
 from vllm.utils import random_uuid
 

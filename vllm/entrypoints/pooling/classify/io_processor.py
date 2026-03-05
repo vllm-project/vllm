@@ -10,13 +10,13 @@ from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationCompletionRequest,
 )
 from vllm.inputs import ProcessorInputs
-from vllm.renderers.inputs import TokPrompt
+from vllm.inputs.data import EngineInputs
 
 
 class ClassifyIOProcessor(PoolingIOProcessor):
     def pre_process_online(
         self, request: ClassificationCompletionRequest | ClassificationChatRequest
-    ) -> list[TokPrompt] | None:
+    ) -> list[EngineInputs] | None:
         if isinstance(request, ClassificationChatRequest):
             self._validate_chat_template(
                 request_chat_template=request.chat_template,
@@ -38,7 +38,7 @@ class ClassifyIOProcessor(PoolingIOProcessor):
             )
         else:
             raise ValueError("Invalid classification request type")
-        return engine_prompts
+        return [EngineInputs(engine_prompt=prompt) for prompt in engine_prompts]
 
     def pre_process_offline(
         self,

@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 import torch
 from typing_extensions import NotRequired, TypedDict, assert_never
+from dataclasses import dataclass
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import (
@@ -318,6 +319,12 @@ which can be passed to
 
 SingletonInputs: TypeAlias = DecoderOnlyInputs | MultiModalEncDecInputs
 """The inputs for a single encoder/decoder prompt."""
+
+
+@dataclass
+class EngineInputs:
+    engine_prompt: ProcessorInputs
+    request_id_item: str | None = None
 
 
 def _validate_enc_inputs(inputs: SingletonInputs) -> EncoderInputs:
