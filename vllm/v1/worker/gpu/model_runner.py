@@ -886,7 +886,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if cudagraph_runtime_mode == CUDAGraphMode.FULL:
                 # Pad the attention batch size to match the capture-time value.
                 input_batch.pad_for_cudagraph(
-                    num_tokens_after_padding, self.max_num_reqs, self.input_buffers
+                    num_tokens_after_padding, self.input_buffers
                 )
 
             if self.lora_config:

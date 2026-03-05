@@ -181,10 +181,6 @@ def build_attn_metadata(
     kv_cache_config: KVCacheConfig,
     dcp_local_seq_lens: torch.Tensor | None = None,
 ) -> dict[str, Any]:
-    seq_lens = seq_lens[:num_reqs]
-    if dcp_local_seq_lens is not None:
-        dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]
-
     attn_metadata: dict[str, Any] = {}
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
     for i in range(num_kv_cache_groups):
