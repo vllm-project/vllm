@@ -10,11 +10,29 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 from batch_spec import get_batch_type, parse_batch_spec
 from rich.console import Console
 from rich.table import Table
+
+
+def batch_spec_sort_key(spec: str) -> tuple[int, int, int]:
+    """
+    Extract sorting key from batch spec: (batch_size, max_q_len, max_kv_len).
+
+    This ensures results are sorted by batch size first, then query length,
+    then sequence length, rather than alphabetically.
+    """
+    try:
+        requests = parse_batch_spec(spec)
+        batch_size = len(requests)
+        max_q_len = max(r.q_len for r in requests) if requests else 0
+        max_kv_len = max(r.kv_len for r in requests) if requests else 0
+        return (batch_size, max_q_len, max_kv_len)
+    except Exception:
+        # Fallback for unparseable specs
+        return (0, 0, 0)
+
 
 # Mock classes for vLLM attention infrastructure
 
@@ -22,7 +40,7 @@ from rich.table import Table
 class MockHfConfig:
     """Mock HuggingFace config that satisfies vLLM's requirements."""
 
-    def __init__(self, mla_dims: dict):
+    def __init__(self, mla_dims: dict, index_topk: int | None = None):
         self.num_attention_heads = mla_dims["num_q_heads"]
         self.num_key_value_heads = mla_dims["num_kv_heads"]
         self.hidden_size = mla_dims["head_dim"] * mla_dims["num_q_heads"]
@@ -33,6 +51,8 @@ class MockHfConfig:
         self.qk_rope_head_dim = mla_dims["qk_rope_head_dim"]
         self.v_head_dim = mla_dims["v_head_dim"]
         self.qk_head_dim = mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"]
+        if index_topk is not None:
+            self.index_topk = index_topk
 
     def get_text_config(self):
         return self
@@ -41,10 +61,7 @@ class MockHfConfig:
 # Import AttentionLayerBase at module level to avoid circular dependencies
 try:
     from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-
-    _HAS_ATTENTION_LAYER_BASE = True
 except ImportError:
-    _HAS_ATTENTION_LAYER_BASE = False
     AttentionLayerBase = object  # Fallback
 
 
@@ -83,6 +100,38 @@ class MockKVBProj:
         return (result,)  # Return as tuple to match ColumnParallelLinear API
 
 
+class MockIndexer:
+    """Mock Indexer for sparse MLA backends.
+
+    Provides topk_indices_buffer that sparse MLA backends use to determine
+    which KV cache slots to attend to for each token.
+    """
+
+    def __init__(
+        self,
+        max_num_tokens: int,
+        topk_tokens: int,
+        device: torch.device,
+    ):
+        self.topk_tokens = topk_tokens
+        self.topk_indices_buffer = torch.zeros(
+            (max_num_tokens, topk_tokens),
+            dtype=torch.int32,
+            device=device,
+        )
+
+    def fill_random_indices(self, num_tokens: int, max_kv_len: int):
+        """Fill topk_indices_buffer with random valid indices for benchmarking."""
+        indices = torch.randint(
+            0,
+            max_kv_len,
+            (num_tokens, self.topk_tokens),
+            dtype=torch.int32,
+            device=self.topk_indices_buffer.device,
+        )
+        self.topk_indices_buffer[:num_tokens] = indices
+
+
 class MockLayer(AttentionLayerBase):
     """Mock attention layer with scale parameters and impl.
 
@@ -112,95 +161,6 @@ class MockLayer(AttentionLayerBase):
     def get_kv_cache_spec(self):
         """Get the KV cache spec (required by AttentionLayerBase)."""
         return self._kv_cache_spec
-
-
-class MockModelConfig:
-    """Mock model configuration."""
-
-    def __init__(
-        self,
-        num_q_heads: int,
-        num_kv_heads: int,
-        head_dim: int,
-        dtype: torch.dtype = torch.float16,
-        max_model_len: int = 32768,
-    ):
-        self._n_q = num_q_heads
-        self._n_kv = num_kv_heads
-        self._d = head_dim
-        self.dtype = dtype
-        self.max_model_len = max_model_len
-
-    def get_num_attention_heads(self, _=None) -> int:
-        return self._n_q
-
-    def get_num_kv_heads(self, _=None) -> int:
-        return self._n_kv
-
-    def get_head_size(self) -> int:
-        return self._d
-
-    def get_num_layers(self) -> int:
-        """Mock method for layer count queries."""
-        return 1
-
-    def get_sliding_window_for_layer(self, _layer_idx: int):
-        """Mock method for sliding window queries."""
-        return None
-
-    def get_logits_soft_cap_for_layer(self, _layer_idx: int):
-        """Mock method for logits soft cap queries."""
-        return None
-
-    def get_sm_scale_for_layer(self, _layer_idx: int) -> float:
-        """Mock method for SM scale queries."""
-        return 1.0 / (self.get_head_size() ** 0.5)
-
-
-class MockParallelConfig:
-    """Mock parallel configuration."""
-
-    pass
-
-
-class MockCompilationConfig:
-    """Mock compilation configuration."""
-
-    def __init__(self):
-        self.full_cuda_graph = False
-        self.static_forward_context = {}
-
-
-class MockVLLMConfig:
-    """Mock VLLM configuration."""
-
-    def __init__(self):
-        self.compilation_config = MockCompilationConfig()
-
-
-class MockRunner:
-    """Mock GPU runner for metadata builders."""
-
-    def __init__(
-        self,
-        seq_lens: np.ndarray,
-        query_start_locs: np.ndarray,
-        device: torch.device,
-        num_q_heads: int,
-        num_kv_heads: int,
-        head_dim: int,
-        dtype: torch.dtype,
-    ):
-        self.model_config = MockModelConfig(num_q_heads, num_kv_heads, head_dim, dtype)
-        self.parallel_config = MockParallelConfig()
-        self.vllm_config = MockVLLMConfig()
-        self.seq_lens_np = seq_lens
-        self.query_start_loc_np = query_start_locs
-        self.device = device
-        self.attention_chunk_size = None
-        self.num_query_heads = num_q_heads
-        self.num_kv_heads = num_kv_heads
-        self.dtype = dtype
 
 
 @dataclass
@@ -326,6 +286,9 @@ class ResultsFormatter:
                 by_spec[spec] = {}
                 specs_order.append(spec)
             by_spec[spec][r.config.backend] = r
+
+        # Sort specs by (batch_size, q_len, kv_len) instead of alphabetically
+        specs_order = sorted(by_spec.keys(), key=batch_spec_sort_key)
 
         # Create shortened backend names for display
         def shorten_backend_name(name: str) -> str:
@@ -493,10 +456,11 @@ def get_attention_scale(head_dim: int) -> float:
 
 def is_mla_backend(backend: str) -> bool:
     """
-    Check if backend is an MLA backend using the backend's is_mla() property.
+    Check if backend is an MLA backend using the AttentionBackendEnum.
 
     Args:
-        backend: Backend name (e.g., "CUTLASS_MLA", "FLASHINFER_MLA")
+        backend: Backend name matching AttentionBackendEnum exactly
+        (e.g., "FLASHMLA_SPARSE")
 
     Returns:
         True if the backend is an MLA backend, False otherwise
@@ -504,7 +468,8 @@ def is_mla_backend(backend: str) -> bool:
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     try:
-        backend_class = AttentionBackendEnum[backend.upper()].get_class()
+        backend_enum = AttentionBackendEnum[backend]
+        backend_class = backend_enum.get_class()
         return backend_class.is_mla()
-    except (KeyError, ValueError, ImportError):
+    except (KeyError, ValueError, ImportError, AttributeError):
         return False

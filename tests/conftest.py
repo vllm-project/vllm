@@ -176,16 +176,20 @@ def init_test_http_connection():
 
 @pytest.fixture
 def dist_init():
+    from tests.utils import ensure_current_vllm_config
+
     temp_file = tempfile.mkstemp()[1]
-    init_distributed_environment(
-        world_size=1,
-        rank=0,
-        distributed_init_method=f"file://{temp_file}",
-        local_rank=0,
-        backend="nccl",
-    )
-    initialize_model_parallel(1, 1)
-    yield
+
+    with ensure_current_vllm_config():
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            distributed_init_method=f"file://{temp_file}",
+            local_rank=0,
+            backend="nccl",
+        )
+        initialize_model_parallel(1, 1)
+        yield
     cleanup_dist_env_and_memory()
 
 
@@ -419,7 +423,6 @@ class HfRunner:
             self.tokenizer: "PreTrainedTokenizer | PreTrainedTokenizerFast" = (
                 AutoTokenizer.from_pretrained(
                     model_name,
-                    dtype=dtype,
                     trust_remote_code=trust_remote_code,
                 )
             )
@@ -430,7 +433,6 @@ class HfRunner:
 
         self.processor = AutoProcessor.from_pretrained(
             model_name,
-            dtype=dtype,
             trust_remote_code=trust_remote_code,
         )
         if skip_tokenizer_init:
@@ -1138,6 +1140,15 @@ class VllmRunner:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        # Explicitly shutdown the engine core to release GPU resources
+        # This is needed because when executing consecutive tests, the GC
+        # might not be fast enough in shutting down the llm engine. This can lead to OOMs
+        # because when the next test starts some GPU memory is still in use.
+        try:
+            self.llm.llm_engine.engine_core.shutdown()
+        except Exception:
+            # Ignore shutdown errors as cleanup will still proceed
+            pass
         del self.llm
         cleanup_dist_env_and_memory()
 
@@ -1531,7 +1542,7 @@ def clean_gpu_memory_between_tests():
 
     # Clean up GPU memory after the test
     if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         gc.collect()
 
 
@@ -1544,6 +1555,14 @@ def use_fresh_inductor_cache():
     """
     with fresh_cache():
         yield
+
+
+@pytest.fixture
+def fresh_vllm_cache(monkeypatch, use_fresh_inductor_cache):
+    """Temporary VLLM_CACHE_ROOT combined with a fresh inductor cache."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        monkeypatch.setenv("VLLM_CACHE_ROOT", tmp_dir)
+        yield tmp_dir
 
 
 @pytest.fixture(scope="function")
