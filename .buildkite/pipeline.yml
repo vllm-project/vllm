@@ -31,8 +31,8 @@ steps:
     - sh .buildkite/scripts/hardware_ci/run-xpu-test.sh
     env:
       DOCKER_HOST: tcp://localhost:2375
-      REGISTRY_USER: ${REGISTRY_USER}
-      REGISTRY: ${REGISTRY}
+      #REGISTRY_USER: ${REGISTRY_USER}
+      #REGISTRY: ${REGISTRY}
     secrets:
       - REGISTRY_TOKEN
       - HF_TOKEN
