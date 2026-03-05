@@ -6,6 +6,9 @@ on:
       - main
   workflow_dispatch:  # Manual trigger
 
+permissions:
+  contents: read
+
 jobs:
   macos-m1-smoke-test:
     runs-on: macos-latest
