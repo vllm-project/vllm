@@ -40,6 +40,9 @@ fi
 if [[ -n "$ENABLE_HMA_VAR" ]]; then
   echo "HMA (Hybrid KV Cache Manager) enabled"
 fi
+if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
+  echo "vLLM serve extra args: $VLLM_SERVE_EXTRA_ARGS"
+fi
 
 DECODER_KV_LAYOUT=${DECODER_KV_LAYOUT:-"HND"} # Default to HND, optional NHD
 if [[ "$DECODER_KV_LAYOUT" == "NHD" ]]; then
@@ -79,6 +82,8 @@ DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.2}
 PREFILL_BLOCK_SIZE=${PREFILL_BLOCK_SIZE:-128}
 DECODE_BLOCK_SIZE=${DECODE_BLOCK_SIZE:-128}
+# Comma-separated extra args for vllm serve (e.g. --max-model-len,2048)
+VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
 
 # Find the git repository root directory
 GIT_ROOT=$(git rev-parse --show-toplevel)
@@ -160,6 +165,12 @@ run_tests_for_model() {
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
     --kv-transfer-config '$KV_CONFIG'"
+    if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
+      IFS=',' read -r -a extra_args <<< "$VLLM_SERVE_EXTRA_ARGS"
+      for arg in "${extra_args[@]}"; do
+        BASE_CMD="${BASE_CMD} $arg"
+      done
+    fi
 
     # Add attention backend config if specified
     if [[ -n "$ATTENTION_BACKEND" ]]; then
@@ -206,6 +217,12 @@ run_tests_for_model() {
     --block-size ${DECODE_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --kv-transfer-config '$KV_CONFIG'"
+    if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
+      IFS=',' read -r -a extra_args <<< "$VLLM_SERVE_EXTRA_ARGS"
+      for arg in "${extra_args[@]}"; do
+        BASE_CMD="${BASE_CMD} $arg"
+      done
+    fi
 
     # Add attention backend config if specified
     if [[ -n "$ATTENTION_BACKEND" ]]; then
