@@ -392,7 +392,7 @@ def benchmark_operation(
     num_op_per_cudagraph = 10
 
     # Use vLLM's graph_capture to make tensor_model_parallel_all_reduce graph-safe
-    device = torch.device(f"cuda:{torch.cuda.current_device()}")
+    device = torch.device(f"cuda:{torch.accelerator.current_device_index()}")
     with graph_capture(device=device), torch.cuda.graph(graph):
         for _ in range(num_op_per_cudagraph):
             operation_func(*args, **kwargs)

@@ -66,10 +66,18 @@ def graph_quickreduce(
             for dtype in [torch.float16, torch.bfloat16]:
                 with graph_capture(device=device) as graph_capture_context:
                     inp1 = torch.randint(
-                        1, 23, (sz,), dtype=dtype, device=torch.cuda.current_device()
+                        1,
+                        23,
+                        (sz,),
+                        dtype=dtype,
+                        device=torch.accelerator.current_device_index(),
                     )
                     inp2 = torch.randint(
-                        -23, 1, (sz,), dtype=dtype, device=torch.cuda.current_device()
+                        -23,
+                        1,
+                        (sz,),
+                        dtype=dtype,
+                        device=torch.accelerator.current_device_index(),
                     )
                     torch.accelerator.synchronize()
                     graph = torch.cuda.CUDAGraph()
@@ -172,11 +180,13 @@ def qr_variable_input(rank, world_size):
         if num % 2 == 0:
             s2 = 1024
             inp1 = torch.zeros(
-                (s1, s2), dtype=dtype, device=torch.cuda.current_device()
+                (s1, s2), dtype=dtype, device=torch.accelerator.current_device_index()
             )
         else:
             s2 = 2048
-            inp1 = torch.ones((s1, s2), dtype=dtype, device=torch.cuda.current_device())
+            inp1 = torch.ones(
+                (s1, s2), dtype=dtype, device=torch.accelerator.current_device_index()
+            )
         result = torch.empty_like(inp1)
         # FP = 0 INT8 = 1 INT6 = 2 INT4 = 3 NONE = 4
         ops.qr_all_reduce(_ptr, inp1, result, 3, cast_bf2half=True)

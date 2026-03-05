@@ -146,7 +146,7 @@ class NCCLWeightTransferEngine(
                 init_info.master_port,
                 rank,
                 init_info.world_size,
-                torch.cuda.current_device(),
+                torch.accelerator.current_device_index(),
             )
         )
 
@@ -275,7 +275,7 @@ class NCCLWeightTransferEngine(
         Initialize NCCL process group for trainer-side weight transfer.
 
         The trainer is always rank 0 in the process group. Uses the current
-        CUDA device (torch.cuda.current_device()).
+        CUDA device (torch.accelerator.current_device_index()).
 
         Args:
             init_info: Either an NCCLWeightTransferInitInfo object or a dict with keys:
@@ -310,7 +310,11 @@ class NCCLWeightTransferEngine(
 
         # Trainer is always rank 0
         return NCCLWeightTransferEngine._stateless_init_process_group(
-            master_address, master_port, 0, world_size, torch.cuda.current_device()
+            master_address,
+            master_port,
+            0,
+            world_size,
+            torch.accelerator.current_device_index(),
         )
 
     @staticmethod

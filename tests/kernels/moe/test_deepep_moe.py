@@ -210,7 +210,9 @@ def deep_ep_moe_impl(
         s = pgi.rank * num_local_experts
         e = s + num_local_experts
         expert_map[s:e] = torch.tensor(list(range(num_local_experts)))
-        return expert_map.to(device=torch.cuda.current_device(), dtype=torch.int32)
+        return expert_map.to(
+            device=torch.accelerator.current_device_index(), dtype=torch.int32
+        )
 
     hidden_size = test_tensors.rank_tokens.size(1)
     is_quantized = w1.dtype == torch.float8_e4m3fn
@@ -365,14 +367,14 @@ def _deep_ep_moe(
         )
 
     is_quantized = w1.dtype == torch.float8_e4m3fn
-    w1 = w1.to(device=torch.cuda.current_device())
-    w2 = w2.to(device=torch.cuda.current_device())
+    w1 = w1.to(device=torch.accelerator.current_device_index())
+    w2 = w2.to(device=torch.accelerator.current_device_index())
     if is_quantized:
         w1_scale = w1_scale.to(  # type: ignore
-            device=torch.cuda.current_device()
+            device=torch.accelerator.current_device_index()
         )
         w2_scale = w2_scale.to(  # type: ignore
-            device=torch.cuda.current_device()
+            device=torch.accelerator.current_device_index()
         )
 
     pg = torch.distributed.new_group(list(range(pgi.world_size)))

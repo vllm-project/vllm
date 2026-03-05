@@ -548,7 +548,7 @@ def deserialize_tensorizer_model(
             dtype=tensorizer_config.dtype,
             device=f"xpu:{torch.xpu.current_device()}"
             if current_platform.is_xpu()
-            else f"cuda:{torch.cuda.current_device()}",
+            else f"cuda:{torch.accelerator.current_device_index()}",
             **tensorizer_args.deserialization_kwargs,
         ) as deserializer,
     ):

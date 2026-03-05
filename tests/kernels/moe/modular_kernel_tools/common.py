@@ -322,7 +322,7 @@ class WeightTensors:
         )
 
     def to_current_device(self):
-        device = torch.cuda.current_device()
+        device = torch.accelerator.current_device_index()
         self.w1 = self.w1.to(device=device)
         self.w2 = self.w2.to(device=device)
 
@@ -392,7 +392,12 @@ class RankTensors:
         Return hidden_states
         """
         m, k, dtype = (config.M, config.K, config.dtype)
-        a = torch.randn((m, k), device=torch.cuda.current_device(), dtype=dtype) / 15.0
+        a = (
+            torch.randn(
+                (m, k), device=torch.accelerator.current_device_index(), dtype=dtype
+            )
+            / 15.0
+        )
 
         if config.quant_dtype is None:
             return a, None
@@ -430,7 +435,7 @@ class RankTensors:
         # distribute topk_ids evenly
         for mi in range(m):
             topk_ids[mi] = torch.randperm(config.E)[:topk]
-        topk_ids = topk_ids.to(device=torch.cuda.current_device())
+        topk_ids = topk_ids.to(device=torch.accelerator.current_device_index())
 
         expert_map = None
         if config.world_size > 1 and config.supports_expert_map():
@@ -441,7 +446,7 @@ class RankTensors:
             e = s + num_local_experts
             expert_map[s:e] = torch.tensor(list(range(num_local_experts)))
             expert_map = expert_map.to(
-                device=torch.cuda.current_device(), dtype=torch.int32
+                device=torch.accelerator.current_device_index(), dtype=torch.int32
             )
 
         return RankTensors(
@@ -558,7 +563,9 @@ def reference_moe_impl(
 
 def _make_gscale(num_experts: int) -> torch.Tensor:
     return torch.ones(
-        (num_experts,), device=torch.cuda.current_device(), dtype=torch.float32
+        (num_experts,),
+        device=torch.accelerator.current_device_index(),
+        dtype=torch.float32,
     )
 
 
