@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from dataclasses import dataclass
 
 import torch
@@ -26,6 +27,19 @@ except ImportError:
     fused_rms_fp8_group_quant = None
 
 
+# Environment variable to enable/disable MLA fusion
+# Uses vLLM's registered VLLM_ROCM_USE_AITER_MLA variable
+def _is_mla_fusion_enabled() -> bool:
+    """Check if MLA fusion is enabled via environment variable.
+
+    Returns True by default when AITER is available.
+    Set VLLM_ROCM_USE_AITER_MLA=0 or False to disable fusion for testing.
+    """
+    if not _AITER_AVAILABLE:
+        return False
+    return os.getenv("VLLM_ROCM_USE_AITER_MLA", "1").lower() in ("true", "1")
+
+
 def _fused_rms_fp8_group_quant_impl(
     q_c: torch.Tensor,
     q_a_layernorm_weight: torch.Tensor,
@@ -37,14 +51,15 @@ def _fused_rms_fp8_group_quant_impl(
     dtype_quant: torch.dtype,
     output_unquantized_inp1: bool,
     transpose_scale: bool,
-):
+) -> list[torch.Tensor]:
     """Implementation that calls AITER kernel.
 
-    Returns AITER's raw output (nested tuples).
+    Returns flattened list: [out1_quantized, out1_bs, out2]
+    (AITER returns nested tuples, we flatten for custom op compatibility)
     """
-    # Call AITER's fused kernel - return as-is without unpacking
+    # Call AITER's fused kernel
     # Returns: ((out1_quantized, out1_bs), out1_unquantized, out2, out_res1)
-    return fused_rms_fp8_group_quant(
+    result = fused_rms_fp8_group_quant(
         q_c,  # x1: first input to normalize + quantize
         q_a_layernorm_weight,  # x1_weight: RMSNorm weight for q_c
         q_a_layernorm_variance_epsilon,  # x1_epsilon: epsilon for q_c
@@ -57,6 +72,9 @@ def _fused_rms_fp8_group_quant_impl(
         output_unquantized_inp1,  # output_unquantized_inp1: False
         transpose_scale,  # transpose_scale: True
     )
+    # Flatten nested tuples to list: ((q_c_quantized, q_c_scale), _, kv_c_normed, _)
+    (q_c_quantized, q_c_scale), _, kv_c_normed, _ = result
+    return [q_c_quantized, q_c_scale, kv_c_normed]
 
 
 def _fused_rms_fp8_group_quant_fake(
@@ -70,10 +88,10 @@ def _fused_rms_fp8_group_quant_fake(
     dtype_quant: torch.dtype,
     output_unquantized_inp1: bool,
     transpose_scale: bool,
-):
-    """Fake implementation matching AITER's nested tuple structure.
+) -> list[torch.Tensor]:
+    """Fake implementation for tracing/compilation.
 
-    Returns: ((out1_quantized, out1_bs), out1_unquantized, out2, out_res1)
+    Returns flattened list: [out1_quantized, out1_bs, out2]
     """
     m, n1 = q_c.shape
     out1_quantized = torch.empty((m, n1), dtype=dtype_quant, device=q_c.device)
@@ -82,11 +100,9 @@ def _fused_rms_fp8_group_quant_fake(
     )
     if transpose_scale:
         out1_bs = out1_bs.transpose(0, 1).contiguous().view(*out1_bs.shape)
-    out1_unquantized = None
     out2 = torch.empty_like(kv_c)
-    out_res1 = None
-    # Return nested tuple structure matching AITER
-    return ((out1_quantized, out1_bs), out1_unquantized, out2, out_res1)
+    # Return flattened list for custom op compatibility
+    return [out1_quantized, out1_bs, out2]
 
 
 # Custom op registration state
@@ -106,6 +122,7 @@ def _register_mla_fusion_op_once() -> None:
                 dispatch_key=current_platform.dispatch_key,
             )
             _FUSION_OP_REGISTERED = True
+            logger.info("MLA fusion custom op registered successfully")
         except Exception as e:
             logger.warning("Failed to register MLA fusion custom op: %s", e)
             _FUSION_OP_REGISTERED = False
@@ -134,25 +151,44 @@ def _fuse_rmsnorm_quant(
 
     Returns:
         (q_c_quantized, q_c_scale, kv_c_normed) if successful, else (None, None, None)
+
+    Can be disabled by setting VLLM_ROCM_USE_AITER_MLA=0 for testing purposes.
     """
     if not _AITER_AVAILABLE:
+        logger.debug("MLA fusion: AITER not available, using unfused path")
+        return None, None, None
+
+    # Check if fusion is enabled via environment variable
+    if not _is_mla_fusion_enabled():
+        logger.info(
+            "MLA fusion: disabled via VLLM_ROCM_USE_AITER_MLA, using unfused path"
+        )
         return None, None, None
 
     # Register custom op on first use in this process
     _register_mla_fusion_op_once()
 
     if not _FUSION_OP_REGISTERED:
+        logger.warning("MLA fusion: custom op registration failed, using unfused path")
         return None, None, None
 
     if dtype_quant is None:
         dtype_quant = dtypes.fp8
 
     if dtype_quant != dtypes.fp8:
+        logger.debug("MLA fusion: non-FP8 dtype (%s), using unfused path", dtype_quant)
         return None, None, None
 
+    logger.info(
+        "MLA fusion: calling AITER fused kernel "
+        "(q_c.shape=%s, kv_c.shape=%s, group_size=%d)",
+        q_c.shape,
+        kv_c.shape,
+        group_size,
+    )
     try:
-        # Call the registered custom op which returns nested tuples
-        # Returns: ((out1_quantized, out1_bs), out1_unquantized, out2, out_res1)
+        # Call the registered custom op which returns flattened list
+        # Returns: [q_c_quantized, q_c_scale, kv_c_normed]
         result = torch.ops.vllm.fused_rms_fp8_group_quant_mla(
             q_c,
             q_a_layernorm_weight,
@@ -165,13 +201,20 @@ def _fuse_rmsnorm_quant(
             output_unquantized_inp1,
             transpose_scale,
         )
-        # Unpack the nested tuples after the custom op call
-        (q_c_quantized, q_c_scale), _, kv_c_normed, _ = result
+        # Unpack the flattened list
+        q_c_quantized, q_c_scale, kv_c_normed = result
+        logger.info(
+            "MLA fusion: AITER kernel succeeded "
+            "(q_c_quantized.shape=%s, q_c_scale.shape=%s, kv_c_normed.shape=%s)",
+            q_c_quantized.shape,
+            q_c_scale.shape,
+            kv_c_normed.shape,
+        )
         return q_c_quantized, q_c_scale, kv_c_normed
     except (RuntimeError, TypeError, ValueError, AttributeError) as e:
         # Fallback to unfused path if AITER kernel fails
         # This can happen due to unsupported shapes, dtypes, or platform issues
-        logger.debug("AITER MLA fusion failed, falling back to unfused path: %s", e)
+        logger.warning("AITER MLA fusion failed, falling back to unfused path: %s", e)
         return None, None, None
 
 
