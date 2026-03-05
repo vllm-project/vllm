@@ -142,7 +142,11 @@ def _merge_mm_kwargs(
 
 
 def get_processor_cls_name_from_config(processor_name: str) -> str | None:
-    config_file = ["preprocessor_config.json", "processor_config.json"]
+    config_file = [
+        "processor_config.json",
+        "preprocessor_config.json",
+        "tokenizer_config.json",
+    ]
     for file in config_file:
         config = get_hf_file_to_dict(file, processor_name)
         if config and "processor_class" in config:

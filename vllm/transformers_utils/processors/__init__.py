@@ -13,8 +13,8 @@ import importlib
 _CLASS_TO_MODULE: dict[str, str] = {
     "BagelProcessor": "vllm.transformers_utils.processors.bagel",
     "DeepseekVLV2Processor": "vllm.transformers_utils.processors.deepseek_vl2",
-    "FireRedASR2Processor": "vllm.transformers_utils.processors.fireredasr2_processor",
-    "FunASRProcessor": "vllm.transformers_utils.processors.funasr_processor",
+    "FireRedASR2Processor": "vllm.transformers_utils.processors.fireredasr2",
+    "FunASRProcessor": "vllm.transformers_utils.processors.funasr",
     "HunYuanVLProcessor": "vllm.transformers_utils.processors.hunyuan_vl",
     "HunYuanVLImageProcessor": "vllm.transformers_utils.processors.hunyuan_vl_image",
     "OvisProcessor": "vllm.transformers_utils.processors.ovis",
