@@ -14,7 +14,7 @@ from typing import Annotated, Literal, TypeAlias
 import regex as re
 import torch
 from torch import nn
-from transformers import BatchFeature, PreTrainedTokenizer
+from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -432,9 +432,6 @@ class QwenVLModel(QWenModel):
 
 
 class QwenVLProcessingInfo(BaseProcessingInfo):
-    def get_tokenizer(self) -> PreTrainedTokenizer:
-        return self.get_hf_processor().tokenizer
-
     def get_hf_processor(self, **kwargs: object) -> QwenVLProcessor:
         config = self.get_hf_config()
         vision_config = config.visual

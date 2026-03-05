@@ -102,4 +102,4 @@ def warmup_kernels(model_runner: GPUModelRunner) -> None:
     cleanup_output.finished_req_ids = set(req_ids)
     model_runner.execute_model(cleanup_output)
     model_runner.kv_connector.set_disabled(False)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
