@@ -767,6 +767,7 @@ class SequenceGroup:
         # Tree decoding related fields
         self.tree_branch_id = 0  # 分支标识
         self.tree_depth = 0
+        self.parent_seq_group_id = None
 
     @property
     def prompt(self) -> Optional[str]:
