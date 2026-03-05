@@ -1562,8 +1562,6 @@ class Scheduler(SchedulerInterface):
     ) -> None:
         """
         Appends an EngineCoreOutput for a failed KV load or rejected request.
-        If rejected is True, the output indicates a rejected request; otherwise,
-        it indicates a request that failed due to KV load failure.
         """
         output = EngineCoreOutput(
             request_id=request.request_id,
