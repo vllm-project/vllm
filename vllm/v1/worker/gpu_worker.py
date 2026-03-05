@@ -390,18 +390,30 @@ class Worker(WorkerBase):
         ) as profile_result:
             self.model_runner.profile_run()
 
+            profile_torch_peak = current_platform.memory_stats(self.device).get(
+                "allocated_bytes.all.peak", 0
+            )
+
             # Profile CUDA graph memory if graphs will be captured.
             cudagraph_memory_estimate = 0
             if not self.model_config.enforce_eager:
                 cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
-            # Only apply the estimate to KV cache sizing
-            # when VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS is enabled.
-            cudagraph_memory_estimate_applied = (
-                cudagraph_memory_estimate
-                if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
-                else 0
-            )
+        # Use the pre-cudagraph torch peak to avoid double-counting.
+        profile_result.torch_peak_increase = (
+            profile_torch_peak - profile_result.before_profile.torch_peak
+        )
+        profile_result.non_kv_cache_memory = (
+            profile_result.non_torch_increase
+            + profile_result.torch_peak_increase
+            + profile_result.weights_memory
+        )
+
+        cudagraph_memory_estimate_applied = (
+            cudagraph_memory_estimate
+            if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+            else 0
+        )
 
         self.non_torch_memory = profile_result.non_torch_increase
         self.peak_activation_memory = (
