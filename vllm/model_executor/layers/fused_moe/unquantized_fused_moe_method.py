@@ -339,25 +339,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: F401
-
-        assert self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
-
-        return torch.ops.vllm.flashinfer_fused_moe_bf16(
-            routing_logits=router_logits,
-            routing_bias=layer.e_score_correction_bias,
-            hidden_states=x,
-            gemm1_weights=layer.w13_weight,
-            gemm2_weights=layer.w2_weight,
-            num_experts=layer.global_num_experts,
-            top_k=layer.top_k,
-            n_group=layer.num_expert_group,
-            topk_group=layer.topk_group,
-            intermediate_size=layer.intermediate_size_per_partition,
-            local_expert_offset=layer.ep_rank * layer.local_num_experts,
-            local_num_experts=layer.local_num_experts,
-            routing_method_type=layer.routing_method_type,
-        )
+        raise NotImplementedError("TODO(yzong-rh): Mid migration")
 
     def forward_monolithic_cpu(
         self,

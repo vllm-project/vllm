@@ -15,8 +15,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
-    is_supported_config_trtllm_bf16,
+from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
+    TrtLlmBf16Experts,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoDPEPModular,
@@ -86,8 +86,12 @@ def select_unquantized_moe_backend(
     )
 
     # Check if FlashInfer TRTLLM BF16 MoE is supported
-    trtllm_supported, _ = is_supported_config_trtllm_bf16(
+    # TODO(yzong-rh): Mid migration
+    trtllm_supported, _ = TrtLlmBf16Experts.is_supported_config(
+        TrtLlmBf16Experts,
         moe_config=moe_config,
+        weight_key=None,
+        activation_key=None,
         activation_format=activation_format,
     )
     flashinfer_trtllm_available = has_flashinfer() and trtllm_supported
