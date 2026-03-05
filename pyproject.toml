@@ -175,6 +175,8 @@ tme = "tme"
 dout = "dout"
 Pn = "Pn"
 arange = "arange"
+PARD = "PARD"
+pard = "pard"
 
 [tool.typos.type.py]
 extend-glob = []

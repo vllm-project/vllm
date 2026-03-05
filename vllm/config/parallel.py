@@ -3,11 +3,11 @@
 
 import os
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 import torch
 from pydantic import Field, field_validator, model_validator
-from torch.distributed import ProcessGroup, ReduceOp
+from torch.distributed import ProcessGroup, ReduceOp, Store
 from typing_extensions import Self
 
 import vllm.envs as envs
@@ -507,7 +507,17 @@ class ParallelConfig:
     def get_next_stateless_eplb_group_port(self) -> list[int]:
         return self._stateless_eplb_group_port_list.pop()
 
-    def stateless_init_dp_group(self, return_store: bool = False) -> ProcessGroup:
+    @overload
+    def stateless_init_dp_group(
+        self, return_store: Literal[False] = ...
+    ) -> ProcessGroup: ...
+    @overload
+    def stateless_init_dp_group(
+        self, return_store: Literal[True] = ...
+    ) -> tuple[ProcessGroup, Store]: ...
+    def stateless_init_dp_group(
+        self, return_store: bool = False
+    ) -> ProcessGroup | tuple[ProcessGroup, Store]:
         # NOTE: In high-concurrency scenarios multiple processes
         # can pick the same (currently free) port through a race
         # condition when calling `get_open_port()`. When the first
