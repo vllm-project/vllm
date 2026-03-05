@@ -50,6 +50,7 @@ from vllm.multimodal.audio import split_audio
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -264,8 +265,6 @@ class OpenAISpeechToText(OpenAIServing):
         via ``get_language_detection_prompt`` and
         ``parse_language_detection_output``.
         """
-        from vllm.sampling_params import SamplingParams
-
         prompt = self.model_cls.get_language_detection_prompt(
             audio_chunk,
             self.asr_config,
@@ -403,6 +402,22 @@ class OpenAISpeechToText(OpenAIServing):
 
         return prompt
 
+    @staticmethod
+    def _get_decoder_prompt_len(engine_prompts: list[ProcessorInputs]) -> int:
+        """Get the length of the decoder prompt. Currently we need to offset
+        by the decoder prompt length when running beam search because the mm
+        encoder is not currently cached and runs on decode calls; because of
+        this, we need to make sure the redundant encoder calls won't exceed
+        the context :(
+
+        FIXME (Alex) - this will be removed in the very near future once the
+        encoder/decoder caching is implemented.
+        """
+        input_len = 0
+        if engine_prompts and engine_prompts[0].get("type") == "enc_dec":
+            input_len = len(engine_prompts[0]["decoder_prompt"]["prompt_token_ids"])
+        return input_len
+
     def _get_verbose_segments(
         self,
         tokens: tuple,
@@ -526,6 +541,13 @@ class OpenAISpeechToText(OpenAIServing):
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
         list_result_generator: list[AsyncGenerator[RequestOutput, None]] | None = None
+
+        input_len = (
+            OpenAISpeechToText._get_decoder_prompt_len(engine_prompts)
+            if request.use_beam_search
+            else 0
+        )
+
         # Unlike most decoder-only models, whisper generation length is not
         # constrained by the size of the input audio, which is mapped to a
         # fixed-size log-mel-spectogram. Still, allow for fewer tokens to be
@@ -533,14 +555,20 @@ class OpenAISpeechToText(OpenAIServing):
         max_tokens = get_max_tokens(
             max_model_len,
             request.max_completion_tokens,
-            0,
+            input_len,
             self.default_sampling_params,
         )
 
-        sampling_params = request.to_sampling_params(
-            max_tokens,
-            self.default_sampling_params,
-        )
+        if request.use_beam_search:
+            sampling_params = request.to_beam_search_params(
+                max_tokens, self.default_sampling_params
+            )
+        else:
+            sampling_params = request.to_sampling_params(
+                max_tokens,
+                self.default_sampling_params,
+            )
+
         if request.response_format == "verbose_json":
             sampling_params.logprobs = 1
 
@@ -569,9 +597,46 @@ class OpenAISpeechToText(OpenAIServing):
                 trace_headers=trace_headers,
             )
 
+<<<<<<< HEAD
             list_result_generator.append(generator)
+=======
+                self._log_inputs(
+                    request_id_item,
+                    engine_prompt,
+                    params=sampling_params,
+                    lora_request=lora_request,
+                )
 
-        if request.stream:
+                trace_headers = (
+                    None
+                    if raw_request is None
+                    else await self._get_trace_headers(raw_request.headers)
+                )
+
+                if isinstance(sampling_params, BeamSearchParams):
+                    generator = self.beam_search(
+                        prompt=engine_prompt,
+                        params=sampling_params,
+                        request_id=request_id_item,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                    )
+                else:
+                    generator = self.engine_client.generate(
+                        engine_prompt,
+                        sampling_params,
+                        request_id_item,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                    )
+
+                list_result_generator.append(generator)
+        except ValueError as e:
+            return self.create_error_response(e)
+>>>>>>> 99a1a629f (add whisper transcription)
+
+        # We don't allow streaming for beam search
+        if request.stream and not request.use_beam_search:
             return stream_generator_method(
                 request, list_result_generator, request_id, request_metadata, duration_s
             )

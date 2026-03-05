@@ -3,11 +3,10 @@
 
 from dataclasses import dataclass
 
-from vllm.inputs import TokenInputs, token_inputs, EncoderDecoderInputs
+from vllm.inputs import EncoderDecoderInputs, TokenInputs, token_inputs
 from vllm.logprobs import Logprob
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import MultiModalInputs, mm_inputs, mm_enc_dec_inputs
-from typing import TYPE_CHECKING, Any, cast, get_args, get_type_hints
+from vllm.multimodal.inputs import MultiModalInputs, mm_inputs
 
 
 @dataclass
@@ -20,9 +19,8 @@ class BeamSearchSequence:
 
     orig_prompt: TokenInputs | MultiModalInputs | EncoderDecoderInputs
 
-    # The tokens include the prompt.
-    encoder_tokens: list[int] | None
-    decoder_tokens: list[int]
+    # NOTE: Tokens represents decoder tokens in the encoder / decoder case
+    tokens: list[int]
     logprobs: list[dict[int, Logprob]]
     lora_request: LoRARequest | None = None
     cum_logprob: float = 0.0
@@ -33,32 +31,55 @@ class BeamSearchSequence:
     def get_prompt(self):
         prompt = self.orig_prompt
 
+        if prompt["type"] == "enc_dec":
+            return self._build_encoder_decoder_inputs(prompt)
+
+        # Handle decoder-only inputs
         prompt_text = prompt.get("prompt")
         cache_salt = prompt.get("cache_salt")
 
-        if prompt["type"] == "enc_dec":
-            cast(EncoderDecoderInputs, prompt)
-            decoder_prompt = prompt["decoder_prompt"]
-            return mm_enc_dec_inputs(
-                encoder_inputs=decoder_prompt, # FIXME - this doesn't look quite right?
-                decoder_prompt_token_ids=self.decoder_tokens,
-                decoder_prompt=decoder_prompt.get("prompt", None),
-            )
-
-        elif prompt["type"] == "token": # TODO - when we have mm inputs, this is taken on decode, right?
+        if prompt["type"] == "token":
             return token_inputs(
-                self.decoder_tokens,
+                self.tokens,
                 prompt=prompt_text,
                 cache_salt=cache_salt,
             )
 
         return mm_inputs(
-            prompt_token_ids=self.decoder_tokens,
+            prompt_token_ids=self.tokens,
             mm_kwargs=prompt["mm_kwargs"],
             mm_hashes=prompt["mm_hashes"],
             mm_placeholders=prompt["mm_placeholders"],
             prompt=prompt_text,
             cache_salt=cache_salt,
+        )
+
+    def _build_encoder_decoder_inputs(self, prompt):
+        """Rebuild the encoder-decoder inputs with the current beam search
+        sequence's tokens.
+
+        FIXME (alex) - the encoder multimodal cache is not properly wired up
+        yet, which means that currently we are running the encoder on every
+        new beam because num_computed_tokens is 0 on each new request. This
+        will be fixed once the cache is correctly implemented.
+        """
+        dec_prompt = prompt["decoder_prompt"]
+
+        # Rebuild decoder prompt with updated tokens,
+        # but keep everything else the same.
+        new_dec_prompt = mm_inputs(
+            self.tokens,
+            prompt=dec_prompt.get("prompt"),
+            cache_salt=dec_prompt.get("cache_salt"),
+            mm_kwargs=dec_prompt.get("mm_kwargs"),
+            mm_hashes=dec_prompt.get("mm_hashes", {}),
+            mm_placeholders=dec_prompt.get("mm_placeholders", {}),
+        )
+
+        return EncoderDecoderInputs(
+            type="enc_dec",
+            encoder_prompt=prompt["encoder_prompt"],
+            decoder_prompt=new_dec_prompt,
         )
 
 
@@ -80,18 +101,15 @@ class BeamSearchInstance:
         logprobs: list[dict[int, Logprob]] | None = None,
         **kwargs,
     ):
-        if prompt["type"] == "enc_dec":
-            encoder_tokens = prompt["encoder_prompt"]["prompt_token_ids"]
-            decoder_tokens = prompt["decoder_prompt"]["prompt_token_ids"]
-        else:
-            encoder_tokens = None
-            decoder_tokens = prompt["prompt_token_ids"]
+        decoder_prompt = (
+            prompt if prompt["type"] != "enc_dec" else prompt["decoder_prompt"]
+        )
+        initial_tokens = decoder_prompt["prompt_token_ids"]
 
         self.beams: list[BeamSearchSequence] = [
             BeamSearchSequence(
                 orig_prompt=prompt,
-                encoder_tokens=encoder_tokens,
-                decoder_tokens=decoder_tokens,
+                tokens=initial_tokens,
                 logprobs=[] if logprobs is None else list(logprobs),
                 lora_request=lora_request,
                 **kwargs,
