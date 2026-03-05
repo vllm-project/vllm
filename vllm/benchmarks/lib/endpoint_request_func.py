@@ -304,6 +304,7 @@ async def async_request_openai_chat_completions(
         ],
         "max_completion_tokens": request_func_input.output_len,
         "stream": True,
+        "logprobs": True,  # Enable to get exact token counts per chunk
         "stream_options": {
             "include_usage": True,
         },
@@ -350,8 +351,17 @@ async def async_request_openai_chat_completions(
                                 if ttft == 0.0:
                                     ttft = timestamp - st
                                     output.ttft = ttft
-
-                                # Decoding phase
+                                elif content:
+                                    logprobs = choices[0].get("logprobs")
+                                    
+                                    if logprobs and logprobs.get("content") and len(logprobs["content"]) > 0:
+                                        actual_tokens = len(logprobs["content"])
+                                    else:
+                                        actual_tokens = 1
+                                    
+                                    chunk_latency = timestamp - most_recent_timestamp
+                                    per_token_latency = chunk_latency / actual_tokens
+                                    output.itl.extend([per_token_latency] * actual_tokens)
                                 else:
                                     output.itl.append(timestamp - most_recent_timestamp)
 
