@@ -40,8 +40,7 @@ class CacheConfig:
     """Configuration for the KV cache."""
 
     block_size: SkipValidation[BlockSize] = None  # type: ignore[assignment]
-    """Size of a contiguous cache block in number of tokens. On CUDA devices,
-    only block sizes up to 32 are supported.
+    """Size of a contiguous cache block in number of tokens.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `Platform.check_and_update_config()` based on the current
