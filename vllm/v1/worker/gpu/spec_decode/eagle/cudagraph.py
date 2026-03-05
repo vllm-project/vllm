@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
+from typing import Any
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
-    CaptureCallback,
     CudaGraphManager,
     prepare_inputs_to_capture,
 )
@@ -19,9 +19,23 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
+# Callback signature for Eagle: (num_reqs, num_tokens, attn_metadata,
+# slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode) -> None
+EagleGenerateCallback = Callable[
+    [
+        int,
+        int,
+        dict[str, Any] | None,
+        dict[str, torch.Tensor] | None,
+        torch.Tensor | None,
+        CUDAGraphMode,
+    ],
+    None,
+]
+
 
 class EagleCudaGraphManager(CudaGraphManager):
-    """CudaGraphManager for Eagle speculative decoding with draft token management."""
+    """CudaGraphManager for Eagle speculative decoding (FULL mode only)."""
 
     def __init__(
         self,
@@ -43,13 +57,13 @@ class EagleCudaGraphManager(CudaGraphManager):
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
-        generate_fn: CaptureCallback,
+        generate_fn: EagleGenerateCallback,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        """Capture CUDA graphs for Eagle speculative decoding."""
+        """Capture CUDA graphs for Eagle speculative decoding (FULL mode only)."""
 
         def capture_fn(desc: BatchExecutionDescriptor) -> None:
-            num_tokens = desc.num_tokens
+            num_reqs, num_tokens = desc.num_reqs, desc.num_tokens
             num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
             attn_metadata, slot_mappings = prepare_inputs_to_capture(
                 desc,
@@ -59,21 +73,16 @@ class EagleCudaGraphManager(CudaGraphManager):
                 attn_groups,
                 kv_cache_config,
             )
-            batch_descriptor = (
-                BatchDescriptor(num_tokens=num_tokens)
-                if desc.cg_mode == CUDAGraphMode.PIECEWISE
-                else None
+            # Eagle only uses FULL mode - cg_mode is NONE for both warmup
+            # and inside torch.cuda.graph capture
+            generate_fn(
+                num_reqs,
+                num_tokens,
+                attn_metadata,
+                slot_mappings,
+                num_tokens_across_dp,
+                CUDAGraphMode.NONE,
             )
-            with set_forward_context(
-                attn_metadata if desc.cg_mode != CUDAGraphMode.PIECEWISE else None,
-                self.vllm_config,
-                num_tokens=num_tokens,
-                cudagraph_runtime_mode=desc.cg_mode,
-                num_tokens_across_dp=num_tokens_across_dp,
-                slot_mapping=slot_mappings,
-                batch_descriptor=batch_descriptor,
-            ):
-                generate_fn(desc)
 
         super().capture(capture_fn, progress_bar_desc)
 

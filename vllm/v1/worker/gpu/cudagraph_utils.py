@@ -64,11 +64,8 @@ class CudaGraphManager:
         uniform_decode_query_len: int,
     ):
         self.vllm_config = vllm_config
-        self.scheduler_config = vllm_config.scheduler_config
         self.device = device
-        self.max_model_len = vllm_config.model_config.max_model_len
-        self.max_num_reqs = self.scheduler_config.max_num_seqs
-        self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
+        self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
         self.cudagraph_mode = cudagraph_mode
@@ -105,7 +102,6 @@ class CudaGraphManager:
         descs_by_mode = defaultdict(list)
 
         for padded in capture_sizes:
-            candidates: list[BatchExecutionDescriptor] = []
             if (
                 decode_mode != CUDAGraphMode.NONE
                 and self.uniform_decode_query_len <= padded <= max_uniform_tokens
@@ -130,9 +126,6 @@ class CudaGraphManager:
                 )
                 descs_by_mode[mixed_mode].append(desc)
                 descs_by_token_count[padded].append(desc)
-
-            if candidates:
-                descs_by_token_count[padded] = candidates
 
         if not descs_by_token_count:
             return
