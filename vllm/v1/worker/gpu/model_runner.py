@@ -432,6 +432,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # dummy run the eagle speculator's propose to ensure DP/EP sync.
         if self.speculator is not None:
             assert self.sampler is not None
+            mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
+            if self.speculator.supports_mm_inputs:
+                mm_inputs = (
+                    [],
+                    torch.zeros(
+                        input_batch.num_tokens,
+                        dtype=torch.bool,
+                        device=self.device,
+                    ),
+                )
             self.speculator.propose(
                 input_batch=input_batch,
                 attn_metadata=attn_metadata,
@@ -452,6 +462,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens_across_dp=num_tokens_across_dp,
                 dummy_run=True,
                 skip_attn_for_dummy_run=skip_attn,
+                mm_inputs=mm_inputs,
             )
 
         assert hidden_states is not None  # Last PP rank always has hidden_states
@@ -1126,6 +1137,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_event=self.output_copy_event,
         )
 
+        mm_inputs = None
+        if self.speculator is not None and self.speculator.supports_mm_inputs:
+            # Get cached multimodal embeddings for draft forward.
+            mm_inputs = self.model_state.encoder_runner.gather_mm_embeddings(
+                input_batch.req_ids,
+                input_batch.num_tokens,
+                input_batch.num_scheduled_tokens,
+                input_batch.query_start_loc_np,
+                self.req_states.prefill_len.np[input_batch.idx_mapping_np],
+                self.req_states.num_computed_prefill_tokens[input_batch.idx_mapping_np]
+                + 1,
+            )
+
         # Postprocess results and update request states.
         # NOTE: This is intentionally done after creating the AsyncOutput,
         # ensuring that `copy_event` is recorded before calling postprocess.
@@ -1150,6 +1174,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.sampler.sampling_states.seeds.gpu,
                 self.req_states.draft_logits,
                 num_tokens_across_dp=num_tokens_across_dp,
+                mm_inputs=mm_inputs,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
