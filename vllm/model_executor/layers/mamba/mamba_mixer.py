@@ -29,10 +29,8 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
-from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
-    selective_scan_fn,
-    selective_state_update,
-)
+from vllm.model_executor.layers.mamba.ops.mamba_ssm import selective_scan_fn
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import selective_state_update
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -422,8 +420,8 @@ class MambaMixer(MambaBase, PluggableLayer):
                 B_d,
                 C_d,
                 self.D,
-                gate_d.transpose(0, 1),
                 time_proj_bias,
+                z=gate_d.transpose(0, 1),
                 dt_softplus=True,
                 state_batch_indices=state_indices_tensor_d_input,
                 dst_state_batch_indices=state_indices_tensor_d_output,

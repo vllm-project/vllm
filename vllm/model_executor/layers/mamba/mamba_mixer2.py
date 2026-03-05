@@ -30,10 +30,10 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
-from vllm.model_executor.layers.mamba.ops.mamba_ssm import selective_state_update
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import selective_state_update
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import (
     LoaderFunction,
@@ -879,8 +879,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 B_d,
                 C_d,
                 D_d,
-                z=None,
-                dt_bias=dt_bias,
+                dt_bias,
                 dt_softplus=True,
                 state_batch_indices=state_indices_tensor_d_input,
                 dst_state_batch_indices=state_indices_tensor_d_output,

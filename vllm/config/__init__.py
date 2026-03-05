@@ -16,6 +16,7 @@ from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
 from vllm.config.lora import LoRAConfig
+from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.config.model import (
     ModelConfig,
     iter_architecture_defaults,
@@ -83,6 +84,9 @@ __all__ = [
     "LoadConfig",
     # From vllm.config.lora
     "LoRAConfig",
+    # From vllm.config.mamba
+    "MambaBackendEnum",
+    "MambaConfig",
     # From vllm.config.model
     "ModelConfig",
     "iter_architecture_defaults",
