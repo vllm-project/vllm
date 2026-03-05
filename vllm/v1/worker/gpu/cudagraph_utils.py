@@ -91,7 +91,7 @@ class CudaGraphManager:
         if not capture_sizes:
             return
         capture_sizes = sorted(capture_sizes)
-        max_uniform_tokens = self.max_num_reqs * self.uniform_decode_query_len
+        max_decode_tokens = self.max_num_reqs * self.uniform_decode_query_len
         decode_mode = self.cudagraph_mode.decode_mode()
         mixed_mode = self.cudagraph_mode.mixed_mode()
         separate_decode_routine = self.cudagraph_mode.separate_routine()
@@ -102,7 +102,7 @@ class CudaGraphManager:
         for padded in capture_sizes:
             if (
                 decode_mode != CUDAGraphMode.NONE
-                and self.uniform_decode_query_len <= padded <= max_uniform_tokens
+                and self.uniform_decode_query_len <= padded <= max_decode_tokens
             ):
                 desc = BatchExecutionDescriptor(
                     cg_mode=decode_mode,
