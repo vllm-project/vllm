@@ -5,9 +5,7 @@ from math import ceil
 
 import numpy as np
 import torch
-from mistral_common.tokens.tokenizers.audio import (
-    AudioEncoder,
-)
+from mistral_common.tokens.tokenizers.audio import AudioEncoder
 from transformers import BatchFeature, ProcessorMixin, TensorType
 from transformers.audio_utils import AudioInput
 from transformers.processing_utils import ProcessingKwargs
