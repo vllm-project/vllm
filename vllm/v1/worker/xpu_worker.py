@@ -77,13 +77,21 @@ class XPUWorker(Worker):
         os.environ["LOCAL_WORLD_SIZE"] = ENV_LOCAL_WORLD_SIZE
         os.environ["LOCAL_RANK"] = str(self.local_rank)
 
-        init_worker_distributed_environment(
-            self.vllm_config,
-            self.rank,
-            self.distributed_init_method,
-            self.local_rank,
-            current_platform.dist_backend,
-        )
+        try:
+            init_worker_distributed_environment(
+                self.vllm_config,
+                self.rank,
+                self.distributed_init_method,
+                self.local_rank,
+                current_platform.dist_backend,
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to initialize distributed environment: %s. "
+                "Continuing without distributed support "
+                "(expected on simulators without oneCCL).",
+                e,
+            )
 
         # Set random seed.
         set_random_seed(self.model_config.seed)

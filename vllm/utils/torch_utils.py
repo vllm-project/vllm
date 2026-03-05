@@ -772,7 +772,11 @@ class ModuleName(OpaqueBase):  # type: ignore[misc]
 if HAS_OPAQUE_TYPE:
     from torch._library.opaque_object import register_opaque_type
 
-    register_opaque_type(ModuleName, typ="value", hoist=True)
+    try:
+        register_opaque_type(ModuleName, typ="value", hoist=True)
+    except TypeError:
+        # Older PyTorch builds (e.g. JGS 2.11.0a0) lack the 'hoist' kwarg
+        register_opaque_type(ModuleName, typ="value")
 
 
 # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform

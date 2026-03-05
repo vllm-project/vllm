@@ -4,7 +4,15 @@
 from typing import TYPE_CHECKING
 
 import torch
-from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
+
+try:
+    from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
+except ImportError:
+    # Stub for environments without vllm_xpu_kernels (e.g. JGS simulator)
+    def flash_attn_varlen_func(**kwargs):
+        raise NotImplementedError(
+            "flash_attn_varlen_func requires vllm_xpu_kernels"
+        )
 
 from vllm.logger import init_logger
 

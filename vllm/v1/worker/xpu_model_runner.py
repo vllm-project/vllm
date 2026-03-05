@@ -44,8 +44,12 @@ def _torch_cuda_wrapper():
         torch.cuda.mem_get_info = torch.xpu.mem_get_info
         torch.cuda.synchronize = torch.xpu.synchronize
         if supports_xpu_graph():
-            torch.cuda.graph = torch.xpu.graph
-            torch.cuda.CUDAGraph = torch.xpu.XPUGraph
+            try:
+                torch.cuda.graph = torch.xpu.graph
+                torch.cuda.CUDAGraph = torch.xpu.XPUGraph
+            except AttributeError:
+                logger.warning("torch.xpu.graph not available, "
+                               "XPU graph support disabled")
         yield
     finally:
         pass

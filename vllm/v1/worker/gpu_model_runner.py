@@ -204,6 +204,29 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 
+class _DummyEvent:
+    """No-op event for environments where ``torch.Event()`` crashes
+    (e.g. XPU simulators report ``device_index=-1``)."""
+
+    def record(self, *a: Any, **kw: Any) -> None:  # noqa: ARG002
+        pass
+
+    def synchronize(self, *a: Any, **kw: Any) -> None:  # noqa: ARG002
+        pass
+
+    def query(self, *a: Any, **kw: Any) -> bool:  # noqa: ARG002
+        return True
+
+
+def _make_event() -> torch.Event:
+    """Create a ``torch.Event``, falling back to ``_DummyEvent`` on
+    platforms that do not support it (e.g. XPU simulators)."""
+    try:
+        return torch.Event()
+    except (RuntimeError, ValueError):
+        return _DummyEvent()  # type: ignore[return-value]
+
+
 # Wrapper for ModelRunnerOutput to support overlapped execution.
 class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
     def __init__(
@@ -219,7 +242,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._invalid_req_indices = invalid_req_indices
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
-        self.async_copy_ready_event = torch.Event()
+        self.async_copy_ready_event = _make_event()
 
         # Keep a reference to the device tensor to avoid it being
         # deallocated until we finish copying it to the host.
@@ -329,7 +352,7 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
         self._model_runner_output = model_runner_output
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
-        self.async_copy_ready_event = torch.Event()
+        self.async_copy_ready_event = _make_event()
 
         # Keep a reference to the device tensors to avoid them being
         # deallocated until we finish copying it to the host.
@@ -594,7 +617,7 @@ class GPUModelRunner(
         self.prepare_inputs_event: torch.Event | None = None
         if self.use_async_scheduling:
             self.async_output_copy_stream = torch.cuda.Stream()
-            self.prepare_inputs_event = torch.Event()
+            self.prepare_inputs_event = _make_event()
 
         # Cache the device properties.
         self._init_device_properties()
@@ -709,7 +732,7 @@ class GPUModelRunner(
         # Cached outputs.
         self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
         self._draft_token_req_ids: list[str] | None = None
-        self.transfer_event = torch.Event()
+        self.transfer_event = _make_event()
         self.sampled_token_ids_pinned_cpu = torch.empty(
             (self.max_num_reqs, 1),
             dtype=torch.int64,
@@ -728,7 +751,7 @@ class GPUModelRunner(
         self.valid_sampled_token_count_cpu: torch.Tensor | None = None
         self.draft_token_ids_cpu: torch.Tensor | None = None
         if self.num_spec_tokens:
-            self.draft_token_ids_event = torch.Event()
+            self.draft_token_ids_event = _make_event()
             self.draft_token_ids_copy_stream = torch.cuda.Stream()
             self.draft_token_ids_cpu = torch.empty(
                 (self.max_num_reqs, self.num_spec_tokens),
@@ -737,7 +760,7 @@ class GPUModelRunner(
                 pin_memory=self.pin_memory,
             )
             if self.use_async_scheduling:
-                self.valid_sampled_token_count_event = torch.Event()
+                self.valid_sampled_token_count_event = _make_event()
                 self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
                 self.valid_sampled_token_count_cpu = torch.empty(
                     self.max_num_reqs,
