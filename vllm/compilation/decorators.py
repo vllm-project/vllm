@@ -449,10 +449,15 @@ def _support_torch_compile(
                 self.was_aot_compile_fn_loaded_from_disk = True
             except Exception as e:
                 if os.path.exists(aot_compilation_path):
+                    if isinstance(e, EOFError):
+                        message = "Compile cache file corrupted."
+                    else:
+                        message = str(e)
                     logger.warning(
-                        "Cannot load aot compilation from path %s, error: %s",
+                        "Compiling model again due to a load failure from %s, "
+                        "reason: %s",
                         aot_compilation_path,
-                        str(e),
+                        message,
                     )
                 if envs.VLLM_FORCE_AOT_LOAD:
                     raise e
@@ -575,7 +580,11 @@ def _support_torch_compile(
         logger.info("saving AOT compiled function to %s", self._aot_compilation_path)
         try:
             os.makedirs(self._aot_cache_dir, exist_ok=True)
-            self.aot_compiled_fn.save_compiled_function(self._aot_compilation_path)
+            # File saving should be atomic, so we will save to a temporary location
+            # first. Should be upstreamed to PyTorch 2.12 as well.
+            tmp_file = f"{self._aot_compilation_path}.{os.getpid()}.tmp"
+            self.aot_compiled_fn.save_compiled_function(tmp_file)
+            os.replace(tmp_file, self._aot_compilation_path)
             logger.info("saved AOT compiled function to %s", self._aot_compilation_path)
         except Exception as e:
             logger.warning(
