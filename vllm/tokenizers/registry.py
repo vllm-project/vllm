@@ -167,7 +167,7 @@ def resolve_tokenizer_args(
         tokenizer_mode = "grok2"
 
     # Model-specific tokenizers
-    if tokenizer_mode == "auto" and "Qwen-VL" in str(tokenizer_name):
+    if tokenizer_mode == "auto" and "/Qwen-VL" in str(tokenizer_name):
         tokenizer_mode = "qwen_vl"
 
     # Fallback to HF tokenizer
