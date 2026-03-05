@@ -31,7 +31,8 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.utils.import_utils import has_deep_ep
+from vllm.utils.import_utils import has_deep_ep, has_mori
+from vllm.utils.flashinfer import has_flashinfer_all2all
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import cuda_device_count_stateless, set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -58,7 +59,14 @@ PARALLEL_COMBOS = [
     [4, 1, True],
 ]
 
-BACKENDS = ["naive"]
+# TODO: should this even be set manually?  let oracles handle this
+BACKENDS = ["allgather_reducescatter"]
+
+if has_mori():
+    BACKENDS += ["mori"]
+
+if has_flashinfer_all2all():
+    BACKENDS += ["flashinfer_all2allv"]
 
 if False and has_deep_ep():
     BACKENDS += ["deepep_low_latency", "deepep_high_throughput"]
@@ -603,8 +611,8 @@ def test_moe_layer(
     if world_size > num_gpus:
         pytest.skip(f"Not enough GPUs got {num_gpus}, expected {world_size}.")
 
-    if not use_ep and backend != "naive":
-        pytest.skip(f"Skipping backend {backend} w/o EP.")
+    #if not use_ep and backend != None:
+    #    pytest.skip(f"Skipping backend {backend} w/o EP.")
 
     if backend == "deepep_low_latency":
         from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501

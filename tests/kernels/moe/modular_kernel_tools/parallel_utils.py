@@ -42,8 +42,6 @@ def _set_vllm_config(
     tp_pp_rank = rank % tp_pp_world_size
     vllm_config.parallel_config.rank = tp_pp_rank
 
-    print(f"INIT CONF {rank}, {local_rank}, {vllm_config.parallel_config}")
-
     with set_current_vllm_config(vllm_config):
         init_distributed_environment(
             world_size=tp_pp_world_size,
