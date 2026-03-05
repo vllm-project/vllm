@@ -17,6 +17,7 @@ IMAGE_NAME="${REGISTRY}/${REGISTRY_USER}/vllm-ci:${BUILDKITE_COMMIT}"
 BUILDKIT_ADDR="tcp://buildkit.default.svc.cluster.local:1234"
 DOCKERFILE="${BUILDKITE_BUILD_CHECKOUT_PATH}/docker/Dockerfile.xpu"
 CONTEXT="${BUILDKITE_BUILD_CHECKOUT_PATH}"
+IMAGE_NAME="${REGISTRY}/${REGISTRY_USER}/vllm-ci:${BUILDKITE_COMMIT}"
 
 # Set up registry auth so buildctl can push.
 # buildctl uses the standard Docker config at $DOCKER_CONFIG/config.json.
