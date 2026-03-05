@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 from transformers import LlamaConfig
 
-from vllm.v1.attention.backend import AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
@@ -31,6 +30,7 @@ from vllm.model_executor.models.llama import (
     LlamaMLP,
 )
 from vllm.multimodal.inputs import NestedTensors
+from vllm.v1.attention.backend import AttentionType
 
 from .utils import (
     AutoWeightsLoader,
