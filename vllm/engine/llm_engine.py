@@ -403,8 +403,6 @@ class LLMEngine:
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
 
-        # Tree decoder
-        self.tree_decoder = TreeDecoder()
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -1365,7 +1363,8 @@ class LLMEngine:
                     for branch_group in new_branch_groups:
                         self._add_branch_to_scheduler(branch_group, virtual_engine)
                     for branch_group in branch_groups_to_delete:
-                        self._delete_branch_from_scheduler(branch_group, virtual_engine)
+                        # self._delete_branch_from_scheduler(branch_group, virtual_engine)
+                        self.abort_request(branch_group.request_id)
                 self._skip_scheduling_next_step = False
             except InputProcessingError as e:
                 # The input for this request cannot be processed, so we must
@@ -1480,11 +1479,11 @@ class LLMEngine:
                     continue
                 original_seq_group = self.seq_id_to_seq_group[request_id]
                 print("group length:", len(original_seq_group.seqs))
-                if self.tree_decoder.should_create_branches(
+                if self._should_create_branches(
                     original_seq_group, logprobs[i], sampling_params):
                     # 创建分支序列组
                     # remove_seqs.append(original_seq)
-                    new_branch_seq_groups = self.tree_decoder.create_branch_sequences(
+                    new_branch_seq_groups = self._create_branch_sequences(
                         original_seq_group, logprobs[i], sampling_params
                     )
                     seq_groups.extend(new_branch_seq_groups)
@@ -1508,6 +1507,79 @@ class LLMEngine:
         # 更新序列ID映射
         if branch_group.request_id in self.seq_id_to_seq_group:
             del self.seq_id_to_seq_group[branch_group.request_id]
+
+    def _should_create_branches(self, seq_group, logprobs, sampling_params):
+        if seq_group.tree_depth >= sampling_params.tree_search_params.max_tree_depth:
+            return False
+        entropy = self._calculate_entropy(logprobs)
+        return entropy > sampling_params.tree_search_params.entropy_threshold
+    
+    def _calculate_entropy(self, logprobs):
+        """Calculate the entropy of the logits."""
+        # Convert logits to probabilities
+        probs = torch.exp(logprobs)
+        # Calculate entropy
+        entropy = -torch.sum(probs * logprobs, dim=-1)
+        return entropy.item()
+    
+    def _create_branch_sequences(self, parent_seq_group, logprobs, sampling_params):
+        """Create new branch sequence groups based on the model output and sampling parameters."""
+        logprobs_dict = {token_id.item(): Logprob(logprob=logprob.item()) for token_id, logprob in zip(torch.arange(logprobs.shape[-1]), logprobs)}
+
+        num_branches = sampling_params.tree_search_params.branching_factor
+        probs = torch.exp(logprobs)
+        _, top_k_indices = torch.topk(
+            probs, num_branches, dim=-1
+        )
+        branch_seq_groups = []
+        for i, token_id in enumerate(top_k_indices):
+            # 创建新的序列组作为分支
+            branch_seq_group = self._clone_sequence_for_branch(
+                parent_seq_group, i, token_id.item(), logprobs_dict
+            )
+            branch_seq_groups.append(branch_seq_group)
+            
+        return branch_seq_groups
+    
+    def _clone_sequence_for_branch(self, original_seq_group, branch_id, token_id, logprobs_dict):
+        """克隆序列组创建分支"""
+        # 深度复制原序列组
+        # new_seq_group = copy.deepcopy(original_seq_group)
+        # print("old:",len(original_seq_group.seqs))
+        # print("new:",len(new_seq_group.seqs))
+
+        # # 更新分支特有属性
+        # new_seq_group.request_id = f"{original_seq_group.request_id}_branch_{branch_id}"
+        # new_seq_group.arrival_time = time.time()
+        # new_seq_group.tree_depth = original_seq_group.tree_depth + 1
+        # new_seq_group.parent_seq_group_id = original_seq_group.request_id
+        # new_seq_group.seqs[0].append_token_id(token_id, logprobs=logprobs_dict)
+        # new_seq_group.seqs[0].status = SequenceStatus.WAITING
+            
+        # return new_seq_group
+    
+        original_seq = original_seq_group.seqs[0]
+        new_seq = copy.deepcopy(original_seq)
+        new_seq.status = SequenceStatus.WAITING
+        request_id = f"{original_seq_group.request_id}_branch_{branch_id}"
+        arrival_time = time.time()
+
+        new_seq_group = self._create_sequence_group_with_sampling(
+            request_id,
+            new_seq,
+            original_seq_group.sampling_params,
+            arrival_time=arrival_time,
+            lora_request=original_seq_group.lora_request,
+            trace_headers=original_seq_group.trace_headers,
+            prompt_adapter_request=original_seq_group.prompt_adapter_request,
+            encoder_seq=original_seq_group.encoder_seq,
+            priority=original_seq_group.priority)
+        
+        new_seq_group.tree_branch_id = branch_id
+        new_seq_group.tree_depth = original_seq_group.tree_depth + 1
+        new_seq_group.parent_seq_group_id = original_seq_group.request_id
+
+        return new_seq_group
 
     def _abort_and_cache_schedule(
             self, request_id: str, virtual_engine: int,
@@ -2165,58 +2237,3 @@ class LLMEngine:
 if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
     from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
     LLMEngine = V1LLMEngine  # type: ignore
-
-class TreeDecoder:
-    """A class that encapsulates the logic for tree decoding. This is used to
-    keep the tree decoding logic separate from the main LLMEngine code, which
-    is already quite complex. The TreeDecoder class can be used by the
-    LLMEngine to process tree decoding logic when enabled in the sampling
-    parameters."""
-    def should_create_branches(self, seq_group, logprobs, sampling_params):
-        if seq_group.tree_depth >= sampling_params.tree_search_params.max_tree_depth:
-            return False
-        entropy = self._calculate_entropy(logprobs)
-        return entropy > sampling_params.tree_search_params.entropy_threshold
-    
-    def _calculate_entropy(self, logprobs):
-        """Calculate the entropy of the logits."""
-        # Convert logits to probabilities
-        probs = torch.exp(logprobs)
-        # Calculate entropy
-        entropy = -torch.sum(probs * logprobs, dim=-1)
-        return entropy.item()
-    
-    def create_branch_sequences(self, parent_seq_group, logprobs, sampling_params):
-        """Create new branch sequence groups based on the model output and sampling parameters."""
-        logprobs_dict = {token_id.item(): Logprob(logprob=logprob.item()) for token_id, logprob in zip(torch.arange(logprobs.shape[-1]), logprobs)}
-
-        num_branches = sampling_params.tree_search_params.branching_factor
-        probs = torch.exp(logprobs)
-        _, top_k_indices = torch.topk(
-            probs, num_branches, dim=-1
-        )
-        branch_seq_groups = []
-        for i, token_id in enumerate(top_k_indices):
-            # 创建新的序列组作为分支
-            branch_seq_group = self._clone_sequence_for_branch(
-                parent_seq_group, i, token_id.item(), logprobs_dict
-            )
-            branch_seq_groups.append(branch_seq_group)
-            
-        return branch_seq_groups
-    
-    def _clone_sequence_for_branch(self, original_seq_group, branch_id, token_id, logprobs_dict):
-        """克隆序列组创建分支"""
-        # 深度复制原序列组
-        new_seq_group = copy.deepcopy(original_seq_group)
-        print("old:",len(original_seq_group.seqs))
-        print("new:",len(new_seq_group.seqs))
-
-        # 更新分支特有属性
-        new_seq_group.request_id = f"{original_seq_group.request_id}_branch_{branch_id}"
-        new_seq_group.arrival_time = time.time()
-        new_seq_group.tree_depth = original_seq_group.tree_depth + 1
-        new_seq_group.parent_seq_group_id = original_seq_group.request_id
-        new_seq_group.seqs[0].append_token_id(token_id, logprobs=logprobs_dict)
-            
-        return new_seq_group
