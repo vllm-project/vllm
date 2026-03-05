@@ -9,6 +9,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -24,6 +26,91 @@ except ImportError:
     fused_rms_fp8_group_quant = None
 
 
+def _fused_rms_fp8_group_quant_impl(
+    q_c: torch.Tensor,
+    q_a_layernorm_weight: torch.Tensor,
+    q_a_layernorm_variance_epsilon: float,
+    kv_c: torch.Tensor,
+    kv_a_layernorm_weight: torch.Tensor,
+    kv_a_layernorm_variance_epsilon: float,
+    group_size: int,
+    dtype_quant: torch.dtype,
+    output_unquantized_inp1: bool,
+    transpose_scale: bool,
+):
+    """Implementation that calls AITER kernel.
+
+    Returns AITER's raw output (nested tuples).
+    """
+    # Call AITER's fused kernel - return as-is without unpacking
+    # Returns: ((out1_quantized, out1_bs), out1_unquantized, out2, out_res1)
+    return fused_rms_fp8_group_quant(
+        q_c,  # x1: first input to normalize + quantize
+        q_a_layernorm_weight,  # x1_weight: RMSNorm weight for q_c
+        q_a_layernorm_variance_epsilon,  # x1_epsilon: epsilon for q_c
+        kv_c,  # x2: second input to normalize (no quant)
+        kv_a_layernorm_weight,  # x2_weight: RMSNorm weight for kv_c
+        kv_a_layernorm_variance_epsilon,  # x2_epsilon: epsilon for kv_c
+        group_size,  # group_size: 128 elements per group
+        dtype_quant,  # dtype_quant: dtypes.fp8
+        None,  # res1: no residual connection
+        output_unquantized_inp1,  # output_unquantized_inp1: False
+        transpose_scale,  # transpose_scale: True
+    )
+
+
+def _fused_rms_fp8_group_quant_fake(
+    q_c: torch.Tensor,
+    q_a_layernorm_weight: torch.Tensor,
+    q_a_layernorm_variance_epsilon: float,
+    kv_c: torch.Tensor,
+    kv_a_layernorm_weight: torch.Tensor,
+    kv_a_layernorm_variance_epsilon: float,
+    group_size: int,
+    dtype_quant: torch.dtype,
+    output_unquantized_inp1: bool,
+    transpose_scale: bool,
+):
+    """Fake implementation matching AITER's nested tuple structure.
+
+    Returns: ((out1_quantized, out1_bs), out1_unquantized, out2, out_res1)
+    """
+    m, n1 = q_c.shape
+    out1_quantized = torch.empty((m, n1), dtype=dtype_quant, device=q_c.device)
+    out1_bs = torch.empty(
+        (m, (n1 + group_size - 1) // group_size), dtype=torch.float32, device=q_c.device
+    )
+    if transpose_scale:
+        out1_bs = out1_bs.transpose(0, 1).contiguous().view(*out1_bs.shape)
+    out1_unquantized = None
+    out2 = torch.empty_like(kv_c)
+    out_res1 = None
+    # Return nested tuple structure matching AITER
+    return ((out1_quantized, out1_bs), out1_unquantized, out2, out_res1)
+
+
+# Custom op registration state
+_FUSION_OP_REGISTERED = False
+
+
+def _register_mla_fusion_op_once() -> None:
+    """Register MLA fusion custom op once per process."""
+    global _FUSION_OP_REGISTERED
+    if not _FUSION_OP_REGISTERED and _AITER_AVAILABLE:
+        try:
+            direct_register_custom_op(
+                op_name="fused_rms_fp8_group_quant_mla",
+                op_func=_fused_rms_fp8_group_quant_impl,
+                mutates_args=[],
+                fake_impl=_fused_rms_fp8_group_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+            _FUSION_OP_REGISTERED = True
+        except Exception as e:
+            logger.warning("Failed to register MLA fusion custom op: %s", e)
+            _FUSION_OP_REGISTERED = False
+
+
 def _fuse_rmsnorm_quant(
     q_c: torch.Tensor,
     q_a_layernorm_weight: torch.Tensor,
@@ -31,12 +118,12 @@ def _fuse_rmsnorm_quant(
     kv_c: torch.Tensor,
     kv_a_layernorm_weight: torch.Tensor,
     kv_a_layernorm_variance_epsilon: float,
-    dtype_quant=None,  # dtypes.fp8
+    dtype_quant: torch.dtype | None = None,
     group_size: int = 128,
     output_unquantized_inp1: bool = False,
     transpose_scale: bool = True,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-    """Fused dual RMSNorm + FP8 quantization.
+    """Fused dual RMSNorm + FP8 quantization with validation.
 
     Fuses:
     1. RMSNorm on q_c
@@ -51,6 +138,12 @@ def _fuse_rmsnorm_quant(
     if not _AITER_AVAILABLE:
         return None, None, None
 
+    # Register custom op on first use in this process
+    _register_mla_fusion_op_once()
+
+    if not _FUSION_OP_REGISTERED:
+        return None, None, None
+
     if dtype_quant is None:
         dtype_quant = dtypes.fp8
 
@@ -58,24 +151,23 @@ def _fuse_rmsnorm_quant(
         return None, None, None
 
     try:
-        # Call AITER's fused kernel
-        # Returns: (out1_quantized, out1_bs), out1_unquantized, out2, out_res1
-        (q_c_quantized, q_c_scale), _, kv_c_normed, _ = fused_rms_fp8_group_quant(
-            q_c,  # x1: first input to normalize + quantize
-            q_a_layernorm_weight,  # x1_weight: RMSNorm weight for q_c
-            q_a_layernorm_variance_epsilon,  # x1_epsilon: epsilon for q_c
-            kv_c,  # x2: second input to normalize (no quant)
-            kv_a_layernorm_weight,  # x2_weight: RMSNorm weight for kv_c
-            kv_a_layernorm_variance_epsilon,  # x2_epsilon: epsilon for kv_c
-            group_size,  # group_size: 128 elements per group
-            dtype_quant,  # dtype_quant: dtypes.fp8
-            None,  # res1: no residual connection
-            output_unquantized_inp1,  # output_unquantized_inp1: False
-            transpose_scale,  # transpose_scale: True
+        # Call the registered custom op which returns nested tuples
+        # Returns: ((out1_quantized, out1_bs), out1_unquantized, out2, out_res1)
+        result = torch.ops.vllm.fused_rms_fp8_group_quant_mla(
+            q_c,
+            q_a_layernorm_weight,
+            q_a_layernorm_variance_epsilon,
+            kv_c,
+            kv_a_layernorm_weight,
+            kv_a_layernorm_variance_epsilon,
+            group_size,
+            dtype_quant,
+            output_unquantized_inp1,
+            transpose_scale,
         )
-
+        # Unpack the nested tuples after the custom op call
+        (q_c_quantized, q_c_scale), _, kv_c_normed, _ = result
         return q_c_quantized, q_c_scale, kv_c_normed
-
     except (RuntimeError, TypeError, ValueError, AttributeError) as e:
         # Fallback to unfused path if AITER kernel fails
         # This can happen due to unsupported shapes, dtypes, or platform issues
