@@ -95,6 +95,7 @@ class EagleSpeculator:
         self.attn_groups = attn_groups
         self.block_tables = block_tables
 
+    @torch.inference_mode()
     def run_model(
         self,
         num_tokens: int,
@@ -184,12 +185,12 @@ class EagleSpeculator:
             return
         logger.info("Capturing model for Eagle speculator...")
         self.cudagraph_manager.capture(
+            self.generate_draft,
             self.model_state,
             self.input_buffers,
             self.block_tables,
             self.attn_groups,
             self.kv_cache_config,
-            self.generate_draft,
             progress_bar_desc="Capturing eagle CUDA graphs",
         )
 

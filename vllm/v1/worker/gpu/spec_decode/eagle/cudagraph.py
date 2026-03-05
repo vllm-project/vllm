@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
-from typing import Any
 
 import torch
 
@@ -19,20 +18,6 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
-# Callback signature for Eagle: (num_reqs, num_tokens, attn_metadata,
-# slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode) -> None
-EagleGenerateCallback = Callable[
-    [
-        int,
-        int,
-        dict[str, Any] | None,
-        dict[str, torch.Tensor] | None,
-        torch.Tensor | None,
-        CUDAGraphMode,
-    ],
-    None,
-]
-
 
 class EagleCudaGraphManager(CudaGraphManager):
     """CudaGraphManager for Eagle speculative decoding (FULL mode only)."""
@@ -44,6 +29,9 @@ class EagleCudaGraphManager(CudaGraphManager):
         cudagraph_mode: CUDAGraphMode,
         draft_tokens: torch.Tensor,
     ):
+        assert not cudagraph_mode.has_mode(CUDAGraphMode.PIECEWISE), (
+            "EagleCudaGraphManager does not support PIECEWISE mode yet"
+        )
         # Eagle always uses uniform decode with query_len=1
         super().__init__(
             vllm_config, device, cudagraph_mode, uniform_decode_query_len=1
@@ -52,12 +40,12 @@ class EagleCudaGraphManager(CudaGraphManager):
 
     def capture(
         self,
+        generate_fn: Callable,
         model_state: ModelState,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
-        generate_fn: EagleGenerateCallback,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture CUDA graphs for Eagle speculative decoding (FULL mode only)."""
