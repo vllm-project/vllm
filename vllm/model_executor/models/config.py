@@ -705,6 +705,10 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
+    "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
+    "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
+    "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
+    "FalconMambaForCausalLM": MambaModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,
