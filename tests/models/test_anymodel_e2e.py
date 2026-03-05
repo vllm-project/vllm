@@ -3,7 +3,7 @@
 """E2E initialization tests for AnyModel across all 9 supported architectures.
 
 Each test downloads the real HF config (not weights), injects AnyModel-specific
-overrides (``architectures``, ``base_architectures``, ``block_configs``), and
+overrides (``architectures``, ``base_architecture``, ``block_configs``), and
 initialises the model with ``load_format="dummy"`` (random weights).  This
 validates the full AnyModel → base-model → patch pipeline for every registered
 architecture without requiring real checkpoints.
@@ -263,7 +263,7 @@ def _anymodel_hf_overrides(
     text_cfg.num_hidden_layers = _NUM_LAYERS
 
     hf_config.architectures = ["AnyModel"]
-    hf_config.base_architectures = [case.base_arch]
+    hf_config.base_architecture = case.base_arch
 
     for key, val in case.extra_hf_overrides.items():
         setattr(text_cfg, key, val)
@@ -504,7 +504,7 @@ def _generate_config(case: _AnyModelE2ECase, output_dir: Path) -> Path:
     block_configs = gen(text_cfg)
 
     hf_config.architectures = ["AnyModel"]
-    hf_config.base_architectures = [case.base_arch]
+    hf_config.base_architecture = case.base_arch
     text_cfg.block_configs = block_configs
 
     out_dir = output_dir / case.id
@@ -537,7 +537,7 @@ def test_generate_anymodel_configs(case: _AnyModelE2ECase, tmp_path: Path):
         data = json.load(f)
 
     assert data["architectures"] == ["AnyModel"]
-    assert data["base_architectures"] == [case.base_arch]
+    assert data["base_architecture"] == case.base_arch
 
     text_data = data.get("text_config", data)
     assert "block_configs" in text_data or "block_configs" in data
@@ -567,7 +567,7 @@ def _identity_anymodel_overrides(hf_config: PretrainedConfig) -> PretrainedConfi
     n_layers = getattr(text_cfg, "num_hidden_layers", 1)
 
     hf_config.architectures = ["AnyModel"]
-    hf_config.base_architectures = [_PARITY_BASE_ARCH]
+    hf_config.base_architecture = _PARITY_BASE_ARCH
     text_cfg.block_configs = [
         {"attention": {"no_op": False}, "ffn": {"no_op": False}}
         for _ in range(n_layers)
@@ -637,7 +637,7 @@ def _reduced_anymodel_llama_overrides(
     text_cfg.num_hidden_layers = _REDUCTION_NUM_LAYERS
 
     hf_config.architectures = ["AnyModel"]
-    hf_config.base_architectures = [_REDUCTION_BASE_ARCH]
+    hf_config.base_architecture = _REDUCTION_BASE_ARCH
 
     isize = getattr(text_cfg, "intermediate_size", 1024)
     kv = getattr(

@@ -46,16 +46,13 @@ class AnyModelConfig(VerifyAndUpdateConfig):
         from vllm.model_executor.models.anymodel import _AttrDict
 
         hf_config = model_config.hf_config
-        text_config = hf_config.get_text_config()
 
         # --- 1. Normalize block_configs to _AttrDict ----------------------
-        # For VL models (e.g. Qwen3VL), block_configs lives on text_config
-        # rather than the top-level hf_config.
-        block_configs = getattr(text_config, "block_configs", None)
+        block_configs = getattr(hf_config, "block_configs", None)
         if block_configs:
-            assert len(block_configs) == text_config.num_hidden_layers, (
+            assert len(block_configs) == hf_config.num_hidden_layers, (
                 f"block_configs length ({len(block_configs)}) must match "
-                f"num_hidden_layers ({text_config.num_hidden_layers})"
+                f"num_hidden_layers ({hf_config.num_hidden_layers})"
             )
 
             def _to_attrdict(obj):
@@ -65,7 +62,7 @@ class AnyModelConfig(VerifyAndUpdateConfig):
                     return [_to_attrdict(item) for item in obj]
                 return obj
 
-            text_config.block_configs = [_to_attrdict(bc) for bc in block_configs]
+            hf_config.block_configs = [_to_attrdict(bc) for bc in block_configs]
 
         # --- 2. Patch _model_info from base architecture ------------------
         base_arch = getattr(hf_config, "base_architecture", None)
@@ -73,19 +70,6 @@ class AnyModelConfig(VerifyAndUpdateConfig):
             base_info = model_config.registry._try_inspect_model_cls(base_arch)
             if base_info is not None:
                 model_config._model_info = replace(base_info, has_noops=True)
-
-                # "AnyModel" ends with "Model" → auto-resolves to
-                # ("pooling", "embed") via _SUFFIX_TO_DEFAULTS.  Correct
-                # runner_type/convert_type when the base arch is a
-                # text-generation model and the user did not explicitly set
-                # --runner.
-                if (
-                    model_config.runner == "auto"
-                    and base_info.is_text_generation_model
-                    and model_config.runner_type != "generate"
-                ):
-                    model_config.runner_type = "generate"
-                    model_config.convert_type = "none"
 
 
 class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
