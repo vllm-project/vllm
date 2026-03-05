@@ -2055,7 +2055,7 @@ class Scheduler(SchedulerInterface):
                 RequestStatus.WAITING_FOR_STREAMING_REQ,
             ):
                 break
-            blocked_prefix.add_request(self.waiting.pop_request())
+            blocked_prefix.prepend_request(self.waiting.pop_request())
 
         self.waiting.prepend_requests(promoted_requests)
         if blocked_prefix:
