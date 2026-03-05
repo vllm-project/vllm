@@ -5,11 +5,10 @@ steps:
       queue: "intel-xpu-kubevirt"
     commands:
       - sh .buildkite/scripts/hardware_ci/build-container.sh
-    env:
-      REGISTRY_USER: ${REGISTRY_USER}
-      REGISTRY: ${REGISTRY}
     secrets:
       - REGISTRY_TOKEN
+      - REGISTRY_USER
+      - REGISTRY
     plugins:
       - kubernetes:
           podSpecPatch:
