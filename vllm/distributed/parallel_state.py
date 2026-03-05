@@ -385,8 +385,10 @@ class GroupCoordinator:
                 self.cpu_group, 1 << 22, 6
             )
 
+        # TODO(#35915): Remove is_tpu() check once tpu_inference
+        # overrides use_custom_op_collectives() to return True.
         self.use_custom_op_call = (
-            current_platform.is_cuda_alike() or current_platform.is_tpu()
+            current_platform.is_tpu() or current_platform.use_custom_op_collectives()
         )
 
         self.use_cpu_custom_send_recv = current_platform.is_cpu() and hasattr(
