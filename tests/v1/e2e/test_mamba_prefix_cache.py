@@ -76,11 +76,11 @@ def get_fake_sample_fn() -> SamplerOutput:
                 ),
                 logprobs_tensors=None,
             )
-        accpeted_tokens = prompt_token_ids[
+        accepted_tokens = prompt_token_ids[
             first_token_id_index : first_token_id_index
             + min(num_accepted_tokens, logits.shape[0])
         ]
-        sampled_token_ids = accpeted_tokens
+        sampled_token_ids = accepted_tokens
         return SamplerOutput(
             sampled_token_ids=torch.tensor(
                 [sampled_token_ids], device="cuda", dtype=torch.int32

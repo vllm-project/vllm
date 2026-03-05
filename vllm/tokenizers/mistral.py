@@ -169,7 +169,7 @@ def _prepare_apply_chat_template_tools_and_messages(
                     tool.pop(tool_key)
                     logger.warning_once(
                         f"'{tool_key}' is not supported by mistral-common for tools. "
-                        "It has been poped from the tool definition."
+                        "It has been popped from the tool definition."
                     )
                 if tool["type"] == "function":
                     function_keys = list(tool["function"].keys())
@@ -178,7 +178,7 @@ def _prepare_apply_chat_template_tools_and_messages(
                             tool["function"].pop(function_key)
                             logger.warning_once(
                                 f"'{function_key}' is not supported by mistral-common "
-                                "for function tools. It has been poped from the "
+                                "for function tools. It has been popped from the "
                                 "function definition."
                             )
                 else:

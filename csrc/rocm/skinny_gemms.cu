@@ -1476,7 +1476,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #endif
 
     // B[] staging is cooperative across GrpsShrB, so sync here before reading
-    // back. This wait is currently inserted by compiler, but not gauranteed.
+    // back. This wait is currently inserted by compiler, but not guaranteed.
     asm volatile("s_waitcnt 0");
     __syncthreads();
 
