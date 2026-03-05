@@ -1215,11 +1215,19 @@ def get_moe_wna16_block_config(
 def should_moe_wna16_use_cuda(
     num_valid_tokens: int, group_size: int, num_experts: int, bit: int
 ):
+    # The condition num_valid_tokens / num_experts <= 6 was too conservative.
+    # We relax this condition to allow more cases to use the optimized CUDA kernel,
+    # especially for larger batch sizes where num_valid_tokens / num_experts > 6.
+    # The CUDA kernel generally performs better for INT4 quantization.
     return (
         current_platform.is_cuda()
         and bit == 4
         and group_size in [32, 64, 128]
-        and num_valid_tokens / num_experts <= 6
+        # Relaxed condition: Use CUDA kernel for most cases unless extremely overloaded per expert
+        # or if specific tuning suggests otherwise.
+        # For now, we increase the threshold significantly or remove it for Ampere+ if we could detect arch.
+        # Let's increase it to 256 based on typical performance characteristics of the kernel.
+        and num_valid_tokens / num_experts <= 256
     )
 
 
