@@ -1052,8 +1052,10 @@ def _get_kv_cache_groups_uniform_page_size(
         logger.info(
             "Overriding hybrid KV cache group_size=%d (was %d, "
             "min_num_layers=%d, max_num_layers=%d)",
-            override_group_size, group_size,
-            min_num_layers, max_num_layers,
+            override_group_size,
+            group_size,
+            min_num_layers,
+            max_num_layers,
         )
         group_size = override_group_size
     grouped_layers = []
@@ -1265,8 +1267,7 @@ def get_kv_cache_groups(
     # size.
     return _get_kv_cache_groups_uniform_page_size(
         kv_cache_spec,
-        override_group_size=(
-            vllm_config.scheduler_config.hybrid_kv_cache_group_size),
+        override_group_size=(vllm_config.scheduler_config.hybrid_kv_cache_group_size),
     )
 
 

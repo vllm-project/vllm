@@ -521,9 +521,7 @@ class EngineArgs:
     disable_hybrid_kv_cache_manager: bool | None = (
         SchedulerConfig.disable_hybrid_kv_cache_manager
     )
-    hybrid_kv_cache_group_size: int | None = (
-        SchedulerConfig.hybrid_kv_cache_group_size
-    )
+    hybrid_kv_cache_group_size: int | None = SchedulerConfig.hybrid_kv_cache_group_size
 
     structured_outputs_config: StructuredOutputsConfig = get_field(
         VllmConfig, "structured_outputs_config"
