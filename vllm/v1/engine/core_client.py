@@ -7,6 +7,7 @@ import queue
 import sys
 import uuid
 import weakref
+import zlib
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Sequence
@@ -52,6 +53,12 @@ from vllm.v1.engine.utils import (
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.pool.late_interaction import (
+    LATE_INTERACTION_MODE_CACHE_QUERY,
+    LATE_INTERACTION_MODE_KEY,
+    LATE_INTERACTION_MODE_SCORE_DOC,
+    LATE_INTERACTION_QUERY_KEY,
+)
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
 logger = init_logger(__name__)
@@ -1358,9 +1365,34 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             len(self.core_engines) * self.client_index
         ) // client_count
 
+    def _get_late_interaction_engine_index(
+        self, request: EngineCoreRequest
+    ) -> int | None:
+        pooling_params = request.pooling_params
+        if pooling_params is None or pooling_params.extra_kwargs is None:
+            return None
+
+        extra_kwargs = pooling_params.extra_kwargs
+        mode = extra_kwargs.get(LATE_INTERACTION_MODE_KEY)
+        if mode not in (
+            LATE_INTERACTION_MODE_CACHE_QUERY,
+            LATE_INTERACTION_MODE_SCORE_DOC,
+        ):
+            return None
+
+        query_key = extra_kwargs.get(LATE_INTERACTION_QUERY_KEY)
+        if not isinstance(query_key, str) or not query_key:
+            return None
+
+        # query embeddings are cached in process-local worker memory,
+        # pin requests sharing the same query key to the same engine.
+        return zlib.crc32(query_key.encode("utf-8")) % len(self.core_engines)
+
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
-        if (eng_index := request.data_parallel_rank) is None:
+        if (eng_index := request.data_parallel_rank) is None and (
+            eng_index := self._get_late_interaction_engine_index(request)
+        ) is None:
             current_counts = self.lb_engines
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)
