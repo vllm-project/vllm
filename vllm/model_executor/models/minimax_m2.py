@@ -530,7 +530,7 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts
             if isinstance(layer, PPMissingLayer):
                 continue
             if hasattr(layer, "block_sparse_moe") and isinstance(
-                    layer.block_sparse_moe, MiniMaxM2MoE
+                layer.block_sparse_moe, MiniMaxM2MoE
             ):
                 example_moe = layer.block_sparse_moe.experts
                 self.moe_layers.append(layer.block_sparse_moe.experts)
@@ -553,7 +553,7 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts
             self.num_local_physical_experts = example_moe.local_num_experts
             self.num_routed_experts = example_moe.logical_num_experts
             self.num_redundant_experts = (
-                    example_moe.global_num_experts - example_moe.logical_num_experts
+                example_moe.global_num_experts - example_moe.logical_num_experts
             )
             self.num_expert_groups = 1
             self.num_shared_experts = 0
@@ -589,16 +589,16 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts
         return self.model.get_expert_mapping()
 
     def set_eplb_state(
-            self,
-            expert_load_view: torch.Tensor,
-            logical_to_physical_map: torch.Tensor,
-            logical_replica_count: torch.Tensor,
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
     ) -> None:
         for layer_idx, layer in enumerate(self.model.layers):
             if isinstance(layer, PPMissingLayer):
                 continue
             if hasattr(layer, "block_sparse_moe") and isinstance(
-                    layer.block_sparse_moe, MiniMaxM2MoE
+                layer.block_sparse_moe, MiniMaxM2MoE
             ):
                 moe_layer = layer.block_sparse_moe.experts
                 self.expert_weights.append(moe_layer.get_expert_weights())
@@ -610,9 +610,9 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts
                 )
 
     def update_physical_experts_metadata(
-            self,
-            num_physical_experts: int,
-            num_local_physical_experts: int,
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
     ) -> None:
         self.num_physical_experts = num_physical_experts
         self.num_local_physical_experts = num_local_physical_experts
@@ -621,7 +621,7 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts
             if isinstance(layer, PPMissingLayer):
                 continue
             if hasattr(layer, "block_sparse_moe") and isinstance(
-                    layer.block_sparse_moe, MiniMaxM2MoE
+                layer.block_sparse_moe, MiniMaxM2MoE
             ):
                 moe_layer = layer.block_sparse_moe.experts
                 moe_layer.global_num_experts = num_physical_experts
