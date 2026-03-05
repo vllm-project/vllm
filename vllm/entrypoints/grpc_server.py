@@ -78,7 +78,7 @@ async def serve_grpc(args: argparse.Namespace):
     )
     request_logger = None
     if args.enable_log_requests:
-        request_logger = RequestLogger(max_log_len=args.max_log_len)
+        request_logger = RequestLogger()
 
     # Create servicer
     servicer = VllmEngineServicer(async_llm, start_time, request_logger=request_logger)
