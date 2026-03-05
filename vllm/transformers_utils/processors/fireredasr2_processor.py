@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import TYPE_CHECKING
 
-import kaldi_native_fbank as knf
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -16,6 +16,13 @@ from transformers.processing_utils import ProcessorMixin
 from transformers.utils import TensorType
 
 from vllm.logger import init_logger
+from vllm.utils.import_utils import LazyLoader
+
+if TYPE_CHECKING:
+    import kaldi_native_fbank as knf
+else:
+    knf = LazyLoader("knf", globals(), "kaldi_native_fbank")
+
 
 logger = init_logger(__name__)
 
