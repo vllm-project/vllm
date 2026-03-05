@@ -50,7 +50,7 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -619,12 +619,6 @@ class FlashAttentionImpl(AttentionImpl):
                 "heads in the layer"
             )
         self.supports_quant_query_input = True
-        self.supports_per_head_quant_scales = (
-            self.vllm_flash_attn_version >= 3
-            if self.vllm_flash_attn_version is not None
-            else False
-        )
-
 
         vllm_config = get_current_vllm_config_or_none()
         dcp_a2a = (
@@ -677,7 +671,12 @@ class FlashAttentionImpl(AttentionImpl):
         if vllm_config.model_config.dtype != torch.bfloat16:
             return False
 
-        return False
+        # FA3 cannot write FP8 output directly. FA3 requires:
+        # - BF16/FP16 input → BF16/FP16 output (same dtype)
+        # - FP8 input → BF16 output
+        # Therefore, fused FP8 output quantization is not supported for FA3
+        # when using FP8 KV cache.
+        return not self.kv_cache_dtype.startswith("fp8")
 
     def forward(
         self,
