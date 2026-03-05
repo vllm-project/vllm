@@ -1551,7 +1551,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--ready-check-timeout-sec",
         type=int,
-        default=0,
+        default=60,
         help="Maximum time to wait for the endpoint to become ready "
         "in seconds. Ready check will be skipped by default.",
     )
