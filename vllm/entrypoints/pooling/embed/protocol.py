@@ -18,23 +18,6 @@ from vllm.renderers import TokenizeParams
 from vllm.utils import random_uuid
 
 
-def _get_max_total_output_tokens(
-    model_config: ModelConfig,
-) -> tuple[int | None, int]:
-    max_total_tokens = model_config.max_model_len
-    pooler_config = model_config.pooler_config
-
-    if pooler_config is None:
-        return max_total_tokens, 0
-
-    if pooler_config.enable_chunked_processing:
-        return None, 0
-
-    max_embed_len = pooler_config.max_embed_len or max_total_tokens
-    max_output_tokens = max_total_tokens - max_embed_len
-    return max_total_tokens, max_output_tokens
-
-
 class EmbeddingCompletionRequest(
     PoolingBasicRequestMixin, CompletionRequestMixin, EmbedRequestMixin
 ):
@@ -115,3 +98,20 @@ class EmbeddingBytesResponse(OpenAIBaseModel):
     content: list[bytes]
     headers: dict[str, str] | None = None
     media_type: str = "application/octet-stream"
+
+
+def _get_max_total_output_tokens(
+    model_config: ModelConfig,
+) -> tuple[int | None, int]:
+    max_total_tokens = model_config.max_model_len
+    pooler_config = model_config.pooler_config
+
+    if pooler_config is None:
+        return max_total_tokens, 0
+
+    if pooler_config.enable_chunked_processing:
+        return None, 0
+
+    max_embed_len = pooler_config.max_embed_len or max_total_tokens
+    max_output_tokens = max_total_tokens - max_embed_len
+    return max_total_tokens, max_output_tokens

@@ -7,9 +7,9 @@ from http import HTTPStatus
 from typing import ClassVar, Generic, TypeVar
 
 from fastapi import Request
+from fastapi.responses import JSONResponse, Response
 from pydantic import ConfigDict
 from starlette.datastructures import Headers
-from starlette.responses import JSONResponse
 
 from vllm import (
     PoolingParams,
@@ -27,7 +27,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.pooling.typing import AnyPoolingRequest, AnyPoolingResponse
+from vllm.entrypoints.pooling.typing import AnyPoolingRequest
 from vllm.inputs import ProcessorInputs
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer
@@ -111,7 +111,7 @@ class PoolingServing:
         self,
         request: AnyPoolingRequest,
         raw_request: Request,
-    ) -> JSONResponse:
+    ) -> Response:
         try:
             model_name = self.models.model_name()
             request_id = (
@@ -132,8 +132,7 @@ class PoolingServing:
             await self._preprocess(ctx)
             await self._prepare_generators(ctx)
             await self._collect_batch(ctx)
-            response = await self._build_response(ctx)
-            return JSONResponse(content=response.model_dump())
+            return await self._build_response(ctx)
         except Exception as e:
             error_response = create_error_response(e)
             return JSONResponse(
@@ -214,7 +213,7 @@ class PoolingServing:
     async def _build_response(
         self,
         ctx: PoolingServeContext,
-    ) -> AnyPoolingResponse:
+    ) -> Response:
         raise NotImplementedError
 
     @staticmethod

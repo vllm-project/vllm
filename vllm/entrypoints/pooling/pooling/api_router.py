@@ -21,7 +21,7 @@ router = APIRouter()
 
 
 def pooling(request: Request) -> OpenAIServingPooling | None:
-    return request.app.state.openai_serving_pooling
+    return request.app.state.serving_pooling
 
 
 @router.post(

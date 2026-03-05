@@ -4,6 +4,7 @@
 from typing import TypeAlias
 
 import numpy as np
+from fastapi.responses import JSONResponse
 
 from vllm import ClassificationOutput
 from vllm.config import ModelConfig
@@ -44,7 +45,7 @@ class ServingClassification(PoolingServing):
     async def _build_response(
         self,
         ctx: ClassificationServeContext,
-    ) -> ClassificationResponse:
+    ) -> JSONResponse:
         final_res_batch_checked = await self.io_processor.post_process_async(
             ctx.final_res_batch
         )
@@ -75,10 +76,12 @@ class ServingClassification(PoolingServing):
             total_tokens=num_prompt_tokens,
         )
 
-        return ClassificationResponse(
+        response = ClassificationResponse(
             id=ctx.request_id,
             created=ctx.created_time,
             model=ctx.model_name,
             data=items,
             usage=usage,
         )
+
+        return JSONResponse(content=response.model_dump())
