@@ -61,10 +61,7 @@ async def create_embedding(
             message="The model does not support Embeddings API"
         )
 
-    try:
-        generator = await handler.create_embedding(request, raw_request)
-    except Exception as e:
-        generator = handler.create_error_response(e)
+    generator = await handler.create_embedding(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(

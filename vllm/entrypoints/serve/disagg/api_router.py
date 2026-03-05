@@ -64,10 +64,8 @@ async def generate(request: GenerateRequest, raw_request: Request):
         return tokenization(raw_request).create_error_response(
             message="The model does not support generate tokens API"
         )
-    try:
-        generator = await handler.serve_tokens(request, raw_request)
-    except Exception as e:
-        generator = handler.create_error_response(e)
+
+    generator = await handler.serve_tokens(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(

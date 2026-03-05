@@ -41,7 +41,6 @@ from vllm.tracing import (
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import merge_async_iterators
 
-from ...utils import create_error_response
 from .io_processor import PoolingIOProcessor
 
 PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
@@ -112,34 +111,25 @@ class PoolingServing:
         request: AnyPoolingRequest,
         raw_request: Request,
     ) -> JSONResponse:
-        try:
-            model_name = self.models.model_name()
-            request_id = (
-                f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
-            )
+        model_name = self.models.model_name()
+        request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
 
-            await self._check_model(request)
+        await self._check_model(request)
 
-            ctx = PoolingServeContext(
-                request=request,
-                raw_request=raw_request,
-                model_name=model_name,
-                request_id=request_id,
-            )
+        ctx = PoolingServeContext(
+            request=request,
+            raw_request=raw_request,
+            model_name=model_name,
+            request_id=request_id,
+        )
 
-            self._validate_request(ctx)
-            self._maybe_get_adapters(ctx)
-            await self._preprocess(ctx)
-            await self._prepare_generators(ctx)
-            await self._collect_batch(ctx)
-            response = await self._build_response(ctx)
-            return JSONResponse(content=response.model_dump())
-        except Exception as e:
-            error_response = create_error_response(e)
-            return JSONResponse(
-                content=error_response.model_dump(),
-                status_code=error_response.error.code,
-            )
+        self._validate_request(ctx)
+        self._maybe_get_adapters(ctx)
+        await self._preprocess(ctx)
+        await self._prepare_generators(ctx)
+        await self._collect_batch(ctx)
+        response = await self._build_response(ctx)
+        return JSONResponse(content=response.model_dump())
 
     async def _preprocess(
         self,

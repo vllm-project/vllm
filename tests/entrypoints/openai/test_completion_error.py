@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass, field
-from http import HTTPStatus
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -11,7 +10,7 @@ import pytest
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -131,12 +130,8 @@ async def test_completion_error_non_stream():
         stream=False,
     )
 
-    response = await serving_completion.create_completion(request)
-
-    assert isinstance(response, ErrorResponse)
-    assert response.error.type == "InternalServerError"
-    assert response.error.message == "Internal server error"
-    assert response.error.code == HTTPStatus.INTERNAL_SERVER_ERROR
+    with pytest.raises(GenerationError):
+        await serving_completion.create_completion(request)
 
 
 @pytest.mark.asyncio
