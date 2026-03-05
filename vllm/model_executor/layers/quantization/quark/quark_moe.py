@@ -36,7 +36,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     CK_MXFP4_MOE_DIM_ALIGNMENT,
     _swizzle_mxfp4,
-    maybe_roundup_mxfp4_fused_moe_sizes
+    maybe_roundup_mxfp4_fused_moe_sizes,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
