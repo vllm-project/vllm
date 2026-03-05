@@ -649,7 +649,7 @@ class FusedMoE(CustomOp):
             # can property determine where the shared experts are supposed to be
             # called, i.e. by a MK or by the MoERunner.
             # Once the MK can be created upfront, we can just pass in the proper
-            # flags dervied from the quant_method's MK.
+            # flags derived from the quant_method's MK.
             reduce_results=self.reduce_results,
             quant_method=self.quant_method,
         )
