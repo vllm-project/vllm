@@ -31,14 +31,13 @@ logger = init_logger(__name__)
 
 
 class UnquantizedMoeBackend(Enum):
+    NONE = "NONE"
     FLASHINFER_TRTLLM = "FlashInfer TRTLLM"
     FLASHINFER_CUTLASS = "FlashInfer CUTLASS"
     AITER = "ROCm AITER"
     TRITON = "TRITON"
     CPU = "CPU"
     XPU = "XPU"
-    TPU = "TPU"
-    OOT = "OOT"
 
 
 # NOTE(zyongye): Unsupported backend means backend
@@ -47,8 +46,7 @@ class UnquantizedMoeBackend(Enum):
 UNSUPPORTED_BACKEND = [
     UnquantizedMoeBackend.FLASHINFER_TRTLLM,
     UnquantizedMoeBackend.CPU,
-    UnquantizedMoeBackend.TPU,
-    UnquantizedMoeBackend.OOT,
+    UnquantizedMoeBackend.NONE,
 ]
 
 
@@ -144,7 +142,7 @@ def select_unquantized_moe_backend(
             backend = UnquantizedMoeBackend.AITER
         else:
             backend = UnquantizedMoeBackend.TRITON
-    if current_platform.is_cuda():
+    elif current_platform.is_cuda():
         if flashinfer_trtllm_moe_enabled:
             backend = UnquantizedMoeBackend.FLASHINFER_TRTLLM
         elif flashinfer_cutlass_moe_enabled:
@@ -178,14 +176,13 @@ def select_unquantized_moe_backend(
                     scope="local",
                 )
             backend = UnquantizedMoeBackend.TRITON
-    if current_platform.is_xpu():
+    elif current_platform.is_xpu():
         backend = UnquantizedMoeBackend.XPU
-    if current_platform.is_cpu():
+    elif current_platform.is_cpu():
         backend = UnquantizedMoeBackend.CPU
-    if current_platform.is_tpu():
-        backend = UnquantizedMoeBackend.TPU
-    if current_platform.is_out_of_tree():
-        backend = UnquantizedMoeBackend.OOT
+    else:
+        assert current_platform.is_tpu() or current_platform.is_out_of_tree()
+        backend = UnquantizedMoeBackend.NONE
 
     logger.info_once(_make_log_backend(backend), scope="local")
     return backend

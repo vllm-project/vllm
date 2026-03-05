@@ -63,6 +63,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             use_ep=self.moe.moe_parallel_config.use_ep,
             use_dp=self.moe.moe_parallel_config.dp_size > 1,
         )
+        assert self.unquantized_backend != UnquantizedMoeBackend.NONE
 
         self.kernel: mk.FusedMoEKernel | None = None
         self._is_monolithic = (
