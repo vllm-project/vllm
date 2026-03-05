@@ -592,7 +592,7 @@ class VllmConfig:
 
         If the user configuration does not specify a value for a default field
         and if the default field is still None after all user selections are
-        applied, then default values will be applied to the field. User speciied
+        applied, then default values will be applied to the field. User specified
         fields will not be overridden by the default.
 
         Args:
@@ -1599,6 +1599,8 @@ class VllmConfig:
             f"tensor_parallel_size={self.parallel_config.tensor_parallel_size}, "  # noqa
             f"pipeline_parallel_size={self.parallel_config.pipeline_parallel_size}, "  # noqa
             f"data_parallel_size={self.parallel_config.data_parallel_size}, "  # noqa
+            f"decode_context_parallel_size={self.parallel_config.decode_context_parallel_size}, "  # noqa
+            f"dcp_comm_backend={self.parallel_config.dcp_comm_backend}, "  # noqa
             f"disable_custom_all_reduce={self.parallel_config.disable_custom_all_reduce}, "  # noqa
             f"quantization={self.model_config.quantization}, "
             f"enforce_eager={self.model_config.enforce_eager}, "
