@@ -96,11 +96,7 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-    ):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -496,7 +492,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         start_time = time.perf_counter()
         gc.collect()
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
@@ -627,9 +623,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs, dtype=torch.int32, device=self.device
             )
         else:
-            num_draft_tokens = np.array(
-                [len(draft_tokens.get(req_id, ())) for req_id in req_ids],
+            num_draft_tokens = np.fromiter(
+                (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
                 dtype=np.int32,
+                count=num_reqs,
             )
             total_num_draft_tokens = int(num_draft_tokens.sum())
             total_num_logits = num_reqs + total_num_draft_tokens
@@ -782,9 +779,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if input_batch.num_draft_tokens == 0:
             # No draft tokens (common case).
-            num_sampled = torch.ones(
-                input_batch.num_reqs, dtype=torch.int32, device=self.device
-            )
+            num_sampled = input_batch.seq_lens.new_ones(input_batch.num_reqs)
         else:
             # Rejection sampling for spec decoding.
             sampled_tokens, num_sampled = rejection_sample(
@@ -1117,7 +1112,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # The prior execute_model call must have failed.
             return None
 
-        input_batch, _, _, _, hidden_states, _, kv_connector_output = (
+        input_batch, _, _, _, hidden_states, _, kv_connector_output, _ = (
             self.execute_model_state
         )
         self.execute_model_state = None
