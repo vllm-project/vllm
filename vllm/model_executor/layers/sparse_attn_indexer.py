@@ -108,6 +108,18 @@ def sparse_attn_indexer(
                 chunk.block_table,
                 chunk.cu_seq_lens,
             )
+
+            tokens = chunk.token_end - chunk.token_start
+            logits_bytes = chunk.total_seq_lens * tokens * 4
+            logger.debug(
+                "Sparse indexer prefill chunk: tokens=%d, total_seq_lens=%d, "
+                "logits_size=%.2f MB, num_reqs=%d",
+                tokens,
+                chunk.total_seq_lens,
+                logits_bytes / (1024 * 1024),
+                chunk.num_reqs,
+            )
+
             logits = fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
                 (k_fp8, k_scale.view(torch.float32).flatten()),
@@ -116,6 +128,7 @@ def sparse_attn_indexer(
                 chunk.cu_seqlen_ke,
                 clean_logits=False,
             )
+
             num_rows = logits.shape[0]
 
             topk_indices = topk_indices_buffer[
