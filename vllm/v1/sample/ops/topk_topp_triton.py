@@ -1036,4 +1036,4 @@ def apply_top_k_top_p_triton(
 def reset_buffer_cache():
     _TRITON_BUFFER_CACHE.clear()
     _TRITON_TABLE_CACHE.clear()
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
