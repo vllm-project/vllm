@@ -1424,7 +1424,7 @@ def gpu_tier_mark(*, min_gpus: int = 1, max_gpus: int | None = None):
         @gpu_tier_mark(max_gpus=1)          # only on single-GPU
         @gpu_tier_mark(min_gpus=2, max_gpus=4)  # 2-4 GPUs only
     """
-    gpu_count = cuda_device_count_stateless()
+    gpu_count = current_platform.device_count()
     marks = []
 
     if min_gpus > 1:

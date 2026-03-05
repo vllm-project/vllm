@@ -7,6 +7,7 @@ import tempfile
 import openai
 import pytest
 import pytest_asyncio
+import torch
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.model_loader.tensorizer import (
