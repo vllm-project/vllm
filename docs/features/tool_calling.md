@@ -413,9 +413,15 @@ Olmo 3 models output tool calls in a format that is very similar to the one expe
 Supported models:
 
 * `allenai/Olmo-3-7B-Instruct`
-* `allenai/Olmo-3-32B-Think`
+* `allenai/Olmo-3.1-32B-Instruct`
 
-Flags: `--tool-call-parser olmo3`
+Note: OLMo 3 **Think** models (e.g., `Olmo-3.1-32B-Think`) do **not** support tool calling. Only the **Instruct** models listed above are supported.
+
+vLLM provides a tool chat template for Olmo 3 models:
+
+* [examples/tool_chat_template_olmo3.jinja](../../examples/tool_chat_template_olmo3.jinja) - this template instructs the model to output tool calls in the `<function_calls>` format expected by the parser.
+
+Recommended flags: `--tool-call-parser olmo3 --chat-template examples/tool_chat_template_olmo3.jinja`
 
 ### Gigachat 3 Models (`gigachat3`)
 
