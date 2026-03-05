@@ -1646,7 +1646,11 @@ def initialize_model_parallel(
 
     # TPA reuses the DCP group (same rank topology).
     global _TPA_SIZE
-    if config is not None and config.parallel_config.dcp_size > 1:
+    if (
+        config is not None
+        and config.parallel_config.tpa_size
+        < config.parallel_config.tensor_parallel_size
+    ):
         _TPA_SIZE = config.parallel_config.tpa_size
         logger.info(
             "TPA enabled: TPA=%d, DCP=%d (using DCP group for communication)",

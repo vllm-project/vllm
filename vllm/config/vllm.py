@@ -1710,6 +1710,7 @@ class VllmConfig:
             f"pipeline_parallel_size={self.parallel_config.pipeline_parallel_size}, "  # noqa
             f"data_parallel_size={self.parallel_config.data_parallel_size}, "  # noqa
             f"decode_context_parallel_size={self.parallel_config.decode_context_parallel_size}, "  # noqa
+            f"tensor_parallel_size_attention={self.parallel_config.tensor_parallel_size_attention}, "  # noqa
             f"dcp_comm_backend={self.parallel_config.dcp_comm_backend}, "  # noqa
             f"disable_custom_all_reduce={self.parallel_config.disable_custom_all_reduce}, "  # noqa
             f"quantization={self.model_config.quantization}, "
