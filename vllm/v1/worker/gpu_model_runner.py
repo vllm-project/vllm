@@ -778,6 +778,10 @@ class GPUModelRunner(
             if draft_config is None or draft_config.max_model_len is None:
                 self.effective_drafter_max_model_len = self.max_model_len
 
+    def _clear_late_interaction_query_cache(self) -> None:
+        self._late_interaction_query_cache.clear()
+        self._late_interaction_query_uses.clear()
+
     def reset_mm_cache(self) -> None:
         """
         Clear the multi-modal cache that was used during profiling,
@@ -785,6 +789,7 @@ class GPUModelRunner(
         """
         if self.mm_budget:
             self.mm_budget.reset_cache()
+        self._clear_late_interaction_query_cache()
 
     def reset_encoder_cache(self) -> None:
         """Clear the GPU-side encoder cache storing vision embeddings.
@@ -793,6 +798,7 @@ class GPUModelRunner(
         stale embeddings computed with old weights are not reused.
         """
         self.encoder_cache.clear()
+        self._clear_late_interaction_query_cache()
 
     @torch.inference_mode()
     def init_fp8_kv_scales(self) -> None:
