@@ -177,6 +177,7 @@ Pn = "Pn"
 arange = "arange"
 PARD = "PARD"
 pard = "pard"
+AKS = "AKS"
 
 [tool.typos.type.py]
 extend-glob = []
