@@ -50,21 +50,21 @@ __device__ __forceinline__ uint8_t sw_float_to_e2m1(float v) {
   uint8_t e2m1;
   // Midpoint tie-breaking: <= rounds to lower (even) code, < rounds to upper.
   if (av <= 0.25f)
-    e2m1 = 0;       // 0.0; midpoint 0.25 → code 0 (even)
+    e2m1 = 0;  // 0.0; midpoint 0.25 → code 0 (even)
   else if (av < 0.75f)
-    e2m1 = 1;       // 0.5; midpoint 0.75 → code 2 (even, next branch)
+    e2m1 = 1;  // 0.5; midpoint 0.75 → code 2 (even, next branch)
   else if (av <= 1.25f)
-    e2m1 = 2;       // 1.0; midpoint 1.25 → code 2 (even)
+    e2m1 = 2;  // 1.0; midpoint 1.25 → code 2 (even)
   else if (av < 1.75f)
-    e2m1 = 3;       // 1.5; midpoint 1.75 → code 4 (even, next branch)
+    e2m1 = 3;  // 1.5; midpoint 1.75 → code 4 (even, next branch)
   else if (av <= 2.5f)
-    e2m1 = 4;       // 2.0; midpoint 2.5 → code 4 (even)
+    e2m1 = 4;  // 2.0; midpoint 2.5 → code 4 (even)
   else if (av < 3.5f)
-    e2m1 = 5;       // 3.0; midpoint 3.5 → code 6 (even, next branch)
+    e2m1 = 5;  // 3.0; midpoint 3.5 → code 6 (even, next branch)
   else if (av <= 5.0f)
-    e2m1 = 6;       // 4.0; midpoint 5.0 → code 6 (even)
+    e2m1 = 6;  // 4.0; midpoint 5.0 → code 6 (even)
   else
-    e2m1 = 7;       // 6.0 (satfinite)
+    e2m1 = 7;  // 6.0 (satfinite)
   return (sign << 3) | e2m1;
 }
 
