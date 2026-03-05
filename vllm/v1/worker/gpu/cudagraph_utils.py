@@ -60,7 +60,7 @@ class CudaGraphManager:
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        uniform_decode_query_len: int,
+        decode_query_len: int,
     ):
         self.vllm_config = vllm_config
         self.device = device
@@ -68,13 +68,11 @@ class CudaGraphManager:
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
         self.cudagraph_mode = cudagraph_mode
-        self.uniform_decode_query_len = uniform_decode_query_len
+        self.decode_query_len = decode_query_len
         self.dp_size = vllm_config.parallel_config.data_parallel_size
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
-        self.pool = (
-            current_platform.get_graph_pool_handle() if self.cudagraph_mode else None
-        )
+        self.pool = current_platform.get_graph_pool_handle() if cudagraph_mode else None
 
         self._graphs_captured = False
         self._candidates: list[list[BatchExecutionDescriptor]] = []
@@ -83,13 +81,12 @@ class CudaGraphManager:
 
     def _init_candidates(self) -> None:
         """Build priority-ordered candidate lists for each token count."""
-        if self.cudagraph_mode == CUDAGraphMode.NONE:
-            return
         capture_sizes = self.compilation_config.cudagraph_capture_sizes
-        if not capture_sizes:
+        if not (self.cudagraph_mode and capture_sizes):
             return
+
         capture_sizes = sorted(capture_sizes)
-        max_decode_tokens = self.max_num_reqs * self.uniform_decode_query_len
+        max_decode_tokens = self.max_num_reqs * self.decode_query_len
         decode_mode = self.cudagraph_mode.decode_mode()
         mixed_mode = self.cudagraph_mode.mixed_mode()
         separate_decode_routine = self.cudagraph_mode.separate_routine()
@@ -98,17 +95,18 @@ class CudaGraphManager:
         descs_by_mode = defaultdict(list)
 
         for padded in capture_sizes:
-            # Capture decode specfifc graphs if required (i.e. separate decode routine)
+            # Capture uniform decode specfifc graphs if required
+            #  (i.e. separate decode routine)
             if (
                 separate_decode_routine
                 and decode_mode
-                and self.uniform_decode_query_len <= padded <= max_decode_tokens
+                and self.decode_query_len <= padded <= max_decode_tokens
             ):
                 desc = BatchExecutionDescriptor(
                     cg_mode=decode_mode,
                     num_tokens=padded,
-                    num_reqs=padded // self.uniform_decode_query_len,
-                    uniform_token_count=self.uniform_decode_query_len,
+                    num_reqs=padded // self.decode_query_len,
+                    uniform_token_count=self.decode_query_len,
                 )
                 descs_by_mode[decode_mode].append(desc)
                 descs_by_token_count[padded].append(desc)
@@ -241,9 +239,9 @@ class ModelCudaGraphManager(CudaGraphManager):
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        uniform_decode_query_len: int,
+        decode_query_len: int,
     ):
-        super().__init__(vllm_config, device, cudagraph_mode, uniform_decode_query_len)
+        super().__init__(vllm_config, device, cudagraph_mode, decode_query_len)
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
         self.use_aux_hidden_state_outputs = False
