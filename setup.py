@@ -983,7 +983,7 @@ setup(
         # Optional deps for Helion kernel development
         "helion": ["helion"],
         # Optional deps for gRPC server (vllm serve --grpc)
-        "grpc": ["smg-grpc-servicer"],
+        "grpc": ["smg-grpc-servicer >= 0.4.2"],
         # Optional deps for OpenTelemetry tracing
         "otel": [
             "opentelemetry-sdk>=1.26.0",
