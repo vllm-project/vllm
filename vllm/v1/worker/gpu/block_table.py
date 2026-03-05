@@ -106,11 +106,9 @@ class BlockTables:
     def gather_block_tables(
         self,
         idx_mapping: torch.Tensor,
-        num_reqs_padded: int | None = None,
+        num_reqs_padded: int,
     ) -> tuple[torch.Tensor, ...]:
         num_reqs = idx_mapping.shape[0]
-        if num_reqs_padded is None:
-            num_reqs_padded = num_reqs
         # Launch kernel with num_reqs_padded to fuse zeroing of padded rows.
         _gather_block_tables_kernel[(self.num_kv_cache_groups, num_reqs_padded)](
             idx_mapping,
