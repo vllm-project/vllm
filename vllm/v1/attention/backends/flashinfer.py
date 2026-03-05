@@ -92,6 +92,17 @@ def _get_trtllm_gen_workspace_buffer():
     return trtllm_gen_workspace_buffer
 
 
+def _get_trtllm_decode_chunk_size(num_decodes: int) -> int:
+    # Keep smaller chunks for moderate decode concurrency to avoid the
+    # problematic kernel region, and use larger chunks at very high concurrency
+    # to reduce launch/slicing overhead.
+    if num_decodes > 1536:
+        return 512
+    if num_decodes > 1024:
+        return 384
+    return TRTLLM_DECODE_CHUNK_SIZE
+
+
 @triton.jit
 def _trtllm_prefill_attn_kvfp8_dequant(
     kv_cache_ptr,
@@ -1587,8 +1598,9 @@ class FlashInferImpl(AttentionImpl):
                 if use_chunked_decode:
                     assert self.o_sf_scale is not None
                     assert output_block_scale is not None
-                    for req_start in range(0, num_decodes, TRTLLM_DECODE_CHUNK_SIZE):
-                        req_end = min(req_start + TRTLLM_DECODE_CHUNK_SIZE, num_decodes)
+                    chunk_size = _get_trtllm_decode_chunk_size(num_decodes)
+                    for req_start in range(0, num_decodes, chunk_size):
+                        req_end = min(req_start + chunk_size, num_decodes)
                         tok_start = req_start * q_len_per_req
                         tok_end = req_end * q_len_per_req
                         decode_query_chunk = decode_query[tok_start:tok_end]
