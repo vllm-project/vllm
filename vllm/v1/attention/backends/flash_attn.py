@@ -976,11 +976,11 @@ class FlashAttentionImpl(AttentionImpl):
         # Scatter query attention output to match.
         if tpa_gqa_mode:
             dcp_group = get_dcp_group()
-            kvp_rank = dcp_group.rank_in_group
-            kvp_size = dcp_group.world_size
+            dcp_rank = dcp_group.rank_in_group
+            dcp_size = dcp_group.world_size
             num_heads = query_attn_out.shape[1]
-            heads_per_rank = num_heads // kvp_size
-            start_head = kvp_rank * heads_per_rank
+            heads_per_rank = num_heads // dcp_size
+            start_head = dcp_rank * heads_per_rank
             end_head = start_head + heads_per_rank
             query_attn_out = query_attn_out[:, start_head:end_head, :].contiguous()
             query_lse = query_lse[start_head:end_head, :].contiguous()

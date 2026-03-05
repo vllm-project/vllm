@@ -288,14 +288,14 @@ class Attention(nn.Module, AttentionLayerBase):
 
         # For TPA GQA, the attention output has fewer heads after DCP combine
         # (A2A scatter or ReduceScatter). Input Q has num_heads (TPA-sharded),
-        # but output has num_heads // kvp_size (TP-sharded).
+        # but output has num_heads // dcp_size (TP-sharded).
         from vllm.distributed.parallel_state import (
-            _KVP_SIZE,
             _TPA_SIZE,
+            get_dcp_group,
         )
 
-        if _TPA_SIZE > 1 and _KVP_SIZE > 1:
-            self.num_output_heads = num_heads // _KVP_SIZE
+        if _TPA_SIZE > 1 and get_dcp_group().world_size > 1:
+            self.num_output_heads = num_heads // get_dcp_group().world_size
         else:
             self.num_output_heads = num_heads
 
@@ -670,12 +670,12 @@ def unified_attention_fake(
     value: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    from vllm.distributed.parallel_state import _KVP_SIZE, _TPA_SIZE
+    from vllm.distributed.parallel_state import _TPA_SIZE, get_dcp_group
 
-    if _TPA_SIZE > 1 and _KVP_SIZE > 1:
+    if _TPA_SIZE > 1 and get_dcp_group().world_size > 1:
         # TPA GQA: attention output has fewer heads after DCP combine
         # (heads scattered from TPA-space to TP-space).
-        num_output_heads = query.shape[1] // _KVP_SIZE
+        num_output_heads = query.shape[1] // get_dcp_group().world_size
         return torch.empty(
             query.shape[0],
             num_output_heads,
