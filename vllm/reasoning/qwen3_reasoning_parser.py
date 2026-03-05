@@ -144,16 +144,16 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
             reasoning, _, content = model_output.partition(self.end_token)
             return reasoning, content or None
 
+        if not self.thinking_enabled:
+            # Thinking explicitly disabled — treat everything as content.
+            return None, model_output
+
         # No </think> — check for implicit reasoning end via <tool_call>.
         tool_call_index = model_output.find(self._tool_call_tag)
         if tool_call_index != -1:
             reasoning = model_output[:tool_call_index]
             content = model_output[tool_call_index:]
             return reasoning or None, content or None
-
-        if not self.thinking_enabled:
-            # Thinking explicitly disabled — treat everything as content.
-            return None, model_output
         # Thinking enabled but no </think>: output was truncated.
         # Everything generated so far is reasoning.
         return model_output, None
