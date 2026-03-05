@@ -69,7 +69,6 @@ class SpecDecodeBaseProposer:
         self.method = self.speculative_config.method
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
 
-        self.runner = runner
         self.device = device
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
@@ -415,8 +414,6 @@ class SpecDecodeBaseProposer:
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
         )
-
-        assert self.runner is not None
 
         per_layer_attn_metadata: dict[str, object] = {}
         for attn_group in self.draft_attn_groups:
@@ -841,7 +838,7 @@ class SpecDecodeBaseProposer:
 
     def prepare_next_token_ids_padded(
         self,
-        common_attn_metadata: CommonAttentionMetadata,
+        seq_lens: torch.Tensor,
         sampled_token_ids: torch.Tensor,
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
@@ -856,15 +853,7 @@ class SpecDecodeBaseProposer:
         """
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
-        num_computed_tokens_cpu = gpu_input_batch.num_computed_tokens_cpu_tensor[
-            :num_reqs
-        ]
-        query_lens_cpu = (
-            common_attn_metadata.query_start_loc_cpu[1 : num_reqs + 1]
-            - common_attn_metadata.query_start_loc_cpu[:num_reqs]
-        )
-        seq_lens_cpu = num_computed_tokens_cpu + query_lens_cpu
-        seq_lens_list = seq_lens_cpu.tolist()
+        seq_lens_list = seq_lens[:num_reqs].tolist()
         self.backup_next_token_ids.np[:num_reqs] = np.array(
             [
                 requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i])
