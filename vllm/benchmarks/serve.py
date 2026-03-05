@@ -1321,6 +1321,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         - "slow" will always use the slow tokenizer.\n
         - "mistral" will always use the tokenizer from `mistral_common`.\n
         - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
+        - "qwen_vl" will always use the tokenizer from `qwen_vl`.\n
         - Other custom values can be supported via plugins.""",
     )
     parser.add_argument("--use-beam-search", action="store_true")
