@@ -4,7 +4,6 @@ depends_on:
 steps:
 - label: Basic Models Tests (Initialization)
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -16,7 +15,6 @@ steps:
 
 - label: Basic Models Tests (Extra Initialization) %N
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
@@ -38,6 +36,12 @@ steps:
   - tests/models/test_registry.py
   commands:
     - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
+    
 
 - label: Basic Models Test (Other CPU) # 5min
   depends_on: 

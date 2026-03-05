@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import importlib
 import inspect
 import multiprocessing
@@ -8,6 +9,7 @@ import os
 import signal
 import socket
 import tempfile
+import warnings
 from argparse import Namespace
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -61,6 +63,8 @@ prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
 logger = init_logger("vllm.entrypoints.openai.api_server")
+
+_FALLBACK_SUPPORTED_TASKS: tuple[SupportedTask, ...] = ("generate",)
 
 
 @asynccontextmanager
@@ -152,7 +156,19 @@ async def build_async_engine_client_from_engine_args(
             async_llm.shutdown()
 
 
-def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> FastAPI:
+def build_app(
+    args: Namespace, supported_tasks: tuple["SupportedTask", ...] | None = None
+) -> FastAPI:
+    if supported_tasks is None:
+        warnings.warn(
+            "The 'supported_tasks' parameter was not provided to "
+            "build_app and will be required in a future version. "
+            "Defaulting to ('generate',).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        supported_tasks = _FALLBACK_SUPPORTED_TASKS
+
     if args.disable_fastapi_docs:
         app = FastAPI(
             openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan
@@ -162,10 +178,6 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
     else:
         app = FastAPI(lifespan=lifespan)
     app.state.args = args
-
-    from vllm.entrypoints.openai.basic.api_router import register_basic_api_routers
-
-    register_basic_api_routers(app)
 
     from vllm.entrypoints.serve import register_vllm_serve_api_routers
 
@@ -183,12 +195,30 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
 
     register_sagemaker_api_router(app, supported_tasks)
 
-    if "generate" in supported_tasks:
+    if any(task in supported_tasks for task in ("generate", "render")):
         from vllm.entrypoints.openai.generate.api_router import (
             register_generate_api_routers,
         )
 
         register_generate_api_routers(app)
+
+        from vllm.entrypoints.serve.disagg.api_router import (
+            attach_router as attach_disagg_router,
+        )
+
+        attach_disagg_router(app)
+
+        from vllm.entrypoints.serve.rlhf.api_router import (
+            attach_router as attach_rlhf_router,
+        )
+
+        attach_rlhf_router(app)
+
+        from vllm.entrypoints.serve.elastic_ep.api_router import (
+            attach_router as elastic_ep_attach_router,
+        )
+
+        elastic_ep_attach_router(app)
 
     if "transcription" in supported_tasks:
         from vllm.entrypoints.openai.speech_to_text.api_router import (
@@ -235,6 +265,14 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
     # Add scaling middleware to check for scaling state
     app.add_middleware(ScalingMiddleware)
 
+    if "realtime" in supported_tasks:
+        # Add WebSocket metrics middleware
+        from vllm.entrypoints.openai.realtime.metrics import (
+            WebSocketMetricsMiddleware,
+        )
+
+        app.add_middleware(WebSocketMetricsMiddleware)
+
     if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
         logger.warning(
             "CAUTION: Enabling log response in the API Server. "
@@ -263,9 +301,18 @@ async def init_app_state(
     engine_client: EngineClient,
     state: State,
     args: Namespace,
-    supported_tasks: tuple["SupportedTask", ...],
+    supported_tasks: tuple["SupportedTask", ...] | None = None,
 ) -> None:
     vllm_config = engine_client.vllm_config
+    if supported_tasks is None:
+        warnings.warn(
+            "The 'supported_tasks' parameter was not provided to "
+            "init_app_state and will be required in a future version. "
+            "Please pass 'supported_tasks' explicitly.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        supported_tasks = _FALLBACK_SUPPORTED_TASKS
 
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
@@ -311,7 +358,7 @@ async def init_app_state(
         log_error_stack=args.log_error_stack,
     )
 
-    if "generate" in supported_tasks:
+    if any(task in supported_tasks for task in ("generate", "render")):
         from vllm.entrypoints.openai.generate.api_router import init_generate_state
 
         await init_generate_state(
@@ -423,6 +470,53 @@ def setup_server(args):
     return listen_address, sock
 
 
+async def build_and_serve(
+    engine_client: EngineClient,
+    listen_address: str,
+    sock: socket.socket,
+    args: Namespace,
+    **uvicorn_kwargs,
+) -> asyncio.Task:
+    """Build FastAPI app, initialize state, and start serving.
+
+    Returns the shutdown task for the caller to await.
+    """
+
+    # Get uvicorn log config (from file or with endpoint filter)
+    log_config = get_uvicorn_log_config(args)
+    if log_config is not None:
+        uvicorn_kwargs["log_config"] = log_config
+
+    supported_tasks = await engine_client.get_supported_tasks()
+    logger.info("Supported tasks: %s", supported_tasks)
+
+    app = build_app(args, supported_tasks)
+    await init_app_state(engine_client, app.state, args, supported_tasks)
+
+    logger.info("Starting vLLM server on %s", listen_address)
+
+    return await serve_http(
+        app,
+        sock=sock,
+        enable_ssl_refresh=args.enable_ssl_refresh,
+        host=args.host,
+        port=args.port,
+        log_level=args.uvicorn_log_level,
+        # NOTE: When the 'disable_uvicorn_access_log' value is True,
+        # no access log will be output.
+        access_log=not args.disable_uvicorn_access_log,
+        timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
+        ssl_keyfile=args.ssl_keyfile,
+        ssl_certfile=args.ssl_certfile,
+        ssl_ca_certs=args.ssl_ca_certs,
+        ssl_cert_reqs=args.ssl_cert_reqs,
+        ssl_ciphers=args.ssl_ciphers,
+        h11_max_incomplete_event_size=args.h11_max_incomplete_event_size,
+        h11_max_header_count=args.h11_max_header_count,
+        **uvicorn_kwargs,
+    )
+
+
 async def run_server(args, **uvicorn_kwargs) -> None:
     """Run a single-worker API server."""
 
@@ -444,47 +538,13 @@ async def run_server_worker(
     if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
         ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
 
-    # Get uvicorn log config (from file or with endpoint filter)
-    log_config = get_uvicorn_log_config(args)
-    if log_config is not None:
-        uvicorn_kwargs["log_config"] = log_config
-
     async with build_async_engine_client(
         args,
         client_config=client_config,
     ) as engine_client:
-        supported_tasks = await engine_client.get_supported_tasks()
-        logger.info("Supported tasks: %s", supported_tasks)
-
-        app = build_app(args, supported_tasks)
-        await init_app_state(engine_client, app.state, args, supported_tasks)
-
-        logger.info(
-            "Starting vLLM API server %d on %s",
-            engine_client.vllm_config.parallel_config._api_process_rank,
-            listen_address,
+        shutdown_task = await build_and_serve(
+            engine_client, listen_address, sock, args, **uvicorn_kwargs
         )
-        shutdown_task = await serve_http(
-            app,
-            sock=sock,
-            enable_ssl_refresh=args.enable_ssl_refresh,
-            host=args.host,
-            port=args.port,
-            log_level=args.uvicorn_log_level,
-            # NOTE: When the 'disable_uvicorn_access_log' value is True,
-            # no access log will be output.
-            access_log=not args.disable_uvicorn_access_log,
-            timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
-            ssl_keyfile=args.ssl_keyfile,
-            ssl_certfile=args.ssl_certfile,
-            ssl_ca_certs=args.ssl_ca_certs,
-            ssl_cert_reqs=args.ssl_cert_reqs,
-            ssl_ciphers=args.ssl_ciphers,
-            h11_max_incomplete_event_size=args.h11_max_incomplete_event_size,
-            h11_max_header_count=args.h11_max_header_count,
-            **uvicorn_kwargs,
-        )
-
     # NB: Await server shutdown only after the backend context is exited
     try:
         await shutdown_task

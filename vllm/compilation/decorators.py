@@ -333,7 +333,7 @@ def _support_torch_compile(
     ) -> None:
         def mark_dynamic(arg: torch.Tensor, dims: list[int]) -> None:
             if ds_type == DynamicShapesType.UNBACKED:
-                if is_torch_equal_or_newer("2.10.0.dev"):
+                if is_torch_equal_or_newer("2.10.0"):
                     for dim in dims:
                         torch._dynamo.decorators.mark_unbacked(
                             arg, dim, hint_override=arg.size()[dim]
@@ -373,7 +373,7 @@ def _support_torch_compile(
                     if isinstance(arg, torch.Tensor):
                         # In case dims is specified with negative indexing
                         dims = [arg.ndim + dim if dim < 0 else dim for dim in dims]
-                        if is_torch_equal_or_newer("2.10.0.dev"):
+                        if is_torch_equal_or_newer("2.10.0"):
                             for dim in dims:
                                 torch._dynamo.decorators.mark_unbacked(
                                     arg, dim, hint_override=arg.size()[dim]
@@ -407,10 +407,10 @@ def _support_torch_compile(
         if envs.VLLM_USE_AOT_COMPILE:
             """
             When using torch.compile in AOT mode, we store the cache artifacts
-            under VLLM_CACHE_ROOT/torch_aot_compile/{hash}/rank_i_j. The {hash}
-            contains all of the factors except for the source files being
-            traced through, because we don't actually know which source files
-            to check at this point (before dynamo runs).
+            under VLLM_CACHE_ROOT/torch_compile_cache/torch_aot_compile/{hash}
+            The {hash} contains all of the factors except for the source files
+            being traced through, because we don't actually know which source
+            files to check at this point (before dynamo runs).
             On loading we will actually look at the source files being traced
             through. If any source file have changed (compared with the
             serialized backend artifacts), then we need to generate a new AOT
@@ -424,6 +424,7 @@ def _support_torch_compile(
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT,
+                "torch_compile_cache",
                 "torch_aot_compile",
                 hash_key,
             )
@@ -448,10 +449,15 @@ def _support_torch_compile(
                 self.was_aot_compile_fn_loaded_from_disk = True
             except Exception as e:
                 if os.path.exists(aot_compilation_path):
+                    if isinstance(e, EOFError):
+                        message = "Compile cache file corrupted."
+                    else:
+                        message = str(e)
                     logger.warning(
-                        "Cannot load aot compilation from path %s, error: %s",
+                        "Compiling model again due to a load failure from %s, "
+                        "reason: %s",
                         aot_compilation_path,
-                        str(e),
+                        message,
                     )
                 if envs.VLLM_FORCE_AOT_LOAD:
                     raise e
@@ -460,8 +466,12 @@ def _support_torch_compile(
                     "Directly load AOT compilation from path %s", aot_compilation_path
                 )
                 # Apply partition wrapper context for proper CUDA graph capture
+                from .monitor import end_monitoring_torch_compile
+
                 with maybe_use_cudagraph_partition_wrapper(self.vllm_config):
-                    return self.aot_compiled_fn(self, *args, **kwargs)
+                    output = self.aot_compiled_fn(self, *args, **kwargs)
+                end_monitoring_torch_compile(self.vllm_config)
+                return output
 
         if self.compiled:
             assert (
@@ -525,9 +535,9 @@ def _support_torch_compile(
             fx_config_patches["backed_size_oblivious"] = True
 
         # Prepare inductor config patches
-        # assume_32bit_indexing is only available in torch 2.10.0.dev+
+        # assume_32bit_indexing is only available in torch 2.10.0+
         inductor_config_patches = {}
-        if is_torch_equal_or_newer("2.10.0.dev"):
+        if is_torch_equal_or_newer("2.10.0"):
             inductor_config_patches["assume_32bit_indexing"] = (
                 self.compilation_config.dynamic_shapes_config.assume_32_bit_indexing
             )
@@ -546,18 +556,19 @@ def _support_torch_compile(
                 logger.warning("Detected eager backend, disabling AOT compile.")
                 use_aot_compile = False
             if use_aot_compile:
-                from vllm.compilation.backends import set_on_compilation_complete
-
                 # store the path for saving after warmup
                 self._aot_compilation_path = aot_compilation_path
                 self._aot_cache_dir = cache_dir
-                # set callback in context so it's available when compilation completes
-                with set_on_compilation_complete(self.save_aot_compiled_function):
-                    self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
-                    output = self.aot_compiled_fn(self, *args, **kwargs)
+                self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
+                # All compilation is done at this point, save the AOT artifact.
+                self.save_aot_compiled_function()
+                output = self.aot_compiled_fn(self, *args, **kwargs)
             else:
                 output = TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)  # type: ignore[arg-type]
 
+        from .monitor import end_monitoring_torch_compile
+
+        end_monitoring_torch_compile(self.vllm_config)
         self.compiled = True
         return output
 
@@ -571,11 +582,18 @@ def _support_torch_compile(
             self.aot_compiled_fn and self._aot_compilation_path and self._aot_cache_dir
         )
 
-        logger.info("saving AOT compiled function to %s", self._aot_compilation_path)
         try:
             os.makedirs(self._aot_cache_dir, exist_ok=True)
-            self.aot_compiled_fn.save_compiled_function(self._aot_compilation_path)
-            logger.info("saved AOT compiled function to %s", self._aot_compilation_path)
+            # File saving should be atomic, so we will save to a temporary location
+            # first. Should be upstreamed to PyTorch 2.12 as well.
+            tmp_file = f"{self._aot_compilation_path}.{os.getpid()}.tmp"
+            self.aot_compiled_fn.save_compiled_function(tmp_file)
+            os.replace(tmp_file, self._aot_compilation_path)
+            logger.info_once(
+                "saved AOT compiled function to %s",
+                self._aot_compilation_path,
+                scope="local",
+            )
         except Exception as e:
             logger.warning(
                 "unable to save AOT compiled function to %s: %s",

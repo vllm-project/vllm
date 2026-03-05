@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
-import contextvars
 import dataclasses
 import hashlib
 import json
@@ -18,7 +17,7 @@ from typing import Any
 
 import torch
 import torch.fx as fx
-from torch._dispatch.python import enable_python_dispatcher
+from torch._dynamo.utils import dynamo_timed
 from torch._logging._internal import trace_structured
 
 import vllm.envs as envs
@@ -134,6 +133,7 @@ class CompilerManager:
         self.is_cache_updated = False
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
+        self.loaded_artifacts: dict[str, Any] = {}
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         return self.compiler.compute_hash(vllm_config)
@@ -221,10 +221,28 @@ class CompilerManager:
     ) -> Callable[..., Any] | None:
         if (compile_range, graph_index, self.compiler.name) not in self.cache:
             return None
-        handle = self.cache[(compile_range, graph_index, self.compiler.name)]
+
+        def parse_value(value: Any) -> tuple[tuple[str, str], str]:
+            assert isinstance(value, dict)
+            handle = value["graph_handle"]
+            assert isinstance(handle[0], str)
+            assert isinstance(handle[1], str)
+            cache_key = value["cache_key"]
+            return handle, cache_key
+
+        try:
+            handle, cache_key = parse_value(
+                self.cache[(compile_range, graph_index, self.compiler.name)]
+            )
+        except Exception:
+            # When the cache is outdated, we should ignore the existing file.
+            # This should cause the correct cache to be generated again.
+            return None
+
         compiled_graph = self.compiler.load(
             handle, graph, example_inputs, graph_index, compile_range
         )
+        self.loaded_artifacts[cache_key] = compiled_graph
         logger.debug(
             "Directly load the %s-th graph for compile range %sfrom %s via handle %s",
             graph_index,
@@ -248,7 +266,7 @@ class CompilerManager:
         if graph_index == 0:
             # before compiling the first graph, record the start time
             global compilation_start_time
-            compilation_start_time = time.time()
+            compilation_start_time = time.perf_counter()
 
         compilation_counter.num_backend_compilations += 1
 
@@ -260,8 +278,7 @@ class CompilerManager:
             if graph_index == num_graphs - 1:
                 # after loading the last graph for this shape, record the time.
                 # there can be multiple graphs due to piecewise compilation.
-                now = time.time()
-                elapsed = now - compilation_start_time
+                elapsed = time.perf_counter() - compilation_start_time
                 compilation_config.compilation_time += elapsed
                 logger.info_once(
                     "Directly load the compiled graph(s) for compile range %s "
@@ -282,19 +299,70 @@ class CompilerManager:
             maybe_key += f"{compile_range.start}_{compile_range.end}"
             maybe_key += f"_subgraph_{graph_index}"
         with self.compile_context(compile_range):
-            compiled_graph, handle = self.compiler.compile(
-                graph,
-                example_inputs,
-                additional_inductor_config,
-                compile_range,
-                maybe_key,
-            )
+            # There is a compilation time optimization here.
+            #
+            # If the (input metadata, graph, compiler config) are the same, then
+            # we want to avoid compiling the same artifact again. If we didn't
+            # do this optimization, the backend compilation (InductorAdaptor or
+            # InductorStandaloneAdaptor)
+            # is able to cache hit and produce an artifact faster if it was
+            # already created, but it is still a duplicate artifact that
+            # requires unnecessary things e.g. disk IO.
+            #
+            # The optimization is: If the backend compilation cache hits,
+            # then do an early return from the backend compilation and look up
+            # which of the previous in-memory artifacts we created to reuse.
+            #
+            # We implemented this by monkey-patching torch (torch does not
+            # easily expose the cache_key function), but in the future torch
+            # should expose the cache_key function that we can just call
+            # directly before invoking backend compilation.
+            cache_key = None
+            orig = torch._functorch._aot_autograd.autograd_cache.autograd_cache_key
+
+            def autograd_cache_key(*args, **kwargs):
+                result = orig(*args, **kwargs)
+                if result is None:
+                    return None
+                nonlocal cache_key
+                cache_key = result[0]
+                if cache_key in self.loaded_artifacts:
+                    raise StopCompiling()
+                return result
+
+            from unittest.mock import patch
+
+            with (
+                # Graphs that are isometric (different node names but same
+                # structure) should be treated as the same.
+                torch._functorch.config.patch(autograd_cache_normalize_inputs=True),
+                patch(
+                    "torch._functorch._aot_autograd.autograd_cache.autograd_cache_key",
+                    autograd_cache_key,
+                ),
+            ):
+                try:
+                    compiled_graph, handle = self.compiler.compile(
+                        graph,
+                        example_inputs,
+                        additional_inductor_config,
+                        compile_range,
+                        maybe_key,
+                    )
+                except StopCompiling:
+                    assert cache_key is not None
+                    return self.loaded_artifacts[cache_key]
+            if cache_key is not None and compiled_graph is not None:
+                self.loaded_artifacts[cache_key] = compiled_graph
 
         assert compiled_graph is not None, "Failed to compile the graph"
 
         # store the artifact in the cache
         if is_compile_cache_enabled(additional_inductor_config) and handle is not None:
-            self.cache[(compile_range, graph_index, self.compiler.name)] = handle
+            self.cache[(compile_range, graph_index, self.compiler.name)] = {
+                "graph_handle": handle,
+                "cache_key": cache_key,
+            }
             compilation_counter.num_cache_entries_updated += 1
             self.is_cache_updated = True
             if graph_index == 0:
@@ -313,8 +381,7 @@ class CompilerManager:
 
         # after compiling the last graph, record the end time
         if graph_index == num_graphs - 1:
-            now = time.time()
-            elapsed = now - compilation_start_time
+            elapsed = time.perf_counter() - compilation_start_time
             compilation_config.compilation_time += elapsed
             logger.info_once(
                 "Compiling a graph for compile range %s takes %.2f s",
@@ -324,6 +391,10 @@ class CompilerManager:
             )
 
         return compiled_graph
+
+
+class StopCompiling(BaseException):
+    pass
 
 
 @dataclasses.dataclass
@@ -459,9 +530,9 @@ def wrap_with_cudagraph_if_needed(
 
 class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
     """Code adapted from `torch.fx.passes.shape_prop.ShapeProp`.
-    It runs the given graph with fake inputs, and compile some
-    submodules specified by `compile_submod_names` with the given
-    compilation configs.
+    It runs the given split graph interpreter, and for each submodule in
+    `compile_submod_names`, creates a PiecewiseBackend and compiles all
+    ranges up front.
 
     NOTE: the order in `compile_submod_names` matters, because
     it will be used to determine the order of the compiled piecewise
@@ -489,9 +560,6 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
         vllm_backend: "VllmBackend",
     ) -> None:
         super().__init__(module)
-        from torch._guards import detect_fake_mode
-
-        self.fake_mode = detect_fake_mode()
         self.compile_submod_names = compile_submod_names
         self.compilation_config = vllm_config.compilation_config
         self.vllm_config = vllm_config
@@ -501,13 +569,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
 
     @instrument(span_name="Inductor compilation")
     def run(self, *args: Any) -> Any:
-        # maybe instead just assert inputs are fake?
-        fake_args = [
-            self.fake_mode.from_tensor(t) if isinstance(t, torch.Tensor) else t
-            for t in args
-        ]
-        with self.fake_mode, enable_python_dispatcher():
-            return super().run(*fake_args)
+        return super().run(*args)
 
     def call_module(
         self,
@@ -517,7 +579,9 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
     ) -> Any:
         assert isinstance(target, str)
 
-        output = super().call_module(target, args, kwargs)
+        gm = getattr(self.module, target)
+        outputs = gm.graph.output_node().args[0]
+        output = fx.map_arg(outputs, lambda node: node.meta["example_value"])
 
         if target in self.compile_submod_names:
             index = self.compile_submod_names.index(target)
@@ -560,21 +624,6 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
 # e.g. backbone/eagle_head
 model_tag: str = "backbone"
 model_is_encoder: bool = False
-
-_on_compilation_complete_callback: contextvars.ContextVar[Callable[[], None] | None] = (
-    contextvars.ContextVar("on_compilation_complete_callback", default=None)
-)
-
-
-@contextmanager
-def set_on_compilation_complete(
-    callback: Callable[[], None],
-) -> Generator[None, None, None]:
-    token = _on_compilation_complete_callback.set(callback)
-    try:
-        yield
-    finally:
-        _on_compilation_complete_callback.reset(token)
 
 
 @contextmanager
@@ -793,6 +842,7 @@ class VllmBackend:
             ),
         )
 
+    @dynamo_timed("vllm_backend")
     def __call__(self, graph: fx.GraphModule, example_inputs: Sequence[Any]) -> Any:
         from .caching import (
             VllmSerializableFunction,
@@ -919,7 +969,7 @@ class VllmBackend:
         compilation_counter.num_graphs_seen += 1
         from .monitor import torch_compile_start_time
 
-        dynamo_time = time.time() - torch_compile_start_time
+        dynamo_time = time.perf_counter() - torch_compile_start_time
         logger.info_once(
             "Dynamo bytecode transform time: %.2f s", dynamo_time, scope="local"
         )
@@ -983,10 +1033,23 @@ class VllmBackend:
         ]
 
         # propagate the split graph to the piecewise backend,
-        # compile submodules with symbolic shapes
+        # compile submodules with symbolic shapes, and compile all ranges
+        # up front so that compilation is complete before the callable
+        # is returned.
         PiecewiseCompileInterpreter(
             self.split_gm, submod_names_to_compile, self.vllm_config, self
         ).run(*fake_args)
+
+        # All compilation is done. Save the cache.
+        time_before_saving = time.perf_counter()
+        self.compiler_manager.save_to_file()
+        elapsed = time.perf_counter() - time_before_saving
+        if elapsed > 1:
+            logger.info_once(
+                "Saved compiler manager cache in %.2f seconds.",
+                elapsed,
+                scope="local",
+            )
 
         from torch._guards import detect_fake_mode
 

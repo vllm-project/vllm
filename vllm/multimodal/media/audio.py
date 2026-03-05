@@ -4,6 +4,7 @@ import base64
 from io import BytesIO
 from pathlib import Path
 
+import numpy as np
 import numpy.typing as npt
 import pybase64
 import torch
@@ -22,6 +23,63 @@ try:
     import soundfile
 except ImportError:
     soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
+
+try:
+    import av
+except ImportError:
+    av = PlaceholderModule("av")  # type: ignore[assignment]
+
+
+def extract_audio_from_video_bytes(
+    data: bytes,
+) -> tuple[npt.NDArray, float]:
+    """Extract the audio track from raw video bytes using PyAV.
+
+    PyAV wraps FFmpeg's C libraries in-process — no subprocess is
+    spawned, which is critical to avoid crashing CUDA-active vLLM
+    worker processes.
+
+    The returned waveform is at the native sample rate of the video's
+    audio stream.  Resampling to a model-specific rate is left to the
+    downstream :class:`AudioResampler` in the parsing pipeline.
+
+    Args:
+        data: Raw video file bytes (e.g. from an mp4 file).
+
+    Returns:
+        A tuple of ``(waveform, sample_rate)`` suitable for use as an
+        :class:`AudioItem`.
+    """
+    if data is None or len(data) == 0:
+        raise ValueError(
+            "Cannot extract audio: video bytes are missing or empty. "
+            "Ensure video was loaded with keep_video_bytes=True for "
+            "audio-in-video extraction."
+        )
+    try:
+        with av.open(BytesIO(data)) as container:
+            if not container.streams.audio:
+                raise ValueError("No audio stream found in the video.")
+            stream = container.streams.audio[0]
+            native_sr = stream.rate
+
+            chunks: list[npt.NDArray] = []
+            for frame in container.decode(audio=0):
+                arr = frame.to_ndarray()
+                chunks.append(arr.mean(axis=0) if arr.ndim > 1 else arr)
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(
+            "Invalid or corrupted video data when extracting audio. "
+            "Ensure the input is valid video bytes (e.g. a complete MP4)."
+        ) from e
+
+    if not chunks:
+        raise ValueError("No audio found in the video.")
+
+    audio = np.concatenate(chunks).astype(np.float32)
+    return audio, float(native_sr)
 
 
 class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
