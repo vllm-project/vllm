@@ -167,12 +167,14 @@ class Scheduler(SchedulerInterface):
         # requests skipped in waiting flow due async deps or constraints.
         self.skipped_waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
-        self.rejected: list[Request] = []
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
+
+        # Requests that are rejected due to a full waiting queue.
+        self.rejected: list[Request] = []
 
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
@@ -1473,14 +1475,15 @@ class Scheduler(SchedulerInterface):
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
         # Handle rejected requests.
-        if self.rejected:
+        rejected_reqs = self.rejected
+        if rejected_reqs:
             # Create EngineCoreOutputs for all rejected requests.
-            for request in self.rejected:
+            for request in rejected_reqs:
                 self._append_failed_or_rejected_output(
                     outputs,
                     request,
                 )
-            self.rejected.clear()
+            rejected_reqs.clear()
         # collect KV cache events from KV cache manager
         events = self.kv_cache_manager.take_events()
 
@@ -1733,12 +1736,6 @@ class Scheduler(SchedulerInterface):
         return len(self.running), len(self.waiting) + len(self.skipped_waiting)
 
     def add_request(self, request: Request) -> None:
-        if len(self.waiting) >= self.max_waiting_queue_length:
-            request.status = RequestStatus.FINISHED_REJECTED
-            self.rejected.append(request)
-            if self.log_stats:
-                request.record_event(EngineCoreEventType.REJECTED)
-            return
         existing = self.requests.get(request.request_id)
         if existing is not None:
             update = StreamingUpdate.from_request(request)
@@ -1753,6 +1750,12 @@ class Scheduler(SchedulerInterface):
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         else:
+            if len(self.waiting) >= self.max_waiting_queue_length:
+                request.status = RequestStatus.FINISHED_REJECTED
+                self.rejected.append(request)
+                if self.log_stats:
+                    request.record_event(EngineCoreEventType.REJECTED)
+                return
             if request.resumable:
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)

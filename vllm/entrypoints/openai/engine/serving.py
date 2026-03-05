@@ -175,8 +175,6 @@ class ServeContext(Generic[RequestT]):
 
 class OpenAIServing:
     # Limit rejected log frequency
-    rejected_log_counter: int = 0
-    rejected_log_interval: int = 100
     request_id_prefix: ClassVar[str] = """
     A short string prepended to every request’s ID.
     """
@@ -188,6 +186,8 @@ class OpenAIServing:
         *,
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
+        rejected_log_counter: int = 0,
+        rejected_log_interval: int = 100,
     ):
         super().__init__()
 
@@ -588,15 +588,8 @@ class OpenAIServing:
             )
             raise GenerationError("Internal server error")
         if finish_reason == "rejected":
-            if type(self).rejected_log_counter % type(self).rejected_log_interval == 0:
-                logger.error(
-                    "Request %s was rejected due to "
-                    "a full waiting queue (log every %d requests)",
-                    request_id,
-                    type(self).rejected_log_interval,
-                )
-                type(self).rejected_log_counter = 0
-            type(self).rejected_log_counter += 1
+            if self.request_logger is not None:
+                self.request_logger.log_rejected_request(request_id)
             raise RequestRejectedError("Request was rejected")
 
     def _convert_generation_error_to_response(self, e: Exception) -> ErrorResponse:

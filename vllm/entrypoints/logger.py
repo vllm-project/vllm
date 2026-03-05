@@ -17,7 +17,8 @@ logger = init_logger(__name__)
 class RequestLogger:
     def __init__(self, *, max_log_len: int | None) -> None:
         self.max_log_len = max_log_len
-
+        self.rejected_log_counter = 0
+        self.rejected_log_interval = 100
         if not logger.isEnabledFor(logging.INFO):
             logger.warning_once(
                 "`--enable-log-requests` is set but "
@@ -98,3 +99,17 @@ class RequestLogger:
             output_token_ids,
             finish_reason,
         )
+
+    def log_rejected_request(
+        self,
+        request_id: str,
+    ) -> None:
+        if self.rejected_log_counter % self.rejected_log_interval == 0:
+            logger.error(
+                "Request %s was rejected due to "
+                "a full waiting queue (log every %d requests)",
+                request_id,
+                self.rejected_log_interval,
+            )
+            self.rejected_log_counter = 0
+        self.rejected_log_counter += 1
