@@ -923,3 +923,147 @@ def test_streaming_multiple_tool_calls_not_leaked(kimi_k2_tool_parser):
 
     # Legitimate content preserved
     assert "compare" in full_content.lower() or len(all_content) > 0
+
+
+def test_streaming_regex_does_not_match_across_tool_boundaries(kimi_k2_tool_parser):
+    """
+    CRITICAL TEST for GitHub issue #24478: Verify that the streaming regex
+    patterns correctly use [^<]+ instead of .+ to prevent greedy matching
+    across tool call boundaries.
+
+    This bug caused multiple concatenated tool calls to be incorrectly parsed
+    as a single tool call with a garbled ID like:
+    "functions.get_weather:0<|tool_call_argument_begin|>...get_news:1"
+
+    The fix ensures that [^<]+ excludes '<' characters, stopping the match
+    at the first '<' (the start of the next marker).
+    """
+    # Verify the regex patterns are correctly defined with [^<]+ not .+
+
+    portion_regex = kimi_k2_tool_parser.stream_tool_call_portion_regex
+    name_regex = kimi_k2_tool_parser.stream_tool_call_name_regex
+
+    # Test that the regexes correctly parse tool call IDs without over-matching
+
+    # Case 1: Single tool call - should match correctly
+    single_tool = "functions.get_weather:0 <|tool_call_argument_begin|> {}"
+    match = portion_regex.match(single_tool)
+    assert match is not None
+    assert match.group("tool_call_id") == "functions.get_weather:0"
+    assert "{}" in match.group("function_arguments")
+
+    # Case 2: Tool call portion that would contain markers if using .+
+    # This simulates what could happen if .+ was used and matched across boundaries
+    problematic_input = (
+        "functions.get_weather:0<|tool_call_argument_begin|>"
+        '{"lat": 34}<|tool_call_end|><|tool_call_begin|>functions.get_news:1'
+        "<|tool_call_argument_begin|>"
+        '{"topic": "LA"}'
+    )
+
+    # With the correct [^<]+ pattern, this should NOT match the entire string
+    # because [^<]+ stops at the first '<' character
+    match = portion_regex.match(problematic_input)
+    if match:
+        # If it matches, it should only capture up to the first '<'
+        tool_id = match.group("tool_call_id")
+        # The tool_id should NOT contain special markers
+        assert "<|" not in tool_id, (
+            f"Regex over-matched across tool boundaries! "
+            f"Captured tool_id: {repr(tool_id)}"
+        )
+        assert tool_id == "functions.get_weather:0", (
+            f"Expected 'functions.get_weather:0', got: {repr(tool_id)}"
+        )
+
+    # Case 3: Test stream_tool_call_name_regex similarly
+    name_match = name_regex.match("functions.test:5 ")
+    assert name_match is not None
+    assert name_match.group("tool_call_id") == "functions.test:5"
+
+    # Verify it doesn't over-match when there's a '<' character
+    name_problematic = "functions.test:0<|something|>more"
+    name_match2 = name_regex.match(name_problematic)
+    if name_match2:
+        # Should stop at '<' if using [^<]+
+        captured_id = name_match2.group("tool_call_id")
+        assert "<|" not in captured_id, (
+            f"Name regex over-matched! Captured: {repr(captured_id)}"
+        )
+
+
+def test_streaming_concatenated_tool_calls_issue_24478(kimi_k2_tool_parser):
+    """
+    Regression test for GitHub issue #24478: Multiple tool calls should be
+    correctly parsed in streaming mode, not concatenated into a single
+    malformed tool call.
+
+    This test simulates the exact scenario from the bug report where
+    get_weather and get_news tool calls were being merged together.
+    """
+    kimi_k2_tool_parser.reset_streaming_state()
+
+    section_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_begin|>")
+    section_end_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_end|>")
+    tool_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_call_begin|>")
+    tool_end_id = kimi_k2_tool_parser.vocab.get("<|tool_call_end|>")
+
+    # Simulate the exact bug scenario: concatenated tool calls without spacing
+    # First tool call
+    tool1_id = "functions.get_weather:0"
+    tool1_args_text = '{"latitude": 34.0522, "longitude": -118.2437}'
+    tool1 = (
+        f"<|tool_call_begin|>{tool1_id}"
+        f"<|tool_call_argument_begin|>{tool1_args_text}<|tool_call_end|>"
+    )
+
+    # Second tool call immediately follows (no spacing between them)
+    tool2_id = "functions.get_news:1"
+    tool2_args_text = '{"content": "Los Angeles today"}'
+    tool2 = (
+        f"<|tool_call_begin|>{tool2_id}"
+        f"<|tool_call_argument_begin|>{tool2_args_text}<|tool_call_end|>"
+    )
+
+    deltas = [
+        ("I'll get the weather and news. ", [1, 2, 3]),
+        ("<|tool_calls_section_begin|>", [section_begin_id]),
+        (tool1, [tool_begin_id, 10, 11, 12, tool_end_id]),
+        (tool2, [tool_begin_id, 20, 21, 22, tool_end_id]),
+        ("<|tool_calls_section_end|>", [section_end_id]),
+    ]
+
+    results = run_streaming_sequence(kimi_k2_tool_parser, deltas)
+
+    # Collect all tool calls emitted during streaming
+    all_tool_calls = []
+    for res in results:
+        if res and hasattr(res, "tool_calls") and res.tool_calls:
+            all_tool_calls.extend(res.tool_calls)
+
+    # Verify that we got tool calls for both tools
+    tool_ids_seen = []
+    tool_names_seen = []
+    for tc in all_tool_calls:
+        if hasattr(tc, "id") and tc.id:
+            tool_ids_seen.append(tc.id)
+        if hasattr(tc, "function") and tc.function:
+            func = tc.function
+            if isinstance(func, dict) and "name" in func:
+                tool_names_seen.append(func["name"])
+
+    # CRITICAL: The tool IDs should NOT contain special markers
+    for tid in tool_ids_seen:
+        assert "<|" not in tid, (
+            f"ISSUE #24478 NOT FIXED: Tool ID contains markers: {repr(tid)}"
+        )
+        assert "|>" not in tid, (
+            f"ISSUE #24478 NOT FIXED: Tool ID contains markers: {repr(tid)}"
+        )
+
+    # The parser should have seen both tool calls as separate entities
+    # (The streaming parser processes them one at a time)
+    assert kimi_k2_tool_parser.current_tool_id >= 1, (
+        "Parser did not process multiple tool calls - "
+        f"current_tool_id is {kimi_k2_tool_parser.current_tool_id}"
+    )
