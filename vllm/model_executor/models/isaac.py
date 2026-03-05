@@ -551,7 +551,7 @@ def process_vision_for_patches(
             `(num_images, height, width, channels)` for a batch. Channels are
             expected to be RGB.
         patch_size (`int`):
-            Edge length of square patches; implictly controls resize grid granularity.
+            Edge length of square patches; implicitly controls resize grid granularity.
         max_num_patches (`int`):
             Maximum number of patches allowed after resizing.
         min_num_patches (`int`, *optional*):

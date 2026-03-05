@@ -7,7 +7,6 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from typing import cast
 
-import jinja2
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -56,14 +55,12 @@ class OpenAIServingCompletion(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
-        log_error_stack: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            log_error_stack=log_error_stack,
         )
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
@@ -85,8 +82,7 @@ class OpenAIServingCompletion(OpenAIServing):
         render completion request by validating and preprocessing inputs.
 
         Returns:
-            A list of engine_prompts on success,
-            or an ErrorResponse on failure.
+            A list of engine_inputs on success, or an ErrorResponse on failure.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -110,15 +106,11 @@ class OpenAIServingCompletion(OpenAIServing):
                 "prompt_logprobs is not compatible with prompt embeds."
             )
 
-        try:
-            engine_inputs = await self._preprocess_completion(
-                request,
-                prompt_input=request.prompt,
-                prompt_embeds=request.prompt_embeds,
-            )
-        except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(e)
+        engine_inputs = await self._preprocess_completion(
+            request,
+            prompt_input=request.prompt,
+            prompt_embeds=request.prompt_embeds,
+        )
 
         return engine_inputs
 
@@ -149,11 +141,7 @@ class OpenAIServingCompletion(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        try:
-            lora_request = self._maybe_get_adapters(request)
-        except (ValueError, TypeError, RuntimeError) as e:
-            logger.exception("Error preparing request components")
-            return self.create_error_response(e)
+        lora_request = self._maybe_get_adapters(request)
 
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
@@ -161,64 +149,61 @@ class OpenAIServingCompletion(OpenAIServing):
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
-        try:
-            for i, engine_input in enumerate(engine_inputs):
-                max_tokens = get_max_tokens(
-                    max_model_len,
-                    request.max_tokens,
-                    self._extract_prompt_len(engine_input),
+        for i, engine_input in enumerate(engine_inputs):
+            max_tokens = get_max_tokens(
+                max_model_len,
+                request.max_tokens,
+                self._extract_prompt_len(engine_input),
+                self.default_sampling_params,
+                self.override_max_tokens,
+            )
+
+            sampling_params: SamplingParams | BeamSearchParams
+            if request.use_beam_search:
+                sampling_params = request.to_beam_search_params(
+                    max_tokens, self.default_sampling_params
+                )
+            else:
+                sampling_params = request.to_sampling_params(
+                    max_tokens,
                     self.default_sampling_params,
-                    self.override_max_tokens,
                 )
 
-                sampling_params: SamplingParams | BeamSearchParams
-                if request.use_beam_search:
-                    sampling_params = request.to_beam_search_params(
-                        max_tokens, self.default_sampling_params
-                    )
-                else:
-                    sampling_params = request.to_sampling_params(
-                        max_tokens,
-                        self.default_sampling_params,
-                    )
+            request_id_item = f"{request_id}-{i}"
 
-                request_id_item = f"{request_id}-{i}"
+            self._log_inputs(
+                request_id_item,
+                engine_input,
+                params=sampling_params,
+                lora_request=lora_request,
+            )
 
-                self._log_inputs(
-                    request_id_item,
-                    engine_input,
+            trace_headers = (
+                None
+                if raw_request is None
+                else await self._get_trace_headers(raw_request.headers)
+            )
+
+            if isinstance(sampling_params, BeamSearchParams):
+                generator = self.beam_search(
+                    prompt=engine_input,
+                    request_id=request_id,
                     params=sampling_params,
                     lora_request=lora_request,
+                    trace_headers=trace_headers,
+                )
+            else:
+                generator = self.engine_client.generate(
+                    engine_input,
+                    sampling_params,
+                    request_id_item,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    priority=request.priority,
+                    data_parallel_rank=data_parallel_rank,
                 )
 
-                trace_headers = (
-                    None
-                    if raw_request is None
-                    else await self._get_trace_headers(raw_request.headers)
-                )
-
-                if isinstance(sampling_params, BeamSearchParams):
-                    generator = self.beam_search(
-                        prompt=engine_input,
-                        request_id=request_id,
-                        params=sampling_params,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
-                    )
-                else:
-                    generator = self.engine_client.generate(
-                        engine_input,
-                        sampling_params,
-                        request_id_item,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
-                        priority=request.priority,
-                        data_parallel_rank=data_parallel_rank,
-                    )
-
-                generators.append(generator)
-        except ValueError as e:
-            return self.create_error_response(e)
+            generators.append(generator)
 
         result_generator = merge_async_iterators(*generators)
 
@@ -272,10 +257,6 @@ class OpenAIServingCompletion(OpenAIServing):
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except GenerationError as e:
-            return self._convert_generation_error_to_response(e)
-        except ValueError as e:
-            return self.create_error_response(e)
 
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.
@@ -293,7 +274,7 @@ class OpenAIServingCompletion(OpenAIServing):
     async def completion_stream_generator(
         self,
         request: CompletionRequest,
-        engine_prompts: list[EngineInput],
+        engine_inputs: list[EngineInput],
         result_generator: AsyncIterator[tuple[int, RequestOutput]],
         request_id: str,
         created_time: int,
@@ -326,8 +307,8 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 prompt_text = res.prompt
                 if prompt_text is None:
-                    engine_prompt = engine_prompts[prompt_idx]
-                    prompt_text = self._extract_prompt_text(engine_prompt)
+                    engine_input = engine_inputs[prompt_idx]
+                    prompt_text = self._extract_prompt_text(engine_input)
 
                 # Prompt details are excluded from later streamed outputs
                 if prompt_token_ids is not None:

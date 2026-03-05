@@ -394,6 +394,20 @@ class Platform:
         pass
 
     @classmethod
+    def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Apply the platform-specific default values to the config.
+
+        This function is called during the initialization of global VllmConfig, after
+        parsing cli arguments.
+        It can modify the defaults of the config according to the platform. For example,
+        it can enable custom_ops based on the enabled features.
+
+        The config is passed by reference, so it can be modified in place.
+        """
+        pass
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """
         Check and update the configuration for the current platform.
@@ -637,6 +651,15 @@ class Platform:
     def support_static_graph_mode(cls) -> bool:
         """
         Returns if the graph mode is supported by the current platform.
+        """
+        return False
+
+    @classmethod
+    def use_custom_op_collectives(cls) -> bool:
+        """
+        Whether this platform should use torch.ops.vllm.* custom ops for collectives.
+
+        Returns False by default - platforms must explicitly opt-in.
         """
         return False
 

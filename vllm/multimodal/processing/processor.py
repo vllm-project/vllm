@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Generic, NamedTuple, Protocol, TypeAlias, cast
 
 import regex as re
 import torch
-from typing_extensions import TypeVar, assert_never, deprecated
+from typing_extensions import TypeVar, assert_never
 
 from vllm.inputs import (
     MultiModalEncDecInput,
@@ -991,16 +991,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         self.data_parser = self.info.get_data_parser()
 
-    @property
-    @deprecated("Will be removed in v0.17. Use `info.supported_mm_limits` instead.")
-    def supported_mm_limits(self):
-        return self.info.supported_mm_limits
-
-    @property
-    @deprecated("Will be removed in v0.17. Use `info.allowed_mm_limits` instead.")
-    def allowed_mm_limits(self):
-        return self.info.allowed_mm_limits
-
     def __call__(
         self,
         prompt: str,
@@ -1078,21 +1068,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             unbound_prompt_updates,
             mm_items.get_all_counts(),
         )
-
-        for modality, prompt_updates in mm_prompt_updates.items():
-            for item_idx, item_prompt_updates in enumerate(prompt_updates):
-                if len(item_prompt_updates) > 1:
-                    logger.warning_once(
-                        "Detected %d prompt updates for `mm_items[%r][%s]`. "
-                        "Multiple prompt updates per item is now "
-                        "deprecated and may be removed in v0.13. "
-                        "Instead, please specify dynamic update targets "
-                        "in the same prompt update definition by passing "
-                        "a function to `PromptUpdate.target`.",
-                        len(prompt_updates),
-                        modality,
-                        item_idx,
-                    )
 
         return mm_prompt_updates
 

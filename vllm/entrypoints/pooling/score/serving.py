@@ -31,7 +31,7 @@ from vllm.entrypoints.pooling.score.utils import (
     ScoreInputs,
     _cosine_similarity,
     compress_token_type_ids,
-    compute_maxsim_score,
+    compute_maxsim_scores,
     get_score_prompt,
     parse_score_data_single,
     validate_score_input,
@@ -56,14 +56,15 @@ class ServingScores(OpenAIServing):
         request_logger: RequestLogger | None,
         score_template: str | None = None,
         log_error_stack: bool = False,
+        use_gpu_for_pooling_score: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
-            log_error_stack=log_error_stack,
         )
         self.score_template = score_template
+        self.use_gpu_for_pooling_score = use_gpu_for_pooling_score
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
@@ -306,19 +307,18 @@ class ServingScores(OpenAIServing):
         # Compute MaxSim scores
         from vllm.outputs import PoolingOutput
 
+        maxsim_scores = compute_maxsim_scores(
+            [emb.outputs.data for emb in emb_data_1],
+            [emb.outputs.data for emb in emb_data_2],
+            use_gpu_for_pooling_score=self.use_gpu_for_pooling_score,
+        )
+
         scores: list[PoolingRequestOutput] = []
         padding: list[int] = []
         if (pad_token_id := tokenizer.pad_token_id) is not None:
             padding = [pad_token_id]
 
-        for emb_1, emb_2 in zip(emb_data_1, emb_data_2):
-            # emb_1.outputs.data: [query_len, dim]
-            # emb_2.outputs.data: [doc_len, dim]
-            q_emb = emb_1.outputs.data
-            d_emb = emb_2.outputs.data
-
-            maxsim_score = compute_maxsim_score(q_emb, d_emb)
-
+        for emb_1, emb_2, maxsim_score in zip(emb_data_1, emb_data_2, maxsim_scores):
             tokens = emb_1.prompt_token_ids + padding + emb_2.prompt_token_ids
 
             scores.append(
@@ -506,8 +506,6 @@ class ServingScores(OpenAIServing):
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            return self.create_error_response(e)
 
     async def do_rerank(
         self, request: RerankRequest, raw_request: Request | None = None
@@ -550,8 +548,6 @@ class ServingScores(OpenAIServing):
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            return self.create_error_response(e)
 
     def request_output_to_score_response(
         self,

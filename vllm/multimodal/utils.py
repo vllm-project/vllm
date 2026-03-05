@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import mimetypes
-import warnings
 from collections import defaultdict
 from collections.abc import Generator, Sequence
 from itertools import groupby
@@ -28,23 +27,6 @@ if TYPE_CHECKING:
     import torch.types
 else:
     torch = LazyLoader("torch", globals(), "torch")
-
-
-def __getattr__(name: str):
-    if name == "MEDIA_CONNECTOR_REGISTRY":
-        from .media import MEDIA_CONNECTOR_REGISTRY
-
-        warnings.warn(
-            "`vllm.multimodal.utils.MEDIA_CONNECTOR_REGISTRY` "
-            "has been moved to `vllm.multimodal.media.MEDIA_CONNECTOR_REGISTRY`. "
-            "The old name will be removed in v0.17.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-        return MEDIA_CONNECTOR_REGISTRY
-
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def encode_audio_base64(
