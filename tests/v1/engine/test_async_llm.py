@@ -17,9 +17,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-)
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.inputs import PromptType
@@ -542,11 +539,9 @@ async def test_header_dp_rank_argument():
         # Test 2: Out-of-range DP rank (1)
         mock_raw_request.headers = {"X-data-parallel-rank": "1"}
 
-        # should return ErrorResponse for out-of-range rank
-        response2 = await serving_chat.create_chat_completion(req, mock_raw_request)
-        assert isinstance(response2, ErrorResponse), (
-            "Expected an ErrorResponse for out-of-range DP rank"
-        )
+        # should raise ValueError for out-of-range rank
+        with pytest.raises(ValueError):
+            await serving_chat.create_chat_completion(req, mock_raw_request)
 
 
 @pytest.mark.asyncio
@@ -708,9 +703,7 @@ async def test_pause_resume_basic():
         # Test all modes with no requests in flight
         for mode in ("abort", "wait", "keep"):
             await engine.pause_generation(mode=mode)
-            # "keep" only freezes the scheduler; it does not set _paused
-            if mode != "keep":
-                assert await engine.is_paused()
+            assert await engine.is_paused()
             await engine.resume_generation()
             assert not await engine.is_paused()
 
@@ -806,6 +799,53 @@ async def test_pause_abort():
         final_output2 = await asyncio.wait_for(gen_task2, timeout=10.0)
         assert request_completed
         assert final_output2.finished
+
+
+@pytest.mark.asyncio
+async def test_pause_then_abort_queued_request():
+    """Test that aborting a request that was submitted while paused (in
+    _paused_adds_queue) aborts it and notifies the client; the request does
+    not run after resume.
+    """
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        request_id = "abort-queued-request"
+        sampling_params = SamplingParams(max_tokens=20, ignore_eos=True)
+        outputs: list[RequestOutput] = []
+
+        # Pause first so the next add goes to _paused_adds_queue
+        await engine.pause_generation(mode="keep")
+        assert await engine.is_paused()
+
+        async def gen():
+            async for out in engine.generate(
+                request_id=request_id,
+                prompt=TEXT_PROMPT,
+                sampling_params=sampling_params,
+            ):
+                outputs.append(out)
+            return outputs[-1] if outputs else None
+
+        gen_task = asyncio.create_task(gen())
+
+        # Give the request time to reach the engine and sit in _paused_adds_queue
+        await asyncio.sleep(0.2)
+
+        # Abort the queued request
+        await engine.abort(request_id, internal=False)
+
+        # Resume so the engine can process and deliver the abort output
+        await engine.resume_generation()
+
+        final_output = await asyncio.wait_for(gen_task, timeout=10.0)
+        assert final_output is not None
+        assert final_output.finished
+        assert final_output.outputs[0].finish_reason == "abort"
+        # Request was never run, so no tokens
+        assert len(final_output.outputs[0].token_ids) == 0
 
 
 @pytest.mark.asyncio

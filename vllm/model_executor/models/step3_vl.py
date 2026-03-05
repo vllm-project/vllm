@@ -459,14 +459,14 @@ class Step3VLProcessor:
             image_inputs = {}
             text_inputs = self.tokenizer(text)
         else:
-            splitted_images_data = self._split_images(images)
+            split_images_data = self._split_images(images)
             pixel_values_lst = []
             patch_pixel_values_lst = []
             patch_newline_mask_lst = []
             image_repl_str_lst = []
             image_repl_ids_lst = []
             num_patches = []
-            for raw_img, img_patches, patch_newline_mask in splitted_images_data:
+            for raw_img, img_patches, patch_newline_mask in split_images_data:
                 pixel_values_lst.extend(self._convert_images_to_pixel_values([raw_img]))
 
                 if len(img_patches) > 0:
@@ -564,12 +564,12 @@ class Step3VLDummyInputsBuilder(BaseDummyInputsBuilder[Step3VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(

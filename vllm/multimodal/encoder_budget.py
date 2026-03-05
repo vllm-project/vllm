@@ -181,7 +181,7 @@ class MultiModalBudget:
 
     def get_modality_with_max_tokens(self) -> str:
         mm_max_toks_per_item = self.mm_max_toks_per_item
-        modality, _ = max(mm_max_toks_per_item.items(), key=lambda x: x[1])
+        modality, _ = max(mm_max_toks_per_item.items(), key=lambda x: (x[1], x[0]))
 
         return modality
 
