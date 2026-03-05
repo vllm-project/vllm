@@ -1475,7 +1475,7 @@ class Scheduler(SchedulerInterface):
         if rejected_reqs:
             # Create EngineCoreOutputs for all rejected requests.
             for request in rejected_reqs:
-                self._append_failed_or_rejected_output(outputs, request, rejected=True)
+                self._append_failed_or_rejected_output(outputs, request)
             rejected_reqs.clear()
         # collect KV cache events from KV cache manager
         events = self.kv_cache_manager.take_events()
@@ -1559,7 +1559,6 @@ class Scheduler(SchedulerInterface):
         self,
         outputs: dict[int, list[EngineCoreOutput]],
         request: "Request",
-        rejected: bool = False,
     ) -> None:
         """
         Appends an EngineCoreOutput for a failed KV load or rejected request.
@@ -1572,12 +1571,9 @@ class Scheduler(SchedulerInterface):
             finish_reason=request.get_finished_reason(),
             events=request.take_events(),
             trace_headers=request.trace_headers,
+            stop_reason=request.stop_reason,
+            num_cached_tokens=request.num_cached_tokens,
         )
-        if rejected:
-            output.stop_reason = request.stop_reason
-        else:
-            output.num_cached_tokens = request.num_cached_tokens
-
         outputs[request.client_index].append(output)
 
     def _handle_stopped_request(self, request: Request) -> bool:
