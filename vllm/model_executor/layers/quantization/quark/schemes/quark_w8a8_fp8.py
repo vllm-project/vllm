@@ -15,8 +15,8 @@ from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     kFp8DynamicTokenSym,
+    kFp8StaticChannelSym,
     kFp8StaticTensorSym,
-    kFp8StaticTokenSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     normalize_e4m3fn_to_e4m3fnuz,
@@ -54,7 +54,7 @@ class QuarkW8A8Fp8(QuarkScheme):
             kFp8DynamicTokenSym if per_token_activation else kFp8StaticTensorSym
         )
         self.weight_quant_key = (
-            kFp8StaticTokenSym if per_token_weight else kFp8StaticTensorSym
+            kFp8StaticChannelSym if per_token_weight else kFp8StaticTensorSym
         )
         self.out_dtype = torch.get_default_dtype()
 
