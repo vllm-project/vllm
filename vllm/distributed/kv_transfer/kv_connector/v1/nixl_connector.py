@@ -308,7 +308,13 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 class NixlConnector(KVConnectorBase_V1, SupportsHMA):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
-        return False
+        if any([
+            isinstance(group.kv_cache_spec, MambaSpec)
+            for group in self.kv_cache_config.kv_cache_groups
+        ]):
+            # Hybrid SSM models do not yet support cross-layer layout
+            return False
+
         backend = get_current_attn_backend(self._vllm_config)
         if backend.get_name() not in (
             "FLASH_ATTN",
@@ -334,14 +340,9 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, role, kv_cache_config)
-        # print(f"{kv_cache_config=}\n\n")
-        for i, group in enumerate(kv_cache_config.kv_cache_groups):
-            print(
-                f"Group {i}: {group.layer_names[:2]=} (..{len(group.layer_names)} layers), {group.kv_cache_spec=} \n"
-            )
-
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
+        self.kv_cache_config = kv_cache_config
         # for group in kv_cache_config.kv_cache_groups:
         # if isinstance(group.kv_cache_spec, MambaSpec):
         # raise ValueError("NixlConnector does not support Mamba models.")
@@ -955,7 +956,6 @@ class NixlConnectorWorker:
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
         )
         self.kv_cache_config = kv_cache_config
-        # TODO maybe move to topo?
         self._layer_specs = {
             layer: group.kv_cache_spec
             for group in kv_cache_config.kv_cache_groups
@@ -993,7 +993,6 @@ class NixlConnectorWorker:
                 ssm_shape.numel() * ssm_nbytes,
             )
         self._mamba_ssm_size = mamba_ssm_size
-        print(f"{mamba_ssm_size=}\n\n")
 
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
@@ -1124,9 +1123,9 @@ class NixlConnectorWorker:
 
         # Get the attention backend from the first layer
         # NOTE (NickLucche) models with multiple backends are not supported yet
-        self.attn_backend = get_current_attn_backend(vllm_config)
+        self.attn_backends = get_current_attn_backends(vllm_config)
+        self.backend_name = self.attn_backends[0].get_name()
 
-        self.backend_name = self.attn_backend.get_name()
         self.kv_cache_layout = get_kv_cache_layout()
         self.host_buffer_kv_cache_layout = self.kv_cache_layout
         logger.info("Detected attention backend %s", self.backend_name)
@@ -1450,17 +1449,16 @@ class NixlConnectorWorker:
             remote_block_size=self._block_size,  # shared state
             is_mla=self.use_mla,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
-            attn_backend=self.attn_backend,
+            attn_backends=self.attn_backends,
+            # SSM States come in tuples (ssm, conv)
             tensor_shape=next(iter(kv_caches.values())).shape
             if not self._is_mamba
             else None,
+            is_mamba=self._is_mamba,
         )
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config, self.backend_name, self.kv_topo.cross_layers_blocks
         )
-        # TODO when MAMBA is present, we should assume all backends to behave like FI! Strides are
-        # re-adjusted so its num_blocks first!
-        # hybrid ssm requires the layout of attention to be (num_blocks, 2, hidden_size) so that the blocks can be shared between attention layers and mamba layers
 
         if self.use_host_buffer:
             self.initialize_host_xfer_buffer(kv_caches=kv_caches)
@@ -1500,88 +1498,69 @@ class NixlConnectorWorker:
 
         # Enable different block lengths for different layers *only* when MLA is used.
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
+        # TODO (NickLucche) We should refactor this MLA DSv32 Indexer case with HMA.
         self.block_len_per_layer = list[int]()
         for layer_name, cache_or_caches in xfer_buffers.items():
-            # Ok I see, for FA we shouldnt split..or I think actually this is fine UNLESS is_kv_layout_blocks_first (flashinfer)
-            # in that case we split only for mamba models
-            # layer_name='model.layers.5.self_attn.attn', [torch.Size([18525, 400, 4, 128]), torch.Size([18525, 400, 4, 128])]
-            print(f"{self.vllm_config.attention_config.backend=}\n\n")
-
+            # NOTE (NickLucche) Hybrid SSM models assume a layout that is similar to 
+            # that of FI, with block laid out as in `get_backend_aware_kv_block_len`.
+            # However, physical page_size may differ when kernel requires a specific 
+            # block size. This leads to SSM and FA layers having different num_blocks.
+            # `_physical_blocks_per_logical_kv_block` ratio is used to adjust for this.
             layer_spec = self._layer_specs[layer_name]
             cache_list = self.kv_topo.get_transfer_cache_regions(
                 cache_or_caches, layer_spec
             )
+            # `layer_spec.page_size_bytes` only accounts for logical page_size, that is
+            # the page_size assuming constant `self._logical_num_blocks`.
             page_size = (
                 layer_spec.page_size_bytes
                 if isinstance(layer_spec, MambaSpec)
                 else layer_spec.page_size_bytes
                 // self._physical_blocks_per_logical_kv_block
             )
-            # FIXME tmp assert
+            num_blocks = (
+                self._logical_num_blocks
+                if isinstance(layer_spec, MambaSpec)
+                else self.num_blocks
+            )
+            # `page_size`` accounts for physical blocks, st KVCache is always [`num_blocks` * `page_size`]
             if not isinstance(layer_spec, MambaSpec):
-                print(
-                    layer_spec.page_size_bytes,
-                    self._layer_specs["model.layers.0.mixer"].page_size_bytes,
-                    "\n\n\n",
-                    flush=True,
-                )
-                # NOTE THIS DOES NOT ACCOUNT FOR PHYSICAL BLOCKS
-                assert (
-                    layer_spec.page_size_bytes
-                    == self._layer_specs["model.layers.0.mixer"].page_size_bytes
-                )
+                # TODO check if this works for DSv32
                 self.block_len_per_layer.append(page_size)
+            curr_tensor_size_bytes = num_blocks * page_size
+            if tensor_size_bytes is None:
+                tensor_size_bytes = curr_tensor_size_bytes
 
             print(f"{layer_name=}, {[v.shape for v in cache_list]}")
             print(f"{layer_name=} strides, {[v.stride() for v in cache_list]}")
+
             # TODO (NickLucche) we could eventually unify how we handle FA/FI regions,
             # registering a single tensor for both K/V and splitting logically like FI.
             for cache in cache_list:
                 base_addr = cache.data_ptr()
-                # SS+Conv actually share the same tensor but with different offseted views, so base addr is
-                # different. This shouldnt matter for our purposes I think, just registering regions with different
-                # sizes
                 if base_addr in seen_base_addresses:
                     # NOTE (NickLucche) HMA employs memory pooling to share tensors
                     # across groups. This results in skipping all tensors but the ones
                     # pointed to by group0. Also, generally we will have more blocks
                     # per tensor but fewer regions.
-                    print("Skipping", layer_name, "because it's already seen")
+                    logger.debug("Skipping", layer_name, "because it's already seen")
                     continue
                 logger.debug(
                     "Registering layer %s with cache shape: %s", layer_name, cache.shape
                 )
                 seen_base_addresses.append(base_addr)
-                # page_size_bytes = prod(cache.shape[1:])*element_size, but it also
-                # counts *padding* for tensors that do not expose it in .shape (Mamba).
-                # (2,) num_blocks, H,N,D=>HND for FA 2*NHD for FI
 
-                num_blocks = (
-                    self._logical_num_blocks
-                    if isinstance(layer_spec, MambaSpec)
-                    else self.num_blocks
-                )
                 assert cache.shape[0] == num_blocks, (
                     "All kv cache tensors must have the same number of blocks"
                 )
 
-                # NOTE (NickLucche) page_size accounts for physical blocks, ie KVCache is always [`num_blocks` * `page_size`]
-                curr_tensor_size_bytes = num_blocks * page_size
-                if tensor_size_bytes is None:
-                    tensor_size_bytes = curr_tensor_size_bytes
-
                 print(f"{curr_tensor_size_bytes=}, {page_size=}\n\n")
-                # [(2,)NHD] FA, [conv*ssm] for mamba ==> conv*ssm == NHD as num_blocks is the same
-                # self.block_len_per_layer.append(page_size)
-                # print(f"{self.block_len_per_layer[-1]=} \n")
-                print(f"{tensor_size_bytes=}, {curr_tensor_size_bytes=}\n\n")
                 if not self.use_mla:
                     # Different kv cache shape is not supported by HeteroTP.
                     # This must also hold true for Mamba-like models.
                     assert tensor_size_bytes == curr_tensor_size_bytes, (
                         "All kv cache tensors must have the same size"
-                    )  # entails self.block_len_per_layer has only one value
-
+                    )
                 # Need to make sure the device ID is non-negative for NIXL,
                 # Torch uses -1 to indicate CPU tensors.
                 self.device_id = max(cache.get_device(), 0)
@@ -1603,8 +1582,9 @@ class NixlConnectorWorker:
             flush=True,
         )
         # TODO (NickLucche) Adapt to different descs views (engine_id->tp_rank) to
-        # support heterogeneous TP. `seen_base_addresses*num_blocks=num_descs`.
-        # Doubling for when a region is registered packed and unpacked with descs.
+        # support heterogeneous TP. 
+        # `seen_base_addresses*num_blocks=num_descs` we register below.
+        # x2 factor is for when a region is registered packed or unpacked with descs.
         self.num_descs = (
             len(seen_base_addresses)
             * self.num_blocks
@@ -2435,10 +2415,6 @@ class NixlConnectorWorker:
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
                 remote_rank
             ]
-            print(
-                f"READ BLOCKS REQUEST: {req_id}, {meta.local_physical_block_ids=}, {meta.remote.block_ids=}\n\n",
-                flush=True,
-            )
             self._read_blocks(
                 request_id=req_id,
                 dst_engine_id=meta.remote.engine_id,
@@ -2634,7 +2610,6 @@ class NixlConnectorWorker:
         When HMA is enabled number of descriptors across kv cache groups might differ.
         A single flattened array is returned for all groups anyway.
         """
-        # print(f"get_block_descs_ids input: {block_ids=}\n")
         region_ids = np.arange(self.num_regions)
 
         # NOTE (NickLucche) With HMA, every kv group has the same number of layers and
@@ -2643,7 +2618,6 @@ class NixlConnectorWorker:
         # same for [3], but group0-group1 blocks will always differ (different areas).
         # Therefore we can just flatten the block_ids and compute the descs ids for all
         # groups at once.
-        # FIXME use mamba one
         num_blocks = self.dst_num_blocks[engine_id]
         if block_size_ratio is not None:
             num_blocks = int(num_blocks * block_size_ratio)
@@ -2655,7 +2629,6 @@ class NixlConnectorWorker:
         if not self._is_mamba:
             block_ids = np.concatenate(block_ids)[None, :]
             descs_ids = region_ids * num_blocks + block_ids
-            # print(f"get_block_descs_ids output: {descs_ids=}\n\n", flush=True)
             return descs_ids.flatten()
         else:
             # NOTE (NickLucche) SSM and Attention blocks regions can be exchanged

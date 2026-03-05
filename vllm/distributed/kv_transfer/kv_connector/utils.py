@@ -348,31 +348,29 @@ class TpKVTopology:
     remote_tp_size: dict[EngineId, int]
     is_mla: bool
     total_num_kv_heads: int
-    attn_backend: type[AttentionBackend]
+    attn_backends: list[type[AttentionBackend]]
     engine_id: EngineId
     remote_block_size: dict[EngineId, int]
     tensor_shape: torch.Size | None = None
+    is_mamba: bool = False
 
     def __post_init__(self):
         # Figure out whether the first dimension of the cache is K/V
         # or num_blocks. This is used to register the memory regions correctly.
         _MOCK_BLOCK_SIZE = 16
-        # FIXME Wont work with as kv cache shape is not implemented for mamba
-        print(f"{self.attn_backend=}")
-        # kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-        #     num_blocks=1, block_size=_MOCK_BLOCK_SIZE, num_kv_heads=1, head_size=1
-        # )
-        # logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
+        kv_cache_shape: tuple[int, ...] = self.attn_backends[0].get_kv_cache_shape(
+            num_blocks=1, block_size=_MOCK_BLOCK_SIZE, num_kv_heads=1, head_size=1
+        )
+        logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
         # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
         # we just mock num_blocks to 1 for the dimension check below.
-        # self._is_kv_layout_blocks_first = (
-        #     len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
-        # )
+        self._is_kv_layout_blocks_first = (
+            len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
+        )
         # FIXME to patch only once when mamba is detected. Basically we treat all backends as nb, 2, ...
-        self._is_kv_layout_blocks_first = True
+        # self._is_kv_layout_blocks_first = True
 
         self._cross_layers_blocks = False
-        # self._physical_block_size_position = 0
         if self.tensor_shape is not None:
             self._cross_layers_blocks = (
                 len(self.tensor_shape) == len(kv_cache_shape) + 1
@@ -396,7 +394,8 @@ class TpKVTopology:
 
     @property
     def is_kv_layout_blocks_first(self) -> bool:
-        return self._is_kv_layout_blocks_first
+        # Hybrid SSM models assume a single blocks_first layout
+        return self.is_mamba or self._is_kv_layout_blocks_first
 
     @property
     def split_k_and_v(self) -> bool:
@@ -509,20 +508,22 @@ class TpKVTopology:
     def get_transfer_cache_regions(
         self, cache: torch.Tensor, layer_spec: "KVCacheSpec"
     ) -> list[torch.Tensor] | torch.Tensor:
-        # TODO docs
+        """Return the cache tensor(s) to register as NIXL memory regions,
+        also accounting for hybrid SSM models specificities.
+        """
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
         if isinstance(layer_spec, MambaSpec):
             # Register the whole kv cache shared tensor, including SSM/Conv. This is
             # similar to FI with the difference that SSM/Conv have different sizes
             ssm, conv = cache
             return [ssm]
 
-        # FIXME check if *any* of the backends are mamba
-        _is_mamba = True
-        # if _is_mamba and backends[layer] == AttentionBackendEnum.FLASH_ATTN:
-        if True:
-            # assuming FA for now in this branch, we want to treat it like FI and register the whole tensor.
-            #  Stride is already adjusted by manager. Shape's not.
-            # swap [2<>num_blocks, block_size, num_kv_heads, head_size] to match FI
+        # TODO (NickLucche) generalize check to non-natively blocks-first backends.
+        if self.is_mamba and any(backend==FlashAttentionBackend for backend in self.attn_backends):
+            # When MAMBA is present, all backends are blocks first, so that blocks
+            # can be shared between attention layers and mamba layers. KV manager 
+            # already adjusted strides for FlashAttn so its num_blocks first.
+            # Swap [2<>num_blocks] dims to get required layout for hybrid SSM.
             cache = cache.transpose(0, 1)
 
         # Regular case: backends like FA register K/V in separate regions
