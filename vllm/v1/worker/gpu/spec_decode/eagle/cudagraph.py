@@ -32,9 +32,7 @@ class EagleCudaGraphManager(CudaGraphManager):
             "EagleCudaGraphManager does not support PIECEWISE mode yet"
         )
         # Eagle always uses uniform decode with query_len=1
-        super().__init__(
-            vllm_config, device, cudagraph_mode, uniform_decode_query_len=1
-        )
+        super().__init__(vllm_config, device, cudagraph_mode, decode_query_len=1)
         self.draft_tokens = draft_tokens
 
     def capture(
