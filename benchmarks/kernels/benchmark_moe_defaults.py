@@ -131,7 +131,7 @@ def benchmark_config(
                 topk_ids,
                 quant_config=quant_config,
             )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Benchmark
     start = torch.cuda.Event(enable_timing=True)
@@ -149,7 +149,7 @@ def benchmark_config(
                 quant_config=quant_config,
             )
     end.record()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     return start.elapsed_time(end) / num_iters * 1000  # ms -> us
 
 

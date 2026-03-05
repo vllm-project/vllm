@@ -391,7 +391,7 @@ def _run_single_benchmark(
                 attn_metadata,
                 output=out,
             )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Benchmark
     times = []
@@ -412,7 +412,7 @@ def _run_single_benchmark(
             )
         end.record()
 
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         elapsed_ms = start.elapsed_time(end)
         times.append(elapsed_ms / 1000.0 / config.num_layers)  # seconds per layer
 

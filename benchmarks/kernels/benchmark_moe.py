@@ -304,19 +304,19 @@ def benchmark_config(
 
     # JIT compilation & warmup
     run()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Capture 10 invocations with CUDA graph
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         for _ in range(10):
             run()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Warmup
     for _ in range(5):
         graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     start_event = torch.Event(enable_timing=True)
     end_event = torch.Event(enable_timing=True)
@@ -324,7 +324,7 @@ def benchmark_config(
     latencies: list[float] = []
     for i in range(num_iters):
         prepare(i)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         start_event.record()
         graph.replay()
