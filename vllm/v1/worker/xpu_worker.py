@@ -15,7 +15,7 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.workspace import init_workspace_manager
-from vllm.v1.worker.xpu_model_runner import XPUModelRunner
+from vllm.v1.worker.xpu_model_runner import XPUModelRunner, XPUModelRunnerV2
 
 from .utils import request_memory
 
@@ -105,7 +105,8 @@ class XPUWorker(Worker):
         init_workspace_manager(self.device, num_ubatches)
 
         # Construct the model runner
-        self.model_runner = XPUModelRunner(  # type: ignore
+        model_runner = XPUModelRunnerV2 if self.use_v2_model_runner else XPUModelRunner
+        self.model_runner = model_runner(  # type: ignore
             self.vllm_config, self.device
         )
 
