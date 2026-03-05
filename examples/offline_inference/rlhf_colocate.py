@@ -88,7 +88,7 @@ class RayTrainingActor:
         # Zero out all the parameters.
         for name, p in self.model.named_parameters():
             p.data.zero_()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         # The argument for `get_device_uuid` is the index of the GPU in the
         # list of visible devices.
         from vllm.platforms import current_platform
@@ -151,7 +151,7 @@ class RayTrainingActor:
                     p.data.view(-1).view(dtype=torch.uint8), non_blocking=True
                 )
                 offset += get_size(p)
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             s.send_pyobj(named_tensors)
             s.recv()
         s.send_pyobj(None)

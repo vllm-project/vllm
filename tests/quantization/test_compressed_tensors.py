@@ -196,7 +196,7 @@ def test_compressed_tensors_w8a8_logprobs(
     )
 
     if current_platform.is_rocm():
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
 
 def test_compressed_tensors_no_enforce_eager(vllm_runner):

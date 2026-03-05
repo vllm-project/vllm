@@ -120,7 +120,7 @@ class ColocateWorkerExtension:
                 process_weights_after_loading(
                     self.model_runner.model, self.model_config, self.device
                 )
-                torch.cuda.synchronize()
+                torch.accelerator.synchronize()
                 socket.send(b"")
                 break
             if isinstance(payload, tuple):
@@ -144,7 +144,7 @@ class ColocateWorkerExtension:
                 weights.append((item["name"], tensor))
             self.model_runner.model.load_weights(weights=weights)
             del weights
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             socket.send(b"")
 
         socket.close()

@@ -9,6 +9,7 @@ import regex as re
 # --------------------------------------------------------------------------- #
 _TORCH_CUDA_PATTERNS = [
     r"\btorch\.cuda\.empty_cache\b",
+    r"\btorch\.cuda\.synchronize\b",
 ]
 
 ALLOWED_FILES = {"vllm/platforms/", "vllm/device_allocator/"}

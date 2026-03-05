@@ -622,7 +622,7 @@ def rearrange_expert_weights_inplace(
 
     # NOTE(bowen): We need this synchronize to run, but I don't know why.
     # If you figure out the reason, please let me know -- thank you!
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     old_global_expert_indices_cpu = old_global_expert_indices.cpu().numpy()
     new_global_expert_indices_cpu = new_global_expert_indices.cpu().numpy()

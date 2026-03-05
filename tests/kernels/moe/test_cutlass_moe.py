@@ -399,9 +399,9 @@ def test_cutlass_moe_8_bit_cuda_graph(
                 mt, topk_weights, topk_ids, per_act_token, per_out_ch
             )
 
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         torch.testing.assert_close(triton_output, cutlass_output, atol=9e-2, rtol=1e-2)
 

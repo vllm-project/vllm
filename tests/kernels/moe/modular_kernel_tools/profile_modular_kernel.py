@@ -34,7 +34,7 @@ def do_profile(
         record_shapes=True,
     ) as tprof:
         fn(**fn_kwargs)
-        torch.cuda.synchronize(torch.cuda.current_device())
+        torch.accelerator.synchronize(torch.cuda.current_device())
 
     # TODO (varun): Add a descriptive trace file name
     tprof.export_chrome_trace(

@@ -57,7 +57,7 @@ def test_gather_cache_oob():
         seq_starts,
     )
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert True
 
 

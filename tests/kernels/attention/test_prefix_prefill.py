@@ -239,7 +239,7 @@ def test_contexted_kv_attention(
         v_scale,
         sliding_window=sliding_window,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     start_time = time.time()
     op(
         query,
@@ -258,7 +258,7 @@ def test_contexted_kv_attention(
         v_scale,
         sliding_window=sliding_window,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     end_time = time.time()
     print(f"triton Time: {(end_time - start_time) * 1000:.2f} ms")
 
@@ -298,7 +298,7 @@ def test_contexted_kv_attention(
         dropout_p=0.0,
         scale=scale,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     start_time = time.time()
     output_ref = F.scaled_dot_product_attention(
         query_sdpa,
@@ -308,7 +308,7 @@ def test_contexted_kv_attention(
         dropout_p=0.0,
         scale=scale,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     end_time = time.time()
     print(f"PyTorch SDPA Time: {(end_time - start_time) * 1000:.2f} ms")
 
@@ -482,7 +482,7 @@ def test_contexted_kv_attention_alibi(
         v_scale,
         alibi_slopes=alibi_slopes,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     start_time = time.time()
     op(
         query,
@@ -501,7 +501,7 @@ def test_contexted_kv_attention_alibi(
         v_scale,
         alibi_slopes=alibi_slopes,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     end_time = time.time()
     print(f"triton Time: {(end_time - start_time) * 1000:.2f} ms")
     scale = float(1.0 / (head_size**0.5))
@@ -517,7 +517,7 @@ def test_contexted_kv_attention_alibi(
 
     output_ref = torch.empty_like(output)
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     start_time = time.time()
 
     query_start = 0
@@ -572,7 +572,7 @@ def test_contexted_kv_attention_alibi(
         query_start = query_end
         key_start = key_end
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     end_time = time.time()
     print(f"PyTorch SDPA Time: {(end_time - start_time) * 1000:.2f} ms")
     atol = 1e-3 if "fp8" in kv_cache_dtype else 1e-6

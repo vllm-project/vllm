@@ -95,7 +95,7 @@ If GPU/CPU communication cannot be established, you can use the following Python
     torch.cuda.set_device(local_rank)
     data = torch.FloatTensor([1,] * 128).to("cuda")
     dist.all_reduce(data, op=dist.ReduceOp.SUM)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     value = data.mean().item()
     world_size = dist.get_world_size()
     assert value == world_size, f"Expected {world_size}, got {value}"

@@ -94,7 +94,7 @@ def create_logits(
 
 def measure_memory() -> tuple[int, int]:
     """Return (allocated, reserved) memory in bytes."""
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     return torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated()
 
 
@@ -123,7 +123,7 @@ def benchmark_function(
     for _ in range(warmup_iters):
         logits_copy = logits.clone()
         func(logits_copy, k, p)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Reset memory stats before benchmark
     reset_memory_stats()
@@ -140,7 +140,7 @@ def benchmark_function(
         func(logits_copy, k, p)
         end_events[i].record()
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Calculate timing
     times = [

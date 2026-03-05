@@ -217,7 +217,7 @@ class ElasticEPScalingExecutor:
                 dp_group=standby_dp_group,
                 expert_weights=model.expert_weights,
             )
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
     def broadcast_expert_mapping(self) -> None:
         standby_dp_group = get_standby_dp_group()
@@ -407,7 +407,7 @@ class ElasticEPScalingExecutor:
             reset_compile_wrapper(self.worker.model_runner.get_model())
 
         gc.collect()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
         unlock_workspace()
         self.worker.compile_or_warm_up_model()
@@ -446,7 +446,7 @@ class ElasticEPScalingExecutor:
 
             eplb_state.rearrange(rank_mapping=rank_mapping)
         # NOTE(yongji): check whether we need to synchronize here
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         # reset expert_rearrangement_step to ensure all ranks are synchronized
         eplb_state.expert_rearrangement_step = 0
         eplb_state.num_valid_physical_experts = (
@@ -491,7 +491,7 @@ class ElasticEPScalingExecutor:
             dp_group=dp_group,
             expert_weights=model.expert_weights,
         )
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
     def receive_expert_mapping(self) -> tuple[torch.Tensor, int, int]:
         dp_group = get_dp_group()
