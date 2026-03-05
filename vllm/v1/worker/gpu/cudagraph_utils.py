@@ -13,6 +13,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -21,6 +22,8 @@ from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
+
+logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -100,21 +103,17 @@ class CudaGraphManager:
         descs_by_mode = defaultdict(list)
 
         for padded in capture_sizes:
+            # Capture decode specfifc graphs if required (i.e. separate decode routine)
             if (
                 decode_mode != CUDAGraphMode.NONE
                 and self.uniform_decode_query_len <= padded <= max_decode_tokens
+                and separate_decode_routine
             ):
                 desc = BatchExecutionDescriptor(
                     cg_mode=decode_mode,
                     num_tokens=padded,
                     num_reqs=padded // self.uniform_decode_query_len,
-                    # if separate decode routine, we assume the decode graphs needs
-                    # to be uniform (otherwise, a mixed mode graph would be fine)
-                    uniform_token_count=(
-                        self.uniform_decode_query_len
-                        if separate_decode_routine
-                        else None
-                    ),
+                    uniform_token_count=self.uniform_decode_query_len,
                 )
                 descs_by_mode[decode_mode].append(desc)
                 descs_by_token_count[padded].append(desc)
@@ -183,6 +182,9 @@ class CudaGraphManager:
                     capture_fn(warmup_desc)
 
                     # Capture
+                    logger.debug(
+                        "CG Capture: mode=%s, batch_desc=%s", desc.cg_mode.name, desc
+                    )
                     if desc.cg_mode == CUDAGraphMode.PIECEWISE:
                         capture_fn(desc)
                     else:
@@ -225,6 +227,7 @@ class CudaGraphManager:
             f"Expected FULL mode, got {desc.cg_mode}"
         )
         assert desc in self.graphs, f"No cudagraph for {desc}"
+        logger.debug("CG Replay: mode=FULL, batch_desc=%s", desc)
         # Sync offloader before replay - needed when transitioning from
         # eager/piecewise to full cudagraph (e.g., prefill → decode).
         # The previous eager iteration's start_prefetch may have queued
