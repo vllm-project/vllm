@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import datetime
+import json
 from collections.abc import Iterable, Sequence
 from typing import Literal
 
@@ -148,6 +149,25 @@ def get_developer_message(
             )
     dev_msg = Message.from_role_and_content(Role.DEVELOPER, dev_msg_content)
     return dev_msg
+
+
+def inject_response_formats(
+    instructions: str | None,
+    schema: dict,
+    format_name: str = "structured_output",
+) -> str:
+    """Append a Harmony cookbook ``# Response Formats`` section.
+
+    Per the cookbook, structured output schemas should appear in the
+    developer message under a ``# Response Formats`` heading so the
+    model knows what format to produce.  This complements grammar
+    enforcement via structural tags.
+    """
+    schema_json = json.dumps(schema, separators=(",", ":"))
+    section = f"\n\n# Response Formats\n\n## {format_name}\n\n{schema_json}"
+    if instructions:
+        return instructions + section
+    return section.lstrip("\n")
 
 
 def get_user_message(content: str) -> Message:
