@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from itertools import chain
 from typing import TYPE_CHECKING
 
@@ -148,7 +148,7 @@ class BatchUpdateBuilder:
 class LogitsProcessors:
     """Encapsulates initialized logitsproc objects."""
 
-    def __init__(self, logitsprocs: Iterator["LogitsProcessor"] | None = None) -> None:
+    def __init__(self, logitsprocs: Iterable["LogitsProcessor"] | None = None) -> None:
         self.argmax_invariant: list[LogitsProcessor] = []
         self.non_argmax_invariant: list[LogitsProcessor] = []
         if logitsprocs:
