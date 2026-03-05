@@ -151,8 +151,13 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
 
-        # Fused RoPE+FP8 quant is always-on for FP8 cache
-        self.use_fused_rope_quant = kv_cache_dtype.startswith("fp8")
+        # Fused RoPE+FP8 quant for FP8 cache (disable with
+        # VLLM_MLA_FUSED_ROPE_QUANT=0 for benchmarking)
+        import vllm.envs as envs
+
+        self.use_fused_rope_quant = (
+            kv_cache_dtype.startswith("fp8") and envs.VLLM_MLA_FUSED_ROPE_QUANT
+        )
 
     def _fused_rope_quant(
         self,
