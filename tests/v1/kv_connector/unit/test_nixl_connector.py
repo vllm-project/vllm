@@ -1969,6 +1969,7 @@ def test_transfer_failure_logging(
 
     # For notification_failed, we need empty local blocks
     # (full cache hit path to trigger send_notif)
+    local_blocks: tuple[()] | tuple[list[int], ...]
     if enable_hma:
         # HMA enabled: multiple groups (FA + SW)
         local_blocks = (
