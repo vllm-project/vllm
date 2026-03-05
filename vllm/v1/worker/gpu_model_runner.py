@@ -941,7 +941,7 @@ class GPUModelRunner(
 
     # Note: used for model runner override.
     def _sync_device(self) -> None:
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -5359,7 +5359,7 @@ class GPUModelRunner(
                 gc.collect()
 
     def _cleanup_profiling_kv_cache(self) -> None:
-        current_platform.synchronize()
+        torch.accelerator.synchronize()
         if hasattr(self, "kv_caches") and self.kv_caches:
             for i in range(len(self.kv_caches)):
                 self.kv_caches[i] = None  # type: ignore
@@ -5378,7 +5378,7 @@ class GPUModelRunner(
                 layer.kv_cache = []
 
         gc.collect()
-        current_platform.empty_cache()
+        torch.accelerator.empty_cache()
 
         logger.debug("Cleaned up profiling KV cache and CUDA graphs")
 
@@ -5418,15 +5418,15 @@ class GPUModelRunner(
             shared_memory_estimate = {}
             per_graph_estimate = {}
             piecewise_graphs_captured = 0
-            current_platform.synchronize()
-            current_platform.empty_cache()
+            torch.accelerator.synchronize()
+            torch.accelerator.empty_cache()
 
             for mode, descs in capture_descs:
                 profile_descs = descs[:2]
                 mem_samples: list[int] = []
 
                 for i, desc in enumerate(profile_descs):
-                    mem_before = current_platform.mem_get_info()[0]
+                    mem_before = torch.accelerator.get_memory_info()[0]
                     self._warmup_and_capture(
                         desc,
                         cudagraph_runtime_mode=mode,
@@ -5440,8 +5440,9 @@ class GPUModelRunner(
                         ),
                         num_warmups=None if i == 0 else 0,
                     )
-                    current_platform.synchronize()
-                    mem_samples.append(mem_before - current_platform.mem_get_info()[0])
+                    torch.accelerator.synchronize()
+                    free_after = torch.accelerator.get_memory_info()[0]
+                    mem_samples.append(mem_before - free_after)
 
                 first_capture = mem_samples[0]
                 # Use at least 1 MiB per graph for driver overhead
@@ -5508,9 +5509,9 @@ class GPUModelRunner(
         # can reuse the memory pool allocated for the large shapes.
         set_cudagraph_capturing_enabled(True)
         with self._freeze_gc(), graph_capture(device=self.device):
-            current_platform.synchronize()
-            current_platform.empty_cache()
-            start_free_gpu_memory = current_platform.mem_get_info()[0]
+            torch.accelerator.synchronize()
+            torch.accelerator.empty_cache()
+            start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
             for (
                 runtime_mode,
@@ -5520,10 +5521,10 @@ class GPUModelRunner(
                     batch_descriptors=batch_descs,
                     cudagraph_runtime_mode=runtime_mode,
                 )
-                current_platform.synchronize()
+                torch.accelerator.synchronize()
 
-            current_platform.synchronize()
-            end_free_gpu_memory = current_platform.mem_get_info()[0]
+            torch.accelerator.synchronize()
+            end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
         # Disable cudagraph capturing globally, so any unexpected cudagraph
         # capturing will be detected and raise an error after here.
@@ -5532,8 +5533,8 @@ class GPUModelRunner(
         # after here.
         set_cudagraph_capturing_enabled(False)
 
-        current_platform.synchronize()
-        current_platform.empty_cache()
+        torch.accelerator.synchronize()
+        torch.accelerator.empty_cache()
 
         # Lock workspace to prevent resizing during execution.
         # Max workspace sizes should have been captured during warmup/profiling.
@@ -5632,7 +5633,7 @@ class GPUModelRunner(
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 allow_microbatching=allow_microbatching,
             )
-            current_platform.synchronize()
+            torch.accelerator.synchronize()
         self.maybe_remove_all_loras(self.lora_config)
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
@@ -6451,13 +6452,13 @@ class GPUModelRunner(
         group_refs = group_lora_refs[current_item_idx : current_item_idx + num_items]
         group_request_ids = {req_id for req_id, _ in group_refs}
 
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         start_time = time.perf_counter()
 
         try:
             yield
         finally:
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             elapsed = time.perf_counter() - start_time
 
             per_request_time = elapsed / max(len(group_request_ids), 1)
