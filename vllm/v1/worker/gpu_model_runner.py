@@ -5427,7 +5427,7 @@ class GPUModelRunner(
                 mem_samples: list[int] = []
 
                 for i, desc in enumerate(profile_descs):
-                    mem_before = torch.accelerator.get_memory_info()[0]
+                    mem_before = torch.cuda.mem_get_info()[0]
                     self._warmup_and_capture(
                         desc,
                         cudagraph_runtime_mode=mode,
@@ -5441,7 +5441,7 @@ class GPUModelRunner(
                         ),
                     )
                     torch.accelerator.synchronize()
-                    free_after = torch.accelerator.get_memory_info()[0]
+                    free_after = torch.cuda.mem_get_info()[0]
                     mem_samples.append(mem_before - free_after)
 
                 first_capture = mem_samples[0]
@@ -5512,7 +5512,7 @@ class GPUModelRunner(
         with self._freeze_gc(), graph_capture(device=self.device):
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
-            start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
+            start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
             for (
                 runtime_mode,
@@ -5525,7 +5525,7 @@ class GPUModelRunner(
                 torch.accelerator.synchronize()
 
             torch.accelerator.synchronize()
-            end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
+            end_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         # Disable cudagraph capturing globally, so any unexpected cudagraph
         # capturing will be detected and raise an error after here.
