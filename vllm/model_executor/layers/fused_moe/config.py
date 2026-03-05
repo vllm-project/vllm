@@ -228,6 +228,7 @@ class FusedMoEQuantConfig:
     _a2: FusedMoEQuantDesc
     _w1: FusedMoEQuantDesc
     _w2: FusedMoEQuantDesc
+    is_nvfp4_scale_swizzled: bool = True
 
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
@@ -475,6 +476,7 @@ class FusedMoEQuantConfig:
         w1_zp: torch.Tensor | None = None,
         w2_zp: torch.Tensor | None = None,
         weight_dtype: torch.dtype | str | None = None,
+        is_nvfp4_scale_swizzled: bool = True,
     ) -> "FusedMoEQuantConfig":
         """
         General builder function for a FusedMoEQuantConfig.
@@ -504,6 +506,7 @@ class FusedMoEQuantConfig:
         - w2_bias: Optional biases for w1 (GPT OSS Triton).
         - w1_zp: Optional w1 zero points for int4/int8 quantization.
         - w2_zp: Optional w2 zero points for int4/int8 quantization.
+        - is_nvfp4_scale_swizzled: Whether to swizzle the nvfp4 scale swizzling.
         """
         assert not isinstance(quant_dtype, str) or quant_dtype in {
             "nvfp4",
@@ -536,6 +539,7 @@ class FusedMoEQuantConfig:
             _w2=FusedMoEQuantDesc(
                 weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
             ),
+            is_nvfp4_scale_swizzled=is_nvfp4_scale_swizzled,
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
         assert quant_config.per_out_ch_quant == per_out_ch_quant
@@ -737,6 +741,7 @@ def nvfp4_moe_quant_config(
     w2_scale: torch.Tensor,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    is_nvfp4_scale_swizzled: bool = True,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for mxfp4 activations and nvp4 weights.
@@ -754,6 +759,7 @@ def nvfp4_moe_quant_config(
         per_act_token_quant=False,
         per_out_ch_quant=False,
         block_shape=None,
+        is_nvfp4_scale_swizzled=is_nvfp4_scale_swizzled,
     )
 
 
@@ -940,10 +946,6 @@ class FusedMoEParallelConfig:
         return self.dp_size > 1 and self.use_ep
 
     @property
-    def use_pplx_kernels(self):
-        return self.use_all2all_kernels and self.all2all_backend == "pplx"
-
-    @property
     def use_deepep_ht_kernels(self):
         return (
             self.use_all2all_kernels
@@ -962,7 +964,7 @@ class FusedMoEParallelConfig:
 
     @property
     def use_batched_activation_format(self):
-        return self.use_deepep_ll_kernels or self.use_pplx_kernels
+        return self.use_deepep_ll_kernels
 
     @property
     def use_naive_all2all_kernels(self):
@@ -1220,10 +1222,6 @@ class FusedMoEConfig:
     @property
     def use_ep(self):
         return self.moe_parallel_config.use_ep
-
-    @property
-    def use_pplx_kernels(self):
-        return self.moe_parallel_config.use_pplx_kernels
 
     @property
     def use_deepep_ht_kernels(self):

@@ -101,11 +101,15 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             sampling_params = self._sampling_params_from_proto(
                 request.sampling_params, stream=request.stream
             )
+            tokenization_kwargs = self._tokenization_kwargs_from_proto(
+                request.sampling_params
+            )
 
             async for output in self.async_llm.generate(
                 prompt=prompt,
                 sampling_params=sampling_params,
                 request_id=request_id,
+                tokenization_kwargs=tokenization_kwargs,
             ):
                 # Convert vLLM output to protobuf
                 # For streaming, always send chunks
@@ -308,9 +312,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             seed=params.seed if params.HasField("seed") else None,
             include_stop_str_in_output=params.include_stop_str_in_output,
             logit_bias=dict(params.logit_bias) if params.logit_bias else None,
-            truncate_prompt_tokens=params.truncate_prompt_tokens
-            if params.HasField("truncate_prompt_tokens")
-            else None,
             structured_outputs=structured_outputs,
             # detokenize must be True if stop strings are used
             detokenize=bool(stop),
@@ -318,6 +319,14 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             if stream
             else RequestOutputKind.FINAL_ONLY,
         )
+
+    @staticmethod
+    def _tokenization_kwargs_from_proto(
+        params: vllm_engine_pb2.SamplingParams,
+    ) -> dict[str, int] | None:
+        if params.HasField("truncate_prompt_tokens"):
+            return {"truncate_prompt_tokens": params.truncate_prompt_tokens}
+        return None
 
     @staticmethod
     def _chunk_response(output: RequestOutput) -> vllm_engine_pb2.GenerateResponse:
