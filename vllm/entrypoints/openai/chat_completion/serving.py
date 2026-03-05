@@ -458,7 +458,7 @@ class OpenAIServingChat(OpenAIServing):
                 request_id if len(engine_prompts) == 1 else f"{request_id}_{i}"
             )
 
-                sampling_params = self._build_params(request, engine_prompt)
+            sampling_params = self._build_params(request, engine_prompt)
 
             self._log_inputs(
                 sub_request_id,

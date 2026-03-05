@@ -95,7 +95,7 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
 
-    return JSONResponse(content=result)
+    return JSONResponse(content=result.model_dump())
 
 
 def attach_router(app: FastAPI):
