@@ -11,6 +11,8 @@ import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
+import regex as re
+
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
     VLLM_PORT: int | None = None
@@ -260,10 +262,22 @@ def get_default_config_root():
     )
 
 
+_FLOAT_LIKE_INT_RE = re.compile(r"^[+-]?(?:\d(?:_?\d)*)\.(?:0(?:_?0)*)$")
+
+
 def maybe_convert_int(value: str | None) -> int | None:
     if value is None:
         return None
-    return int(value)
+    try:
+        return int(value)
+    except ValueError as int_err:
+        # Accept explicit float-like integer strings, e.g. "4.0" -> 4.
+        # Avoid using float() to preserve exact integer semantics.
+        stripped = value.strip()
+        if _FLOAT_LIKE_INT_RE.fullmatch(stripped):
+            integer_part = stripped.split(".", 1)[0].replace("_", "")
+            return int(integer_part)
+        raise int_err
 
 
 def maybe_convert_bool(value: str | None) -> bool | None:
@@ -693,7 +707,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
     # (CPU backend only) CPU key-value cache space.
     # default is None and will be set as 4 GB
-    "VLLM_CPU_KVCACHE_SPACE": lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0"))
+    "VLLM_CPU_KVCACHE_SPACE": lambda: maybe_convert_int(
+        os.getenv("VLLM_CPU_KVCACHE_SPACE")
+    )
     if "VLLM_CPU_KVCACHE_SPACE" in os.environ
     else None,
     # (CPU backend only) CPU core ids bound by OpenMP threads, e.g., "0-31",
@@ -701,8 +717,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CPU_OMP_THREADS_BIND": lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "auto"),
     # (CPU backend only) CPU cores not used by OMP threads .
     # Those CPU cores will not be used by OMP threads of a rank.
-    "VLLM_CPU_NUM_OF_RESERVED_CPU": lambda: int(
-        os.getenv("VLLM_CPU_NUM_OF_RESERVED_CPU", "0")
+    "VLLM_CPU_NUM_OF_RESERVED_CPU": lambda: maybe_convert_int(
+        os.getenv("VLLM_CPU_NUM_OF_RESERVED_CPU")
     )
     if "VLLM_CPU_NUM_OF_RESERVED_CPU" in os.environ
     else None,

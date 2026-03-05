@@ -14,6 +14,7 @@ from vllm.envs import (
     env_set_with_choices,
     env_with_choices,
     environment_variables,
+    maybe_convert_int,
 )
 
 
@@ -93,6 +94,30 @@ def test_is_envs_cache_enabled() -> None:
 
     disable_envs_cache()
     assert not envs._is_envs_cache_enabled()
+
+
+def test_maybe_convert_int_handles_float_like_strings() -> None:
+    assert maybe_convert_int("4") == 4
+    assert maybe_convert_int("4.0") == 4
+    assert maybe_convert_int("1_000.0") == 1000
+    assert maybe_convert_int("9007199254740993.0") == 9007199254740993
+    assert maybe_convert_int(None) is None
+
+    with pytest.raises(ValueError):
+        maybe_convert_int("4.2")
+    with pytest.raises(ValueError):
+        maybe_convert_int("1e3")
+
+
+def test_cpu_env_ints_allow_float_like_strings(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_CPU_KVCACHE_SPACE", "4.0")
+    monkeypatch.setenv("VLLM_CPU_NUM_OF_RESERVED_CPU", "2.0")
+
+    if hasattr(envs.__getattr__, "cache_clear"):
+        envs.__getattr__.cache_clear()
+
+    assert envs.VLLM_CPU_KVCACHE_SPACE == 4
+    assert envs.VLLM_CPU_NUM_OF_RESERVED_CPU == 2
 
 
 class TestEnvWithChoices:
