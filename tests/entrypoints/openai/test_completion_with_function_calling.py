@@ -141,12 +141,12 @@ def server():
         "qwen3",
         "--gpu-memory-utilization",
         "0.4",
+        "--enforce-eager",
     ]
 
     rocm_args = {
         "--max-num-seqs": "1",
         "--no-enable-prefix-caching": None,
-        "--enforce-eager": None,
     }
     if current_platform.is_rocm():
         for k, v in rocm_args.items():
