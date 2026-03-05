@@ -23,7 +23,7 @@ CACHE_LAYOUTS = ["NHD", "HND"]
 KV_SCALE_TYPES = ["tensor", "attn_head"]
 
 # Parameters for MLA tests.
-KV_LORA_RANKS = [512]
+KV_LORA_RANKS = [256, 512]
 QK_ROPE_HEAD_DIMS = [64]
 NUM_TOKENS_MLA = [42]
 BLOCK_SIZES_MLA = [16]
