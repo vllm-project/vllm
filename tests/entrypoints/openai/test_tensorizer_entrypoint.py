@@ -7,7 +7,7 @@ import tempfile
 import openai
 import pytest
 import pytest_asyncio
-import torch.cuda
+import torch
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.model_loader.tensorizer import (
@@ -15,6 +15,7 @@ from vllm.model_executor.model_loader.tensorizer import (
     tensorize_lora_adapter,
     tensorize_vllm_model,
 )
+from vllm.platforms import current_platform
 
 from ...utils import RemoteOpenAIServer
 

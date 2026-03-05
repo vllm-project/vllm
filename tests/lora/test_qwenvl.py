@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
+import pytest
 import vllm
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest

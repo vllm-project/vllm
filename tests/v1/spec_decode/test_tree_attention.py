@@ -18,6 +18,9 @@ from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+DEVICE = current_platform.device_type
+
+
 if not is_flash_attn_varlen_func_available():
     pytest.skip(
         "This test requires flash_attn_varlen_func, but it's not available.",
@@ -170,9 +173,9 @@ def _get_available_reference_backends() -> list[AttentionBackendEnum]:
 
 
 class MockAttentionLayer(torch.nn.Module):
-    _q_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
-    _k_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
-    _v_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+    _q_scale = torch.tensor(1.0, dtype=torch.float32, device=DEVICE)
+    _k_scale = torch.tensor(1.0, dtype=torch.float32, device=DEVICE)
+    _v_scale = torch.tensor(1.0, dtype=torch.float32, device=DEVICE)
     layer_name = "mock_layer"
 
     def __init__(self):
@@ -322,9 +325,9 @@ def test_tree_attn_correctness(
     reference_backend: AttentionBackendEnum,
 ) -> None:
     torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
+    current_platform.manual_seed_all(42)
 
-    device = "cuda"
+    device = DEVICE
     tree_attn_masks = {
         # Chain.
         "[(0,), (0, 0), (0, 0, 0)]": torch.tensor(

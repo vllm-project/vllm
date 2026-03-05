@@ -22,6 +22,7 @@ from torch.distributed import (
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -157,7 +158,7 @@ def move_to_buffer(
     new_indices: np.ndarray,
     expert_weights: Sequence[torch.Tensor],
     expert_weights_buffers: Sequence[torch.Tensor],
-    cuda_stream: torch.cuda.Stream | None,
+    cuda_stream: torch.cuda.Stream | torch.xpu.Stream | None,
     ep_group: ProcessGroup,
 ) -> MoveToBufferResult:
     """
@@ -472,7 +473,7 @@ async def transfer_layer(
     expert_weights_buffer: Sequence[torch.Tensor],
     ep_group: ProcessGroup,
     is_profile: bool = False,
-    cuda_stream: torch.cuda.Stream | None = None,
+    cuda_stream: torch.cuda.Stream | torch.xpu.Stream | None = None,
     rank_mapping: dict[int, int] | None = None,
 ) -> MoveToBufferResult:
     """
@@ -622,7 +623,7 @@ def rearrange_expert_weights_inplace(
 
     # NOTE(bowen): We need this synchronize to run, but I don't know why.
     # If you figure out the reason, please let me know -- thank you!
-    torch.cuda.synchronize()
+    current_platform.synchronize()
 
     old_global_expert_indices_cpu = old_global_expert_indices.cpu().numpy()
     new_global_expert_indices_cpu = new_global_expert_indices.cpu().numpy()

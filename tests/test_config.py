@@ -973,7 +973,6 @@ def test_vllm_config_callable_defaults():
     assert enable_if_sequential(config_moe) is False
     assert enable_if_sequential(config_quantized) is True
 
-
 @pytest.mark.skipif(
     not current_platform.support_static_graph_mode(),
     reason="Explicit overrides may be force-overwritten without static graph support.",
