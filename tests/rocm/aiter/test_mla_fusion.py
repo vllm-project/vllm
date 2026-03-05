@@ -349,68 +349,6 @@ def test_logprobs_match_baseline(
     )
 
 
-@pytest.mark.skip(
-    reason="AITER kernels may exhibit non-deterministic behavior due to "
-    "parallel reduction operations and floating-point arithmetic ordering. "
-    "This is expected for GPU kernels optimized for performance."
-)
-@pytest.mark.parametrize(
-    "model",
-    [
-        "deepseek-ai/DeepSeek-V2-Lite",
-    ],
-)
-def test_deterministic_outputs(vllm_runner, model):
-    """Test that fusion produces deterministic outputs.
-
-    NOTE: This test is skipped because AITER kernels may have non-deterministic
-    behavior due to:
-    1. Parallel reduction operations (atomic adds, sum reductions)
-    2. Floating-point arithmetic ordering differences
-    3. Non-deterministic kernel launch patterns
-
-    This is common for GPU kernels optimized for performance. If strict
-    determinism is required, use enforce_eager=True and set appropriate
-    environment variables (CUBLAS_WORKSPACE_CONFIG, etc.), though this
-    may not eliminate all sources of non-determinism in custom kernels.
-    """
-    import gc
-
-    import torch
-
-    from vllm.distributed import cleanup_dist_env_and_memory
-
-    prompts = ["Hello, how are you?"]
-    max_tokens = 20
-
-    # Run twice with same seed
-    outputs_list = []
-    for i in range(2):
-        with vllm_runner(
-            model,
-            quantization="fp8",
-            trust_remote_code=True,
-            max_model_len=256,
-            enforce_eager=True,
-            seed=42,  # Fixed seed
-        ) as vllm_model:
-            outputs = vllm_model.generate_greedy(prompts, max_tokens)
-            outputs_list.append(outputs)
-
-        # Cleanup GPU memory between runs
-        if i == 0:  # After first run
-            cleanup_dist_env_and_memory()
-            gc.collect()
-            torch.accelerator.empty_cache()
-
-    # Outputs should be identical
-    assert len(outputs_list) == 2
-    for i in range(len(prompts)):
-        _, text1 = outputs_list[0][i]
-        _, text2 = outputs_list[1][i]
-        assert text1 == text2, f"Outputs differ:\n{text1}\n vs\n{text2}"
-
-
 @pytest.mark.parametrize("prompt_length", [10, 100])
 def test_different_prompt_lengths(vllm_runner, prompt_length):
     """Test fusion works correctly with different prompt lengths."""
