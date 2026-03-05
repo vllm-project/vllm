@@ -1196,6 +1196,7 @@ class Qwen3OmniMoeThinkerProcessingInfo(
 
         return mm_max_tokens
 
+
 Qwen3OmniMoeThinkerDummyInputsBuilder = Qwen2_5OmniThinkerDummyInputsBuilder
 
 
