@@ -493,9 +493,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_time = time.perf_counter()
         gc.collect()
         torch.accelerator.empty_cache()
-        start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
+            start_reserved_gpu_memory = torch.cuda.memory_reserved()
             self.cudagraph_manager.capture(
                 model=self.model,
                 model_state=self.model_state,
@@ -507,11 +507,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             if self.speculator is not None:
                 self.speculator.capture_model()
-
+            end_reserved_gpu_memory = torch.cuda.memory_reserved()
         end_time = time.perf_counter()
-        end_free_gpu_memory = torch.cuda.mem_get_info()[0]
         elapsed_time = end_time - start_time
-        cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
+        cuda_graph_size = end_reserved_gpu_memory - start_reserved_gpu_memory
         # This usually takes 5~20 seconds.
         logger.info(
             "Graph capturing finished in %.0f secs, took %.2f GiB",
