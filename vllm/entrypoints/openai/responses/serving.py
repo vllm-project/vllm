@@ -42,7 +42,6 @@ from vllm import envs
 from vllm.config.utils import replace
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
 from vllm.entrypoints.logger import RequestLogger
@@ -245,16 +244,12 @@ class OpenAIServingResponses(OpenAIServing):
             self.tool_call_id_type = "random"
 
         self.enable_auto_tools = enable_auto_tools
-        # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: If enable_store=True, this may cause a memory leak since we
-        # never remove responses from the store.
-        self.response_store: dict[str, ResponsesResponse] = {}
-        self.response_store_lock = asyncio.Lock()
 
-        # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: If enable_store=True, this may cause a memory leak since we
-        # never remove messages from the store.
-        self.msg_store: dict[str, list[ChatCompletionMessageParam]] = {}
+        from vllm.entrypoints.openai.responses.store import (
+            create_response_store,
+        )
+
+        self.store = create_response_store()
 
         # HACK(wuhang): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
@@ -321,6 +316,14 @@ class OpenAIServingResponses(OpenAIServing):
                 status_code=HTTPStatus.BAD_REQUEST,
                 param="previous_response_id",
             )
+        if request.previous_input_messages and request.previous_response is not None:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message="Only one of `previous_input_messages` and "
+                "`previous_response` can be set.",
+                status_code=HTTPStatus.BAD_REQUEST,
+                param="previous_response",
+            )
         return None
 
     async def create_responses(
@@ -355,27 +358,65 @@ class OpenAIServingResponses(OpenAIServing):
             # value).
             request.store = False
 
-        # Handle the previous response ID.
-        prev_response_id = request.previous_response_id
-        if prev_response_id is not None:
-            async with self.response_store_lock:
-                prev_response = self.response_store.get(prev_response_id)
+        # Resolve the previous response (store-backed or stateless).
+        prev_response: ResponsesResponse | None = None
+        if request.previous_response_id is not None:
+            if not self.enable_store:
+                return self.create_error_response(
+                    err_type="invalid_request_error",
+                    message=(
+                        "`previous_response_id` requires the response store to be "
+                        "enabled (VLLM_ENABLE_RESPONSES_API_STORE=1). "
+                        "For stateless multi-turn without a persistent store, pass "
+                        "the full previous response object via `previous_response` "
+                        "with `include=['reasoning.encrypted_content']` and "
+                        "`store=false`."
+                    ),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                )
+            prev_response = await self.store.get_response(request.previous_response_id)
             if prev_response is None:
-                return self._make_not_found_error(prev_response_id)
-        else:
-            prev_response = None
+                return self._make_not_found_error(request.previous_response_id)
+        elif request.previous_response is not None:
+            prev_response = request.previous_response
+
+        # For stateless multi-turn: extract Harmony/chat messages from the
+        # encrypted_content state carrier embedded in the previous response.
+        # This replaces the store message lookup for subsequent turns.
+        prev_messages_from_state: list | None = None
+        if prev_response is not None and request.previous_response is not None:
+            prev_messages_from_state = self._extract_state_from_response(prev_response)
+            if prev_messages_from_state is None:
+                # The caller passed previous_response but the prior response
+                # contains no vLLM state carrier — most likely because
+                # include=['reasoning.encrypted_content'] was omitted on the
+                # prior turn.  previous_response always implies the stateless
+                # path; there is no stored-message fallback regardless of
+                # enable_store (stored messages are keyed by response ID, not
+                # carried in the response object).  Return a clear 400.
+                return self.create_error_response(
+                    err_type="invalid_request_error",
+                    message=(
+                        "The provided 'previous_response' does not contain a "
+                        "vLLM state carrier. To use stateless multi-turn, "
+                        "generate the previous response with "
+                        "include=['reasoning.encrypted_content'] and "
+                        "store=false."
+                    ),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                )
 
         try:
             lora_request = self._maybe_get_adapters(request)
             model_name = self.models.model_name(lora_request)
 
             if self.use_harmony:
-                messages, engine_prompts = self._make_request_with_harmony(
-                    request, prev_response
+                messages, engine_prompts = await self._make_request_with_harmony(
+                    request, prev_response, prev_messages_from_state
                 )
             else:
                 messages, engine_prompts = await self._make_request(
-                    request, prev_response
+                    request, prev_response, prev_messages_from_state
                 )
 
         except (
@@ -510,7 +551,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Store the input messages.
         if request.store:
-            self.msg_store[request.request_id] = messages
+            await self.store.put_messages(request.request_id, messages)
 
         if request.background:
             created_time = int(time.time())
@@ -523,8 +564,7 @@ class OpenAIServingResponses(OpenAIServing):
                 status="queued",
                 usage=None,
             )
-            async with self.response_store_lock:
-                self.response_store[response.id] = response
+            await self.store.put_response(response.id, response)
 
             # Run the request in the background.
             if request.stream:
@@ -576,6 +616,7 @@ class OpenAIServingResponses(OpenAIServing):
                 model_name,
                 tokenizer,
                 request_metadata,
+                messages=messages,
             )
 
         try:
@@ -587,6 +628,7 @@ class OpenAIServingResponses(OpenAIServing):
                 model_name,
                 tokenizer,
                 request_metadata,
+                messages=messages,
             )
         except GenerationError as e:
             return self._convert_generation_error_to_response(e)
@@ -597,13 +639,25 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
+        prev_messages: list | None = None,
     ):
         tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
         # Construct the input messages.
+        # For stateless multi-turn, prev_messages comes from the encrypted_content
+        # state carrier; otherwise fall back to the response store.
+        prev_msg = (
+            prev_messages
+            if prev_messages is not None
+            else (
+                await self.store.get_messages(prev_response.id)
+                if prev_response
+                else None
+            )
+        )
         messages = construct_input_messages(
             request_instructions=request.instructions,
             request_input=request.input,
-            prev_msg=self.msg_store.get(prev_response.id) if prev_response else None,
+            prev_msg=prev_msg,
             prev_response_output=prev_response.output if prev_response else None,
         )
 
@@ -618,17 +672,20 @@ class OpenAIServingResponses(OpenAIServing):
         )
         return messages, engine_prompts
 
-    def _make_request_with_harmony(
+    async def _make_request_with_harmony(
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
+        prev_messages: list | None = None,
     ):
         if request.tool_choice != "auto":
             raise NotImplementedError(
                 "Only 'auto' tool_choice is supported in response API with Harmony"
             )
 
-        messages = self._construct_input_messages_with_harmony(request, prev_response)
+        messages = await self._construct_input_messages_with_harmony(
+            request, prev_response, prev_messages
+        )
         prompt_token_ids = render_for_completion(messages)
         engine_prompt = token_inputs(prompt_token_ids)
 
@@ -664,6 +721,7 @@ class OpenAIServingResponses(OpenAIServing):
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         created_time: int | None = None,
+        messages: list | None = None,
     ) -> ErrorResponse | ResponsesResponse:
         if created_time is None:
             created_time = int(time.time())
@@ -795,12 +853,44 @@ class OpenAIServingResponses(OpenAIServing):
             usage=usage,
         )
 
+        # Inject state carrier for stateless multi-turn (RFC #26934 + @grs).
+        # When the client requests encrypted_content inclusion and has opted out
+        # of server-side storage, embed a signed blob of the full message history
+        # into a synthetic ReasoningItem appended to response.output.  The client
+        # stores the response opaquely and passes it back as `previous_response`
+        # on the next turn; vLLM then deserializes the blob to recover history.
+        if (
+            request.include
+            and "reasoning.encrypted_content" in request.include
+            and not request.store
+        ):
+            carrier_messages: list | None = None
+            if self.use_harmony and isinstance(context, HarmonyContext):
+                # Harmony context already contains the full history including
+                # the assistant turn that was just generated.
+                carrier_messages = list(context.messages)
+            elif messages is not None:
+                # Non-Harmony path: `messages` is the input to the LLM for
+                # this turn. Append the assistant's response output so the
+                # carrier contains the complete history (input + response)
+                # for the next turn to build on.
+                from vllm.entrypoints.openai.responses.utils import (
+                    construct_chat_messages_with_tool_call,
+                )
+
+                carrier_messages = messages + construct_chat_messages_with_tool_call(
+                    response.output
+                )
+            if carrier_messages is not None:
+                state_carrier = self._build_state_carrier(
+                    carrier_messages, request.request_id
+                )
+                response.output.append(state_carrier)
+
         if request.store:
-            async with self.response_store_lock:
-                stored_response = self.response_store.get(response.id)
-                # If the response is already cancelled, don't update it.
-                if stored_response is None or stored_response.status != "cancelled":
-                    self.response_store[response.id] = response
+            await self.store.put_response(
+                response.id, response, unless_status="cancelled"
+            )
         return response
 
     def _topk_logprobs(
@@ -1040,10 +1130,11 @@ class OpenAIServingResponses(OpenAIServing):
         )
         return sys_msg
 
-    def _construct_input_messages_with_harmony(
+    async def _construct_input_messages_with_harmony(
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
+        prev_messages: list | None = None,
     ) -> list[OpenAIHarmonyMessage]:
         messages: list[OpenAIHarmonyMessage] = []
         if prev_response is None:
@@ -1066,7 +1157,15 @@ class OpenAIServingResponses(OpenAIServing):
             # Continue the previous conversation.
             # FIXME(woosuk): Currently, request params like reasoning and
             # instructions are ignored.
-            prev_msgs = self.msg_store[prev_response.id]
+            if prev_messages is not None:
+                # Stateless path: messages came from the encrypted_content
+                # state carrier; deserialize dicts back to OpenAIHarmonyMessage.
+                prev_msgs = [
+                    OpenAIHarmonyMessage.model_validate(m) if isinstance(m, dict) else m
+                    for m in prev_messages
+                ]
+            else:
+                prev_msgs = await self.store.get_messages(prev_response.id) or []
 
             # FIXME(woosuk): The slice-delete-reappend cycle below is
             # currently a no-op --- it removes messages then puts them all
@@ -1144,12 +1243,11 @@ class OpenAIServingResponses(OpenAIServing):
 
         if response is not None and isinstance(response, ErrorResponse):
             # If the request has failed, update the status to "failed".
-            response_id = request.request_id
-            async with self.response_store_lock:
-                stored_response = self.response_store.get(response_id)
-                assert stored_response is not None
-                if stored_response.status not in ("completed", "cancelled"):
-                    stored_response.status = "failed"
+            await self.store.update_response_status(
+                request.request_id,
+                "failed",
+                allowed_current_statuses={"queued", "in_progress"},
+            )
 
     async def _run_background_request(
         self,
@@ -1167,12 +1265,11 @@ class OpenAIServingResponses(OpenAIServing):
 
         if isinstance(response, ErrorResponse):
             # If the request has failed, update the status to "failed".
-            response_id = request.request_id
-            async with self.response_store_lock:
-                stored_response = self.response_store.get(response_id)
-                assert stored_response is not None
-                if stored_response.status not in ("completed", "cancelled"):
-                    stored_response.status = "failed"
+            await self.store.update_response_status(
+                request.request_id,
+                "failed",
+                allowed_current_statuses={"queued", "in_progress"},
+            )
 
     async def responses_background_stream_generator(
         self,
@@ -1213,8 +1310,20 @@ class OpenAIServingResponses(OpenAIServing):
         | ResponsesResponse
         | AsyncGenerator[StreamingResponsesResponse, None]
     ):
-        async with self.response_store_lock:
-            response = self.response_store.get(response_id)
+        if not self.enable_store:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message=(
+                    "Response retrieval requires the response store to be enabled "
+                    "(VLLM_ENABLE_RESPONSES_API_STORE=1). "
+                    "For stateless multi-turn, use `previous_response` with "
+                    "`include=['reasoning.encrypted_content']` and `store=false` "
+                    "instead of retrieving responses by ID."
+                ),
+                status_code=HTTPStatus.NOT_IMPLEMENTED,
+            )
+
+        response = await self.store.get_response(response_id)
 
         if response is None:
             return self._make_not_found_error(response_id)
@@ -1230,21 +1339,50 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         response_id: str,
     ) -> ErrorResponse | ResponsesResponse:
-        async with self.response_store_lock:
-            response = self.response_store.get(response_id)
-            if response is None:
+        if not self.enable_store:
+            # Stateless mode: cancel in-flight tasks by ID only (no stored response).
+            task = self.background_tasks.get(response_id)
+            if not task:
+                # Mimic the stateful path's 404 when no task is found.
                 return self._make_not_found_error(response_id)
 
-            prev_status = response.status
-            if prev_status not in ("queued", "in_progress"):
-                return self.create_error_response(
-                    err_type="invalid_request_error",
-                    message="Cannot cancel a synchronous response.",
-                    param="response_id",
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                logger.info(
+                    "Background task for %s was cancelled (stateless mode)",
+                    response_id,
                 )
 
-            # Update the status to "cancelled".
-            response.status = "cancelled"
+            # Cancellation was initiated but we cannot return a full response
+            # object because no state is stored in stateless mode.
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message=(
+                    "Response cancellation was initiated for the in-flight task, "
+                    "but a full response object cannot be returned in stateless mode. "
+                    "Enable VLLM_ENABLE_RESPONSES_API_STORE=1 for full cancel "
+                    "support."
+                ),
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+
+        response = await self.store.update_response_status(
+            response_id,
+            "cancelled",
+            allowed_current_statuses={"queued", "in_progress"},
+        )
+        if response is None:
+            # Either not found or not in a cancellable state.
+            stored = await self.store.get_response(response_id)
+            if stored is None:
+                return self._make_not_found_error(response_id)
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message="Cannot cancel a synchronous response.",
+                param="response_id",
+            )
 
         # Abort the request.
         if task := self.background_tasks.get(response_id):
@@ -1262,6 +1400,50 @@ class OpenAIServingResponses(OpenAIServing):
             status_code=HTTPStatus.NOT_FOUND,
             param="response_id",
         )
+
+    def _build_state_carrier(
+        self, messages: list, request_id: str
+    ) -> ResponseReasoningItem:
+        """Build a synthetic ReasoningItem that carries serialized message history.
+
+        The ``encrypted_content`` field holds a signed, base64-encoded JSON blob
+        of the full message list.  On the next turn the client passes the full
+        response back as ``previous_response``; vLLM calls
+        ``_extract_state_from_response`` to recover history without a store.
+        """
+        from vllm.entrypoints.openai.responses.state import serialize_state
+
+        return ResponseReasoningItem(
+            id=f"rs_state_{request_id[-12:]}",
+            type="reasoning",
+            summary=[],
+            status="completed",
+            encrypted_content=serialize_state(messages),
+        )
+
+    def _extract_state_from_response(self, response: ResponsesResponse) -> list | None:
+        """Extract the serialized message history from a response's state carrier.
+
+        Scans ``response.output`` for a vLLM state-carrier ReasoningItem and
+        deserializes its ``encrypted_content`` field back into a message list.
+
+        Returns:
+            The deserialized message list (plain dicts), or ``None`` if no state
+            carrier is found (e.g. when the previous response was generated
+            without ``include=['reasoning.encrypted_content']``).
+
+        Raises:
+            ValueError: If a state carrier is found but its HMAC is invalid.
+        """
+        from vllm.entrypoints.openai.responses.state import (
+            deserialize_state,
+            is_state_carrier,
+        )
+
+        for item in response.output:
+            if is_state_carrier(item):
+                return deserialize_state(item.encrypted_content)
+        return None
 
     def _make_store_not_supported_error(self) -> ErrorResponse:
         return self.create_error_response(
@@ -1661,6 +1843,7 @@ class OpenAIServingResponses(OpenAIServing):
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         created_time: int | None = None,
+        messages: list | None = None,
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         # TODO:
         # 1. Handle disconnect
@@ -1748,6 +1931,7 @@ class OpenAIServingResponses(OpenAIServing):
                 tokenizer,
                 request_metadata,
                 created_time=created_time,
+                messages=messages,
             )
             yield _increment_sequence_number_and_return(
                 ResponseCompletedEvent(
