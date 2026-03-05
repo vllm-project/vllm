@@ -64,6 +64,12 @@ WEIGHT_LOADER_V2_SUPPORTED = [
 ]
 
 
+def register_weight_loader_v2_supported_method(cls):
+    """Decorator to register a LinearMethod as supporting weight_loader_v2."""
+    WEIGHT_LOADER_V2_SUPPORTED.append(cls.__name__)
+    return cls
+
+
 def adjust_marlin_shard(
     param: Parameter,
     shard_size: int,
