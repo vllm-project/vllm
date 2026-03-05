@@ -324,7 +324,7 @@ def test_auto_backend_selection_behavior():
         set_current_vllm_config(vllm_config_auto),
         patch("vllm.platforms.current_platform", CpuPlatform()),
     ):
-        backend_auto = get_attn_backend(16, torch.float16, None, 16)
+        backend_auto = get_attn_backend(16, torch.float16, None)
 
     _cached_get_attn_backend.cache_clear()
 
@@ -332,7 +332,7 @@ def test_auto_backend_selection_behavior():
         set_current_vllm_config(vllm_config_none),
         patch("vllm.platforms.current_platform", CpuPlatform()),
     ):
-        backend_none = get_attn_backend(16, torch.float16, None, 16)
+        backend_none = get_attn_backend(16, torch.float16, None)
 
     # Both should select the same backend
     assert backend_auto.get_name() == backend_none.get_name()
