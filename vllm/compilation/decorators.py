@@ -466,8 +466,12 @@ def _support_torch_compile(
                     "Directly load AOT compilation from path %s", aot_compilation_path
                 )
                 # Apply partition wrapper context for proper CUDA graph capture
+                from .monitor import end_monitoring_torch_compile
+
                 with maybe_use_cudagraph_partition_wrapper(self.vllm_config):
-                    return self.aot_compiled_fn(self, *args, **kwargs)
+                    output = self.aot_compiled_fn(self, *args, **kwargs)
+                end_monitoring_torch_compile(self.vllm_config)
+                return output
 
         if self.compiled:
             assert (
@@ -552,18 +556,19 @@ def _support_torch_compile(
                 logger.warning("Detected eager backend, disabling AOT compile.")
                 use_aot_compile = False
             if use_aot_compile:
-                from vllm.compilation.backends import set_on_compilation_complete
-
                 # store the path for saving after warmup
                 self._aot_compilation_path = aot_compilation_path
                 self._aot_cache_dir = cache_dir
-                # set callback in context so it's available when compilation completes
-                with set_on_compilation_complete(self.save_aot_compiled_function):
-                    self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
-                    output = self.aot_compiled_fn(self, *args, **kwargs)
+                self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
+                # All compilation is done at this point, save the AOT artifact.
+                self.save_aot_compiled_function()
+                output = self.aot_compiled_fn(self, *args, **kwargs)
             else:
                 output = TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)  # type: ignore[arg-type]
 
+        from .monitor import end_monitoring_torch_compile
+
+        end_monitoring_torch_compile(self.vllm_config)
         self.compiled = True
         return output
 
@@ -577,7 +582,6 @@ def _support_torch_compile(
             self.aot_compiled_fn and self._aot_compilation_path and self._aot_cache_dir
         )
 
-        logger.info("saving AOT compiled function to %s", self._aot_compilation_path)
         try:
             os.makedirs(self._aot_cache_dir, exist_ok=True)
             # File saving should be atomic, so we will save to a temporary location
@@ -585,7 +589,11 @@ def _support_torch_compile(
             tmp_file = f"{self._aot_compilation_path}.{os.getpid()}.tmp"
             self.aot_compiled_fn.save_compiled_function(tmp_file)
             os.replace(tmp_file, self._aot_compilation_path)
-            logger.info("saved AOT compiled function to %s", self._aot_compilation_path)
+            logger.info_once(
+                "saved AOT compiled function to %s",
+                self._aot_compilation_path,
+                scope="local",
+            )
         except Exception as e:
             logger.warning(
                 "unable to save AOT compiled function to %s: %s",
