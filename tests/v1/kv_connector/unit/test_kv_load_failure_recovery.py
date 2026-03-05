@@ -79,7 +79,7 @@ def test_async_load_failure(
     assert len(scheduler.waiting) == 0
     assert len(scheduler.waiting_for_remote_kvs) == 3
     for request in scheduler.waiting_for_remote_kvs:
-        assert request.num_computed_tokens == 0
+        assert request.num_computed_tokens == num_external_computed_tokens
         assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 3
 
@@ -105,7 +105,7 @@ def test_async_load_failure(
                 min_invalid_block_idx * scheduler.block_size
             )
         else:
-            assert request.num_computed_tokens == 0
+            assert request.num_computed_tokens == num_external_computed_tokens
         assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert scheduler.failed_recving_kv_req_ids == {request2.request_id}
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 3
@@ -310,7 +310,7 @@ def test_async_progressive_load_failure(
     assert (
         scheduler.waiting_for_remote_kvs.peek_request().request_id == request.request_id
     )
-    assert request.num_computed_tokens == 0
+    assert request.num_computed_tokens == num_external_computed_tokens
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 1
 
