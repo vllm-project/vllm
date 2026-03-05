@@ -596,9 +596,7 @@ class OpenAIServing:
         """Convert GenerationError or RequestRejectedError to ErrorResponse."""
         if isinstance(e, (GenerationError, RequestRejectedError)):
             return self.create_error_response(
-                str(e),
-                err_type=e.err_type,
-                status_code=e.status_code,
+                str(e), err_type=e.err_type, status_code=e.status_code
             )
         # fallback for other exception types
         return self.create_error_response(str(e))
