@@ -190,10 +190,6 @@ class EmbedRequestMixin(EncodingRequestMixin):
         description="Whether to use activation for the pooler outputs. "
         "`None` uses the pooler's default, which is `True` in most cases.",
     )
-    normalize: bool | None = Field(
-        default=None,
-        description="Deprecated; please pass `use_activation` instead",
-    )
     # --8<-- [end:embed-extra-params]
 
 

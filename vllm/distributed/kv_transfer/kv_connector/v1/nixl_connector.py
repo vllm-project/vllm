@@ -135,7 +135,10 @@ _NIXL_SUPPORTED_DEVICE = {
         "cpu",
     ),
     "tpu": ("cpu",),
-    "xpu": ("cpu",),
+    "xpu": (
+        "cpu",
+        "xpu",
+    ),
     "cpu": ("cpu",),
 }
 # support for oot platform by providing mapping in current_platform
@@ -935,13 +938,17 @@ class NixlConnectorWorker:
             ]
 
             if rsv_cores_for_kv:
+                if not hasattr(os, "sched_setaffinity"):
+                    raise NotImplementedError(
+                        "os.sched_setaffinity is not available on this platform"
+                    )
                 os.sched_setaffinity(0, rsv_cores_for_kv)
 
         # support for oot platform which can't register nixl memory
         # type based on kv_buffer_device
         nixl_memory_type = current_platform.get_nixl_memory_type()
         if nixl_memory_type is None:
-            if self.kv_buffer_device == "cuda":
+            if self.kv_buffer_device in ["cuda", "xpu"]:
                 nixl_memory_type = "VRAM"
             elif self.kv_buffer_device == "cpu":
                 nixl_memory_type = "DRAM"
@@ -2502,6 +2509,9 @@ class NixlConnectorWorker:
 
     def shutdown(self):
         """Shutdown the connector worker."""
+        if not hasattr(self, "_handshake_initiation_executor"):
+            # error happens during init, no need to shutdown
+            return
         self._handshake_initiation_executor.shutdown(wait=False)
         for handles in self._recving_transfers.values():
             for handle in handles:
