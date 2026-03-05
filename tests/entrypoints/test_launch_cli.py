@@ -51,14 +51,56 @@ def test_parse_launch_invalid_component(launch_parser):
         launch_parser.parse_args(["launch", "unknown", "--model", "test-model"])
 
 
+# -- Parsing: `--server` argument --
+
+
+def test_parse_render_server_default(launch_parser):
+    args = launch_parser.parse_args(["launch", "render", "--model", "m"])
+    assert args.server == "http"
+
+
+def test_parse_render_server_http(launch_parser):
+    args = launch_parser.parse_args(
+        ["launch", "render", "--model", "m", "--server", "http"]
+    )
+    assert args.server == "http"
+
+
+def test_parse_render_server_grpc(launch_parser):
+    args = launch_parser.parse_args(
+        ["launch", "render", "--model", "m", "--server", "grpc"]
+    )
+    assert args.server == "grpc"
+
+
+def test_parse_render_server_invalid(launch_parser):
+    with pytest.raises(SystemExit):
+        launch_parser.parse_args(
+            ["launch", "render", "--model", "m", "--server", "invalid"]
+        )
+
+
 # -- Dispatch --
 
 
-def test_cmd_launch_render_calls_run():
-    args = argparse.Namespace(model_tag=None, model="test-model")
-    with patch("vllm.entrypoints.cli.launch.uvloop.run") as mock_uvloop_run:
+def test_cmd_launch_render_calls_http():
+    args = argparse.Namespace(server="http")
+    with (
+        patch("vllm.entrypoints.cli.launch.run_launch_http") as mock_http,
+        patch("vllm.entrypoints.cli.launch.uvloop.run"),
+    ):
         RenderSubcommand.cmd(args)
-        mock_uvloop_run.assert_called_once()
+        mock_http.assert_called_once_with(args)
+
+
+def test_cmd_launch_render_calls_grpc():
+    args = argparse.Namespace(server="grpc")
+    with (
+        patch("vllm.entrypoints.cli.launch.run_launch_grpc") as mock_grpc,
+        patch("vllm.entrypoints.cli.launch.uvloop.run"),
+    ):
+        RenderSubcommand.cmd(args)
+        mock_grpc.assert_called_once_with(args)
 
 
 def test_cmd_launch_model_tag_overrides():
