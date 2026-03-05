@@ -157,7 +157,6 @@ class BlockTables:
             PAD_ID=PAD_SLOT_ID,
             TRITON_BLOCK_SIZE=1024,  # type: ignore
         )
-        # Kernel already pads slots beyond num_tokens with PAD_SLOT_ID.
         return self.slot_mappings[:, :num_tokens_padded]
 
     def get_dummy_slot_mappings(self, num_tokens: int) -> torch.Tensor:

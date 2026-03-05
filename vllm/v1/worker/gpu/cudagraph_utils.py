@@ -15,11 +15,11 @@ from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
+from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
-from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
@@ -29,7 +29,8 @@ logger = init_logger(__name__)
 
 @dataclass(frozen=True)
 class BatchExecutionDescriptor:
-    """Batch execution shape descriptor with mode and padded values."""
+    """Describes the shape of the batch and CG mode to run; this is used to make shape
+    matches between the capture and runtime."""
 
     cg_mode: CUDAGraphMode
     num_tokens: int
@@ -71,12 +72,11 @@ class CudaGraphManager:
         self.dp_size = vllm_config.parallel_config.data_parallel_size
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
-        self._graphs_captured = False
         self.pool = (
-            torch.cuda.graph_pool_handle()
-            if self.cudagraph_mode != CUDAGraphMode.NONE
-            else None
+            current_platform.get_graph_pool_handle() if self.cudagraph_mode else None
         )
+
+        self._graphs_captured = False
         self._candidates: list[list[BatchExecutionDescriptor]] = []
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
         self._init_candidates()
@@ -100,9 +100,9 @@ class CudaGraphManager:
         for padded in capture_sizes:
             # Capture decode specfifc graphs if required (i.e. separate decode routine)
             if (
-                decode_mode != CUDAGraphMode.NONE
+                separate_decode_routine
+                and decode_mode
                 and self.uniform_decode_query_len <= padded <= max_decode_tokens
-                and separate_decode_routine
             ):
                 desc = BatchExecutionDescriptor(
                     cg_mode=decode_mode,
@@ -113,7 +113,7 @@ class CudaGraphManager:
                 descs_by_mode[decode_mode].append(desc)
                 descs_by_token_count[padded].append(desc)
 
-            if mixed_mode != CUDAGraphMode.NONE:
+            if mixed_mode:
                 desc = BatchExecutionDescriptor(
                     cg_mode=mixed_mode,
                     num_tokens=padded,
@@ -265,7 +265,11 @@ class ModelCudaGraphManager(CudaGraphManager):
 
         def capture_fn(desc: BatchExecutionDescriptor) -> None:
             num_tokens = desc.num_tokens
-            num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
+            num_tokens_across_dp = (
+                torch.full((self.dp_size,), num_tokens, dtype=torch.int32, device="cpu")
+                if self.dp_size > 1
+                else None
+            )
             attn_metadata, slot_mappings = prepare_inputs_to_capture(
                 desc,
                 model_state,

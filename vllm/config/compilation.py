@@ -97,6 +97,9 @@ class CUDAGraphMode(enum.Enum):
     def __str__(self) -> str:
         return self.name
 
+    def __bool__(self) -> bool:
+        return self != CUDAGraphMode.NONE
+
 
 @config
 class PassConfig:
