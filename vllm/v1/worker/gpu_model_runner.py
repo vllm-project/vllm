@@ -1797,13 +1797,27 @@ class GPUModelRunner(
         )
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
+        # Copy input_batch.num_accepted_tokens_cpu into
+        # self.num_accepted_tokens, then sync to GPU.
+        # Hybrid: input_batch.num_accepted_tokens_cpu has correct values,
+        #   set by _update_states_after_model_execute (async copy, needs
+        #   event sync).
+        # Non-hybrid: input_batch.num_accepted_tokens_cpu is always 1
+        #   (default), which is wrong for draft requests. In async mode,
+        #   self.num_accepted_tokens.gpu is corrected by
+        #   _update_num_computed_tokens_for_batch_change below. In sync
+        #   mode, self.num_accepted_tokens.gpu is unused (only GDN/Mamba2
+        #   attention builders consume it).
         if self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
-        self.num_accepted_tokens.np[:num_reqs] = (
-            self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-        )
-        self.num_accepted_tokens.np[num_reqs:].fill(1)
-        self.num_accepted_tokens.copy_to_gpu()
+            self.num_accepted_tokens.np[:num_reqs] = (
+                self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+            )
+            self.num_accepted_tokens.np[num_reqs:].fill(1)
+            self.num_accepted_tokens.copy_to_gpu()
+        else:
+            self.num_accepted_tokens.np.fill(1)
+            self.num_accepted_tokens.gpu.fill_(1)
 
         # Update num_computed_tokens on GPU.
         # For async spec decode, the CPU values are optimistic (assume all
