@@ -136,20 +136,20 @@ Testing has been conducted on AWS Graviton3 instances for compatibility.
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:pre-built-images]
 
-To pull the latest image:
+To pull the latest image from Docker Hub:
 
 ```bash
-docker pull public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest
+docker pull vllm/vllm-openai-cpu:latest-arm64
 ```
 
 To pull an image with a specific vLLM version:
 
 ```bash
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
-docker pull public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:v${VLLM_VERSION}
+docker pull vllm/vllm-openai-cpu:v${VLLM_VERSION}-arm64
 ```
 
-All available image tags are here: [https://gallery.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo](https://gallery.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo).
+All available image tags are here: [https://hub.docker.com/r/vllm/vllm-openai-cpu/tags](https://hub.docker.com/r/vllm/vllm-openai-cpu/tags).
 
 You can run these images via:
 
@@ -158,7 +158,7 @@ docker run \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -p 8000:8000 \
     --env "HF_TOKEN=<secret>" \
-    public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:<tag> <args...>
+    vllm/vllm-openai-cpu:latest-arm64 <args...>
 ```
 
 You can also access the latest code with Docker images. These are not intended for production use and are meant for CI and testing only. They will expire after several days.
