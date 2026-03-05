@@ -412,8 +412,8 @@ class AnyModelArchConfigConvertor(ModelArchConfigConvertorBase):
     """
 
     def get_total_num_kv_heads(self) -> int:
-        # block_configs are normalized to SimpleNamespace by
-        # AnyModelForCausalLMConfig.verify_and_update_model_config before
+        # block_configs are normalized to _AttrDict by
+        # AnyModelConfig.verify_and_update_model_config before
         # this method is called.
         #
         # Return the *maximum* KV head count across non-no-op layers so
@@ -491,8 +491,9 @@ class LongCatFlashMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 1)
 
 
-# hf_config.model_type -> convertor class
+# hf_config.model_type (or architecture name) -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
+    "AnyModel": AnyModelArchConfigConvertor,
     "mamba": MambaModelArchConfigConvertor,
     "falcon_mamba": MambaModelArchConfigConvertor,
     "timm_wrapper": TerratorchModelArchConfigConvertor,
