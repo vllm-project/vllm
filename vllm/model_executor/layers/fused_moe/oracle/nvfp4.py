@@ -428,12 +428,15 @@ def make_nvfp4_moe_kernel(
     # NOTE(rob): we only want the mk to control the shared_expert
     # if using all2all (for SBO). bnell is making this explicit in
     # the new MoE runner class.
+    is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
         shared_experts=(
             shared_experts
-            if moe_config.moe_parallel_config.use_all2all_kernels
+            if (
+                moe_config.moe_parallel_config.use_all2all_kernels and not is_monolithic
+            )
             else None
         ),
         moe_parallel_config=moe_config.moe_parallel_config,
