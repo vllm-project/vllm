@@ -272,9 +272,9 @@ def run_moe_test(
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
             )
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
     torch.testing.assert_close(test_output, baseline_output, atol=atol, rtol=rtol)
 
@@ -768,7 +768,7 @@ def test_mixtral_moe(
                 F.pad(vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[..., 0:-128],
                 requires_grad=False,
             )
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
 
         # FIXME (zyongye) fix this after we move self.kernel
