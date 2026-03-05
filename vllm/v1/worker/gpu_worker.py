@@ -392,15 +392,20 @@ class Worker(WorkerBase):
 
             # Profile CUDA graph memory if graphs will be captured.
             cudagraph_memory_estimate = 0
-            if (
-                not self.model_config.enforce_eager
-                and envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
-            ):
+            if not self.model_config.enforce_eager:
                 cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+
+            # Only apply the estimate to KV cache sizing
+            # when VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS is enabled.
+            cudagraph_memory_estimate_applied = (
+                cudagraph_memory_estimate
+                if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+                else 0
+            )
 
         self.non_torch_memory = profile_result.non_torch_increase
         self.peak_activation_memory = (
-            profile_result.torch_peak_increase + cudagraph_memory_estimate
+            profile_result.torch_peak_increase + cudagraph_memory_estimate_applied
         )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
@@ -419,7 +424,7 @@ class Worker(WorkerBase):
         self.available_kv_cache_memory_bytes = (
             self.requested_memory
             - profile_result.non_kv_cache_memory
-            - cudagraph_memory_estimate
+            - cudagraph_memory_estimate_applied
         )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
@@ -496,7 +501,7 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> float:
-        warmup_sizes = []
+        warmup_sizes: list[int] = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             # warm up sizes that are not in cudagraph capture sizes,
@@ -550,6 +555,51 @@ class Worker(WorkerBase):
                 GiB(diff),
                 100 * diff / max(cuda_graph_memory_bytes, 1),
             )
+
+        # Log transition messages for CUDA graph memory profiling.
+        if (
+            hasattr(self, "cudagraph_memory_estimate")
+            and self.cudagraph_memory_estimate > 0
+            and hasattr(self, "init_snapshot")
+        ):
+            total_mem = self.init_snapshot.total_memory
+            current_util = self.cache_config.gpu_memory_utilization
+            cg_util_delta = self.cudagraph_memory_estimate / total_mem
+            if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
+                equiv_util = round(current_util - cg_util_delta, 4)
+                suggested_util = min(
+                    round(current_util + cg_util_delta, 4),
+                    1.0,
+                )
+                logger.info(
+                    "CUDA graph memory profiling is enabled "
+                    "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1). "
+                    "This will become the default in v0.19. "
+                    "The current --gpu-memory-utilization=%.4f is equivalent "
+                    "to --gpu-memory-utilization=%.4f without CUDA graph "
+                    "memory profiling. To maintain the same KV "
+                    "cache size as before, increase "
+                    "--gpu-memory-utilization to %.4f.",
+                    current_util,
+                    equiv_util,
+                    suggested_util,
+                )
+            else:
+                suggested_util = min(
+                    round(current_util + cg_util_delta, 4),
+                    1.0,
+                )
+                logger.info(
+                    "In v0.19, CUDA graph memory profiling will be enabled "
+                    "by default (VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1), "
+                    "which more accurately accounts for CUDA graph memory "
+                    "during KV cache allocation. To try it now, set "
+                    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1 and increase "
+                    "--gpu-memory-utilization from %.4f (current setting) to %.4f "
+                    "to maintain the same KV cache size.",
+                    current_util,
+                    suggested_util,
+                )
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
             self, "peak_activation_memory"
