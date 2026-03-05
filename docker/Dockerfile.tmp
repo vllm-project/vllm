@@ -1,0 +1,3 @@
+FROM ubuntu:22.04
+
+RUN touch /tmp/hello.txt && echo "Hello, World!" > /tmp/hello.txt
