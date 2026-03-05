@@ -1,5 +1,3 @@
-<!-- markdownlint-disable -->
-
 # Optimization Levels
 
 ## Overview
@@ -15,6 +13,7 @@ All optimization level defaults can be achieved by manually setting the underlyi
 User-set flags take precedence over optimization level defaults.
 
 ## Level Summaries and Usage Examples
+
 ```bash
 # CLI usage
 python -m vllm.entrypoints.api_server --model RedHatAI/Llama-3.2-1B-FP8 -O1
@@ -27,7 +26,9 @@ llm = LLM(
     optimization_level=2 # equivalent to -O2
 )
 ```
+
 ### `-O0`: No Optimization
+
 Startup as fast as possible - no autotuning, no compilation, and no cudagraphs.
 This level is good for initial phases of development and debugging.
 
@@ -38,8 +39,8 @@ Settings:
 - `-cc.pass_config.fuse_...=False` (all fusions disabled)
 - `--kernel-config.enable_flashinfer_autotune=False`
 
-
 ### `-O1`: Fast Optimization
+
 Prioritize fast startup, but still enable basic optimizations like compilation and cudagraphs.
 This level is a good balance for most development scenarios where you want faster startup but
 still make sure your code does not break cudagraphs or compilation.
@@ -57,13 +58,14 @@ Fusions:
 - `-cc.pass_config.fuse_act_padding=True`†
 - `-cc.pass_config.fuse_rope_kvcache=True`† (will be moved to O2)
 
-\* These fusions are only enabled when either op is using a custom kernel, otherwise Inductor fusion is better.
+\* These fusions are only enabled when either op is using a custom kernel, otherwise Inductor fusion is better.</br>
 † These fusions are ROCm-only and require AITER.
 
 ### `-O2`: Full Optimization (Default)
-Prioritize performance at the expense of additional startup time. 
+
+Prioritize performance at the expense of additional startup time.
 This level is recommended for production workloads and is hence the default.
-Fusions in this level _may_ take longer due to additional compile ranges. 
+Fusions in this level _may_ take longer due to additional compile ranges.
 
 Settings (on top of `-O1`):
 
@@ -71,7 +73,8 @@ Settings (on top of `-O1`):
 - `-cc.pass_config.fuse_allreduce_rms=True`
 
 ### `-O3`: Aggressive Optimization
-This level is currently the same as `-O2`, but may include additional optimizations 
+
+This level is currently the same as `-O2`, but may include additional optimizations
 in the future that are more time-consuming or experimental.
 
 ## Troubleshooting

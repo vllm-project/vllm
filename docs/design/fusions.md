@@ -2,7 +2,7 @@
 
 vLLM applies a set of kernel/operator fusions at compile time (via custom [`torch.compile`](torch_compile.md) Inductor passes)
 to separate optimizations from model definitions and avoid breaking layer abstractions in model code.
-These fusions are controlled by fields in [`PassConfig`](../configuration/engine_args.md) and are automatically enabled
+These fusions are controlled by fields in [`PassConfig`][vllm.config.compilation.PassConfig] and are automatically enabled
 at appropriate [optimization levels](optimization_levels.md).
 
 ## Quick Reference
@@ -181,7 +181,7 @@ Other attention backends do not support fused output quantization yet.
 
 **What it fuses.** Fuses the tensor-parallel all-reduce collective with the subsequent residual add,
 RMSNorm, and optionally a quantization step into a single FlashInfer / TRT-LLM communication kernel.
-This fusion is only profitable for small `num_tokens`, 
+This fusion is only profitable for small `num_tokens`,
 so the fusion is only performed in the lower compiled range.
 
 Patterns covered:
@@ -213,7 +213,7 @@ H100/SM90 for models with `hidden_size >= 8192`. The threshold is configurable v
 
 The general transformation:
 
-```
+```text
 Input → AllReduce → RMSNorm → Output
 becomes:
 Input → ReduceScatter → local RMSNorm → AllGather → Output
@@ -228,7 +228,7 @@ Patterns covered:
 Requires: `use_inductor_graph_partition=True` **or** piecewise compilation with static sizes
 divisible by `tensor_parallel_size`.
 
-Supported hardware: Only tested on NVIDIA CUDA, possibly works on ROCm. FP8 all-gather requires sm90+. 
+Supported hardware: Only tested on NVIDIA CUDA, possibly works on ROCm. FP8 all-gather requires sm90+.
 
 **Code locations.**
 
@@ -254,8 +254,9 @@ Patterns covered:
 
 Supported hardware: NVIDIA CUDA (requires `torch.distributed._symmetric_memory`).
 
-On B200, pattern-matching fp8 FlashInfer scaled MM is not supported, so it must be disabled 
+On B200, pattern-matching fp8 FlashInfer scaled MM is not supported, so it must be disabled
 ([#27893](https://github.com/vllm-project/vllm/issues/27893))
+
 ```shell
 VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel ...
 ```
@@ -272,11 +273,10 @@ VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel ...
     embedding (e.g. Qwen). Not enabled by default at any optimization level due to perf issues on H100:
     [#34391](https://github.com/vllm-project/vllm/issues/34391)
 
-
 **What it fuses.** Fuses the sequence: split QKV → reshape → Q/K RMSNorm → reshape → rotary
 embedding into a single `fused_qk_norm_rope` CUDA kernel.
 
-```
+```text
 # Unfused:
 q, k, v = split(qkv)
 q_norm = rms_norm(q.view(heads))
@@ -297,7 +297,7 @@ Supported hardware: CUDA (SM70+) only.
 ### RoPE + KV-Cache Update (`fuse_rope_kvcache`)
 
 !!! info
-    ROCm/AITER-only. Not available on NVIDIA CUDA or CPU. The fusion is only enabled for 
+    ROCm/AITER-only. Not available on NVIDIA CUDA or CPU. The fusion is only enabled for
     `num_tokens ≤ 256` by default due to AITER fused kernel performance issues.
     This threshold is configurable via `PassConfig.rope_kvcache_fusion_max_token_num`.
 
@@ -306,7 +306,7 @@ a single kernel, avoiding separate reads and writes of the key and value tensors
 
 Requires: AMD ROCm with AITER enabled, the `rotary_embedding` custom op active (automatic),
 and the `kv_cache` update op visible in the graph: either by using Inductor graph partition
-or removed from `splitting_ops`. 
+or removed from `splitting_ops`.
 If these conditions are set, the fusion is enabled automatically for optimization level O1 and above.
 
 **Code locations.**
