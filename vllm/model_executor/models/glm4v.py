@@ -394,7 +394,7 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
 
         return self.ctx.init_processor(
             GLM4VProcessor,
-            tokenizer=self.ctx.get_tokenizer(),
+            tokenizer=self.get_tokenizer(),
             **{**kwargs, "image_size": image_size},
         )
 

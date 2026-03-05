@@ -439,7 +439,7 @@ class QwenVLProcessingInfo(BaseProcessingInfo):
 
         return self.ctx.init_processor(
             QwenVLProcessor,
-            tokenizer=self.ctx.get_tokenizer(),
+            tokenizer=self.get_tokenizer(),
             **{**kwargs, "image_size": image_size},
         )
 
