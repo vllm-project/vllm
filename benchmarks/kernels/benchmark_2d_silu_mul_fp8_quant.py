@@ -168,7 +168,7 @@ def bench_impl(
     # warmup
     for kwargs in kwargs_list:
         impl_type.get_impl()(**kwargs)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Merge into a single kwargs and qualify arguments as ArgPool
     kwargs = {k: ArgPool([]) for k in kwargs_list[0]}

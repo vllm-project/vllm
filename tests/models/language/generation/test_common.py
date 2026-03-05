@@ -195,4 +195,4 @@ def test_models(
         # unit tests. On ROCm, when using AITER
         # the memory might not be deallocated completely
         # before running the next test case
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()

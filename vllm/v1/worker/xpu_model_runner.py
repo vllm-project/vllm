@@ -29,9 +29,6 @@ class XPUModelRunner(GPUModelRunner):
         # FIXME: To be verified.
         self.cascade_attn_enabled = False
 
-    def _sync_device(self) -> None:
-        torch.xpu.synchronize()
-
 
 @contextmanager
 def _torch_cuda_wrapper():
@@ -42,7 +39,6 @@ def _torch_cuda_wrapper():
         torch.cuda.current_stream = torch.xpu.current_stream
         torch.cuda.stream = torch.xpu.stream
         torch.cuda.mem_get_info = torch.xpu.mem_get_info
-        torch.cuda.synchronize = torch.xpu.synchronize
         if supports_xpu_graph():
             torch.cuda.graph = torch.xpu.graph
             torch.cuda.CUDAGraph = torch.xpu.XPUGraph
