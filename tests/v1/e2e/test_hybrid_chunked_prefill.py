@@ -37,12 +37,16 @@ MESSAGES = [
 # TODO(ben): Add Nemotron-H with MTP
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA not available")
 @pytest.mark.parametrize("model_name", ["Qwen/Qwen3.5-35B-A3B-FP8"])
-def test_mtp_speculative_mixed_batch_short_prefill(vllm_runner, model_name):
+@pytest.mark.parametrize("enable_prefix_caching", [False, True])
+def test_mtp_speculative_mixed_batch_short_prefill(
+    vllm_runner, model_name, enable_prefix_caching
+):
     """Test to ensure MTP speculative decoding correctly handles
     short prefill chunks that fall below the reorder_batch_threshold."""
 
     # Set so large that both prefills will be classified as decodes in a mixed batch
-    chunk_size = 256
+    # note, with prefix caching we require chunk_size >= mamba_block_size
+    chunk_size = 256 if not enable_prefix_caching else 8192
     num_draft_tokens = 100
 
     with vllm_runner(
@@ -57,10 +61,8 @@ def test_mtp_speculative_mixed_batch_short_prefill(vllm_runner, model_name):
         tensor_parallel_size=2,
         trust_remote_code=True,
         enable_chunked_prefill=True,
-        enable_prefix_caching=False,
-        attention_config={
-            "backend": "flash_attn",
-        },
+        enable_prefix_caching=enable_prefix_caching,
+        mamba_cache_mode="align" if enable_prefix_caching else "none",
     ) as llm:
         sampling_params = SamplingParams(
             temperature=0.0,
