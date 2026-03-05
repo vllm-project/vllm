@@ -1230,14 +1230,13 @@ def get_dcp_group() -> GroupCoordinator:
 get_context_model_parallel_group = get_dcp_group
 
 _TPA_SIZE: int = 0  # TPA size (head parallelism for attention)
-_KVP_SIZE: int = 0  # KVP size (= DCP size when TPA is enabled)
 
 
 def is_tpa_gqa_mode() -> bool:
     """Check if TPA GQA mode is enabled (TPA > 1).
 
     TPA GQA mode is enabled when tensor_parallel_size_attention is set
-    AND TPA < TP (meaning KVP > 1 with head separation).
+    AND TPA < TP (meaning DCP > 1 with head separation).
 
     For MLA models, TPA=1 so this returns False.
     """
@@ -1260,14 +1259,15 @@ def get_attention_tp_world_size(disable_parallel: bool = False) -> int:
 def get_attention_tp_rank(disable_parallel: bool = False) -> int:
     """Get the rank for attention head parallelism.
 
-    In TPA GQA mode, attention heads are indexed by TPA rank (TP rank // KVP).
-    In standard mode, returns the full TP rank.
+    In TPA GQA mode, attention heads are indexed by TPA rank
+    (TP rank // DCP size). In standard mode, returns the full TP rank.
     """
     if disable_parallel:
         return 0
     if _TPA_SIZE > 0:
         tp_rank = get_tensor_model_parallel_rank()
-        return tp_rank // _KVP_SIZE
+        dcp_size = get_dcp_group().world_size
+        return tp_rank // dcp_size
     return get_tensor_model_parallel_rank()
 
 
@@ -1633,17 +1633,16 @@ def initialize_model_parallel(
         group_name="dcp",
     )
 
-    # Store TPA/KVP sizes for head sharding math if TPA is enabled.
-    # No separate KVP group is needed — DCP group has the correct topology
-    # (contiguous ranks within TP group, same as KVP grouping).
-    global _TPA_SIZE, _KVP_SIZE
-    if config is not None and config.parallel_config.kvp_size > 1:
+    # Store TPA size for head sharding math if TPA is enabled.
+    # No separate group is needed — DCP group has the correct topology
+    # (contiguous ranks within TP group, same as TPA grouping).
+    global _TPA_SIZE
+    if config is not None and config.parallel_config.dcp_size > 1:
         _TPA_SIZE = config.parallel_config.tpa_size
-        _KVP_SIZE = config.parallel_config.kvp_size
         logger.info(
-            "TPA enabled: TPA=%d, KVP=%d (using DCP group for communication)",
+            "TPA enabled: TPA=%d, DCP=%d (using DCP group for communication)",
             _TPA_SIZE,
-            _KVP_SIZE,
+            config.parallel_config.dcp_size,
         )
 
     global _PCP
@@ -1922,9 +1921,8 @@ def destroy_model_parallel():
         _DCP.destroy()
     _DCP = None
 
-    global _TPA_SIZE, _KVP_SIZE
+    global _TPA_SIZE
     _TPA_SIZE = 0
-    _KVP_SIZE = 0
 
     global _PCP
     if _PCP:
