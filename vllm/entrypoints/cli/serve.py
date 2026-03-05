@@ -50,6 +50,17 @@ class ServeSubcommand(CLISubcommand):
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
 
+        if getattr(args, "grpc", False):
+            try:
+                from smg_grpc_servicer.vllm.server import serve_grpc
+            except ImportError:
+                raise ImportError(
+                    "smg-grpc-servicer is required for --grpc mode. "
+                    "Install it with: pip install vllm[grpc]"
+                ) from None
+            uvloop.run(serve_grpc(args))
+            return
+
         if args.headless:
             if args.api_server_count is not None and args.api_server_count > 0:
                 raise ValueError(
@@ -126,6 +137,13 @@ class ServeSubcommand(CLISubcommand):
         )
 
         serve_parser = make_arg_parser(serve_parser)
+        serve_parser.add_argument(
+            "--grpc",
+            action="store_true",
+            default=False,
+            help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
+            "server. Requires: pip install vllm[grpc].",
+        )
         serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
         return serve_parser
 
