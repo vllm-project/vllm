@@ -180,8 +180,6 @@ Other attention backends do not support fused output quantization yet.
 - Pass: [`vllm/compilation/passes/fusion/attn_quant_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/attn_quant_fusion.py)
 - Attention backends: [`vllm/v1/attention/backends/`](https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/)
 
----
-
 ### AllReduce + RMSNorm (`fuse_allreduce_rms`)
 
 !!! warning
