@@ -196,6 +196,7 @@ from .utils import (
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+    from vllm.v1.worker.gpu.mm.encoder_cudagraph import EncoderCudaGraphManager
 
 logger = init_logger(__name__)
 
@@ -482,6 +483,9 @@ class GPUModelRunner(
 
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
+
+        # Encoder CUDA graph manager (initialized after model load if enabled)
+        self.encoder_cudagraph_manager: EncoderCudaGraphManager | None = None
 
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
@@ -2500,7 +2504,22 @@ class GPUModelRunner(
                 with self.timed_encoder_operation(
                     should_time, mm_lora_refs, current_item_idx, num_items
                 ):
-                    curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
+                    cudagraph_output = None
+                    if (
+                        self.encoder_cudagraph_manager is not None
+                        and modality == "image"
+                        and "pixel_values" in mm_kwargs_group
+                        and "image_grid_thw" in mm_kwargs_group
+                    ):
+                        cudagraph_output = self.encoder_cudagraph_manager.execute(
+                            pixel_values=mm_kwargs_group["pixel_values"],
+                            grid_thw=mm_kwargs_group["image_grid_thw"],
+                        )
+
+                    if cudagraph_output is not None:
+                        curr_group_outputs = cudagraph_output
+                    else:
+                        curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -5309,6 +5328,24 @@ class GPUModelRunner(
             )
             return 0
 
+        # Initialize encoder CUDA graph manager if enabled
+        if (
+            self.compilation_config.cudagraph_mm_encoder
+            and self.supports_mm_inputs
+            and self.encoder_cudagraph_manager is None
+        ):
+            from vllm.v1.worker.gpu.mm.encoder_cudagraph import EncoderCudaGraphManager
+
+            model = cast(SupportsMultiModal, self.model)
+            if hasattr(model, "visual"):
+                self.encoder_cudagraph_manager = EncoderCudaGraphManager(
+                    vllm_config=self.vllm_config,
+                    device=self.device,
+                    dtype=self.dtype,
+                    vision_model=model.visual,
+                )
+                logger.info("Initialized EncoderCudaGraphManager for vision encoder")
+
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
         start_time = time.perf_counter()
@@ -5344,6 +5381,10 @@ class GPUModelRunner(
                     batch_descriptors=batch_descs,
                     cudagraph_runtime_mode=runtime_mode,
                 )
+
+            # Capture encoder CUDA graphs if enabled
+            if self.encoder_cudagraph_manager is not None:
+                self.encoder_cudagraph_manager.capture()
 
             torch.cuda.synchronize()
             end_free_gpu_memory = torch.cuda.mem_get_info()[0]
