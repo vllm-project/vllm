@@ -49,6 +49,7 @@ can later be overridden directly from the model's ``config.json``.
 from __future__ import annotations
 
 import copy
+import functools
 import importlib
 import inspect
 from dataclasses import dataclass, field
@@ -59,9 +60,43 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 
 from .interfaces import HasNoOps
 from .utils import PPMissingLayer, maybe_prefix
+
+logger = init_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# AttrDict – JSON-serializable dict with attribute access
+# ---------------------------------------------------------------------------
+
+
+class _AttrDict(dict):
+    """A JSON-serializable dict that also supports attribute access.
+
+    Used for ``block_configs`` entries so they can be accessed as
+    ``bc.attention.no_op`` (attribute style) while remaining serializable
+    by :func:`json.dumps` (needed for config hashing via
+    ``to_json_string()``).
+    """
+
+    def __getattr__(self, key: str):
+        try:
+            return self[key]
+        except KeyError:
+            raise AttributeError(key) from None
+
+    def __setattr__(self, key: str, value):
+        self[key] = value
+
+    def __delattr__(self, key: str):
+        try:
+            del self[key]
+        except KeyError:
+            raise AttributeError(key) from None
+
 
 # ---------------------------------------------------------------------------
 # Block config access helpers
@@ -119,7 +154,7 @@ class NoOpMLP(nn.Module):
         return torch.zeros_like(hidden_states)
 
 
-class Same(nn.Module):
+class NoOpNorm(nn.Module):
     """Identity replacement for layer norms. Must handle vLLM's fused
     RMSNorm calling convention: (hidden_states) or
     (hidden_states, residual) -> (hidden_states, residual)."""
@@ -347,8 +382,15 @@ def _resolve_layer_class(
             class_name = info.decoder_layer_class_map.get(
                 pattern[layer_idx], class_name
             )
-    mod = importlib.import_module(info.decoder_layer_module, package=__package__)
-    return getattr(mod, class_name)
+    try:
+        mod = importlib.import_module(info.decoder_layer_module, package=__package__)
+        return getattr(mod, class_name)
+    except (ImportError, AttributeError) as exc:
+        raise type(exc)(
+            f"Failed to resolve layer class {class_name!r} from "
+            f"module {info.decoder_layer_module!r} for layer {layer_idx}: "
+            f"{exc}"
+        ) from exc
 
 
 def _create_layer_config(global_config, block_config, info: ArchInfo):
@@ -386,13 +428,15 @@ def _create_layer_config(global_config, block_config, info: ArchInfo):
             if s is not None:
                 setattr(config, moe_size_field, s)
 
-    # Stage-2 / extra fields (e.g. {"hidden_size": "hidden_size"})
+    # Stage-2 / extra fields (e.g. {"ffn.hidden_size": "hidden_size"})
     for block_path, config_attr in info.extra_config_fields.items():
         parts = block_path.split(".", 1)
-        if len(parts) == 2:
-            val = _get_block_attr(block_config, parts[0], parts[1])
-        else:
-            val = _get_attr(_get_block_section(block_config, parts[0]), parts[0])
+        if len(parts) != 2:
+            raise ValueError(
+                f"extra_config_fields key {block_path!r} must be "
+                f"'section.key' format (e.g. 'ffn.hidden_size')"
+            )
+        val = _get_block_attr(block_config, parts[0], parts[1])
         if val is not None:
             setattr(config, config_attr, val)
 
@@ -403,10 +447,16 @@ def _apply_no_ops(layer: nn.Module, block_config, info: ArchInfo) -> None:
     """Replace sub-modules with no-ops according to *block_config*."""
     if _get_block_attr(block_config, "attention", "no_op", False):
         setattr(layer, info.attn_module, NoOpAttention())
-        setattr(layer, info.attn_norm_module, Same())
+        setattr(layer, info.attn_norm_module, NoOpNorm())
     if _get_block_attr(block_config, "ffn", "no_op", False):
         setattr(layer, info.ffn_module, NoOpMLP())
-        setattr(layer, info.ffn_norm_module, Same())
+        setattr(layer, info.ffn_norm_module, NoOpNorm())
+
+
+@functools.cache
+def _layer_init_params(layer_cls: type) -> frozenset[str]:
+    """Return the parameter names of *layer_cls.__init__*, cached per class."""
+    return frozenset(inspect.signature(layer_cls.__init__).parameters)
 
 
 def _instantiate_layer(
@@ -439,7 +489,7 @@ def _instantiate_layer(
         "prefix": prefix,
         "layer_idx": layer_idx,
     }
-    params = inspect.signature(layer_cls.__init__).parameters
+    params = _layer_init_params(layer_cls)
     kwargs = {k: v for k, v in _pool.items() if k in params}
     return layer_cls(**kwargs)
 
@@ -478,11 +528,12 @@ def _has_overrides(block_config, info: ArchInfo | None = None) -> bool:
     if info and info.extra_config_fields:
         for block_path in info.extra_config_fields:
             parts = block_path.split(".", 1)
-            if len(parts) == 2:
-                val = _get_block_attr(block_config, parts[0], parts[1])
-            else:
-                section_data = _get_block_section(block_config, parts[0])
-                val = _get_attr(section_data, parts[0])
+            if len(parts) != 2:
+                raise ValueError(
+                    f"extra_config_fields key {block_path!r} must be "
+                    f"'section.key' format (e.g. 'ffn.hidden_size')"
+                )
+            val = _get_block_attr(block_config, parts[0], parts[1])
             if val is not None:
                 return True
     return False
@@ -498,7 +549,7 @@ def _unregister_layer(layer_prefix: str, vllm_config: VllmConfig) -> None:
     "Duplicate layer name" error.
     """
     ctx = vllm_config.compilation_config.static_forward_context
-    stale = [k for k in ctx if k.startswith(layer_prefix)]
+    stale = [k for k in ctx if k.startswith(layer_prefix + ".")]
     for k in stale:
         del ctx[k]
 
@@ -546,6 +597,14 @@ def _patch_anymodel_layers(
     # Full dotted prefix for the layers list; used to construct the
     # weight-name prefix when instantiating replacement layers.
     layers_prefix = maybe_prefix(base_init_prefix, arch_info.layers_path)
+
+    if len(block_configs) != len(layers):
+        logger.warning(
+            "block_configs length (%d) != layers length (%d); "
+            "extra entries will be ignored.",
+            len(block_configs),
+            len(layers),
+        )
 
     for layer_idx, block_config in enumerate(block_configs):
         if layer_idx >= len(layers):
