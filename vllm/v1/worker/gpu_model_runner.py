@@ -691,8 +691,18 @@ class GPUModelRunner(
 
         self.uniform_decode_query_len = 1 + self.num_spec_tokens
 
-        # If this model has mamba2 layers, we handle num_accepted_tokens_cpu differently
-        self.is_mamba2_hybrid: bool = False
+        # When spec decode is active, the mamba backend classifies requests
+        # with query_len <= reorder_batch_threshold as "decodes". Prefill
+        # chunks that fall under this threshold get processed via the decode
+        # path, which stores intermediate states at sequential slots. We must
+        # set num_accepted_tokens to the chunk's query_len for those requests
+        # so the next iteration reads from the correct final-state slot.
+        # Prefills that went through the actual prefill path should keep the
+        # default value of 1 (the prefill path stores state at slot 0 only).
+        self.needs_prefill_as_decode_slots: bool = False
+        self.prefill_as_decode_num_tokens = self._make_buffer(
+            self.max_num_reqs, dtype=torch.int32
+        )
 
         # Cudagraph dispatcher for runtime cudagraph dispatching.
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
@@ -1213,37 +1223,41 @@ class GPUModelRunner(
             .int()
             .argmax(-1)
         )
-        for i, num_tokens in enumerate(self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()):
-            if not self.is_mamba2_hybrid:
-                self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
-                continue
-
-            # When spec decode is active, the mamba backend classifies requests
-            # with query_len <= reorder_batch_threshold as "decodes". Prefill
-            # chunks that fall under this threshold get processed via the decode
-            # path, which stores intermediate states at sequential slots. We must
-            # set num_accepted_tokens to the chunk's query_len for those requests
-            # so the next iteration reads from the correct final-state slot.
-            # Prefills that went through the actual prefill path should keep the
-            # default value of 1 (the prefill path stores state at slot 0 only).
-            spec_decode_active = bool(scheduler_output.scheduled_spec_decode_tokens)
+        spec_decode_active = bool(scheduler_output.scheduled_spec_decode_tokens)
+        if self.needs_prefill_as_decode_slots and spec_decode_active:
             threshold = self.reorder_batch_threshold
-            num_computed = self.input_batch.num_computed_tokens_cpu[i]
-            num_prompt = self.input_batch.num_prompt_tokens[i]
-            is_prefill = num_computed < num_prompt
-            req_id = self.input_batch.req_ids[i]
-            query_len = scheduler_output.num_scheduled_tokens[req_id]
+            any_is_prefill = False
+            for i in range(num_reqs):
+                num_computed = self.input_batch.num_computed_tokens_cpu[i]
+                num_prompt = self.input_batch.num_prompt_tokens[i]
+                is_prefill = num_computed < num_prompt
+                req_id = self.input_batch.req_ids[i]
+                query_len = scheduler_output.num_scheduled_tokens[req_id]
 
-            if is_prefill:
-                classified_as_decode = (
-                    spec_decode_active
-                    and threshold is not None
-                    and query_len <= threshold
+                if is_prefill:
+                    classified_as_decode = (
+                        threshold is not None and query_len <= threshold
+                    )
+                    num_tokens = query_len if classified_as_decode else 1
+                    any_is_prefill = True
+                else:
+                    num_tokens = -1
+                self.prefill_as_decode_num_tokens.np[i] = num_tokens
+
+            # We can skip the GPU transfer if there aren't any values to update
+            if any_is_prefill:
+                self.prefill_as_decode_num_tokens.copy_to_gpu(num_reqs)
+                self.num_accepted_tokens.gpu[:num_reqs] = torch.where(
+                    self.prefill_as_decode_num_tokens.gpu[:num_reqs] != -1,
+                    self.prefill_as_decode_num_tokens.gpu[:num_reqs],
+                    self.num_accepted_tokens.gpu[:num_reqs],
                 )
-                num_tokens = query_len if classified_as_decode else 1
-            self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
 
         if self.cache_config.mamba_cache_mode == "align":
+            for i, num_tokens in enumerate(
+                self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
+            ):
+                self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
             mamba_utils.postprocess_mamba(
                 scheduler_output,
                 self.kv_cache_config,
@@ -1254,10 +1268,10 @@ class GPUModelRunner(
                 self.model.get_mamba_state_copy_func(),
                 self._get_mamba_copy_bufs(),
             )
-        # else:
-        #     self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
-        #         self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
-        #     )
+        else:
+            self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
+                self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
+            )
 
     def _update_streaming_request(
         self, req_id: str, new_req_data: NewRequestData
@@ -1901,7 +1915,7 @@ class GPUModelRunner(
             )
 
             if isinstance(builder, Mamba2AttentionMetadataBuilder):
-                self.is_mamba2_hybrid = True
+                self.needs_prefill_as_decode_slots = True
             extra_attn_metadata_args = {}
             if use_spec_decode and isinstance(
                 builder, (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder)
