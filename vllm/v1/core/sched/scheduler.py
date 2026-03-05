@@ -1465,7 +1465,7 @@ class Scheduler(SchedulerInterface):
             requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
             self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
             for request in requests:
-                self._append_failed_or_rejected_output(outputs, request, failed_kv=True)
+                self._append_failed_or_rejected_output(outputs, request)
 
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
@@ -1475,7 +1475,7 @@ class Scheduler(SchedulerInterface):
         if rejected_reqs:
             # Create EngineCoreOutputs for all rejected requests.
             for request in rejected_reqs:
-                self._append_failed_or_rejected_output(outputs, request)
+                self._append_failed_or_rejected_output(outputs, request, rejected=True)
             rejected_reqs.clear()
         # collect KV cache events from KV cache manager
         events = self.kv_cache_manager.take_events()
@@ -1559,11 +1559,12 @@ class Scheduler(SchedulerInterface):
         self,
         outputs: dict[int, list[EngineCoreOutput]],
         request: "Request",
-        failed_kv: bool = False,
+        rejected: bool = False,
     ) -> None:
         """
         Appends an EngineCoreOutput for a failed KV load or rejected request.
-        If failed_kv is True, omits stop_reason (not available for failed KV loads).
+        If rejected is True, the output indicates a rejected request; otherwise,
+        it indicates a request that failed due to KV load failure.
         """
         output = EngineCoreOutput(
             request_id=request.request_id,
@@ -1572,10 +1573,10 @@ class Scheduler(SchedulerInterface):
             events=request.take_events(),
             trace_headers=request.trace_headers,
         )
-        if failed_kv:
-            output.num_cached_tokens = request.num_cached_tokens
-        else:
+        if rejected:
             output.stop_reason = request.stop_reason
+        else:
+            output.num_cached_tokens = request.num_cached_tokens
 
         outputs[request.client_index].append(output)
 
