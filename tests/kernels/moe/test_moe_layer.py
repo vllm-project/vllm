@@ -107,6 +107,25 @@ def maybe_chunk_by_rank(
         return t
 
 
+def tp_chunk_gate_up(
+    w: torch.Tensor,
+    tp_rank: int,
+    tp_size: int,
+    dim: int,
+    device: torch.device | int | None = None,
+) -> torch.Tensor:
+    """TP-chunk a combined [gate; up] weight, splitting each half separately
+    so every rank gets a portion of both gate and up."""
+    half = w.shape[dim] // 2
+    gate = chunk_by_rank(
+        w.narrow(dim, 0, half), tp_rank, tp_size, dim=dim, device=device
+    )
+    up = chunk_by_rank(
+        w.narrow(dim, half, half), tp_rank, tp_size, dim=dim, device=device
+    )
+    return torch.cat([gate, up], dim=dim)
+
+
 def chunk_scales_by_rank(
     t: torch.Tensor | None,
     r: int,
@@ -448,7 +467,6 @@ def _test_loop(
 
     assert vllm_config.parallel_config.enable_expert_parallel == use_ep
 
-    # torch.set_printoptions(profile="full")
     set_random_seed(7)
 
     in_dtype = hidden_states.dtype
@@ -465,13 +483,12 @@ def _test_loop(
         w2 = chunk_by_rank(w2, dp_rank, dp_size, dim=0, device=device)
 
     if tp_size > 1:
-        # w1 is the combined [gate; up] tensor with shape (E, 2*N, K).
-        # Split each half separately so each TP rank gets a portion of both.
-        half = w1.shape[1] // 2
-        w1_gate = chunk_by_rank(w1[:, :half, :], tp_rank, tp_size, dim=1, device=device)
-        w1_up = chunk_by_rank(w1[:, half:, :], tp_rank, tp_size, dim=1, device=device)
-        w1 = torch.cat([w1_gate, w1_up], dim=1)
+        w1 = tp_chunk_gate_up(w1, tp_rank, tp_size, dim=1, device=device)
         w2 = chunk_by_rank(w2, tp_rank, tp_size, dim=2, device=device)
+
+    if ep_size <= 1 and tp_size <= 1:
+        w1 = w1.to(device)
+        w2 = w2.to(device)
 
     hidden_states = hidden_states.to(device)
     router_logits = router_logits.to(device)
@@ -479,25 +496,12 @@ def _test_loop(
 
     with set_current_vllm_config(vllm_config):
         if shared_experts_config is not None:
-            s_w1 = shared_experts_config.w1
-            s_w2 = shared_experts_config.w2
+            s_w1 = shared_experts_config.w1.to(device)
+            s_w2 = shared_experts_config.w2.to(device)
 
             if tp_size > 1:
-                # s_w1 is (k, n*2) — gate+up combined, column parallel.
-                # Split each half so each TP rank gets a portion of both.
-                half = s_w1.shape[1] // 2
-                s_w1_gate = chunk_by_rank(
-                    s_w1[:, :half], tp_rank, tp_size, dim=1, device=device
-                )
-                s_w1_up = chunk_by_rank(
-                    s_w1[:, half:], tp_rank, tp_size, dim=1, device=device
-                )
-                s_w1 = torch.cat([s_w1_gate, s_w1_up], dim=1)
-                # s_w2 is (n, k) — row parallel, split along input dim.
+                s_w1 = tp_chunk_gate_up(s_w1, tp_rank, tp_size, dim=1, device=device)
                 s_w2 = chunk_by_rank(s_w2, tp_rank, tp_size, dim=0, device=device)
-            else:
-                s_w1 = s_w1.to(device)
-                s_w2 = s_w2.to(device)
 
             shared_experts = TestMLP(
                 w1=s_w1,
@@ -582,7 +586,6 @@ def test_moe_layer(
     use_shared_experts: bool,
     monkeypatch,
 ):
-    # torch.set_printoptions(profile="full")
     set_random_seed(7)
 
     num_gpus = cuda_device_count_stateless()
