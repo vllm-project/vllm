@@ -57,8 +57,6 @@ for per-backend details.
 other architectures support requires setting `PassConfig.sp_min_token_num` explicitly.
 SM100 support also requires setting `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel`.
 
----
-
 ## Enabling / Disabling Fusions
 
 Fusions are exposed through `PassConfig`, which is nested inside `CompilationConfig`:
