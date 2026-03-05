@@ -1553,7 +1553,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=int,
         default=60,
         help="Maximum time to wait for the endpoint to become ready "
-        "in seconds. Ready check will be skipped by default.",
+        "in seconds. A value of 0 will skip the ready check.",
     )
 
     parser.add_argument(
