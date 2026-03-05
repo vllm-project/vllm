@@ -379,13 +379,18 @@ class CompressedTensors24(CompressedTensorsScheme):
             ]
             decompressed = combine_shards(decompressed_shards)
         else:
+            # Compute the decompressed shape from the actual compressed tensor
+            # dimensions. For 2:4 sparsity, compressed has shape [out, in/2]
+            # and decompressed should be [out, in].
+            # This is more robust than using layer.logical_widths and
+            # layer.input_size_per_partition which may not be correctly set
+            # for all layer types (e.g., RowParallelLinear in vision models).
+            output_dim = compressed.shape[0]
+            input_dim = compressed.shape[1] * 2  # 2:4 sparsity packs 2 values
             decompressed = sparsity_compressor.decompress_weight(
                 dict(
                     compressed=compressed,
-                    shape=(
-                        layer.logical_widths[0],
-                        layer.input_size_per_partition,
-                    ),
+                    shape=(output_dim, input_dim),
                     bitmask=bitmask,
                 )
             )
