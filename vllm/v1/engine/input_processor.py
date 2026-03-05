@@ -194,7 +194,7 @@ class InputProcessor:
     @staticmethod
     def assign_request_id(request: EngineCoreRequest):
         """Replace the externally supplied request ID with an internal request ID
-        that adds 8 random characters in order to ensure uniquness.
+        that adds 8 random characters in order to ensure uniqueness.
         """
         if request.external_req_id is not None:
             raise ValueError(

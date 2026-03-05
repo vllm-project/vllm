@@ -542,7 +542,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       if (!lane_id) {
         // Store scales.
         if constexpr (std::is_same<scale_t, uint8_t>::value) {
-          // Packed UE8MO format. Remove Mantissa.
+          // Packed UE8M0 format. Remove Mantissa.
           *y_s_ptr = reinterpret_cast<int16_t&>(y_s) >> 7;
 
           bool const jump_pack = (current_group_id + 1) % 4 == 0;

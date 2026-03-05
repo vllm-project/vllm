@@ -174,7 +174,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             query_start_loc = query_start_loc[: num_decodes + 1]
             block_table_tensor = block_table_tensor[:num_decodes]
 
-        sheduler_metadata = ops.cpu_attn_get_scheduler_metadata(
+        scheduler_metadata = ops.cpu_attn_get_scheduler_metadata(
             num_reqs=num_reqs,
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
@@ -197,7 +197,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             seq_lens=seq_lens,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
-            scheduler_metadata=sheduler_metadata,
+            scheduler_metadata=scheduler_metadata,
             causal=causal,
             use_sdpa_prefill=self.use_sdpa_prefill,
             num_decode_tokens=num_decode_tokens,

@@ -1724,11 +1724,11 @@ class DPEngineCoreProc(EngineCoreProc):
         """
         Send notifications to EngineCoreClient, which can then forward
         the notifications to other engine core processes. It is used for:
-        1) In scale up: new core engines to notify exisiting core engines
+        1) In scale up: new core engines to notify existing core engines
            that they are ready;
         2) In scale down: removing core engines to notify EngineCoreClient
            so EngineCoreClient can release their ray placement groups;
-        3) Both scale up/down: to notify EngineCoreClient that exisiting
+        3) Both scale up/down: to notify EngineCoreClient that existing
            core engines have already switched to the new parallel setup.
         """
         if vllm_config is None:

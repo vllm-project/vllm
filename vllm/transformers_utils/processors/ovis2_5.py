@@ -402,7 +402,7 @@ class Ovis2_5Processor(ProcessorMixin):
                 images = [images]
         elif video is not None:
             is_video = True
-            # type of vidoe in dummy_mm_data is np.ndarray
+            # type of video in dummy_mm_data is np.ndarray
             if isinstance(video, np.ndarray):
                 images = []
                 for i in range(video.shape[0]):

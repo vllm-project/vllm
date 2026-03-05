@@ -99,7 +99,7 @@ def _setup_kv_transfer_request(request, remote_host="127.0.0.1", fake_port=4789)
     return request
 
 
-class FakeMorIIOWrapper:
+class FakeMoRIIOWrapper:
     # A fake MoRIIOWrapper for testing purposes
     def __init__(self, *args, **kwargs):
         pass
@@ -168,7 +168,7 @@ class FakeMorIIOWrapper:
         pass
 
 
-class FakeMorIIOConnectorWorker(MoRIIOConnectorWorker):
+class FakeMoRIIOConnectorWorker(MoRIIOConnectorWorker):
     # Define a fake remote engine id for testing
     REMOTE_ENGINE_ID = "remote_engine"
 
@@ -373,7 +373,7 @@ def test_read_mode_loads_remote_block_ids(moriio_read_mode):
     # Set remote block ids to be fetched.
     request.kv_transfer_params["remote_block_ids"] = block_list
 
-    # Remote Prefill, triggers MorIIOConnectorMetadata.
+    # Remote Prefill, triggers MoRIIOConnectorMetadata.
 
     scheduler_output = scheduler.schedule()
     kv_connector_metadata = scheduler_output.kv_connector_metadata
@@ -451,7 +451,7 @@ def test_register_kv_caches(mock_parallel_groups):
 
         with set_current_vllm_config(vllm_config):
             connector = MoRIIOConnector(vllm_config, KVConnectorRole.WORKER)
-            connector.connector_worker = FakeMorIIOConnectorWorker(
+            connector.connector_worker = FakeMoRIIOConnectorWorker(
                 vllm_config, connector.engine_id, hand_shake_latency=0
             )
 
@@ -528,7 +528,7 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
     with (
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine.MoRIIOWrapper",
-            FakeMorIIOWrapper,
+            FakeMoRIIOWrapper,
         ),
     ):
         handshake_port = _find_free_port()
