@@ -251,7 +251,7 @@ def trainer_broadcast_tensor(
     dtype = getattr(torch, tensor_dtype)
     tensor_to_send = torch.ones(tensor_shape, dtype=dtype, device="cuda:0")
     comm.broadcast(tensor_to_send, src=0, stream=torch.cuda.current_stream())
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     return True
 
@@ -309,7 +309,7 @@ def inference_receive_tensor(
         shapes=[tensor_shape],
     )
     engine.receive_weights(update_info, noop_load_weights)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Verify we received the tensor
     success = False
@@ -630,7 +630,7 @@ class TrainerActor:
         ipc_handle = reduce_tensor(self.tensor)
         gpu_uuid = get_physical_gpu_id(0)
 
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         self.ipc_handle_dict = {
             "ipc_handle": ipc_handle,
@@ -704,7 +704,7 @@ def inference_receive_ipc_tensor(
 
     update_info = engine.parse_update_info(update_dict)
     engine.receive_weights(update_info, noop_load_weights)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Verify we received the tensor
     success = False
