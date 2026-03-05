@@ -3,16 +3,13 @@
 
 """Multimodal tests for the /render endpoints that expose prompt preprocessing."""
 
-import json
-
 import httpx
 import pytest
 import pytest_asyncio
 
 from vllm.multimodal.utils import encode_image_url
-from vllm.platforms import current_platform
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteLaunchRenderServer
 
 VISION_MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
 
@@ -22,26 +19,20 @@ def vision_server():
     """Vision-capable server used for multimodal /render tests."""
 
     args = [
-        "--runner",
-        "generate",
-        "--max-model-len",
-        "256",
-        "--max-num-seqs",
-        "2",
         "--enforce-eager",
-        "--trust-remote-code",
-        "--limit-mm-per-prompt",
-        json.dumps({"image": 1}),
+        "--max-model-len",
+        "100",
+        "--max-num-seqs",
+        "1",
+        "--limit-mm-per-prompt.image",
+        "1",
+        "--limit-mm-per-prompt.video",
+        "0",
     ]
 
     env_overrides: dict[str, str] = {}
-    if current_platform.is_rocm():
-        env_overrides = {
-            "VLLM_VIDEO_FETCH_TIMEOUT": "120",
-            "VLLM_ENGINE_ITERATION_TIMEOUT_S": "300",
-        }
 
-    with RemoteOpenAIServer(
+    with RemoteLaunchRenderServer(
         VISION_MODEL_NAME,
         args,
         env_dict=env_overrides,
