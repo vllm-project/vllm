@@ -1,49 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Generic AnyModel for NAS-optimized heterogeneous architectures.
+"""AnyModel: dynamic-parent wrapper for NAS-optimized heterogeneous models.
 
-AnyModel uses a **dynamic parent** approach: :class:`AnyModel`
-changes its own ``__class__`` at runtime to a dynamically created subclass
-of the target base model (e.g. ``LlamaForCausalLM``).  The base model's
-``__init__`` then builds the full model structure with the *global* config.
-Afterwards, :func:`_patch_anymodel_layers` replaces layers whose per-layer
-config (from ``block_configs``) differs from the global config — changing
-the weight shapes — and injects no-op modules where required.
+At init time, ``__new__`` creates a wrapper subclass inheriting from both
+AnyModel and the target base model (e.g. ``LlamaForCausalLM``).  The base
+model builds the full structure with the global config; then
+``_patch_anymodel_layers`` replaces layers whose ``block_configs`` differ
+and injects no-ops.  VL models work automatically (vision tower, forward,
+load_weights all inherited).
 
-This design means:
-
-* No separate ``AnyModelForConditionalGeneration`` is needed; VL models
-  (e.g. Qwen3VL) are supported automatically because their vision tower,
-  ``forward``, and ``load_weights`` are inherited from the base class.
-* Adding a new architecture requires only a single :class:`ArchInfo` entry
-  in :data:`_ARCH_REGISTRY` — no subclassing.
-
-**Canonical block_configs schema (Stage 1)**::
+Canonical block_configs schema::
 
     {
-      "attention": {
-        "no_op": false,              // skip attention entirely
-        "num_key_value_heads": 4     // GQA override (optional)
-      },
-      "ffn": {
-        "no_op": false,              // skip FFN entirely
-        "intermediate_size": 8192,   // override (optional)
-        "hidden_act": "silu",        // override (optional)
-        "moe": {                     // present only for MoE layers (optional)
-          "num_local_experts": 8,
-          "expert_intermediate_size": 1024
-        }
-      }
+        "attention": {"no_op": false, "num_key_value_heads": 4},
+        "ffn": {
+            "no_op": false,
+            "intermediate_size": 8192,
+            "hidden_act": "silu",
+            "moe": {"num_local_experts": 8, "expert_intermediate_size": 1024},
+        },
     }
-
-**Hybrid architectures** (NemotronH):
-
-When ``ArchInfo.decoder_layer_class_map`` is set, the layer class is
-selected per position using the character at
-``config.<hybrid_pattern_field>[layer_idx]``.
-
-The ``ArchInfo`` fields are intentionally kept as plain strings so they
-can later be overridden directly from the model's ``config.json``.
 """
 
 from __future__ import annotations
@@ -68,19 +44,9 @@ from .utils import PPMissingLayer, maybe_prefix
 logger = init_logger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# AttrDict – JSON-serializable dict with attribute access
-# ---------------------------------------------------------------------------
-
-
 class _AttrDict(dict):
-    """A JSON-serializable dict that also supports attribute access.
-
-    Used for ``block_configs`` entries so they can be accessed as
-    ``bc.attention.no_op`` (attribute style) while remaining serializable
-    by :func:`json.dumps` (needed for config hashing via
-    ``to_json_string()``).
-    """
+    """Dict with attribute access, stays JSON-serializable for
+    ``to_json_string()`` config hashing."""
 
     def __getattr__(self, key: str):
         try:
@@ -98,23 +64,15 @@ class _AttrDict(dict):
             raise AttributeError(key) from None
 
 
-# ---------------------------------------------------------------------------
-# Block config access helpers
-# ---------------------------------------------------------------------------
-
-
 def _get_block_section(block_config, section: str):
-    """Get a section (e.g. 'attention', 'ffn') from a block_config entry.
-
-    Handles both dict and namespace-object representations.
-    """
+    """Get a section (e.g. 'attention', 'ffn'); handles dict or namespace."""
     if isinstance(block_config, dict):
         return block_config.get(section, {})
     return getattr(block_config, section, {})
 
 
 def _get_attr(obj, key: str, default=None):
-    """Get an attribute from either a dict or namespace object."""
+    """Attribute lookup that works on both dicts and namespace objects."""
     if obj is None:
         return default
     if isinstance(obj, dict):
@@ -123,19 +81,13 @@ def _get_attr(obj, key: str, default=None):
 
 
 def _get_block_attr(block_config, section: str, key: str, default=None):
-    """Shortcut: get a nested attribute from block_config[section][key]."""
+    """Shortcut for block_config[section][key]."""
     section_data = _get_block_section(block_config, section)
     return _get_attr(section_data, key, default)
 
 
-# ---------------------------------------------------------------------------
-# No-op modules
-# ---------------------------------------------------------------------------
-
-
 class NoOpAttention(nn.Module):
-    """No-op replacement for attention. Returns zeros so residual is
-    preserved when added back (zeros + residual = residual)."""
+    """Returns zeros; residual path preserves hidden states."""
 
     def forward(
         self,
@@ -147,17 +99,15 @@ class NoOpAttention(nn.Module):
 
 
 class NoOpMLP(nn.Module):
-    """No-op replacement for MLP / MoE block. Returns zeros so residual
-    is preserved when added back."""
+    """Returns zeros; residual path preserves hidden states."""
 
     def forward(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
         return torch.zeros_like(hidden_states)
 
 
 class NoOpNorm(nn.Module):
-    """Identity replacement for layer norms. Must handle vLLM's fused
-    RMSNorm calling convention: (hidden_states) or
-    (hidden_states, residual) -> (hidden_states, residual)."""
+    """Identity norm; handles vLLM's fused RMSNorm calling convention
+    ``(hidden_states[, residual]) -> (hidden_states[, residual])``."""
 
     def forward(
         self,
@@ -169,107 +119,67 @@ class NoOpNorm(nn.Module):
         return hidden_states
 
 
-# ---------------------------------------------------------------------------
-# ArchInfo — per-architecture descriptor (data only, no subclassing needed)
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class ArchInfo:
-    """Describes how to build and patch heterogeneous layers for one
-    base architecture.
+    """Per-architecture descriptor for building and patching layers.
+    All fields are plain strings so they can be overridden from config.json."""
 
-    All string fields are intentionally simple so they can later be
-    overridden via model ``config.json`` without code changes.
-    """
-
-    # Lazy import path for the decoder layer class --------------------------
+    # Decoder layer class location
     decoder_layer_module: str
-    """Dotted module path, absolute or relative to this package.
-    Examples: ``".llama"``, ``"vllm.model_executor.models.qwen2"``."""
+    """Dotted module path, e.g. ``".llama"``."""
 
     decoder_layer_class: str
-    """Default class name within ``decoder_layer_module``.
-    Used when ``decoder_layer_class_map`` is absent or has no match."""
+    """Default class name (fallback when ``decoder_layer_class_map`` is absent)."""
 
-    # Hybrid / multi-type layer support -------------------------------------
+    # Hybrid / multi-type layer support
     decoder_layer_class_map: dict[str, str] | None = None
-    """Maps layer-type code → class name for hybrid architectures.
-    E.g. ``{"*": "NemotronHAttentionDecoderLayer",
-             "-": "NemotronHMLPDecoderLayer",
-             "E": "NemotronHMoEDecoderLayer",
-             "M": "NemotronHMambaDecoderLayer"}``.
-    If ``None``, ``decoder_layer_class`` is always used."""
+    """Maps layer-type code -> class name (e.g. ``{"*": "AttentionLayer"}``).
+    ``None`` means ``decoder_layer_class`` is always used."""
 
     hybrid_pattern_field: str | None = None
-    """Config attribute whose value is a per-layer type string, e.g.
-    ``"hybrid_override_pattern"`` → ``"*-*E*M"``.  Position ``layer_idx``
-    gives the type code used to select from ``decoder_layer_class_map``."""
+    """Config attr holding a per-layer type string (e.g. ``"*-*E*M"``).
+    ``pattern[layer_idx]`` selects from ``decoder_layer_class_map``."""
 
-    # Module attribute names on the decoder layer instance ------------------
+    # Sub-module attribute names on the decoder layer
     attn_module: str = "self_attn"
     attn_norm_module: str = "input_layernorm"
     ffn_module: str = "mlp"
     ffn_norm_module: str = "post_attention_layernorm"
 
-    # Config attribute names (canonical block_config name → arch name) ------
+    # Config field names (canonical block_config key -> HF config attr)
     kv_heads_field: str = "num_key_value_heads"
-    """Config attribute that holds the number of KV heads."""
-
     intermediate_size_field: str = "intermediate_size"
-    """Config attribute that holds the FFN intermediate size."""
-
     hidden_act_field: str = "hidden_act"
-    """Config attribute that holds the activation function name."""
 
-    # MoE-specific config attribute names (None = not a MoE architecture) --
+    # MoE (None = not a MoE architecture)
     moe_num_experts_field: str | None = None
-    """Config attribute for total number of experts, e.g. ``"num_experts"``
-    or ``"num_local_experts"``.  ``None`` means the arch has no MoE."""
-
     moe_intermediate_size_field: str | None = None
-    """Config attribute for per-expert intermediate size.
-    ``None`` means fall back to ``intermediate_size_field``."""
+    """Falls back to ``intermediate_size_field`` when None."""
 
-    # Future extensibility --------------------------------------------------
     extra_config_fields: dict[str, str] = field(default_factory=dict)
-    """Reserved for Stage 2 (hidden size, latent dim, window size, …).
-    Maps canonical block_config field paths to config attribute names."""
+    """Maps ``"section.key"`` block_config paths to config attr names."""
 
-    # Dynamic-parent support ------------------------------------------------
+    # Dynamic-parent support
     base_model_module: str | None = None
-    """Dotted module path for the *base model* class.
-    ``None`` means fall back to ``decoder_layer_module``.  Set this when
-    the base model class lives in a different file from the decoder layer
-    (e.g. Qwen3VL: layers in ``\".qwen3\"``, model in ``\".qwen3_vl\"``)."""
+    """Module path for the base model class. ``None`` = use
+    ``decoder_layer_module``. Set when the base model lives in a
+    different file (e.g. Qwen3VL)."""
 
     layers_path: str = "model.layers"
-    """Dotted attribute path from the model root to the decoder layers
-    ``nn.ModuleList``.  Examples: ``"model.layers"`` (most architectures),
-    ``"language_model.model.layers"`` (Qwen3VL)."""
+    """Dotted path from model root to the decoder ``nn.ModuleList``."""
 
     init_prefix: str | None = None
-    """Prefix to pass to ``base_cls.__init__`` instead of the outer
-    ``prefix``.
-
-    * ``None`` (default) — inherit the engine-provided prefix.
-    * ``""`` — explicitly pass an empty string (forces blank prefix).
-    * ``"model"`` — used by Qwen3VL whose checkpoint weights are stored
-      under a ``model`` sub-key."""
+    """Prefix for ``base_cls.__init__``. ``None`` = inherit from engine.
+    Set to ``"model"`` for Qwen3VL (checkpoint weights under ``model.*``)."""
 
     layer_hf_config: str | None = None
-    """Attribute path on ``hf_config`` to use as the *base* for per-layer
-    config shallow-copies.  ``None`` means use ``hf_config`` directly.
-    Set to ``"text_config"`` for Qwen3VL where the language model layers
-    are configured by the text sub-config, not the top-level VL config."""
+    """Attr path on ``hf_config`` to use as per-layer config base.
+    ``None`` = use ``hf_config`` directly. E.g. ``"text_config"`` for
+    Qwen3VL where LM layers use the text sub-config."""
 
-
-# ---------------------------------------------------------------------------
-# Architecture registry
-# ---------------------------------------------------------------------------
 
 _ARCH_REGISTRY: dict[str, ArchInfo] = {
-    # ---- Dense: Llama family ------------------------------------------------
+    # Dense: Llama family
     "LlamaForCausalLM": ArchInfo(
         decoder_layer_module=".llama",
         decoder_layer_class="LlamaDecoderLayer",
@@ -278,7 +188,7 @@ _ARCH_REGISTRY: dict[str, ArchInfo] = {
         decoder_layer_module=".mistral",
         decoder_layer_class="MistralDecoderLayer",
     ),
-    # ---- Dense: Qwen2/3 family ----------------------------------------------
+    # Dense: Qwen2/3 family
     "Qwen2ForCausalLM": ArchInfo(
         decoder_layer_module=".qwen2",
         decoder_layer_class="Qwen2DecoderLayer",
@@ -287,35 +197,24 @@ _ARCH_REGISTRY: dict[str, ArchInfo] = {
         decoder_layer_module=".qwen3",
         decoder_layer_class="Qwen3DecoderLayer",
     ),
-    # ---- MoE: Qwen family ---------------------------------------------------
+    # MoE: Qwen family
     "Qwen2MoeForCausalLM": ArchInfo(
         decoder_layer_module=".qwen2_moe",
         decoder_layer_class="Qwen2MoeDecoderLayer",
         moe_num_experts_field="num_experts",
         moe_intermediate_size_field="moe_intermediate_size",
     ),
-    # ---- MoE: Mixtral family ------------------------------------------------
+    # MoE: Mixtral family
     "MixtralForCausalLM": ArchInfo(
         decoder_layer_module=".mixtral",
         decoder_layer_class="MixtralDecoderLayer",
         ffn_module="block_sparse_moe",
         moe_num_experts_field="num_local_experts",
     ),
-    # ---- Hybrid: NemotronH --------------------------------------------------
-    # nemotron-nano-12b-v2  (hybrid_override_pattern "*-")
-    # nemotron-3-nano-30b   (hybrid_override_pattern "*E")
-    #
-    # Layer type is selected per-position from config.hybrid_override_pattern:
-    #   "*" → NemotronHAttentionDecoderLayer
-    #   "-" → NemotronHMLPDecoderLayer
-    #   "E" → NemotronHMoEDecoderLayer
-    #   "M" → NemotronHMambaDecoderLayer
-    #
-    # No-op patching uses "mixer" for the compute module and "norm" for the
-    # layer norm, which is the naming convention for all NemotronH layer types.
+    # Hybrid: NemotronH (layer type from config.hybrid_override_pattern)
     "NemotronHForCausalLM": ArchInfo(
         decoder_layer_module=".nemotron_h",
-        decoder_layer_class="NemotronHAttentionDecoderLayer",  # fallback
+        decoder_layer_class="NemotronHAttentionDecoderLayer",
         decoder_layer_class_map={
             "*": "NemotronHAttentionDecoderLayer",
             "-": "NemotronHMLPDecoderLayer",
@@ -330,19 +229,14 @@ _ARCH_REGISTRY: dict[str, ArchInfo] = {
         moe_num_experts_field="n_routed_experts",
         moe_intermediate_size_field="moe_intermediate_size",
     ),
-    # ---- MoE: GptOss --------------------------------------------------------
+    # MoE: GptOss
     "GptOssForCausalLM": ArchInfo(
         decoder_layer_module=".gpt_oss",
         decoder_layer_class="TransformerBlock",
         attn_module="attn",
         moe_num_experts_field="num_local_experts",
     ),
-    # ---- Multimodal: Qwen3VL ------------------------------------------------
-    # qwen3-vl-30b: language-model layers are Qwen3DecoderLayer instances
-    # (via Qwen3LLMModel < Qwen3Model inside Qwen3LLMForCausalLM).
-    # Weights are stored under "model.*" in the checkpoint, so init_prefix
-    # must be "model".  Per-layer configs are based on config.text_config
-    # (the Qwen3 language model sub-config, not the top-level VL config).
+    # Multimodal: Qwen3VL
     "Qwen3VLForConditionalGeneration": ArchInfo(
         decoder_layer_module=".qwen3",
         decoder_layer_class="Qwen3DecoderLayer",
@@ -353,14 +247,7 @@ _ARCH_REGISTRY: dict[str, ArchInfo] = {
     ),
 }
 
-# NemotronHPuzzleForCausalLM is an alias used by some Puzzletron checkpoints;
-# it is identical to NemotronHForCausalLM so we share the same object.
 _ARCH_REGISTRY["NemotronHPuzzleForCausalLM"] = _ARCH_REGISTRY["NemotronHForCausalLM"]
-
-
-# ---------------------------------------------------------------------------
-# Generic helpers
-# ---------------------------------------------------------------------------
 
 
 def _resolve_layer_class(
@@ -368,13 +255,7 @@ def _resolve_layer_class(
     global_config,
     layer_idx: int,
 ) -> type[nn.Module]:
-    """Return the decoder layer class for this position.
-
-    For hybrid architectures (``decoder_layer_class_map`` is set) the class
-    is chosen by reading ``global_config.<hybrid_pattern_field>[layer_idx]``.
-    Falls back to ``info.decoder_layer_class`` when the map is absent or the
-    pattern character is not in the map.
-    """
+    """Return the decoder layer class for this position (hybrid-aware)."""
     class_name = info.decoder_layer_class
     if info.decoder_layer_class_map and info.hybrid_pattern_field:
         pattern = getattr(global_config, info.hybrid_pattern_field, "") or ""
@@ -394,8 +275,7 @@ def _resolve_layer_class(
 
 
 def _create_layer_config(global_config, block_config, info: ArchInfo):
-    """Return a deep copy of *global_config* with per-layer overrides
-    from *block_config* applied, using the field names in *info*."""
+    """Deep-copy *global_config* with per-layer overrides applied."""
     config = copy.deepcopy(global_config)
 
     attn = _get_block_section(block_config, "attention")
@@ -428,7 +308,6 @@ def _create_layer_config(global_config, block_config, info: ArchInfo):
             if s is not None:
                 setattr(config, moe_size_field, s)
 
-    # Stage-2 / extra fields (e.g. {"ffn.hidden_size": "hidden_size"})
     for block_path, config_attr in info.extra_config_fields.items():
         parts = block_path.split(".", 1)
         if len(parts) != 2:
@@ -444,7 +323,7 @@ def _create_layer_config(global_config, block_config, info: ArchInfo):
 
 
 def _apply_no_ops(layer: nn.Module, block_config, info: ArchInfo) -> None:
-    """Replace sub-modules with no-ops according to *block_config*."""
+    """Replace sub-modules with no-ops per *block_config*."""
     if _get_block_attr(block_config, "attention", "no_op", False):
         setattr(layer, info.attn_module, NoOpAttention())
         setattr(layer, info.attn_norm_module, NoOpNorm())
@@ -455,7 +334,7 @@ def _apply_no_ops(layer: nn.Module, block_config, info: ArchInfo) -> None:
 
 @functools.cache
 def _layer_init_params(layer_cls: type) -> frozenset[str]:
-    """Return the parameter names of *layer_cls.__init__*, cached per class."""
+    """Cached ``__init__`` parameter names for *layer_cls*."""
     return frozenset(inspect.signature(layer_cls.__init__).parameters)
 
 
@@ -467,13 +346,8 @@ def _instantiate_layer(
     layer_idx: int,
 ) -> nn.Module:
     """Instantiate a decoder layer via signature introspection.
-
-    A patched ``vllm_config`` (with ``model_config.hf_config`` swapped to
-    ``per_layer_config``) is included in the pool so that classes which read
-    config through ``vllm_config.model_config.hf_config`` (e.g.
-    ``TransformerBlock``) receive the per-layer config automatically.
-    Classes with an explicit ``config`` kwarg use that instead.
-    """
+    Patches ``vllm_config.model_config.hf_config`` with the per-layer config
+    so classes that read config either way get the right values."""
     mock_mc = copy.copy(vllm_config.model_config)
     mock_mc.hf_config = per_layer_config
     mock_vc = copy.copy(vllm_config)
@@ -494,27 +368,10 @@ def _instantiate_layer(
     return layer_cls(**kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Post-init patching helpers
-# ---------------------------------------------------------------------------
-
-
 def _has_overrides(block_config, info: ArchInfo | None = None) -> bool:
-    """Return True if block_config contains overrides that require the layer
-    to be rebuilt (KV heads, FFN size, activation function, MoE fields, or
-    any extra_config_fields declared in *info*).
-
-    No-ops alone do not require layer recreation — they are handled by
-    :func:`_apply_no_ops` which simply replaces sub-modules in place.
-
-    .. note::
-
-       This checks for *presence* (non-None) of override fields, not whether
-       they differ from the global config.  Layers whose block_config carries
-       the same value as the global config will still be rebuilt.  This is
-       intentional for simplicity; comparing against global is a potential
-       future optimisation.
-    """
+    """True if block_config has overrides requiring a layer rebuild.
+    Checks presence (non-None), not equality with global config.
+    No-ops alone don't trigger a rebuild."""
     attn = _get_block_section(block_config, "attention")
     ffn = _get_block_section(block_config, "ffn")
     has_base = (
@@ -540,14 +397,8 @@ def _has_overrides(block_config, info: ArchInfo | None = None) -> bool:
 
 
 def _unregister_layer(layer_prefix: str, vllm_config: VllmConfig) -> None:
-    """Remove entries registered by the old layer from static_forward_context.
-
-    Attention modules register themselves in ``compilation_config
-    .static_forward_context`` during ``__init__``.  When a layer is about
-    to be replaced, those entries must be removed first so the new layer
-    can register under the same keys without triggering a
-    "Duplicate layer name" error.
-    """
+    """Remove old layer's entries from static_forward_context to avoid
+    'Duplicate layer name' errors when the replacement registers."""
     ctx = vllm_config.compilation_config.static_forward_context
     stale = [k for k in ctx if k.startswith(layer_prefix + ".")]
     for k in stale:
@@ -560,42 +411,20 @@ def _patch_anymodel_layers(
     arch_info: ArchInfo,
     base_init_prefix: str,
 ) -> None:
-    """Post-init: replace layers that have per-layer config overrides and
-    apply no-op module substitutions.
-
-    Must be called *after* ``base_cls.__init__`` so that all layers are
-    already built.  vLLM's subsequent profiling and memory estimation will
-    then observe the correct (per-layer) weight shapes.
-
-    Args:
-        model: The model instance (already initialised by base_cls.__init__).
-        vllm_config: VllmConfig used during initialisation.
-        arch_info: ArchInfo for the current architecture.
-        base_init_prefix: The prefix that was passed to base_cls.__init__,
-            used to reconstruct per-layer weight-name prefixes.
-    """
+    """Post-init: rebuild layers with overrides and apply no-ops.
+    Must run after ``base_cls.__init__`` so layers already exist."""
     config = vllm_config.model_config.hf_config
-
-    # Use a sub-config as the base for per-layer config copies when specified
-    # (e.g. Qwen3VL passes text_config to its LM layers, not the VL config).
     layer_base_config = (
         getattr(config, arch_info.layer_hf_config)
         if arch_info.layer_hf_config
         else config
     )
-
-    # block_configs lives on the same config as the layer parameters: the
-    # sub-config for VL models (e.g. text_config), top-level otherwise.
     block_configs = layer_base_config.block_configs
 
-    # Navigate from the model root to the nn.ModuleList of decoder layers.
     obj = model
     for part in arch_info.layers_path.split("."):
         obj = getattr(obj, part)
     layers: nn.ModuleList = obj
-
-    # Full dotted prefix for the layers list; used to construct the
-    # weight-name prefix when instantiating replacement layers.
     layers_prefix = maybe_prefix(base_init_prefix, arch_info.layers_path)
 
     if len(block_configs) != len(layers):
@@ -610,7 +439,6 @@ def _patch_anymodel_layers(
         if layer_idx >= len(layers):
             break
         layer = layers[layer_idx]
-        # Skip pipeline-parallel placeholder layers on other ranks.
         if isinstance(layer, PPMissingLayer):
             continue
 
@@ -619,18 +447,9 @@ def _patch_anymodel_layers(
         )
 
         if _has_overrides(block_config, arch_info):
-            # Weight shapes differ from the global config — rebuild the
-            # layer with the per-layer config so load_weights maps correctly
-            # to the pruned checkpoint tensors.
             layer_cls = _resolve_layer_class(arch_info, layer_base_config, layer_idx)
             layer_prefix = f"{layers_prefix}.{layer_idx}"
-
-            # The original layer registered its attention modules in the
-            # compilation config's static_forward_context.  Remove those
-            # entries before creating the replacement to avoid
-            # "Duplicate layer name" errors.
             _unregister_layer(layer_prefix, vllm_config)
-
             new_layer = _instantiate_layer(
                 layer_cls,
                 vllm_config,
@@ -644,30 +463,9 @@ def _patch_anymodel_layers(
         _apply_no_ops(layer, block_config, arch_info)
 
 
-# ---------------------------------------------------------------------------
-# Config-driven ArchInfo loading
-# ---------------------------------------------------------------------------
-
-
 def _arch_info_from_config(hf_config) -> ArchInfo | None:
-    """Load an :class:`ArchInfo` from ``hf_config.anymodel_arch_info``.
-
-    Returns ``None`` when the field is absent or falsy.  Accepts both plain
-    dicts (as deserialized from JSON) and namespace/object representations.
-    Unknown keys are silently ignored so that configs remain forward-compatible
-    as ``ArchInfo`` fields are added or removed.
-
-    Example ``config.json`` snippet::
-
-        {
-            "architectures": ["MyCustomForCausalLM"],
-            "anymodel_arch_info": {
-                "decoder_layer_module": ".llama",
-                "decoder_layer_class": "LlamaDecoderLayer",
-            },
-            "block_configs": [...],
-        }
-    """
+    """Load ArchInfo from ``hf_config.anymodel_arch_info`` if present.
+    Unknown keys are ignored for forward-compatibility."""
     data = getattr(hf_config, "anymodel_arch_info", None)
     if not data:
         return None
@@ -677,29 +475,12 @@ def _arch_info_from_config(hf_config) -> ArchInfo | None:
     return ArchInfo(**{k: v for k, v in data.items() if k in known})
 
 
-# ---------------------------------------------------------------------------
-# Named wrapper class factory
-# ---------------------------------------------------------------------------
-
-
 def _make_wrapper_cls(
     arch_name: str,
     arch_info: ArchInfo,
 ) -> type:
-    """Create a named wrapper class for *arch_name*.
-
-    The wrapper inherits from both :class:`AnyModel` and the target base
-    model class (e.g. ``LlamaForCausalLM``), giving it the name
-    ``AnyModel{arch_name}`` (e.g. ``AnyModelLlamaForCausalLM``).
-
-    MRO example for Llama::
-
-        AnyModelLlamaForCausalLM
-          ├── AnyModel            ← defines __init__ with post-init patching
-          └── LlamaForCausalLM   ← base model; super().__init__() resolves here
-
-    Imports are deferred to this function so the module stays fast to import.
-    """
+    """Create ``AnyModel{arch_name}(AnyModel, BaseModelCls)`` wrapper.
+    MRO: AnyModel.__init__ -> base model's __init__ via super()."""
     base_mod_path = arch_info.base_model_module or arch_info.decoder_layer_module
     mod = importlib.import_module(base_mod_path, package=__package__)
     base_cls = getattr(mod, arch_name)
@@ -710,65 +491,23 @@ def _make_wrapper_cls(
     )
 
 
-# ---------------------------------------------------------------------------
-# Model classes
-# ---------------------------------------------------------------------------
-
-
 class AnyModel(nn.Module, HasNoOps):
-    """Entry point for NAS-optimized heterogeneous models.
+    """Factory entry point for NAS-optimized heterogeneous models.
 
-    Handles both text-only (``ForCausalLM``) and vision-language
-    (``ForConditionalGeneration``) architectures — no separate class needed.
-
-    When instantiated, :meth:`__new__` acts as a *factory*: it creates (and
-    caches) a named **wrapper subclass** that inherits from both this class
-    and the target base model.  For example, for a Llama checkpoint the
-    wrapper is ``AnyModelLlamaForCausalLM(AnyModel, LlamaForCausalLM)``.
-
-    :meth:`__init__` then calls ``super().__init__()`` which, thanks to the
-    wrapper's MRO, resolves to the base model's ``__init__``
-    (e.g. ``LlamaForCausalLM.__init__``).  This builds the full model
-    structure with the *global* HF config.  Afterwards,
-    :func:`_patch_anymodel_layers` replaces any decoder layers whose per-
-    layer ``block_configs`` differ in weight shape and applies no-op
-    module substitutions.  All patching completes before vLLM starts
-    profiling or memory estimation.
-
-    The resulting instance inherits every method from the base model
-    (``forward``, ``compute_logits``, ``load_weights``, the vision tower
-    for VL models, etc.) — no separate ``AnyModelForConditionalGeneration``
-    is needed.
-
-    To add support for a new architecture, add a single :class:`ArchInfo`
-    entry to :data:`_ARCH_REGISTRY` — no subclassing required.
-    """
+    ``__new__`` creates a wrapper subclass ``(AnyModel, BaseModelCls)``.
+    ``__init__`` delegates to the base model, then patches layers per
+    ``block_configs``.  All base model methods (forward, load_weights,
+    vision tower, etc.) are inherited automatically."""
 
     has_noops = True
-
-    # Set on each named wrapper subclass by __new__ / _make_wrapper_cls.
     _anymodel_arch_info: ClassVar[ArchInfo | None] = None
-
-    # Cache of arch_name → named wrapper class (lazily populated).
     _wrapper_cache: ClassVar[dict[str, type[AnyModel]]] = {}
 
     @staticmethod
     def _resolve_arch(config) -> tuple[str, ArchInfo, bool]:
-        """Determine the base architecture name and :class:`ArchInfo`.
-
-        Reads ``base_architecture`` from the HF config to identify the
-        underlying model class, then resolves the corresponding
-        :class:`ArchInfo` (config-driven descriptor takes priority over
-        the hardcoded :data:`_ARCH_REGISTRY`).
-
-        Returns:
-            ``(arch_name, arch_info, from_config)`` — *from_config* is
-            ``True`` when the descriptor was loaded from the HF config's
-            ``anymodel_arch_info`` field rather than the hardcoded registry.
-
-        Raises:
-            ValueError: if the architecture is not supported.
-        """
+        """Return ``(arch_name, arch_info, from_config)`` from
+        ``config.base_architecture``. Config-driven ArchInfo takes
+        priority over the hardcoded registry."""
         arch_name = getattr(config, "base_architecture", None)
         if not arch_name:
             raise ValueError(
@@ -798,15 +537,7 @@ class AnyModel(nn.Module, HasNoOps):
         *,
         from_config: bool = False,
     ) -> type[AnyModel]:
-        """Return (or lazily create) the named wrapper class for *arch_name*.
-
-        Args:
-            from_config: True when *arch_info* was loaded from the HF config
-                (``anymodel_arch_info`` field) rather than the hardcoded
-                :data:`_ARCH_REGISTRY`.  Config-driven descriptors use a
-                repr-based cache key so that distinct descriptors produce
-                distinct wrapper classes even for the same architecture name.
-        """
+        """Return (or lazily create) the named wrapper class."""
         cache_key: str = f"config:{repr(arch_info)}" if from_config else arch_name
         if cache_key not in AnyModel._wrapper_cache:
             AnyModel._wrapper_cache[cache_key] = _make_wrapper_cls(arch_name, arch_info)
@@ -817,17 +548,8 @@ class AnyModel(nn.Module, HasNoOps):
         cls,
         model_config,
     ) -> type[AnyModel]:
-        """Return the concrete wrapper class for *model_config*.
-
-        The wrapper inherits from both :class:`AnyModel` and the target
-        base model (e.g. ``LlamaForCausalLM``), giving callers access to
-        all class-level methods and attributes defined on the base model
-        (``get_mamba_state_shape_from_config``, ``_processor_factory``,
-        etc.).
-
-        This is the public API consumed by the model loader and other
-        subsystems that need the wrapper class *before* instantiation.
-        """
+        """Public API: return the concrete wrapper class for *model_config*.
+        Used by model loader and subsystems that need the class pre-init."""
         config = model_config.hf_config
         arch_name, arch_info, from_config = cls._resolve_arch(config)
         return cls._get_or_create_wrapper(arch_name, arch_info, from_config=from_config)
@@ -848,13 +570,5 @@ class AnyModel(nn.Module, HasNoOps):
         base_init_prefix = (
             arch_info.init_prefix if arch_info.init_prefix is not None else prefix
         )
-
-        # super() resolves to the base model class (e.g. LlamaForCausalLM)
-        # because it is the next entry after AnyModel in the wrapper's MRO.
-        # This builds the full model: embeddings, all layers with the *global*
-        # config, LM head, weight-tying, etc.
         super().__init__(vllm_config=vllm_config, prefix=base_init_prefix)
-
-        # Post-init: replace layers with shape-changing overrides and inject
-        # no-op modules.  Completes before vLLM profiling / memory estimation.
         _patch_anymodel_layers(self, vllm_config, arch_info, base_init_prefix)
