@@ -5408,8 +5408,10 @@ class GPUModelRunner(
 
         # Use a temporary pool for profiling to avoid fragmentation in the main pool
         profiling_pool = current_platform.graph_pool_handle()
-        original_pool = self.model.cudagraph_wrapper.graph_pool
-        self.model.cudagraph_wrapper.graph_pool = profiling_pool
+        original_pool = None
+        if isinstance(self.model, (CUDAGraphWrapper, UBatchWrapper)):
+            original_pool = self.model.cudagraph_wrapper.graph_pool
+            self.model.cudagraph_wrapper.graph_pool = profiling_pool
 
         set_cudagraph_capturing_enabled(True)
         with self._freeze_gc(), graph_capture(device=self.device):
@@ -5464,8 +5466,9 @@ class GPUModelRunner(
                 )
 
         set_cudagraph_capturing_enabled(False)
-        self.model.clear_graphs()
-        self.model.cudagraph_wrapper.graph_pool = original_pool
+        if isinstance(self.model, (CUDAGraphWrapper, UBatchWrapper)):
+            self.model.clear_graphs()
+            self.model.cudagraph_wrapper.graph_pool = original_pool
         self.maybe_remove_all_loras(self.lora_config)
         self._cleanup_profiling_kv_cache()
 
