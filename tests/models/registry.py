@@ -108,7 +108,7 @@ class _HfExamplesInfo:
 
     use_original_num_layers: bool = False
     """
-    If True, use the original number of layers from the model config 
+    If True, use the original number of layers from the model config
     instead of minimal layers for testing.
     """
 
@@ -194,6 +194,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "ArcticForCausalLM": _HfExamplesInfo(
         "Snowflake/snowflake-arctic-instruct", trust_remote_code=True
     ),
+    "AXK1ForCausalLM": _HfExamplesInfo("skt/A.X-K1", trust_remote_code=True),
     "BaiChuanForCausalLM": _HfExamplesInfo(
         "baichuan-inc/Baichuan-7B", trust_remote_code=True
     ),
@@ -205,6 +206,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "BailingMoeV2ForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ling-mini-2.0", trust_remote_code=True
+    ),
+    "BailingMoeV2_5ForCausalLM": _HfExamplesInfo(
+        "inclusionAI/Ring-2.5-1T", trust_remote_code=True
     ),
     "BambaForCausalLM": _HfExamplesInfo(
         "ibm-ai-platform/Bamba-9B-v1",
@@ -592,6 +596,12 @@ _EMBEDDING_EXAMPLE_MODELS = {
     ),
     # [Multimodal]
     "CLIPModel": _HfExamplesInfo("openai/clip-vit-base-patch32"),
+    "ColModernVBertForRetrieval": _HfExamplesInfo(
+        "ModernVBERT/colmodernvbert-merged",
+    ),
+    "LlamaNemotronVLModel": _HfExamplesInfo(
+        "nvidia/llama-nemotron-embed-vl-1b-v2", trust_remote_code=True
+    ),
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),
     "Phi3VForCausalLM": _HfExamplesInfo(
         "TIGER-Lab/VLM2Vec-Full", trust_remote_code=True
@@ -602,6 +612,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
     ),
     "OpsColQwen3Model": _HfExamplesInfo(
         "OpenSearch-AI/Ops-Colqwen3-4B", trust_remote_code=True
+    ),
+    "Qwen3VLNemotronEmbedModel": _HfExamplesInfo(
+        "nvidia/nemotron-colembed-vl-4b-v2",
     ),
     "SiglipModel": _HfExamplesInfo("google/siglip-base-patch16-224"),
     "PrithviGeoSpatialMAE": _HfExamplesInfo(
@@ -639,6 +652,9 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     ),
     "LlamaBidirectionalForSequenceClassification": _HfExamplesInfo(
         "nvidia/llama-nemotron-rerank-1b-v2", trust_remote_code=True
+    ),
+    "LlamaNemotronVLForSequenceClassification": _HfExamplesInfo(
+        "nvidia/llama-nemotron-rerank-vl-1b-v2", trust_remote_code=True
     ),
     "ModernBertForSequenceClassification": _HfExamplesInfo(
         "Alibaba-NLP/gte-reranker-modernbert-base"
@@ -709,7 +725,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"fork": "Isotr0py/deepseek-vl2-tiny"},
         max_transformers_version="4.48",
         transformers_version_reason={"hf": "HF model is not compatible."},
-        hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]},
     ),
     "DeepseekOCRForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-OCR",
@@ -727,6 +742,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Ernie4_5_VLMoeForConditionalGeneration": _HfExamplesInfo(
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
         trust_remote_code=True,
+    ),
+    "FireRedASR2ForConditionalGeneration": _HfExamplesInfo(
+        "allendou/FireRedASR2-LLM-vllm",
     ),
     "FunASRForConditionalGeneration": _HfExamplesInfo(
         "allendou/Fun-ASR-Nano-2512-vllm",
@@ -993,24 +1011,20 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         min_transformers_version="4.57",
     ),
     "Qwen3_5ForConditionalGeneration": _HfExamplesInfo(
-        "Qwen/Qwen3.5-9B-Instruct",
+        "Qwen/Qwen3.5-0.8B",
         max_model_len=4096,
-        min_transformers_version="5.1.0",
     ),
     "Qwen3_5MoeForConditionalGeneration": _HfExamplesInfo(
-        "Qwen/Qwen3.5-35B-A3B-Instruct",
+        "Qwen/Qwen3.5-35B-A3B",
         max_model_len=4096,
-        min_transformers_version="5.1.0",
     ),
     "Qwen3_5MTP": _HfExamplesInfo(
-        "Qwen/Qwen3.5-9B-Instruct",
-        speculative_model="Qwen/Qwen3.5-9B-Instruct",
-        min_transformers_version="5.1.0",
+        "Qwen/Qwen3.5-0.8B",
+        speculative_model="Qwen/Qwen3.5-0.8B",
     ),
     "Qwen3_5MoeMTP": _HfExamplesInfo(
-        "Qwen/Qwen3.5-35B-A3B-Instruct",
-        speculative_model="Qwen/Qwen3.5-35B-A3B-Instruct",
-        min_transformers_version="5.1.0",
+        "Qwen/Qwen3.5-35B-A3B",
+        speculative_model="Qwen/Qwen3.5-35B-A3B",
     ),
     "Qwen3OmniMoeForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-Omni-30B-A3B-Instruct",
@@ -1021,6 +1035,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Qwen/Qwen3-ASR-1.7B",
         max_model_len=4096,
         min_transformers_version="4.57",
+        is_available_online=False,
+    ),
+    "Qwen3ASRRealtimeGeneration": _HfExamplesInfo(
+        "Qwen/Qwen3-ASR-1.7B",
+        max_model_len=4096,
+        min_transformers_version="4.57",
+        enforce_eager=True,
+        hf_overrides={"architectures": ["Qwen3ASRRealtimeGeneration"]},
         is_available_online=False,
     ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
@@ -1140,6 +1162,10 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="LGAI-EXAONE/K-EXAONE-236B-A23B",
         min_transformers_version="5.1.0",
     ),
+    "ExtractHiddenStatesModel": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        speculative_method="extract_hidden_states",
+    ),
     "Glm4MoeMTPModel": _HfExamplesInfo(
         "zai-org/GLM-4.5",
         speculative_model="zai-org/GLM-4.5",
@@ -1184,6 +1210,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         hf_overrides={
             "num_hidden_layers": 4,
         },
+        is_available_online=False,
+    ),
+    "NemotronHMTPModel": _HfExamplesInfo(
+        "nvidia/Nemotron-Super-Placeholder",
+        speculative_model="nvidia/Nemotron-Super-Placeholder",
         is_available_online=False,
     ),
 }

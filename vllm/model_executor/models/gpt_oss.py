@@ -23,7 +23,11 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import (
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_BLOCK_SIZE
@@ -165,7 +169,14 @@ class MLPBlock(torch.nn.Module):
         self.hidden_size = config.hidden_size
         self.experts_per_token = config.num_experts_per_tok
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
-        self.router = torch.nn.Linear(config.hidden_size, config.num_local_experts)
+        self.router = ReplicatedLinear(
+            config.hidden_size,
+            config.num_local_experts,
+            bias=True,
+            quant_config=None,
+            prefix=f"{prefix}.router",
+            return_bias=False,
+        )
         assert config.intermediate_size % self.world_size == 0
         self.experts = FusedMoE(
             num_experts=config.num_local_experts,
@@ -586,7 +597,7 @@ class GptOssModel(nn.Module):
                 parts = name.split(".")
                 ids = [s for s in parts if s.isdigit()]
 
-                # for amd-quark format that each expert is seperated
+                # for amd-quark format that each expert is separated
                 # need to extract the parameter name with experts fused.
                 # example model: amd/gpt-oss-20b-MoE-Quant-W-MXFP4-A-FP8-KV-FP8
                 if len(ids) == 2:

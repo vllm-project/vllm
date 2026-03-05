@@ -47,16 +47,17 @@ from vllm.multimodal.parse import (
     AudioProcessorItems,
     MultiModalDataItems,
     MultiModalDataParser,
-    MultiModalUUIDItems,
 )
-from vllm.multimodal.processing import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     MultiModalProcessingInfo,
     PlaceholderFeaturesInfo,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
+    TimingContext,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -218,18 +219,19 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
 
         target_length = self.info.get_max_audio_array_len()
 
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        audio_overrides = mm_options.get("audio")
 
         return {
             "audio": self._get_dummy_audios(
-                length=target_length, num_audios=num_audios, overrides=audio_overrides
+                length=target_length,
+                num_audios=num_audios,
+                overrides=audio_overrides,
             )
         }
 
@@ -237,8 +239,7 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> ProcessorInputs:
         tokenizer = self.info.get_tokenizer()
 
@@ -265,13 +266,13 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
         res = tokenizer.mistral.encode_chat_completion(request)
         dummy_tokens = res.tokens
 
-        dummy_mm_inputs = self.info.parse_mm_data(
+        dummy_mm_items = self.info.parse_mm_data(
             # whixtral tokenizer adds padding to the audio
             # so we need to update the audio arrays
             {**dummy_mm_data, "audio": [a.audio_array for a in res.audios]},
         )
 
-        return ProcessorInputs(prompt=dummy_tokens, mm_items=dummy_mm_inputs)
+        return ProcessorInputs(prompt=dummy_tokens, mm_data_items=dummy_mm_items)
 
 
 class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo]):
@@ -361,19 +362,10 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
 
     def _cached_apply_hf_processor(
         self,
-        prompt: str | list[int],
-        mm_data_items: MultiModalDataItems,
-        mm_uuid_items: MultiModalUUIDItems | None,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
-        prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(
-            prompt=prompt,
-            mm_data_items=mm_data_items,
-            mm_uuid_items=mm_uuid_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-        )
+        prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(inputs, timing_ctx)
 
         # NOTE: The tokens are already inserted by the chat template
         return prompt_ids, mm_info, True

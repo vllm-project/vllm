@@ -97,8 +97,9 @@ def create_batched_mm_kwargs(
     processor_inputs = dummy_inputs.get_dummy_processor_inputs(
         seq_len=model_config.max_model_len,
         mm_counts=mm_counts,
+        mm_options={},
     )
-    mm_items = processor_inputs.mm_items
+    mm_items = processor_inputs.mm_data_items
     resized_mm_data = {
         modality: resize_mm_data(items.data, size_factors)
         for modality, items in mm_items.items()
@@ -107,11 +108,10 @@ def create_batched_mm_kwargs(
     # video metadata will be added back to the resized video data here.
     text_prompt, token_prompt = get_text_token_prompts(processor, resized_mm_data)
 
-    mm_kwargs = processor.apply(
+    mm_kwargs = processor(
         prompt=token_prompt if text_prompt is None else text_prompt,
         mm_items=processor.info.parse_mm_data(resized_mm_data),
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
-        tokenization_kwargs=processor_inputs.tokenization_kwargs,
     )["mm_kwargs"].require_data()
 
     return group_mm_kwargs_by_modality(

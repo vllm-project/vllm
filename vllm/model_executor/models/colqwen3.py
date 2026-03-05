@@ -16,6 +16,7 @@ Based on: Qwen3-VL backbone with custom text projection
 Target models:
 - TomoroAI/tomoro-colqwen3-embed-8b
 - OpenSearch-AI/Ops-Colqwen3-4B
+- nvidia/nemotron-colembed-vl-4b-v2
 """
 
 from collections.abc import Iterable, Mapping
@@ -229,13 +230,14 @@ class ColQwen3Model(
         if not isinstance(hidden_states, torch.Tensor):
             return hidden_states  # type: ignore
 
-        proj_dtype = self.custom_text_proj.weight.dtype  # type: ignore
-        if hidden_states.dtype != proj_dtype:
-            hidden_states = hidden_states.to(proj_dtype)
+        if self.custom_text_proj is not None:
+            proj_dtype = self.custom_text_proj.weight.dtype
+            if hidden_states.dtype != proj_dtype:
+                hidden_states = hidden_states.to(proj_dtype)
+            hidden_states = self.custom_text_proj(hidden_states)
 
-        # Project to embedding dimension and L2 normalize
-        proj = self.custom_text_proj(hidden_states)  # type: ignore
-        return torch.nn.functional.normalize(proj, p=2, dim=-1)
+        # L2 normalize
+        return torch.nn.functional.normalize(hidden_states, p=2, dim=-1)
 
     # Names used for the projection layer across different ColQwen3 variants
     _PROJ_LAYER_NAMES = {
