@@ -5410,6 +5410,7 @@ class GPUModelRunner(
         profiling_pool = current_platform.graph_pool_handle()
         original_pool = None
         if isinstance(self.model, (CUDAGraphWrapper, UBatchWrapper)):
+            assert self.model.cudagraph_wrapper is not None
             original_pool = self.model.cudagraph_wrapper.graph_pool
             self.model.cudagraph_wrapper.graph_pool = profiling_pool
 
@@ -5469,6 +5470,7 @@ class GPUModelRunner(
         set_cudagraph_capturing_enabled(False)
         if isinstance(self.model, (CUDAGraphWrapper, UBatchWrapper)):
             self.model.clear_graphs()
+            assert self.model.cudagraph_wrapper is not None
             self.model.cudagraph_wrapper.graph_pool = original_pool
         self.maybe_remove_all_loras(self.lora_config)
         self._cleanup_profiling_kv_cache()

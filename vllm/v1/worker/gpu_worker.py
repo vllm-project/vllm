@@ -548,7 +548,7 @@ class Worker(WorkerBase):
             # but users still want to compile for better performance,
             # e.g. for the max-num-batched token size in chunked prefill.
             compile_sizes = self.vllm_config.compilation_config.compile_sizes
-            warmup_sizes = compile_sizes.copy() if compile_sizes is not None else []
+            warmup_sizes = compile_sizes.copy() if compile_sizes is not None else []  # type: ignore[assignment]
             cg_capture_sizes: list[int] = []
 
             if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
