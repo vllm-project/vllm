@@ -333,10 +333,6 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
 
-    dcp_context_kv_lens: torch.Tensor | None = None
-    """DCP context KV lengths (context only, excludes new tokens) for this rank.
-    Pre-computed as a persistent buffer for FULL CUDA graph compatibility."""
-
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None
@@ -418,7 +414,6 @@ class CommonAttentionMetadata:
             encoder_seq_lens_cpu=maybe_slice_reqs(self.encoder_seq_lens_cpu),
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
-            dcp_context_kv_lens=maybe_slice_reqs(self.dcp_context_kv_lens),
         )
 
 

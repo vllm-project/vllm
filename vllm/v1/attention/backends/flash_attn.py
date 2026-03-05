@@ -22,6 +22,7 @@ from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
     is_flash_attn_varlen_func_available,
 )
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
@@ -341,6 +342,17 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 self.attention_config.flash_attn_max_num_splits_for_cuda_graph
             )
 
+        # Persistent buffer for DCP context KV lengths (FULL CUDA graph
+        # compatibility). Pre-allocated so the GPU address stays stable
+        # across CUDA graph replays.
+        if self.dcp_world_size > 1:
+            max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+            self._dcp_context_kv_lens = torch.zeros(
+                max_num_reqs,
+                dtype=torch.int32,
+                device=self.device,
+            )
+
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
         self.aot_sliding_window: tuple[int, int] | None = None
@@ -437,11 +449,21 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         prefix_scheduler_metadata = None
 
         if self.dcp_world_size > 1:
-            # Use pre-computed persistent buffer from gpu_model_runner for
-            # FULL CUDA graph compatibility. The buffer contains context-only
-            # KV lengths (total - new tokens) distributed across DCP ranks.
-            dcp_context_kv_lens = common_attn_metadata.dcp_context_kv_lens
-            assert dcp_context_kv_lens is not None
+            # Compute context-only KV lengths (total - new tokens) for this
+            # DCP rank. Written into a persistent buffer so the GPU address
+            # stays stable across CUDA graph replays.
+            query_lens = query_start_loc[1 : num_reqs + 1] - query_start_loc[:num_reqs]
+            context_kv_lens = seq_lens[:num_reqs] - query_lens
+            local_context_kv_lens = get_dcp_local_seq_lens(
+                context_kv_lens,
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.cp_kv_cache_interleave_size,
+            )
+            self._dcp_context_kv_lens[:num_reqs] = local_context_kv_lens
+            self._dcp_context_kv_lens[num_reqs:] = 0
+            dcp_context_kv_lens = self._dcp_context_kv_lens[:num_reqs]
+
             # After DCP distribution, the maximum number of tokens for any rank is
             # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
             # and I is cp_kv_cache_interleave_size.

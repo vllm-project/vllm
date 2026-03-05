@@ -615,9 +615,6 @@ class GPUModelRunner(
             self.dcp_local_seq_lens = self._make_buffer(
                 self.max_num_reqs, dtype=torch.int32
             )
-            self.dcp_context_kv_lens = self._make_buffer(
-                self.max_num_reqs, dtype=torch.int32
-            )
         # Because inputs_embeds may be bfloat16 and we don't need a numpy
         # version of this tensor, avoid a RuntimeError by not creating a
         # numpy buffer.
@@ -1845,25 +1842,6 @@ class GPUModelRunner(
             cm_base.dcp_local_seq_lens_cpu = self.dcp_local_seq_lens.cpu[
                 :num_reqs_padded
             ]
-
-            # Pre-compute context KV lens (total - new tokens) for FULL CUDA
-            # graph compatibility. Without this, flash_attn build() would create
-            # new tensors on GPU each step, breaking CUDA graph replay.
-            query_kv_lens = (
-                self.query_start_loc.cpu[1 : num_reqs + 1]
-                - self.query_start_loc.cpu[:num_reqs]
-            )
-            context_kv_lens = self.seq_lens.cpu[:num_reqs] - query_kv_lens
-            self.dcp_context_kv_lens.cpu[:num_reqs] = get_dcp_local_seq_lens(
-                context_kv_lens,
-                self.dcp_world_size,
-                self.dcp_rank,
-                self.parallel_config.cp_kv_cache_interleave_size,
-            )
-            self.dcp_context_kv_lens.cpu[num_reqs:].fill_(0)
-            self.dcp_context_kv_lens.copy_to_gpu(num_reqs_padded)
-
-            cm_base.dcp_context_kv_lens = self.dcp_context_kv_lens.gpu[:num_reqs_padded]
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
             cm_base.num_logits_indices = logits_indices.size(0)
