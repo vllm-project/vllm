@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from functools import partial
 
 import numpy as np
@@ -33,6 +34,61 @@ def async_copy_to_gpu(
 
     # CPU-to-GPU copy
     return out.copy_(tmp, non_blocking=True)
+
+
+@dataclass
+class PrepareInputsRingSlot:
+    idx_mapping_cpu: torch.Tensor
+    query_start_loc_cpu: torch.Tensor
+    cu_num_logits_cpu: torch.Tensor
+    event: torch.cuda.Event
+    in_use: bool = False
+
+
+class PrepareInputsBuffers:
+    def __init__(self, ring_size: int, max_num_reqs: int, device: torch.device):
+        self.device = device
+        self.ring_slots = [
+            PrepareInputsRingSlot(
+                idx_mapping_cpu=torch.empty(
+                    max_num_reqs, dtype=torch.int32, pin_memory=True
+                ),
+                query_start_loc_cpu=torch.empty(
+                    max_num_reqs + 1, dtype=torch.int32, pin_memory=True
+                ),
+                cu_num_logits_cpu=torch.empty(
+                    max_num_reqs + 1, dtype=torch.int32, pin_memory=True
+                ),
+                event=torch.cuda.Event(),
+            )
+            for _ in range(ring_size)
+        ]
+        self.ring_slot_idx = -1
+        self.idx_mapping_gpu = torch.empty(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
+        self.cu_num_logits_gpu = torch.empty(
+            max_num_reqs + 1, dtype=torch.int32, device=device
+        )
+        self.arange_reqs_np = np.arange(max_num_reqs + 1, dtype=np.int32)
+        self.arange_reqs_gpu = torch.arange(
+            max_num_reqs + 1, dtype=torch.int32, device=device
+        )
+        self.zero_local_pos_gpu = torch.zeros(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
+
+    def acquire_ring_slot(self) -> PrepareInputsRingSlot:
+        slot_idx = (self.ring_slot_idx + 1) % len(self.ring_slots)
+        self.ring_slot_idx = slot_idx
+        slot = self.ring_slots[slot_idx]
+        if slot.in_use and not slot.event.query():
+            slot.event.synchronize()
+        return slot
+
+    def mark_ring_slot_inflight(self, slot: PrepareInputsRingSlot) -> None:
+        slot.event.record(torch.cuda.current_stream(self.device))
+        slot.in_use = True
 
 
 class UvaBuffer:

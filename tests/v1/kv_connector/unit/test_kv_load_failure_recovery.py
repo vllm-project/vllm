@@ -17,6 +17,26 @@ from .utils import (
 )
 
 
+def _get_remote_waiting_queue(scheduler: Scheduler):
+    return getattr(scheduler, "waiting_for_remote_kvs", None)
+
+
+def _num_waiting_requests(scheduler: Scheduler) -> int:
+    remote_waiting = _get_remote_waiting_queue(scheduler)
+    return len(scheduler.waiting) + (len(remote_waiting) if remote_waiting else 0)
+
+
+def _get_remote_waiting_requests(scheduler: Scheduler) -> list[Request]:
+    remote_waiting = _get_remote_waiting_queue(scheduler)
+    if remote_waiting is not None:
+        return list(remote_waiting)
+    return [
+        req
+        for req in scheduler.waiting
+        if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    ]
+
+
 def _make_get_num_new_matched_tokens(
     req_num_new_matched_tokens: dict[str, int],
     async_load,
@@ -76,8 +96,8 @@ def test_async_load_failure(
 
     scheduler_output = scheduler.schedule()
 
-    assert len(scheduler.waiting) == 3
-    for request in scheduler.waiting:
+    assert _num_waiting_requests(scheduler) == 3
+    for request in _get_remote_waiting_requests(scheduler):
         assert request.num_computed_tokens == 0
         assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 3
@@ -96,8 +116,8 @@ def test_async_load_failure(
 
     min_invalid_block_idx = min(invalid_block_idxs)
 
-    assert len(scheduler.waiting) == 3
-    for request in scheduler.waiting:
+    assert _num_waiting_requests(scheduler) == 3
+    for request in _get_remote_waiting_requests(scheduler):
         if request.request_id == request2.request_id:
             assert request.num_computed_tokens == (
                 min_invalid_block_idx * scheduler.block_size
@@ -303,8 +323,10 @@ def test_async_progressive_load_failure(
 
     scheduler_output = scheduler.schedule()
 
-    assert len(scheduler.waiting) == 1
-    assert scheduler.waiting.peek_request().request_id == request.request_id
+    assert _num_waiting_requests(scheduler) == 1
+    remote_waiting_reqs = _get_remote_waiting_requests(scheduler)
+    assert len(remote_waiting_reqs) == 1
+    assert remote_waiting_reqs[0].request_id == request.request_id
     assert request.num_computed_tokens == 0
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 1
@@ -325,8 +347,10 @@ def test_async_progressive_load_failure(
 
         min_invalid_block_idx = min(min_invalid_block_idx, invalid_block_idx)
 
-        assert len(scheduler.waiting) == 1
-        assert scheduler.waiting.peek_request().request_id == request.request_id
+        assert _num_waiting_requests(scheduler) == 1
+        remote_waiting_reqs = _get_remote_waiting_requests(scheduler)
+        assert len(remote_waiting_reqs) == 1
+        assert remote_waiting_reqs[0].request_id == request.request_id
         assert request.num_computed_tokens == (
             min_invalid_block_idx * scheduler.block_size
         )
