@@ -36,7 +36,7 @@ class EagleMistralLarge3Model(DeepseekV2Model):
 
         config = vllm_config.model_config.hf_config
         config = copy.deepcopy(vllm_config.model_config.hf_config)
-        config.first_k_dense_replace = config.first_k_dense_replace + start_layer_id
+        config.first_k_dense_replace += start_layer_id
 
         quant_config = vllm_config.quant_config
         self.config = config
