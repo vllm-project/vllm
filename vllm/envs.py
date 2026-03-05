@@ -246,6 +246,7 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = False
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
+    VLLM_POOL_CUDAGRAPH_BATCH_SIZES: str | None = None
 
 
 def get_default_cache_root():
@@ -1645,6 +1646,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # NIXL EP environment variables
     "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
         os.getenv("VLLM_NIXL_EP_MAX_NUM_RANKS", "32")
+    ),
+    # Comma-separated list of batch sizes for pooler CUDA graph capture.
+    # When set, the pooler CUDA graph optimization will capture graphs for
+    # these batch sizes instead of the default range (1..128).
+    # Example: "1,2,4,8,16,32,64,128,256"
+    "VLLM_POOL_CUDAGRAPH_BATCH_SIZES": lambda: os.environ.get(
+        "VLLM_POOL_CUDAGRAPH_BATCH_SIZES", None
     ),
 }
 
