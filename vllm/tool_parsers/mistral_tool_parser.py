@@ -94,21 +94,36 @@ class MistralToolParser(ToolParser):
         self.current_tool_name: str | None = None
         self.current_tool_mistral_id: str | None = None
         self.starting_new_tool = False
-        if _is_pre_v11_tokeniser(self.model_tokenizer):
-            self.parse_coro = ijson.parse_coro(
-                self.update_stream_state_pre_v11_tokenizer()
-            )
+
+        # Lazily initialized parse coroutine for pre-v11 format streaming.
+        # This is created on-demand when we confirm pre-v11 format is being used.
+        self.parse_coro: Any | None = None
+        self._parse_coro_initialized = False
 
         self.bot_token = "[TOOL_CALLS]"
         self.bot_token_id = self.vocab.get(self.bot_token)
         self.tool_call_regex = re.compile(r"\[{.*}\]", re.DOTALL)
         self._is_pre_v11 = _is_pre_v11_tokeniser(self.model_tokenizer)
 
+        # Track whether we've detected the actual tool format during streaming.
+        # This allows models like Devstral to use v11+ format even when
+        # not using MistralTokenizer.
+        # None = not yet detected, True = v11+ format, False = pre-v11 format
+        self._detected_v11_format: bool | None = None
+
         if self.bot_token_id is None:
             raise RuntimeError(
                 "Mistral Tool Parser could not locate the tool call token in "
                 "the tokenizer!"
             )
+
+    def _init_parse_coro(self) -> None:
+        """Initialize the parse coroutine for pre-v11 format streaming."""
+        if not self._parse_coro_initialized:
+            self.parse_coro = ijson.parse_coro(
+                self.update_stream_state_pre_v11_tokenizer()
+            )
+            self._parse_coro_initialized = True
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         request = super().adjust_request(request)
@@ -159,8 +174,11 @@ class MistralToolParser(ToolParser):
         content = content_and_raw_tool_calls[0]
         raw_tool_calls = content_and_raw_tool_calls[1:]
 
+        # Detect format dynamically for non-streaming extraction
+        use_v11_format = self._detect_format_from_output(model_output)
+
         # >= v11: content[BOT]tool_name1{args_call1}[BOT]tool_name2{args_call2}
-        if not self._is_pre_v11:
+        if use_v11_format:
             tool_calls = []
             for raw_tool_call in raw_tool_calls:
                 if "{" not in raw_tool_call:
@@ -231,6 +249,30 @@ class MistralToolParser(ToolParser):
             content=content if len(content) > 0 else None,
         )
 
+    def _detect_format_from_output(self, model_output: str) -> bool:
+        """
+        Detect whether the model output uses v11+ or pre-v11 tool format.
+
+        v11+ format: ``[TOOL_CALLS]tool_name{args}``
+        pre-v11 format: ``[TOOL_CALLS][{"name": ..., "arguments": ...}]``
+
+        Returns True for v11+ format, False for pre-v11 format.
+        """
+        # If using MistralTokenizer, rely on version detection
+        if isinstance(self.model_tokenizer, MistralTokenizer):
+            return self.model_tokenizer.version >= 11
+
+        # For non-MistralTokenizer, detect from actual output
+        if self.bot_token in model_output:
+            after_bot_token = model_output.split(self.bot_token, 1)[-1].lstrip()
+            if after_bot_token:
+                # If content starts with '[', it's pre-v11 format (JSON array)
+                # Otherwise it's v11+ format (tool_name{args})
+                return not after_bot_token.startswith("[")
+
+        # Default to tokenizer-based detection
+        return not self._is_pre_v11
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
@@ -249,18 +291,63 @@ class MistralToolParser(ToolParser):
         # if the tool call token IS in the tokens generated so far, that
         # means we're parsing as tool calls now
         try:
-            if _is_pre_v11_tokeniser(self.model_tokenizer):
+            # Determine which parsing method to use based on tokenizer type
+            # or dynamically detected format from model output
+            use_v11_format = self._should_use_v11_format(current_text)
+
+            if use_v11_format:
+                return self._extract_tool_calls_streaming(
+                    delta_text=delta_text, delta_token_ids=delta_token_ids
+                )
+            else:
                 return self._extract_tool_calls_streaming_pre_v11_tokenizer(
                     delta_text=delta_text,
                     delta_token_ids=delta_token_ids,
                 )
-            else:
-                return self._extract_tool_calls_streaming(
-                    delta_text=delta_text, delta_token_ids=delta_token_ids
-                )
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
             return None
+
+    def _should_use_v11_format(self, current_text: str) -> bool:
+        """
+        Determine whether to use v11+ format parsing based on tokenizer type
+        or dynamically detected format from the model output.
+
+        This handles cases like Devstral-Small-2507 which uses v11+ format
+        but may not use MistralTokenizer when tokenizer_mode is not set.
+
+        v11+ format: ``[TOOL_CALLS]tool_name{args}``
+        pre-v11 format: ``[TOOL_CALLS][{"name": ..., "arguments": ...}]``
+        """
+        # If using MistralTokenizer, rely on version detection
+        if isinstance(self.model_tokenizer, MistralTokenizer):
+            return self.model_tokenizer.version >= 11
+
+        # For non-MistralTokenizer, we need to detect the format dynamically
+        # from the model output itself
+        if self._detected_v11_format is not None:
+            return self._detected_v11_format
+
+        # Try to detect the format from current_text
+        if self.bot_token in current_text:
+            # Get the content after [TOOL_CALLS]
+            after_bot_token = current_text.split(self.bot_token, 1)[-1].lstrip()
+
+            if after_bot_token:
+                # If content starts with '[', it's pre-v11 format (JSON array)
+                # Otherwise it's v11+ format (tool_name{args})
+                is_v11 = not after_bot_token.startswith("[")
+                self._detected_v11_format = is_v11
+
+                if is_v11:
+                    logger.debug(
+                        "Detected v11+ tool format for non-MistralTokenizer model"
+                    )
+                return is_v11
+
+        # Default to pre-v11 format if we can't detect yet
+        # This will be re-evaluated on subsequent calls
+        return False
 
     def _extract_tool_calls_streaming(
         self,
@@ -404,7 +491,10 @@ class MistralToolParser(ToolParser):
         doing tool calls of the following format:
         `[TOOL_CALLS][{"name": "add", "arguments":{"a": 3.5, "b": 4}}`
         """
+        # Initialize parse coroutine on first use
+        self._init_parse_coro()
         assert self.parse_coro is not None
+
         content = None
         delta_tool_calls: list[DeltaToolCall] = []
         current_tool_call: DeltaToolCall = DeltaToolCall(
