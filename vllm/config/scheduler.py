@@ -135,6 +135,16 @@ class SchedulerConfig:
     and starting configuration.
     """
 
+    hybrid_kv_cache_group_size: int | None = None
+    """Override the group size used by the hybrid KV cache manager to split
+    layers into groups. Each group shares a block table and requires a
+    host-to-device copy per scheduling step. A larger group size reduces
+    H2D overhead but may waste KV cache memory due to padding.
+    When None (default), the group size is determined automatically based
+    on the layer ratio pattern (e.g., min_num_layers across attention types).
+    Only takes effect for hybrid models with multiple attention types.
+    """
+
     async_scheduling: bool | None = Field(default=None)
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.

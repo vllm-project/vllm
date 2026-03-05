@@ -521,6 +521,9 @@ class EngineArgs:
     disable_hybrid_kv_cache_manager: bool | None = (
         SchedulerConfig.disable_hybrid_kv_cache_manager
     )
+    hybrid_kv_cache_group_size: int | None = (
+        SchedulerConfig.hybrid_kv_cache_group_size
+    )
 
     structured_outputs_config: StructuredOutputsConfig = get_field(
         VllmConfig, "structured_outputs_config"
@@ -1209,6 +1212,10 @@ class EngineArgs:
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
         scheduler_group.add_argument(
+            "--hybrid-kv-cache-group-size",
+            **scheduler_kwargs["hybrid_kv_cache_group_size"],
+        )
+        scheduler_group.add_argument(
             "--async-scheduling", **scheduler_kwargs["async_scheduling"]
         )
         scheduler_group.add_argument(
@@ -1763,6 +1770,7 @@ class EngineArgs:
             max_long_partial_prefills=self.max_long_partial_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
+            hybrid_kv_cache_group_size=self.hybrid_kv_cache_group_size,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
         )
