@@ -10,6 +10,7 @@ from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
 
+from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -37,6 +38,9 @@ from vllm.model_executor.layers.fla.ops import (
     fused_recurrent_gated_delta_rule,
 )
 from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
+from vllm.model_executor.layers.fla.ops.cutedsl_gdn_transpose import (
+    cutedsl_transpose_fused_sigmoid_gated_delta_rule_update,
+)
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
@@ -206,6 +210,79 @@ class ChunkGatedDeltaRule(CustomOp):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+
+
+@CustomOp.register("decode_gated_delta_rule")
+class DecodeGatedDeltaRule(CustomOp):
+    def __init__(self, use_cutedsl_transpose: bool) -> None:
+        super().__init__()
+        self._forward_method = (
+            self.forward_cutedsl if use_cutedsl_transpose else self.forward_native
+        )
+
+    def forward_cutedsl(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        initial_state: torch.Tensor,
+        ssm_state_indices: torch.Tensor,
+        cu_seqlens: torch.LongTensor | None = None,
+        use_qk_l2norm_in_kernel: bool = True,
+    ):
+        del g, beta
+        output = cutedsl_transpose_fused_sigmoid_gated_delta_rule_update(
+            A_log=A_log,
+            dt_bias=dt_bias,
+            q=q,
+            k=k,
+            v=v,
+            a=a,
+            b=b,
+            initial_state_source=initial_state.transpose(-2, -1),
+            initial_state_indices=ssm_state_indices,
+            cu_seqlens=cu_seqlens,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            softplus_beta=1.0,
+            softplus_threshold=20.0,
+        ).unsqueeze(0)
+        return output, initial_state
+
+    def forward_native(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        initial_state: torch.Tensor,
+        ssm_state_indices: torch.Tensor,
+        cu_seqlens: torch.LongTensor | None = None,
+        use_qk_l2norm_in_kernel: bool = True,
+    ):
+        del a, b, A_log, dt_bias
+        return fused_recurrent_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            inplace_final_state=True,
+            cu_seqlens=cu_seqlens,
+            ssm_state_indices=ssm_state_indices,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         )
 
@@ -475,6 +552,35 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         )
 
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+        self._use_cutedsl_transpose_decode = False
+        gdn_decode_backend = envs.VLLM_GDN_DECODE_BACKEND.lower()
+        if gdn_decode_backend == "cutedsl_transpose":
+            is_supported_sm = current_platform.is_cuda() and (
+                current_platform.is_device_capability_family(90)
+                or current_platform.is_device_capability_family(100)
+            )
+            if not is_supported_sm:
+                logger.warning_once(
+                    "Ignoring VLLM_GDN_DECODE_BACKEND=cutedsl_transpose: "
+                    "cutedsl_transpose decode is only enabled on sm90/sm100."
+                )
+            elif self.head_k_dim != self.head_v_dim or self.head_k_dim not in (
+                128,
+                256,
+            ):
+                raise ValueError(
+                    "cutedsl_transpose decode backend requires K=V in {128, 256}; "
+                    f"got K={self.head_k_dim}, V={self.head_v_dim}."
+                )
+            else:
+                self._use_cutedsl_transpose_decode = True
+                logger.info_once(
+                    "Using cutedsl_transpose GDN decode kernel "
+                    "(VLLM_GDN_DECODE_BACKEND=cutedsl_transpose)."
+                )
+        self.decode_gated_delta_rule = DecodeGatedDeltaRule(
+            use_cutedsl_transpose=self._use_cutedsl_transpose_decode
+        )
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -793,21 +899,20 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 ssm_state.dtype
             )
         elif attn_metadata.num_decodes > 0:
-            core_attn_out_non_spec, last_recurrent_state = (
-                fused_recurrent_gated_delta_rule(
-                    q=query_non_spec,
-                    k=key_non_spec,
-                    v=value_non_spec,
-                    g=g_non_spec,
-                    beta=beta_non_spec,
-                    initial_state=ssm_state,
-                    inplace_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc[
-                        : attn_metadata.num_decodes + 1
-                    ],
-                    ssm_state_indices=non_spec_state_indices_tensor,
-                    use_qk_l2norm_in_kernel=True,
-                )
+            core_attn_out_non_spec, last_recurrent_state = self.decode_gated_delta_rule(
+                q=query_non_spec,
+                k=key_non_spec,
+                v=value_non_spec,
+                a=a,
+                b=b,
+                g=g_non_spec,
+                beta=beta_non_spec,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                initial_state=ssm_state,
+                ssm_state_indices=non_spec_state_indices_tensor,
+                cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
+                use_qk_l2norm_in_kernel=True,
             )
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
