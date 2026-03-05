@@ -735,9 +735,6 @@ class FunASRProcessingInfo(BaseProcessingInfo):
     def get_target_channels(self) -> int:
         return 1
 
-    # def get_num_audio_tokens(self) -> int:
-    #    return self.get_hf_config().max_source_positions
-
 
 class FunASRDummyInputsBuilder(BaseDummyInputsBuilder[FunASRProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
@@ -961,9 +958,6 @@ class FunASRForConditionalGeneration(
         )
         return decoder_outputs
 
-    # def get_language_model(self) -> torch.nn.Module:
-    #    return self.model.decoder
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
 
@@ -994,9 +988,12 @@ class FunASRForConditionalGeneration(
     def _parse_and_validate_audio_input(self, **kwargs: object) -> FunASRAudioInputs:
         input_features = kwargs.pop("input_features", None)
         speech_lengths = kwargs.pop("speech_lengths", None)
+        fake_token_lengths = kwargs.pop("fake_token_lengths", None)
 
         return FunASRAudioInputs(
-            input_features=input_features, speech_lengths=speech_lengths
+            input_features=input_features,
+            speech_lengths=speech_lengths,
+            fake_token_lengths=fake_token_lengths,
         )
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
