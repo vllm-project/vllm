@@ -7,10 +7,8 @@ build:
   os: ubuntu-22.04
   tools:
     python: "3.12"
-  apt_packages:
-    - jq
   jobs:
-    post_system_dependencies:
+    post_checkout:
       # Skip PR builds unless the PR has the "documentation" or "ready" label
       - |
         if [ "$READTHEDOCS_VERSION_TYPE" = "external" ]; then
@@ -22,7 +20,7 @@ build:
           HTTP_CODE=$(curl -s -o /tmp/pr_response.json -w "%{http_code}" -H "$AUTH_HEADER" "$PR_URL")
           if [ "$HTTP_CODE" -ne 200 ]; then
             echo "GitHub API returned HTTP ${HTTP_CODE}, proceeding with build."
-          elif jq -e '.labels[].name' /tmp/pr_response.json 2>/dev/null | grep -qwE "documentation|ready"; then
+          elif grep -qE "\"name\": *\"(documentation|ready)\"" /tmp/pr_response.json; then
             echo "Found required label, proceeding with build."
           else
             echo "PR #${READTHEDOCS_VERSION} lacks 'documentation' or 'ready' label, skipping build."
