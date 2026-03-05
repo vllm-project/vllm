@@ -45,7 +45,7 @@ buildctl \
   --frontend dockerfile.v0 \
   --local context="${CONTEXT}" \
   --local dockerfile="${CONTEXT}/docker" \
-  --opt filename=Dockerfile.tmp \
+  --opt filename=Dockerfile.xpu \
   --output "type=image,name=${IMAGE_NAME},push=true"
 
 echo "Build complete: ${IMAGE_NAME}"
