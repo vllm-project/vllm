@@ -1226,33 +1226,14 @@ class GPUModelRunner(
         )
         spec_decode_active = bool(scheduler_output.scheduled_spec_decode_tokens)
         if self.needs_prefill_as_decode_slots and spec_decode_active:
-            threshold = self.reorder_batch_threshold
-            any_is_prefill = False
-            for i in range(num_reqs):
-                num_computed = self.input_batch.num_computed_tokens_cpu[i]
-                num_prompt = self.input_batch.num_prompt_tokens[i]
-                is_prefill = num_computed < num_prompt
-                req_id = self.input_batch.req_ids[i]
-                query_len = scheduler_output.num_scheduled_tokens[req_id]
-
-                if is_prefill:
-                    classified_as_decode = (
-                        threshold is not None and query_len <= threshold
-                    )
-                    num_tokens = query_len if classified_as_decode else 1
-                    any_is_prefill = True
-                else:
-                    num_tokens = -1
-                self.prefill_as_decode_num_tokens.np[i] = num_tokens
-
-            # We can skip the GPU transfer if there aren't any values to update
-            if any_is_prefill:
-                self.prefill_as_decode_num_tokens.copy_to_gpu(num_reqs)
-                self.num_accepted_tokens.gpu[:num_reqs] = torch.where(
-                    self.prefill_as_decode_num_tokens.gpu[:num_reqs] != -1,
-                    self.prefill_as_decode_num_tokens.gpu[:num_reqs],
-                    self.num_accepted_tokens.gpu[:num_reqs],
-                )
+            mamba_utils.update_accepted_tokens_for_prefill_as_decode(
+                self.input_batch,
+                self.prefill_as_decode_num_tokens,
+                self.num_accepted_tokens.gpu,
+                scheduler_output,
+                self.reorder_batch_threshold,
+                num_reqs,
+            )
 
         if self.cache_config.mamba_cache_mode == "align":
             for i, num_tokens in enumerate(
