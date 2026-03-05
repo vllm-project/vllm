@@ -302,7 +302,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         num_nodes: int,
         num_ranks: int,
         old_global_expert_indices: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """
         Entry point for expert-parallelism load balancer.
 
@@ -321,12 +321,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         Returns:
             phy2log: [layers, num_replicas], the expert
                 index of each replica
-            log2phy: [layers, num_logical_experts, X],
-                the replica indices for each expert
-            logcnt: [layers, num_logical_experts], number of
-                physical replicas for each logical expert
         """
-        device = weight.device
         num_layers, num_logical_experts = weight.shape
         weight_np = weight.float().cpu().numpy()
         old_phy2log_np = (
@@ -355,7 +350,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         # Only apply when the number of GPUs and slots per GPU remain unchanged.
         # Helps to avoid unnecessary weight copying when experts move
         # within the same GPU.
-        if old_global_expert_indices is not None:
+        if old_phy2log_np is not None:
             phy2log_np, phy_replicas_idx_np = cls.preserve_intragpu_slots(
                 phy2log_np, phy_replicas_idx_np, num_ranks, old_phy2log_np
             )
@@ -370,7 +365,5 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         )
         log2phy_np[layer_indices, phy2log_np, phy_replicas_idx_np] = replica_indices
 
-        phy2log = torch.from_numpy(phy2log_np).to(device)
-        log2phy = torch.from_numpy(log2phy_np).to(device)
-        logcnt = torch.from_numpy(logcnt_np).to(device)
-        return phy2log, log2phy, logcnt
+        phy2log = torch.from_numpy(phy2log_np)
+        return phy2log
