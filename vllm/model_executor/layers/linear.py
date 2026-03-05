@@ -64,6 +64,12 @@ WEIGHT_LOADER_V2_SUPPORTED = [
 ]
 
 
+def register_weight_loader_v2_supported_method(cls):
+    """Decorator to register a LinearMethod as supporting weight_loader_v2."""
+    WEIGHT_LOADER_V2_SUPPORTED.append(cls.__name__)
+    return cls
+
+
 def adjust_marlin_shard(
     param: Parameter,
     shard_size: int,
@@ -1496,10 +1502,10 @@ class RowParallelLinear(LinearBase):
         if self.input_is_parallel:
             input_parallel = input_
         else:
-            splitted_input = split_tensor_along_last_dim(
+            split_input = split_tensor_along_last_dim(
                 input_, num_partitions=self.tp_size
             )
-            input_parallel = splitted_input[self.tp_rank].contiguous()
+            input_parallel = split_input[self.tp_rank].contiguous()
 
         # Matrix multiply.
         assert self.quant_method is not None
