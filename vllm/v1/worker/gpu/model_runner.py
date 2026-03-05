@@ -370,7 +370,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return None, None
 
         assert self.execute_model_state is not None
-        hidden_states, _, input_batch, _ = self.execute_model_state
+        hidden_states, _, input_batch, _, _ = self.execute_model_state
         assert hidden_states is not None  # Last PP rank always has hidden_states
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
@@ -758,6 +758,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
+        shift_computed_tokens: int = 0,
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
         mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
             scheduled_encoder_inputs
@@ -769,7 +770,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.num_scheduled_tokens,
             input_batch.query_start_loc_np,
             self.req_states.prefill_len.np[input_batch.idx_mapping_np],
-            self.req_states.num_computed_prefill_tokens[input_batch.idx_mapping_np],
+            self.req_states.num_computed_prefill_tokens[input_batch.idx_mapping_np]
+            + shift_computed_tokens,
         )
         return mm_embeds, is_mm_embed
 
@@ -1009,7 +1011,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Non-last PP rank: return IntermediateTensors for sending.
             assert isinstance(hidden_states, IntermediateTensors)
             hidden_states.kv_connector_output = kv_connector_output
-            self.execute_model_state = (None, None, input_batch, kv_connector_output)
+            self.execute_model_state = (
+                None,
+                None,
+                input_batch,
+                kv_connector_output,
+                scheduler_output,
+            )
             return hidden_states
 
         # Last rank (or no PP): hidden_states is a tensor for sampling.
@@ -1019,6 +1027,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             aux_hidden_states,
             input_batch,
             kv_connector_output,
+            scheduler_output,
         )  # type: ignore
         return None
 
@@ -1027,9 +1036,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self, grammar_output: GrammarOutput | None
     ) -> AsyncOutput | ModelRunnerOutput | None:
         assert self.execute_model_state is not None
-        hidden_states, aux_hidden_states, input_batch, kv_connector_output = (
-            self.execute_model_state
-        )
+        (
+            hidden_states,
+            aux_hidden_states,
+            input_batch,
+            kv_connector_output,
+            scheduler_output,
+        ) = self.execute_model_state
         self.execute_model_state = None  # type: ignore
 
         if not self.is_last_pp_rank:
@@ -1080,6 +1093,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
             copy_event=self.output_copy_event,
         )
+
+        # Only first PP rank prepares multimodal embeddings.
+        if self.supports_mm_inputs and self.is_first_pp_rank:
+            mm_embeds, is_mm_embed = self.get_mm_embeddings(
+                scheduler_output.scheduled_encoder_inputs,
+                input_batch,
+                shift_computed_tokens=1,
+            )
+            inputs_embeds = self.encoder_runner.get_inputs_embeds(
+                self.model, input_batch.input_ids, mm_embeds, is_mm_embed
+            )
+            input_batch.inputs_embeds = inputs_embeds[
+                : input_batch.num_tokens_after_padding
+            ]
 
         # Postprocess results and update request states.
         # NOTE: This is intentionally done after creating the AsyncOutput,

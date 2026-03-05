@@ -93,6 +93,7 @@ class EagleSpeculator:
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        input_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
@@ -108,6 +109,7 @@ class EagleSpeculator:
                 input_ids=self.input_buffers.input_ids[:num_tokens],
                 positions=self.input_buffers.positions[:num_tokens],
                 hidden_states=self.hidden_states[:num_tokens],
+                input_embeds=input_embeds,
             )
         if self.method == "mtp":
             last_hidden_states = ret_hidden_states
@@ -232,6 +234,7 @@ class EagleSpeculator:
             input_batch.attn_metadata,
             input_batch.slot_mappings,
             num_tokens_across_dp=None,  # FIXME
+            input_embeds=input_batch.inputs_embeds,
         )
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
