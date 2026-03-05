@@ -37,8 +37,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     HAS_OPAQUE_TYPE,
     ModuleName,
-    aux_stream,
-    current_stream,
     direct_register_custom_op,
 )
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
@@ -86,7 +84,7 @@ def _moe_forward(
     shared_experts_input: torch.Tensor | None,
     layer_name: _layer_name_type,
 ) -> torch.Tensor:
-    layer = get_layer_from_name(layer_name)
+    layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer.runner.forward_dispatch(
         layer,
         hidden_states,
@@ -110,7 +108,7 @@ def _moe_forward_shared(
     shared_experts_input: torch.Tensor | None,
     layer_name: _layer_name_type,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    layer = get_layer_from_name(layer_name)
+    layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer.runner.forward_dispatch(
         layer,
         hidden_states,
@@ -141,7 +139,7 @@ def _moe_forward_shared_fake(
 direct_register_custom_op(
     op_name="moe_forward",
     op_func=_moe_forward,
-    mutates_args=["hidden_states"],  # ?
+    mutates_args=["hidden_states"],  # is this still true?
     fake_impl=_moe_forward_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
@@ -150,7 +148,6 @@ direct_register_custom_op(
 direct_register_custom_op(
     op_name="moe_forward_shared",
     op_func=_moe_forward_shared,
-    mutates_args=["hidden_states"],  # ?
     fake_impl=_moe_forward_shared_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
@@ -202,10 +199,8 @@ class DefaultMoERunner(MoERunner):
         self.enable_eplb = moe_config.moe_parallel_config.enable_eplb
 
         # Chunked all2all staging tensor
-        # TODO rename these?
         # These need to exist ahead of time due to CUDAgraph construction
         # needing a fixed buffer address.
-        # TODO: these could be global, i.e. shared by all layers
         self.use_dp_chunking = self.moe_config.moe_parallel_config.use_dp_chunking
         self.batched_hidden_states: torch.Tensor | None = None
         self.batched_router_logits: torch.Tensor | None = None
