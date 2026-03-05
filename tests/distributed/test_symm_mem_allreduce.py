@@ -105,7 +105,7 @@ def test_symm_mem_allreduce(
     monkeypatch: pytest.MonkeyPatch, tp_size, pipeline_parallel_size
 ):
     world_size = tp_size * pipeline_parallel_size
-    if world_size > torch.cuda.device_count():
+    if world_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
     q = mp.get_context("spawn").Queue()
     mp.spawn(symm_mem_allreduce_worker, args=(world_size, q), nprocs=world_size)
@@ -126,7 +126,7 @@ def test_symm_mem_allreduce(
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 def test_dp_with_symm_mem_allreduce(monkeypatch: pytest.MonkeyPatch):
     world_size = 4
-    if world_size > torch.cuda.device_count():
+    if world_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
     # Verify that the DataParallel runs without error
     engine_args = EngineArgs(
