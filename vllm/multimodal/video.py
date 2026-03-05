@@ -87,6 +87,22 @@ class VideoLoader:
         """Load video frames from bytes and return (frames_array, metadata_dict)."""
         raise NotImplementedError
 
+    @classmethod
+    def create_hf_metadata(
+        cls,
+        source: VideoSourceMetadata,
+        valid_frame_indices: list[int],
+        video_backend: str,
+    ):
+        return {
+            "total_num_frames": source.total_frames_num,
+            "fps": source.original_fps,
+            "duration": source.duration,
+            "video_backend": video_backend,
+            "frames_indices": valid_frame_indices,
+            "do_sample_frames": len(valid_frame_indices) == source.total_frames_num,
+        }
+
 
 VIDEO_LOADER_REGISTRY = ExtensionManager()
 
@@ -427,19 +443,11 @@ class OpenCVVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
             frame_recovery=frame_recovery,
         )
 
-        # Use transformers transformers.video_utils.VideoMetadata format
-        # NOTE(Isotr0py): For models like Qwen3-VL/GLM4.5V, this metadata
-        # can cause incorrect timestamp calculation without num_frames=-1.
-        metadata = {
-            "total_num_frames": source.total_frames_num,
-            "fps": source.original_fps,
-            "duration": source.duration,
-            "video_backend": "opencv",
-            "frames_indices": valid_frame_indices,
-            # extra field used to control hf processor's video
-            # sampling behavior
-            "do_sample_frames": len(valid_frame_indices) == source.total_frames_num,
-        }
+        metadata = cls.create_hf_metadata(
+            source=source,
+            video_backend="opencv",
+            valid_frame_indices=valid_frame_indices,
+        )
 
         return frames, metadata
 
@@ -544,15 +552,11 @@ class OpenCVDynamicVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
             frame_recovery=frame_recovery,
         )
 
-        # Use transformers transformers.video_utils.VideoMetadata format
-        metadata = {
-            "total_num_frames": source.total_frames_num,
-            "fps": source.original_fps,
-            "duration": duration,
-            "video_backend": "opencv_dynamic",
-            "frames_indices": valid_frame_indices,
-            "do_sample_frames": False,
-        }
+        metadata = cls.create_hf_metadata(
+            source=source,
+            video_backend="opencv_dynamic",
+            valid_frame_indices=valid_frame_indices,
+        )
 
         return frames, metadata
 
@@ -817,14 +821,11 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
             frame_recovery=frame_recovery,
         )
 
-        metadata = {
-            "total_num_frames": source.total_frames_num,
-            "fps": source.original_fps,
-            "duration": source.duration,
-            "video_backend": "opencv",
-            "frames_indices": valid_frame_indices,
-            "do_sample_frames": False,
-        }
+        metadata = cls.create_hf_metadata(
+            source=source,
+            video_backend="opencv",
+            valid_frame_indices=valid_frame_indices,
+        )
 
         return frames, metadata
 
@@ -971,12 +972,9 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         )
 
         # Use transformers transformers.video_utils.VideoMetadata format
-        metadata = {
-            "total_num_frames": source.total_frames_num,
-            "fps": source.original_fps,
-            "duration": source.duration,
-            "video_backend": "opencv_dynamic",
-            "frames_indices": valid_frame_indices,
-            "do_sample_frames": False,
-        }
+        metadata = cls.create_hf_metadata(
+            source=source,
+            video_backend="opencv_dynamic",
+            valid_frame_indices=valid_frame_indices,
+        )
         return frames, metadata
