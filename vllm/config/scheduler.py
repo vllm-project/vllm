@@ -46,11 +46,18 @@ class SchedulerConfig:
     """The runner type to launch for the model."""
 
     max_num_batched_tokens: int = Field(default=DEFAULT_MAX_NUM_BATCHED_TOKENS, ge=1)
-    """Maximum number of tokens to be processed in a single iteration.
+    """Maximum number of tokens that can be processed in a single iteration.
 
     The default value here is mainly for convenience when testing.
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
+
+    max_num_scheduled_tokens: int | None = Field(default=None)
+    """Maximum number of tokens that the scheduler may issue in a single iteration.
+    
+    This is usually equal to max_num_batched_tokens, but can be smaller in cases
+    when the model might append tokens into the batch (such as speculative decoding).
+    Defaults to max_num_batched_tokens."""
 
     max_num_seqs: int = Field(default=DEFAULT_MAX_NUM_SEQS, ge=1)
     """Maximum number of sequences to be processed in a single iteration.
