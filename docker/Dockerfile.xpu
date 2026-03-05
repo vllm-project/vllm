@@ -180,3 +180,19 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip uninstall oneccl oneccl-devel
 
 ENTRYPOINT ["vllm", "serve"]
+
+FROM vllm-openai AS vllm-test
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,src=requirements/xpu-test.txt,target=/workspace/vllm/requirements/xpu-test.txt \
+    uv pip install -r /workspace/vllm/requirements/xpu-test.txt
+
+# Ensure oneAPI/oneCCL runtime env is available for XPU tests
+ENV CCL_ROOT="/opt/intel/oneapi/ccl/latest"
+ENV LD_LIBRARY_PATH="${CCL_ROOT}/lib:${LD_LIBRARY_PATH}"
+
+ENV VLLM_TEST_DEVICE=xpu
+ENV PYTEST_ADDOPTS="--color=yes"
+
+ENTRYPOINT []
+CMD ["pytest", "tests/"]
