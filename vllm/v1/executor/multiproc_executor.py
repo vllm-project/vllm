@@ -456,12 +456,13 @@ class MultiprocExecutor(Executor):
                         w.worker_response_mq.shutdown()
                         w.worker_response_mq = None
 
-        if self.rpc_broadcast_mq is not None:
-            self.rpc_broadcast_mq.shutdown()
+        if rpc_broadcast_mq := getattr(self, "rpc_broadcast_mq", None):
+            rpc_broadcast_mq.shutdown()
             self.rpc_broadcast_mq = None
-        for mq in self.response_mqs:
-            mq.shutdown()
-        self.response_mqs = []
+        if response_mqs := getattr(self, "response_mqs", None):
+            for mq in response_mqs:
+                mq.shutdown()
+            self.response_mqs = []
 
     def check_health(self) -> None:
         self.collective_rpc("check_health", timeout=10)
