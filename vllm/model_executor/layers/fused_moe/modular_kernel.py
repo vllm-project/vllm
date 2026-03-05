@@ -1001,11 +1001,9 @@ class FusedMoEKernelModularImpl:
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
         self.shared_experts = shared_experts
-        self.moe_parallel_config = moe_parallel_config
         self.inplace = inplace
-
         moe_parallel_config = fused_experts.moe_config.moe_parallel_config
-        self.moe_parallel_config: FusedMoEParallelConfig | None = moe_parallel_config
+        self.moe_parallel_config = moe_parallel_config
         self.is_dp_ep = (
             moe_parallel_config is not None
             and moe_parallel_config.dp_size > 1
@@ -1459,8 +1457,7 @@ class FusedMoEKernel:
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         fused_experts: FusedMoEExperts,
-        shared_experts: torch.nn.Module | None = None,
-        moe_parallel_config: FusedMoEParallelConfig | None = None,
+        shared_experts: SharedExperts | None = None,
         inplace: bool = False,
     ):
         super().__init__()
@@ -1475,7 +1472,6 @@ class FusedMoEKernel:
                 prepare_finalize,
                 fused_experts,
                 shared_experts,
-                moe_parallel_config,
                 inplace,
             )
 
