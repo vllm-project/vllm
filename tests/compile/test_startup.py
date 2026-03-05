@@ -61,11 +61,11 @@ def test_moe_startup(monkeypatch, vllm_runner, fresh_vllm_cache):
     counters.clear()
     with compilation_counter.expect(
         num_compiled_artifacts_loaded=3,
-        # TODO: warm start should not save any artifacts
-        # https://github.com/vllm-project/vllm/issues/35708
-        num_compiled_artifacts_saved=1,
+        num_compiled_artifacts_saved=0,
     ):
         _run_vllm(vllm_runner)
     assert counters["aot_autograd"]["total"] == 30
     assert counters["aot_autograd"]["autograd_cache_miss"] == 0
-    assert counters["aot_autograd"]["autograd_cache_hit"] == 1
+    assert (
+        counters["aot_autograd"]["autograd_cache_hit"] == 0
+    )  # No miss at aot_autograd level causing disk I/O.
