@@ -21,6 +21,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
@@ -60,6 +61,12 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.moondream3 import (
+    Moondream3Config,
+    Moondream3RegionConfig,
+    Moondream3TextConfig,
+    Moondream3VisionConfig,
+)
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -77,120 +84,6 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
-
-# ============================================================================
-# Configuration
-# ============================================================================
-
-
-@dataclass
-class Moondream3TextConfig:
-    """Configuration for Moondream3 text decoder."""
-
-    dim: int = 2048
-    ff_dim: int = 8192
-    n_layers: int = 24
-    vocab_size: int = 51200
-    max_context: int = 4096
-    n_heads: int = 32
-    n_kv_heads: int = 32
-    prefix_attn: int = 730  # BOS + 729 vision tokens
-    prefix_lm_left_padding: int = 1  # include BOS in prefix-lm span
-    rope_theta: float = 1500000.0
-    # MoE configuration
-    moe_start_layer: int = 4
-    moe_num_experts: int = 64
-    moe_experts_per_token: int = 8
-    moe_expert_inner_dim: int = 1024
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "Moondream3TextConfig":
-        text_cfg = d.get("text", d)
-        return cls(
-            dim=text_cfg.get("dim", 2048),
-            ff_dim=text_cfg.get("ff_dim", 8192),
-            n_layers=text_cfg.get("n_layers", 24),
-            vocab_size=text_cfg.get("vocab_size", 51200),
-            max_context=text_cfg.get("max_context", 4096),
-            n_heads=text_cfg.get("n_heads", 32),
-            n_kv_heads=text_cfg.get("n_kv_heads", 32),
-            prefix_attn=text_cfg.get("prefix_attn", 730),
-            prefix_lm_left_padding=text_cfg.get("prefix_lm_left_padding", 1),
-            rope_theta=text_cfg.get("rope_theta", 1500000.0),
-            moe_start_layer=text_cfg.get("moe", {}).get("start_layer", 4),
-            moe_num_experts=text_cfg.get("moe", {}).get("n_experts", 64),
-            moe_experts_per_token=text_cfg.get("moe", {}).get("n_experts_per_tok", 8),
-            moe_expert_inner_dim=text_cfg.get("moe", {}).get("expert_inner_dim", 1024),
-        )
-
-
-@dataclass
-class Moondream3VisionConfig:
-    """Configuration for Moondream3 vision encoder."""
-
-    enc_dim: int = 1152
-    enc_patch_size: int = 14
-    enc_n_layers: int = 27
-    enc_ff_dim: int = 4304
-    enc_n_heads: int = 16
-    proj_inner_dim: int = 8192
-    crop_size: int = 378
-    max_crops: int = 12
-    overlap_margin: int = 4
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "Moondream3VisionConfig":
-        vision_cfg = d.get("vision", d)
-        return cls(
-            enc_dim=vision_cfg.get("enc_dim", 1152),
-            enc_patch_size=vision_cfg.get("enc_patch_size", 14),
-            enc_n_layers=vision_cfg.get("enc_n_layers", 27),
-            enc_ff_dim=vision_cfg.get("enc_ff_dim", 4304),
-            enc_n_heads=vision_cfg.get("enc_n_heads", 16),
-            proj_inner_dim=vision_cfg.get("proj_inner_dim", 8192),
-            crop_size=vision_cfg.get("crop_size", 378),
-            max_crops=vision_cfg.get("max_crops", 12),
-            overlap_margin=vision_cfg.get("overlap_margin", 4),
-        )
-
-
-@dataclass
-class Moondream3RegionConfig:
-    """Configuration for Moondream3 region module (point/detect)."""
-
-    dim: int = 2048
-    coord_feat_dim: int = 256
-    coord_out_dim: int = 1024
-    size_feat_dim: int = 512
-    size_out_dim: int = 2048
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "Moondream3RegionConfig":
-        region_cfg = d.get("region", d)
-        return cls(
-            dim=region_cfg.get("dim", 2048),
-            coord_feat_dim=region_cfg.get("coord_feat_dim", 256),
-            coord_out_dim=region_cfg.get("coord_out_dim", 1024),
-            size_feat_dim=region_cfg.get("size_feat_dim", 512),
-            size_out_dim=region_cfg.get("size_out_dim", 2048),
-        )
-
-
-@dataclass
-class Moondream3Config:
-    """Combined configuration for Moondream3 model."""
-
-    text: Moondream3TextConfig
-    vision: Moondream3VisionConfig
-    region: Moondream3RegionConfig
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "Moondream3Config":
-        return cls(
-            text=Moondream3TextConfig.from_dict(d),
-            vision=Moondream3VisionConfig.from_dict(d),
-            region=Moondream3RegionConfig.from_dict(d),
-        )
 
 
 # ============================================================================
@@ -711,6 +604,7 @@ class Moondream3PerRequestStateAdapter(NoOpPerRequestStateAdapter):
 
     def __init__(self, model: "Moondream3ForCausalLM") -> None:
         self.model = model
+        self.detect_point_manager = model.detect_point_manager
 
     def on_new_request(
         self,
@@ -740,11 +634,11 @@ class Moondream3PerRequestStateAdapter(NoOpPerRequestStateAdapter):
             ) from None
         if max_obj < 1:
             raise ValueError(f"moondream3_max_objects must be >= 1, got {max_obj}")
-        self.model.detect_point_manager.register_request(req_id, mode, max_obj)
+        self.detect_point_manager.register_request(req_id, mode, max_obj)
 
     def on_requests_finished(self, req_ids: Iterable[str]) -> None:
         for req_id in req_ids:
-            self.model.detect_point_manager.remove_request(req_id)
+            self.detect_point_manager.remove_request(req_id)
 
     def on_before_model_forward(
         self,
@@ -754,7 +648,7 @@ class Moondream3PerRequestStateAdapter(NoOpPerRequestStateAdapter):
         device: torch.device,
     ) -> None:
         """Prepare pending coordinate/size embed replacements for forward."""
-        dp_mgr = self.model.detect_point_manager
+        dp_mgr = self.detect_point_manager
         if not dp_mgr.has_active_requests():
             self.model._dp_embed_data = None
             return
@@ -783,7 +677,7 @@ class Moondream3PerRequestStateAdapter(NoOpPerRequestStateAdapter):
         self.model._dp_embed_data = dp_embed_data or None
 
     def on_before_compute_logits(self, *, req_ids: list[str]) -> None:
-        dp_mgr = self.model.detect_point_manager
+        dp_mgr = self.detect_point_manager
         if not dp_mgr.has_active_requests():
             self.model._dp_row_states = None
             return
@@ -795,7 +689,7 @@ class Moondream3PerRequestStateAdapter(NoOpPerRequestStateAdapter):
         req_ids: list[str],
         sampled_token_ids: torch.Tensor,
     ) -> None:
-        dp_mgr = self.model.detect_point_manager
+        dp_mgr = self.detect_point_manager
         if not dp_mgr.has_active_requests():
             return
         for i, req_id in enumerate(req_ids):
@@ -810,7 +704,7 @@ class Moondream3PerRequestStateAdapter(NoOpPerRequestStateAdapter):
         req_ids: list[str],
     ) -> PerRequestStateExtraOutput | None:
         """Return per-request final text overrides for active requests."""
-        dp_mgr = self.model.detect_point_manager
+        dp_mgr = self.detect_point_manager
         if not get_pp_group().is_last_rank or not dp_mgr.has_active_requests():
             return None
 
@@ -821,7 +715,12 @@ class Moondream3PerRequestStateAdapter(NoOpPerRequestStateAdapter):
                 continue
             json_str = dp_mgr.get_json_result(req_id)
             if json_str is not None:
-                per_request_extra[req_id] = {"text_override": json_str}
+                per_request_extra[req_id] = {
+                    "output_text_utf8": torch.tensor(
+                        list(json_str.encode("utf-8")),
+                        dtype=torch.uint8,
+                    )
+                }
         return per_request_extra or None
 
     def _sync_dp_pending_embeds(
@@ -840,7 +739,7 @@ class Moondream3PerRequestStateAdapter(NoOpPerRequestStateAdapter):
             dtype=torch.float32,
         )
 
-        dp_mgr = self.model.detect_point_manager
+        dp_mgr = self.detect_point_manager
         if pp.is_last_rank:
             for i, req_id in enumerate(req_ids):
                 st = dp_mgr.get_state(req_id)
@@ -1099,7 +998,7 @@ class Moondream3Attention(nn.Module):
             total_num_kv_heads=self.num_kv_heads,
             bias=True,
             quant_config=quant_config,
-            prefix=f"{prefix}.qkv",
+            prefix=f"{prefix}.qkv_proj",
         )
 
         self.out_proj = RowParallelLinear(
@@ -1107,7 +1006,7 @@ class Moondream3Attention(nn.Module):
             output_size=self.hidden_size,
             bias=True,
             quant_config=quant_config,
-            prefix=f"{prefix}.proj",
+            prefix=f"{prefix}.out_proj",
         )
 
         # Moondream uses 32-dim rotation out of 64-dim head (partial_rotary_factor=0.5)
@@ -1173,8 +1072,6 @@ class Moondream3Attention(nn.Module):
         # With TP, reconstruct qkv in correct layout [q_full, k_full, v_full]
         # (all-gather would produce [q_0, k_0, v_0, q_1, k_1, v_1] - wrong)
         if self.tp_size > 1:
-            from vllm.distributed import tensor_model_parallel_all_gather
-
             # All-gather once, then reconstruct [q_full, k_full, v_full].
             qkv_full_sharded = tensor_model_parallel_all_gather(qkv.contiguous())
             q_local_dim = q.shape[-1]
@@ -1545,24 +1442,26 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
 
-        # Parse config from HuggingFace config
-        config_dict = hf_config.config if hasattr(hf_config, "config") else {}
-
-        self.config = Moondream3Config.from_dict(config_dict)
+        # Reuse the transformers_utils config implementation.
+        if isinstance(hf_config, Moondream3Config):
+            self.config = hf_config
+        else:
+            config_dict = hf_config.config if hasattr(hf_config, "config") else {}
+            self.config = Moondream3Config(config=config_dict)
 
         with self._mark_tower_model(vllm_config, "image"):
             # Vision encoder
             self.vision = Moondream3VisionEncoder(
-                config=self.config.vision,
+                config=self.config.vision_config,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "vision"),
             )
 
             # Vision projection
             self.vision_proj = Moondream3VisionProjection(
-                input_dim=self.config.vision.enc_dim,
-                inner_dim=self.config.vision.proj_inner_dim,
-                output_dim=self.config.text.dim,
+                input_dim=self.config.vision_config.enc_dim,
+                inner_dim=self.config.vision_config.proj_inner_dim,
+                output_dim=self.config.text_config.dim,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "vision_proj"),
             )
@@ -1570,7 +1469,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         with self._mark_language_model(vllm_config):
             # Text decoder
             self.text = Moondream3TextModel(
-                config=self.config.text,
+                config=self.config.text_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "text"),
@@ -1578,8 +1477,8 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
             # LM head (with bias - Moondream3 has lm_head bias)
             self.lm_head = ParallelLMHead(
-                self.config.text.vocab_size,
-                self.config.text.dim,
+                self.config.text_config.vocab_size,
+                self.config.text_config.dim,
                 bias=True,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
@@ -1587,16 +1486,26 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         # Region module for point/detect coordinate encoding/decoding.
         self.region = Moondream3RegionModule(
-            config=self.config.region,
+            config=self.config.region_config,
             prefix=maybe_prefix(prefix, "region"),
         )
-        self.logits_processor = LogitsProcessor(self.config.text.vocab_size)
+        self.logits_processor = LogitsProcessor(self.config.text_config.vocab_size)
         self.make_empty_intermediate_tensors = self.text.make_empty_intermediate_tensors
 
         # Detect/point token IDs (from config, with defaults).
-        self._coord_id = getattr(hf_config, "coord_token_id", 5)
-        self._size_id = getattr(hf_config, "size_token_id", 6)
-        self._eos_id = getattr(hf_config, "region_eos_token_id", 0)
+        # Prefer token IDs parsed by Moondream3Config, but preserve fallback
+        # behavior for configs that expose these IDs at top-level.
+        self._coord_id = getattr(
+            self.config, "coord_token_id", getattr(hf_config, "coord_token_id", 5)
+        )
+        self._size_id = getattr(
+            self.config, "size_token_id", getattr(hf_config, "size_token_id", 6)
+        )
+        self._eos_id = getattr(
+            self.config,
+            "region_eos_token_id",
+            getattr(hf_config, "region_eos_token_id", 0),
+        )
 
         # Detect/point state management and per-step scratch buffers.
         # These buffers are populated by per-request callbacks from the v1 runner.
@@ -1631,31 +1540,31 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         pixel_values: object,
     ) -> list[torch.Tensor]:
+        # The processor should standardize image inputs into:
+        # - torch.Tensor [num_images, num_crops, C, H, W], or
+        # - list[torch.Tensor[num_crops, C, H, W]] for ragged crops.
         if isinstance(pixel_values, torch.Tensor):
-            if pixel_values.dim() == 5:
-                return [pv.contiguous() for pv in pixel_values]
-            if pixel_values.dim() == 4:
-                return [pixel_values.contiguous()]
-            if pixel_values.dim() == 3:
-                return [pixel_values.unsqueeze(0).contiguous()]
-            raise ValueError(
-                f"Unsupported pixel_values shape {tuple(pixel_values.shape)}."
-            )
+            if pixel_values.dim() != 5:
+                raise ValueError(
+                    "Expected `pixel_values` tensor with shape "
+                    "[num_images, num_crops, C, H, W], got "
+                    f"{tuple(pixel_values.shape)}."
+                )
+            return [pv.contiguous() for pv in pixel_values]
 
         if isinstance(pixel_values, (list, tuple)):
             tensors: list[torch.Tensor] = []
             for value in pixel_values:
-                tensor_value = (
-                    value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
-                )
-                if tensor_value.dim() == 3:
-                    tensor_value = tensor_value.unsqueeze(0)
-                elif tensor_value.dim() != 4:
-                    raise ValueError(
-                        f"Unsupported pixel_values element shape "
-                        f"{tuple(tensor_value.shape)}."
+                if not isinstance(value, torch.Tensor):
+                    raise TypeError(
+                        "Expected each `pixel_values` element to be a tensor, "
+                        f"got {type(value)!r}."
                     )
-                tensors.append(tensor_value.contiguous())
+                if value.dim() != 4:
+                    raise ValueError(
+                        f"Unsupported pixel_values element shape {tuple(value.shape)}."
+                    )
+                tensors.append(value.contiguous())
             return tensors
 
         raise TypeError(
@@ -1672,6 +1581,11 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             return [None] * expected
 
         if isinstance(tilings, torch.Tensor):
+            if tilings.dim() != 2 or tilings.shape[1] != 2:
+                raise ValueError(
+                    "Expected `tilings` tensor with shape [num_images, 2], got "
+                    f"{tuple(tilings.shape)}."
+                )
             tiling_items = tilings.tolist()
         elif isinstance(tilings, (list, tuple)):
             tiling_items = list(tilings)
@@ -1735,8 +1649,11 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         features = self.vision(pixel_values)
 
         # Grid size = crop_size / patch_size (e.g., 378 / 14 = 27)
-        grid_size = self.config.vision.crop_size // self.config.vision.enc_patch_size
-        enc_dim = self.config.vision.enc_dim
+        grid_size = (
+            self.config.vision_config.crop_size
+            // self.config.vision_config.enc_patch_size
+        )
+        enc_dim = self.config.vision_config.enc_dim
         global_features = features[0]
 
         if features.shape[0] > 1:
@@ -1748,7 +1665,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             reconstructed = reconstruct_from_crops(
                 local,
                 image_input.tiling,
-                overlap_margin=self.config.vision.overlap_margin,
+                overlap_margin=self.config.vision_config.overlap_margin,
                 patch_size=1,
             )
         else:
@@ -1757,7 +1674,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         recon = reconstructed.permute(2, 0, 1).contiguous()
         # Mirror HF reference behavior: reconstructed local features are pooled
         # to enc_n_layers x enc_n_layers. For moondream3-preview this is 27x27.
-        pooled_size = self.config.vision.enc_n_layers
+        pooled_size = self.config.vision_config.enc_n_layers
         if pooled_size != grid_size:
             logger.warning_once(
                 "Moondream3 pooled_size (%d) differs from crop grid (%d). "

@@ -58,7 +58,7 @@ def test_processor_apply(
     prompt = "<image> \n\nQuestion: What is this?\n\nAnswer:"
     mm_data = {"image": [image_assets[0].pil_image]}
 
-    processed_inputs = processor.apply(
+    processed_inputs = processor(
         prompt,
         mm_items=processor.info.parse_mm_data(mm_data),
         hf_processor_mm_kwargs={},
@@ -85,7 +85,7 @@ def test_processor_pixel_values(
     prompt = "<image> \n\nQuestion: What is this?\n\nAnswer:"
     mm_data = {"image": [image_assets[0].pil_image]}
 
-    processed_inputs = processor.apply(
+    processed_inputs = processor(
         prompt,
         mm_items=processor.info.parse_mm_data(mm_data),
         hf_processor_mm_kwargs={},
@@ -120,7 +120,7 @@ def test_processor_image_token_expansion(
     prompt = "<image> \n\nQuestion: Describe.\n\nAnswer:"
     mm_data = {"image": [image_assets[0].pil_image]}
 
-    processed_inputs = processor.apply(
+    processed_inputs = processor(
         prompt,
         mm_items=processor.info.parse_mm_data(mm_data),
         hf_processor_mm_kwargs={},
@@ -224,7 +224,7 @@ def test_chat_template_with_image(
     prompt = "<|endoftext|><image> \n\nQuestion: What is this?\n\nAnswer:"
     mm_data = {"image": [image_assets[0].pil_image]}
 
-    processed_inputs = processor.apply(
+    processed_inputs = processor(
         prompt,
         mm_items=processor.info.parse_mm_data(mm_data),
         hf_processor_mm_kwargs={},
@@ -255,7 +255,7 @@ def test_bos_token_always_first(
     prompt = "<|endoftext|><image> \n\nQuestion: Describe this image.\n\nAnswer:"
     mm_data = {"image": [image_assets[0].pil_image]}
 
-    processed_inputs = processor.apply(
+    processed_inputs = processor(
         prompt,
         mm_items=processor.info.parse_mm_data(mm_data),
         hf_processor_mm_kwargs={},

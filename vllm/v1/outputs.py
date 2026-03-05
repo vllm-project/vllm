@@ -4,7 +4,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypeVar
 
 import numpy as np
 import torch
@@ -170,14 +170,25 @@ class KVConnectorOutput:
         finished_recving = _combine_non_none(
             set.union, [output.finished_recving for output in outputs]
         )
-        kv_connector_stats = _combine_non_none(
-            lambda x, y: x.aggregate(y),
-            [output.kv_connector_stats for output in outputs],
-        )
-        kv_cache_events = _combine_non_none(
-            lambda x, y: x.merge(y),
-            [output.kv_cache_events for output in outputs],
-        )
+        kv_connector_stats: KVConnectorStats | None = None
+        for output in outputs:
+            stats = output.kv_connector_stats
+            if stats is None:
+                continue
+            if kv_connector_stats is None:
+                kv_connector_stats = stats
+            else:
+                kv_connector_stats = kv_connector_stats.aggregate(stats)
+
+        kv_cache_events: KVConnectorKVEvents | None = None
+        for output in outputs:
+            events = output.kv_cache_events
+            if events is None:
+                continue
+            if kv_cache_events is None:
+                kv_cache_events = events
+            else:
+                kv_cache_events = kv_cache_events.merge(events)
         invalid_block_ids = _combine_non_none(
             set.union, [output.invalid_block_ids for output in outputs]
         )
@@ -248,8 +259,8 @@ class ModelRunnerOutput:
     cudagraph_stats: CUDAGraphStat | None = None
 
     # Per-request model-specific extra outputs:
-    # req_id -> model-defined metadata forwarded to the output processor.
-    model_extra_output: dict[str, dict[str, Any]] | None = None
+    # req_id -> model-defined tensor metadata forwarded to the output processor.
+    model_extra_output: dict[str, dict[str, torch.Tensor]] | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.

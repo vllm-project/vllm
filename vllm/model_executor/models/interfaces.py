@@ -13,7 +13,6 @@ from collections.abc import (
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,
-    Any,
     ClassVar,
     Literal,
     Protocol,
@@ -65,7 +64,7 @@ The output embeddings must be one of the following formats:
 """
 
 
-PerRequestStateExtraOutput: TypeAlias = dict[str, dict[str, Any]]
+PerRequestStateExtraOutput: TypeAlias = dict[str, dict[str, torch.Tensor]]
 
 
 class PerRequestStateAdapter(Protocol):

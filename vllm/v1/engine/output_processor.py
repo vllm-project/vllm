@@ -40,6 +40,7 @@ from vllm.v1.metrics.stats import (
 
 # shared empty CPU tensor used as a placeholder pooling output
 EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
+OUTPUT_TEXT_UTF8_KEY = "output_text_utf8"
 
 
 class RequestOutputCollector:
@@ -644,17 +645,11 @@ class OutputProcessor:
                 kv_transfer_params,
                 routed_experts,
             ):
-                # Allow model-specific final text override.
-                _extra = engine_core_output.model_extra_output
-                text_override = _extra.get("text_override") if _extra else None
-                if (
-                    isinstance(text_override, str)
-                    and finish_reason is not None
-                    and isinstance(request_output, RequestOutput)
-                    and request_output.outputs
-                ):
-                    for comp_output in request_output.outputs:
-                        comp_output.text = text_override
+                self._apply_model_output_overrides(
+                    request_output=request_output,
+                    model_extra_output=engine_core_output.model_extra_output,
+                    finish_reason=finish_reason,
+                )
 
                 if req_state.streaming_input:
                     request_output.finished = False
@@ -692,6 +687,46 @@ class OutputProcessor:
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
         )
+
+    def _apply_model_output_overrides(
+        self,
+        *,
+        request_output: RequestOutput | PoolingRequestOutput,
+        model_extra_output: dict[str, torch.Tensor] | None,
+        finish_reason: FinishReason | None,
+    ) -> None:
+        if (
+            finish_reason is None
+            or not isinstance(request_output, RequestOutput)
+            or not request_output.outputs
+            or not model_extra_output
+        ):
+            return
+
+        text_override = self._decode_output_text_utf8(model_extra_output)
+        if text_override is None:
+            return
+
+        for comp_output in request_output.outputs:
+            comp_output.text = text_override
+
+    def _decode_output_text_utf8(
+        self,
+        model_extra_output: dict[str, torch.Tensor],
+    ) -> str | None:
+        payload = model_extra_output.get(OUTPUT_TEXT_UTF8_KEY)
+        if payload is None:
+            return None
+        if not isinstance(payload, torch.Tensor):
+            return None
+        if payload.dim() != 1:
+            return None
+
+        try:
+            byte_values = payload.to("cpu", dtype=torch.uint8).tolist()
+            return bytes(byte_values).decode("utf-8")
+        except (TypeError, ValueError, UnicodeDecodeError):
+            return None
 
     def _finish_request(self, req_state: RequestState) -> None:
         req_id = req_state.request_id

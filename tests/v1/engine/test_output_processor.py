@@ -5,6 +5,7 @@ import math
 import time
 
 import pytest
+import torch
 
 from tests.v1.engine.utils import (
     NUM_PROMPT_LOGPROBS_UNDER_TEST,
@@ -171,7 +172,12 @@ def test_model_text_override(dummy_test_vectors):
             request_id=request.request_id,
             new_token_ids=[first_token],
             finish_reason=FinishReason.LENGTH,
-            model_extra_output={"text_override": override_text},
+            model_extra_output={
+                "output_text_utf8": torch.tensor(
+                    list(override_text.encode("utf-8")),
+                    dtype=torch.uint8,
+                )
+            },
         )
     ]
     processed_outputs = output_processor.process_outputs(outputs)
@@ -181,6 +187,24 @@ def test_model_text_override(dummy_test_vectors):
     request_output = processed_outputs.request_outputs[0]
     assert isinstance(request_output, RequestOutput)
     assert request_output.outputs[0].text == override_text
+
+
+def test_model_text_override_invalid_payload_is_ignored(dummy_test_vectors):
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+
+    # Wrong shape: payload must be 1D byte tensor.
+    invalid_payload = torch.tensor([[1, 2]], dtype=torch.uint8)
+    assert (
+        output_processor._decode_output_text_utf8({"output_text_utf8": invalid_payload})
+        is None
+    )
+
+    # Invalid UTF-8 bytes should also be ignored.
+    invalid_utf8 = torch.tensor([0xFF], dtype=torch.uint8)
+    assert (
+        output_processor._decode_output_text_utf8({"output_text_utf8": invalid_utf8})
+        is None
+    )
 
 
 def _validate_logprobs(
