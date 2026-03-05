@@ -40,5 +40,9 @@ class SamplingMetadata:
     # Loaded logits processors
     logitsprocs: LogitsProcessors
 
+    # Uniform top-k across the whole batch, if available.
+    # This allows a faster top-k-only path that avoids full vocab sorting.
+    top_k_scalar: int | None = None
+
     # Speculative token ids
     spec_token_ids: list[list[int]] | None = None

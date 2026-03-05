@@ -783,6 +783,12 @@ class InputBatch:
             copy_slice(self.top_p_cpu_tensor, self.top_p, num_reqs)
         if not self.no_top_k:
             copy_slice(self.top_k_cpu_tensor, self.top_k, num_reqs)
+        top_k_scalar: int | None = None
+        if not self.no_top_k and num_reqs > 0:
+            top_k_values = self.top_k_cpu[:num_reqs]
+            first_top_k = int(top_k_values[0])
+            if np.all(top_k_values == first_top_k):
+                top_k_scalar = first_top_k
 
         if not self.no_penalties:
             # Since syncing these tensors is expensive only copy them
@@ -853,6 +859,7 @@ class InputBatch:
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
             logitsprocs=self.logitsprocs,
+            top_k_scalar=top_k_scalar,
         )
 
     def get_pooling_params(self) -> list[PoolingParams]:

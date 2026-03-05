@@ -97,13 +97,14 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
         k: torch.Tensor | None,
         p: torch.Tensor | None,
+        k_scalar: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
         PyTorch-native implementation of top-k and top-p sampling.
 
         The logits tensor may be updated in-place.
         """
-        logits = apply_top_k_top_p(logits, k, p)
+        logits = apply_top_k_top_p(logits, k, p, k_scalar=k_scalar)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
@@ -118,6 +119,7 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
         k: torch.Tensor | None,
         p: torch.Tensor | None,
+        k_scalar: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """More optimized implementation for top-k and top-p sampling."""
         # We prefer `random_sample` over `flashinfer_sample` when sorting is
@@ -130,7 +132,7 @@ class TopKTopPSampler(nn.Module):
                     "per-request generators. Falling back to "
                     "PyTorch-native implementation."
                 )
-            return self.forward_native(logits, generators, k, p)
+            return self.forward_native(logits, generators, k, p, k_scalar)
         assert self.logprobs_mode not in ("processed_logits", "processed_logprobs"), (
             "FlashInfer does not support returning logits/logprobs"
         )
@@ -145,13 +147,20 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
         k: torch.Tensor | None,
         p: torch.Tensor | None,
+        k_scalar: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
         PyTorch-native implementation of top-k and top-p sampling for CPU.
 
         The logits tensor may be updated in-place.
         """
-        logits = apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
+        logits = apply_top_k_top_p_pytorch(
+            logits,
+            k,
+            p,
+            allow_cpu_sync=True,
+            k_scalar=k_scalar,
+        )
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
@@ -175,6 +184,7 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
         k: torch.Tensor | None,
         p: torch.Tensor | None,
+        k_scalar: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # FIXME: Fix aiter_sampler's accuracy issue and remove this flag
         DISABLE_AITER_SAMPLER = True
@@ -185,13 +195,13 @@ class TopKTopPSampler(nn.Module):
                     "aiter sampler does not support per-request generators; "
                     "falling back to PyTorch-native."
                 )
-            return self.forward_native(logits, generators, k, p)
+            return self.forward_native(logits, generators, k, p, k_scalar)
         assert self.logprobs_mode not in (
             "processed_logits",
             "processed_logprobs",
         ), "aiter sampler does not support returning logits/logprobs."
         if DISABLE_AITER_SAMPLER:
-            return self.forward_native(logits, generators, k, p)
+            return self.forward_native(logits, generators, k, p, k_scalar)
         return self.aiter_sample(logits, k, p, generators), None
 
     def aiter_sample(
@@ -243,7 +253,10 @@ def compiled_random_sample(logits: torch.Tensor) -> torch.Tensor:
 
 
 def apply_top_k_top_p(
-    logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    k_scalar: int | None = None,
 ) -> torch.Tensor:
     if p is None and k is None:
         return logits
@@ -252,7 +265,7 @@ def apply_top_k_top_p(
         return apply_top_k_top_p_triton(logits, k, p)
 
     # Use pytorch sort implementation for small batch sizes.
-    return apply_top_k_top_p_pytorch(logits, k, p)
+    return apply_top_k_top_p_pytorch(logits, k, p, k_scalar=k_scalar)
 
 
 def apply_top_k_top_p_pytorch(
@@ -260,6 +273,7 @@ def apply_top_k_top_p_pytorch(
     k: torch.Tensor | None,
     p: torch.Tensor | None,
     allow_cpu_sync: bool = False,
+    k_scalar: int | None = None,
 ) -> torch.Tensor:
     """Apply top-k and top-p masks to the logits.
 
@@ -269,6 +283,8 @@ def apply_top_k_top_p_pytorch(
     The logits tensor may be updated in-place.
     """
     if p is None:
+        if k_scalar is not None:
+            return apply_top_k_only_scalar(logits, k_scalar)
         if k is None:
             return logits
 
@@ -297,6 +313,17 @@ def apply_top_k_top_p_pytorch(
 
     # Re-sort the probabilities.
     return logits.scatter_(dim=-1, index=logits_idx, src=logits_sort)
+
+
+def apply_top_k_only_scalar(logits: torch.Tensor, k: int) -> torch.Tensor:
+    """Apply top-k mask when the same k value is used across all requests."""
+    vocab_size = logits.shape[1]
+    if k >= vocab_size:
+        return logits
+    top_k_threshold = logits.topk(k, dim=1, sorted=False).values.amin(
+        dim=1, keepdim=True
+    )
+    return logits.masked_fill_(logits < top_k_threshold, -float("inf"))
 
 
 def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
