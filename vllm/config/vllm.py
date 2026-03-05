@@ -883,7 +883,13 @@ class VllmConfig:
                     self.compilation_config.pass_config.enable_sp = False
                     self.compilation_config.pass_config.fuse_gemm_comms = False
 
-        if self.compilation_config.fast_moe_cold_start is None:
+        from vllm.utils.torch_utils import HAS_OPAQUE_TYPE
+
+        if HAS_OPAQUE_TYPE:
+            # On torch >= 2.11 the hoisted OpaqueObject approach supersedes
+            # fast_moe_cold_start, so force it off.
+            self.compilation_config.fast_moe_cold_start = False
+        elif self.compilation_config.fast_moe_cold_start is None:
             # resolve default behavior: try to be as safe as possible
             # this config is unsafe if any spec decoding draft model has a MOE.
             # We'll conservatively turn it off if we see spec decoding.
@@ -918,6 +924,33 @@ class VllmConfig:
                     self.compilation_config.cudagraph_mode = (
                         CUDAGraphMode.FULL_DECODE_ONLY
                     )
+
+            # Check if KV connector requires PIECEWISE mode for CUDA graphs
+            if (
+                self.kv_transfer_config is not None
+                and self.kv_transfer_config.is_kv_transfer_instance
+                and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            ):
+                # Lazy import to avoid circular dependencies
+                from vllm.distributed.kv_transfer.kv_connector.factory import (
+                    KVConnectorFactory,
+                )
+
+                connector_cls = KVConnectorFactory.get_connector_class(
+                    self.kv_transfer_config
+                )
+                if connector_cls.requires_piecewise_for_cudagraph(
+                    self.kv_transfer_config.kv_connector_extra_config
+                ):
+                    logger.warning_once(
+                        "KV connector %s requires PIECEWISE CUDA graph mode "
+                        "due to layerwise async operations that cannot be "
+                        "captured in CUDA graphs. "
+                        "Overriding cudagraph_mode from %s to PIECEWISE.",
+                        connector_cls.__name__,
+                        self.compilation_config.cudagraph_mode.name,
+                    )
+                    self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:
@@ -1615,6 +1648,8 @@ class VllmConfig:
             f"tensor_parallel_size={self.parallel_config.tensor_parallel_size}, "  # noqa
             f"pipeline_parallel_size={self.parallel_config.pipeline_parallel_size}, "  # noqa
             f"data_parallel_size={self.parallel_config.data_parallel_size}, "  # noqa
+            f"decode_context_parallel_size={self.parallel_config.decode_context_parallel_size}, "  # noqa
+            f"dcp_comm_backend={self.parallel_config.dcp_comm_backend}, "  # noqa
             f"disable_custom_all_reduce={self.parallel_config.disable_custom_all_reduce}, "  # noqa
             f"quantization={self.model_config.quantization}, "
             f"enforce_eager={self.model_config.enforce_eager}, "
