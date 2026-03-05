@@ -374,7 +374,16 @@ run_serving_tests() {
 
     if [[ -n "${PROMPTS_PER_CONCURRENCY}" ]]; then
       # Remove any fixed --num-prompts from JSON-derived args (avoid duplicates)
-      client_args_no_np="$(echo " $client_args " | sed -E 's/[[:space:]]--num-prompts[[:space:]]+[0-9]+([[:space:]]|$)/ /g')"
+      # Remove any fixed --num-prompts from JSON-derived args (avoid duplicates)
+      # Handles: --num-prompts 123   and   --num-prompts=123
+      client_args_no_np="$(
+        printf ' %s ' "$client_args" \
+        | sed -E \
+          -e 's/[[:space:]]--num-prompts=([^[:space:]]+)([[:space:]]|$)/ /g' \
+          -e 's/[[:space:]]--num-prompts[[:space:]]+([^[:space:]]+)([[:space:]]|$)/ /g'
+      )"
+      # normalize whitespace
+      client_args_no_np="$(echo "$client_args_no_np" | tr -s ' ' | sed -E 's/^ //; s/ $//')"
       client_args_no_np="$(echo "$client_args_no_np" | xargs)"
       client_args_effective="$client_args_no_np"
     else

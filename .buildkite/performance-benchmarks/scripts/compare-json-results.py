@@ -46,10 +46,18 @@ def _find_concurrency_col(df: pd.DataFrame) -> str:
     ]:
         if c in df.columns:
             return c
+
     for c in df.columns:
-        if df[c].dtype.kind in "iu" and df[c].nunique() > 1 and df[c].min() >= 1:
-            return c
-    return "# of max concurrency."
+        if "concurr" in str(c).lower():
+            s = df[c]
+            if s.dtype.kind in "iu" and s.nunique() > 1 and s.min() >= 1:
+                return c
+
+    raise ValueError(
+        "Cannot infer concurrency column. "
+        "Please rename the column to one of the known names "
+        "or add an explicit override (e.g., --concurrency-col)."
+    )
 
 
 def _normalize_concurrency_in_df(
@@ -906,13 +914,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--ttft-slack-pct",
         type=float,
         default=5.0,
-        help="Allowed percentage above TTFT SLA for valid max concurrency (default: 5).",
+        help="Allowed percentage above TTFT SLA (default: 5).",
     )
     parser.add_argument(
         "--tpot-slack-pct",
         type=float,
         default=5.0,
-        help="Allowed percentage above TPOT SLA for valid max concurrency (default: 5).",
+        help="Allowed percentage above TPOT SLA (default: 5).",
     )
 
     # ---- export options ----
@@ -1193,7 +1201,7 @@ def write_report_group_first(
                     while sheet in used_sheets:
                         dedup_i += 1
                         suffix = f"_{dedup_i}"
-                        # Ensure uniqueness even when sheet names are truncated to 31 chars.
+                        # Ensure uniqueness even when sheet names are truncated.
                         base = str(sheet_base)
                         keep = max(1, 31 - len(suffix))
                         sheet = _sanitize_sheet_name(base[:keep] + suffix)
