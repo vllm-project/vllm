@@ -321,10 +321,10 @@ class ParallelConfig:
     than tensor_parallel_size, attention heads are sharded by this value (TPA)
     while FFN layers use the full tensor_parallel_size.
 
-    This enables KV Parallel (KVP) where TP / TPA ranks share the same
-    attention heads but process different KV cache shards with sequence
-    parallelism. KVP groups use All-to-All communication to exchange partial
-    attention outputs and combine them with LSE-weighted reduction.
+    This enables DCP (Decode Context Parallel) where TP / TPA ranks share
+    the same attention heads but process different KV cache shards with
+    sequence parallelism. DCP groups use All-to-All communication to exchange
+    partial attention outputs and combine them with LSE-weighted reduction.
 
     For GQA models: TPA < TP means each TPA group has the same Q/KV heads
     and different sequence shards.
@@ -336,7 +336,7 @@ class ParallelConfig:
     match tensor_parallel_size / tensor_parallel_size_attention.
 
     Example: --tensor-parallel-size 16 --tensor-parallel-size-attention 4
-    creates TPA=4, KVP=4 (4 groups of 4 ranks each).
+    creates TPA=4, DCP=4 (4 groups of 4 ranks each).
 
     Reference: https://arxiv.org/abs/2507.07120
     """
@@ -446,15 +446,17 @@ class ParallelConfig:
                     f"tensor_parallel_size ({tp}) must be divisible by "
                     f"tensor_parallel_size_attention ({tpa})."
                 )
-            kvp = tp // tpa
-            if kvp > 1 and self.decode_context_parallel_size != kvp:
+            dcp = tp // tpa
+            if dcp > 1 and self.decode_context_parallel_size != dcp:
                 raise ValueError(
                     f"When tensor_parallel_size_attention ({tpa}) < "
                     f"tensor_parallel_size ({tp}), "
                     f"decode_context_parallel_size must equal "
                     f"tensor_parallel_size / tensor_parallel_size_attention "
-                    f"(= {kvp}), but got "
-                    f"{self.decode_context_parallel_size}."
+                    f"(= {dcp}), but got "
+                    f"{self.decode_context_parallel_size}. "
+                    f"Use --decode-context-parallel-size {dcp} "
+                    f"--tensor-parallel-size-attention {tpa}."
                 )
 
         return self
@@ -468,9 +470,9 @@ class ParallelConfig:
         return self.tensor_parallel_size
 
     @property
-    def kvp_size(self) -> int:
-        """KVP (KV parallel) size. Derived as TP / TPA.
-        Returns 1 when TPA == TP (no KV parallelism)."""
+    def dcp_size(self) -> int:
+        """DCP (decode context parallel) size. Derived as TP / TPA.
+        Returns 1 when TPA == TP (no context parallelism)."""
         return self.tensor_parallel_size // self.tpa_size
 
     @property
