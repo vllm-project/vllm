@@ -663,7 +663,7 @@ class GPUModelRunner(
         self.req_indices = self._make_buffer(self.max_num_tokens, dtype=torch.int64)
         # Maps current batch position -> previous batch position (-1 for new reqs)
         self.prev_positions = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
-        self.num_scheduled_tokens_buf = self._make_buffer(
+        self.num_scheduled_tokens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
         )
 
@@ -1854,9 +1854,9 @@ class GPUModelRunner(
         req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
 
         self.query_pos.copy_to_gpu(total_num_scheduled_tokens)
-        self.num_scheduled_tokens_buf.np[:num_reqs] = num_scheduled_tokens
-        self.num_scheduled_tokens_buf.copy_to_gpu(num_reqs)
-        num_scheduled_tokens_gpu = self.num_scheduled_tokens_buf.gpu[:num_reqs]
+        self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
+        self.num_scheduled_tokens.copy_to_gpu(num_reqs)
+        num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
         self.positions[:total_num_scheduled_tokens] = (
             self.num_computed_tokens[req_indices_gpu].to(torch.int64)
             + self.query_pos.gpu[:total_num_scheduled_tokens]
