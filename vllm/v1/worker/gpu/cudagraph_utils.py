@@ -72,7 +72,7 @@ class CudaGraphManager:
         self.dp_size = vllm_config.parallel_config.data_parallel_size
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
-        self.pool = current_platform.get_graph_pool_handle() if cudagraph_mode else None
+        self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
 
         self._graphs_captured = False
         self._candidates: list[list[BatchExecutionDescriptor]] = []
