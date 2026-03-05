@@ -1074,21 +1074,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_items.get_all_counts(),
         )
 
-        for modality, prompt_updates in mm_prompt_updates.items():
-            for item_idx, item_prompt_updates in enumerate(prompt_updates):
-                if len(item_prompt_updates) > 1:
-                    logger.warning_once(
-                        "Detected %d prompt updates for `mm_items[%r][%s]`. "
-                        "Multiple prompt updates per item is now "
-                        "deprecated and may be removed in v0.13. "
-                        "Instead, please specify dynamic update targets "
-                        "in the same prompt update definition by passing "
-                        "a function to `PromptUpdate.target`.",
-                        len(prompt_updates),
-                        modality,
-                        item_idx,
-                    )
-
         return mm_prompt_updates
 
     def _find_mm_placeholders(
