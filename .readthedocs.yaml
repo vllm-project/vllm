@@ -13,11 +13,11 @@ build:
       - |
         if [ "$READTHEDOCS_VERSION_TYPE" = "external" ]; then
           PR_URL="https://api.github.com/repos/vllm-project/vllm/pulls/${READTHEDOCS_VERSION}"
-          CURL_ARGS=(-s -o /tmp/pr_response.json -w "%{http_code}")
+          AUTH_HEADER=""
           if [ -n "$GITHUB_TOKEN" ]; then
-            CURL_ARGS+=(-H "Authorization: token ${GITHUB_TOKEN}")
+            AUTH_HEADER="Authorization: token ${GITHUB_TOKEN}"
           fi
-          HTTP_CODE=$(curl "${CURL_ARGS[@]}" "$PR_URL")
+          HTTP_CODE=$(curl -s -o /tmp/pr_response.json -w "%{http_code}" -H "$AUTH_HEADER" "$PR_URL")
           if [ "$HTTP_CODE" -ne 200 ]; then
             echo "GitHub API returned HTTP ${HTTP_CODE}, proceeding with build."
           elif LABELS=$(jq -r '.labels[].name' /tmp/pr_response.json 2>/dev/null) && echo "$LABELS" | grep -qwE "documentation|ready"; then
