@@ -157,10 +157,13 @@ class MultiprocExecutor(Executor):
             global_start_rank = (
                 self.local_world_size * self.parallel_config.node_rank_within_dp
             )
-            # Keep track of socket file descriptors that are inherited by the
-            # worker when using fork, so that we can close them in subsequent
+            # When using fork, keep track of socket file descriptors that are
+            # inherited by the worker, so that we can close them in subsequent
             # workers
-            inherited_fds: list[int] = []
+            inherited_fds: list[int] | None = None
+            if context.get_start_method() == "fork":
+                inherited_fds = []
+
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
                 is_driver_worker = self._is_driver_worker(global_rank)
@@ -175,7 +178,7 @@ class MultiprocExecutor(Executor):
                     inherited_fds=inherited_fds,
                 )
                 unready_workers.append(unready_worker_handle)
-                if context.get_start_method() == "fork":
+                if inherited_fds is not None:
                     inherited_fds.extend(
                         [
                             unready_worker_handle.death_writer.fileno(),
@@ -631,7 +634,7 @@ class WorkerProc:
         input_shm_handle,  # Receive SchedulerOutput
         shared_worker_lock: LockType,
         is_driver_worker: bool,
-        inherited_fds: list[int],
+        inherited_fds: list[int] | None = None,
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
         # Ready pipe to communicate readiness from child to parent
@@ -650,7 +653,9 @@ class WorkerProc:
             "is_driver_worker": is_driver_worker,
             # Have the worker close parent end of this worker's pipes too
             "inherited_fds": inherited_fds
-            + [ready_reader.fileno(), death_writer.fileno()],
+            + [ready_reader.fileno(), death_writer.fileno()]
+            if inherited_fds is not None
+            else [],
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(
