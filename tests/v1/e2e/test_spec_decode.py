@@ -704,11 +704,13 @@ def test_mtp_correctness(
         method, model_name, tp_size = model_setup
         _skip_if_insufficient_gpus_for_tp(tp_size)
 
+        attn_backend = "TRITON_ATTN" if current_platform.is_rocm() else "auto"
         ref_llm = LLM(
             model=model_name,
             max_model_len=2048,
             tensor_parallel_size=tp_size,
             trust_remote_code=True,
+            attention_backend=attn_backend,
         )
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         evaluate_llm_for_gsm8k(
@@ -728,6 +730,7 @@ def test_mtp_correctness(
                 "max_model_len": 2048,
             },
             max_model_len=2048,
+            attention_backend=attn_backend,
         )
         evaluate_llm_for_gsm8k(
             spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
