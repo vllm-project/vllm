@@ -24,7 +24,10 @@ from vllm.entrypoints.openai.cli_args import (
     validate_parsed_serve_args,
 )
 from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
-from vllm.grpc import vllm_render_pb2, vllm_render_pb2_grpc
+from vllm.grpc import (  # type: ignore[attr-defined]
+    vllm_render_pb2,
+    vllm_render_pb2_grpc,
+)
 from vllm.grpc.render_servicer import RenderGrpcServicer
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
