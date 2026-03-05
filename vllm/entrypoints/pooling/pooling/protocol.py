@@ -116,7 +116,7 @@ PoolingRequest: TypeAlias = (
 class PoolingResponseData(OpenAIBaseModel):
     index: int
     object: str = "pooling"
-    data: list[list[float]] | list[float] | str
+    data: list[list[float]] | list[float] | str | list[str]
 
 
 class PoolingResponse(OpenAIBaseModel):

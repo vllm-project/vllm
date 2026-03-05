@@ -133,7 +133,7 @@ class InputProcessor:
             if not supported_pooling_tasks:
                 raise ValueError("This model does not support pooling")
 
-            if params.task is None:
+            if not params.get_tasks():
                 if "token_embed" in supported_pooling_tasks:
                     params.task = "token_embed"
                 elif "token_classify" in supported_pooling_tasks:
@@ -141,11 +141,12 @@ class InputProcessor:
                 elif "plugin" in supported_pooling_tasks:
                     params.task = "plugin"
 
-            if params.task not in supported_pooling_tasks:
-                raise ValueError(
-                    f"Unsupported task: {params.task!r} "
-                    f"Supported tasks: {supported_pooling_tasks}"
-                )
+            for task in params.get_tasks():
+                if task not in supported_pooling_tasks:
+                    raise ValueError(
+                        f"Unsupported task: {task!r} "
+                        f"Supported tasks: {supported_pooling_tasks}"
+                    )
 
             params.verify(self.model_config)
         else:

@@ -29,6 +29,8 @@ from vllm.entrypoints.pooling.pooling.protocol import (
     PoolingResponseData,
 )
 from vllm.entrypoints.pooling.utils import (
+    encode_multi_tasks_pooling_output_base64,
+    encode_multi_tasks_pooling_output_float,
     encode_pooling_bytes,
     encode_pooling_output_base64,
     encode_pooling_output_float,
@@ -36,6 +38,7 @@ from vllm.entrypoints.pooling.utils import (
 from vllm.inputs import ProcessorInputs
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
+from vllm.pooling_params import PoolingParams
 from vllm.renderers.inputs.preprocess import prompt_to_seq
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
@@ -146,10 +149,20 @@ class OpenAIServingPooling(OpenAIServing):
                 assert self.io_processor is not None
 
                 pooling_params = self.io_processor.merge_pooling_params()
-                if pooling_params.task is None:
+                if not pooling_params.get_tasks():
                     pooling_params.task = "plugin"
             else:
                 pooling_params = request.to_pooling_params()  # type: ignore
+
+            if (
+                pooling_params is not None
+                and len(pooling_params.get_tasks()) > 1
+                and request.encoding_format not in ["float", "base64"]
+            ):
+                return self.create_error_response(
+                    "encoding_format must be float or base64, "
+                    "when multiple tasks are specified"
+                )
 
             for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"
@@ -230,6 +243,7 @@ class OpenAIServingPooling(OpenAIServing):
                 request.encoding_format,
                 request.embed_dtype,
                 request.endianness,
+                pooling_params=pooling_params,
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
@@ -247,14 +261,23 @@ class OpenAIServingPooling(OpenAIServing):
         encoding_format: Literal["float", "base64"],
         embed_dtype: EmbedDType,
         endianness: Endianness,
+        pooling_params: PoolingParams | None = None,
     ) -> PoolingResponse:
-        encode_fn = cast(
-            Callable[[PoolingRequestOutput], list[float] | str],
+        encode_base64_fn = cast(
+            Callable[[PoolingRequestOutput], str],
             (
-                encode_pooling_output_float
-                if encoding_format == "float"
-                else partial(
+                partial(
                     encode_pooling_output_base64,
+                    embed_dtype=embed_dtype,
+                    endianness=endianness,
+                )
+            ),
+        )
+        encode_multi_task_base64_fn = cast(
+            Callable[[PoolingRequestOutput], list[str]],
+            (
+                partial(
+                    encode_multi_tasks_pooling_output_base64,
                     embed_dtype=embed_dtype,
                     endianness=endianness,
                 )
@@ -263,11 +286,29 @@ class OpenAIServingPooling(OpenAIServing):
 
         items: list[PoolingResponseData] = []
         num_prompt_tokens = 0
-
+        is_multi_pooling_task = (
+            pooling_params is not None and len(pooling_params.get_tasks()) > 1
+        )
         for idx, final_res in enumerate(final_res_batch):
+            pooling_rsp_data: str | list[str] | list[float] | list[list[float]]
+            if encoding_format == "float":
+                pooling_rsp_data = (
+                    encode_multi_tasks_pooling_output_float(final_res)
+                    if is_multi_pooling_task
+                    else encode_pooling_output_float(final_res)
+                )
+
+            elif encoding_format == "base64":
+                pooling_rsp_data = (
+                    encode_multi_task_base64_fn(final_res)
+                    if is_multi_pooling_task
+                    else encode_base64_fn(final_res)
+                )
+            else:
+                assert_never(encoding_format)
             item = PoolingResponseData(
                 index=idx,
-                data=encode_fn(final_res),
+                data=pooling_rsp_data,
             )
             prompt_token_ids = final_res.prompt_token_ids
 
@@ -330,6 +371,7 @@ class OpenAIServingPooling(OpenAIServing):
         encoding_format: EncodingFormat,
         embed_dtype: EmbedDType,
         endianness: Endianness,
+        pooling_params: PoolingParams | None = None,
     ) -> PoolingResponse | PoolingBytesResponse:
         if encoding_format == "float" or encoding_format == "base64":
             return self.request_output_to_pooling_json_response(
@@ -340,6 +382,7 @@ class OpenAIServingPooling(OpenAIServing):
                 encoding_format,
                 embed_dtype,
                 endianness,
+                pooling_params,
             )
 
         if encoding_format == "bytes" or encoding_format == "bytes_only":

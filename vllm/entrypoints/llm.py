@@ -1123,12 +1123,14 @@ class LLM:
             prompts = self.io_processor.pre_process(prompt=validated_prompt)
             prompts_seq = prompt_to_seq(prompts)
 
+            params_seq_before_merge: Sequence[PoolingParams] = self._params_to_seq(
+                pooling_params if pooling_params is not None else PoolingParams(),
+                len(prompts_seq),
+            )
+
             params_seq: Sequence[PoolingParams] = [
                 self.io_processor.merge_pooling_params(param)
-                for param in self._params_to_seq(
-                    pooling_params,
-                    len(prompts_seq),
-                )
+                for param in params_seq_before_merge
             ]
             for p in params_seq:
                 if p.task is None:
@@ -1479,7 +1481,7 @@ class LLM:
 
         if pooling_params is None:
             pooling_params = PoolingParams(task="score")
-        elif pooling_params.task is None:
+        elif not pooling_params.get_tasks():
             pooling_params.task = "score"
 
         pooling_params_list = list[PoolingParams]()

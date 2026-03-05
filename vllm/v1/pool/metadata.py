@@ -60,10 +60,10 @@ class PoolingMetadata:
     def __post_init__(self) -> None:
         pooling_params = self.pooling_params
 
-        tasks: list[PoolingTask] = [
-            task
+        tasks: list[list[PoolingTask]] = [
+            pooling_tasks
             for pooling_param in pooling_params
-            if (task := pooling_param.task) is not None
+            if (pooling_tasks := pooling_param.get_tasks())
         ]
         assert len(pooling_params) == len(tasks)
 

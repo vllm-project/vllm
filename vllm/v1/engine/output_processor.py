@@ -613,6 +613,7 @@ class OutputProcessor:
 
             new_token_ids = engine_core_output.new_token_ids
             pooling_output = engine_core_output.pooling_output
+            pooling_outputs = engine_core_output.pooling_outputs
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
@@ -620,7 +621,7 @@ class OutputProcessor:
             req_state.num_cached_tokens = engine_core_output.num_cached_tokens
             req_state.is_prefilling = False
 
-            if pooling_output is None:
+            if pooling_output is None and pooling_outputs is None:
                 assert req_state.detokenizer is not None
                 assert req_state.logprobs_processor is not None
                 # 2) Detokenize the token ids into text and perform stop checks.
@@ -638,7 +639,7 @@ class OutputProcessor:
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
                 new_token_ids,
-                pooling_output,
+                pooling_output if pooling_output is not None else pooling_outputs,
                 finish_reason,
                 stop_reason,
                 kv_transfer_params,

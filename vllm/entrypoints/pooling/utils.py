@@ -53,6 +53,12 @@ def encode_pooling_output_float(output: PoolingRequestOutput) -> list[float]:
     return output.outputs.data.tolist()
 
 
+def encode_multi_tasks_pooling_output_float(
+    output: PoolingRequestOutput,
+) -> list[list[float]]:
+    return [t.tolist() for t in output.outputs.data]
+
+
 def encode_pooling_output_binary(
     output: PoolingRequestOutput,
     embed_dtype: EmbedDType,
@@ -68,6 +74,17 @@ def encode_pooling_output_base64(
 ) -> str:
     embedding_bytes = tensor2binary(output.outputs.data, embed_dtype, endianness)
     return pybase64.b64encode(embedding_bytes).decode("utf-8")
+
+
+def encode_multi_tasks_pooling_output_base64(
+    output: PoolingRequestOutput,
+    embed_dtype: EmbedDType,
+    endianness: Endianness,
+) -> list[str]:
+    return [
+        pybase64.b64encode(tensor2binary(t, embed_dtype, endianness)).decode("utf-8")
+        for t in output.outputs.data
+    ]
 
 
 def encode_pooling_bytes(
