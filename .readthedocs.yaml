@@ -12,14 +12,14 @@ build:
       # Skip PR builds unless the PR has the "documentation" or "ready" label
       - |
         if [ "$READTHEDOCS_VERSION_TYPE" = "external" ]; then
-          PR_URL="https://api.github.com/repos/vllm-project/vllm/pulls/${$READTHEDOCS_VERSION}"
+          PR_URL="https://api.github.com/repos/vllm-project/vllm/pulls/${READTHEDOCS_VERSION}"
           HTTP_CODE=$(curl -s -o /tmp/pr_response.json -w "%{http_code}" -H "Authorization: token ${GITHUB_TOKEN}" "$PR_URL")
           if [ "$HTTP_CODE" -ne 200 ]; then
             echo "GitHub API returned HTTP ${HTTP_CODE}, proceeding with build."
           elif LABELS=$(jq -r '.labels[].name' /tmp/pr_response.json 2>/dev/null) && echo "$LABELS" | grep -qwE "documentation|ready"; then
             echo "Found required label, proceeding with build."
           else
-            echo "PR #${$READTHEDOCS_VERSION} lacks 'documentation' or 'ready' label, skipping build."
+            echo "PR #${READTHEDOCS_VERSION} lacks 'documentation' or 'ready' label, skipping build."
             exit 183
           fi
         fi
