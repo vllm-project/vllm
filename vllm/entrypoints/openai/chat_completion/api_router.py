@@ -37,6 +37,7 @@ def chat(request: Request) -> OpenAIServingChat | None:
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
     },
 )
 @with_cancellation
@@ -52,10 +53,7 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
             message="The model does not support Chat Completions API"
         )
 
-    try:
-        generator = await handler.create_chat_completion(request, raw_request)
-    except Exception as e:
-        generator = handler.create_error_response(e)
+    generator = await handler.create_chat_completion(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
@@ -79,6 +77,7 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
     },
 )
 async def render_chat_completion(request: ChatCompletionRequest, raw_request: Request):
@@ -91,15 +90,12 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
             message="The model does not support Chat Completions API"
         )
 
-    try:
-        result = await handler.render_chat_completion(request, raw_request)
-    except Exception as e:
-        result = handler.create_error_response(e)
+    result = await handler.render_chat_completion(request, raw_request)
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
 
-    return JSONResponse(content=result.model_dump())
+    return JSONResponse(content=result)
 
 
 def attach_router(app: FastAPI):
