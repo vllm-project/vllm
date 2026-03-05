@@ -214,6 +214,32 @@ class TestReasoningStructuredOutput:
         # Should return True since reasoning has ended
         assert result is True
 
+    def test_should_advance_with_new_token_ids_reasoning_ends_mid_batch(
+        self,
+        mock_vllm_config,
+        mock_request_with_structured_output,
+        mock_reasoning_parser,
+    ):
+        """When speculative decoding produces tokens containing </think>,
+        should_advance(new_token_ids=...) must return True so the caller
+        can process the post-reasoning tokens."""
+        manager = StructuredOutputManager(mock_vllm_config)
+        manager.reasoner = mock_reasoning_parser
+
+        struct_req = mock_request_with_structured_output.structured_output_request
+        struct_req.reasoning_ended = False
+
+        new_token_ids = [REASONING_TOKEN_A, THINK_END_TOKEN, JSON_TOKEN_A, JSON_TOKEN_B]
+        mock_reasoning_parser.is_reasoning_end_streaming.return_value = True
+
+        result = manager.should_advance(
+            mock_request_with_structured_output,
+            new_token_ids=new_token_ids,
+        )
+
+        assert result is True
+        assert struct_req.reasoning_ended is True
+
     def _make_manager_for_bitmask_test(
         self, mock_vllm_config, mock_reasoning_parser, num_spec_tokens=5
     ):
