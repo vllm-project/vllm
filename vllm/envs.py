@@ -244,6 +244,7 @@ if TYPE_CHECKING:
     VLLM_CUDA_COMPATIBILITY_PATH: str | None = None
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
+    VLLM_POOL_CUDAGRAPH_BATCH_SIZES: str | None = None
 
 
 def get_default_cache_root():
@@ -1627,6 +1628,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # scaling command in elastic EP.
     "VLLM_ELASTIC_EP_DRAIN_REQUESTS": lambda: bool(
         int(os.getenv("VLLM_ELASTIC_EP_DRAIN_REQUESTS", "0"))
+    ),
+    # Comma-separated list of batch sizes for pooler CUDA graph capture.
+    # When set, the pooler CUDA graph optimization will capture graphs for
+    # these batch sizes instead of the default range (1..128).
+    # Example: "1,2,4,8,16,32,64,128,256"
+    "VLLM_POOL_CUDAGRAPH_BATCH_SIZES": lambda: os.environ.get(
+        "VLLM_POOL_CUDAGRAPH_BATCH_SIZES", None
     ),
 }
 
