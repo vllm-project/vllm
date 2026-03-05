@@ -203,11 +203,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
 
         # CUDA graphs.
+        self.decode_query_len = self.num_speculative_steps + 1
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
             self.device,
             self.compilation_config.cudagraph_mode,
-            decode_query_len=self.num_speculative_steps + 1,
+            decode_query_len=self.decode_query_len,
         )
         # Structured outputs worker.
         self.structured_outputs_worker = StructuredOutputsWorker(
@@ -338,10 +339,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens: int,
         *args,
         skip_attn: bool = True,
+        uniform_decode: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         # Create a dummy scheduler output.
         num_reqs = min(num_tokens, self.max_num_reqs)
+        if uniform_decode:
+            num_reqs = num_tokens // self.decode_query_len
+            assert num_tokens % self.decode_query_len == 0
         num_tokens_per_request = [num_tokens // num_reqs] * num_reqs
         num_tokens_per_request[-1] += num_tokens % num_reqs
 
