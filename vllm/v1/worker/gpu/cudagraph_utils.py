@@ -101,12 +101,8 @@ class CudaGraphManager:
         mixed_mode = self.cudagraph_mode.mixed_mode()
         separate_decode_routine = self.cudagraph_mode.separate_routine()
 
-        descs_by_token_count: dict[int, list[BatchExecutionDescriptor]] = defaultdict(
-            list
-        )
-        descs_by_mode: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = (
-            defaultdict(list)
-        )
+        descs_by_token_count = defaultdict(list)
+        descs_by_mode = defaultdict(list)
 
         for padded in capture_sizes:
             candidates: list[BatchExecutionDescriptor] = []
