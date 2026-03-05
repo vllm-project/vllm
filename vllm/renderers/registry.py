@@ -21,6 +21,7 @@ _VLLM_RENDERERS = {
     "grok2": ("grok2", "Grok2Renderer"),
     "mistral": ("mistral", "MistralRenderer"),
     "terratorch": ("terratorch", "TerratorchRenderer"),
+    "tiktoken": ("tiktoken", "TikTokenRenderer"),
 }
 
 
