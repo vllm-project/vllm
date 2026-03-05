@@ -114,6 +114,56 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.physical_to_global = _maybe_cast(physical_to_global)
         self.local_expert_global_ids = _maybe_cast(local_expert_global_ids)
 
+        # Optimization: If the mappings are identity, set to None to avoid
+        # unnecessary kernel launches during prepare/finalize.
+        # This is especially important for latency-sensitive workloads like
+        # speculative decoding draft models.
+        if self.global_to_physical is not None:
+            num_experts = self.global_to_physical.numel()
+            if torch.equal(
+                self.global_to_physical,
+                torch.arange(
+                    num_experts,
+                    device=self.global_to_physical.device,
+                    dtype=self.global_to_physical.dtype,
+                ),
+            ):
+                self.global_to_physical = None
+
+        if self.physical_to_global is not None:
+            num_experts = self.physical_to_global.numel()
+            if torch.equal(
+                self.physical_to_global,
+                torch.arange(
+                    num_experts,
+                    device=self.physical_to_global.device,
+                    dtype=self.physical_to_global.dtype,
+                ),
+            ):
+                self.physical_to_global = None
+
+        if self.local_expert_global_ids is not None:
+            # For local_expert_global_ids, check if it's contiguous and starts
+            # at expected offset (rank * num_local_experts).
+            # But here we just check if it matches the slicing logic.
+            # Actually, simpler: if local_expert_global_ids matches what
+            # slicing would produce, we might optimize _map_local_to_global_ids?
+            # However, _map_local_to_global_ids uses indexing.
+            # If local_expert_global_ids is contiguous, we might use adding offset?
+            # For now, let's stick to the simple identity check if it applies
+            # (e.g. single GPU or simple sharding).
+            # In general case, let's keep it unless it's strictly identity [0, 1, ...].
+            num_local = self.local_expert_global_ids.numel()
+            if torch.equal(
+                self.local_expert_global_ids,
+                torch.arange(
+                    num_local,
+                    device=self.local_expert_global_ids.device,
+                    dtype=self.local_expert_global_ids.dtype,
+                ),
+            ):
+                self.local_expert_global_ids = None
+
         # We don't have enough information to determine if we should dispatch
         # activation scales in a packed ue8m0 format during object construction
         # time. This setting is handled by post_init_setup.
