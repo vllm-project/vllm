@@ -1,6 +1,30 @@
 steps:
+  - label: "Build Container"
+    key: "build-container"
+    agents:
+      queue: "intel-xpu-kubevirt"
+    commands:
+      - sh .buildkite/scripts/hardware_ci/build-container.sh
+    env:
+      REGISTRY_USER: ${REGISTRY_USER}
+      REGISTRY: ${REGISTRY}
+    secrets:
+      - REGISTRY_TOKEN
+    plugins:
+      - kubernetes:
+          podSpecPatch:
+            containers:
+            - name: container-0
+              image: moby/buildkit:latest   # buildctl is the only tool needed here
+              resources:
+                requests:
+                  cpu: "8"
+                  memory: "16Gi"
+
+  - wait
+
   - label: "Intel GPU Test"
-    depends_on: []
+    depends_on: "build-container"
     soft_fail: true
     agents:
      queue: "intel-xpu-kubevirt"
@@ -16,11 +40,11 @@ steps:
     plugins:
       - kubernetes:
           podSpecPatch:
-            imagePullSecrets: # <-- This is the only required field for imagePullSecrets.
+            imagePullSecrets:
               - name: sharvilshah-1-pull-secret
             containers:
-            - name: container-0    # <-- Specify this exactly as `container-0`.
-              image: quay.io/sharvilshah-1/vllm-ci:845ee348ef82d12b5d106384070f7578c843d3cd
+            - name: container-0
+              image: ${REGISTRY}/${REGISTRY_USER}/vllm-ci:${BUILDKITE_COMMIT}   # built by build-container step
               resources:           #     Currently under experimentation to make this more ergonomic.
                 requests:
                   "gpu.intel.com/i915": "2"
