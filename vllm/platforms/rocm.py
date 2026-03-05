@@ -592,7 +592,6 @@ class RocmPlatform(Platform):
         use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
         use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
         use_aiter_fused_se = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        use_aiter_triton_rope = rocm_aiter_ops.is_triton_rotary_embed_enabled()
         #  Aiter rms norm perform best when CUDA Graph capture is enabled.
         if (
             use_aiter_rms_norm
@@ -619,9 +618,9 @@ class RocmPlatform(Platform):
             and "-grouped_topk" not in compilation_config.custom_ops
         ):
             compilation_config.custom_ops.append("+grouped_topk")
-        # Enable rotary embedding when using AITER if its not disabled by user
+        # Enable rotary embedding customop when using AITER if not disabled by user
         if (
-            use_aiter_triton_rope
+            rocm_aiter_ops.is_enabled()
             and "+rotary_embedding" not in compilation_config.custom_ops
             and "-rotary_embedding" not in compilation_config.custom_ops
         ):
@@ -821,5 +820,9 @@ class RocmPlatform(Platform):
         return True
 
     @classmethod
-    def num_compute_units(cls, device_id=0):
+    def num_compute_units(cls, device_id: int = 0) -> int:
         return torch.cuda.get_device_properties(device_id).multi_processor_count
+
+    @classmethod
+    def use_custom_op_collectives(cls) -> bool:
+        return True
