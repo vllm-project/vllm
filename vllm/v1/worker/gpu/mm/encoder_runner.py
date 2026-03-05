@@ -56,11 +56,9 @@ class EncoderRunner:
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             mm_kwargs, device=self.device, pin_memory=False
         ):
-            curr_group_outputs = self.model.embed_multimodal(**mm_kwargs_batch)
-            sanity_check_mm_encoder_outputs(
-                curr_group_outputs, expected_num_items=num_items
-            )
-            encoder_outputs.extend(curr_group_outputs)
+            batch_outputs = self.model.embed_multimodal(**mm_kwargs_batch)
+            sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
+            encoder_outputs.extend(batch_outputs)
         return encoder_outputs
 
     def gather_mm_embeddings(
