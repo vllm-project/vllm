@@ -106,6 +106,19 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_nccl.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_ipc.py
 
+- label: TP2 Smoke Test (2xH100)
+  timeout_in_minutes: 15
+  device: h100
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/compilation/
+  - vllm/distributed/
+  - vllm/v1/worker/
+  - vllm/config/
+  - vllm/envs.py
+  commands:
+  - pytest -v -s tests/v1/distributed/test_tp2_smoke.py
+
 - label: Distributed Tests (8 GPUs)(H100)
   timeout_in_minutes: 10
   device: h100
