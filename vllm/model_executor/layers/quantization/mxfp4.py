@@ -48,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    CK_MXFP4_MOE_DIM_ALIGNMENT,
     _can_support_mxfp4,
     _swizzle_mxfp4,
     get_padding_alignment,
@@ -258,6 +259,31 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
         )
+
+        # CK's pre-compiled MXFP4 MoE GEMM kernel instances have dimension
+        # alignment requirements. Fall back to Triton when not met.
+        if (
+            self.mxfp4_backend == Mxfp4Backend.CK
+            and moe.intermediate_size_per_partition % CK_MXFP4_MOE_DIM_ALIGNMENT != 0
+        ):
+            if has_triton_kernels():
+                logger.warning_once(
+                    "CK MXFP4 MoE GEMM does not support "
+                    "intermediate_size_per_partition=%d (not a multiple of "
+                    "%d). Falling back to Triton backend.",
+                    moe.intermediate_size_per_partition,
+                    CK_MXFP4_MOE_DIM_ALIGNMENT,
+                )
+                self.mxfp4_backend = Mxfp4Backend.TRITON
+            else:
+                raise ValueError(
+                    f"CK MXFP4 MoE GEMM does not support "
+                    f"intermediate_size_per_partition="
+                    f"{moe.intermediate_size_per_partition} (not a multiple "
+                    f"of {CK_MXFP4_MOE_DIM_ALIGNMENT}) and no Triton "
+                    f"fallback is available. Use a compatible "
+                    f"tensor_parallel_size."
+                )
 
         assert self.mxfp4_backend != Mxfp4Backend.NONE, (
             f"get_mxfp4_backend(with_lora_support={moe.is_lora_enabled}) found"
