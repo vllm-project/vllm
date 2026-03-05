@@ -100,7 +100,7 @@ class RayDistributedExecutor(Executor):
 
         self.uses_sampler = self.vllm_config.model_config.runner_type != "pooling" and (
             self.vllm_config.ec_transfer_config is None
-            or not self.vllm_config.ec_transfer_config.is_ec_producer
+            or self.vllm_config.ec_transfer_config.is_ec_consumer
         )
 
         self.scheduler_output: SchedulerOutput | None = None
@@ -382,8 +382,10 @@ class RayDistributedExecutor(Executor):
             all_kwargs.append(kwargs)
         self.collective_rpc("init_worker", args=(all_kwargs,))
 
-        self.collective_rpc("init_device")
-        self.collective_rpc("load_model")
+        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
+        if not is_eep_new_worker:
+            self.collective_rpc("init_device")
+            self.collective_rpc("load_model")
 
         for pp_rank in range(self.parallel_config.pipeline_parallel_size):
             self.pp_tp_workers.append([])
