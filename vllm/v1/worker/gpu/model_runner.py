@@ -56,8 +56,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
-from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
-from vllm.v1.worker.gpu.dp_utils import get_cudagraph_and_dp_padding
+from vllm.v1.worker.gpu.cudagraph.manager import CudaGraphManager
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
@@ -333,7 +332,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if uniform_decode:
             # Align tokens to uniform_decode_query_len for cudagraph
             # compatibility across DP ranks.
-            query_len = self.cudagraph_manager.uniform_decode_query_len
+            query_len = self.cudagraph_manager.decode_len
             num_reqs = min(cdiv(num_tokens, query_len), self.max_num_reqs)
             num_tokens = num_reqs * query_len
             num_tokens_per_request = [query_len] * num_reqs
@@ -503,7 +502,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 block_tables=self.block_tables,
                 attn_groups=self.attn_groups,
                 kv_cache_config=self.kv_cache_config,
-                has_lora=self.lora_config is not None,
             )
             if self.speculator is not None:
                 self.speculator.capture_model()
@@ -851,29 +849,36 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 return empty_output
 
         # Get local cudagraph mode and size.
-        local_cudagraph_mode, local_cudagraph_size = (
-            self.cudagraph_manager.get_cudagraph_runtime_mode(
-                num_reqs=len(scheduler_output.num_scheduled_tokens),
-                num_tokens=scheduler_output.total_num_scheduled_tokens,
-                max_query_len=max(scheduler_output.num_scheduled_tokens.values()),
-            )
+        cudagraph_key = self.cudagraph_manager.get_cudagraph_key(
+            scheduler_output.num_scheduled_tokens.values()
         )
+        if cudagraph_key is None:
+            num_tokens_after_padding = scheduler_output.total_num_scheduled_tokens
+            cudagraph_runtime_mode = CUDAGraphMode.NONE
+        else:
+            num_tokens_after_padding = cudagraph_key.total_num_tokens
+            cudagraph_runtime_mode = (
+                CUDAGraphMode.FULL
+                if cudagraph_key.is_full_graph
+                else CUDAGraphMode.PIECEWISE
+            )
+        num_tokens_across_dp = None
 
-        # DP sync: num_tokens + cudagraph_size + cudagraph_mode
-        num_tokens_after_padding, num_tokens_across_dp, synced_cudagraph_mode = (
-            get_cudagraph_and_dp_padding(
-                scheduler_output.total_num_scheduled_tokens,
-                local_cudagraph_size,
-                local_cudagraph_mode.value,
-                self.parallel_config.data_parallel_size,
-                self.parallel_config.data_parallel_rank,
-            )
-        )
-        cudagraph_runtime_mode = CUDAGraphMode(synced_cudagraph_mode)
-        if num_tokens_after_padding == 0:
-            # All DP ranks have zero tokens to run.
-            empty_output = self.kv_connector.no_forward(scheduler_output)
-            return empty_output
+        # # DP sync: num_tokens + cudagraph_size + cudagraph_mode
+        # num_tokens_after_padding, num_tokens_across_dp, synced_cudagraph_mode = (
+        #     get_cudagraph_and_dp_padding(
+        #         scheduler_output.total_num_scheduled_tokens,
+        #         local_cudagraph_size,
+        #         local_cudagraph_mode.value,
+        #         self.parallel_config.data_parallel_size,
+        #         self.parallel_config.data_parallel_rank,
+        #     )
+        # )
+        # cudagraph_runtime_mode = CUDAGraphMode(synced_cudagraph_mode)
+        # if num_tokens_after_padding == 0:
+        #     # All DP ranks have zero tokens to run.
+        #     empty_output = self.kv_connector.no_forward(scheduler_output)
+        #     return empty_output
 
         if not dummy_run:
             # Common case.
@@ -952,9 +957,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
             self.kv_connector.pre_forward(scheduler_output)
-            model_output = self.cudagraph_manager.run_fullgraph(
-                input_batch.num_tokens_after_padding
-            )
+            assert cudagraph_key is not None
+            model_output = self.cudagraph_manager.run_fullgraph(cudagraph_key)
             if self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = model_output
             else:
