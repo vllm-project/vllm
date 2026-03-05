@@ -58,9 +58,15 @@ Find the full list of supported models [here](https://docs.vllm.ai/en/latest/mod
 
 ## Getting Started
 
-Install vLLM with `pip` or [from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source):
+**Requirements:** Python 3.10 - 3.13
+
+Install vLLM with `uv` (recommended) or `pip`. For source builds and other platforms, see the [installation guide](https://docs.vllm.ai/en/latest/getting_started/installation.html).
 
 ```bash
+# Recommended: using uv (https://docs.astral.sh/uv/)
+uv pip install vllm --torch-backend=auto
+
+# Alternative: using pip (see installation guide for GPU setup)
 pip install vllm
 ```
 
