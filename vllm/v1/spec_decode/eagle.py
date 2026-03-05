@@ -162,6 +162,9 @@ class SpecDecodeBaseProposer:
             (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=device
         )
 
+        # Will be set when we initialize the attention backend
+        self.block_size: int = -1
+
         # We need +1 here because the arange is used to set query_start_loc,
         # which has one more element than batch_size.
         max_num_slots_for_arange = max(max_batch_size + 1, self.max_num_tokens)
@@ -583,8 +586,8 @@ class SpecDecodeBaseProposer:
                 common_attn_metadata._num_computed_tokens_cpu += 1
 
             # Compute the slot mapping.
-            # Use the first draft attention group's kv_cache_spec for block_size
-            block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
+            block_size = self.block_size
+            assert block_size > 0, "block_size has not been initialized."
             if self.uses_mrope:
                 # all dimensions of positions are the same
                 block_numbers = clamped_positions[0] // block_size
@@ -778,17 +781,14 @@ class SpecDecodeBaseProposer:
             # 2.
             # Recompute the slot mapping based on the new positions and
             # rejection mask.
-            # Use the first draft attention group's kv_cache_spec for block_size
-            # (all draft layers share the same kv-cache group)
-            assert len(self.draft_attn_groups) > 0
-            block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
+            assert self.block_size > 0, "block_size has not been initialized."
             new_slot_mapping = compute_new_slot_mapping(
                 cad=cad,
                 new_positions=self.positions[:total_num_output_tokens],
                 is_rejected_token_mask=self.is_rejected_token_mask[
                     :total_num_output_tokens
                 ],
-                block_size=block_size,
+                block_size=self.block_size,
                 num_new_tokens=self.net_num_new_slots_per_request,
                 max_model_len=self.max_model_len,
             )
@@ -1635,6 +1635,10 @@ class SpecDecodeBaseProposer:
                     attention_groups[backend_key].layer_names.append(layer_name)
 
         self.draft_attn_groups = list(attention_groups.values())
+        self.block_size = (
+            self.draft_attn_groups[0].get_metadata_builder().kv_cache_spec.block_size
+        )
+        logger.debug("Using block size %d for drafting layers", self.block_size)
 
     def _determine_batch_execution_and_padding(
         self,
