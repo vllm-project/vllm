@@ -603,8 +603,7 @@ def preload_lm_eval_requests(
         # set_config must be called BEFORE build_all_requests, which reads
         # self._config.num_fewshot rather than accepting it as an argument.
         if num_fewshot is not None:
-            if task_obj.get_config("num_fewshot") != 0:
-                task_obj.set_config(key="num_fewshot", value=num_fewshot)
+            task_obj.set_config(key="num_fewshot", value=num_fewshot)
         else:
             if task_obj.get_config("num_fewshot") is None:
                 task_obj.set_config(key="num_fewshot", value=0)

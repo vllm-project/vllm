@@ -73,14 +73,20 @@ def _run_eval(args: argparse.Namespace) -> None:
     print(f"[eval] Loaded {len(requests)} prompts from {args.eval_tasks}")
     args.num_prompts = len(requests)
 
-    # Inject lm_eval stop sequences so the model stops at natural
-    # boundaries instead of generating up to max_gen_toks.
+    # Collect stop sequences from all instances so multi-task runs
+    # with different stop tokens are handled correctly.
     if instances:
-        until = instances[0].args[1].get("until", [])
-        if until:
+        all_stops: set[str] = set()
+        for inst in instances:
+            until = inst.args[1].get("until", [])
+            if isinstance(until, str):
+                all_stops.add(until)
+            else:
+                all_stops.update(until)
+        if all_stops:
             extra = dict(getattr(args, "extra_body", None) or {})
             if "stop" not in extra:
-                extra["stop"] = until
+                extra["stop"] = list(all_stops)
                 args.extra_body = extra
 
     result = bench_main(args, prebuilt_requests=requests)
