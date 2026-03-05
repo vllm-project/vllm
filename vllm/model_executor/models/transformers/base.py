@@ -516,8 +516,8 @@ class Base(
             )
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.check_version("5.0.0", "Eagle3 support")
-        from transformers.utils.generic import OutputRecorder
+        self.check_version("5.2.0", "Eagle3 support")
+        from transformers.utils.output_capturing import OutputRecorder
 
         # The default value in PreTrainedModel is None
         if self.model._can_record_outputs is None:
