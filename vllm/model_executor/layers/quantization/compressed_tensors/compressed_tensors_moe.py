@@ -557,6 +557,20 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             is_act_and_mul=self.moe.is_act_and_mul,
         )
 
+        # GB10 (SM121) workaround: the Marlin MoE CUDA kernel produces NaN
+        # when reading weight tensors from certain CUDA unified memory
+        # addresses. Cloning forces fresh allocations at accessible addresses.
+        if torch.cuda.is_available() and torch.cuda.get_device_capability() == (12, 1):
+            logger.warning("GB10 workaround: cloning MoE weight tensors")
+            w13 = w13.clone()
+            w13_scale = w13_scale.clone()
+            if isinstance(w13_scale_2, torch.Tensor):
+                w13_scale_2 = w13_scale_2.clone()
+            w2 = w2.clone()
+            w2_scale = w2_scale.clone()
+            if isinstance(w2_scale_2, torch.Tensor):
+                w2_scale_2 = w2_scale_2.clone()
+
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
         replace_parameter(layer, "w2_weight", w2)
