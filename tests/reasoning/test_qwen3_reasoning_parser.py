@@ -342,6 +342,12 @@ THINKING_DISABLED_CASES = [
         "Some output without think tokens",
         id="thinking_disabled_no_think_tokens",
     ),
+    pytest.param(
+        "I need to read the file.\n\n" + TOOL_CALL_BODY,
+        None,
+        "I need to read the file.\n\n" + TOOL_CALL_BODY,
+        id="thinking_disabled_with_tool_call",
+    ),
 ]
 
 
