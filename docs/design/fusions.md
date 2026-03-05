@@ -1,7 +1,7 @@
 # Kernel and Operator Fusions
 
 vLLM applies a set of kernel/operator fusions at compile time (via custom [`torch.compile`](torch_compile.md) Inductor passes)
-to separate optimizations from model definitions and avoid breaking layer abstractions in model code. 
+to separate optimizations from model definitions and avoid breaking layer abstractions in model code.
 These fusions are controlled by fields in [`PassConfig`](../configuration/engine_args.md) and are automatically enabled
 at appropriate [optimization levels](optimization_levels.md).
 
@@ -13,7 +13,7 @@ The last column indicates whether the fusion requires the entire model graph to 
 visible (either via Inductor partition or `splitting_ops=[]`).
 
 !!! info
-    Speedup depends heavily on the exact model, batch size, and hardware. 
+    Speedup depends heavily on the exact model, batch size, and hardware.
     If tuning performance by hand, always benchmark your exact use-case with and without the fusion to verify the impact.
 
 | Fusion                                                                           | `PassConfig` flag            | Fused operations                               | Default at                     | E2E Speedup        | Requires fullgraph |
@@ -34,7 +34,7 @@ visible (either via Inductor partition or `splitting_ops=[]`).
 ## Support Matrix
 
 The table below lists the quantization schemes supported by each fusion on each platform.
-**—** means the fusion is not available on that platform. The latest and in-progress work is available in the tracking issue: 
+**—** means the fusion is not available on that platform. The latest and in-progress work is available in the tracking issue:
 [#36066](https://github.com/vllm-project/vllm/issues/36066)
 
 | Fusion                       | SM100 (Blackwell)                        | SM90 (Hopper)                            | SM89 (Ada)                               | SM80 (Ampere) | ROCm                                     |
@@ -100,6 +100,7 @@ Fields set explicitly by the user always take precedence over optimization-level
 ## Fusion Details
 
 ### RMSNorm + Quantization (`fuse_norm_quant`)
+
 !!! warning
     On NVIDIA, Inductor actually generates a faster fused kernel than our custom CUDA kernel.
     Hence this fusion is only enabled when either `rms_norm` or `quant_fp8` is using a custom kernel.
@@ -118,7 +119,7 @@ Supported quantization scheme/hardware combinations:
 
 - FP8 static per-tensor: CUDA & HIP kernel
 - FP8 dynamic per-token: CUDA & HIP kernel, AITER
-- FP8 dynamic per-token-group (128/64): CUDA & HIP kernel, AITER 
+- FP8 dynamic per-token-group (128/64): CUDA & HIP kernel, AITER
 
 **Code locations.**
 
@@ -129,6 +130,7 @@ Supported quantization scheme/hardware combinations:
 ---
 
 ### SiLU+Mul + Quantization (`fuse_act_quant`)
+
 !!! warning
     Same as `fuse_norm_quant`: on NVIDIA, Inductor generates a faster fused kernel than our custom ops.
     This fusion is only enabled when either `silu_and_mul` or `quant_fp8` are using a custom kernel,
@@ -154,6 +156,7 @@ Supported quantization scheme/hardware combinations:
 ---
 
 ### Attention + Quantization (`fuse_attn_quant`)
+
 !!! warning
     `fuse_attn_quant` is currently not enabled at any optimization level by default and must be set
     explicitly. It requires the full model graph to be visible (Inductor partition or `splitting_ops=[]`).
@@ -182,12 +185,13 @@ Other attention backends do not support fused output quantization yet.
 ---
 
 ### AllReduce + RMSNorm (`fuse_allreduce_rms`)
+
 !!! warning
     TP+DP and TP+PP combinations are currently broken
     ([#34458](https://github.com/vllm-project/vllm/issues/34458) and
     [#35426](https://github.com/vllm-project/vllm/issues/35426)).
     Only supported on NVIDIA Hopper (SM90) and Blackwell (SM100) with FlashInfer installed.
-    
+
 **What it fuses.** Fuses the tensor-parallel all-reduce collective with the subsequent residual add,
 RMSNorm, and optionally a quantization step into a single FlashInfer / TRT-LLM communication kernel.
 This fusion is only profitable for small `num_tokens`, 
@@ -245,9 +249,8 @@ Supported hardware: Only tested on NVIDIA CUDA, possibly works on ROCm. FP8 all-
 
 - Pass: [`vllm/compilation/passes/fusion/sequence_parallelism.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/sequence_parallelism.py)
 
----
-
 ### AsyncTP GEMM + Collective Overlap (`fuse_gemm_comms`)
+
 !!! warning
     Requires `enable_sp=True` (enabled automatically). This pass is a no-op if Sequence Parallelism has not been applied.
     Requires symmetric-memory support (`torch.distributed._symmetric_memory`) on CUDA.
@@ -277,9 +280,8 @@ VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel ...
 - Pass: [`vllm/compilation/passes/fusion/collective_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/collective_fusion.py)
 - Sequence parallelism pass: [`vllm/compilation/passes/fusion/sequence_parallelism.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/sequence_parallelism.py)
 
----
-
 ### QK Norm + RoPE (`enable_qk_norm_rope_fusion`)
+
 !!! info
     Only applicable to models that apply per-head RMSNorm to Q and K before rotary positional
     embedding (e.g. Qwen). Not enabled by default at any optimization level due to perf issues on H100:
@@ -307,9 +309,8 @@ Supported hardware: CUDA (SM70+) only.
 - Pass: [`vllm/compilation/passes/fusion/qk_norm_rope_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/qk_norm_rope_fusion.py)
 - CUDA kernel: [`csrc/ops.h`](https://github.com/vllm-project/vllm/blob/main/csrc/ops.h) (`fused_qk_norm_rope`)
 
----
-
 ### RoPE + KV-Cache Update (`fuse_rope_kvcache`)
+
 !!! info
     ROCm/AITER-only. Not available on NVIDIA CUDA or CPU. The fusion is only enabled for 
     `num_tokens ≤ 256` by default due to AITER fused kernel performance issues.
@@ -327,9 +328,8 @@ If these conditions are set, the fusion is enabled automatically for optimizatio
 
 - Pass: [`vllm/compilation/passes/fusion/rope_kvcache_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rope_kvcache_fusion.py)
 
----
-
 ### RMSNorm + Padding (`fuse_act_padding`)
+
 !!! info
     ROCm/AITER-only. Targeted at GPT-OSS models.
 

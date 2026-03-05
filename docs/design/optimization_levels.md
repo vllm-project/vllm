@@ -57,7 +57,7 @@ Fusions:
 - `-cc.pass_config.fuse_act_padding=True`†
 - `-cc.pass_config.fuse_rope_kvcache=True`† (will be moved to O2)
 
-* These fusions are only enabled when either op is using a custom kernel, otherwise Inductor fusion is better.
+\* These fusions are only enabled when either op is using a custom kernel, otherwise Inductor fusion is better.
 † These fusions are ROCm-only and require AITER.
 
 ### `-O2`: Full Optimization (Default)
