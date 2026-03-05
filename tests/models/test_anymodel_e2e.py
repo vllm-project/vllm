@@ -759,7 +759,7 @@ def _run_puzzletron_nas_config():
     from vllm.model_executor.models.anymodel import (
         NoOpAttention,
         NoOpMLP,
-        Same,
+        NoOpNorm,
     )
 
     with open(_NAS_CONFIG_PATH) as f:
@@ -796,9 +796,9 @@ def _run_puzzletron_nas_config():
         f_noop = bc["ffn"]["no_op"]
 
         assert isinstance(layer.self_attn, NoOpAttention) == a_noop, f"L{i} attn"
-        assert isinstance(layer.input_layernorm, Same) == a_noop, f"L{i} attn norm"
+        assert isinstance(layer.input_layernorm, NoOpNorm) == a_noop, f"L{i} attn norm"
         assert isinstance(layer.mlp, NoOpMLP) == f_noop, f"L{i} ffn"
-        assert isinstance(layer.post_attention_layernorm, Same) == f_noop, (
+        assert isinstance(layer.post_attention_layernorm, NoOpNorm) == f_noop, (
             f"L{i} ffn norm"
         )
 
