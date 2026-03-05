@@ -18,18 +18,9 @@ build:
             AUTH_HEADER="Authorization: token ${GITHUB_TOKEN}"
           fi
           HTTP_CODE=$(curl -s -o /tmp/pr_response.json -w "%{http_code}" -H "$AUTH_HEADER" "$PR_URL")
-          echo "HTTP_CODE=${HTTP_CODE}"
-          echo "Response: $(cat /tmp/pr_response.json | head -c 500)"
-          LABELS=$(jq -r '.labels[].name' /tmp/pr_response.json 2>/dev/null)
-          JQ_EXIT=$?
-          echo "JQ_EXIT=${JQ_EXIT}"
-          echo "LABELS=[${LABELS}]"
-          echo "$LABELS" | grep -qwE "documentation|ready"
-          GREP_EXIT=$?
-          echo "GREP_EXIT=${GREP_EXIT}"
           if [ "$HTTP_CODE" -ne 200 ]; then
             echo "GitHub API returned HTTP ${HTTP_CODE}, proceeding with build."
-          elif [ "$JQ_EXIT" -eq 0 ] && [ "$GREP_EXIT" -eq 0 ]; then
+          elif grep -qE '"name":\s*"(documentation|ready)"' /tmp/pr_response.json; then
             echo "Found required label, proceeding with build."
           else
             echo "PR #${READTHEDOCS_VERSION} lacks 'documentation' or 'ready' label, skipping build."
