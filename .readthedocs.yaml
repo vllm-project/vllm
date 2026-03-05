@@ -10,7 +10,7 @@ build:
   apt_packages:
     - jq
   jobs:
-    post_checkout:
+    post_system_dependencies:
       # Skip PR builds unless the PR has the "documentation" or "ready" label
       - |
         if [ "$READTHEDOCS_VERSION_TYPE" = "external" ]; then
