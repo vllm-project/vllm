@@ -432,7 +432,7 @@ class OpenCVVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
             target=target,
         )
 
-        frames, valid_frame_indices = OpenCVVideoBackendMixin.read_frames(
+        frames, valid_frame_indices = cls.read_frames(
             cap,
             frame_idx,
             total_frames_num=source.total_frames_num,
