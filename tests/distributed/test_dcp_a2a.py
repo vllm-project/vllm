@@ -4,7 +4,7 @@
 
 Tests cover:
 1. DCP A2A config validation (--dcp-comm-backend)
-2. KVP group function exists
+2. TPA config validation (--tensor-parallel-size-attention)
 3. LSE-weighted combination correctness
 """
 
@@ -67,26 +67,25 @@ class TestTPAConfig:
         config = ParallelConfig()
         assert config.tensor_parallel_size_attention is None
         assert config.tpa_size == config.tensor_parallel_size
-        assert config.kvp_size == 1
 
     def test_tpa_equals_tp(self):
-        """TPA = TP means no KV parallelism."""
+        """TPA = TP means no context parallelism."""
         config = ParallelConfig(
             tensor_parallel_size=8,
             tensor_parallel_size_attention=8,
         )
         assert config.tpa_size == 8
-        assert config.kvp_size == 1
+        assert config.dcp_size == 1
 
-    def test_tpa_less_than_tp_requires_dcp(self):
-        """TPA < TP requires DCP = TP / TPA."""
+    def test_tpa_with_matching_dcp(self):
+        """TPA < TP with correct DCP = TP / TPA."""
         config = ParallelConfig(
             tensor_parallel_size=16,
             tensor_parallel_size_attention=4,
             decode_context_parallel_size=4,
         )
         assert config.tpa_size == 4
-        assert config.kvp_size == 4
+        assert config.dcp_size == 4
 
     def test_tpa_must_divide_tp(self):
         """TPA must evenly divide TP."""
@@ -94,6 +93,17 @@ class TestTPAConfig:
             ParallelConfig(
                 tensor_parallel_size=16,
                 tensor_parallel_size_attention=3,
+            )
+
+    def test_tpa_without_dcp_rejected(self):
+        """TPA < TP without matching DCP is rejected."""
+        with pytest.raises(
+            ValueError,
+            match="decode_context_parallel_size must equal",
+        ):
+            ParallelConfig(
+                tensor_parallel_size=16,
+                tensor_parallel_size_attention=4,
             )
 
     def test_tpa_dcp_mismatch_rejected(self):
@@ -109,14 +119,14 @@ class TestTPAConfig:
             )
 
     def test_tpa_mla_mode(self):
-        """TPA=1 is valid for MLA (single effective KV head)."""
+        """TPA=1 with DCP=8 is valid for MLA."""
         config = ParallelConfig(
             tensor_parallel_size=8,
             tensor_parallel_size_attention=1,
             decode_context_parallel_size=8,
         )
         assert config.tpa_size == 1
-        assert config.kvp_size == 8
+        assert config.dcp_size == 8
 
 
 class TestLSEWeightedCombine:
