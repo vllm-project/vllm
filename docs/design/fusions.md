@@ -18,7 +18,7 @@ visible (either via Inductor partition or `splitting_ops=[]`).
 
 | Fusion                                                                           | `PassConfig` flag            | Fused operations                               | Default at                     | E2E Speedup        | Requires fullgraph |
 |----------------------------------------------------------------------------------|------------------------------|------------------------------------------------|--------------------------------|--------------------|--------------------|
-| [Attention + Quant](#attention--quantization-fuse_attn_quant)                    | `fuse_attn_quant`            | Attention output → FP8/NVfp4 quant             | Off by default                 | 3-7%               | Yes                |
+| [Attention + Quant](#attention--quantization-fuse_attn_quant)                    | `fuse_attn_quant`            | Attention output → FP8/NVFP4 quant             | Off by default                 | 3-7%               | Yes                |
 | [AllReduce + RMSNorm](#allreduce--rmsnorm-fuse_allreduce_rms)                    | `fuse_allreduce_rms`         | All-reduce → RMSNorm (+residual_add) (→ quant) | O2 (Hopper/Blackwell + TP > 1) | 5-20%              | No                 |
 | [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion)                      | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No                 |
 | [Sequence Parallelism](#sequence-parallelism-enable_sp)                          | `enable_sp`                  | AllReduce → ReduceScatter + AllGather          | Off by default                 | Prereq for AsyncTP | Yes                |
@@ -37,9 +37,9 @@ The table below lists the quantization schemes supported by each fusion on each 
 | Fusion                       | SM100 (Blackwell)                        | SM90 (Hopper)                            | SM89 (Ada)                               | SM80 (Ampere) | ROCm                                     |
 |------------------------------|------------------------------------------|------------------------------------------|------------------------------------------|---------------|------------------------------------------|
 | `fuse_norm_quant`            | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | —             | FP8 static, FP8 per-token, FP8 per-group |
-| `fuse_act_quant`             | FP8 static, NVfp4                        | FP8 static                               | FP8 static                               | —             | FP8 per-group                            |
-| `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVfp4             | FP16/BF16, FP8 static                    | —                                        | —             | —                                        |
-| `fuse_attn_quant`\*          | FP8 static\*, NVfp4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                             |
+| `fuse_act_quant`             | FP8 static, NVFP4                        | FP8 static                               | FP8 static                               | —             | FP8 per-group                            |
+| `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVFP4             | FP16/BF16, FP8 static                    | —                                        | —             | —                                        |
+| `fuse_attn_quant`\*          | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                             |
 | `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
 | `fuse_act_padding`           | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
 | `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16†                               | FP16/BF16†    | —                                        |
@@ -96,7 +96,7 @@ Fields set explicitly by the user always take precedence over optimization-level
 
 !!! warning
     On NVIDIA, Inductor actually generates a faster fused kernel than our custom CUDA kernel.
-    Hence this fusion is only enabled when either `rms_norm` or `quant_fp8` is using a custom kernel.
+    Hence, this fusion is only enabled when either `rms_norm` or `quant_fp8` is using a custom kernel.
 
 **What it fuses.** Combines the custom `rms_norm` / `fused_add_rms_norm`
 operations with subsequent quantization into a single fused kernel,
@@ -125,7 +125,7 @@ Supported quantization scheme/hardware combinations:
 !!! warning
     Same as `fuse_norm_quant`: on NVIDIA, Inductor generates a faster fused kernel than our custom ops.
     This fusion is only enabled when either `silu_and_mul` or `quant_fp8` are using a custom kernel,
-    or for NVfp4-quantized models (where FP4 quant is always a custom op).
+    or for NVFP4-quantized models (where FP4 quant is always a custom op).
 
 **What it fuses.** Fuses the `silu_and_mul` gate-up projection activation with subsequent quantization into a single kernel,
 avoiding materialization of the full-precision post-activation tensor.
@@ -135,7 +135,7 @@ Note that AITER fusions are in a separate pass in `vllm.compilation.passes.fusio
 Supported quantization scheme/hardware combinations:
 
 - FP8 static per-tensor: CUDA & HIP kernel
-- NVfp4 dynamic: CUDA sm100+ only with flashinfer
+- NVFP4 dynamic: CUDA sm100+ only with FlashInfer
 - FP8 per-token-group (128): ROCm AITER only
 
 **Code locations.**
@@ -160,7 +160,7 @@ eliminating a full-precision memory round-trip of the attention output. Patterns
 - `ROCM_ATTN`: ROCm
 - `ROCM_AITER_UNIFIED_ATTN`: ROCm with AITER
 
-`Attention → NVfp4 dynamic quant`:
+`Attention → NVFP4 dynamic quant`:
 
 - `FLASHINFER`: CUDA sm100+ with FlashInfer installed
 
@@ -188,7 +188,7 @@ Patterns covered:
 
 - `AllReduce → RMSNorm(+residual_add)`: CUDA sm90+ with FlashInfer
 - `AllReduce → RMSNorm(+residual_add) → FP8 static quant`: CUDA sm90+ with FlashInfer
-- `AllReduce → RMSNorm(+residual_add) → NVfp4 dynamic quant`: CUDA sm100+ with FlashInfer
+- `AllReduce → RMSNorm(+residual_add) → NVFP4 dynamic quant`: CUDA sm100+ with FlashInfer
 
 The maximum tensor size below which the fused kernel is used is hardware-dependent (64 MB for TP=2
 on SM90/SM100) and configurable via `PassConfig.fi_allreduce_fusion_max_size_mb`.
@@ -207,7 +207,7 @@ pass can fuse the reduce-scatter / all-gather with the surrounding GEMMs.
 
 Sequence Parallelism itself does not directly improve performance; it is a prerequisite for the
 AsyncTP pass (`fuse_gemm_comms`). SP is only applied above a minimum token threshold that is
-auto-configured based on device capability and model `hidden_size`. Currently only active on
+autoconfigured based on device capability and model `hidden_size`. Currently only active on
 H100/SM90 for models with `hidden_size >= 8192`. The threshold is configurable via
 `PassConfig.sp_min_token_num`.
 
@@ -243,7 +243,7 @@ Supported hardware: Only tested on NVIDIA CUDA, possibly works on ROCm. FP8 all-
 **What it fuses.** After Sequence Parallelism transforms the graph, fuses GEMM kernels with the
 surrounding reduce-scatter (output projection) and all-gather (input projection) using
 `torch.ops.symm_mem` symmetric-memory primitives, overlapping communication and computation.
-This overlap is only profitable for large `num_tokens`, so the fusion (and preceeding SP)
+This overlap is only profitable for large `num_tokens`, so the fusion (and preceding SP)
 is only performed in the higher compiled range above `PassConfig.sp_min_token_num`.
 
 Patterns covered:
