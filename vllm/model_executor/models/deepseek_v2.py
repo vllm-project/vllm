@@ -43,6 +43,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -76,7 +77,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.multi_stream import maybe_execute_in_parallel
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import aux_stream, direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
@@ -608,15 +609,13 @@ class Indexer(nn.Module):
         cache_config: CacheConfig | None,
         topk_indices_buffer: torch.Tensor | None,
         prefix: str = "",
-        alt_stream: torch.cuda.Stream | None = None,
     ):
         super().__init__()
         self.vllm_config = vllm_config
         self.config = config
-        self.alt_stream = alt_stream
         self.events = (
             [torch.cuda.Event(), torch.cuda.Event()]
-            if alt_stream is not None
+            if current_platform.is_cuda()
             else [None, None]
         )
         # self.indexer_cfg = config.attn_module_list_cfg[0]["attn_index"]
@@ -665,6 +664,11 @@ class Indexer(nn.Module):
         )
         self.max_model_len = vllm_config.model_config.max_model_len
         self.prefix = prefix
+
+        compilation_config = get_current_vllm_config().compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
         from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
 
         self.max_total_seq_len = get_max_prefill_buffer_size(vllm_config)
@@ -691,13 +695,13 @@ class Indexer(nn.Module):
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
     ) -> torch.Tensor:
         # Overlap: weights_proj (default stream) || wk + k_norm (aux stream).
-        # When alt_stream is None, both run sequentially on the default stream.
-        weights, (k, k_pe, k_nope) = maybe_execute_in_parallel(
-            lambda: self.weights_proj(hidden_states)[0],
-            lambda: self._compute_k(hidden_states),
-            self.events[0],
-            self.events[1],
-            self.alt_stream,
+        # Wrapped in a custom op to avoid graph breaks under torch.compile.
+        weights, k, k_pe, k_nope = torch.ops.vllm.indexer_dual_stream(
+            hidden_states,
+            self.prefix,
+            self.n_head,
+            self.head_dim,
+            self.rope_dim,
         )
 
         q, _ = self.wq_b(qr)
@@ -735,6 +739,57 @@ class Indexer(nn.Module):
         weights = weights.squeeze(-1)
 
         return self.indexer_op(hidden_states, q_fp8, k, weights)
+
+
+def _indexer_dual_stream_impl(
+    hidden_states: torch.Tensor,
+    layer_name: str,
+    n_head: int,
+    head_dim: int,
+    rope_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run weights_proj and wk+k_norm in parallel on separate CUDA streams.
+
+    Wrapped as a custom op so that stream/event operations are opaque to
+    torch.compile and do not cause graph breaks.
+    """
+    forward_context = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    stream = aux_stream()
+
+    weights, (k, k_pe, k_nope) = maybe_execute_in_parallel(
+        lambda: self.weights_proj(hidden_states)[0],
+        lambda: self._compute_k(hidden_states),
+        self.events[0],
+        self.events[1],
+        stream,
+    )
+    return weights, k, k_pe, k_nope
+
+
+def _indexer_dual_stream_fake(
+    hidden_states: torch.Tensor,
+    layer_name: str,
+    n_head: int,
+    head_dim: int,
+    rope_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fake implementation for torch.compile shape inference."""
+    num_tokens = hidden_states.shape[0]
+    return (
+        hidden_states.new_empty(num_tokens, n_head),
+        hidden_states.new_empty(num_tokens, head_dim),
+        hidden_states.new_empty(num_tokens, rope_dim),
+        hidden_states.new_empty(num_tokens, head_dim - rope_dim),
+    )
+
+
+direct_register_custom_op(
+    op_name="indexer_dual_stream",
+    op_func=_indexer_dual_stream_impl,
+    mutates_args=[],
+    fake_impl=_indexer_dual_stream_fake,
+)
 
 
 def _min_latency_fused_qkv_a_proj_impl(
@@ -847,7 +902,6 @@ class DeepseekV2MLAAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
-        alt_stream: torch.cuda.Stream | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -957,7 +1011,6 @@ class DeepseekV2MLAAttention(nn.Module):
                 cache_config,
                 topk_indices_buffer,
                 f"{prefix}.indexer",
-                alt_stream=alt_stream,
             )
         else:
             self.indexer_rope_emb = None
@@ -1014,7 +1067,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         prefix: str,
         config: DeepseekV2Config | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
-        alt_stream: torch.cuda.Stream | None = None,
     ) -> None:
         super().__init__()
 
@@ -1065,9 +1117,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
-            **(
-                {"alt_stream": alt_stream} if attn_cls is DeepseekV2MLAAttention else {}
-            ),
         )
 
         if (
@@ -1167,10 +1216,8 @@ class DeepseekV2Model(nn.Module):
                 dtype=torch.int32,
                 device=self.device,
             )
-            alt_stream = torch.cuda.Stream() if current_platform.is_cuda() else None
         else:
             topk_indices_buffer = None
-            alt_stream = None
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -1187,7 +1234,6 @@ class DeepseekV2Model(nn.Module):
                 vllm_config,
                 prefix,
                 topk_indices_buffer=topk_indices_buffer,
-                alt_stream=alt_stream,
             ),
             prefix=f"{prefix}.layers",
         )
