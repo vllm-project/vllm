@@ -5,7 +5,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 
