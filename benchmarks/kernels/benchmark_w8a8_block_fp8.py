@@ -334,7 +334,7 @@ def distribute_batch_sizes(batch_sizes, num_gpus):
 
 def main(args):
     print(args)
-    num_gpus = torch.cuda.device_count()
+    num_gpus = torch.accelerator.device_count()
     if num_gpus == 0:
         raise RuntimeError("No GPU available for tuning")
     print(f"Found {num_gpus} GPUs for parallel tuning")

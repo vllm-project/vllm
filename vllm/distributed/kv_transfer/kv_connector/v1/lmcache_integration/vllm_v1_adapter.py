@@ -483,7 +483,7 @@ def _init_lmcache_engine(
     )
 
     # Change current device.
-    num_gpus = torch.cuda.device_count()
+    num_gpus = torch.accelerator.device_count()
     local_rank = parallel_config.rank % num_gpus
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")

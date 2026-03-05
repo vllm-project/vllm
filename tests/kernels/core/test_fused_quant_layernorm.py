@@ -33,7 +33,9 @@ SCALE_UBS = [True, False]
 GROUP_SIZES = [None, [1, 64], [1, 128]]
 TMA_ALIGNMENTS = [0, 4]
 SEEDS = [0]
-CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+]
 
 EPS = 1e-6
 

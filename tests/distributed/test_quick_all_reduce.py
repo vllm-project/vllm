@@ -130,7 +130,7 @@ def test_custom_quick_allreduce(
     quant_mode,
 ):
     world_size = tp_size * pipeline_parallel_size
-    if world_size > torch.cuda.device_count():
+    if world_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
 
     monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", quant_mode)
@@ -198,7 +198,7 @@ def qr_variable_input(rank, world_size):
 @pytest.mark.parametrize("pipeline_parallel_size", [1])
 def test_custom_quick_allreduce_variable_input(tp_size, pipeline_parallel_size):
     world_size = tp_size * pipeline_parallel_size
-    if world_size > torch.cuda.device_count():
+    if world_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
 
     multiprocessing.set_start_method("spawn", force=True)

@@ -11,7 +11,7 @@ from vllm.model_executor.models.utils import get_draft_quant_config
 from vllm.platforms import current_platform
 
 DEVICES = (
-    [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+    [f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)]
     if current_platform.is_cuda_alike()
     else ["cpu"]
 )
