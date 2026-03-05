@@ -37,8 +37,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     HAS_OPAQUE_TYPE,
     ModuleName,
-    aux_stream,
-    current_stream,
     direct_register_custom_op,
 )
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
@@ -86,36 +84,13 @@ def _moe_forward(
     shared_experts_input: torch.Tensor | None,
     layer_name: _layer_name_type,
 ) -> torch.Tensor:
-<<<<<<< HEAD
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
-    # TODO(bnell): this can be removed after MK migration is complete.
-    layer.ensure_moe_quant_config_init()
-    runner = layer.runner
-    router_logits = runner._maybe_gate(hidden_states, router_logits)
-    with runner._sequence_parallel_context():
-        if runner.use_dp_chunking:
-            return runner.forward_impl_chunked(
-                layer,
-                hidden_states,
-                router_logits,
-                shared_experts_input,
-            )
-        else:
-            return runner.forward_impl(
-                layer,
-                hidden_states,
-                router_logits,
-                shared_experts_input,
-            )
-=======
-    layer = get_layer_from_name(layer_name)
     return layer.runner.forward_dispatch(
         layer,
         hidden_states,
         router_logits,
         shared_experts_input,
     )
->>>>>>> d11342756e (wip more refactoring)
 
 
 def _moe_forward_fake(
@@ -133,75 +108,13 @@ def _moe_forward_shared(
     shared_experts_input: torch.Tensor | None,
     layer_name: _layer_name_type,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-<<<<<<< HEAD
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
-    # TODO(bnell): this can be removed after MK migration is complete.
-    layer.ensure_moe_quant_config_init()
-    runner = layer.runner
-    router_logits = runner._maybe_gate(hidden_states, router_logits)
-    with runner._sequence_parallel_context():
-        if runner.use_dp_chunking:
-            return runner.forward_impl_chunked(
-                layer,
-                hidden_states,
-                router_logits,
-                shared_experts_input,
-            )
-        else:
-            return runner.forward_impl(
-                layer,
-                hidden_states,
-                router_logits,
-                shared_experts_input,
-            )
-
-
-def _moe_forward_shared_new(
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    shared_experts_input: torch.Tensor | None,
-    layer_name: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    layer = get_layer_from_name(layer_name)
-    runner = layer.runner
-
-    def reduce_shared_out(shared_out: torch.Tensor) -> torch.Tensor:
-        # Reduce shared expert outputs if necessary, since the MLP
-        # should have been created with reduce_results=False.
-        if (
-            runner.reduce_results
-            and get_tensor_model_parallel_world_size() > 1
-            and runner.must_reduce_shared_expert_outputs()
-        ):
-            shared_out = tensor_model_parallel_all_reduce(shared_out)
-        return shared_out
-
-    if not runner.overlap_shared_experts:
-        shared_out = runner._shared_experts(hidden_states)
-        # XXXXXXXXXXXXXXXX
-        shared_experts = None
-
-    router_logits = runner._maybe_gate(hidden_states, router_logits)
-    with runner._sequence_parallel_context():
-        if runner.use_dp_chunking:
-            shared_out, fused_out = runner.forward_impl_chunked(
-                layer, hidden_states, router_logits
-            )
-        else:
-            shared_out = fused_out = runner.forward_impl(
-                layer, hidden_states, router_logits
-            )
-
-    return reduce_shared_out(shared_out), fused_out
-=======
-    layer = get_layer_from_name(layer_name)
     return layer.runner.forward_dispatch(
         layer,
         hidden_states,
         router_logits,
         shared_experts_input,
     )
->>>>>>> d11342756e (wip more refactoring)
 
 
 def _moe_forward_shared_fake(
@@ -226,7 +139,7 @@ def _moe_forward_shared_fake(
 direct_register_custom_op(
     op_name="moe_forward",
     op_func=_moe_forward,
-    mutates_args=["hidden_states"],  # ?
+    mutates_args=["hidden_states"],  # is this still true?
     fake_impl=_moe_forward_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
@@ -235,7 +148,6 @@ direct_register_custom_op(
 direct_register_custom_op(
     op_name="moe_forward_shared",
     op_func=_moe_forward_shared,
-    mutates_args=["hidden_states"],  # ?
     fake_impl=_moe_forward_shared_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
@@ -287,10 +199,8 @@ class DefaultMoERunner(MoERunner):
         self.enable_eplb = moe_config.moe_parallel_config.enable_eplb
 
         # Chunked all2all staging tensor
-        # TODO rename these?
         # These need to exist ahead of time due to CUDAgraph construction
         # needing a fixed buffer address.
-        # TODO: these could be global, i.e. shared by all layers
         self.use_dp_chunking = self.moe_config.moe_parallel_config.use_dp_chunking
         self.batched_hidden_states: torch.Tensor | None = None
         self.batched_router_logits: torch.Tensor | None = None
