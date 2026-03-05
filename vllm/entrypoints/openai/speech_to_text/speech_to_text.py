@@ -589,51 +589,24 @@ class OpenAISpeechToText(OpenAIServing):
                 else await self._get_trace_headers(raw_request.headers)
             )
 
-            generator = self.engine_client.generate(
-                engine_prompt,
-                sampling_params,
-                request_id_item,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-            )
-
-<<<<<<< HEAD
-            list_result_generator.append(generator)
-=======
-                self._log_inputs(
-                    request_id_item,
-                    engine_prompt,
+            if isinstance(sampling_params, BeamSearchParams):
+                generator = self.beam_search(
+                    prompt=engine_prompt,
                     params=sampling_params,
+                    request_id=request_id_item,
                     lora_request=lora_request,
+                    trace_headers=trace_headers,
+                )
+            else:
+                generator = self.engine_client.generate(
+                    engine_prompt,
+                    sampling_params,
+                    request_id_item,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
                 )
 
-                trace_headers = (
-                    None
-                    if raw_request is None
-                    else await self._get_trace_headers(raw_request.headers)
-                )
-
-                if isinstance(sampling_params, BeamSearchParams):
-                    generator = self.beam_search(
-                        prompt=engine_prompt,
-                        params=sampling_params,
-                        request_id=request_id_item,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
-                    )
-                else:
-                    generator = self.engine_client.generate(
-                        engine_prompt,
-                        sampling_params,
-                        request_id_item,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
-                    )
-
-                list_result_generator.append(generator)
-        except ValueError as e:
-            return self.create_error_response(e)
->>>>>>> 99a1a629f (add whisper transcription)
+            list_result_generator.append(generator)
 
         # We don't allow streaming for beam search
         if request.stream and not request.use_beam_search:
