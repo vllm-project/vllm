@@ -5467,8 +5467,8 @@ class GPUModelRunner(
                 )
 
         set_cudagraph_capturing_enabled(False)
+        CUDAGraphWrapper.clear_all_graphs()
         if isinstance(self.model, (CUDAGraphWrapper, UBatchWrapper)):
-            self.model.clear_graphs()
             assert self.model.cudagraph_wrapper is not None
             self.model.cudagraph_wrapper.graph_pool = original_pool
         self.maybe_remove_all_loras(self.lora_config)

@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import weakref
 from collections import Counter
 from collections.abc import Callable
 from contextlib import ExitStack
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 import torch
@@ -162,6 +163,14 @@ class CUDAGraphWrapper:
     guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
     """
 
+    _all_instances: ClassVar[weakref.WeakSet["CUDAGraphWrapper"]] = weakref.WeakSet()
+
+    @classmethod
+    def clear_all_graphs(cls) -> None:
+        """Clear captured graphs from all CUDAGraphWrapper instances."""
+        for instance in list(cls._all_instances):
+            instance.clear_graphs()
+
     def __init__(
         self,
         runnable: Callable[..., Any],
@@ -191,6 +200,8 @@ class CUDAGraphWrapper:
         # the entries for different batch descriptors that we need to capture
         # cudagraphs for.
         self.concrete_cudagraph_entries: dict[BatchDescriptor, CUDAGraphEntry] = {}
+
+        CUDAGraphWrapper._all_instances.add(self)
 
     def __getattr__(self, key: str) -> Any:
         # allow accessing the attributes of the runnable.
