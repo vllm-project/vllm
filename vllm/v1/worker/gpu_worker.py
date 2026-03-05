@@ -565,7 +565,7 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> float:
-        warmup_sizes: list[int] = []
+        warmup_sizes: list[int | str] = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             # warm up sizes that are not in cudagraph capture sizes,
