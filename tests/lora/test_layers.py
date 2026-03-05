@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib
 import random
 from copy import deepcopy
 from dataclasses import dataclass
@@ -28,8 +27,8 @@ from vllm.lora.layers import (
     ReplicatedLinearWithLoRA,
     RowParallelLinearWithLoRA,
     RowParallelLinearWithShardedLoRA,
-    VocabParallelEmbeddingWithLoRA,
 )
+from vllm.lora.layers.vocab_parallel_embedding import VocabParallelEmbeddingWithLoRA
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.model_executor.layers.linear import (
@@ -1441,16 +1440,4 @@ def test_variable_slice_lora_class_selection(default_vllm_config, dist_init):
     ), (
         "MergedColumnParallelLinearVariableSliceWithLoRA "
         "should NOT handle 2 slices even with empty packed_modules_list"
-    )
-
-
-def test_vocab_parallel_embedding_module_rename_compatibility():
-    new_module = importlib.import_module("vllm.lora.layers.vocab_parallel_embedding")
-    old_module = importlib.import_module("vllm.lora.layers.vocal_parallel_embedding")
-
-    assert hasattr(new_module, "VocabParallelEmbeddingWithLoRA")
-    assert hasattr(old_module, "VocabParallelEmbeddingWithLoRA")
-    assert (
-        old_module.VocabParallelEmbeddingWithLoRA
-        is new_module.VocabParallelEmbeddingWithLoRA
     )
