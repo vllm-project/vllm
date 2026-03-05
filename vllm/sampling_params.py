@@ -322,6 +322,22 @@ class SamplingParams(
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
     ) -> "SamplingParams":
+        """Create SamplingParams from optional parameters.
+
+        This factory method accepts None values and converts them to defaults.
+        Useful for API compatibility where parameters may be omitted.
+
+        Args:
+            n: Number of output sequences. Defaults to 1 if None.
+            presence_penalty: Presence penalty. Defaults to 0.0 if None.
+            frequency_penalty: Frequency penalty. Defaults to 0.0 if None.
+            temperature: Sampling temperature. Defaults to 1.0 if None.
+            top_p: Top-p sampling. Defaults to 1.0 if None.
+            logit_bias: Token bias dict. Values clamped to [-100, 100].
+
+        Returns:
+            SamplingParams: Instance with defaults applied.
+        """
         if logit_bias is not None:
             # Convert token_id to integer
             # Clamp the bias between -100 and 100 per OpenAI API spec
@@ -538,6 +554,13 @@ class SamplingParams(
                     self.stop_token_ids = list(eos_ids)
 
     def update_from_tokenizer(self, tokenizer: TokenizerLike) -> None:
+        """Update parameters from tokenizer properties.
+
+        Sets bad_words_token_ids from tokenizer if bad_words are configured.
+
+        Args:
+            tokenizer: Tokenizer to extract properties from.
+        """
         if not self.bad_words:
             return
         self._bad_words_token_ids = []
@@ -580,6 +603,11 @@ class SamplingParams(
 
     @cached_property
     def sampling_type(self) -> SamplingType:
+        """Determine sampling type based on parameters.
+
+        Returns:
+            SamplingType: GREEDY if temp≈0, RANDOM_SEED if seed set, else RANDOM.
+        """
         if self.temperature < _SAMPLING_EPS:
             return SamplingType.GREEDY
         if self.seed is not None:
@@ -588,10 +616,20 @@ class SamplingParams(
 
     @property
     def eos_token_id(self) -> int | None:
+        """Get the end-of-sequence token ID.
+
+        Returns:
+            int | None: EOS token ID, or None if not set.
+        """
         return self._eos_token_id
 
     @property
     def all_stop_token_ids(self) -> set[int]:
+        """Get all stop token IDs including EOS.
+
+        Returns:
+            set[int]: All token IDs that stop generation.
+        """
         return self._all_stop_token_ids
 
     @property
