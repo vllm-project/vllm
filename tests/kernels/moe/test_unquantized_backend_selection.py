@@ -63,7 +63,7 @@ def test_select_default_backend_by_platform(
     return_value=True,
 )
 @patch(
-    "vllm.model_executor.layers.fused_moe.oracle.unquantized.is_supported_config_trtllm_bf16",
+    "vllm.model_executor.layers.fused_moe.oracle.unquantized.TrtLlmBf16Experts.is_supported_config",
     return_value=(True, None),
 )
 @pytest.mark.skipif(
@@ -102,7 +102,7 @@ def test_select_cuda_flashinfer_trtllm_backend(
     return_value=True,
 )
 @patch(
-    "vllm.model_executor.layers.fused_moe.oracle.unquantized.is_supported_config_trtllm_bf16",
+    "vllm.model_executor.layers.fused_moe.oracle.unquantized.TrtLlmBf16Experts.is_supported_config",
     return_value=(False, None),
 )
 @pytest.mark.skipif(
