@@ -48,6 +48,16 @@ from .passes.pass_manager import PostGradPassManager
 logger = init_logger(__name__)
 
 
+class CompilationDone(Exception):
+    """Raised in compile-only mode after compilation is complete.
+
+    This signals that the Inductor cache has been populated and
+    there is no need to actually execute the compiled code.
+    """
+
+    pass
+
+
 def make_copy_and_call(
     sym_tensor_indices: list[int],
     input_buffers: list[torch.Tensor | None],
@@ -838,7 +848,23 @@ class VllmBackend:
         # Compute config/compiler/code hashes once and reuse
         config_hash = vllm_config.compute_hash()
         compiler_hash = self.compiler_manager.compute_hash(vllm_config)
-        forward_code_files = list(sorted(self.compilation_config.traced_files))
+        if (
+            self.compilation_config.compile_only
+            or self.compilation_config.overlap_compile
+        ):
+            # TODO: Fix traced_files consistency between compile-only
+            # (FakeTensor weights) and normal (real weights) paths.
+            # FakeTensor weights cause Dynamo to trace a slightly
+            # different set of files (e.g. parameter.py is missing),
+            # which changes code_hash and thus the cache directory.
+            # For now, skip traced_files entirely when overlapping so
+            # both paths get the same cache dir. Eventually we should
+            # make the traced file sets consistent regardless of the
+            # weight loading method.
+            forward_code_files: list[str] = []
+            self.compilation_config.traced_files.clear()
+        else:
+            forward_code_files = list(sorted(self.compilation_config.traced_files))
 
         logger.debug(
             "Traced files (to be considered for compilation cache):\n%s",
@@ -1029,6 +1055,9 @@ class VllmBackend:
                 elapsed,
                 scope="local",
             )
+
+        if self.compilation_config.compile_only:
+            logger.info("Compile-only mode: Inductor cache has been populated.")
 
         from torch._guards import detect_fake_mode
 

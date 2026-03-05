@@ -562,8 +562,16 @@ def _support_torch_compile(
                 self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
                 # All compilation is done at this point, save the AOT artifact.
                 self.save_aot_compiled_function()
+                if self.compilation_config.compile_only:
+                    from .backends import CompilationDone
+
+                    raise CompilationDone("Compilation and AOT save complete.")
                 output = self.aot_compiled_fn(self, *args, **kwargs)
             else:
+                if self.compilation_config.compile_only:
+                    from .backends import CompilationDone
+
+                    raise CompilationDone("Compilation complete (non-AOT path).")
                 output = TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)  # type: ignore[arg-type]
 
         from .monitor import end_monitoring_torch_compile

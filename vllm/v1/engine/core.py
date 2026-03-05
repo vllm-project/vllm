@@ -19,6 +19,7 @@ import zmq
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.config.compilation import CompilationMode
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
@@ -106,10 +107,30 @@ class EngineCore:
 
         self.log_stats = log_stats
 
+        # Phase 2: Optionally launch a background compile-only subprocess
+        # to overlap compilation with weight loading.
+        compile_proc = None
+        if (
+            vllm_config.compilation_config.overlap_compile
+            and vllm_config.compilation_config.mode != CompilationMode.NONE
+            and not vllm_config.compilation_config.compile_only
+        ):
+            compile_proc = _launch_compile_subprocess(vllm_config)
+
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
+
+        # Wait for compile subprocess before profiling/warmup
+        if compile_proc is not None:
+            _wait_for_compile_subprocess(compile_proc)
+
+        # In compile-only mode, skip KV cache allocation, scheduler setup,
+        # and everything else — just run compilation and return.
+        if vllm_config.compilation_config.compile_only:
+            self.model_executor.collective_rpc("compile_or_warm_up_model")
+            return
 
         self.available_gpu_memory_for_kv_cache = -1
 
@@ -545,16 +566,19 @@ class EngineCore:
             self.abort_requests(request_ids)
 
     def shutdown(self):
-        self.structured_output_manager.clear_backend()
-        if self.model_executor:
+        if hasattr(self, "structured_output_manager"):
+            self.structured_output_manager.clear_backend()
+        if getattr(self, "model_executor", None):
             self.model_executor.shutdown()
-        if self.scheduler:
+        if getattr(self, "scheduler", None):
             self.scheduler.shutdown()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.model_executor.profile(is_start, profile_prefix)
 
     def reset_mm_cache(self):
+        if not hasattr(self, "scheduler"):
+            return
         # NOTE: Since this is mainly for debugging, we don't attempt to
         # re-sync the internal caches (P0 sender, P1 receiver)
         if self.scheduler.has_unfinished_requests():
@@ -1962,3 +1986,50 @@ class EngineCoreActor(EngineCoreActorMixin, EngineCoreProc):
             log_stats,
             engine_index=dp_rank,
         )
+
+
+def _launch_compile_subprocess(vllm_config: VllmConfig):
+    """Launch a background compile-only subprocess.
+
+    Serializes the VllmConfig to a temp file and spawns a subprocess
+    that runs compile-only mode with fake weights.  The subprocess
+    populates the Inductor compilation cache while the main process
+    loads real weights concurrently.
+    """
+    import pickle
+    import subprocess
+    import sys
+    import tempfile
+
+    logger.info("Launching background compile-only subprocess...")
+    fd, config_path = tempfile.mkstemp(suffix=".pkl", prefix="vllm_compile_config_")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            pickle.dump(vllm_config, f)
+    except Exception:
+        os.unlink(config_path)
+        raise
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "vllm.compile_only", "--config-path", config_path],
+    )
+    # Store config_path on proc for cleanup
+    proc._compile_config_path = config_path  # type: ignore[attr-defined]
+    return proc
+
+
+def _wait_for_compile_subprocess(proc):
+    """Wait for the background compile-only subprocess to finish."""
+    logger.info("Waiting for background compile-only subprocess (pid=%d)...", proc.pid)
+    proc.wait()
+    config_path = getattr(proc, "_compile_config_path", None)
+    if config_path and os.path.exists(config_path):
+        os.unlink(config_path)
+    if proc.returncode != 0:
+        logger.warning(
+            "Background compile subprocess failed (rc=%d). "
+            "Check stderr output above for details.",
+            proc.returncode,
+        )
+    else:
+        logger.info("Background compile-only subprocess finished successfully.")
