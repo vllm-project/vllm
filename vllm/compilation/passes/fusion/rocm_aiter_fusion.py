@@ -289,9 +289,7 @@ class AiterRMSNormStaticQuantPattern(AiterRMSNormQuantPattern):
         def pattern(input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor):
             result_rms = self.rmsnorm_matcher(input, weight)
             out = self.quant_matcher(result_rms, scale)
-            if self.quant_matcher.enabled:
-                return out
-            return out[0]
+            return out
 
         def replacement(input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor):
             result = self.FUSED_OP(
@@ -343,9 +341,7 @@ class AiterFusedAddRMSNormStaticQuantPattern(AiterRMSNormQuantPattern):
             result_rms, residual = self.rmsnorm_matcher(input, weight, residual)
             result, scale = self.quant_matcher(result_rms, in_scale)
 
-            if self.quant_matcher.enabled:
-                return result, residual, scale
-            return result, residual
+            return result, residual, scale
 
         def replacement(
             input: torch.Tensor,
