@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import shutil
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -301,21 +299,14 @@ def test_video_recovery_dynamic_backend(monkeypatch: pytest.MonkeyPatch):
         )
 
 
-@pytest.fixture(scope="session")
-def dummy_video_path():
+@pytest.fixture
+def dummy_video_path(tmp_path):
     image_path = get_vllm_public_assets(
         filename="stop_sign.jpg", s3_prefix="vision_model_images"
     )
 
-    path = tempfile.mkdtemp()
-    try:
-        video_path = Path(path) / "test_RGB_video.mp4"
-        create_video_from_image(
-            str(image_path), str(video_path), num_frames=1800, fps=30
-        )
-        yield str(video_path)
-    finally:
-        shutil.rmtree(path)
+    video_path = tmp_path / "test_RGB_video.mp4"
+    create_video_from_image(str(image_path), str(video_path), num_frames=1800, fps=30)
     return video_path
 
 
