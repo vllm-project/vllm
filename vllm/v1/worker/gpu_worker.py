@@ -446,6 +446,46 @@ class Worker(WorkerBase):
             scope="local",
         )
 
+        if cudagraph_memory_estimate > 0:
+            total_mem = self.init_snapshot.total_memory
+            current_util = self.cache_config.gpu_memory_utilization
+            cg_util_delta = cudagraph_memory_estimate / total_mem
+            if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
+                equiv_util = round(current_util - cg_util_delta, 4)
+                suggested_util = min(
+                    round(current_util + cg_util_delta, 4),
+                    1.0,
+                )
+                logger.info(
+                    "CUDA graph memory profiling is enabled "
+                    "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1). "
+                    "This will become the default in v0.19. "
+                    "The current --gpu-memory-utilization=%.4f is equivalent "
+                    "to --gpu-memory-utilization=%.4f without CUDA graph "
+                    "memory profiling. To maintain the same effective KV "
+                    "cache size as before, increase "
+                    "--gpu-memory-utilization to %.4f.",
+                    current_util,
+                    equiv_util,
+                    suggested_util,
+                )
+            else:
+                suggested_util = min(
+                    round(current_util + cg_util_delta, 4),
+                    1.0,
+                )
+                logger.info(
+                    "In v0.19, CUDA graph memory profiling will be enabled "
+                    "by default (VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1), "
+                    "which more accurately accounts for CUDA graph memory "
+                    "during KV cache allocation. To try it now, set "
+                    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1 and increase "
+                    "--gpu-memory-utilization from %.4f to %.4f to maintain "
+                    "the same effective KV cache size.",
+                    current_util,
+                    suggested_util,
+                )
+
         return int(self.available_kv_cache_memory_bytes)
 
     def get_kv_connector_handshake_metadata(self) -> dict | None:
@@ -555,51 +595,6 @@ class Worker(WorkerBase):
                 GiB(diff),
                 100 * diff / max(cuda_graph_memory_bytes, 1),
             )
-
-        # Log transition messages for CUDA graph memory profiling.
-        if (
-            hasattr(self, "cudagraph_memory_estimate")
-            and self.cudagraph_memory_estimate > 0
-            and hasattr(self, "init_snapshot")
-        ):
-            total_mem = self.init_snapshot.total_memory
-            current_util = self.cache_config.gpu_memory_utilization
-            cg_util_delta = self.cudagraph_memory_estimate / total_mem
-            if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
-                equiv_util = round(current_util - cg_util_delta, 4)
-                suggested_util = min(
-                    round(current_util + cg_util_delta, 4),
-                    1.0,
-                )
-                logger.info(
-                    "CUDA graph memory profiling is enabled "
-                    "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1). "
-                    "This will become the default in v0.19. "
-                    "The current --gpu-memory-utilization=%.4f is equivalent "
-                    "to --gpu-memory-utilization=%.4f without CUDA graph "
-                    "memory profiling. To maintain the same KV "
-                    "cache size as before, increase "
-                    "--gpu-memory-utilization to %.4f.",
-                    current_util,
-                    equiv_util,
-                    suggested_util,
-                )
-            else:
-                suggested_util = min(
-                    round(current_util + cg_util_delta, 4),
-                    1.0,
-                )
-                logger.info(
-                    "In v0.19, CUDA graph memory profiling will be enabled "
-                    "by default (VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1), "
-                    "which more accurately accounts for CUDA graph memory "
-                    "during KV cache allocation. To try it now, set "
-                    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1 and increase "
-                    "--gpu-memory-utilization from %.4f (current setting) to %.4f "
-                    "to maintain the same KV cache size.",
-                    current_util,
-                    suggested_util,
-                )
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
             self, "peak_activation_memory"
