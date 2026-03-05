@@ -2039,14 +2039,13 @@ class LLM:
 
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""
-        return "FOOBARBAZ"
-        # # Cache the result to avoid repeated collective_rpc calls
-        # if self._cached_repr is None:
-        #     results = self.llm_engine.collective_rpc("get_model_inspection")
-        #     # In distributed settings, we get results from all workers
-        #     # Just return the first one (they should all be the same)
-        #     if results:
-        #         self._cached_repr = results[0]
-        #     else:
-        #         self._cached_repr = f"LLM(model={self.model_config.model!r})"
-        # return self._cached_repr
+        # Cache the result to avoid repeated collective_rpc calls
+        if self._cached_repr is None:
+            results = self.llm_engine.collective_rpc("get_model_inspection")
+            # In distributed settings, we get results from all workers
+            # Just return the first one (they should all be the same)
+            if results:
+                self._cached_repr = results[0]
+            else:
+                self._cached_repr = f"LLM(model={self.model_config.model!r})"
+        return self._cached_repr
