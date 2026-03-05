@@ -17,3 +17,10 @@ vLLM supports the following hardware platforms:
 vLLM supports third-party hardware plugins that live **outside** the main `vllm` repository. These follow the [Hardware-Pluggable RFC](../../design/plugin_system.md).
 
 A list of all supported hardware can be found on the [vllm.ai website](https://vllm.ai/#hardware). If you want to add new hardware, please contact us on [Slack](https://slack.vllm.ai/) or [Email](mailto:collaboration@vllm.ai).
+
+## Free-threaded Python (experimental)
+
+There is experimental support for running vLLM with free-threaded Python (PEP 703).
+See the [vllm-ft-build](https://github.com/nascheme/vllm-ft-build) repository for
+build instructions and scripts. Not all vLLM features are available with the
+free-threaded interpreter, and this configuration is not well tested.
