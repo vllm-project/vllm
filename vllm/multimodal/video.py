@@ -3,16 +3,22 @@
 import math
 from abc import abstractmethod
 from io import BytesIO
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import numpy.typing as npt
 
-if TYPE_CHECKING:
-    import cv2
-
 from vllm.logger import init_logger
+from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.registry import ExtensionManager
+
+try:
+    import cv2
+    import cv2.videoio_registry as vr
+except ImportError:
+    cv2 = PlaceholderModule("cv2")
+    vr = PlaceholderModule("cv2").placeholder_attr("videoio_registry")
+
 
 logger = init_logger(__name__)
 
@@ -23,8 +29,6 @@ def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
     resized_frames = np.empty(
         (num_frames, new_height, new_width, channels), dtype=frames.dtype
     )
-    # lazy import cv2 to avoid bothering users who only use text models
-    import cv2
 
     for i, frame in enumerate(frames):
         resized_frame = cv2.resize(frame, (new_width, new_height))
@@ -110,8 +114,6 @@ VIDEO_LOADER_REGISTRY = ExtensionManager()
 class OpenCVVideoBackendMixin:
     @staticmethod
     def get_cv2_video_api():
-        import cv2.videoio_registry as vr
-
         api_pref = None
         for backend in vr.getStreamBufferedBackends():
             if not vr.hasBackend(backend):
@@ -126,8 +128,6 @@ class OpenCVVideoBackendMixin:
 
     @classmethod
     def open_video_capture(cls, data: bytes) -> "cv2.VideoCapture":
-        import cv2
-
         backend = cls.get_cv2_video_api()
         cap = cv2.VideoCapture(BytesIO(data), backend, [])
         if not cap.isOpened():
@@ -136,8 +136,6 @@ class OpenCVVideoBackendMixin:
 
     @staticmethod
     def get_video_metadata(cap: "cv2.VideoCapture") -> VideoSourceMetadata:
-        import cv2
-
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         duration = total_frames_num / original_fps if original_fps > 0 else 0
@@ -186,8 +184,6 @@ class OpenCVVideoBackendMixin:
             - valid_frame_indices: List of frame indices that were loaded
             - recovered_map: Dict mapping recovered_idx -> source_idx
         """
-        import cv2
-
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
@@ -277,8 +273,6 @@ class OpenCVVideoBackendMixin:
         frame_indices: set[int],
         max_frame_idx: int,
     ) -> tuple[npt.NDArray, list[int]]:
-        import cv2
-
         num_expected_frames = len(frame_indices)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -416,7 +410,7 @@ class OpenCVVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         Returns:
             Tuple of (frames_array, metadata_dict)
         """
-        cap = OpenCVVideoBackendMixin.open_video_capture(data)
+        cap = cls.open_video_capture(data)
 
         source = OpenCVVideoBackendMixin.get_video_metadata(cap)
         target = VideoTargetMetadata(
@@ -512,7 +506,7 @@ class OpenCVDynamicVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         Returns:
             Tuple of (frames_array, metadata_dict)
         """
-        cap = OpenCVVideoBackendMixin.open_video_capture(data)
+        cap = cls.open_video_capture(data)
 
         orig_source = OpenCVVideoBackendMixin.get_video_metadata(cap)
         max_frame_idx = orig_source.total_frames_num - 1
@@ -788,7 +782,7 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         frame_recovery: bool = False,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
-        cap = OpenCVVideoBackendMixin.open_video_capture(data)
+        cap = cls.open_video_capture(data)
 
         source = OpenCVVideoBackendMixin.get_video_metadata(cap)
         target = VideoTargetMetadata(
@@ -934,7 +928,7 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         Returns:
             Tuple of (frames_array, metadata_dict)
         """
-        cap = OpenCVVideoBackendMixin.open_video_capture(data)
+        cap = cls.open_video_capture(data)
 
         source = OpenCVVideoBackendMixin.get_video_metadata(cap)
 
