@@ -39,7 +39,6 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
-from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -147,7 +146,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Data parallelism.
         self.dp_size = self.parallel_config.data_parallel_size
         self.dp_rank = self.parallel_config.data_parallel_rank
-        self.use_dp = self.dp_size > 1
 
         # Decode context parallelism.
         self.dcp_size = self.parallel_config.decode_context_parallel_size
@@ -205,12 +203,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
 
         # CUDA graphs.
-        self.uniform_decode_query_len = self.num_speculative_steps + 1
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
             self.device,
             self.compilation_config.cudagraph_mode,
-            self.uniform_decode_query_len,
+            decode_query_len=self.num_speculative_steps + 1,
         )
         # Structured outputs worker.
         self.structured_outputs_worker = StructuredOutputsWorker(
@@ -341,21 +338,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens: int,
         *args,
         skip_attn: bool = True,
-        uniform_decode: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         # Create a dummy scheduler output.
-        if uniform_decode:
-            # Align tokens to uniform_decode_query_len for cudagraph
-            # compatibility across DP ranks.
-            query_len = self.cudagraph_manager.uniform_decode_query_len
-            num_reqs = min(cdiv(num_tokens, query_len), self.max_num_reqs)
-            num_tokens = num_reqs * query_len
-            num_tokens_per_request = [query_len] * num_reqs
-        else:
-            num_reqs = min(num_tokens, self.max_num_reqs)
-            num_tokens_per_request = [num_tokens // num_reqs] * num_reqs
-            num_tokens_per_request[-1] += num_tokens % num_reqs
+        num_reqs = min(num_tokens, self.max_num_reqs)
+        num_tokens_per_request = [num_tokens // num_reqs] * num_reqs
+        num_tokens_per_request[-1] += num_tokens % num_reqs
+
         assert sum(num_tokens_per_request) == num_tokens
         num_scheduled_tokens = {
             f"_dummy_req_{i}": n for i, n in enumerate(num_tokens_per_request)
