@@ -521,7 +521,6 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts
         )
         self.set_moe_parameters()
 
-
     def set_moe_parameters(self):
         self.expert_weights: list[list[torch.Tensor]] = []
         self.moe_layers: list[nn.Module] = []
