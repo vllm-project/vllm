@@ -37,6 +37,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
     get_dcp_group,
+    get_pcp_group,
     get_pp_group,
     get_tp_group,
     graph_capture,
@@ -176,6 +177,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.pcp_virtual_request import PCPVirtualRequestManager
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
@@ -417,8 +419,26 @@ class GPUModelRunner(
         self.calculate_kv_scales = self.cache_config.calculate_kv_scales
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
+        self.pcp_world_size = self.parallel_config.prefill_context_parallel_size
+        self.pcp_rank = 0 if self.pcp_world_size <= 1 else get_pcp_group().rank_in_group
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
+
+        # PCP Virtual Request Manager
+        self.pcp_manager: PCPVirtualRequestManager | None = None
+        if self.pcp_world_size > 1:
+            self.pcp_manager = PCPVirtualRequestManager(
+                pcp_world_size=self.pcp_world_size,
+                pcp_rank=self.pcp_rank,
+                max_num_reqs=self.max_num_reqs,
+                max_num_batched_tokens=self.max_num_tokens,
+                device=self.device,
+            )
+            logger.info(
+                "PCP enabled: world_size=%d, rank=%d",
+                self.pcp_world_size,
+                self.pcp_rank,
+            )
 
         # Broadcast PP output for external_launcher (torchrun)
         # to make sure we are synced across pp ranks
@@ -1519,6 +1539,9 @@ class GPUModelRunner(
         self,
         scheduler_output: "SchedulerOutput",
         num_scheduled_tokens: np.ndarray,
+        pcp_req_indices: np.ndarray | None = None,
+        pcp_positions: np.ndarray | None = None,
+        pcp_cu_num_tokens: np.ndarray | None = None,
     ) -> tuple[
         torch.Tensor,
         SpecDecodeMetadata | None,
@@ -1527,8 +1550,18 @@ class GPUModelRunner(
         :return: tuple[
             logits_indices, spec_decode_metadata,
         ]
+
+        Args:
+            scheduler_output: The scheduler output.
+            num_scheduled_tokens: Token counts per (virtual) request.
+            pcp_req_indices: Pre-computed request indices for PCP. Maps each
+                token to its physical request index. If None, computed normally.
+            pcp_positions: Pre-computed position values for PCP. If None,
+                computed normally.
+            pcp_cu_num_tokens: Pre-computed cumulative token counts for PCP.
+                If None, computed normally.
         """
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        total_num_scheduled_tokens = int(num_scheduled_tokens.sum())
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
@@ -1539,19 +1572,34 @@ class GPUModelRunner(
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
-        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+        if pcp_req_indices is not None:
+            req_indices = pcp_req_indices
+        else:
+            req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
 
         # cu_num_tokens: [2, 5, 3] -> [2, 7, 10]
         # arange: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
+        if pcp_cu_num_tokens is not None:
+            cu_num_tokens = pcp_cu_num_tokens
+            # Compute arange from cumsum
+            arange = (
+                np.concatenate([np.arange(n) for n in num_scheduled_tokens])
+                if len(num_scheduled_tokens) > 0
+                else np.array([], dtype=np.int64)
+            )
+        else:
+            cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
 
         # Get positions.
         positions_np = self.positions.np[:total_num_scheduled_tokens]
-        np.add(
-            self.input_batch.num_computed_tokens_cpu[req_indices],
-            arange,
-            out=positions_np,
-        )
+        if pcp_positions is not None:
+            np.copyto(positions_np, pcp_positions)
+        else:
+            np.add(
+                self.input_batch.num_computed_tokens_cpu[req_indices],
+                arange,
+                out=positions_np,
+            )
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1842,6 +1890,22 @@ class GPUModelRunner(
             cm_base.logits_indices_padded = self._prepare_kv_sharing_fast_prefill(
                 logits_indices
             )
+
+        # PCP: All-gather slot_mapping and set up KV restore indices
+        if self.pcp_manager is not None:
+            pcp_group = get_pcp_group()
+            kv_restore_idx = self.pcp_manager.get_kv_restore_idx()
+            cm_base.pcp_kv_restore_idx = kv_restore_idx
+
+            # All-gather slot_mapping for KV cache write (same for all layers)
+            # After all-gather, slot_mapping contains slots for all ranks' KV
+            gathered_slot_mapping = pcp_group.all_gather(
+                slot_mapping_gid_0[:num_tokens].contiguous(), dim=0
+            )
+            # Reorder to global position order using kv_restore_idx
+            if kv_restore_idx is not None:
+                gathered_slot_mapping = gathered_slot_mapping[kv_restore_idx]
+            cm_base.slot_mapping = gathered_slot_mapping
 
         # Cache attention metadata builds across hybrid KV-cache groups
         # The only thing that changes between different hybrid KV-cache groups when the
@@ -3449,9 +3513,30 @@ class GPUModelRunner(
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
+            # PCP: Partition inputs for this rank
+            pcp_req_indices = None
+            pcp_positions = None
+            pcp_cu_num_tokens = None
+            if self.pcp_manager is not None:
+                (
+                    num_scheduled_tokens_np,
+                    pcp_req_indices,
+                    pcp_positions,
+                    pcp_cu_num_tokens,
+                ) = self.pcp_manager.partition(
+                    num_scheduled_tokens_np,
+                    self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                )
+                # Update num_tokens for this rank's partition
+                num_tokens_unpadded = int(num_scheduled_tokens_np.sum())
+                max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
+
             logits_indices, spec_decode_metadata = self._prepare_inputs(
                 scheduler_output,
                 num_scheduled_tokens_np,
+                pcp_req_indices=pcp_req_indices,
+                pcp_positions=pcp_positions,
+                pcp_cu_num_tokens=pcp_cu_num_tokens,
             )
 
             cascade_attn_prefix_lens = None
@@ -3626,6 +3711,13 @@ class GPUModelRunner(
                 # Common case.
                 hidden_states = model_output
                 aux_hidden_states = None
+
+            # PCP: Restore hidden states by all-gathering across PCP ranks
+            if self.pcp_manager is not None and not isinstance(
+                hidden_states, IntermediateTensors
+            ):
+                hidden_states = self.pcp_manager.restore_hidden_states(hidden_states)
+                # TODO: Handle aux_hidden_states for PCP if needed
 
             if not self.broadcast_pp_output:
                 # Common case.
