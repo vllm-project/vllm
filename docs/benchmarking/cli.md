@@ -942,12 +942,13 @@ The benchmark measures the following stages for each request:
 
 | Stage | Description |
 |-------|-------------|
-| `hf_processor_time` | Time in the HuggingFace processor |
-| `hashing_time` | Time hashing multimodal inputs |
-| `cache_lookup_time` | Time looking up the processor cache |
-| `prompt_update_time` | Time updating prompt tokens |
-| `preprocessor_total_time` | Total preprocessing time |
-| `encoder_forward_time` | Encoder model forward pass |
+| `get_mm_hashes_secs` | Time hashing multimodal inputs |
+| `get_cache_missing_items_secs` | Time looking up the processor cache |
+| `apply_hf_processor_secs` | Time in the HuggingFace processor |
+| `merge_mm_kwargs_secs` | Time merging multimodal kwargs |
+| `apply_prompt_updates_secs` | Time updating prompt tokens |
+| `preprocessor_total_secs` | Total preprocessing time |
+| `encoder_forward_secs` | Encoder model forward pass |
 | `num_encoder_calls` | Number of encoder invocations per request |
 
 The benchmark also reports end-to-end latency (TTFT + decode time) per
