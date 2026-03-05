@@ -62,7 +62,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                 torch.profiler.ProfilerActivity.CUDA,
             ],
             schedule=torch.profiler.schedule(
-                wait=1000, warmup=1, active=10, repeat=1
+                wait=2500, warmup=1, active=10, repeat=1
             ),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(
                 "./profiler_logs/ffn"
@@ -97,8 +97,6 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         else:
             self.num_layers = self.model_config.hf_config.num_hidden_layers
         
-        self._execute_model_count = 0
-
     def get_model(self) -> nn.Module:
         return self.model
 
@@ -154,19 +152,17 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         
         # TODO(jcz): process first_k_dense_replace
         # for layer_idx in range(self.first_k_dense_replace,self.num_layers):
-        for layer_idx in range(0, self.num_layers):
-            for ubatch_idx in range(num_ubatches):
-                hidden_states, recv_metadata = self.connector.recv_attn_output(ubatch_idx=ubatch_idx)
-                dp_metadata = dp_metadata_list.get(
-                    recv_metadata.stage_idx, None
-                )
-                if recv_metadata is not None and recv_metadata.recv_handle_list is not None:
-                    for work in recv_metadata.recv_handle_list:
-                        work.wait()
-                # Fallback to eager mode
-                with set_forward_context(
-                    attn_metadata=None, vllm_config=self.vllm_config
-                ):
+        # Fallback to eager mode
+        with set_forward_context(attn_metadata=None, vllm_config=self.vllm_config):
+            for layer_idx in range(0, self.num_layers):
+                for ubatch_idx in range(num_ubatches):
+                    hidden_states, recv_metadata = self.connector.recv_attn_output(ubatch_idx=ubatch_idx)
+                    dp_metadata = dp_metadata_list.get(
+                        recv_metadata.stage_idx, None
+                    )
+                    if recv_metadata is not None and recv_metadata.recv_handle_list is not None:
+                        for work in recv_metadata.recv_handle_list:
+                            work.wait()
                     # For asymmetric A/F, scale token counts by ratio
                     # because FFN receives concatenated tokens from multiple A's
                     # Also need to rebuild num_tokens_across_dp_cpu to match F side's DP size
@@ -207,13 +203,14 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                     rank_ffn_output = self._execute_eager_mode(
                         hidden_states, layer_idx
                     )
+                    # TODO(jcz): 这个修复很hardcode，需要优化
+                    if get_forward_context().moe_layer_index != 0 and ubatch_idx != num_ubatches - 1:
+                        get_forward_context().moe_layer_index -= 1
 
-                recv_metadata.recv_handle_list = None
-                self.connector.send_ffn_output(rank_ffn_output, recv_metadata)
-        self._execute_model_count += 1
+                    recv_metadata.recv_handle_list = None
+                    self.connector.send_ffn_output(rank_ffn_output, recv_metadata)
         return rank_ffn_output
 
-    
     @torch.inference_mode()
     def execute_model(
         self,

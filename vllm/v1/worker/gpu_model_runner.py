@@ -698,7 +698,6 @@ class GPUModelRunner(
                 get_world_group().rank, get_world_group().local_rank, vllm_config
             )
             self.afd_connector.init_afd_connector()
-            self.num_stages = self.afd_config.num_afd_stages
 
         self.kv_sharing_fast_prefill_eligible_layers: set[str] = set()
 
@@ -788,7 +787,7 @@ class GPUModelRunner(
                 torch.profiler.ProfilerActivity.CUDA,
             ],
             schedule=torch.profiler.schedule(
-                wait=1500, warmup=1, active=10, repeat=1
+                wait=2500, warmup=1, active=10, repeat=1
             ),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_dir),
             record_shapes=True,
