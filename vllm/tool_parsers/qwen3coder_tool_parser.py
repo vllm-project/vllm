@@ -157,6 +157,12 @@ class Qwen3CoderToolParser(ToolParser):
             and "type" in param_config[param_name]
         ):
             param_type = str(param_config[param_name]["type"]).strip().lower()
+        elif (
+            isinstance(param_config[param_name], dict)
+            and "anyOf" in param_config[param_name]
+        ):
+            # anyOf has no top-level "type"; treat as object to trigger json.loads.
+            param_type = "object"
         else:
             param_type = "string"
         if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
