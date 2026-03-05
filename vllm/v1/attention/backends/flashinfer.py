@@ -74,6 +74,10 @@ FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 # under very high decode request concurrency.
 TRTLLM_DECODE_CHUNK_TRIGGER_REQS = 512
 TRTLLM_DECODE_CHUNK_SIZE = 256
+TRTLLM_DECODE_CHUNK_THRESH_MID = 1024
+TRTLLM_DECODE_CHUNK_SIZE_MID = 384
+TRTLLM_DECODE_CHUNK_THRESH_HIGH = 1536
+TRTLLM_DECODE_CHUNK_SIZE_HIGH = 512
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -96,10 +100,10 @@ def _get_trtllm_decode_chunk_size(num_decodes: int) -> int:
     # Keep smaller chunks for moderate decode concurrency to avoid the
     # problematic kernel region, and use larger chunks at very high concurrency
     # to reduce launch/slicing overhead.
-    if num_decodes > 1536:
-        return 512
-    if num_decodes > 1024:
-        return 384
+    if num_decodes > TRTLLM_DECODE_CHUNK_THRESH_HIGH:
+        return TRTLLM_DECODE_CHUNK_SIZE_HIGH
+    if num_decodes > TRTLLM_DECODE_CHUNK_THRESH_MID:
+        return TRTLLM_DECODE_CHUNK_SIZE_MID
     return TRTLLM_DECODE_CHUNK_SIZE
 
 
