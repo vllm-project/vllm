@@ -252,7 +252,7 @@ class Worker(WorkerBase):
                 )
 
             self.device = torch.device(f"cuda:{self.local_rank}")
-            current_platform.set_device(self.device)
+            torch.accelerator.set_device_index(self.device)
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)
 

@@ -61,7 +61,7 @@ def test_fc_layer_quant_config_usage(default_vllm_config, dist_init, device) -> 
     from vllm.model_executor.layers.linear import ReplicatedLinear
 
     if current_platform.is_cuda_alike():
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
 
     torch.set_default_device(device)
 

@@ -184,7 +184,7 @@ def test_rms_norm(
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
     torch.set_default_device(device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     if group_size is not None and hidden_size % group_size[1] != 0:
         # skip

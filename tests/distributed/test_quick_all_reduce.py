@@ -39,7 +39,7 @@ def graph_quickreduce(
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         device = torch.device(f"cuda:{rank}")
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
         group = get_tp_group().device_group
@@ -103,7 +103,7 @@ def eager_quickreduce(
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         device = torch.device(f"cuda:{rank}")
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
 
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
@@ -153,7 +153,7 @@ def qr_variable_input(rank, world_size):
     has been observed with the gpt_oss model).
     """
     device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     qr_max_size = None  # MB
     _ptr = ops.init_custom_qr(rank, world_size, qr_max_size)
     ranks = []
