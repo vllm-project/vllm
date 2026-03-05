@@ -5,7 +5,7 @@ import math
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SkipValidation, field_validator, model_validator
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -40,8 +40,9 @@ class CacheConfig:
 
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
 
-    block_size: int | None = None
-    """Size of a contiguous cache block in number of tokens."""
+    block_size: SkipValidation[int] = None  # type: ignore[assignment]
+    """Size of a contiguous cache block in number of tokens.
+    Accepts None (meaning "use default"). After construction, always int."""
     user_specified_block_size: bool = field(default=False, init=False)
     """Whether block_size was explicitly provided. Derived automatically."""
     gpu_memory_utilization: float = Field(default=0.9, gt=0, le=1)
