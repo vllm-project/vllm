@@ -243,7 +243,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         self, lora_b: list[torch.Tensor | None]
     ) -> list[torch.Tensor | None]:
         sliced_lora_b = [None] * self.n_slices
-        n_lora_b = len(lora_b) if isinstance(lora_b, (list, tuple)) else self.n_slices
+        n_lora_b = len(lora_b)
         for i, (shard_id, shard_size) in enumerate(
             zip(self.output_ids, self.output_slices)
         ):
@@ -268,8 +268,8 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         # Bounds-check for packed slice count mismatch (e.g., Qwen3.5-MoE
         # in_proj_qkvz has n_slices=4 but packed_modules_mapping provides
         # only 2 subloras). Treat out-of-bounds slices as None (no LoRA).
-        n_lora_a = len(lora_a) if isinstance(lora_a, (list, tuple)) else self.n_slices
-        n_lora_b = len(lora_b) if isinstance(lora_b, (list, tuple)) else self.n_slices
+        n_lora_a = len(lora_a)
+        n_lora_b = len(lora_b)
         for i in range(self.n_slices):
             if i < n_lora_a and (lora_a_i := lora_a[i]) is not None:
                 self.lora_a_stacked[i][
