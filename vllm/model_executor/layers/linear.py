@@ -1011,7 +1011,6 @@ class QKVParallelLinear(ColumnParallelLinear):
             total_num_kv_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
         # Divide the weight matrix along the last dimension.
-        # For TPA GQA, use attention TP (TPA) for Q/KV head sharding
         tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
         attn_tp_size = get_attention_tp_world_size(disable_tp)
         attn_tp_rank = get_attention_tp_rank(disable_tp)
@@ -1022,8 +1021,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         else:
             self.num_kv_heads = divide(self.total_num_kv_heads, attn_tp_size)
             self.num_kv_head_replicas = 1
-        # Store the QKV TP rank for weight loading (supports TPA GQA where
-        # attention heads are sharded by TPA, not full TP)
+        # TPA rank for weight loading (may differ from full TP rank).
         self._qkv_tp_rank = attn_tp_rank
         input_size = self.hidden_size
         output_size = (

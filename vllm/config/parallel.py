@@ -317,26 +317,9 @@ class ParallelConfig:
     """
 
     tensor_parallel_size_attention: int | None = None
-    """Tensor parallel size for attention heads. When set to a value smaller
-    than tensor_parallel_size, attention heads are sharded by this value (TPA)
-    while FFN layers use the full tensor_parallel_size.
-
-    This enables DCP (Decode Context Parallel) where TP / TPA ranks share
-    the same attention heads but process different KV cache shards with
-    sequence parallelism. DCP groups use All-to-All communication to exchange
-    partial attention outputs and combine them with LSE-weighted reduction.
-
-    For GQA models: TPA < TP means each TPA group has the same Q/KV heads
-    and different sequence shards.
-    For MLA models: TPA = 1 (single effective KV head), all ranks share the
-    same heads and process different sequence shards.
-
-    Requires: tensor_parallel_size must be divisible by
-    tensor_parallel_size_attention, and decode_context_parallel_size must
-    match tensor_parallel_size / tensor_parallel_size_attention.
-
-    Example: --tensor-parallel-size 16 --tensor-parallel-size-attention 4
-    creates TPA=4, DCP=4 (4 groups of 4 ranks each).
+    """Tensor parallel size for attention heads (TPA). When set smaller than
+    tensor_parallel_size, attention heads are sharded by TPA while FFN layers
+    use full TP. Requires decode_context_parallel_size = TP / TPA.
 
     Reference: https://arxiv.org/abs/2507.07120
     """
@@ -471,9 +454,8 @@ class ParallelConfig:
 
     @property
     def dcp_size(self) -> int:
-        """DCP (decode context parallel) size. Derived as TP / TPA.
-        Returns 1 when TPA == TP (no context parallelism)."""
-        return self.tensor_parallel_size // self.tpa_size
+        """DCP (decode context parallel) size."""
+        return self.decode_context_parallel_size
 
     @property
     def world_size_across_dp(self) -> int:

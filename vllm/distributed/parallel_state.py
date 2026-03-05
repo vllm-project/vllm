@@ -1644,9 +1644,7 @@ def initialize_model_parallel(
         group_name="dcp",
     )
 
-    # Store TPA size for head sharding math if TPA is enabled.
-    # No separate group is needed — DCP group has the correct topology
-    # (contiguous ranks within TP group, same as TPA grouping).
+    # TPA reuses the DCP group (same rank topology).
     global _TPA_SIZE
     if config is not None and config.parallel_config.dcp_size > 1:
         _TPA_SIZE = config.parallel_config.tpa_size

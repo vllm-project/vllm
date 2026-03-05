@@ -310,15 +310,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         )
         self.num_heads_kv = self.model_config.get_num_kv_heads(self.parallel_config)
 
-        # Fix for TPA GQA: When TPA is enabled with DCP > 1, KV heads are
-        # distributed by TPA (attention TP), not full TP. The config methods
-        # above use full TP, which underestimates num_heads_kv when
-        # total_kv_heads < TP but total_kv_heads >= TPA (e.g., Nemotron-49B
-        # with 8 KV heads, TP=16, DCP=4 → TPA=4 → 2 KV heads/rank, not 1).
-        # This affects FA3 AOT scheduler metadata correctness.
-        # Note: num_heads_q does NOT need fixing because the AOT scheduler
-        # already multiplies it by dcp_world_size (line ~398), which gives
-        # the same result: (total_q/TP)*DCP = total_q/TPA.
+        # TPA GQA: KV heads are sharded by TPA, not full TP.
         tpa_size = self.parallel_config.tpa_size
         if tpa_size < self.parallel_config.tensor_parallel_size:
             total_kv_heads = self.model_config.get_total_num_kv_heads()
@@ -896,15 +888,11 @@ class FlashAttentionImpl(AttentionImpl):
             list(self.sliding_window) if self.sliding_window is not None else None
         )
 
-        # Check if this is TPA GQA mode (TPA > 1)
-        # In TPA GQA mode, GPUs in the same DCP group have the same Q and KV
-        # heads so we don't need to AllGather Q
-        from vllm.distributed.parallel_state import is_tpa_gqa_mode
+        from vllm.distributed.parallel_state import is_tpa_gqa_mode  # noqa: E402
 
         tpa_gqa_mode = is_tpa_gqa_mode()
 
-        # TPA GQA: compute with local Q and local KV (same heads)
-        # Standard DCP or TPA MLA: AllGather Q across DCP ranks
+        # TPA GQA: DCP ranks share the same heads, no AllGather needed.
         context_q = query if tpa_gqa_mode else get_dcp_group().all_gather(query, dim=1)
 
         n = context_q.shape[0]
@@ -971,9 +959,8 @@ class FlashAttentionImpl(AttentionImpl):
             num_splits=attn_metadata.max_num_splits,
         )
 
-        # In TPA GQA mode, query attention output has TPA-sized heads but
-        # context attention output has TP-sized heads (after A2A scatter).
-        # Scatter query attention output to match.
+        # TPA GQA: slice query output from TPA-sized to TP-sized heads
+        # to match context output shape after DCP combine.
         if tpa_gqa_mode:
             dcp_group = get_dcp_group()
             dcp_rank = dcp_group.rank_in_group
