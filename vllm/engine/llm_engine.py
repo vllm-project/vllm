@@ -562,7 +562,7 @@ class LLMEngine:
         """Add a processed request to the engine's request pool.
         return the created sequence group.
         """
-        if isinstance(params, SamplingParams) and params.n > 1:
+        if isinstance(params, SamplingParams) and (params.n > 1 or params.tree_search_params.enable_tree_search):
             ParallelSampleSequenceGroup.add_request(
                 request_id,
                 self,
@@ -625,8 +625,8 @@ class LLMEngine:
         min_cost_scheduler = self.scheduler[costs.index(min(costs))]
         min_cost_scheduler.add_seq_group(seq_group)
 
-        if params.tree_search_params.enable_tree_search:
-            self.seq_id_to_seq_group[request_id] = seq_group
+        # if params.tree_search_params.enable_tree_search:
+        #     self.seq_id_to_seq_group[request_id] = seq_group
 
         return seq_group
 
@@ -1563,7 +1563,8 @@ class LLMEngine:
         new_seq = copy.deepcopy(original_seq)
         new_seq.seq_id = next(self.seq_counter)
         new_seq.status = SequenceStatus.WAITING
-        request_id = f"{original_seq_group.request_id}_branch_{branch_id}"
+        new_seq.append_token_id(token_id, logprobs=logprobs_dict)
+        request_id = f"{original_seq_group.request_id}{branch_id}"
         arrival_time = time.time()
 
         new_seq_group = self._create_sequence_group_with_sampling(

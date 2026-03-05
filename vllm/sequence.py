@@ -1504,6 +1504,7 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             group.seq_id_to_index[request_id_i] = i
             params = original_params.clone()
             params.n = 1
+            params.tree_search_params.enable_tree_search = False
             if params.seed is not None:
                 params.seed += i
             seq_group = engine._add_processed_request(

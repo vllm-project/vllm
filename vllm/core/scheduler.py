@@ -591,12 +591,9 @@ class Scheduler:
                 # When n>1, seq_group.request_id looks like
                 # foo_parallel_sample_0, while request_ids is just foo, and we
                 # should resolve it as real_request_id to match.
-                if hasattr(seq_group, 'group_id'):
-                    if seq_group.request_id in seq_id_to_seq_group:
-                        real_request_id = seq_id_to_seq_group[
-                            seq_group.request_id].group_id
-                    else:
-                        real_request_id = seq_group.group_id
+                if seq_group.request_id in seq_id_to_seq_group:
+                    real_request_id = seq_id_to_seq_group[
+                        seq_group.request_id].group_id
                 else:
                     real_request_id = seq_group.request_id
                 if real_request_id in request_ids:
