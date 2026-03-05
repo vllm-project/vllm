@@ -373,6 +373,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     reasoning_effort=self.reasoning_effort,
                 ),
             ),
+            media_io_kwargs=self.media_io_kwargs,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:

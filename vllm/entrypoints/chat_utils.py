@@ -494,7 +494,6 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
     @property
     def media_io_kwargs(self) -> dict[str, dict[str, Any]] | None:
-        """Per-request media_io_kwargs override config-level ones."""
         return self._media_io_kwargs or (
             self._model_config.multimodal_config.media_io_kwargs
             if self._model_config.multimodal_config

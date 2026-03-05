@@ -36,8 +36,6 @@ class TerratorchRenderer(BaseRenderer):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
-        *,
-        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
 
@@ -45,7 +43,7 @@ class TerratorchRenderer(BaseRenderer):
             messages,
             model_config,
             content_format="string",
-            media_io_kwargs=media_io_kwargs,
+            media_io_kwargs=params.media_io_kwargs,
         )
 
         prompt = parse_dec_only_prompt([1])  # Dummy token IDs
@@ -60,8 +58,6 @@ class TerratorchRenderer(BaseRenderer):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
-        *,
-        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
 
@@ -69,7 +65,7 @@ class TerratorchRenderer(BaseRenderer):
             messages,
             model_config,
             content_format="string",
-            media_io_kwargs=media_io_kwargs,
+            media_io_kwargs=params.media_io_kwargs,
         )
 
         prompt = parse_dec_only_prompt([1])  # Dummy token IDs

@@ -974,10 +974,15 @@ class OpenAIServing:
             ),
         )
 
+        mm_config = self.model_config.multimodal_config
+
         tok_params = request.build_tok_params(self.model_config)
         chat_params = request.build_chat_params(
             default_template, default_template_content_format
-        ).with_defaults(default_template_kwargs)
+        ).with_defaults(
+            default_template_kwargs,
+            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
+        )
 
         (conversation,), (engine_prompt,) = await renderer.render_chat_async(
             [messages],
@@ -986,7 +991,6 @@ class OpenAIServing:
             prompt_extras={
                 k: v
                 for k in (
-                    "media_io_kwargs",
                     "mm_processor_kwargs",
                     "cache_salt",
                 )

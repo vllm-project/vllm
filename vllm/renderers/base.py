@@ -262,8 +262,6 @@ class BaseRenderer(ABC, Generic[_T]):
         self,
         messages: list["ChatCompletionMessageParam"],
         params: ChatParams,
-        *,
-        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[list["ConversationMessage"], DictPrompt]:
         raise NotImplementedError
 
@@ -271,10 +269,8 @@ class BaseRenderer(ABC, Generic[_T]):
         self,
         messages: list["ChatCompletionMessageParam"],
         params: ChatParams,
-        *,
-        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[list["ConversationMessage"], DictPrompt]:
-        return self.render_messages(messages, params, media_io_kwargs=media_io_kwargs)
+        return self.render_messages(messages, params)
 
     # Step 2: Tokenize prompts if necessary
     def _tokenize_prompt(
@@ -715,12 +711,8 @@ class BaseRenderer(ABC, Generic[_T]):
         if tok_params is None:
             tok_params = self.default_chat_tok_params
 
-        media_io_kwargs = (prompt_extras or {}).pop("media_io_kwargs", None)
-
         rendered = [
-            self.render_messages(
-                conversation, chat_params, media_io_kwargs=media_io_kwargs
-            )
+            self.render_messages(conversation, chat_params)
             for conversation in conversations
         ]
 
@@ -753,12 +745,8 @@ class BaseRenderer(ABC, Generic[_T]):
         if tok_params is None:
             tok_params = self.default_chat_tok_params
 
-        media_io_kwargs = (prompt_extras or {}).pop("media_io_kwargs", None)
-
         rendered = [
-            self.render_messages_async(
-                conversation, chat_params, media_io_kwargs=media_io_kwargs
-            )
+            self.render_messages_async(conversation, chat_params)
             for conversation in conversations
         ]
 

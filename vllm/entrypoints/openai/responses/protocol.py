@@ -283,6 +283,7 @@ class ResponsesRequest(OpenAIBaseModel):
                     reasoning_effort=None if reasoning is None else reasoning.effort,
                 ),
             ),
+            media_io_kwargs=self.media_io_kwargs,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
