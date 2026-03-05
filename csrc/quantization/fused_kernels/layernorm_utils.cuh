@@ -356,10 +356,9 @@ __device__ void compute_dynamic_per_token_scales(
 
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; ++j) {
-        block_absmax_val_maybe =
-            fmaxf(block_absmax_val_maybe,
-                  fabs(static_cast<scalar_t>(x.val[j] * rms) *
-                       effective_weight<is_gemma>(w.val[j])));
+        block_absmax_val_maybe = fmaxf(
+            block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.val[j] * rms) *
+                                         effective_weight<is_gemma>(w.val[j])));
       }
     }
 
@@ -443,10 +442,9 @@ __device__ void compute_dynamic_per_token_scales(
 
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; ++j) {
-        block_absmax_val_maybe =
-            fmaxf(block_absmax_val_maybe,
-                  fabs(static_cast<scalar_t>(x.val[j] * rms) *
-                       effective_weight<is_gemma>(w.val[j])));
+        block_absmax_val_maybe = fmaxf(
+            block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.val[j] * rms) *
+                                         effective_weight<is_gemma>(w.val[j])));
       }
     }
 

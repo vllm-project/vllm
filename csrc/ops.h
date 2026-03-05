@@ -154,16 +154,13 @@ void gemma_rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                      torch::Tensor& weight,
                                      torch::Tensor& scale, double epsilon);
 
-void gemma_fused_add_rms_norm_static_fp8_quant(torch::Tensor& out,
-                                               torch::Tensor& input,
-                                               torch::Tensor& residual,
-                                               torch::Tensor& weight,
-                                               torch::Tensor& scale,
-                                               double epsilon);
+void gemma_fused_add_rms_norm_static_fp8_quant(
+    torch::Tensor& out, torch::Tensor& input, torch::Tensor& residual,
+    torch::Tensor& weight, torch::Tensor& scale, double epsilon);
 
 void gemma_rms_norm_dynamic_per_token_quant(
-    torch::Tensor& out, torch::Tensor const& input,
-    torch::Tensor const& weight, torch::Tensor& scales, double const epsilon,
+    torch::Tensor& out, torch::Tensor const& input, torch::Tensor const& weight,
+    torch::Tensor& scales, double const epsilon,
     std::optional<torch::Tensor> scale_ub,
     std::optional<torch::Tensor> residual);
 

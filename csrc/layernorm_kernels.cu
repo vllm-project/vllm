@@ -261,7 +261,7 @@ void gemma_rms_norm(torch::Tensor& out,     // [..., hidden_size]
   rms_norm_impl<true>(out, input, weight, epsilon);
 }
 
-#define LAUNCH_FUSED_ADD_RMS_NORM(width, _is_gemma)                          \
+#define LAUNCH_FUSED_ADD_RMS_NORM(width, _is_gemma)                         \
   VLLM_DISPATCH_FLOATING_TYPES(                                             \
       input.scalar_type(), "fused_add_rms_norm_kernel", [&] {               \
         vllm::fused_add_rms_norm_kernel<scalar_t, width, _is_gemma>         \
@@ -272,10 +272,11 @@ void gemma_rms_norm(torch::Tensor& out,     // [..., hidden_size]
       });
 
 template <bool is_gemma = false>
-static void fused_add_rms_norm_impl(torch::Tensor& input,     // [..., hidden_size]
-                                     torch::Tensor& residual,  // [..., hidden_size]
-                                     torch::Tensor& weight,    // [hidden_size]
-                                     double epsilon) {
+static void fused_add_rms_norm_impl(
+    torch::Tensor& input,     // [..., hidden_size]
+    torch::Tensor& residual,  // [..., hidden_size]
+    torch::Tensor& weight,    // [hidden_size]
+    double epsilon) {
   TORCH_CHECK(weight.scalar_type() == input.scalar_type());
   TORCH_CHECK(input.scalar_type() == residual.scalar_type());
   TORCH_CHECK(residual.is_contiguous());

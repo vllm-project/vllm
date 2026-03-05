@@ -237,19 +237,19 @@ static void rms_norm_static_fp8_quant_impl(
       });
 }
 
-#define LAUNCH_FUSED_ADD_RMS_NORM(width, _is_gemma)                           \
-  VLLM_DISPATCH_FLOATING_TYPES(                                              \
-      input.scalar_type(), "fused_add_rms_norm_kernel_scalar_type", [&] {    \
-        VLLM_DISPATCH_FP8_TYPES(                                             \
-            out.scalar_type(), "fused_add_rms_norm_kernel_fp8_type", [&] {   \
-              vllm::fused_add_rms_norm_static_fp8_quant_kernel<              \
-                  scalar_t, width, fp8_t, _is_gemma>                         \
-                  <<<grid, block, 0, stream>>>(                              \
-                      out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),     \
-                      input_stride, residual.data_ptr<scalar_t>(),           \
-                      weight.data_ptr<scalar_t>(), scale.data_ptr<float>(),  \
-                      epsilon, num_tokens, hidden_size);                     \
-            });                                                              \
+#define LAUNCH_FUSED_ADD_RMS_NORM(width, _is_gemma)                         \
+  VLLM_DISPATCH_FLOATING_TYPES(                                             \
+      input.scalar_type(), "fused_add_rms_norm_kernel_scalar_type", [&] {   \
+        VLLM_DISPATCH_FP8_TYPES(                                            \
+            out.scalar_type(), "fused_add_rms_norm_kernel_fp8_type", [&] {  \
+              vllm::fused_add_rms_norm_static_fp8_quant_kernel<             \
+                  scalar_t, width, fp8_t, _is_gemma>                        \
+                  <<<grid, block, 0, stream>>>(                             \
+                      out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),    \
+                      input_stride, residual.data_ptr<scalar_t>(),          \
+                      weight.data_ptr<scalar_t>(), scale.data_ptr<float>(), \
+                      epsilon, num_tokens, hidden_size);                    \
+            });                                                             \
       });
 template <bool is_gemma = false>
 static void fused_add_rms_norm_static_fp8_quant_impl(
@@ -308,8 +308,7 @@ void fused_add_rms_norm_static_fp8_quant(torch::Tensor& out,
                                          torch::Tensor& input,
                                          torch::Tensor& residual,
                                          torch::Tensor& weight,
-                                         torch::Tensor& scale,
-                                         double epsilon) {
+                                         torch::Tensor& scale, double epsilon) {
   fused_add_rms_norm_static_fp8_quant_impl<false>(out, input, residual, weight,
                                                   scale, epsilon);
 }
@@ -321,12 +320,9 @@ void gemma_rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
   rms_norm_static_fp8_quant_impl<true>(out, input, weight, scale, epsilon);
 }
 
-void gemma_fused_add_rms_norm_static_fp8_quant(torch::Tensor& out,
-                                               torch::Tensor& input,
-                                               torch::Tensor& residual,
-                                               torch::Tensor& weight,
-                                               torch::Tensor& scale,
-                                               double epsilon) {
+void gemma_fused_add_rms_norm_static_fp8_quant(
+    torch::Tensor& out, torch::Tensor& input, torch::Tensor& residual,
+    torch::Tensor& weight, torch::Tensor& scale, double epsilon) {
   fused_add_rms_norm_static_fp8_quant_impl<true>(out, input, residual, weight,
                                                  scale, epsilon);
 }

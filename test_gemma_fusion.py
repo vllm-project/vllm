@@ -9,17 +9,17 @@ This script:
 4. Reports on fusion behavior
 """
 
-import torch
 import sys
-import os
+
+import torch
 
 # Add parent directory to path for imports
-sys.path.insert(0, '/home/jackz_elevenlabs_io/Dev/asr-inference')
+sys.path.insert(0, "/home/jackz_elevenlabs_io/Dev/asr-inference")
 
 # Import vLLM first to ensure ops are registered
 import vllm._C  # noqa: F401
-
 from asr.ckpts import get_ckpt
+
 
 def check_ops_registered():
     """Verify all 6 Gemma ops are registered."""
@@ -51,6 +51,7 @@ def check_ops_registered():
 
     return all_registered
 
+
 def test_basic_ops():
     """Test basic op functionality."""
     print("\n" + "=" * 80)
@@ -58,29 +59,32 @@ def test_basic_ops():
     print("=" * 80)
 
     # Test gemma_rms_norm
-    input_tensor = torch.randn(4, 16, dtype=torch.bfloat16, device='cuda')
-    weight = torch.randn(16, dtype=torch.bfloat16, device='cuda')
+    input_tensor = torch.randn(4, 16, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(16, dtype=torch.bfloat16, device="cuda")
     output = torch.empty_like(input_tensor)
 
     torch.ops._C.gemma_rms_norm(output, input_tensor, weight, 1e-6)
 
-    print(f"✓ gemma_rms_norm executed successfully")
+    print("✓ gemma_rms_norm executed successfully")
     print(f"  Input shape: {input_tensor.shape}, dtype: {input_tensor.dtype}")
     print(f"  Output shape: {output.shape}, dtype: {output.dtype}")
     print(f"  Output range: [{output.min():.4f}, {output.max():.4f}]")
 
     # Test gemma_rms_norm_static_fp8_quant
-    scale = torch.tensor([1.0], dtype=torch.float32, device='cuda')
-    fp8_output = torch.empty(input_tensor.shape, dtype=torch.float8_e4m3fn, device='cuda')
+    scale = torch.tensor([1.0], dtype=torch.float32, device="cuda")
+    fp8_output = torch.empty(
+        input_tensor.shape, dtype=torch.float8_e4m3fn, device="cuda"
+    )
 
     torch.ops._C.gemma_rms_norm_static_fp8_quant(
         fp8_output, input_tensor, weight, scale, 1e-6
     )
 
-    print(f"\n✓ gemma_rms_norm_static_fp8_quant executed successfully")
+    print("\n✓ gemma_rms_norm_static_fp8_quant executed successfully")
     print(f"  FP8 output shape: {fp8_output.shape}, dtype: {fp8_output.dtype}")
 
     return True
+
 
 def test_model_loading():
     """Test loading scribe_v2_fp8 model."""
@@ -109,15 +113,17 @@ def test_model_loading():
 
         print("\n✓ Model loaded successfully!")
         print(f"  Model: {ckpt.hf_dir}")
-        print(f"  Max tokens: 512")
+        print("  Max tokens: 512")
 
         return llm, ckpt
 
     except Exception as e:
         print(f"\n✗ Model loading failed: {e}")
         import traceback
+
         traceback.print_exc()
         return None, None
+
 
 def test_inference(llm):
     """Test basic inference."""
@@ -149,8 +155,10 @@ def test_inference(llm):
     except Exception as e:
         print(f"\n✗ Inference failed: {e}")
         import traceback
+
         traceback.print_exc()
         return False
+
 
 def main():
     print("\n" + "=" * 80)
@@ -170,6 +178,7 @@ def main():
     except Exception as e:
         print(f"\n✗ TEST FAILED: Basic ops test error: {e}")
         import traceback
+
         traceback.print_exc()
         return 1
 
@@ -205,6 +214,7 @@ def main():
     print("\n✓ Full end-to-end test (including model inference) passed!")
 
     return 0
+
 
 if __name__ == "__main__":
     exit(main())

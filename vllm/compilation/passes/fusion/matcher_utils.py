@@ -483,9 +483,7 @@ class MatcherGemmaRMSNorm(MatcherCustomOp):
         if enabled is None:
             # Use custom op path only if the non-quant op is registered
             # and GemmaRMSNorm custom op dispatch is enabled.
-            enabled = (
-                GEMMA_RMS_OP is not None and GemmaRMSNorm.enabled()
-            )
+            enabled = GEMMA_RMS_OP is not None and GemmaRMSNorm.enabled()
 
         super().__init__(enabled)
         self.epsilon = epsilon
@@ -520,9 +518,7 @@ class MatcherGemmaRMSNorm(MatcherCustomOp):
         input: torch.Tensor,
         weight: torch.Tensor,
     ) -> torch.Tensor:
-        return GemmaRMSNorm._forward_static_no_residual(
-            weight, self.epsilon, input
-        )
+        return GemmaRMSNorm._forward_static_no_residual(weight, self.epsilon, input)
 
 
 class MatcherFusedAddGemmaRMSNorm(MatcherCustomOp):
@@ -532,9 +528,7 @@ class MatcherFusedAddGemmaRMSNorm(MatcherCustomOp):
         enabled: bool | None = None,
     ) -> None:
         if enabled is None:
-            enabled = (
-                GEMMA_RMS_ADD_OP is not None and GemmaRMSNorm.enabled()
-            )
+            enabled = GEMMA_RMS_ADD_OP is not None and GemmaRMSNorm.enabled()
 
         super().__init__(enabled)
         self.epsilon = epsilon

@@ -541,9 +541,7 @@ def gemma_rms_norm_static_fp8_quant(
     scale: torch.Tensor,
     epsilon: float,
 ) -> None:
-    torch.ops._C.gemma_rms_norm_static_fp8_quant(
-        out, input, weight, scale, epsilon
-    )
+    torch.ops._C.gemma_rms_norm_static_fp8_quant(out, input, weight, scale, epsilon)
 
 
 def gemma_fused_add_rms_norm_static_fp8_quant(
@@ -592,8 +590,8 @@ def gemma_rms_norm_per_block_quant(
     tma_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert len(group_size) == 2
-    assert tma_alignment in [0, 4], (
-        "Expected TMA alignment 0 or 4, but got " + str(tma_alignment)
+    assert tma_alignment in [0, 4], "Expected TMA alignment 0 or 4, but got " + str(
+        tma_alignment
     )
     output = torch.empty_like(input, dtype=quant_dtype)
     scales = _create_per_block_quant_scales(

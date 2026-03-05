@@ -118,33 +118,33 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
 # Gemma RMSNorm fused ops (weight applied as 1 + weight)
 GEMMA_FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {}
 if hasattr(torch.ops._C, "gemma_rms_norm_static_fp8_quant"):
-    GEMMA_FUSED_OPS[FusedRMSQuantKey(
-        kFp8StaticTensorSym, False
-    )] = torch.ops._C.gemma_rms_norm_static_fp8_quant.default
+    GEMMA_FUSED_OPS[FusedRMSQuantKey(kFp8StaticTensorSym, False)] = (
+        torch.ops._C.gemma_rms_norm_static_fp8_quant.default
+    )
 if hasattr(torch.ops._C, "gemma_fused_add_rms_norm_static_fp8_quant"):
-    GEMMA_FUSED_OPS[FusedRMSQuantKey(
-        kFp8StaticTensorSym, True
-    )] = torch.ops._C.gemma_fused_add_rms_norm_static_fp8_quant.default
+    GEMMA_FUSED_OPS[FusedRMSQuantKey(kFp8StaticTensorSym, True)] = (
+        torch.ops._C.gemma_fused_add_rms_norm_static_fp8_quant.default
+    )
 if hasattr(torch.ops._C, "gemma_rms_norm_dynamic_per_token_quant"):
-    GEMMA_FUSED_OPS[FusedRMSQuantKey(
-        kFp8DynamicTokenSym, False
-    )] = torch.ops._C.gemma_rms_norm_dynamic_per_token_quant.default
-    GEMMA_FUSED_OPS[FusedRMSQuantKey(
-        kFp8DynamicTokenSym, True
-    )] = torch.ops._C.gemma_rms_norm_dynamic_per_token_quant.default
+    GEMMA_FUSED_OPS[FusedRMSQuantKey(kFp8DynamicTokenSym, False)] = (
+        torch.ops._C.gemma_rms_norm_dynamic_per_token_quant.default
+    )
+    GEMMA_FUSED_OPS[FusedRMSQuantKey(kFp8DynamicTokenSym, True)] = (
+        torch.ops._C.gemma_rms_norm_dynamic_per_token_quant.default
+    )
 if hasattr(torch.ops._C, "gemma_rms_norm_per_block_quant"):
-    GEMMA_FUSED_OPS[FusedRMSQuantKey(
-        kFp8Dynamic128Sym, False
-    )] = torch.ops._C.gemma_rms_norm_per_block_quant.default
-    GEMMA_FUSED_OPS[FusedRMSQuantKey(
-        kFp8Dynamic128Sym, True
-    )] = torch.ops._C.gemma_rms_norm_per_block_quant.default
-    GEMMA_FUSED_OPS[FusedRMSQuantKey(
-        kFp8Dynamic64Sym, False
-    )] = torch.ops._C.gemma_rms_norm_per_block_quant.default
-    GEMMA_FUSED_OPS[FusedRMSQuantKey(
-        kFp8Dynamic64Sym, True
-    )] = torch.ops._C.gemma_rms_norm_per_block_quant.default
+    GEMMA_FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic128Sym, False)] = (
+        torch.ops._C.gemma_rms_norm_per_block_quant.default
+    )
+    GEMMA_FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic128Sym, True)] = (
+        torch.ops._C.gemma_rms_norm_per_block_quant.default
+    )
+    GEMMA_FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic64Sym, False)] = (
+        torch.ops._C.gemma_rms_norm_per_block_quant.default
+    )
+    GEMMA_FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic64Sym, True)] = (
+        torch.ops._C.gemma_rms_norm_per_block_quant.default
+    )
 
 
 class RMSNormQuantPattern:
@@ -701,9 +701,7 @@ class FusedAddGemmaRMSNormDynamicQuantPattern(
         self._init_gemma(epsilon, key)
 
 
-class GemmaRMSNormGroupQuantPattern(
-    GemmaRMSNormQuantPattern, RMSNormGroupQuantPattern
-):
+class GemmaRMSNormGroupQuantPattern(GemmaRMSNormQuantPattern, RMSNormGroupQuantPattern):
     def __init__(
         self,
         epsilon: float,
@@ -826,15 +824,15 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             for epsilon in [1e-5, 1e-6]:
                 # Fuse gemma_fused_add_rms_norm + static fp8 quant
                 if FusedRMSQuantKey(kFp8StaticTensorSym, True) in GEMMA_FUSED_OPS:
-                    FusedAddGemmaRMSNormStaticQuantPattern(
-                        epsilon, FP8_DTYPE
-                    ).register(self.patterns)
+                    FusedAddGemmaRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(
+                        self.patterns
+                    )
 
                 # Fuse gemma_rms_norm + static fp8 quant
                 if FusedRMSQuantKey(kFp8StaticTensorSym, False) in GEMMA_FUSED_OPS:
-                    GemmaRMSNormStaticQuantPattern(
-                        epsilon, FP8_DTYPE
-                    ).register(self.patterns)
+                    GemmaRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(
+                        self.patterns
+                    )
 
                 # Fuse gemma_fused_add_rms_norm + dynamic per-token fp8 quant
                 if FusedRMSQuantKey(kFp8DynamicTokenSym, True) in GEMMA_FUSED_OPS:
@@ -844,9 +842,9 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
 
                 # Fuse gemma_rms_norm + dynamic per-token fp8 quant
                 if FusedRMSQuantKey(kFp8DynamicTokenSym, False) in GEMMA_FUSED_OPS:
-                    GemmaRMSNormDynamicQuantPattern(
-                        epsilon, FP8_DTYPE
-                    ).register(self.patterns)
+                    GemmaRMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(
+                        self.patterns
+                    )
 
                 # Gemma group quant patterns
                 if current_platform.is_cuda():
@@ -854,9 +852,7 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
                         gkey = FusedRMSQuantKey(
                             QuantKey(
                                 dtype=FP8_DTYPE,
-                                scale=ScaleDesc(
-                                    torch.float32, False, group_shape
-                                ),
+                                scale=ScaleDesc(torch.float32, False, group_shape),
                                 symmetric=True,
                             ),
                             True,
