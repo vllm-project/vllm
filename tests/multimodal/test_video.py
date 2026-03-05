@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -307,8 +308,14 @@ def dummy_video_path():
     )
 
     path = tempfile.mkdtemp()
-    video_path = f"{path}/test_RGB_video.mp4"
-    create_video_from_image(image_path, video_path, num_frames=1800, fps=30)
+    try:
+        video_path = Path(path) / "test_RGB_video.mp4"
+        create_video_from_image(
+            str(image_path), str(video_path), num_frames=1800, fps=30
+        )
+        yield str(video_path)
+    finally:
+        shutil.rmtree(path)
     return video_path
 
 
