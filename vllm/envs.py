@@ -263,7 +263,10 @@ def get_default_config_root():
 def maybe_convert_int(value: str | None) -> int | None:
     if value is None:
         return None
-    return int(value)
+    try:
+        return int(value)
+    except ValueError:
+        return int(float(value))
 
 
 def maybe_convert_bool(value: str | None) -> bool | None:
@@ -693,7 +696,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
     # (CPU backend only) CPU key-value cache space.
     # default is None and will be set as 4 GB
-    "VLLM_CPU_KVCACHE_SPACE": lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0"))
+    "VLLM_CPU_KVCACHE_SPACE":
+    lambda: int(float(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")))
     if "VLLM_CPU_KVCACHE_SPACE" in os.environ
     else None,
     # (CPU backend only) CPU core ids bound by OpenMP threads, e.g., "0-31",

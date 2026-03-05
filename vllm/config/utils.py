@@ -443,5 +443,8 @@ def set_from_deprecated_env_if_set(
         if to_bool:
             field_value = env_value.lower() in ("1", "true")
         elif to_int:
-            field_value = int(env_value)
+            try:
+                field_value = int(env_value)
+            except ValueError:
+                field_value = int(float(env_value))
         setattr(config, field_name, field_value)

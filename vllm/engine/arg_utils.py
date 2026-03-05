@@ -2250,8 +2250,11 @@ def human_readable_int(value: str) -> int:
                     f"{number}{suffix.lower()} instead?"
                 ) from e
 
-    # Regular plain number.
-    return int(value)
+    # Regular plain number. Use int(float(...)) to accept values like '4.0'.
+    try:
+        return int(value)
+    except ValueError:
+        return int(float(value))
 
 
 def human_readable_int_or_auto(value: str) -> int:
