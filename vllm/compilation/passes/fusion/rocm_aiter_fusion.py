@@ -357,8 +357,6 @@ class AiterFusedAddRMSNormStaticQuantPattern(AiterRMSNormQuantPattern):
             )
             return at[0], at[1], scale.reshape((1,))
 
-            return at[0], at[1]
-
         inputs = [
             # input, weight, residual
             *self.rmsnorm_matcher.inputs(),
