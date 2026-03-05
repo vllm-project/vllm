@@ -1401,7 +1401,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
-        return make_nvfp4_moe_quant_config(
+        result = make_nvfp4_moe_quant_config(
             backend=self.nvfp4_backend,
             w13_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
@@ -1412,6 +1412,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             g1_alphas=getattr(layer, "g1_alphas", None),
             g2_alphas=getattr(layer, "g2_alphas", None),
         )
+        assert result is not None
+        return result
 
     @property
     def supports_eplb(self) -> bool:
