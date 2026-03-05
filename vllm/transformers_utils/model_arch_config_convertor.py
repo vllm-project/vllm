@@ -491,9 +491,9 @@ class LongCatFlashMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 1)
 
 
-# hf_config.model_type (or architecture name) -> convertor class
+# hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
-    "AnyModel": AnyModelArchConfigConvertor,
+    "anymodel": AnyModelArchConfigConvertor,
     "mamba": MambaModelArchConfigConvertor,
     "falcon_mamba": MambaModelArchConfigConvertor,
     "timm_wrapper": TerratorchModelArchConfigConvertor,

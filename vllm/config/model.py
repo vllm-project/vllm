@@ -644,15 +644,8 @@ class ModelConfig:
         self,
     ) -> ModelArchitectureConfig:
         convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(
-            self.hf_config.model_type, None
+            self.hf_config.model_type, ModelArchConfigConvertorBase
         )
-        if convertor_cls is None:
-            for arch in getattr(self.hf_config, "architectures", []):
-                convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(arch)
-                if convertor_cls is not None:
-                    break
-        if convertor_cls is None:
-            convertor_cls = ModelArchConfigConvertorBase
         convertor = convertor_cls(self.hf_config, self.hf_text_config)
         return convertor.convert()
 
