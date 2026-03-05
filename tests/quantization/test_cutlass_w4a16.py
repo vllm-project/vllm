@@ -27,7 +27,6 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.kernels.linear.mixed_precision import (
     MacheteLinearKernel,
 )
-
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod,
     CompressedTensorsWNA16,
