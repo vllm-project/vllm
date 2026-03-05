@@ -39,18 +39,11 @@ class CacheConfig:
     """Configuration for the KV cache."""
 
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
-    _BLOCK_SIZE_UNSET: ClassVar[int] = -1
 
-    block_size: int = Field(default=_BLOCK_SIZE_UNSET)
-    """Size of a contiguous cache block in number of tokens.
-
-    Defaults to DEFAULT_BLOCK_SIZE and may be overridden by the platform
-    or attention backend."""
+    block_size: int | None = None
+    """Size of a contiguous cache block in number of tokens."""
     user_specified_block_size: bool = field(default=False, init=False)
-    """Whether the user explicitly set --block-size. When True, platform
-    and backend auto-selection will not override block_size.
-    Automatically set when block_size is provided in the constructor
-    or assigned after construction."""
+    """Whether block_size was explicitly provided. Derived automatically."""
     gpu_memory_utilization: float = Field(default=0.9, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
@@ -187,6 +180,7 @@ class CacheConfig:
             "cpu_kvcache_space_bytes",
             "mamba_page_size_padded",
             "user_specified_block_size",
+            "_block_size_resolved",
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
@@ -204,16 +198,17 @@ class CacheConfig:
         # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
 
-    @field_validator("block_size", mode="before")
-    @classmethod
-    def _coerce_block_size(cls, v: object) -> int:
-        if v is None:
-            return cls._BLOCK_SIZE_UNSET
-        return v  # type: ignore[return-value]
+    _block_size_resolved: bool = field(default=False, init=False)
+    """Guard against pydantic re-running _apply_block_size_default."""
 
     @model_validator(mode="after")
-    def _detect_user_specified_block_size(self) -> "CacheConfig":
-        if self.block_size == self._BLOCK_SIZE_UNSET:
+    def _apply_block_size_default(self) -> "CacheConfig":
+        # Pydantic re-runs validators when CacheConfig is nested inside
+        # another pydantic model (e.g. VllmConfig). Guard against that.
+        if self._block_size_resolved:
+            return self
+        object.__setattr__(self, "_block_size_resolved", True)
+        if self.block_size is None:
             object.__setattr__(self, "block_size", self.DEFAULT_BLOCK_SIZE)
         else:
             object.__setattr__(self, "user_specified_block_size", True)
