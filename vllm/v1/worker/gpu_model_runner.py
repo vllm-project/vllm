@@ -5439,7 +5439,6 @@ class GPUModelRunner(
                             if mode == CUDAGraphMode.FULL and i == 0
                             else None
                         ),
-                        num_warmups=None,
                     )
                     torch.accelerator.synchronize()
                     free_after = torch.accelerator.get_memory_info()[0]
