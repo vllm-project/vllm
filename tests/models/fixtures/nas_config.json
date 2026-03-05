@@ -663,7 +663,7 @@
     "intermediate_size": 14336,
     "max_position_embeddings": 131072,
     "mlp_bias": false,
-    "model_type": "llama",
+    "model_type": "anymodel",
     "num_attention_heads": 32,
     "num_hidden_layers": 32,
     "num_key_value_heads": 8,
