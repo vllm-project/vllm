@@ -357,18 +357,18 @@ class TpKVTopology:
     def __post_init__(self):
         # Figure out whether the first dimension of the cache is K/V
         # or num_blocks. This is used to register the memory regions correctly.
-        _MOCK_BLOCK_SIZE = 16
-        kv_cache_shape: tuple[int, ...] = self.attn_backends[0].get_kv_cache_shape(
-            num_blocks=1, block_size=_MOCK_BLOCK_SIZE, num_kv_heads=1, head_size=1
-        )
-        logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
+        if not self.is_mamba:
+            _MOCK_BLOCK_SIZE = 16
+            kv_cache_shape: tuple[int, ...] = self.attn_backends[0].get_kv_cache_shape(
+                num_blocks=1, block_size=_MOCK_BLOCK_SIZE, num_kv_heads=1, head_size=1
+            )
+            logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
         # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
         # we just mock num_blocks to 1 for the dimension check below.
+        # Hybrid SSM models assume a single blocks_first layout
         self._is_kv_layout_blocks_first = (
-            len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
+            self.is_mamba or (len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1)
         )
-        # FIXME to patch only once when mamba is detected. Basically we treat all backends as nb, 2, ...
-        # self._is_kv_layout_blocks_first = True
 
         self._cross_layers_blocks = False
         if self.tensor_shape is not None:
@@ -394,8 +394,7 @@ class TpKVTopology:
 
     @property
     def is_kv_layout_blocks_first(self) -> bool:
-        # Hybrid SSM models assume a single blocks_first layout
-        return self.is_mamba or self._is_kv_layout_blocks_first
+        return self._is_kv_layout_blocks_first
 
     @property
     def split_k_and_v(self) -> bool:
