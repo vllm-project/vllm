@@ -17,6 +17,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -54,11 +55,32 @@ class EagleCudaGraphManager:
     def get_cudagraph_size(self, num_tokens: int) -> int | None:
         return self.cudagraph_sizes.get(num_tokens)
 
+    def get_cudagraph_runtime_mode(
+        self, num_tokens: int
+    ) -> tuple[CUDAGraphMode, int | None]:
+        cudagraph_size = self.get_cudagraph_size(num_tokens)
+        if cudagraph_size is None:
+            cudagraph_mode = CUDAGraphMode.NONE
+        else:
+            cudagraph_mode = self.cudagraph_mode
+
+        if (
+            cudagraph_mode == CUDAGraphMode.FULL
+            and cudagraph_size is not None
+            and cudagraph_size not in self.graphs
+        ):
+            # If graph wasn't captured yet, fall back to eager.
+            # This might happen when the dummy run is called before capture.
+            cudagraph_mode = CUDAGraphMode.NONE
+            cudagraph_size = None
+        return cudagraph_mode, cudagraph_size
+
     def capture_graph(
         self,
         num_tokens: int,
         capture_cg_mode: CUDAGraphMode,
         generate_fn: Callable,
+        model_state: ModelState,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
@@ -76,12 +98,11 @@ class EagleCudaGraphManager:
         attn_metadata, slot_mappings = prepare_inputs_to_capture(
             num_reqs,
             num_tokens,
+            model_state,
             input_buffers,
             block_tables,
             attn_groups,
-            self.max_model_len,
             kv_cache_config,
-            uniform_decode_query_len=1,
         )
         num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
 
@@ -158,6 +179,7 @@ class EagleCudaGraphManager:
     def capture(
         self,
         generate_fn: Callable,
+        model_state: ModelState,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
@@ -173,6 +195,7 @@ class EagleCudaGraphManager:
             capture_cudagraph_mode=self.cudagraph_mode,
             desc=f"Capturing eagle CUDA graphs ({self.cudagraph_mode.name})",
             generate_fn=generate_fn,
+            model_state=model_state,
             input_buffers=input_buffers,
             block_tables=block_tables,
             attn_groups=attn_groups,

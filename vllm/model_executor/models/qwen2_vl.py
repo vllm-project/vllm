@@ -755,6 +755,7 @@ def _create_qwen2vl_field_factory(
                 "video", video_embed_grid_sizes
             ),
             video_grid_thw=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+            timestamps=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
     return _qwen2vl_field_config
@@ -843,7 +844,13 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         temporal_patch_size = vision_config.temporal_patch_size
 
         mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
-        size = mm_kwargs.get("size", image_processor.size)
+        size = image_processor.size
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+        if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+            size = size | {"shortest_edge": override_min_pixels}
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            size = size | {"longest_edge": override_max_pixels}
 
         if do_resize:
             resized_height, resized_width = smart_resize(
@@ -930,7 +937,14 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             image_processor = self.get_image_processor()
 
             mm_kwargs = self.ctx.get_merged_mm_kwargs({})
-            size = mm_kwargs.get("size", image_processor.size)
+            size = image_processor.size
+            if override_size := mm_kwargs.get("size"):
+                size = size | override_size
+            if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+                size = size | {"shortest_edge": override_min_pixels}
+            if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+                size = size | {"longest_edge": override_max_pixels}
+
             max_pixels = size["longest_edge"]
 
         unit = patch_size * merge_size

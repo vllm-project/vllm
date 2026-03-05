@@ -85,6 +85,7 @@ from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import (
     All2AllBackend,
     DataParallelBackend,
+    DCPCommBackend,
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
 )
@@ -405,6 +406,7 @@ class EngineArgs:
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
+    dcp_comm_backend: DCPCommBackend = ParallelConfig.dcp_comm_backend
     dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
     cp_kv_cache_interleave_size: int = ParallelConfig.cp_kv_cache_interleave_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
@@ -419,6 +421,7 @@ class EngineArgs:
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     moe_backend: MoEBackend = KernelConfig.moe_backend
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
+    enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
@@ -820,6 +823,10 @@ class EngineArgs:
             **parallel_kwargs["decode_context_parallel_size"],
         )
         parallel_group.add_argument(
+            "--dcp-comm-backend",
+            **parallel_kwargs["dcp_comm_backend"],
+        )
+        parallel_group.add_argument(
             "--dcp-kv-cache-interleave-size",
             **parallel_kwargs["dcp_kv_cache_interleave_size"],
         )
@@ -895,6 +902,9 @@ class EngineArgs:
         parallel_group.add_argument(
             "--ubatch-size",
             **parallel_kwargs["ubatch_size"],
+        )
+        parallel_group.add_argument(
+            "--enable-elastic-ep", **parallel_kwargs["enable_elastic_ep"]
         )
         parallel_group.add_argument(
             "--dbo-decode-token-threshold",
@@ -1698,6 +1708,7 @@ class EngineArgs:
             is_moe_model=model_config.is_moe,
             enable_expert_parallel=self.enable_expert_parallel,
             all2all_backend=self.all2all_backend,
+            enable_elastic_ep=self.enable_elastic_ep,
             enable_dbo=self.enable_dbo,
             ubatch_size=self.ubatch_size,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
@@ -1715,6 +1726,7 @@ class EngineArgs:
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
             decode_context_parallel_size=self.decode_context_parallel_size,
+            dcp_comm_backend=self.dcp_comm_backend,
             dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
@@ -1804,13 +1816,10 @@ class EngineArgs:
                     "attention_backend and attention_config.backend "
                     "are mutually exclusive"
                 )
-            # Convert string to enum if needed (CLI parsing returns a string)
-            if isinstance(self.attention_backend, str):
-                attention_config.backend = AttentionBackendEnum[
-                    self.attention_backend.upper()
-                ]
-            else:
-                attention_config.backend = self.attention_backend
+            # Reuse the validator to handle "auto" and string-to-enum conversion
+            attention_config.backend = AttentionConfig.validate_backend_before(
+                self.attention_backend
+            )
 
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)
@@ -2076,20 +2085,19 @@ class EngineArgs:
             )
 
         # Disable chunked prefill and prefix caching for:
-        # POWER (ppc64le)/RISCV CPUs in V1
+        # RISCV CPUs in V1
         if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
-            CpuArchEnum.POWERPC,
             CpuArchEnum.RISCV,
         ):
             logger.info(
-                "Chunked prefill is not supported for POWER, "
-                "and RISC-V CPUs; "
+                "Chunked prefill is not supported for"
+                "RISC-V CPUs; "
                 "disabling it for V1 backend."
             )
             self.enable_chunked_prefill = False
             logger.info(
-                "Prefix caching is not supported for POWER, "
-                "and RISC-V CPUs; "
+                "Prefix caching is not supported for "
+                "RISC-V CPUs; "
                 "disabling it for V1 backend."
             )
             self.enable_prefix_caching = False
@@ -2183,14 +2191,10 @@ class AsyncEngineArgs(EngineArgs):
             "--enable-log-requests",
             action=argparse.BooleanOptionalAction,
             default=AsyncEngineArgs.enable_log_requests,
-            help="Enable logging requests.",
-        )
-        parser.add_argument(
-            "--disable-log-requests",
-            action=argparse.BooleanOptionalAction,
-            default=not AsyncEngineArgs.enable_log_requests,
-            help="[DEPRECATED] Disable logging requests.",
-            deprecated=True,
+            help="Enable logging request information, dependant on log level:\n"
+            "- INFO: Request ID, parameters and LoRA request.\n"
+            "- DEBUG: Prompt inputs (e.g: text, token IDs).\n"
+            "You can set the minimum log level via `VLLM_LOGGING_LEVEL`.",
         )
         current_platform.pre_register_and_update(parser)
         return parser
