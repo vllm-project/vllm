@@ -174,7 +174,6 @@ class ServeContext(Generic[RequestT]):
 
 
 class OpenAIServing:
-    # Limit rejected log frequency
     request_id_prefix: ClassVar[str] = """
     A short string prepended to every request’s ID.
     """
@@ -186,8 +185,7 @@ class OpenAIServing:
         *,
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
-        rejected_log_counter: int = 0,
-        rejected_log_interval: int = 100,
+
     ):
         super().__init__()
 
@@ -607,9 +605,7 @@ class OpenAIServing:
         """
         if isinstance(e, (GenerationError, RequestRejectedError)):
             return self.create_streaming_error_response(
-                str(e),
-                err_type=e.err_type,
-                status_code=e.status_code,
+                str(e), err_type=e.err_type, status_code=e.status_code
             )
         return self.create_streaming_error_response(str(e))
 
