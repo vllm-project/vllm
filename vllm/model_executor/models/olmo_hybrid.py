@@ -268,6 +268,10 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
             prefix=f"{prefix}.o_proj",
         )
 
+        # FLA triton kernels need a PyTorch-backed allocator for scratch
+        # memory (required by triton >= 3.x autotuner). Set once at init.
+        set_triton_allocator(current_platform.current_device())
+
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -532,9 +536,6 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
             core_attn_out_spec, last_recurrent_state = None, None
 
         if attn_metadata.num_prefills > 0:
-            # FLA triton kernels need a PyTorch-backed allocator for scratch
-            # memory (required by triton >= 3.x autotuner).
-            set_triton_allocator(mixed_qkv.device)
             initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
             initial_state[~has_initial_state, ...] = 0
             (
