@@ -135,12 +135,10 @@ class BlockTables:
         idx_mapping: torch.Tensor,
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
-        num_tokens_padded: int | None = None,
+        num_tokens_padded: int,
     ) -> torch.Tensor:
         num_reqs = idx_mapping.shape[0]
         num_tokens = positions.shape[0]
-        if num_tokens_padded is None:
-            num_tokens_padded = num_tokens
         num_groups = self.num_kv_cache_groups
         _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
             num_tokens,

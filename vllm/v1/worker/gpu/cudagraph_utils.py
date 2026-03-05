@@ -31,28 +31,23 @@ class BatchExecutionDescriptor:
     cg_mode: CUDAGraphMode
     num_tokens: int
     num_reqs: int
-    uniform: bool = False
-    # Future LoRA support: num_active_loras: int = 0
+    uniform_token_count: int | None = None
 
 
-def is_uniform_batch(
+def get_uniform_token_count(
     num_reqs: int,
     num_tokens: int,
     max_query_len: int,
-) -> bool:
+) -> int | None:
     """
-    Check if a batch "uniform"
-    i.e. all requests have the same number of tokens (max_query_len)
+    Return the uniform token count if batch is uniform, else None.
+    A batch is uniform if all requests have the same number of tokens.
     """
-    return (max_query_len == num_tokens // num_reqs) and (
+    if (max_query_len == num_tokens // num_reqs) and (
         num_tokens == max_query_len * num_reqs
-    )
-
-
-# Type alias for capture callback function.
-# The callback receives a BatchExecutionDescriptor and runs the model forward.
-# The forward context (attn_metadata, slot_mappings, etc.) is set up by the caller.
-CaptureCallback = Callable[[BatchExecutionDescriptor], None]
+    ):
+        return max_query_len
+    return None
 
 
 class CudaGraphManager:
@@ -112,7 +107,11 @@ class CudaGraphManager:
                     num_reqs=padded // self.uniform_decode_query_len,
                     # if separate decode routine, we assume the decode graphs needs
                     # to be uniform (otherwise, a mixed mode graph would be fine)
-                    uniform=separate_decode_routine,
+                    uniform_token_count=(
+                        self.uniform_decode_query_len
+                        if separate_decode_routine
+                        else None
+                    ),
                 )
                 descs_by_mode[decode_mode].append(desc)
                 descs_by_token_count[padded].append(desc)
@@ -122,7 +121,6 @@ class CudaGraphManager:
                     cg_mode=mixed_mode,
                     num_tokens=padded,
                     num_reqs=min(padded, self.max_num_reqs),
-                    uniform=False,
                 )
                 descs_by_mode[mixed_mode].append(desc)
                 descs_by_token_count[padded].append(desc)
@@ -154,7 +152,7 @@ class CudaGraphManager:
     @torch.inference_mode()
     def capture(
         self,
-        capture_fn: CaptureCallback,
+        capture_fn: Callable,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture CUDA graphs by calling capture_fn for each descriptor.
@@ -177,7 +175,7 @@ class CudaGraphManager:
                         cg_mode=CUDAGraphMode.NONE,
                         num_tokens=desc.num_tokens,
                         num_reqs=desc.num_reqs,
-                        uniform=desc.uniform,
+                        uniform_token_count=desc.uniform_token_count,
                     )
                     capture_fn(warmup_desc)
 
@@ -206,12 +204,12 @@ class CudaGraphManager:
         self,
         num_reqs: int,
         num_tokens: int,
-        is_uniform: bool,
+        uniform_token_count: int | None,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
         if self._graphs_captured and 0 < num_tokens < len(self._candidates):
             for desc in self._candidates[num_tokens]:
-                if desc.uniform and not is_uniform:
+                if desc.uniform_token_count != uniform_token_count:
                     continue
                 return desc
         return BatchExecutionDescriptor(

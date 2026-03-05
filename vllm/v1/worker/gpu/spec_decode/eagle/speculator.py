@@ -104,7 +104,6 @@ class EagleSpeculator:
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run the model forward with context setup."""
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
             attn_metadata,
@@ -136,11 +135,9 @@ class EagleSpeculator:
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
-        """Generate draft tokens for speculative decoding."""
         pos = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
         idx_mapping = self.idx_mapping[:num_reqs]
-
         for step in range(1, self.num_speculative_steps):
             # Run the eagle model.
             last_hidden_states, hidden_states = self.run_model(
@@ -177,7 +174,7 @@ class EagleSpeculator:
                 )
                 if attn_metadata is not None:
                     self.block_tables.compute_slot_mappings(
-                        idx_mapping, query_start_loc, pos
+                        idx_mapping, query_start_loc, pos, num_tokens_padded
                     )
 
     def capture_model(self) -> None:
@@ -252,7 +249,7 @@ class EagleSpeculator:
             num_tokens,
             attn_metadata,
             slot_mappings,
-            num_tokens_across_dp,
+            num_tokens_across_dp=num_tokens_across_dp,
         )
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
@@ -300,20 +297,29 @@ class EagleSpeculator:
             self.max_num_reqs,
         )
 
+        # Get batch descriptor and sync across DP ranks.
+        # Eagle is always uniform decode with query_len=1, so num_tokens=num_reqs.
+        if self.dp_size == 1:
+            batch_desc = self.cudagraph_manager.get_cudagraph_desc(
+                num_reqs, num_reqs, uniform_token_count=1
+            )
+            num_tokens_across_dp = None
+        else:
+            batch_desc, num_tokens_across_dp = sync_cudagraph_and_dp_padding(
+                self.cudagraph_manager,
+                num_reqs,
+                num_reqs,
+                1,  # uniform_token_count
+                self.dp_size,
+                self.dp_rank,
+            )
+
         if not (dummy_run and skip_attn_for_dummy_run):
             query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
             slot_mappings = self.block_tables.compute_slot_mappings(
-                idx_mapping, query_start_loc, pos
+                idx_mapping, query_start_loc, pos, batch_desc.num_reqs
             )
 
-        # Get batch descriptor and sync across DP ranks.
-        # Eagle is always uniform decode with query_len=1, so num_tokens=num_reqs.
-        batch_desc = self.cudagraph_manager.get_cudagraph_desc(
-            num_reqs, num_reqs, is_uniform=True
-        )
-        batch_desc, num_tokens_across_dp = sync_cudagraph_and_dp_padding(
-            self.cudagraph_manager, batch_desc, num_reqs, self.dp_size, self.dp_rank
-        )
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             return self.cudagraph_manager.run_fullgraph(batch_desc)
 
@@ -351,8 +357,8 @@ class EagleSpeculator:
             batch_desc.num_tokens,
             attn_metadata_updated,
             slot_mappings_updated,
-            num_tokens_across_dp,
-            batch_desc.cg_mode,
+            num_tokens_across_dp=num_tokens_across_dp,
+            cudagraph_runtime_mode=batch_desc.cg_mode,
         )
         return self.draft_tokens[:num_reqs]
 
