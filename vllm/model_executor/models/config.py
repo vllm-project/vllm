@@ -74,6 +74,19 @@ class AnyModelConfig(VerifyAndUpdateConfig):
             if base_info is not None:
                 model_config._model_info = replace(base_info, has_noops=True)
 
+                # "AnyModel" ends with "Model" → auto-resolves to
+                # ("pooling", "embed") via _SUFFIX_TO_DEFAULTS.  Correct
+                # runner_type/convert_type when the base arch is a
+                # text-generation model and the user did not explicitly set
+                # --runner.
+                if (
+                    model_config.runner == "auto"
+                    and base_info.is_text_generation_model
+                    and model_config.runner_type != "generate"
+                ):
+                    model_config.runner_type = "generate"
+                    model_config.convert_type = "none"
+
 
 class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
     @classmethod
