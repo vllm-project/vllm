@@ -64,7 +64,6 @@ class ServingScores(OpenAIServing):
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
-            log_error_stack=log_error_stack,
         )
         self.score_template = score_template
 
@@ -548,8 +547,6 @@ class ServingScores(OpenAIServing):
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            return self.create_error_response(e)
 
     async def do_rerank(
         self, request: RerankRequest, raw_request: Request | None = None
@@ -592,8 +589,6 @@ class ServingScores(OpenAIServing):
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            return self.create_error_response(e)
 
     def request_output_to_score_response(
         self,
