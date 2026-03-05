@@ -223,4 +223,4 @@ class SharedExperts:
             assert self._output is not None
             self._output = self._maybe_reduce_shared_out(self._output)
 
-        # TODO(bnell): potentially do AFTER reduce here insteed of in runner.
+        # TODO(bnell): potentially do AFTER reduce here instead of in runner.
