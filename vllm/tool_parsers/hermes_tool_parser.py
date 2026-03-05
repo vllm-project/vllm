@@ -378,6 +378,8 @@ class Hermes2ProToolParser(ToolParser):
 
             # main logic for tool parsing here - compare prev. partially-parsed
             #   JSON to the current partially-parsed JSON
+            if current_tool_call is None:
+                return None
             prev_arguments = self.prev_tool_call_arr[self.current_tool_id].get(
                 "arguments"
             )
