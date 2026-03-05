@@ -59,11 +59,8 @@ def afd_p2p_send_impl(tensor: torch.Tensor, dst: int, comm_id: int) -> None:
     print(f"begin afd_p2p_send_impl tensor.shape:{tensor.shape}", flush=True)
     comm.send(tensor, dst, stream=torch.cuda.current_stream(tensor.device))
     print("end afd_p2p_send_impl", flush=True)
-    # NOTE: Removed synchronize() to avoid deadlock when FFN side is capturing CUDA graph
-    # The stream-based send will be properly ordered with subsequent operations on the same stream
 
 def afd_p2p_send_fake(tensor: torch.Tensor, dst: int, comm_id: int) -> None:
-    print("afd_p2p_send_fake", flush=True)
     return None
 
 direct_register_custom_op(
@@ -85,15 +82,12 @@ def afd_p2p_recv_impl(
     print(f"begin afd_p2p_recv_impl out.shape:{out.shape}", flush=True)
     comm.recv(out, src, stream=torch.cuda.current_stream(out.device))
     print("end afd_p2p_recv_impl", flush=True)
-    # NOTE: Removed synchronize() to avoid deadlock when one side is capturing CUDA graph
-    # The stream-based recv will be properly ordered with subsequent operations on the same stream
 
 def afd_p2p_recv_fake(
     out: torch.Tensor,
     src: int,
     comm_id: int,
 ) -> None:
-    print("afd_p2p_recv_fake", flush=True)
     return None
 
 direct_register_custom_op(
