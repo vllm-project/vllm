@@ -20,11 +20,11 @@ if not current_platform.has_device_capability(90):
         allow_module_level=True,
     )
 
-from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
+from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
 )
-from vllm.model_executor.layers.quantization.kernels.mixed_precision.machete import (  # noqa: E501
+from vllm.model_executor.kernels.linear.mixed_precision import (
     MacheteLinearKernel,
 )
 
