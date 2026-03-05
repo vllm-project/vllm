@@ -83,3 +83,47 @@ async def test_chat_completion_render_with_base64_image_url(
     assert "token_ids" in data
     assert isinstance(data["token_ids"], list)
     assert len(data["token_ids"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_tokenize_matches_render_for_multimodal_input(
+    vision_client,
+    local_asset_server,
+):
+    """`/tokenize` should match `/v1/chat/completions/render` token output."""
+
+    image = local_asset_server.get_image_asset("RGBA_comp.png")
+    data_url = encode_image_url(image, format="PNG")
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": data_url}},
+                {"type": "text", "text": "What's in this image?"},
+            ],
+        }
+    ]
+
+    render_response = await vision_client.post(
+        "/v1/chat/completions/render",
+        json={
+            "model": VISION_MODEL_NAME,
+            "messages": messages,
+        },
+    )
+    assert render_response.status_code == 200
+    render_data = render_response.json()
+
+    tokenize_response = await vision_client.post(
+        "/tokenize",
+        json={
+            "model": VISION_MODEL_NAME,
+            "messages": messages,
+        },
+    )
+    assert tokenize_response.status_code == 200
+    tokenize_data = tokenize_response.json()
+
+    assert tokenize_data["tokens"] == render_data["token_ids"]
+    assert tokenize_data["count"] == len(render_data["token_ids"])
