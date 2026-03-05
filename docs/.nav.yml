@@ -25,7 +25,16 @@ nav:
     - Models:
       - models/supported_models.md
       - models/generative_models.md
-      - models/pooling_models.md
+      - Pooling models:
+        - models/pooling/overall.md
+        - models/pooling/classify.md
+        - models/pooling/token_classify.md
+        - models/pooling/embed.md
+        - models/pooling/token_embed.md
+        - models/pooling/reward.md
+        - models/pooling/score.md
+        - models/pooling/encode.md
+        - models/pooling/specific_models.md
       - models/extensions
       - Hardware Supported Models:
         - models/hardware_supported_models/*
