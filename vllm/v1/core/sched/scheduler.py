@@ -1720,8 +1720,16 @@ class Scheduler(SchedulerInterface):
                     "Only FINISHED_ABORTED is allowed for requests that are "
                     "already finished."
                 )
-                logger.info("Aborting finished request %s, freeing blocks.", req_id)
-                self._free_blocks(request)
+                logger.info("Aborting finished request %s.", req_id)
+                # Set status to FINISHED_ABORTED so connector can detect this
+                # case and participate in cleanup.
+                request.status = RequestStatus.FINISHED_ABORTED
+                # Notify connector to participate in cleanup. Blocks will be
+                # freed when connector reports finished_sending.
+                # A finished request can only exist in self.requests when
+                # connector delays block freeing (P/D scenario).
+                assert self.connector is not None
+                self._connector_finished(request)
                 continue
 
             valid_requests.append(request)
@@ -2043,14 +2051,8 @@ class Scheduler(SchedulerInterface):
                 self._free_blocks(self.requests[req_id])
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            if req_id not in self.requests:
-                logger.warning(
-                    "Got finished sending KV transfer for request %s,"
-                    "but the request is already freed.",
-                    req_id,
-                )
-            else:
-                self._free_blocks(self.requests[req_id])
+            assert req_id in self.requests
+            self._free_blocks(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(
         self,
