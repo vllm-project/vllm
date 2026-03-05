@@ -109,19 +109,17 @@ def cmd_init() -> list[CLISubcommand]:
 async def run_launch_fastapi(args: argparse.Namespace) -> None:
     """Run the online serving layer with FastAPI (no GPU inference)."""
     from vllm.config import VllmConfig
-    from vllm.v1.engine.launch import LaunchEngineClient
 
     # 1. Socket binding
     listen_address, sock = setup_server(args)
 
-    # 2. Create LaunchEngineClient (no GPU)
+    # 2. Build and serve the API server
     engine_args = AsyncEngineArgs.from_cli_args(args)
     model_config = engine_args.create_model_config()
     vllm_config = VllmConfig(model_config=model_config)
-    engine_client = LaunchEngineClient.from_vllm_config(vllm_config)
-
-    # 3. Build app, initialize state, and start serving
-    shutdown_task = await build_and_serve(engine_client, listen_address, sock, args)
+    shutdown_task = await build_and_serve(
+        None, listen_address, sock, args, vllm_config=vllm_config
+    )
     try:
         await shutdown_task
     finally:

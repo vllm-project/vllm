@@ -113,7 +113,7 @@ async def init_generate_state(
             enable_log_deltas=args.enable_log_deltas,
             log_error_stack=args.log_error_stack,
         )
-        if any(task in supported_tasks for task in ("generate", "render"))
+        if "generate" in supported_tasks
         else None
     )
     # Warm up chat template processing to avoid first-request latency
@@ -129,7 +129,7 @@ async def init_generate_state(
             enable_force_include_usage=args.enable_force_include_usage,
             log_error_stack=args.log_error_stack,
         )
-        if any(task in supported_tasks for task in ("generate", "render"))
+        if "generate" in supported_tasks
         else None
     )
     state.anthropic_serving_messages = (
@@ -163,4 +163,23 @@ async def init_generate_state(
         )
         if "generate" in supported_tasks
         else None
+    )
+
+    # Render endpoints are always backed by OpenAIServingRender so that
+    # /v1/chat/completions/render and /v1/completions/render work on both
+    # generate-mode and render-only servers.
+    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+
+    state.openai_serving_render = OpenAIServingRender.from_engine_client(
+        engine_client,
+        [mp.name for mp in state.openai_serving_models.base_model_paths],
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        trust_request_chat_template=args.trust_request_chat_template,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
+        tool_parser=args.tool_call_parser,
+        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        log_error_stack=args.log_error_stack,
     )

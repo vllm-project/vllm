@@ -22,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import State
 
 import vllm.envs as envs
+from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
@@ -195,7 +196,7 @@ def build_app(
 
     register_sagemaker_api_router(app, supported_tasks)
 
-    if any(task in supported_tasks for task in ("generate", "render")):
+    if "generate" in supported_tasks:
         from vllm.entrypoints.openai.generate.api_router import (
             register_generate_api_routers,
         )
@@ -219,6 +220,13 @@ def build_app(
         )
 
         elastic_ep_attach_router(app)
+
+    if "generate" in supported_tasks or "render" in supported_tasks:
+        from vllm.entrypoints.serve.render.api_router import (
+            attach_router as attach_render_router,
+        )
+
+        attach_render_router(app)
 
     if "transcription" in supported_tasks:
         from vllm.entrypoints.openai.speech_to_text.api_router import (
@@ -358,7 +366,7 @@ async def init_app_state(
         log_error_stack=args.log_error_stack,
     )
 
-    if any(task in supported_tasks for task in ("generate", "render")):
+    if "generate" in supported_tasks:
         from vllm.entrypoints.openai.generate.api_router import init_generate_state
 
         await init_generate_state(
@@ -385,6 +393,61 @@ async def init_app_state(
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
+    state.server_load_metrics = 0
+
+
+async def init_render_app_state(
+    vllm_config: VllmConfig,
+    state: State,
+    args: Namespace,
+) -> None:
+    """Initialise FastAPI app state for a CPU-only render server.
+
+    Unlike :func:`init_app_state` this function does not require an
+    :class:`~vllm.engine.protocol.EngineClient`; it bootstraps the
+    preprocessing pipeline (renderer, io_processor, input_processor)
+    directly from the :class:`~vllm.config.VllmConfig`.
+    """
+    from vllm.entrypoints.chat_utils import load_chat_template
+    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+    from vllm.plugins.io_processors import get_io_processor
+    from vllm.renderers import renderer_from_config
+
+    served_model_names = args.served_model_name or [args.model]
+
+    if args.enable_log_requests:
+        request_logger = RequestLogger(max_log_len=args.max_log_len)
+    else:
+        request_logger = None
+
+    renderer = renderer_from_config(vllm_config)
+    io_processor = get_io_processor(
+        vllm_config, renderer, vllm_config.model_config.io_processor_plugin
+    )
+    resolved_chat_template = load_chat_template(args.chat_template)
+
+    state.openai_serving_render = OpenAIServingRender(
+        model_config=vllm_config.model_config,
+        renderer=renderer,
+        io_processor=io_processor,
+        served_model_names=served_model_names,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        trust_request_chat_template=args.trust_request_chat_template,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
+        tool_parser=args.tool_call_parser,
+        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        log_error_stack=args.log_error_stack,
+    )
+
+    state.vllm_config = vllm_config
+    # Disable stats logging — there is no engine to poll.
+    state.log_stats = False
+    state.engine_client = None
+    state.args = args
+    state.enable_server_load_tracking = False
     state.server_load_metrics = 0
 
 
@@ -471,13 +534,19 @@ def setup_server(args):
 
 
 async def build_and_serve(
-    engine_client: EngineClient,
+    engine_client: EngineClient | None,
     listen_address: str,
     sock: socket.socket,
     args: Namespace,
+    *,
+    vllm_config: VllmConfig | None = None,
     **uvicorn_kwargs,
 ) -> asyncio.Task:
     """Build FastAPI app, initialize state, and start serving.
+
+    Pass ``engine_client=None`` together with ``vllm_config`` for a
+    CPU-only render server; pass a real :class:`EngineClient` for the
+    normal inference path.
 
     Returns the shutdown task for the caller to await.
     """
@@ -487,11 +556,20 @@ async def build_and_serve(
     if log_config is not None:
         uvicorn_kwargs["log_config"] = log_config
 
-    supported_tasks = await engine_client.get_supported_tasks()
-    logger.info("Supported tasks: %s", supported_tasks)
+    if engine_client is not None:
+        supported_tasks = await engine_client.get_supported_tasks()
+        logger.info("Supported tasks: %s", supported_tasks)
+    else:
+        supported_tasks = ("render",)
 
     app = build_app(args, supported_tasks)
-    await init_app_state(engine_client, app.state, args, supported_tasks)
+
+    if engine_client is not None:
+        await init_app_state(engine_client, app.state, args, supported_tasks)
+    else:
+        if vllm_config is None:
+            raise ValueError("vllm_config is required when engine_client is None")
+        await init_render_app_state(vllm_config, app.state, args)
 
     logger.info("Starting vLLM server on %s", listen_address)
 
