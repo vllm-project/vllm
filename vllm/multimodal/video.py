@@ -328,14 +328,12 @@ class OpenCVVideoBackendMixin:
         cls,
         cap: "cv2.VideoCapture",
         frame_idx: list[int],
-        frame_idx_set: set[int],
-        num_frames_to_sample: int,
-        max_frame_idx: int,
         total_frames_num: int,
         *,
         frame_recovery: bool = False,
     ) -> tuple[npt.NDArray, list[int]]:
         if frame_recovery:
+            num_frames_to_sample = len(frame_idx)
             frames, valid_frame_indices, recovered_map = cls._read_frames_with_recovery(
                 cap, frame_idx, total_frames_num
             )
@@ -347,6 +345,7 @@ class OpenCVVideoBackendMixin:
                 )
         else:
             frame_idx_set = set(frame_idx)
+            num_frames_to_sample = len(frame_idx_set)
             frames, valid_frame_indices = cls._read_frames_no_recovery(
                 cap, frame_idx_set, max(frame_idx)
             )
@@ -436,9 +435,6 @@ class OpenCVVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         frames, valid_frame_indices = OpenCVVideoBackendMixin.read_frames(
             cap,
             frame_idx,
-            set(frame_idx),
-            len(frame_idx),
-            max(frame_idx),
             total_frames_num=source.total_frames_num,
             frame_recovery=frame_recovery,
         )
@@ -545,9 +541,6 @@ class OpenCVDynamicVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         frames, valid_frame_indices = cls.read_frames(
             cap,
             frame_indices_list,
-            set(frame_indices_list),
-            len(frame_indices_list),
-            max(frame_indices_list),
             total_frames_num=source.total_frames_num,
             frame_recovery=frame_recovery,
         )
@@ -814,9 +807,6 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         frames, valid_frame_indices = cls.read_frames(
             cap,
             frame_idx,
-            set(frame_idx),
-            len(frame_idx),
-            max(frame_idx),
             total_frames_num=source.total_frames_num,
             frame_recovery=frame_recovery,
         )
@@ -964,9 +954,6 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         frames, valid_frame_indices = cls.read_frames(
             cap,
             frame_indices_list,
-            set(frame_indices_list),
-            len(frame_indices_list),
-            max(frame_indices_list),
             total_frames_num=source.total_frames_num,
             frame_recovery=frame_recovery,
         )
