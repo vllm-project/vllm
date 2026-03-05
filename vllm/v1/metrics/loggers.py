@@ -1305,8 +1305,8 @@ class StatLoggerManager:
     ):
         if engine_idx is None:
             engine_idx = 0
-        for logger in self.stat_loggers:
-            logger.record(
+        for stat_logger in self.stat_loggers:
+            stat_logger.record(
                 scheduler_stats,
                 iteration_stats,
                 mm_cache_stats=mm_cache_stats,

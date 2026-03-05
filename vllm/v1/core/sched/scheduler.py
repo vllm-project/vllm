@@ -158,6 +158,12 @@ class Scheduler(SchedulerInterface):
         self.waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
 
+        # When True, skip scheduling running (decode) requests so that
+        # the full token budget goes to prefilling waiting requests.
+        # Used by benchmarking to ensure all requests finish prefill
+        # before any decode begins, achieving a steady-state batch.
+        self.prefill_only = False
+
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
         # requests so that they can free the cached states for those requests.
@@ -350,7 +356,13 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager.new_step_starts()
 
         # First, schedule the RUNNING requests.
+        # In prefill_only mode, skip decode scheduling entirely so that
+        # the full token budget is available for prefilling waiting
+        # requests.  This ensures all requests complete prefill before
+        # any decode begins (used by benchmarking for steady-state batch).
         req_index = 0
+        if self.prefill_only:
+            req_index = len(self.running)  # skip the loop
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
