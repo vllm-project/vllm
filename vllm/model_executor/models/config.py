@@ -657,32 +657,7 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
         model_config.hf_config.embedding_size = model_config.hf_config.num_labels
 
 
-class _AttrDict(dict):
-    """A JSON-serializable dict that also supports attribute access.
-
-    Used for ``block_configs`` entries so they can be accessed as
-    ``bc.attention.no_op`` (attribute style) while remaining serializable
-    by :func:`json.dumps` (needed for config hashing via
-    ``to_json_string()``).
-    """
-
-    def __getattr__(self, key: str):
-        try:
-            return self[key]
-        except KeyError:
-            raise AttributeError(key) from None
-
-    def __setattr__(self, key: str, value):
-        self[key] = value
-
-    def __delattr__(self, key: str):
-        try:
-            del self[key]
-        except KeyError:
-            raise AttributeError(key) from None
-
-
-class AnyModelForCausalLMConfig(VerifyAndUpdateConfig):
+class AnyModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         """Validate block_configs and normalize entries to attr-accessible dicts.
@@ -695,6 +670,8 @@ class AnyModelForCausalLMConfig(VerifyAndUpdateConfig):
         and therefore remains JSON-serializable (required for config
         hashing via ``to_json_string()``).
         """
+        from vllm.model_executor.models.anymodel import _AttrDict
+
         hf_config = model_config.hf_config
         block_configs = getattr(hf_config, "block_configs", None)
         if not block_configs:
@@ -716,7 +693,7 @@ class AnyModelForCausalLMConfig(VerifyAndUpdateConfig):
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
-    "AnyModel": AnyModelForCausalLMConfig,
+    "AnyModel": AnyModelConfig,
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,

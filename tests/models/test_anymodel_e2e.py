@@ -750,9 +750,7 @@ def test_anymodel_size_reduction():
 # build the model via LLM(), and validate every layer.
 # ---------------------------------------------------------------------------
 
-_NAS_CONFIG_PATH = (
-    Path(__file__).resolve().parents[0] / "fixtures" / "nas_config.json"
-)
+_NAS_CONFIG_PATH = Path(__file__).resolve().parents[0] / "fixtures" / "nas_config.json"
 
 
 @create_new_process_for_each_test()
