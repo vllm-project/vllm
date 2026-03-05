@@ -159,7 +159,7 @@ class RayTrainingActor:
         s.close()
         del buffer
         gc.collect()
-        torch.accelerator.empty_cache()
+        torch.cuda.empty_cache()
 
 
 # Ray manages four GPUs.

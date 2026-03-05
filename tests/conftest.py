@@ -1542,7 +1542,7 @@ def clean_gpu_memory_between_tests():
 
     # Clean up GPU memory after the test
     if torch.cuda.is_available():
-        torch.accelerator.empty_cache()
+        torch.cuda.empty_cache()
         gc.collect()
 
 

@@ -46,6 +46,7 @@ def _torch_cuda_wrapper():
         if supports_xpu_graph():
             torch.cuda.graph = torch.xpu.graph
             torch.cuda.CUDAGraph = torch.xpu.XPUGraph
+            torch.cuda.empty_cache = torch.xpu.empty_cache
         yield
     finally:
         pass
