@@ -171,6 +171,7 @@ _TEXT_GENERATION_MODELS = {
     "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
     "Olmo2ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
     "Olmo3ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
+    "OlmoHybridForCausalLM": ("olmo_hybrid", "OlmoHybridForCausalLM"),
     "OlmoeForCausalLM": ("olmoe", "OlmoeForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),

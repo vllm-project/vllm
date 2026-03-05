@@ -382,13 +382,6 @@ class CompilationConfig:
     """
 
     # Top-level Compilation control
-    level: int = Field(default=None)
-    """
-    Level is deprecated and will be removed in the next release,
-    either 0.12.0 or 0.11.2 whichever is soonest.
-    Please use mode. Currently all levels are mapped to mode.
-    """
-    # Top-level Compilation control
     mode: CompilationMode = Field(default=None)
     """The compilation approach used for torch.compile-based compilation of the
     model.
@@ -673,6 +666,7 @@ class CompilationConfig:
         "vllm::linear_attention",
         "vllm::plamo2_mamba_mixer",
         "vllm::gdn_attention_core",
+        "vllm::olmo_hybrid_gdn_full_forward",
         "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
@@ -801,17 +795,6 @@ class CompilationConfig:
         return handler(value)
 
     def __post_init__(self) -> None:
-        if self.level is not None:
-            logger.warning(
-                "Level is deprecated and will be removed in the next release,"
-                "either 0.12.0 or 0.11.2 whichever is soonest."
-                "Use mode instead."
-                "If both level and mode are given,"
-                "only mode will be used."
-            )
-            if self.mode is None:
-                self.mode = self.level
-
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
@@ -890,7 +873,7 @@ class CompilationConfig:
                 )
 
         # Currently only eager and inductor backend are supported.
-        # for piecewise compilation. Custom backends are not suppported for
+        # for piecewise compilation. Custom backends are not supported for
         # piecewise compilation. Update when more backends are supported.
         if self.mode == CompilationMode.VLLM_COMPILE and self.backend not in [
             "",
