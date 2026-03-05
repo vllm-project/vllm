@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -7,8 +9,10 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
+
 def get_local_sizes():
     return get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
+
 
 class FlashInferMoeA2APrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """FlashInfer implementation using the Moe AlltoAll kernel."""
