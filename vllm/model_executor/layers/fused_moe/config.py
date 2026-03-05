@@ -940,7 +940,7 @@ class FusedMoEParallelConfig:
     @property
     def use_dp_chunking(self) -> bool:
         return (
-            or self.use_deepep_ll_kernels
+            self.use_deepep_ll_kernels
             or self.use_mori_kernels
             or self.use_fi_all2allv_kernels
             or self.use_fi_nvl_two_sided_kernels
