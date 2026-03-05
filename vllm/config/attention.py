@@ -46,6 +46,10 @@ class AttentionConfig:
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
 
+    use_fused_rope_quant: bool = True
+    """Whether to fuse RoPE and FP8 quantization in MLA decode.
+    Set to False to disable for benchmarking."""
+
     def compute_hash(self) -> str:
         """
         Provide a hash that uniquely identifies all the configs
