@@ -831,10 +831,9 @@ def _rocm_aiter_fused_add_rms_fp8_per_tensor_static_quant_fake(
     dtype_quant: torch.dtype,
     residual: torch.tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    shape = (x.shape[0], x.shape[1])
     return (
-        torch.empty(shape, dtype=dtype_quant, device=x.device),
-        torch.empty(shape, dtype=dtype_quant, device=x.device),
+        torch.empty_like(x, dtype=dtype_quant, device=x.device),
+        torch.empty_like(x, device=x.device),
     )
 
 
