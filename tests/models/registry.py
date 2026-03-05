@@ -1080,6 +1080,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
 
 
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
+    # [Medusa]
     "MedusaModel": _HfExamplesInfo(
         "JackFram/llama-68m", speculative_model="abhigoyal/vllm-medusa-llama-68m-random"
     ),
@@ -1089,11 +1090,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     #     "JackFram/llama-160m",
     #     speculative_model="ibm-ai-platform/llama-160m-accelerator"
     # ),
-    "DeepSeekMTPModel": _HfExamplesInfo(
-        "luccafong/deepseek_mtp_main_random",
-        speculative_model="luccafong/deepseek_mtp_draft_random",
-        trust_remote_code=True,
-    ),
+    # [Eagle]
     "EagleDeepSeekMTPModel": _HfExamplesInfo(
         "eagle618/deepseek-v3-random",
         speculative_model="eagle618/eagle-deepseek-v3-random",
@@ -1139,6 +1136,20 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_method="eagle",
         tokenizer="openbmb/MiniCPM-2B-sft-bf16",
     ),
+    "Eagle3Qwen2_5vlForCausalLM": _HfExamplesInfo(
+        "Qwen/Qwen2.5-VL-7B-Instruct",
+        speculative_model="Rayzl/qwen2.5-vl-7b-eagle3-sgl",
+    ),
+    "Eagle3Qwen3vlForCausalLM": _HfExamplesInfo(
+        "Qwen/Qwen3-VL-8B-Instruct",
+        speculative_model="taobao-mnn/Qwen3-VL-8B-Instruct-Eagle3",
+    ),
+    # [MTP]
+    "DeepSeekMTPModel": _HfExamplesInfo(
+        "luccafong/deepseek_mtp_main_random",
+        speculative_model="luccafong/deepseek_mtp_draft_random",
+        trust_remote_code=True,
+    ),
     "ErnieMTPModel": _HfExamplesInfo(
         "baidu/ERNIE-4.5-21B-A3B-PT",
         trust_remote_code=True,
@@ -1178,18 +1189,15 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         speculative_model="XiaomiMiMo/MiMo-7B-RL",
     ),
+    "NemotronHMTPModel": _HfExamplesInfo(
+        "nvidia/Nemotron-Super-Placeholder",
+        speculative_model="nvidia/Nemotron-Super-Placeholder",
+        is_available_online=False,
+    ),
     "OpenPanguMTPModel": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
         trust_remote_code=True,
         is_available_online=False,
-    ),
-    "Eagle3Qwen2_5vlForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen2.5-VL-7B-Instruct",
-        speculative_model="Rayzl/qwen2.5-vl-7b-eagle3-sgl",
-    ),
-    "Eagle3Qwen3vlForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-VL-8B-Instruct",
-        speculative_model="taobao-mnn/Qwen3-VL-8B-Instruct-Eagle3",
     ),
     "Qwen3NextMTP": _HfExamplesInfo(
         "Qwen/Qwen3-Next-80B-A3B-Instruct", min_transformers_version="4.56.3"
@@ -1210,11 +1218,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         hf_overrides={
             "num_hidden_layers": 4,
         },
-        is_available_online=False,
-    ),
-    "NemotronHMTPModel": _HfExamplesInfo(
-        "nvidia/Nemotron-Super-Placeholder",
-        speculative_model="nvidia/Nemotron-Super-Placeholder",
         is_available_online=False,
     ),
 }
