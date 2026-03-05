@@ -1465,11 +1465,7 @@ class Scheduler(SchedulerInterface):
             requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
             self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
             for request in requests:
-                self._append_failed_or_rejected_output(
-                    outputs,
-                    request,
-                    failed_kv=True,
-                )
+                self._append_failed_or_rejected_output(outputs, request, failed_kv=True)
 
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
@@ -1479,10 +1475,7 @@ class Scheduler(SchedulerInterface):
         if rejected_reqs:
             # Create EngineCoreOutputs for all rejected requests.
             for request in rejected_reqs:
-                self._append_failed_or_rejected_output(
-                    outputs,
-                    request,
-                )
+                self._append_failed_or_rejected_output(outputs, request)
             rejected_reqs.clear()
         # collect KV cache events from KV cache manager
         events = self.kv_cache_manager.take_events()
