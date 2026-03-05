@@ -60,9 +60,9 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     ScaledMMLinearLayerConfig,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
-    AiterBpreshufflePerTokenFp8ScaledMMLinearKernel,
-    AiterCKPerTokenFp8ScaledMMLinearKernel,
     AiterInt8ScaledMMLinearKernel,
+    AiterPerTokenFp8ScaledMMLinearKernel,
+    AiterShuffledPerTokenFp8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
     CPUInt8ScaledMMLinearKernel,
@@ -112,8 +112,8 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
-        AiterBpreshufflePerTokenFp8ScaledMMLinearKernel,
-        AiterCKPerTokenFp8ScaledMMLinearKernel,
+        AiterShuffledPerTokenFp8ScaledMMLinearKernel,
+        AiterPerTokenFp8ScaledMMLinearKernel,
         ROCmFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         RowWiseTorchFP8ScaledMMLinearKernel,
@@ -379,8 +379,8 @@ __all__ = [
     "FP8ScaledMMLinearLayerConfig",
     "Int8ScaledMMLinearLayerConfig",
     "ScaledMMLinearLayerConfig",
-    "AiterBpreshufflePerTokenFp8ScaledMMLinearKernel",
-    "AiterCKPerTokenFp8ScaledMMLinearKernel",
+    "AiterShuffledPerTokenFp8ScaledMMLinearKernel",
+    "AiterPerTokenFp8ScaledMMLinearKernel",
     "AiterInt8ScaledMMLinearKernel",
     "CPUInt8ScaledMMLinearKernel",
     "CutlassFP8ScaledMMLinearKernel",

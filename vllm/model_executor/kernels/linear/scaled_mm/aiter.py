@@ -117,7 +117,7 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         return rocm_aiter_ops.gemm_a8w8(x_q, w_q.t(), x_s, w_s, bias, out_dtype)
 
 
-class AiterBpreshufflePerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class AiterShuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -186,12 +186,12 @@ class AiterBpreshufflePerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return rocm_aiter_ops.gemm_a8w8_bpreshuffle(A, B, As, Bs, bias, out_dtype)
 
 
-class AiterCKPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        return AiterBpreshufflePerTokenFp8ScaledMMLinearKernel.is_supported(
+        return AiterShuffledPerTokenFp8ScaledMMLinearKernel.is_supported(
             compute_capability
         )
 
@@ -207,6 +207,16 @@ class AiterCKPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 "requires per token activation scales and per channel weight scales.",
             )
         return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        w_name, _, _, _ = self.layer_param_names
+        w, *_ = self._get_layer_params(layer)
+
+        replace_parameter(
+            layer,
+            w_name,
+            torch.nn.Parameter(w.t(), requires_grad=False),
+        )
 
     def apply_scaled_mm(
         self,
