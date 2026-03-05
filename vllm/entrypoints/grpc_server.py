@@ -30,6 +30,7 @@ from grpc_reflection.v1alpha import reflection
 
 from vllm import SamplingParams, TextPrompt, TokensPrompt
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.utils import log_version_and_model
 from vllm.exceptions import RequestRejectedError
 from vllm.grpc import vllm_engine_pb2, vllm_engine_pb2_grpc
@@ -57,10 +58,12 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
     - GetServerInfo: Server state
     """
 
-    rejected_log_counter = 0
-    rejected_log_interval = 100
-
-    def __init__(self, async_llm: AsyncLLM, start_time: float):
+    def __init__(
+        self,
+        async_llm: AsyncLLM,
+        start_time: float,
+        request_logger: RequestLogger | None = None,
+    ):
         """
         Initialize the servicer.
 
@@ -70,28 +73,25 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """
         self.async_llm = async_llm
         self.start_time = start_time
+        self.rejected_log_counter = 0
+        self.rejected_log_interval = 100
+        self.request_logger = request_logger
         logger.info("VllmEngineServicer initialized")
 
-    async def _raise_if_error(self, finish_reason: str | None, request_id: str) -> None:
+    def _raise_if_error(self, output: RequestOutput | None, request_id: str) -> None:
         """
         Raise appropriate exception if finish_reason indicates an error or rejection.
         Args:
-            finish_reason: The finish reason from vLLM output
+            output: The vLLM output
             request_id: The request ID for logging
         """
+        finish_reason = ""
+        if output.finished and output.outputs:
+            finish_reason = output.outputs[0].finish_reason
         if finish_reason != "rejected":
             return
-
-        # Request was rejected, handle it
-        if type(self).rejected_log_counter % type(self).rejected_log_interval == 0:
-            logger.error(
-                "Request %s was rejected due to "
-                "a full waiting queue (log every %d requests)",
-                request_id,
-                type(self).rejected_log_interval,
-            )
-            type(self).rejected_log_counter = 0
-        type(self).rejected_log_counter += 1
+        if self.request_logger is not None:
+            self.request_logger.log_rejected_request(request_id)
         raise RequestRejectedError("Request was rejected")
 
     async def Generate(
@@ -138,9 +138,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 tokenization_kwargs=tokenization_kwargs,
             ):
                 # Check if the request was rejected due to waiting queue being full.
-                if output.finished and output.outputs:
-                    finish_reason = output.outputs[0].finish_reason
-                    await self._raise_if_error(finish_reason, request_id)
+                self._raise_if_error(output, request_id)
 
                 # Convert vLLM output to protobuf
                 # For streaming, always send chunks
@@ -472,9 +470,12 @@ async def serve_grpc(args: argparse.Namespace):
         enable_log_requests=args.enable_log_requests,
         disable_log_stats=args.disable_log_stats_server,
     )
+    request_logger = None
+    if args.enable_log_requests:
+        request_logger = RequestLogger(max_log_len=args.max_log_len)
 
     # Create servicer
-    servicer = VllmEngineServicer(async_llm, start_time)
+    servicer = VllmEngineServicer(async_llm, start_time, request_logger=request_logger)
 
     # Create gRPC server
     server = grpc.aio.server(
