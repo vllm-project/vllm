@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass, field
-from http import HTTPStatus
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,7 +10,7 @@ import pytest
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -145,12 +144,8 @@ async def test_chat_error_non_stream():
         stream=False,
     )
 
-    response = await serving_chat.create_chat_completion(request)
-
-    assert isinstance(response, ErrorResponse)
-    assert response.error.type == "InternalServerError"
-    assert response.error.message == "Internal server error"
-    assert response.error.code == HTTPStatus.INTERNAL_SERVER_ERROR
+    with pytest.raises(GenerationError):
+        await serving_chat.create_chat_completion(request)
 
 
 @pytest.mark.asyncio
