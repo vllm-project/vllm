@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
@@ -50,12 +51,6 @@ def get_uniform_token_count(
     ):
         return max_query_len
     return None
-
-
-def make_num_tokens_across_dp(dp_size: int, num_tokens: int) -> torch.Tensor | None:
-    if dp_size == 1:
-        return None
-    return torch.full((dp_size,), num_tokens, dtype=torch.int32, device="cpu")
 
 
 class CudaGraphManager:

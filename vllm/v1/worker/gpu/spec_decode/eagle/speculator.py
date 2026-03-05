@@ -75,7 +75,15 @@ class EagleSpeculator:
             device=device,
         )
 
-        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode.decode_mode()
+        # currently we don't  support PIECEWISE for Eagle.
+        if (
+            vllm_config.compilation_config.cudagraph_mode.decode_mode()
+            == CUDAGraphMode.FULL
+        ):
+            cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        else:
+            cudagraph_mode = CUDAGraphMode.NONE
+
         self.cudagraph_manager = EagleCudaGraphManager(
             vllm_config, device, cudagraph_mode, self.draft_tokens
         )
@@ -298,7 +306,7 @@ class EagleSpeculator:
         )
 
         # Get batch descriptor and sync across DP ranks.
-        # Eagle is always uniform decode with query_len=1, so num_tokens=num_reqs.
+        # Eagle uses FULL-only mode, dispatch with uniform_token_count=1 for decode
         if self.dp_size == 1:
             batch_desc, num_tokens_across_dp = (
                 self.cudagraph_manager.dispatch(num_reqs, num_reqs, 1),
@@ -321,7 +329,7 @@ class EagleSpeculator:
             )
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            return self.cudagraph_manager.run_fullgraph(batch_desc)
+            return self.cudagraph_manager.run_fullgraph(batch_desc)[:num_reqs]
 
         # Run eager or piecewise CUDA graph.
         attn_metadata_updated = None
