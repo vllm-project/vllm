@@ -7,9 +7,9 @@ from transformers import AutoTokenizer
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
-from . import TokenizerLike
 from .deepseek_v32_encoding import encode_messages
 from .hf import HfTokenizer, get_cached_tokenizer
+from .protocol import TokenizerLike
 
 
 def get_deepseek_v32_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:

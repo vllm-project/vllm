@@ -20,6 +20,7 @@ _VLLM_RENDERERS = {
     "hf": ("hf", "HfRenderer"),
     "grok2": ("grok2", "Grok2Renderer"),
     "mistral": ("mistral", "MistralRenderer"),
+    "qwen_vl": ("qwen_vl", "QwenVLRenderer"),
     "terratorch": ("terratorch", "TerratorchRenderer"),
 }
 
