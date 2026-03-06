@@ -2801,7 +2801,7 @@ steps:
   - vllm/v1/attention/selector.py
   - vllm/platforms/cuda.py
   commands:
-    rocm-smi
+    - rocm-smi
     - python3 examples/offline_inference/basic/chat.py
     # Attention
     # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
