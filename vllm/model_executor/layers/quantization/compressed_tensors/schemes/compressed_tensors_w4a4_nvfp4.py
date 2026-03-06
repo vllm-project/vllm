@@ -131,7 +131,9 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         # Process global scales (CT stores as divisors, i.e. 1/scale)
         # NOTE: compressed-tensors stores the scales as
         # `x_fp8_range = x * global_scale`, and `global_scale` is large.
-        # Taking the max is not enough: the fp8 scales should be recomputed accordingly!
+        # Taking the max here is inconsistent with `modelopt.py` implementation
+        # that does the contrary.
+        # NOTE: Taking the max is not enough: the fp8 scales should be recomputed!
         input_global_scale_inv = layer.input_global_scale.max().to(torch.float32)
         layer.input_global_scale = Parameter(
             (1.0 / input_global_scale_inv).to(torch.float32), requires_grad=False
