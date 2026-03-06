@@ -321,7 +321,7 @@ def test_mla_backend_selection(
             assert backend_path == expected_backend_path
 
 
-def test_aiter_fa_requires_gfx9(mock_vllm_config):
+def test_aiter_fa_requires_mi3xx(mock_vllm_config):
     """Test that ROCM_AITER_FA requires mi3xx architecture."""
     from vllm.platforms.rocm import RocmPlatform
 
