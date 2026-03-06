@@ -37,8 +37,8 @@ def test_rms_norm(
     device: str,
     strided_input: bool,
 ) -> None:
-    torch.set_default_device(device)
     set_random_seed(seed)
+    torch.set_default_device(device)
     layer = RMSNorm(hidden_size).to(dtype=dtype)
     layer.weight.data.normal_(mean=1.0, std=0.1)
     scale = 1 / (2 * hidden_size)
@@ -46,7 +46,7 @@ def test_rms_norm(
     x = torch.randn(num_tokens, last_dim, dtype=dtype)
     x = x[..., :hidden_size]
     assert x.is_contiguous() != strided_input
-    x = x*scale if add_residual else x
+    x = x * scale if add_residual else x
     residual = torch.randn_like(x) * scale if add_residual else None
 
     # NOTE(woosuk): The reference implementation should be executed first
@@ -57,7 +57,7 @@ def test_rms_norm(
         orig_dtype=x.dtype,
         weight=layer.weight,
         hidden_size=layer.hidden_size,
-        residual=residual
+        residual=residual,
     )
     out = layer(x, residual)
     # NOTE(woosuk): LayerNorm operators (including RMS) typically have larger
