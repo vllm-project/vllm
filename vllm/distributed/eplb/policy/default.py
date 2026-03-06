@@ -75,7 +75,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
     @classmethod
     def replicate_experts(
         cls, weight: np.ndarray, num_phy: int
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         Replicate `num_log` experts to `num_phy` replicas, such that the maximum
         load of all replicas is minimized.
@@ -86,22 +86,19 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
 
         Returns:
             phy2log: [X, num_phy], logical expert id of each physical expert
-            replica_idx: [X, num_phy], the index of the replica for each logical expert
             logcnt: [X, num_log], number of replicas for each logical expert
         """
         n, num_log = weight.shape
         num_redundant = num_phy - num_log
         assert num_redundant >= 0
         phy2log = np.tile(np.arange(num_phy, dtype=np.int64), (n, 1))
-        replica_idx = np.zeros((n, num_phy), dtype=np.int64)
         logcnt = np.ones((n, num_log), dtype=np.int64)
         arangen = np.arange(n, dtype=np.int64)
         for i in range(num_log, num_phy):
             redundant_indices = np.argmax(weight / logcnt, axis=-1)
             phy2log[:, i] = redundant_indices
-            replica_idx[:, i] = logcnt[arangen, redundant_indices]
             logcnt[arangen, redundant_indices] += 1
-        return phy2log, replica_idx, logcnt
+        return phy2log, logcnt
 
     @classmethod
     def rebalance_experts_hierarchical(
@@ -163,7 +160,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         tokens_per_mlog = np.take_along_axis(weight, mlog2log, axis=1).reshape(
             -1, num_logical_experts // num_nodes
         )
-        phy2mlog, replicas_idx, mlogcnt = cls.replicate_experts(
+        phy2mlog, mlogcnt = cls.replicate_experts(
             tokens_per_mlog, num_physical_experts // num_nodes
         )
 
