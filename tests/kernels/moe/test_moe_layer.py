@@ -78,6 +78,17 @@ QUANT_METHODS = [
     "modelopt_fp4",
 ]
 
+# Which quantization methods each backend supports.
+# fmt: off
+_BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
+    "allgather_reducescatter": {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
+    "mori":                    {None, "fp8", "modelopt_fp8"},
+    "flashinfer_all2allv":     {None,        "modelopt_fp8", "modelopt_fp4"},
+    "deepep_low_latency":      {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
+    "deepep_high_throughput":   {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
+}
+# fmt: on
+
 
 def rank_chunk(num: int, r: int, w: int) -> int:
     rem = num % w
@@ -618,7 +629,8 @@ def _test_loop(
     elif quantization in ("fp8", "modelopt_fp8"):
         atol, rtol = 6e-2, 6e-2
     elif quantization == "modelopt_fp4":
-        atol, rtol = 5e-1, 5e-1
+        # FP4 quantization error grows with the reduction dimension (k).
+        atol = rtol = 1e-1 + k * 5e-4
     else:
         atol, rtol = 6e-2, 6e-2
 
@@ -655,9 +667,12 @@ def test_moe_layer(
     if world_size > num_gpus:
         pytest.skip(f"Not enough GPUs got {num_gpus}, expected {world_size}.")
 
-    # flashinfer_all2allv EP has known correctness issues and fp8 is unsupported
-    if backend == "flashinfer_all2allv" and (use_ep or quantization == "fp8"):
-        pytest.skip("flashinfer_all2allv EP or FP8 not yet supported.")
+    supported_quants = _BACKEND_SUPPORTED_QUANTS.get(backend)
+    if supported_quants is not None and quantization not in supported_quants:
+        pytest.skip(f"{backend} does not support quantization={quantization}")
+
+    if backend == "flashinfer_all2allv" and use_ep:
+        pytest.skip("flashinfer_all2allv EP not yet supported.")
 
     if backend == "deepep_low_latency":
         from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
