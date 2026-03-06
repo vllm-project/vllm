@@ -2,13 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import Any
+from collections.abc import Callable
+from typing import Any, ParamSpec
 
 import torch
 import torch._inductor.pattern_matcher as pm
+from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -18,9 +22,15 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
-from .attn_quant_fusion import AttentionQuantPattern
+from ..fx_utils import is_func
+from ..inductor_pass import enable_fake_mode
+from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .matcher_utils import MatcherQuantFP8
 from .rms_quant_fusion import QUANT_OPS, empty_fp32, empty_i32
+
+logger = init_logger(__name__)
+
+P = ParamSpec("P")
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -65,6 +75,39 @@ class MLAAttentionQuantPattern(ABC):
     def empty_quant(self, *args: Any, **kwargs: Any) -> torch.Tensor:
         kwargs = {"dtype": self.quant_dtype, "device": "cuda", **kwargs}
         return torch.empty(*args, **kwargs)
+
+    @staticmethod
+    def wrap_trace_fn(
+        trace_fn: Callable[P, fx.GraphModule],
+        *process_fx_fns: Callable[[fx.GraphModule], None],
+    ) -> Callable[P, fx.GraphModule]:
+        def wrapped(*args: P.args, **kwargs: P.kwargs) -> fx.GraphModule:
+            gm = trace_fn(*args, **kwargs)
+            for process_fx in process_fx_fns:
+                process_fx(gm)
+            return gm
+
+        return wrapped
+
+    @staticmethod
+    def fx_view_to_reshape(gm: torch.fx.GraphModule) -> None:
+        from torch._inductor.fx_passes.post_grad import view_to_reshape
+
+        view_to_reshape(gm)
+
+    @staticmethod
+    def remove_noop_permutes(gm: torch.fx.GraphModule) -> None:
+        for node in gm.graph.nodes:
+            if not is_func(node, torch.ops.aten.permute.default):
+                continue
+
+            dims = node.args[1]
+            if any(dim != i for i, dim in enumerate(dims)):
+                continue
+
+            # this is now an identity op, remove
+            node.replace_all_uses_with(node.args[0])
+            gm.graph.erase_node(node)
 
     def register_if_supported(self, pm_pass: PatternMatcherPass) -> None:
         if self.layer.impl.fused_output_quant_supported(self.quant_key):
@@ -159,10 +202,10 @@ class MLAAttentionFp8StaticQuantPattern(MLAAttentionQuantPattern):
             pattern,
             replacement,
             inputs,
-            AttentionQuantPattern.wrap_trace_fn(
+            MLAAttentionQuantPattern.wrap_trace_fn(
                 pm.fwd_only,
-                AttentionQuantPattern.fx_view_to_reshape,
-                AttentionQuantPattern.remove_noop_permutes,
+                MLAAttentionQuantPattern.fx_view_to_reshape,
+                MLAAttentionQuantPattern.remove_noop_permutes,
             ),
             pm_pass,
         )
@@ -264,10 +307,68 @@ class MLAAttentionNvfp4QuantPattern(MLAAttentionQuantPattern):
             pattern,
             replacement,
             inputs,
-            AttentionQuantPattern.wrap_trace_fn(
+            MLAAttentionQuantPattern.wrap_trace_fn(
                 pm.fwd_only,
-                AttentionQuantPattern.fx_view_to_reshape,
-                AttentionQuantPattern.remove_noop_permutes,
+                MLAAttentionQuantPattern.fx_view_to_reshape,
+                MLAAttentionQuantPattern.remove_noop_permutes,
             ),
             pm_pass,
+        )
+
+
+class MLAAttnFusionPass(VllmPatternMatcherPass):
+    """
+    This pass fuses post-attention quantization onto MLA attention if supported.
+
+    It uses the pattern matcher and matches each MLA layer manually, as strings
+    cannot be wildcarded. This also lets us check support on attention layers
+    upon registration instead of during pattern matching.
+    """
+
+    @enable_fake_mode
+    def __init__(self, config: VllmConfig) -> None:
+        super().__init__(config)
+
+        self.patterns = PatternMatcherPass(
+            pass_name="mla_attn_fusion_pass"
+        )
+
+        mla_layers = get_layers_from_vllm_config(config, MLAAttention)
+        for layer_name, layer in mla_layers.items():
+            pattern_fp8 = MLAAttentionFp8StaticQuantPattern(
+                layer, config.model_config.dtype
+            )
+            pattern_fp8.register_if_supported(self.patterns)
+
+            if current_platform.is_cuda() and hasattr(
+                torch.ops._C, "scaled_fp4_quant"
+            ):
+                pattern_nvfp4 = MLAAttentionNvfp4QuantPattern(
+                    layer, config.model_config.dtype
+                )
+                pattern_nvfp4.register_if_supported(self.patterns)
+
+        if len(mla_layers) == 0:
+            logger.warning(
+                "MLA attention + quant fusion is enabled, but no MLA "
+                "attention layers were found in "
+                "CompilationConfig.static_forward_context "
+                "so no fusion patterns were registered."
+            )
+
+        self.dump_patterns(config, self.patterns)
+
+    @VllmInductorPass.time_and_log
+    def __call__(self, graph: torch.fx.graph.Graph) -> None:
+        self.matched_count = self.patterns.apply(graph)
+        logger.debug(
+            "Fused quant onto %s MLA attention nodes", self.matched_count
+        )
+
+    def uuid(self) -> str:
+        return VllmInductorPass.hash_source(
+            self,
+            MLAAttentionQuantPattern,
+            MLAAttentionFp8StaticQuantPattern,
+            MLAAttentionNvfp4QuantPattern,
         )
