@@ -763,6 +763,19 @@ class VllmConfig:
             else:
                 self.parallel_config.disable_nccl_for_dp_synchronization = False
 
+        if (
+            self.speculative_config is not None
+            and self.scheduler_config.async_scheduling
+            and self.model_config is not None
+            and not self.model_config.disable_cascade_attn
+        ):
+            logger.warning_once(
+                "Disabling cascade attention (not yet compatible with "
+                "async speculative decoding).",
+                scope="local",
+            )
+            self.model_config.disable_cascade_attn = True
+
         from vllm.platforms import current_platform
 
         if (
