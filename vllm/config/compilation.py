@@ -1248,6 +1248,5 @@ class CompilationConfig:
             return []
         endpoints = sorted(set(self.compile_ranges_endpoints))
         return [
-            Range(start=s + 1, end=e)
-            for s, e in zip([0] + endpoints[:-1], endpoints)
+            Range(start=s + 1, end=e) for s, e in zip([0] + endpoints[:-1], endpoints)
         ]
