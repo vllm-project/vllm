@@ -79,7 +79,7 @@ def test_api_server_process_manager_init(api_server_args, with_stats_update):
     finally:
         # Always clean up the processes
         print("Cleaning up processes...")
-        manager.close()
+        manager.shutdown()
 
         # Give processes time to terminate
         time.sleep(0.2)
@@ -111,6 +111,8 @@ def test_wait_for_completion_or_failure(api_server_args):
                 wait_for_completion_or_failure(api_server_manager=manager)
             except Exception as e:
                 result["exception"] = e
+            finally:
+                manager.shutdown()
 
         # Start a thread to run wait_for_completion_or_failure
         wait_thread = threading.Thread(target=run_with_exception_capture, daemon=True)
@@ -143,7 +145,7 @@ def test_wait_for_completion_or_failure(api_server_args):
             assert not proc.is_alive(), f"Process {i} should not be alive"
 
     finally:
-        manager.close()
+        manager.shutdown()
         time.sleep(0.2)
 
 
@@ -174,11 +176,14 @@ def test_normal_completion(api_server_args):
         # since all processes have already
         # terminated, it should return immediately
         # with no error
-        wait_for_completion_or_failure(api_server_manager=manager)
+        try:
+            wait_for_completion_or_failure(api_server_manager=manager)
+        finally:
+            manager.shutdown()
 
     finally:
         # Clean up just in case
-        manager.close()
+        manager.shutdown()
         time.sleep(0.2)
 
 
@@ -201,7 +206,7 @@ def test_external_process_monitoring(api_server_args):
         def __init__(self, proc):
             self.proc = proc
 
-        def close(self):
+        def shutdown(self):
             if self.proc.is_alive():
                 self.proc.terminate()
                 self.proc.join(timeout=0.5)
@@ -226,6 +231,9 @@ def test_external_process_monitoring(api_server_args):
                 )
             except Exception as e:
                 result["exception"] = e
+            finally:
+                manager.shutdown()
+                mock_coordinator.shutdown()
 
         # Start a thread to run wait_for_completion_or_failure
         wait_thread = threading.Thread(target=run_with_exception_capture, daemon=True)
@@ -259,6 +267,6 @@ def test_external_process_monitoring(api_server_args):
 
     finally:
         # Clean up
-        manager.close()
-        mock_coordinator.close()
+        manager.shutdown()
+        mock_coordinator.shutdown()
         time.sleep(0.2)
