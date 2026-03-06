@@ -2516,16 +2516,7 @@ template <int mmq_y, int nwarps, bool need_check> static __device__ __forceinlin
         if (kqsx < 16) {
             x_ql[i * (WARP_SIZE_GGUF + 1) + k] = get_int_from_uint8(bxi->qs, kqsx);
         } else if (kqsx < 24) {
-            // Signs are at qs + QK_K/8 = qs + 32... wait, block_iq2_s stores signs differently
-            // Actually qs[QK_K/4=64], then signs are at qs + QK_K/8 in the MMVQ code.
-            // But in the struct: qs[QK_K/4], qh[QK_K/32], scales[QK_K/32].
-            // The MMVQ accesses: signs = bq2->qs + QK_K/8 + 4*ib32.
-            // QK_K/8 = 32, so signs start at qs[32]. qs has 64 bytes total.
-            // So signs occupy qs[32..63] (32 bytes), and grid indices occupy qs[0..31].
-            // Wait that can't be right with qs[QK_K/4=64]. Let me re-read the MMVQ.
-            // In vec_dot_iq2_s_q8_1: signs = bq2->qs + QK_K/8 + 4*ib32.
-            // QK_K/8 = 32. So signs are at byte offset 32 within qs array.
-            // qs[0..31] = grid indices, qs[32..63] = sign bytes.
+            // qs layout: [0..31] grid indices, [32..63] sign bytes (signs start at qs + QK_K/8)
             x_ql[i * (WARP_SIZE_GGUF + 1) + k] = get_int_from_uint8(bxi->qs + QK_K/8, kqsx - 16);
         } else {
             x_ql[i * (WARP_SIZE_GGUF + 1) + k] = 0;
