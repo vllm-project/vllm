@@ -336,20 +336,15 @@ class LlamaDecoderLayer(nn.Module):
         return vllm_config.quant_config
 
 
-def llama_model_invariants(
-    input_ids, positions, intermediate_tensors=None, inputs_embeds=None
-):
-    """Shape invariants for Llama model compilation, those are translated to
-    runtime assertions for unbacked dynamic shapes and are compiled away for
-    backed"""
-    if input_ids is not None:
-        torch._check(positions.size()[0] == input_ids.size()[0])
-
-
 @support_torch_compile(
     # TODO[#32068]: Investigate recompilation
     # mark_unbacked_dims={"input_ids": 0},
-    shape_invariants=llama_model_invariants
+    dynamic_arg_dims={
+        "input_ids": {0: "b"},
+        "positions": {0: "b"},
+        "intermediate_tensors": {0: "b"},
+        "inputs_embeds": {0: "b"},
+    },
 )
 class LlamaModel(nn.Module):
     def __init__(
