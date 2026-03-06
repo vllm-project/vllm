@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 import glob
+import json
 import os
 import time
 from collections.abc import Generator, Iterable
@@ -175,12 +176,40 @@ class DefaultModelLoader(BaseModelLoader):
         else:
             hf_weights_files = filter_files_not_needed_for_inference(hf_weights_files)
 
+        if len(hf_weights_files) == 0 and is_local:
+            hf_weights_files, use_safetensors = (
+                self._weights_from_index(hf_folder, index_file)
+            )
+
         if len(hf_weights_files) == 0:
             raise RuntimeError(
                 f"Cannot find any model weights with `{model_name_or_path}`"
             )
 
         return hf_folder, hf_weights_files, use_safetensors
+
+    @staticmethod
+    def _weights_from_index(
+        hf_folder: str, index_file: str
+    ) -> tuple[list[str], bool]:
+        """Discover weight files via the safetensors index.
+
+        Fallback used when the standard glob finds no files, e.g. when
+        weights live in a subdirectory referenced by the index."""
+        index_path = os.path.join(hf_folder, index_file)
+        if not os.path.isfile(index_path):
+            return [], False
+        with open(index_path) as f:
+            weight_map = json.load(f)["weight_map"]
+        files: set[str] = set()
+        for rel_path in weight_map.values():
+            full = os.path.join(hf_folder, rel_path)
+            if os.path.isfile(full):
+                files.add(full)
+        if not files:
+            return [], False
+        use_safetensors = all(f.endswith(".safetensors") for f in files)
+        return sorted(files), use_safetensors
 
     def _get_weights_iterator(
         self, source: "Source"
