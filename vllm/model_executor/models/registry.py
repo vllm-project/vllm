@@ -90,6 +90,7 @@ _TEXT_GENERATION_MODELS = {
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
     "Cohere2ForCausalLM": ("commandr", "CohereForCausalLM"),
     "CwmForCausalLM": ("llama", "LlamaForCausalLM"),
+    "DeepForCausalLM": ("pacific_prime", "DeepForCausalLM"),  # Pacific-Prime
     "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek_v2", "DeepseekForCausalLM"),
