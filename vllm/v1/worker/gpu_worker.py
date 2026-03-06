@@ -355,8 +355,8 @@ class Worker(WorkerBase):
         """Return the number of parallel compile processes if applicable,
         or 0 if parallel compilation is not in use."""
         using_inductor = (
-            self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
-            and not self.model_config.enforce_eager
+            self.vllm_config.compilation_config.mode != CompilationMode.NONE
+            and self.vllm_config.compilation_config.backend in ("inductor", "")
         )
         if not using_inductor:
             return 0
