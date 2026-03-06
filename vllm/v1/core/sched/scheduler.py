@@ -1695,6 +1695,8 @@ class Scheduler(SchedulerInterface):
             if request.resumable:
                 request.streaming_queue = deque()
             self.waiting.add_request(request)
+            if self.connector is not None:
+                self.connector.add_request(request)
             self.requests[request.request_id] = request
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
@@ -1994,6 +1996,9 @@ class Scheduler(SchedulerInterface):
         assert self.connector is not None
         if request.request_id not in self.finished_recving_kv_req_ids:
             return False
+
+        # Stop KV lease refresh for this request as we are done.
+        self.connector.finish_lease_refresh(request.request_id)
 
         if request.request_id in self.failed_recving_kv_req_ids:
             # Request had KV load failures; num_computed_tokens was already

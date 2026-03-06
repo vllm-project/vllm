@@ -587,6 +587,16 @@ class EngineCore:
             reset_running_requests, reset_connector
         )
 
+    def kv_connector_refresh_lease(self, request_id: str) -> None:
+        """Refresh the KV block lease for pending remote-decode requests.
+
+        Called on P-side OpenAI API server when D workers POST
+        /internal/kv_connector_refresh_lease.
+        """
+        connector = self.scheduler.get_kv_connector()
+        if connector is not None:
+            connector.handle_refresh_lease(request_id)
+
     def reset_encoder_cache(self) -> None:
         """Reset the encoder cache to invalidate all cached encoder outputs.
 
