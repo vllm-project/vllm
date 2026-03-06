@@ -156,6 +156,7 @@ class DefaultMoERunner(MoERunner):
     Eventually, this class will be split up and specialized for different
     configurations, e.g. the presence or absence of shared experts, a gate, etc.
     """
+
     # --8<-- [end:default_moe_runner]
 
     def __init__(
