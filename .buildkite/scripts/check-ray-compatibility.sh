@@ -168,11 +168,11 @@ fi
 
 # Notify Slack if webhook is configured and PR/branch are valid.
 if [ -n "$RAY_COMPAT_SLACK_WEBHOOK_URL" ]; then
-    PR="${BUILDKITE_PULL_REQUEST:-N/A}"
+    PR="${BUILDKITE_PULL_REQUEST:-}"
     BRANCH="${BUILDKITE_BRANCH:-}"
-    
+
     # Skip notification if PR is invalid or branch is empty
-    if [ "$PR" = "false" ] || [ "$PR" = "N/A" ] || [ -z "$PR" ] || [ -z "$BRANCH" ]; then
+    if [[ "$PR" = "false" || -z "$PR" || -z "$BRANCH" ]]; then
         echo ">>> Skipping Slack notification (invalid PR or empty branch: PR=$PR, branch=$BRANCH)"
     else
         echo ">>> Sending Slack notification"
