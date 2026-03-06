@@ -30,6 +30,10 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptFp8Config,
+    ModelOptNvFp4Config,
+)
 from vllm.utils.flashinfer import has_flashinfer_all2all
 from vllm.utils.import_utils import has_deep_ep, has_mori
 from vllm.utils.math_utils import cdiv
@@ -70,8 +74,8 @@ if has_deep_ep():
 QUANT_METHODS = [
     None,
     "fp8",
-    # "modelopt",
-    # "compressed-tensors",
+    "modelopt_fp8",
+    "modelopt_fp4",
 ]
 
 
@@ -161,55 +165,111 @@ def chunk_scales(
     return t
 
 
+@dataclass
+class QuantizedWeights:
+    w13_weight: torch.Tensor
+    w2_weight: torch.Tensor
+    w13_weight_scale: torch.Tensor | None = None
+    w2_weight_scale: torch.Tensor | None = None
+    w13_weight_scale_2: torch.Tensor | None = None
+    w2_weight_scale_2: torch.Tensor | None = None
+    w13_input_scale: torch.Tensor | None = None
+    w2_input_scale: torch.Tensor | None = None
+
+
+def _quantize_fp8_halves(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+) -> QuantizedWeights:
+    """Quantize w13 gate/up halves separately to FP8, producing per-shard scales."""
+    half = w1.shape[1] // 2
+    w1q_a, w1s_a, _ = moe_quantize_weights(
+        w1[:, :half, :], None, torch.float8_e4m3fn, False, None
+    )
+    w1q_b, w1s_b, _ = moe_quantize_weights(
+        w1[:, half:, :], None, torch.float8_e4m3fn, False, None
+    )
+    assert w1s_a is not None and w1s_b is not None
+
+    w2q, w2s, _ = moe_quantize_weights(w2, None, torch.float8_e4m3fn, False, None)
+    assert w2s is not None
+
+    return QuantizedWeights(
+        w13_weight=torch.cat([w1q_a, w1q_b], dim=1),
+        w2_weight=w2q,
+        # Each w1s_x is (E, 1, 1) -> reshape to (E, 1), cat to (E, 2)
+        w13_weight_scale=torch.cat([w1s_a.view(-1, 1), w1s_b.view(-1, 1)], dim=1),
+        # w2s is (E, 1, 1) -> reshape to (E,)
+        w2_weight_scale=w2s.view(-1),
+    )
+
+
 def make_quant_config(
     quantization: str | None,
     w1: torch.Tensor,
     w2: torch.Tensor,
-) -> tuple[
-    QuantizationConfig | None,
-    torch.Tensor,  # quantized w1
-    torch.Tensor | None,  # quantized w1 scales
-    torch.Tensor,  # quantized w2
-    torch.Tensor | None,  # quantized w1 scales
-]:
+    num_experts: int,
+) -> tuple[QuantizationConfig | None, QuantizedWeights]:
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 
-    quant_config = None
-    w1q = w1
-    w2q = w2
-    w1s = None
-    w2s = None
+    if quantization is None:
+        return None, QuantizedWeights(w13_weight=w1, w2_weight=w2)
 
     if quantization == "fp8":
-        quant_config = Fp8Config(True)
-        # w1 is the combined w13 tensor: (E, 2*N, K).
-        # Quantize the two halves (w1 and w3) separately to produce
-        # per-shard scales matching the checkpoint format expected by
-        # process_fp8_weight_tensor_strategy_moe: (E, 2).
-        half = w1.shape[1] // 2
-        w1q_a, w1s_a, _ = moe_quantize_weights(
-            w1[:, :half, :], None, torch.float8_e4m3fn, False, None
+        return Fp8Config(True), _quantize_fp8_halves(w1, w2)
+
+    if quantization == "modelopt_fp8":
+        qw = _quantize_fp8_halves(w1, w2)
+        qw.w13_input_scale = torch.ones(
+            num_experts, dtype=torch.float32, device=w1.device
         )
-        w1q_b, w1s_b, _ = moe_quantize_weights(
-            w1[:, half:, :], None, torch.float8_e4m3fn, False, None
+        qw.w2_input_scale = torch.ones(
+            num_experts, dtype=torch.float32, device=w2.device
         )
+        quant_config = ModelOptFp8Config(
+            quant_method="FP8",
+            is_checkpoint_fp8_serialized=True,
+            kv_cache_quant_method=None,
+            exclude_modules=[],
+        )
+        return quant_config, qw
 
-        assert w1s_a is not None and w1s_b is not None
+    if quantization == "modelopt_fp4":
+        # Quantize full w13 at once so both gate/up halves share the same
+        # global scale per expert.  process_weights_after_loading uses
+        # w13_weight_scale_2[:, 0] for the entire tensor, so the two shard
+        # scales must match.
+        w1q, w1s, w1gs = moe_quantize_weights(w1, None, "nvfp4", False, None)
+        assert w1s is not None and w1gs is not None
 
-        w1q = torch.cat([w1q_a, w1q_b], dim=1)
-        # Each w1s_x is (E, 1, 1) -> reshape to (E, 1), cat to (E, 2)
-        w1s = torch.cat([w1s_a.view(-1, 1), w1s_b.view(-1, 1)], dim=1)
+        w2q, w2s, w2gs = moe_quantize_weights(w2, None, "nvfp4", False, None)
+        assert w2s is not None and w2gs is not None
 
-        w2q, w2s, _ = moe_quantize_weights(w2, None, torch.float8_e4m3fn, False, None)
-        # w2s is (E, 1, 1) -> reshape to (E,)
-        assert w2s is not None
-        w2s = w2s.view(-1)
+        qw = QuantizedWeights(
+            w13_weight=w1q,
+            w2_weight=w2q,
+            w13_weight_scale=w1s,
+            w2_weight_scale=w2s,
+            # weight_scale_2 = 1/w_gs: the kernel computes
+            # g_alphas = a_scale * w_scale_2, and correct dequant needs 1/w_gs.
+            # Expand per-expert scalar to (E, 2) for the two shards.
+            w13_weight_scale_2=(1.0 / w1gs).unsqueeze(1).expand(-1, 2).contiguous(),
+            w2_weight_scale_2=1.0 / w2gs,
+            w13_input_scale=torch.ones(
+                (num_experts, 2), dtype=torch.float32, device=w1.device
+            ),
+            w2_input_scale=torch.ones(
+                num_experts, dtype=torch.float32, device=w2.device
+            ),
+        )
+        quant_config = ModelOptNvFp4Config(
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+        )
+        return quant_config, qw
 
-        assert w1s is not None and w2s is not None
-    elif quantization == "modelopt" or quantization == "compressed_tensors":
-        raise NotImplementedError
-
-    return quant_config, w1q, w1s, w2q, w2s
+    raise NotImplementedError(f"Unsupported quantization: {quantization}")
 
 
 @dataclass
@@ -255,7 +315,7 @@ def make_fused_moe_layer(
     num_redundant_experts: int = 0,
     has_bias: bool = False,
 ) -> tuple[Callable, FusedMoE]:
-    quant_config, w1q, w1s, w2q, w2s = make_quant_config(quantization, w1, w2)
+    quant_config, qw = make_quant_config(quantization, w1, w2, global_num_experts)
 
     kwargs = dict()
     if shared_experts is None:
@@ -292,23 +352,21 @@ def make_fused_moe_layer(
         **kwargs,
     )
 
-    #
-    # TODO: make sure parameter names correct for diff quantization types
-    #
-    layer.register_parameter("w13_weight", torch.nn.Parameter(w1q, requires_grad=False))
+    for name, value in [
+        ("w13_weight", qw.w13_weight),
+        ("w2_weight", qw.w2_weight),
+        ("w13_weight_scale", qw.w13_weight_scale),
+        ("w2_weight_scale", qw.w2_weight_scale),
+        ("w13_weight_scale_2", qw.w13_weight_scale_2),
+        ("w2_weight_scale_2", qw.w2_weight_scale_2),
+        ("w13_input_scale", qw.w13_input_scale),
+        ("w2_input_scale", qw.w2_input_scale),
+    ]:
+        if value is not None:
+            layer.register_parameter(
+                name, torch.nn.Parameter(value, requires_grad=False)
+            )
 
-    layer.register_parameter("w2_weight", torch.nn.Parameter(w2q, requires_grad=False))
-
-    if w1s is not None:
-        assert w2s is not None
-        layer.register_parameter(
-            "w13_weight_scale", torch.nn.Parameter(w1s, requires_grad=False)
-        )
-        layer.register_parameter(
-            "w2_weight_scale", torch.nn.Parameter(w2s, requires_grad=False)
-        )
-
-    # layer.maybe_init_modular_kernel()
     layer.quant_method.process_weights_after_loading(layer)
 
     def _moe(
@@ -357,7 +415,7 @@ def make_fake_moe_layer(
     activation: str = "silu",
     indices_type: torch.dtype | None = None,
     expert_map: torch.Tensor | None = None,
-    enable_eplb: bool = False,  # for now
+    enable_eplb: bool = False,  # TODO: add eplb support
     expert_load_view: torch.Tensor | None = None,
     logical_to_physical_map: torch.Tensor | None = None,
     logical_replica_count: torch.Tensor | None = None,
@@ -367,7 +425,7 @@ def make_fake_moe_layer(
     router = create_fused_moe_router(
         top_k=top_k,
         global_num_experts=global_num_experts,
-        # eplb_state=None, # for now
+        # eplb_state=None, # TODO
         renormalize=renormalize,
         use_grouped_topk=use_grouped_topk,
         num_expert_group=num_expert_group,
@@ -376,7 +434,7 @@ def make_fake_moe_layer(
         scoring_func=scoring_func,
         routed_scaling_factor=routed_scaling_factor,
         e_score_correction_bias=e_score_correction_bias,
-        num_fused_shared_experts=0,  # for now
+        num_fused_shared_experts=0,  # TODO
         enable_eplb=enable_eplb,
         # TODO(bnell): once we can construct the MK at init time, we
         # can make this a value.
@@ -554,12 +612,15 @@ def _test_loop(
         ):
             output = moe_fn(hidden_states, router_logits)
 
-    if quantization is not None:
-        atol = 6e-2
-        rtol = 6e-2
+    # TODO: add tolerance to QuantizaedWeights + maybe rename
+    if quantization is None:
+        atol, rtol = 3.5e-2, 3.5e-2
+    elif quantization in ("fp8", "modelopt_fp8"):
+        atol, rtol = 6e-2, 6e-2
+    elif quantization == "modelopt_fp4":
+        atol, rtol = 5e-1, 5e-1
     else:
-        atol = 3.5e-2
-        rtol = 3.5e-2
+        atol, rtol = 6e-2, 6e-2
 
     torch.testing.assert_close(baseline_output, output, atol=atol, rtol=rtol)
 
@@ -635,9 +696,6 @@ def test_moe_layer(
 
     in_dtype = torch.bfloat16
 
-    # Just fp8 for now.
-    # quant_dtype = torch.float8_e4m3fn if quantization is not None else None
-
     (w1, _, _, _), (w2, _, _, _) = make_test_weights(
         num_experts,
         n,
@@ -652,6 +710,9 @@ def test_moe_layer(
         )
     else:
         shared_experts_config = None
+
+    # For now, run baseline unquantized.
+    # quant_dtype = torch.float8_e4m3fn if quantization is not None else None
 
     with set_current_vllm_config(vllm_config):
         baseline_layer = make_fake_moe_layer(
