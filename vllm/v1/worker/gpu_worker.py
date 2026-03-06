@@ -6,6 +6,7 @@ import gc
 import os
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
+from datetime import timedelta
 from types import NoneType
 from typing import TYPE_CHECKING, Any
 
@@ -57,6 +58,7 @@ from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
+from ...model_executor.model_loader import TensorizerLoader
 from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
@@ -277,7 +279,7 @@ class Worker(WorkerBase):
 
             # Now take memory snapshot after NCCL is initialized
             gc.collect()
-            torch.cuda.empty_cache()
+            torch.accelerator.empty_cache()
 
             # take current memory snapshot
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
@@ -463,6 +465,10 @@ class Worker(WorkerBase):
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
 
+        # Update local config with adjusted num blocks after profiling,
+        # so that it's available to the warmup stage.
+        self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
+
         # Init kv cache connector here, because it requires
         # `kv_cache_config`.
         # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
@@ -584,7 +590,7 @@ class Worker(WorkerBase):
             # sampling related tensors of max possible shape to avoid memory
             # fragmentation issue.
             # NOTE: This is called after `capture_model` on purpose to prevent
-            # memory buffers from being cleared by `torch.cuda.empty_cache`.
+            # memory buffers from being cleared by `torch.accelerator.empty_cache`.
             max_num_reqs = min(
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens,
@@ -836,12 +842,11 @@ class Worker(WorkerBase):
             max_size=max_size,
         )
 
-    def save_tensorized_model(
-        self,
-        tensorizer_config: "TensorizerConfig",
-    ) -> None:
-        self.model_runner.save_tensorized_model(
+    def save_tensorized_model(self, tensorizer_config: "TensorizerConfig") -> None:
+        TensorizerLoader.save_model(
+            self.get_model(),
             tensorizer_config=tensorizer_config,
+            model_config=self.model_config,
         )
 
     def init_weight_transfer_engine(self, init_info: dict) -> None:
@@ -938,8 +943,18 @@ def init_worker_distributed_environment(
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_method = distributed_init_method or "env://"
+
+    timeout = None
+    if parallel_config.distributed_timeout_seconds is not None:
+        timeout = timedelta(seconds=parallel_config.distributed_timeout_seconds)
+
     init_distributed_environment(
-        parallel_config.world_size, rank, init_method, local_rank, backend
+        parallel_config.world_size,
+        rank,
+        init_method,
+        local_rank,
+        backend,
+        timeout,
     )
 
     ensure_model_parallel_initialized(
