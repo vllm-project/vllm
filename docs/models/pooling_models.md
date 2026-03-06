@@ -99,7 +99,7 @@ embeds = output.outputs.embedding
 print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 ```
 
-A code example can be found here: [examples/offline_inference/basic/embed.py](../../examples/offline_inference/basic/embed.py)
+A code example can be found here: [examples/basic/offline_inference/embed.py](../../examples/basic/offline_inference/embed.py)
 
 ### `LLM.classify`
 
@@ -116,7 +116,7 @@ probs = output.outputs.probs
 print(f"Class Probabilities: {probs!r} (size={len(probs)})")
 ```
 
-A code example can be found here: [examples/offline_inference/basic/classify.py](../../examples/offline_inference/basic/classify.py)
+A code example can be found here: [examples/basic/offline_inference/classify.py](../../examples/basic/offline_inference/classify.py)
 
 ### `LLM.score`
 
@@ -140,7 +140,7 @@ score = output.outputs.score
 print(f"Score: {score}")
 ```
 
-A code example can be found here: [examples/offline_inference/basic/score.py](../../examples/offline_inference/basic/score.py)
+A code example can be found here: [examples/basic/offline_inference/score.py](../../examples/basic/offline_inference/score.py)
 
 ### `LLM.reward`
 
@@ -156,7 +156,7 @@ data = output.outputs.data
 print(f"Data: {data!r}")
 ```
 
-A code example can be found here: [examples/offline_inference/basic/reward.py](../../examples/offline_inference/basic/reward.py)
+A code example can be found here: [examples/basic/offline_inference/reward.py](../../examples/basic/offline_inference/reward.py)
 
 ### `LLM.encode`
 
