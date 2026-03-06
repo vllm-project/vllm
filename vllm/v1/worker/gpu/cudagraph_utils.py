@@ -38,6 +38,19 @@ class BatchExecutionDescriptor:
     uniform_token_count: int | None = None
 
 
+def _is_compatible(
+    desc: BatchExecutionDescriptor,
+    num_reqs: int,
+    num_tokens: int,
+    uniform_token_count: int | None,
+) -> bool:
+    return (
+        (desc.uniform_token_count or uniform_token_count) == uniform_token_count
+        and desc.num_reqs >= num_reqs
+        and desc.num_tokens >= num_tokens
+    )
+
+
 def get_uniform_token_count(
     num_reqs: int,
     num_tokens: int,
@@ -207,9 +220,8 @@ class CudaGraphManager:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
         if self._graphs_captured and 0 < num_tokens < len(self._candidates):
             for desc in self._candidates[num_tokens]:
-                if desc.uniform_token_count != uniform_token_count:
-                    continue
-                return desc
+                if _is_compatible(desc, num_reqs, num_tokens, uniform_token_count):
+                    return desc
         return BatchExecutionDescriptor(
             cg_mode=CUDAGraphMode.NONE, num_tokens=num_tokens, num_reqs=num_reqs
         )

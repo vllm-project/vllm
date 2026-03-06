@@ -345,6 +345,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Create a dummy scheduler output.
         num_reqs = min(num_tokens, self.max_num_reqs)
         if uniform_decode:
+            # HACK(lucas): for now since the worker is shared between MRV1 and MRV2,
+            # and for spec-decode with MTP we want to make sure the dummy runs use
+            # 1+num_speculative_tokens we use max here, this will likely be eventually
+            # changed in the worker: https://github.com/vllm-project/vllm/pull/35243
+            num_tokens = max(num_tokens, self.decode_query_len)
             num_reqs = num_tokens // self.decode_query_len
             assert num_tokens % self.decode_query_len == 0
         num_tokens_per_request = [num_tokens // num_reqs] * num_reqs
@@ -697,8 +702,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.dcp_rank,
                 self.cp_interleave,
             )
-            # Zero out padded entries.
-            self.input_buffers.dcp_local_seq_lens[num_reqs:num_reqs_padded].zero_()
             dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs_padded]
 
         # Some input token ids are directly read from the last sampled tokens
