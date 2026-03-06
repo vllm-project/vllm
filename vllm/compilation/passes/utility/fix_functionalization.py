@@ -99,7 +99,7 @@ class FixFunctionalizationPass(VllmInductorPass):
                     # Handle extra nodes added for functionalized query and q_pe
                     query_view_orig = query.args[0]
                     q_pe_orig = query
-                    q_pe_getitem = getitem_nodes[0]
+                    q_pe_getitem = getitem_nodes[1]
                     query_slice_scatter_temp = next(iter(q_pe_getitem.users))
                     query_view_temp = query_slice_scatter_temp.args[0]
                     for user in query_slice_scatter_temp.users:
@@ -120,7 +120,7 @@ class FixFunctionalizationPass(VllmInductorPass):
 
                     # Handle extra nodes added for functionalized k_pe
                     k_pe_unsqueeze_orig = key
-                    k_pe_getitem = getitem_nodes[1]
+                    k_pe_getitem = getitem_nodes[2]
                     k_pe_squeeze_temp = next(iter(k_pe_getitem.users))
                     kv_lora_pe_slice_scatter_temp = next(iter(k_pe_squeeze_temp.users))
                     kv_lora_getitem_temp = kv_lora_pe_slice_scatter_temp.args[0]
