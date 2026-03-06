@@ -29,6 +29,7 @@ if len(configs) == 0:
 
 @dataclass
 class Row:
+    rank: str
     shape: str
     baseline_ms: float
     kernel_ms: float
@@ -44,9 +45,10 @@ def save_rows_json(rows, rank=0, out_dir="bench_results"):
         json.dump([r.__dict__ for r in rows], f, indent=2)
 
 def print_table(rows: List[Row]) -> None:
-    headers = ["shape", "baseline_ms", "kernel_ms", "speedup(x)", "baseline_peak(MB)", "kernel_peak(MB)", "mem_improve(x)"]
+    headers = ["rank", "shape", "baseline_ms", "kernel_ms", "speedup(x)", "baseline_peak(MB)", "kernel_peak(MB)", "mem_improve(x)"]
     data = [
         [
+            r.rank,
             r.shape,
             f"{r.baseline_ms:.3f}",
             f"{r.kernel_ms:.3f}",
@@ -329,7 +331,7 @@ def benchmark_all_gather_gemm_fp8(M: int , N:int , K:int ,sp: int, world_size: i
     )
     # if rank == 0:
     #     print(f"[Rank:{rank}] Sanity check Testing shape M={M},N={N},K={K} with split {sp} (tokens per rank: {M_per_rank})")
-    # sabity  check
+    # sanity  check
     with torch.no_grad():
         a_out, c = helion_kernel()
         ag_golden, mm_golden = baseline_kernel()
@@ -392,6 +394,7 @@ def benchmark_all_gather_gemm_fp8(M: int , N:int , K:int ,sp: int, world_size: i
     # results
     rows.append(
         Row(
+            rank=f"rank:{rank}",
             shape=f"M={M},N={N},K={K}splits={sp}",
             baseline_ms=baseline_latency,
             kernel_ms=helion_latency,
@@ -442,8 +445,54 @@ if __name__ == "__main__":
             print(f"Rank {rank} failed with error: {e}")
             raise e
     finally:
-        if rank == 0:
-            print("\n=== Benchmark Results ===")
-            print_table(rows)
+        # Prepare rows to send (empty if no rows)
+        to_send = rows if rows else []
+
+        # gather rows on rank 0
+        all_ranks_rows = [None] * world_size if rank == 0 else None
         if dist.is_initialized():
+            try:
+                dist.gather_object(to_send, all_ranks_rows if rank == 0 else None, dst=0)
+            except Exception as e:
+                print(f"Rank {rank} gather_object failed: {e}")
+
+        if rank == 0:
+            # flatten rows
+            consolidated_rows = []
+            if all_ranks_rows:
+                for r in all_ranks_rows:
+                    if r is not None:
+                        consolidated_rows.extend(r)
+
+            # group by shape
+            from collections import defaultdict
+            per_shape = defaultdict(list)
+            for r in consolidated_rows:
+                per_shape[r.shape].append(r)
+
+            final_rows = []
+            for shape, rows_for_shape in per_shape.items():
+                baseline_ms = max(r.baseline_ms for r in rows_for_shape)
+                kernel_ms = max(r.kernel_ms for r in rows_for_shape)
+                baseline_mem = max(r.baseline_peak_mb for r in rows_for_shape)
+                kernel_mem = max(r.kernel_peak_mb for r in rows_for_shape)
+                speedup = baseline_ms / kernel_ms if kernel_ms > 0 else 0
+                mem_improve = baseline_mem / kernel_mem if kernel_mem > 0 else 0
+                final_rows.append(
+                    Row(
+                        rank="ALL",
+                        shape=shape,
+                        baseline_ms=baseline_ms,
+                        kernel_ms=kernel_ms,
+                        speedup_x=speedup,
+                        baseline_peak_mb=baseline_mem,
+                        kernel_peak_mb=kernel_mem,
+                        mem_improve_x=mem_improve,
+                    )
+                )
+
+            print("=== Final Distributed Benchmark Results ===")
+            print_table(final_rows)
+        if dist.is_initialized():
+            dist.barrier(group=dist_group)  # ensure all ranks finished before cleanup
             dist.destroy_process_group()
