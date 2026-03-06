@@ -151,14 +151,6 @@ from vllm.v1.outputs import (
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
-from vllm.v1.pool.late_interaction import (
-    LATE_INTERACTION_MODE_CACHE_QUERY,
-    LATE_INTERACTION_MODE_KEY,
-    LATE_INTERACTION_MODE_SCORE_DOC,
-    LATE_INTERACTION_QUERY_KEY,
-    LATE_INTERACTION_QUERY_USES_KEY,
-    compute_maxsim_score,
-)
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.logits_processor.interface import LogitsProcessor
@@ -180,6 +172,7 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
+from vllm.v1.worker.gpu.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
@@ -490,10 +483,7 @@ class GPUModelRunner(
 
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
-        # query_key -> token embeddings for late-interaction scoring.
-        self._late_interaction_query_cache: dict[str, torch.Tensor] = {}
-        # query_key -> remaining number of docs that should use this query.
-        self._late_interaction_query_uses: dict[str, int] = {}
+        self.late_interaction_runner = LateInteractionRunner()
 
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
@@ -778,10 +768,6 @@ class GPUModelRunner(
             if draft_config is None or draft_config.max_model_len is None:
                 self.effective_drafter_max_model_len = self.max_model_len
 
-    def _clear_late_interaction_query_cache(self) -> None:
-        self._late_interaction_query_cache.clear()
-        self._late_interaction_query_uses.clear()
-
     def reset_mm_cache(self) -> None:
         """
         Clear the multi-modal cache that was used during profiling,
@@ -789,7 +775,7 @@ class GPUModelRunner(
         """
         if self.mm_budget:
             self.mm_budget.reset_cache()
-        self._clear_late_interaction_query_cache()
+        self.late_interaction_runner.clear()
 
     def reset_encoder_cache(self) -> None:
         """Clear the GPU-side encoder cache storing vision embeddings.
@@ -798,7 +784,7 @@ class GPUModelRunner(
         stale embeddings computed with old weights are not reused.
         """
         self.encoder_cache.clear()
-        self._clear_late_interaction_query_cache()
+        self.late_interaction_runner.clear()
 
     @torch.inference_mode()
     def init_fp8_kv_scales(self) -> None:
@@ -962,6 +948,9 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+        self.late_interaction_runner.on_requests_finished(
+            scheduler_output.finished_req_ids
+        )
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -1042,6 +1031,7 @@ class GPUModelRunner(
                 lora_request=new_req_data.lora_request,
             )
             self.requests[req_id] = req_state
+            self.late_interaction_runner.register_request(req_id, pooling_params)
 
             if sampling_params and sampling_params.prompt_logprobs is not None:
                 self.num_prompt_logprobs[req_id] = (
@@ -1271,6 +1261,7 @@ class GPUModelRunner(
         req_state.prompt_embeds = new_req_data.prompt_embeds
         req_state.sampling_params = new_req_data.sampling_params
         req_state.pooling_params = new_req_data.pooling_params
+        self.late_interaction_runner.register_request(req_id, req_state.pooling_params)
         req_state.block_ids = new_req_data.block_ids
         req_state.num_computed_tokens = new_req_data.num_computed_tokens
         req_state.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
@@ -2786,10 +2777,11 @@ class GPUModelRunner(
             seq_len == prompt_len
             for seq_len, prompt_len in zip(seq_lens_cpu, pooling_metadata.prompt_lens)
         ]
-        raw_pooler_output = self._postprocess_late_interaction_scores(
-            raw_pooler_output,
-            pooling_metadata.pooling_params,
-            finished_mask,
+        raw_pooler_output = self.late_interaction_runner.postprocess_pooler_output(
+            raw_pooler_output=raw_pooler_output,
+            pooling_params=pooling_metadata.pooling_params,
+            req_ids=self.input_batch.req_ids,
+            finished_mask=finished_mask,
         )
 
         model_runner_output = ModelRunnerOutput(
@@ -2817,75 +2809,6 @@ class GPUModelRunner(
         self._sync_device()
 
         return model_runner_output
-
-    def _postprocess_late_interaction_scores(
-        self,
-        raw_pooler_output: PoolerOutput,
-        pooling_params: list[PoolingParams],
-        finished_mask: list[bool],
-    ) -> PoolerOutput:
-        if not isinstance(raw_pooler_output, list):
-            return raw_pooler_output
-
-        # fast path: no requests are finished or no late-interaction metadata
-        if not any(finished_mask):
-            return raw_pooler_output
-        if not any(
-            p.extra_kwargs and LATE_INTERACTION_MODE_KEY in p.extra_kwargs
-            for p in pooling_params
-        ):
-            return raw_pooler_output
-
-        outputs: list[torch.Tensor | None] = list(raw_pooler_output)
-        for i, (output, params, finished) in enumerate(
-            zip(outputs, pooling_params, finished_mask)
-        ):
-            if not finished or output is None:
-                continue
-
-            extra_kwargs = params.extra_kwargs or {}
-            mode = extra_kwargs.get(LATE_INTERACTION_MODE_KEY)
-            if mode is None:
-                continue
-
-            query_key = extra_kwargs.get(LATE_INTERACTION_QUERY_KEY)
-            if not isinstance(query_key, str) or not query_key:
-                raise ValueError(
-                    "late-interaction request is missing a valid query key in "
-                    "pooling_params.extra_kwargs."
-                )
-
-            if mode == LATE_INTERACTION_MODE_CACHE_QUERY:
-                query_uses = extra_kwargs.get(LATE_INTERACTION_QUERY_USES_KEY, 1)
-                # `output` can be a view into the current step's hidden-states
-                # buffer, so clone it before storing across scheduling steps.
-                self._late_interaction_query_cache[query_key] = output.clone()
-                self._late_interaction_query_uses[query_key] = max(1, int(query_uses))
-                # return a tiny scalar so this query request can finish quickly
-                outputs[i] = torch.zeros((), device=output.device, dtype=torch.float32)
-                continue
-
-            if mode == LATE_INTERACTION_MODE_SCORE_DOC:
-                query_output = self._late_interaction_query_cache.get(query_key)
-                if query_output is None:
-                    raise ValueError(
-                        "late-interaction query cache miss for key "
-                        f"{query_key!r}. Ensure query requests are executed "
-                        "before their paired document requests."
-                    )
-
-                outputs[i] = compute_maxsim_score(query_output, output)
-                remaining = self._late_interaction_query_uses.get(query_key, 1) - 1
-                if remaining <= 0:
-                    self._late_interaction_query_uses.pop(query_key, None)
-                    self._late_interaction_query_cache.pop(query_key, None)
-                else:
-                    self._late_interaction_query_uses[query_key] = remaining
-                continue
-
-            raise ValueError(f"Unsupported late-interaction mode: {mode!r}")
-
-        return outputs
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
