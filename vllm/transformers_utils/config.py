@@ -143,11 +143,13 @@ class HFConfigParser(ConfigParserBase):
         **kwargs,
     ) -> tuple[dict, PretrainedConfig]:
         kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
+        trust_remote_code |= kwargs.get("trust_remote_code", False)
+        kwargs = without_trust_remote_code(kwargs)
         config_dict, _ = PretrainedConfig.get_config_dict(
             model,
             revision=revision,
             code_revision=code_revision,
-            **without_trust_remote_code(kwargs),
+            **kwargs,
         )
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
