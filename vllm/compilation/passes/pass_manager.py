@@ -26,6 +26,7 @@ if rocm_aiter_ops.is_enabled():
 if current_platform.is_cuda_alike():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
     from .fusion.attn_quant_fusion import AttnFusionPass
+    from .fusion.mla_attn_quant_fusion import MLAAttnFusionPass
     from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
     from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
     from .fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
@@ -145,6 +146,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
             if self.pass_config.fuse_attn_quant:
                 self.passes += [AttnFusionPass(config)]
+                self.passes += [MLAAttnFusionPass(config)]
 
             if self.pass_config.enable_qk_norm_rope_fusion:
                 self.passes += [SplitCoalescingPass(config)]
