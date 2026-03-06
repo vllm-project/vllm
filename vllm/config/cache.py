@@ -40,8 +40,7 @@ class CacheConfig:
     """Configuration for the KV cache."""
 
     block_size: SkipValidation[BlockSize] = None  # type: ignore[assignment]
-    """Size of a contiguous cache block in number of tokens. On CUDA devices,
-    only block sizes up to 32 are supported.
+    """Size of a contiguous cache block in number of tokens.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `Platform.check_and_update_config()` based on the current
@@ -92,24 +91,6 @@ class CacheConfig:
     benefits before turning this on.\n
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
     reproducible hashing. Requires the optional ``xxhash`` package."""
-    cpu_offload_gb: float = Field(default=0, ge=0)
-    """The space in GiB to offload to CPU, per GPU. Default is 0, which means
-    no offloading. Intuitively, this argument can be seen as a virtual way to
-    increase the GPU memory size. For example, if you have one 24 GB GPU and
-    set this to 10, virtually you can think of it as a 34 GB GPU. Then you can
-    load a 13B model with BF16 weight, which requires at least 26GB GPU memory.
-    Note that this requires fast CPU-GPU interconnect, as part of the model is
-    loaded from CPU memory to GPU memory on the fly in each model forward pass.
-
-    DEPRECATED: This field is deprecated and will be removed in v0.16.
-    Please use OffloadConfig.uva.cpu_offload_gb instead.
-    """
-    cpu_offload_params: set[str] = Field(default_factory=set)
-    """The set of parameter name segments to target for CPU offloading.
-
-    DEPRECATED: This field is deprecated and will be removed in v0.16.
-    Please use OffloadConfig.uva.cpu_offload_params instead.
-    """
     calculate_kv_scales: bool = False
     """This enables dynamic calculation of `k_scale` and `v_scale` when
     kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
