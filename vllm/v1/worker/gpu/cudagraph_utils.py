@@ -191,8 +191,10 @@ class CudaGraphManager:
                 if is_global_first_rank():
                     descs = tqdm(descs, desc=f"{progress_bar_desc} ({mode.name})")
                 for desc in descs:
-                    # Warmup with NONE mode
+                    # Prepare inputs and get forward function
                     forward_fn = create_forward_fn(desc)
+
+                    # Warmup
                     forward_fn(CUDAGraphMode.NONE)
 
                     # Capture
@@ -200,18 +202,21 @@ class CudaGraphManager:
                         "CG Capture: mode=%s, batch_desc=%s", desc.cg_mode.name, desc
                     )
                     if desc.cg_mode == CUDAGraphMode.PIECEWISE:
-                        forward_fn = create_forward_fn(desc)
                         forward_fn(CUDAGraphMode.PIECEWISE)
                     else:
                         assert desc not in self.graphs, (
                             f"Graph already captured for {desc}"
                         )
-                        # create_forward_fn prepares inputs OUTSIDE the graph
-                        forward_fn = create_forward_fn(desc)
                         graph = torch.cuda.CUDAGraph()
+                        # Sync offloader's copy stream before capture.
+                        # Ensure any pre-capture prefetches from offloader are complete.
                         get_offloader().sync_prev_onload()
                         with torch.cuda.graph(graph, self.pool):
                             forward_fn(CUDAGraphMode.NONE)
+                            # Join offloader's copy stream after forward to avoid
+                            # unjoined stream error. The last layer's start_prefetch
+                            # forks copy_stream, but wait_prefetch only happens in
+                            # the next forward pass.
                             get_offloader().join_after_forward()
                         self.graphs[desc] = graph
         self._graphs_captured = True
