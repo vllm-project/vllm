@@ -142,17 +142,12 @@ class KimiAudioProcessingInfo(BaseProcessingInfo):
             model_path = self.ctx.model_config.model
             trust_remote_code = self.ctx.model_config.trust_remote_code
 
-            # Load feature extractor - try local subfolder first, then HF Hub
-            whisper_path = os.path.join(model_path, "whisper-large-v3")
-            try:
-                feature_extractor = WhisperFeatureExtractor.from_pretrained(
-                    whisper_path, trust_remote_code=trust_remote_code
-                )
-            except OSError:
-                # Download from HF Hub if local subfolder doesn't exist
-                feature_extractor = WhisperFeatureExtractor.from_pretrained(
-                    "openai/whisper-large-v3", trust_remote_code=trust_remote_code
-                )
+            # Load feature extractor with subfolder support
+            feature_extractor = WhisperFeatureExtractor.from_pretrained(
+                model_path,
+                trust_remote_code=trust_remote_code,
+                subfolder="whisper-large-v3",
+            )
 
             # Use KimiAudioTokenizer for Kimi-Audio
             tokenizer = KimiAudioTokenizer.from_pretrained(
@@ -599,6 +594,8 @@ class KimiAudioForConditionalGeneration(
         loaded = loader.load_weights(filtered_weights, mapper=self.hf_to_vllm_mapper)
 
         # Load Whisper encoder weights from standalone folder
+        # Note: Using manual loading (not DefaultModelLoader.Source) because
+        # Kimi-Audio requires custom weight transformations (Q/K/V fusion, fc mapping)
         model_path = self.config._name_or_path
         whisper_path = os.path.join(model_path, "whisper-large-v3", "model.safetensors")
 

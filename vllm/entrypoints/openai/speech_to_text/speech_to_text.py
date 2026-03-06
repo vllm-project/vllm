@@ -12,7 +12,7 @@ from typing import Final, Literal, TypeAlias, TypeVar, cast
 import numpy as np
 from fastapi import Request
 from soundfile import LibsndfileError
-from transformers import PreTrainedTokenizerBase
+from transformers import PreTrainedTokenizerBase, ProcessorMixin
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
@@ -182,8 +182,6 @@ class OpenAISpeechToText(OpenAIServing):
 
             feature_extractor = None
             # Check if processor is actually a ProcessorMixin (not just a tokenizer)
-            from transformers import ProcessorMixin
-
             if isinstance(processor, ProcessorMixin):
                 if hasattr(processor, "feature_extractor"):
                     feature_extractor = processor.feature_extractor
