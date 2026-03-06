@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import time
 from http import HTTPStatus
-from typing import Literal, TypeAlias
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import torch
 from fastapi import HTTPException, UploadFile
@@ -19,11 +20,17 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
 )
 from vllm.utils import random_uuid
+
+if TYPE_CHECKING:
+    import numpy as np
+
+    from vllm.config import ModelConfig, SpeechToTextConfig
 
 logger = init_logger(__name__)
 _LONG_INFO = torch.iinfo(torch.long)
@@ -106,7 +113,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     stream_include_usage: bool | None = False
     stream_continuous_usage_stats: bool | None = False
 
-    vllm_xargs: dict[str, str | int | float] | None = Field(
+    vllm_xargs: dict[str, str | int | float | bool] | None = Field(
         default=None,
         description=(
             "Additional request parameters with string or "
@@ -169,6 +176,25 @@ class TranscriptionRequest(OpenAIBaseModel):
         "top_k": 0,
         "min_p": 0.0,
     }
+
+    def build_stt_params(
+        self,
+        audio: "np.ndarray",
+        stt_config: "SpeechToTextConfig",
+        model_config: "ModelConfig",
+        language: str | None,
+        task_type: str,
+        to_language: str | None,
+    ) -> SpeechToTextParams:
+        return SpeechToTextParams(
+            audio=audio,
+            stt_config=stt_config,
+            model_config=model_config,
+            language=language,
+            task_type=task_type,
+            request_prompt=self.prompt,
+            to_language=to_language,
+        )
 
     def to_sampling_params(
         self, default_max_tokens: int, default_sampling_params: dict | None = None
@@ -240,6 +266,11 @@ class TranscriptionRequest(OpenAIBaseModel):
                 "Stream options can only be defined when `stream=True`.",
                 parameter=invalid_param,
             )
+
+        # Parse vllm_xargs from JSON string (form data sends it as a string)
+        xargs = data.get("vllm_xargs")
+        if isinstance(xargs, str):
+            data["vllm_xargs"] = json.loads(xargs)
 
         return data
 
@@ -423,6 +454,25 @@ class TranslationRequest(OpenAIBaseModel):
     _DEFAULT_SAMPLING_PARAMS: dict = {
         "temperature": 0,
     }
+
+    def build_stt_params(
+        self,
+        audio: "np.ndarray",
+        stt_config: "SpeechToTextConfig",
+        model_config: "ModelConfig",
+        language: str | None,
+        task_type: str,
+        to_language: str | None,
+    ) -> SpeechToTextParams:
+        return SpeechToTextParams(
+            audio=audio,
+            stt_config=stt_config,
+            model_config=model_config,
+            language=language,
+            task_type=task_type,
+            request_prompt=self.prompt,
+            to_language=to_language,
+        )
 
     def to_sampling_params(
         self, default_max_tokens: int, default_sampling_params: dict | None = None

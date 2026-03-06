@@ -37,6 +37,7 @@ from transformers import BatchFeature, PretrainedConfig
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs.data import PromptType, TokensPrompt
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -848,15 +849,14 @@ class GraniteSpeechForConditionalGeneration(
     @classmethod
     def get_generation_prompt(
         cls,
-        audio: np.ndarray,
-        model_config: ModelConfig,
-        stt_config: SpeechToTextConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
+        stt_params: SpeechToTextParams,
     ) -> PromptType:
         """Get the generation prompt to be used for transcription requests."""
+        audio = stt_params.audio
+        model_config = stt_params.model_config
+        task_type = stt_params.task_type
+        to_language = stt_params.to_language
+
         # Audio placeholders don't use an index, so value doesn't matter
         audio_tok = cls.get_placeholder_str("audio", 0)
 

@@ -15,6 +15,7 @@ from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.inputs.data import PromptType, TokensPrompt
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
@@ -1131,17 +1132,12 @@ class GlmAsrForConditionalGeneration(
         )
 
     @classmethod
-    def get_generation_prompt(
-        cls,
-        audio: np.ndarray,
-        model_config: ModelConfig,
-        stt_config: SpeechToTextConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
-    ) -> PromptType:
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
         """Get the generation prompt to be used for transcription requests."""
+        audio = stt_params.audio
+        model_config = stt_params.model_config
+        task_type = stt_params.task_type
+        to_language = stt_params.to_language
         tokenizer = cached_tokenizer_from_config(model_config)
         audio_token = cls._get_audio_token(model_config)
 

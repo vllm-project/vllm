@@ -51,6 +51,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.inputs.data import PromptType
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
@@ -2182,19 +2183,17 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         )
 
     @classmethod
-    def get_generation_prompt(
-        cls,
-        audio: np.ndarray,
-        stt_config: SpeechToTextConfig,
-        model_config: ModelConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
-    ) -> PromptType:
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
         """
         Construct a transcription/translation prompt for Qwen3-Omni.
         """
+        audio = stt_params.audio
+        stt_config = stt_params.stt_config
+        model_config = stt_params.model_config
+        language = stt_params.language
+        task_type = stt_params.task_type
+        to_language = stt_params.to_language
+        request_prompt = stt_params.request_prompt
         # Transcribe this audio [into <language>] | for transcription
         # Translate this audio [from <language> into <to_language>] | for translation
         instruction = "Transcribe" if task_type == "transcribe" else "Translate"

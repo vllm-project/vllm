@@ -50,6 +50,7 @@ from vllm.multimodal.audio import split_audio
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -223,13 +224,13 @@ class OpenAISpeechToText(OpenAIServing):
             # Use the same method that _preprocess_speech_to_text uses
             # to create the prompt
             dummy_prompt = self.model_cls.get_generation_prompt(
-                audio=dummy_audio,
-                stt_config=self.asr_config,
-                model_config=self.model_config,
-                language="en",
-                task_type=self.task_type,
-                request_prompt="",
-                to_language=None,
+                SpeechToTextParams(
+                    audio=dummy_audio,
+                    stt_config=self.asr_config,
+                    model_config=self.model_config,
+                    language="en",
+                    task_type=self.task_type,
+                ),
             )
             parsed_prompt = parse_model_prompt(self.model_config, dummy_prompt)
 
@@ -362,17 +363,15 @@ class OpenAISpeechToText(OpenAIServing):
 
         parsed_prompts: list[DictPrompt] = []
         for chunk in chunks:
-            # The model has control over the construction, as long as it
-            # returns a valid PromptType.
-            prompt = self.model_cls.get_generation_prompt(
+            stt_params = request.build_stt_params(
                 audio=chunk,
                 stt_config=self.asr_config,
                 model_config=self.model_config,
                 language=language,
                 task_type=self.task_type,
-                request_prompt=request.prompt,
                 to_language=to_language,
             )
+            prompt = self.model_cls.get_generation_prompt(stt_params)
 
             parsed_prompt: DictPrompt
             if request.response_format == "verbose_json":

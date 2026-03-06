@@ -20,6 +20,7 @@ from transformers.models.siglip import SiglipImageProcessorFast
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs.data import PromptType, TextPrompt
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import RowParallelLinear
@@ -772,21 +773,18 @@ class Gemma3nForConditionalGeneration(
             raise ValueError(f"Unsupported modality: {modality}")
 
     @classmethod
-    def get_generation_prompt(
-        cls,
-        audio: np.ndarray,
-        stt_config: SpeechToTextConfig,
-        model_config: ModelConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
-    ) -> PromptType:
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
         """
         Gemma3n supports "free-form" transcription.
         We fix its prompt here to standardize transcriptions/translations
         requests.
         """
+        audio = stt_params.audio
+        stt_config = stt_params.stt_config
+        model_config = stt_params.model_config
+        language = stt_params.language
+        task_type = stt_params.task_type
+        to_language = stt_params.to_language
         # Transcribe this audio [into <>] | for transcription
         # Translate this audio [from <> into <>] | for translation
         prompt = "<start_of_turn>user\n"
