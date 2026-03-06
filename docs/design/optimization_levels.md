@@ -1,29 +1,18 @@
-<!-- markdownlint-disable -->
-
 # Optimization Levels
 
 ## Overview
 
-vLLM now supports optimization levels (`-O0`, `-O1`, `-O2`, `-O3`). Optimization levels provide an intuitive mechanism for users to trade startup time for performance. Higher levels have better performance but worse startup time. These optimization levels have associated defaults to help users get desired out-of-the-box performance. Importantly, defaults set by optimization levels are purely defaults; explicit user settings will not be overwritten.
+vLLM provides 4 optimization levels (`-O0`, `-O1`, `-O2`, `-O3`) that allow users to trade off startup time for performance:
+
+- `-O0`: No optimization. Fastest startup time, but lowest performance.
+- `-O1`: Fast optimization. Simple compilation and fast fusions, and PIECEWISE cudagraphs.
+- `-O2`: Default optimization. Additional compilation ranges, additional fusions, FULL_AND_PIECEWISE cudagraphs.
+- `-O3`: Aggressive optimization. Currently equal to `-O2`, but may include additional time-consuming or experimental optimizations in the future.
+
+All optimization level defaults can be achieved by manually setting the underlying flags.
+User-set flags take precedence over optimization level defaults.
 
 ## Level Summaries and Usage Examples
-```bash
-# CLI usage
-python -m vllm.entrypoints.api_server --model RedHatAI/Llama-3.2-1B-FP8 -O0
-
-# Python API usage
-from vllm.entrypoints.llm import LLM
-
-llm = LLM(
-    model="RedHatAI/Llama-3.2-1B-FP8",
-    optimization_level=0
-)
-```
-
-#### `-O1`: Quick Optimizations
-- **Startup**: Moderate startup time
-- **Performance**: Inductor compilation, CUDAGraphMode.PIECEWISE
-- **Use case**:  Balance for most development scenarios
 
 ```bash
 # CLI usage
@@ -34,31 +23,59 @@ from vllm.entrypoints.llm import LLM
 
 llm = LLM(
     model="RedHatAI/Llama-3.2-1B-FP8",
-    optimization_level=1
+    optimization_level=2 # equivalent to -O2
 )
 ```
 
-#### `-O2`: Full Optimizations (Default)
-- **Startup**: Longer startup time
-- **Performance**: `-O1` + CUDAGraphMode.FULL_AND_PIECEWISE
-- **Use case**: Production workloads where performance is important. This is the default use case. It is also very similar to the previous default. The primary difference is that  noop & fusion flags are enabled. 
+### `-O0`: No Optimization
 
-```bash
-# CLI usage (default, so optional)
-python -m vllm.entrypoints.api_server --model RedHatAI/Llama-3.2-1B-FP8 -O2
+Startup as fast as possible - no autotuning, no compilation, and no cudagraphs.
+This level is good for initial phases of development and debugging.
 
-# Python API usage
-from vllm.entrypoints.llm import LLM
+Settings:
 
-llm = LLM(
-    model="RedHatAI/Llama-3.2-1B-FP8",
-    optimization_level=2  # This is the default
-)
-```
+- `-cc.cudagraph_mode=NONE`
+- `-cc.mode=NONE` (also resulting in `-cc.custom_ops=["none"]`)
+- `-cc.pass_config.fuse_...=False` (all fusions disabled)
+- `--kernel-config.enable_flashinfer_autotune=False`
 
-#### `-O3`: Full Optimization
-Still in development. Added infrastructure to prevent changing API in future 
-release. Currently behaves the same O2.
+### `-O1`: Fast Optimization
+
+Prioritize fast startup, but still enable basic optimizations like compilation and cudagraphs.
+This level is a good balance for most development scenarios where you want faster startup but
+still make sure your code does not break cudagraphs or compilation.
+
+Settings:
+
+- `-cc.cudagraph_mode=PIECEWISE`
+- `-cc.mode=VLLM_COMPILE`
+- `--kernel-config.enable_flashinfer_autotune=True`
+
+Fusions:
+
+- `-cc.pass_config.fuse_norm_quant=True`*
+- `-cc.pass_config.fuse_act_quant=True`*
+- `-cc.pass_config.fuse_act_padding=True`†
+- `-cc.pass_config.fuse_rope_kvcache=True`† (will be moved to O2)
+
+\* These fusions are only enabled when either op is using a custom kernel, otherwise Inductor fusion is better.</br>
+† These fusions are ROCm-only and require AITER.
+
+### `-O2`: Full Optimization (Default)
+
+Prioritize performance at the expense of additional startup time.
+This level is recommended for production workloads and is hence the default.
+Fusions in this level _may_ take longer due to additional compile ranges.
+
+Settings (on top of `-O1`):
+
+- `-cc.cudagraph_mode=FULL_AND_PIECEWISE`
+- `-cc.pass_config.fuse_allreduce_rms=True`
+
+### `-O3`: Aggressive Optimization
+
+This level is currently the same as `-O2`, but may include additional optimizations
+in the future that are more time-consuming or experimental.
 
 ## Troubleshooting
 
