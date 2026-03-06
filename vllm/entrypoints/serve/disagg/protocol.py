@@ -14,8 +14,20 @@ from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
 from vllm.utils import random_uuid
 
-
 ####### Tokens IN <> Tokens OUT #######
+
+
+class GenerateMultiModalFeature(BaseModel):
+    """JSON-serializable metadata for a multimodal item, with optional
+    tensor data for full-data transfer to workers."""
+
+    modality: str
+    mm_hash: str
+    offset: int
+    length: int
+    kwargs_data: str | None = None
+
+
 class GenerateRequest(BaseModel):
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
@@ -28,9 +40,7 @@ class GenerateRequest(BaseModel):
     token_ids: list[int]
     """The token ids to generate text from."""
 
-    # features: MultiModalFeatureSpec
-    # TODO (NickLucche): implement once Renderer work is completed
-    features: str | None = None
+    features: list[GenerateMultiModalFeature] | None = None
     """The processed MM inputs for the model."""
 
     sampling_params: SamplingParams
