@@ -10,6 +10,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
+from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -74,6 +75,7 @@ def _get_token_offs(
 
 
 _LORA_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
+_LORA_SCALE_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
 
 
 def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
@@ -95,6 +97,23 @@ def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
 
     _LORA_PTR_DICT[key] = ptr_tensor
     return _LORA_PTR_DICT.get(key)
+
+
+def _get_scale_ptr(lora_scales: list[torch.Tensor], device: torch.device):
+    """
+    Separate pointer cache for scale tensors, kept distinct from
+    `_LORA_PTR_DICT` to avoid mixing weight and scale pointers.
+    """
+    key = tuple(s.data_ptr() for s in lora_scales)
+
+    if (ptr_tensor := _LORA_SCALE_PTR_DICT.get(key)) is not None:
+        return ptr_tensor
+
+    tensor_ptrs = [s.data_ptr() for s in lora_scales]
+    ptr_tensor = torch.tensor(tensor_ptrs, device=device, dtype=torch.uint64)
+
+    _LORA_SCALE_PTR_DICT[key] = ptr_tensor
+    return _LORA_SCALE_PTR_DICT.get(key)
 
 
 def _adjust_kernel_inputs(
@@ -123,6 +142,7 @@ def _adjust_kernel_inputs(
         "stride_tl",
         "stride_el",
         "slice_a_size",
+        "slice_a_scale_size",
         "slice_c_size",
     ]
 )
@@ -146,11 +166,7 @@ def _fused_moe_lora_kernel_fp8(
     top_k_num,
     lora_ids,
     adapter_enabled,
-    max_loras,  # <<< PR2: rename, used for masks when grid axis-2 != max_loras
-    # The stride variables represent how much to increase the ptr by when
-    # moving by 1 element in a particular dimension. E.g. `stride_am` is
-    # how much to increase `a_ptr` by to get the element one row down
-    # (A has M rows).
+    max_loras,
     stride_am,
     stride_ak,
     stride_bl,
@@ -171,6 +187,7 @@ def _fused_moe_lora_kernel_fp8(
     group_n: tl.constexpr,
     group_k: tl.constexpr,
     slice_a_size,
+    slice_a_scale_size,
     slice_c_size,
     # Meta-parameters
     num_slice_a: tl.constexpr,
@@ -192,8 +209,6 @@ def _fused_moe_lora_kernel_fp8(
     launch_pdl: tl.constexpr,
     IS_PRIMARY: tl.constexpr,
     use_fp8_w8a8: tl.constexpr,
-    use_int8_w8a8: tl.constexpr,
-    use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
@@ -265,7 +280,12 @@ def _fused_moe_lora_kernel_fp8(
     )
     # get a_ptr,b_ptr,c_ptr
     cur_a_ptr = a_ptr + (slice_id % num_slice_a) * slice_a_size
-    cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(c_ptr.dtype.element_ty))
+    if use_fp8_w8a8:
+        cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(tl.float8e4nv))
+    else:
+        cur_b_ptr = tl.load(b_ptr + slice_id).to(
+            tl.pointer_type(c_ptr.dtype.element_ty)
+        )
     cur_c_ptr = c_ptr + (slice_id % num_slice_c) * slice_c_size
 
     # remove modulo wrap-around
@@ -287,6 +307,41 @@ def _fused_moe_lora_kernel_fp8(
         + offs_bn[None, :] * stride_bn
     )
 
+    if use_fp8_w8a8:
+        cur_b_scale_ptr = tl.load(b_scale_ptr + slice_id).to(
+            tl.pointer_type(tl.float32)
+        )
+        cur_a_scale_ptr = a_scale_ptr + (slice_id % num_slice_a) * slice_a_scale_size
+        # block-wise scale ptrs
+        if group_k > 0 and group_n > 0:
+            a_scale_ptrs = (
+                cur_a_scale_ptr + (offs_token // token_mapping_factor) * stride_asm
+            )
+            offs_bsn = offs_bn // group_n
+            b_scale_ptrs = (
+                cur_b_scale_ptr
+                + lora_id * stride_bsl
+                + expert_id * stride_bse
+                + offs_bsn * stride_bsn
+            )
+        elif per_channel_quant:
+            b_scale_ptrs = (
+                cur_b_scale_ptr
+                + lora_id * stride_bsl
+                + expert_id * stride_bse
+                + offs_bn[None, :] * stride_bsn
+            )
+            b_scale = tl.load(b_scale_ptrs)
+            # load per-token scale for activations
+            a_scale_ptrs = (
+                cur_a_scale_ptr + (offs_token // token_mapping_factor) * stride_asm
+            )
+            a_scale = tl.load(a_scale_ptrs, mask=token_mask, other=0.0)[:, None]
+        # tensor-wise
+        else:
+            a_scale = tl.load(cur_a_scale_ptr)
+            b_scale = tl.load(cur_b_scale_ptr + lora_id * stride_bsl + expert_id)
+
     if USE_GDC and IS_PRIMARY:
         # GDC launch dependents hints the runtime system to launch dependent kernels.
         tl.extra.cuda.gdc_launch_dependents()
@@ -299,6 +354,16 @@ def _fused_moe_lora_kernel_fp8(
 
     for k in range(0, grid_k):
         k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K)
+        # Pre-load scales before dot product to overlap memory latency
+        # with the weight/activation loads below. This reduces stall waits
+        # by allowing scale data to arrive while dot product is computing.
+        if use_fp8_w8a8 and group_n > 0 and group_k > 0:
+            k_start = k * BLOCK_SIZE_K * SPLIT_K
+            offs_ks = k_start // group_k
+            a_scale = tl.load(
+                a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
+            )
+            b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
         # GDC wait waits for ALL programs in the prior kernel to complete
         # before continuing.
         # pre-fetch lora weight
@@ -311,12 +376,26 @@ def _fused_moe_lora_kernel_fp8(
 
         if USE_GDC and not IS_PRIMARY:
             tl.extra.cuda.gdc_wait()
+
         a = tl.load(
             a_ptrs,
             mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
             other=0.0,
         )
-        accumulator += tl.dot(a, b)
+
+        # GDC wait waits for ALL programs in the the prior kernel to complete
+        # before continuing.
+        if USE_GDC and not IS_PRIMARY:
+            tl.extra.cuda.gdc_wait()
+        if use_fp8_w8a8:
+            if group_n > 0 and group_k > 0:
+                # Pre-compute combined scale to reduce dependency chain
+                scale = a_scale[:, None] * b_scale[None, :]
+                accumulator += tl.dot(a, b) * scale
+            else:
+                accumulator = tl.dot(a, b, acc=accumulator)
+        else:
+            accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
@@ -324,7 +403,15 @@ def _fused_moe_lora_kernel_fp8(
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
         accumulator = accumulator * moe_weight[:, None]
-    accumulator = accumulator.to(c_ptr.dtype.element_ty)
+
+    if use_fp8_w8a8:
+        if group_k > 0 and group_n > 0:
+            accumulator = accumulator.to(c_ptr.dtype.element_ty)
+        else:
+            accumulator = (accumulator * a_scale * b_scale).to(c_ptr.dtype.element_ty)
+    else:
+        accumulator = accumulator.to(c_ptr.dtype.element_ty)
+
     # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = cur_c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
@@ -378,12 +465,10 @@ def _fused_moe_lora_shrink_fp8(
     use_gdc: bool = False,
     act_scale: torch.Tensor | None = None,
     use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
     block_shape: List[int] | None = None,  # noqa: UP006, UP007
 ) -> None:
-    if use_fp8_w8a8 or use_int8_w8a8:
+    if use_fp8_w8a8:
         assert lora_a_scale_stacked is not None, (
             "lora_a_scale_stacked must be provided for w8a8 quantization"
         )
@@ -397,13 +482,6 @@ def _fused_moe_lora_shrink_fp8(
         ) == lora_a_scale_stacked[0].size(-1), (
             "Incompatible block shape for lora_a_scale_stacked.size(-1) "
         )
-    elif use_int8_w8a16:
-        assert lora_a_scale_stacked is not None, (
-            "lora_a_scale_stacked must be provided for w8a16 quantization"
-        )
-        assert block_shape is None or block_shape[0] == 0, (
-            "Block shape for activation must be 0 for w8a16"
-        )
     else:
         assert act_scale is None
         assert lora_a_scale_stacked is None
@@ -412,7 +490,7 @@ def _fused_moe_lora_shrink_fp8(
         block_size_k = min(block_size_k, min(block_shape[0], block_shape[1]))
 
     if lora_a_scale_stacked is not None:
-        b_scale_ptr = _get_ptr(lora_a_scale_stacked, device)
+        b_scale_ptr = _get_scale_ptr(lora_a_scale_stacked, device)
         w1_lora_a_scale_stacked = lora_a_scale_stacked[0]
 
     w1_lora_a_stacked = lora_a_stacked[0]
@@ -488,6 +566,7 @@ def _fused_moe_lora_shrink_fp8(
         0 if block_shape is None else block_shape[0],
         0 if block_shape is None else block_shape[1],
         slice_a_size=qcurr_hidden_states.numel(),
+        slice_a_scale_size=act_scale.numel() if act_scale is not None else 0,
         slice_c_size=a_intermediate_cache1.numel() // num_slices,
         num_slice_a=1,
         num_slice_c=num_slices,
@@ -498,8 +577,6 @@ def _fused_moe_lora_shrink_fp8(
         USE_B_L2_CACHE=True,  # new
         IS_PRIMARY=True,
         use_fp8_w8a8=use_fp8_w8a8,
-        use_int8_w8a8=use_int8_w8a8,
-        use_int8_w8a16=use_int8_w8a16,
         per_channel_quant=per_channel_quant,
         **shrink_config,
     )
@@ -545,12 +622,10 @@ def _fused_moe_lora_expand_fp8(
     use_gdc: bool = False,
     act_scale: torch.Tensor | None = None,
     use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
     block_shape: List[int] | None = None,  # noqa: UP006, UP007
 ) -> None:
-    if use_fp8_w8a8 or use_int8_w8a8:
+    if use_fp8_w8a8:
         assert lora_b_scale_stacked is not None, (
             "lora_b_scale_stacked must be provided for w8a8 quantization"
         )
@@ -564,19 +639,12 @@ def _fused_moe_lora_expand_fp8(
         ) == lora_b_scale_stacked[0].size(-1), (
             "Incompatible block shape for lora_b_scale_stacked.size(-1) "
         )
-    elif use_int8_w8a16:
-        assert lora_b_scale_stacked is not None, (
-            "lora_b_scale_stacked must be provided for w8a16 quantization"
-        )
-        assert block_shape is None or block_shape[0] == 0, (
-            "Block shape for activation must be 0 for w8a16"
-        )
     else:
         assert act_scale is None
         assert lora_b_scale_stacked is None
 
     if lora_b_scale_stacked is not None:
-        b_scale_ptr = _get_ptr(lora_b_scale_stacked, device)
+        b_scale_ptr = _get_scale_ptr(lora_b_scale_stacked, device)
         w1_lora_b_scale_stacked = lora_b_scale_stacked[0]
 
     if block_shape is not None:
@@ -665,6 +733,7 @@ def _fused_moe_lora_expand_fp8(
         0 if block_shape is None else block_shape[0],
         0 if block_shape is None else block_shape[1],
         slice_a_size=a_intermediate_cache1.numel() // num_slices,
+        slice_a_scale_size=act_scale.numel() if act_scale is not None else 0,
         slice_c_size=slice_c_size,
         num_slice_a=num_slices,
         num_slice_c=num_slices,
@@ -675,8 +744,6 @@ def _fused_moe_lora_expand_fp8(
         USE_B_L2_CACHE=True,  # new
         IS_PRIMARY=False,
         use_fp8_w8a8=use_fp8_w8a8,
-        use_int8_w8a8=use_int8_w8a8,
-        use_int8_w8a16=use_int8_w8a16,
         per_channel_quant=per_channel_quant,
         **expand_config,
     )
@@ -724,8 +791,6 @@ def _fused_moe_lora_fp8(
     fully_sharded: bool = False,
     offset: int = 0,
     use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
     block_shape: List[int] | None = None,  # noqa: UP006, UP007
 ) -> None:
@@ -750,6 +815,12 @@ def _fused_moe_lora_fp8(
         )
     assert output.shape[0] == topk_weights.shape[0]
     assert top_k_num == topk_weights.shape[1]
+    # Convert empty lists to None for internal functions
+    # (custom op schema requires List[Tensor], but internals expect None)
+    if not lora_a_scale_stacked:
+        lora_a_scale_stacked = None  # type: ignore[assignment]
+    if not lora_b_scale_stacked:
+        lora_b_scale_stacked = None  # type: ignore[assignment]
     device = qcurr_hidden_states.device
     num_slices = len(lora_a_stacked)
     w1_lora_b_stacked = lora_b_stacked[0]
@@ -807,8 +878,6 @@ def _fused_moe_lora_fp8(
         use_gdc=use_gdc,
         act_scale=shrink_act_scale,
         use_fp8_w8a8=use_fp8_w8a8,
-        use_int8_w8a8=use_int8_w8a8,
-        use_int8_w8a16=use_int8_w8a16,
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
     )
@@ -825,6 +894,30 @@ def _fused_moe_lora_fp8(
 
             # reset max_lora_rank to the full rank after allgather
             max_lora_rank = a_intermediate_cache1.shape[-1]
+
+    # Dynamic quantization of intermediate cache for the expand pass.
+    # The shrink kernel outputs in output.dtype (bf16/fp16).
+    # The expand kernel needs FP8 activations to do FP8 dot with FP8 lora_b.
+    if use_fp8_w8a8:
+        orig_shape = a_intermediate_cache1.shape
+        flat_intermediate = a_intermediate_cache1.view(-1, orig_shape[-1])
+        quant_dtype = torch.float8_e4m3fn
+        # Clamp block_shape for intermediate cache: max_lora_rank may be
+        # smaller than the original block dimensions.
+        intermediate_block_shape = block_shape
+        if block_shape is not None:
+            intermediate_block_shape = [
+                min(block_shape[0], orig_shape[-1]),
+                min(block_shape[1], orig_shape[-1]),
+            ]
+        flat_intermediate, expand_act_scale = moe_kernel_quantize_input(
+            A=flat_intermediate,
+            A_scale=expand_act_scale,
+            quant_dtype=quant_dtype,
+            per_act_token_quant=per_channel_quant,
+            block_shape=intermediate_block_shape,
+        )
+        a_intermediate_cache1 = flat_intermediate.view(orig_shape)
 
     _fused_moe_lora_expand_fp8(
         output,
@@ -863,8 +956,6 @@ def _fused_moe_lora_fp8(
         use_gdc=use_gdc,
         act_scale=expand_act_scale,
         use_fp8_w8a8=use_fp8_w8a8,
-        use_int8_w8a8=use_int8_w8a8,
-        use_int8_w8a16=use_int8_w8a16,
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
     )
@@ -907,8 +998,6 @@ def _fused_moe_lora_fp8_fake(
     shrink_act_scale: torch.Tensor | None = None,
     expand_act_scale: torch.Tensor | None = None,
     use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
     block_shape: List[int] | None = None,  # noqa: UP006, UP007
 ) -> None:
@@ -948,8 +1037,6 @@ def _fused_moe_lora_shrink_fp8_fake(
     use_gdc: bool = False,
     act_scale: torch.Tensor | None = None,
     use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
     block_shape: List[int] | None = None,  # noqa: UP006, UP007
 ) -> None:
@@ -991,8 +1078,6 @@ def _fused_moe_lora_expand_fp8_fake(
     mul_routed_weight: bool = False,
     offset: int = 0,
     use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
     block_shape: List[int] | None = None,  # noqa: UP006, UP007
     use_gdc: bool = False,
