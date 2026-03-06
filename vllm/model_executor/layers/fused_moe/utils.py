@@ -250,10 +250,6 @@ def moe_kernel_quantize_input(
     ocp_mx_scheme: str | None = None,
     emulation: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """
-    `topk_ids` (num_tokens, top_k) may be used e.g. if static quantization is used
-    and different experts use different scales from `A_scale`.
-    """
     # Handle OCP MX scheme that requires QDQ (quantize-dequantize) for emulation
     if ocp_mx_scheme is not None:
         if ocp_mx_scheme in {"w_mxfp4", "w_mxfp4_a_mxfp4"}:
