@@ -1356,20 +1356,33 @@ class EngineArgs:
         """Print detailed help for --speculative-config"""
         from dataclasses import fields as dc_fields
 
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("SPECULATIVE DECODING CONFIGURATION HELP")
-        print("="*80 + "\n")
+        print("=" * 80 + "\n")
 
-        print("The --speculative-config flag accepts a JSON object with the following keys:\n")
+        print(
+            "The --speculative-config flag accepts a JSON object with the following keys:\n"
+        )
 
         # Get SpeculativeConfig fields
         for field in dc_fields(SpeculativeConfig):
             # Skip internal fields
-            if field.name.startswith('_') or field.name in ['target_model_config', 'target_parallel_config', 'draft_model_config', 'draft_parallel_config']:
+            if field.name.startswith("_") or field.name in [
+                "target_model_config",
+                "target_parallel_config",
+                "draft_model_config",
+                "draft_parallel_config",
+            ]:
                 continue
 
-            field_type = str(field.type).replace('typing.', '').replace('|', ' or ')
-            default = field.default if field.default is not dataclasses.MISSING else field.default_factory() if field.default_factory is not dataclasses.MISSING else "None"
+            field_type = str(field.type).replace("typing.", "").replace("|", " or ")
+            default = (
+                field.default
+                if field.default is not dataclasses.MISSING
+                else field.default_factory()
+                if field.default_factory is not dataclasses.MISSING
+                else "None"
+            )
 
             print(f"  {field.name}:")
             print(f"    Type: {field_type}")
@@ -1377,17 +1390,21 @@ class EngineArgs:
 
             # Get docstring if available
             if field.metadata:
-                doc = field.metadata.get('description', '')
+                doc = field.metadata.get("description", "")
                 if doc:
                     print(f"    Description: {doc}")
 
             print()
 
         print("\nFor complete documentation with examples, see:")
-        print("  https://docs.vllm.ai/en/latest/api/vllm/config/#vllm.config.SpeculativeConfig")
+        print(
+            "  https://docs.vllm.ai/en/latest/api/vllm/config/#vllm.config.SpeculativeConfig"
+        )
         print("\nExample usage:")
-        print('  vllm serve model --speculative-config \'{"method": "ngram", "num_speculative_tokens": 5}\'')
-        print("\n" + "="*80 + "\n")
+        print(
+            '  vllm serve model --speculative-config \'{"method": "ngram", "num_speculative_tokens": 5}\''
+        )
+        print("\n" + "=" * 80 + "\n")
 
     def create_model_config(self) -> ModelConfig:
         # gguf file needs a specific model loader
