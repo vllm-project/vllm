@@ -168,21 +168,21 @@ class CudaGraphManager:
     @torch.inference_mode()
     def capture(
         self,
-        capture_fn: Callable,
+        create_forward_fn: Callable[
+            [BatchExecutionDescriptor], Callable[[CUDAGraphMode], None]
+        ],
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        """Capture CUDA graphs by calling capture_fn for each descriptor.
+        """Capture CUDA graphs.
 
-        The callback is invoked with desc.cg_mode indicating the runtime mode:
-        - NONE: warmup pass (no capture)
-        - PIECEWISE: piecewise cudagraph capture
-        - FULL: inside torch.cuda.graph() capture (but mode is NONE)
+        Args:
+            create_forward_fn: Factory that prepares inputs (OUTSIDE graph) and
+                returns a function that runs forward with a given CUDAGraphMode.
         """
         with graph_capture(device=self.device):
-            # Capture in order: PIECEWISE first, then FULL, PIECEWISE has larger
-            # activations so in theory the FULL activations should fit in the already
-            # allocated buffers in the graph pool. More experiments are needed to
-            # to confirm this.
+            # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
+            # activations so FULL activations should fit in already allocated
+            # buffers in the graph pool.
             for mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
                 if mode not in self._capture_descs:
                     continue
@@ -191,35 +191,27 @@ class CudaGraphManager:
                 if is_global_first_rank():
                     descs = tqdm(descs, desc=f"{progress_bar_desc} ({mode.name})")
                 for desc in descs:
-                    # Warmup with cg_mode=NONE
-                    warmup_desc = BatchExecutionDescriptor(
-                        cg_mode=CUDAGraphMode.NONE,
-                        num_tokens=desc.num_tokens,
-                        num_reqs=desc.num_reqs,
-                        uniform_token_count=desc.uniform_token_count,
-                    )
-                    capture_fn(warmup_desc)
+                    # Warmup with NONE mode
+                    forward_fn = create_forward_fn(desc)
+                    forward_fn(CUDAGraphMode.NONE)
 
                     # Capture
                     logger.debug(
                         "CG Capture: mode=%s, batch_desc=%s", desc.cg_mode.name, desc
                     )
                     if desc.cg_mode == CUDAGraphMode.PIECEWISE:
-                        capture_fn(desc)
+                        forward_fn = create_forward_fn(desc)
+                        forward_fn(CUDAGraphMode.PIECEWISE)
                     else:
                         assert desc not in self.graphs, (
                             f"Graph already captured for {desc}"
                         )
+                        # create_forward_fn prepares inputs OUTSIDE the graph
+                        forward_fn = create_forward_fn(desc)
                         graph = torch.cuda.CUDAGraph()
-                        # Sync offloader's copy stream before capture.
-                        # Ensure any pre-capture prefetches from offloader are complete.
                         get_offloader().sync_prev_onload()
                         with torch.cuda.graph(graph, self.pool):
-                            capture_fn(warmup_desc)
-                            # Join offloader's copy stream after forward to avoid
-                            # unjoined stream error. The last layer's start_prefetch
-                            # forks copy_stream, but wait_prefetch only happens in
-                            # the next forward pass.
+                            forward_fn(CUDAGraphMode.NONE)
                             get_offloader().join_after_forward()
                         self.graphs[desc] = graph
         self._graphs_captured = True
@@ -245,7 +237,6 @@ class CudaGraphManager:
             f"Expected FULL mode, got {desc.cg_mode}"
         )
         assert desc in self.graphs, f"No cudagraph for {desc}"
-        logger.debug("CG Replay: mode=FULL, batch_desc=%s", desc)
         # Sync offloader before replay - needed when transitioning from
         # eager/piecewise to full cudagraph (e.g., prefill → decode).
         # The previous eager iteration's start_prefetch may have queued
@@ -286,7 +277,9 @@ class ModelCudaGraphManager(CudaGraphManager):
         """Capture CUDA graphs for model forward pass."""
         self.use_aux_hidden_state_outputs = use_aux_hidden_state_outputs
 
-        def capture_fn(desc: BatchExecutionDescriptor) -> None:
+        def create_forward_fn(
+            desc: BatchExecutionDescriptor,
+        ) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
             num_tokens_across_dp = (
@@ -303,41 +296,45 @@ class ModelCudaGraphManager(CudaGraphManager):
                 attn_groups,
                 kv_cache_config,
             )
-            batch_descriptor = (
-                BatchDescriptor(num_tokens=num_tokens)
-                if desc.cg_mode == CUDAGraphMode.PIECEWISE
-                else None
-            )
-            with set_forward_context(
-                attn_metadata if desc.cg_mode != CUDAGraphMode.PIECEWISE else None,
-                self.vllm_config,
-                num_tokens=num_tokens,
-                cudagraph_runtime_mode=desc.cg_mode,
-                num_tokens_across_dp=num_tokens_across_dp,
-                slot_mapping=slot_mappings,
-                batch_descriptor=batch_descriptor,
-            ):
-                model_inputs = {
-                    "input_ids": input_buffers.input_ids[:num_tokens],
-                    "positions": input_buffers.positions[:num_tokens],
-                }
-                model_output = model(**model_inputs)
-                if self.use_aux_hidden_state_outputs:
-                    hidden_states, aux_hidden_states = model_output
-                else:
-                    hidden_states = model_output
-                    aux_hidden_states = []
-                if self.hidden_states is None:
-                    self.hidden_states = torch.empty_like(hidden_states)
-                if self.use_aux_hidden_state_outputs and not self.aux_hidden_states:
-                    self.aux_hidden_states = [
-                        torch.empty_like(x) for x in aux_hidden_states
-                    ]
-                self.hidden_states[:num_tokens] = hidden_states
-                for i, aux in enumerate(aux_hidden_states):
-                    self.aux_hidden_states[i][:num_tokens] = aux
 
-        super().capture(capture_fn, progress_bar_desc)
+            def forward_fn(cg_mode: CUDAGraphMode) -> None:
+                batch_descriptor = (
+                    BatchDescriptor(num_tokens=num_tokens)
+                    if cg_mode == CUDAGraphMode.PIECEWISE
+                    else None
+                )
+                with set_forward_context(
+                    attn_metadata if cg_mode != CUDAGraphMode.PIECEWISE else None,
+                    self.vllm_config,
+                    num_tokens=num_tokens,
+                    cudagraph_runtime_mode=cg_mode,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    slot_mapping=slot_mappings,
+                    batch_descriptor=batch_descriptor,
+                ):
+                    model_inputs = {
+                        "input_ids": input_buffers.input_ids[:num_tokens],
+                        "positions": input_buffers.positions[:num_tokens],
+                    }
+                    model_output = model(**model_inputs)
+                    if self.use_aux_hidden_state_outputs:
+                        hidden_states, aux_hidden_states = model_output
+                    else:
+                        hidden_states = model_output
+                        aux_hidden_states = []
+                    if self.hidden_states is None:
+                        self.hidden_states = torch.empty_like(hidden_states)
+                    if self.use_aux_hidden_state_outputs and not self.aux_hidden_states:
+                        self.aux_hidden_states = [
+                            torch.empty_like(x) for x in aux_hidden_states
+                        ]
+                    self.hidden_states[:num_tokens] = hidden_states
+                    for i, aux in enumerate(aux_hidden_states):
+                        self.aux_hidden_states[i][:num_tokens] = aux
+
+            return forward_fn
+
+        super().capture(create_forward_fn, progress_bar_desc)
 
     def run_fullgraph(
         self, desc: BatchExecutionDescriptor

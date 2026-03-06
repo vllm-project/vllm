@@ -47,7 +47,9 @@ class EagleCudaGraphManager(CudaGraphManager):
     ) -> None:
         """Capture CUDA graphs for Eagle speculative decoding (FULL mode only)."""
 
-        def capture_fn(desc: BatchExecutionDescriptor) -> None:
+        def create_forward_fn(
+            desc: BatchExecutionDescriptor,
+        ) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
             num_tokens_across_dp = (
@@ -64,18 +66,17 @@ class EagleCudaGraphManager(CudaGraphManager):
                 attn_groups,
                 kv_cache_config,
             )
-            # Eagle only uses FULL mode - cg_mode is NONE for both warmup
-            # and inside torch.cuda.graph capture
-            generate_fn(
+
+            return lambda cg_mode: generate_fn(
                 num_reqs,
                 num_tokens,
                 attn_metadata,
                 slot_mappings,
                 num_tokens_across_dp,
-                CUDAGraphMode.NONE,
+                cg_mode,
             )
 
-        super().capture(capture_fn, progress_bar_desc)
+        super().capture(create_forward_fn, progress_bar_desc)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor:
         """Replay a captured FULL cudagraph and return draft tokens."""
