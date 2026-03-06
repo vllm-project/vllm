@@ -20,6 +20,10 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8StaticTensorSym,
+)
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.backend import (
@@ -233,6 +237,11 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
                 "are not implemented for "
                 "FlashMLAImpl"
             )
+
+    def fused_output_quant_supported(self, quant_key: QuantKey) -> bool:
+        return (
+            self.kv_cache_dtype.startswith("fp8") and quant_key == kFp8StaticTensorSym
+        )
 
     def forward_mqa(
         self,

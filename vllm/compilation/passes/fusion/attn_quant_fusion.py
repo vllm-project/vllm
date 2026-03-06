@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Any, ParamSpec
+from typing import TYPE_CHECKING, Any, ParamSpec
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -28,12 +28,16 @@ from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .matcher_utils import MatcherQuantFP8
 from .rms_quant_fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
 
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+
 logger = init_logger(__name__)
 P = ParamSpec("P")
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
 ATTN_OP = torch.ops.vllm.unified_attention_with_output.default
+MLA_ATTN_OP = torch.ops.vllm.unified_mla_attention_with_output.default
 RESHAPE_OP = torch.ops.aten.reshape.default
 
 
@@ -319,6 +323,132 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
         )
 
 
+class MLAAttentionFp8StaticQuantPattern:
+    """
+    Fusion for MLA Attention+Fp8StaticQuant.
+
+    Only triggers when the MLA attention implementation returns True in
+    `fused_output_quant_supported()`. If the pattern is found, the
+    Fp8StaticQuant op will be removed from the graph, and its scale
+    will be passed into MLA Attention op as the `output_scale` argument.
+
+    MLA attention outputs a 2D tensor (tokens, num_heads * v_head_dim)
+    so no reshape is needed between attention and quantization.
+    """
+
+    def __init__(
+        self,
+        layer: "MLAAttention",
+        dtype: torch.dtype,
+        symmetric: bool = True,
+    ) -> None:
+        from vllm.model_executor.layers.attention.mla_attention import (
+            MLAAttention,
+        )
+
+        assert isinstance(layer, MLAAttention)
+        self.layer = layer
+        self.layer_name = layer.layer_name
+        self.num_heads = layer.num_heads
+        self.v_head_dim = layer.v_head_dim
+        self.dtype = dtype
+
+        quant_key = QuantKey(
+            dtype=FP8_DTYPE, scale=kStaticTensorScale, symmetric=symmetric
+        )
+        self.quant_key = quant_key
+        self.quant_dtype = quant_key.dtype
+        self.QUANT_OP = QUANT_OPS[quant_key]
+        self.quant_matcher = MatcherQuantFP8(quant_key)
+
+    def register_if_supported(self, pm_pass: PatternMatcherPass) -> None:
+        if self.layer.impl.fused_output_quant_supported(self.quant_key):
+            self._register(pm_pass)
+
+    def _register(self, pm_pass: PatternMatcherPass) -> None:
+        hidden_size = self.num_heads * self.v_head_dim
+
+        def pattern(
+            q: torch.Tensor,
+            kv_c_normed: torch.Tensor,
+            k_pe: torch.Tensor,
+            output_attn: torch.Tensor,
+            scale: torch.Tensor,
+            kv_cache_dummy_dep: torch.Tensor,
+        ) -> torch.Tensor:
+            at1 = auto_functionalized(
+                MLA_ATTN_OP,
+                q=q,
+                kv_c_normed=kv_c_normed,
+                k_pe=k_pe,
+                output=output_attn,
+                layer_name=self.layer_name,
+                output_scale=None,
+                output_block_scale=None,
+                kv_cache_dummy_dep=kv_cache_dummy_dep,
+            )
+            return self.quant_matcher(at1[1], scale)[0]
+
+        def replacement(
+            q: torch.Tensor,
+            kv_c_normed: torch.Tensor,
+            k_pe: torch.Tensor,
+            output_attn: torch.Tensor,
+            scale: torch.Tensor,
+            kv_cache_dummy_dep: torch.Tensor,
+        ) -> torch.Tensor:
+            # MLA attn output in quant_dtype
+            output_attn = torch.ops.aten.full.default(
+                [q.shape[0], hidden_size],
+                0.0,
+                dtype=self.quant_dtype,
+                device=q.device,
+            )
+            at1 = auto_functionalized(
+                MLA_ATTN_OP,
+                q=q,
+                kv_c_normed=kv_c_normed,
+                k_pe=k_pe,
+                output=output_attn,
+                layer_name=self.layer_name,
+                output_scale=scale,
+                output_block_scale=None,
+                kv_cache_dummy_dep=kv_cache_dummy_dep,
+            )
+            return at1[1]
+
+        # MLA q shape: (tokens, num_heads, qk_nope_head_dim + qk_rope_head_dim)
+        # but we use a generic shape for pattern matching since the pattern
+        # matcher only cares about the number of dimensions, not exact sizes.
+        qk_head_dim = self.layer.qk_nope_head_dim + self.layer.qk_rope_head_dim
+        inputs = [
+            torch.empty(
+                5, self.num_heads, qk_head_dim, dtype=self.dtype, device="cuda"
+            ),  # q
+            torch.empty(
+                5, self.layer.kv_lora_rank, dtype=self.dtype, device="cuda"
+            ),  # kv_c_normed
+            torch.empty(
+                5, 1, self.layer.qk_rope_head_dim, dtype=self.dtype, device="cuda"
+            ),  # k_pe
+            torch.empty(5, hidden_size, dtype=self.dtype, device="cuda"),  # output (2D)
+            empty_fp32(1, 1),  # scale
+            torch.empty(0, dtype=self.dtype, device="cuda"),  # kv_cache_dummy_dep
+        ]
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            inputs,
+            AttentionQuantPattern.wrap_trace_fn(
+                pm.fwd_only,
+                AttentionQuantPattern.fx_view_to_reshape,
+                AttentionQuantPattern.remove_noop_permutes,
+            ),
+            pm_pass,
+        )
+
+
 class AttnFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses post-attention quantization onto attention if supported.
@@ -351,7 +481,19 @@ class AttnFusionPass(VllmPatternMatcherPass):
                 )
                 pattern_nvfp4.register_if_supported(self.patterns)
 
-        if len(attn_layers) == 0:
+        # MLA attention layers (e.g., DeepSeek V3/R1)
+        from vllm.model_executor.layers.attention.mla_attention import (
+            MLAAttention,
+        )
+
+        mla_layers = get_layers_from_vllm_config(config, MLAAttention)
+        for layer_name, layer in mla_layers.items():
+            mla_pattern_fp8 = MLAAttentionFp8StaticQuantPattern(
+                layer, config.model_config.dtype
+            )
+            mla_pattern_fp8.register_if_supported(self.patterns)
+
+        if len(attn_layers) == 0 and len(mla_layers) == 0:
             logger.warning(
                 "Attention + quant fusion is enabled, but no attention layers "
                 "were found in CompilationConfig.static_forward_context "
@@ -371,4 +513,5 @@ class AttnFusionPass(VllmPatternMatcherPass):
             AttentionQuantPattern,
             AttentionFp8StaticQuantPattern,
             AttentionNvfp4QuantPattern,
+            MLAAttentionFp8StaticQuantPattern,
         )

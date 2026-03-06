@@ -760,6 +760,17 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     """MLA attention implementation with forward_mqa and forward_mha methods."""
 
+    def fused_output_quant_supported(self, quant_key: "QuantKey"):
+        """
+        Does this MLA implementation support fused output quantization.
+        This is used by the AttnFusionPass to only fuse output quantization
+        onto implementations that support it.
+
+        :param quant_key: QuantKey object that describes the quantization op
+        :return: is fusion supported for this type of quantization
+        """
+        return False
+
     @abstractmethod
     def __init__(
         self,

@@ -9,7 +9,11 @@ from tests.compile.backend import LazyInitPass, TestBackend
 from tests.utils import TestFP8Layer, flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.compilation.passes.fusion.attn_quant_fusion import ATTN_OP, AttnFusionPass
+from vllm.compilation.passes.fusion.attn_quant_fusion import (
+    ATTN_OP,
+    MLA_ATTN_OP,
+    AttnFusionPass,
+)
 from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
 from vllm.compilation.passes.fx_utils import find_op_nodes
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
@@ -27,6 +31,8 @@ from vllm.config import (
 )
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -36,7 +42,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -470,4 +476,333 @@ def test_attention_quant_pattern(
         )
 
     # Check that results are close
+    torch.testing.assert_close(result_unfused, result_fused, atol=1e-2, rtol=1e-2)
+
+
+# ====================================================================
+# MLA Attention + Quant Fusion Tests
+# ====================================================================
+
+# DeepSeek V3/R1 MLA dimensions
+MLA_KV_LORA_RANK = 512
+MLA_QK_NOPE_HEAD_DIM = 128
+MLA_QK_ROPE_HEAD_DIM = 64
+MLA_V_HEAD_DIM = 128
+MLA_NUM_HEADS = 16  # Reduced for test efficiency
+
+
+class MLAAttentionQuantPatternModel(torch.nn.Module):
+    """Base model for MLA Attention+Quant fusion testing."""
+
+    def __init__(
+        self,
+        num_heads: int,
+        kv_cache_dtype: torch.dtype,
+        device: torch.device,
+        vllm_config: VllmConfig,
+        **kwargs,
+    ):
+        super().__init__()
+        self.num_heads = num_heads
+        self.kv_lora_rank = MLA_KV_LORA_RANK
+        self.qk_nope_head_dim = MLA_QK_NOPE_HEAD_DIM
+        self.qk_rope_head_dim = MLA_QK_ROPE_HEAD_DIM
+        self.v_head_dim = MLA_V_HEAD_DIM
+        self.head_size = self.kv_lora_rank + self.qk_rope_head_dim
+        self.kv_cache_dtype = kv_cache_dtype
+        self.device = device
+        self.vllm_config = vllm_config
+
+        self.block_size = vllm_config.cache_config.block_size
+
+        # Create kv_b_proj (ColumnParallelLinear)
+        kv_b_proj = ColumnParallelLinear(
+            input_size=self.kv_lora_rank,
+            output_size=num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+            bias=False,
+        ).to(device=device)
+
+        self.attn = MLAAttention(
+            num_heads=num_heads,
+            scale=1.0 / (self.head_size**0.5),
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            v_head_dim=self.v_head_dim,
+            q_lora_rank=None,
+            kv_lora_rank=self.kv_lora_rank,
+            kv_b_proj=kv_b_proj,
+            cache_config=vllm_config.cache_config,
+            prefix="model.layers.0.self_attn.attn",
+        )
+        self.attn._k_scale = self.attn._k_scale.to(device)
+
+        # Process weights (extracts W_UK_T, W_UV from kv_b_proj)
+        self.attn.process_weights_after_loading(torch.get_default_dtype())
+
+        # Initialize attn MetadataBuilder
+        self.builder = self.attn.attn_backend.get_builder_cls()(
+            kv_cache_spec=MLAAttentionSpec(
+                block_size=self.block_size,
+                num_kv_heads=1,
+                head_size=self.head_size,
+                dtype=self.kv_cache_dtype,
+            ),
+            layer_names=[self.attn.layer_name],
+            vllm_config=self.vllm_config,
+            device=self.device,
+        )
+
+    def build_attn_metadata(self, batch_size: int) -> AttentionMetadata:
+        """Initialize attention metadata for decode-only batch."""
+        batch_spec = BatchSpec(seq_lens=[32] * batch_size, query_lens=[1] * batch_size)
+        common_attn_metadata = create_common_attn_metadata(
+            batch_spec, self.block_size, self.device, arange_block_indices=True
+        )
+
+        max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
+        num_blocks = batch_size * max_blocks
+
+        # MLA KV cache shape: (num_blocks, block_size, head_size)
+        kv_cache = torch.zeros(
+            num_blocks,
+            self.block_size,
+            self.head_size,
+            dtype=self.kv_cache_dtype,
+            device=self.device,
+        )
+        self.attn.kv_cache = [kv_cache]
+
+        self.attn_metadata = self.builder.build(
+            common_prefix_len=0, common_attn_metadata=common_attn_metadata
+        )
+        return self.attn_metadata
+
+
+class TestMLAAttentionFp8StaticQuantPatternModel(MLAAttentionQuantPatternModel):
+    """Test model for MLA Attention+Fp8StaticQuant fusion."""
+
+    quant_key = kFp8StaticTensorSym
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        hidden_size = self.num_heads * self.v_head_dim
+        self.fp8_linear = TestFP8Layer(
+            weight_shape=(hidden_size, hidden_size),
+            activation_quant_key=self.quant_key,
+            weight_quant_key=self.quant_key,
+            device=self.device,
+        )
+
+        w = kwargs.get("w")
+        if w is not None:
+            self.fp8_linear.weight = w["weight"]
+            self.fp8_linear.weight_scale = w["wscale"]
+            self.fp8_linear.input_scale = w["scale"]
+
+        self.w = {
+            "weight": self.fp8_linear.weight,
+            "wscale": self.fp8_linear.weight_scale,
+            "scale": self.fp8_linear.input_scale,
+        }
+
+    def forward(
+        self, q: torch.Tensor, kv_c_normed: torch.Tensor, k_pe: torch.Tensor
+    ):
+        """Forward pass that creates the MLA attention + quant pattern."""
+        output_shape = (q.shape[0], self.num_heads * self.v_head_dim)
+        attn_output = self.attn(q, kv_c_normed, k_pe, output_shape=output_shape)
+        return self.fp8_linear(attn_output)
+
+
+MLA_PATTERN_TEST_MODELS_FP8: list[tuple[str, type]] = []
+MLA_BACKENDS_FP8: list[AttentionBackendEnum] = []
+
+if current_platform.is_cuda():
+    MLA_PATTERN_TEST_MODELS_FP8 = [
+        (
+            "deepseek-ai/DeepSeek-V2-Lite-Chat",
+            TestMLAAttentionFp8StaticQuantPatternModel,
+        )
+    ]
+    MLA_BACKENDS_FP8 = [AttentionBackendEnum.FLASHMLA]
+
+
+@pytest.mark.parametrize("num_heads", [MLA_NUM_HEADS])
+@pytest.mark.parametrize(
+    "batch_size", [7, 256] if current_platform.is_cuda() else [8]
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize(
+    "backend, model_name, model_class, custom_ops",
+    list(
+        flat_product(
+            MLA_BACKENDS_FP8, MLA_PATTERN_TEST_MODELS_FP8, ["+quant_fp8", "-quant_fp8"]
+        )
+    ),
+)
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Only test CUDA"
+)
+@pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
+def test_mla_attention_quant_pattern(
+    num_heads: int,
+    batch_size: int,
+    dtype: torch.dtype,
+    custom_ops: str,
+    model_name: str,
+    model_class: type[MLAAttentionQuantPatternModel],
+    backend: AttentionBackendEnum,
+    dist_init,
+    monkeypatch,
+    use_fresh_inductor_cache,
+):
+    """Test MLA Attention + Fp8StaticQuant fusion pass."""
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    if backend == AttentionBackendEnum.FLASHMLA:
+        if not current_platform.is_device_capability((9, 0)):
+            pytest.skip("FlashMLA requires Hopper (sm90) or newer")
+        try:
+            from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
+
+            supported, reason = is_flashmla_dense_supported()
+            if not supported:
+                pytest.skip(f"FlashMLA not supported: {reason}")
+        except ImportError:
+            pytest.skip("FlashMLA not available")
+
+    custom_ops_list = custom_ops.split(",") if custom_ops else []
+
+    device = torch.device("cuda:0")
+    torch.set_default_dtype(dtype)
+    torch.manual_seed(42)
+
+    model_config = ModelConfig(
+        model=model_name,
+        max_model_len=2048,
+        dtype=dtype,
+    )
+
+    block_size = 64  # FlashMLA requires block_size=64
+
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=1024,
+            max_model_len=model_config.max_model_len,
+            is_encoder_decoder=model_config.is_encoder_decoder,
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=custom_ops_list,
+        ),
+        cache_config=CacheConfig(cache_dtype="fp8", block_size=block_size),
+        attention_config=AttentionConfig(backend=backend),
+    )
+
+    # MLA input shapes
+    qk_head_dim = MLA_QK_NOPE_HEAD_DIM + MLA_QK_ROPE_HEAD_DIM
+    q = torch.randn(batch_size, num_heads, qk_head_dim, dtype=dtype, device=device)
+    kv_c_normed = torch.randn(
+        batch_size, MLA_KV_LORA_RANK, dtype=dtype, device=device
+    )
+    k_pe = torch.randn(
+        batch_size, 1, MLA_QK_ROPE_HEAD_DIM, dtype=dtype, device=device
+    )
+
+    torch._dynamo.mark_dynamic(q, 0)
+    torch._dynamo.mark_dynamic(kv_c_normed, 0)
+    torch._dynamo.mark_dynamic(k_pe, 0)
+
+    # Run model without fusion
+    vllm_config_unfused = copy.deepcopy(vllm_config)
+    with (
+        set_current_vllm_config(vllm_config_unfused),
+        set_forward_context(attn_metadata=None, vllm_config=vllm_config_unfused),
+    ):
+        model_unfused = model_class(
+            num_heads=num_heads,
+            kv_cache_dtype=FP8_DTYPE,
+            device=device,
+            vllm_config=vllm_config_unfused,
+        )
+        model_unfused = model_unfused.to(device)
+        result_unfused_0 = model_unfused(q, kv_c_normed, k_pe)  # noqa: F841
+
+        forward_ctx = get_forward_context()
+        forward_ctx.attn_metadata = model_unfused.build_attn_metadata(batch_size)
+
+        compiled_unfused = torch.compile(model_unfused, fullgraph=True)
+        result_unfused = compiled_unfused(q, kv_c_normed, k_pe)
+
+    # Run model with attn fusion enabled
+    vllm_config.compilation_config.pass_config = PassConfig(
+        fuse_attn_quant=True, eliminate_noops=True
+    )
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(attn_metadata=None, vllm_config=vllm_config),
+    ):
+        model_fused = model_class(
+            num_heads=num_heads,
+            kv_cache_dtype=FP8_DTYPE,
+            device=device,
+            vllm_config=vllm_config,
+            w=model_unfused.w,
+        )
+        model_fused = model_fused.to(device)
+
+        forward_ctx = get_forward_context()
+        forward_ctx.attn_metadata = model_fused.build_attn_metadata(batch_size)
+
+        noop_pass = NoOpEliminationPass(vllm_config)
+        attn_pass = LazyInitPass(AttnFusionPass, vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
+
+        test_backend = TestBackend(noop_pass, attn_pass, cleanup_pass)
+        result_fused_0 = model_fused(q, kv_c_normed, k_pe)  # noqa: F841
+
+        compiled_fused = torch.compile(
+            model_fused, backend=test_backend, fullgraph=True
+        )
+        result_fused = compiled_fused(q, kv_c_normed, k_pe)
+
+    # Check attn fusion support
+    quant_key: QuantKey = model_class.quant_key
+    attn_fusion_supported = [
+        layer.impl.fused_output_quant_supported(quant_key)
+        for key, layer in vllm_config.compilation_config.static_forward_context.items()
+        if isinstance(layer, MLAAttention)
+    ]
+    assert sum(attn_fusion_supported) == len(attn_fusion_supported), (
+        "All MLA layers should support attention fusion"
+    )
+
+    # Check quantization ops in the graph
+    quant_op = (
+        torch.ops.aten.reciprocal
+        if "-quant_fp8" in custom_ops_list
+        else QUANT_OPS[quant_key]
+    )
+    test_backend.check_before_ops([quant_op], fully_replaced=False)
+
+    assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
+
+    # Check MLA attention ops in the graph
+    attn_nodes_pre = list(find_op_nodes(MLA_ATTN_OP, test_backend.graph_pre_pass))
+    attn_nodes_post = list(find_op_nodes(MLA_ATTN_OP, test_backend.graph_post_pass))
+
+    assert len(attn_nodes_pre) > 0, "Should have MLA attention nodes before fusion"
+    assert len(attn_nodes_pre) == len(attn_nodes_post), (
+        "Should have same number of MLA attention nodes before and after fusion"
+    )
+    assert attn_nodes_pre[0].kwargs.get("output_scale") is None, (
+        "MLA attention should not have output_scale before fusion"
+    )
+    assert attn_nodes_post[0].kwargs.get("output_scale") is not None, (
+        "MLA attention should have output_scale after fusion"
+    )
+
+    # Check results are close
     torch.testing.assert_close(result_unfused, result_fused, atol=1e-2, rtol=1e-2)

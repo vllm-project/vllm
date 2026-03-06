@@ -15,6 +15,10 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8StaticTensorSym,
+)
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -149,6 +153,11 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self._workspace_buffer = g_fi_workspace
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
+
+    def fused_output_quant_supported(self, quant_key: QuantKey) -> bool:
+        return (
+            self.kv_cache_dtype.startswith("fp8") and quant_key == kFp8StaticTensorSym
+        )
 
     def forward_mqa(
         self,

@@ -15,6 +15,10 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadata,
     MLACommonMetadataBuilder,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8StaticTensorSym,
+)
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.backend import (
@@ -160,6 +164,11 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         # Share workspace buffer across all executions
         self._workspace = g_sm100_workspace
+
+    def fused_output_quant_supported(self, quant_key: QuantKey) -> bool:
+        return (
+            self.kv_cache_dtype.startswith("fp8") and quant_key == kFp8StaticTensorSym
+        )
 
     def _sm100_cutlass_mla_decode(
         self,

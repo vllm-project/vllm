@@ -520,9 +520,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
-        if output_scale is not None or output_block_scale is not None:
-            raise NotImplementedError(
-                "fused output quantization is not yet supported for MLA"
+        # When fused output quantization is requested, the output buffer is
+        # in quantized dtype (e.g., FP8). We need a temporary buffer in
+        # compute dtype for internal work, then quantize at the end.
+        quant_output = None
+        if output_scale is not None:
+            quant_output = output
+            output = torch.empty(
+                quant_output.shape,
+                dtype=q.dtype,
+                device=quant_output.device,
             )
 
         if attn_metadata is None:
@@ -681,6 +688,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             # v_up projection
             self._v_up_proj(attn_out, out=mqa_output_slice)
+
+        if quant_output is not None:
+            # Quantize the compute-dtype output into the FP8 output buffer
+            torch.ops._C.static_scaled_fp8_quant(
+                quant_output[:num_actual_toks],
+                output[:num_actual_toks],
+                output_scale,
+            )
+            return quant_output
+
         return output_padded
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
