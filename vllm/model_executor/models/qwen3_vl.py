@@ -768,6 +768,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         metadata: dict[str, Any],
         do_sample_frames: bool | None = None,
         sampled_fps: float | None = None,
+        sampled_num_frames: int | None = None,
     ) -> list[int]:
         video_processor = self.get_video_processor()
         merge_size = video_processor.merge_size
@@ -782,11 +783,20 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         # video loader), we need to re-calculate the indices from original
         # metadata.
         if do_sample_frames:
-            # here video_fps is the fps of the sampled video, and
-            # metadata["fps"] refers to the fps of the original video.
-            sampled_fps = sampled_fps if sampled_fps else video_processor.fps
             total_num_frames = metadata["total_num_frames"]
-            num_frames = int(total_num_frames / metadata["fps"] * sampled_fps)
+
+            # When num_frames is explicitly provided, use it directly
+            # instead of computing from fps. This mirrors the behavior of
+            # HF's Qwen3VLVideoProcessor.sample_frames where num_frames
+            # and fps are mutually exclusive.
+            if sampled_num_frames is not None:
+                num_frames = sampled_num_frames
+            else:
+                # here video_fps is the fps of the sampled video, and
+                # metadata["fps"] refers to the fps of the original video.
+                sampled_fps = sampled_fps if sampled_fps else video_processor.fps
+                num_frames = int(total_num_frames / metadata["fps"] * sampled_fps)
+
             num_frames = min(
                 min(
                     max(num_frames, video_processor.min_frames),
@@ -987,6 +997,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                     metadata=metadata,
                     do_sample_frames=video_mm_kwargs["do_sample_frames"],
                     sampled_fps=video_mm_kwargs.get("fps"),
+                    sampled_num_frames=video_mm_kwargs.get("num_frames"),
                 )
                 timestamps_per_video.append(timestamps)
 
