@@ -17,17 +17,44 @@ Before you begin, ensure that you have the following:
 
 ## Installing the chart
 
+First of all, ensure you have cloned the repo and navigate to the Helm Chart directory:
+
+```bash
+git clone https://github.com/vllm-project/vllm.git
+cd vllm/examples/online_serving/chart-helm
+```
+
 To install the chart with the release name `test-vllm`:
 
 ```bash
 helm upgrade --install --create-namespace \
   --namespace=ns-vllm test-vllm . \
-  -f values.yaml \
+  -f values.yaml \  # If you have another values file to override the default one, add another '-f values.override-yaml' line.
   --set secrets.s3endpoint=$ACCESS_POINT \
   --set secrets.s3bucketname=$BUCKET \
   --set secrets.s3accesskeyid=$ACCESS_KEY \
   --set secrets.s3accesskey=$SECRET_KEY
 ```
+
+If you have a AMD Radeon, you might as well add the `values.override.yaml` file with a content like this:
+
+```yaml
+image:
+  repository: rocm/vllm-dev
+  tag: rocm7.1_navi_ubuntu22.04_py3.10_pytorch_2.8_vllm_0.10.2rc1
+
+resources:
+  requests:
+    amd.com/gpu: 1
+    nvidia.com/gpu: 0
+  limits:
+    amd.com/gpu: 1
+    nvidia.com/gpu: 0
+
+gpuModels: []  # leave blank, we use Radeon!
+```
+
+This assumes you have configured your Kubernetes cluster with the [AMD GPU Device Plugin](https://github.com/ROCm/k8s-device-plugin) helper first.
 
 ## Uninstalling the chart
 
