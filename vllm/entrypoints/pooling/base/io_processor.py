@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from typing import Any, Final
 
 from vllm import PoolingRequestOutput, PromptType
@@ -15,18 +13,13 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
 )
 from vllm.entrypoints.openai.engine.serving import RendererChatRequest, RendererRequest
+from vllm.entrypoints.pooling.typing import EngineInputs
 from vllm.inputs.data import ProcessorInputs, SingletonPrompt
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.utils.mistral import is_mistral_tokenizer
-
-
-@dataclass
-class EngineInputs:
-    engine_prompt: ProcessorInputs
-    request_id_item: str | None = None
 
 
 class PoolingIOProcessor:
@@ -36,8 +29,6 @@ class PoolingIOProcessor:
         renderer: BaseRenderer,
         chat_template_config: ChatTemplateConfig,
     ):
-        self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
-
         self.model_config = model_config
         self.renderer = renderer
 

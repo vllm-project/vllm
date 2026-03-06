@@ -79,13 +79,12 @@ class EmbedIOProcessor(PoolingIOProcessor):
         max_model_len = self.model_config.max_model_len
         chunked_engine_inputs: list[EngineInputs] = []
         for prompt_idx, engine_prompt in enumerate(engine_prompts):
-            if "prompt_token_ids" not in engine_prompt:
+            prompt_token_ids = engine_prompt.get("prompt_token_ids", None)
+            if prompt_token_ids is None:
                 raise NotImplementedError(
-                    "Long Text Embedding with Chunked Processing does not support "
-                    "EmbedsPrompt and EncoderDecoderInputs."
+                    "Long Text Embedding with Chunked Processing does "
+                    "not support EmbedsPrompt and EncoderDecoderInputs."
                 )
-
-            prompt_token_ids = engine_prompt["prompt_token_ids"]
 
             for chunk_idx, chunk_tokens in enumerate(
                 chunk_list(prompt_token_ids, max_model_len)

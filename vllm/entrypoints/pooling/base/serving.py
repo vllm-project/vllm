@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import time
 from collections.abc import AsyncGenerator, Mapping
-from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import ClassVar, Generic, TypeVar
+from typing import ClassVar
 
 from fastapi import Request
 from fastapi.responses import Response
-from pydantic import ConfigDict
 from starlette.datastructures import Headers
 
 from vllm import PoolingParams, PoolingRequestOutput, envs
@@ -21,10 +18,10 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.pooling.typing import AnyPoolingRequest
+from vllm.entrypoints.pooling.typing import AnyPoolingRequest, PoolingServeContext
+from vllm.inputs.data import ProcessorInputs
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
-from vllm.renderers.inputs import TokPrompt
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.tracing import (
     contains_trace_headers,
@@ -34,27 +31,7 @@ from vllm.tracing import (
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import merge_async_iterators
 
-from .io_processor import EngineInputs, PoolingIOProcessor
-
-PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
-
-
-@dataclass(kw_only=True)
-class PoolingServeContext(Generic[PoolingRequestT]):
-    request: PoolingRequestT
-    raw_request: Request | None = None
-    model_name: str
-    request_id: str
-    created_time: int = field(default_factory=lambda: int(time.time()))
-    lora_request: LoRARequest | None = None
-    engine_inputs: list[EngineInputs] | None = None
-
-    result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
-        None
-    )
-    final_res_batch: list[PoolingRequestOutput] = field(default_factory=list)
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+from .io_processor import PoolingIOProcessor
 
 
 class PoolingServing:
@@ -341,7 +318,7 @@ class PoolingServing:
     def _log_inputs(
         self,
         request_id: str,
-        inputs: TokPrompt,
+        inputs: ProcessorInputs,
         params: PoolingParams,
         lora_request: LoRARequest | None,
     ) -> None:

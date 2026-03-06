@@ -11,7 +11,7 @@ from typing_extensions import assert_never
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
-from vllm.entrypoints.pooling.base.serving import PoolingServeContext, PoolingServing
+from vllm.entrypoints.pooling.base.serving import PoolingServing
 from vllm.entrypoints.pooling.embed.io_processor import EmbedIOProcessor
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingBytesResponse,
@@ -19,6 +19,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingResponse,
     EmbeddingResponseData,
 )
+from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.entrypoints.pooling.utils import (
     encode_pooling_bytes,
     encode_pooling_output_base64,
