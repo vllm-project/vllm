@@ -453,11 +453,9 @@ class RocmAttentionImpl(AttentionImpl):
         # Get the actual block_size from value_cache
         # value_cache shape: [num_blocks, num_heads, head_size, block_size]
         block_size = value_cache.shape[3]
-        # Determine if it is a power of 2
-        is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
 
-        if is_pow2:
-            # Normal 16, 32, 64, etc., use vLLM native HIP C++ logic
+        if block_size in (16, 32):
+            # Normal 16, 32, use vLLM native HIP C++ logic
             PagedAttention.write_to_paged_cache(
                 key,
                 value,
@@ -469,7 +467,7 @@ class RocmAttentionImpl(AttentionImpl):
                 layer._v_scale,
             )
         else:
-            # Case B: Non-standard blocks (e.g., 544 in Qwen3),
+            # Case B: Non-standard blocks (e.g., 64, 128, 544 in Qwen3Next or Qwen3.5 ),
             # force using our modified Triton logic
             triton_reshape_and_cache_flash(
                 key,
