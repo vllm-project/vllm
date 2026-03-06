@@ -15,7 +15,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import (
-    PAD_SLOT_ID,
     compute_causal_conv1d_metadata,
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
@@ -499,7 +498,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 state_indices_tensor_d, non_blocking=True
             )
             state_indices_tensor_d = self.state_indices_tensor_d[:padded_bs]
-            state_indices_tensor_d[metadata.num_decodes :] = PAD_SLOT_ID
+            state_indices_tensor_d[metadata.num_decodes :] = 0
 
             if self.use_spec_decode:
                 assert query_start_loc_d is not None

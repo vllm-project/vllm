@@ -134,7 +134,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     ).to(tl.int64)
 
     if USE_PAD_SLOT:  # noqa
-        if conv_states_input_coord == pad_slot_id:
+        if conv_states_input_coord == 0:
             # not processing as this is not the actual sequence
             return
     conv_states_base = (
@@ -812,7 +812,7 @@ def _causal_conv1d_update_kernel(
     ).to(tl.int64)
 
     if USE_PAD_SLOT:  # noqa
-        if conv_states_input_coord == pad_slot_id:
+        if conv_states_input_coord == 0:
             # not processing as this is not the actual sequence
             return
 
@@ -1076,7 +1076,7 @@ def causal_conv1d_update(
     num_accepted_tokens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
     max_query_len: int = -1,
-    pad_slot_id: int = PAD_SLOT_ID,
+    pad_slot_id: int = 0,
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
     validate_data=False,

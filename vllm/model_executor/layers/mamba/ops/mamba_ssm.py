@@ -10,7 +10,6 @@ from packaging import version
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 from vllm.triton_utils import HAS_TRITON, tl, triton
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 TRITON3 = HAS_TRITON and (version.parse(triton.__version__) >= version.parse("3.0.0"))
 
@@ -185,7 +184,7 @@ def _selective_scan_update_kernel(
 
     mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
     if HAS_STATE_BATCH_INDICES:
-        mask &= state_batch_idx != pad_slot_id
+        mask &= state_batch_idx != 0
     state = tl.load(state_ptrs, mask=mask, other=0.0).to(tl.float32)
 
     if HAS_DT_BIAS:
@@ -283,7 +282,7 @@ def selective_state_update(
     dt_softplus=False,
     state_batch_indices=None,
     dst_state_batch_indices=None,
-    pad_slot_id=PAD_SLOT_ID,
+    pad_slot_id=0,
     out=None,
     num_accepted_tokens=None,
     cu_seqlens=None,
@@ -493,7 +492,7 @@ def selective_scan_fn(
     query_start_loc=None,
     cache_indices=None,
     has_initial_state=None,
-    pad_slot_id=PAD_SLOT_ID,
+    pad_slot_id=0,
     block_size=1024,
     block_idx_first_scheduled_token=None,
     block_idx_last_scheduled_token=None,
