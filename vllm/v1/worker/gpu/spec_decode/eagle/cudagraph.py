@@ -35,6 +35,13 @@ class EagleCudaGraphManager(CudaGraphManager):
         super().__init__(vllm_config, device, cudagraph_mode, decode_query_len=1)
         self.draft_tokens = draft_tokens
 
+        # Use a dedicated pool for Eagle to avoid memory overlap with the main
+        # model's cudagraph. The base class uses a shared global pool, but Eagle's
+        # internal allocations (e.g., gumbel_sample temporaries) can conflict with
+        # the main model's allocations when sharing the same pool.
+        if cudagraph_mode:
+            self.pool = torch.cuda.graph_pool_handle()
+
     def capture(
         self,
         generate_fn: Callable,
