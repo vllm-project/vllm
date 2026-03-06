@@ -170,15 +170,19 @@ class OpenAISpeechToText(OpenAIServing):
 
             processor = cached_processor_from_config(self.model_config)
             feature_extractor = None
-            if hasattr(processor, "feature_extractor"):
-                feature_extractor = processor.feature_extractor
-            elif hasattr(processor, "audio_processor"):
-                # For models like GraniteSpeech that use audio_processor
-                audio_proc = processor.audio_processor
-                if hasattr(audio_proc, "feature_extractor"):
-                    feature_extractor = audio_proc.feature_extractor
-                # If audio_processor doesn't have feature_extractor,
-                # skip mel-spectrogram warmup for these models
+            # Check if processor is actually a ProcessorMixin (not just a tokenizer)
+            from transformers import ProcessorMixin
+
+            if isinstance(processor, ProcessorMixin):
+                if hasattr(processor, "feature_extractor"):
+                    feature_extractor = processor.feature_extractor
+                elif hasattr(processor, "audio_processor"):
+                    # For models like GraniteSpeech that use audio_processor
+                    audio_proc = processor.audio_processor
+                    if hasattr(audio_proc, "feature_extractor"):
+                        feature_extractor = audio_proc.feature_extractor
+                    # If audio_processor doesn't have feature_extractor,
+                    # skip mel-spectrogram warmup for these models
 
             if feature_extractor is not None:
                 _ = librosa.feature.melspectrogram(
