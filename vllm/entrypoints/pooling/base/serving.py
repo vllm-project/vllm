@@ -95,18 +95,11 @@ class PoolingServing:
 
         self._validate_request(ctx)
         self._maybe_get_adapters(ctx)
-        await self._preprocess(ctx)
+        await self.io_processor.pre_process_online_async(ctx)
         await self._prepare_generators(ctx)
         await self._collect_batch(ctx)
+        await self.io_processor.post_process_online_async(ctx)
         return await self._build_response(ctx)
-
-    async def _preprocess(
-        self,
-        ctx: PoolingServeContext,
-    ):
-        ctx.engine_inputs = await self.io_processor.pre_process_online_async(
-            ctx.request
-        )
 
     async def _prepare_generators(
         self,

@@ -4,18 +4,21 @@ from collections.abc import Sequence
 from typing import Any
 
 from vllm import PromptType
-from vllm.entrypoints.pooling.base.io_processor import EngineInputs, PoolingIOProcessor
+from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
 )
+from vllm.entrypoints.pooling.typing import EngineInputs, PoolingServeContext
 from vllm.inputs import ProcessorInputs
 
 
 class ClassifyIOProcessor(PoolingIOProcessor):
-    def pre_process_online(
-        self, request: ClassificationCompletionRequest | ClassificationChatRequest
-    ) -> list[EngineInputs] | None:
+    def pre_process_online(self, ctx: PoolingServeContext):
+        request: ClassificationCompletionRequest | ClassificationChatRequest = (
+            ctx.request
+        )
+
         if isinstance(request, ClassificationChatRequest):
             self._validate_chat_template(
                 request_chat_template=request.chat_template,
@@ -37,7 +40,10 @@ class ClassifyIOProcessor(PoolingIOProcessor):
             )
         else:
             raise ValueError("Invalid classification request type")
-        return [EngineInputs(engine_prompt=prompt) for prompt in engine_prompts]
+
+        ctx.engine_inputs = [
+            EngineInputs(engine_prompt=prompt) for prompt in engine_prompts
+        ]
 
     def pre_process_offline(
         self,

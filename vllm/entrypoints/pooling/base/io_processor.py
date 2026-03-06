@@ -13,7 +13,7 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
 )
 from vllm.entrypoints.openai.engine.serving import RendererChatRequest, RendererRequest
-from vllm.entrypoints.pooling.typing import EngineInputs
+from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.inputs.data import ProcessorInputs, SingletonPrompt
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
@@ -40,13 +40,32 @@ class PoolingIOProcessor:
             chat_template_config.trust_request_chat_template
         )
 
-    def pre_process_online(self, *args, **kwargs) -> list[EngineInputs] | None:
+    def create_pooling_params(self, request):
+        return request.to_pooling_params()
+
+    #######################################
+    # online APIs
+
+    def pre_process_online(self, ctx: PoolingServeContext):
         raise NotImplementedError
 
-    async def pre_process_online_async(
-        self, *args, **kwargs
-    ) -> list[EngineInputs] | None:
-        return self.pre_process_online(*args, **kwargs)
+    async def pre_process_online_async(self, ctx: PoolingServeContext):
+        self.pre_process_online(ctx)
+
+    def post_process_online(
+        self,
+        ctx: PoolingServeContext,
+    ) -> list[PoolingRequestOutput]:
+        return ctx.final_res_batch
+
+    async def post_process_online_async(
+        self,
+        ctx: PoolingServeContext,
+    ) -> list[PoolingRequestOutput]:
+        return self.post_process_online(ctx)
+
+    #######################################
+    # offline APIs
 
     def pre_process_offline(self, *args, **kwargs):
         raise NotImplementedError
@@ -54,18 +73,20 @@ class PoolingIOProcessor:
     async def pre_process_offline_async(self, *args, **kwargs):
         return self.pre_process_offline(*args, **kwargs)
 
-    def post_process(
-        self, outputs: list[PoolingRequestOutput]
+    def post_process_offline(
+        self,
+        outputs: list[PoolingRequestOutput],
     ) -> list[PoolingRequestOutput]:
         return outputs
 
-    async def post_process_async(
-        self, outputs: list[PoolingRequestOutput]
+    async def post_process_offline_async(
+        self,
+        outputs: list[PoolingRequestOutput],
     ) -> list[PoolingRequestOutput]:
-        return self.post_process(outputs)
+        return self.post_process_offline(outputs)
 
-    def create_pooling_params(self, request):
-        return request.to_pooling_params()
+    #######################################
+    # helpers
 
     def _preprocess_completion_online(
         self,

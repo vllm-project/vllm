@@ -3,7 +3,7 @@
 import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Generic, TypeAlias, TypeVar
+from typing import Any, Generic, TypeAlias, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict
@@ -77,6 +77,7 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
     engine_inputs: list[EngineInputs] | None = None
+    intermediates: Any | None = None
 
     result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
         None

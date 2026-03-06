@@ -47,14 +47,10 @@ class ServingClassification(PoolingServing):
         self,
         ctx: ClassificationServeContext,
     ) -> JSONResponse:
-        final_res_batch_checked = await self.io_processor.post_process_async(
-            ctx.final_res_batch
-        )
-
         id2label = getattr(self.model_config.hf_config, "id2label", {})
         num_prompt_tokens = 0
         items: list[ClassificationData] = []
-        for idx, final_res in enumerate(final_res_batch_checked):
+        for idx, final_res in enumerate(ctx.final_res_batch):
             classify_res = ClassificationOutput.from_base(final_res.outputs)
 
             probs = classify_res.probs
