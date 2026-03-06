@@ -464,7 +464,7 @@ def fp8_mqa_logits_torch(
     return logits
 
 
-def fp8_paged_mqa_logits_torch(
+def _fp8_paged_mqa_logits_torch_impl(
     q: torch.Tensor,
     kv_cache: torch.Tensor,
     weights: torch.Tensor,
@@ -495,96 +495,89 @@ def fp8_paged_mqa_logits_torch(
     """
     fp8_dtype = current_platform.fp8_dtype()
     batch_size, next_n, heads, dim = q.size()
-    num_blocks, block_size, _, packed_dim = kv_cache.size()
-    assert packed_dim == dim + 4, (
-        f"Expected packed KV cache last dim {dim + 4}, got {packed_dim}"
-    )
-
-    # Match DeepGEMM's packed layout:
-    # [block0 token bytes..., block0 scale bytes..., block1 ...]
-    kv_cache_flat = kv_cache.view(num_blocks, block_size * packed_dim)
-    kv_bytes = kv_cache_flat[:, : block_size * dim].view(num_blocks, block_size, 1, dim)
-    scale_bytes = kv_cache_flat[:, block_size * dim :].view(
-        num_blocks, block_size, 1, 4
-    )
-    scale = scale_bytes.contiguous().view(torch.float)
+    kv_cache, scale = kv_cache[..., :dim], kv_cache[..., dim:]
+    scale = scale.contiguous().view(torch.float)
     q = q.float()
-    kv_cache = kv_bytes.view(fp8_dtype).float() * scale
+    kv_cache = kv_cache.view(fp8_dtype).float() * scale
+    num_blocks, block_size, _, dim = kv_cache.size()
     logits = torch.full(
         [batch_size * next_n, max_model_len],
         float("-inf"),
         device=q.device,
         dtype=torch.float32,
     )
-    # Keep a single cudagraph-safe implementation. This avoids host sync
-    # (`.item()` / `.tolist()`) and prevents full decode capture from falling
-    # back to a Python loop over requests and blocks.
-    max_blocks = min(block_tables.shape[1], cdiv(max_model_len, block_size))
-    if max_blocks == 0:
-        return logits
-
-    blocks_per_chunk = 8
-    decode_offsets = torch.arange(next_n, device=q.device, dtype=context_lens.dtype)
-    block_offsets = torch.arange(block_size, device=q.device, dtype=context_lens.dtype)
-    num_context_blocks = torch.div(
-        context_lens + block_size - 1,
-        block_size,
-        rounding_mode="floor",
-    )
-    q_offsets = context_lens[:, None] - next_n + decode_offsets[None, :]
-    weight_slice = weights.view(batch_size, next_n, heads).permute(0, 2, 1).contiguous()
-    block_ids = block_tables[:, :max_blocks].clamp(min=0).to(torch.int64)
-    logits_view = logits.view(batch_size, next_n, max_model_len)
-
-    for block_start in range(0, max_blocks, blocks_per_chunk):
-        block_end = min(block_start + blocks_per_chunk, max_blocks)
-        chunk_blocks = block_end - block_start
-
-        k_chunk = kv_cache.index_select(
-            0, block_ids[:, block_start:block_end].reshape(-1)
+    for i in range(batch_size):
+        context_len = context_lens[i].item()
+        q_offsets = torch.arange(context_len - next_n, context_len, device=q.device)
+        weight_slice = (
+            weights[i * next_n : (i + 1) * next_n, :].transpose(0, 1).contiguous()
         )
-        k_chunk = k_chunk.squeeze(-2).view(batch_size, chunk_blocks, block_size, dim)
-
-        # [B, next_n, H, D] x [B, chunk_blocks, block_size, D]
-        # -> [B, H, next_n, chunk_blocks, block_size]
-        s = torch.einsum("bnhd,bmtd->bhnmt", q, k_chunk).to(logits.dtype)
-        s = torch.relu(s) * weight_slice[..., None, None]
-        s = s.sum(dim=1)
-
-        k_offsets = (
-            torch.arange(
-                block_start,
-                block_end,
-                device=q.device,
-                dtype=context_lens.dtype,
-            )[:, None]
-            * block_size
-            + block_offsets[None, :]
-        )
-        flat_offsets = k_offsets.reshape(-1)
-        valid_cols = flat_offsets < max_model_len
-        valid_blocks = (
-            torch.arange(
-                block_start,
-                block_end,
-                device=q.device,
-                dtype=context_lens.dtype,
-            )[None, :]
-            < num_context_blocks[:, None]
-        )
-        causal_mask = (
-            k_offsets[None, None, :, :] <= q_offsets[:, :, None, None]
-        ) & valid_blocks[:, None, :, None]
-        col_start = block_start * block_size
-        col_end = min(block_end * block_size, max_model_len)
-        if col_end - col_start < chunk_blocks * block_size:
-            causal_mask = causal_mask & valid_cols.view(1, 1, chunk_blocks, -1)
-
-        s = torch.where(causal_mask, s, float("-inf"))
-        logits_view[:, :, col_start:col_end] = s.reshape(batch_size, next_n, -1)[
-            :, :, : col_end - col_start
-        ]
+        for block_idx in range(cdiv(context_len, block_size)):
+            block_id = block_tables[i][block_idx]
+            qx, kx = q[i], kv_cache[block_id]
+            k_offsets = torch.arange(
+                block_idx * block_size, (block_idx + 1) * block_size, device=q.device
+            )
+            mask = (k_offsets[None, :] < context_len) & (
+                k_offsets[None, :] <= q_offsets[:, None]
+            )
+            s = torch.where(
+                mask[None, :, :],
+                (qx.transpose(0, 1) @ kx.transpose(0, 1).transpose(1, 2)).to(
+                    logits.dtype
+                ),
+                float("-inf"),
+            )
+            s = torch.relu(s) * weight_slice[..., None]
+            s = s.sum(dim=0)
+            logits[
+                i * next_n : (i + 1) * next_n,
+                block_idx * block_size : (block_idx + 1) * block_size,
+            ] = torch.where(k_offsets[None, :] <= q_offsets[:, None], s, float("-inf"))
     return logits
+
+
+def fp8_paged_mqa_logits_torch(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_model_len: int,
+) -> torch.Tensor:
+    """Compute FP8 MQA logits using paged KV-cache (Triton kernel).
+
+    This implementation uses a Triton kernel to avoid memory blow-up during
+    CUDA Graph capture. Key features:
+    1. Single kernel launch (no Python loops)
+    2. On-the-fly FP8 dequantization in kernel
+    3. Direct paged memory access via block tables
+
+    Args:
+        q: Query tensor of shape [B, next_n, H, D]. Casted to
+            `torch.float8_e4m3fn` by caller.
+        kv_cache: Paged KV-cache in packed FP8+scale layout with shape
+            [num_blocks, block_size, 1, D+4], dtype `torch.uint8`. The last
+            4 bytes per (block,pos) store the `float` dequant scale.
+        weights: Tensor of shape [B * next_n, H], dtype `torch.float32`.
+        context_lens: Tensor of shape [B], dtype int32; effective context length
+            for each batch element.
+        block_tables: Tensor of shape [B, max_blocks], dtype int32; maps logical
+            block indices to physical blocks in the paged cache.
+        max_model_len: Maximum sequence length used to size the logits output.
+
+    Returns:
+        Logits tensor of shape [B * next_n, max_model_len], dtype
+        `torch.float32`.
+    """
+    # Import here to avoid circular dependency
+    from vllm.v1.attention.ops.triton_fp8_paged_mqa_logits import (
+        fp8_paged_mqa_logits_triton,
+    )
+
+    return fp8_paged_mqa_logits_triton(
+        q, kv_cache, weights, context_lens, block_tables, max_model_len
+    )
 
 
 __all__ = [
