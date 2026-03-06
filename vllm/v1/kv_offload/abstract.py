@@ -28,7 +28,7 @@ The class provides the following primitives:
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from vllm.v1.core.kv_cache_utils import BlockHash
@@ -68,7 +68,7 @@ class OffloadingEvent:
 
 class OffloadingManager(ABC):
     @abstractmethod
-    def lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
+    def maximal_prefix_lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
         """
         Finds the length of the maximal series of blocks, starting from the
         first one, that are all offloaded.
@@ -81,6 +81,27 @@ class OffloadingManager(ABC):
             are currently offloaded, or None if the lookup should be retried
             later. Returning None will delay the request handling by the vLLM
             scheduler.
+        """
+        pass
+
+    @abstractmethod
+    def sliding_window_lookup(
+        self, block_hashes: Sequence[BlockHash], sliding_window_size: int
+    ) -> int | None:
+        """
+        Finds the maximal ending position of sliding_window_size consecutive blocks
+        that are all offloaded.
+        In case no such window exists, return the maximal series of blocks,
+        starting from the first one, that are all offloaded.
+
+        Args:
+            block_hashes: the hashes identifying the blocks to lookup.
+            sliding_window_size: the size of the sliding window.
+
+        Returns:
+            An integer representing the ending offset of the maximal hit in blocks,
+            or None if the lookup should be retried later.
+            Returning None will delay the request handling by the vLLM scheduler.
         """
         pass
 

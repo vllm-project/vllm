@@ -316,7 +316,7 @@ class OffloadingConnectorScheduler:
             return 0, False
 
         start_block_idx = num_computed_tokens // self.offloaded_block_size
-        hits = self.manager.lookup(
+        hits = self.manager.maximal_prefix_lookup(
             self._get_block_hashes(request, start_idx=start_block_idx)
         )
         if hits is None:
