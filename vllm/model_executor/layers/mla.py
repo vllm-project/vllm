@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 from dataclasses import dataclass
 
 import torch
@@ -10,56 +9,82 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
 # Try to import AITER ops for fused kernels
 try:
     from aiter import dtypes
+    from aiter.jit.utils.torch_guard import torch_compile_guard
     from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
 
     _AITER_AVAILABLE = True
 except ImportError:
     _AITER_AVAILABLE = False
     dtypes = None
+    torch_compile_guard = None
     fused_rms_fp8_group_quant = None
 
 
-# Environment variable to enable/disable MLA fusion
-# Uses vLLM's registered VLLM_ROCM_USE_AITER_MLA variable
-def _is_mla_fusion_enabled() -> bool:
-    """Check if MLA fusion is enabled via environment variable.
-
-    Returns True by default when AITER is available.
-    Set VLLM_ROCM_USE_AITER_MLA=0 or False to disable fusion for testing.
-    """
-    if not _AITER_AVAILABLE:
-        return False
-    return os.getenv("VLLM_ROCM_USE_AITER_MLA", "1").lower() in ("true", "1")
-
-
-def _fused_rms_fp8_group_quant_impl(
+def _fused_rms_fp8_group_quant_fake(
     q_c: torch.Tensor,
     q_a_layernorm_weight: torch.Tensor,
     q_a_layernorm_variance_epsilon: float,
     kv_c: torch.Tensor,
     kv_a_layernorm_weight: torch.Tensor,
     kv_a_layernorm_variance_epsilon: float,
-    group_size: int,
-    dtype_quant: torch.dtype,
-    output_unquantized_inp1: bool,
-    transpose_scale: bool,
-) -> list[torch.Tensor]:
-    """Implementation that calls AITER kernel.
+    dtype_quant: torch.dtype | None = None,
+    group_size: int = 128,
+    output_unquantized_inp1: bool = False,
+    transpose_scale: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fake implementation for torch.compile/CUDA graphs.
 
-    Returns flattened list: [out1_quantized, out1_bs, out2]
-    (AITER returns nested tuples, we flatten for custom op compatibility)
+    Returns tuple: (out1_quantized, out1_bs, out2)
+    """
+    if dtype_quant is None:
+        dtype_quant = dtypes.fp8
+    m, n1 = q_c.shape
+    out1_quantized = torch.empty((m, n1), dtype=dtype_quant, device=q_c.device)
+    out1_bs = torch.empty(
+        (m, (n1 + group_size - 1) // group_size), dtype=torch.float32, device=q_c.device
+    )
+    if transpose_scale:
+        out1_bs = out1_bs.transpose(0, 1).contiguous().view(*out1_bs.shape)
+    out2 = torch.empty_like(kv_c)
+    # Return tuple for ATOM-style pattern
+    return out1_quantized, out1_bs, out2
+
+
+def _fuse_rmsnorm_quant_impl(
+    q_c: torch.Tensor,
+    q_a_layernorm_weight: torch.Tensor,
+    q_a_layernorm_variance_epsilon: float,
+    kv_c: torch.Tensor,
+    kv_a_layernorm_weight: torch.Tensor,
+    kv_a_layernorm_variance_epsilon: float,
+    dtype_quant: torch.dtype | None = None,
+    group_size: int = 128,
+    output_unquantized_inp1: bool = False,
+    transpose_scale: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fused dual RMSNorm + FP8 quantization using AITER (ATOM pattern).
+
+    Fuses:
+    1. RMSNorm on q_c
+    2. FP8 group quantization on q_c
+    3. RMSNorm on kv_c (without quantization)
+
+    Based on ATOM's implementation in deepseek_v2.py:245-280
+
+    Returns:
+        (q_c_quantized, q_c_scale, kv_c_normed)
+
+    Uses @torch_compile_guard decorator for CUDA graph compatibility.
     """
     # Call AITER's fused kernel
     # Returns: ((out1_quantized, out1_bs), out1_unquantized, out2, out_res1)
-    result = fused_rms_fp8_group_quant(
+    (q_c_quantized, q_c_scale), _, kv_c_normed, _ = fused_rms_fp8_group_quant(
         q_c,  # x1: first input to normalize + quantize
         q_a_layernorm_weight,  # x1_weight: RMSNorm weight for q_c
         q_a_layernorm_variance_epsilon,  # x1_epsilon: epsilon for q_c
@@ -72,150 +97,17 @@ def _fused_rms_fp8_group_quant_impl(
         output_unquantized_inp1,  # output_unquantized_inp1: False
         transpose_scale,  # transpose_scale: True
     )
-    # Flatten nested tuples to list: ((q_c_quantized, q_c_scale), _, kv_c_normed, _)
-    (q_c_quantized, q_c_scale), _, kv_c_normed, _ = result
-    return [q_c_quantized, q_c_scale, kv_c_normed]
+    # Return flattened tuple (ATOM pattern)
+    return q_c_quantized, q_c_scale, kv_c_normed
 
 
-def _fused_rms_fp8_group_quant_fake(
-    q_c: torch.Tensor,
-    q_a_layernorm_weight: torch.Tensor,
-    q_a_layernorm_variance_epsilon: float,
-    kv_c: torch.Tensor,
-    kv_a_layernorm_weight: torch.Tensor,
-    kv_a_layernorm_variance_epsilon: float,
-    group_size: int,
-    dtype_quant: torch.dtype,
-    output_unquantized_inp1: bool,
-    transpose_scale: bool,
-) -> list[torch.Tensor]:
-    """Fake implementation for tracing/compilation.
-
-    Returns flattened list: [out1_quantized, out1_bs, out2]
-    """
-    m, n1 = q_c.shape
-    out1_quantized = torch.empty((m, n1), dtype=dtype_quant, device=q_c.device)
-    out1_bs = torch.empty(
-        (m, (n1 + group_size - 1) // group_size), dtype=torch.float32, device=q_c.device
+# Apply decorator conditionally only when AITER is available
+if _AITER_AVAILABLE:
+    _fuse_rmsnorm_quant = torch_compile_guard(gen_fake=_fused_rms_fp8_group_quant_fake)(
+        _fuse_rmsnorm_quant_impl
     )
-    if transpose_scale:
-        out1_bs = out1_bs.transpose(0, 1).contiguous().view(*out1_bs.shape)
-    out2 = torch.empty_like(kv_c)
-    # Return flattened list for custom op compatibility
-    return [out1_quantized, out1_bs, out2]
-
-
-# Custom op registration state
-_FUSION_OP_REGISTERED = False
-
-
-def _register_mla_fusion_op_once() -> None:
-    """Register MLA fusion custom op once per process."""
-    global _FUSION_OP_REGISTERED
-    if not _FUSION_OP_REGISTERED and _AITER_AVAILABLE:
-        try:
-            direct_register_custom_op(
-                op_name="fused_rms_fp8_group_quant_mla",
-                op_func=_fused_rms_fp8_group_quant_impl,
-                mutates_args=[],
-                fake_impl=_fused_rms_fp8_group_quant_fake,
-                dispatch_key=current_platform.dispatch_key,
-            )
-            _FUSION_OP_REGISTERED = True
-            logger.info("MLA fusion custom op registered successfully")
-        except Exception as e:
-            logger.warning("Failed to register MLA fusion custom op: %s", e)
-            _FUSION_OP_REGISTERED = False
-
-
-def _fuse_rmsnorm_quant(
-    q_c: torch.Tensor,
-    q_a_layernorm_weight: torch.Tensor,
-    q_a_layernorm_variance_epsilon: float,
-    kv_c: torch.Tensor,
-    kv_a_layernorm_weight: torch.Tensor,
-    kv_a_layernorm_variance_epsilon: float,
-    dtype_quant: torch.dtype | None = None,
-    group_size: int = 128,
-    output_unquantized_inp1: bool = False,
-    transpose_scale: bool = True,
-) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-    """Fused dual RMSNorm + FP8 quantization with validation.
-
-    Fuses:
-    1. RMSNorm on q_c
-    2. FP8 group quantization on q_c
-    3. RMSNorm on kv_c (without quantization)
-
-    Based on ATOM's implementation in deepseek_v2.py:283 (_fuse_rmsnorm_quant)
-
-    Returns:
-        (q_c_quantized, q_c_scale, kv_c_normed) if successful, else (None, None, None)
-
-    Can be disabled by setting VLLM_ROCM_USE_AITER_MLA=0 for testing purposes.
-    """
-    if not _AITER_AVAILABLE:
-        logger.debug("MLA fusion: AITER not available, using unfused path")
-        return None, None, None
-
-    # Check if fusion is enabled via environment variable
-    if not _is_mla_fusion_enabled():
-        logger.info(
-            "MLA fusion: disabled via VLLM_ROCM_USE_AITER_MLA, using unfused path"
-        )
-        return None, None, None
-
-    # Register custom op on first use in this process
-    _register_mla_fusion_op_once()
-
-    if not _FUSION_OP_REGISTERED:
-        logger.warning("MLA fusion: custom op registration failed, using unfused path")
-        return None, None, None
-
-    if dtype_quant is None:
-        dtype_quant = dtypes.fp8
-
-    if dtype_quant != dtypes.fp8:
-        logger.debug("MLA fusion: non-FP8 dtype (%s), using unfused path", dtype_quant)
-        return None, None, None
-
-    logger.info(
-        "MLA fusion: calling AITER fused kernel "
-        "(q_c.shape=%s, kv_c.shape=%s, group_size=%d)",
-        q_c.shape,
-        kv_c.shape,
-        group_size,
-    )
-    try:
-        # Call the registered custom op which returns flattened list
-        # Returns: [q_c_quantized, q_c_scale, kv_c_normed]
-        result = torch.ops.vllm.fused_rms_fp8_group_quant_mla(
-            q_c,
-            q_a_layernorm_weight,
-            q_a_layernorm_variance_epsilon,
-            kv_c,
-            kv_a_layernorm_weight,
-            kv_a_layernorm_variance_epsilon,
-            group_size,
-            dtype_quant,
-            output_unquantized_inp1,
-            transpose_scale,
-        )
-        # Unpack the flattened list
-        q_c_quantized, q_c_scale, kv_c_normed = result
-        logger.info(
-            "MLA fusion: AITER kernel succeeded "
-            "(q_c_quantized.shape=%s, q_c_scale.shape=%s, kv_c_normed.shape=%s)",
-            q_c_quantized.shape,
-            q_c_scale.shape,
-            kv_c_normed.shape,
-        )
-        return q_c_quantized, q_c_scale, kv_c_normed
-    except (RuntimeError, TypeError, ValueError, AttributeError) as e:
-        # Fallback to unfused path if AITER kernel fails
-        # This can happen due to unsupported shapes, dtypes, or platform issues
-        logger.warning("AITER MLA fusion failed, falling back to unfused path: %s", e)
-        return None, None, None
+else:
+    _fuse_rmsnorm_quant = _fuse_rmsnorm_quant_impl
 
 
 @dataclass
@@ -319,7 +211,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.prefix = prefix
 
         # Determine if RMSNorm+Quant fusion should be enabled (ATOM pattern)
-        # Store quant_config and determine fusion dtype at init time
+        # Fusion is enabled when AITER is available and quantization is FP8
         self.quant_config = quant_config
         self.quant_dtype = None
         self.fuse_qknorm_quant = False
@@ -331,6 +223,11 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             if isinstance(quant_config, Fp8Config):
                 self.quant_dtype = dtypes.fp8
                 self.fuse_qknorm_quant = True
+                logger.info(
+                    "[MLA_FUSION_INIT] Fusion enabled for %s: "
+                    "AITER available and FP8 quantization detected",
+                    prefix,
+                )
 
     def forward(
         self,
@@ -363,53 +260,28 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
             )
 
-            # Step 2: Try fused RMSNorm + FP8 quantization
-            # Only attempt fusion if enabled in __init__ (based on quant_config)
+            # Step 2: Apply RMSNorm and optional FP8 quantization (ATOM pattern)
+            # Fusion is enabled when fuse_qknorm_quant=True (AITER + FP8 quant)
             if self.fuse_qknorm_quant:
-                q_c_fused, q_c_scale, kv_c_normed_fused = _fuse_rmsnorm_quant(
+                # Fused RMSNorm + FP8 quantization on q_c and kv_c
+                q_c_quantized, q_c_scale, kv_c_normed = _fuse_rmsnorm_quant(
                     q_c,
                     self.q_a_layernorm.weight,
                     self.q_a_layernorm.variance_epsilon,
                     kv_c,
                     self.kv_a_layernorm.weight,
                     self.kv_a_layernorm.variance_epsilon,
-                    dtype_quant=self.quant_dtype,  # Use dtype determined in __init__
+                    dtype_quant=self.quant_dtype,  # dtypes.fp8
                     group_size=128,
                     output_unquantized_inp1=False,
                     transpose_scale=True,
                 )
+                # Pass quantized tensor + scale as separate parameters
+                # (ATOM pattern). The layer will skip internal quantization
+                # and use the pre-quantized input.
+                q = self.q_b_proj(q_c_quantized, x_scale=q_c_scale)[0]
             else:
-                # Fusion disabled, set to None to trigger unfused path
-                q_c_fused = None
-                q_c_scale = None
-                kv_c_normed_fused = None
-
-            # Try to use fused path
-            fused_succeeded = False
-            if q_c_fused is not None:
-                try:
-                    # Attempt to use FP8 quantized q_c
-                    if q_c_scale is not None:
-                        try:
-                            q = self.q_b_proj((q_c_fused, q_c_scale))[0]
-                        except (TypeError, IndexError):
-                            # q_b_proj doesn't support tuple input, dequantize
-                            q_c_dequant = q_c_fused.to(hidden_states.dtype)
-                            q = self.q_b_proj(q_c_dequant)[0]
-                    else:
-                        # No scale (shouldn't happen with FP8, but handle it)
-                        q = self.q_b_proj(q_c_fused)[0]
-
-                    # If we got here, use fused kv_c_normed
-                    kv_c_normed = kv_c_normed_fused
-                    fused_succeeded = True
-                except (RuntimeError, TypeError, ValueError, AttributeError) as e:
-                    # Fused path failed, fall back to unfused
-                    logger.debug("Fused MLA forward failed, using unfused path: %s", e)
-                    fused_succeeded = False
-
-            if not fused_succeeded:
-                # Unfused fallback path
+                # Unfused path: standard RMSNorm without quantization
                 q_c = self.q_a_layernorm(q_c)
                 kv_c_normed = self.kv_a_layernorm(kv_c)
                 q = self.q_b_proj(q_c)[0]
