@@ -45,7 +45,7 @@ def _check_petit_nvfp4_supported(
         return (
             False,
             (
-                "Petit currently only supports: NVFP4 quantizations in sglang. "
+                "Petit currently only supports: NVFP4 quantizations in vLLM. "
                 "Please check the `hf_quant_config.json` file for your model's "
                 "quant configuration."
             ),
@@ -65,46 +65,73 @@ def verify_petit_nvfp4_supported(quant_method: str, group_size: int | None) -> N
         raise ValueError(error_msg)
 
 
-def prepare_nvfp4_layer_for_petit(layer: torch.nn.Module) -> None:
-    # 2. Call _import_petit_kernel() to trigger (or get) the import.
-    petit_kernel = _import_petit_kernel()
+def _check_petit_mxfp4_supported(
+    quant_method: str, group_size: int | None
+) -> tuple[bool, str | None]:
+    if quant_method != "MXFP4":
+        return (
+            False,
+            (
+                "Petit currently only supports: MXFP4 quantizations for this "
+                "backend. Please check the `hf_quant_config.json` file for "
+                "your model's quant configuration."
+            ),
+        )
+    if group_size is not None and group_size != 32:
+        return (
+            False,
+            "Petit currently only supports: group_size=32 quantizations for MXFP4.",
+        )
+    return (True, None)
 
-    # Repack weights to petit format
+
+def verify_petit_mxfp4_supported(quant_method: str, group_size: int | None) -> None:
+    supported, error_msg = _check_petit_mxfp4_supported(quant_method, group_size)
+    if not supported:
+        assert error_msg is not None
+        raise ValueError(error_msg)
+
+
+def _prepare_fp4_layer_for_petit(
+    layer: torch.nn.Module,
+    repack_fn_name: str,
+    process_scales_fn_name: str,
+) -> None:
+    petit_kernel = _import_petit_kernel()
     part_size_n = layer.output_size_per_partition
     part_size_k = layer.input_size_per_partition
     qweight = layer.weight.view(torch.int32).contiguous()
 
-    # 3. Call functions through the imported module variable.
-    petit_qweight = petit_kernel.repack_nvfp4(
-        qweight, size_n=part_size_n, size_k=part_size_k
-    )
+    repack_fn = getattr(petit_kernel, repack_fn_name)
+    process_scales_fn = getattr(petit_kernel, process_scales_fn_name)
+
+    petit_qweight = repack_fn(qweight, size_n=part_size_n, size_k=part_size_k)
     layer.weight = torch.nn.Parameter(petit_qweight, requires_grad=False)
 
-    # Permute scales
-    weight_scale = petit_kernel.process_nvfp4_scales(
+    weight_scale = process_scales_fn(
         scales=layer.weight_scale, size_k=part_size_k, size_n=part_size_n
     )
     layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
 
 
-def apply_petit_nvfp4_linear(
+def _apply_petit_fp4_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     weight_scale_2: torch.Tensor,
     size_n: int,
     size_k: int,
+    gemm_fn_name: str,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    # Trigger (or get) the import here as well.
     petit_kernel = _import_petit_kernel()
+    gemm_fn = getattr(petit_kernel, gemm_fn_name)
 
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n,)
 
     # TODO: Use auto-tuning to find the performant solution_id
-    # Call the function via the module variable.
-    output = petit_kernel.mul_nvfp4_a16(
+    output = gemm_fn(
         a=reshaped_x,
         b=weight,
         s=weight_scale,
@@ -118,3 +145,61 @@ def apply_petit_nvfp4_linear(
         output.add_(bias)  # In-place add
 
     return output.reshape(out_shape)
+
+
+def prepare_nvfp4_layer_for_petit(layer: torch.nn.Module) -> None:
+    _prepare_fp4_layer_for_petit(
+        layer,
+        repack_fn_name="repack_nvfp4",
+        process_scales_fn_name="process_nvfp4_scales",
+    )
+
+
+def apply_petit_nvfp4_linear(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    weight_scale_2: torch.Tensor,
+    size_n: int,
+    size_k: int,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return _apply_petit_fp4_linear(
+        input=input,
+        weight=weight,
+        weight_scale=weight_scale,
+        weight_scale_2=weight_scale_2,
+        size_n=size_n,
+        size_k=size_k,
+        gemm_fn_name="mul_nvfp4_a16",
+        bias=bias,
+    )
+
+
+def prepare_mxfp4_layer_for_petit(layer: torch.nn.Module) -> None:
+    _prepare_fp4_layer_for_petit(
+        layer,
+        repack_fn_name="repack_mxfp4",
+        process_scales_fn_name="process_mxfp4_scales",
+    )
+
+
+def apply_petit_mxfp4_linear(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    weight_scale_2: torch.Tensor,
+    size_n: int,
+    size_k: int,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return _apply_petit_fp4_linear(
+        input=input,
+        weight=weight,
+        weight_scale=weight_scale,
+        weight_scale_2=weight_scale_2,
+        size_n=size_n,
+        size_k=size_k,
+        gemm_fn_name="mul_mxfp4_a16",
+        bias=bias,
+    )

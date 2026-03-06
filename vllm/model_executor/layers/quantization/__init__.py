@@ -32,6 +32,7 @@ QuantizationMethods = Literal[
     "inc",
     "mxfp4",
     "petit_nvfp4",
+    "petit_mxfp4",
     "cpu_awq",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
@@ -129,7 +130,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     )
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import Mxfp4Config
-    from .petit import PetitNvFp4Config
+    from .petit import PetitMxFp4Config, PetitNvFp4Config
     from .ptpc_fp8 import PTPCFp8Config
     from .torchao import TorchAOConfig
 
@@ -157,6 +158,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
         "petit_nvfp4": PetitNvFp4Config,
+        "petit_mxfp4": PetitMxFp4Config,
         "cpu_awq": CPUAWQConfig,
     }
     # Update the `method_to_config` with customized quantization methods.
