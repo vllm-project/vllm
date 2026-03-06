@@ -606,7 +606,7 @@ class EplbState:
 
         # Update the expert load sliding window
         if not is_dummy:
-            should_record = self._should_record_current_step()
+            should_record = self._should_record_current_step(log_stats=log_stats)
             for eplb_model_state in self.model_states.values():
                 if should_record:
                     eplb_model_state.expert_load_window[
@@ -647,32 +647,40 @@ class EplbState:
                 # Still performing asynchronous rearrangement; update
                 # should_record (step > step_interval, so always True) and
                 # bail out before the step counter is reset.
-                self._update_layer_should_record()
+                self._update_layer_should_record(log_stats=log_stats)
                 return
             self.expert_rearrangement_step = 0
             self.rearrange()
 
-        self._update_layer_should_record()
+        self._update_layer_should_record(log_stats=log_stats)
 
-    def _should_record_current_step(self) -> bool:
-        """Return whether expert-load recording should be enabled this step."""
+    def _should_record_current_step(self, log_stats: bool = False) -> bool:
+        """Return whether expert-load recording should be enabled this step.
+
+        Recording is enabled when we are close to either:
+        1) The next rearrangement step, so the sliding window is ready.
+        2) The next balancedness logging step, when log_stats is enabled.
+        """
         steps_remaining = (
             self.expert_rearrangement_step_interval - self.expert_rearrangement_step
         )
-        return steps_remaining <= self.expert_load_window_size
+        should_record_for_rearrange = steps_remaining <= self.expert_load_window_size
 
-    def _update_layer_should_record(self) -> None:
-        """Update ``should_record`` on every registered layer state.
+        if not log_stats:
+            return should_record_for_rearrange
 
-        Recording is skipped for the first
-        ``step_interval - window_size`` steps of each rearrangement period
-        because those window slots will be overwritten before the next
-        rearrangement fires.  We always record when ``window_size >=
-        step_interval`` (the window covers the full period).
-        """
+        log_interval = self.parallel_config.eplb_config.log_balancedness_interval
+        steps_until_next_log = (
+            log_interval - (self.expert_rearrangement_step % log_interval)
+        ) % log_interval
+        should_record_for_log = steps_until_next_log <= self.expert_load_window_size
+        return should_record_for_rearrange or should_record_for_log
+
+    def _update_layer_should_record(self, log_stats: bool = False) -> None:
+        """Update ``should_record`` on every registered layer state."""
         if not self._layer_states:
             return
-        should_record = self._should_record_current_step()
+        should_record = self._should_record_current_step(log_stats=log_stats)
         for layer_state in self._layer_states:
             layer_state.should_record = should_record
             if layer_state.should_record_tensor is not None:
