@@ -398,12 +398,13 @@ def make_nvfp4_moe_kernel(
     shared_experts: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
+    is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
         quant_config=moe_quant_config,
         routing_tables=routing_tables,
         allow_new_interface=True,
-        use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
+        use_monolithic=is_monolithic,
     )
     assert prepare_finalize is not None
 
@@ -428,7 +429,6 @@ def make_nvfp4_moe_kernel(
     # NOTE(rob): we only want the mk to control the shared_expert
     # if using all2all (for SBO). bnell is making this explicit in
     # the new MoE runner class.
-    is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,

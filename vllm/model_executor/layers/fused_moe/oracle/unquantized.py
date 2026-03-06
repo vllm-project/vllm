@@ -11,15 +11,16 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoDPEPModular,
-)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
+    convert_moe_weights_to_flashinfer_trtllm_block_layout,
     get_flashinfer_moe_backend,
     swap_w13_to_w31,
 )
@@ -201,14 +202,11 @@ def select_unquantized_moe_backend(
 
     # Handle explicit FlashInfer FP16 configuration.
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP16"):
-        if not current_platform.is_cuda():
-            raise NotImplementedError(
-                "FlashInfer unquantized MoE is only supported on NVIDIA platforms."
-            )
-
         if not envs.VLLM_USE_FLASHINFER_MOE_FP16:
-            AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.FLASHINFER_TRTLLM)
-            AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.FLASHINFER_CUTLASS)
+            if UnquantizedMoeBackend.FLASHINFER_TRTLLM in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.FLASHINFER_TRTLLM)
+            if UnquantizedMoeBackend.FLASHINFER_CUTLASS in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.FLASHINFER_CUTLASS)
         elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
             # If user is explicit about backend, validate it.
             fi_backend = get_flashinfer_moe_backend()
@@ -278,76 +276,77 @@ def convert_to_unquantized_kernel_format(
     w2_weight: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if unquantized_backend == UnquantizedMoeBackend.AITER:
-        w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(
-            layer.w13_weight.data, layer.w2_weight.data
-        )
+        w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(w13_weight, w2_weight)
 
     elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
         # Swap halves to arrange as [w3; w1] (kernel expectation)
-        w13_weight = swap_w13_to_w31(layer.w13_weight.data)
+        w13_weight = swap_w13_to_w31(w13_weight)
+
+    elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
+        # Swap halves to arrange as [w3; w1] (kernel expectation)
+        w13_weight = swap_w13_to_w31(w13_weight)
+        _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+        w13_weight, w2_weight = convert_moe_weights_to_flashinfer_trtllm_block_layout(
+            _cache_permute_indices,
+            w13_weight,
+            w2_weight,
+        )
 
     return w13_weight, w2_weight
 
 
 def make_unquantized_moe_kernel(
-    backend: UnquantizedMoeBackend,
     quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
-) -> mk.FusedMoEKernel | None:
-    if backend in (
-        UnquantizedMoeBackend.FLASHINFER_TRTLLM,
-        UnquantizedMoeBackend.CPU,
-        UnquantizedMoeBackend.NONE,
-    ):
-        return None
+    backend: UnquantizedMoeBackend,
+    experts_cls: type[mk.FusedMoEExperts],
+    routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    shared_experts: torch.nn.Module | None = None,
+) -> mk.FusedMoEKernel:
+    # Create Prepare/Finalize
+    is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
+    prepare_finalize = maybe_make_prepare_finalize(
+        moe=moe_config,
+        quant_config=quant_config,
+        routing_tables=routing_tables,
+        allow_new_interface=True,
+        use_monolithic=is_monolithic,
+    )
+    assert prepare_finalize is not None
 
-    if backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-            FlashInferExperts,
+    logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
+
+    # Create Experts
+    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
+        assert max_num_tokens is not None
+        experts = experts_cls(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=prepare_finalize.num_dispatchers(),
+        )
+    else:
+        experts = experts_cls(
+            moe_config=moe_config,
+            quant_config=quant_config,
         )
 
-        kernel = mk.FusedMoEKernel(
-            MoEPrepareAndFinalizeNoDPEPModular(),
-            FlashInferExperts(
-                moe_config=moe_config,
-                quant_config=quant_config,
-            ),
-            inplace=False,
-        )
+    kernel = mk.FusedMoEKernel(
+        prepare_finalize,
+        experts,
+        shared_experts=(
+            shared_experts
+            if (
+                moe_config.moe_parallel_config.use_all2all_kernels and not is_monolithic
+            )
+            else None
+        ),
+        moe_parallel_config=moe_config.moe_parallel_config,
+        inplace=(
+            not moe_config.disable_inplace
+            and backend != UnquantizedMoeBackend.FLASHINFER_CUTLASS
+        ),
+    )
 
-    elif backend == UnquantizedMoeBackend.AITER:
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            AiterExperts,
-        )
-
-        kernel = mk.FusedMoEKernel(
-            MoEPrepareAndFinalizeNoDPEPModular(),
-            AiterExperts(
-                moe_config=moe_config,
-                quant_config=quant_config,
-            ),
-            inplace=not moe_config.disable_inplace,
-        )
-    elif backend == UnquantizedMoeBackend.TRITON:
-        from vllm.model_executor.layers.fused_moe import TritonExperts
-
-        kernel = mk.FusedMoEKernel(
-            MoEPrepareAndFinalizeNoDPEPModular(),
-            TritonExperts(
-                moe_config=moe_config,
-                quant_config=quant_config,
-            ),
-            inplace=not moe_config.disable_inplace,
-        )
-    elif backend == UnquantizedMoeBackend.XPU:
-        from vllm.model_executor.layers.fused_moe import XPUExperts
-
-        kernel = mk.FusedMoEKernel(
-            MoEPrepareAndFinalizeNoDPEPModular(),
-            XPUExperts(
-                moe_config=moe_config,
-                quant_config=quant_config,
-            ),
-            inplace=not moe_config.disable_inplace,
-        )
     return kernel
