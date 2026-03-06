@@ -1282,7 +1282,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--speculative-config-help",
             action="store_true",
-            help=vllm_kwargs["speculative_config_help"]["help"],
+            help="Print detailed help for --speculative-config and exit",
         )
         vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
