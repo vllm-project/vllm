@@ -515,6 +515,144 @@ def make_fake_moe_layer(
 # TODO: maybe add separate testpoint for this?
 
 
+def _test_body_regular(
+    moe_fn: Callable,
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    vllm_config: VllmConfig,
+    num_tokens: int,
+    num_tokens_across_dp: torch.Tensor,
+    baseline_output: torch.Tensor,
+    device: torch.device,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Regular MoE test body: compare layer output to baseline."""
+    baseline_output = baseline_output.to(device)
+
+    with set_forward_context(
+        None,
+        vllm_config,
+        num_tokens=num_tokens,
+        num_tokens_across_dp=num_tokens_across_dp,
+    ):
+        output = moe_fn(hidden_states, router_logits)
+
+    return baseline_output, output
+
+
+def _test_body_eplb(
+    moe_fn: Callable,
+    moe_layer: FusedMoE,
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    vllm_config: VllmConfig,
+    num_tokens: int,
+    num_tokens_across_dp: torch.Tensor,
+    cpu_group,
+    device: torch.device,
+    in_dtype: torch.dtype,
+    quantization: str | None,
+    use_ep: bool,
+    tp_size: int,
+    ep_size: int,
+    dp_size: int,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    num_experts: int,
+    k: int,
+    n: int,
+    top_k: int,
+    shared_experts,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """EPLB test body: compare output before and after expert weight rearrangement."""
+    # Get "before" output with original weight arrangement
+    with set_forward_context(
+        None,
+        vllm_config,
+        num_tokens=num_tokens,
+        num_tokens_across_dp=num_tokens_across_dp,
+    ):
+        output_before = moe_fn(hidden_states, router_logits)
+
+    # Create a fresh FusedMoE layer with enable_eplb=True
+    # Delete the original layer's registration so the constructor can
+    # re-use the same "from_forward_context" prefix
+    cc = vllm_config.compilation_config
+    del cc.static_forward_context["from_forward_context"]
+    cc.static_all_moe_layers.remove("from_forward_context")
+
+    moe_fn, moe_layer = make_fused_moe_layer(
+        quantization=quantization,
+        use_ep=use_ep,
+        hidden_size=k,
+        intermediate_size=n,
+        in_dtype=in_dtype,
+        tp_size=tp_size,
+        ep_size=ep_size,
+        dp_size=dp_size,
+        reduce_results=False,
+        w1=w1,
+        w2=w2,
+        top_k=top_k,
+        global_num_experts=num_experts,
+        shared_experts=shared_experts,
+        enable_eplb=True,
+    )
+
+    if moe_layer._expert_map is not None:
+        moe_layer._expert_map = moe_layer._expert_map.to(device)
+
+    # All ranks must generate the same permutation
+    set_random_seed(42)
+    initial_indices = torch.arange(num_experts, dtype=torch.long)
+    shuffled_indices = initial_indices[torch.randperm(num_experts)]
+
+    # Rearrange expert weights across EP ranks
+    expert_weights = [list(moe_layer.get_expert_weights())]
+    rearrange_expert_weights_inplace(
+        old_global_expert_indices=initial_indices.unsqueeze(0),
+        new_global_expert_indices=shuffled_indices.unsqueeze(0),
+        expert_weights=expert_weights,
+        ep_group=cpu_group,
+    )
+
+    # Build logical_to_physical_map from shuffled_indices
+    # shuffled_indices[physical] = logical, we need the inverse
+    logical_to_physical = torch.empty(num_experts, dtype=torch.int32, device=device)
+    logical_to_physical[shuffled_indices.to(device)] = torch.arange(
+        num_experts, dtype=torch.int32, device=device
+    )
+
+    moe_layer.set_eplb_state(
+        moe_layer_idx=0,
+        expert_load_view=torch.zeros(
+            (1, num_experts),
+            dtype=torch.int32,
+            device=device,
+        ),
+        logical_to_physical_map=logical_to_physical.reshape(num_experts, 1).unsqueeze(
+            0
+        ),
+        logical_replica_count=torch.ones(
+            (1, num_experts),
+            dtype=torch.int32,
+            device=device,
+        ),
+    )
+
+    # Get "after" output with rearranged weights and EPLB routing
+    with set_forward_context(
+        None,
+        vllm_config,
+        num_tokens=num_tokens,
+        num_tokens_across_dp=num_tokens_across_dp,
+    ):
+        output_after = moe_fn(hidden_states, router_logits)
+
+    return output_before, output_after
+
+
 def _test_loop(
     pgi: ProcessGroupInfo,
     vllm_config: VllmConfig,
@@ -522,7 +660,6 @@ def _test_loop(
     ep_size: int,
     dp_size: int,
     tp_size: int,
-    baseline_output: torch.Tensor,
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     w1: torch.Tensor,
@@ -534,7 +671,15 @@ def _test_loop(
     top_k: int,
     quantization: str | None,
     shared_experts_config: SharedExpertsConfig | None,
-):
+    test_body_fn: Callable,
+    **test_body_kwargs,
+) -> None:
+    """Generic test loop that sets up environment and delegates to test_body_fn.
+
+    This function is called directly by test_moe_layer and test_moe_layer_eplb
+    via parallel_launch_with_config, passing either _test_body_regular or
+    _test_body_eplb as the test_body_fn parameter.
+    """
     world_size = tp_size * dp_size
     use_ep = ep_size > 1
 
@@ -543,14 +688,13 @@ def _test_loop(
     set_random_seed(7)
 
     in_dtype = hidden_states.dtype
-
     device = torch.cuda.current_device()
     init_workspace_manager(device)
 
     dp_rank = vllm_config.parallel_config.data_parallel_rank
-    # Processes are organized as: rank = dp_rank * tp_size + tp_rank
     tp_rank = pgi.rank % tp_size
 
+    # Chunk weights for EP/TP
     if ep_size > 1:
         w1 = chunk_by_rank(w1, dp_rank, dp_size, dim=0, device=device)
         w2 = chunk_by_rank(w2, dp_rank, dp_size, dim=0, device=device)
@@ -565,9 +709,9 @@ def _test_loop(
 
     hidden_states = hidden_states.to(device)
     router_logits = router_logits.to(device)
-    baseline_output = baseline_output.to(device)
 
     with set_current_vllm_config(vllm_config):
+        # Setup shared experts if needed
         if shared_experts_config is not None:
             s_w1 = shared_experts_config.w1.to(device)
             s_w2 = shared_experts_config.w2.to(device)
@@ -584,6 +728,7 @@ def _test_loop(
         else:
             shared_experts = None
 
+        # Create initial MoE layer
         moe_fn, moe_layer = make_fused_moe_layer(
             quantization=quantization,
             use_ep=use_ep,
@@ -601,40 +746,56 @@ def _test_loop(
             shared_experts=shared_experts,
         )
 
-        # What?
         if moe_layer._expert_map is not None:
-            moe_layer._expert_map = moe_layer._expert_map.to(
-                torch.cuda.current_device()
-            )
+            moe_layer._expert_map = moe_layer._expert_map.to(device)
 
-        # output should be completely reduced at this point
         num_tokens = m
         num_tokens_across_dp = torch.tensor(
             [num_tokens] * world_size,
-            device=torch.cuda.current_device(),
+            device=device,
             dtype=torch.int,
         )
 
-        with set_forward_context(
-            None,
-            vllm_config,
+        # Call the test body function with all necessary context
+        expected, actual = test_body_fn(
+            moe_fn=moe_fn,
+            moe_layer=moe_layer,
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            vllm_config=vllm_config,
             num_tokens=num_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
-        ):
-            output = moe_fn(hidden_states, router_logits)
+            pgi=pgi,
+            cpu_group=cpu_group,
+            device=device,
+            in_dtype=in_dtype,
+            quantization=quantization,
+            use_ep=use_ep,
+            tp_size=tp_size,
+            ep_size=ep_size,
+            dp_size=dp_size,
+            w1=w1,
+            w2=w2,
+            num_experts=num_experts,
+            k=k,
+            n=n,
+            m=m,
+            top_k=top_k,
+            shared_experts=shared_experts,
+            **test_body_kwargs,
+        )
 
-    # TODO: add tolerance to QuantizaedWeights + maybe rename
+    # Common tolerance logic
     if quantization is None:
         atol, rtol = 3.5e-2, 3.5e-2
     elif quantization in ("fp8", "modelopt_fp8"):
         atol, rtol = 6e-2, 6e-2
     elif quantization == "modelopt_fp4":
-        # FP4 quantization error grows with the reduction dimension (k).
         atol = rtol = 1e-1 + k * 5e-4
     else:
         atol, rtol = 6e-2, 6e-2
 
-    torch.testing.assert_close(baseline_output, output, atol=atol, rtol=rtol)
+    torch.testing.assert_close(expected, actual, atol=atol, rtol=rtol)
 
 
 # TODO: add cudagraphs/torch.compile tests
@@ -758,7 +919,6 @@ def test_moe_layer(
         1 if not use_ep else world_size,  # or dp_size?
         dp_size,
         tp_size,
-        baseline_output,
         hidden_states,
         router_logits,
         w1,
@@ -770,198 +930,9 @@ def test_moe_layer(
         top_k,
         quantization,
         shared_experts_config,
+        _test_body_regular,
+        baseline_output=baseline_output,
     )
-
-
-def _test_eplb_loop(
-    pgi: ProcessGroupInfo,
-    vllm_config: VllmConfig,
-    cpu_group,
-    ep_size: int,
-    dp_size: int,
-    tp_size: int,
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    num_experts: int,
-    m: int,
-    n: int,
-    k: int,
-    top_k: int,
-    quantization: str | None,
-    shared_experts_config: SharedExpertsConfig | None,
-):
-    """Worker for EPLB test: create layer, get output, rearrange, compare."""
-    world_size = tp_size * dp_size
-    use_ep = ep_size > 1
-
-    assert vllm_config.parallel_config.enable_expert_parallel == use_ep
-
-    set_random_seed(7)
-
-    in_dtype = hidden_states.dtype
-
-    device = torch.cuda.current_device()
-    init_workspace_manager(device)
-
-    dp_rank = vllm_config.parallel_config.data_parallel_rank
-    tp_rank = pgi.rank % tp_size
-
-    if ep_size > 1:
-        w1 = chunk_by_rank(w1, dp_rank, dp_size, dim=0, device=device)
-        w2 = chunk_by_rank(w2, dp_rank, dp_size, dim=0, device=device)
-
-    if tp_size > 1:
-        w1 = tp_chunk_gate_up(w1, tp_rank, tp_size, dim=1, device=device)
-        w2 = chunk_by_rank(w2, tp_rank, tp_size, dim=2, device=device)
-
-    if ep_size <= 1 and tp_size <= 1:
-        w1 = w1.to(device)
-        w2 = w2.to(device)
-
-    hidden_states = hidden_states.to(device)
-    router_logits = router_logits.to(device)
-
-    with set_current_vllm_config(vllm_config):
-        if shared_experts_config is not None:
-            s_w1 = shared_experts_config.w1.to(device)
-            s_w2 = shared_experts_config.w2.to(device)
-
-            if tp_size > 1:
-                s_w1 = tp_chunk_gate_up(s_w1, tp_rank, tp_size, dim=1, device=device)
-                s_w2 = chunk_by_rank(s_w2, tp_rank, tp_size, dim=0, device=device)
-
-            shared_experts = TestMLP(
-                w1=s_w1,
-                w2=s_w2,
-                out_dtype=in_dtype,
-            )
-        else:
-            shared_experts = None
-
-        # Create the initial layer and get "before" output.
-        moe_fn, moe_layer = make_fused_moe_layer(
-            quantization=quantization,
-            use_ep=use_ep,
-            hidden_size=k,
-            intermediate_size=n,
-            in_dtype=in_dtype,
-            tp_size=tp_size,
-            ep_size=ep_size,
-            dp_size=dp_size,
-            reduce_results=False,
-            w1=w1,
-            w2=w2,
-            top_k=top_k,
-            global_num_experts=num_experts,
-            shared_experts=shared_experts,
-        )
-
-        if moe_layer._expert_map is not None:
-            moe_layer._expert_map = moe_layer._expert_map.to(device)
-
-        num_tokens = m
-        num_tokens_across_dp = torch.tensor(
-            [num_tokens] * world_size,
-            device=device,
-            dtype=torch.int,
-        )
-
-        with set_forward_context(
-            None,
-            vllm_config,
-            num_tokens=num_tokens,
-            num_tokens_across_dp=num_tokens_across_dp,
-        ):
-            output_before = moe_fn(hidden_states, router_logits)
-
-        # Create a fresh FusedMoE layer with enable_eplb=True.
-        # Delete the original layer's registration so the constructor can
-        # re-use the same "from_forward_context" prefix.
-        cc = vllm_config.compilation_config
-        del cc.static_forward_context["from_forward_context"]
-        cc.static_all_moe_layers.remove("from_forward_context")
-
-        moe_fn, moe_layer = make_fused_moe_layer(
-            quantization=quantization,
-            use_ep=use_ep,
-            hidden_size=k,
-            intermediate_size=n,
-            in_dtype=in_dtype,
-            tp_size=tp_size,
-            ep_size=ep_size,
-            dp_size=dp_size,
-            reduce_results=False,
-            w1=w1,
-            w2=w2,
-            top_k=top_k,
-            global_num_experts=num_experts,
-            shared_experts=shared_experts,
-            enable_eplb=True,
-        )
-
-        if moe_layer._expert_map is not None:
-            moe_layer._expert_map = moe_layer._expert_map.to(device)
-
-        # All ranks must generate the same permutation.
-        set_random_seed(42)
-        initial_indices = torch.arange(num_experts, dtype=torch.long)
-        shuffled_indices = initial_indices[torch.randperm(num_experts)]
-
-        # Rearrange expert weights across EP ranks.
-        expert_weights = [list(moe_layer.get_expert_weights())]
-        rearrange_expert_weights_inplace(
-            old_global_expert_indices=initial_indices.unsqueeze(0),
-            new_global_expert_indices=shuffled_indices.unsqueeze(0),
-            expert_weights=expert_weights,
-            ep_group=cpu_group,
-        )
-
-        # Build logical_to_physical_map from shuffled_indices.
-        # shuffled_indices[physical] = logical, we need the inverse.
-        logical_to_physical = torch.empty(num_experts, dtype=torch.int32, device=device)
-        logical_to_physical[shuffled_indices.to(device)] = torch.arange(
-            num_experts, dtype=torch.int32, device=device
-        )
-
-        moe_layer.set_eplb_state(
-            moe_layer_idx=0,
-            expert_load_view=torch.zeros(
-                (1, num_experts),
-                dtype=torch.int32,
-                device=device,
-            ),
-            logical_to_physical_map=logical_to_physical.reshape(
-                num_experts, 1
-            ).unsqueeze(0),
-            logical_replica_count=torch.ones(
-                (1, num_experts),
-                dtype=torch.int32,
-                device=device,
-            ),
-        )
-
-        with set_forward_context(
-            None,
-            vllm_config,
-            num_tokens=num_tokens,
-            num_tokens_across_dp=num_tokens_across_dp,
-        ):
-            output_after = moe_fn(hidden_states, router_logits)
-
-        # With correct EPLB routing, the before/after outputs should be
-        # nearly identical — same weights, same inputs, compensating routing.
-        if quantization is None:
-            atol, rtol = 3.5e-2, 3.5e-2
-        elif quantization in ("fp8", "modelopt_fp8"):
-            atol, rtol = 6e-2, 6e-2
-        elif quantization == "modelopt_fp4":
-            atol = rtol = 1e-1 + k * 5e-4
-        else:
-            atol, rtol = 6e-2, 6e-2
-
-        torch.testing.assert_close(output_before, output_after, atol=atol, rtol=rtol)
 
 
 # Which quantization methods support EPLB.
@@ -1059,7 +1030,7 @@ def test_moe_layer_eplb(
 
     parallel_launch_with_config(
         world_size,
-        _test_eplb_loop,
+        _test_loop,
         vllm_config,
         test_env,
         world_size,  # ep_size = world_size for EPLB
@@ -1076,4 +1047,5 @@ def test_moe_layer_eplb(
         top_k,
         quantization,
         shared_experts_config,
+        _test_body_eplb,
     )
