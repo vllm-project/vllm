@@ -30,6 +30,7 @@ from .utils import (
     get_draft_quant_config,
     maybe_prefix,
     process_eagle_weight,
+    get_target_config
 )
 
 logger = init_logger(__name__)
@@ -360,6 +361,17 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         return self.model.fc(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        # TODO maybe extract a function
+        target_model_path = Path(target_config.model_config.model)
+        rotation_path = get_rotation_path(target_config)
+
+        use_quarot = rotation_path is not None
+
+        if use_quarot:
+            Q = get_rotataion_matrix(rotation_path)
+            Q3 = compute_rotataion_matrix3(Q)
+            dtype = None
+
         model_weights = {}
         includes_draft_id_mapping = False
         includes_embed_tokens = False
@@ -384,9 +396,22 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
                 continue
             elif "lm_head" not in name:
                 name = "model." + name
+            if "fc." in name and use_quarot:
+                # anti-rotate fc
+                dtype = loaded_weight.dtype
+                loaded_weight = loaded_weight @ Q3.to(dtype)
             if "embed_tokens" in name:
                 includes_embed_tokens = True
             model_weights[name] = loaded_weight
+            process_eagle_weight(self, name)
+
+        # process embedding if drafter does not have embedding
+        if use_quarot and not includes_embed_tokens:
+            name = "model.embed_tokens.weight"
+            loaded_weight = get_embedding_tensor(target_model_path).to(dtype) @ Q.T.to(dtype)
+            model_weights[name] = loaded_weight
+
+            includes_embed_tokens = True
             process_eagle_weight(self, name)
 
         if not includes_mask_hidden and self.use_parallel_drafting:
