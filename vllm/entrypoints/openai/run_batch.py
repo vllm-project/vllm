@@ -54,6 +54,7 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreResponse,
 )
 from vllm.entrypoints.utils import create_error_response
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.utils import random_uuid
@@ -86,9 +87,10 @@ class BatchTranscriptionRequest(TranscriptionRequest):
     def validate_no_file(cls, data: Any):
         """Ensure file field is not provided in batch requests."""
         if isinstance(data, dict) and "file" in data:
-            raise ValueError(
+            raise VLLMValidationError(
                 "The 'file' field is not supported in batch requests. "
-                "Use 'file_url' instead."
+                "Use 'file_url' instead.",
+                parameter="file",
             )
         return data
 
@@ -116,9 +118,10 @@ class BatchTranslationRequest(TranslationRequest):
     def validate_no_file(cls, data: Any):
         """Ensure file field is not provided in batch requests."""
         if isinstance(data, dict) and "file" in data:
-            raise ValueError(
+            raise VLLMValidationError(
                 "The 'file' field is not supported in batch requests. "
-                "Use 'file_url' instead."
+                "Use 'file_url' instead.",
+                parameter="file",
             )
         return data
 
