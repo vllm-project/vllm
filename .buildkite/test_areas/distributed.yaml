@@ -60,6 +60,7 @@ steps:
   - tests/distributed/test_pynccl
   - tests/distributed/test_events
   - tests/compile/fullgraph/test_basic_correctness.py
+  - tests/distributed/test_mnnvl_alltoall.py
   - examples/offline_inference/rlhf.py
   - examples/offline_inference/rlhf_colocate.py
   - examples/offline_inference/new_weight_syncing/
@@ -105,6 +106,7 @@ steps:
   - cd new_weight_syncing
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_nccl.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_ipc.py
+  - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
 
 - label: Distributed Tests (8 GPUs)(H100)
   timeout_in_minutes: 10
