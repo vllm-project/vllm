@@ -16,6 +16,7 @@ from vllm.transformers_utils.processors.fireredasr2_processor import (
 from vllm.transformers_utils.processors.funasr_processor import FunASRProcessor
 from vllm.transformers_utils.processors.hunyuan_vl import HunYuanVLProcessor
 from vllm.transformers_utils.processors.hunyuan_vl_image import HunYuanVLImageProcessor
+from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
 from vllm.transformers_utils.processors.ovis import OvisProcessor
 from vllm.transformers_utils.processors.ovis2_5 import Ovis2_5Processor
 
@@ -26,6 +27,7 @@ __all__ = [
     "FunASRProcessor",
     "HunYuanVLProcessor",
     "HunYuanVLImageProcessor",
+    "Moondream3Processor",
     "OvisProcessor",
     "Ovis2_5Processor",
 ]

@@ -723,6 +723,38 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         patch_hf_runner=model_utils.molmo_patch_hf_runner,
     ),
+    "moondream3": VLMTestInfo(
+        models=["moondream/moondream3-preview"],
+        test_type=VLMTestType.IMAGE,
+        prompt_formatter=lambda img_prompt: f"<|endoftext|>{img_prompt}",
+        # Note: space after <image> is required for correct tokenization
+        img_idx_to_prompt=lambda idx: "<image> \n\n",
+        # Common-image coverage here targets query/caption. Detect/point
+        # behavior is validated in test_moondream3.py.
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<vlm_image>Question: What is this sign?\n\nAnswer:",
+                "cherry_blossom": (
+                    "<vlm_image>Question: What season is shown?\n\nAnswer:"
+                ),
+            }
+        ),
+        max_model_len=4096,
+        max_num_seqs=2,
+        dtype="bfloat16",
+        hf_model_kwargs={
+            "hf_tokenizer_name": "moondream/starmie-v1",
+            # Skip AutoProcessor (model repo has no processor files);
+            # moondream3_patch_hf_runner sets the real processor.
+            "skip_processor_init": True,
+        },
+        patch_hf_runner=model_utils.moondream3_patch_hf_runner,
+        # Single size factor to avoid GPU OOM when running multiple test
+        # cases sequentially (9B MoE model uses ~18 GiB per instance).
+        image_size_factors=[(1.0,)],
+        # Moondream3 is 9B params with MoE, needs significant GPU memory
+        marks=[large_gpu_mark(min_gb=48)],
+    ),
     "ovis1_6-gemma2": VLMTestInfo(
         models=["AIDC-AI/Ovis1.6-Gemma2-9B"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),

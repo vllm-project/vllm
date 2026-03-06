@@ -1121,14 +1121,20 @@ class ModelConfig:
         if hasattr(self.hf_config, "is_mm_prefix_lm"):
             return bool(self.hf_config.is_mm_prefix_lm)
         # fallback to list of known models
-        MM_PREFIX_LM_MODELS = (
-            "gemma3",
-            "molmo2",
-            "paligemma",
-        )
+        MM_PREFIX_LM_MODELS = ("gemma3", "molmo2", "moondream3", "paligemma")
         if not hasattr(self.hf_config, "model_type"):
             return False
         return self.hf_config.model_type in MM_PREFIX_LM_MODELS
+
+    @cached_property
+    def mm_prefix_lm_left_padding(self) -> int:
+        """Extra positions before MM embeds to include in prefix-LM spans."""
+        # Prefer text_config so nested hf_overrides (e.g. {"text_config": ...})
+        # take precedence even if duplicated top-level aliases are stale.
+        value = getattr(self.hf_text_config, "prefix_lm_left_padding", None)
+        if value is None:
+            value = getattr(self.hf_config, "prefix_lm_left_padding", 0)
+        return int(value)
 
     def get_head_size(self) -> int:
         return self.model_arch_config.head_size
