@@ -77,6 +77,8 @@ def w8a8_block_matmul(
     C_shape = A.shape[:-1] + (N,)
     C = A.new_empty(C_shape, dtype=output_dtype)
 
+    needs_masking = bool(K % config["BLOCK_SIZE_K"] != 0)
+
     def grid(META):
         return (
             triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
@@ -109,6 +111,7 @@ def w8a8_block_matmul(
         Bs.stride(1),
         Bs.stride(0),
         **config,
+        needs_masking=needs_masking,
     )
 
     return C
