@@ -283,7 +283,9 @@ class PassConfig:
         ]
 
         if enabled_fusions:
-            logger.info("Enabled custom fusions: %s", ", ".join(enabled_fusions))
+            logger.info_once(
+                "Enabled custom fusions: %s", ", ".join(enabled_fusions), scope="global"
+            )
 
 
 class DynamicShapesType(str, enum.Enum):
