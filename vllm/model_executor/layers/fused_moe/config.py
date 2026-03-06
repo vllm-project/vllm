@@ -1015,51 +1015,64 @@ class FusedMoEParallelConfig:
             Expert Parallelism is considered only when either `dp_size_`, `pcp_size_` or
             `tp_size_` is non trivial.
 
-            Note that PCP serves the same function as DP here.
+            Note that PCP serves the same function as TP here (PCP ranks
+            are flattened into TP), while DP ranks hold replicated MoE
+            weights when EP is disabled.
 
-            When TP = 2, DP(PCP) = 1 and EP = False, the configuration on different
-            devices:
+            When TP = 2, DP = 1, PCP = 1 and EP = False, the configuration
+            on different devices:
 
             - device 0 : TP = {2, 0} DP = {1, 0} EP = {1, 0} //
                 legend : {size, rank}
             - device 1 : TP = {2, 1} DP = {1, 0} EP = {1, 0}
             - Comment : Tensors are sharded across 2 devices.
 
-            When TP = 1, DP(PCP) = 2 and EP = False, the configuration on different
-                devices:
+            When TP = 1, DP = 2, PCP = 1 and EP = False, the configuration
+            on different devices:
 
-            - device 0 : TP = {2, 0} DP = {2, 0} EP = {1, 0}
-            - device 1 : TP = {2, 1} DP = {2, 1} EP = {1, 0}
-            - Comment: There are 2 engine instances and the tensors are sharded
-                across 2 decvices.
+            - device 0 : TP = {1, 0} DP = {2, 0} EP = {1, 0}
+            - device 1 : TP = {1, 0} DP = {2, 1} EP = {1, 0}
+            - Comment: There are 2 engine instances. Each DP rank holds
+                a full replica of the MoE weights.
 
-            When TP = 2, DP(PCP) = 2 and EP = False, the configuration on different
-                devices:
+            When TP = 2, DP = 2, PCP = 1 and EP = False, the configuration
+            on different devices:
 
-            - device 0: TP = {4, 0} DP = {2, 0} EP = {1, 0}
-            - device 1: TP = {4, 1} DP = {2, 0} EP = {1, 0}
-            - device 2: TP = {4, 2} DP = {2, 1} EP = {1, 0}
-            - device 3: TP = {4, 3} DP = {2, 1} EP = {1, 0}
-            - Comment: There are 2 engine instances and the tensors are sharded
+            - device 0: TP = {2, 0} DP = {2, 0} EP = {1, 0}
+            - device 1: TP = {2, 1} DP = {2, 0} EP = {1, 0}
+            - device 2: TP = {2, 0} DP = {2, 1} EP = {1, 0}
+            - device 3: TP = {2, 1} DP = {2, 1} EP = {1, 0}
+            - Comment: There are 2 engine instances and the tensors are
+                sharded across 2 devices within each DP group. Each DP
+                rank holds the same weight shards.
+
+            When TP = 2, DP = 1, PCP = 2 and EP = False, the configuration
+            on different devices:
+
+            - device 0: TP = {4, 0} DP = {1, 0} EP = {1, 0}
+            - device 1: TP = {4, 1} DP = {1, 0} EP = {1, 0}
+            - device 2: TP = {4, 2} DP = {1, 0} EP = {1, 0}
+            - device 3: TP = {4, 3} DP = {1, 0} EP = {1, 0}
+            - Comment: PCP is flattened into TP. Tensors are sharded
                 across 4 devices.
 
-            When, TP = 2, DP(PCP) = 1 and EP = True, the configuration on different
-                devices:
+            When, TP = 2, DP = 1, PCP = 1 and EP = True, the configuration
+            on different devices:
 
             - device 0: TP = {1, 0} DP = {1, 0} EP = {2, 0}
             - device 1: TP = {1, 0} DP = {1, 0} EP = {2, 1}
             - Comment: The experts are split between the 2 devices.
 
-            When, TP = 1, DP(PCP) = 2 and EP = True, the configuration on different
-                devices:
+            When, TP = 1, DP = 2, PCP = 1 and EP = True, the configuration
+            on different devices:
 
             - device 0: TP = {1, 0} DP = {2, 0} EP = {2, 0}
             - device 1: TP = {1, 0} DP = {2, 1} EP = {2, 1}
             - Comment: There are 2 engine instances and the experts are split
                 between the 2 devices.
 
-            When TP = 2, DP(PCP) = 2 and EP = True, the configuration on different
-                devices:
+            When TP = 2, DP = 2, PCP = 1 and EP = True, the configuration
+            on different devices:
 
             - device 0: TP = {1, 0} DP = {2, 0} EP = {4, 0}
             - device 1: TP = {1, 0} DP = {2, 0} EP = {4, 1}
@@ -1077,11 +1090,14 @@ class FusedMoEParallelConfig:
         dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
         pcp_size = pcp_size_
         pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
-        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
-            tp_size_, dp_size_, dp_rank, pcp_size_, pcp_rank
-        )
 
         if not use_ep:
+            # For non-EP, only flatten PCP into TP. DP ranks hold
+            # replicated MoE weights and process different data
+            # independently, so dp_size must NOT be folded into tp_size.
+            tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
+                tp_size_, 1, 0, pcp_size_, pcp_rank
+            )
             return FusedMoEParallelConfig(
                 tp_size=tp_size,
                 tp_rank=tp_rank,
@@ -1098,8 +1114,12 @@ class FusedMoEParallelConfig:
             )
         # DP + EP / TP + EP / DP + TP + EP
         assert use_ep
-        # In EP, each device owns a set of experts fully. There is no tensor
-        # parallel update tp_size, tp_rank, ep_size and ep_rank to reflect that.
+        # For EP, flatten DP, PCP and TP into EP size since each device
+        # owns a distinct set of experts fully (no tensor parallelism
+        # within experts).
+        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
+            tp_size_, dp_size_, dp_rank, pcp_size_, pcp_rank
+        )
         ep_size = tp_size
         ep_rank = tp_rank
         return FusedMoEParallelConfig(
