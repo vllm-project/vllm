@@ -60,7 +60,7 @@ def is_valid_flashinfer_cutlass_fused_moe(
     return True
 
 
-class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class FlashInferExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: mk.FusedMoEConfig,
@@ -394,5 +394,5 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         # No support for LoRA in flashinfer_cutlass_fused_moe.
-        # See TODOs in flashinfer functions runMoe and runMoeMinLantency.
+        # See TODOs in flashinfer functions runMoe and runMoeMinLatency.
         raise NotImplementedError("LoRA is not supported for flashinfer_cutlass_moe")
