@@ -295,7 +295,7 @@ class CudagraphDispatcher:
 
         normalized_uniform = uniform_decode and self.cudagraph_mode.separate_routine()
         batch_desc = self._create_padded_batch_descriptor(
-                    num_tokens, normalized_uniform, has_lora, effective_num_active_loras
+            num_tokens, normalized_uniform, has_lora, effective_num_active_loras
         )
 
         if CUDAGraphMode.FULL in allowed_modes:
