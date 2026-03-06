@@ -523,7 +523,14 @@ class CoreEngineActorManager:
                 placement_groups.append(pg)
                 local_dp_ranks.append(i)
                 if len(placement_groups) == dp_size:
+                    # In some cases, it is already satisfied when not all
+                    # nodes are fully utilized, for example, 4*8=32 GPUs,
+                    # but when setting TP4, DP3, only half of the GPUs on
+                    # the second node are used.
                     break
+            if len(placement_groups) == dp_size:
+                # All placement groups are created, skip other nodes.
+                break
 
         if len(placement_groups) < dp_size:
             raise ValueError(
