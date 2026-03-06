@@ -15,7 +15,7 @@ def init_pooling_io_processors(
     renderer: BaseRenderer,
     chat_template_config: ChatTemplateConfig,
 ) -> dict[str, PoolingIOProcessor]:
-    processors = []
+    processors: list[tuple[str, type(PoolingIOProcessor)]] = []
     if "classify" in supported_tasks:
         from vllm.entrypoints.pooling.classify.io_processor import ClassifyIOProcessor
 
