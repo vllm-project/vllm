@@ -37,6 +37,7 @@ def test_rms_norm(
     device: str,
     strided_input: bool,
 ) -> None:
+    torch.set_default_device(device)
     set_random_seed(seed)
     layer = RMSNorm(hidden_size).to(dtype=dtype)
     layer.weight.data.normal_(mean=1.0, std=0.1)
@@ -58,7 +59,7 @@ def test_rms_norm(
         hidden_size=layer.hidden_size,
         residual=residual
     )
-    out = layer(x.to(device), residual)
+    out = layer(x, residual)
     # NOTE(woosuk): LayerNorm operators (including RMS) typically have larger
     # numerical errors than other operators because they involve reductions.
     # Therefore, we use a larger tolerance.
