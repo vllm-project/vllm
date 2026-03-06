@@ -11,13 +11,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import ConfigDict
 from starlette.datastructures import Headers
 
-from vllm import (
-    PoolingParams,
-    PoolingRequestOutput,
-    PromptType,
-    SamplingParams,
-    envs,
-)
+from vllm import PoolingParams, PoolingRequestOutput, envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
@@ -29,11 +23,10 @@ from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.typing import AnyPoolingRequest
 from vllm.entrypoints.utils import create_error_response
-from vllm.inputs.data import EngineInputs, ProcessorInputs
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
+from vllm.renderers.inputs import TokPrompt
 from vllm.renderers.inputs.preprocess import extract_prompt_components
-from vllm.sampling_params import BeamSearchParams
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
@@ -42,7 +35,7 @@ from vllm.tracing import (
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import merge_async_iterators
 
-from .io_processor import PoolingIOProcessor
+from .io_processor import EngineInputs, PoolingIOProcessor
 
 PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
 
@@ -359,8 +352,8 @@ class PoolingServing:
     def _log_inputs(
         self,
         request_id: str,
-        inputs: PromptType | ProcessorInputs,
-        params: SamplingParams | PoolingParams | BeamSearchParams | None,
+        inputs: TokPrompt,
+        params: PoolingParams,
         lora_request: LoRARequest | None,
     ) -> None:
         if self.request_logger is None:

@@ -3,6 +3,7 @@
 
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any, Final
 
 from vllm import PoolingRequestOutput, PromptType
@@ -21,6 +22,12 @@ from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.utils.mistral import is_mistral_tokenizer
+
+
+@dataclass
+class EngineInputs:
+    engine_prompt: TokPrompt
+    request_id_item: str | None = None
 
 
 class PoolingIOProcessor:
@@ -43,10 +50,12 @@ class PoolingIOProcessor:
             chat_template_config.trust_request_chat_template
         )
 
-    def pre_process_online(self, *args, **kwargs):
+    def pre_process_online(self, *args, **kwargs) -> list[EngineInputs] | None:
         raise NotImplementedError
 
-    async def pre_process_online_async(self, *args, **kwargs):
+    async def pre_process_online_async(
+        self, *args, **kwargs
+    ) -> list[EngineInputs] | None:
         return self.pre_process_online(*args, **kwargs)
 
     def pre_process_offline(self, *args, **kwargs):

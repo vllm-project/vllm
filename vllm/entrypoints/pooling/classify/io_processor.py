@@ -4,13 +4,12 @@ from collections.abc import Sequence
 from typing import Any
 
 from vllm import PromptType
-from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
+from vllm.entrypoints.pooling.base.io_processor import EngineInputs, PoolingIOProcessor
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
 )
 from vllm.inputs import ProcessorInputs
-from vllm.inputs.data import EngineInputs
 
 
 class ClassifyIOProcessor(PoolingIOProcessor):

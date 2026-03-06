@@ -3,12 +3,14 @@
 from collections.abc import Sequence
 from typing import Any
 
-from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
+from vllm.entrypoints.pooling.base.io_processor import EngineInputs, PoolingIOProcessor
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
 )
-from vllm.inputs.data import EngineInputs, ProcessorInputs, PromptType, TokensPrompt
+from vllm.inputs.data import ProcessorInputs, PromptType, TokensPrompt
+from vllm.outputs import PoolingRequestOutput
+from vllm.renderers.inputs import DecoderOnlyTokPrompt, TokPrompt
 from vllm.utils.collection_utils import chunk_list
 
 
@@ -49,6 +51,11 @@ class EmbedIOProcessor(PoolingIOProcessor):
             request_id=request.request_id, engine_prompts=engine_prompts
         )
 
+    def post_process(
+        self, outputs: list[PoolingRequestOutput]
+    ) -> list[PoolingRequestOutput]:
+        return self._maybe_apply_chunked_processing_post_process_online(outputs)
+
     def pre_process_offline(
         self,
         prompts: PromptType | Sequence[PromptType],
@@ -65,7 +72,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
     def _maybe_apply_chunked_processing_pre_process_online(
         self,
         request_id: str,
-        engine_prompts: list[ProcessorInputs],
+        engine_prompts: list[TokPrompt],
     ) -> list[EngineInputs]:
         if not self.enable_chunked_processing:
             return [EngineInputs(engine_prompt=prompt) for prompt in engine_prompts]
@@ -73,6 +80,8 @@ class EmbedIOProcessor(PoolingIOProcessor):
         max_model_len = self.model_config.max_model_len
         chunked_engine_prompts: list[EngineInputs] = []
         for prompt_idx, engine_prompt in enumerate(engine_prompts):
+            # "EncoderDecoderInputs" has no key "prompt_token_ids"
+            assert isinstance(engine_prompt, DecoderOnlyTokPrompt)
             prompt_token_ids = engine_prompt["prompt_token_ids"]
 
             for chunk_idx, chunk_tokens in enumerate(
@@ -80,9 +89,15 @@ class EmbedIOProcessor(PoolingIOProcessor):
             ):
                 chunked_engine_prompts.append(
                     EngineInputs(
-                        engine_prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
+                        engine_prompt=TokensPrompt(prompt_token_ids=chunk_tokens),
                         request_id_item=f"{request_id}-prompt-{prompt_idx}-chunk-{chunk_idx}",
                     )
                 )
-
         return chunked_engine_prompts
+
+    def _maybe_apply_chunked_processing_post_process_online(
+        self, outputs: list[PoolingRequestOutput]
+    ) -> list[PoolingRequestOutput]:
+        if not self.enable_chunked_processing:
+            return outputs
+        return outputs
