@@ -161,6 +161,7 @@ class Scheduler(SchedulerInterface):
         # Priority queues for requests.
         self.waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
+
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
         # requests so that they can free the cached states for those requests.
@@ -1470,8 +1471,7 @@ class Scheduler(SchedulerInterface):
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
         # Handle rejected requests.
-        rejected_reqs = self.rejected
-        if rejected_reqs:
+        if rejected_reqs := self.rejected:
             # Create EngineCoreOutputs for all rejected requests.
             for request in rejected_reqs:
                 self._append_failed_or_rejected_output(outputs, request)

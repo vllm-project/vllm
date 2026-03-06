@@ -263,14 +263,6 @@ class DeltaMessage(OpenAIBaseModel):
     tool_calls: list[DeltaToolCall] = Field(default_factory=list)
 
 
-class GenerationError(Exception):
-    """raised when finish_reason indicates internal server error (500)"""
-
-    def __init__(self, message: str = "Internal server error"):
-        super().__init__(message)
-        self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
-
-
 ####### Tokens IN <> Tokens OUT #######
 class GenerateRequest(BaseModel):
     request_id: str = Field(
