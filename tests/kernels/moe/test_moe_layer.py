@@ -93,7 +93,8 @@ _BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
 # Which quantization methods support EPLB.
 # ModelOptFp8MoEMethod inherits supports_eplb=False from FusedMoEMethodBase.
 # TODO: double check modelopt fp8
-_EPLB_SUPPORTED_QUANTS: set[str | None] = {None, "fp8", "modelopt_fp4"}
+# modelopt_fp4 excluded: get_expert_weights() can't handle NvFP4 packed format.
+_EPLB_SUPPORTED_QUANTS: set[str | None] = {None, "fp8"}
 
 
 def rank_chunk(num: int, r: int, w: int) -> int:
@@ -356,7 +357,7 @@ def make_fused_moe_layer(
         tp_size=tp_size,
         ep_size=ep_size,
         dp_size=dp_size,
-        prefix="test_layer",
+        prefix="from_forward_context",
         custom_routing_function=custom_routing_function,
         scoring_func=scoring_func,
         routed_scaling_factor=routed_scaling_factor,
@@ -518,26 +519,64 @@ def make_fake_moe_layer(
 
 
 def _test_eplb_rearrangement(
-    moe_layer: FusedMoE,
-    moe_fn: Callable,
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     output_before: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
     num_experts: int,
+    n: int,
+    k: int,
+    top_k: int,
+    quantization: str | None,
+    use_ep: bool,
+    tp_size: int,
+    ep_size: int,
+    dp_size: int,
+    shared_experts: torch.nn.Module | None,
     device: torch.device | int,
     cpu_group,
     vllm_config: VllmConfig,
     num_tokens: int,
     num_tokens_across_dp: torch.Tensor,
-    quantization: str | None,
-    k: int,
 ) -> None:
     """Test EPLB by rearranging expert weights and verifying output matches.
 
-    Shuffles the physical-to-logical expert mapping, rearranges weights
-    accordingly, enables EPLB routing, and checks that the forward pass
-    produces the same output as before rearrangement.
+    Creates a fresh FusedMoE layer with enable_eplb=True, shuffles the
+    physical-to-logical expert mapping, rearranges weights accordingly,
+    sets up EPLB routing state, and checks that the forward pass produces
+    the same output as the non-EPLB layer before rearrangement.
     """
+    in_dtype = hidden_states.dtype
+
+    # Create a fresh FusedMoE layer with enable_eplb=True.
+    # Delete the original layer's registration so the constructor can
+    # re-use the same "from_forward_context" prefix.
+    cc = vllm_config.compilation_config
+    del cc.static_forward_context["from_forward_context"]
+    cc.static_all_moe_layers.remove("from_forward_context")
+
+    moe_fn, moe_layer = make_fused_moe_layer(
+        quantization=quantization,
+        use_ep=use_ep,
+        hidden_size=k,
+        intermediate_size=n,
+        in_dtype=in_dtype,
+        tp_size=tp_size,
+        ep_size=ep_size,
+        dp_size=dp_size,
+        reduce_results=False,
+        w1=w1,
+        w2=w2,
+        top_k=top_k,
+        global_num_experts=num_experts,
+        shared_experts=shared_experts,
+        enable_eplb=True,
+    )
+
+    if moe_layer._expert_map is not None:
+        moe_layer._expert_map = moe_layer._expert_map.to(device)
+
     # All ranks must generate the same permutation.
     set_random_seed(42)
     initial_indices = torch.arange(num_experts, dtype=torch.long)
@@ -559,15 +598,6 @@ def _test_eplb_rearrangement(
         num_experts, dtype=torch.int32, device=device
     )
 
-    # Enable EPLB and set state (1 layer, 0 redundant experts).
-    # Must also enable on the router — it has its own flag checked in
-    # _apply_eplb_mapping, independent of the layer's flag.
-
-    # TODO(bnell): this is hacky, create a separate FusedMoE for the eplb case.
-    moe_layer.enable_eplb = True
-    moe_layer.router.enable_eplb = True
-    # end hacky
-
     moe_layer.set_eplb_state(
         moe_layer_idx=0,
         expert_load_view=torch.zeros(
@@ -585,7 +615,6 @@ def _test_eplb_rearrangement(
         ),
     )
 
-    # Second forward in a fresh context (moe_forward tracks call counts).
     with set_forward_context(
         None,
         vllm_config,
@@ -710,9 +739,6 @@ def _test_loop(
             dtype=torch.int,
         )
 
-        # Make moe_forward happy
-        vllm_config.compilation_config.static_forward_context["test_layer"] = moe_layer
-
         with set_forward_context(
             None,
             vllm_config,
@@ -723,19 +749,26 @@ def _test_loop(
 
         if use_eplb:
             _test_eplb_rearrangement(
-                moe_layer=moe_layer,
-                moe_fn=moe_fn,
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 output_before=output,
+                w1=w1,
+                w2=w2,
                 num_experts=num_experts,
+                n=n,
+                k=k,
+                top_k=top_k,
+                quantization=quantization,
+                use_ep=use_ep,
+                tp_size=tp_size,
+                ep_size=ep_size,
+                dp_size=dp_size,
+                shared_experts=shared_experts,
                 device=device,
                 cpu_group=cpu_group,
                 vllm_config=vllm_config,
                 num_tokens=num_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
-                quantization=quantization,
-                k=k,
             )
 
     # TODO: add tolerance to QuantizaedWeights + maybe rename
@@ -791,6 +824,10 @@ def test_moe_layer(
             pytest.skip(f"EPLB not supported with quantization={quantization}")
         if num_experts % dp_size != 0:
             pytest.skip("EPLB requires num_experts divisible by ep_size")
+
+        # TODO(bnell): is this true?
+        if backend.startswith("deepep"):
+            pytest.skip("EPLB not yet supported with deepep backends")
 
     supported_quants = _BACKEND_SUPPORTED_QUANTS.get(backend)
     if supported_quants is not None and quantization not in supported_quants:
