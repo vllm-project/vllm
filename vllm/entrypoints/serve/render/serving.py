@@ -4,7 +4,7 @@ import sys
 import traceback
 from collections.abc import Callable, Sequence
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import jinja2
 from openai_harmony import Message as OpenAIMessage
@@ -34,9 +34,6 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.mistral import mt as _mt
-
-if TYPE_CHECKING:
-    from vllm.engine.protocol import EngineClient
 
 logger = init_logger(__name__)
 
@@ -85,21 +82,6 @@ class OpenAIServingRender:
         self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
         self.supports_browsing = False
         self.supports_code_interpreter = False
-
-    @classmethod
-    def from_engine_client(
-        cls,
-        engine_client: "EngineClient",
-        served_model_names: list[str],
-        **kwargs: Any,
-    ) -> "OpenAIServingRender":
-        return cls(
-            model_config=engine_client.model_config,
-            renderer=engine_client.renderer,
-            io_processor=engine_client.io_processor,
-            served_model_names=served_model_names,
-            **kwargs,
-        )
 
     async def render_chat_request(
         self,

@@ -170,9 +170,13 @@ async def init_generate_state(
     # generate-mode and render-only servers.
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 
-    state.openai_serving_render = OpenAIServingRender.from_engine_client(
-        engine_client,
-        [mp.name for mp in state.openai_serving_models.base_model_paths],
+    state.openai_serving_render = OpenAIServingRender(
+        model_config=engine_client.model_config,
+        renderer=engine_client.renderer,
+        io_processor=engine_client.io_processor,
+        served_model_names=[
+            mp.name for mp in state.openai_serving_models.base_model_paths
+        ],
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
