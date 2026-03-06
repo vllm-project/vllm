@@ -92,7 +92,8 @@ class QuarkMoEMethod(FusedMoEMethodBase):
                 rocm_aiter_ops.is_fused_moe_enabled()
             )
             if (
-                input_config.get("dtype") == "fp8_e4m3"
+                input_config is not None
+                and input_config.get("dtype") == "fp8_e4m3"
                 and not input_config.get("is_dynamic")
                 and not emulate
             ):
