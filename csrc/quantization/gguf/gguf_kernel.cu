@@ -271,6 +271,51 @@ torch::Tensor ggml_mul_mat_a8(torch::Tensor W,  // quant weight
             (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
             (scalar_t*)Y.data_ptr(), col, row, batch, padded, row, stream);
         break;
+      case 16:
+        ggml_mul_mat_iq2_xxs_q8_1_cuda(
+            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), col, row, batch, padded, row, stream);
+        break;
+      case 17:
+        ggml_mul_mat_iq2_xs_q8_1_cuda(
+            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), col, row, batch, padded, row, stream);
+        break;
+      case 18:
+        ggml_mul_mat_iq3_xxs_q8_1_cuda(
+            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), col, row, batch, padded, row, stream);
+        break;
+      case 19:
+        ggml_mul_mat_iq1_s_q8_1_cuda(
+            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), col, row, batch, padded, row, stream);
+        break;
+      case 20:
+        ggml_mul_mat_iq4_nl_q8_1_cuda(
+            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), col, row, batch, padded, row, stream);
+        break;
+      case 21:
+        ggml_mul_mat_iq3_s_q8_1_cuda(
+            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), col, row, batch, padded, row, stream);
+        break;
+      case 22:
+        ggml_mul_mat_iq2_s_q8_1_cuda(
+            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), col, row, batch, padded, row, stream);
+        break;
+      case 23:
+        ggml_mul_mat_iq4_xs_q8_1_cuda(
+            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), col, row, batch, padded, row, stream);
+        break;
+      case 29:
+        ggml_mul_mat_iq1_m_q8_1_cuda(
+            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), col, row, batch, padded, row, stream);
+        break;
     }
   });
   return Y;
