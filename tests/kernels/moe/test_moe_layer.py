@@ -518,7 +518,7 @@ def make_fake_moe_layer(
     return _moe
 
 
-def _test_eplb_rearrangement(
+def _test_eplb(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     output_before: torch.Tensor,
@@ -748,7 +748,7 @@ def _test_loop(
             output = moe_fn(hidden_states, router_logits)
 
         if use_eplb:
-            _test_eplb_rearrangement(
+            _test_eplb(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 output_before=output,
