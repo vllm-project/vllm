@@ -45,6 +45,15 @@ class ShardedStateLoader(BaseModelLoader):
             else load_config.model_loader_extra_config.copy()
         )
         self.pattern = extra_config.pop("pattern", self.DEFAULT_PATTERN)
+        if load_config.load_format == "runai_streamer_sharded":
+            concurrency = extra_config.pop("concurrency", None)
+            if isinstance(concurrency, int):
+                os.environ["RUNAI_STREAMER_CONCURRENCY"] = str(concurrency)
+
+            memory_limit = extra_config.pop("memory_limit", None)
+            if isinstance(memory_limit, int):
+                os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] = str(memory_limit)
+
         if extra_config:
             raise ValueError(
                 f"Unexpected extra config keys for load format "
