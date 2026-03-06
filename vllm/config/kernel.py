@@ -72,10 +72,11 @@ class IrOpPriorityConfig:
         use the given default list.
         """
         for field in fields(cls):
-            if field not in kwargs:
+            if field.name not in kwargs:
                 kwargs[field.name] = default
 
         return cls(**kwargs)
+
 
 MoEBackend = Literal[
     "auto",

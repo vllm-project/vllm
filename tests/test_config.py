@@ -1149,3 +1149,17 @@ def test_eagle_draft_model_config():
     assert draft_model_config.hf_text_config.model_type == "eagle"
     assert draft_model_config.architectures == ["EagleLlamaForCausalLM"]
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
+
+
+def test_ir_op_priority_default():
+    """Test that IR op priority defaults are set correctly."""
+    from vllm.config.kernel import IrOpPriorityConfig
+
+    # Assert default is applied to ops
+    priority_config = IrOpPriorityConfig.with_default(["vllm_c", "native"])
+    assert priority_config.rms_norm == ["vllm_c", "native"]
+
+    # Assert single ops override the default
+    assert IrOpPriorityConfig.with_default(
+        ["vllm_c", "native"], rms_norm=["oink", "native"]
+    ) == IrOpPriorityConfig(rms_norm=["oink", "native"])
