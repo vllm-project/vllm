@@ -91,7 +91,7 @@ timm==1.0.17
 # Required for plugins test
 albumentations==1.4.6
 # Pin transformers version
-transformers==5.0.0
+transformers==5.3.0
 # Pin HF Hub version
 huggingface-hub==1.4.1
 # Pin Mistral Common
