@@ -596,6 +596,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
     ),
     # [Multimodal]
     "CLIPModel": _HfExamplesInfo("openai/clip-vit-base-patch32"),
+    "MetaClip2Model": _HfExamplesInfo("facebook/metaclip-2-mt5-worldwide-s16"),
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
     ),
