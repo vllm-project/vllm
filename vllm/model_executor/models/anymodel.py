@@ -9,6 +9,15 @@ model builds the full structure with the global config; then
 and injects no-ops.  VL models work automatically (vision tower, forward,
 load_weights all inherited).
 
+No-op handling
+~~~~~~~~~~~~~~
+Layers marked ``"no_op": true`` are replaced with identity pass-throughs
+(``NoOpAttention``, ``NoOpMLP``) paired with ``NoOpNorm``.  The identity
+approach is necessary because vLLM fuses the residual add into the layer
+norm via an **in-place** CUDA kernel (``fused_add_rms_norm``).  The
+identity norms defer the residual add to the next real norm, which
+correctly accumulates the residual stream without in-place aliasing issues.
+
 Canonical block_configs schema::
 
     {
@@ -87,28 +96,32 @@ def _get_block_attr(block_config, section: str, key: str, default=None):
 
 
 class NoOpAttention(nn.Module):
-    """Returns zeros; residual path preserves hidden states."""
+    """Identity pass-through replacing a skipped attention block.
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
-        return torch.zeros_like(hidden_states)
+    Uses ``*args, **kwargs`` to handle varying call conventions across
+    architectures (keyword-only, positional, reversed order, etc.).
+    """
+
+    def forward(self, *args, **kwargs) -> torch.Tensor:
+        if "hidden_states" in kwargs:
+            return kwargs["hidden_states"]
+        return args[0]
 
 
 class NoOpMLP(nn.Module):
-    """Returns zeros; residual path preserves hidden states."""
+    """Identity pass-through replacing a skipped feed-forward block."""
 
     def forward(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
-        return torch.zeros_like(hidden_states)
+        return hidden_states
 
 
 class NoOpNorm(nn.Module):
-    """No-op replacement for layer norms adjacent to no-op attention/MLP.
+    """Identity replacement for layer norms adjacent to no-op attention/MLP.
 
-    vLLM fuses the residual add into the norm:"""
+    Returns (hidden_states, residual) unchanged so the decoder block acts as
+    a pure identity. The real residual accumulation is left to the surrounding
+    real norms in non-no-op blocks.
+    """
 
     def forward(
         self,
@@ -116,8 +129,7 @@ class NoOpNorm(nn.Module):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if residual is not None:
-            hidden_states = hidden_states + residual
-            return hidden_states, hidden_states
+            return hidden_states, residual
         return hidden_states
 
 
