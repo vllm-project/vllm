@@ -15,7 +15,7 @@ Register a lazy module mapping.
 Example:
     ToolParserManager.register_lazy_module(
         name="kimi_k2",
-        module_path="vllm.tool_parsers.kimi_k2_parser",
+        module_path="vllm.tool_parsers.kimi_k2_tool_parser",
         class_name="KimiK2ToolParser",
     )
 """
