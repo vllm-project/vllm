@@ -183,7 +183,7 @@ There is a [GitHub CI workflow](https://github.com/pytorch/pytorch-integration-t
 
 ### How It Works
 
-The workflow currently runs weekly profiling sessions for selected models, generating detailed performance traces that can be analyzed using different tools to identify performance regressions or optimization opportunities. But, it can be triggered manually as well, using the Github Action tool.
+The workflow currently runs weekly profiling sessions for selected models, generating detailed performance traces that can be analyzed using different tools to identify performance regressions or optimization opportunities. But, it can be triggered manually as well, using the GitHub Actions tool.
 
 ### Adding New Models
 

@@ -71,8 +71,8 @@ For mitigation strategies, please refer to the FAQ entry *Can the output of a pr
 
 ## Known Feature Incompatibility
 
-1. Pipeline parallelism is not composible with speculative decoding as of `vllm<=0.15.0`
-2. Speculative decoding with a draft models is not supported in `vllm<=0.10.0`
+1. Pipeline parallelism is not composable with speculative decoding as of `vllm<=0.15.0`
+2. Speculative decoding with draft models is not supported in `vllm<=0.10.0`
 
 ## Resources for vLLM contributors
 
