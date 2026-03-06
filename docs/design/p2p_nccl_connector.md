@@ -9,9 +9,9 @@ An implementation of xPyD with dynamic scaling based on point-to-point communica
 As shown in Figure 1, the overall process of this **PD disaggregation** solution is described through a request flow:
 
 1. The client sends an HTTP request to the Proxy/Router's `/v1/completions` interface.
-2. The Proxy/Router selects a **1P1D (1 Prefill instance + 1 Decode instance)** through either through round-robin or random selection, generates a `request_id` (rules to be introduced later), modifies the `max_tokens` in the HTTP request message to **1**, and then forwards the request to the **P instance**.
-3. Immediately afterward, the Proxy/Router forwards the **original HTTP request** to the **D instance**.
-4. The **P instance** performs **Prefill** and then **actively sends the generated KV cache** to the D instance (using **PUT_ASYNC** mode). The D instance's `zmq_addr` can be resolved through the `request_id`.
+2. The Proxy/Router selects a **1P1D (1 Prefill instance + 1 Decode instance)** through either round-robin or random selection, generates an `request_id`, modifies the `max_tokens` in the HTTP request message to **1**, disables streaming, injects `kv_transfer_params` containing the D instance's KV address, and then forwards the request to the **P instance**.
+3. The Proxy/Router waits for the P instance's response, extracts the returned `kv_transfer_params` (containing the P instance's `request_id` and KV address), and forwards them along with the **original HTTP request** to the **D instance**.
+4. The **P instance** performs **Prefill** and then **actively sends the generated KV cache** to the D instance (using **PUT_ASYNC** mode). The D instance's KV address is provided via `kv_transfer_params`.
 5. The **D instance** has a **dedicated thread** for receiving the KV cache (to avoid blocking the main process). The received KV cache is saved into the **GPU memory buffer**, the size of which is determined by the vLLM startup parameter `kv_buffer_size`. When the GPU buffer is full, the KV cache is stored in the **local Tensor memory pool**.
 6. During the **Decode**, the D instance's main process retrieves the KV cache (transmitted by the P instance) from either the **GPU buffer** or the **memory pool**, thereby **skipping Prefill**.
 7. After completing **Decode**, the D instance returns the result to the **Proxy/Router**, which then forwards it to the **client**.
@@ -22,11 +22,11 @@ As shown in Figure 1, the overall process of this **PD disaggregation** solution
 
 A simple HTTP service acts as the entry point for client requests and starts a background thread to listen for P/D instances reporting their HTTP IP and PORT, as well as ZMQ IP and PORT. It maintains a dictionary of `http_addr -> zmq_addr`. The `http_addr` is the IP:PORT for the vLLM instance's request, while the `zmq_addr` is the address for KV cache handshake and metadata reception.
 
-The Proxy/Router is responsible for selecting 1P1D based on the characteristics of the client request, such as the prompt, and generating a corresponding `request_id`, for example:
+The Proxy/Router is responsible for selecting 1P1D based on the characteristics of the client request and coordinating the two-phase handshake via `kv_transfer_params`:
 
-```text
-cmpl-___prefill_addr_10.0.1.2:21001___decode_addr_10.0.1.3:22001_93923d63113b4b338973f24d19d4bf11-0
-```
+1. **Prefill request**: The proxy generates a UUID `request_id` and injects `kv_transfer_params` containing the D instance's KV address (`remote_kv_addr`) into the request body. Streaming is disabled so the proxy can read the full JSON response.
+2. **Prefill response**: The P instance's completion response includes `kv_transfer_params` with its `request_id` and KV address, which the proxy extracts from the JSON body.
+3. **Decode request**: The proxy forwards the prefill's `kv_transfer_params` to the D instance, which uses them to coordinate the KV cache transfer.
 
 Currently, to quickly verify whether xPyD can work, a round-robin selection of 1P1D is used. In the future, it is planned to use a trie combined with the load status of instances to select appropriate P and D.
 
