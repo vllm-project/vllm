@@ -9,11 +9,11 @@ from tests.compile.backend import LazyInitPass, TestBackend
 from tests.utils import TestFP8Layer, flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
+from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
 from vllm.compilation.passes.fusion.mla_attn_quant_fusion import (
+    MLA_ATTN_OP,
     MLAAttnFusionPass,
 )
-from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
-from vllm.compilation.passes.fusion.mla_attn_quant_fusion import MLA_ATTN_OP
 from vllm.compilation.passes.fx_utils import find_op_nodes
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
@@ -118,16 +118,12 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
     def build_attn_metadata(self, batch_size: int) -> AttentionMetadata:
         """Initialize MLA attention metadata."""
 
-        batch_spec = BatchSpec(
-            seq_lens=[1] * batch_size, query_lens=[1] * batch_size
-        )
+        batch_spec = BatchSpec(seq_lens=[1] * batch_size, query_lens=[1] * batch_size)
         common_attn_metadata = create_common_attn_metadata(
             batch_spec, self.block_size, self.device, arange_block_indices=True
         )
 
-        max_blocks = (
-            max(batch_spec.seq_lens) + self.block_size - 1
-        ) // self.block_size
+        max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
 
         # MLA KV cache is 3D: (num_blocks, block_size, head_size)
@@ -140,12 +136,9 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         except (AttributeError, NotImplementedError):
             kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
 
-        ordered_shape = tuple(
-            kv_cache_shape[i] for i in kv_cache_stride_order
-        )
+        ordered_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
         inv_order = [
-            kv_cache_stride_order.index(i)
-            for i in range(len(kv_cache_stride_order))
+            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
         ]
 
         raw_tensor = torch.zeros(
@@ -225,12 +218,8 @@ class TestMLAAttentionNvfp4QuantPatternModel(MLAAttentionQuantPatternModel):
                 "wscale_swizzled": torch.randn(
                     self.output_dim, self.output_dim // 16
                 ).to(dtype=FP8_DTYPE, device=self.device),
-                "wscale": torch.tensor(
-                    [500], dtype=torch.float32, device=self.device
-                ),
-                "scale": torch.tensor(
-                    [0.002], dtype=torch.float32, device=self.device
-                ),
+                "wscale": torch.tensor([500], dtype=torch.float32, device=self.device),
+                "scale": torch.tensor([0.002], dtype=torch.float32, device=self.device),
             },
         )
 
@@ -290,9 +279,7 @@ if current_platform.is_cuda():
     "num_heads, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, kv_lora_rank",
     MLA_DIMS,
 )
-@pytest.mark.parametrize(
-    "batch_size", [7, 256] if current_platform.is_cuda() else [8]
-)
+@pytest.mark.parametrize("batch_size", [7, 256] if current_platform.is_cuda() else [8])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize(
     "backend, model_name, model_class, custom_ops",
@@ -356,15 +343,9 @@ def test_mla_attention_quant_pattern(
 
     # MLA inputs: q(B, N, qk_head_dim), kv_c_normed(B, L), k_pe(B, 1, R)
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
-    q = torch.randn(
-        batch_size, num_heads, qk_head_dim, dtype=dtype, device=device
-    )
-    kv_c_normed = torch.randn(
-        batch_size, kv_lora_rank, dtype=dtype, device=device
-    )
-    k_pe = torch.randn(
-        batch_size, 1, qk_rope_head_dim, dtype=dtype, device=device
-    )
+    q = torch.randn(batch_size, num_heads, qk_head_dim, dtype=dtype, device=device)
+    kv_c_normed = torch.randn(batch_size, kv_lora_rank, dtype=dtype, device=device)
+    k_pe = torch.randn(batch_size, 1, qk_rope_head_dim, dtype=dtype, device=device)
 
     # Mark first dimension as dynamic
     torch._dynamo.mark_dynamic(q, 0)
@@ -375,9 +356,7 @@ def test_mla_attention_quant_pattern(
     vllm_config_unfused = copy.deepcopy(vllm_config)
     with (
         set_current_vllm_config(vllm_config_unfused),
-        set_forward_context(
-            attn_metadata=None, vllm_config=vllm_config_unfused
-        ),
+        set_forward_context(attn_metadata=None, vllm_config=vllm_config_unfused),
     ):
         model_unfused = model_class(
             num_heads=num_heads,
@@ -394,9 +373,7 @@ def test_mla_attention_quant_pattern(
         result_unfused_0 = model_unfused(q, kv_c_normed, k_pe)  # noqa: F841
 
         forward_ctx = get_forward_context()
-        forward_ctx.attn_metadata = model_unfused.build_attn_metadata(
-            batch_size
-        )
+        forward_ctx.attn_metadata = model_unfused.build_attn_metadata(batch_size)
 
         compiled_unfused = torch.compile(model_unfused, fullgraph=True)
         result_unfused = compiled_unfused(q, kv_c_normed, k_pe)
@@ -423,9 +400,7 @@ def test_mla_attention_quant_pattern(
         model_fused = model_fused.to(device)
 
         forward_ctx = get_forward_context()
-        forward_ctx.attn_metadata = model_fused.build_attn_metadata(
-            batch_size
-        )
+        forward_ctx.attn_metadata = model_fused.build_attn_metadata(batch_size)
 
         # Create test backend with fusion passes
         noop_pass = NoOpEliminationPass(vllm_config)
@@ -459,23 +434,15 @@ def test_mla_attention_quant_pattern(
         if "-quant_fp8" in custom_ops_list
         else QUANT_OPS[quant_key]
     )
-    test_backend.check_before_ops(
-        [quant_op], fully_replaced=quant_key is kNvfp4Dynamic
-    )
+    test_backend.check_before_ops([quant_op], fully_replaced=quant_key is kNvfp4Dynamic)
 
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
 
     # Check MLA attention ops in the graph
-    attn_nodes_pre = list(
-        find_op_nodes(MLA_ATTN_OP, test_backend.graph_pre_pass)
-    )
-    attn_nodes_post = list(
-        find_op_nodes(MLA_ATTN_OP, test_backend.graph_post_pass)
-    )
+    attn_nodes_pre = list(find_op_nodes(MLA_ATTN_OP, test_backend.graph_pre_pass))
+    attn_nodes_post = list(find_op_nodes(MLA_ATTN_OP, test_backend.graph_post_pass))
 
-    assert len(attn_nodes_pre) > 0, (
-        "Should have MLA attention nodes before fusion"
-    )
+    assert len(attn_nodes_pre) > 0, "Should have MLA attention nodes before fusion"
     assert len(attn_nodes_pre) == len(attn_nodes_post), (
         "Should have same number of MLA attention nodes before and after fusion"
     )
@@ -495,13 +462,9 @@ def test_mla_attention_quant_pattern(
             "MLA attention should not have output_block_scale after FP8 fusion"
         )
     elif quant_key.dtype == FP4_DTYPE:
-        assert (
-            attn_nodes_post[0].kwargs.get("output_block_scale") is not None
-        ), (
+        assert attn_nodes_post[0].kwargs.get("output_block_scale") is not None, (
             "MLA attention should have output_block_scale after FP4 fusion"
         )
 
     # Check numerical correctness
-    torch.testing.assert_close(
-        result_unfused, result_fused, atol=1e-2, rtol=1e-2
-    )
+    torch.testing.assert_close(result_unfused, result_fused, atol=1e-2, rtol=1e-2)
