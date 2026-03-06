@@ -85,7 +85,7 @@ def test_rms_norm(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("quant_scale", [0.01, 1.0, 10.0])
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("strided_input", [False, True])
 def test_fused_rms_norm_quant(
     num_tokens: int,
