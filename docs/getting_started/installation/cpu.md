@@ -22,7 +22,7 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 The main discussions happen in the `#sig-cpu` channel of [vLLM Slack](https://slack.vllm.ai/).
 
-When open a Github issue about the CPU backend, please add `[CPU Backend]` in the title and it will be labeled with `cpu` for better awareness.
+When opening a GitHub issue about the CPU backend, please add `[CPU Backend]` in the title and it will be labeled with `cpu` for better awareness.
 
 ## Requirements
 
