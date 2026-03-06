@@ -741,6 +741,14 @@ class AiterFlashAttentionBackend(AttentionBackend):
         "fp8_e5m2",
     ]
 
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        """ROCM AITER FA supports decoder and encoder-decoder (cross) attention."""
+        return attn_type in (
+            AttentionType.DECODER,
+            AttentionType.ENCODER_DECODER,
+        )
+
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [16, 32]
