@@ -6,6 +6,7 @@ import gc
 import os
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
+from datetime import timedelta
 from types import NoneType
 from typing import TYPE_CHECKING, Any
 
@@ -942,8 +943,18 @@ def init_worker_distributed_environment(
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_method = distributed_init_method or "env://"
+
+    timeout = None
+    if parallel_config.distributed_timeout_seconds is not None:
+        timeout = timedelta(seconds=parallel_config.distributed_timeout_seconds)
+
     init_distributed_environment(
-        parallel_config.world_size, rank, init_method, local_rank, backend
+        parallel_config.world_size,
+        rank,
+        init_method,
+        local_rank,
+        backend,
+        timeout,
     )
 
     ensure_model_parallel_initialized(
