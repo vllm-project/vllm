@@ -45,11 +45,11 @@ def get_decode_configs():
         x_names=["batch_size", "seq_len", "topk"],
         x_vals=[list(_) for _ in get_decode_configs()],
         line_arg="provider",
-        line_vals=["vllm_decode", "large_context_topk", "radix_topk"],
+        line_vals=["vllm_decode", "medium_context_topk", "large_context_topk"],
         line_names=[
             "vLLM top_k_per_row_decode",
+            "vLLM medium_context_topk",
             "vLLM large_context_topk",
-            "vLLM radix_topk",
         ],
         styles=[("blue", "--"), ("orange", "-."), ("green", "-")],
         ylabel="Latency (μs)",
@@ -81,15 +81,17 @@ def bench_decode(batch_size, seq_len, topk, provider):
             ),
             quantiles=quantiles,
         )
-    elif provider == "large_context_topk":
+    elif provider == "medium_context_topk":
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
-            lambda: torch.ops._C.large_context_topk(logits, indices, lengths, None),
+            lambda: torch.ops._C.medium_context_topk(logits, indices, lengths, None),
             quantiles=quantiles,
         )
-    else:  # radix_topk
+    else:  # large_context_topk
         workspace = torch.zeros(1024 * 1024, dtype=torch.uint8, device="cuda")
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
-            lambda: torch.ops._C.radix_topk(logits, lengths, indices, workspace, topk),
+            lambda: torch.ops._C.large_context_topk(
+                logits, lengths, indices, workspace, topk
+            ),
             quantiles=quantiles,
         )
 
@@ -113,7 +115,7 @@ if __name__ == "__main__":
     print("\n" + "=" * 70)
     print("TOP-K DECODE KERNEL BENCHMARKS")
     print("=" * 70)
-    print("Kernels: top_k_per_row_decode vs large_context_topk vs radix_topk")
+    print("Kernels: top_k_per_row_decode vs medium_context_topk vs large_context_topk")
     print(f"Batch sizes: {BATCH_SIZES}")
     print(f"Sequence lengths: {SEQ_LENS}")
     print(f"Top-k values: {TOP_K_VALUES}")

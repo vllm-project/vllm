@@ -191,15 +191,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("top_k_per_row_decode", torch::kCUDA, &top_k_per_row_decode);
 
   ops.def(
-      "large_context_topk(Tensor score, Tensor indices, Tensor lengths, "
+      "medium_context_topk(Tensor score, Tensor indices, Tensor lengths, "
       "Tensor? "
       "row_starts_opt) -> ()");
-  ops.impl("large_context_topk", torch::kCUDA, &large_context_topk);
+  ops.impl("medium_context_topk", torch::kCUDA, &medium_context_topk);
 
   ops.def(
-      "radix_topk(Tensor logits, Tensor lengths, Tensor output, "
+      "large_context_topk(Tensor logits, Tensor lengths, Tensor output, "
       "Tensor workspace, int k) -> ()");
-  ops.impl("radix_topk", torch::kCUDA, &radix_topk);
+  ops.impl("large_context_topk", torch::kCUDA, &large_context_topk);
 
   // Layernorm-quant
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
