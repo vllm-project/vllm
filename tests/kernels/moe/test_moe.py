@@ -1675,7 +1675,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         intermediate_size_per_partition=n,
         num_local_experts=e,
         num_logical_experts=e,
-        activation="silu",
+        activation=MoEActivation.SILU,
         device="cuda",
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         in_dtype=dtype,
@@ -1706,7 +1706,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         layer.topk_group = 1
         layer.intermediate_size_per_partition = n
         layer.ep_rank = 0
-        layer.activation = "silu"
+        layer.activation = MoEActivation.SILU
         layer.e_score_correction_bias = None
         layer.routing_method_type = RoutingMethodType.Renormalize
         layer.expert_map = None
