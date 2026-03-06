@@ -227,6 +227,3 @@ class Qwen3ASRProcessor(ProcessorMixin):
                 + ["feature_attention_mask"]
             )
         )
-
-
-AutoProcessor.register("Qwen3ASRProcessor", Qwen3ASRProcessor)
