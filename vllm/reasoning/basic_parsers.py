@@ -151,31 +151,41 @@ class BaseThinkingReasoningParser(ReasoningParser):
             # not find thinking start token
             return DeltaMessage(content=delta_text)
 
-    def extract_reasoning(
-        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
-    ) -> tuple[str | None, str | None]:
-        """
-        Extract reasoning content from the model output.
+ import re 
 
-        This is the base implementation that works for most models.
-        Subclasses can override this method for specific behavior.
-        """
-        # Check if the start token is present in the model output, remove it
-        # if it is present.
-        model_output_parts = model_output.partition(self.start_token)
-        model_output = (
-            model_output_parts[2] if model_output_parts[1] else model_output_parts[0]
-        )
-
-        # For models that may not generate start token,
-        # assume the reasoning content is always at the start.
-        if self.end_token not in model_output:
-            return model_output, None
-        else:
-            reasoning, _, content = model_output.partition(self.end_token)
-            # If generation stops right after end-of-think, return null content
-            final_content = content or None
-            return reasoning, final_content
+def extract_reasoning(self, model_output: str) -> tuple[str | None, str]:
+    """
+    Extract reasoning content from model output using start/end tokens.
+    Supports both standard tags (``) and escaped tags (<\think>).
+    
+    Args:
+        model_output: Raw output from the model
+    
+    Returns:
+        Tuple of (reasoning_content, remaining_output)
+    """
+   
+    start_token_escaped = re.escape(self.start_token)
+    end_token_escaped = re.escape(self.end_token)
+    
+    
+    pattern = re.compile(
+        rf"{start_token_escaped}(.*?){end_token_escaped}",
+        re.DOTALL  # 让 . 匹配换行符
+    )
+    
+   
+    match = pattern.search(model_output)
+    
+    if match:
+        # 提取推理内容并去除首尾空格
+        reasoning_content = match.group(1).strip()
+        
+        remaining_output = model_output[:match.start()] + model_output[match.end():]
+        return (reasoning_content, remaining_output.strip())
+    else:
+        
+        return (None, model_output.strip())
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         """Count tokens that fall within start/end thinking markers.
