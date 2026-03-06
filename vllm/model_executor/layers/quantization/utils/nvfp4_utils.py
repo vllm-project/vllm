@@ -129,6 +129,12 @@ def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
     else:
         selected_backend = NvFp4LinearBackend(envs.VLLM_NVFP4_GEMM_BACKEND)
 
+    if selected_backend is None:
+        raise ValueError(
+            f"No NVFP4 GEMM backend selected, "
+            f"available backends: {NVFP4_LINEAR_BACKENDS}"
+        )
+
     supported, reason = is_backend_supported(selected_backend)
 
     if not supported:
@@ -137,12 +143,6 @@ def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
             f"environment. Reason: {reason}. Current environment: "
             f"{envs.VLLM_USE_FBGEMM=}, {envs.VLLM_USE_NVFP4_CT_EMULATIONS=}, "
             f"{envs.VLLM_NVFP4_GEMM_BACKEND}."
-        )
-
-    if selected_backend is None:
-        raise ValueError(
-            f"No NVFP4 GEMM backend selected, "
-            f"available backends: {NVFP4_LINEAR_BACKENDS}"
         )
 
     logger.info_once(f"Using {backend} for NVFP4 GEMM")
