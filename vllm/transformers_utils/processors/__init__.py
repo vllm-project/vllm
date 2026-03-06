@@ -19,6 +19,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "HunYuanVLImageProcessor": "vllm.transformers_utils.processors.hunyuan_vl_image",
     "OvisProcessor": "vllm.transformers_utils.processors.ovis",
     "Ovis2_5Processor": "vllm.transformers_utils.processors.ovis2_5",
+    "Qwen3ASRProcessor": "vllm.transformers_utils.processors.qwen3_asr",
 }
 
 
@@ -31,6 +32,7 @@ __all__ = [
     "HunYuanVLImageProcessor",
     "OvisProcessor",
     "Ovis2_5Processor",
+    "Qwen3ASRProcessor",
 ]
 
 
