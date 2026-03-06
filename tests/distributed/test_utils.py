@@ -79,11 +79,11 @@ def gpu_worker(rank, WORLD_SIZE, port1, port2):
     data = torch.tensor([rank]).cuda()
     pynccl1.all_reduce(data)
     pg1.barrier()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     if rank <= 2:
         pynccl2.all_reduce(data)
         pg2.barrier()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
     item = data[0].item()
     print(f"rank: {rank}, item: {item}")
     if rank == 3:

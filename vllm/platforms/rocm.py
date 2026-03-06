@@ -306,6 +306,52 @@ def flash_attn_triton_available() -> bool:
         return False
 
 
+def _get_backend_priorities(
+    use_mla: bool,
+    use_sparse: bool,
+) -> list[AttentionBackendEnum]:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if use_sparse:
+        return [AttentionBackendEnum.ROCM_AITER_MLA_SPARSE]
+
+    if use_mla:
+        if rocm_aiter_ops.is_mla_enabled():
+            return [
+                AttentionBackendEnum.ROCM_AITER_MLA,
+                AttentionBackendEnum.TRITON_MLA,
+                AttentionBackendEnum.ROCM_AITER_TRITON_MLA,
+            ]
+        else:
+            return [
+                AttentionBackendEnum.TRITON_MLA,
+            ]
+
+    backends = []
+
+    # Priority 1: Check for AITER Unified Attention (must check before MHA)
+    if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION:
+        backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
+
+    # Priority 2: Check for AITER MHA (Flash Attention)
+    if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA:
+        backends.append(AttentionBackendEnum.ROCM_AITER_FA)
+
+    # Priority 3: Check for ROCM_ATTN (prefill-decode split)
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if (
+        vllm_config is not None
+        and vllm_config.attention_config.use_prefill_decode_attention
+    ):
+        backends.append(AttentionBackendEnum.ROCM_ATTN)
+
+    # Default: Triton Unified Attention
+    backends.append(AttentionBackendEnum.TRITON_ATTN)
+    return backends
+
+
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
     device_name: str = "rocm"
@@ -350,123 +396,109 @@ class RocmPlatform(Platform):
             import vllm._rocm_C  # noqa: F401
 
     @classmethod
+    def get_valid_backends(
+        cls,
+        device_capability: DeviceCapability,
+        attn_selector_config: "AttentionSelectorConfig",
+        num_heads: int | None = None,
+    ) -> tuple[
+        list[tuple["AttentionBackendEnum", int]],
+        dict["AttentionBackendEnum", list[str]],
+    ]:
+        valid_backends_priorities = []
+        invalid_reasons = {}
+
+        backend_priorities = _get_backend_priorities(
+            attn_selector_config.use_mla,
+            attn_selector_config.use_sparse,
+        )
+        for priority, backend in enumerate(backend_priorities):
+            try:
+                backend_class = backend.get_class()
+                invalid_reasons_i = backend_class.validate_configuration(
+                    device_capability=device_capability,
+                    **attn_selector_config._asdict(),
+                )
+            except ImportError:
+                invalid_reasons_i = ["ImportError"]
+            if invalid_reasons_i:
+                invalid_reasons[backend] = invalid_reasons_i
+            else:
+                valid_backends_priorities.append((backend, priority))
+
+        return valid_backends_priorities, invalid_reasons
+
+    @classmethod
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
     ) -> str:
-        from vllm._aiter_ops import rocm_aiter_ops
+        device_capability = cls.get_device_capability()
+        assert device_capability is not None
 
-        block_size = attn_selector_config.block_size
-        kv_cache_dtype = attn_selector_config.kv_cache_dtype
-
-        if attn_selector_config.use_sparse:
-            if kv_cache_dtype and kv_cache_dtype.startswith("fp8"):
+        # First try checking just the selected backend, if there is one.
+        if selected_backend is not None:
+            try:
+                backend_class = selected_backend.get_class()
+                invalid_reasons = backend_class.validate_configuration(
+                    device_capability=device_capability,
+                    **attn_selector_config._asdict(),
+                )
+            except ImportError:
+                invalid_reasons = ["ImportError"]
+            if invalid_reasons:
                 raise ValueError(
-                    "ROCMAiterMLASparseBackend doesn't support fp8 kv_cache_dtype."
+                    f"Selected backend {selected_backend} is not valid for "
+                    f"this configuration. Reason: {invalid_reasons}"
                 )
-            assert block_size == 1, (
-                "Sparse MLA backend on ROCm only supports block size 1 for now."
-            )
-            logger.info_once("Using Sparse MLA backend.")
-            return AttentionBackendEnum.ROCM_AITER_MLA_SPARSE.get_path()
-
-        if attn_selector_config.use_mla:
-            if selected_backend is None:
-                selected_backend = (
-                    AttentionBackendEnum.ROCM_AITER_MLA
-                    if rocm_aiter_ops.is_mla_enabled() or block_size == 1
-                    else AttentionBackendEnum.TRITON_MLA
-                )
-            if selected_backend == AttentionBackendEnum.TRITON_MLA:
-                if block_size != 1:
-                    logger.info_once("Using Triton MLA backend.")
-                    return AttentionBackendEnum.TRITON_MLA.get_path()
-                raise ValueError(
-                    f" The selected backend, {selected_backend.name},"
-                    f"does not support block size {block_size}."
-                )
-            if selected_backend == AttentionBackendEnum.ROCM_AITER_MLA:
-                logger.info("Using AITER MLA backend.")
-                return AttentionBackendEnum.ROCM_AITER_MLA.get_path()
-            if selected_backend == AttentionBackendEnum.ROCM_AITER_TRITON_MLA:
-                logger.info("Using AITER TRITON MLA backend.")
-                return AttentionBackendEnum.ROCM_AITER_TRITON_MLA.get_path()
-
-            raise ValueError(
-                f" The selected backend, {selected_backend.name},"
-                f"is not MLA type while requested for MLA backend."
-            )
-
-        if selected_backend == AttentionBackendEnum.FLEX_ATTENTION:
-            logger.info("Using FlexAttention backend.")
-            return AttentionBackendEnum.FLEX_ATTENTION.get_path()
-
-        if selected_backend == AttentionBackendEnum.TRITON_ATTN:
-            logger.info("Using Triton Attention backend.")
-            return AttentionBackendEnum.TRITON_ATTN.get_path()
-
-        if selected_backend == AttentionBackendEnum.ROCM_ATTN:
-            logger.info("Using Rocm Attention backend.")
-            return AttentionBackendEnum.ROCM_ATTN.get_path()
-
-        if selected_backend == AttentionBackendEnum.ROCM_AITER_FA:
-            if on_gfx9():
-                logger.info("Using Aiter Flash Attention backend.")
-                return AttentionBackendEnum.ROCM_AITER_FA.get_path()
             else:
-                raise ValueError(
-                    f"The selected backend, {selected_backend.name}, "
-                    "is only supported on gfx9 architectures."
-                )
+                logger.info("Using %s backend.", selected_backend)
+                return selected_backend.get_path()
 
-        if selected_backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
-            logger.info("Using Aiter Unified Attention backend.")
-            return AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path()
-
-        # Handle automatic backend selection based on environment variables
-        if selected_backend is None:
-            # Priority 1: Check for AITER Unified Attention (must check before MHA)
-            if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION:
-                logger.info("Using Aiter Unified Attention backend.")
-                return AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path()
-
-            # Priority 2: Check for AITER MHA (Flash Attention)
-            # Only use if explicitly enabled (not just VLLM_ROCM_USE_AITER=1)
-            if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
-                logger.info("Using Aiter Flash Attention backend.")
-                return AttentionBackendEnum.ROCM_AITER_FA.get_path()
-
-            # Priority 3: Check for ROCM_ATTN (prefill-decode split)
-            from vllm.config import get_current_vllm_config_or_none
-
-            vllm_config = get_current_vllm_config_or_none()
-            if (
-                vllm_config is not None
-                and vllm_config.attention_config.use_prefill_decode_attention
-            ):
-                logger.info("Using Rocm Attention backend.")
-                return AttentionBackendEnum.ROCM_ATTN.get_path()
-
-            # Priority 4: Check for AITER enabled without specific flags
-            # This defaults to AITER FA only if MHA is not explicitly disabled
-            if (
-                envs.VLLM_ROCM_USE_AITER
-                and on_gfx9()
-                and envs.VLLM_ROCM_USE_AITER_MHA is not False
-            ):
-                logger.info("Using Aiter Flash Attention backend.")
-                return AttentionBackendEnum.ROCM_AITER_FA.get_path()
-
-            # Default: Triton Unified Attention
-            logger.info("Using Triton Attention backend.")
-            return AttentionBackendEnum.TRITON_ATTN.get_path()
-
-        raise RuntimeError(
-            f"Attention backend {selected_backend.name} is not supported on "
-            "ROCm. Note that V0 attention backends have been removed."
+        # No selected backend or the selected backend is invalid,
+        # so we try finding a valid backend.
+        valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
+            device_capability=device_capability,
+            attn_selector_config=attn_selector_config,
+            num_heads=num_heads,
         )
+        reasons_str = (
+            "{"
+            + ", ".join(
+                f"{backend.name}: [{', '.join(reasons)}]"
+                for backend, reasons in invalid_reasons.items()
+            )
+            + "}"
+        )
+        config_str = attn_selector_config.__repr__()
+        logger.debug_once(
+            f"Some attention backends are not valid for {cls.device_name} with "
+            f"{config_str}. Reasons: {reasons_str}."
+        )
+        if len(valid_backends_priorities) == 0:
+            raise ValueError(
+                f"No valid attention backend found for {cls.device_name} "
+                f"with {config_str}. Reasons: {reasons_str}."
+            )
+
+        # We have found some valid backends. Select the one with the
+        # highest priority.
+        sorted_indices = sorted(
+            range(len(valid_backends_priorities)),
+            key=lambda i: valid_backends_priorities[i][1],
+        )
+        selected_index = sorted_indices[0]
+        selected_backend = valid_backends_priorities[selected_index][0]
+        logger.info_once(
+            "Using %s attention backend out of potential backends: %s.",
+            selected_backend.name,
+            "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]",
+            scope="local",
+        )
+
+        return selected_backend.get_path()
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:

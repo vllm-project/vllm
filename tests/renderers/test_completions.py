@@ -271,7 +271,7 @@ class TestRenderPrompt:
 
         with pytest.raises(
             ValueError,
-            match="input characters and requested .* context length is only",
+            match="maximum context length is",
         ):
             renderer.tokenize_prompts(
                 prompts,
@@ -292,7 +292,7 @@ class TestRenderPrompt:
 
         with pytest.raises(
             ValueError,
-            match="input tokens and requested .* context length is only",
+            match="maximum context length is",
         ):
             renderer.tokenize_prompts(
                 prompts,
@@ -313,7 +313,7 @@ class TestRenderPrompt:
 
         with pytest.raises(
             ValueError,
-            match="input tokens and requested .* context length is only",
+            match="maximum context length is",
         ):
             renderer.tokenize_prompts(
                 prompts,
