@@ -97,10 +97,15 @@ Fields set explicitly by the user always take precedence over optimization-level
 ### AllReduce + RMSNorm (`fuse_allreduce_rms`)
 
 !!! warning
-    **What it fuses.** Fuses the tensor-parallel all-reduce collective with the subsequent residual add,
-    RMSNorm, and optionally a quantization step into a single FlashInfer / TRT-LLM communication kernel.
-    This fusion is only profitable for small `num_tokens`,
-    so the fusion is only performed in the lower compiled range.
+    TP+DP and TP+PP combinations are currently broken
+    ([#34458](https://github.com/vllm-project/vllm/issues/34458) and
+    [#35426](https://github.com/vllm-project/vllm/issues/35426)).
+    Only supported on NVIDIA Hopper (SM90) and Blackwell (SM100) with FlashInfer installed.
+
+**What it fuses.** Fuses the tensor-parallel all-reduce collective with the subsequent residual add,
+RMSNorm, and optionally a quantization step into a single FlashInfer / TRT-LLM communication kernel.
+This fusion is only profitable for small `num_tokens`,
+so the fusion is only performed in the lower compiled range.
 
 Patterns covered:
 
@@ -202,7 +207,6 @@ Supported hardware: Only tested on NVIDIA CUDA, possibly works on ROCm. FP8 all-
 
 !!! info
     Requires `enable_sp=True` (enabled automatically). This pass is a no-op if Sequence Parallelism has not been applied.
-    Requires symmetric-memory support (`torch.distributed._symmetric_memory`) on CUDA.
 
 **What it fuses.** After Sequence Parallelism transforms the graph, fuses GEMM kernels with the
 surrounding reduce-scatter (output projection) and all-gather (input projection) using
@@ -216,7 +220,7 @@ Patterns covered:
 - `all-gather → GEMM` → `all_gather_matmul`
 - FP8 scaled variants of both patterns
 
-Supported hardware: NVIDIA CUDA (requires `torch.distributed._symmetric_memory`).
+Supported hardware: NVIDIA CUDA with symmetric-memory (`torch.distributed._symmetric_memory`) support.
 
 On B200, pattern-matching fp8 FlashInfer scaled MM is not supported, so it must be disabled
 ([#27893](https://github.com/vllm-project/vllm/issues/27893))
