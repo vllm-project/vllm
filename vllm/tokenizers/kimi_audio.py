@@ -24,13 +24,6 @@ def _load_tiktoken_encoding(
     vocab_file: Path, special_tokens: dict[str, int]
 ) -> tuple[Any, dict[str, int]]:
     """Load TikToken encoding from vocab file."""
-    try:
-        pass  # Imports already at top
-    except ImportError as exc:
-        raise ImportError(
-            "Kimi-Audio tokenizer requires the `tiktoken` package."
-        ) from exc
-
     mergeable_ranks: dict[bytes, int] = {}
     with open(vocab_file, encoding="utf-8") as f:
         for line in f:
