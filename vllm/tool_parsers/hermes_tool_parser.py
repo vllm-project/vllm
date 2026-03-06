@@ -368,6 +368,9 @@ class Hermes2ProToolParser(ToolParser):
             # now, the nitty-gritty of tool calls
             # now we have the portion to parse as tool call.
 
+            if current_tool_call is None:
+                return None
+
             logger.debug(
                 "Trying to parse current tool call with ID %s", self.current_tool_id
             )

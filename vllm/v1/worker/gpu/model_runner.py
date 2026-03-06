@@ -457,7 +457,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 self._dummy_pooler_run(hidden_states)
 
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         del hidden_states, sample_hidden_states
         gc.collect()
 
@@ -525,7 +525,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # to trigger JIT compilation.
         if all("FLASHINFER" in b.get_name() for b in self.attn_backends.values()):
             self._dummy_run(self.max_num_tokens, skip_attn=False)
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         finished_req_ids = scheduler_output.finished_req_ids
