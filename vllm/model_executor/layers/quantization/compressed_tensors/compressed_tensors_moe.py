@@ -887,7 +887,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 w13,
                 w13_scale,
                 shard_size=layer.intermediate_size_per_partition,
-                num_experts=layer.num_local_experts,
+                num_experts=layer.local_num_experts,
                 is_act_and_mul=self.moe.is_act_and_mul,
             )
 
@@ -2445,7 +2445,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             w2_scale=layer.w2_weight_scale,  # group scale
             g1_alphas=layer.w13_weight_chan_scale,
             g2_alphas=layer.w2_weight_chan_scale,
-            per_act_token_quant=True,  # always use dynamc per-token
+            per_act_token_quant=True,  # always use dynamic per-token
             per_out_ch_quant=True,  # always use per-channel
         )
 
