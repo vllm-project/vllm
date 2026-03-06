@@ -862,7 +862,13 @@ class LLM:
             for i, p in enumerate(beam_params):
                 if p is None:
                     beam = all_beams[i]
-                    prompt_len = len(beam.orig_prompt["prompt_token_ids"])
+                    orig = beam.orig_prompt
+                    if orig["type"] == "enc_dec":
+                        prompt_len = len(
+                            orig["decoder_prompt"]["prompt_token_ids"]
+                        )
+                    else:
+                        prompt_len = len(orig["prompt_token_ids"])
                     if len(beam.tokens) > prompt_len:
                         for (s, e), inst in zip(
                             instance_start_and_end,

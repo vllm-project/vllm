@@ -463,8 +463,9 @@ class OpenAIServing:
                             allowed_sets,
                         )
                         current_beam = active_beams[parent_beam_idx]
-                        assert output[parent_beam_idx].outputs[0].logprobs is not None
-                        logprobs_entry = output[parent_beam_idx].outputs[0].logprobs[0]
+                        _lp = output[parent_beam_idx].outputs[0].logprobs
+                        assert _lp is not None
+                        logprobs_entry = _lp[0]
                         completed.append(
                             BeamSearchSequence(
                                 orig_prompt=prompt,
@@ -500,8 +501,9 @@ class OpenAIServing:
                     )
                     current_beam = active_beams[parent_beam_idx]
                     token_id = int(all_beams_token_id_np[idx])
-                    assert output[parent_beam_idx].outputs[0].logprobs is not None
-                    logprobs_entry = output[parent_beam_idx].outputs[0].logprobs[0]
+                    _lp = output[parent_beam_idx].outputs[0].logprobs
+                    assert _lp is not None
+                    logprobs_entry = _lp[0]
                     new_beams.append(
                         BeamSearchSequence(
                             orig_prompt=prompt,

@@ -158,7 +158,11 @@ def get_beam_allowed_token_ids(
     request_type, grammar_spec = so_key
     grammar = backend.compile_grammar(request_type, grammar_spec)
 
-    prompt_len = len(beam.orig_prompt["prompt_token_ids"])
+    orig = beam.orig_prompt
+    if orig["type"] == "enc_dec":
+        prompt_len = len(orig["decoder_prompt"]["prompt_token_ids"])
+    else:
+        prompt_len = len(orig["prompt_token_ids"])
     generated_tokens = beam.tokens[prompt_len:]
 
     if generated_tokens:
