@@ -502,11 +502,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # the last matched block.
             sliding_window_contiguous_blocks += 1
 
-        # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
-        # optimize the time complexity from O(max_num_blocks) to
-        # O(max_num_blocks / sliding_window_contiguous_blocks +
-        # sliding_window_contiguous_blocks),
-        # which is good for low cache hit rate scenarios.
         max_num_blocks = max_length // kv_cache_spec.block_size
         computed_blocks = tuple(
             [block_pool.null_block] * max_num_blocks
@@ -516,7 +511,17 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         num_contiguous_blocks = 0
         match_found = False
         # Search from right to left and early stop when a match is found.
-        for i in range(max_num_blocks - 1, -1, -1):
+        # Optimization: When cache miss occurs at position i, any sequence of
+        # sliding_window_contiguous_blocks consecutive blocks that includes i
+        # cannot be valid. So we can skip sliding_window_contiguous_blocks
+        # positions directly (but we need to handle the case where we have
+        # already accumulated some contiguous blocks).
+        # This reduces time complexity from O(max_num_blocks) to
+        # O(max_num_blocks / sliding_window_contiguous_blocks +
+        # sliding_window_contiguous_blocks)
+        # for low cache hit rate scenarios.
+        i = max_num_blocks - 1
+        while i >= 0:
             if cached_block := block_pool.get_cached_block(
                 block_hashes[i], kv_cache_group_ids
             ):
@@ -527,6 +532,9 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                     and block_size != alignment_tokens  # Faster for common case.
                     and (i + 1) * block_size % alignment_tokens != 0
                 ):
+                    # This block cannot be the start of a valid sequence due to
+                    # alignment, skip it and continue searching.
+                    i -= 1
                     continue
                 # Add the cached block to the computed blocks.
                 for computed, cached in zip(computed_blocks, cached_block):
@@ -540,7 +548,34 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                         del computed[i + num_contiguous_blocks :]
                     match_found = True
                     break
+                i -= 1
             else:
+                # Cache miss at position i.
+                # Any sequence of sliding_window_contiguous_blocks consecutive
+                # blocks that includes position i cannot be valid (since i is
+                # not cached). However, we may have already accumulated some
+                # contiguous blocks to the right of i, which should be
+                # preserved as partial results.
+                # Optimization: When num_contiguous_blocks > 0, we can skip to
+                # position i - sliding_window_contiguous_blocks + num_contiguous_blocks,
+                # because:
+                # - We've already found num_contiguous_blocks consecutive blocks
+                #   to the right of i
+                # - We need sliding_window_contiguous_blocks consecutive blocks
+                # - Starting from any position in [i - k + c + 1, i] would require
+                #   position i to be cached, which is not
+                # - So the next possible starting position is i - k + c + 1
+                #   (k = sliding_window_contiguous_blocks, c = num_contiguous_blocks)
+                # Note: When num_contiguous_blocks == 0, we should check positions
+                # one by one since any position could be the start of a new sequence.
+                c = num_contiguous_blocks
+                if c > 0:
+                    # Skip sliding_window_contiguous_blocks - c positions since
+                    # those positions cannot form a valid sequence without position i.
+                    i -= sliding_window_contiguous_blocks - c
+                else:
+                    # No accumulated blocks, check next position one by one.
+                    i -= 1
                 num_contiguous_blocks = 0
         if not match_found:
             # The first `num_contiguous_blocks` is a cache hit even if
