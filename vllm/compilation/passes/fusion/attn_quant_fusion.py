@@ -14,7 +14,6 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
@@ -350,25 +349,7 @@ class AttnFusionPass(VllmPatternMatcherPass):
                 )
                 pattern_nvfp4.register_if_supported(self.patterns)
 
-        from .mla_attn_quant_fusion import (
-            MLAAttentionFp8StaticQuantPattern,
-            MLAAttentionNvfp4QuantPattern,
-        )
-
-        mla_layers = get_layers_from_vllm_config(config, MLAAttention)
-        for layer_name, layer in mla_layers.items():
-            pattern_fp8 = MLAAttentionFp8StaticQuantPattern(
-                layer, config.model_config.dtype
-            )
-            pattern_fp8.register_if_supported(self.patterns)
-
-            if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
-                pattern_nvfp4 = MLAAttentionNvfp4QuantPattern(
-                    layer, config.model_config.dtype
-                )
-                pattern_nvfp4.register_if_supported(self.patterns)
-
-        if len(attn_layers) == 0 and len(mla_layers) == 0:
+        if len(attn_layers) == 0:
             logger.warning(
                 "Attention + quant fusion is enabled, but no attention layers "
                 "were found in CompilationConfig.static_forward_context "
@@ -383,18 +364,9 @@ class AttnFusionPass(VllmPatternMatcherPass):
         logger.debug("Fused quant onto %s attention nodes", self.matched_count)
 
     def uuid(self) -> str:
-        from .mla_attn_quant_fusion import (
-            MLAAttentionFp8StaticQuantPattern,
-            MLAAttentionNvfp4QuantPattern,
-            MLAAttentionQuantPattern,
-        )
-
         return VllmInductorPass.hash_source(
             self,
             AttentionQuantPattern,
             AttentionFp8StaticQuantPattern,
             AttentionNvfp4QuantPattern,
-            MLAAttentionQuantPattern,
-            MLAAttentionFp8StaticQuantPattern,
-            MLAAttentionNvfp4QuantPattern,
         )
