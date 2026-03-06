@@ -214,7 +214,7 @@ class OpenAIServingRender:
         self,
         request: ChatCompletionRequest,
         should_include_tools: bool = True,
-    ) -> tuple[list[Any], list[ProcessorInputs]]:
+    ):
         """Copied from OpenAIServingChat._make_request_with_harmony."""
         messages: list[OpenAIMessage] = []
 
