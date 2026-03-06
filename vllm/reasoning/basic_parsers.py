@@ -151,32 +151,74 @@ class BaseThinkingReasoningParser(ReasoningParser):
             # not find thinking start token
             return DeltaMessage(content=delta_text)
 
-    def extract_reasoning(
-        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
-    ) -> tuple[str | None, str | None]:
+import re  
+
+class BaseThinkingReasoningParser(BaseReasoningParser):
+    """Base parser for models that use  tags for reasoning."""
+
+    start_token: str = ""
+    end_token: str = ""
+
+    def extract_reasoning_streaming(
+        self, delta_text: str, request: ChatCompletionRequest | ResponsesRequest
+    ) -> tuple[str | None, str]:
+       
+        ...
+
+         def extract_reasoning(self, model_output: str, request: ChatCompletionRequest | ResponsesRequest) -> tuple[str | None, str]:
         """
-        Extract reasoning content from the model output.
-
-        This is the base implementation that works for most models.
-        Subclasses can override this method for specific behavior.
+        Extract reasoning and content from model output, supporting both standard  tags and escaped <\think> tags.
+        
+        Args:
+            model_output: Raw output string from the model
+            request: Original chat/completion request object
+            
+        Returns:
+            Tuple of (reasoning_content, main_content):
+            - reasoning_content: Extracted reasoning text (None if no tags found)
+            - main_content: Remaining content without reasoning tags
         """
-        # Check if the start token is present in the model output, remove it
-        # if it is present.
-        model_output_parts = model_output.partition(self.start_token)
-        model_output = (
-            model_output_parts[2] if model_output_parts[1] else model_output_parts[0]
-        )
+        # Guard clause to avoid errors from empty input/tokens
+        if not model_output or not self.start_token or not self.end_token:
+            return None, model_output.strip()
 
-        # For models that may not generate start token,
-        # assume the reasoning content is always at the start.
-        if self.end_token not in model_output:
-            return model_output, None
-        else:
-            reasoning, _, content = model_output.partition(self.end_token)
-            # If generation stops right after end-of-think, return null content
-            final_content = content or None
-            return reasoning, final_content
+        # Regex pattern to match both standard and escaped tags (core fix)
+        # - Matches  or <\think> for start token
+        # - Matches  or <\/think> for end token
+        start_pattern = re.escape(self.start_token).replace('<', r'<\\?')
+        end_pattern = re.escape(self.end_token).replace('</', r'<\\?/')
+        full_pattern = fr"({start_pattern})(.*?)({end_pattern})"
 
+        # Extract all tag matches using non-greedy matching
+        matches = re.findall(full_pattern, model_output, re.DOTALL)
+        
+        # Return full output if no tags are found
+        if not matches:
+            return None, model_output.strip()
+
+        # Split content into reasoning (inside tags) and main content (outside tags)
+        reasoning_parts = []
+        content_parts = []
+        last_end = 0
+
+        for start_tag, reasoning_text, end_tag in matches:
+            # Add content before current tag to main content
+            content_parts.append(model_output[last_end:model_output.index(start_tag, last_end)])
+            # Add reasoning text (inside tags) to reasoning parts
+            reasoning_parts.append(reasoning_text.strip())
+            # Update cursor to end of current end tag
+            last_end = model_output.index(end_tag, last_end) + len(end_tag)
+
+        # Add remaining content after last tag to main content
+        content_parts.append(model_output[last_end:].strip())
+
+        # Combine parts and strip whitespace for clean output
+        final_reasoning = "\n".join(reasoning_parts).strip()
+        final_content = "\n".join(content_parts).strip()
+
+        # Return None if reasoning is empty, otherwise return the reasoning text
+        return final_reasoning if final_reasoning else None, final_content
+   
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         """Count tokens that fall within start/end thinking markers.
 
