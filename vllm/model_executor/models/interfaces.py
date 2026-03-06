@@ -296,7 +296,11 @@ class SupportsMultiModal(Protocol):
 
             yield
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+        modality: str | None = None,
+    ) -> int:
         """
         Implement this function to enable LoRA support
         for the tower module of the multi-modal model.
@@ -305,7 +309,11 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+        modality: str | None = None,
+    ) -> int:
         """
         Implement this function to enable LoRA support
         for the connector module of the multi-modal model.
