@@ -1036,10 +1036,17 @@ __global__ void cp_gather_and_upconvert_fp8_kv_cache(
 
   const uint2 fp8_lo = make_uint2(fp8_data.x, fp8_data.y);
   const uint2 fp8_hi = make_uint2(fp8_data.z, fp8_data.w);
+#ifdef USE_ROCM
+  const bf16_8_t bf16_lo =
+      fp8::scaled_vec_conversion<bf16_8_t, uint2>(fp8_lo, scale);
+  const bf16_8_t bf16_hi =
+      fp8::scaled_vec_conversion<bf16_8_t, uint2>(fp8_hi, scale);
+#else
   const bf16_8_t bf16_lo =
       fp8::scaled_vec_conversion<bf16_8_t, uint2>(fp8_lo, scale, __NV_E4M3);
   const bf16_8_t bf16_hi =
       fp8::scaled_vec_conversion<bf16_8_t, uint2>(fp8_hi, scale, __NV_E4M3);
+#endif
 
   __nv_bfloat16* dst_ptr = dst + out_token_id * dst_entry_stride;
   int4* nope_dst = reinterpret_cast<int4*>(dst_ptr) + lane_id * 2;
