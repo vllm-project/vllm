@@ -49,7 +49,6 @@ from .utils import (
 )
 from .vision import get_vision_encoder_info
 
-EOT = "<|endofturn|>"
 IMAGE_TOKEN: str = "<|dummy3|>"
 VIDEO_TOKEN: str = "<|_unuse_missing_100270|>"
 

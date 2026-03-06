@@ -12,8 +12,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEPermuteExpertsUnpermute,
-    FusedMoEPrepareAndFinalize,
+    FusedMoEExpertsModular,
+    FusedMoEPrepareAndFinalizeModular,
 )
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
@@ -27,19 +27,21 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         super().__init__()
         self.moe: FusedMoEConfig = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
-        self.moe_mk: mk.FusedMoEModularKernel | None = None
+        self.moe_kernel: mk.FusedMoEKernel | None = None
 
     @property
     def supports_internal_mk(self) -> bool:
         # NOTE(rob): temporary attribute to indicate support for
         # completed migration to the new internal MK interface.
-        return self.moe_mk is not None
+        return self.moe_kernel is not None
 
     @property
     def mk_owns_shared_expert(self) -> bool:
         # NOTE(rob): temporary attribute to indicate support for
         # completed migration to the new internal MK interface.
-        return self.moe_mk is not None and self.moe_mk.shared_experts is not None
+        return (
+            self.moe_kernel is not None and self.moe_kernel.shared_experts is not None
+        )
 
     @abstractmethod
     def create_weights(
@@ -66,35 +68,25 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> FusedMoEPrepareAndFinalize | None:
+    ) -> FusedMoEPrepareAndFinalizeModular | None:
         from .all2all_utils import maybe_make_prepare_finalize
 
-        return maybe_make_prepare_finalize(
+        pf = maybe_make_prepare_finalize(
             self.moe, self.moe_quant_config, routing_tables
         )
+        assert pf is None or isinstance(pf, FusedMoEPrepareAndFinalizeModular)
+        return pf
 
     def select_gemm_impl(
         self,
-        prepare_finalize: FusedMoEPrepareAndFinalize,
+        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
         layer: torch.nn.Module,
-    ) -> FusedMoEPermuteExpertsUnpermute:
+    ) -> FusedMoEExpertsModular:
         # based on the all2all implementation, select the appropriate
         # gemm implementation
-        raise NotImplementedError(
-            f"{self.__class__.__name__} must select appropriate gemm "
-            "implementation based on the prepare_finalize"
-        )
-
-    def prepare_dp_allgather_tensor(
-        self,
-        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        """Hook to prepare tensors and extra tensors for DP allgather + EP dispatch."""
-        raise NotImplementedError(
-            "Method 'prepare_dp_allgather_tensor' is not implemented in "
-            f"{self.__class__.__name__}."
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
         )
 
     @abstractmethod
@@ -105,8 +97,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @property
     def topk_indices_dtype(self) -> torch.dtype | None:
-        if self.moe_mk is not None:
-            return self.moe_mk.prepare_finalize.topk_indices_dtype()
+        if self.moe_kernel is not None:
+            return self.moe_kernel.prepare_finalize.topk_indices_dtype()
         return None
 
     @property
@@ -119,7 +111,12 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @property
     def is_monolithic(self) -> bool:
-        return False
+        if self.moe_kernel is None:
+            if hasattr(self, "experts_cls"):
+                return self.experts_cls.is_monolithic()
+            else:
+                return False
+        return self.moe_kernel.is_monolithic
 
     def apply(
         self,
