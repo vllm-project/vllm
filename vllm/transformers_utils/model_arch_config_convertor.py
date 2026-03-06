@@ -172,6 +172,7 @@ class ModelArchConfigConvertorBase:
                     _SAFETENSORS_TO_TORCH_DTYPE[dtype]
                     for info in param_mt.values()
                     if (dtype := info.get("dtype", None))
+                    and dtype in _SAFETENSORS_TO_TORCH_DTYPE
                 }
 
                 if param_dtypes:
