@@ -411,6 +411,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             vllm_config.observability_config.kv_cache_metrics
         )
 
+        # Custom histogram bucket configurations
+        obs_config = vllm_config.observability_config
+        custom_ttft_buckets = obs_config.histogram_buckets_ttft
+        custom_itl_buckets = obs_config.histogram_buckets_itl
+        custom_request_latency_buckets = obs_config.histogram_buckets_request_latency
+
         labelnames = ["model_name", "engine"]
         model_name = vllm_config.model_config.served_model_name
         max_model_len = vllm_config.model_config.max_model_len
@@ -723,63 +729,65 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         #
         # Histogram of timing intervals
         #
+        default_ttft_buckets = [
+            0.001,
+            0.005,
+            0.01,
+            0.02,
+            0.04,
+            0.06,
+            0.08,
+            0.1,
+            0.25,
+            0.5,
+            0.75,
+            1.0,
+            2.5,
+            5.0,
+            7.5,
+            10.0,
+            20.0,
+            40.0,
+            80.0,
+            160.0,
+            640.0,
+            2560.0,
+        ]
         histogram_time_to_first_token = self._histogram_cls(
             name="vllm:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
-            buckets=[
-                0.001,
-                0.005,
-                0.01,
-                0.02,
-                0.04,
-                0.06,
-                0.08,
-                0.1,
-                0.25,
-                0.5,
-                0.75,
-                1.0,
-                2.5,
-                5.0,
-                7.5,
-                10.0,
-                20.0,
-                40.0,
-                80.0,
-                160.0,
-                640.0,
-                2560.0,
-            ],
+            buckets=custom_ttft_buckets or default_ttft_buckets,
             labelnames=labelnames,
         )
         self.histogram_time_to_first_token = make_per_engine(
             histogram_time_to_first_token, engine_indexes, model_name
         )
 
+        default_itl_buckets = [
+            0.01,
+            0.025,
+            0.05,
+            0.075,
+            0.1,
+            0.15,
+            0.2,
+            0.3,
+            0.4,
+            0.5,
+            0.75,
+            1.0,
+            2.5,
+            5.0,
+            7.5,
+            10.0,
+            20.0,
+            40.0,
+            80.0,
+        ]
         histogram_inter_token_latency = self._histogram_cls(
             name="vllm:inter_token_latency_seconds",
             documentation="Histogram of inter-token latency in seconds.",
-            buckets=[
-                0.01,
-                0.025,
-                0.05,
-                0.075,
-                0.1,
-                0.15,
-                0.2,
-                0.3,
-                0.4,
-                0.5,
-                0.75,
-                1.0,
-                2.5,
-                5.0,
-                7.5,
-                10.0,
-                20.0,
-                40.0,
-                80.0,
-            ],
+            buckets=custom_itl_buckets or default_itl_buckets,
             labelnames=labelnames,
         )
         self.histogram_inter_token_latency = make_per_engine(
@@ -789,34 +797,14 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_request_time_per_output_token = self._histogram_cls(
             name="vllm:request_time_per_output_token_seconds",
             documentation="Histogram of time_per_output_token_seconds per request.",
-            buckets=[
-                0.01,
-                0.025,
-                0.05,
-                0.075,
-                0.1,
-                0.15,
-                0.2,
-                0.3,
-                0.4,
-                0.5,
-                0.75,
-                1.0,
-                2.5,
-                5.0,
-                7.5,
-                10.0,
-                20.0,
-                40.0,
-                80.0,
-            ],
+            buckets=custom_itl_buckets or default_itl_buckets,
             labelnames=labelnames,
         )
         self.histogram_request_time_per_output_token = make_per_engine(
             histogram_request_time_per_output_token, engine_indexes, model_name
         )
 
-        request_latency_buckets = [
+        default_request_latency_buckets = [
             0.3,
             0.5,
             0.8,
@@ -839,6 +827,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             1920.0,
             7680.0,
         ]
+        request_latency_buckets = (
+            custom_request_latency_buckets or default_request_latency_buckets
+        )
         histogram_e2e_time_request = self._histogram_cls(
             name="vllm:e2e_request_latency_seconds",
             documentation="Histogram of e2e request latency in seconds.",
