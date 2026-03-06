@@ -4,6 +4,7 @@ import asyncio
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, overload
 
@@ -22,7 +23,11 @@ from vllm.inputs import (
 from vllm.inputs.data import build_enc_dec_inputs, embeds_inputs, token_inputs
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.utils.async_utils import AsyncMicrobatchTokenizer
+from vllm.utils.async_utils import (
+    AsyncMicrobatchTokenizer,
+    InlineExecutor,
+    make_async,
+)
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.stats import MultiModalCacheStats
@@ -78,11 +83,32 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self.tokenizer = tokenizer
 
+        # Shared single-thread executor for all blocking tokenizer and
+        # multimodal preprocessing operations.  HuggingFace Fast Tokenizers
+        # (Rust backend) use interior mutability (&mut self) and are NOT
+        # thread-safe, so every access must be serialized through one thread.
+        self._executor = ThreadPoolExecutor(max_workers=1)
+
+        # When --async-mm-input-processing is enabled, multimodal
+        # preprocessing is offloaded to the shared thread pool executor.
+        # Otherwise, a dummy inline executor is used (runs synchronously).
+        mm_config = config.model_config.multimodal_config
+        if mm_config and mm_config.async_mm_input_processing:
+            self._mm_executor: Executor = self._executor
+        else:
+            self._mm_executor = InlineExecutor()
+
         # Lazy initialization since offline LLM doesn't use async
         self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
 
         self.mm_processor: BaseMultiModalProcessor | None = None
         self._mm_cache_stats: MultiModalCacheStats | None = None
+        self._clear_mm_cache_async = make_async(
+            self.clear_mm_cache, executor=self._executor
+        )
+        self._process_multimodal_async = make_async(
+            self._process_multimodal, executor=self._mm_executor
+        )
         if config.model_config.is_multimodal_model:
             from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
             from vllm.multimodal.registry import MultiModalTimingRegistry
@@ -115,7 +141,9 @@ class BaseRenderer(ABC, Generic[_T]):
 
     def get_async_tokenizer(self) -> AsyncMicrobatchTokenizer:
         if self._async_tokenizer is None:
-            self._async_tokenizer = AsyncMicrobatchTokenizer(self.get_tokenizer())
+            self._async_tokenizer = AsyncMicrobatchTokenizer(
+                self.get_tokenizer(), executor=self._executor
+            )
 
         return self._async_tokenizer
 
@@ -157,10 +185,23 @@ class BaseRenderer(ABC, Generic[_T]):
         if self._mm_cache_stats is not None:
             self._mm_cache_stats.reset = True
 
+    async def clear_mm_cache_async(self) -> None:
+        """Serialize clear_mm_cache through the shared executor to avoid
+        races with concurrent process_inputs on the mm_processor_cache."""
+        await self._clear_mm_cache_async()
+
     def shutdown(self) -> None:
         mm_processor_cache = self.mm_processor_cache
         if mm_processor_cache is not None:
             mm_processor_cache.close()
+
+        if executor := getattr(self, "_executor", None):
+            executor.shutdown(wait=False)
+
+        if (
+            mm_executor := getattr(self, "_mm_executor", None)
+        ) is not None and mm_executor is not executor:
+            mm_executor.shutdown(wait=False)
 
     def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:
@@ -570,6 +611,13 @@ class BaseRenderer(ABC, Generic[_T]):
         self,
         prompt: TokensPrompt,
     ) -> "TokenInputs | MultiModalInputs":
+        """Process token inputs, with multimodal preprocessing offloaded
+        via `self._mm_executor` in the async variant.
+
+        When `--async-mm-input-processing` is enabled, `_mm_executor`
+        is a real thread pool.  Otherwise it is an inline executor so the
+        call runs synchronously with no overhead.
+        """
         prompt_token_ids = prompt["prompt_token_ids"]
 
         inputs: TokenInputs | MultiModalInputs
@@ -622,6 +670,31 @@ class BaseRenderer(ABC, Generic[_T]):
             cache_salt=prompt.get("cache_salt"),
         )
 
+    async def _process_tokens_async(
+        self,
+        prompt: TokensPrompt,
+    ) -> "TokenInputs | MultiModalInputs":
+        prompt_token_ids = prompt["prompt_token_ids"]
+
+        inputs: TokenInputs | MultiModalInputs
+        if multi_modal_data := prompt.get("multi_modal_data"):
+            inputs = await self._process_multimodal_async(
+                prompt_token_ids,
+                multi_modal_data,
+                mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
+                tokenization_kwargs=None,
+                mm_uuids=prompt.get("multi_modal_uuids"),
+            )
+        else:
+            inputs = token_inputs(prompt_token_ids)
+
+        if prompt_text := prompt.get("prompt"):
+            inputs["prompt"] = prompt_text
+        if cache_salt := prompt.get("cache_salt"):
+            inputs["cache_salt"] = cache_salt
+
+        return inputs
+
     def _process_singleton(
         self,
         prompt: SingletonTokPrompt,
@@ -630,6 +703,15 @@ class BaseRenderer(ABC, Generic[_T]):
             return self._process_embeds(prompt)  # type: ignore[arg-type]
 
         return self._process_tokens(prompt)  # type: ignore[arg-type]
+
+    async def _process_singleton_async(
+        self,
+        prompt: SingletonTokPrompt,
+    ) -> SingletonInputs:
+        if "prompt_embeds" in prompt:
+            return self._process_embeds(prompt)  # type: ignore[arg-type]
+
+        return await self._process_tokens_async(prompt)  # type: ignore[arg-type]
 
     def _process_enc_dec(
         self,
@@ -646,6 +728,28 @@ class BaseRenderer(ABC, Generic[_T]):
             decoder_start_token_id=self.get_dec_start_token_id(),
         )
 
+    async def _process_enc_dec_async(
+        self,
+        prompt: EncoderDecoderTokPrompt,
+    ) -> EncoderDecoderInputs:
+        enc_prompt = prompt["encoder_prompt"]
+        dec_prompt = prompt["decoder_prompt"]
+
+        encoder_inputs, decoder_inputs = await asyncio.gather(
+            self._process_singleton_async(enc_prompt),
+            (
+                asyncio.sleep(0)
+                if dec_prompt is None
+                else self._process_singleton_async(dec_prompt)
+            ),
+        )
+
+        return build_enc_dec_inputs(
+            encoder_inputs=encoder_inputs,
+            decoder_inputs=decoder_inputs,
+            decoder_start_token_id=self.get_dec_start_token_id(),
+        )
+
     def process_for_engine(
         self, prompt: TokPrompt, arrival_time: float
     ) -> ProcessorInputs:
@@ -654,6 +758,21 @@ class BaseRenderer(ABC, Generic[_T]):
             engine_prompt = self._process_enc_dec(prompt)  # type: ignore[arg-type]
         else:
             engine_prompt = self._process_singleton(prompt)
+
+        engine_prompt["arrival_time"] = arrival_time
+
+        return engine_prompt
+
+    async def process_for_engine_async(
+        self, prompt: TokPrompt, arrival_time: float
+    ) -> ProcessorInputs:
+        engine_prompt: ProcessorInputs
+        if "encoder_prompt" in prompt:
+            engine_prompt = await self._process_enc_dec_async(
+                prompt  # type: ignore[arg-type]
+            )
+        else:
+            engine_prompt = await self._process_singleton_async(prompt)
 
         engine_prompt["arrival_time"] = arrival_time
 
@@ -696,7 +815,9 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        return [self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts]
+        return await asyncio.gather(
+            *(self.process_for_engine_async(p, arrival_time) for p in tok_prompts)
+        )
 
     def render_chat(
         self,
@@ -760,8 +881,8 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        eng_prompts = [
-            self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts
-        ]
+        eng_prompts = await asyncio.gather(
+            *(self.process_for_engine_async(p, arrival_time) for p in tok_prompts)
+        )
 
         return out_conversations, eng_prompts
