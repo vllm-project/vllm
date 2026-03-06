@@ -16,7 +16,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.multimodal import MultiModalDataDict, MultiModalUUIDDict
+from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import (
     encode_audio_url,
     encode_image_url,

@@ -84,11 +84,11 @@ async def test_chat_completion_render_basic(client):
     assert response.status_code == 200
     data = response.json()
 
-    # Verify response structure - should be [conversation, engine_prompts]
+    # Verify response structure - should be [conversation, engine_inputs]
     assert isinstance(data, list)
     assert len(data) == 2
 
-    conversation, engine_prompts = data
+    conversation, engine_inputs = data
 
     # Verify conversation
     assert isinstance(conversation, list)
@@ -96,11 +96,11 @@ async def test_chat_completion_render_basic(client):
     assert conversation[0]["role"] == "user"
     assert "empty string" in conversation[0]["content"]
 
-    # Verify engine_prompts
-    assert isinstance(engine_prompts, list)
-    assert len(engine_prompts) > 0
+    # Verify engine_inputs
+    assert isinstance(engine_inputs, list)
+    assert len(engine_inputs) > 0
 
-    first_prompt = engine_prompts[0]
+    first_prompt = engine_inputs[0]
     assert "prompt_token_ids" in first_prompt
     assert "prompt" in first_prompt
     assert isinstance(first_prompt["prompt_token_ids"], list)
@@ -160,7 +160,7 @@ async def test_chat_completion_render_multi_turn(client):
     assert response.status_code == 200
     data = response.json()
 
-    conversation, engine_prompts = data
+    conversation, engine_inputs = data
 
     # Verify all messages preserved
     assert len(conversation) == 3
@@ -169,8 +169,8 @@ async def test_chat_completion_render_multi_turn(client):
     assert conversation[2]["role"] == "user"
 
     # Verify tokenization occurred
-    assert len(engine_prompts) > 0
-    assert len(engine_prompts[0]["prompt_token_ids"]) > 0
+    assert len(engine_inputs) > 0
+    assert len(engine_inputs[0]["prompt_token_ids"]) > 0
 
 
 @pytest.mark.asyncio

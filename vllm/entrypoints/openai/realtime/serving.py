@@ -12,7 +12,7 @@ from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.inputs.data import PromptType
+from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsRealtime
 from vllm.renderers.inputs.preprocess import parse_model_prompt

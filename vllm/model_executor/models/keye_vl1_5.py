@@ -14,13 +14,13 @@ from transformers.activations import GELUActivation
 from transformers.feature_extraction_utils import BatchFeature
 
 from vllm.config import VllmConfig
+from vllm.inputs import ModalityData
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     ImageItem,
-    ModalityData,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,

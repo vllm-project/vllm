@@ -28,7 +28,7 @@ from vllm.entrypoints.pooling.utils import (
     encode_pooling_output_base64,
     encode_pooling_output_float,
 )
-from vllm.inputs.data import ProcessorInputs, TokensPrompt, token_inputs
+from vllm.inputs import EngineInput, TokensPrompt, tokens_input
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.pooling_params import PoolingParams
@@ -84,7 +84,7 @@ class OpenAIServingEmbedding(OpenAIServing):
             if error_check_ret is not None:
                 return error_check_ret
 
-            _, ctx.engine_prompts = await self._preprocess_chat(
+            _, ctx.engine_inputs = await self._preprocess_chat(
                 ctx.request,
                 ctx.request.messages,
                 default_template=self.chat_template,
@@ -92,7 +92,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                 default_template_kwargs=None,
             )
         elif isinstance(ctx.request, EmbeddingCompletionRequest):
-            ctx.engine_prompts = await self._preprocess_completion(
+            ctx.engine_inputs = await self._preprocess_completion(
                 ctx.request,
                 prompt_input=ctx.request.input,
                 prompt_embeds=None,
@@ -249,19 +249,19 @@ class OpenAIServingEmbedding(OpenAIServing):
             chunk_request_id = f"{ctx.request_id}-prompt-{prompt_idx}-chunk-{chunk_idx}"
 
             # Create engine prompt for this chunk
-            chunk_engine_prompt = token_inputs(chunk_tokens)
+            chunk_engine_input = tokens_input(chunk_tokens)
 
             # Log the chunk
             self._log_inputs(
                 chunk_request_id,
-                chunk_engine_prompt,
+                chunk_engine_input,
                 params=pooling_params,
                 lora_request=ctx.lora_request,
             )
 
             # Create generator for this chunk and wrap it to return indices
             original_generator = self.engine_client.encode(
-                chunk_engine_prompt,
+                chunk_engine_input,
                 pooling_params,
                 chunk_request_id,
                 lora_request=ctx.lora_request,
@@ -351,7 +351,7 @@ class OpenAIServingEmbedding(OpenAIServing):
     async def _create_single_prompt_generator(
         self,
         ctx: EmbeddingServeContext,
-        engine_prompt: ProcessorInputs,
+        engine_input: EngineInput,
         pooling_params: PoolingParams,
         trace_headers: Mapping[str, str] | None,
         prompt_index: int,
@@ -361,14 +361,14 @@ class OpenAIServingEmbedding(OpenAIServing):
 
         self._log_inputs(
             request_id_item,
-            engine_prompt,
+            engine_input,
             params=pooling_params,
             lora_request=ctx.lora_request,
         )
 
         # Return the original generator without wrapping
         return self.engine_client.encode(
-            engine_prompt,
+            engine_input,
             pooling_params,
             request_id_item,
             lora_request=ctx.lora_request,
@@ -401,15 +401,15 @@ class OpenAIServingEmbedding(OpenAIServing):
         if isinstance(pooling_params, ErrorResponse):
             return pooling_params
 
-        if ctx.engine_prompts is None:
+        if ctx.engine_inputs is None:
             return self.create_error_response("Engine prompts not available")
 
         max_pos_embeddings = self._get_max_position_embeddings()
 
-        for i, engine_prompt in enumerate(ctx.engine_prompts):
+        for i, engine_input in enumerate(ctx.engine_inputs):
             # Check if this specific prompt needs chunked processing
-            if "prompt_token_ids" in engine_prompt:
-                prompt_token_ids = engine_prompt["prompt_token_ids"]  # type: ignore[typeddict-item]
+            if "prompt_token_ids" in engine_input:
+                prompt_token_ids = engine_input["prompt_token_ids"]  # type: ignore[typeddict-item]
 
                 if len(prompt_token_ids) > max_pos_embeddings:
                     # Use chunked processing for this prompt
@@ -425,7 +425,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
             # Normal processing for short prompts or non-token prompts
             generator = await self._create_single_prompt_generator(
-                ctx, engine_prompt, pooling_params, trace_headers, i
+                ctx, engine_input, pooling_params, trace_headers, i
             )
             generators.append(generator)
 
@@ -444,7 +444,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         minimize memory usage.
         For regular requests, collects results normally.
         """
-        if ctx.engine_prompts is None:
+        if ctx.engine_inputs is None:
             return self.create_error_response("Engine prompts not available")
 
         # Check if we used chunked processing
@@ -540,7 +540,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
         # Finalize aggregated results
         final_res_batch: list[PoolingRequestOutput] = []
-        num_prompts = len(ctx.engine_prompts)
+        num_prompts = len(ctx.engine_inputs)
 
         for prompt_idx in range(num_prompts):
             if prompt_idx in prompt_aggregators:
@@ -564,7 +564,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                     pooling_output_data = PoolingOutput(data=final_embedding)
 
                     # Get original prompt token IDs for this prompt
-                    original_prompt = ctx.engine_prompts[prompt_idx]
+                    original_prompt = ctx.engine_inputs[prompt_idx]
                     if "prompt_token_ids" not in original_prompt:
                         return self.create_error_response(
                             f"Chunked prompt {prompt_idx} does not contain token IDs"

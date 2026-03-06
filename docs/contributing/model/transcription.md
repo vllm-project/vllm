@@ -23,7 +23,7 @@ Declare supported languages and capabilities:
     from torch import nn
 
     from vllm.config import ModelConfig, SpeechToTextConfig
-    from vllm.inputs.data import PromptType
+    from vllm.inputs import PromptType
     from vllm.model_executor.models.interfaces import SupportsTranscription
     
     class YourASRModel(nn.Module, SupportsTranscription):
@@ -66,7 +66,7 @@ This is for controlling general behavior of the API when serving your model:
 
 See [Audio preprocessing and chunking](#audio-preprocessing-and-chunking) for what each field controls.
 
-Implement the prompt construction via [get_generation_prompt][vllm.model_executor.models.interfaces.SupportsTranscription.get_generation_prompt]. The server passes you the resampled waveform and task parameters; you return a valid [PromptType][vllm.inputs.data.PromptType]. There are two common patterns:
+Implement the prompt construction via [get_generation_prompt][vllm.model_executor.models.interfaces.SupportsTranscription.get_generation_prompt]. The server passes you the resampled waveform and task parameters; you return a valid [PromptType][vllm.inputs.llm.PromptType]. There are two common patterns:
 
 #### Multimodal LLM with audio embeddings (e.g., Voxtral, Gemma3n)
 

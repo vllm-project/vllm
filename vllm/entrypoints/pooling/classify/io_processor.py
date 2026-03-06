@@ -9,7 +9,7 @@ from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
 )
-from vllm.inputs import ProcessorInputs
+from vllm.inputs import EngineInput
 from vllm.renderers.inputs import TokPrompt
 
 
@@ -23,7 +23,7 @@ class ClassifyIOProcessor(PoolingIOProcessor):
                 chat_template_kwargs=request.chat_template_kwargs,
                 trust_request_chat_template=self.trust_request_chat_template,
             )
-            _, engine_prompts = self._preprocess_chat_online(
+            _, engine_inputs = self._preprocess_chat_online(
                 request,
                 request.messages,
                 default_template=self.chat_template,
@@ -31,20 +31,20 @@ class ClassifyIOProcessor(PoolingIOProcessor):
                 default_template_kwargs=None,
             )
         elif isinstance(request, ClassificationCompletionRequest):
-            engine_prompts = self._preprocess_completion_online(
+            engine_inputs = self._preprocess_completion_online(
                 request,
                 prompt_input=request.input,
                 prompt_embeds=None,
             )
         else:
             raise ValueError("Invalid classification request type")
-        return engine_prompts
+        return engine_inputs
 
     def pre_process_offline(
         self,
         prompts: PromptType | Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> Sequence[ProcessorInputs]:
+    ) -> Sequence[EngineInput]:
         return self._preprocess_completion_offline(
             prompts=prompts, tokenization_kwargs=tokenization_kwargs
         )

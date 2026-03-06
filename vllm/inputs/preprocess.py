@@ -7,14 +7,9 @@ from typing import Any, overload
 from typing_extensions import assert_never
 
 from vllm.config import VllmConfig
-from vllm.inputs.data import build_enc_dec_inputs
+from vllm.inputs import build_enc_dec_input
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.inputs import (
-    MultiModalDataDict,
-    MultiModalInputs,
-    MultiModalUUIDDict,
-)
 from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.renderers.inputs import (
     DecoderDictPrompt,
@@ -26,20 +21,25 @@ from vllm.renderers.inputs import (
 from vllm.renderers.inputs.preprocess import parse_dec_only_prompt, parse_enc_dec_prompt
 from vllm.tokenizers import TokenizerLike
 
-from .data import (
-    DecoderInputs,
-    DecoderOnlyInputs,
-    EmbedsInputs,
+from .engine import (
+    DecoderEngineInput,
+    DecoderOnlyEngineInput,
+    EmbedsInput,
+    EncoderDecoderInput,
+    EncoderInput,
+    EngineInput,
+    MultiModalInput,
+    SingletonInput,
+    TokensInput,
+    tokens_input,
+)
+from .llm import (
     EmbedsPrompt,
-    EncoderDecoderInputs,
-    EncoderInputs,
-    ProcessorInputs,
+    MultiModalDataDict,
+    MultiModalUUIDDict,
     PromptType,
-    SingletonInputs,
     TextPrompt,
-    TokenInputs,
     TokensPrompt,
-    token_inputs,
 )
 
 logger = init_logger(__name__)
@@ -95,7 +95,7 @@ class InputPreprocessor:
         tokenization_kwargs: dict[str, Any] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
-    ) -> MultiModalInputs:
+    ) -> MultiModalInput:
         """
         Apply the model's multi-modal processor to a multi-modal prompt,
         returning the corresponding token IDs and metadata.
@@ -111,7 +111,7 @@ class InputPreprocessor:
     def _process_embeds(
         self,
         parsed_content: EmbedsPrompt,
-    ) -> EmbedsInputs:
+    ) -> EmbedsInput:
         return self.renderer._process_embeds(parsed_content)
 
     def _truncate_inputs(
@@ -134,12 +134,12 @@ class InputPreprocessor:
         self,
         parsed_content: TokensPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> TokenInputs | MultiModalInputs:
+    ) -> TokensInput | MultiModalInput:
         prompt_token_ids = self._truncate_inputs(
             parsed_content["prompt_token_ids"], tokenization_kwargs
         )
 
-        inputs: TokenInputs | MultiModalInputs
+        inputs: TokensInput | MultiModalInput
         if multi_modal_data := parsed_content.get("multi_modal_data"):
             inputs = self._process_multimodal(
                 prompt_token_ids,
@@ -149,7 +149,7 @@ class InputPreprocessor:
                 mm_uuids=parsed_content.get("multi_modal_uuids"),
             )
         else:
-            inputs = token_inputs(prompt_token_ids)
+            inputs = tokens_input(prompt_token_ids)
 
         if prompt_text := parsed_content.get("prompt"):
             inputs["prompt"] = prompt_text
@@ -162,10 +162,10 @@ class InputPreprocessor:
         self,
         parsed_content: TextPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> TokenInputs | MultiModalInputs:
+    ) -> TokensInput | MultiModalInput:
         prompt_text = parsed_content["prompt"]
 
-        inputs: TokenInputs | MultiModalInputs
+        inputs: TokensInput | MultiModalInput
         if multi_modal_data := parsed_content.get("multi_modal_data"):
             inputs = self._process_multimodal(
                 prompt_text,
@@ -178,7 +178,7 @@ class InputPreprocessor:
                 prompt_text,
                 tokenization_kwargs=tokenization_kwargs,
             )
-            inputs = token_inputs(prompt_token_ids)
+            inputs = tokens_input(prompt_token_ids)
 
         inputs["prompt"] = prompt_text
 
@@ -192,38 +192,27 @@ class InputPreprocessor:
         self,
         prompt: EncoderDictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> EncoderInputs: ...
+    ) -> EncoderInput: ...
 
     @overload
     def _prompt_to_llm_inputs(  # type: ignore[misc]
         self,
         prompt: DecoderDictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> DecoderInputs: ...
+    ) -> DecoderEngineInput: ...
 
     @overload
     def _prompt_to_llm_inputs(  # type: ignore[misc]
         self,
         prompt: DecoderOnlyDictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> DecoderOnlyInputs: ...
+    ) -> DecoderOnlyEngineInput: ...
 
     def _prompt_to_llm_inputs(
         self,
         prompt: SingletonDictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> SingletonInputs:
-        """
-        Extract the singleton inputs from a prompt.
-
-        Arguments:
-
-        * prompt: single encoder or decoder input prompt
-
-        Returns:
-
-        * [`SingletonInputs`][vllm.inputs.data.SingletonInputs] instance
-        """
+    ) -> SingletonInput:
         if "prompt_embeds" in prompt:
             return self._process_embeds(prompt)  # type: ignore[arg-type]
 
@@ -242,31 +231,16 @@ class InputPreprocessor:
         self,
         prompt: EncoderDecoderDictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> EncoderDecoderInputs:
-        """
-        For encoder/decoder models only:
-        Process an input prompt into an
-        [`EncoderDecoderInputs`][vllm.inputs.data.EncoderDecoderInputs]
-        instance.
-
-        Arguments:
-
-        * prompt: an input prompt
-
-        Returns:
-
-        * [`EncoderDecoderInputs`][vllm.inputs.data.EncoderDecoderInputs]
-          instance
-        """
+    ) -> EncoderDecoderInput:
         encoder_prompt = prompt["encoder_prompt"]
         decoder_prompt = prompt["decoder_prompt"]
 
-        return build_enc_dec_inputs(
-            encoder_inputs=self._prompt_to_llm_inputs(
+        return build_enc_dec_input(
+            encoder_input=self._prompt_to_llm_inputs(
                 encoder_prompt,
                 tokenization_kwargs=tokenization_kwargs,
             ),
-            decoder_inputs=(
+            decoder_input=(
                 None
                 if decoder_prompt is None
                 else self._prompt_to_llm_inputs(
@@ -281,20 +255,7 @@ class InputPreprocessor:
         self,
         prompt: DecoderOnlyDictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> DecoderOnlyInputs:
-        """
-        For decoder-only models:
-        Process an input prompt into a
-        [`DecoderOnlyInputs`][vllm.inputs.data.DecoderOnlyInputs] instance.
-
-        Arguments:
-
-        * prompt: input prompt
-
-        Returns:
-
-        * [`DecoderOnlyInputs`][vllm.inputs.data.DecoderOnlyInputs] instance
-        """
+    ) -> DecoderOnlyEngineInput:
         return self._prompt_to_llm_inputs(
             prompt,
             tokenization_kwargs=tokenization_kwargs,
@@ -304,7 +265,7 @@ class InputPreprocessor:
         self,
         prompt: PromptType,
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> ProcessorInputs:
+    ) -> EngineInput:
         """Preprocess the input prompt."""
         if self.model_config.is_encoder_decoder:
             # Encoder-decoder model requires special mapping of
