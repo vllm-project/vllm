@@ -66,6 +66,7 @@ IPCWeightTransferEngine.trainer_send_weights(
 In HTTP mode, IPC handles are pickled, base64-encoded, and sent as JSON to the `/update_weights` endpoint.
 
 See [`IPCTrainerSendWeightsArgs`](https://github.com/vllm-project/vllm/blob/main/vllm/distributed/weight_transfer/ipc_engine.py) for the full list of configurable fields.
+
 ## Examples
 
 - [RLHF with IPC weight syncing (offline, Ray)](../../examples/offline_inference/weight_syncing.md#rlhf-ipc) - Colocated training and inference on a single GPU using Ray placement groups and CUDA IPC handles
