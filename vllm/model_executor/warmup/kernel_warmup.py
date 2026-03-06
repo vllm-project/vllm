@@ -39,6 +39,33 @@ def _get_flashinfer_attention_warmup_sizes(worker: "Worker") -> tuple[int, int, 
     return long_prefill_tokens, decode_tokens, mixed_tokens
 
 
+def _warmup_flashinfer_attention(worker: "Worker") -> None:
+    long_prefill_tokens, decode_tokens, mixed_tokens = (
+        _get_flashinfer_attention_warmup_sizes(worker)
+    )
+    logger.info(
+        "Warming up FlashInfer attention with long prefill (%d tokens), "
+        "decode (%d tokens), and mixed batch (%d tokens).",
+        long_prefill_tokens,
+        decode_tokens,
+        mixed_tokens,
+    )
+
+    warmup_runs = (
+        {"num_tokens": long_prefill_tokens},
+        {"num_tokens": decode_tokens, "uniform_decode": True},
+        {"num_tokens": mixed_tokens, "create_mixed_batch": True},
+    )
+    for warmup_kwargs in warmup_runs:
+        worker.model_runner._dummy_run(
+            skip_eplb=True,
+            is_profile=True,
+            force_attention=True,
+            **warmup_kwargs,
+        )
+    torch.accelerator.synchronize()
+
+
 def kernel_warmup(worker: "Worker"):
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
@@ -81,41 +108,7 @@ def kernel_warmup(worker: "Worker"):
             for group in groups
         )
     ):
-        long_prefill_tokens, decode_tokens, mixed_tokens = (
-            _get_flashinfer_attention_warmup_sizes(worker)
-        )
-        logger.info(
-            "Warming up FlashInfer attention with long prefill (%d tokens), "
-            "decode (%d tokens), and mixed batch (%d tokens).",
-            long_prefill_tokens,
-            decode_tokens,
-            mixed_tokens,
-        )
-        # First warm a long prefill shape so the first real prompt does not
-        # build the heavy attention path on the critical request path.
-        worker.model_runner._dummy_run(
-            num_tokens=long_prefill_tokens,
-            skip_eplb=True,
-            is_profile=True,
-            force_attention=True,
-        )
-        # Then warm a pure decode batch that matches the runtime decode route.
-        worker.model_runner._dummy_run(
-            num_tokens=decode_tokens,
-            skip_eplb=True,
-            is_profile=True,
-            force_attention=True,
-            uniform_decode=True,
-        )
-        # Finally warm a mixed batch to cover the mixed prefill/decode route.
-        worker.model_runner._dummy_run(
-            num_tokens=mixed_tokens,
-            skip_eplb=True,
-            is_profile=True,
-            force_attention=True,
-            create_mixed_batch=True,
-        )
-        torch.accelerator.synchronize()
+        _warmup_flashinfer_attention(worker)
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:

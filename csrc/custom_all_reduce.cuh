@@ -15,6 +15,7 @@ typedef __hip_bfloat16 nv_bfloat16;
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 #include <cstdlib>
@@ -317,6 +318,56 @@ inline int select_blocks_for_work(int work_items, int threads,
                   std::min(block_limit, (work_items + threads - 1) / threads));
 }
 
+struct LaunchConfig {
+  int threads;
+  int blocks;
+};
+
+inline LaunchConfig select_launch_config(int work_items, size_t bytes,
+                                         int threads, int block_limit) {
+  if (threads == 512) {
+    threads = select_threads_for_bytes(bytes);
+  }
+  return LaunchConfig{
+      threads,
+      select_blocks_for_work(work_items, threads, block_limit),
+  };
+}
+
+template <typename T, int ngpus>
+DINLINE void load_peer_ptrs(const RankData& dp, const T* ptrs[ngpus]) {
+#pragma unroll
+  for (int i = 0; i < ngpus; i++) {
+    ptrs[i] = reinterpret_cast<const T*>(dp.ptrs[i]);
+  }
+}
+
+template <typename T, int ngpus>
+DINLINE void gather_copy_1stage(const T* srcs[ngpus], T* result,
+                                int segment_size, int tid, int stride) {
+  for (int idx = tid; idx < segment_size; idx += stride) {
+#pragma unroll
+    for (int i = 0; i < ngpus; i++) {
+      result[i * segment_size + idx] = srcs[i][idx];
+    }
+  }
+}
+
+template <typename T, int ngpus>
+DINLINE bool can_use_packed_gather(const T* srcs[ngpus], T* result, int size) {
+  using P = typename packed_t<T>::P;
+  if (size % P::size != 0 || !is_aligned_to(result, sizeof(P))) {
+    return false;
+  }
+#pragma unroll
+  for (int i = 0; i < ngpus; i++) {
+    if (!is_aligned_to(srcs[i], sizeof(P))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
     cross_device_reduce_1stage(RankData* _dp, RankSignals sg, Signal* self_sg,
@@ -394,45 +445,22 @@ __global__ void __launch_bounds__(512, 1)
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = gridDim.x * blockDim.x;
   using P = typename packed_t<T>::P;
-  constexpr int pack_elems = P::size;
   auto dp = *_dp;
   const T* srcs[ngpus];
-  const P* packed_srcs[ngpus];
-#pragma unroll
-  for (int i = 0; i < ngpus; i++) {
-    srcs[i] = reinterpret_cast<const T*>(dp.ptrs[i]);
-    packed_srcs[i] = reinterpret_cast<const P*>(dp.ptrs[i]);
-  }
+  load_peer_ptrs<T, ngpus>(dp, srcs);
 
   barrier_at_start<ngpus>(sg, self_sg, rank);
 
-  bool can_use_packed =
-      size % pack_elems == 0 && is_aligned_to(result, sizeof(P));
-#pragma unroll
-  for (int i = 0; i < ngpus; i++) {
-    can_use_packed = can_use_packed && is_aligned_to(srcs[i], sizeof(P));
-  }
-
-  if (can_use_packed) {
-    int packed_size = size / pack_elems;
-    auto packed_result = reinterpret_cast<P*>(result);
-    for (int idx = tid; idx < packed_size; idx += stride) {
-#pragma unroll
-      for (int i = 0; i < ngpus; i++) {
-        packed_result[i * packed_size + idx] = packed_srcs[i][idx];
-      }
-    }
+  if (can_use_packed_gather<T, ngpus>(srcs, result, size)) {
+    const P* packed_srcs[ngpus];
+    load_peer_ptrs<P, ngpus>(dp, packed_srcs);
+    gather_copy_1stage<P, ngpus>(packed_srcs, reinterpret_cast<P*>(result),
+                                 size / P::size, tid, stride);
   } else {
-    for (int idx = tid; idx < size; idx += stride) {
-#pragma unroll
-      for (int i = 0; i < ngpus; i++) {
-        result[i * size + idx] = srcs[i][idx];
-      }
-    }
+    gather_copy_1stage<T, ngpus>(srcs, result, size, tid, stride);
   }
-}
 
-barrier_at_end<ngpus, true>(sg, self_sg, rank);
+  barrier_at_end<ngpus, true>(sg, self_sg, rank);
 }
 
 template <typename T, int ngpus>
@@ -449,10 +477,7 @@ __global__ void __launch_bounds__(512, 1)
   int end = start + part;
   auto dp = *_dp;
   const P* ptrs[ngpus];
-#pragma unroll
-  for (int i = 0; i < ngpus; i++) {
-    ptrs[i] = reinterpret_cast<const P*>(dp.ptrs[i]);
-  }
+  load_peer_ptrs<P, ngpus>(dp, ptrs);
 
   barrier_at_start<ngpus>(sg, self_sg, rank);
 
@@ -564,6 +589,33 @@ class CustomAllreduce {
       throw std::runtime_error(
           "Rank data buffer is overflowed by " +
           std::to_string(d_rank_data_base_ + num - d_rank_data_end_));
+  }
+
+  [[noreturn]] void throw_unsupported_world_size(const char* op_name) const {
+    throw std::runtime_error("custom " + std::string(op_name) +
+                             " only supports num gpus in (2,4,6,8). Actual "
+                             "num gpus = " +
+                             std::to_string(world_size_));
+  }
+
+  template <typename F>
+  void dispatch_by_world_size(F&& launch, const char* op_name) {
+    switch (world_size_) {
+      case 2:
+        launch(std::integral_constant<int, 2>{});
+        return;
+      case 4:
+        launch(std::integral_constant<int, 4>{});
+        return;
+      case 6:
+        launch(std::integral_constant<int, 6>{});
+        return;
+      case 8:
+        launch(std::integral_constant<int, 8>{});
+        return;
+      default:
+        throw_unsupported_world_size(op_name);
+    }
   }
 
   template <typename T>
@@ -684,44 +736,38 @@ class CustomAllreduce {
       }
     }
 
-#define KL(ngpus, name)                                                       \
-  name<T, ngpus><<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output, \
+    dispatch_by_world_size(
+        [&](auto ngpus_tag) {
+          constexpr int ngpus = decltype(ngpus_tag)::value;
+          if (force_1stage) {
+            cross_device_reduce_1stage<T, ngpus>
+                <<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output,
                                                  rank_, size);
-#define REDUCE_CASE(ngpus)                              \
-  case ngpus: {                                         \
-    if (force_1stage) {                                 \
-      KL(ngpus, cross_device_reduce_1stage);            \
-    } else if (force_2stage) {                          \
-      KL(ngpus, cross_device_reduce_2stage);            \
-    } else {                                            \
-      if (world_size_ == 2) {                           \
-        KL(ngpus, cross_device_reduce_1stage);          \
-      } else if (fully_connected_) {                    \
-        if ((world_size_ <= 4 && bytes < 512 * 1024) || \
-            (world_size_ <= 8 && bytes < 256 * 1024)) { \
-          KL(ngpus, cross_device_reduce_1stage);        \
-        } else {                                        \
-          KL(ngpus, cross_device_reduce_2stage);        \
-        }                                               \
-      }                                                 \
-    }                                                   \
-    break;                                              \
-  }
-
-    switch (world_size_) {
-      REDUCE_CASE(2)
-      REDUCE_CASE(4)
-      REDUCE_CASE(6)
-      REDUCE_CASE(8)
-      default:
-        throw std::runtime_error(
-            "custom allreduce only supports num gpus in (2,4,6,8). Actual "
-            "num "
-            "gpus = " +
-            std::to_string(world_size_));
-    }
-#undef REDUCE_CASE
-#undef KL
+            return;
+          }
+          if (force_2stage) {
+            cross_device_reduce_2stage<T, ngpus>
+                <<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output,
+                                                 rank_, size);
+            return;
+          }
+          if (world_size_ == 2) {
+            cross_device_reduce_1stage<T, ngpus>
+                <<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output,
+                                                 rank_, size);
+            return;
+          }
+          if (fully_connected_ && ((world_size_ <= 4 && bytes < 512 * 1024) ||
+                                   (world_size_ <= 8 && bytes < 256 * 1024))) {
+            cross_device_reduce_1stage<T, ngpus>
+                <<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output,
+                                                 rank_, size);
+            return;
+          }
+          cross_device_reduce_2stage<T, ngpus><<<blocks, threads, 0, stream>>>(
+              ptrs, sg_, self_sg_, output, rank_, size);
+        },
+        "allreduce");
   }
 
   template <typename T>
@@ -734,41 +780,16 @@ class CustomAllreduce {
 
     RankData* ptrs = resolve_rank_data(stream, input);
 
-    auto bytes = static_cast<size_t>(size) * sizeof(T);
-    if (threads == 512) {
-      threads = select_threads_for_bytes(bytes);
-    }
-    int blocks = select_blocks_for_work(size, threads, block_limit);
-
-#define KL_AG(ngpus)                                                    \
-  cross_device_gather_1stage<T, ngpus><<<blocks, threads, 0, stream>>>( \
-      ptrs, sg_, self_sg_, output, rank_, size);
-
-    switch (world_size_) {
-      case 2: {
-        KL_AG(2)
-        break;
-      }
-      case 4: {
-        KL_AG(4)
-        break;
-      }
-      case 6: {
-        KL_AG(6)
-        break;
-      }
-      case 8: {
-        KL_AG(8)
-        break;
-      }
-      default:
-        throw std::runtime_error(
-            "custom allgather only supports num gpus in (2,4,6,8). Actual "
-            "num gpus = " +
-            std::to_string(world_size_));
-    }
-
-#undef KL_AG
+    auto launch = select_launch_config(
+        size, static_cast<size_t>(size) * sizeof(T), threads, block_limit);
+    dispatch_by_world_size(
+        [&](auto ngpus_tag) {
+          constexpr int ngpus = decltype(ngpus_tag)::value;
+          cross_device_gather_1stage<T, ngpus>
+              <<<launch.blocks, launch.threads, 0, stream>>>(
+                  ptrs, sg_, self_sg_, output, rank_, size);
+        },
+        "allgather");
   }
 
   template <typename T>
@@ -795,43 +816,18 @@ class CustomAllreduce {
     }
 
     int chunk_size = size / world_size_;
-    auto chunk_bytes =
-        static_cast<size_t>(chunk_size) * sizeof(typename packed_t<T>::P);
-    if (threads == 512) {
-      threads = select_threads_for_bytes(chunk_bytes);
-    }
-    int blocks = select_blocks_for_work(chunk_size, threads, block_limit);
-
-#define KL_RS(ngpus)                                                       \
-  cross_device_reduce_scatter_1stage<T, ngpus>                             \
-      <<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output, rank_, \
-                                       size);
-
-    switch (world_size_) {
-      case 2: {
-        KL_RS(2)
-        break;
-      }
-      case 4: {
-        KL_RS(4)
-        break;
-      }
-      case 6: {
-        KL_RS(6)
-        break;
-      }
-      case 8: {
-        KL_RS(8)
-        break;
-      }
-      default:
-        throw std::runtime_error(
-            "custom reduce_scatter only supports num gpus in (2,4,6,8). "
-            "Actual num gpus = " +
-            std::to_string(world_size_));
-    }
-
-#undef KL_RS
+    auto launch = select_launch_config(
+        chunk_size,
+        static_cast<size_t>(chunk_size) * sizeof(typename packed_t<T>::P),
+        threads, block_limit);
+    dispatch_by_world_size(
+        [&](auto ngpus_tag) {
+          constexpr int ngpus = decltype(ngpus_tag)::value;
+          cross_device_reduce_scatter_1stage<T, ngpus>
+              <<<launch.blocks, launch.threads, 0, stream>>>(
+                  ptrs, sg_, self_sg_, output, rank_, size);
+        },
+        "reduce_scatter");
   }
 
   ~CustomAllreduce() {

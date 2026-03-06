@@ -65,6 +65,27 @@ void* prepare_reg_buffer(cudaStream_t stream, torch::Tensor& inp,
   return inp.data_ptr();
 }
 
+template <typename Fn>
+void dispatch_custom_ar_out_dtype(torch::ScalarType dtype, Fn&& fn,
+                                  const char* op_name) {
+  switch (dtype) {
+    case at::ScalarType::Float:
+      fn(static_cast<float*>(nullptr));
+      return;
+    case at::ScalarType::Half:
+      fn(static_cast<half*>(nullptr));
+      return;
+#if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
+    case at::ScalarType::BFloat16:
+      fn(static_cast<nv_bfloat16*>(nullptr));
+      return;
+#endif
+    default:
+      throw std::runtime_error(std::string("custom ") + op_name +
+                               " only supports float32, float16 and bfloat16");
+  }
+}
+
 /**
  * Performs an out-of-place allreduce and stores result in out.
  *
@@ -84,30 +105,14 @@ void all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
   TORCH_CHECK(_is_weak_contiguous(inp));
   auto reg_buffer =
       prepare_reg_buffer(stream, inp, _reg_buffer, reg_buffer_sz_bytes);
-  switch (out.scalar_type()) {
-    case at::ScalarType::Float: {
-      fa->allreduce<float>(stream, reinterpret_cast<float*>(reg_buffer),
-                           reinterpret_cast<float*>(out.data_ptr()),
-                           out.numel());
-      break;
-    }
-    case at::ScalarType::Half: {
-      fa->allreduce<half>(stream, reinterpret_cast<half*>(reg_buffer),
-                          reinterpret_cast<half*>(out.data_ptr()), out.numel());
-      break;
-    }
-#if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
-    case at::ScalarType::BFloat16: {
-      fa->allreduce<nv_bfloat16>(
-          stream, reinterpret_cast<nv_bfloat16*>(reg_buffer),
-          reinterpret_cast<nv_bfloat16*>(out.data_ptr()), out.numel());
-      break;
-    }
-#endif
-    default:
-      throw std::runtime_error(
-          "custom allreduce only supports float32, float16 and bfloat16");
-  }
+  dispatch_custom_ar_out_dtype(
+      out.scalar_type(),
+      [&](auto* type_tag) {
+        using T = std::remove_pointer_t<decltype(type_tag)>;
+        fa->allreduce<T>(stream, reinterpret_cast<T*>(reg_buffer),
+                         reinterpret_cast<T*>(out.data_ptr()), out.numel());
+      },
+      "allreduce");
 }
 
 /**
@@ -138,33 +143,28 @@ void all_gather(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
       prepare_reg_buffer(stream, inp, _reg_buffer, reg_buffer_sz_bytes);
 
   switch (out.scalar_type()) {
-    case at::ScalarType::Byte: {
-      fa->allgather<uint8_t>(stream, reinterpret_cast<uint8_t*>(reg_buffer),
-                             reinterpret_cast<uint8_t*>(out.data_ptr()), size);
-      break;
-    }
+    case at::ScalarType::Byte:
     case at::ScalarType::Float8_e4m3fn: {
-      // FP8 E4M3 is a 1-byte storage type. All-gather can use byte-wise copy.
       fa->allgather<uint8_t>(stream, reinterpret_cast<uint8_t*>(reg_buffer),
                              reinterpret_cast<uint8_t*>(out.data_ptr()), size);
-      break;
+      return;
     }
     case at::ScalarType::Float: {
       fa->allgather<float>(stream, reinterpret_cast<float*>(reg_buffer),
                            reinterpret_cast<float*>(out.data_ptr()), size);
-      break;
+      return;
     }
     case at::ScalarType::Half: {
       fa->allgather<half>(stream, reinterpret_cast<half*>(reg_buffer),
                           reinterpret_cast<half*>(out.data_ptr()), size);
-      break;
+      return;
     }
 #if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
     case at::ScalarType::BFloat16: {
       fa->allgather<nv_bfloat16>(
           stream, reinterpret_cast<nv_bfloat16*>(reg_buffer),
           reinterpret_cast<nv_bfloat16*>(out.data_ptr()), size);
-      break;
+      return;
     }
 #endif
     default:
@@ -198,32 +198,15 @@ void reduce_scatter(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
 
   auto reg_buffer =
       prepare_reg_buffer(stream, inp, _reg_buffer, reg_buffer_sz_bytes);
-
-  switch (out.scalar_type()) {
-    case at::ScalarType::Float: {
-      fa->reduce_scatter<float>(stream, reinterpret_cast<float*>(reg_buffer),
-                                reinterpret_cast<float*>(out.data_ptr()),
-                                inp.numel());
-      break;
-    }
-    case at::ScalarType::Half: {
-      fa->reduce_scatter<half>(stream, reinterpret_cast<half*>(reg_buffer),
-                               reinterpret_cast<half*>(out.data_ptr()),
-                               inp.numel());
-      break;
-    }
-#if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
-    case at::ScalarType::BFloat16: {
-      fa->reduce_scatter<nv_bfloat16>(
-          stream, reinterpret_cast<nv_bfloat16*>(reg_buffer),
-          reinterpret_cast<nv_bfloat16*>(out.data_ptr()), inp.numel());
-      break;
-    }
-#endif
-    default:
-      throw std::runtime_error(
-          "custom reduce_scatter only supports float32, float16 and bfloat16");
-  }
+  dispatch_custom_ar_out_dtype(
+      out.scalar_type(),
+      [&](auto* type_tag) {
+        using T = std::remove_pointer_t<decltype(type_tag)>;
+        fa->reduce_scatter<T>(stream, reinterpret_cast<T*>(reg_buffer),
+                              reinterpret_cast<T*>(out.data_ptr()),
+                              inp.numel());
+      },
+      "reduce_scatter");
 }
 
 void dispose(fptr_t _fa) {
