@@ -539,6 +539,7 @@ class MPClient(EngineCoreClient):
         # exception is raised mid-construction.
         self.resources = BackgroundResources(ctx=sync_ctx)
         self._finalizer = weakref.finalize(self, self.resources)
+        self.is_shutting_down = False
         success = False
         try:
             # State used for data parallel.
@@ -638,10 +639,12 @@ class MPClient(EngineCoreClient):
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown engine manager under timeout and clean up resources."""
-        self._finalizer.detach()
-        if self.resources.engine_manager is not None:
-            self.resources.engine_manager.shutdown(timeout=timeout)
-        self.resources()
+        if not self.is_shutting_down:
+            self.is_shutting_down = True
+            self._finalizer.detach()
+            if self.resources.engine_manager is not None:
+                self.resources.engine_manager.shutdown(timeout=timeout)
+            self.resources()
 
     def _format_exception(self, e: Exception) -> Exception:
         """If errored, use EngineDeadError so root cause is clear."""
@@ -685,7 +688,7 @@ class MPClient(EngineCoreClient):
             sentinels = [proc.sentinel for proc in engine_processes]
             died = multiprocessing.connection.wait(sentinels)
             _self = self_ref()
-            if not _self or _self.resources.engine_dead:
+            if not _self or _self.is_shutting_down or _self.resources.engine_dead:
                 return
             _self.resources.engine_dead = True
             proc_name = next(
