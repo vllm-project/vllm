@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 
 import torch
 
-from vllm.model_executor.custom_op import PluggableLayer
 
-
-class MoERunner(PluggableLayer):
+class MoERunner(ABC):
     """
     Abstract base class for Mixture of Experts (MoE) runners.
 
