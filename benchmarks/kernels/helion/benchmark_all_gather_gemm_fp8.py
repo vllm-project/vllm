@@ -432,6 +432,8 @@ if __name__ == "__main__":
     ]
     import time 
     rank, local_rank, world_size, device, dist_group, world_group = setup_distributed()
+    dist.barrier(group=dist_group)
+
     try:
         for (M, N, K) in TEST_SHAPES:
             # allocating the tensors before bencharking, so we can reuse it in between split_per_rank.
