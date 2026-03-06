@@ -70,7 +70,8 @@ if current_platform.is_cuda_alike():
 
         record_enabled = tl.load(record_enabled_ptr) != 0
         valid = mask & record_enabled & (physical_id >= 0) & (physical_id < out_size)
-        tl.atomic_add(out_ptr + physical_id, 1, mask=valid)
+        safe_physical_id = tl.where(physical_id >= 0, physical_id, 0)
+        tl.atomic_add(out_ptr + safe_physical_id, 1, mask=valid)
 
     def _eplb_map_and_record_triton(
         topk_ids: torch.Tensor,
