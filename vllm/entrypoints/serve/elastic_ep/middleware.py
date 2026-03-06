@@ -31,19 +31,26 @@ class ScalingMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
+    # Paths that should never be blocked by the scaling middleware.
+    _EXEMPT_PATHS = {"/live", "/metrics"}
+
     def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
         if scope["type"] != "http":
             return self.app(scope, receive, send)
 
         # Check global scaling state
         if get_scaling_elastic_ep():
-            # Return 503 Service Unavailable response
-            response = JSONResponse(
-                content={
-                    "error": "The model is currently scaling. Please try again later."
-                },
-                status_code=503,
-            )
-            return response(scope, receive, send)
+            # Allow liveness probe and metrics through even while scaling.
+            path = scope.get("path", "")
+            if path not in self._EXEMPT_PATHS:
+                # Return 503 Service Unavailable response
+                response = JSONResponse(
+                    content={
+                        "error": "The model is currently scaling. "
+                        "Please try again later."
+                    },
+                    status_code=503,
+                )
+                return response(scope, receive, send)
 
         return self.app(scope, receive, send)

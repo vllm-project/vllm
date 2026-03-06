@@ -4,6 +4,7 @@ Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine le
 
 - [Deployment with CPUs](#deployment-with-cpus)
 - [Deployment with GPUs](#deployment-with-gpus)
+- [Graceful Shutdown](#graceful-shutdown)
 - [Troubleshooting](#troubleshooting)
     - [Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"](#startup-probe-or-readiness-probe-failure-container-log-contains-keyboardinterrupt-terminated)
 - [Conclusion](#conclusion)
@@ -242,7 +243,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
                 mountPath: /dev/shm
               livenessProbe:
                 httpGet:
-                  path: /health
+                  path: /live
                   port: 8000
                 initialDelaySeconds: 60
                 periodSeconds: 10
@@ -386,6 +387,86 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
       ```
 
       If the service is correctly deployed, you should receive a response from the vLLM model.
+
+## Graceful Shutdown
+
+When the vLLM server receives a `SIGTERM` signal (e.g. from Kubernetes
+during pod termination), it marks itself as draining and begins
+shutting down. During this period, the `/health` readiness probe
+returns `503` so that load balancers stop routing new traffic, while
+the `/live` liveness probe continues returning `200` so that
+Kubernetes does not restart the pod mid-shutdown.
+
+### Probe endpoints
+
+vLLM exposes two probe endpoints with different semantics:
+
+| State        | `/health` (readiness) | `/live` (liveness) |
+|--------------|-----------------------|--------------------|
+| Running      | 200                   | 200                |
+| Paused       | 503                   | 200                |
+| Draining     | 503                   | 200                |
+| Dead/crashed | 503                   | 503                |
+
+- **`/health`** is a *readiness* probe — it returns `503` during shutdown
+  drain so that the load balancer stops routing new traffic to the pod.
+- **`/live`** is a *liveness* probe — it returns `200` as long as the
+  process is alive (even while draining), so Kubernetes does **not**
+  restart the pod mid-drain. It only returns `503` when the engine has
+  encountered a fatal error.
+
+### Kubernetes deployment with graceful shutdown
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-server
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: vllm
+        image: vllm/vllm-openai:latest
+        command: ["/bin/sh", "-c"]
+        args:
+        - "vllm serve mistralai/Mistral-7B-Instruct-v0.3"
+        ports:
+        - containerPort: 8000
+        livenessProbe:
+          httpGet:
+            path: /live
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 5
+```
+
+!!! tip "Optional preStop hook"
+    You can add a `preStop` hook to sleep for a few seconds before
+    the `SIGTERM` is sent. This gives the Kubernetes endpoints
+    controller time to remove the pod from the Service, preventing
+    new connections from arriving during the first moments of drain:
+
+    ```yaml
+    lifecycle:
+      preStop:
+        exec:
+          command: ["sleep", "5"]
+    ```
 
 ## Troubleshooting
 

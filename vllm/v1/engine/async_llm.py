@@ -1027,6 +1027,12 @@ class AsyncLLM(EngineClient):
         return self.engine_core.resources.engine_dead or not self.is_running
 
     @property
+    def is_engine_dead(self) -> bool:
+        """True only when the engine has encountered a fatal error,
+        not during graceful shutdown/drain."""
+        return self.engine_core.resources.engine_dead
+
+    @property
     def dead_error(self) -> BaseException:
         return EngineDeadError()
 
