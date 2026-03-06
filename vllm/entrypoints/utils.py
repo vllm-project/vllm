@@ -24,7 +24,9 @@ from vllm.entrypoints.openai.engine.protocol import (
     StreamOptions,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.entrypoints.openai.speech_to_text.protocol import AudioProcessingError
 from vllm.logger import current_formatter_type, init_logger
+from vllm.lora.exceptions import LoRAAdapterNotFoundError
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -326,6 +328,14 @@ def create_error_response(
             # jinja2.TemplateError (avoid importing jinja2)
             err_type = "BadRequestError"
             status_code = HTTPStatus.BAD_REQUEST
+            param = None
+        elif isinstance(exc, LoRAAdapterNotFoundError):
+            err_type = "NotFoundError"
+            status_code = HTTPStatus.NOT_FOUND
+            param = None
+        elif isinstance(exc, AudioProcessingError):
+            err_type = "InternalServerError"
+            status_code = HTTPStatus.INTERNAL_SERVER_ERROR
             param = None
         else:
             err_type = "InternalServerError"

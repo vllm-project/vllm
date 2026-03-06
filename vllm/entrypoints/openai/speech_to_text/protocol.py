@@ -466,6 +466,29 @@ class TranslationRequest(OpenAIBaseModel):
         return data
 
 
+class AudioProcessingError(Exception):
+    """Exception raised when audio processing encounters an error.
+
+    This exception is used to handle various error conditions that may occur
+    during audio processing operations in the speech-to-text pipeline.
+
+    Attributes:
+        message: The error message string describing the specific error condition
+    """
+
+    message: str
+
+    def __init__(
+        self,
+        message: str,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+
+    def __str__(self):
+        return self.message
+
+
 # Translation response objects
 class TranslationResponse(OpenAIBaseModel):
     text: str
