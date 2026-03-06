@@ -296,7 +296,7 @@ def _test_async_transfer_layer_without_mtp_worker(
     num_logical_experts: int,
     eplb_communicator: str,
 ) -> None:
-    set_env_vars_and_device(env, eplb_communicator)
+    set_env_vars_and_device(env)
 
     vllm_config = VllmConfig()
     vllm_config.parallel_config.tensor_parallel_size = world_size
@@ -415,7 +415,7 @@ def _test_rearrange_expert_weights_with_redundancy(
 ) -> None:
     # Initialize model parallel (using tensor parallel as an entrypoint
     # to expert parallel)
-    set_env_vars_and_device(env, eplb_communicator)
+    set_env_vars_and_device(env)
 
     vllm_config = VllmConfig()
     vllm_config.parallel_config.tensor_parallel_size = world_size
