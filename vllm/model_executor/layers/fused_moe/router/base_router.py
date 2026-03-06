@@ -10,8 +10,95 @@ from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 
 if current_platform.is_cuda_alike():
+
+    @triton.jit
+    def _eplb_map_and_record_i32_kernel(
+        topk_ids_ptr,
+        logical_replica_count_ptr,
+        logical_to_physical_ptr,
+        out_ids_ptr,
+        out_ptr,
+        record_enabled_ptr,
+        num_logical_experts,
+        map_slots,
+        out_size,
+        numel,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs < numel
+
+        expert_id = tl.load(topk_ids_ptr + offs, mask=mask, other=0).to(tl.int64)
+        valid_expert = (expert_id >= 0) & (expert_id < num_logical_experts)
+
+        # 1. Convert the logical expert ids to physical expert ids
+        # Directly select a random replica for each logical expert
+        replica_count = tl.load(
+            logical_replica_count_ptr + expert_id,
+            mask=mask & valid_expert,
+            other=1,
+        )
+        # Avoid invalid modulo/div by forcing at least 1.
+        replica_count = tl.maximum(replica_count, 1)
+        # Match torch.compile path: use flattened token position.
+        replica_idx = offs % replica_count
+
+        # 2. Record expert load metrics.
+
+        # TODO(bowen): When using `FusedMoEModularKernel`, this
+        # can be done in a more unified way, since
+        # `FusedMoEPrepareAndFinalize` will return the expert
+        # token count, in some cases directly from the kernel.
+        # However, now there are many code paths not using
+        # the modular kernel, e.g. calling `fused_experts`,
+        # so we decide to keep the logic here.
+        #
+        # If later refactor moved all the MoE kernel calls
+        # to the modular kernel, we can move this logic there
+        # to achieve better efficiency.
+        map_index = expert_id * map_slots + replica_idx
+        physical_id = tl.load(
+            logical_to_physical_ptr + map_index,
+            mask=mask & valid_expert,
+            other=-1,
+        )
+        tl.store(out_ids_ptr + offs, physical_id, mask=mask)
+
+        record_enabled = tl.load(record_enabled_ptr) != 0
+        valid = mask & record_enabled & (physical_id >= 0) & (physical_id < out_size)
+        tl.atomic_add(out_ptr + physical_id, 1, mask=valid)
+
+    def _eplb_map_and_record_triton(
+        topk_ids: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+        expert_load_view: torch.Tensor,
+        record_enabled: torch.Tensor,
+    ) -> torch.Tensor:
+        topk_ids_in = topk_ids.contiguous().flatten().to(dtype=torch.int32)
+        numel = topk_ids_in.numel()
+        if numel == 0:
+            return topk_ids
+        out_flat = torch.empty((numel,), device=topk_ids.device, dtype=torch.int64)
+        grid = lambda meta: (triton.cdiv(numel, meta["BLOCK_SIZE"]),)
+        _eplb_map_and_record_i32_kernel[grid](
+            topk_ids_in,
+            logical_replica_count.contiguous(),
+            logical_to_physical_map.contiguous(),
+            out_flat,
+            expert_load_view,
+            record_enabled,
+            logical_replica_count.shape[0],
+            logical_to_physical_map.shape[1],
+            expert_load_view.shape[0],
+            numel,
+            BLOCK_SIZE=256,
+        )
+        return out_flat.reshape(topk_ids.shape)
 
     @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
     def eplb_map_to_physical_and_record(
@@ -84,6 +171,22 @@ if current_platform.is_cuda_alike():
             src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
         )
         return topk_ids
+
+    def eplb_map_to_physical_and_record_triton(
+        topk_ids: torch.Tensor,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+        record_enabled: torch.Tensor,
+    ) -> torch.Tensor:
+        # Fused triton implementation: mapping + optional recording in one kernel.
+        return _eplb_map_and_record_triton(
+            topk_ids=topk_ids,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count,
+            expert_load_view=expert_load_view,
+            record_enabled=record_enabled,
+        )
 else:
 
     def eplb_map_to_physical_and_record(
@@ -93,6 +196,15 @@ else:
         logical_replica_count: torch.Tensor,
     ) -> torch.Tensor:
         # CPU fallback: no EPLB so just return as is
+        return topk_ids
+
+    def eplb_map_to_physical_and_record_triton(
+        topk_ids: torch.Tensor,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+        record_enabled: torch.Tensor,
+    ) -> torch.Tensor:
         return topk_ids
 
 
@@ -146,6 +258,10 @@ class BaseRouter(FusedMoERouter):
                 raise ValueError(
                     "enable_eplb=True requires logical_replica_count != None"
                 )
+            if self.eplb_state.should_record_tensor is None:
+                raise ValueError(
+                    "enable_eplb=True requires should_record_tensor != None"
+                )
 
     def _get_indices_type(self) -> torch.dtype | None:
         """Get the desired indices dtype from the getter function."""
@@ -156,14 +272,15 @@ class BaseRouter(FusedMoERouter):
     def _apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
         """Apply EPLB mapping to convert logical expert IDs to physical expert IDs."""
         if self.enable_eplb:
-            assert self.eplb_state.expert_load_view is not None
             assert self.eplb_state.logical_to_physical_map is not None
             assert self.eplb_state.logical_replica_count is not None
-            return eplb_map_to_physical_and_record(
+            assert self.eplb_state.should_record_tensor is not None
+            return eplb_map_to_physical_and_record_triton(
                 topk_ids=topk_ids,
-                expert_load_view=self.eplb_state.expert_load_view,
                 logical_to_physical_map=self.eplb_state.logical_to_physical_map,
                 logical_replica_count=self.eplb_state.logical_replica_count,
+                expert_load_view=self.eplb_state.expert_load_view,
+                record_enabled=self.eplb_state.should_record_tensor,
             )
         return topk_ids
 
