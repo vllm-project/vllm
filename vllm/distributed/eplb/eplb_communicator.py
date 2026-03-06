@@ -199,9 +199,13 @@ class PyNcclEplbCommunicator(EplbCommunicator):
 
 def create_eplb_communicator(
     group_coordinator: GroupCoordinator,
-    backend: str,
+    backend: str | None,
     expert_weights: Sequence[torch.Tensor],
 ) -> EplbCommunicator:
+    # Keep a safe default for callers that have not resolved communicator yet.
+    if backend is None:
+        backend = "torch_nccl"
+
     tensor_device_type = expert_weights[0].device.type if expert_weights else "cpu"
     torch_group = (
         group_coordinator.cpu_group
