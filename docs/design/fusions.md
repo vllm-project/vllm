@@ -1,4 +1,4 @@
-# Custom torch.compile Fusions
+# Fusion torch.compile passes
 
 vLLM applies a set of kernel/operator fusions at compile time (via custom [`torch.compile`](torch_compile.md) Inductor passes)
 to separate optimizations from model definitions and avoid breaking layer abstractions in model code.
