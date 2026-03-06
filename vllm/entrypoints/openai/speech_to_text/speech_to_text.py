@@ -166,9 +166,20 @@ class OpenAISpeechToText(OpenAIServing):
             _ = librosa.get_duration(y=dummy_audio, sr=self.asr_config.sample_rate)
 
             # Warm up mel-spectrogram computation with model-specific parameters
+            # Note: Some models (e.g., Kimi-Audio) don't have a ProcessorMixin,
+            # so we catch TypeError from cached_processor_from_config
             from vllm.transformers_utils.processor import cached_processor_from_config
 
-            processor = cached_processor_from_config(self.model_config)
+            try:
+                processor = cached_processor_from_config(self.model_config)
+            except TypeError:
+                # Model doesn't have a proper processor (e.g., Kimi-Audio)
+                # uses tokenizer instead of processor
+                logger.debug(
+                    "Skipping audio warmup: model uses tokenizer instead of processor"
+                )
+                return
+
             feature_extractor = None
             # Check if processor is actually a ProcessorMixin (not just a tokenizer)
             from transformers import ProcessorMixin
