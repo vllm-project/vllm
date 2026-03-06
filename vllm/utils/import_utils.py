@@ -418,7 +418,10 @@ def has_triton_kernels() -> bool:
         "vllm.third_party.triton_kernels"
     )
     if is_available:
-        import_triton_kernels()
+        try:
+            import_triton_kernels()
+        except (ImportError, ModuleNotFoundError):
+            return False
     return is_available
 
 
