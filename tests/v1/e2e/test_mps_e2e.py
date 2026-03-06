@@ -5,6 +5,7 @@
 import weakref
 
 import pytest
+import torch
 
 from vllm.platforms import current_platform
 
@@ -94,3 +95,47 @@ def test_generate_max_tokens(llm: LLM):
     outputs = llm.generate(PROMPTS, sampling_params=sampling_params)
     for output in outputs:
         assert len(output.outputs[0].token_ids) <= max_tokens
+
+
+# E2E validation with real 7B-scale model
+# Note: Using Qwen/Qwen2-7B-Instruct (non-gated, public) instead of Llama-2
+# (which is gated and requires HF authentication).
+E2E_PROMPTS = [
+    "Once upon a time,",
+    "The key to happiness is",
+]
+
+
+@pytest.fixture(scope="module")
+def llm_qwen_float16():
+    """Fixture for Qwen2-7B with FP16 precision (E2E validation)."""
+    llm = LLM(
+        model="Qwen/Qwen2-7B-Instruct",
+        max_num_batched_tokens=2048,
+        tensor_parallel_size=1,
+        enforce_eager=True,
+        dtype="float16",
+        gpu_memory_utilization=0.9,
+    )
+    yield weakref.proxy(llm)
+    del llm
+    cleanup_dist_env_and_memory()
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
+def test_7b_model_float16_generation(llm_qwen_float16: LLM):
+    """E2E validation: 7B-scale model FP16 inference on MPS.
+
+    This is the primary validation test for Metal kernels in vLLM.
+    Confirms that a 7B-scale LLM can run inference with FP16 precision using
+    the Hub Metal kernels (paged-attention, rotary-embedding, fused-rms-norm)
+    and MPS platform backend.
+    """
+    sampling_params = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=20)
+    outputs = llm_qwen_float16.generate(E2E_PROMPTS, sampling_params=sampling_params)
+    assert len(outputs) == len(E2E_PROMPTS)
+    for output in outputs:
+        assert len(output.outputs) > 0
+        assert len(output.outputs[0].text) > 0
+        assert len(output.outputs[0].token_ids) > 0
