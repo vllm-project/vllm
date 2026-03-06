@@ -187,7 +187,15 @@ class EngineCore:
         # to eliminate pipeline bubbles.
         self.batch_queue_size = self.model_executor.max_concurrent_batches
         self.batch_queue: (
-            deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]] | None
+            deque[
+                tuple[
+                    Future[ModelRunnerOutput],
+                    SchedulerOutput,
+                    Future[Any],
+                    float,
+                ]
+            ]
+            | None
         ) = None
         if self.batch_queue_size > 1:
             logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
@@ -347,7 +355,14 @@ class EngineCore:
             raise err
 
     @contextmanager
-    def log_iteration_details(self, scheduler_output: SchedulerOutput):
+    def log_iteration_details(
+        self,
+        scheduler_output: SchedulerOutput,
+        submit_time: float | None = None,
+    ):
+        """Log iteration stats. If submit_time is set (batch-queue path), elapsed
+        time is from submit to now; otherwise it's the time inside this with block.
+        """
         if not self.vllm_config.observability_config.enable_logging_iteration_details:
             yield
             return
@@ -355,6 +370,10 @@ class EngineCore:
         iteration_details = compute_iteration_details(scheduler_output)
         before = time.monotonic()
         yield
+        if submit_time is not None:
+            elapsed_ms = (time.monotonic() - submit_time) * 1000
+        else:
+            elapsed_ms = (time.monotonic() - before) * 1000
         logger.info(
             "".join(
                 [
@@ -369,7 +388,7 @@ class EngineCore:
                     " generation requests, ",
                     str(iteration_details.num_generation_tokens),
                     " generation tokens, iteration elapsed time: ",
-                    format((time.monotonic() - before) * 1000, ".2f"),
+                    format(elapsed_ms, ".2f"),
                     " ms",
                 ]
             )
@@ -472,7 +491,9 @@ class EngineCore:
 
             if not deferred_scheduler_output:
                 # Add this step's future to the queue.
-                batch_queue.appendleft((future, scheduler_output, exec_future))
+                batch_queue.appendleft(
+                    (future, scheduler_output, exec_future, time.monotonic())
+                )
                 if (
                     model_executed
                     and len(batch_queue) < self.batch_queue_size
@@ -489,10 +510,10 @@ class EngineCore:
             return None, False
 
         # Block until the next result is available.
-        future, scheduler_output, exec_model_fut = batch_queue.pop()
+        future, scheduler_output, exec_model_fut, submit_time = batch_queue.pop()
         with (
             self.log_error_detail(scheduler_output),
-            self.log_iteration_details(scheduler_output),
+            self.log_iteration_details(scheduler_output, submit_time=submit_time),
         ):
             model_output = future.result()
             if model_output is None:
@@ -530,7 +551,9 @@ class EngineCore:
                 deferred_scheduler_output
             )
             future = self.model_executor.sample_tokens(grammar_output, non_block=True)
-            batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
+            batch_queue.appendleft(
+                (future, deferred_scheduler_output, exec_future, time.monotonic())
+            )
 
         return engine_core_outputs, model_executed
 
