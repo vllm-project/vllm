@@ -255,7 +255,7 @@ def _flashinfer_fp8_blockscale_gemm_impl(
 
     This batch-size-dependent selection is essential for maintaining model accuracy.
     Benchmarks on GSM8K show a significant accuracy gap (88% vs 95%) for DeepSeek-V3.1
-    when using FlashInfer's DeepGEMM on M>=32. The M < 32 strategy fixes the accurracy
+    when using FlashInfer's DeepGEMM on M>=32. The M < 32 strategy fixes the accuracy
     drop.
 
     Args:
@@ -1407,7 +1407,7 @@ def _maybe_pad_fp8_weight(weight: torch.Tensor) -> torch.Tensor:
         import torch.nn.functional as F
 
         weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
     return weight
 
 
