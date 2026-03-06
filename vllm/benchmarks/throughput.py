@@ -7,6 +7,7 @@ import dataclasses
 import json
 import os
 import random
+import statistics
 import time
 import warnings
 from typing import Any
@@ -932,6 +933,53 @@ def main(args: argparse.Namespace):
     print(f"Total num prompt tokens:  {total_prompt_tokens}")
     print(f"Total num output tokens:  {total_output_tokens}")
 
+    ttft_ms_list: list[float] = []
+    tpot_ms_list: list[float] = []
+    if request_outputs and args.backend in ("vllm", "vllm-chat"):
+        for ro in request_outputs:
+            if not isinstance(ro, RequestOutput) or ro.metrics is None:
+                continue
+            m = ro.metrics
+            if getattr(m, "first_token_latency", None) is not None:
+                ttft_ms_list.append(m.first_token_latency * 1000.0)
+            num_out = (
+                sum(len(o.token_ids) for o in ro.outputs if o) if ro.outputs else 0
+            )
+            if (
+                num_out > 1
+                and getattr(m, "first_token_ts", None) is not None
+                and getattr(m, "last_token_ts", None) is not None
+            ):
+                tpot_sec = (m.last_token_ts - m.first_token_ts) / (num_out - 1)
+                tpot_ms_list.append(tpot_sec * 1000.0)
+        if ttft_ms_list:
+            print(
+                "TTFT (ms): mean %.2f, median %.2f, p99 %.2f"
+                % (
+                    statistics.mean(ttft_ms_list),
+                    statistics.median(ttft_ms_list),
+                    sorted(ttft_ms_list)[
+                        min(int(0.99 * len(ttft_ms_list)), len(ttft_ms_list) - 1)
+                    ],
+                )
+            )
+        if tpot_ms_list:
+            print(
+                "TPOT (ms): mean %.2f, median %.2f, p99 %.2f"
+                % (
+                    statistics.mean(tpot_ms_list),
+                    statistics.median(tpot_ms_list),
+                    sorted(tpot_ms_list)[
+                        min(int(0.99 * len(tpot_ms_list)), len(tpot_ms_list) - 1)
+                    ],
+                )
+            )
+        if not ttft_ms_list and not tpot_ms_list:
+            print(
+                "TTFT/TPOT: no per-request stats. Enable by not passing "
+                "--disable-log-stats to the throughput command."
+            )
+
     # Output JSON results if specified
     if args.output_json:
         results = {
@@ -941,6 +989,18 @@ def main(args: argparse.Namespace):
             "requests_per_second": len(requests) / elapsed_time,
             "tokens_per_second": total_num_tokens / elapsed_time,
         }
+        if ttft_ms_list:
+            results["ttft_ms_mean"] = statistics.mean(ttft_ms_list)
+            results["ttft_ms_median"] = statistics.median(ttft_ms_list)
+            results["ttft_ms_p99"] = sorted(ttft_ms_list)[
+                min(int(0.99 * len(ttft_ms_list)), len(ttft_ms_list) - 1)
+            ]
+        if tpot_ms_list:
+            results["tpot_ms_mean"] = statistics.mean(tpot_ms_list)
+            results["tpot_ms_median"] = statistics.median(tpot_ms_list)
+            results["tpot_ms_p99"] = sorted(tpot_ms_list)[
+                min(int(0.99 * len(tpot_ms_list)), len(tpot_ms_list) - 1)
+            ]
         with open(args.output_json, "w") as f:
             json.dump(results, f, indent=4)
         save_to_pytorch_benchmark_format(args, results)
