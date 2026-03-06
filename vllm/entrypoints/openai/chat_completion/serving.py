@@ -1932,7 +1932,7 @@ class OpenAIServingChat(OpenAIServing):
         # if the model supports it. TODO: Support browsing.
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
-        if reasoning_effort := request.reasoning_effort == "none":
+        if (reasoning_effort := request.reasoning_effort) == "none":
             raise ValueError(f"Harmony does not support {reasoning_effort=}")
         sys_msg = get_system_message(
             reasoning_effort=reasoning_effort,
