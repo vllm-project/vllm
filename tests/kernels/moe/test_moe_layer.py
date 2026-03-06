@@ -81,7 +81,7 @@ QUANT_METHODS = [
 
 # Which quantization methods each backend supports.
 # fmt: off
-_BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
+BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
     "allgather_reducescatter": {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
     "mori":                    {None, "fp8", "modelopt_fp8"},
     "flashinfer_all2allv":     {None,        "modelopt_fp8", "modelopt_fp4"},
@@ -89,12 +89,6 @@ _BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
     "deepep_high_throughput":   {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
 }
 # fmt: on
-
-# Which quantization methods support EPLB.
-# ModelOptFp8MoEMethod inherits supports_eplb=False from FusedMoEMethodBase.
-# TODO: double check modelopt fp8
-# modelopt_fp4 excluded: get_expert_weights() can't handle NvFP4 packed format.
-_EPLB_SUPPORTED_QUANTS: set[str | None] = {None, "fp8"}
 
 
 def rank_chunk(num: int, r: int, w: int) -> int:
@@ -518,124 +512,7 @@ def make_fake_moe_layer(
     return _moe
 
 
-def _test_eplb(
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    output_before: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    num_experts: int,
-    n: int,
-    k: int,
-    top_k: int,
-    quantization: str | None,
-    use_ep: bool,
-    tp_size: int,
-    ep_size: int,
-    dp_size: int,
-    shared_experts: torch.nn.Module | None,
-    device: torch.device | int,
-    cpu_group,
-    vllm_config: VllmConfig,
-    num_tokens: int,
-    num_tokens_across_dp: torch.Tensor,
-) -> None:
-    """Test EPLB by rearranging expert weights and verifying output matches.
-
-    Creates a fresh FusedMoE layer with enable_eplb=True, shuffles the
-    physical-to-logical expert mapping, rearranges weights accordingly,
-    sets up EPLB routing state, and checks that the forward pass produces
-    the same output as the non-EPLB layer before rearrangement.
-    """
-    in_dtype = hidden_states.dtype
-
-    # Create a fresh FusedMoE layer with enable_eplb=True.
-    # Delete the original layer's registration so the constructor can
-    # re-use the same "from_forward_context" prefix.
-    cc = vllm_config.compilation_config
-    del cc.static_forward_context["from_forward_context"]
-    cc.static_all_moe_layers.remove("from_forward_context")
-
-    moe_fn, moe_layer = make_fused_moe_layer(
-        quantization=quantization,
-        use_ep=use_ep,
-        hidden_size=k,
-        intermediate_size=n,
-        in_dtype=in_dtype,
-        tp_size=tp_size,
-        ep_size=ep_size,
-        dp_size=dp_size,
-        reduce_results=False,
-        w1=w1,
-        w2=w2,
-        top_k=top_k,
-        global_num_experts=num_experts,
-        shared_experts=shared_experts,
-        enable_eplb=True,
-    )
-
-    if moe_layer._expert_map is not None:
-        moe_layer._expert_map = moe_layer._expert_map.to(device)
-
-    # All ranks must generate the same permutation.
-    set_random_seed(42)
-    initial_indices = torch.arange(num_experts, dtype=torch.long)
-    shuffled_indices = initial_indices[torch.randperm(num_experts)]
-
-    # Rearrange expert weights across EP ranks.
-    expert_weights = [list(moe_layer.get_expert_weights())]
-    rearrange_expert_weights_inplace(
-        old_global_expert_indices=initial_indices.unsqueeze(0),
-        new_global_expert_indices=shuffled_indices.unsqueeze(0),
-        expert_weights=expert_weights,
-        ep_group=cpu_group,
-    )
-
-    # Build logical_to_physical_map from shuffled_indices.
-    # shuffled_indices[physical] = logical, we need the inverse.
-    logical_to_physical = torch.empty(num_experts, dtype=torch.int32, device=device)
-    logical_to_physical[shuffled_indices.to(device)] = torch.arange(
-        num_experts, dtype=torch.int32, device=device
-    )
-
-    moe_layer.set_eplb_state(
-        moe_layer_idx=0,
-        expert_load_view=torch.zeros(
-            (1, num_experts),
-            dtype=torch.int32,
-            device=device,
-        ),
-        logical_to_physical_map=logical_to_physical.reshape(num_experts, 1).unsqueeze(
-            0
-        ),
-        logical_replica_count=torch.ones(
-            (1, num_experts),
-            dtype=torch.int32,
-            device=device,
-        ),
-    )
-
-    with set_forward_context(
-        None,
-        vllm_config,
-        num_tokens=num_tokens,
-        num_tokens_across_dp=num_tokens_across_dp,
-    ):
-        output_after = moe_fn(hidden_states, router_logits)
-
-    # With correct EPLB routing, the before/after outputs should be
-    # nearly identical — same weights, same inputs, compensating routing.
-    # Use the same tolerances as the baseline comparison.
-    if quantization is None:
-        atol, rtol = 3.5e-2, 3.5e-2
-    elif quantization in ("fp8", "modelopt_fp8"):
-        atol, rtol = 6e-2, 6e-2
-    elif quantization == "modelopt_fp4":
-        atol = rtol = 1e-1 + k * 5e-4
-    else:
-        atol, rtol = 6e-2, 6e-2
-
-    torch.testing.assert_close(output_before, output_after, atol=atol, rtol=rtol)
+# TODO: maybe add separate testpoint for this?
 
 
 def _test_loop(
@@ -657,7 +534,6 @@ def _test_loop(
     top_k: int,
     quantization: str | None,
     shared_experts_config: SharedExpertsConfig | None,
-    use_eplb: bool = False,
 ):
     world_size = tp_size * dp_size
     use_ep = ep_size > 1
@@ -747,30 +623,6 @@ def _test_loop(
         ):
             output = moe_fn(hidden_states, router_logits)
 
-        if use_eplb:
-            _test_eplb(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                output_before=output,
-                w1=w1,
-                w2=w2,
-                num_experts=num_experts,
-                n=n,
-                k=k,
-                top_k=top_k,
-                quantization=quantization,
-                use_ep=use_ep,
-                tp_size=tp_size,
-                ep_size=ep_size,
-                dp_size=dp_size,
-                shared_experts=shared_experts,
-                device=device,
-                cpu_group=cpu_group,
-                vllm_config=vllm_config,
-                num_tokens=num_tokens,
-                num_tokens_across_dp=num_tokens_across_dp,
-            )
-
     # TODO: add tolerance to QuantizaedWeights + maybe rename
     if quantization is None:
         atol, rtol = 3.5e-2, 3.5e-2
@@ -793,7 +645,6 @@ def _test_loop(
 @pytest.mark.parametrize("dp_size, tp_size, use_ep", PARALLEL_COMBOS)
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("use_shared_experts", [False, True])
-@pytest.mark.parametrize("use_eplb", [False, True])
 def test_moe_layer(
     m: int,
     n: int,
@@ -806,7 +657,6 @@ def test_moe_layer(
     use_ep: bool,
     backend: str,
     use_shared_experts: bool,
-    use_eplb: bool,
     monkeypatch,
 ):
     set_random_seed(7)
@@ -817,19 +667,7 @@ def test_moe_layer(
     if world_size > num_gpus:
         pytest.skip(f"Not enough GPUs got {num_gpus}, expected {world_size}.")
 
-    if use_eplb:
-        if not use_ep:
-            pytest.skip("EPLB requires expert parallelism (ep_size > 1)")
-        if quantization not in _EPLB_SUPPORTED_QUANTS:
-            pytest.skip(f"EPLB not supported with quantization={quantization}")
-        if num_experts % dp_size != 0:
-            pytest.skip("EPLB requires num_experts divisible by ep_size")
-
-        # TODO(bnell): is this true?
-        if backend.startswith("deepep"):
-            pytest.skip("EPLB not yet supported with deepep backends")
-
-    supported_quants = _BACKEND_SUPPORTED_QUANTS.get(backend)
+    supported_quants = BACKEND_SUPPORTED_QUANTS.get(backend)
     if supported_quants is not None and quantization not in supported_quants:
         pytest.skip(f"{backend} does not support quantization={quantization}")
 
@@ -906,14 +744,10 @@ def test_moe_layer(
     hidden_states = torch.randn((m, k), device="cuda", dtype=in_dtype) / 10
     router_logits = torch.randn((m, num_experts), device="cuda", dtype=in_dtype)
 
-    # do these really need a clone?
-    hidden_states_clone = hidden_states.clone().detach()
-    router_logits_clone = router_logits.clone().detach()
-
     baseline_output = baseline_layer(hidden_states, router_logits)
 
     # Free the baseline layer and main-process CUDA memory before spawn.
-    del baseline_layer, hidden_states, router_logits
+    del baseline_layer
     torch.accelerator.empty_cache()
 
     parallel_launch_with_config(
@@ -925,8 +759,8 @@ def test_moe_layer(
         dp_size,
         tp_size,
         baseline_output,
-        hidden_states_clone,
-        router_logits_clone,
+        hidden_states,
+        router_logits,
         w1,
         w2,
         num_experts,
@@ -936,5 +770,310 @@ def test_moe_layer(
         top_k,
         quantization,
         shared_experts_config,
-        use_eplb,
+    )
+
+
+def _test_eplb_loop(
+    pgi: ProcessGroupInfo,
+    vllm_config: VllmConfig,
+    cpu_group,
+    ep_size: int,
+    dp_size: int,
+    tp_size: int,
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    num_experts: int,
+    m: int,
+    n: int,
+    k: int,
+    top_k: int,
+    quantization: str | None,
+    shared_experts_config: SharedExpertsConfig | None,
+):
+    """Worker for EPLB test: create layer, get output, rearrange, compare."""
+    world_size = tp_size * dp_size
+    use_ep = ep_size > 1
+
+    assert vllm_config.parallel_config.enable_expert_parallel == use_ep
+
+    set_random_seed(7)
+
+    in_dtype = hidden_states.dtype
+
+    device = torch.cuda.current_device()
+    init_workspace_manager(device)
+
+    dp_rank = vllm_config.parallel_config.data_parallel_rank
+    tp_rank = pgi.rank % tp_size
+
+    if ep_size > 1:
+        w1 = chunk_by_rank(w1, dp_rank, dp_size, dim=0, device=device)
+        w2 = chunk_by_rank(w2, dp_rank, dp_size, dim=0, device=device)
+
+    if tp_size > 1:
+        w1 = tp_chunk_gate_up(w1, tp_rank, tp_size, dim=1, device=device)
+        w2 = chunk_by_rank(w2, tp_rank, tp_size, dim=2, device=device)
+
+    if ep_size <= 1 and tp_size <= 1:
+        w1 = w1.to(device)
+        w2 = w2.to(device)
+
+    hidden_states = hidden_states.to(device)
+    router_logits = router_logits.to(device)
+
+    with set_current_vllm_config(vllm_config):
+        if shared_experts_config is not None:
+            s_w1 = shared_experts_config.w1.to(device)
+            s_w2 = shared_experts_config.w2.to(device)
+
+            if tp_size > 1:
+                s_w1 = tp_chunk_gate_up(s_w1, tp_rank, tp_size, dim=1, device=device)
+                s_w2 = chunk_by_rank(s_w2, tp_rank, tp_size, dim=0, device=device)
+
+            shared_experts = TestMLP(
+                w1=s_w1,
+                w2=s_w2,
+                out_dtype=in_dtype,
+            )
+        else:
+            shared_experts = None
+
+        # Create the initial layer and get "before" output.
+        moe_fn, moe_layer = make_fused_moe_layer(
+            quantization=quantization,
+            use_ep=use_ep,
+            hidden_size=k,
+            intermediate_size=n,
+            in_dtype=in_dtype,
+            tp_size=tp_size,
+            ep_size=ep_size,
+            dp_size=dp_size,
+            reduce_results=False,
+            w1=w1,
+            w2=w2,
+            top_k=top_k,
+            global_num_experts=num_experts,
+            shared_experts=shared_experts,
+        )
+
+        if moe_layer._expert_map is not None:
+            moe_layer._expert_map = moe_layer._expert_map.to(device)
+
+        num_tokens = m
+        num_tokens_across_dp = torch.tensor(
+            [num_tokens] * world_size,
+            device=device,
+            dtype=torch.int,
+        )
+
+        with set_forward_context(
+            None,
+            vllm_config,
+            num_tokens=num_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
+        ):
+            output_before = moe_fn(hidden_states, router_logits)
+
+        # Create a fresh FusedMoE layer with enable_eplb=True.
+        # Delete the original layer's registration so the constructor can
+        # re-use the same "from_forward_context" prefix.
+        cc = vllm_config.compilation_config
+        del cc.static_forward_context["from_forward_context"]
+        cc.static_all_moe_layers.remove("from_forward_context")
+
+        moe_fn, moe_layer = make_fused_moe_layer(
+            quantization=quantization,
+            use_ep=use_ep,
+            hidden_size=k,
+            intermediate_size=n,
+            in_dtype=in_dtype,
+            tp_size=tp_size,
+            ep_size=ep_size,
+            dp_size=dp_size,
+            reduce_results=False,
+            w1=w1,
+            w2=w2,
+            top_k=top_k,
+            global_num_experts=num_experts,
+            shared_experts=shared_experts,
+            enable_eplb=True,
+        )
+
+        if moe_layer._expert_map is not None:
+            moe_layer._expert_map = moe_layer._expert_map.to(device)
+
+        # All ranks must generate the same permutation.
+        set_random_seed(42)
+        initial_indices = torch.arange(num_experts, dtype=torch.long)
+        shuffled_indices = initial_indices[torch.randperm(num_experts)]
+
+        # Rearrange expert weights across EP ranks.
+        expert_weights = [list(moe_layer.get_expert_weights())]
+        rearrange_expert_weights_inplace(
+            old_global_expert_indices=initial_indices.unsqueeze(0),
+            new_global_expert_indices=shuffled_indices.unsqueeze(0),
+            expert_weights=expert_weights,
+            ep_group=cpu_group,
+        )
+
+        # Build logical_to_physical_map from shuffled_indices.
+        # shuffled_indices[physical] = logical, we need the inverse.
+        logical_to_physical = torch.empty(num_experts, dtype=torch.int32, device=device)
+        logical_to_physical[shuffled_indices.to(device)] = torch.arange(
+            num_experts, dtype=torch.int32, device=device
+        )
+
+        moe_layer.set_eplb_state(
+            moe_layer_idx=0,
+            expert_load_view=torch.zeros(
+                (1, num_experts),
+                dtype=torch.int32,
+                device=device,
+            ),
+            logical_to_physical_map=logical_to_physical.reshape(
+                num_experts, 1
+            ).unsqueeze(0),
+            logical_replica_count=torch.ones(
+                (1, num_experts),
+                dtype=torch.int32,
+                device=device,
+            ),
+        )
+
+        with set_forward_context(
+            None,
+            vllm_config,
+            num_tokens=num_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
+        ):
+            output_after = moe_fn(hidden_states, router_logits)
+
+        # With correct EPLB routing, the before/after outputs should be
+        # nearly identical — same weights, same inputs, compensating routing.
+        if quantization is None:
+            atol, rtol = 3.5e-2, 3.5e-2
+        elif quantization in ("fp8", "modelopt_fp8"):
+            atol, rtol = 6e-2, 6e-2
+        elif quantization == "modelopt_fp4":
+            atol = rtol = 1e-1 + k * 5e-4
+        else:
+            atol, rtol = 6e-2, 6e-2
+
+        torch.testing.assert_close(output_before, output_after, atol=atol, rtol=rtol)
+
+
+# Which quantization methods support EPLB.
+# ModelOptFp8MoEMethod inherits supports_eplb=False from FusedMoEMethodBase.
+# TODO: double check modelopt fp8
+# modelopt_fp4 excluded: get_expert_weights() can't handle NvFP4 packed format.
+EPLB_SUPPORTED_QUANTS: list[str | None] = [None, "fp8"]
+
+# Which backends support EPLB.
+# deepep backends fail in get_expert_weights / rearrange_expert_weights_inplace.
+# TODO(bnell): check this
+EPLB_SUPPORTED_BACKENDS: list[str] = ["allgather_reducescatter"]
+
+# EPLB only works with EP and specific quant methods.
+EPLB_PARALLEL_COMBOS = [
+    [2, 1, True],
+    [4, 1, True],
+]
+
+
+@pytest.mark.parametrize("m, n, k", SHAPE_COMBOS)
+@pytest.mark.parametrize("num_experts", NUM_EXPERTS)
+@pytest.mark.parametrize("top_k", TOP_KS)
+@pytest.mark.parametrize("quantization", EPLB_SUPPORTED_QUANTS)
+@pytest.mark.parametrize("dp_size, tp_size, use_ep", EPLB_PARALLEL_COMBOS)
+@pytest.mark.parametrize("backend", EPLB_SUPPORTED_BACKENDS)
+@pytest.mark.parametrize("use_shared_experts", [False, True])
+def test_moe_layer_eplb(
+    m: int,
+    n: int,
+    k: int,
+    num_experts: int,
+    top_k: int,
+    quantization: str | None,
+    dp_size: int,
+    tp_size: int,
+    use_ep: bool,
+    backend: str,
+    use_shared_experts: bool,
+    monkeypatch,
+):
+    set_random_seed(7)
+
+    num_gpus = cuda_device_count_stateless()
+    world_size = tp_size * dp_size
+
+    if world_size > num_gpus:
+        pytest.skip(f"Not enough GPUs got {num_gpus}, expected {world_size}.")
+
+    if num_experts % dp_size != 0:
+        pytest.skip("EPLB requires num_experts divisible by ep_size")
+
+    test_env = dict()
+    test_env["VLLM_MOE_DP_CHUNK_SIZE"] = "128"
+    monkeypatch.setenv("VLLM_MOE_DP_CHUNK_SIZE", "128")
+
+    parallel_config = ParallelConfig(
+        pipeline_parallel_size=1,
+        data_parallel_size=dp_size,
+        tensor_parallel_size=tp_size,
+        enable_expert_parallel=use_ep,
+        all2all_backend=backend,
+    )
+
+    compilation_config = CompilationConfig()
+    compilation_config.pass_config.fuse_allreduce_rms = False
+
+    vllm_config = VllmConfig(
+        parallel_config=parallel_config, compilation_config=compilation_config
+    )
+
+    in_dtype = torch.bfloat16
+
+    (w1, _, _, _), (w2, _, _, _) = make_test_weights(
+        num_experts,
+        n,
+        k,
+        in_dtype=in_dtype,
+    )
+    # Keep weights on CPU — workers will .to(device).
+    w1 = w1.cpu()
+    w2 = w2.cpu()
+    torch.accelerator.empty_cache()
+
+    if use_shared_experts:
+        shared_experts_config = SharedExpertsConfig(
+            w1=torch.randn((k, n * 2), dtype=in_dtype) / 15,
+            w2=torch.randn((n, k), dtype=in_dtype) / 15,
+        )
+    else:
+        shared_experts_config = None
+
+    hidden_states = torch.randn((m, k), dtype=in_dtype) / 10
+    router_logits = torch.randn((m, num_experts), dtype=in_dtype)
+
+    parallel_launch_with_config(
+        world_size,
+        _test_eplb_loop,
+        vllm_config,
+        test_env,
+        world_size,  # ep_size = world_size for EPLB
+        dp_size,
+        tp_size,
+        hidden_states,
+        router_logits,
+        w1,
+        w2,
+        num_experts,
+        m,
+        n,
+        k,
+        top_k,
+        quantization,
+        shared_experts_config,
     )
