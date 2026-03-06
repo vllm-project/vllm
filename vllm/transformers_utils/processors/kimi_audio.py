@@ -24,7 +24,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from transformers import AddedToken, BatchFeature, ProcessorMixin
+from transformers import BatchFeature, ProcessorMixin
 from transformers.audio_utils import AudioInput
 from transformers.tokenization_utils_base import TextInput
 
@@ -78,53 +78,6 @@ class KimiAudioProcessor(ProcessorMixin):
         kwargs["feature_extractor"] = feature_extractor
         kwargs["tokenizer"] = tokenizer
         super().__init__(**kwargs)
-
-        # Add Kimi-Audio special tokens to tokenizer if not already present
-        if tokenizer is not None and hasattr(tokenizer, "add_tokens"):
-            special_tokens = [
-                AddedToken(
-                    "<|im_media_begin|>",
-                    single_word=True,
-                    normalized=False,
-                    special=True,
-                ),
-                AddedToken(
-                    "<|im_media_end|>", single_word=True, normalized=False, special=True
-                ),
-                AddedToken(
-                    "<|im_kimia_text_blank|>",
-                    single_word=True,
-                    normalized=False,
-                    special=True,
-                ),
-                AddedToken(
-                    "<|im_msg_end|>", single_word=True, normalized=False, special=True
-                ),
-                AddedToken(
-                    "<|im_kimia_user_msg_start|>",
-                    single_word=True,
-                    normalized=False,
-                    special=True,
-                ),
-                AddedToken(
-                    "<|im_kimia_assistant_msg_start|>",
-                    single_word=True,
-                    normalized=False,
-                    special=True,
-                ),
-            ]
-            # Check if tokens already exist
-            try:
-                existing = set(tokenizer.added_tokens_decoder.values())
-                tokens_to_add = [
-                    t
-                    for t in special_tokens
-                    if t.content not in {e.content for e in existing}
-                ]
-                if tokens_to_add:
-                    tokenizer.add_tokens(tokens_to_add)
-            except Exception:
-                pass  # Ignore errors if tokenizer doesn't support added_tokens
 
     def check_argument_for_proper_class(self, attribute_name: str, argument: Any):
         """Override to skip class validation for custom tokenizer."""

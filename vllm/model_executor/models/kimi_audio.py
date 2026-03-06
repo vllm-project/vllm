@@ -314,10 +314,10 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
             num_features = (
                 audio_output_lengths[item_idx]
                 if item_idx < len(audio_output_lengths)
-                else 376
+                else KimiAudioProcessor.AUDIO_SEQ_LEN
             )
             if num_features == 0:
-                num_features = 376  # Default Kimi-Audio sequence length
+                num_features = KimiAudioProcessor.AUDIO_SEQ_LEN
             # Return the placeholder token ID repeated num_features times
             return [KimiAudioProcessor.KIMIA_TEXT_BLANK] * num_features
 

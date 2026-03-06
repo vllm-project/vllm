@@ -7,6 +7,9 @@ import json
 from pathlib import Path
 from typing import Any, overload
 
+import pybase64
+import tiktoken
+from huggingface_hub import hf_hub_download
 from transformers import BatchEncoding
 from transformers.utils import chat_template_utils as hf_chat_utils
 
@@ -22,9 +25,7 @@ def _load_tiktoken_encoding(
 ) -> tuple[Any, dict[str, int]]:
     """Load TikToken encoding from vocab file."""
     try:
-        import base64
-
-        import tiktoken
+        pass  # Imports already at top
     except ImportError as exc:
         raise ImportError(
             "Kimi-Audio tokenizer requires the `tiktoken` package."
@@ -40,7 +41,7 @@ def _load_tiktoken_encoding(
             if len(parts) == 2:
                 token_b64 = parts[0]
                 rank = int(parts[1])
-                token_bytes = base64.b64decode(token_b64)
+                token_bytes = pybase64.b64decode(token_b64)
                 mergeable_ranks[token_bytes] = rank
 
     tokenizer = tiktoken.Encoding(
@@ -79,8 +80,6 @@ class KimiAudioTokenizer(TokenizerLike):
                 vocab_file = path / "tokenizer.model"
         else:
             # Download from HuggingFace Hub
-            from huggingface_hub import hf_hub_download
-
             repo_id = str(path_or_repo_id)
 
             # Try to download tiktoken.model or tokenizer.model
@@ -162,6 +161,9 @@ class KimiAudioTokenizer(TokenizerLike):
             self._token_to_id[token_str] = token_id
             self._id_to_token[token_id] = token_str
 
+        # Add Kimi-Audio special tokens
+        self._add_kimiaudio_special_tokens()
+
         # Add special tokens from added_tokens_decoder (populated later)
         self._added_tokens_decoder: dict[int, Any] = {}
 
@@ -174,6 +176,59 @@ class KimiAudioTokenizer(TokenizerLike):
         self._max_chars_per_token = max(
             (len(tok) for tok in self._token_to_id), default=10
         )
+
+    def _add_kimiaudio_special_tokens(self) -> None:
+        """Add Kimi-Audio special tokens to the tokenizer."""
+        from transformers import AddedToken
+
+        special_tokens = [
+            AddedToken(
+                "<|im_media_begin|>",
+                single_word=True,
+                normalized=False,
+                special=True,
+            ),
+            AddedToken(
+                "<|im_media_end|>", single_word=True, normalized=False, special=True
+            ),
+            AddedToken(
+                "<|im_kimia_text_blank|>",
+                single_word=True,
+                normalized=False,
+                special=True,
+            ),
+            AddedToken(
+                "<|im_msg_end|>", single_word=True, normalized=False, special=True
+            ),
+            AddedToken(
+                "<|im_kimia_user_msg_start|>",
+                single_word=True,
+                normalized=False,
+                special=True,
+            ),
+            AddedToken(
+                "<|im_kimia_assistant_msg_start|>",
+                single_word=True,
+                normalized=False,
+                special=True,
+            ),
+        ]
+        # Check if tokens already exist
+        try:
+            existing = set(self._added_tokens_decoder.values())
+            tokens_to_add = [
+                t
+                for t in special_tokens
+                if t.content not in {e.content for e in existing}
+            ]
+            if tokens_to_add:
+                for token in tokens_to_add:
+                    token_id = len(self._token_to_id) + len(self._added_tokens_decoder)
+                    self._added_tokens_decoder[token_id] = token.content
+                    self._token_to_id[token.content] = token_id
+                    self._id_to_token[token_id] = token.content
+        except Exception:
+            pass  # Ignore errors if tokenizer doesn't support added_tokens
 
     def num_special_tokens_to_add(self) -> int:
         return 0
