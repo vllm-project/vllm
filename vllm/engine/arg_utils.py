@@ -287,6 +287,9 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
         )
         if dataclass_cls is not None:
             # Add documentation link for config classes
+            # dataclass_cls should be a type, not an instance
+            if not isinstance(dataclass_cls, type):
+                continue
             config_module = dataclass_cls.__module__
             config_name = dataclass_cls.__name__
             # Extract the parent module path (e.g., vllm.config.speculative -> vllm/config)
@@ -1528,13 +1531,11 @@ class EngineArgs:
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
         # config.
-        self.speculative_config.update(
-            {
-                "target_model_config": target_model_config,
-                "target_parallel_config": target_parallel_config,
-            }
+        return dataclasses.replace(
+            self.speculative_config,
+            target_model_config=target_model_config,
+            target_parallel_config=target_parallel_config,
         )
-        return SpeculativeConfig(**self.speculative_config)
 
     def create_engine_config(
         self,
@@ -1558,15 +1559,26 @@ class EngineArgs:
         # HuggingFace cannot load configs directly from S3 URLs. S3 models can still
         # use speculators with explicit --speculative-config.
         if not is_cloud_storage(self.model):
-            (self.model, self.tokenizer, self.speculative_config) = (
-                maybe_override_with_speculators(
-                    model=self.model,
-                    tokenizer=self.tokenizer,
-                    revision=self.revision,
-                    trust_remote_code=self.trust_remote_code,
-                    vllm_speculative_config=self.speculative_config,
-                )
+            model, tokenizer, spec_config_dict = maybe_override_with_speculators(
+                model=self.model,
+                tokenizer=self.tokenizer,
+                revision=self.revision,
+                trust_remote_code=self.trust_remote_code,
+                vllm_speculative_config=(
+                    dataclasses.asdict(self.speculative_config)
+                    if self.speculative_config is not None
+                    else None
+                ),
             )
+            self.model = model
+            self.tokenizer = tokenizer
+            # Convert dict back to SpeculativeConfig if needed
+            if spec_config_dict is not None and spec_config_dict != (
+                dataclasses.asdict(self.speculative_config)
+                if self.speculative_config is not None
+                else None
+            ):
+                self.speculative_config = SpeculativeConfig(**spec_config_dict)
 
         model_config = self.create_model_config()
         self.model = model_config.model
