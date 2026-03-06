@@ -2448,7 +2448,8 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
     output = scheduler.schedule()
     assert len(output.scheduled_new_reqs) == 0
     assert len(scheduler.running) == 0
-    assert len(scheduler.waiting) == 1
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.blocked_waiting) == 1
 
 
 @pytest.mark.parametrize(
