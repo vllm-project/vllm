@@ -44,7 +44,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import cuda_device_count_stateless, set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -482,7 +482,7 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> float:
-        warmup_sizes = []
+        warmup_sizes: list[int | str] = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             # warm up sizes that are not in cudagraph capture sizes,
@@ -938,6 +938,37 @@ def init_worker_distributed_environment(
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_method = distributed_init_method or "env://"
+
+    # Set NCCL_P2P_DISABLE=1 on non-fully-connected CUDA topology
+    # to avoid NCCL collective hangs.
+    if (
+        backend == "nccl"
+        and current_platform.is_cuda_alike()
+        and parallel_config.world_size > 2
+    ):
+        cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
+        if cuda_visible_devices:
+            try:
+                physical_device_ids = [int(i) for i in cuda_visible_devices.split(",")]
+            except ValueError:
+                physical_device_ids = []
+        else:
+            physical_device_ids = list(range(cuda_device_count_stateless()))
+        physical_device_ids = physical_device_ids[: parallel_config.world_size]
+        is_fully_connected = current_platform.is_fully_connected(physical_device_ids)
+
+        if (
+            os.environ.get("NCCL_P2P_DISABLE") is None
+            and not is_fully_connected
+            and len(physical_device_ids) == parallel_config.world_size
+        ):
+            os.environ["NCCL_P2P_DISABLE"] = "1"
+            logger.warning(
+                "Setting NCCL_P2P_DISABLE=1 on non-fully-connected CUDA "
+                "topology (%s) to avoid NCCL collective hangs. "
+                "Set NCCL_P2P_DISABLE explicitly to override.",
+                physical_device_ids,
+            )
     init_distributed_environment(
         parallel_config.world_size, rank, init_method, local_rank, backend
     )
