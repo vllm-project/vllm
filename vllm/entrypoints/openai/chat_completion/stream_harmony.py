@@ -7,6 +7,7 @@ This module handles the extraction of DeltaMessage objects from
 harmony parser state during streaming chat completions.
 """
 
+from dataclasses import dataclass
 from typing import NamedTuple
 
 from openai_harmony import StreamableParser
@@ -25,147 +26,215 @@ class TokenState(NamedTuple):
     text: str
 
 
+@dataclass
+class HarmonyStreamingState:
+    emitted_message_count: int = 0
+    next_tool_call_index: int = 0
+    prev_current_signature: tuple[str | None, str | None] | None = None
+    prev_current_emitted_len: int = 0
+    prev_current_tool_index: int | None = None
+    prev_current_tool_header_emitted: bool = False
+
+
+def _is_function_tool_message(channel: str | None, recipient: str | None) -> bool:
+    return (
+        channel in ("commentary", "analysis")
+        and recipient is not None
+        and recipient.startswith("functions.")
+    )
+
+
+def _extract_message_text(message) -> str:
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                texts.append(part)
+            else:
+                text = getattr(part, "text", None)
+                if isinstance(text, str):
+                    texts.append(text)
+        return "".join(texts)
+
+    text = getattr(message, "text", None)
+    if isinstance(text, str):
+        return text
+
+    return ""
+
+
+def _append_tool_deltas(
+    *,
+    tool_messages: list[DeltaToolCall],
+    recipient: str,
+    tool_index: int,
+    emit_header: bool,
+    args_delta: str,
+) -> None:
+    if emit_header:
+        tool_messages.append(
+            DeltaToolCall(
+                id=make_tool_call_id(),
+                type="function",
+                function=DeltaFunctionCall(
+                    name=recipient.split("functions.", 1)[1],
+                    arguments="",
+                ),
+                index=tool_index,
+            )
+        )
+
+    if args_delta:
+        tool_messages.append(
+            DeltaToolCall(
+                index=tool_index,
+                function=DeltaFunctionCall(arguments=args_delta),
+            )
+        )
+
+
 def extract_harmony_streaming_delta(
     harmony_parser: StreamableParser,
-    token_states: list[TokenState],
-    prev_recipient: str | None,
+    stream_state: HarmonyStreamingState,
     include_reasoning: bool,
 ) -> tuple[DeltaMessage | None, bool]:
     """
     Extract a DeltaMessage from harmony parser state during streaming.
 
-    Args:
-        harmony_parser: The StreamableParser instance tracking parse state
-        token_states: List of TokenState tuples for each token
-        prev_recipient: Previous recipient for detecting tool call transitions
-        include_reasoning: Whether to include reasoning content
-
-    Returns:
-        A tuple of (DeltaMessage or None, tools_streamed_flag)
+    Unlike the previous token-group heuristic, this function diffs parser-level
+    completed messages and parser current_content against persistent state.
+    This makes tool call indexing and argument streaming robust across arbitrary
+    chunk boundaries, including repeated recipients.
     """
 
-    if not token_states:
-        return None, False
-
-    tools_streamed = False
-
-    # Group consecutive tokens with same channel/recipient
-    groups: list[TokenState] = []
-
-    current_channel = token_states[0].channel
-    current_recipient = token_states[0].recipient
-    current_text = token_states[0].text
-
-    for i in range(1, len(token_states)):
-        state = token_states[i]
-        if state.channel == current_channel and state.recipient == current_recipient:
-            current_text += state.text
-        else:
-            groups.append(TokenState(current_channel, current_recipient, current_text))
-            current_channel = state.channel
-            current_recipient = state.recipient
-            current_text = state.text
-
-    groups.append(TokenState(current_channel, current_recipient, current_text))
-
-    # Process each group and create delta messages
-    delta_message = None
+    tool_messages: list[DeltaToolCall] = []
     combined_content = ""
     combined_reasoning = ""
-    tool_messages = []
     content_encountered = False
 
-    # Calculate base_index once before the loop
-    # This counts completed tool calls in messages
-    base_index = 0
-    for msg in harmony_parser.messages:
+    prev_signature = stream_state.prev_current_signature
+    prev_emitted_len = stream_state.prev_current_emitted_len
+    prev_tool_index = stream_state.prev_current_tool_index
+    prev_tool_header_emitted = stream_state.prev_current_tool_header_emitted
+
+    carryover_consumed = False
+
+    for msg in harmony_parser.messages[stream_state.emitted_message_count :]:
+        channel = msg.channel
+        recipient = msg.recipient
+        signature = (channel, recipient)
+        msg_text = _extract_message_text(msg)
+
+        already_emitted_len = 0
+        tool_index: int | None = None
+        tool_header_emitted = False
+
         if (
-            (msg.channel == "commentary" or msg.channel == "analysis")
-            and msg.recipient
-            and msg.recipient.startswith("functions.")
+            not carryover_consumed
+            and prev_signature is not None
+            and signature == prev_signature
         ):
-            base_index += 1
+            already_emitted_len = min(prev_emitted_len, len(msg_text))
+            tool_index = prev_tool_index
+            tool_header_emitted = prev_tool_header_emitted
+            carryover_consumed = True
 
-    # If there's an ongoing tool call from previous chunk,
-    # the next new tool call starts at base_index + 1
-    if prev_recipient and prev_recipient.startswith("functions."):
-        next_tool_index = base_index + 1
-        # Ongoing call is at base_index
-        ongoing_tool_index = base_index
+        delta_text = msg_text[already_emitted_len:]
+
+        if _is_function_tool_message(channel, recipient):
+            assert recipient is not None
+            if tool_index is None:
+                tool_index = stream_state.next_tool_call_index
+                stream_state.next_tool_call_index += 1
+            _append_tool_deltas(
+                tool_messages=tool_messages,
+                recipient=recipient,
+                tool_index=tool_index,
+                emit_header=not tool_header_emitted,
+                args_delta=delta_text,
+            )
+        elif channel in ("final", "commentary"):
+            if delta_text:
+                combined_content += delta_text
+                content_encountered = True
+        elif channel == "analysis" and include_reasoning and delta_text:
+            combined_reasoning += delta_text
+
+    stream_state.emitted_message_count = len(harmony_parser.messages)
+
+    current_channel = harmony_parser.current_channel
+    current_recipient = harmony_parser.current_recipient
+    current_signature: tuple[str | None, str | None] | None = None
+    if current_channel is not None:
+        current_signature = (current_channel, current_recipient)
+    current_content = harmony_parser.current_content or ""
+
+    if current_signature is None:
+        stream_state.prev_current_signature = None
+        stream_state.prev_current_emitted_len = 0
+        stream_state.prev_current_tool_index = None
+        stream_state.prev_current_tool_header_emitted = False
     else:
-        # No ongoing call, next new call is at base_index
-        next_tool_index = base_index
-        ongoing_tool_index = None
+        same_current_message = (
+            not carryover_consumed
+            and prev_signature is not None
+            and current_signature == prev_signature
+            and len(current_content) >= prev_emitted_len
+        )
 
-    for group in groups:
-        if group.channel == "final":
-            combined_content += group.text
-            content_encountered = True
-        elif (
-            (group.channel == "commentary" or group.channel == "analysis")
-            and group.recipient
-            and group.recipient.startswith("functions.")
-        ):
-            opened_new_call = False
-            if prev_recipient != group.recipient:
-                # New tool call - emit the opening message
-                tool_name = group.recipient.split("functions.", 1)[1]
-                tool_messages.append(
-                    DeltaToolCall(
-                        id=make_tool_call_id(),
-                        type="function",
-                        function=DeltaFunctionCall(
-                            name=tool_name,
-                            arguments="",
-                        ),
-                        index=next_tool_index,
-                    )
-                )
-                opened_new_call = True
-                prev_recipient = group.recipient
-                # Increment for subsequent new tool calls
-                next_tool_index += 1
+        if same_current_message:
+            already_emitted_len = prev_emitted_len
+            current_tool_index = prev_tool_index
+            current_header_emitted = prev_tool_header_emitted
+        else:
+            already_emitted_len = 0
+            current_tool_index = None
+            current_header_emitted = False
 
-            if group.text:
-                # Stream arguments for the ongoing tool call
-                if opened_new_call:
-                    # Just opened in this group
-                    tool_call_index = next_tool_index - 1
-                else:
-                    # Continuing from previous chunk
-                    # If ongoing_tool_index is None here, it means
-                    # we're continuing a call but prev_recipient
-                    # wasn't a function. Use base_index.
-                    tool_call_index = (
-                        ongoing_tool_index
-                        if ongoing_tool_index is not None
-                        else base_index
-                    )
-                tool_messages.append(
-                    DeltaToolCall(
-                        index=tool_call_index,
-                        function=DeltaFunctionCall(arguments=group.text),
-                    )
-                )
-        elif group.channel == "commentary" and group.recipient is None:
-            # Tool call preambles meant to be shown to the user
-            combined_content += group.text
-            content_encountered = True
-        elif group.channel == "analysis" and include_reasoning:
-            combined_reasoning += group.text
+        delta_text = current_content[already_emitted_len:]
 
-    # Combine all non-empty fields into a single message
-    if content_encountered or combined_reasoning or tool_messages:
-        delta_kwargs: dict[str, str | list[DeltaToolCall]] = {}
-        if content_encountered:
-            delta_kwargs["content"] = combined_content
-        if combined_reasoning:
-            delta_kwargs["reasoning"] = combined_reasoning
-        if tool_messages:
-            delta_kwargs["tool_calls"] = tool_messages
-            tools_streamed = True
-        delta_message = DeltaMessage(**delta_kwargs)
-    else:
-        delta_message = None
+        if _is_function_tool_message(current_channel, current_recipient):
+            assert current_recipient is not None
+            if current_tool_index is None:
+                current_tool_index = stream_state.next_tool_call_index
+                stream_state.next_tool_call_index += 1
 
-    return delta_message, tools_streamed
+            _append_tool_deltas(
+                tool_messages=tool_messages,
+                recipient=current_recipient,
+                tool_index=current_tool_index,
+                emit_header=not current_header_emitted,
+                args_delta=delta_text,
+            )
+
+            stream_state.prev_current_tool_index = current_tool_index
+            stream_state.prev_current_tool_header_emitted = True
+        else:
+            if current_channel in ("final", "commentary"):
+                if delta_text:
+                    combined_content += delta_text
+                    content_encountered = True
+            elif current_channel == "analysis" and include_reasoning and delta_text:
+                combined_reasoning += delta_text
+
+            stream_state.prev_current_tool_index = None
+            stream_state.prev_current_tool_header_emitted = False
+
+        stream_state.prev_current_signature = current_signature
+        stream_state.prev_current_emitted_len = len(current_content)
+
+    if not (content_encountered or combined_reasoning or tool_messages):
+        return None, False
+
+    delta_kwargs: dict[str, str | list[DeltaToolCall]] = {}
+    if content_encountered:
+        delta_kwargs["content"] = combined_content
+    if combined_reasoning:
+        delta_kwargs["reasoning"] = combined_reasoning
+    if tool_messages:
+        delta_kwargs["tool_calls"] = tool_messages
+
+    return DeltaMessage(**delta_kwargs), bool(tool_messages)

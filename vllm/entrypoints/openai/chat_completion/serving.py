@@ -35,7 +35,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatMessage,
 )
 from vllm.entrypoints.openai.chat_completion.stream_harmony import (
-    TokenState,
+    HarmonyStreamingState,
     extract_harmony_streaming_delta,
 )
 from vllm.entrypoints.openai.engine.protocol import (
@@ -62,6 +62,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     get_system_message,
     parse_chat_inputs_to_harmony_messages,
     parse_chat_output,
+    parse_output_into_messages,
     render_for_completion,
 )
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
@@ -298,7 +299,7 @@ class OpenAIServingChat(OpenAIServing):
             )
         else:
             # For GPT-OSS.
-            should_include_tools = tool_dicts is not None
+            should_include_tools = bool(tool_dicts)
             conversation, engine_prompts = self._make_request_with_harmony(
                 request, should_include_tools
             )
@@ -621,13 +622,20 @@ class OpenAIServingChat(OpenAIServing):
             harmony_parsers = [
                 get_streamable_parser_for_assistant() for _ in range(num_choices)
             ]
+            harmony_stream_states = [
+                HarmonyStreamingState() for _ in range(num_choices)
+            ]
             harmony_tools_streamed = [False] * num_choices
+            harmony_fallback_to_text = [False] * num_choices
+            harmony_all_token_ids: list[list[int]] = [[] for _ in range(num_choices)]
+            harmony_visible_output_streamed = [False] * num_choices
         tools_streamed = [False] * num_choices
 
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             tool_choice_function_name = request.tool_choice.function.name
         else:
             tool_choice_function_name = None
+        harmony_allow_tool_calls = bool(request.tools)
 
         # Determine whether tools are in use with "auto" tool choice
         tool_choice_auto = (
@@ -776,6 +784,8 @@ class OpenAIServingChat(OpenAIServing):
                 for output in res.outputs:
                     i = output.index
                     tool_parser = tool_parsers[i]
+                    if self.use_harmony and output.token_ids:
+                        harmony_all_token_ids[i].extend(as_list(output.token_ids))
 
                     if (
                         reasoning_parser
@@ -803,29 +813,27 @@ class OpenAIServingChat(OpenAIServing):
                         logprobs = None
 
                     if self.use_harmony:
-                        harmony_parser = harmony_parsers[i]
-                        prev_recipient = harmony_parser.current_recipient
-
-                        # Track accumulated content per token with their state
-                        token_states: list[TokenState] = []
-                        for token_id in output.token_ids:
-                            harmony_parser.process(token_id)
-                            token_delta = harmony_parser.last_content_delta or ""
-                            token_states.append(
-                                TokenState(
-                                    harmony_parser.current_channel,
-                                    harmony_parser.current_recipient,
-                                    token_delta,
+                        if harmony_fallback_to_text[i]:
+                            delta_text = output.text
+                        else:
+                            harmony_parser = harmony_parsers[i]
+                            delta_text = ""
+                            try:
+                                for token_id in output.token_ids:
+                                    harmony_parser.process(token_id)
+                                    delta_text += (
+                                        harmony_parser.last_content_delta or ""
+                                    )
+                            except Exception as e:
+                                logger.warning(
+                                    "Harmony parser failed in streaming; "
+                                    "falling back to raw text deltas. "
+                                    "choice=%d, error=%s",
+                                    i,
+                                    e,
                                 )
-                            )
-                        delta_text = "".join(delta for _, _, delta in token_states)
-                        cur_channel = harmony_parser.current_channel
-
-                        # handle the case where several tokens where generated at once
-                        # including the final token, leading to a delta in the text
-                        # but the current channel to be empty (start state)
-                        if not cur_channel and delta_text:
-                            cur_channel = "final"
+                                harmony_fallback_to_text[i] = True
+                                delta_text = output.text
                     else:
                         delta_text = output.text
 
@@ -855,14 +863,35 @@ class OpenAIServingChat(OpenAIServing):
                             current_token_ids = as_list(output.token_ids)
 
                     if self.use_harmony:
-                        delta_message, tools_streamed_flag = (
-                            extract_harmony_streaming_delta(
-                                harmony_parser=harmony_parser,
-                                token_states=token_states,
-                                prev_recipient=prev_recipient,
-                                include_reasoning=request.include_reasoning,
+                        if harmony_fallback_to_text[i]:
+                            delta_message = DeltaMessage(content=delta_text)
+                            tools_streamed_flag = False
+                        else:
+                            delta_message, tools_streamed_flag = (
+                                extract_harmony_streaming_delta(
+                                    harmony_parser=harmony_parser,
+                                    stream_state=harmony_stream_states[i],
+                                    include_reasoning=request.include_reasoning,
+                                )
                             )
-                        )
+                        if (
+                            not harmony_allow_tool_calls
+                            and delta_message is not None
+                            and delta_message.tool_calls
+                        ):
+                            if (
+                                delta_message.role is not None
+                                or delta_message.content is not None
+                                or delta_message.reasoning is not None
+                            ):
+                                delta_message = DeltaMessage(
+                                    role=delta_message.role,
+                                    content=delta_message.content,
+                                    reasoning=delta_message.reasoning,
+                                )
+                            else:
+                                delta_message = None
+                            tools_streamed_flag = False
                         harmony_tools_streamed[i] |= tools_streamed_flag
                     # handle streaming deltas for tools with named tool_choice
                     elif tool_choice_function_name:
@@ -1138,6 +1167,15 @@ class OpenAIServingChat(OpenAIServing):
                             continue
                         delta_message = DeltaMessage()
 
+                    if self.use_harmony and (
+                        (
+                            delta_message.content is not None
+                            and delta_message.content != ""
+                        )
+                        or bool(delta_message.tool_calls)
+                    ):
+                        harmony_visible_output_streamed[i] = True
+
                     # Log streaming delta if output logging is enabled
                     if self.enable_log_outputs and self.request_logger:
                         delta_content_parts = []
@@ -1202,10 +1240,14 @@ class OpenAIServingChat(OpenAIServing):
                             index = 0
 
                         if (
-                            self._should_check_for_unstreamed_tool_arg_tokens(
+                            not self.use_harmony
+                            and auto_tools_called
+                            and tool_parser is not None
+                            and index < len(tool_parser.prev_tool_call_arr)
+                            and index < len(tool_parser.streamed_args_for_tool)
+                            and self._should_check_for_unstreamed_tool_arg_tokens(
                                 delta_message, output
                             )
-                            and tool_parser
                         ):
                             latest_delta_len = 0
                             if (
@@ -1251,6 +1293,24 @@ class OpenAIServingChat(OpenAIServing):
                             delta_message = self._create_remaining_args_delta(
                                 delta_message, remaining_call, index
                             )
+
+                        if self.use_harmony and not harmony_visible_output_streamed[i]:
+                            recovered_delta, recovered_tools_called = (
+                                self._recover_harmony_terminal_delta(
+                                    request=request,
+                                    tokenizer=tokenizer,
+                                    token_ids=harmony_all_token_ids[i],
+                                )
+                            )
+                            if recovered_delta is not None:
+                                delta_message = recovered_delta
+                                if (
+                                    recovered_delta.content is not None
+                                    and recovered_delta.content != ""
+                                ) or recovered_delta.tool_calls:
+                                    harmony_visible_output_streamed[i] = True
+                                if recovered_tools_called:
+                                    harmony_tools_streamed[i] = True
 
                         # Send the finish response for each request.n only once
                         # In OpenAI's API, when a tool is called, the
@@ -1421,7 +1481,7 @@ class OpenAIServingChat(OpenAIServing):
                 if not request.include_reasoning:
                     reasoning = None
 
-                if self.tool_parser is not None:
+                if self.tool_parser is not None and request.tools:
                     if tokenizer is None:
                         raise ValueError(
                             "Tokenizer not available when `skip_tokenizer_init=True`"
@@ -1914,6 +1974,88 @@ class OpenAIServingChat(OpenAIServing):
                 )
             ]
         )
+
+    def _recover_harmony_terminal_delta(
+        self,
+        *,
+        request: ChatCompletionRequest,
+        tokenizer: TokenizerLike | None,
+        token_ids: list[int],
+    ) -> tuple[DeltaMessage | None, bool]:
+        """
+        Recover a final Harmony delta from aggregate token_ids when streaming
+        produced no visible content/tool delta for a choice.
+        """
+        if not token_ids:
+            return None, False
+
+        recovered_content: str | None = None
+        if self.tool_parser is not None and request.tools and tokenizer is not None:
+            try:
+                tool_parser = self.tool_parser(tokenizer)
+                tool_call_info = tool_parser.extract_tool_calls(
+                    "",
+                    request=request,
+                    token_ids=token_ids,  # type: ignore
+                )
+            except Exception:
+                logger.exception("Failed to recover Harmony terminal tool calls.")
+            else:
+                if tool_call_info.tools_called and tool_call_info.tool_calls:
+                    recovered_tool_calls: list[DeltaToolCall] = []
+                    for idx, tc in enumerate(tool_call_info.tool_calls):
+                        fn = tc.function
+                        recovered_tool_calls.append(
+                            DeltaToolCall(
+                                index=idx,
+                                id=tc.id,
+                                type=tc.type,
+                                function=DeltaFunctionCall(
+                                    name=fn.name if fn else None,
+                                    arguments=fn.arguments if fn else None,
+                                ),
+                            )
+                        )
+                    return (
+                        DeltaMessage(
+                            content=tool_call_info.content,
+                            tool_calls=recovered_tool_calls,
+                        ),
+                        True,
+                    )
+                recovered_content = tool_call_info.content
+
+        try:
+            harmony_parser = parse_output_into_messages(token_ids)
+        except Exception:
+            logger.exception("Failed to parse Harmony terminal output from token IDs.")
+            return None, False
+
+        delta_message, tools_called = extract_harmony_streaming_delta(
+            harmony_parser=harmony_parser,
+            stream_state=HarmonyStreamingState(),
+            include_reasoning=request.include_reasoning,
+        )
+
+        if delta_message is not None and delta_message.tool_calls and not request.tools:
+            if (
+                delta_message.role is not None
+                or delta_message.content is not None
+                or delta_message.reasoning is not None
+            ):
+                delta_message = DeltaMessage(
+                    role=delta_message.role,
+                    content=delta_message.content,
+                    reasoning=delta_message.reasoning,
+                )
+            else:
+                delta_message = None
+            tools_called = False
+
+        if delta_message is None and recovered_content:
+            return DeltaMessage(content=recovered_content), False
+
+        return delta_message, tools_called
 
     def _make_request_with_harmony(
         self,
