@@ -65,7 +65,9 @@ def _supports_f32x2_intrinsics() -> bool:
     return major >= 10
 
 
-if _supports_f32x2_intrinsics():
+_USE_PACKED_F32X2 = _supports_f32x2_intrinsics()
+
+if _USE_PACKED_F32X2:
     fma_packed_f32x2 = partial(cute.arch.fma_packed_f32x2, rnd=nvvm.RoundingModeKind.RN)
     mul_packed_f32x2 = partial(cute.arch.mul_packed_f32x2, rnd=nvvm.RoundingModeKind.RN)
     add_packed_f32x2 = partial(cute.arch.add_packed_f32x2, rnd=nvvm.RoundingModeKind.RN)
@@ -76,23 +78,19 @@ if _supports_f32x2_intrinsics():
         rnd=nvvm.RoundingModeKind.RN,
     )
 else:
-    logger.info_once(
-        "Using scalar fallback for cutedsl transpose GDN packed f32x2 ops (SM<100)."
-    )
+    logger.info_once("Using scalar fallback for cutedsl transpose GDN ops (SM<100).")
 
-    @cute.jit
+    # For SM<100, define scalar operations that work with single values
+    # The packed functions return tuples, so we mimic that interface
     def fma_packed_f32x2(a, b, c):
         return a[0] * b[0] + c[0], a[1] * b[1] + c[1]
 
-    @cute.jit
     def mul_packed_f32x2(a, b):
         return a[0] * b[0], a[1] * b[1]
 
-    @cute.jit
     def add_packed_f32x2(a, b):
         return a[0] + b[0], a[1] + b[1]
 
-    @cute.jit
     def sub_packed_f32x2(a, b):
         return a[0] - b[0], a[1] - b[1]
 
@@ -120,21 +118,18 @@ def reduce_dim0(
 
     input_r_ = cute.make_rmem_tensor_like(output, input_r.element_type)
 
-    for reg_H_idx_y in cutlass.range_constexpr(0, DIM1, 2, unroll=(DIM1 // 2)):
-        input_r_[reg_H_idx_y], input_r_[reg_H_idx_y + 1] = add_packed_f32x2(
-            (input_r[reg_H_idx_y * DIM0], input_r[(reg_H_idx_y + 1) * DIM0]),
-            (input_r[reg_H_idx_y * DIM0 + 1], input_r[(reg_H_idx_y + 1) * DIM0 + 1]),
-        )
+    # Initialize accumulators
+    for reg_H_idx_y in cutlass.range_constexpr(0, DIM1, 1, unroll=DIM1):
+        input_r_[reg_H_idx_y] = input_r[reg_H_idx_y * DIM0]
 
-        for reg_H_idx_x in cutlass.range_constexpr(2, DIM0, 1, unroll=(DIM0 - 2)):
-            input_r_[reg_H_idx_y], input_r_[reg_H_idx_y + 1] = add_packed_f32x2(
-                (input_r_[reg_H_idx_y], input_r_[reg_H_idx_y + 1]),
-                (
-                    input_r[reg_H_idx_y * DIM0 + reg_H_idx_x],
-                    input_r[(reg_H_idx_y + 1) * DIM0 + reg_H_idx_x],
-                ),
+    # Accumulate along dim0 using scalar operations
+    for reg_H_idx_x in cutlass.range_constexpr(1, DIM0, 1, unroll=(DIM0 - 1)):
+        for reg_H_idx_y in cutlass.range_constexpr(0, DIM1, 1, unroll=DIM1):
+            input_r_[reg_H_idx_y] = (
+                input_r_[reg_H_idx_y] + input_r[reg_H_idx_y * DIM0 + reg_H_idx_x]
             )
 
+    # Warp reduction
     for reg_H_idx_y in cutlass.range_constexpr(0, DIM1, 1, unroll=DIM1):
         input_r_[reg_H_idx_y] = cute.arch.warp_reduction(
             input_r_[reg_H_idx_y], operator.add, threads_in_group=cute.arch.WARP_SIZE
@@ -153,24 +148,19 @@ def L2Norm(
     thrX_r = X.load().to(cute.Float32)
     thrX_norm = cute.make_rmem_tensor_like(X, cute.Float32)
     thrX_sum = 0.0
-    for reg_X_idx in cutlass.range_constexpr(0, elem_per_thread, 2, unroll=2):
-        thrX_norm[reg_X_idx], thrX_norm[reg_X_idx + 1] = mul_packed_f32x2(
-            (thrX_r[reg_X_idx], thrX_r[reg_X_idx + 1]),
-            (thrX_r[reg_X_idx], thrX_r[reg_X_idx + 1]),
-        )
+    # Use scalar operations instead of packed
+    for reg_X_idx in cutlass.range_constexpr(0, elem_per_thread, 1, unroll=4):
+        val = thrX_r[reg_X_idx]
+        thrX_norm[reg_X_idx] = val * val
         thrX_sum += thrX_norm[reg_X_idx]
-        thrX_sum += thrX_norm[reg_X_idx + 1]
 
     thrX_sum = cute.arch.warp_reduction(
         thrX_sum, operator.add, threads_in_group=cute.arch.WARP_SIZE
     )
 
     thrX_rsqrt = cute.rsqrt(thrX_sum + 1e-6)
-    for reg_X_idx in cutlass.range_constexpr(0, elem_per_thread, 2, unroll=2):
-        thrX_norm[reg_X_idx], thrX_norm[reg_X_idx + 1] = mul_packed_f32x2(
-            (thrX_r[reg_X_idx], thrX_r[reg_X_idx + 1]),
-            (thrX_rsqrt, thrX_rsqrt),
-        )
+    for reg_X_idx in cutlass.range_constexpr(0, elem_per_thread, 1, unroll=4):
+        thrX_norm[reg_X_idx] = thrX_r[reg_X_idx] * thrX_rsqrt
     return thrX_norm
 
 
@@ -289,81 +279,42 @@ def fused_recurrent_sigmoid_update_kernel_128x32_col(
             tBrB = 1.0 / (1.0 + cute.math.exp(-tBrBeta))
 
             if const_expr(USE_QK_L2NORM_IN_KERNEL):
-                tQrQ = L2Norm(tQgQ, ELEM_H_X)
+                tQrQ_norm = L2Norm(tQgQ, ELEM_H_X)
                 tKrK = L2Norm(tKgK, ELEM_H_X)
             else:
-                tQrQ = tQgQ.load().to(cute.Float32)
+                tQrQ_norm = tQgQ.load().to(cute.Float32)
                 tKrK = tKgK.load().to(cute.Float32)
 
-            for reg_Q_idx in cutlass.range_constexpr(0, ELEM_H_X, 2, unroll=2):
-                tQrQ[reg_Q_idx], tQrQ[reg_Q_idx + 1] = mul_packed_f32x2(
-                    (tQrQ[reg_Q_idx], tQrQ[reg_Q_idx + 1]),
-                    (scale, scale),
-                )
+            # Create a new tensor for scaled Q
+            tQrQ = cute.make_rmem_tensor_like(tQgQ, cute.Float32)
+            for reg_Q_idx in cutlass.range_constexpr(0, ELEM_H_X, 1, unroll=4):
+                tQrQ[reg_Q_idx] = tQrQ_norm[reg_Q_idx] * scale
 
             tGrGexp = cute.math.exp(tGrG, fastmath=True)[0]
             for reg_H_idx in cutlass.range_constexpr(
-                0, ELEM_H_X * ELEM_H_Y, 2, unroll=2
+                0, ELEM_H_X * ELEM_H_Y, 1, unroll=4
             ):
-                tHrH_g[reg_H_idx], tHrH_g[reg_H_idx + 1] = mul_packed_f32x2(
-                    (tHrH_i[reg_H_idx], tHrH_i[reg_H_idx + 1]),
-                    (tGrGexp, tGrGexp),
-                )
+                tHrH_g[reg_H_idx] = tHrH_i[reg_H_idx] * tGrGexp
 
             for reg_H_idx in cutlass.range_constexpr(
-                0, ELEM_H_X * ELEM_H_Y, 2, unroll=2
+                0, ELEM_H_X * ELEM_H_Y, 1, unroll=4
             ):
-                tHrHk[reg_H_idx], tHrHk[reg_H_idx + 1] = mul_packed_f32x2(
-                    (tHrH_g[reg_H_idx], tHrH_g[reg_H_idx + 1]),
-                    (tKrK[reg_H_idx % ELEM_H_X], tKrK[(reg_H_idx + 1) % ELEM_H_X]),
-                )
+                tHrHk[reg_H_idx] = tHrH_g[reg_H_idx] * tKrK[reg_H_idx % ELEM_H_X]
 
             reduce_dim0(tHrHk, tVrU, ELEM_H_X, ELEM_H_Y)
 
-            for reg_V_idx in cutlass.range_constexpr(0, ELEM_H_Y, 2, unroll=2):
-                tVrU[reg_V_idx], tVrU[reg_V_idx + 1] = sub_packed_f32x2(
-                    (tVrV[reg_V_idx], tVrV[reg_V_idx + 1]),
-                    (tVrU[reg_V_idx], tVrU[reg_V_idx + 1]),
-                )
+            for reg_V_idx in cutlass.range_constexpr(0, ELEM_H_Y, 1, unroll=4):
+                tVrU[reg_V_idx] = (tVrV[reg_V_idx] - tVrU[reg_V_idx]) * tBrB
 
-                tVrU[reg_V_idx], tVrU[reg_V_idx + 1] = mul_packed_f32x2(
-                    (tVrU[reg_V_idx], tVrU[reg_V_idx + 1]),
-                    (tBrB, tBrB),
-                )
-
-            for reg_K_idx in cutlass.range_constexpr(0, ELEM_H_X, 2, unroll=2):
-                for reg_V_idx in cutlass.range_constexpr(0, ELEM_H_Y, 2, unroll=2):
-                    (
-                        tHrHk[reg_V_idx * ELEM_H_X + reg_K_idx],
-                        tHrHk[(reg_V_idx + 1) * ELEM_H_X + reg_K_idx + 1],
-                    ) = fma_packed_f32x2(
-                        (tKrK[reg_K_idx], tKrK[reg_K_idx + 1]),
-                        (tVrU[reg_V_idx], tVrU[reg_V_idx + 1]),
-                        (
-                            tHrH_g[reg_V_idx * ELEM_H_X + reg_K_idx],
-                            tHrH_g[(reg_V_idx + 1) * ELEM_H_X + reg_K_idx + 1],
-                        ),
-                    )
-
-                    (
-                        tHrHk[(reg_V_idx + 1) * ELEM_H_X + reg_K_idx],
-                        tHrHk[reg_V_idx * ELEM_H_X + reg_K_idx + 1],
-                    ) = fma_packed_f32x2(
-                        (tKrK[reg_K_idx], tKrK[reg_K_idx + 1]),
-                        (tVrU[reg_V_idx + 1], tVrU[reg_V_idx]),
-                        (
-                            tHrH_g[(reg_V_idx + 1) * ELEM_H_X + reg_K_idx],
-                            tHrH_g[reg_V_idx * ELEM_H_X + reg_K_idx + 1],
-                        ),
-                    )
+            for reg_K_idx in cutlass.range_constexpr(0, ELEM_H_X, 1, unroll=4):
+                for reg_V_idx in cutlass.range_constexpr(0, ELEM_H_Y, 1, unroll=4):
+                    idx = reg_V_idx * ELEM_H_X + reg_K_idx
+                    tHrHk[idx] = tKrK[reg_K_idx] * tVrU[reg_V_idx] + tHrH_g[idx]
 
             for reg_H_idx in cutlass.range_constexpr(
-                0, ELEM_H_X * ELEM_H_Y, 2, unroll=2
+                0, ELEM_H_X * ELEM_H_Y, 1, unroll=4
             ):
-                tHrH_g[reg_H_idx], tHrH_g[reg_H_idx + 1] = mul_packed_f32x2(
-                    (tHrHk[reg_H_idx], tHrHk[reg_H_idx + 1]),
-                    (tQrQ[reg_H_idx % ELEM_H_X], tQrQ[(reg_H_idx + 1) % ELEM_H_X]),
-                )
+                tHrH_g[reg_H_idx] = tHrHk[reg_H_idx] * tQrQ[reg_H_idx % ELEM_H_X]
 
             reduce_dim0(tHrH_g, tOgO, ELEM_H_X, ELEM_H_Y)
 
@@ -397,7 +348,7 @@ def fused_recurrent_sigmoid_update_128x32_col(
     k_dtype = mK.element_type
 
     x_threads = 32
-    y_threads = 8
+    y_threads = 4
     if const_expr(DIM == 256):
         x_threads = 32
         y_threads = 16
