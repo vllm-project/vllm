@@ -734,10 +734,6 @@ class LLM:
                 raise NotImplementedError(
                     "Embedding prompt not supported for beam search"
                 )
-            if prompt["type"] == "enc_dec":
-                raise NotImplementedError(
-                    "Encoder-decoder prompt not supported for beam search"
-                )
 
             instances.append(
                 BeamSearchInstance(
