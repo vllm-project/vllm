@@ -284,13 +284,22 @@ def create_forward_context(
     else:
         all_moe_layers = None
 
-    # Similar optimization for KV cache: skip when using speculative decoding
-    if vllm_config.speculative_config is None:
+    # Similar optimization for KV cache: use tri-state config flag
+    fast_kv = vllm_config.compilation_config.fast_kv_cache_cold_start
+    if fast_kv is True:
         all_kv_cache_update_layers = (
             vllm_config.compilation_config.static_all_kv_cache_update_layers or None
         )
-    else:
+    elif fast_kv is False:
         all_kv_cache_update_layers = None
+    else:
+        # None — auto mode: on normally, off for speculative decoding
+        if vllm_config.speculative_config is None:
+            all_kv_cache_update_layers = (
+                vllm_config.compilation_config.static_all_kv_cache_update_layers or None
+            )
+        else:
+            all_kv_cache_update_layers = None
 
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
