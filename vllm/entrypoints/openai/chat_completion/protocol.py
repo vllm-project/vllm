@@ -774,6 +774,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def set_include_reasoning_for_none_effort(cls, data: Any) -> Any:
-        if isinstance(data, dict) and data.get("reasoning_effort") == "none":
+        if data.get("reasoning_effort") == "none":
             data["include_reasoning"] = False
         return data
