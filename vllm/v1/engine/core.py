@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import os
 import queue
 import signal
@@ -117,9 +118,17 @@ class EngineCore:
             self._eep_scale_up_before_kv_init()
 
         # Setup KV Caches and update CacheConfig after profiling.
-        num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(
-            vllm_config
-        )
+        try:
+            num_gpu_blocks, num_cpu_blocks, kv_cache_config = (
+                self._initialize_kv_caches(vllm_config)
+            )
+        except Exception:
+            logger.exception(
+                "EngineCore failed during KV cache initialization; "
+                "shutting down executor."
+            )
+            self.model_executor.shutdown()
+            raise
 
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -193,9 +202,9 @@ class EngineCore:
             logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
 
-        self.is_ec_producer = (
-            vllm_config.ec_transfer_config is not None
-            and vllm_config.ec_transfer_config.is_ec_producer
+        self.is_ec_consumer = (
+            vllm_config.ec_transfer_config is None
+            or vllm_config.ec_transfer_config.is_ec_consumer
         )
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
@@ -449,7 +458,7 @@ class EngineCore:
             exec_future = self.model_executor.execute_model(
                 scheduler_output, non_block=True
             )
-            if not self.is_ec_producer:
+            if self.is_ec_consumer:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
             if self.is_pooling_model or not model_executed:
@@ -958,29 +967,49 @@ class EngineCoreProc(EngineCore):
             addresses = self.startup_handshake(
                 handshake_socket, local_client, headless, parallel_config_to_update
             )
-            yield addresses
+            exc_during_init = False
+            try:
+                yield addresses
+            except Exception:
+                exc_during_init = True
+                raise
+            finally:
+                if exc_during_init:
+                    # Send FAILED status so the front-end detects init
+                    # failure immediately via ZMQ instead of waiting for
+                    # process sentinel (which may be delayed by cleanup).
+                    with contextlib.suppress(Exception):
+                        handshake_socket.send(
+                            msgspec.msgpack.encode(
+                                {
+                                    "status": "FAILED",
+                                    "local": local_client,
+                                    "headless": headless,
+                                }
+                            )
+                        )
+                else:
+                    # Send ready message.
+                    num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
+                    # We pass back the coordinator stats update address
+                    # here for the external LB case for our colocated
+                    # front-end to use (coordinator only runs with rank 0).
+                    dp_stats_address = self.frontend_stats_publish_address
 
-            # Send ready message.
-            num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
-            # We pass back the coordinator stats update address here for the
-            # external LB case for our colocated front-end to use (coordinator
-            # only runs with rank 0).
-            dp_stats_address = self.frontend_stats_publish_address
+                    # Include config hash for DP configuration validation
+                    ready_msg = {
+                        "status": "READY",
+                        "local": local_client,
+                        "headless": headless,
+                        "num_gpu_blocks": num_gpu_blocks,
+                        "dp_stats_address": dp_stats_address,
+                    }
+                    if vllm_config.parallel_config.data_parallel_size > 1:
+                        ready_msg["parallel_config_hash"] = (
+                            vllm_config.parallel_config.compute_hash()
+                        )
 
-            # Include config hash for DP configuration validation
-            ready_msg = {
-                "status": "READY",
-                "local": local_client,
-                "headless": headless,
-                "num_gpu_blocks": num_gpu_blocks,
-                "dp_stats_address": dp_stats_address,
-            }
-            if vllm_config.parallel_config.data_parallel_size > 1:
-                ready_msg["parallel_config_hash"] = (
-                    vllm_config.parallel_config.compute_hash()
-                )
-
-            handshake_socket.send(msgspec.msgpack.encode(ready_msg))
+                    handshake_socket.send(msgspec.msgpack.encode(ready_msg))
 
     @staticmethod
     def startup_handshake(
@@ -1539,18 +1568,18 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         # Configure GPUs and stateless process group for data parallel.
-        dp_rank = vllm_config.parallel_config.data_parallel_rank
-        dp_size = vllm_config.parallel_config.data_parallel_size
-        local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+        parallel_config = vllm_config.parallel_config
+        dp_rank = parallel_config.data_parallel_rank
+        dp_size = parallel_config.data_parallel_size
+        local_dp_rank = parallel_config.data_parallel_rank_local
 
         assert dp_size > 1
         assert local_dp_rank is not None
         assert 0 <= local_dp_rank <= dp_rank < dp_size
 
         self.dp_rank = dp_rank
-        self.dp_group, self.dp_store = (
-            vllm_config.parallel_config.stateless_init_dp_group(return_store=True)
-        )
+        dp_group, dp_store = parallel_config.stateless_init_dp_group(return_store=True)
+        self.dp_group, self.dp_store = dp_group, dp_store
 
     def shutdown(self):
         super().shutdown()
@@ -1571,7 +1600,11 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def resume_scheduler(self):
         super().resume_scheduler()
-        if not self.engines_running and self.scheduler.has_unfinished_requests():
+        if (
+            self.has_coordinator
+            and not self.engines_running
+            and self.scheduler.has_unfinished_requests()
+        ):
             # Wake up other DP engines.
             self.output_queue.put_nowait(
                 (-1, EngineCoreOutputs(start_wave=self.current_wave))
@@ -1720,11 +1753,11 @@ class DPEngineCoreProc(EngineCoreProc):
         """
         Send notifications to EngineCoreClient, which can then forward
         the notifications to other engine core processes. It is used for:
-        1) In scale up: new core engines to notify exisiting core engines
+        1) In scale up: new core engines to notify existing core engines
            that they are ready;
         2) In scale down: removing core engines to notify EngineCoreClient
            so EngineCoreClient can release their ray placement groups;
-        3) Both scale up/down: to notify EngineCoreClient that exisiting
+        3) Both scale up/down: to notify EngineCoreClient that existing
            core engines have already switched to the new parallel setup.
         """
         if vllm_config is None:

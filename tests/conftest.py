@@ -1140,6 +1140,15 @@ class VllmRunner:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        # Explicitly shutdown the engine core to release GPU resources
+        # This is needed because when executing consecutive tests, the GC
+        # might not be fast enough in shutting down the llm engine. This can lead to OOMs
+        # because when the next test starts some GPU memory is still in use.
+        try:
+            self.llm.llm_engine.engine_core.shutdown()
+        except Exception:
+            # Ignore shutdown errors as cleanup will still proceed
+            pass
         del self.llm
         cleanup_dist_env_and_memory()
 
@@ -1533,7 +1542,7 @@ def clean_gpu_memory_between_tests():
 
     # Clean up GPU memory after the test
     if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         gc.collect()
 
 
@@ -1546,6 +1555,14 @@ def use_fresh_inductor_cache():
     """
     with fresh_cache():
         yield
+
+
+@pytest.fixture
+def fresh_vllm_cache(monkeypatch, use_fresh_inductor_cache):
+    """Temporary VLLM_CACHE_ROOT combined with a fresh inductor cache."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        monkeypatch.setenv("VLLM_CACHE_ROOT", tmp_dir)
+        yield tmp_dir
 
 
 @pytest.fixture(scope="function")

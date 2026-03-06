@@ -1116,7 +1116,7 @@ def _step_until_done(
 
 
 def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
-    """Cycle requests through a KV transfer cyle."""
+    """Cycle requests through a KV transfer cycle."""
 
     # Requests should first transition to WAITING_FOR_REMOTE_KVS
     output = scheduler.schedule()
@@ -2714,7 +2714,7 @@ def _assert_right_encoder_inputs(
         if expected_total_reqs == 0:
             return
 
-    # Number of expected enocder inputs should match number of requests
+    # Number of expected encoder inputs should match number of requests
     if expected_encoder_inputs:
         assert check_exist and requests is not None  # only support expect input exist
         assert len(requests) == len(expected_encoder_inputs)
@@ -2964,7 +2964,7 @@ def test_ec_connector_with_partial_cache_hit_multi_round(use_kv_connector):
     )
     scheduler.update_from_output(output, model_output)
 
-    # request1 is finished after outputing 1 token
+    # request1 is finished after outputting 1 token
     # Finish request
     scheduler.finish_requests(request1.request_id, RequestStatus.FINISHED_LENGTH_CAPPED)
 
@@ -3010,12 +3010,16 @@ def test_ec_connector_with_partial_cache_hit_multi_round(use_kv_connector):
     # Encoder cache should contain all mm items from request2
     _assert_right_encoder_cache_allocated(scheduler, requests=[request2])
 
-    # Should call update_state_after_alloc for hash1_C, ONLY
     # hash1_A should not be loaded from connector
     # since it's computed in last request & exist in local cache
     # Order of getting encoder cache should be: local cache -> connector-> compute
-    scheduler.ec_connector.update_state_after_alloc.assert_called_with(request2, 0)
-    scheduler.ec_connector.update_state_after_alloc.assert_called_once()
+    # update_state_after_alloc is called for all paths:
+    #   index 0 (hash1_C): connector hit → queued for load
+    #   index 1 (hash1_D): cache miss → no-op inside connector
+    #   index 2 (hash1_E): cache miss → no-op inside connector
+    scheduler.ec_connector.update_state_after_alloc.assert_any_call(request2, 0)
+    scheduler.ec_connector.update_state_after_alloc.assert_any_call(request2, 1)
+    scheduler.ec_connector.update_state_after_alloc.assert_any_call(request2, 2)
 
     scheduler.ec_connector.update_state_after_alloc.reset_mock()
 
@@ -3056,14 +3060,14 @@ def test_ec_connector_schedule_multiple_requests(cache_exist, use_kv_connector):
     for request in requests:
         scheduler.add_request(request)
 
-    # Set up to test different encoder cache exsistence scenario after preemption
+    # Set up to test different encoder cache existence scenario after preemption
     # Order of getting encoder cache should be: local cache -> connector-> compute
     scheduler.ec_connector.update_state_after_alloc = Mock(
         wraps=scheduler.ec_connector.update_state_after_alloc
     )
 
     if cache_exist == "local":
-        # Allocate cache to cache manager manually to mimick
+        # Allocate cache to cache manager manually to mimic
         for req in requests:
             scheduler.encoder_cache_manager.allocate(req, 0)
     else:
@@ -3087,7 +3091,6 @@ def test_ec_connector_schedule_multiple_requests(cache_exist, use_kv_connector):
     # mm_hashes of requests exist in cache after scheduling for all scenario
     _assert_right_encoder_cache_allocated(scheduler, requests=requests)
 
-    # Should only call update_state_after_alloc when loaded externally
     if cache_exist == "connector_only":
         scheduler.ec_connector.update_state_after_alloc.assert_called_with(
             requests[-1], 0
@@ -3098,9 +3101,15 @@ def test_ec_connector_schedule_multiple_requests(cache_exist, use_kv_connector):
 
         # Check metadata should contain mm data for all 10 requests
         _assert_right_ec_connector_metadata(output, mm_features_list=mm_features_list)
-    else:
+    elif cache_exist == "local":
+        # Local cache hit: items never reach update_state_after_alloc
         scheduler.ec_connector.update_state_after_alloc.assert_not_called()
-        # ECConnector should carry no metadata
+        _assert_right_ec_connector_metadata(output, mm_features_list=[])
+    else:
+        # no_where: called from encoder_inputs_to_schedule but no-op
+        # inside connector (has_cache_item returns False)
+        assert cache_exist == "no_where"
+        scheduler.ec_connector.update_state_after_alloc.assert_called()
         _assert_right_ec_connector_metadata(output, mm_features_list=[])
 
     scheduler.ec_connector.update_state_after_alloc.reset_mock()
@@ -3375,13 +3384,13 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
         pooler_output=[],
     )
     # Finish the requests to make room for the preempted requests to resume
-    # req_high is finished after outputing 2 tokens
+    # req_high is finished after outputting 2 tokens
     scheduler.update_from_output(output, model_output)
     scheduler.finish_requests(
         request_high.request_id, RequestStatus.FINISHED_LENGTH_CAPPED
     )
 
-    # Set up to test different encoder cache exsistence scenario after preemption
+    # Set up to test different encoder cache existence scenario after preemption
     # Order of getting encoder cache should be: local cache -> connector-> compute
     # By default, the cache should still exist in local in this test case
     if cache_exist != "local":
@@ -3419,7 +3428,6 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
     # mm_hash of request_low exists in cache after scheduling for all scenario
     _assert_right_encoder_cache_allocated(scheduler, requests=[request_low])
 
-    # Should only call update_state_after_alloc when loaded externally
     if cache_exist == "connector_only":
         scheduler.ec_connector.update_state_after_alloc.assert_called_with(
             request_low, 0
@@ -3427,9 +3435,14 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
         _assert_right_ec_connector_metadata(
             output, mm_features_list=request_low.mm_features
         )
-    else:
+    elif cache_exist == "local":
         scheduler.ec_connector.update_state_after_alloc.assert_not_called()
-        # ECConnector should carry no metadata
+        _assert_right_ec_connector_metadata(output, mm_features_list=[])
+    else:
+        assert cache_exist == "no_where"
+        scheduler.ec_connector.update_state_after_alloc.assert_called_with(
+            request_low, 0
+        )
         _assert_right_ec_connector_metadata(output, mm_features_list=[])
 
     scheduler.ec_connector.update_state_after_alloc.reset_mock()
@@ -3470,7 +3483,7 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
         ec_role="ec_consumer",
     )
 
-    # Limit the number of availiable slots of EncoderCacheManager
+    # Limit the number of available slots of EncoderCacheManager
     scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=32)
 
     # Create MM request1
@@ -3561,7 +3574,7 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
     )
     scheduler.update_from_output(output, model_output)
 
-    # request1 is finished after outputing 1 token
+    # request1 is finished after outputting 1 token
     # Finish request
     scheduler.finish_requests(request1.request_id, RequestStatus.FINISHED_LENGTH_CAPPED)
     assert scheduler.get_num_unfinished_requests() == 1

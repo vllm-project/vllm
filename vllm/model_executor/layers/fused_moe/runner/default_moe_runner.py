@@ -320,8 +320,8 @@ class DefaultMoERunner(MoERunner):
         """
         assert self.quant_method is not None
         return (
-            self.quant_method.moe_mk is not None
-            and self.quant_method.moe_mk.output_is_reduced()
+            self.quant_method.moe_kernel is not None
+            and self.quant_method.moe_kernel.output_is_reduced()
         )
 
     def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
@@ -640,45 +640,6 @@ class DefaultMoERunner(MoERunner):
         )
 
         with sp_ctx:
-            extra_tensors = None
-            if do_naive_dispatch_combine:
-                post_quant_allgather = (
-                    self.quant_method is not None
-                    and self.moe_config.dp_size > 1
-                    and self.moe_config.use_ep
-                    and getattr(self.quant_method, "do_post_quant_allgather", False)
-                )
-                if post_quant_allgather:
-                    hidden_states_to_dispatch, extra_tensors = (
-                        self.quant_method.prepare_dp_allgather_tensor(
-                            layer, hidden_states, router_logits
-                        )
-                    )
-                else:
-                    hidden_states_to_dispatch = hidden_states
-
-                dispatch_res = get_ep_group().dispatch_router_logits(
-                    hidden_states_to_dispatch,
-                    router_logits,
-                    self.moe_config.is_sequence_parallel,
-                    extra_tensors=extra_tensors,
-                )
-                if extra_tensors is not None:
-                    (
-                        orig_hidden_states,
-                        router_logits,
-                        extra_tensors_combined,
-                    ) = dispatch_res
-                    hidden_states_combined = (
-                        orig_hidden_states,
-                        extra_tensors_combined[0],
-                    )
-                else:
-                    hidden_states_combined, router_logits = dispatch_res
-                    orig_hidden_states = hidden_states_combined
-            else:
-                orig_hidden_states = hidden_states
-
             # Run shared experts before matrix multiply.
             # because matrix multiply maybe modify the hidden_states.
             if has_separate_shared_experts and not use_shared_experts_stream:
@@ -687,6 +648,17 @@ class DefaultMoERunner(MoERunner):
                     shared_input if shared_input is not None else hidden_states
                 )
                 shared_output = self.shared_experts(shared_input)
+
+            # For naive dispatch/combine Dp/Ep, dispatch the hidden states and
+            # router logits to all experts.
+            # NOTE: this will be removed once all kernels are migrated into the
+            # MoEKernel framework.
+            if do_naive_dispatch_combine:
+                hidden_states, router_logits = get_ep_group().dispatch_router_logits(
+                    hidden_states,
+                    router_logits,
+                    self.moe_config.is_sequence_parallel,
+                )
 
             # NOTE: Similar with DP, PCP also needs dispatch and combine. For
             # simplicity, AgRsAll2All was added separately for PCP here. Maybe
@@ -701,31 +673,22 @@ class DefaultMoERunner(MoERunner):
                     dim=0,
                 )
 
-            # TODO(bnell): deal with fp4 flashinfer tuple hidden states hack (#30014).
-            # Figure out nicer way to do this.
-            if do_naive_dispatch_combine:
-                x = hidden_states_combined
-                x_orig = orig_hidden_states
-            else:
-                x = hidden_states
-                x_orig = hidden_states
-
             # Matrix multiply.
             if self.quant_method.is_monolithic:
                 final_hidden_states = self.quant_method.apply_monolithic(
                     layer=layer,
-                    x=x,
+                    x=hidden_states,
                     router_logits=router_logits,
                 )
             else:
                 topk_weights, topk_ids = self.router.select_experts(
-                    hidden_states=x_orig,
+                    hidden_states=hidden_states,
                     router_logits=router_logits,
                 )
 
                 final_hidden_states = self.quant_method.apply(
                     layer=layer,
-                    x=x,  # The type signture of this is wrong due to the hack.
+                    x=hidden_states,
                     topk_weights=topk_weights,
                     topk_ids=topk_ids,
                     shared_experts_input=shared_input,
