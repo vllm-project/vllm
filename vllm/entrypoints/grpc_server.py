@@ -156,13 +156,6 @@ def main():
         default=50051,
         help="Port to bind gRPC server to",
     )
-    parser.add_argument(
-        "--disable-log-stats",
-        action="store_true",
-        help="Disable stats logging on server side",
-    )
-
-    # Add vLLM engine args
     parser = AsyncEngineArgs.add_cli_args(parser)
 
     args = parser.parse_args()
