@@ -957,7 +957,7 @@ class EplbState:
                 transferred_layer,
             )
             if model_state.layer_to_transfer >= model_state.model.num_moe_layers:
-                self.post_eplb(model_state, is_profile)
+                self.post_eplb(model_state)
                 model_state.rebalanced = False
                 model_state.layer_to_transfer = 0
                 model_state.pending_global_ready_check = False
@@ -978,7 +978,7 @@ class EplbState:
                     str(e),
                 )
 
-    def post_eplb(self, model_state: EplbModelState, is_profile: bool = False) -> None:
+    def post_eplb(self, model_state: EplbModelState) -> None:
         assert model_state.new_physical_to_logical_map is not None
         model_state.new_physical_to_logical_map = None
 
@@ -1044,10 +1044,22 @@ class EplbState:
         (logical_to_physical_map_cpu, logical_replica_count_cpu) = compute_logical_maps(
             expanded_physical_to_logical.cpu(), model.num_logical_experts
         )
-        logical_to_physical_map = logical_to_physical_map_cpu.to(device)
+
+        max_num_replicas = eplb_model_state.logical_to_physical_map.shape[-1]
+        num_replicas = logical_to_physical_map_cpu.shape[-1]
+        logical_to_physical_map = torch.nn.functional.pad(
+            logical_to_physical_map_cpu,
+            (
+                0,
+                max_num_replicas - num_replicas,
+            ),
+            value=-1,
+        ).to(device)
         logical_replica_count = logical_replica_count_cpu.to(device)
+
         eplb_model_state.logical_to_physical_map.copy_(logical_to_physical_map)
         eplb_model_state.logical_replica_count.copy_(logical_replica_count)
+
         return eplb_state
 
 
