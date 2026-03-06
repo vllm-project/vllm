@@ -246,21 +246,29 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         This function blocks until the copy is finished.
         """
-        max_gen_len = self.sampled_token_ids_cpu.shape[-1]
         self.async_copy_ready_event.synchronize()
+
+        sampled_token_ids_np = self.sampled_token_ids_cpu.numpy()
+        max_gen_len = sampled_token_ids_np.shape[-1]
 
         # Release the device tensors once the copy has completed.
         del self._logprobs_tensors
         del self._sampled_token_ids
+        sampled_token_ids_list: list[list[int]] | None = None
+        sampled_token_ids_np_out: np.ndarray | None = None
+        num_generated_tokens_out: np.ndarray | None = None
         if max_gen_len == 1:
-            valid_sampled_token_ids = self.sampled_token_ids_cpu.tolist()
-            for i in self._invalid_req_indices:
-                valid_sampled_token_ids[i].clear()
+            num_generated_tokens_out = np.ones(
+                sampled_token_ids_np.shape[0], dtype=np.int32
+            )
+            if self._invalid_req_indices:
+                num_generated_tokens_out[self._invalid_req_indices] = 0
+            sampled_token_ids_np_out = sampled_token_ids_np
             logprobs_lists = None
             if self._logprobs_tensors_cpu is not None:
                 logprobs_lists = self._logprobs_tensors_cpu.tolists()
         else:
-            valid_sampled_token_ids, logprobs_lists = RejectionSampler.parse_output(
+            sampled_token_ids_list, logprobs_lists = RejectionSampler.parse_output(
                 self.sampled_token_ids_cpu,
                 self.vocab_size,
                 self._invalid_req_indices,
@@ -268,7 +276,9 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             )
 
         output = self._model_runner_output
-        output.sampled_token_ids = valid_sampled_token_ids
+        output.sampled_token_ids_np = sampled_token_ids_np_out
+        output.num_generated_tokens = num_generated_tokens_out
+        output.sampled_token_ids = sampled_token_ids_list
         output.logprobs = logprobs_lists
         return output
 
