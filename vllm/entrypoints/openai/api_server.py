@@ -567,16 +567,12 @@ async def build_and_serve(
     if engine_client is not None:
         supported_tasks = await engine_client.get_supported_tasks()
         logger.info("Supported tasks: %s", supported_tasks)
-    else:
-        supported_tasks = ("render",)
-
-    app = build_app(args, supported_tasks)
-
-    if engine_client is not None:
+        app = build_app(args, supported_tasks)
         await init_app_state(engine_client, app.state, args, supported_tasks)
     else:
         if vllm_config is None:
             raise ValueError("vllm_config is required when engine_client is None")
+        app = build_app(args, ("render",))
         await init_render_app_state(vllm_config, app.state, args)
 
     logger.info("Starting vLLM server on %s", listen_address)
