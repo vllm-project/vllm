@@ -11,6 +11,49 @@ from .conftest import validate_streaming_event_stack
 MODEL_NAME = "Qwen/Qwen3-8B"
 
 
+def _input_text_message(text: str) -> dict:
+    return {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": text}],
+    }
+
+
+def _assistant_output_text_message(
+    text: str,
+    *,
+    item_id: str | None = None,
+    status: str | None = None,
+) -> dict:
+    message = {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text}],
+    }
+    if item_id is not None:
+        message["id"] = item_id
+    if status is not None:
+        message["status"] = status
+    return message
+
+
+def _reasoning_item(
+    *,
+    item_id: str | None = None,
+    status: str | None = None,
+) -> dict:
+    item = {
+        "type": "reasoning",
+        "summary": [],
+        "encrypted_content": None,
+    }
+    if item_id is not None:
+        item["id"] = item_id
+    if status is not None:
+        item["status"] = status
+    return item
+
+
 @pytest.fixture(scope="module")
 def server():
     from .conftest import BASE_TEST_ENV
@@ -90,6 +133,83 @@ async def test_reasoning_item(client: OpenAI, model_name: str):
     assert response.output[0].type == "reasoning"
     assert response.output[1].type == "message"
     assert type(response.output[1].content[0].text) is str
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_input_history_openai_shape_e2e(client: OpenAI, model_name: str):
+    """E2E: OpenAI-style history with assistant/reasoning id+status is accepted."""
+    response = await client.responses.create(
+        model=model_name,
+        input=[
+            _input_text_message("You are a concise assistant."),
+            _assistant_output_text_message(
+                "Acknowledged.",
+                item_id="msg_hist_openai_1",
+                status="completed",
+            ),
+            _reasoning_item(item_id="rs_hist_openai_1", status="completed"),
+            _input_text_message("Reply with one short sentence."),
+        ],
+        temperature=0.0,
+    )
+
+    assert response is not None
+    assert response.status == "completed"
+    assert response.output_text is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_input_history_openresponses_shape_e2e(client: OpenAI, model_name: str):
+    """E2E: OpenResponses-style history allows optional assistant/reasoning ids."""
+    response = await client.responses.create(
+        model=model_name,
+        input=[
+            _input_text_message("You are a concise assistant."),
+            _assistant_output_text_message("Acknowledged."),
+            _reasoning_item(),
+            _input_text_message("Reply with one short sentence."),
+        ],
+        temperature=0.0,
+    )
+
+    assert response is not None
+    assert response.status == "completed"
+    assert response.output_text is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_multiturn_history_replay_without_ids_e2e(
+    client: OpenAI, model_name: str
+):
+    """E2E: second turn succeeds when replayed assistant/reasoning omit id/status."""
+    first_turn_prompt = "Remember this marker for the next turn: MARKER-729."
+    first_response = await client.responses.create(
+        model=model_name,
+        input=first_turn_prompt,
+        temperature=0.0,
+    )
+
+    assert first_response is not None
+    assert first_response.status == "completed"
+    assert first_response.output_text is not None
+
+    second_response = await client.responses.create(
+        model=model_name,
+        input=[
+            _input_text_message(first_turn_prompt),
+            _assistant_output_text_message(first_response.output_text),
+            _reasoning_item(),
+            _input_text_message("What marker did I ask you to remember?"),
+        ],
+        temperature=0.0,
+    )
+
+    assert second_response is not None
+    assert second_response.status == "completed"
+    assert second_response.output_text is not None
 
 
 @pytest.mark.asyncio
