@@ -12,7 +12,6 @@ ROCM_VERSION=$(grep -E '^ARG BASE_IMAGE=' docker/Dockerfile.rocm_base | sed -E '
 PYTHON_VERSION=$(buildkite-agent meta-data get rocm-python-version 2>/dev/null || echo "3.12")
 PYTORCH_ROCM_ARCH=$(buildkite-agent meta-data get rocm-pytorch-rocm-arch 2>/dev/null || echo "gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151")
 
-# TODO: Enable the nightly build for ROCm
 # Get release version, default to 1.0.0.dev for nightly/per-commit builds
 RELEASE_VERSION=$(buildkite-agent meta-data get release-version 2>/dev/null || echo "")
 if [ -z "${RELEASE_VERSION}" ]; then
