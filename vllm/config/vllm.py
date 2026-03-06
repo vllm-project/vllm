@@ -868,6 +868,17 @@ class VllmConfig:
                 "disabling enable_sp_moe."
             )
             self.compilation_config.pass_config.enable_sp_moe = False
+        if (
+            self.compilation_config.pass_config.enable_sp_moe
+            and not self.parallel_config.disable_custom_all_reduce
+            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            logger.warning(
+                "MoE sequence parallelism with cudagraph capture is not yet "
+                "compatible with custom all-reduce; disabling "
+                "custom all-reduce."
+            )
+            self.parallel_config.disable_custom_all_reduce = True
         if self.compilation_config.pass_config.enable_sp:
             if self.parallel_config.tensor_parallel_size == 1:
                 logger.warning("Sequence Parallelism requires TP>1, disabling")
