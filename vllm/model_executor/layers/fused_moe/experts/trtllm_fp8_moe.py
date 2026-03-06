@@ -29,9 +29,10 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 
-class TrtLlmFp8ExpertsModular(mk.FusedMoEExpertsModular):
+class TrtLlmFp8ExpertsBase:
     """
-    Fp8 TRTLLM-Gen MoE kernels. Supports modular interface.
+    Fp8 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic
+    interfaces.
     """
 
     def __init__(
@@ -39,8 +40,6 @@ class TrtLlmFp8ExpertsModular(mk.FusedMoEExpertsModular):
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(moe_config, quant_config)
-
         if moe_config.moe_parallel_config.use_ep and quant_config.is_per_tensor:
             raise NotImplementedError(
                 "EP parallelism is not supported with TRTLLM"
@@ -55,6 +54,8 @@ class TrtLlmFp8ExpertsModular(mk.FusedMoEExpertsModular):
         self.hidden_dim = moe_config.hidden_dim
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
+
+        self.quant_config = quant_config
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -71,17 +72,6 @@ class TrtLlmFp8ExpertsModular(mk.FusedMoEExpertsModular):
     def _supports_no_act_and_mul() -> bool:
         """Does not support non-gated MoE (i.e. Nanotron-3-Nano)."""
         return True
-
-    @staticmethod
-    def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        """Supports Fp8 block."""
-        SUPPORTED_W_A = [
-            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
-        ]
-        return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
@@ -117,6 +107,23 @@ class TrtLlmFp8ExpertsModular(mk.FusedMoEExpertsModular):
 
     def supports_expert_map(self) -> bool:
         return False
+
+
+class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
+    """
+    Fp8 TRTLLM-Gen MoE kernels. Supports modular interface.
+    """
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        """Supports Fp8 block."""
+        SUPPORTED_W_A = [
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
 
     def workspace_shapes(
         self,
@@ -172,8 +179,9 @@ class TrtLlmFp8ExpertsModular(mk.FusedMoEExpertsModular):
         if fi_utils._is_fi_autotuning:
             return
 
-        # The FP8 kernel allocates its own output buffer and returns it;
-        # it does not write in-place to a provided output tensor.
+        # `trtllm_fp8_block_scale_routed_moe` has a bug and does not write to the
+        # output tensor in-place so we need to manually copy the result to the
+        # output tensor.
         result = flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(
             topk_ids=packed_topk_ids,
             routing_bias=None,
@@ -194,12 +202,12 @@ class TrtLlmFp8ExpertsModular(mk.FusedMoEExpertsModular):
             routing_method_type=1,
             use_shuffled_weight=False,
             weight_layout=0,
-            do_finalize=True,
+            # output=output,
         )
         output.copy_(result)
 
 
-class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
+class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolithic):
     """
     Fp8 TRTLLM-Gen MoE kernels. Supports monolithic interface.
     """
@@ -210,21 +218,6 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(moe_config, quant_config)
-
-        if moe_config.moe_parallel_config.use_ep and quant_config.is_per_tensor:
-            raise NotImplementedError(
-                "EP parallelism is not supported with TRTLLM"
-                "per-tensor FP8 quantization."
-            )
-
-        self.routing_method_type = moe_config.routing_method
-        self.topk = moe_config.experts_per_token
-        self.intermediate_size_per_partition = (
-            moe_config.intermediate_size_per_partition
-        )
-        self.hidden_dim = moe_config.hidden_dim
-        self.local_num_experts = moe_config.num_local_experts
-        self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
         # Make additional scales for per-tensor interface.
         if self.quant_config.is_per_tensor:
@@ -246,22 +239,6 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
             )
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
-
-    @staticmethod
-    def _supports_current_device() -> bool:
-        """Supports only Blackwell-family GPUs."""
-        p = current_platform
-        # Add check flashinfer trtllm is available
-        return p.is_cuda() and p.is_device_capability_family(100)
-
-    @staticmethod
-    def _supports_no_act_and_mul() -> bool:
-        """Does not support non-gated MoE (i.e. Nanotron-3-Nano)."""
-        return True
-
-    @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
@@ -272,11 +249,6 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
             (kFp8StaticTensorSym, kFp8StaticTensorSym),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
-
-    @staticmethod
-    def _supports_activation(activation: MoEActivation) -> bool:
-        """Supports only SiLU and RELU^2 non-gated activation."""
-        return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
     @staticmethod
     def _supports_routing_method(
@@ -304,36 +276,6 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
             ]
         else:
             raise ValueError("Unsupported quantization scheme.")
-
-    @staticmethod
-    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        """Monolithic kernel so only use with naive DP/EP and TP."""
-        return (
-            not moe_parallel_config.use_all2all_kernels
-            or moe_parallel_config.use_naive_all2all_kernels
-        ) and not moe_parallel_config.enable_eplb
-
-    @staticmethod
-    def _supports_router_logits_dtype(
-        router_logits_dtype: torch.dtype | None,
-        routing_method: RoutingMethodType,
-    ) -> bool:
-        """
-        The FlashInfer TRTLLM FP8 kernel expects bfloat16 router_logits by default.
-        Only DeepSeekV3 routing supports float32 router_logits (which is converted
-        internally in the kernel).
-        """
-        if router_logits_dtype == torch.float32:
-            # Only DeepSeekV3 routing handles float32 logits
-            # https://github.com/flashinfer-ai/flashinfer/issues/2469
-            return routing_method == RoutingMethodType.DeepSeekV3
-        return True
-
-    def supports_chunking(self) -> bool:
-        return False
-
-    def supports_expert_map(self) -> bool:
-        return False
 
     def _apply_per_block(
         self,
