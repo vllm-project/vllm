@@ -2,6 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kernel implementations for vLLM."""
 
-from . import aiter_ops, vllm_c
+from . import aiter_ops, oink_ops, vllm_c
 
-__all__ = ["vllm_c", "aiter_ops"]
+__all__ = ["vllm_c", "aiter_ops", "oink_ops"]

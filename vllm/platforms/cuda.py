@@ -509,13 +509,16 @@ class CudaPlatformBase(Platform):
         from vllm.config.compilation import CompilationMode
         from vllm.config.kernel import IrOpPriorityConfig
 
+        # Native used by default when compiling,
+        # use vllm_c kernels where available when no codegen
         cc = vllm_config.compilation_config
-        if cc.backend == "inductor" and cc.mode != CompilationMode.NONE:
-            # Native used by default when compiling
-            return IrOpPriorityConfig.with_default(["native"])
+        using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
+        default = ["native"] if using_inductor else ["vllm_c", "native"]
 
-        # Use vllm_c kernels where available when no codegen
-        return IrOpPriorityConfig.with_default(["vllm_c", "native"])
+        # Use oink if available for rms_norm
+        rms_norm = ["oink"] + default
+
+        return IrOpPriorityConfig.with_default(["vllm_c", "native"], rms_norm=rms_norm)
 
 
 # NVML utils
