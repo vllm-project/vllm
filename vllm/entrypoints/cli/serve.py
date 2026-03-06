@@ -51,13 +51,8 @@ class ServeSubcommand(CLISubcommand):
             args.model = args.model_tag
 
         if getattr(args, "grpc", False):
-            try:
-                from smg_grpc_servicer.vllm.server import serve_grpc
-            except ImportError:
-                raise ImportError(
-                    "smg-grpc-servicer is required for --grpc mode. "
-                    "Install it with: pip install vllm[grpc]"
-                ) from None
+            from vllm.entrypoints.grpc_server import serve_grpc
+
             uvloop.run(serve_grpc(args))
             return
 
