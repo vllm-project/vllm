@@ -34,7 +34,7 @@ def run_cuda_test_in_thread(device_input, expected_device_id):
             )
 
         # Test setting CUDA context
-        current_platform.set_device_index(device_input)
+        current_platform.set_device(device_input)
 
         # Verify context is created correctly
         valid_after, device_id = check_cuda_context()
@@ -74,7 +74,7 @@ class TestSetCudaContext:
     def test_set_cuda_context_invalid_device_type(self):
         """Test error handling for invalid device type."""
         with pytest.raises(ValueError, match="Expected a cuda device"):
-            current_platform.set_device_index(torch.device("cpu"))
+            current_platform.set_device(torch.device("cpu"))
 
 
 if __name__ == "__main__":
