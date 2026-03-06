@@ -17,7 +17,13 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
-from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
+from vllm.entrypoints.openai.engine.protocol import (
+    ErrorInfo,
+    ErrorResponse,
+    ModelCard,
+    ModelList,
+    ModelPermission,
+)
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
     get_system_message,
@@ -255,6 +261,21 @@ class OpenAIServingRender:
             engine_prompt["cache_salt"] = request.cache_salt
 
         return messages, [engine_prompt]
+
+    async def show_available_models(self) -> ModelList:
+        """Returns the models served by this render server."""
+        max_model_len = self.model_config.max_model_len
+        return ModelList(
+            data=[
+                ModelCard(
+                    id=name,
+                    max_model_len=max_model_len,
+                    root=self.model_config.model,
+                    permission=[ModelPermission()],
+                )
+                for name in self.served_model_names
+            ]
+        )
 
     def create_error_response(
         self,

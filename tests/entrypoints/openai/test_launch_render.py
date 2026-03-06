@@ -187,3 +187,13 @@ async def test_render_is_fast(client):
 async def test_health_endpoint(client):
     response = await client.get("/health")
     assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_models_endpoint(client):
+    response = await client.get("/v1/models")
+    assert response.status_code == 200
+    data = response.json()
+    assert "data" in data
+    model_ids = [m["id"] for m in data["data"]]
+    assert MODEL_NAME in model_ids

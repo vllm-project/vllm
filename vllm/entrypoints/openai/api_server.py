@@ -447,6 +447,9 @@ async def init_render_app_state(
         log_error_stack=args.log_error_stack,
     )
 
+    # Expose models endpoint via the render handler.
+    state.openai_serving_models = state.openai_serving_render
+
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.
     state.log_stats = False
