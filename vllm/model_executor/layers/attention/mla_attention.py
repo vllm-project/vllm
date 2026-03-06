@@ -553,9 +553,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             quant_output = output
             quant_output_padded = output
             bf16_shape = (output.shape[0], self.num_heads * self.v_head_dim)
-            output = torch.empty(
-                bf16_shape, dtype=q.dtype, device=output.device
-            )
+            output = torch.empty(bf16_shape, dtype=q.dtype, device=output.device)
 
         if attn_metadata is None:
             # During the profile run try to simulate to worse case output size
@@ -725,9 +723,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # NVFP4: two FP4 values packed into one uint8
                 from vllm._custom_ops import scaled_fp4_quant
 
-                fp4_data, fp4_scales = scaled_fp4_quant(
-                    actual, output_scale
-                )
+                fp4_data, fp4_scales = scaled_fp4_quant(actual, output_scale)
                 quant_output[:num_actual_toks].copy_(
                     fp4_data.view(quant_output[:num_actual_toks].shape)
                 )
@@ -737,9 +733,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 quant_actual = quant_output[:num_actual_toks].reshape(
                     -1, self.num_heads * self.v_head_dim
                 )
-                torch.ops._C.static_scaled_fp8_quant(
-                    quant_actual, actual, output_scale
-                )
+                torch.ops._C.static_scaled_fp8_quant(quant_actual, actual, output_scale)
             return quant_output_padded
 
         return output_padded
@@ -2092,7 +2086,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
     understand this class
     """
 
-    def fused_output_quant_supported(self, quant_key: "QuantKey"):
+    def fused_output_quant_supported(self, quant_key):
         from vllm.model_executor.layers.quantization.utils.quant_utils import (
             kFp8StaticTensorSym,
             kNvfp4Dynamic,
