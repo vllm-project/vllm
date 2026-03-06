@@ -16,7 +16,7 @@ The validated platform for this workflow:
 
 ---
 
-# Architecture Overview
+## Architecture Overview
 
 ```mermaid
 flowchart LR
@@ -48,14 +48,14 @@ flowchart LR
 
 ---
 
-# 0. (Optional) Enable Priority Core Turbo
+## 0. (Optional) Enable Priority Core Turbo
 
-Follow [Enabling Priority Core Turbo](priority_core_turbo/README.md) 
+Follow [Enabling Priority Core Turbo](priority_core_turbo/README.md)
 to enable PCT on Intel® Xeon® 6 platforms.
 
 After enabling PCT a CPU list file will be generated:
 
-```
+```bash
 priority_core_turbo/results/clos0_cpulist.txt
 ```
 
@@ -63,7 +63,7 @@ This list is used for CPU binding.
 
 ---
 
-# 1. Environment Setup
+## 1. Environment Setup
 
 Install required dependencies:
 
@@ -73,7 +73,7 @@ pip install -r requirements_cpu_binding.txt
 
 ---
 
-# 2. GPU vLLM Service with CPU Pinning
+## 2. GPU vLLM Service with CPU Pinning
 
 Generate the CPU binding configuration:
 
@@ -91,7 +91,7 @@ All **deploy** and **benchmark** runs should include this override file.
 
 ---
 
-## Deploy Mode
+### Deploy Mode
 
 Runs a persistent OpenAI‑compatible vLLM server.
 
@@ -107,7 +107,7 @@ curl http://localhost:8000/v1/models
 
 ---
 
-## Benchmark Mode
+### Benchmark Mode
 
 Runs the automated benchmark driver.
 
@@ -117,13 +117,13 @@ MODE=benchmark docker compose   -f docker-compose.yml   -f docker-compose.overri
 
 Results:
 
-```
+```bash
 benchmarks/results/
 ```
 
 ---
 
-# 3. Reusing Idle CPUs for CPU vLLM
+## 3. Reusing Idle CPUs for CPU vLLM
 
 Idle CPUs released from the GPU workload can be reused for CPU inference.
 
@@ -133,17 +133,16 @@ Generate CPU binding including CPU service named as "vllm-cpu-server" provided i
 python3 generate_cpu_binding_from_csv.py   --settings cpu_binding_gnr.csv   --output docker-compose.override.yml   --cpuservice vllm-cpu-server
 ```
 
-
 ---
 
-# Running GPU and CPU Together
+### Running GPU and CPU Together
 
 Both GPU and CPU services can run simultaneously while sharing the same CPU binding policy.
 
-## Deploy Mode
+#### Deploy Mode
 
 ```bash
-MODE=deploy MODEL="meta-llama/Llama-3.1-405B-Instruct" PORT=8000 CPU_MODE=deploy CPU_MODEL=meta-llama/Llama-3.1-8B-Instruct CPU_PORT=8001 docker compose   -f docker-compose.yml   -f docker-compose.cpu.yml   -f docker-compose.override.yml   --profile deploy up
+MODE=deploy MODEL="meta-llama/Llama-3.1-405B-Instruct" PORT=8000 CPU_MODEL=meta-llama/Llama-3.1-8B-Instruct CPU_PORT=8001 docker compose   -f docker-compose.yml   -f docker-compose.cpu.yml   -f docker-compose.override.yml   --profile deploy up
 ```
 
 Test:
@@ -153,22 +152,22 @@ curl http://localhost:8000/v1/models
 curl http://localhost:8001/v1/models
 ```
 
-## Benchmark Mode
+#### Benchmark Mode
 
 ```bash
-MODE=benchmark CPU_MODE=benchmark docker compose   -f docker-compose.yml   -f docker-compose.cpu.yml   -f docker-compose.override.yml   --profile benchmark up
+MODE=benchmark docker compose   -f docker-compose.yml   -f docker-compose.cpu.yml   -f docker-compose.override.yml   --profile benchmark up
 ```
 
 Outputs:
 
-```
+```bash
 benchmarks/results/
 benchmarks/results-cpu/
 ```
 
 ---
 
-# Key Takeaways
+## Key Takeaways
 
 - **docker-compose.override.yml** defines NUMA-aware CPU pinning
 - GPU inference uses **closest CPUs and PCT turbo cores**
