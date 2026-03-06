@@ -37,12 +37,12 @@ class QwenVLProcessor(ProcessorMixin):
 
     @property
     def image_start_tag(self) -> str:
-        return self.tokenizer.image_start_tag
+        return self.tokenizer.image_start_tag  # type: ignore[attr-defined]
 
     @property
     def image_end_tag(self) -> str:
-        return self.tokenizer.image_end_tag
+        return self.tokenizer.image_end_tag  # type: ignore[attr-defined]
 
     @property
     def image_pad_tag(self) -> str:
-        return self.tokenizer.image_pad_tag
+        return self.tokenizer.image_pad_tag  # type: ignore[attr-defined]
