@@ -14,15 +14,121 @@ from logging import Logger
 from logging.config import dictConfig
 from os import path
 from types import MethodType
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import vllm.envs as envs
 from vllm.logging_utils import ColoredFormatter, NewLineFormatter
+
+# Try to import pythonjsonlogger, fall back gracefully if not available
+try:
+    from pythonjsonlogger import jsonlogger
+
+    HAS_JSON_LOGGER = True
+except ImportError:
+    HAS_JSON_LOGGER = False
+    jsonlogger = None
+
+
+if TYPE_CHECKING:
+
+    class _JsonFormatterBase(logging.Formatter):
+        """Typed stub so mypy knows about add_fields from JsonFormatter."""
+
+        def add_fields(
+            self,
+            log_record: dict,
+            record: logging.LogRecord,
+            message_dict: dict,
+        ) -> None: ...
+else:
+    _JsonFormatterBase = (
+        jsonlogger.JsonFormatter if HAS_JSON_LOGGER else logging.Formatter
+    )
+
+
+class VllmJsonFormatter(_JsonFormatterBase):
+    """JSON formatter that includes exception/traceback information."""
+
+    def add_fields(
+        self, log_record: dict, record: logging.LogRecord, message_dict: dict
+    ) -> None:
+        """Add fields including exception info to the log record."""
+        if HAS_JSON_LOGGER:
+            super().add_fields(log_record, record, message_dict)
+
+        # Add fileinfo (filename without full path)
+        if hasattr(record, "pathname"):
+            log_record["fileinfo"] = record.pathname
+
+        # Add exception info if present
+        if record.exc_info:
+            import traceback
+
+            # Format the full traceback as string
+            tb_lines = traceback.format_exception(*record.exc_info)
+            # Store as array of lines (stripped of whitespace and newlines)
+            log_record["exc_info"] = [line.strip() for line in tb_lines if line.strip()]
+
+        if record.stack_info:
+            # Also convert stack info to array of lines
+            log_record["stack_info"] = [
+                line.strip()
+                for line in self.formatStack(record.stack_info).split("\n")
+                if line.strip()
+            ]
+
+
+_json_exception_handler_installed = False
+
+
+def _install_json_exception_handler() -> None:
+    """Install a global exception handler that logs uncaught exceptions as JSON."""
+    global _json_exception_handler_installed
+
+    # Only install once to avoid multiple wrapping
+    if _json_exception_handler_installed:
+        return
+    _json_exception_handler_installed = True
+
+    original_excepthook = sys.excepthook
+
+    def json_excepthook(exc_type, exc_value, exc_traceback):
+        """Handle uncaught exceptions by logging them through the vllm logger."""
+        if issubclass(exc_type, KeyboardInterrupt):
+            # Call the original handler for KeyboardInterrupt
+            original_excepthook(exc_type, exc_value, exc_traceback)
+            return
+
+        logger.critical(
+            "Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback)
+        )
+
+    sys.excepthook = json_excepthook
+
+    import threading
+
+    original_threading_excepthook = threading.excepthook
+
+    def json_threading_excepthook(args):
+        """Handle uncaught exceptions in threads."""
+        if issubclass(args.exc_type, KeyboardInterrupt):
+            original_threading_excepthook(args)
+            return
+
+        logger.critical(
+            "Uncaught exception in thread %s",
+            args.thread.name,
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    threading.excepthook = json_threading_excepthook
+
 
 _FORMAT = (
     f"{envs.VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
     "[%(fileinfo)s:%(lineno)d] %(message)s"
 )
+_JSON_FORMAT = "%(asctime)s %(levelname)s %(name)s %(fileinfo)s %(lineno)d %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 
@@ -38,6 +144,15 @@ def _use_color() -> bool:
     return False
 
 
+def _use_json_logging() -> bool:
+    """Check if JSON logging should be enabled via environment variable."""
+    return (
+        HAS_JSON_LOGGER
+        and hasattr(envs, "VLLM_LOGGING_JSON")
+        and envs.VLLM_LOGGING_JSON == "1"
+    )
+
+
 DEFAULT_LOGGING_CONFIG: dict[str, dict[str, Any] | Any] = {
     "formatters": {
         "vllm": {
@@ -50,12 +165,20 @@ DEFAULT_LOGGING_CONFIG: dict[str, dict[str, Any] | Any] = {
             "datefmt": _DATE_FORMAT,
             "format": _FORMAT,
         },
+        "vllm_json": {
+            "()": VllmJsonFormatter,
+            "format": _JSON_FORMAT,
+        },
     },
     "handlers": {
         "vllm": {
             "class": "logging.StreamHandler",
-            # Choose formatter based on color setting.
-            "formatter": "vllm_color" if _use_color() else "vllm",
+            # Choose formatter based on JSON/color setting
+            "formatter": (
+                "vllm_json"
+                if _use_json_logging()
+                else ("vllm_color" if _use_color() else "vllm")
+            ),
             "level": envs.VLLM_LOGGING_LEVEL,
             "stream": envs.VLLM_LOGGING_STREAM,
         },
@@ -174,7 +297,12 @@ def _configure_vllm_root_logger() -> None:
         # Refresh these values in case env vars have changed.
         vllm_handler["level"] = envs.VLLM_LOGGING_LEVEL
         vllm_handler["stream"] = envs.VLLM_LOGGING_STREAM
-        vllm_handler["formatter"] = "vllm_color" if _use_color() else "vllm"
+
+        # Choose formatter based on JSON/color settings
+        if _use_json_logging():
+            vllm_handler["formatter"] = "vllm_json"
+        else:
+            vllm_handler["formatter"] = "vllm_color" if _use_color() else "vllm"
 
         vllm_loggers = logging_config["loggers"]["vllm"]
         vllm_loggers["level"] = envs.VLLM_LOGGING_LEVEL
@@ -202,6 +330,21 @@ def _configure_vllm_root_logger() -> None:
 
     if logging_config:
         dictConfig(logging_config)
+
+    # Warn if JSON logging was requested but pythonjsonlogger is not available
+    if (
+        hasattr(envs, "VLLM_LOGGING_JSON")
+        and envs.VLLM_LOGGING_JSON == "1"
+        and not HAS_JSON_LOGGER
+    ):
+        logging.warning(
+            "VLLM_LOGGING_JSON is enabled but 'python-json-logger' is not installed. "
+            "Install it with: pip install python-json-logger"
+        )
+
+    # Install global exception handler for JSON logging
+    if _use_json_logging():
+        _install_json_exception_handler()
 
 
 def init_logger(name: str) -> _VllmLogger:
