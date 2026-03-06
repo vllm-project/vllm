@@ -93,7 +93,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
-from vllm.multimodal.utils import group_mm_kwargs_by_modality
+from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
@@ -905,7 +905,7 @@ class GPUModelRunner(
         Args:
             scheduler_output: The scheduler output.
         """
-        # Attention free models have zero kv_cache_goups, however models
+        # Attention free models have zero kv_cache_groups, however models
         # like Mamba are also attention free but use the kv_cache for
         # keeping its internal state. This is why we check the number
         # of kv_cache groups instead of solely checking
@@ -928,7 +928,7 @@ class GPUModelRunner(
 
     # Note: used for model runner override.
     def _sync_device(self) -> None:
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -1065,7 +1065,7 @@ class GPUModelRunner(
                 # of the request. for example:
                 # fist step: num_computed_tokens = 0, spec_tokens = [],
                 # prev_num_draft_len = 0.
-                # second step: num_computed_tokens = 100(prompt lenth),
+                # second step: num_computed_tokens = 100(prompt length),
                 # spec_tokens = [a,b], prev_num_draft_len = 0.
                 # third step: num_computed_tokens = 100 + 2, spec_tokens = [c,d],
                 # prev_num_draft_len = 2.
@@ -1311,12 +1311,12 @@ class GPUModelRunner(
 
         # Input all modalities at once
         mm_kwargs_combined: BatchedTensorInputs = {}
-        for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
+        for _, _, mm_kwargs_batch in group_and_batch_mm_kwargs(
             mm_kwargs,
             device=self.device,
             pin_memory=self.pin_memory,
         ):
-            mm_kwargs_combined.update(mm_kwargs_group)
+            mm_kwargs_combined.update(mm_kwargs_batch)
 
         return mm_kwargs_combined
 
@@ -1412,30 +1412,30 @@ class GPUModelRunner(
                 prev_draft_token_indices.extend(range(start, start + draft_len))
                 indices_match &= prev_index == flattened_index
                 max_flattened_index = max(max_flattened_index, flattened_index)
-        num_commmon_tokens = len(sample_flattened_indices)
+        num_common_tokens = len(sample_flattened_indices)
         total_without_spec = total_num_scheduled_tokens - total_num_spec_tokens
-        if num_commmon_tokens < total_without_spec:
+        if num_common_tokens < total_without_spec:
             # If not all requests are decodes from the last iteration,
             # We need to copy the input_ids_cpu to the GPU first.
             self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
             if self.enable_prompt_embeds:
                 self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
                 self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
-        if num_commmon_tokens == 0:
+        if num_common_tokens == 0:
             # No requests in common with the previous iteration
             # So input_ids.cpu will have all the input ids.
             return
-        if indices_match and max_flattened_index == (num_commmon_tokens - 1):
+        if indices_match and max_flattened_index == (num_common_tokens - 1):
             # Common-case optimization: the batch is unchanged
             # and no reordering happened.
             # The indices are both the same permutation of 0..N-1 so
             # we can copy directly using a single slice.
-            self.input_ids.gpu[:num_commmon_tokens].copy_(
-                self.input_batch.prev_sampled_token_ids[:num_commmon_tokens, 0],
+            self.input_ids.gpu[:num_common_tokens].copy_(
+                self.input_batch.prev_sampled_token_ids[:num_common_tokens, 0],
                 non_blocking=True,
             )
             if self.enable_prompt_embeds:
-                self.is_token_ids.gpu[:num_commmon_tokens] = True
+                self.is_token_ids.gpu[:num_common_tokens] = True
             return
         # Upload the index tensors asynchronously so the scatter can be non-blocking.
         sampled_tokens_index_tensor = torch.tensor(
@@ -2446,12 +2446,12 @@ class GPUModelRunner(
         encoder_outputs: list[torch.Tensor] = []
         # Track the current index in mm_kwargs/mm_lora_refs to map groups to request IDs
         current_item_idx = 0
-        for modality, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
+        for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             mm_kwargs,
             device=self.device,
             pin_memory=self.pin_memory,
         ):
-            curr_group_outputs: MultiModalEmbeddings
+            batch_outputs: MultiModalEmbeddings
 
             # EVS-related change.
             # (ekhvedchenia): Temporary hack to limit peak memory usage when
@@ -2467,14 +2467,14 @@ class GPUModelRunner(
                 and modality == "video"
                 and num_items > 1
             ):
-                curr_group_outputs_lst = list[torch.Tensor]()
+                batch_outputs_lst = list[torch.Tensor]()
                 for video_idx in range(num_items):
                     video_mm_kwargs_item = mm_kwargs[current_item_idx + video_idx]
                     with self.timed_encoder_operation(
                         should_time, mm_lora_refs, current_item_idx + video_idx, 1
                     ):
                         _, _, micro_batch_mm_inputs = next(
-                            group_mm_kwargs_by_modality(
+                            group_and_batch_mm_kwargs(
                                 [video_mm_kwargs_item],
                                 device=self.device,
                                 pin_memory=self.pin_memory,
@@ -2485,12 +2485,12 @@ class GPUModelRunner(
                             **micro_batch_mm_inputs
                         )
 
-                        curr_group_outputs_lst.extend(micro_batch_outputs)
+                        batch_outputs_lst.extend(micro_batch_outputs)
 
-                curr_group_outputs = curr_group_outputs_lst
+                batch_outputs = batch_outputs_lst
             else:
                 # Run the encoder.
-                # `curr_group_outputs` is either of the following:
+                # `batch_outputs` is either of the following:
                 # 1. A tensor of shape (num_items, feature_size, hidden_size)
                 # in case feature_size is fixed across all multimodal items.
                 # 2. A list or tuple (length: num_items) of tensors,
@@ -2500,13 +2500,10 @@ class GPUModelRunner(
                 with self.timed_encoder_operation(
                     should_time, mm_lora_refs, current_item_idx, num_items
                 ):
-                    curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
+                    batch_outputs = model.embed_multimodal(**mm_kwargs_batch)
 
-            sanity_check_mm_encoder_outputs(
-                curr_group_outputs,
-                expected_num_items=num_items,
-            )
-            encoder_outputs.extend(curr_group_outputs)
+            sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
+            encoder_outputs.extend(batch_outputs)
 
             current_item_idx += num_items
 
@@ -4383,7 +4380,7 @@ class GPUModelRunner(
             self.model.compile(fullgraph=True, backend=backend)
             return
         # for other compilation modes, cudagraph behavior is controlled by
-        # CudagraphWraper and CudagraphDispatcher of vllm.
+        # CudagraphWrapper and CudagraphDispatcher of vllm.
 
         # wrap the model with full cudagraph wrapper if needed.
         cudagraph_mode = self.compilation_config.cudagraph_mode
@@ -4444,7 +4441,7 @@ class GPUModelRunner(
         :param weights_path: path to load weights from if weights_iterator is not
             provided. Use path of original model if neither is provided.
         :param is_checkpoint_format: set to False if weights have already been processed
-            into kernel format (repacking, renaming, ect.)
+            into kernel format (repacking, renaming, etc.)
         """
         # TODO(@kylesayrs): generalize to all runners and loaders
         # argument validation
@@ -4707,8 +4704,8 @@ class GPUModelRunner(
         assert dummy_mm_item is not None, "Item should not already be cached"
 
         return next(
-            mm_kwargs_group
-            for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
+            mm_kwargs_batch
+            for _, _, mm_kwargs_batch in group_and_batch_mm_kwargs(
                 [(modality, dummy_mm_item)] * max_items_per_batch,
                 device=self.device,
                 pin_memory=self.pin_memory,
@@ -5345,7 +5342,7 @@ class GPUModelRunner(
                     cudagraph_runtime_mode=runtime_mode,
                 )
 
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             end_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         # Disable cudagraph capturing globally, so any unexpected cudagraph
@@ -6266,13 +6263,13 @@ class GPUModelRunner(
         group_refs = group_lora_refs[current_item_idx : current_item_idx + num_items]
         group_request_ids = {req_id for req_id, _ in group_refs}
 
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         start_time = time.perf_counter()
 
         try:
             yield
         finally:
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             elapsed = time.perf_counter() - start_time
 
             per_request_time = elapsed / max(len(group_request_ids), 1)
