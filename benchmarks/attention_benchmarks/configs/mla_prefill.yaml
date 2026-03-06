@@ -27,6 +27,18 @@ model:
   v_head_dim: 128
   block_size: 128
 
+# model:
+#   name: "deepseek-v2-lite"
+#   num_layers: 27
+#   num_q_heads: 16
+#   num_kv_heads: 1
+#   head_dim: 576
+#   kv_lora_rank: 512
+#   qk_nope_head_dim: 128
+#   qk_rope_head_dim: 64
+#   v_head_dim: 128
+#   block_size: 128
+
 batch_specs:
   # Pure prefill (q_len == kv_len)
   - "q512"
