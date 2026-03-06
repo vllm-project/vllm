@@ -38,7 +38,6 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     FunctionCall,
     FunctionDefinition,
-    GenerationError,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import (
@@ -185,7 +184,6 @@ class OpenAIServing:
         *,
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
-
     ):
         super().__init__()
 
@@ -588,11 +586,11 @@ class OpenAIServing:
         if finish_reason == "rejected":
             if self.request_logger is not None:
                 self.request_logger.log_rejected_request(request_id)
-            raise RequestRejectedError("Request was rejected")
+            raise RequestRejectedError()
 
     def _convert_generation_error_to_response(self, e: Exception) -> ErrorResponse:
         """Convert GenerationError or RequestRejectedError to ErrorResponse."""
-        if isinstance(e, (GenerationError, RequestRejectedError)):
+        if isinstance(e, GenerationError):
             return self.create_error_response(
                 str(e), err_type=e.err_type, status_code=e.status_code
             )
@@ -603,7 +601,7 @@ class OpenAIServing:
         """
         Convert GenerationError or RequestRejectedError to streaming error response.
         """
-        if isinstance(e, (GenerationError, RequestRejectedError)):
+        if isinstance(e, (GenerationError)):
             return self.create_streaming_error_response(
                 str(e), err_type=e.err_type, status_code=e.status_code
             )

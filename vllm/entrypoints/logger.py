@@ -100,12 +100,9 @@ class RequestLogger:
             finish_reason,
         )
 
-    def log_rejected_request(
-        self,
-        request_id: str,
-    ) -> None:
-        if self.rejected_log_counter % self.rejected_log_interval == 0:
-            logger.error(
+    def log_rejected_request(self, request_id: str) -> None:
+        if self.rejected_log_counter == self.rejected_log_interval:
+            logger.warning(
                 "Request %s was rejected due to "
                 "a full waiting queue (log every %d requests)",
                 request_id,

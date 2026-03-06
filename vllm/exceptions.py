@@ -85,10 +85,9 @@ class RequestRejectedError(GenerationError):
     """Raised when finish_reason indicates the request was rejected
     (e.g., queue full, rate-limited, etc)."""
 
-    def __init__(
-        self,
-        message: str = "Request was rejected",
-        err_type: str = "ServiceUnavailableError",
-        status_code: HTTPStatus = HTTPStatus.SERVICE_UNAVAILABLE,
-    ):
-        super().__init__(message, err_type=err_type, status_code=status_code)
+    def __init__(self):
+        super().__init__(
+            message="Request was rejected",
+            err_type="ServiceUnavailableError",
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+        )
