@@ -322,6 +322,26 @@ class DynamicShapesConfig:
     `True` requires PyTorch 2.10+
     """
 
+    autotune_batch_hint: int | None = None
+    """Optional hint for the batch dimension size during autotuning.
+
+    When set, this value is passed as `hint_override` to torch.mark_dynamic()
+    or torch._dynamo.decorators.mark_unbacked() for dimension 0 (batch).
+    This controls what batch size Inductor uses when benchmarking kernel
+    configurations during autotuning.
+
+    If None (default), the behavior is unchanged:
+    - BACKED: uses actual tensor size from first run
+    - UNBACKED: falls back to torch._inductor.config.unbacked_symint_fallback (8192)
+    """
+
+    @field_validator("autotune_batch_hint")
+    @classmethod
+    def validate_autotune_batch_hint(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            raise ValueError("autotune_batch_hint must be a positive integer.")
+        return v
+
     def compute_hash(self) -> str:
         """
         Provide a hash for DynamicShapesConfig
