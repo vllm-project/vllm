@@ -505,8 +505,8 @@ class RocmPlatform(Platform):
     @classmethod
     @with_amdsmi_context
     def get_device_uuid(cls, device_id: int = 0) -> str:
-            device0 = amdsmi_get_processor_handles()[0]
-            return amdsmi_get_gpu_device_uuid(device0)
+            device = amdsmi_get_processor_handles()[device_id]
+            return amdsmi_get_gpu_device_uuid(device)
         
 
     @classmethod
