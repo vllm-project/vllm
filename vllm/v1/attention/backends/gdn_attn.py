@@ -305,12 +305,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         else:
             has_initial_state = None
 
-        # Function code counted on either presency non-spec decode or spec decode,
-        # but not both.
-        assert not (num_decodes > 0 and num_spec_decodes > 0), (
-            f"num_decodes: {num_decodes}, num_spec_decodes: {num_spec_decodes}"
-        )
-
         # Prepare tensors for cudagraph
         # Note: m.num_actual_tokens is already padded by the model runner for CUDAGraph
         batch_size = m.num_actual_tokens
