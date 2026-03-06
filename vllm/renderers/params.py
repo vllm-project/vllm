@@ -253,13 +253,14 @@ class TokenizeParams:
                 # To save resources, fail the request outright without even
                 # attempting tokenization
                 raise VLLMValidationError(
-                    f"You passed {len(text)} input characters "
-                    f"and requested {self.max_output_tokens} output tokens. "
-                    f"However, the model's context length is only "
-                    f"{self.max_total_tokens} tokens, resulting in a maximum "
-                    f"input length of {max_input_tokens} tokens "
-                    f"(at most {max_input_chars} characters). "
-                    f"Please reduce the length of the input prompt.",
+                    f"This model's maximum context length is "
+                    f"{self.max_total_tokens} tokens. However, you requested "
+                    f"{self.max_output_tokens} output tokens and your prompt "
+                    f"contains {len(text)} characters (more than "
+                    f"{max_input_chars} characters, which is the upper bound "
+                    f"for {max_input_tokens} input tokens). "
+                    f"Please reduce the length of the input prompt or the "
+                    f"number of requested output tokens.",
                     parameter="input_text",
                     value=len(text),
                 )
@@ -334,15 +335,22 @@ class TokenizeParams:
             return tokens
 
         if len(tokens) > max_input_tokens:
+            token_count = len(tokens)
+            # The tokenizer may have truncated the prompt to
+            # max_input_tokens + 1 (see get_encode_kwargs), so the
+            # actual prompt length could be larger.
+            qualifier = "at least " if token_count == max_input_tokens + 1 else ""
+            total = token_count + self.max_output_tokens
             raise VLLMValidationError(
-                f"You passed {len(tokens)} input tokens "
-                f"and requested {self.max_output_tokens} output tokens. "
-                f"However, the model's context length is only "
-                f"{self.max_total_tokens} tokens, resulting in a maximum "
-                f"input length of {max_input_tokens} tokens. "
-                f"Please reduce the length of the input prompt.",
+                f"This model's maximum context length is "
+                f"{self.max_total_tokens} tokens. However, you requested "
+                f"{self.max_output_tokens} output tokens and your prompt "
+                f"contains {qualifier}{token_count} input tokens, "
+                f"for a total of {qualifier}{total} tokens. "
+                f"Please reduce the length of the input prompt or the "
+                f"number of requested output tokens.",
                 parameter="input_tokens",
-                value=len(tokens),
+                value=token_count,
             )
 
         return tokens
