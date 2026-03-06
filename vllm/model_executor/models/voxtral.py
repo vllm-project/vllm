@@ -815,16 +815,27 @@ class VoxtralEncoderModel(nn.Module):
             max_frequency=8000.0,
             sampling_rate=self.config.sampling_rate,
         )
-        self.mel_filters = torch.tensor(mel_filters, dtype=torch.float32)
+        self.register_buffer(
+            "mel_filters",
+            torch.tensor(mel_filters, dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "hann_window",
+            torch.hann_window(
+                self.config.window_size,
+                dtype=torch.float32,
+            ),
+            persistent=False,
+        )
 
     def compute_whisper_melspec(
         self,
         audio_waveforms: torch.Tensor,
     ) -> torch.Tensor:
         input_dtype = audio_waveforms.dtype
-        window = torch.hann_window(
-            self.config.window_size, device=audio_waveforms.device
-        )
+        audio_waveforms = audio_waveforms.to(torch.float32)
+        window = self.hann_window.to(audio_waveforms.device)
         stft = torch.stft(
             audio_waveforms,
             self.config.window_size,
@@ -833,7 +844,8 @@ class VoxtralEncoderModel(nn.Module):
             return_complex=True,
         )
         magnitudes = stft[..., :-1].abs() ** 2
-        mel_spec = self.mel_filters.T @ magnitudes
+        mel_filters = self.mel_filters.to(audio_waveforms.device)
+        mel_spec = mel_filters.T @ magnitudes
         log_spec = torch.clamp(mel_spec, min=1e-10).log10()
 
         if global_log_mel_max := self.config.global_log_mel_max:
@@ -866,30 +878,36 @@ class VoxtralEncoderModel(nn.Module):
         audio_waveforms: list[torch.Tensor],
     ) -> tuple[torch.Tensor, list[int]]:
         assert isinstance(audio_waveforms, list)
+        assert len(audio_waveforms) > 0, "audio_waveforms must be non-empty"
         # list[num_mel_bins, seq_len]
-        input_features = [
+        log_mel_features = [
             self.compute_whisper_melspec(audio).to(self.dtype)
             for audio in audio_waveforms
         ]
 
         chunked_features: list[torch.Tensor] = []
         chunks_per_example: list[int] = []
-        for feature in input_features:
+        for feature in log_mel_features:
+            if feature.shape[-1] % self.chunk_size != 0:
+                raise ValueError(
+                    "Expected log-mel length to be divisible by chunk_size; "
+                    "audio should already be padded by mistral_common."
+                )
             chunks = feature.split(self.chunk_size, dim=-1)
-            chunked_features += chunks
+            chunked_features.extend(chunks)
             chunks_per_example.append(len(chunks))
 
         # [total_num_chunks, num_mel_bins, chunk_size]
         return torch.stack(chunked_features), chunks_per_example
 
     def forward(
-        self, input_features: torch.Tensor | list[torch.Tensor]
+        self, audio_waveforms: torch.Tensor | list[torch.Tensor]
     ) -> list[torch.Tensor]:
-        if not isinstance(input_features, list):
-            input_features = [input_features]
+        if not isinstance(audio_waveforms, list):
+            audio_waveforms = [audio_waveforms]
 
         # Split long inputs into chunks
-        input_embeds, chunks_per_example = self.prepare_inputs_for_conv(input_features)
+        input_embeds, chunks_per_example = self.prepare_inputs_for_conv(audio_waveforms)
 
         # [total_num_chunks, ceil(chunk_size / downsample_factor), hidden_size]
         out = self.whisper_encoder([input_embeds])
