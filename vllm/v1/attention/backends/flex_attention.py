@@ -31,6 +31,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionCGSupport,
     AttentionImpl,
     AttentionMetadataBuilder,
     AttentionType,
@@ -290,6 +291,12 @@ def causal_mask_mod(
     return q_idx >= kv_idx
 
 
+def copy_to_persistent(dst, src):
+    dst = dst.as_strided(src.shape, src.stride())
+    dst.copy_(src)
+    return dst
+
+
 @dataclass
 class FlexAttentionMetadata:
     causal: bool
@@ -315,6 +322,9 @@ class FlexAttentionMetadata:
     physical_to_logical: torch.Tensor
     decode_offset: torch.Tensor
     num_blocks_per_seq: torch.Tensor
+    persistent_kv_indices: torch.Tensor
+    persistent_kv_num_blocks: torch.Tensor
+    persistent_doc_ids: torch.Tensor
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
@@ -613,8 +623,11 @@ class FlexAttentionMetadata:
         kv_indices = unique_static_unsorted(
             (used_pages_padded.long()), M=self.num_blocks
         ).to(torch.int32)
+        kv_indices = copy_to_persistent(self.persistent_kv_indices, kv_indices)
 
         kv_num_blocks = (kv_indices >= 0).sum(dim=-1).to(torch.int32)
+        kv_num_blocks = copy_to_persistent(self.persistent_kv_num_blocks, kv_num_blocks)
+
         block_mask_kwargs = {
             "seq_lengths": (self.num_actual_tokens, self.total_cache_tokens),
             "kv_num_blocks": kv_num_blocks[None, None],
@@ -651,6 +664,7 @@ class FlexAttentionMetadata:
         assert self.suffix_kv_lens is None, "Not implemented yet."
         # Create a lookup mapping from query indices -> request number
         self.doc_ids = _offsets_to_doc_ids_tensor(self.query_start_loc)
+        self.doc_ids = copy_to_persistent(self.persistent_doc_ids, self.doc_ids)
         self.num_blocks = self.total_cache_tokens // self.block_size
 
         self.mask_mod = self.get_mask_mod()
@@ -663,6 +677,8 @@ class FlexAttentionMetadata:
 
 
 class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadata]):
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -687,6 +703,29 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.direct_build: bool = supports_small_blocks
         self.q_block_size: int = 16 if supports_small_blocks else 128
         self.kv_block_size: int = self.block_size if supports_small_blocks else 128
+
+        max_model_len = self.model_config.max_model_len
+        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        max_num_q_block = (max_model_len + self.q_block_size - 1) // self.q_block_size
+        max_num_kv_block = (
+            max_model_len + self.kv_block_size - 1
+        ) // self.kv_block_size
+        self.persistent_kv_indices = torch.empty(
+            max_num_q_block, max_num_kv_block, dtype=torch.int32, device=device
+        )
+        self.persistent_kv_num_blocks = torch.empty(
+            max_num_q_block, dtype=torch.int32, device=device
+        )
+        self.persistent_offset_tensor = torch.empty(
+            max_num_seqs, dtype=torch.int32, device=device
+        )
+        self.persistent_doc_ids = torch.empty(
+            max_num_batched_tokens, dtype=torch.int32, device=device
+        )
+
+        # initialize later when we can access block_table
+        self.persistent_physical_to_logical = None
 
     def build(
         self,
@@ -724,8 +763,20 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         inverse_block_table = physical_to_logical_mapping(
             block_table_tensor, seq_lens, block_size, num_gpu_blocks
         )
+        if self.persistent_physical_to_logical is None:
+            self.persistent_physical_to_logical = torch.empty(
+                block_table_tensor.size(0),
+                num_gpu_blocks,
+                dtype=torch.long,
+                device=self.device,
+            )
+
+        inverse_block_table = copy_to_persistent(
+            self.persistent_physical_to_logical, inverse_block_table
+        )
 
         offset_tensor = common_attn_metadata.compute_num_computed_tokens()
+        offset_tensor = copy_to_persistent(self.persistent_offset_tensor, offset_tensor)
 
         out = FlexAttentionMetadata(
             causal=common_attn_metadata.causal,
@@ -754,6 +805,9 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             direct_build=(self.direct_build and common_attn_metadata.causal),
             q_block_size=self.q_block_size,
             kv_block_size=self.kv_block_size,
+            persistent_kv_indices=self.persistent_kv_indices,
+            persistent_kv_num_blocks=self.persistent_kv_num_blocks,
+            persistent_doc_ids=self.persistent_doc_ids,
         )
         return out
 
