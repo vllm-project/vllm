@@ -1172,7 +1172,6 @@ class DeepseekV2Model(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        # Eagle3 support: track which layers should output auxiliary hidden states
         self.aux_hidden_state_layers = tuple[int, ...]()
 
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
@@ -1214,14 +1213,11 @@ class DeepseekV2Model(nn.Module):
         else:
             llama_4_scaling = None
 
-        # Eagle3 support: collect auxiliary hidden states from specified layers
         aux_hidden_states = []
         for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
-            # Calculate global layer index for pipeline parallelism
             global_layer_idx = self.start_layer + idx
-            # Save hidden states before layer processing if this layer is marked
             if global_layer_idx in self.aux_hidden_state_layers:
-                # Store pre-normalization state (hidden_states + residual)
+                # Pre-normalization state
                 aux_hidden_states.append(hidden_states + residual)
 
             hidden_states, residual = layer(
@@ -1235,7 +1231,6 @@ class DeepseekV2Model(nn.Module):
 
         hidden_states, _ = self.norm(hidden_states, residual)
 
-        # Eagle3 support: return auxiliary hidden states if collected
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
 
@@ -1372,43 +1367,18 @@ class DeepseekV2ForCausalLM(
         return self.model.embed_input_ids(input_ids)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        """Set which layers should output auxiliary hidden states for Eagle3.
-
-        Args:
-            layers: Tuple of layer indices that should output auxiliary hidden states.
-        """
+        """Set which layers should output auxiliary hidden states."""
         self.model.aux_hidden_state_layers = layers
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        """Get default auxiliary layer indices for DeepseekV2.
-
-        Returns default layer selection based on model size. These defaults
-        can be overridden by speculative config if the draft model specifies
-        eagle_aux_hidden_state_layer_ids in its config.
-
-        Returns:
-            Tuple of layer indices (typically: early, middle, late layers)
-        """
-        # Use total number of layers from config, not len(layers) which
-        # only reflects the current pipeline parallel rank
+        """Return default auxiliary layer indices: early, middle, and late layers."""
+        # Use config.num_hidden_layers for correct count across pipeline stages
         num_layers = self.model.config.num_hidden_layers
 
-        # Handle small models gracefully
         if num_layers < 4:
-            # For very small models, return middle layer only (or empty if no layers)
             return (num_layers // 2,) if num_layers > 0 else ()
 
-        # Select 3 representative layers: early, middle, and late
-        # Use set to avoid duplicates in edge cases, then sort
-        return tuple(
-            sorted(
-                {
-                    2,  # Early layer (captures low-level features)
-                    num_layers // 2,  # Middle layer (captures mid-level semantics)
-                    num_layers - 3,  # Late layer (captures high-level semantics)
-                }
-            )
-        )
+        return tuple(sorted({2, num_layers // 2, num_layers - 3}))
 
     def forward(
         self,

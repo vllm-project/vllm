@@ -458,23 +458,11 @@ class KimiK25ForConditionalGeneration(
         return vision_embeddings
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        """Set which layers should output auxiliary hidden states for Eagle3.
-
-        Delegates to the underlying language model (DeepseekV2ForCausalLM).
-
-        Args:
-            layers: Tuple of layer indices that should output auxiliary hidden states.
-        """
+        """Set which layers should output auxiliary hidden states."""
         self.language_model.set_aux_hidden_state_layers(layers)
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        """Get default auxiliary layer indices for Kimi K2.5.
-
-        Delegates to the underlying language model (DeepseekV2ForCausalLM).
-
-        Returns:
-            Tuple of layer indices (typically: early, middle, late layers)
-        """
+        """Return default auxiliary layer indices."""
         return self.language_model.get_eagle3_aux_hidden_state_layers()
 
     def forward(
