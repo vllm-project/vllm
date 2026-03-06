@@ -22,6 +22,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE, fused_experts
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -88,6 +89,11 @@ _BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
     "deepep_high_throughput":   {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
 }
 # fmt: on
+
+# Which quantization methods support EPLB.
+# ModelOptFp8MoEMethod inherits supports_eplb=False from FusedMoEMethodBase.
+# TODO: double check modelopt fp8
+_EPLB_SUPPORTED_QUANTS: set[str | None] = {None, "fp8", "modelopt_fp4"}
 
 
 def rank_chunk(num: int, r: int, w: int) -> int:
@@ -511,6 +517,98 @@ def make_fake_moe_layer(
     return _moe
 
 
+def _test_eplb_rearrangement(
+    moe_layer: FusedMoE,
+    moe_fn: Callable,
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    output_before: torch.Tensor,
+    num_experts: int,
+    device: torch.device | int,
+    cpu_group,
+    vllm_config: VllmConfig,
+    num_tokens: int,
+    num_tokens_across_dp: torch.Tensor,
+    quantization: str | None,
+    k: int,
+) -> None:
+    """Test EPLB by rearranging expert weights and verifying output matches.
+
+    Shuffles the physical-to-logical expert mapping, rearranges weights
+    accordingly, enables EPLB routing, and checks that the forward pass
+    produces the same output as before rearrangement.
+    """
+    # All ranks must generate the same permutation.
+    set_random_seed(42)
+    initial_indices = torch.arange(num_experts, dtype=torch.long)
+    shuffled_indices = initial_indices[torch.randperm(num_experts)]
+
+    # Rearrange expert weights across EP ranks.
+    expert_weights = [list(moe_layer.get_expert_weights())]
+    rearrange_expert_weights_inplace(
+        old_global_expert_indices=initial_indices.unsqueeze(0),
+        new_global_expert_indices=shuffled_indices.unsqueeze(0),
+        expert_weights=expert_weights,
+        ep_group=cpu_group,
+    )
+
+    # Build logical_to_physical_map from shuffled_indices.
+    # shuffled_indices[physical] = logical, we need the inverse.
+    logical_to_physical = torch.empty(num_experts, dtype=torch.int32, device=device)
+    logical_to_physical[shuffled_indices.to(device)] = torch.arange(
+        num_experts, dtype=torch.int32, device=device
+    )
+
+    # Enable EPLB and set state (1 layer, 0 redundant experts).
+    # Must also enable on the router — it has its own flag checked in
+    # _apply_eplb_mapping, independent of the layer's flag.
+
+    # TODO(bnell): this is hacky, create a separate FusedMoE for the eplb case.
+    moe_layer.enable_eplb = True
+    moe_layer.router.enable_eplb = True
+    # end hacky
+
+    moe_layer.set_eplb_state(
+        moe_layer_idx=0,
+        expert_load_view=torch.zeros(
+            (1, num_experts),
+            dtype=torch.int32,
+            device=device,
+        ),
+        logical_to_physical_map=logical_to_physical.reshape(num_experts, 1).unsqueeze(
+            0
+        ),
+        logical_replica_count=torch.ones(
+            (1, num_experts),
+            dtype=torch.int32,
+            device=device,
+        ),
+    )
+
+    # Second forward in a fresh context (moe_forward tracks call counts).
+    with set_forward_context(
+        None,
+        vllm_config,
+        num_tokens=num_tokens,
+        num_tokens_across_dp=num_tokens_across_dp,
+    ):
+        output_after = moe_fn(hidden_states, router_logits)
+
+    # With correct EPLB routing, the before/after outputs should be
+    # nearly identical — same weights, same inputs, compensating routing.
+    # Use the same tolerances as the baseline comparison.
+    if quantization is None:
+        atol, rtol = 3.5e-2, 3.5e-2
+    elif quantization in ("fp8", "modelopt_fp8"):
+        atol, rtol = 6e-2, 6e-2
+    elif quantization == "modelopt_fp4":
+        atol = rtol = 1e-1 + k * 5e-4
+    else:
+        atol, rtol = 6e-2, 6e-2
+
+    torch.testing.assert_close(output_before, output_after, atol=atol, rtol=rtol)
+
+
 def _test_loop(
     pgi: ProcessGroupInfo,
     vllm_config: VllmConfig,
@@ -530,6 +628,7 @@ def _test_loop(
     top_k: int,
     quantization: str | None,
     shared_experts_config: SharedExpertsConfig | None,
+    use_eplb: bool = False,
 ):
     world_size = tp_size * dp_size
     use_ep = ep_size > 1
@@ -619,9 +718,25 @@ def _test_loop(
             vllm_config,
             num_tokens=num_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
-            # num_tokens_across_dp=None,
         ):
             output = moe_fn(hidden_states, router_logits)
+
+        if use_eplb:
+            _test_eplb_rearrangement(
+                moe_layer=moe_layer,
+                moe_fn=moe_fn,
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                output_before=output,
+                num_experts=num_experts,
+                device=device,
+                cpu_group=cpu_group,
+                vllm_config=vllm_config,
+                num_tokens=num_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                quantization=quantization,
+                k=k,
+            )
 
     # TODO: add tolerance to QuantizaedWeights + maybe rename
     if quantization is None:
@@ -645,6 +760,7 @@ def _test_loop(
 @pytest.mark.parametrize("dp_size, tp_size, use_ep", PARALLEL_COMBOS)
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("use_shared_experts", [False, True])
+@pytest.mark.parametrize("use_eplb", [False, True])
 def test_moe_layer(
     m: int,
     n: int,
@@ -657,6 +773,7 @@ def test_moe_layer(
     use_ep: bool,
     backend: str,
     use_shared_experts: bool,
+    use_eplb: bool,
     monkeypatch,
 ):
     set_random_seed(7)
@@ -666,6 +783,14 @@ def test_moe_layer(
 
     if world_size > num_gpus:
         pytest.skip(f"Not enough GPUs got {num_gpus}, expected {world_size}.")
+
+    if use_eplb:
+        if not use_ep:
+            pytest.skip("EPLB requires expert parallelism (ep_size > 1)")
+        if quantization not in _EPLB_SUPPORTED_QUANTS:
+            pytest.skip(f"EPLB not supported with quantization={quantization}")
+        if num_experts % dp_size != 0:
+            pytest.skip("EPLB requires num_experts divisible by ep_size")
 
     supported_quants = _BACKEND_SUPPORTED_QUANTS.get(backend)
     if supported_quants is not None and quantization not in supported_quants:
@@ -774,4 +899,5 @@ def test_moe_layer(
         top_k,
         quantization,
         shared_experts_config,
+        use_eplb,
     )
