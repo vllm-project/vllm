@@ -9,6 +9,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -163,6 +164,13 @@ class RocmAttentionBackend(AttentionBackend):
         torch.bfloat16,
         torch.float32,
     ]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+        "fp8",
+        "fp8_e4m3",
+        "fp8_e5m2",
+    ]
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -185,15 +193,12 @@ class RocmAttentionBackend(AttentionBackend):
         return [32, 64, 80, 96, 128, 160, 192, 224, 256]
 
     @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        if not cls.supports_head_size(head_size):
-            attn_type = cls.__name__.removesuffix("Backend")
-            raise ValueError(
-                f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {cls.get_supported_head_sizes()}. "
-                "Set --attention-backend=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes."
-            )
+    def supports_mm_prefix(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_sink(cls) -> bool:
+        return True
 
     forward_includes_kv_cache_update: bool = False
 
@@ -274,8 +279,6 @@ class RocmAttentionImpl(AttentionImpl):
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-
-        RocmAttentionBackend.validate_head_size(head_size)
 
         self.fp8_dtype = current_platform.fp8_dtype()
 
