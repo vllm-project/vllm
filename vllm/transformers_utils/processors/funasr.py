@@ -9,7 +9,6 @@ import torchaudio.compliance.kaldi as kaldi
 from torch.nn.utils.rnn import pad_sequence
 from transformers import (
     AutoFeatureExtractor,
-    AutoProcessor,
     BatchFeature,
 )
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
@@ -503,4 +502,3 @@ class FunASRProcessor(ProcessorMixin):
 
 
 AutoFeatureExtractor.register("FunASRFeatureExtractor", FunASRFeatureExtractor)
-AutoProcessor.register("FunASRProcessor", FunASRProcessor)
