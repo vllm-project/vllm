@@ -7,7 +7,7 @@ from http import HTTPStatus
 from typing import ClassVar, Generic, TypeVar
 
 from fastapi import Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response
 from pydantic import ConfigDict
 from starlette.datastructures import Headers
 
@@ -22,7 +22,6 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.typing import AnyPoolingRequest
-from vllm.entrypoints.utils import create_error_response
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
 from vllm.renderers.inputs import TokPrompt
@@ -35,7 +34,7 @@ from vllm.tracing import (
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import merge_async_iterators
 
-from .io_processor import PoolingIOProcessor
+from .io_processor import EngineInputs, PoolingIOProcessor
 
 PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
 
@@ -104,7 +103,7 @@ class PoolingServing:
         self,
         request: AnyPoolingRequest,
         raw_request: Request,
-    ) -> JSONResponse:
+    ) -> Response:
         model_name = self.models.model_name()
         request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
 
@@ -116,26 +115,12 @@ class PoolingServing:
             model_name=model_name,
             request_id=request_id,
         )
-
-            self._validate_request(ctx)
-            self._maybe_get_adapters(ctx)
-            await self._preprocess(ctx)
-            await self._prepare_generators(ctx)
-            await self._collect_batch(ctx)
-            return await self._build_response(ctx)
-        except Exception as e:
-            error_response = create_error_response(e)
-            return JSONResponse(
-                content=error_response.model_dump(),
-                status_code=error_response.error.code,
-            )
         self._validate_request(ctx)
         self._maybe_get_adapters(ctx)
         await self._preprocess(ctx)
         await self._prepare_generators(ctx)
         await self._collect_batch(ctx)
-        response = await self._build_response(ctx)
-        return JSONResponse(content=response.model_dump())
+        return await self._build_response(ctx)
 
     async def _preprocess(
         self,
