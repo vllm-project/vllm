@@ -608,7 +608,6 @@ class WorkerProc:
         )
 
         # Load model
-        self._init_message_queues(input_shm_handle, vllm_config)
         is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
         if not is_eep_new_worker:
             self.worker.init_device()
@@ -617,6 +616,10 @@ class WorkerProc:
                 enable_ep=vllm_config.parallel_config.enable_expert_parallel
             )
             self.worker.load_model()
+
+        # Initialize message queues after init_device() since multi-node setups
+        # (nnodes_within_dp > 1) require distributed groups to be initialized
+        self._init_message_queues(input_shm_handle, vllm_config)
 
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)

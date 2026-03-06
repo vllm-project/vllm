@@ -67,6 +67,7 @@ steps:
   - tests/v1/distributed
   - tests/v1/engine/test_engine_core_client.py
   - tests/distributed/test_symm_mem_allreduce.py
+  - tests/distributed/test_multiproc_executor.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
@@ -95,6 +96,8 @@ steps:
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
   - pytest -v -s distributed/test_symm_mem_allreduce.py
+  # test multi-node TP with multiproc executor (simulated on single node)
+  - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
   # OLD rlhf examples
