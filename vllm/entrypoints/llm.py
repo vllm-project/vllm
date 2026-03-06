@@ -40,6 +40,10 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateRequest,
 )
 from vllm.engine.arg_utils import EngineArgs
+from vllm.entrypoints.beam_search_utils import (
+    get_beam_allowed_token_ids,
+    init_beam_search_so_backend,
+)
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateConfig,
@@ -93,19 +97,13 @@ from vllm.sampling_params import (
 from vllm.tasks import PoolingTask
 from vllm.tokenizers import TokenizerLike
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils.bitmask import bitmask_to_token_ids
 from vllm.utils.counter import Counter
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.tqdm_utils import maybe_tqdm
 from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
-from vllm.v1.structured_output.backend_types import (
-    StructuredOutputBackend,
-    StructuredOutputOptions,
-)
-from vllm.v1.structured_output.request import get_structured_output_key
-from vllm.v1.structured_output.utils import choice_as_grammar
+from vllm.v1.structured_output.backend_types import StructuredOutputBackend
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -119,12 +117,6 @@ _O = TypeVar(
 )
 _P = TypeVar("_P", bound=SamplingParams | PoolingParams | None)
 _R = TypeVar("_R", default=Any)
-
-
-# Backwards-compatible alias for the bitmask helper that was
-# previously defined here.  Code inside this module now uses the
-# canonical ``bitmask_to_token_ids`` imported from vllm.utils.bitmask.
-_bitmask_to_token_ids = bitmask_to_token_ids
 
 
 class LLM:
@@ -962,78 +954,12 @@ class LLM:
         tokenizer: TokenizerLike,
     ) -> tuple[StructuredOutputBackend, tuple, torch.Tensor]:
         """Initialize the structured output backend for beam search."""
-        vllm_config = self.llm_engine.vllm_config
-        so_config = vllm_config.structured_outputs_config
-        # Resolve the backend name from engine config if not already set.
-        if not structured_outputs._backend:
-            structured_outputs._backend = so_config.backend
-
-        backend_name = structured_outputs._backend
-
-        # Resolve "auto" to a concrete backend.
-        if backend_name == "auto":
-            backend_name = "xgrammar"
-
-        vocab_size = self.model_config.get_vocab_size()
-
-        backend: StructuredOutputBackend
-        if backend_name == "xgrammar":
-            from vllm.v1.structured_output.backend_xgrammar import (
-                XgrammarBackend,
-            )
-
-            backend = XgrammarBackend(
-                vllm_config=vllm_config,
-                tokenizer=tokenizer,
-                vocab_size=vocab_size,
-            )
-        elif backend_name == "guidance":
-            from vllm.v1.structured_output.backend_guidance import (
-                GuidanceBackend,
-            )
-
-            backend = GuidanceBackend(
-                vllm_config=vllm_config,
-                tokenizer=tokenizer,
-                vocab_size=vocab_size,
-            )
-        elif backend_name == "outlines":
-            from vllm.v1.structured_output.backend_outlines import (
-                OutlinesBackend,
-            )
-
-            backend = OutlinesBackend(
-                vllm_config=vllm_config,
-                tokenizer=tokenizer,
-                vocab_size=vocab_size,
-            )
-        elif backend_name == "lm-format-enforcer":
-            from vllm.v1.structured_output.backend_lm_format_enforcer import (
-                LMFormatEnforcerBackend,
-            )
-
-            backend = LMFormatEnforcerBackend(
-                vllm_config=vllm_config,
-                tokenizer=tokenizer,
-                vocab_size=vocab_size,
-            )
-        else:
-            raise ValueError(f"Unsupported structured output backend: {backend_name}")
-
-        key = get_structured_output_key(structured_outputs)
-
-        # Backends like xgrammar don't handle CHOICE natively in
-        # compile_grammar — convert to an EBNF grammar first.
-        request_type, grammar_spec = key
-        if request_type == StructuredOutputOptions.CHOICE:
-            import json as _json
-
-            choices = _json.loads(grammar_spec)
-            key = (StructuredOutputOptions.GRAMMAR, choice_as_grammar(choices))
-
-        bitmask = backend.allocate_token_bitmask(1)
-
-        return backend, key, bitmask
+        return init_beam_search_so_backend(
+            vllm_config=self.llm_engine.vllm_config,
+            tokenizer=tokenizer,
+            vocab_size=self.model_config.get_vocab_size(),
+            structured_outputs=structured_outputs,
+        )
 
     def _build_beam_sampling_params(
         self,
@@ -1048,28 +974,14 @@ class LLM:
         Returns None for beams where the grammar has terminated.
         """
         vocab_size = self.model_config.get_vocab_size()
-        request_type, grammar_spec = structured_output_key
         result: list[SamplingParams | None] = []
 
         for beam in beams:
-            # Fresh grammar per beam, replaying generated tokens.
-            # Backends don't support cloning grammar state, so
-            # replay is needed to reconstruct the FSM position.
-            grammar = backend.compile_grammar(request_type, grammar_spec)
-            prompt_len = len(beam.orig_prompt["prompt_token_ids"])
-            generated_tokens = beam.tokens[prompt_len:]
+            allowed_ids = get_beam_allowed_token_ids(
+                beam, backend, structured_output_key, bitmask, vocab_size
+            )
 
-            if generated_tokens:
-                grammar.accept_tokens("beam", generated_tokens)
-
-            if grammar.is_terminated():
-                result.append(None)
-                continue
-
-            grammar.fill_bitmask(bitmask, 0)
-            allowed_ids = _bitmask_to_token_ids(bitmask[0], vocab_size)
-
-            if not allowed_ids:
+            if allowed_ids is None:
                 result.append(None)
                 continue
 

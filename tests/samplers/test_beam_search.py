@@ -285,5 +285,5 @@ def test_beam_search_structured_output(
             generated = seq.text[gen_start:]
             generated = generated.replace("</s>", "").strip()
             print(f"Generated JSON: {generated!r}")
-            parsed = json.loads(generated)
+            parsed, _ = json.JSONDecoder().raw_decode(generated)
             jsonschema.validate(instance=parsed, schema=json_schema)

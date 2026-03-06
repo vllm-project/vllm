@@ -20,6 +20,10 @@ import vllm.envs as envs
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.beam_search_utils import (
+    get_beam_allowed_token_ids,
+    init_beam_search_so_backend,
+)
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -125,14 +129,8 @@ from vllm.utils.async_utils import (
     collect_from_async_generator,
     merge_async_iterators,
 )
-from vllm.utils.bitmask import bitmask_to_token_ids
 from vllm.utils.mistral import is_mistral_tokenizer
-from vllm.v1.structured_output.backend_types import (
-    StructuredOutputBackend,
-    StructuredOutputOptions,
-)
-from vllm.v1.structured_output.request import get_structured_output_key
-from vllm.v1.structured_output.utils import choice_as_grammar
+from vllm.v1.structured_output.backend_types import StructuredOutputBackend
 
 logger = init_logger(__name__)
 
@@ -246,102 +244,18 @@ class OpenAIServing:
     ) -> tuple[StructuredOutputBackend, tuple, Any]:
         """Initialize a structured output backend for beam search.
 
-        Resolves the backend name from the engine's
-        ``structured_outputs_config`` when the request does not specify
-        one explicitly.  The returned tuple contains the instantiated
-        backend, the grammar compilation key derived from the request
-        parameters, and a pre-allocated single-row token bitmask.
-
-        Args:
-            structured_outputs: The structured output parameters from
-                the API request.
-
-        Returns:
-            A ``(backend, key, bitmask)`` tuple ready for use in the
-            beam search loop.
-
-        Raises:
-            ValueError: If the requested backend is not supported.
+        Delegates to the shared utility in
+        :mod:`vllm.entrypoints.beam_search_utils`.
         """
-        vllm_config = self.engine_client.vllm_config
-        so_config = vllm_config.structured_outputs_config
+        return init_beam_search_so_backend(
+            vllm_config=self.engine_client.vllm_config,
+            tokenizer=self.renderer.get_tokenizer(),
+            vocab_size=self.model_config.get_vocab_size(),
+            structured_outputs=structured_outputs,
+        )
 
-        # Resolve the backend name from engine config if not already set.
-        if not structured_outputs._backend:
-            structured_outputs._backend = so_config.backend
-
-        backend_name = structured_outputs._backend
-
-        # Resolve "auto" to a concrete backend.  The normal request path
-        # does this during SamplingParams validation; beam search bypasses
-        # that, so we replicate the resolution here: xgrammar first, then
-        # guidance as fallback.
-        if backend_name == "auto":
-            backend_name = "xgrammar"
-
-        tokenizer = self.renderer.get_tokenizer()
-        vocab_size = self.model_config.get_vocab_size()
-
-        backend: StructuredOutputBackend
-        if backend_name == "xgrammar":
-            from vllm.v1.structured_output.backend_xgrammar import (
-                XgrammarBackend,
-            )
-
-            backend = XgrammarBackend(
-                vllm_config=vllm_config,
-                tokenizer=tokenizer,
-                vocab_size=vocab_size,
-            )
-        elif backend_name == "guidance":
-            from vllm.v1.structured_output.backend_guidance import (
-                GuidanceBackend,
-            )
-
-            backend = GuidanceBackend(
-                vllm_config=vllm_config,
-                tokenizer=tokenizer,
-                vocab_size=vocab_size,
-            )
-        elif backend_name == "outlines":
-            from vllm.v1.structured_output.backend_outlines import (
-                OutlinesBackend,
-            )
-
-            backend = OutlinesBackend(
-                vllm_config=vllm_config,
-                tokenizer=tokenizer,
-                vocab_size=vocab_size,
-            )
-        elif backend_name == "lm-format-enforcer":
-            from vllm.v1.structured_output.backend_lm_format_enforcer import (
-                LMFormatEnforcerBackend,
-            )
-
-            backend = LMFormatEnforcerBackend(
-                vllm_config=vllm_config,
-                tokenizer=tokenizer,
-                vocab_size=vocab_size,
-            )
-        else:
-            raise ValueError(f"Unsupported structured output backend: {backend_name}")
-
-        key = get_structured_output_key(structured_outputs)
-
-        # Backends like xgrammar don't handle CHOICE natively in
-        # compile_grammar — convert to an EBNF grammar first.
-        request_type, grammar_spec = key
-        if request_type == StructuredOutputOptions.CHOICE:
-            import json as _json
-
-            choices = _json.loads(grammar_spec)
-            key = (StructuredOutputOptions.GRAMMAR, choice_as_grammar(choices))
-
-        bitmask = backend.allocate_token_bitmask(1)
-        return backend, key, bitmask
-
+    @staticmethod
     def _get_beam_allowed_token_ids(
-        self,
         beam: BeamSearchSequence,
         backend: StructuredOutputBackend,
         so_key: tuple,
@@ -350,40 +264,10 @@ class OpenAIServing:
     ) -> list[int] | None:
         """Compute the set of grammar-allowed token IDs for a beam.
 
-        A fresh grammar is compiled and all previously generated tokens
-        are replayed through it so that the FSM state matches the
-        beam's history.  This replay-per-step approach mirrors the
-        offline ``LLM.beam_search`` path — backends do not currently
-        support cloning grammar state.
-
-        Args:
-            beam: The beam sequence whose grammar state to query.
-            backend: The structured output backend instance.
-            so_key: A ``(request_type, grammar_spec)`` tuple obtained
-                from :func:`get_structured_output_key`.
-            bitmask: A pre-allocated single-row bitmask tensor.
-            vocab_size: The model vocabulary size.
-
-        Returns:
-            A list of allowed token IDs, or ``None`` when the grammar
-            has terminated (the beam should be marked completed).
+        Delegates to the shared utility in
+        :mod:`vllm.entrypoints.beam_search_utils`.
         """
-        request_type, grammar_spec = so_key
-        grammar = backend.compile_grammar(request_type, grammar_spec)
-
-        prompt_len = len(beam.orig_prompt["prompt_token_ids"])
-        generated_tokens = beam.tokens[prompt_len:]
-
-        if generated_tokens:
-            grammar.accept_tokens("beam", generated_tokens)
-
-        if grammar.is_terminated():
-            return None
-
-        grammar.fill_bitmask(bitmask, 0)
-        allowed_ids = bitmask_to_token_ids(bitmask[0], vocab_size)
-
-        return allowed_ids if allowed_ids else None
+        return get_beam_allowed_token_ids(beam, backend, so_key, bitmask, vocab_size)
 
     async def beam_search(
         self,
