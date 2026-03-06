@@ -297,9 +297,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
             doc_path = parent_module.replace(".", "/")
             # Anchor: parent module + class name (e.g., vllm.config.SpeculativeConfig)
             anchor = f"{parent_module}.{config_name}"
-            doc_link = (
-                f"https://docs.vllm.ai/en/latest/api/{doc_path}/#{anchor}"
-            )
+            doc_link = f"https://docs.vllm.ai/en/latest/api/{doc_path}/#{anchor}"
 
             def parse_dataclass(
                 val: str,
@@ -320,9 +318,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                             error_msg += f"  - {field}: {msg}\n"
                     else:
                         error_msg += f"  {str(e)}\n"
-                    error_msg += (
-                        f"\nFor all accepted keys and their types, see: {link}"
-                    )
+                    error_msg += f"\nFor all accepted keys and their types, see: {link}"
                     raise argparse.ArgumentTypeError(error_msg) from e
 
             kwargs[name]["type"] = parse_dataclass
@@ -562,9 +558,7 @@ class EngineArgs:
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
     reasoning_parser_plugin: str | None = None
 
-    speculative_config: SpeculativeConfig = get_field(
-        VllmConfig, "speculative_config"
-    )
+    speculative_config: SpeculativeConfig = get_field(VllmConfig, "speculative_config")
     speculative_config_help: bool = False
     """Print detailed help for --speculative-config and exit"""
 
@@ -1354,7 +1348,7 @@ class EngineArgs:
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
         # Handle --speculative-config-help flag
-        if hasattr(args, 'speculative_config_help') and args.speculative_config_help:
+        if hasattr(args, "speculative_config_help") and args.speculative_config_help:
             cls._print_speculative_config_help()
             sys.exit(0)
 
