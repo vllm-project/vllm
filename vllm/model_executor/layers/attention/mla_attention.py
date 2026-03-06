@@ -342,16 +342,29 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_heads=self.num_heads,
         )
 
+        # FlashMLA Sparse Attention fp8 backend uses "fp8_ds_mla" kv-cache format
+        # Automatically convert fp8 kv-cache format to "fp8_ds_mla"
         if (
-            cache_config is not None
-            and self.attn_backend.get_name() == "FLASHMLA_SPARSE"
+            self.attn_backend.get_name() == "FLASHMLA_SPARSE"
             and kv_cache_dtype.startswith("fp8")
             and kv_cache_dtype != "fp8_ds_mla"
         ):
-            kv_cache_dtype = "fp8_ds_mla"
+            assert cache_config is not None
             cache_config.cache_dtype = "fp8_ds_mla"
-            logger.info(
-                "Using custom fp8 kv-cache format for FlashMLA Sparse Attention backend"
+            kv_cache_dtype = "fp8_ds_mla"
+            logger.info_once(
+                "Using `fp8_ds_mla` KV cache format. To use standard "
+                "`fp8` kv-cache format, please set `--attention-backend "
+                "FLASHINFER_MLA_SPARSE`"
+            )
+
+        if (
+            self.attn_backend.get_name() == "FLASHINFER_MLA_SPARSE"
+            and kv_cache_dtype.startswith("fp8")
+        ):
+            logger.info_once(
+                "Using standard `fp8` KV cache format. To use DeepSeek's `fp8_ds_mla` "
+                "KV cache format, please set `--attention-backend FLASHMLA_SPARSE`"
             )
 
         # Initialize KV cache quantization attributes
