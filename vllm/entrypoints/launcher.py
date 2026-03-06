@@ -106,6 +106,10 @@ async def serve_http(
     async def handle_shutdown() -> None:
         await shutdown_event.wait()
 
+        # Mark as draining so /health (readiness) returns 503
+        # while /live (liveness) continues to return 200.
+        app.state.draining = True
+
         engine_client = app.state.engine_client
         timeout = engine_client.vllm_config.shutdown_timeout
 
