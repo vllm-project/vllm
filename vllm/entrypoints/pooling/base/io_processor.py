@@ -55,14 +55,14 @@ class PoolingIOProcessor:
     def post_process_online(
         self,
         ctx: PoolingServeContext,
-    ) -> list[PoolingRequestOutput]:
-        return ctx.final_res_batch
+    ):
+        pass
 
     async def post_process_online_async(
         self,
         ctx: PoolingServeContext,
-    ) -> list[PoolingRequestOutput]:
-        return self.post_process_online(ctx)
+    ):
+        self.post_process_online(ctx)
 
     #######################################
     # offline APIs

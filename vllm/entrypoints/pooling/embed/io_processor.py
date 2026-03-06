@@ -58,8 +58,10 @@ class EmbedIOProcessor(PoolingIOProcessor):
     def post_process_online(
         self,
         ctx: PoolingServeContext,
-    ) -> list[PoolingRequestOutput]:
-        return self._maybe_apply_chunked_processing_post_process_online(ctx)
+    ):
+        ctx.final_res_batch = self._maybe_apply_chunked_processing_post_process_online(
+            ctx
+        )
 
     #################################################################
     # offline APIs
@@ -169,15 +171,13 @@ class EmbedIOProcessor(PoolingIOProcessor):
                         f"chunked embedding, got "
                         f"{type(result).__name__}"
                     )
-
-                embedding_data = result.outputs.data
-
                 if result.prompt_token_ids is None:
                     raise ValueError(
                         "prompt_token_ids cannot be None for chunked processing"
                     )
-                weight = len(result.prompt_token_ids)
 
+                weight = len(result.prompt_token_ids)
+                embedding_data = result.outputs.data
                 weighted_embedding = embedding_data.to(dtype=torch.float32) * weight
 
                 if aggregator["weighted_sum"] is None:
