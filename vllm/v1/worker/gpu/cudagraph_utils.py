@@ -154,9 +154,9 @@ class CudaGraphManager:
 
         current_range_start = 0
         for cg_size in sorted_padded:
-            for i in range(current_range_start, cg_size):
+            for i in range(current_range_start, cg_size + 1):
                 self._candidates[i] = descs_by_token_count[cg_size]
-            current_range_start += cg_size
+            current_range_start = cg_size + 1
 
         for mode, descs in descs_by_mode.items():
             descs.sort(key=lambda d: d.num_tokens, reverse=True)

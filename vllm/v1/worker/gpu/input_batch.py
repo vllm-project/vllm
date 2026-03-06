@@ -338,7 +338,8 @@ def combine_sampled_and_draft_tokens(
     cu_num_logits: torch.Tensor,
     num_logits: int,
 ) -> torch.Tensor:
-    num_reqs = seq_lens.shape[0]
+    # use idx_mapping.shape[0] for actual request count
+    num_reqs = idx_mapping.shape[0]
     num_speculative_steps = draft_tokens.shape[-1]
 
     logits_indices = torch.empty(
