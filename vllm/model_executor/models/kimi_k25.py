@@ -174,7 +174,8 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         self.hf_config = self.get_hf_config()
         self.media_token_id = self.hf_config.media_placeholder_token_id
         media_processor = cached_get_image_processor(
-            self.ctx.model_config.model, trust_remote_code=True
+            self.ctx.model_config.model,
+            trust_remote_code=self.ctx.model_config.trust_remote_code,
         )
         self.media_processor = media_processor
         self.hf_processor = MoonshotKimiVAutoProcessor(
