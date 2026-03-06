@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import torch
 from transformers import PreTrainedTokenizerBase
 
+from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (
@@ -27,6 +28,8 @@ else:
         globals(),
         "lmformatenforcer.integrations.vllm",
     )
+
+logger = init_logger(__name__)
 
 
 @lru_cache
@@ -97,8 +100,19 @@ class LMFormatEnforcerBackend(StructuredOutputBackend):
         )
 
     def compile_grammar(
-        self, request_type: StructuredOutputOptions, grammar_spec: str
+        self,
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        whitespace_pattern: str | None = None,
     ) -> StructuredOutputGrammar:
+        if whitespace_pattern is not None:
+            logger.warning_once(
+                "lm-format-enforcer backend does not support "
+                "whitespace_pattern. The pattern %r will be ignored. "
+                "Use the 'outlines' backend for whitespace_pattern "
+                "support.",
+                whitespace_pattern,
+            )
         character_level_parser: lmformatenforcer.CharacterLevelParser
         if request_type == StructuredOutputOptions.JSON:
             spec_dict = json.loads(grammar_spec)
