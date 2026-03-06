@@ -86,8 +86,8 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_lens: torch.Tensor
     requires_padding: bool
     schedule_metadata: torch.Tensor
+    use_medium_context_topk: bool
     use_large_context_topk: bool
-    use_radix_topk: bool
     offsets: torch.Tensor | None  # Precomputed offsets for speculative decoding
 
 
@@ -325,14 +325,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             # Decision logic based on micro-benchmark results.
             # See: https://github.com/vllm-project/vllm/pull/34265
+            # Three ranges:
+            #   top_k_per_row_decode: seq_len <= 8K (fastest at 4K-8K)
+            #   medium_context_topk: 8K < seq_len < 96K
+            #   large_context_topk (radix): seq_len >= 64K (fastest at 64K+)
+            # large_context_topk uses PTX intrinsics -> not supported on ROCm
             max_seq_len = common_attn_metadata.max_seq_len
-            # radix_topk uses PTX intrinsics -> not supported on ROCm
-            use_radix_topk = max_seq_len >= 96000 and not current_platform.is_rocm()
             use_large_context_topk = (
-                max_seq_len <= 2048
-                or (8192 < max_seq_len < 96000)
-                # Fallback for ROCm
-                or (max_seq_len >= 96000 and current_platform.is_rocm())
+                max_seq_len >= 65536 and current_platform.is_cuda()
+            )
+            use_medium_context_topk = (
+                max_seq_len > 8192 and not use_large_context_topk
             )
 
             next_n = 1 + self.num_speculative_tokens
@@ -352,8 +355,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 decode_lens=decode_lens,
                 requires_padding=requires_padding,
                 schedule_metadata=self.scheduler_metadata_buffer,
+                use_medium_context_topk=use_medium_context_topk,
                 use_large_context_topk=use_large_context_topk,
-                use_radix_topk=use_radix_topk,
                 offsets=offsets,
             )
 

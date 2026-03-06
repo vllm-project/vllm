@@ -5603,25 +5603,29 @@ class GPUModelRunner(
 
         # Configure seq_len-specialized FULL graphs for models with
         # sparse attention indexer (topk kernel selection depends on seq_len).
-        # Only needed when max_model_len >= threshold, otherwise radix_topk
-        # would never be selected and one graph variant suffices.
-        TOPK_SEQ_LEN_THRESHOLD = 96000
-        if (
-            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and self.max_model_len >= TOPK_SEQ_LEN_THRESHOLD
-        ):
+        # Three topk kernel ranges based on micro-benchmarks:
+        #   top_k_per_row_decode: seq_len <= 8K
+        #   medium_context_topk:  8K < seq_len < 64K
+        #   large_context_topk:   seq_len >= 64K
+        # Each range needs a separate CUDA graph since Python-level kernel
+        # selection is frozen during FULL graph capture.
+        TOPK_SHORT_THRESHOLD = 8192
+        TOPK_LARGE_THRESHOLD = 65536
+        if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
             has_indexer = any(
                 attn_backend.get_name() == "DEEPSEEK_V32_INDEXER"
                 for attn_backend_set in attention_backends
                 for attn_backend in attn_backend_set
             )
             if has_indexer:
-                self.cudagraph_dispatcher.set_seq_len_buckets(
-                    [
-                        TOPK_SEQ_LEN_THRESHOLD - 1,
-                        self.max_model_len,
-                    ]
-                )
+                buckets = []
+                if self.max_model_len > TOPK_SHORT_THRESHOLD:
+                    buckets.append(TOPK_SHORT_THRESHOLD)
+                if self.max_model_len >= TOPK_LARGE_THRESHOLD:
+                    buckets.append(TOPK_LARGE_THRESHOLD - 1)
+                buckets.append(self.max_model_len)
+                if len(buckets) > 1:
+                    self.cudagraph_dispatcher.set_seq_len_buckets(buckets)
 
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.

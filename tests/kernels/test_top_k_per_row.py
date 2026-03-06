@@ -355,7 +355,7 @@ def test_deepseek_hybrid_topk(clean_logits: bool) -> None:
         top_k,
     )
 
-    # Test case 2: Long sequences (>= 8192) - should use large_context_topk kernel
+    # Test case 2: Long sequences (>= 8192) - should use medium_context_topk kernel
     batch_size_long = 4
     num_rows_long = batch_size_long * next_n
 
@@ -375,14 +375,14 @@ def test_deepseek_hybrid_topk(clean_logits: bool) -> None:
 
     indices = torch.empty((num_rows_long, top_k), dtype=torch.int32, device="cuda")
 
-    # Use large_context_topk kernel for long sequences
+    # Use medium_context_topk kernel for long sequences
     if next_n == 1:
         lengths = seq_lens_long
     else:
         offsets = torch.arange(next_n, device=logits_long.device, dtype=torch.int32)
         lengths = (seq_lens_long.unsqueeze(1) - next_n + 1 + offsets).flatten()
 
-    torch.ops._C.large_context_topk(
+    torch.ops._C.medium_context_topk(
         logits_long,
         indices,
         lengths,
@@ -418,11 +418,11 @@ def test_deepseek_hybrid_topk(clean_logits: bool) -> None:
 
     assert compare_top_k_results(
         logits_long, indices, torch_indices_long, row_starts_long, row_ends_long, top_k
-    ), "large_context_topk kernel (long sequences) doesn't match torch.topk"
+    ), "medium_context_topk kernel (long sequences) doesn't match torch.topk"
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("kernel_name", ["radix_topk", "large_context_topk"])
+@pytest.mark.parametrize("kernel_name", ["large_context_topk", "medium_context_topk"])
 @pytest.mark.parametrize(
     "seq_len_range,test_id",
     [
@@ -434,7 +434,7 @@ def test_deepseek_hybrid_topk(clean_logits: bool) -> None:
 @pytest.mark.parametrize("top_k", [2048])
 @pytest.mark.parametrize("next_n", [1, 4])
 @torch.inference_mode()
-def test_deepseek_radix_topk(
+def test_deepseek_large_context_topk(
     kernel_name: str,
     seq_len_range: tuple[int, int],
     test_id: str,
@@ -444,7 +444,7 @@ def test_deepseek_radix_topk(
 ) -> None:
     """
     Test top-k kernels with varying sequence lengths and speculative decoding.
-    Tests both radix_topk and large_context_topk kernels.
+    Tests both large_context_topk and large_context_topk kernels.
     Supports speculative decoding with next_n > 1.
     """
     set_random_seed(42 if test_id == "short_sequences" else 43)
@@ -479,11 +479,11 @@ def test_deepseek_radix_topk(
         offsets = torch.arange(next_n, device=logits.device, dtype=torch.int32)
         lengths = (seq_lens.unsqueeze(1) - next_n + 1 + offsets).flatten()
 
-    if kernel_name == "radix_topk":
+    if kernel_name == "large_context_topk":
         workspace = torch.empty(1024 * 1024, dtype=torch.uint8, device="cuda")
-        torch.ops._C.radix_topk(logits, lengths, indices, workspace, top_k)
-    elif kernel_name == "large_context_topk":
-        torch.ops._C.large_context_topk(logits, indices, lengths, None)
+        torch.ops._C.large_context_topk(logits, lengths, indices, workspace, top_k)
+    elif kernel_name == "medium_context_topk":
+        torch.ops._C.medium_context_topk(logits, indices, lengths, None)
     else:
         raise ValueError(f"Unknown kernel_name: {kernel_name}")
 
@@ -492,13 +492,13 @@ def test_deepseek_radix_topk(
     )
 
 
-def run_radix_topk_test(
+def run_large_context_topk_test(
     batch_size: int,
     seq_lens: list[int],
     top_k: int,
     data_type: str = "random",
     seed: int = 42,
-    kernel_name: str = "radix_topk",
+    kernel_name: str = "large_context_topk",
 ) -> None:
     """
     Helper to run top-k kernel test with given parameters.
@@ -509,7 +509,7 @@ def run_radix_topk_test(
         top_k: Number of top elements to select
         data_type: Type of test data to generate
         seed: Random seed for reproducibility
-        kernel_name: Which kernel to test ("radix_topk"
+        kernel_name: Which kernel to test ("large_context_topk"
                      or "large_context_topk")
     """
     torch.set_default_device("cuda:0")
@@ -567,11 +567,11 @@ def run_radix_topk_test(
     # Create output tensor
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
 
-    if kernel_name == "radix_topk":
+    if kernel_name == "large_context_topk":
         workspace = torch.empty(1024 * 1024, dtype=torch.uint8, device="cuda")
-        torch.ops._C.radix_topk(logits, lengths, indices, workspace, top_k)
-    elif kernel_name == "large_context_topk":
-        torch.ops._C.large_context_topk(logits, indices, lengths, None)
+        torch.ops._C.large_context_topk(logits, lengths, indices, workspace, top_k)
+    elif kernel_name == "medium_context_topk":
+        torch.ops._C.medium_context_topk(logits, indices, lengths, None)
     else:
         raise ValueError(f"Unknown kernel_name: {kernel_name}")
 
@@ -645,7 +645,7 @@ def run_radix_topk_test(
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("kernel_name", ["radix_topk", "large_context_topk"])
+@pytest.mark.parametrize("kernel_name", ["large_context_topk", "medium_context_topk"])
 @pytest.mark.parametrize(
     "test_config",
     [
@@ -727,7 +727,7 @@ def run_radix_topk_test(
     ],
 )
 @torch.inference_mode()
-def test_radix_topk_correctness(kernel_name: str, test_config: dict) -> None:
+def test_large_context_topk_correctness(kernel_name: str, test_config: dict) -> None:
     """
     Comprehensive correctness tests covering:
     - Sequence length edge cases (trivial, boundary, varied)
@@ -737,9 +737,9 @@ def test_radix_topk_correctness(kernel_name: str, test_config: dict) -> None:
     - Data distributions (sorted, ties, precision)
     - Memory alignment / vectorization boundaries
 
-    Tests both radix_topk and large_context_topk kernels.
+    Tests both large_context_topk and large_context_topk kernels.
     """
-    run_radix_topk_test(
+    run_large_context_topk_test(
         batch_size=len(test_config["seq_lens"]),
         seq_lens=test_config["seq_lens"],
         top_k=test_config["top_k"],
@@ -749,7 +749,7 @@ def test_radix_topk_correctness(kernel_name: str, test_config: dict) -> None:
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("kernel_name", ["radix_topk", "large_context_topk"])
+@pytest.mark.parametrize("kernel_name", ["large_context_topk", "medium_context_topk"])
 @pytest.mark.parametrize(
     "test_config",
     [
@@ -795,7 +795,7 @@ def test_radix_topk_correctness(kernel_name: str, test_config: dict) -> None:
     ],
 )
 @torch.inference_mode()
-def test_radix_topk_algorithm_paths(kernel_name: str, test_config: dict) -> None:
+def test_large_context_topk_algorithm_paths(kernel_name: str, test_config: dict) -> None:
     """
     Test different algorithm execution paths (capped at 163840 for DeepSeek V3.2):
     - Batch size scalability (1, 4, 32, 256, 1024)
@@ -803,9 +803,9 @@ def test_radix_topk_algorithm_paths(kernel_name: str, test_config: dict) -> None
     - Single-CTA vs Multi-CTA execution
     - Extreme configurations (large batch, max context length)
 
-    Tests both radix_topk and large_context_topk kernels.
+    Tests both large_context_topk and large_context_topk kernels.
     """
-    run_radix_topk_test(
+    run_large_context_topk_test(
         batch_size=test_config["batch_size"],
         seq_lens=[test_config["seq_len"]] * test_config["batch_size"],
         top_k=test_config["top_k"],
@@ -814,14 +814,14 @@ def test_radix_topk_algorithm_paths(kernel_name: str, test_config: dict) -> None
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("kernel_name", ["radix_topk", "large_context_topk"])
+@pytest.mark.parametrize("kernel_name", ["large_context_topk", "medium_context_topk"])
 @torch.inference_mode()
-def test_radix_topk_stress(kernel_name: str) -> None:
+def test_large_context_topk_stress(kernel_name: str) -> None:
     """
     Stress test with random configurations to catch edge cases.
     Capped at 163840 (DeepSeek V3.2 max context) for realistic testing.
 
-    Tests both radix_topk and large_context_topk kernels.
+    Tests both large_context_topk and large_context_topk kernels.
     """
     torch.set_default_device("cuda:0")
     top_k = 2048
@@ -835,7 +835,7 @@ def test_radix_topk_stress(kernel_name: str) -> None:
         # Random sequence lengths capped at DeepSeek V3.2 max context
         seq_lens = torch.randint(100, 163840, (batch_size,)).tolist()
 
-        run_radix_topk_test(
+        run_large_context_topk_test(
             batch_size=batch_size,
             seq_lens=seq_lens,
             top_k=top_k,

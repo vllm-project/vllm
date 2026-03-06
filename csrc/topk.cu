@@ -351,7 +351,7 @@ void setup_kernel_smem_once() {
 
 }  // namespace vllm
 
-void large_context_topk(
+void medium_context_topk(
     const torch::Tensor& logits, torch::Tensor& indices,
     const torch::Tensor& seq_lens,
     c10::optional<torch::Tensor> row_starts = c10::nullopt) {
@@ -374,10 +374,10 @@ void large_context_topk(
 
   const cudaError_t result = cudaGetLastError();
   TORCH_CHECK(result == cudaSuccess,
-              "large_context_topk kernel failed: ", cudaGetErrorString(result));
+              "medium_context_topk kernel failed: ", cudaGetErrorString(result));
 }
 
-void radix_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
+void large_context_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
                 torch::Tensor& output, torch::Tensor& workspace, int64_t k) {
   TORCH_CHECK(logits.is_cuda(), "logits must be CUDA tensor");
   TORCH_CHECK(lengths.is_cuda(), "lengths must be CUDA tensor");
@@ -409,6 +409,6 @@ void radix_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
       reinterpret_cast<vllm::RadixRowState*>(workspace.data_ptr()),
       at::cuda::getCurrentCUDAStream());
 
-  TORCH_CHECK(status == cudaSuccess, "TopKRaggedTransformDispatch failed: ",
+  TORCH_CHECK(status == cudaSuccess, "large_context_topk failed: ",
               cudaGetErrorString(status));
 }
