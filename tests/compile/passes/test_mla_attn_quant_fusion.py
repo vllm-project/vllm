@@ -116,7 +116,15 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         )
 
     def build_attn_metadata(self, batch_size: int) -> AttentionMetadata:
-        """Initialize MLA attention metadata."""
+        """Initialize MLA attention metadata.
+
+        NOTE: Uses decode-only batch (query_len=1 per request). The prefill
+        (forward_mha) path is not separately tested here because it requires
+        FlashAttention availability and different input tensor shapes. The
+        quant logic in forward_impl is identical for both paths — it quantizes
+        the full output[:num_actual_toks] buffer after both forward_mha and
+        forward_mqa have written their results.
+        """
 
         batch_spec = BatchSpec(seq_lens=[1] * batch_size, query_lens=[1] * batch_size)
         common_attn_metadata = create_common_attn_metadata(
@@ -272,7 +280,7 @@ if current_platform.is_cuda():
         )
     ]
     BACKENDS_MLA_FP8 = [AttentionBackendEnum.TRITON_MLA]
-    BACKENDS_MLA_FP4 = []  # TODO: add when FP4 MLA backends are available
+    BACKENDS_MLA_FP4 = [AttentionBackendEnum.TRITON_MLA]
 
 
 @pytest.mark.parametrize(
