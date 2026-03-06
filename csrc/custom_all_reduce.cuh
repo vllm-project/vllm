@@ -10,7 +10,9 @@ typedef __hip_bfloat16 nv_bfloat16;
 #endif
 
 #include <iostream>
+#include <algorithm>
 #include <array>
+#include <cstdint>
 #include <limits>
 #include <map>
 #include <unordered_map>
@@ -295,6 +297,26 @@ DINLINE P packed_reduce(const P* ptrs[], int idx) {
   return downcast<P>(tmp);
 }
 
+DINLINE bool is_aligned_to(const void* ptr, size_t alignment) {
+  return (reinterpret_cast<uintptr_t>(ptr) & (alignment - 1)) == 0;
+}
+
+inline int select_threads_for_bytes(size_t bytes) {
+  if (bytes <= 16 * 1024) {
+    return 128;
+  }
+  if (bytes <= 128 * 1024) {
+    return 256;
+  }
+  return 512;
+}
+
+inline int select_blocks_for_work(int work_items, int threads,
+                                  int block_limit) {
+  return std::max(1,
+                  std::min(block_limit, (work_items + threads - 1) / threads));
+}
+
 template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
     cross_device_reduce_1stage(RankData* _dp, RankSignals sg, Signal* self_sg,
@@ -371,19 +393,46 @@ __global__ void __launch_bounds__(512, 1)
                                T* __restrict__ result, int rank, int size) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = gridDim.x * blockDim.x;
+  using P = typename packed_t<T>::P;
+  constexpr int pack_elems = P::size;
   auto dp = *_dp;
+  const T* srcs[ngpus];
+  const P* packed_srcs[ngpus];
+#pragma unroll
+  for (int i = 0; i < ngpus; i++) {
+    srcs[i] = reinterpret_cast<const T*>(dp.ptrs[i]);
+    packed_srcs[i] = reinterpret_cast<const P*>(dp.ptrs[i]);
+  }
 
   barrier_at_start<ngpus>(sg, self_sg, rank);
 
-  for (int idx = tid; idx < size; idx += stride) {
+  bool can_use_packed =
+      size % pack_elems == 0 && is_aligned_to(result, sizeof(P));
 #pragma unroll
-    for (int i = 0; i < ngpus; i++) {
-      reinterpret_cast<T*>(result)[i * size + idx] =
-          reinterpret_cast<const T*>(dp.ptrs[i])[idx];
-    }
+  for (int i = 0; i < ngpus; i++) {
+    can_use_packed = can_use_packed && is_aligned_to(srcs[i], sizeof(P));
   }
 
-  barrier_at_end<ngpus, true>(sg, self_sg, rank);
+  if (can_use_packed) {
+    int packed_size = size / pack_elems;
+    auto packed_result = reinterpret_cast<P*>(result);
+    for (int idx = tid; idx < packed_size; idx += stride) {
+#pragma unroll
+      for (int i = 0; i < ngpus; i++) {
+        packed_result[i * packed_size + idx] = packed_srcs[i][idx];
+      }
+    }
+  } else {
+    for (int idx = tid; idx < size; idx += stride) {
+#pragma unroll
+      for (int i = 0; i < ngpus; i++) {
+        result[i * size + idx] = srcs[i][idx];
+      }
+    }
+  }
+}
+
+barrier_at_end<ngpus, true>(sg, self_sg, rank);
 }
 
 template <typename T, int ngpus>
@@ -399,12 +448,17 @@ __global__ void __launch_bounds__(512, 1)
   int start = rank * part;
   int end = start + part;
   auto dp = *_dp;
+  const P* ptrs[ngpus];
+#pragma unroll
+  for (int i = 0; i < ngpus; i++) {
+    ptrs[i] = reinterpret_cast<const P*>(dp.ptrs[i]);
+  }
 
   barrier_at_start<ngpus>(sg, self_sg, rank);
 
   for (int idx = start + tid; idx < end; idx += stride) {
     reinterpret_cast<P*>(result)[idx - start] =
-        packed_reduce<P, ngpus, A>((const P**)&dp.ptrs[0], idx);
+        packed_reduce<P, ngpus, A>(ptrs, idx);
   }
 
   barrier_at_end<ngpus, true>(sg, self_sg, rank);
@@ -466,6 +520,7 @@ class CustomAllreduce {
         self_sg_(signals[rank]),
         d_rank_data_base_(reinterpret_cast<RankData*>(rank_data)),
         d_rank_data_end_(d_rank_data_base_ + rank_data_sz / sizeof(RankData)) {
+    graph_unreg_buffers_.reserve(rank_data_sz / sizeof(RankData));
     for (int i = 0; i < world_size_; i++) {
       sg_.signals[i] = signals[i];
     }
@@ -509,6 +564,28 @@ class CustomAllreduce {
       throw std::runtime_error(
           "Rank data buffer is overflowed by " +
           std::to_string(d_rank_data_base_ + num - d_rank_data_end_));
+  }
+
+  template <typename T>
+  RankData* resolve_rank_data(cudaStream_t stream, T* input) {
+    cudaStreamCaptureStatus status;
+    CUDACHECK(cudaStreamIsCapturing(stream, &status));
+    if (status == cudaStreamCaptureStatusActive) {
+      auto slot = graph_unreg_buffers_.size();
+      check_rank_data_capacity(slot + 1);
+      auto ptrs = d_rank_data_base_ + slot;
+      graph_unreg_buffers_.push_back(input);
+      return ptrs;
+    }
+
+    auto it = buffers_.find(input);
+    if (it == buffers_.end()) {
+      throw std::runtime_error(
+          "buffer address " +
+          std::to_string(reinterpret_cast<uint64_t>(input)) +
+          " is not registered!");
+    }
+    return it->second;
   }
 
   /**
@@ -583,21 +660,7 @@ class CustomAllreduce {
                                std::to_string(kMaxBlocks) + ". Got " +
                                std::to_string(block_limit));
 
-    RankData* ptrs;
-    cudaStreamCaptureStatus status;
-    CUDACHECK(cudaStreamIsCapturing(stream, &status));
-    if (status == cudaStreamCaptureStatusActive) {
-      ptrs = d_rank_data_base_ + graph_unreg_buffers_.size();
-      graph_unreg_buffers_.push_back(input);
-    } else {
-      auto it = buffers_.find(input);
-      if (it == buffers_.end())
-        throw std::runtime_error(
-            "buffer address " +
-            std::to_string(reinterpret_cast<uint64_t>(input)) +
-            " is not registered!");
-      ptrs = it->second;
-    }
+    RankData* ptrs = resolve_rank_data(stream, input);
 
     size /= d;
     auto bytes = size * sizeof(typename packed_t<T>::P);
@@ -669,23 +732,13 @@ class CustomAllreduce {
                                std::to_string(kMaxBlocks) + ". Got " +
                                std::to_string(block_limit));
 
-    RankData* ptrs;
-    cudaStreamCaptureStatus status;
-    CUDACHECK(cudaStreamIsCapturing(stream, &status));
-    if (status == cudaStreamCaptureStatusActive) {
-      ptrs = d_rank_data_base_ + graph_unreg_buffers_.size();
-      graph_unreg_buffers_.push_back(input);
-    } else {
-      auto it = buffers_.find(input);
-      if (it == buffers_.end())
-        throw std::runtime_error(
-            "buffer address " +
-            std::to_string(reinterpret_cast<uint64_t>(input)) +
-            " is not registered!");
-      ptrs = it->second;
-    }
+    RankData* ptrs = resolve_rank_data(stream, input);
 
-    int blocks = std::min(block_limit, (size + threads - 1) / threads);
+    auto bytes = static_cast<size_t>(size) * sizeof(T);
+    if (threads == 512) {
+      threads = select_threads_for_bytes(bytes);
+    }
+    int blocks = select_blocks_for_work(size, threads, block_limit);
 
 #define KL_AG(ngpus)                                                    \
   cross_device_gather_1stage<T, ngpus><<<blocks, threads, 0, stream>>>( \
@@ -732,21 +785,7 @@ class CustomAllreduce {
                                std::to_string(kMaxBlocks) + ". Got " +
                                std::to_string(block_limit));
 
-    RankData* ptrs;
-    cudaStreamCaptureStatus status;
-    CUDACHECK(cudaStreamIsCapturing(stream, &status));
-    if (status == cudaStreamCaptureStatusActive) {
-      ptrs = d_rank_data_base_ + graph_unreg_buffers_.size();
-      graph_unreg_buffers_.push_back(input);
-    } else {
-      auto it = buffers_.find(input);
-      if (it == buffers_.end())
-        throw std::runtime_error(
-            "buffer address " +
-            std::to_string(reinterpret_cast<uint64_t>(input)) +
-            " is not registered!");
-      ptrs = it->second;
-    }
+    RankData* ptrs = resolve_rank_data(stream, input);
 
     size /= d;
     if (size % world_size_ != 0) {
@@ -756,7 +795,12 @@ class CustomAllreduce {
     }
 
     int chunk_size = size / world_size_;
-    int blocks = std::min(block_limit, (chunk_size + threads - 1) / threads);
+    auto chunk_bytes =
+        static_cast<size_t>(chunk_size) * sizeof(typename packed_t<T>::P);
+    if (threads == 512) {
+      threads = select_threads_for_bytes(chunk_bytes);
+    }
+    int blocks = select_blocks_for_work(chunk_size, threads, block_limit);
 
 #define KL_RS(ngpus)                                                       \
   cross_device_reduce_scatter_1stage<T, ngpus>                             \

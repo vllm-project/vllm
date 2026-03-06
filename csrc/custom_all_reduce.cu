@@ -52,6 +52,19 @@ bool _is_weak_contiguous(torch::Tensor& t) {
           t.numel() * t.element_size());
 }
 
+void* prepare_reg_buffer(cudaStream_t stream, torch::Tensor& inp,
+                         fptr_t _reg_buffer, int64_t reg_buffer_sz_bytes) {
+  auto input_size = inp.numel() * inp.element_size();
+  auto reg_buffer = reinterpret_cast<void*>(_reg_buffer);
+  if (reg_buffer) {
+    TORCH_CHECK_LE(input_size, reg_buffer_sz_bytes);
+    AT_CUDA_CHECK(cudaMemcpyAsync(reg_buffer, inp.data_ptr(), input_size,
+                                  cudaMemcpyDeviceToDevice, stream));
+    return reg_buffer;
+  }
+  return inp.data_ptr();
+}
+
 /**
  * Performs an out-of-place allreduce and stores result in out.
  *
@@ -69,15 +82,8 @@ void all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
   TORCH_CHECK_EQ(inp.numel(), out.numel());
   TORCH_CHECK(_is_weak_contiguous(out));
   TORCH_CHECK(_is_weak_contiguous(inp));
-  auto input_size = inp.numel() * inp.element_size();
-  auto reg_buffer = reinterpret_cast<void*>(_reg_buffer);
-  if (reg_buffer) {
-    TORCH_CHECK_LE(input_size, reg_buffer_sz_bytes);
-    AT_CUDA_CHECK(cudaMemcpyAsync(reg_buffer, inp.data_ptr(), input_size,
-                                  cudaMemcpyDeviceToDevice, stream));
-  } else {
-    reg_buffer = inp.data_ptr();
-  }
+  auto reg_buffer =
+      prepare_reg_buffer(stream, inp, _reg_buffer, reg_buffer_sz_bytes);
   switch (out.scalar_type()) {
     case at::ScalarType::Float: {
       fa->allreduce<float>(stream, reinterpret_cast<float*>(reg_buffer),
@@ -128,15 +134,8 @@ void all_gather(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
               "custom all_gather input is too large");
   int size = static_cast<int>(inp.numel());
 
-  auto input_size = inp.numel() * inp.element_size();
-  auto reg_buffer = reinterpret_cast<void*>(_reg_buffer);
-  if (reg_buffer) {
-    TORCH_CHECK_LE(input_size, reg_buffer_sz_bytes);
-    AT_CUDA_CHECK(cudaMemcpyAsync(reg_buffer, inp.data_ptr(), input_size,
-                                  cudaMemcpyDeviceToDevice, stream));
-  } else {
-    reg_buffer = inp.data_ptr();
-  }
+  auto reg_buffer =
+      prepare_reg_buffer(stream, inp, _reg_buffer, reg_buffer_sz_bytes);
 
   switch (out.scalar_type()) {
     case at::ScalarType::Byte: {
@@ -197,15 +196,8 @@ void reduce_scatter(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
   TORCH_CHECK_EQ(inp.numel() % fa->world_size_, 0);
   TORCH_CHECK_EQ(inp.numel() / fa->world_size_, out.numel());
 
-  auto input_size = inp.numel() * inp.element_size();
-  auto reg_buffer = reinterpret_cast<void*>(_reg_buffer);
-  if (reg_buffer) {
-    TORCH_CHECK_LE(input_size, reg_buffer_sz_bytes);
-    AT_CUDA_CHECK(cudaMemcpyAsync(reg_buffer, inp.data_ptr(), input_size,
-                                  cudaMemcpyDeviceToDevice, stream));
-  } else {
-    reg_buffer = inp.data_ptr();
-  }
+  auto reg_buffer =
+      prepare_reg_buffer(stream, inp, _reg_buffer, reg_buffer_sz_bytes);
 
   switch (out.scalar_type()) {
     case at::ScalarType::Float: {
