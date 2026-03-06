@@ -121,7 +121,7 @@ def test_error_propagation_async_load(fail_scheduler: Scheduler):
 
     assert len(fail_scheduler.waiting) == 1
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-    assert request.num_computed_tokens == 0
+    assert request.num_computed_tokens == num_external_computed_tokens
 
     (req_block_ids,) = fail_scheduler.kv_cache_manager.get_block_ids(request.request_id)
     invalid_block_ids = {req_block_ids[invalid_block_idx]}
