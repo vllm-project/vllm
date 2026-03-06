@@ -106,13 +106,6 @@ def test_transfer(
     )
     cpu_blocks = random.sample(range(num_cpu_blocks), num_mappings)
 
-    # convert gpu blocks to kernel block size
-    gpu_blocks_in_kernel_block_size = []
-    for gpu_block in gpu_blocks:
-        base_block_id = gpu_block * kernel_blocks_per_gpu_block
-        for i in range(kernel_blocks_per_gpu_block):
-            gpu_blocks_in_kernel_block_size.append(i + base_block_id)
-
     # convert cpu blocks to gpu block size
     cpu_blocks_in_kernel_block_size = []
     for cpu_block in cpu_blocks:
@@ -121,16 +114,40 @@ def test_transfer(
             cpu_blocks_in_kernel_block_size.append(i + base_block_id)
 
     # maybe skip some GPU block to test reading from the middle of a CPU block
+    group_sizes = None
     if not gpu_to_cpu:
+        # split to 2 groups
+        group0_num_blocks = len(cpu_blocks) // 2 * logical_blocks_per_cpu_block
+        group1_num_blocks = len(gpu_blocks) - group0_num_blocks
+        assert group0_num_blocks and group1_num_blocks
+
         gpu_blocks_to_skip = logical_blocks_per_cpu_block - 1
-        gpu_blocks = gpu_blocks[gpu_blocks_to_skip:]
+        gpu_blocks = (
+            gpu_blocks[gpu_blocks_to_skip:group0_num_blocks]
+            + gpu_blocks[group0_num_blocks + gpu_blocks_to_skip :]
+        )
+        group0_num_blocks -= gpu_blocks_to_skip
+        group1_num_blocks -= gpu_blocks_to_skip
+        assert group0_num_blocks > 0 and group1_num_blocks > 0
+        group_sizes = [group0_num_blocks, group1_num_blocks]
+
         kernel_blocks_to_skip = gpu_blocks_to_skip * kernel_blocks_per_gpu_block
-        gpu_blocks_in_kernel_block_size = gpu_blocks_in_kernel_block_size[
-            kernel_blocks_to_skip:
-        ]
-        cpu_blocks_in_kernel_block_size = cpu_blocks_in_kernel_block_size[
-            kernel_blocks_to_skip:
-        ]
+        group0_num_kernal_blocks = group0_num_blocks * kernel_blocks_per_gpu_block
+        cpu_blocks_in_kernel_block_size = (
+            cpu_blocks_in_kernel_block_size[
+                kernel_blocks_to_skip:group0_num_kernal_blocks
+            ]
+            + cpu_blocks_in_kernel_block_size[
+                group0_num_kernal_blocks + kernel_blocks_to_skip :
+            ]
+        )
+
+    # convert gpu blocks to kernel block size
+    gpu_blocks_in_kernel_block_size = []
+    for gpu_block in gpu_blocks:
+        base_block_id = gpu_block * kernel_blocks_per_gpu_block
+        for i in range(kernel_blocks_per_gpu_block):
+            gpu_blocks_in_kernel_block_size.append(i + base_block_id)
 
     # set transfer direction
     if gpu_to_cpu:
@@ -161,7 +178,7 @@ def test_transfer(
 
     # build transfer specs
     src_spec = src_spec_class(src_blocks)
-    dst_spec = dst_spec_class(dst_blocks)
+    dst_spec = dst_spec_class(dst_blocks, group_sizes=group_sizes)
 
     # clone src and dst tensors before transfer
     orig_src_caches = [x.clone() for x in handler.src_tensors]
