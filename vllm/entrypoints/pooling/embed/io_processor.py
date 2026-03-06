@@ -26,8 +26,9 @@ class EmbedIOProcessor(PoolingIOProcessor):
     # PTAL: examples/pooling/embed/openai_embedding_long_text
 
     def pre_process_online(self, ctx: PoolingServeContext):
+        super().pre_process_online(ctx)
+
         if not self.enable_chunked_processing:
-            super().pre_process_online(ctx)
             return None
 
         ctx.intermediates = ctx.engine_prompts
