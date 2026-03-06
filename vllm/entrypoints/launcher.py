@@ -95,6 +95,9 @@ async def serve_http(
     shutdown_event = asyncio.Event()
 
     def signal_handler() -> None:
+        # Mark as draining so /health (readiness) returns 503
+        # while /live (liveness) continues to return 200.
+        app.state.draining = True
         shutdown_event.set()
 
     async def dummy_shutdown() -> None:
