@@ -542,19 +542,13 @@ def setup_server(args):
 
 
 async def build_and_serve(
-    engine_client: EngineClient | None,
+    engine_client: EngineClient,
     listen_address: str,
     sock: socket.socket,
     args: Namespace,
-    *,
-    vllm_config: VllmConfig | None = None,
     **uvicorn_kwargs,
 ) -> asyncio.Task:
     """Build FastAPI app, initialize state, and start serving.
-
-    Pass ``engine_client=None`` together with ``vllm_config`` for a
-    CPU-only render server; pass a real :class:`EngineClient` for the
-    normal inference path.
 
     Returns the shutdown task for the caller to await.
     """
@@ -564,16 +558,55 @@ async def build_and_serve(
     if log_config is not None:
         uvicorn_kwargs["log_config"] = log_config
 
-    if engine_client is not None:
-        supported_tasks = await engine_client.get_supported_tasks()
-        logger.info("Supported tasks: %s", supported_tasks)
-        app = build_app(args, supported_tasks)
-        await init_app_state(engine_client, app.state, args, supported_tasks)
-    else:
-        if vllm_config is None:
-            raise ValueError("vllm_config is required when engine_client is None")
-        app = build_app(args, ("render",))
-        await init_render_app_state(vllm_config, app.state, args)
+    supported_tasks = await engine_client.get_supported_tasks()
+    logger.info("Supported tasks: %s", supported_tasks)
+    app = build_app(args, supported_tasks)
+    await init_app_state(engine_client, app.state, args, supported_tasks)
+
+    logger.info("Starting vLLM server on %s", listen_address)
+
+    return await serve_http(
+        app,
+        sock=sock,
+        enable_ssl_refresh=args.enable_ssl_refresh,
+        host=args.host,
+        port=args.port,
+        log_level=args.uvicorn_log_level,
+        # NOTE: When the 'disable_uvicorn_access_log' value is True,
+        # no access log will be output.
+        access_log=not args.disable_uvicorn_access_log,
+        timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
+        ssl_keyfile=args.ssl_keyfile,
+        ssl_certfile=args.ssl_certfile,
+        ssl_ca_certs=args.ssl_ca_certs,
+        ssl_cert_reqs=args.ssl_cert_reqs,
+        ssl_ciphers=args.ssl_ciphers,
+        h11_max_incomplete_event_size=args.h11_max_incomplete_event_size,
+        h11_max_header_count=args.h11_max_header_count,
+        **uvicorn_kwargs,
+    )
+
+
+async def build_and_serve_renderer(
+    vllm_config: VllmConfig,
+    listen_address: str,
+    sock: socket.socket,
+    args: Namespace,
+    **uvicorn_kwargs,
+) -> asyncio.Task:
+    """Build FastAPI app for a CPU-only render server, initialize state, and
+    start serving.
+
+    Returns the shutdown task for the caller to await.
+    """
+
+    # Get uvicorn log config (from file or with endpoint filter)
+    log_config = get_uvicorn_log_config(args)
+    if log_config is not None:
+        uvicorn_kwargs["log_config"] = log_config
+
+    app = build_app(args, ("render",))
+    await init_render_app_state(vllm_config, app.state, args)
 
     logger.info("Starting vLLM server on %s", listen_address)
 

@@ -8,7 +8,7 @@ import uvloop
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.openai.api_server import (
-    build_and_serve,
+    build_and_serve_renderer,
     setup_server,
 )
 from vllm.entrypoints.openai.cli_args import (
@@ -117,8 +117,8 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     engine_args = AsyncEngineArgs.from_cli_args(args)
     model_config = engine_args.create_model_config()
     vllm_config = VllmConfig(model_config=model_config)
-    shutdown_task = await build_and_serve(
-        None, listen_address, sock, args, vllm_config=vllm_config
+    shutdown_task = await build_and_serve_renderer(
+        vllm_config, listen_address, sock, args
     )
     try:
         await shutdown_task
