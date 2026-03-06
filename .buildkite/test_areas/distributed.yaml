@@ -60,7 +60,6 @@ steps:
   - tests/distributed/test_pynccl
   - tests/distributed/test_events
   - tests/compile/fullgraph/test_basic_correctness.py
-  - tests/distributed/test_mnnvl_alltoall.py
   - examples/offline_inference/rlhf.py
   - examples/offline_inference/rlhf_colocate.py
   - examples/offline_inference/new_weight_syncing/
@@ -106,7 +105,6 @@ steps:
   - cd new_weight_syncing
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_nccl.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_ipc.py
-  - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
 
 - label: Distributed Tests (8 GPUs)(H100)
   timeout_in_minutes: 10
@@ -120,11 +118,14 @@ steps:
   - vllm/v1/engine/llm_engine.py
   - vllm/v1/executor/uniproc_executor.py
   - vllm/v1/worker/gpu_worker.py
+  - tests/distributed/test_mnnvl_alltoall.py
+
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   # test with torchrun tp=2 and dp=4 with ep
   - torchrun --nproc-per-node=8 ../examples/offline_inference/torchrun_dp_example.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
+  - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
 
 - label: Distributed Tests (4 GPUs)(A100)
   device: a100
