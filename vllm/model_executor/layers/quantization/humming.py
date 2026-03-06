@@ -80,7 +80,7 @@ def narrow_tensors(
         assert stack_id is None
 
         tensors_list = []
-        for stack_id in range(len((stack_shape_n_list))):
+        for stack_id in range(len(stack_shape_n_list)):
             tensors_new = narrow_tensors(
                 tensors=tensors,
                 stack_shape_n_list=stack_shape_n_list,
@@ -396,6 +396,8 @@ class HummingConfig(QuantizationConfig):
         self.ignored_layers = hf_to_vllm_mapper.apply_list(self.ignored_layers)
 
     def is_layer_skipped(self, config: dict[str, Any], prefix: str):
+        if self.ignored_layers is None:
+            return False
         ignored_layers = self.ignored_layers
         if any(module_name in prefix for module_name in ignored_layers):
             return True
@@ -987,7 +989,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        sorted_token_ids, expert_ids, num_tokens_post_padded = humming_moe_align(
+        sorted_token_ids, expert_ids, num_tokens_padded = humming_moe_align(
             layer.humming_block_size_configs["w13"],
             topk_ids=topk_ids,
             num_experts=layer.num_experts,
@@ -1001,7 +1003,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             topk_weights=topk_weights,
             sorted_token_ids=sorted_token_ids,
             expert_ids=expert_ids,
-            num_tokens_post_padded=num_tokens_post_padded,
+            num_tokens_padded=num_tokens_padded,
             sublayer_name="w13",
         )
 
@@ -1014,7 +1016,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             topk_weights=topk_weights,
             sorted_token_ids=sorted_token_ids,
             expert_ids=expert_ids,
-            num_tokens_post_padded=num_tokens_post_padded,
+            num_tokens_padded=num_tokens_padded,
             sublayer_name="w2",
         )
 

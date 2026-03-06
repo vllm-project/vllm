@@ -238,7 +238,6 @@ class HummingAWQWeightConverter(HummingBaseWeightConverter):
         tensor = tensor.view(*tensor.shape[:-2], -1).transpose(-1, -2).contiguous()
         pack_kernel = PackWeightKernel(self.quant_config.b_dtype.num_bits)
         tensor = pack_kernel(tensor)
-        tensor = tensor.transpose(-1, -2).contiguous()
         return super().convert_weight(tensor, shape_n, shape_k, num_experts)
 
     def convert_weight_scale(
