@@ -353,8 +353,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             cache_config.cache_dtype = "fp8_ds_mla"
             kv_cache_dtype = "fp8_ds_mla"
             logger.info_once(
-                "Using `fp8_ds_mla` KV cache format. To use standard "
-                "`fp8` kv-cache format, please set `--attention-backend "
+                "Using DeepSeek's fp8_ds_mla KV cache format. To use standard "
+                "fp8 kv-cache format, please set `--attention-backend "
                 "FLASHINFER_MLA_SPARSE`"
             )
 
@@ -363,7 +363,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and kv_cache_dtype.startswith("fp8")
         ):
             logger.info_once(
-                "Using standard `fp8` KV cache format. To use DeepSeek's `fp8_ds_mla` "
+                "Using standard fp8 KV cache format. To use DeepSeek's fp8_ds_mla "
                 "KV cache format, please set `--attention-backend FLASHMLA_SPARSE`"
             )
 
