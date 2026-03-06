@@ -780,7 +780,6 @@ class Gemma3nForConditionalGeneration(
         """
         audio = stt_params.audio
         stt_config = stt_params.stt_config
-        model_config = stt_params.model_config
         language = stt_params.language
         task_type = stt_params.task_type
         to_language = stt_params.to_language

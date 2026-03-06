@@ -182,18 +182,16 @@ class TranscriptionRequest(OpenAIBaseModel):
         audio: "np.ndarray",
         stt_config: "SpeechToTextConfig",
         model_config: "ModelConfig",
-        language: str | None,
         task_type: str,
-        to_language: str | None,
     ) -> SpeechToTextParams:
         return SpeechToTextParams(
             audio=audio,
             stt_config=stt_config,
             model_config=model_config,
-            language=language,
+            language=self.language,
             task_type=task_type,
             request_prompt=self.prompt,
-            to_language=to_language,
+            to_language=self.to_language,
         )
 
     def to_sampling_params(
@@ -460,18 +458,16 @@ class TranslationRequest(OpenAIBaseModel):
         audio: "np.ndarray",
         stt_config: "SpeechToTextConfig",
         model_config: "ModelConfig",
-        language: str | None,
         task_type: str,
-        to_language: str | None,
     ) -> SpeechToTextParams:
         return SpeechToTextParams(
             audio=audio,
             stt_config=stt_config,
             model_config=model_config,
-            language=language,
+            language=self.language,
             task_type=task_type,
             request_prompt=self.prompt,
-            to_language=to_language,
+            to_language=self.to_language,
         )
 
     def to_sampling_params(

@@ -107,6 +107,7 @@ __all__ = [
     "SpeculativeConfig",
     # From vllm.config.speech_to_text
     "SpeechToTextConfig",
+    "SpeechToTextParams",
     # From vllm.config.structured_outputs
     "StructuredOutputsConfig",
     # From vllm.config.profiler

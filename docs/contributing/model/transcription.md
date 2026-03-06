@@ -218,9 +218,7 @@ Relevant server logic:
                 audio=chunk,
                 stt_config=self.asr_config,
                 model_config=self.model_config,
-                language=language,
                 task_type=self.task_type,
-                to_language=to_language,
             )
             prompt = self.model_cls.get_generation_prompt(stt_params)
             prompts.append(prompt)

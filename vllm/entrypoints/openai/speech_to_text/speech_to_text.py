@@ -307,9 +307,8 @@ class OpenAISpeechToText(OpenAIServing):
         request_id: str,
     ) -> tuple[list[ProcessorInputs], float]:
         # Validate request
-        language = self.model_cls.validate_language(request.language)
-        # Skip to_language validation to avoid extra logging for Whisper.
-        to_language = (
+        request.language = self.model_cls.validate_language(request.language)
+        request.to_language = (
             self.model_cls.validate_language(request.to_language)
             if request.to_language
             else None
@@ -352,14 +351,13 @@ class OpenAISpeechToText(OpenAIServing):
                 min_energy_window_size=self.asr_config.min_energy_split_window_size,
             )
 
-        if language is None and getattr(
+        if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
         ):
             # Auto-detect language from the first chunk.
-            language = await self._detect_language(
+            request.language = await self._detect_language(
                 chunks[0], f"{request_id}-lang_detect"
             )
-            request.language = language
 
         parsed_prompts: list[DictPrompt] = []
         for chunk in chunks:
@@ -367,9 +365,7 @@ class OpenAISpeechToText(OpenAIServing):
                 audio=chunk,
                 stt_config=self.asr_config,
                 model_config=self.model_config,
-                language=language,
                 task_type=self.task_type,
-                to_language=to_language,
             )
             prompt = self.model_cls.get_generation_prompt(stt_params)
 
