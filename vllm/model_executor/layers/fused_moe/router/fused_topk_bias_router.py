@@ -108,6 +108,42 @@ def fused_topk_bias(
             return topk_weights, topk_ids
         else:
             raise ValueError(f"Unsupported scoring function: {scoring_func}")
+    elif rocm_aiter_ops.is_fused_moe_enabled() and scoring_func == "sigmoid":
+        # aiter only have sigmoid bias grouped topk now.
+        M = hidden_states.size(0)
+        num_experts = gating_output.shape[-1]
+        _AITER_MAX_EXPERTS_PER_GROUP = 32
+        num_expert_group = max(
+            1, -(-num_experts // _AITER_MAX_EXPERTS_PER_GROUP)
+        )  # ceil division
+        while num_experts % num_expert_group != 0:
+            num_expert_group += 1
+        topk_weights = torch.empty(
+            M, topk, dtype=torch.float32, device=hidden_states.device
+        )
+        assert num_experts % num_expert_group == 0, (
+            f"{num_experts=} not divisible by {num_expert_group=}"
+        )
+        assert num_experts // num_expert_group <= _AITER_MAX_EXPERTS_PER_GROUP, (
+            f"group size {num_experts // num_expert_group} \
+            exceeds limit {_AITER_MAX_EXPERTS_PER_GROUP}"
+        )
+        topk_ids = torch.empty(
+            M,
+            topk,
+            dtype=torch.int32 if indices_type is None else indices_type,
+            device=hidden_states.device,
+        )
+        rocm_aiter_ops.biased_grouped_topk(
+            gating_output,
+            e_score_correction_bias.to(gating_output.dtype),
+            topk_weights,
+            topk_ids,
+            num_expert_group=num_expert_group,
+            topk_group=num_expert_group,
+            need_renorm=renormalize,
+        )
+        return topk_weights, topk_ids
 
     n_routed_experts = gating_output.shape[-1]
     if scoring_func == "softmax":
