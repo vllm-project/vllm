@@ -394,10 +394,11 @@ def make_fused_moe_layer(
             )
 
         if shared_experts is not None:
+            assert not reduce_results
             assert final_shared_states is not None
             final_hidden_states += final_shared_states
 
-        if layer.tp_size > 1 or layer.ep_size > 1:
+        if not reduce_results and layer.tp_size > 1:
             final_hidden_states = layer.maybe_all_reduce_tensor_model_parallel(
                 final_hidden_states
             )
@@ -563,6 +564,7 @@ def _test_body_eplb(
     n: int,
     top_k: int,
     shared_experts,
+    reduce_results: bool,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """EPLB test body: compare output before and after expert weight rearrangement."""
@@ -591,7 +593,7 @@ def _test_body_eplb(
         tp_size=tp_size,
         ep_size=ep_size,
         dp_size=dp_size,
-        reduce_results=False,
+        reduce_results=reduce_results,
         w1=w1,
         w2=w2,
         top_k=top_k,
@@ -671,6 +673,7 @@ def _test_loop(
     top_k: int,
     quantization: str | None,
     shared_experts_config: SharedExpertsConfig | None,
+    reduce_results: bool,
     test_body_fn: Callable,
     **test_body_kwargs,
 ) -> None:
@@ -738,7 +741,7 @@ def _test_loop(
             tp_size=tp_size,
             ep_size=ep_size,
             dp_size=dp_size,
-            reduce_results=False,
+            reduce_results=reduce_results,
             w1=w1,
             w2=w2,
             top_k=top_k,
@@ -782,6 +785,7 @@ def _test_loop(
             m=m,
             top_k=top_k,
             shared_experts=shared_experts,
+            reduce_results=reduce_results,
             **test_body_kwargs,
         )
 
@@ -806,6 +810,7 @@ def _test_loop(
 @pytest.mark.parametrize("dp_size, tp_size, use_ep", PARALLEL_COMBOS)
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("use_shared_experts", [False, True])
+@pytest.mark.parametrize("reduce_results", [False, True])
 def test_moe_layer(
     m: int,
     n: int,
@@ -818,6 +823,7 @@ def test_moe_layer(
     use_ep: bool,
     backend: str,
     use_shared_experts: bool,
+    reduce_results: bool,
     monkeypatch,
 ):
     set_random_seed(7)
@@ -827,6 +833,15 @@ def test_moe_layer(
 
     if world_size > num_gpus:
         pytest.skip(f"Not enough GPUs got {num_gpus}, expected {world_size}.")
+
+    if reduce_results and use_shared_experts:
+        pytest.skip("reduce_results=True is not compatible with shared_experts=True")
+
+    if reduce_results and world_size == 1:
+        pytest.skip("reduce_results=True only makes sense for multi-GPU tests")
+
+    if reduce_results and quantization is not None:
+        pytest.skip("reduce_results=True only tested with unquantized data types")
 
     supported_quants = BACKEND_SUPPORTED_QUANTS.get(backend)
     if supported_quants is not None and quantization not in supported_quants:
@@ -930,6 +945,7 @@ def test_moe_layer(
         top_k,
         quantization,
         shared_experts_config,
+        reduce_results,
         _test_body_regular,
         baseline_output=baseline_output,
     )
@@ -960,6 +976,7 @@ EPLB_PARALLEL_COMBOS = [
 @pytest.mark.parametrize("dp_size, tp_size, use_ep", EPLB_PARALLEL_COMBOS)
 @pytest.mark.parametrize("backend", EPLB_SUPPORTED_BACKENDS)
 @pytest.mark.parametrize("use_shared_experts", [False, True])
+@pytest.mark.parametrize("reduce_results", [False, True])
 def test_moe_layer_eplb(
     m: int,
     n: int,
@@ -972,6 +989,7 @@ def test_moe_layer_eplb(
     use_ep: bool,
     backend: str,
     use_shared_experts: bool,
+    reduce_results: bool,
     monkeypatch,
 ):
     set_random_seed(7)
@@ -981,6 +999,15 @@ def test_moe_layer_eplb(
 
     if world_size > num_gpus:
         pytest.skip(f"Not enough GPUs got {num_gpus}, expected {world_size}.")
+
+    if reduce_results and use_shared_experts:
+        pytest.skip("reduce_results=True is not compatible with shared_experts=True")
+
+    if reduce_results and world_size == 1:
+        pytest.skip("reduce_results=True only makes sense for multi-GPU tests")
+
+    if reduce_results and quantization is not None:
+        pytest.skip("reduce_results=True only tested with unquantized data types")
 
     if num_experts % dp_size != 0:
         pytest.skip("EPLB requires num_experts divisible by ep_size")
@@ -1047,5 +1074,6 @@ def test_moe_layer_eplb(
         top_k,
         quantization,
         shared_experts_config,
+        reduce_results,
         _test_body_eplb,
     )
