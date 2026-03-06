@@ -292,31 +292,43 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                 continue
             config_module = dataclass_cls.__module__
             config_name = dataclass_cls.__name__
-            # Extract the parent module path (e.g., vllm.config.speculative -> vllm/config)
+            # Extract parent module (e.g., vllm.config.speculative -> vllm/config)
             parent_module = ".".join(config_module.split(".")[:-1])
             doc_path = parent_module.replace(".", "/")
-            # Anchor uses parent module + class name (e.g., vllm.config.SpeculativeConfig)
+            # Anchor: parent module + class name (e.g., vllm.config.SpeculativeConfig)
             anchor = f"{parent_module}.{config_name}"
-            doc_link = f"https://docs.vllm.ai/en/latest/api/{doc_path}/#{anchor}"
+            doc_link = (
+                f"https://docs.vllm.ai/en/latest/api/{doc_path}/#{anchor}"
+            )
 
-            def parse_dataclass(val: str, cls=dataclass_cls, link=doc_link) -> Any:
+            def parse_dataclass(
+                val: str,
+                cls=dataclass_cls,
+                link=doc_link,
+                field_name=name,  # Bind loop variable
+            ) -> Any:
                 try:
                     return TypeAdapter(cls).validate_json(val)
                 except ValidationError as e:
                     # Extract field errors for better error messages
-                    error_msg = f"Invalid configuration for --{name.replace('_', '-')}:\n"
-                    if hasattr(e, 'errors'):
+                    flag_name = field_name.replace("_", "-")
+                    error_msg = f"Invalid configuration for --{flag_name}:\n"
+                    if hasattr(e, "errors"):
                         for error in e.errors():
-                            field = '.'.join(str(loc) for loc in error['loc'])
-                            msg = error['msg']
+                            field = ".".join(str(loc) for loc in error["loc"])
+                            msg = error["msg"]
                             error_msg += f"  - {field}: {msg}\n"
                     else:
                         error_msg += f"  {str(e)}\n"
-                    error_msg += f"\nFor all accepted keys and their types, see: {link}"
+                    error_msg += (
+                        f"\nFor all accepted keys and their types, see: {link}"
+                    )
                     raise argparse.ArgumentTypeError(error_msg) from e
 
             kwargs[name]["type"] = parse_dataclass
-            kwargs[name]["help"] += f"\n\nFor all accepted keys, see: {doc_link}\n\n{json_tip}"
+            kwargs[name]["help"] += (
+                f"\n\nFor all accepted keys, see: {doc_link}\n\n{json_tip}"
+            )
         elif contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
             kwargs[name]["action"] = argparse.BooleanOptionalAction
@@ -1364,7 +1376,8 @@ class EngineArgs:
         print("=" * 80 + "\n")
 
         print(
-            "The --speculative-config flag accepts a JSON object with the following keys:\n"
+            "The --speculative-config flag accepts a JSON object "
+            "with the following keys:\n"
         )
 
         # Get SpeculativeConfig fields
@@ -1401,11 +1414,13 @@ class EngineArgs:
 
         print("\nFor complete documentation with examples, see:")
         print(
-            "  https://docs.vllm.ai/en/latest/api/vllm/config/#vllm.config.SpeculativeConfig"
+            "  https://docs.vllm.ai/en/latest/api/vllm/config/"
+            "#vllm.config.SpeculativeConfig"
         )
         print("\nExample usage:")
         print(
-            '  vllm serve model --speculative-config \'{"method": "ngram", "num_speculative_tokens": 5}\''
+            "  vllm serve model --speculative-config "
+            '\'{"method": "ngram", "num_speculative_tokens": 5}\''
         )
         print("\n" + "=" * 80 + "\n")
 
