@@ -53,12 +53,6 @@ class TorchCompileWithNoGuardsWrapper:
     since we drop all guards.
     """
 
-    def check_invariants_and_forward(self, *args: Any, **kwargs: Any) -> Any:
-        assert hasattr(self, "_check_shape_invariants")
-        self._check_shape_invariants(*args, **kwargs)
-
-        return self.forward(*args, **kwargs)
-
     def _call_with_optional_nvtx_range(
         self, callable_fn: Callable[P, R], *args: P.args, **kwargs: P.kwargs
     ) -> Any:
@@ -118,17 +112,13 @@ class TorchCompileWithNoGuardsWrapper:
         # Validate that unbacked dynamic shapes require VLLM_USE_BYTECODE_HOOK=False
 
         if ds_type == DynamicShapesType.UNBACKED:
-            # reason is that bytecode does torch._dynamo.eval_frame.
-            # remove_from_cache(self.original_code_object()) to force a new
-            # re-compilation. And if we use
-            # compiled_ptr = self.check_invariants_and_forward
-            # it will reset all entries.
+            # UNBACKED requires VLLM_USE_BYTECODE_HOOK=0 because bytecode hook
+            # does torch._dynamo.eval_frame.remove_from_cache() which resets
+            # all cached entries on re-compilation.
             assert not envs.VLLM_USE_BYTECODE_HOOK, (
                 "UNBACKED dynamic shapes requires VLLM_USE_BYTECODE_HOOK=0. "
             )
             assert not self.evaluate_guards, "UNBACKED dynamic shapes do not add guards"
-
-            compiled_ptr = self.check_invariants_and_forward
 
         aot_context = nullcontext()
         if envs.VLLM_USE_AOT_COMPILE:
