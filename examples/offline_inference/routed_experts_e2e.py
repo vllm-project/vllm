@@ -27,7 +27,6 @@ import uuid
 from dataclasses import dataclass, field
 
 import numpy as np
-import torch
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 
@@ -149,8 +148,10 @@ def run_inference(
 
     result = asyncio.run(_run_async_inference(engine_args, prompts, max_new_tokens))
 
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    from vllm.platforms import current_platform
+
+    if current_platform.is_cuda_alike():
+        current_platform.empty_cache()
 
     return result
 
