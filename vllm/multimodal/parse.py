@@ -21,7 +21,7 @@ from typing_extensions import assert_never
 
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
-
+from vllm.multimodal.video_sparse import SimilarFrameDetector
 from .audio import AudioResampler, AudioSpec, normalize_audio
 from .inputs import (
     AudioItem,
@@ -125,6 +125,20 @@ class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
 
     def get_passthrough_data(self) -> Mapping[str, object]:
         return {}
+
+    def sparse_video(self, sparse_ratio):
+        detector = SimilarFrameDetector(sparse_ratio=sparse_ratio)
+        self.data = detector.process_video_frames(self.data)
+
+        if (
+            isinstance(self.data[0], tuple)
+            and hasattr(self, "metadata")
+            and self.metadata is not None
+        ):
+            for idx, meta_dd in enumerate(self.metadata):
+                meta_dd["frames_indices"] = self.data[idx][1][
+                    "frames_indices"
+                ]
 
 
 def validate_embedding_ndim(

@@ -21,6 +21,7 @@ from vllm.inputs import (
 )
 from vllm.inputs.data import build_enc_dec_inputs, embeds_inputs, token_inputs
 from vllm.logger import init_logger
+from vllm.multimodal.parse import VideoProcessorItems
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 from vllm.utils.counter import AtomicCounter
@@ -544,6 +545,27 @@ class BaseRenderer(ABC, Generic[_T]):
         mm_processor = self.get_mm_processor()
 
         mm_data_items = mm_processor.info.parse_mm_data(mm_data)
+
+        # Efficient Frame Selection For Videos.
+        if (
+            self.model_config
+            and hasattr(self.model_config, "multimodal_config")
+            and self.model_config.multimodal_config
+        ):
+            efs_sparse_rate = self.model_config.multimodal_config.video_sparse_rate
+        else:
+            efs_sparse_rate = 0.0
+        if efs_sparse_rate is not None and efs_sparse_rate > 0:
+            efs_sparse_enabled = True
+
+        if (
+            efs_sparse_enabled and "video" in mm_data_items  # type: ignore[typeddict-item]
+        ):
+            video_data = mm_data_items["video"]
+            if isinstance(video_data, VideoProcessorItems):
+                sparse_ratio = 1 - (efs_sparse_rate if efs_sparse_rate is not None else 0.0)
+                video_data.sparse_video(sparse_ratio)
+
         mm_uuid_items = parse_mm_uuids(mm_uuids)
 
         mm_uuid_items = self._process_mm_uuids(
