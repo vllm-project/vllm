@@ -395,6 +395,234 @@ def test_hermes_parser_streaming(
     )
 
 
+def test_hermes_parser_streaming_different_intervals_tool_1(
+    qwen_tokenizer: TokenizerLike,
+    hermes_parser: Hermes2ProToolParser,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    text = '<tool_call>\
+{"name": "get_current_temperature","arguments\
+": {"location":\
+"San Francisco, California, United States", "unit": "celsius"}}\
+</tool_call>'
+    tokens = qwen_tokenizer.encode(text)
+    interval_sizes = list(range(1, 21))
+    interval_sizes.extend([100, 1000, 10_000, 100_000, 1_000_000, 10_000_000])
+    for interval in interval_sizes:
+        previous_text = ""
+        delta_messages = []
+
+        # Group tokens into chunks based on interval
+        for i in range(0, len(tokens), interval):
+            # Get chunk of tokens (up to 'interval' tokens, or whatever's left)
+            token_chunk = tokens[i : i + interval]
+
+            # Decode the chunk
+            text = qwen_tokenizer.decode(token_chunk)
+            current_text = previous_text + text
+
+            delta = hermes_parser.extract_tool_calls_streaming(
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=text,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=any_chat_request,
+            )
+            previous_text = current_text
+            if delta is not None:
+                delta_messages.append(delta)
+
+        print(f"Interval: {interval}")
+        for delta in delta_messages:
+            print(delta)
+        assert (
+            delta_messages[0].tool_calls[0].function.name == "get_current_temperature"
+        )
+        tool_call_args = "".join(
+            delta.tool_calls[0].function.arguments or "" for delta in delta_messages
+        )
+        assert tool_call_args == (
+            '{"location":"San Francisco, California, United States", "unit": "celsius"}'
+        )
+
+
+# This test replicates the exact streaming behavior of running the vLLM server below
+# with different --stream-interval values. It correctly handles:
+# - First token processed separately (matching server behavior)
+# - Special tokens like <tool_call> and <|im_end|>
+#
+# Command simulated:
+# vllm serve Qwen/Qwen2.5-1.5B-Instruct
+#   --stream-interval 10
+#   --enable-auto-tool-choice
+#   --tool-call-parser hermes
+#   --max-model-len 2048
+def test_hermes_parser_streaming_different_intervals_tool_2(
+    qwen_tokenizer: TokenizerLike,
+    hermes_parser: Hermes2ProToolParser,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    text = """<tool_call>
+{"name": "list_directory", "arguments": {"dir": "/src"}}
+</tool_call><|im_end|>"""
+    tokens = qwen_tokenizer.encode(text)
+    expected_tokens = [
+        151657,
+        198,
+        4913,
+        606,
+        788,
+        330,
+        1607,
+        14846,
+        497,
+        330,
+        16370,
+        788,
+        5212,
+        3741,
+        788,
+        3521,
+        3548,
+        95642,
+        151658,
+        151645,
+    ]
+    assert tokens == expected_tokens
+
+    interval_sizes = list(range(1, 21))
+    interval_sizes.extend([100, 1000, 10_000, 100_000, 1_000_000, 10_000_000])
+    for interval in interval_sizes:
+        # The first token is processed separately to simulate server behavior
+        previous_text = ""
+        delta_messages = []
+
+        # Process first token separately
+        first_token = tokens[0:1]
+        text = qwen_tokenizer.decode(first_token)
+        current_text = text
+
+        delta = hermes_parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=any_chat_request,
+        )
+        previous_text = current_text
+        if delta is not None:
+            delta_messages.append(delta)
+
+        # Process remaining tokens in chunks based on interval
+        remaining_tokens = tokens[1:]
+        for i in range(0, len(remaining_tokens), interval):
+            # Get chunk of tokens (up to 'interval' tokens, or whatever's left)
+            token_chunk = remaining_tokens[i : i + interval]
+
+            # Decode the chunk
+            text = qwen_tokenizer.decode(token_chunk)
+            current_text = previous_text + text
+
+            delta = hermes_parser.extract_tool_calls_streaming(
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=text,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=any_chat_request,
+            )
+            previous_text = current_text
+            if delta is not None:
+                delta_messages.append(delta)
+
+        print(f"Interval: {interval}")
+        for delta in delta_messages:
+            print(delta)
+        assert delta_messages[0].tool_calls[0].function.name == "list_directory"
+        tool_call_args = "".join(
+            delta.tool_calls[0].function.arguments or ""
+            for delta in delta_messages
+            if delta.tool_calls  # Skips if None or empty list
+        )
+        assert tool_call_args == '{"dir": "/src"}'
+
+
+def test_hermes_parser_streaming_different_intervals_bug_30229(
+    qwen_tokenizer: TokenizerLike,
+    hermes_parser: Hermes2ProToolParser,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    text = """<tool_call>
+{"name": "get_nums", "arguments": {"grade": ["一年级", "二年级", "三年级"]}}
+</tool_call>"""
+    tokens = qwen_tokenizer.encode(text)
+
+    interval_sizes = list(range(1, 21))
+    interval_sizes.extend([100, 1000, 10_000, 100_000, 1_000_000, 10_000_000])
+    for interval in interval_sizes:
+        # The first token is processed separately to simulate server behavior
+        previous_text = ""
+        delta_messages = []
+
+        # Process first token separately
+        first_token = tokens[0:1]
+        text = qwen_tokenizer.decode(first_token)
+        current_text = text
+
+        delta = hermes_parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=any_chat_request,
+        )
+        previous_text = current_text
+        if delta is not None:
+            delta_messages.append(delta)
+
+        # Process remaining tokens in chunks based on interval
+        remaining_tokens = tokens[1:]
+        for i in range(0, len(remaining_tokens), interval):
+            # Get chunk of tokens (up to 'interval' tokens, or whatever's left)
+            token_chunk = remaining_tokens[i : i + interval]
+
+            # Decode the chunk
+            text = qwen_tokenizer.decode(token_chunk)
+            current_text = previous_text + text
+
+            delta = hermes_parser.extract_tool_calls_streaming(
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=text,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=any_chat_request,
+            )
+            previous_text = current_text
+            if delta is not None:
+                delta_messages.append(delta)
+
+        print(f"Interval: {interval}")
+        for delta in delta_messages:
+            print(delta)
+        assert delta_messages[0].tool_calls[0].function.name == "get_nums"
+        tool_call_args = "".join(
+            delta.tool_calls[0].function.arguments or ""
+            for delta in delta_messages
+            if delta.tool_calls  # Skips if None or empty list
+        )
+        print(f"Reconstructed Args: {tool_call_args}")
+        assert tool_call_args == '{"grade": ["一年级", "二年级", "三年级"]}'
+
+
 def test_hermes_parser_non_streaming_no_tool_call(
     hermes_parser: Hermes2ProToolParser,
     any_chat_request: ChatCompletionRequest,
