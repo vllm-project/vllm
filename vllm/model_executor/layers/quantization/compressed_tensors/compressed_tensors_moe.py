@@ -542,6 +542,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             )
         w13_weight_global_scale = layer.w13_weight_global_scale[:, 0].contiguous()
 
+        # compressed-tensors checkpoints store inverse global scales,
+        # compared to modelopt checkpoints.
         w13_weight_global_scale = 1.0 / w13_weight_global_scale
         w2_weight_global_scale = 1.0 / layer.w2_weight_global_scale
         w13_input_global_scale = 1.0 / layer.w13_input_global_scale
