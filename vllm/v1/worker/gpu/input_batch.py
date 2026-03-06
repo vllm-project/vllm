@@ -12,7 +12,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+    pass
 
 
 class InputBuffers:
@@ -86,12 +86,10 @@ class InputBatch:
     @classmethod
     def make_dummy(
         cls,
-        batch_desc: BatchExecutionDescriptor,
+        num_reqs: int,
+        num_tokens: int,
         input_buffers: InputBuffers,
     ) -> InputBatch:
-        num_tokens = batch_desc.num_tokens
-        # num_reqs=None means no request padding (PIECEWISE), default to num_tokens
-        num_reqs = batch_desc.num_reqs or num_tokens
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
 

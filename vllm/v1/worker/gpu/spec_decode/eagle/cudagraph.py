@@ -48,14 +48,16 @@ class EagleCudaGraphManager(CudaGraphManager):
         """Capture CUDA graphs for Eagle speculative decoding (FULL mode only)."""
 
         def capture_fn(desc: BatchExecutionDescriptor) -> None:
-            num_reqs, num_tokens = desc.num_reqs, desc.num_tokens
+            num_tokens = desc.num_tokens
+            num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
             num_tokens_across_dp = (
                 torch.full((self.dp_size,), num_tokens, dtype=torch.int32, device="cpu")
                 if self.dp_size > 1
                 else None
             )
             attn_metadata, slot_mappings = prepare_inputs_to_capture(
-                desc,
+                num_reqs,
+                num_tokens,
                 model_state,
                 input_buffers,
                 block_tables,

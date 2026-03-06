@@ -918,7 +918,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self._set_active_loras(*lora_inputs)
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
-            input_batch = InputBatch.make_dummy(batch_desc, self.input_buffers)
+            input_batch = InputBatch.make_dummy(
+                batch_desc.num_reqs or num_reqs,
+                batch_desc.num_tokens,
+                self.input_buffers,
+            )
             if not skip_attn_for_dummy_run:
                 block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)
             else:

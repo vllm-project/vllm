@@ -130,7 +130,9 @@ class CudaGraphManager:
                 descs_by_token_count[num_tokens].append(desc)
 
             if mixed_mode:
-                # request padding is not needed for PIECEWISE graphs
+                # for PIECEWISE graphs there is no limit on requests when replaying
+                # i.e. no request padding is needed
+                # so we leave it as None
                 num_reqs = (
                     min(num_tokens, self.max_num_reqs)
                     if mixed_mode == CUDAGraphMode.FULL
@@ -286,13 +288,15 @@ class ModelCudaGraphManager(CudaGraphManager):
 
         def capture_fn(desc: BatchExecutionDescriptor) -> None:
             num_tokens = desc.num_tokens
+            num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
             num_tokens_across_dp = (
                 torch.full((self.dp_size,), num_tokens, dtype=torch.int32, device="cpu")
                 if self.dp_size > 1
                 else None
             )
             attn_metadata, slot_mappings = prepare_inputs_to_capture(
-                desc,
+                num_reqs,
+                num_tokens,
                 model_state,
                 input_buffers,
                 block_tables,
@@ -348,17 +352,15 @@ class ModelCudaGraphManager(CudaGraphManager):
 
 
 def prepare_inputs_to_capture(
-    desc: BatchExecutionDescriptor,
+    num_reqs: int,
+    num_tokens: int,
     model_state: ModelState,
     input_buffers: InputBuffers,
     block_tables: BlockTables,
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
 ) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
-    num_tokens = desc.num_tokens
-    # num_reqs=None means no request padding (PIECEWISE), default to num_tokens
-    num_reqs = desc.num_reqs or num_tokens
-    input_batch = InputBatch.make_dummy(desc, input_buffers)
+    input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(
