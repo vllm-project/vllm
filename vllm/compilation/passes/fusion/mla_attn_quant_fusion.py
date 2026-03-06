@@ -274,9 +274,7 @@ class MLAAttentionNvfp4QuantPattern(MLAAttentionQuantPattern):
                 device=q.device,
             )
             # attention output block scale
-            output_scale_view = torch.ops.aten.view.dtype(
-                output_scale, FP8_DTYPE
-            )
+            output_scale_view = torch.ops.aten.view.dtype(output_scale, FP8_DTYPE)
             at2 = auto_functionalized(
                 MLA_ATTN_OP,
                 q=q,
@@ -296,9 +294,7 @@ class MLAAttentionNvfp4QuantPattern(MLAAttentionQuantPattern):
             self.empty(5, 1, self.qk_rope_head_dim),  # k_pe
             self.empty(5, self.output_dim),  # output_attn
             self.empty_quant(5, self.output_dim // 2),  # output_quant
-            empty_i32(
-                128, round_up(self.output_dim // 16, 4)
-            ),  # output_scale
+            empty_i32(128, round_up(self.output_dim // 16, 4)),  # output_scale
             empty_fp32(1, 1),  # input_scale
             self.empty(0),  # kv_cache_dummy_dep
         ]
@@ -329,9 +325,7 @@ class MLAAttnFusionPass(VllmPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
 
-        self.patterns = PatternMatcherPass(
-            pass_name="mla_attn_fusion_pass"
-        )
+        self.patterns = PatternMatcherPass(pass_name="mla_attn_fusion_pass")
 
         mla_layers = get_layers_from_vllm_config(config, MLAAttention)
         for layer_name, layer in mla_layers.items():
@@ -340,9 +334,7 @@ class MLAAttnFusionPass(VllmPatternMatcherPass):
             )
             pattern_fp8.register_if_supported(self.patterns)
 
-            if current_platform.is_cuda() and hasattr(
-                torch.ops._C, "scaled_fp4_quant"
-            ):
+            if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
                 pattern_nvfp4 = MLAAttentionNvfp4QuantPattern(
                     layer, config.model_config.dtype
                 )
@@ -361,9 +353,7 @@ class MLAAttnFusionPass(VllmPatternMatcherPass):
     @VllmInductorPass.time_and_log
     def __call__(self, graph: torch.fx.graph.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
-        logger.debug(
-            "Fused quant onto %s MLA attention nodes", self.matched_count
-        )
+        logger.debug("Fused quant onto %s MLA attention nodes", self.matched_count)
 
     def uuid(self) -> str:
         return VllmInductorPass.hash_source(
