@@ -45,6 +45,11 @@ class TritonMLABackend(MLACommonBackend):
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return True
 
+    @classmethod
+    def supports_block_size(cls, block_size: int | None) -> bool:
+        # The only unsupported block_size is 1
+        return block_size is None or block_size != 1
+
 
 class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True

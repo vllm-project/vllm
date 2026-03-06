@@ -13,7 +13,7 @@ repos:
     args: [--output-format, github, --fix]
   - id: ruff-format
 - repo: https://github.com/crate-ci/typos
-  rev: v1.38.1
+  rev: v1.43.5
   hooks:
   - id: typos
     args: [--force-exclude]
