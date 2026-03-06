@@ -544,9 +544,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
-        if output_scale is not None or output_block_scale is not None:
-            raise NotImplementedError(
-                "fused output quantization is not yet supported for MLA"
+        needs_quant = output_scale is not None or output_block_scale is not None
+        if needs_quant:
+            # The fusion pass has allocated output with quantized dtype
+            # (FP8 or uint8 for FP4). We can't write BF16 into it directly,
+            # so we swap in a temp BF16 buffer for computation, then quantize
+            # into the real output at the end.
+            quant_output = output
+            quant_output_padded = output
+            bf16_shape = (output.shape[0], self.num_heads * self.v_head_dim)
+            output = torch.empty(
+                bf16_shape, dtype=q.dtype, device=output.device
             )
 
         if attn_metadata is None:
@@ -566,6 +574,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the
             # same expert outputs.
+            if needs_quant:
+                return quant_output.fill_(0)
             return output.fill_(0)
 
         if self.impl.dcp_world_size == -1:
@@ -705,6 +715,33 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             # v_up projection
             self._v_up_proj(attn_out, out=mqa_output_slice)
+
+        if needs_quant:
+            # Quantize the BF16 computation result into the quantized output
+            actual = output[:num_actual_toks].reshape(
+                -1, self.num_heads * self.v_head_dim
+            )
+            if output_block_scale is not None:
+                # NVFP4: two FP4 values packed into one uint8
+                from vllm._custom_ops import scaled_fp4_quant
+
+                fp4_data, fp4_scales = scaled_fp4_quant(
+                    actual, output_scale
+                )
+                quant_output[:num_actual_toks].copy_(
+                    fp4_data.view(quant_output[:num_actual_toks].shape)
+                )
+                output_block_scale.copy_(fp4_scales)
+            else:
+                # Static FP8 quantization
+                quant_actual = quant_output[:num_actual_toks].reshape(
+                    -1, self.num_heads * self.v_head_dim
+                )
+                torch.ops._C.static_scaled_fp8_quant(
+                    quant_actual, actual, output_scale
+                )
+            return quant_output_padded
+
         return output_padded
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
@@ -2054,6 +2091,14 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    def fused_output_quant_supported(self, quant_key: "QuantKey"):
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kFp8StaticTensorSym,
+            kNvfp4Dynamic,
+        )
+
+        return quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
 
     def __init__(
         self,
