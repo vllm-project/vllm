@@ -42,8 +42,14 @@ class MockModelConfig:
 
 
 @dataclass
+class MockParallelConfig:
+    _api_process_rank: int = 0
+
+
+@dataclass
 class MockVllmConfig:
     model_config: MockModelConfig
+    parallel_config: MockParallelConfig
 
 
 @dataclass
@@ -78,7 +84,7 @@ def _build_renderer(
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
     renderer = HfRenderer(
-        MockVllmConfig(model_config),
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
         tokenizer=(
             None
             if model_config.skip_tokenizer_init
@@ -93,14 +99,14 @@ def _build_renderer(
 
 
 def _preprocess_prompt(
-    mdoel_config: ModelConfig,
+    model_config: ModelConfig,
     prompt_or_prompts: SingletonPrompt | bytes | Sequence[SingletonPrompt | bytes],
 ):
     return [
         (
             prompt
             if isinstance(prompt, bytes)
-            else parse_model_prompt(mdoel_config, prompt)
+            else parse_model_prompt(model_config, prompt)
         )
         for prompt in prompt_to_seq(prompt_or_prompts)
     ]
@@ -271,7 +277,7 @@ class TestRenderPrompt:
 
         with pytest.raises(
             ValueError,
-            match="input characters and requested .* context length is only",
+            match="maximum context length is",
         ):
             renderer.tokenize_prompts(
                 prompts,
@@ -292,7 +298,7 @@ class TestRenderPrompt:
 
         with pytest.raises(
             ValueError,
-            match="input tokens and requested .* context length is only",
+            match="maximum context length is",
         ):
             renderer.tokenize_prompts(
                 prompts,
@@ -313,7 +319,7 @@ class TestRenderPrompt:
 
         with pytest.raises(
             ValueError,
-            match="input tokens and requested .* context length is only",
+            match="maximum context length is",
         ):
             renderer.tokenize_prompts(
                 prompts,

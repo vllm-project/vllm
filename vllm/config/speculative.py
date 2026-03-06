@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
+import copy
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, model_validator
@@ -36,6 +37,7 @@ MTPModelTypes = Literal[
     "glm4_moe_lite_mtp",
     "glm_ocr_mtp",
     "ernie_mtp",
+    "nemotron_h_mtp",
     "exaone_moe_mtp",
     "qwen3_next_mtp",
     "qwen3_5_mtp",
@@ -44,7 +46,7 @@ MTPModelTypes = Literal[
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
 ]
-EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
+EagleModelTypes = Literal["eagle", "eagle3", "extract_hidden_states", MTPModelTypes]
 SpeculativeMethod = Literal[
     "ngram",
     "medusa",
@@ -101,14 +103,16 @@ class SpeculativeConfig:
     will use the default version."""
 
     # Advanced control
-    disable_by_batch_size: int | None = Field(default=None, ge=2)
-    """Disable speculative decoding for new incoming requests when the number
-    of enqueued requests is larger than this value, if provided."""
     disable_padded_drafter_batch: bool = False
     """Disable input padding for speculative decoding. If set to True,
     speculative input batches can contain sequences of different lengths,
     which may only be supported by certain attention backends. This currently
     only affects the EAGLE method of speculation."""
+    use_local_argmax_reduction: bool = False
+    """Use vocab-parallel local argmax instead of all-gathering full logits
+    for draft token generation. Reduces communication from O(vocab_size) to
+    O(2 * tp_size) per token. Only applies to greedy draft selection in
+    non-tree speculation."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
@@ -178,9 +182,22 @@ class SpeculativeConfig:
         the final hidden states.
         """
         factors: list[Any] = []
-        # Eagle3 affects the computation graph because it returns intermediate
-        # hidden states in addition to the final hidden state.
-        factors.append(self.method == "eagle3")
+        # Eagle3 and extract_hidden_states affect the computation graph because
+        # they return intermediate hidden states in addition to the final hidden state.
+        uses_aux_hidden_states = self.method in ("eagle3", "extract_hidden_states")
+        factors.append(uses_aux_hidden_states)
+
+        # The specific layers used also affect the computation graph
+        if uses_aux_hidden_states and self.draft_model_config is not None:
+            layer_ids = getattr(
+                self.draft_model_config.hf_config,
+                "eagle_aux_hidden_state_layer_ids",
+                None,
+            )
+            if layer_ids is not None:
+                # Convert to tuple to make it hashable
+                factors.append(tuple(layer_ids))
+
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
@@ -253,6 +270,19 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["ErnieMTPModel"]}
             )
 
+        if (
+            hf_config.model_type == "nemotron_h"
+            and hasattr(hf_config, "num_nextn_predict_layers")
+            and hf_config.num_nextn_predict_layers > 0
+        ):
+            # Check if this is an MTP variant
+            hf_config.model_type = "nemotron_h_mtp"
+        if hf_config.model_type == "nemotron_h_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["NemotronHMTPModel"]}
+            )
+
         if hf_config.model_type == "qwen3_next":
             hf_config.model_type = "qwen3_next_mtp"
         if hf_config.model_type == "qwen3_next_mtp":
@@ -305,6 +335,13 @@ class SpeculativeConfig:
         # can not be detected, it will be considered as the "draft_model" by
         # default.
 
+        # infer method from user args
+        if self.method is None:
+            if self.model in ("ngram", "[ngram]"):
+                self.method = "ngram"
+            else:
+                self.method = "draft_model"
+
         if self.method in get_args(MTPModelTypes) and self.method != "mtp":
             logger.warning(
                 "method `%s` is deprecated and replaced with mtp.", self.method
@@ -316,7 +353,7 @@ class SpeculativeConfig:
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
                 if self.target_model_config.hf_text_config.model_type == "deepseek_v32":
-                    # FIXME(luccafong): cudgraph with v32 MTP is not supported,
+                    # FIXME(luccafong): cudagraph with v32 MTP is not supported,
                     # remove this when the issue is fixed.
                     self.enforce_eager = True
                 # use the draft model from the same model:
@@ -329,17 +366,12 @@ class SpeculativeConfig:
                 self.model = "ngram"
             elif self.method == "suffix":
                 self.model = "suffix"
+            elif self.method == "extract_hidden_states":
+                self.model = "extract_hidden_states"
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
                 )
-
-        # Automatically configure the method for ngram when "model" is used
-        # instead of "method"
-        if self.method is None and (
-            self.model is not None and self.model in ("ngram", "[ngram]")
-        ):
-            self.method = "ngram"
 
         if self.method in ("ngram", "[ngram]"):
             # Unified to "ngram" internally
@@ -378,6 +410,34 @@ class SpeculativeConfig:
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "suffix":
             self._validate_suffix_decoding()
+        elif self.method == "extract_hidden_states":
+            from vllm.transformers_utils.configs.extract_hidden_states import (
+                ExtractHiddenStatesConfig,
+            )
+
+            # ExtractHiddenStatesModel is instantiated manually in load_model()
+            # We just need to store the target model config for KV cache shape info
+            self.model = "extract_hidden_states"
+            self.prompt_lookup_max = 0
+            self.prompt_lookup_min = 0
+
+            if hasattr(self.draft_model_config, "hf_config"):
+                hf_config = self.draft_model_config.hf_config.to_dict()
+            elif (
+                isinstance(self.draft_model_config, dict)
+                and "hf_config" in self.draft_model_config
+            ):
+                hf_config = self.draft_model_config["hf_config"]
+            else:
+                hf_config = {}
+
+            self.draft_model_config = copy.copy(self.target_model_config)
+            self.draft_model_config.hf_config = ExtractHiddenStatesConfig(
+                self.draft_model_config.hf_config, **hf_config
+            )
+            self.update_arch_()
+            self.draft_parallel_config = self.target_parallel_config
+
         else:
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0
@@ -425,7 +485,7 @@ class SpeculativeConfig:
                     self.method = "mtp"
                     if self.num_speculative_tokens > 1:
                         logger.warning(
-                            "Enabling num_speculative_tokens > 1 will run"
+                            "Enabling num_speculative_tokens > 1 will run "
                             "multiple times of forward on same MTP layer"
                             ",which may result in lower acceptance rate"
                         )
@@ -462,23 +522,8 @@ class SpeculativeConfig:
                             method=self.method,
                             model_type="eagle",
                         )
-                        # EAGLEConfig primarily updates architectures, so update
-                        # all architectures-related fields in draft_model_config
                         self.draft_model_config.hf_config = eagle_config
-                        self.draft_model_config.hf_text_config = get_hf_text_config(
-                            self.draft_model_config.hf_config
-                        )
-                        self.draft_model_config.model_arch_config = (
-                            self.draft_model_config.get_model_arch_config()
-                        )
-                        model_info, arch = (
-                            self.draft_model_config.registry.inspect_model_cls(
-                                self.draft_model_config.architectures,
-                                self.draft_model_config,
-                            )
-                        )
-                        self.draft_model_config._model_info = model_info
-                        self.draft_model_config._architecture = arch
+                        self.update_arch_()
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"
@@ -505,6 +550,13 @@ class SpeculativeConfig:
                         )
 
                 if self.speculative_token_tree is None:
+                    if self.num_speculative_tokens is None:
+                        raise ValueError(
+                            "A speculative model was provided, but neither "
+                            "`speculative_token_tree` nor `num_speculative_tokens` "
+                            "was provided"
+                        )
+
                     # Generate chain of tokens.
                     self.speculative_token_tree = str(
                         [(i + 1) * (0,) for i in range(self.num_speculative_tokens)]
@@ -648,6 +700,24 @@ class SpeculativeConfig:
             )
         return speculative_draft_tensor_parallel_size
 
+    def update_arch_(self):
+        """
+        EagleConfig and ExtractHiddenStatesConfig update architectures, so update all
+        architectures-related fields in self.draft_model_config
+        """
+        self.draft_model_config.hf_text_config = get_hf_text_config(
+            self.draft_model_config.hf_config
+        )
+        self.draft_model_config.model_arch_config = (
+            self.draft_model_config.get_model_arch_config()
+        )
+        model_info, arch = self.draft_model_config.registry.inspect_model_cls(
+            self.draft_model_config.architectures,
+            self.draft_model_config,
+        )
+        self.draft_model_config._model_info = model_info
+        self.draft_model_config._architecture = arch
+
     @staticmethod
     def create_draft_parallel_config(
         target_parallel_config: ParallelConfig,
@@ -695,14 +765,7 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
-        if self.disable_by_batch_size is not None and self.disable_by_batch_size < 2:
-            raise ValueError(
-                "Expect the batch size threshold of disabling "
-                "speculative decoding is > 1, but got "
-                f"{self.disable_by_batch_size=}"
-            )
-
-        eagle3_target_supported = [
+        aux_hidden_states_supported = [
             "llama",
             "qwen",
             "minicpm",
@@ -710,18 +773,19 @@ class SpeculativeConfig:
             "hunyuan_vl",
             "hunyuan_v1_dense",
             "afmoe",
+            "nemotron_h",
         ]
         if (
-            self.method == "eagle3"
+            self.method in ("eagle3", "extract_hidden_states")
             and self.target_model_config
             and not any(
                 supported_model in self.target_model_config.hf_text_config.model_type
-                for supported_model in eagle3_target_supported
+                for supported_model in aux_hidden_states_supported
             )
         ):
             raise ValueError(
-                f"Eagle3 is only supported for {eagle3_target_supported} models. "  # noqa: E501
-                f"Got {self.target_model_config.hf_text_config.model_type=}"
+                f"{self.method} is only supported for {aux_hidden_states_supported}"
+                f" models. Got {self.target_model_config.hf_text_config.model_type=}"
             )
         self.verify_equal_vocab_size_if_draft_model()
         return self
@@ -743,14 +807,37 @@ class SpeculativeConfig:
                     f"errors during speculative decoding."
                 )
 
+    @property
+    def max_num_new_slots_for_drafting(self) -> int:
+        """
+        Calculate the maximum number of new slots that might be added to the batch
+        when drafting.
+        """
+        slots_per_req = 0  # for serial non-draft-model methods, no change needed
+        if self.parallel_drafting:
+            # For parallel drafting, we need one new slot per 'masked' token
+            slots_per_req = self.num_speculative_tokens - 1
+        if self.uses_draft_model():
+            # For draft model-based speculation, we need one new slot per request
+            # Since we do not slice the draft tokens
+            slots_per_req += 1
+        return slots_per_req
+
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp")
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
 
+    def uses_extract_hidden_states(self) -> bool:
+        return self.method == "extract_hidden_states"
+
     def __repr__(self) -> str:
         method = self.method
-        model = None if method in ("ngram", "suffix") else self.draft_model_config.model
+        model = (
+            None
+            if method in ("ngram", "suffix", "extract_hidden_states")
+            else self.draft_model_config.model
+        )
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"

@@ -15,6 +15,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -48,14 +49,14 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# For FP8 sparse attention we have two impelementations:
+# For FP8 sparse attention we have two implementations:
 # 1. Mixed batch mode: use the FP8 decode kernel for both prefill and decode this is
 #    done by treating all tokens as single batch.
 # 2. Separate prefill and decode mode: use the BF16 prefill kernel for prefill
 #    (upconverting the FP8 cache to BF16 then calling the prefill kernel) and using
 #    the FP8 decode kernel for decode.
 # Currently we use #1 when the number of heads per rank is low (i.e. TP) since the BF16
-# prefill kernel requires padding the numer of heads to 128 while the decode does not
+# prefill kernel requires padding the number of heads to 128 while the decode does not
 # so when the per ranke head count is below MIN_HEADS_FOR_BF16_PREFILL we use the mixed
 # batch mode (#2).
 MIN_HEADS_FOR_BF16_PREFILL = 32
@@ -125,7 +126,7 @@ class FlashMLASparseBackend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         if cache_dtype_str == "fp8_ds_mla":
-            # custom storage fromat is 656 bytes
+            # custom storage format is 656 bytes
             #  see FlashMLA readme.md for details
             return (num_blocks, block_size, 656)
         else:
@@ -237,8 +238,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         # DeepGEMM indexer constraint (fp8_paged_mqa_logits only supports next_n <= 2)
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
 
-        props = torch.cuda.get_device_properties(device)
-        sm_count = props.multi_processor_count
+        sm_count = num_compute_units(device.index)
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)

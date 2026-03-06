@@ -134,7 +134,7 @@ log_info "Fetching merged PRs from milestone '${MILESTONE}'..."
 
 # Store PR data in a temp file
 PR_DATA=$(mktemp)
-trap "rm -f $PR_DATA" EXIT
+trap 'rm -f "$PR_DATA"' EXIT
 
 if ! gh pr list --state merged --search "milestone:${MILESTONE}" \
     --limit 1000 \

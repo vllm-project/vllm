@@ -22,10 +22,10 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
+from vllm.utils.mistral import is_mistral_tokenizer
 
 logger = init_logger(__name__)
 
@@ -34,7 +34,7 @@ class Hermes2ProToolParser(ToolParser):
     def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
 
-        if isinstance(tokenizer, MistralTokenizer):
+        if is_mistral_tokenizer(tokenizer):
             logger.error("Detected Mistral tokenizer when using a Hermes model")
             self.model_tokenizer = tokenizer.tokenizer
 
@@ -329,11 +329,12 @@ class Hermes2ProToolParser(ToolParser):
                 logger.debug("unable to parse JSON")
                 return None
 
+            if current_tool_call is None:
+                return None
+
             # case - we haven't sent the tool name yet. If it's available, send
             #   it. otherwise, wait until it's available.
             if not self.current_tool_name_sent:
-                if current_tool_call is None:
-                    return None
                 function_name: str | None = current_tool_call.get("name")
                 if function_name:
                     self.current_tool_name_sent = True
@@ -366,6 +367,9 @@ class Hermes2ProToolParser(ToolParser):
 
             # now, the nitty-gritty of tool calls
             # now we have the portion to parse as tool call.
+
+            if current_tool_call is None:
+                return None
 
             logger.debug(
                 "Trying to parse current tool call with ID %s", self.current_tool_id

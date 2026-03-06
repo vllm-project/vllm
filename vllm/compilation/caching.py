@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import hashlib
 import inspect
 import os
@@ -144,6 +145,18 @@ class StandaloneCompiledArtifacts:
         self.loaded_submodule_store = {}
 
 
+@contextlib.contextmanager
+def patch_pytree_map_over_slice():
+    pytree._private_register_pytree_node(
+        slice, lambda x: ([x.start, x.stop, x.step], None), lambda x, c: slice(*x)
+    )
+
+    try:
+        yield
+    finally:
+        pytree._deregister_pytree_node(slice)
+
+
 class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
     """
     A wrapper around a compiled function by vllm. It will forward the tensor
@@ -165,6 +178,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         is_encoder: bool = False,
         vllm_backend: Any | None = None,
         sym_tensor_indices: list[int] | None = None,
+        aot_autograd_config: dict[str, Any] | None = None,
     ) -> None:
         assert isinstance(graph_module, torch.fx.GraphModule)
         self.graph_module = graph_module
@@ -175,6 +189,13 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         self.shape_env = None
         self.vllm_backend = vllm_backend
         self.sym_tensor_indices = sym_tensor_indices
+
+        import torch._functorch.config as functorch_config
+
+        self.aot_autograd_config = (
+            aot_autograd_config or functorch_config.save_config_portable()
+        )
+
         sym_input = next(
             (i for i in self.example_inputs if isinstance(i, torch.SymInt)), None
         )
@@ -235,7 +256,10 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
                 lambda inp: torch.empty_like(inp, device="meta"),
                 state["example_inputs"],
             )
-        with patch.object(GraphPickler, "reducer_override", _graph_reducer_override):
+        with (
+            patch.object(GraphPickler, "reducer_override", _graph_reducer_override),
+            patch_pytree_map_over_slice(),
+        ):
             state["graph_module"] = GraphPickler.dumps(
                 state["graph_module"], Options(ops_filter=None)
             )
@@ -261,13 +285,20 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
 
         state = pickle.loads(data)
         fake_mode = FakeTensorMode(shape_env=ShapeEnv())
-        state["graph_module"] = GraphPickler.loads(state["graph_module"], fake_mode)
+        with patch_pytree_map_over_slice():
+            state["graph_module"] = GraphPickler.loads(state["graph_module"], fake_mode)
         state["graph_module"].recompile()
         state["example_inputs"] = GraphPickler.loads(state["example_inputs"], fake_mode)
 
         standalone_compile_artifacts = state.pop("standalone_compile_artifacts", None)
         sym_shape_indices_map = state.pop("sym_shape_indices_map", {})
         returns_tuple_map = state.pop("returns_tuple_map", {})
+
+        saved_aot_autograd_config = state["aot_autograd_config"]
+        if saved_aot_autograd_config is not None:
+            functorch_ctx = torch._functorch.config.patch(saved_aot_autograd_config)
+        else:
+            functorch_ctx = contextlib.nullcontext()
 
         if envs.VLLM_USE_MEGA_AOT_ARTIFACT:
             assert standalone_compile_artifacts is not None
@@ -282,13 +313,14 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
                 num_submods,
             )
 
-            fn = reconstruct_serializable_fn_from_mega_artifact(
-                state=state,
-                standalone_compile_artifacts=standalone_compile_artifacts,
-                vllm_config=get_current_vllm_config(),
-                sym_shape_indices_map=sym_shape_indices_map,
-                returns_tuple_map=returns_tuple_map,
-            )
+            with functorch_ctx:
+                fn = reconstruct_serializable_fn_from_mega_artifact(
+                    state=state,
+                    standalone_compile_artifacts=standalone_compile_artifacts,
+                    vllm_config=get_current_vllm_config(),
+                    sym_shape_indices_map=sym_shape_indices_map,
+                    returns_tuple_map=returns_tuple_map,
+                )
 
             logger.info(
                 "reconstructed serializable fn from standalone compile artifacts"
@@ -296,30 +328,26 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
 
             return fn
 
-        # Fall back to standard VllmBackend
+        # Fall back to standard VllmBackend.
+        # Use a lazy closure: the backend needs traced_files for cache
+        # dir computation, but those are only populated after
+        # _verify_source_unchanged runs in decorators.py (which happens
+        # after deserialization completes).
         from vllm.compilation.backends import VllmBackend
 
         is_encoder = state.get("is_encoder", False)
-        vllm_backend: VllmBackend = VllmBackend(
-            get_current_vllm_config(), state["prefix"], is_encoder
-        )
+        vllm_config = get_current_vllm_config()
+        compile_inputs = list(state["example_inputs"])
 
         def optimized_call(*example_inputs: Any) -> Any:
-            """
-            On the first run of the optimized call, we rerun the compiler
-            backend which should result in a cache hit. After the backend
-            call returns, we just do a one-time replacement of the optimized
-            call with the compiled function, so that subsequent calls are on
-            the AOT compiled path.
-            """
-            compile_inputs = [
-                inp if inp is not None else example_inputs[i]
-                for i, inp in enumerate(fn.example_inputs)
-            ]
-            with tracing(TracingContext(fake_mode)):
+            vllm_backend: VllmBackend = VllmBackend(
+                vllm_config, state["prefix"], is_encoder
+            )
+            with tracing(TracingContext(fake_mode)), functorch_ctx:
                 fn.optimized_call = vllm_backend(
                     state["graph_module"], compile_inputs
                 ).optimized_call
+                fn.vllm_backend = vllm_backend
             return fn.optimized_call(*example_inputs)
 
         fn = cls(**state, optimized_call=optimized_call)
