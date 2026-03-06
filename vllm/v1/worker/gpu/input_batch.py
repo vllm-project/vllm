@@ -89,8 +89,9 @@ class InputBatch:
         batch_desc: BatchExecutionDescriptor,
         input_buffers: InputBuffers,
     ) -> InputBatch:
-        num_reqs = batch_desc.num_reqs
         num_tokens = batch_desc.num_tokens
+        # num_reqs=None means no request padding (PIECEWISE), default to num_tokens
+        num_reqs = batch_desc.num_reqs or num_tokens
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
 

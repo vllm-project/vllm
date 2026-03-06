@@ -21,6 +21,7 @@ def make_num_tokens_across_dp(dp_size: int, num_tokens: int) -> torch.Tensor | N
 
 def sync_cudagraph_and_dp_padding(
     cudagraph_manager: CudaGraphManager,
+    desired_batch_desc: BatchExecutionDescriptor,
     num_tokens: int,
     num_reqs: int,
     uniform_token_count: int | None,
@@ -33,14 +34,10 @@ def sync_cudagraph_and_dp_padding(
     Returns (synced_batch_desc, num_tokens_across_dp).
     """
     assert dp_size > 1, "DP size must be greater than 1"
-
-    # See which CG mode this rank wants to run, namely checking if any rank wants to run
-    # eager mode
-    batch_desc = cudagraph_manager.dispatch(num_reqs, num_tokens, uniform_token_count)
     group = get_dp_group().cpu_group
     tensor = torch.zeros(3, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
-    tensor[1][dp_rank] = batch_desc.cg_mode.value
+    tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
     dist.all_reduce(tensor, group=group)
 
@@ -72,7 +69,8 @@ def sync_cudagraph_and_dp_padding(
     ):
         synced_uniform_token_count = None
 
-    # Dispatch for the final synced values
+    # Dispatch for the final synced values, use num_reqs instead of synced_num_reqs
+    # so we don't perform request padding for PIECEWISE graphs
     synced_desc = cudagraph_manager.dispatch(
         num_reqs, synced_num_tokens, synced_uniform_token_count
     )

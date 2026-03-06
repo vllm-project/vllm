@@ -34,7 +34,7 @@ class BatchExecutionDescriptor:
 
     cg_mode: CUDAGraphMode
     num_tokens: int
-    num_reqs: int
+    num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
 
 
@@ -44,9 +44,14 @@ def _is_compatible(
     num_tokens: int,
     uniform_token_count: int | None,
 ) -> bool:
+    # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
+    # desc.num_reqs=None means no request padding needed (PIECEWISE)
     return (
-        (desc.uniform_token_count or uniform_token_count) == uniform_token_count
-        and desc.num_reqs >= num_reqs
+        (
+            desc.uniform_token_count is None
+            or desc.uniform_token_count == uniform_token_count
+        )
+        and (desc.num_reqs is None or desc.num_reqs >= num_reqs)
         and desc.num_tokens >= num_tokens
     )
 
@@ -107,31 +112,37 @@ class CudaGraphManager:
         descs_by_token_count = defaultdict(list)
         descs_by_mode = defaultdict(list)
 
-        for padded in capture_sizes:
+        for num_tokens in capture_sizes:
             # Capture uniform decode specfifc graphs if required
             #  (i.e. separate decode routine)
             if (
                 separate_decode_routine
                 and decode_mode
-                and self.decode_query_len <= padded <= max_decode_tokens
+                and self.decode_query_len <= num_tokens <= max_decode_tokens
             ):
                 desc = BatchExecutionDescriptor(
                     cg_mode=decode_mode,
-                    num_tokens=padded,
-                    num_reqs=padded // self.decode_query_len,
+                    num_tokens=num_tokens,
+                    num_reqs=num_tokens // self.decode_query_len,
                     uniform_token_count=self.decode_query_len,
                 )
                 descs_by_mode[decode_mode].append(desc)
-                descs_by_token_count[padded].append(desc)
+                descs_by_token_count[num_tokens].append(desc)
 
             if mixed_mode:
+                # request padding is not needed for PIECEWISE graphs
+                num_reqs = (
+                    min(num_tokens, self.max_num_reqs)
+                    if mixed_mode == CUDAGraphMode.FULL
+                    else None
+                )
                 desc = BatchExecutionDescriptor(
                     cg_mode=mixed_mode,
-                    num_tokens=padded,
-                    num_reqs=min(padded, self.max_num_reqs),
+                    num_tokens=num_tokens,
+                    num_reqs=num_reqs,
                 )
                 descs_by_mode[mixed_mode].append(desc)
-                descs_by_token_count[padded].append(desc)
+                descs_by_token_count[num_tokens].append(desc)
 
         if not descs_by_token_count:
             return
@@ -344,7 +355,9 @@ def prepare_inputs_to_capture(
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
 ) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
-    num_reqs, num_tokens = desc.num_reqs, desc.num_tokens
+    num_tokens = desc.num_tokens
+    # num_reqs=None means no request padding (PIECEWISE), default to num_tokens
+    num_reqs = desc.num_reqs or num_tokens
     input_batch = InputBatch.make_dummy(desc, input_buffers)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)

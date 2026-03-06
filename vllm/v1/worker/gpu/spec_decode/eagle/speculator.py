@@ -305,14 +305,14 @@ class EagleSpeculator:
 
         # Get batch descriptor and sync across DP ranks.
         # Eagle uses FULL-only mode, dispatch with uniform_token_count=1 for decode
-        if self.dp_size == 1:
-            batch_desc, num_tokens_across_dp = (
-                self.cudagraph_manager.dispatch(num_reqs, num_reqs, 1),
-                None,
-            )
-        else:
+
+        batch_desc = self.cudagraph_manager.dispatch(num_reqs, num_reqs, 1)
+        num_tokens_across_dp = None
+
+        if self.dp_size > 1:
             batch_desc, num_tokens_across_dp = sync_cudagraph_and_dp_padding(
                 self.cudagraph_manager,
+                batch_desc,
                 num_reqs,
                 num_reqs,
                 1,  # uniform_token_count
@@ -323,7 +323,7 @@ class EagleSpeculator:
         if not (dummy_run and skip_attn_for_dummy_run):
             query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
             slot_mappings = self.block_tables.compute_slot_mappings(
-                idx_mapping, query_start_loc, pos, batch_desc.num_reqs
+                idx_mapping, query_start_loc, pos, batch_desc.num_tokens
             )
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:

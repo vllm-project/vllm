@@ -658,7 +658,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         # Get query_start_loc.
-        num_reqs_padded = batch_desc.num_reqs
+        # num_reqs_padded is None for PIECEWISE graphs (no request padding needed)
+        num_reqs_padded = batch_desc.num_reqs or num_reqs
         query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1 : num_reqs + 1])
@@ -721,7 +722,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
-            num_reqs_after_padding=batch_desc.num_reqs,
+            num_reqs_after_padding=num_reqs_padded,
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
             expanded_idx_mapping=expanded_idx_mapping,
@@ -880,14 +881,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
 
-        if self.dp_size == 1:
-            batch_desc, num_tokens_across_dp = (
-                self.cudagraph_manager.dispatch(num_reqs, num_toks, uniform_tok_count),
-                None,
-            )
-        else:
+        batch_desc = self.cudagraph_manager.dispatch(
+            num_reqs, num_toks, uniform_tok_count
+        )
+        num_tokens_across_dp = None
+
+        if self.dp_size > 1:
             batch_desc, num_tokens_across_dp = sync_cudagraph_and_dp_padding(
                 self.cudagraph_manager,
+                batch_desc,
                 num_toks,
                 num_reqs,
                 uniform_tok_count,
