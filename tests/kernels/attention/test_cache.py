@@ -663,7 +663,8 @@ def test_concat_and_cache_ds_mla(
         ref_cache_32bit = ref_cache_slice.view(torch.float32)
 
         kv_c_data = kv_c[i]
-        for tile_idx in range(4):
+        num_tiles = kv_lora_rank // 128
+        for tile_idx in range(num_tiles):
             tile_start = tile_idx * 128
             tile_end = (tile_idx + 1) * 128
             tile_data[:] = kv_c_data[tile_start:tile_end]
