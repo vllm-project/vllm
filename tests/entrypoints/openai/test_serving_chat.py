@@ -23,6 +23,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.serving import BaseModelPath, OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import TokensPrompt
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
@@ -824,9 +825,8 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
         max_tokens=10,
     )
 
-    resp = await serving_chat.create_chat_completion(req)
-    assert isinstance(resp, ErrorResponse)
-    assert "context length is only" in resp.error.message
+    with pytest.raises(VLLMValidationError):
+        await serving_chat.create_chat_completion(req)
 
 
 @pytest.mark.asyncio
@@ -866,9 +866,8 @@ async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected():
         max_tokens=1,
     )
 
-    resp = await serving_chat.create_chat_completion(req)
-    assert isinstance(resp, ErrorResponse)
-    assert "context length is only" in resp.error.message
+    with pytest.raises(VLLMValidationError):
+        await serving_chat.create_chat_completion(req)
 
 
 @pytest.mark.asyncio
