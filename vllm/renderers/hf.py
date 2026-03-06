@@ -564,7 +564,7 @@ def replace_vision_chunk_video_placeholder(
     mm_data: "MultiModalDataDict",
     video_placeholder: str | None,
 ) -> str | list[int]:
-    # get video placehoder, replace it with runtime video-chunk prompts
+    # get video placeholder, replace it with runtime video-chunk prompts
     if video_placeholder and isinstance(prompt_raw, str):
         video_prompts = build_video_prompts_from_mm_data(mm_data)
 
