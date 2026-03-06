@@ -420,6 +420,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "OlmoForCausalLM": _HfExamplesInfo("allenai/OLMo-1B-hf"),
     "Olmo2ForCausalLM": _HfExamplesInfo("allenai/OLMo-2-0425-1B"),
     "Olmo3ForCausalLM": _HfExamplesInfo("allenai/Olmo-3-7B-Instruct"),
+    "OlmoHybridForCausalLM": _HfExamplesInfo("allenai/Olmo-Hybrid-7B"),
     "OlmoeForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924-Instruct"),
     "OPTForCausalLM": _HfExamplesInfo(
         "facebook/opt-125m", {"1b": "facebook/opt-iml-max-1.3b"}
@@ -1019,18 +1020,15 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         min_transformers_version="4.57",
     ),
     "Qwen3ASRForConditionalGeneration": _HfExamplesInfo(
-        "Qwen/Qwen3-ASR-1.7B",
+        "Qwen/Qwen3-ASR-0.6B",
         max_model_len=4096,
         min_transformers_version="4.57",
-        is_available_online=False,
     ),
     "Qwen3ASRRealtimeGeneration": _HfExamplesInfo(
-        "Qwen/Qwen3-ASR-1.7B",
+        "Qwen/Qwen3-ASR-0.6B",
         max_model_len=4096,
         min_transformers_version="4.57",
-        enforce_eager=True,
         hf_overrides={"architectures": ["Qwen3ASRRealtimeGeneration"]},
-        is_available_online=False,
     ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
