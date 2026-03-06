@@ -99,7 +99,6 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     olmo3="Olmo3Config",
     olmo_hybrid="OlmoHybridConfig",
     ovis="OvisConfig",
-    cohere_asr="CohereASRConfig",
     ultravox="UltravoxConfig",
     step3_vl="Step3VLConfig",
     step3_text="Step3TextConfig",

@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
@@ -49,7 +50,6 @@ from vllm.multimodal.processing import (
 )
 from vllm.platforms import current_platform
 from vllm.renderers import TokenizeParams
-from vllm.transformers_utils.configs.cohere_asr import CohereASRConfig
 from vllm.transformers_utils.processors.cohere_asr import (
     INF_VAL,
     CohereASRFeatureExtractor,
@@ -2067,8 +2067,8 @@ class CohereASRModel(nn.Module):
 
 
 class CohereASRProcessingInfo(BaseProcessingInfo):
-    def get_hf_config(self) -> CohereASRConfig:
-        return self.ctx.get_hf_config(CohereASRConfig)
+    def get_hf_config(self) -> PretrainedConfig:
+        return self.ctx.get_hf_config()
 
     def get_default_tok_params(self) -> TokenizeParams:
         # Special tokens should be provided by the user based on the
