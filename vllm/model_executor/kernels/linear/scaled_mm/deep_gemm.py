@@ -36,7 +36,7 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         self.quant_fp8 = QuantFP8(
             static=False,
             group_shape=act_scale_descriptor.group_shape,
-            use_ue8m0=is_deep_gemm_e8m0_used(),
+            use_ue8m0=self.use_deep_gemm_e8m0,
             tma_aligned_scales=envs.VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES,
             column_major_scales=True,
         )
@@ -94,7 +94,7 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 if weight_scale_invs is not None
                 else params.weight_scale,
                 quant_block_shape=tuple(layer.weight_block_size),
-                use_e8m0=is_deep_gemm_e8m0_used(),
+                use_e8m0=self.use_deep_gemm_e8m0,
             )
             replace_parameter(layer, params.WEIGHT, dg_weight)
             replace_parameter(layer, scale_attr, dg_weight_scale)

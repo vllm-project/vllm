@@ -27,12 +27,21 @@ PauseMode = Literal["abort", "wait", "keep"]
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
-FINISH_REASON_STRINGS = ("stop", "length", "abort", "error")
+FINISH_REASON_STRINGS = ("stop", "length", "abort", "error", "repetition")
+
+EEP_NOTIFICATION_CALL_ID = -1
+
+
+class EEPNotificationType(enum.Enum):
+    NEW_CORE_ENGINES_INIT_READY = "NEW_CORE_ENGINES_INIT_READY"
+    NEW_CORE_ENGINES_WEIGHTS_INIT_READY = "NEW_CORE_ENGINES_WEIGHTS_INIT_READY"
+    RECONFIGURE_FINISHED = "RECONFIGURE_FINISHED"
+    SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
 
 
 class FinishReason(enum.IntEnum):
     """
-    Reason a request finished - stop, length, abort, or error.
+    Reason a request finished - stop, length, abort, error, or repetition.
 
     Int rather than Str for more compact serialization.
 
@@ -41,6 +50,7 @@ class FinishReason(enum.IntEnum):
     abort - aborted by client
     error - retryable request-level internal error (e.g., KV load failure).
             Invariant: always converted to 500 Internal Server Error.
+    repetition - repetitive token pattern detected (hallucination)
 
     """
 
@@ -48,6 +58,7 @@ class FinishReason(enum.IntEnum):
     LENGTH = 1
     ABORT = 2
     ERROR = 3
+    REPETITION = 4
 
     def __str__(self):
         return FINISH_REASON_STRINGS[self.value]
@@ -227,6 +238,8 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b"\x03"
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b"\x04"
+    # Sentinel to wake up input_queue.get() during shutdown.
+    WAKEUP = b"\x05"
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):
@@ -235,6 +248,11 @@ class ReconfigureDistributedRequest(msgspec.Struct):
     new_data_parallel_rank_local: int
     new_data_parallel_master_ip: str
     new_data_parallel_master_port: int
+    new_data_parallel_master_port_list: list[int]
+    new_stateless_world_group_port_list: list[list[int]]
+    new_stateless_dp_group_port_list: list[list[int]]
+    new_stateless_ep_group_port_list: list[list[int]]
+    new_stateless_eplb_group_port_list: list[list[int]]
 
 
 class ReconfigureRankType(enum.IntEnum):

@@ -87,8 +87,12 @@ class CUDAGraphMode(enum.Enum):
     def separate_routine(self) -> bool:
         return isinstance(self.value, tuple)
 
-    def valid_runtime_modes(self) -> bool:
-        return self in [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]
+    @classmethod
+    def valid_runtime_modes(cls) -> frozenset["CUDAGraphMode"]:
+        return frozenset({cls.NONE, cls.PIECEWISE, cls.FULL})
+
+    def is_valid_runtime_mode(self) -> bool:
+        return self in CUDAGraphMode.valid_runtime_modes()
 
     def __str__(self) -> str:
         return self.name
@@ -118,11 +122,15 @@ class PassConfig:
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
     enable_sp: bool = Field(default=None)
-    """Enable sequence parallelism."""
+    """Enable sequence parallelism. Requires TP>1. Automatically disabled
+    if the model's hidden_size is too small for SP to be beneficial
+    (threshold is device-capability dependent)."""
     fuse_gemm_comms: bool = Field(default=None)
     """Enable async TP."""
     fuse_allreduce_rms: bool = Field(default=None)
     """Enable flashinfer allreduce fusion."""
+    enable_qk_norm_rope_fusion: bool = False
+    """Enable fused Q/K RMSNorm + RoPE pass."""
 
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = Field(default=None)
@@ -153,8 +161,11 @@ class PassConfig:
                 8: 1,  # 1MB
             },
         }, where key is the device capability"""
-    enable_qk_norm_rope_fusion: bool = False
-    """Enable fused Q/K RMSNorm + RoPE pass."""
+    sp_min_token_num: int | None = None
+    """The minimum number of tokens above which vllm should use
+    sequence parallelism. Specified as an integer token count.
+    Unspecified will fallback to default values which are compute
+    capability and world size dependent."""
 
     # TODO(luka) better pass enabling system.
 
@@ -370,13 +381,6 @@ class CompilationConfig:
         certain small batchsizes, where inductor is good at optimizing.
     """
 
-    # Top-level Compilation control
-    level: int = Field(default=None)
-    """
-    Level is deprecated and will be removed in the next release,
-    either 0.12.0 or 0.11.2 whichever is soonest.
-    Please use mode. Currently all levels are mapped to mode.
-    """
     # Top-level Compilation control
     mode: CompilationMode = Field(default=None)
     """The compilation approach used for torch.compile-based compilation of the
@@ -662,6 +666,7 @@ class CompilationConfig:
         "vllm::linear_attention",
         "vllm::plamo2_mamba_mixer",
         "vllm::gdn_attention_core",
+        "vllm::olmo_hybrid_gdn_full_forward",
         "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
@@ -790,17 +795,6 @@ class CompilationConfig:
         return handler(value)
 
     def __post_init__(self) -> None:
-        if self.level is not None:
-            logger.warning(
-                "Level is deprecated and will be removed in the next release,"
-                "either 0.12.0 or 0.11.2 whichever is soonest."
-                "Use mode instead."
-                "If both level and mode are given,"
-                "only mode will be used."
-            )
-            if self.mode is None:
-                self.mode = self.level
-
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
@@ -834,23 +828,20 @@ class CompilationConfig:
                 func if isinstance(func, InductorPass) else CallableInductorPass(func)
             )
 
-        if self.pass_config.enable_qk_norm_rope_fusion:
+        if (
+            self.pass_config.enable_qk_norm_rope_fusion
+            and "+rotary_embedding" not in self.custom_ops
+        ):
             # TODO(zhuhaoran): support rope native forward match and remove this.
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
             self.custom_ops.append("+rotary_embedding")
-        if self.pass_config.fuse_rope_kvcache:
-            from vllm._aiter_ops import rocm_aiter_ops
-
-            if rocm_aiter_ops.is_triton_rotary_embed_enabled():
-                logger.warning(
-                    "Cannot use VLLM_ROCM_USE_AITER_TRITON_ROPE with "
-                    "fuse_rope_kvcache. Disabling fuse_rope_kvcache."
-                )
-                self.pass_config.fuse_rope_kvcache = False
-            else:
-                # TODO(Rohan138): support rope native forward match and remove this.
-                # Linked issue: https://github.com/vllm-project/vllm/issues/28042
-                self.custom_ops.append("+rotary_embedding")
+        if (
+            self.pass_config.fuse_rope_kvcache
+            and "+rotary_embedding" not in self.custom_ops
+        ):
+            # TODO(Rohan138): support rope native forward match and remove this.
+            # Linked issue: https://github.com/vllm-project/vllm/issues/28042
+            self.custom_ops.append("+rotary_embedding")
 
         if (
             is_torch_equal_or_newer("2.9.0.dev")
@@ -882,7 +873,7 @@ class CompilationConfig:
                 )
 
         # Currently only eager and inductor backend are supported.
-        # for piecewise compilation. Custom backends are not suppported for
+        # for piecewise compilation. Custom backends are not supported for
         # piecewise compilation. Update when more backends are supported.
         if self.mode == CompilationMode.VLLM_COMPILE and self.backend not in [
             "",
@@ -999,6 +990,7 @@ class CompilationConfig:
                 # https://github.com/vllm-project/vllm/issues/33267
                 if not self.use_inductor_graph_partition:
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
+                    self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
             elif len(self.splitting_ops) == 0:
                 if (
@@ -1041,7 +1033,7 @@ class CompilationConfig:
                 "are optimized for prefill and are incompatible with CUDA Graphs. "
                 "In order to use CUDA Graphs for decode-optimized workloads, "
                 "use --all2all-backend with another option, such as "
-                "deepep_low_latency, pplx, or allgather_reducescatter."
+                "deepep_low_latency or allgather_reducescatter."
             )
             self.cudagraph_mode = CUDAGraphMode.NONE
 
@@ -1180,6 +1172,58 @@ class CompilationConfig:
 
         self.max_cudagraph_capture_size = rounded_sizes[-1]
         self.cudagraph_capture_sizes = rounded_sizes
+
+    def adjust_cudagraph_sizes_for_mamba_cache(
+        self, num_mamba_cache_blocks: int
+    ) -> None:
+        """Cap cudagraph capture sizes to available Mamba cache blocks.
+
+        For hybrid Mamba/attention models, the Mamba conv_state and
+        ssm_state tensors have their first dimension equal to num_blocks
+        (from KVCacheConfig). During CUDA graph capture the decode batch
+        size equals num_tokens, so capture sizes exceeding num_blocks
+        would cause out-of-bounds access in Mamba kernels.
+
+        See: https://github.com/vllm-project/vllm/issues/34094
+        """
+        if not self.cudagraph_capture_sizes or num_mamba_cache_blocks <= 0:
+            return
+
+        assert self.max_cudagraph_capture_size is not None
+
+        if num_mamba_cache_blocks >= self.max_cudagraph_capture_size:
+            return
+
+        capped_sizes = [
+            s for s in self.cudagraph_capture_sizes if s <= num_mamba_cache_blocks
+        ]
+
+        if len(capped_sizes) == 0:
+            logger.warning(
+                "No valid cudagraph capture sizes remain after capping "
+                "to Mamba cache blocks (%d). The smallest capture size "
+                "was %d. Disabling cudagraph capture. Consider reducing "
+                "max_num_seqs or increasing available GPU memory.",
+                num_mamba_cache_blocks,
+                self.cudagraph_capture_sizes[0],
+            )
+            self.cudagraph_capture_sizes = []
+            self.max_cudagraph_capture_size = 0
+            return
+
+        logger.warning(
+            "Capping cudagraph capture sizes from max %d to %d to fit "
+            "Mamba cache blocks (%d blocks available). This limits the "
+            "maximum batch size that can use CUDA graphs. To increase "
+            "this limit, reduce max_num_seqs or increase available GPU "
+            "memory.",
+            self.max_cudagraph_capture_size,
+            capped_sizes[-1],
+            num_mamba_cache_blocks,
+        )
+
+        self.max_cudagraph_capture_size = capped_sizes[-1]
+        self.cudagraph_capture_sizes = capped_sizes
 
     def get_compile_ranges(self) -> list[Range]:
         """Get the compile ranges for the compilation config."""
