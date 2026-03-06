@@ -242,13 +242,24 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
         )
     else()
         message(STATUS "Downloading oneDNN from GitHub")
-        FetchContent_Declare(
-            oneDNN
-            GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-            GIT_TAG v3.10
-            GIT_PROGRESS TRUE
-            GIT_SHALLOW TRUE
-        )
+        if(ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
+            message(STATUS "aarch64 detected: using pinned oneDNN commit 9c5be1cc59e368aebf0909e6cf20f981ea61462a")
+            FetchContent_Declare(
+                oneDNN
+                GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
+                GIT_TAG        9c5be1cc59e368aebf0909e6cf20f981ea61462a
+                GIT_PROGRESS   TRUE
+                GIT_SHALLOW    FALSE
+            )
+        else()
+            FetchContent_Declare(
+                oneDNN
+                GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
+                GIT_TAG        v3.10
+                GIT_PROGRESS   TRUE
+                GIT_SHALLOW    TRUE
+            )
+        endif()
     endif()
 
     set(ONEDNN_LIBRARY_TYPE "STATIC")
