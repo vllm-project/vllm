@@ -145,8 +145,8 @@ def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
             f"{envs.VLLM_NVFP4_GEMM_BACKEND}."
         )
 
-    logger.info_once(f"Using {backend} for NVFP4 GEMM")
-    return backend
+    logger.info_once(f"Using {selected_backend} for NVFP4 GEMM")
+    return selected_backend
 
 
 def prepare_weights_for_nvfp4_flashinfer_trtllm(
