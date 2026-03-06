@@ -388,7 +388,9 @@ def select_fp8_moe_backend(
                 activation_key,
                 activation_format,
             )
-            logger.info(f"Backend: {backend}, Class: {k_cls.__name__}, Supported: {supported}, Reason: {reason}")
+            logger.info(
+                f"Backend: {backend}, Class: {k_cls.__name__}, Supported: {supported}, Reason: {reason}"
+            )
             if supported:
                 logger.info_once(_make_log_backend(backend), scope="local")
                 return backend, k_cls
