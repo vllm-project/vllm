@@ -102,11 +102,12 @@ def backend_to_kernel_cls(
 ) -> type[mk.FusedMoEExperts]:
     if backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
         from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (  # noqa: E501
-            TrtLlmFp8Experts,
             TrtLlmFp8ExpertsModular,
+            TrtLlmFp8ExpertsMonolithic,
         )
 
-        return [TrtLlmFp8Experts, TrtLlmFp8ExpertsModular]
+        # return [TrtLlmFp8ExpertsMonolithic, TrtLlmFp8ExpertsModular]
+        return [TrtLlmFp8ExpertsModular, TrtLlmFp8ExpertsMonolithic]
 
     elif backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
         from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
@@ -254,7 +255,6 @@ def select_fp8_moe_backend(
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
         for k_cls in backend_to_kernel_cls(backend):
-            k_cls = backend_to_kernel_cls(backend)
             supported, reason = k_cls.is_supported_config(
                 k_cls, config, weight_key, activation_key, activation_format
             )
@@ -321,7 +321,6 @@ def select_fp8_moe_backend(
                 Fp8MoeBackend.FLASHINFER_CUTLASS,
             ]:
                 for k_cls in backend_to_kernel_cls(backend):
-                    k_cls = backend_to_kernel_cls(backend)
                     supported, reason = k_cls.is_supported_config(
                         k_cls,
                         config,
@@ -389,6 +388,7 @@ def select_fp8_moe_backend(
                 activation_key,
                 activation_format,
             )
+            logger.info(f"Backend: {backend}, Class: {k_cls.__name__}, Supported: {supported}, Reason: {reason}")
             if supported:
                 logger.info_once(_make_log_backend(backend), scope="local")
                 return backend, k_cls
