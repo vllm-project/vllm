@@ -216,6 +216,44 @@ vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4 -dp 2
 
     This does not impact [multi-modal processor caching](#processor-caching).
 
+### GPU Multi-Modal Processing
+
+You can speed up multi-modal input processing by running Hugging Face processors on the GPU.
+To support this, the processor must accept a `device` argument in its call signature.
+As of this writing, the following processors are known to support GPU acceleration:
+
+- Descendants of `BaseImageProcessorFast` (requires `use_fast=True`)
+- Descendants of `BaseVideoProcessor`
+- `WhisperFeatureExtractor`
+
+To run Hugging Face processors on the GPU, you can pass the `device` argument
+(and `use_fast` if needed) via `mm_processor_kwargs`:
+
+```python
+# Fast image processor requires use_fast=True
+llm = LLM(
+    model="Qwen/Qwen2.5-VL-3B-Instruct",
+    mm_processor_kwargs={"use_fast": True, "device": "cuda"},
+)
+
+# Whisper feature extractor does not require use_fast
+llm = LLM(
+    model="Qwen/Qwen2-Audio-7B-Instruct",
+    mm_processor_kwargs={"device": "cuda"},
+)
+```
+
+!!! note
+    vLLM will try to allocate visible GPUs that are not used by the core engine
+    for multi-modal processing. If this is not possible, then the same GPU
+    will be used for multi-modal processing and model forward pass, resulting
+    in resource contention (both I/O and memory capacity).
+
+!!! important
+    The performance improvement from GPU processing varies from model to model.
+    In some cases, GPU processing may even become detrimental because of resource contention.
+    Make sure to perform benchmarking before enabling this!
+
 ## Multi-Modal Caching
 
 Multi-modal caching avoids repeated transfer or processing of the same multi-modal data,

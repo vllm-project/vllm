@@ -229,6 +229,15 @@ class MultiModalConfig:
             )
         return self
 
+    @property
+    def mm_processing_device(self) -> str:
+        kwargs = self.mm_processor_kwargs or {}
+        return str(kwargs.get("device", "cpu"))
+
+    @mm_processing_device.setter
+    def mm_processing_device(self, device: str) -> None:
+        self.update_mm_processor_kwargs({"device": device})
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -266,6 +275,12 @@ class MultiModalConfig:
 
         return limit_data.count
 
+    def update_mm_processor_kwargs(self, value: dict[str, Any]) -> None:
+        if self.mm_processor_kwargs is None:
+            self.mm_processor_kwargs = {}
+
+        self.mm_processor_kwargs.update(value)
+
     def merge_mm_processor_kwargs(
         self,
         inference_kwargs: Mapping[str, object],
@@ -275,6 +290,16 @@ class MultiModalConfig:
         according to the extra arguments passed during inference.
         """
         kwargs = self.mm_processor_kwargs or {}
+
+        # This is to avoid breaking assumptions in memory profiling
+        init_device = kwargs.get("device", "cpu")
+        inference_device = inference_kwargs.get("device", init_device)
+        if init_device != inference_device:
+            raise ValueError(
+                "You cannot override the device for multi-modal preprocessing "
+                f"at runtime! Found: {init_device=} vs. {inference_device=}"
+            )
+
         return kwargs | dict(inference_kwargs)
 
     def is_multimodal_pruning_enabled(self):

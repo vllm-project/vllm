@@ -225,15 +225,36 @@ class InputProcessingContext:
         self,
         output: JSONTree,
     ) -> JSONTree:
+        mm_config = self.model_config.get_multimodal_config()
+        is_mm_processing_gpu = mm_config.mm_processing_device != "cpu"
+
         def _postprocess_one(x: object):
-            if isinstance(x, torch.Tensor):  # noqa: SIM102
+            if isinstance(x, torch.Tensor):
                 # This mimics the behavior of transformers.BatchFeature
                 if x.is_floating_point():
                     x = x.to(dtype=self.model_config.dtype)
 
+                # This is required because we need to transfer the data
+                # to engine core, and the serialization process expects
+                # CPU tensors.
+                # The dtype of model config is usually lower precision
+                # so we call this last to transfer less data to CPU
+                if is_mm_processing_gpu:
+                    x = x.to(device="cpu", non_blocking=True)
+
             return x
 
-        return json_map_leaves(_postprocess_one, output)
+        output = json_map_leaves(_postprocess_one, output)
+
+        # Async GPU -> CPU requires explicit synchronization
+        if is_mm_processing_gpu:
+            from vllm.platforms import current_platform
+
+            synchronize = current_platform.synchronize
+            if synchronize is not None:
+                synchronize()
+
+        return output
 
     def get_merged_mm_kwargs(self, kwargs: Mapping[str, object]):
         mm_config = self.model_config.get_multimodal_config()
