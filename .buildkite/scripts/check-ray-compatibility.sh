@@ -166,12 +166,19 @@ See [issue #33599](https://github.com/vllm-project/vllm/issues/33599) for contex
 EOF
 fi
 
-# Notify Slack if webhook is configured.
+# Notify Slack if webhook is configured and PR/branch are valid.
 if [ -n "$RAY_COMPAT_SLACK_WEBHOOK_URL" ]; then
-    echo ">>> Sending Slack notification"
-    # Single quotes are intentional: the f-string expressions are Python, not shell.
-    # shellcheck disable=SC2016
-    PAYLOAD=$(python3 -c '
+    PR="${BUILDKITE_PULL_REQUEST:-}"
+    BRANCH="${BUILDKITE_BRANCH:-}"
+
+    # Skip notification if PR is invalid or branch is empty
+    if [[ "$PR" = "false" || -z "$PR" || -z "$BRANCH" ]]; then
+        echo ">>> Skipping Slack notification (invalid PR or empty branch: PR=$PR, branch=$BRANCH)"
+    else
+        echo ">>> Sending Slack notification"
+        # Single quotes are intentional: the f-string expressions are Python, not shell.
+        # shellcheck disable=SC2016
+        PAYLOAD=$(python3 -c '
 import json, os, sys
 pr = os.getenv("BUILDKITE_PULL_REQUEST", "N/A")
 branch = os.getenv("BUILDKITE_BRANCH", "unknown")
@@ -194,10 +201,11 @@ data = {
 print(json.dumps(data))
 ')
 
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$RAY_COMPAT_SLACK_WEBHOOK_URL" \
-        -H 'Content-type: application/json' \
-        -d "$PAYLOAD")
-    echo "    Slack webhook response: $HTTP_CODE"
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$RAY_COMPAT_SLACK_WEBHOOK_URL" \
+            -H 'Content-type: application/json' \
+            -d "$PAYLOAD")
+        echo "    Slack webhook response: $HTTP_CODE"
+    fi
 else
     echo ">>> Skipping Slack notification (RAY_COMPAT_SLACK_WEBHOOK_URL not set)"
 fi
