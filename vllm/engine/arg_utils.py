@@ -433,6 +433,7 @@ class EngineArgs:
     master_port: int = ParallelConfig.master_port
     nnodes: int = ParallelConfig.nnodes
     node_rank: int = ParallelConfig.node_rank
+    distributed_timeout_seconds: int | None = ParallelConfig.distributed_timeout_seconds
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -638,6 +639,8 @@ class EngineArgs:
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
+
+    shutdown_timeout: int = 0
 
     weight_transfer_config: WeightTransferConfig | None = get_field(
         VllmConfig,
@@ -846,6 +849,10 @@ class EngineArgs:
         parallel_group.add_argument("--master-port", **parallel_kwargs["master_port"])
         parallel_group.add_argument("--nnodes", "-n", **parallel_kwargs["nnodes"])
         parallel_group.add_argument("--node-rank", "-r", **parallel_kwargs["node_rank"])
+        parallel_group.add_argument(
+            "--distributed-timeout-seconds",
+            **parallel_kwargs["distributed_timeout_seconds"],
+        )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
         )
@@ -1343,6 +1350,14 @@ class EngineArgs:
             default=False,
             action=argparse.BooleanOptionalAction,
         )
+
+        parser.add_argument(
+            "--shutdown-timeout",
+            type=int,
+            default=0,
+            help="Shutdown timeout in seconds. 0 = abort, >0 = wait.",
+        )
+
         return parser
 
     @classmethod
@@ -1810,6 +1825,7 @@ class EngineArgs:
             master_port=self.master_port,
             nnodes=self.nnodes,
             node_rank=self.node_rank,
+            distributed_timeout_seconds=self.distributed_timeout_seconds,
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
@@ -2023,6 +2039,7 @@ class EngineArgs:
             optimization_level=self.optimization_level,
             performance_mode=self.performance_mode,
             weight_transfer_config=self.weight_transfer_config,
+            shutdown_timeout=self.shutdown_timeout,
         )
 
         return config
