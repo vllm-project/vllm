@@ -82,12 +82,13 @@ class EPLBConfig:
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
 
-    communicator: EPLBCommunicatorBackend = "torch_nccl"
+    communicator: EPLBCommunicatorBackend | None = None
     """
     Backend for EPLB expert weight communication:
     - "torch_nccl": Use torch.distributed on the device process group
     - "torch_gloo": Use torch.distributed gloo with CPU staging
     - "pynccl": Use PyNccl send/recv
+    - None: Auto-select backend ("torch_gloo" for async, "torch_nccl" for sync)
     """
 
     @model_validator(mode="after")
@@ -783,17 +784,10 @@ class ParallelConfig:
                 "backend is mp, uni or external_launcher."
             )
 
-        if (
-            self.enable_eplb
-            and self.eplb_config.use_async
-            and self.eplb_config.communicator != "torch_gloo"
-        ):
-            logger.warning(
-                "Async EPLB causes hangs with the '%s' all2all backend. "
-                "Forcing EPLB communicator to 'torch_gloo'.",
-                self.all2all_backend,
+        if self.enable_eplb and self.eplb_config.communicator is None:
+            self.eplb_config.communicator = (
+                "torch_gloo" if self.eplb_config.use_async else "torch_nccl"
             )
-            self.eplb_config.communicator = "torch_gloo"
 
     @property
     def use_ray(self) -> bool:

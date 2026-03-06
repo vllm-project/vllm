@@ -47,7 +47,7 @@ class EplbCommunicator(ABC):
         logger.info_once("Initialized EPLB communicator: %s.", self.__class__.__name__)
 
 
-class TorchDistributedEplbCommunicator(EplbCommunicator):
+class TorchDistNcclEplbCommunicator(EplbCommunicator):
     """EPLB communicator backed by torch.distributed isend/irecv."""
 
     def __init__(
@@ -92,7 +92,7 @@ class TorchDistributedEplbCommunicator(EplbCommunicator):
             self._p2p_ops.clear()
 
 
-class GlooCpuStagedEplbCommunicator(EplbCommunicator):
+class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
     """EPLB communicator using gloo P2P with CPU staging."""
 
     def __init__(
@@ -259,11 +259,11 @@ def create_eplb_communicator(
         return _create_pynccl()
 
     if backend == "torch_gloo":
-        return GlooCpuStagedEplbCommunicator(
+        return TorchDistGlooStagedEplbCommunicator(
             cpu_group=group_coordinator.cpu_group,
         )
     elif backend == "torch_nccl":
-        return TorchDistributedEplbCommunicator(ep_group=torch_group)
+        return TorchDistNcclEplbCommunicator(ep_group=torch_group)
     elif backend == "pynccl":
         return _create_pynccl()
     raise ValueError(f"Unknown EPLB communicator backend: {backend}")
