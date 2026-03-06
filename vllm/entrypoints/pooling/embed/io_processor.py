@@ -1,22 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Sequence
 from typing import Any, cast
 
 import torch
 
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
-from vllm.entrypoints.pooling.embed.protocol import (
-    EmbeddingChatRequest,
-    EmbeddingCompletionRequest,
-)
-from vllm.entrypoints.pooling.typing import EngineInputs, PoolingServeContext
-from vllm.inputs.data import ProcessorInputs, PromptType, token_inputs
+from vllm.entrypoints.pooling.typing import PoolingServeContext, ProcessorInputs
+from vllm.inputs.data import ProcessorInputs, token_inputs
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.utils.collection_utils import chunk_list
 
 
 class EmbedIOProcessor(PoolingIOProcessor):
+    name = "embedding"
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         assert self.model_config.pooler_config is not None
@@ -25,76 +22,20 @@ class EmbedIOProcessor(PoolingIOProcessor):
         self.enable_chunked_processing = self.pooler_config.enable_chunked_processing
 
     #################################################################
-    # online APIs
-
-    def pre_process_online(self, ctx: PoolingServeContext):
-        request: EmbeddingCompletionRequest | EmbeddingChatRequest = ctx.request
-
-        if isinstance(request, EmbeddingChatRequest):
-            self._validate_chat_template(
-                request_chat_template=request.chat_template,
-                chat_template_kwargs=request.chat_template_kwargs,
-                trust_request_chat_template=self.trust_request_chat_template,
-            )
-            _, engine_prompts = self._preprocess_chat_online(
-                request,
-                request.messages,
-                default_template=self.chat_template,
-                default_template_content_format=self.chat_template_content_format,
-                default_template_kwargs=None,
-            )
-        elif isinstance(request, EmbeddingCompletionRequest):
-            engine_prompts = self._preprocess_completion_online(
-                request,
-                prompt_input=request.input,
-                prompt_embeds=None,
-            )
-        else:
-            raise ValueError("Invalid classification request type")
-        return self._maybe_apply_chunked_processing_pre_process_online(
-            ctx, engine_prompts
-        )
-
-    def post_process_online(
-        self,
-        ctx: PoolingServeContext,
-    ):
-        ctx.final_res_batch = self._maybe_apply_chunked_processing_post_process_online(
-            ctx
-        )
-
-    #################################################################
-    # offline APIs
-
-    def pre_process_offline(
-        self,
-        prompts: PromptType | Sequence[PromptType],
-        tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> Sequence[ProcessorInputs]:
-        return self._preprocess_completion_offline(
-            prompts=prompts, tokenization_kwargs=tokenization_kwargs
-        )
-
-    #################################################################
     # Long Text Embedding with Chunked Processing
     # PTAL: examples/pooling/embed/openai_embedding_long_text
 
-    def _maybe_apply_chunked_processing_pre_process_online(
-        self, ctx: PoolingServeContext, engine_prompts: list[ProcessorInputs]
-    ):
-        engine_inputs = [
-            EngineInputs(engine_prompt=prompt) for prompt in engine_prompts
-        ]
-
+    def pre_process_online(self, ctx: PoolingServeContext):
         if not self.enable_chunked_processing:
-            ctx.engine_inputs = engine_inputs
+            super().pre_process_online(ctx)
             return None
 
-        ctx.intermediates = engine_inputs
+        ctx.intermediates = ctx.engine_prompts
         request_id = ctx.request_id
         max_model_len = self.model_config.max_model_len
-        chunked_engine_inputs: list[EngineInputs] = []
-        for prompt_idx, engine_prompt in enumerate(engine_prompts):
+        chunked_engine_prompts: list[ProcessorInputs] = []
+        prompt_request_ids: list[str] = []
+        for prompt_idx, engine_prompt in enumerate(ctx.engine_prompts):
             token_ids = engine_prompt.get("prompt_token_ids", None)
             if token_ids is None:
                 raise NotImplementedError(
@@ -107,24 +48,26 @@ class EmbedIOProcessor(PoolingIOProcessor):
             for chunk_idx, chunk_tokens in enumerate(
                 chunk_list(prompt_token_ids, max_model_len)
             ):
-                chunked_engine_inputs.append(
-                    EngineInputs(
-                        engine_prompt=token_inputs(prompt_token_ids=chunk_tokens),
-                        request_id_prompt=f"{request_id}-prompt-{prompt_idx}-chunk-{chunk_idx}",
-                    )
+                chunked_engine_prompts.append(
+                    token_inputs(prompt_token_ids=chunk_tokens)
                 )
-        ctx.engine_inputs = chunked_engine_inputs
+                prompt_request_ids.append(
+                    f"{request_id}-prompt-{prompt_idx}-chunk-{chunk_idx}"
+                )
+
+        ctx.engine_prompts = chunked_engine_prompts
+        ctx.prompt_request_ids = prompt_request_ids
         return None
 
-    def _maybe_apply_chunked_processing_post_process_online(
+    def post_process_online(
         self,
         ctx: PoolingServeContext,
-    ) -> list[PoolingRequestOutput]:
+    ):
         if ctx.final_res_batch is None:
             raise ValueError("Final response batch not available")
 
         if not self.enable_chunked_processing:
-            return ctx.final_res_batch
+            return super().post_process_online(ctx)
 
         # Online aggregation for chunked requests to
         # minimize memory usage
@@ -191,10 +134,10 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 aggregator["chunk_count"] += 1
 
         if ctx.intermediates is None:
-            raise ValueError("Original engine inputs not available")
+            raise ValueError("Original prompts inputs not available")
 
-        original_engine_inputs = cast(list[EngineInputs], ctx.intermediates)
-        num_prompts = len(original_engine_inputs)
+        original_engine_prompts = cast(list[ProcessorInputs], ctx.intermediates)
+        num_prompts = len(original_engine_prompts)
 
         # Finalize aggregated results
         final_res_batch: list[PoolingRequestOutput] = []
@@ -220,7 +163,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
                     pooling_output_data = PoolingOutput(data=final_embedding)
 
                     # Get original prompt token IDs for this prompt
-                    original_prompt = original_engine_inputs[prompt_idx].engine_prompt
+                    original_prompt = original_engine_prompts[prompt_idx]
                     token_ids = original_prompt.get("prompt_token_ids", None)
                     if token_ids is None:
                         raise NotImplementedError(
@@ -247,4 +190,5 @@ class EmbedIOProcessor(PoolingIOProcessor):
             else:
                 raise ValueError(f"Result not found for prompt {prompt_idx}")
 
-        return final_res_batch
+        ctx.final_res_batch = final_res_batch
+        return None

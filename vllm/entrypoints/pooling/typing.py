@@ -58,13 +58,6 @@ AnyPoolingResponse: TypeAlias = (
     | ScoreResponse
 )
 
-
-@dataclass
-class EngineInputs:
-    engine_prompt: ProcessorInputs
-    request_id_prompt: str | None = None
-
-
 PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
 
 
@@ -76,7 +69,9 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     request_id: str
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
-    engine_inputs: list[EngineInputs] | None = None
+
+    engine_prompts: list[ProcessorInputs] | None = None
+    prompt_request_ids: list[str] | None = None
     intermediates: Any | None = None
 
     result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (

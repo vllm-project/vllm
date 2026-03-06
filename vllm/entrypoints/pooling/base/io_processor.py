@@ -13,7 +13,11 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
 )
 from vllm.entrypoints.openai.engine.serving import RendererChatRequest, RendererRequest
-from vllm.entrypoints.pooling.typing import PoolingServeContext
+from vllm.entrypoints.pooling.typing import (
+    PoolingChatLikeRequest,
+    PoolingCompletionLikeRequest,
+    PoolingServeContext,
+)
 from vllm.inputs.data import ProcessorInputs, SingletonPrompt
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
@@ -23,6 +27,8 @@ from vllm.utils.mistral import is_mistral_tokenizer
 
 
 class PoolingIOProcessor:
+    name: str
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -47,7 +53,31 @@ class PoolingIOProcessor:
     # online APIs
 
     def pre_process_online(self, ctx: PoolingServeContext):
-        raise NotImplementedError
+        request = ctx.request
+
+        if isinstance(ctx.request, PoolingChatLikeRequest):
+            self._validate_chat_template(
+                request_chat_template=request.chat_template,
+                chat_template_kwargs=request.chat_template_kwargs,
+                trust_request_chat_template=self.trust_request_chat_template,
+            )
+            _, engine_prompts = self._preprocess_chat_online(
+                request,
+                request.messages,
+                default_template=self.chat_template,
+                default_template_content_format=self.chat_template_content_format,
+                default_template_kwargs=None,
+            )
+        elif isinstance(request, PoolingCompletionLikeRequest):
+            engine_prompts = self._preprocess_completion_online(
+                request,
+                prompt_input=request.input,
+                prompt_embeds=None,
+            )
+        else:
+            raise ValueError(f"Invalid {self.name} request type")
+
+        ctx.engine_prompts = engine_prompts
 
     async def pre_process_online_async(self, ctx: PoolingServeContext):
         self.pre_process_online(ctx)
@@ -67,8 +97,14 @@ class PoolingIOProcessor:
     #######################################
     # offline APIs
 
-    def pre_process_offline(self, *args, **kwargs):
-        raise NotImplementedError
+    def pre_process_offline(
+        self,
+        prompts: PromptType | Sequence[PromptType],
+        tokenization_kwargs: dict[str, Any] | None = None,
+    ) -> Sequence[ProcessorInputs]:
+        return self._preprocess_completion_offline(
+            prompts=prompts, tokenization_kwargs=tokenization_kwargs
+        )
 
     async def pre_process_offline_async(self, *args, **kwargs):
         return self.pre_process_offline(*args, **kwargs)

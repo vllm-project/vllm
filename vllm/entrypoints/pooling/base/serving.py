@@ -105,8 +105,8 @@ class PoolingServing:
         self,
         ctx: PoolingServeContext,
     ):
-        if ctx.engine_inputs is None:
-            raise ValueError("Engine inputs not available")
+        if ctx.engine_prompts is None:
+            raise ValueError("Engine prompts not available")
 
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
@@ -118,14 +118,15 @@ class PoolingServing:
 
         pooling_params = self.io_processor.create_pooling_params(ctx.request)
 
-        for i, engine_input in enumerate(ctx.engine_inputs):
-            engine_prompt = engine_input.engine_prompt
-            request_id_prompt = (
-                engine_input.request_id_prompt or f"{ctx.request_id}-{i}"
+        for i, engine_prompt in enumerate(ctx.engine_prompts):
+            prompt_request_id = (
+                f"{ctx.request_id}-{i}"
+                if ctx.prompt_request_ids is None
+                else ctx.prompt_request_ids[i]
             )
 
             self._log_inputs(
-                request_id_prompt,
+                prompt_request_id,
                 engine_prompt,
                 params=pooling_params,
                 lora_request=ctx.lora_request,
@@ -134,7 +135,7 @@ class PoolingServing:
             generator = self.engine_client.encode(
                 engine_prompt,
                 pooling_params,
-                request_id_prompt,
+                prompt_request_id,
                 lora_request=ctx.lora_request,
                 trace_headers=trace_headers,
                 priority=getattr(ctx.request, "priority", 0),
@@ -148,13 +149,13 @@ class PoolingServing:
         self,
         ctx: PoolingServeContext,
     ):
-        if ctx.engine_inputs is None:
-            raise ValueError("Engine inputs not available")
+        if ctx.engine_prompts is None:
+            raise ValueError("Engine prompts not available")
 
         if ctx.result_generator is None:
             raise ValueError("Result generator not available")
 
-        num_inputs = len(ctx.engine_inputs)
+        num_inputs = len(ctx.engine_prompts)
         final_res_batch: list[PoolingRequestOutput | None]
         final_res_batch = [None] * num_inputs
 
