@@ -29,8 +29,15 @@ def mock_vllm_config():
 
 @pytest.fixture
 def mock_on_gfx9():
-    """Mock the on_gfx9 function to return True."""
+    """Mock gfx9 arch detection to return True."""
     with patch("vllm.platforms.rocm.on_gfx9", return_value=True):
+        yield
+
+
+@pytest.fixture
+def mock_on_mi3xx():
+    """Mock mi3xx arch detection to return True."""
+    with patch("vllm.platforms.rocm.on_mi3xx", return_value=True):
         yield
 
 
@@ -122,6 +129,7 @@ def test_standard_attention_backend_selection(
     expected_backend_path,
     mock_vllm_config,
     mock_on_gfx9,
+    mock_on_mi3xx,
     monkeypatch,
 ):
     """Test standard attention backend selection with various configurations."""
@@ -173,13 +181,13 @@ def test_standard_attention_backend_selection(
             AttentionBackendEnum.TRITON_MLA.get_path(),
             False,
         ),
-        # Test Case 2: TRITON_MLA with block_size == 1 (should raise)
+        # Test Case 2: TRITON_MLA with block_size == 1
         (
             {},
             "TRITON_MLA",
             1,
-            None,
-            True,
+            AttentionBackendEnum.TRITON_MLA.get_path(),
+            False,
         ),
         # Test Case 3: ROCM_AITER_MLA with block_size == 1
         (
@@ -314,15 +322,15 @@ def test_mla_backend_selection(
 
 
 def test_aiter_fa_requires_gfx9(mock_vllm_config):
-    """Test that ROCM_AITER_FA requires gfx9 architecture."""
+    """Test that ROCM_AITER_FA requires mi3xx architecture."""
     from vllm.platforms.rocm import RocmPlatform
 
-    # Mock on_gfx9 to return False
+    # Mock on_mi3xx to return False (used by supports_compute_capability)
     with (
-        patch("vllm.platforms.rocm.on_gfx9", return_value=False),
+        patch("vllm.platforms.rocm.on_mi3xx", return_value=False),
         pytest.raises(
             ValueError,
-            match="only supported on gfx9",
+            match="compute capability not supported",
         ),
     ):
         attn_selector_config = AttentionSelectorConfig(
@@ -342,11 +350,12 @@ def test_aiter_fa_requires_gfx9(mock_vllm_config):
 
 
 def test_sparse_not_supported(mock_vllm_config):
-    """Test that sparse attention is not supported on ROCm."""
+    """Test that sparse MLA without use_mla flag raises an error."""
     from vllm.platforms.rocm import RocmPlatform
 
     with pytest.raises(
-        AssertionError, match="Sparse MLA backend on ROCm only supports block size 1"
+        ValueError,
+        match="No valid attention backend found",
     ):
         attn_selector_config = AttentionSelectorConfig(
             head_size=128,

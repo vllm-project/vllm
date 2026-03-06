@@ -33,6 +33,10 @@ class TritonMLABackend(MLACommonBackend):
         "bfloat16",
     ]
 
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return []
+
     @staticmethod
     def get_name() -> str:
         return "TRITON_MLA"
