@@ -10,7 +10,6 @@ from vllm.entrypoints.pooling.embed.protocol import (
 )
 from vllm.inputs.data import ProcessorInputs, PromptType, TokensPrompt
 from vllm.outputs import PoolingRequestOutput
-from vllm.renderers.inputs import DecoderOnlyTokPrompt, TokPrompt
 from vllm.utils.collection_utils import chunk_list
 
 
@@ -72,28 +71,32 @@ class EmbedIOProcessor(PoolingIOProcessor):
     def _maybe_apply_chunked_processing_pre_process_online(
         self,
         request_id: str,
-        engine_prompts: list[TokPrompt],
+        engine_prompts: list[ProcessorInputs],
     ) -> list[EngineInputs]:
         if not self.enable_chunked_processing:
             return [EngineInputs(engine_prompt=prompt) for prompt in engine_prompts]
 
         max_model_len = self.model_config.max_model_len
-        chunked_engine_prompts: list[EngineInputs] = []
+        chunked_engine_inputs: list[EngineInputs] = []
         for prompt_idx, engine_prompt in enumerate(engine_prompts):
-            # "EncoderDecoderInputs" has no key "prompt_token_ids"
-            assert isinstance(engine_prompt, DecoderOnlyTokPrompt)
+            if "prompt_token_ids" not in engine_prompt:
+                raise NotImplementedError(
+                    "Long Text Embedding with Chunked Processing does not support "
+                    "EmbedsPrompt and EncoderDecoderInputs."
+                )
+
             prompt_token_ids = engine_prompt["prompt_token_ids"]
 
             for chunk_idx, chunk_tokens in enumerate(
                 chunk_list(prompt_token_ids, max_model_len)
             ):
-                chunked_engine_prompts.append(
+                chunked_engine_inputs.append(
                     EngineInputs(
                         engine_prompt=TokensPrompt(prompt_token_ids=chunk_tokens),
                         request_id_item=f"{request_id}-prompt-{prompt_idx}-chunk-{chunk_idx}",
                     )
                 )
-        return chunked_engine_prompts
+        return chunked_engine_inputs
 
     def _maybe_apply_chunked_processing_post_process_online(
         self, outputs: list[PoolingRequestOutput]

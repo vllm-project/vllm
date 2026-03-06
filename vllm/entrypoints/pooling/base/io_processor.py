@@ -17,7 +17,6 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.openai.engine.serving import RendererChatRequest, RendererRequest
 from vllm.inputs.data import ProcessorInputs, SingletonPrompt
 from vllm.renderers import BaseRenderer, merge_kwargs
-from vllm.renderers.inputs import TokPrompt
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
@@ -26,7 +25,7 @@ from vllm.utils.mistral import is_mistral_tokenizer
 
 @dataclass
 class EngineInputs:
-    engine_prompt: TokPrompt
+    engine_prompt: ProcessorInputs
     request_id_item: str | None = None
 
 
@@ -82,7 +81,7 @@ class PoolingIOProcessor:
         request: RendererRequest,
         prompt_input: str | list[str] | list[int] | list[list[int]] | None,
         prompt_embeds: bytes | list[bytes] | None,
-    ) -> list[TokPrompt]:
+    ) -> list[ProcessorInputs]:
         renderer = self.renderer
         model_config = self.model_config
 
@@ -121,7 +120,7 @@ class PoolingIOProcessor:
         default_template_kwargs: dict[str, Any] | None,
         tool_dicts: list[dict[str, Any]] | None = None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
-    ) -> tuple[list[ConversationMessage], list[TokPrompt]]:
+    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]]:
         renderer = self.renderer
 
         default_template_kwargs = merge_kwargs(
