@@ -283,12 +283,9 @@ def create_eplb_communicator_or_skip(*, group_coordinator, backend, expert_weigh
             expert_weights=expert_weights,
         )
     except Exception as exc:
-        if backend not in {"nixl", "symm_mem"}:
-            raise
-        pytest.skip(
-            f"Skipping test because create_eplb_communicator failed for "
-            f"backend={backend}: {exc}"
-        )
+        raise RuntimeError(
+            f"Failed to create EPLB communicator for backend={backend}: {exc}"
+        ) from exc
 
 
 def _test_async_transfer_layer_without_mtp_worker(
@@ -530,9 +527,7 @@ def _test_rearrange_expert_weights_with_redundancy(
         (4, 8, 8, 16),
     ],
 )
-@pytest.mark.parametrize(
-    "eplb_communicator", ["symm_mem", "torch_nccl", "torch_gloo", "nixl", "pynccl"]
-)
+@pytest.mark.parametrize("eplb_communicator", ["torch_nccl", "torch_gloo", "pynccl"])
 def test_rearrange_expert_weights_with_redundancy(
     world_size,
     num_layers,
@@ -638,9 +633,7 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
         (2, 2, 2, 3),
     ],
 )
-@pytest.mark.parametrize(
-    "eplb_communicator", ["torch_nccl", "torch_gloo", "nixl", "pynccl", "symm_mem"]
-)
+@pytest.mark.parametrize("eplb_communicator", ["torch_nccl", "torch_gloo", "pynccl"])
 def test_async_transfer_layer_without_mtp(
     world_size: int,
     num_layers: int,

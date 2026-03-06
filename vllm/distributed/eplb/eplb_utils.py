@@ -21,12 +21,9 @@ def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
     is_eplb_enabled = parallel_config.enable_eplb
     async_eplb = parallel_config.eplb_config.use_async
     is_deepep_ll = parallel_config.all2all_backend == "deepep_low_latency"
-    is_nccl_based_eplb_communicator = (
-        parallel_config.eplb_config.communicator == "torch_nccl"
-        or parallel_config.eplb_config.communicator == "pynccl"
-    )
-    is_symm_mem_eplb_communicator = (
-        parallel_config.eplb_config.communicator == "symm_mem"
+    is_nccl_based_eplb_communicator = parallel_config.eplb_config.communicator in (
+        "torch_nccl",
+        "pynccl",
     )
 
     # Override NCCL_MAX_CTAS to avoid hangs when using async EPLB with the
@@ -64,14 +61,5 @@ def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
             f"EPLB: Setting NCCL_MAX_CTAS={override_value} "
             "for expert parallel with NCCL-based EPLB communicator and "
             "deepep_low_latency backend",
-            scope="global",
-        )
-    if is_symm_mem_eplb_communicator:
-        os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
-        logger.info_once(
-            "EPLB: Force setting VLLM_ALLREDUCE_USE_SYMM_MEM=0 "
-            "because we use nvshmem-based torch.symmetric memory for "
-            "EPLB communications. This torch.symmetric_memory backend doesn't "
-            "support multicast operations need for allreduce.",
             scope="global",
         )
