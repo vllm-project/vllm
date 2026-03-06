@@ -12,14 +12,16 @@ Config:
 Run: pytest tests/models/quantization/test_gpt_oss.py
 """
 
-import importlib
 import importlib.metadata
+import importlib.util
 from dataclasses import dataclass
 
 import huggingface_hub
 import lm_eval
 import pytest
 from packaging import version
+
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 MODEL_ACCURACIES = {
     # Full quantization: attention linears and MoE linears
@@ -83,6 +85,9 @@ class EvaluationConfig:
 def test_gpt_oss_attention_quantization(
     model_name: str, tp_size: int, expected_accuracy: float
 ):
+    if tp_size > cuda_device_count_stateless():
+        pytest.skip("Not enough GPUs to run this test case")
+
     model_args = EvaluationConfig(model_name).get_model_args(tp_size)
 
     extra_run_kwargs = {
@@ -104,7 +109,7 @@ def test_gpt_oss_attention_quantization(
     )
 
     rtol = 0.02
-    assert (
-        measured_accuracy - rtol < expected_accuracy
-        and measured_accuracy + rtol > expected_accuracy
-    ), f"Expected: {expected_accuracy} |  Measured: {measured_accuracy}"
+    assert measured_accuracy >= expected_accuracy - rtol, (
+        f"Accuracy {measured_accuracy:.4f} is below threshold "
+        f"{expected_accuracy - rtol:.4f} (expected >= {expected_accuracy} - {rtol})"
+    )

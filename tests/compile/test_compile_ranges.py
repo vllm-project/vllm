@@ -73,6 +73,7 @@ def test_compile_ranges(use_fresh_inductor_cache):
             Range(start=16, end=16),
             Range(start=9, end=32),
             Range(start=64, end=64),
+            Range(start=128, end=128),
             Range(start=33, end=8192),
         ]
     )
@@ -95,16 +96,16 @@ def test_compile_ranges(use_fresh_inductor_cache):
 
     with set_current_vllm_config(vllm_config):
         model = TestModel(vllm_config=vllm_config, prefix="").eval()
-        # Number of compilations: 3 for each compile range + 2 compile sizes
+        # Number of compilations: 3 compile ranges + 3 compile sizes
         batch_sizes = [1, 4, 16, 24, 48, 64, 8192]
 
         with compilation_counter.expect(
             num_graphs_seen=1,
             num_piecewise_graphs_seen=1,
-            num_backend_compilations=5,
+            num_backend_compilations=6,
         ):
             run_model(vllm_config, model, batch_sizes)
-        assert post_grad_range_checker.num_calls == 5
+        assert post_grad_range_checker.num_calls == 6
 
 
 def test_compile_config_get_compile_ranges():

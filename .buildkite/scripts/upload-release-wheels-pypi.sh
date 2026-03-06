@@ -54,9 +54,12 @@ mkdir -p $DIST_DIR
 # include only wheels for the release version, ignore all files with "dev" or "rc" in the name (without excluding 'aarch64')
 aws s3 cp --recursive --exclude "*" --include "vllm-${PURE_VERSION}*.whl" --exclude "*dev*" --exclude "*rc[0-9]*" "$S3_COMMIT_PREFIX" $DIST_DIR
 echo "Wheels copied to local directory"
-# generate source tarball
-git archive --format=tar.gz --output="$DIST_DIR/vllm-${PURE_VERSION}.tar.gz" "$BUILDKITE_COMMIT"
+# generate source distribution using setup.py
+python setup.py sdist --dist-dir=$DIST_DIR
 ls -la $DIST_DIR
+
+SDIST_FILE=$(find $DIST_DIR -name "vllm*.tar.gz")
+echo "Found sdist: $SDIST_FILE"
 
 # upload wheels to PyPI (only default variant, i.e. files without '+' in the name)
 PYPI_WHEEL_FILES=$(find $DIST_DIR -name "vllm-${PURE_VERSION}*.whl" -not -name "*+*")
@@ -65,6 +68,6 @@ if [[ -z "$PYPI_WHEEL_FILES" ]]; then
   exit 1
 fi
 
-python3 -m twine check "$PYPI_WHEEL_FILES"
-python3 -m twine upload --non-interactive --verbose "$PYPI_WHEEL_FILES"
-echo "Wheels uploaded to PyPI"
+python3 -m twine check "$PYPI_WHEEL_FILES" "$SDIST_FILE"
+python3 -m twine upload --non-interactive --verbose "$PYPI_WHEEL_FILES" "$SDIST_FILE"
+echo "Wheels and source distribution uploaded to PyPI"

@@ -382,13 +382,6 @@ class CompilationConfig:
     """
 
     # Top-level Compilation control
-    level: int = Field(default=None)
-    """
-    Level is deprecated and will be removed in the next release,
-    either 0.12.0 or 0.11.2 whichever is soonest.
-    Please use mode. Currently all levels are mapped to mode.
-    """
-    # Top-level Compilation control
     mode: CompilationMode = Field(default=None)
     """The compilation approach used for torch.compile-based compilation of the
     model.
@@ -673,6 +666,7 @@ class CompilationConfig:
         "vllm::linear_attention",
         "vllm::plamo2_mamba_mixer",
         "vllm::gdn_attention_core",
+        "vllm::olmo_hybrid_gdn_full_forward",
         "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
@@ -801,17 +795,6 @@ class CompilationConfig:
         return handler(value)
 
     def __post_init__(self) -> None:
-        if self.level is not None:
-            logger.warning(
-                "Level is deprecated and will be removed in the next release,"
-                "either 0.12.0 or 0.11.2 whichever is soonest."
-                "Use mode instead."
-                "If both level and mode are given,"
-                "only mode will be used."
-            )
-            if self.mode is None:
-                self.mode = self.level
-
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
@@ -890,7 +873,7 @@ class CompilationConfig:
                 )
 
         # Currently only eager and inductor backend are supported.
-        # for piecewise compilation. Custom backends are not suppported for
+        # for piecewise compilation. Custom backends are not supported for
         # piecewise compilation. Update when more backends are supported.
         if self.mode == CompilationMode.VLLM_COMPILE and self.backend not in [
             "",
@@ -1007,6 +990,7 @@ class CompilationConfig:
                 # https://github.com/vllm-project/vllm/issues/33267
                 if not self.use_inductor_graph_partition:
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
+                    self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
             elif len(self.splitting_ops) == 0:
                 if (
@@ -1188,6 +1172,58 @@ class CompilationConfig:
 
         self.max_cudagraph_capture_size = rounded_sizes[-1]
         self.cudagraph_capture_sizes = rounded_sizes
+
+    def adjust_cudagraph_sizes_for_mamba_cache(
+        self, num_mamba_cache_blocks: int
+    ) -> None:
+        """Cap cudagraph capture sizes to available Mamba cache blocks.
+
+        For hybrid Mamba/attention models, the Mamba conv_state and
+        ssm_state tensors have their first dimension equal to num_blocks
+        (from KVCacheConfig). During CUDA graph capture the decode batch
+        size equals num_tokens, so capture sizes exceeding num_blocks
+        would cause out-of-bounds access in Mamba kernels.
+
+        See: https://github.com/vllm-project/vllm/issues/34094
+        """
+        if not self.cudagraph_capture_sizes or num_mamba_cache_blocks <= 0:
+            return
+
+        assert self.max_cudagraph_capture_size is not None
+
+        if num_mamba_cache_blocks >= self.max_cudagraph_capture_size:
+            return
+
+        capped_sizes = [
+            s for s in self.cudagraph_capture_sizes if s <= num_mamba_cache_blocks
+        ]
+
+        if len(capped_sizes) == 0:
+            logger.warning(
+                "No valid cudagraph capture sizes remain after capping "
+                "to Mamba cache blocks (%d). The smallest capture size "
+                "was %d. Disabling cudagraph capture. Consider reducing "
+                "max_num_seqs or increasing available GPU memory.",
+                num_mamba_cache_blocks,
+                self.cudagraph_capture_sizes[0],
+            )
+            self.cudagraph_capture_sizes = []
+            self.max_cudagraph_capture_size = 0
+            return
+
+        logger.warning(
+            "Capping cudagraph capture sizes from max %d to %d to fit "
+            "Mamba cache blocks (%d blocks available). This limits the "
+            "maximum batch size that can use CUDA graphs. To increase "
+            "this limit, reduce max_num_seqs or increase available GPU "
+            "memory.",
+            self.max_cudagraph_capture_size,
+            capped_sizes[-1],
+            num_mamba_cache_blocks,
+        )
+
+        self.max_cudagraph_capture_size = capped_sizes[-1]
+        self.cudagraph_capture_sizes = capped_sizes
 
     def get_compile_ranges(self) -> list[Range]:
         """Get the compile ranges for the compilation config."""
