@@ -84,7 +84,7 @@ class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         # flashinfer does not require input fp8 op.
         # since flashinfer for block_scaled_mm
         # is used dynamically with deepgemm.
-        # the quant_fp8 is instantiated indentical to
+        # the quant_fp8 is instantiated identical to
         # deepgemm input quant.
         self.quant_fp8 = QuantFP8(
             static=act_scale_descriptor.static,
@@ -213,7 +213,7 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
 
     This batch-size-dependent selection is essential for maintaining model accuracy.
     Benchmarks on GSM8K show a significant accuracy gap (88% vs 95%) for DeepSeek-V3.1
-    when using FlashInfer's DeepGEMM on M>=32. The M < 32 strategy fixes the accurracy
+    when using FlashInfer's DeepGEMM on M>=32. The M < 32 strategy fixes the accuracy
     drop.
 
     """
