@@ -4,6 +4,8 @@
 import json
 import math
 import shutil
+import time
+from unittest import mock
 
 import pytest
 
@@ -97,3 +99,59 @@ def test_peft_helper_error(
         PEFTHelper.from_local_dir(
             test_dir, max_position_embeddings=4096
         ).validate_legal(lora_config)
+
+
+@pytest.mark.skip_global_cleanup
+def test_load_lora_config_retry(tmp_path):
+    """_load_lora_config retries transient errors and respects timeout."""
+    # Create a local adapter_config.json instead of downloading from HF Hub
+    config_data = {
+        "r": 8,
+        "lora_alpha": 32,
+        "target_modules": ["q_proj", "v_proj"],
+    }
+    config_dir = tmp_path / "adapter"
+    config_dir.mkdir()
+    src = str(config_dir / "adapter_config.json")
+    with open(src, "w") as f:
+        json.dump(config_data, f)
+
+    # --- immediate success (file already exists) ---
+    result = PEFTHelper._load_lora_config(src, timeout=1.0)
+    assert result["r"] == config_data["r"]
+    assert result["lora_alpha"] == config_data["lora_alpha"]
+
+    # --- timeout on missing file ---
+    missing = str(tmp_path / "no_such_dir" / "adapter_config.json")
+    t0 = time.monotonic()
+    with pytest.raises(FileNotFoundError):
+        PEFTHelper._load_lora_config(missing, timeout=0.2)
+    elapsed = time.monotonic() - t0
+    assert elapsed >= 0.2
+
+    # --- timeout on truncated JSON ---
+    trunc_dir = tmp_path / "truncated"
+    trunc_dir.mkdir()
+    trunc_path = str(trunc_dir / "adapter_config.json")
+    with open(trunc_path, "w") as f:
+        f.write('{"r": 8, "lora_al')
+    t0 = time.monotonic()
+    with pytest.raises(json.JSONDecodeError):
+        PEFTHelper._load_lora_config(trunc_path, timeout=0.2)
+    elapsed = time.monotonic() - t0
+    assert elapsed >= 0.2
+
+    # --- retry succeeds when transient error clears ---
+    real_open = open
+    attempt = {"count": 0}
+
+    def flaky_open(path, *args, **kwargs):
+        if str(path) == src and attempt["count"] < 3:
+            attempt["count"] += 1
+            raise FileNotFoundError(path)
+        return real_open(path, *args, **kwargs)
+
+    with mock.patch("builtins.open", side_effect=flaky_open):
+        result = PEFTHelper._load_lora_config(src, timeout=5.0)
+    assert result["r"] == config_data["r"]
+    assert attempt["count"] == 3
