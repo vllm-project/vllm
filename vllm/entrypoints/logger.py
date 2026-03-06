@@ -15,10 +15,15 @@ logger = init_logger(__name__)
 
 
 class RequestLogger:
-    def __init__(self, *, max_log_len: int | None) -> None:
+    def __init__(
+        self, *, max_log_len: int | None, enable_log_requests: bool = True
+    ) -> None:
         self.max_log_len = max_log_len
+        self.enable_log_requests = enable_log_requests
 
-        if not logger.isEnabledFor(logging.INFO):
+        if not enable_log_requests:
+            return
+        elif not logger.isEnabledFor(logging.INFO):
             logger.warning_once(
                 "`--enable-log-requests` is set but "
                 "the minimum log level is higher than INFO. "
@@ -41,6 +46,8 @@ class RequestLogger:
         params: SamplingParams | PoolingParams | BeamSearchParams | None,
         lora_request: LoRARequest | None,
     ) -> None:
+        if not self.enable_log_requests:
+            return
         if logger.isEnabledFor(logging.DEBUG):
             max_log_len = self.max_log_len
             if max_log_len is not None:
@@ -76,6 +83,8 @@ class RequestLogger:
         is_streaming: bool = False,
         delta: bool = False,
     ) -> None:
+        if not self.enable_log_requests:
+            return
         max_log_len = self.max_log_len
         if max_log_len is not None:
             if outputs is not None:
