@@ -90,18 +90,21 @@ def convert_mapping(
     embedding_indices = index_mapping_indices.copy()
     lora_indices = index_mapping_indices.copy()
 
+    # Build reverse lookup dict for O(1) index lookups instead of O(n)
+    # list.index() calls. This improves performance when many LoRAs are loaded.
+    id_to_index: dict[int, int] = {
+        lora_id: idx
+        for idx, lora_id in enumerate(lora_index_to_id)
+        if lora_id is not None
+    }
+
     prompt_mapping: list[int] = [
-        lora_index_to_id.index(x) if x > 0 else -1 for x in mapping.prompt_mapping
+        id_to_index[x] if x > 0 else -1 for x in mapping.prompt_mapping
     ]
-    lora_idx = None
     for i in range(len(index_mapping_indices)):
-        # TODO index can be slow. optimize
-        lora_idx = (
-            lora_index_to_id.index(index_mapping_indices[i])
-            if index_mapping_indices[i] > 0
-            else -1
-        )
-        embedding_indices[i] = lora_idx if index_mapping_indices[i] > 0 else 0
+        lora_id = index_mapping_indices[i]
+        lora_idx = id_to_index[lora_id] if lora_id > 0 else -1
+        embedding_indices[i] = lora_idx if lora_id > 0 else 0
         lora_indices[i] = lora_idx
 
     indices_list: list[list[int] | torch.Tensor] = [
