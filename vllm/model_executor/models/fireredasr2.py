@@ -107,7 +107,7 @@ class Conv2dSubsampling(nn.Module):
         )
 
         self.subsampling = 4
-        left_context = right_context = 3  # both exclude currect frame
+        left_context = right_context = 3  # both exclude current frame
         self.context = left_context + 1 + right_context  # 7
 
     def forward(
