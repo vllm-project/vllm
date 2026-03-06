@@ -63,6 +63,7 @@ from vllm.transformers_utils.processors.kimi_audio import (
     KimiAudioProcessor,
     _get_feat_extract_output_lengths,
 )
+from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.sample.metadata import SamplingMetadata
 
@@ -675,11 +676,6 @@ class KimiAudioForConditionalGeneration(
         cls, model_config: ModelConfig, task_type: str
     ) -> SpeechToTextConfig:
         """Get speech-to-text config with custom processor."""
-
-        # Import custom processor from vLLM utils
-        from vllm.transformers_utils.processors.kimi_audio import KimiAudioProcessor
-        from vllm.transformers_utils.tokenizer import get_tokenizer
-
         # Load feature extractor from model path
         feature_extractor = AutoFeatureExtractor.from_pretrained(
             model_config.model, trust_remote_code=model_config.trust_remote_code

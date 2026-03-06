@@ -10,7 +10,7 @@ from typing import Any, overload
 import pybase64
 import tiktoken
 from huggingface_hub import hf_hub_download
-from transformers import BatchEncoding
+from transformers import AddedToken, BatchEncoding
 from transformers.utils import chat_template_utils as hf_chat_utils
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
@@ -179,8 +179,6 @@ class KimiAudioTokenizer(TokenizerLike):
 
     def _add_kimiaudio_special_tokens(self) -> None:
         """Add Kimi-Audio special tokens to the tokenizer."""
-        from transformers import AddedToken
-
         special_tokens = [
             AddedToken(
                 "<|im_media_begin|>",
