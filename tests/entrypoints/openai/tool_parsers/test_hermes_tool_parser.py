@@ -458,3 +458,113 @@ def test_hermes_parser_non_streaming_tool_call_invalid_json(
 
     assert tool_call is not None
     assert not tool_call.tools_called
+
+
+def test_hermes_parser_streaming_state_reset(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """Test that streaming state is properly reset between requests.
+
+    This test verifies the fix for issue #31871 where state from a previous
+    streaming session could interfere with a new session.
+    """
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+
+    # First streaming session
+    text1 = '<tool_call>\n{"name": "func1", "arguments": {"a": 1}}\n</tool_call>'
+    tokens1 = qwen_tokenizer.encode(text1)
+    previous_text = ""
+    for token in tokens1:
+        delta_text = qwen_tokenizer.decode([token])
+        current_text = previous_text + delta_text
+        parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=any_chat_request,
+        )
+        previous_text = current_text
+
+    # Verify state after first session
+    assert parser.current_tool_id >= 0
+
+    # Second streaming session (simulating new request)
+    # When previous_text is empty, state should be reset
+    text2 = '<tool_call>\n{"name": "func2", "arguments": {"b": 2}}\n</tool_call>'
+    tokens2 = qwen_tokenizer.encode(text2)
+    previous_text = ""  # Empty indicates new request
+    delta_messages = []
+    for token in tokens2:
+        delta_text = qwen_tokenizer.decode([token])
+        current_text = previous_text + delta_text
+        delta = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=any_chat_request,
+        )
+        previous_text = current_text
+        if delta is not None:
+            delta_messages.append(delta)
+
+    # Verify second session parsed correctly (not affected by first session)
+    tool_call_deltas = [d for d in delta_messages if d.tool_calls]
+    assert len(tool_call_deltas) > 0
+    # The function name should be from the second session
+    assert tool_call_deltas[0].tool_calls[0].function.name == "func2"
+
+
+def test_hermes_parser_streaming_prev_tool_call_arr_populated_early(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """Test that prev_tool_call_arr is populated early for finish_reason.
+
+    This test verifies the fix for issue #31871 where finish_reason was
+    'stop' instead of 'tool_calls' in streaming mode because prev_tool_call_arr
+    was not populated early enough.
+    """
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+
+    text = (
+        "<tool_call>\n"
+        '{"name": "get_weather", "arguments": {"city": "Beijing"}}\n'
+        "</tool_call>"
+    )
+    tokens = qwen_tokenizer.encode(text)
+    previous_text = ""
+    found_tool_name = False
+
+    for token in tokens:
+        delta_text = qwen_tokenizer.decode([token])
+        current_text = previous_text + delta_text
+        delta = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[token],
+            request=any_chat_request,
+        )
+        previous_text = current_text
+
+        # Check if we just received the tool name
+        if delta is not None and delta.tool_calls and delta.tool_calls[0].function.name:
+            found_tool_name = True
+            # CRITICAL: prev_tool_call_arr should be populated immediately
+            # when tool name is detected, not later
+            assert len(parser.prev_tool_call_arr) > 0, (
+                "prev_tool_call_arr should be populated when tool name is sent"
+            )
+            assert parser.prev_tool_call_arr[0].get("name") == "get_weather"
+            break
+
+    assert found_tool_name, "Should have found tool name in streaming output"
