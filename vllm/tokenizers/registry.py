@@ -32,7 +32,6 @@ logger = init_logger(__name__)
 
 
 _VLLM_TOKENIZERS = {
-    "cohere_asr": ("cohere_asr", "CohereASRTokenizer"),
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
     "grok2": ("grok2", "Grok2Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),

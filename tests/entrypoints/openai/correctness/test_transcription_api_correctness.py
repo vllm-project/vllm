@@ -155,9 +155,9 @@ def run_evaluation(
 @pytest.mark.parametrize(
     "model_config",
     [
-        ("openai/whisper-large-v3", 12.744980),
+        # ("openai/whisper-large-v3", 12.744980),
         # TODO (ekagra): add final model ckpt here
-        # ("/host/engines/vllm/audio/2b-release", 11.73),
+        ("/host/engines/vllm/audio/2b-release", 11.73),
     ],
 )
 # Original dataset is 20GB+ in size, hence we use a pre-filtered slice.
@@ -170,12 +170,15 @@ def test_wer_correctness(
     model_name, expected_wer = model_config
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_name)
     # TODO refactor to use `ASRDataset`
+    server_args = [
+        "--enforce-eager",
+        f"--tokenizer_mode={model_info.tokenizer_mode}",
+    ]
+    if model_info.trust_remote_code:
+        server_args.append("--trust-remote-code")
     with RemoteOpenAIServer(
         model_name,
-        [
-            "--enforce-eager",
-            f"--tokenizer_mode={model_info.tokenizer_mode}",
-        ],
+        server_args,
     ) as remote_server:
         dataset = load_hf_dataset(dataset_repo)
 

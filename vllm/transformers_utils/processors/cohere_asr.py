@@ -124,7 +124,7 @@ class FilterbankFeatures(nn.Module):
         self.pad_to = pad_to
         highfreq = highfreq or sample_rate / 2
         self.sample_rate = sample_rate
-        # diable pad min duration
+        # disable pad min duration
         # self.pad_min_duration = 1.0
         self.pad_min_duration = 0.0
         self.pad_direction = "both"
@@ -249,7 +249,7 @@ class FilterbankFeatures(nn.Module):
             max_time = x.shape[2]
 
             # When doing stream capture to a graph, item() is not allowed
-            # becuase it calls cudaStreamSynchronize(). Therefore, we are
+            # because it calls cudaStreamSynchronize(). Therefore, we are
             # sacrificing some error checking when running with cuda graphs.
             # if (
             #     torch.cuda.is_available()
