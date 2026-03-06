@@ -32,11 +32,12 @@ logger = init_logger(__name__)
 
 
 _VLLM_TOKENIZERS = {
+    "cohere_asr": ("cohere_asr", "CohereASRTokenizer"),
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
     "grok2": ("grok2", "Grok2Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
-    "cohere_asr": ("cohere_asr", "CohereASRTokenizer"),
+    "qwen_vl": ("qwen_vl", "QwenVLTokenizer"),
 }
 
 
@@ -165,6 +166,10 @@ def resolve_tokenizer_args(
         revision=revision,
     ):
         tokenizer_mode = "grok2"
+
+    # Model-specific tokenizers
+    if tokenizer_mode == "auto" and "/Qwen-VL" in str(tokenizer_name):
+        tokenizer_mode = "qwen_vl"
 
     # Fallback to HF tokenizer
     if tokenizer_mode == "auto":
