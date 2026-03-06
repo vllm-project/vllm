@@ -373,7 +373,7 @@ class TestCreateLayerConfig:
 
     def test_qwen2moe_num_experts_override(self):
         global_cfg = _base_config(num_experts=8, moe_intermediate_size=1024)
-        moe_block = {"num_local_experts": 4, "expert_intermediate_size": 512}
+        moe_block = {"num_local_experts": 4, "expert_intermediate_dim": 512}
         info = ArchInfo(
             decoder_layer_module=".qwen2_moe",
             decoder_layer_class="Qwen2MoeDecoderLayer",
@@ -388,7 +388,7 @@ class TestCreateLayerConfig:
 
     def test_mixtral_moe_falls_back_to_intermediate_size_field(self):
         global_cfg = _base_config(intermediate_size=14336, num_local_experts=8)
-        moe_block = {"num_local_experts": 4, "expert_intermediate_size": 512}
+        moe_block = {"num_local_experts": 4, "expert_intermediate_dim": 512}
         info = ArchInfo(
             decoder_layer_module=".mixtral",
             decoder_layer_class="MixtralDecoderLayer",
@@ -403,7 +403,7 @@ class TestCreateLayerConfig:
 
     def test_nemotronh_moe_fields(self):
         global_cfg = _base_config(n_routed_experts=8, moe_intermediate_size=2048)
-        moe_block = {"num_local_experts": 4, "expert_intermediate_size": 1024}
+        moe_block = {"num_local_experts": 4, "expert_intermediate_dim": 1024}
         info = _ARCH_REGISTRY["NemotronHForCausalLM"]
         result = _create_layer_config(global_cfg, _block(moe=moe_block), info)
         assert result.n_routed_experts == 4
