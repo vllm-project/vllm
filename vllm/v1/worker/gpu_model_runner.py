@@ -122,6 +122,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     create_fast_prefill_custom_backend,
@@ -2118,9 +2119,12 @@ class GPUModelRunner(
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
 
         if for_cudagraph_capture:
-            # For some attention backends (e.g. FA) with sliding window models we need
-            # to make sure the backend see a max_seq_len that is larger to the sliding
-            # window size when capturing to make sure the correct kernel is selected.
+            # For some attention backends (e.g. FA) with sliding window models
+            # we need to make sure the backend sees a max_seq_len that is
+            # larger than the sliding window size when capturing to ensure
+            # the correct kernel is selected.
+            # Backends that need the actual max_seq_len (e.g. FlexAttention)
+            # can override build_for_cudagraph_capture to restore it.
             max_seq_len = self.max_model_len
         else:
             max_seq_len = self.optimistic_seq_lens_cpu.numpy()[:num_reqs].max().item()
@@ -6067,6 +6071,10 @@ class GPUModelRunner(
         if num_warmups is None:
             num_warmups = self.compilation_config.cudagraph_num_of_warmups
         force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
+        use_the_same_seq_len = (
+            self.vllm_config.attention_config.backend
+            == AttentionBackendEnum.FLEX_ATTENTION
+        )
         for _ in range(num_warmups):
             self._dummy_run(
                 desc.num_tokens,
@@ -6087,7 +6095,7 @@ class GPUModelRunner(
             remove_lora=False,
             num_active_loras=desc.num_active_loras,
             is_graph_capturing=True,
-            profile_seq_lens=profile_seq_lens,
+            profile_seq_lens=profile_seq_lens if not use_the_same_seq_len else None,
         )
 
     def _capture_cudagraphs(
