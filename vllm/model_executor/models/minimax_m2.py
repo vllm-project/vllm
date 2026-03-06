@@ -107,7 +107,7 @@ class MiniMaxM2MoE(nn.Module):
             renormalize=True,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
-            router_logits_dtype=torch.float32,
+            # router_logits_dtype=torch.float32,
         )
 
         self.gate = ReplicatedLinear(
