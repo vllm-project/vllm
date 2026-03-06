@@ -1669,7 +1669,7 @@ __global__ void wvSplitKrc_(const int actlN, const int K, const int Kap,
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
                          const int64_t CuCount) {
-  int constexpr _DTRMNSTC = 1;
+  int constexpr _DTRMNSTC = 0;
 
   auto M_in = in_b.size(0);
   auto N_in = in_a.size(0);
