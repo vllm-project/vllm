@@ -606,9 +606,7 @@ class TestMLAAttentionFp8StaticQuantPatternModel(MLAAttentionQuantPatternModel):
             "scale": self.fp8_linear.input_scale,
         }
 
-    def forward(
-        self, q: torch.Tensor, kv_c_normed: torch.Tensor, k_pe: torch.Tensor
-    ):
+    def forward(self, q: torch.Tensor, kv_c_normed: torch.Tensor, k_pe: torch.Tensor):
         """Forward pass that creates the MLA attention + quant pattern."""
         output_shape = (q.shape[0], self.num_heads * self.v_head_dim)
         attn_output = self.attn(q, kv_c_normed, k_pe, output_shape=output_shape)
@@ -629,9 +627,7 @@ if current_platform.is_cuda():
 
 
 @pytest.mark.parametrize("num_heads", [MLA_NUM_HEADS])
-@pytest.mark.parametrize(
-    "batch_size", [7, 256] if current_platform.is_cuda() else [8]
-)
+@pytest.mark.parametrize("batch_size", [7, 256] if current_platform.is_cuda() else [8])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize(
     "backend, model_name, model_class, custom_ops",
@@ -641,9 +637,7 @@ if current_platform.is_cuda():
         )
     ),
 )
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Only test CUDA"
-)
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Only test CUDA")
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
 def test_mla_attention_quant_pattern(
     num_heads: int,
@@ -704,12 +698,8 @@ def test_mla_attention_quant_pattern(
     # MLA input shapes
     qk_head_dim = MLA_QK_NOPE_HEAD_DIM + MLA_QK_ROPE_HEAD_DIM
     q = torch.randn(batch_size, num_heads, qk_head_dim, dtype=dtype, device=device)
-    kv_c_normed = torch.randn(
-        batch_size, MLA_KV_LORA_RANK, dtype=dtype, device=device
-    )
-    k_pe = torch.randn(
-        batch_size, 1, MLA_QK_ROPE_HEAD_DIM, dtype=dtype, device=device
-    )
+    kv_c_normed = torch.randn(batch_size, MLA_KV_LORA_RANK, dtype=dtype, device=device)
+    k_pe = torch.randn(batch_size, 1, MLA_QK_ROPE_HEAD_DIM, dtype=dtype, device=device)
 
     torch._dynamo.mark_dynamic(q, 0)
     torch._dynamo.mark_dynamic(kv_c_normed, 0)
