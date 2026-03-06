@@ -1101,6 +1101,11 @@ def wait_for_engine_startup(
 
             start_pending[0 if local else 1] -= 1
             engine.state = CoreEngineState.READY
+        elif status == "FAILED":
+            raise RuntimeError(
+                f"Engine core {eng_index} reported initialization failure. "
+                "See root cause above."
+            )
         else:
             raise RuntimeError(
                 f"Unexpected {status} message for "
