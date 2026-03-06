@@ -80,7 +80,10 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import (
+    aux_stream,
+    direct_register_custom_op,
+)
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
@@ -422,6 +425,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             prefix=f"{prefix}.in_proj_ba",
         )
 
+        self.aux_stream = aux_stream()
+        self.event_main = torch.cuda.Event()
+        self.event_aux = torch.cuda.Event()
+
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
 
@@ -583,15 +590,24 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        projected_states_ba, _ = self.in_proj_ba(hidden_states)
-        query, key, value, z, b, a = self.fix_query_key_value_ordering(
-            projected_states_qkvz, projected_states_ba
-        )
-        query, key, value = map(
-            lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
-        )
-        mixed_qkv = torch.cat((query, key, value), dim=-1)
+        if self.aux_stream is not None:
+            mixed_qkv, z, b, a = torch.ops.vllm.gdn_in_proj_dual_stream(
+                hidden_states,
+                self.prefix,
+                self.conv_dim // self.tp_size,
+                self.num_v_heads // self.tp_size,
+                self.head_v_dim,
+            )
+        else:
+            projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            projected_states_ba, _ = self.in_proj_ba(hidden_states)
+            query, key, value, z, b, a = self.fix_query_key_value_ordering(
+                projected_states_qkvz, projected_states_ba
+            )
+            query, key, value = map(
+                lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
+            )
+            mixed_qkv = torch.cat((query, key, value), dim=-1)
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
@@ -1545,3 +1561,111 @@ def fused_gdn_gating(
         num_warps=1,
     )
     return g, beta_output
+
+
+def _gdn_in_proj_dual_stream_impl(
+    hidden_states: torch.Tensor,
+    layer_name: str,
+    mixed_qkv_size: int,
+    num_v_heads: int,
+    head_v_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Implementation of dual-stream input projection for GatedDeltaNet.
+    Runs in_proj_qkvz on main stream and in_proj_ba on auxiliary stream.
+    """
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers.get(layer_name)
+
+    if self is None:
+        raise RuntimeError(
+            f"Cannot find GatedDeltaNet layer with name: {layer_name}. "
+            f"Available layers: {list(forward_context.no_compile_layers.keys())}"
+        )
+
+    # Record an event on the default stream so the aux stream knows
+    # when hidden_states is ready to be read.
+    self.event_main.record()
+
+    # Run the larger projection on the default stream
+    projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+
+    # Run the smaller projection on the auxiliary stream
+    with torch.cuda.stream(self.aux_stream):
+        self.event_main.wait()  # wait for hidden_states to be ready
+        projected_states_ba, _ = self.in_proj_ba(hidden_states)
+        self.event_aux.record()  # signal completion of ba projection
+
+    # Default stream waits only for the ba projection to finish
+    self.event_aux.wait()
+
+    query, key, value, z, b, a = self.fix_query_key_value_ordering(
+        projected_states_qkvz, projected_states_ba
+    )
+    query, key, value = map(
+        lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
+    )
+    mixed_qkv = torch.cat((query, key, value), dim=-1).contiguous()
+
+    # Keep the downstream RMSNormGated fast path on contiguous inputs.
+    z = z.contiguous()
+    b = b.contiguous()
+    a = a.contiguous()
+
+    if (
+        mixed_qkv.shape[-1] != mixed_qkv_size
+        or z.shape[-2] != num_v_heads
+        or z.shape[-1] != head_v_dim
+    ):
+        raise RuntimeError(
+            "Unexpected output shape from gdn_in_proj_dual_stream: "
+            f"got mixed_qkv={tuple(mixed_qkv.shape)}, z={tuple(z.shape)}, "
+            f"expected last dims ({mixed_qkv_size}, {num_v_heads}, {head_v_dim})."
+        )
+
+    return mixed_qkv, z, b, a
+
+
+def _gdn_in_proj_dual_stream_fake(
+    hidden_states: torch.Tensor,
+    layer_name: str | None,
+    mixed_qkv_size: int,
+    num_v_heads: int,
+    head_v_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Fake implementation for shape inference during torch.compile.
+    Returns empty tensors with the expected output shapes.
+    """
+    num_tokens = hidden_states.size(0)
+    return (
+        torch.empty(
+            (num_tokens, mixed_qkv_size),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        ),
+        torch.empty(
+            (num_tokens, num_v_heads, head_v_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        ),
+        torch.empty(
+            (num_tokens, num_v_heads),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        ),
+        torch.empty(
+            (num_tokens, num_v_heads),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        ),
+    )
+
+
+# Register the custom op
+direct_register_custom_op(
+    op_name="gdn_in_proj_dual_stream",
+    op_func=_gdn_in_proj_dual_stream_impl,
+    mutates_args=[],  # We don't mutate the input tensors
+    fake_impl=_gdn_in_proj_dual_stream_fake,
+)
