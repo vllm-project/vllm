@@ -20,7 +20,9 @@ from transformers.video_processing_utils import BaseVideoProcessor
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
+from vllm.transformers_utils import processors
 from vllm.transformers_utils.gguf_utils import is_gguf
+from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 
@@ -139,6 +141,22 @@ def _merge_mm_kwargs(
     return allowed_kwargs
 
 
+def get_processor_cls_name_from_config(
+    processor_name: str,
+    revision: str | None = "main",
+) -> str | None:
+    config_file = [
+        "processor_config.json",
+        "preprocessor_config.json",
+        "tokenizer_config.json",
+    ]
+    for file in config_file:
+        config = get_hf_file_to_dict(file, processor_name, revision=revision)
+        if config and "processor_class" in config:
+            return config["processor_class"]
+    return None
+
+
 def get_processor(
     processor_name: str,
     *args: Any,
@@ -152,8 +170,20 @@ def get_processor(
         revision = "main"
     try:
         processor_name = convert_model_repo_to_path(processor_name)
+        registered_cls_name = get_processor_cls_name_from_config(
+            processor_name, revision=revision
+        )
+        registered_processor_cls = (
+            getattr(processors, registered_cls_name, None)
+            if registered_cls_name
+            else None
+        )
+        registered_processor_cls = cast(type[_P] | None, registered_processor_cls)
+        # Use registered processor class when it's available
+        # and explicit processor_cls is not set.
         if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
-            processor = AutoProcessor.from_pretrained(
+            _processor_cls = registered_processor_cls or AutoProcessor
+            processor = _processor_cls.from_pretrained(
                 processor_name,
                 *args,
                 revision=revision,
