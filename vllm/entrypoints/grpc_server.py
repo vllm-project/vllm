@@ -73,8 +73,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """
         self.async_llm = async_llm
         self.start_time = start_time
-        self.rejected_log_counter = 0
-        self.rejected_log_interval = 100
         self.request_logger = request_logger
         logger.info("VllmEngineServicer initialized")
 
@@ -85,14 +83,14 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             output: The vLLM output
             request_id: The request ID for logging
         """
-        finish_reason = ""
-        if output.finished and output.outputs:
-            finish_reason = output.outputs[0].finish_reason
+        if not output.finished or not output.outputs:
+            return
+        finish_reason = output.outputs[0].finish_reason
         if finish_reason != "rejected":
             return
         if self.request_logger is not None:
             self.request_logger.log_rejected_request(request_id)
-        raise RequestRejectedError("Request was rejected")
+        raise RequestRejectedError()
 
     async def Generate(
         self,
@@ -470,9 +468,7 @@ async def serve_grpc(args: argparse.Namespace):
         enable_log_requests=args.enable_log_requests,
         disable_log_stats=args.disable_log_stats_server,
     )
-    request_logger = None
-    if args.enable_log_requests:
-        request_logger = RequestLogger()
+    request_logger = RequestLogger() if args.enable_log_requests else None
 
     # Create servicer
     servicer = VllmEngineServicer(async_llm, start_time, request_logger=request_logger)
