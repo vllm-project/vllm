@@ -385,7 +385,7 @@ def benchmark_operation(
     # Warmup before graph capture
     for _ in range(warmup):
         operation_func(*args, **kwargs)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Create CUDA graph
     graph = torch.cuda.CUDAGraph()
@@ -398,19 +398,19 @@ def benchmark_operation(
             operation_func(*args, **kwargs)
 
     # Graph warmup
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     for _ in range(warmup):
         graph.replay()
 
     # Benchmark with CUDA graph
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     start_time = time.perf_counter()
 
     for _ in range(trials // num_op_per_cudagraph):
         # operation_func(*args, **kwargs)
         graph.replay()
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     end_time = time.perf_counter()
 
     avg_time_ms = ((end_time - start_time) / trials) * 1000
