@@ -640,6 +640,30 @@ class FlashAttentionImpl(AttentionImpl):
         )
         self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
 
+        # Pre-allocated FA3 output buffers for DCP CUDA graph compatibility.
+        # FA3 with out=None allocates internally, causing incorrect replay.
+        self._dcp_context_out: torch.Tensor | None = None
+        self._dcp_query_out: torch.Tensor | None = None
+        if vllm_config is not None and self.dcp_world_size > 1:
+            n = vllm_config.scheduler_config.max_num_seqs
+            dt = vllm_config.model_config.dtype
+            self._dcp_context_out = torch.empty(
+                n, num_heads * self.dcp_world_size, head_size, dtype=dt, device="cuda"
+            )
+            self._dcp_query_out = torch.empty(
+                n, num_heads, head_size, dtype=dt, device="cuda"
+            )
+
+    def _dcp_fa_out(
+        self,
+        buf: torch.Tensor | None,
+        num_tokens: int,
+    ) -> torch.Tensor | None:
+        """Slice pre-allocated FA output buffer, or None for prefill."""
+        if buf is not None and num_tokens <= buf.shape[0]:
+            return buf[:num_tokens]
+        return None
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -869,7 +893,7 @@ class FlashAttentionImpl(AttentionImpl):
             q=query_across_dcp,
             k=key_cache,
             v=value_cache,
-            out=None,
+            out=self._dcp_fa_out(self._dcp_context_out, query_across_dcp.shape[0]),
             cu_seqlens_q=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
             seqused_k=attn_metadata.dcp_context_kv_lens,
@@ -901,7 +925,7 @@ class FlashAttentionImpl(AttentionImpl):
             q=query,
             k=key,
             v=value,
-            out=None,
+            out=self._dcp_fa_out(self._dcp_query_out, query.shape[0]),
             cu_seqlens_q=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
             cu_seqlens_k=cu_seqlens_q,
