@@ -450,8 +450,43 @@ def test_fp8_paged_mqa_logits_torch_cuda_graph_capture():
             max_model_len,
         )
 
+    # Update inputs in-place after capture and verify replay uses the new values.
+    q_new = torch.randn_like(q)
+    kv_cache_new = torch.randn_like(kv_cache)
+    weights_new = torch.randn_like(weights)
+    context_lens_new = torch.tensor([41, 71], device="cuda", dtype=torch.int32)
+    block_tables_new = torch.zeros_like(block_tables)
+
+    next_block = 0
+    for i, ctx_len in enumerate(context_lens_new.tolist()):
+        num_ctx_blocks = cdiv(ctx_len, blocksize)
+        block_tables_new[i, :num_ctx_blocks] = torch.tensor(
+            list(range(next_block, next_block + num_ctx_blocks)),
+            device="cuda",
+            dtype=torch.int32,
+        )
+        next_block += num_ctx_blocks
+
+    q_fp8.copy_(q_new.to(torch.float8_e4m3fn))
+    kv_cache_fp8.copy_(kv_cache_cast_to_fp8(kv_cache_new))
+    weights.copy_(weights_new)
+    context_lens.copy_(context_lens_new)
+    block_tables.copy_(block_tables_new)
+
+    expected_updated = fp8_paged_mqa_logits_torch(
+        q_fp8,
+        kv_cache_fp8,
+        weights,
+        context_lens,
+        block_tables,
+        max_model_len,
+    )
+
     logits.zero_()
     graph.replay()
     torch.accelerator.synchronize()
 
-    torch.testing.assert_close(logits, expected, equal_nan=True)
+    torch.testing.assert_close(logits, expected_updated, equal_nan=True)
+
+    # Sanity check: output changed after replacing inputs.
+    assert not torch.allclose(expected, expected_updated, equal_nan=True)
