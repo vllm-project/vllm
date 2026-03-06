@@ -93,14 +93,19 @@ from vllm.sampling_params import (
 from vllm.tasks import PoolingTask
 from vllm.tokenizers import TokenizerLike
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils.bitmask import bitmask_to_token_ids
 from vllm.utils.counter import Counter
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.tqdm_utils import maybe_tqdm
 from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
-from vllm.v1.structured_output.backend_types import StructuredOutputBackend
+from vllm.v1.structured_output.backend_types import (
+    StructuredOutputBackend,
+    StructuredOutputOptions,
+)
 from vllm.v1.structured_output.request import get_structured_output_key
+from vllm.v1.structured_output.utils import choice_as_grammar
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -116,21 +121,10 @@ _P = TypeVar("_P", bound=SamplingParams | PoolingParams | None)
 _R = TypeVar("_R", default=Any)
 
 
-_bitmask_cache: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
-
-
-def _bitmask_to_token_ids(bitmask_row: torch.Tensor, vocab_size: int) -> list[int]:
-    """Convert a packed int32 bitmask row to a list of allowed token IDs."""
-    if vocab_size not in _bitmask_cache:
-        indices = torch.arange(vocab_size)
-        _bitmask_cache[vocab_size] = (
-            indices,
-            indices >> 5,  # i // 32
-            indices & 31,  # i % 32
-        )
-    indices, word_indices, bit_indices = _bitmask_cache[vocab_size]
-    mask = ((bitmask_row[word_indices] >> bit_indices) & 1).bool()
-    return indices[mask].tolist()
+# Backwards-compatible alias for the bitmask helper that was
+# previously defined here.  Code inside this module now uses the
+# canonical ``bitmask_to_token_ids`` imported from vllm.utils.bitmask.
+_bitmask_to_token_ids = bitmask_to_token_ids
 
 
 class LLM:
@@ -970,17 +964,16 @@ class LLM:
         """Initialize the structured output backend for beam search."""
         vllm_config = self.llm_engine.vllm_config
         so_config = vllm_config.structured_outputs_config
-        if so_config is None:
-            raise ValueError(
-                "structured_outputs_config is required for beam search "
-                "with structured outputs"
-            )
-
         # Resolve the backend name from engine config if not already set.
         if not structured_outputs._backend:
             structured_outputs._backend = so_config.backend
 
         backend_name = structured_outputs._backend
+
+        # Resolve "auto" to a concrete backend.
+        if backend_name == "auto":
+            backend_name = "xgrammar"
+
         vocab_size = self.model_config.get_vocab_size()
 
         backend: StructuredOutputBackend
@@ -1027,10 +1020,20 @@ class LLM:
         else:
             raise ValueError(f"Unsupported structured output backend: {backend_name}")
 
-        structured_output_key = get_structured_output_key(structured_outputs)
+        key = get_structured_output_key(structured_outputs)
+
+        # Backends like xgrammar don't handle CHOICE natively in
+        # compile_grammar — convert to an EBNF grammar first.
+        request_type, grammar_spec = key
+        if request_type == StructuredOutputOptions.CHOICE:
+            import json as _json
+
+            choices = _json.loads(grammar_spec)
+            key = (StructuredOutputOptions.GRAMMAR, choice_as_grammar(choices))
+
         bitmask = backend.allocate_token_bitmask(1)
 
-        return backend, structured_output_key, bitmask
+        return backend, key, bitmask
 
     def _build_beam_sampling_params(
         self,

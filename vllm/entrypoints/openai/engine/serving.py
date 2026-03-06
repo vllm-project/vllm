@@ -108,7 +108,11 @@ from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
     prompt_to_seq,
 )
-from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.sampling_params import (
+    BeamSearchParams,
+    SamplingParams,
+    StructuredOutputsParams,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.tracing import (
@@ -121,7 +125,14 @@ from vllm.utils.async_utils import (
     collect_from_async_generator,
     merge_async_iterators,
 )
+from vllm.utils.bitmask import bitmask_to_token_ids
 from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.v1.structured_output.backend_types import (
+    StructuredOutputBackend,
+    StructuredOutputOptions,
+)
+from vllm.v1.structured_output.request import get_structured_output_key
+from vllm.v1.structured_output.utils import choice_as_grammar
 
 logger = init_logger(__name__)
 
@@ -229,6 +240,151 @@ class OpenAIServing:
         self.io_processor = engine_client.io_processor
         self.input_processor = engine_client.input_processor
 
+    def _init_beam_search_so_backend(
+        self,
+        structured_outputs: StructuredOutputsParams,
+    ) -> tuple[StructuredOutputBackend, tuple, Any]:
+        """Initialize a structured output backend for beam search.
+
+        Resolves the backend name from the engine's
+        ``structured_outputs_config`` when the request does not specify
+        one explicitly.  The returned tuple contains the instantiated
+        backend, the grammar compilation key derived from the request
+        parameters, and a pre-allocated single-row token bitmask.
+
+        Args:
+            structured_outputs: The structured output parameters from
+                the API request.
+
+        Returns:
+            A ``(backend, key, bitmask)`` tuple ready for use in the
+            beam search loop.
+
+        Raises:
+            ValueError: If the requested backend is not supported.
+        """
+        vllm_config = self.engine_client.vllm_config
+        so_config = vllm_config.structured_outputs_config
+
+        # Resolve the backend name from engine config if not already set.
+        if not structured_outputs._backend:
+            structured_outputs._backend = so_config.backend
+
+        backend_name = structured_outputs._backend
+
+        # Resolve "auto" to a concrete backend.  The normal request path
+        # does this during SamplingParams validation; beam search bypasses
+        # that, so we replicate the resolution here: xgrammar first, then
+        # guidance as fallback.
+        if backend_name == "auto":
+            backend_name = "xgrammar"
+
+        tokenizer = self.renderer.get_tokenizer()
+        vocab_size = self.model_config.get_vocab_size()
+
+        backend: StructuredOutputBackend
+        if backend_name == "xgrammar":
+            from vllm.v1.structured_output.backend_xgrammar import (
+                XgrammarBackend,
+            )
+
+            backend = XgrammarBackend(
+                vllm_config=vllm_config,
+                tokenizer=tokenizer,
+                vocab_size=vocab_size,
+            )
+        elif backend_name == "guidance":
+            from vllm.v1.structured_output.backend_guidance import (
+                GuidanceBackend,
+            )
+
+            backend = GuidanceBackend(
+                vllm_config=vllm_config,
+                tokenizer=tokenizer,
+                vocab_size=vocab_size,
+            )
+        elif backend_name == "outlines":
+            from vllm.v1.structured_output.backend_outlines import (
+                OutlinesBackend,
+            )
+
+            backend = OutlinesBackend(
+                vllm_config=vllm_config,
+                tokenizer=tokenizer,
+                vocab_size=vocab_size,
+            )
+        elif backend_name == "lm-format-enforcer":
+            from vllm.v1.structured_output.backend_lm_format_enforcer import (
+                LMFormatEnforcerBackend,
+            )
+
+            backend = LMFormatEnforcerBackend(
+                vllm_config=vllm_config,
+                tokenizer=tokenizer,
+                vocab_size=vocab_size,
+            )
+        else:
+            raise ValueError(f"Unsupported structured output backend: {backend_name}")
+
+        key = get_structured_output_key(structured_outputs)
+
+        # Backends like xgrammar don't handle CHOICE natively in
+        # compile_grammar — convert to an EBNF grammar first.
+        request_type, grammar_spec = key
+        if request_type == StructuredOutputOptions.CHOICE:
+            import json as _json
+
+            choices = _json.loads(grammar_spec)
+            key = (StructuredOutputOptions.GRAMMAR, choice_as_grammar(choices))
+
+        bitmask = backend.allocate_token_bitmask(1)
+        return backend, key, bitmask
+
+    def _get_beam_allowed_token_ids(
+        self,
+        beam: BeamSearchSequence,
+        backend: StructuredOutputBackend,
+        so_key: tuple,
+        bitmask: Any,
+        vocab_size: int,
+    ) -> list[int] | None:
+        """Compute the set of grammar-allowed token IDs for a beam.
+
+        A fresh grammar is compiled and all previously generated tokens
+        are replayed through it so that the FSM state matches the
+        beam's history.  This replay-per-step approach mirrors the
+        offline ``LLM.beam_search`` path — backends do not currently
+        support cloning grammar state.
+
+        Args:
+            beam: The beam sequence whose grammar state to query.
+            backend: The structured output backend instance.
+            so_key: A ``(request_type, grammar_spec)`` tuple obtained
+                from :func:`get_structured_output_key`.
+            bitmask: A pre-allocated single-row bitmask tensor.
+            vocab_size: The model vocabulary size.
+
+        Returns:
+            A list of allowed token IDs, or ``None`` when the grammar
+            has terminated (the beam should be marked completed).
+        """
+        request_type, grammar_spec = so_key
+        grammar = backend.compile_grammar(request_type, grammar_spec)
+
+        prompt_len = len(beam.orig_prompt["prompt_token_ids"])
+        generated_tokens = beam.tokens[prompt_len:]
+
+        if generated_tokens:
+            grammar.accept_tokens("beam", generated_tokens)
+
+        if grammar.is_terminated():
+            return None
+
+        grammar.fill_bitmask(bitmask, 0)
+        allowed_ids = bitmask_to_token_ids(bitmask[0], vocab_size)
+
+        return allowed_ids if allowed_ids else None
+
     async def beam_search(
         self,
         prompt: ProcessorInputs,
@@ -274,124 +430,209 @@ class OpenAIServing:
                 lora_request=lora_request,
             )
         ]
-        completed = []
+        completed: list[BeamSearchSequence] = []
 
-        for _ in range(max_tokens):
-            tasks = []
-            request_id_batch = f"{request_id}-{random_uuid()}"
+        # Initialize structured output backend if requested.
+        so_backend: StructuredOutputBackend | None = None
+        so_key: tuple | None = None
+        so_bitmask = None
+        if params.structured_outputs is not None:
+            so_backend, so_key, so_bitmask = self._init_beam_search_so_backend(
+                params.structured_outputs
+            )
 
-            for i, beam in enumerate(all_beams):
-                prompt_item = beam.get_prompt()
-                lora_request_item = beam.lora_request
-                request_id_item = f"{request_id_batch}-beam-{i}"
-                task = asyncio.create_task(
-                    collect_from_async_generator(
-                        self.engine_client.generate(
-                            prompt_item,
-                            sampling_params,
-                            request_id_item,
-                            lora_request=lora_request_item,
-                            trace_headers=trace_headers,
+        try:
+            for _ in range(max_tokens):
+                # -- Build per-beam sampling params ----------------------
+                if so_backend is not None:
+                    assert so_key is not None and so_bitmask is not None
+                    vocab_size = self.model_config.get_vocab_size()
+                    beam_sp_list: list[SamplingParams] = []
+                    active_beams: list[BeamSearchSequence] = []
+
+                    for beam in all_beams:
+                        allowed_ids = self._get_beam_allowed_token_ids(
+                            beam,
+                            so_backend,
+                            so_key,
+                            so_bitmask,
+                            vocab_size,
+                        )
+                        if allowed_ids is None:
+                            # Grammar terminated → mark beam completed.
+                            completed.append(
+                                BeamSearchSequence(
+                                    orig_prompt=prompt,
+                                    tokens=beam.tokens,
+                                    logprobs=beam.logprobs,
+                                    cum_logprob=beam.cum_logprob,
+                                    lora_request=beam.lora_request,
+                                    finish_reason="stop",
+                                )
+                            )
+                        else:
+                            beam_sp_list.append(
+                                SamplingParams(
+                                    logprobs=logprobs_num,
+                                    max_tokens=1,
+                                    temperature=temperature,
+                                    allowed_token_ids=allowed_ids,
+                                )
+                            )
+                            active_beams.append(beam)
+
+                    if not active_beams:
+                        break  # All beams terminated by grammar.
+                else:
+                    active_beams = all_beams
+                    beam_sp_list = [sampling_params] * len(all_beams)
+
+                # -- Launch inference for each active beam ---------------
+                tasks = []
+                request_id_batch = f"{request_id}-{random_uuid()}"
+
+                for i, beam in enumerate(active_beams):
+                    prompt_item = beam.get_prompt()
+                    lora_request_item = beam.lora_request
+                    request_id_item = f"{request_id_batch}-beam-{i}"
+                    task = asyncio.create_task(
+                        collect_from_async_generator(
+                            self.engine_client.generate(
+                                prompt_item,
+                                beam_sp_list[i],
+                                request_id_item,
+                                lora_request=lora_request_item,
+                                trace_headers=trace_headers,
+                            )
                         )
                     )
-                )
-                tasks.append(task)
+                    tasks.append(task)
 
-            output = [x[0] for x in await asyncio.gather(*tasks)]
+                output = [x[0] for x in await asyncio.gather(*tasks)]
 
-            new_beams = []
-            # Store all new tokens generated by beam
-            all_beams_token_id = []
-            # Store the cumulative probability of all tokens
-            # generated by beam search
-            all_beams_logprob = []
-            # Iterate through all beam inference results
-            for i, result in enumerate(output):
-                current_beam = all_beams[i]
+                # -- Collect logprobs from each beam result --------------
+                new_beams: list[BeamSearchSequence] = []
+                all_beams_token_id: list[int] = []
+                all_beams_logprob: list[float] = []
 
-                # check for error finish reason and abort beam search
-                if result.outputs[0].finish_reason == "error":
-                    # yield error output and terminate beam search
-                    yield RequestOutput(
-                        request_id=request_id,
-                        prompt=prompt_text,
-                        outputs=[
-                            CompletionOutput(
-                                index=0,
-                                text="",
-                                token_ids=[],
-                                cumulative_logprob=None,
-                                logprobs=None,
-                                finish_reason="error",
+                # Build per-beam allowed-id sets for logprob filtering.
+                # When structured output is active, logprobs are computed
+                # from raw logits *before* the allowed_token_ids mask is
+                # applied, so they may include disallowed tokens.
+                allowed_sets: list[set[int] | None] = []
+                if so_backend is not None:
+                    for sp in beam_sp_list:
+                        if sp.allowed_token_ids:
+                            allowed_sets.append(set(sp.allowed_token_ids))
+                        else:
+                            allowed_sets.append(None)
+                else:
+                    allowed_sets = [None] * len(active_beams)
+
+                for i, result in enumerate(output):
+                    current_beam = active_beams[i]
+
+                    # Check for error finish reason and abort.
+                    if result.outputs[0].finish_reason == "error":
+                        yield RequestOutput(
+                            request_id=request_id,
+                            prompt=prompt_text,
+                            outputs=[
+                                CompletionOutput(
+                                    index=0,
+                                    text="",
+                                    token_ids=[],
+                                    cumulative_logprob=None,
+                                    logprobs=None,
+                                    finish_reason="error",
+                                )
+                            ],
+                            finished=True,
+                            prompt_token_ids=prompt_token_ids,
+                            prompt_logprobs=None,
+                        )
+                        return
+
+                    if result.outputs[0].logprobs is not None:
+                        logprobs = result.outputs[0].logprobs[0]
+                        allowed = allowed_sets[i]
+                        for token_id, logprob_obj in logprobs.items():
+                            if allowed is not None and token_id not in allowed:
+                                continue
+                            all_beams_token_id.append(token_id)
+                            all_beams_logprob.append(
+                                current_beam.cum_logprob + logprob_obj.logprob
                             )
-                        ],
-                        finished=True,
-                        prompt_token_ids=prompt_token_ids,
-                        prompt_logprobs=None,
+
+                # Handle EOS tokens.
+                all_beams_token_id_np = np.array(all_beams_token_id)
+                all_beams_logprob_np = np.array(all_beams_logprob)
+
+                if not ignore_eos:
+                    eos_idx = np.where(all_beams_token_id_np == eos_token_id)[0]
+                    for idx in eos_idx:
+                        # Map flat index back to parent beam.
+                        parent_beam_idx = self._flat_idx_to_beam(
+                            int(idx),
+                            output,
+                            active_beams,
+                            allowed_sets,
+                        )
+                        current_beam = active_beams[parent_beam_idx]
+                        assert output[parent_beam_idx].outputs[0].logprobs is not None
+                        logprobs_entry = output[parent_beam_idx].outputs[0].logprobs[0]
+                        completed.append(
+                            BeamSearchSequence(
+                                orig_prompt=prompt,
+                                tokens=current_beam.tokens + [eos_token_id]
+                                if include_stop_str_in_output
+                                else current_beam.tokens,
+                                logprobs=current_beam.logprobs + [logprobs_entry],
+                                cum_logprob=float(all_beams_logprob_np[idx]),
+                                finish_reason="stop",
+                                stop_reason=eos_token_id,
+                            )
+                        )
+                    all_beams_logprob_np[eos_idx] = -np.inf
+
+                if len(all_beams_logprob_np) == 0:
+                    break
+
+                # Select top beam_width candidates.
+                n_candidates = len(all_beams_logprob_np)
+                k = min(beam_width, n_candidates)
+                if k >= n_candidates:
+                    # All remaining candidates fit — no need to partition.
+                    topn_idx = np.arange(n_candidates)
+                else:
+                    topn_idx = np.argpartition(np.negative(all_beams_logprob_np), k)[:k]
+
+                for idx in topn_idx:
+                    parent_beam_idx = self._flat_idx_to_beam(
+                        int(idx),
+                        output,
+                        active_beams,
+                        allowed_sets,
                     )
-                    return
-
-                if result.outputs[0].logprobs is not None:
-                    logprobs = result.outputs[0].logprobs[0]
-                    all_beams_token_id.extend(list(logprobs.keys()))
-                    all_beams_logprob.extend(
-                        [
-                            current_beam.cum_logprob + obj.logprob
-                            for obj in logprobs.values()
-                        ]
-                    )
-
-            # Handle the token for the end of sentence (EOS)
-            all_beams_token_id = np.array(all_beams_token_id)
-            all_beams_logprob = np.array(all_beams_logprob)
-
-            if not ignore_eos:
-                # Get the index position of eos token in all generated results
-                eos_idx = np.where(all_beams_token_id == eos_token_id)[0]
-                for idx in eos_idx:
-                    current_beam = all_beams[idx // logprobs_num]
-                    result = output[idx // logprobs_num]
-                    assert result.outputs[0].logprobs is not None
-                    logprobs_entry = result.outputs[0].logprobs[0]
-                    completed.append(
+                    current_beam = active_beams[parent_beam_idx]
+                    token_id = int(all_beams_token_id_np[idx])
+                    assert output[parent_beam_idx].outputs[0].logprobs is not None
+                    logprobs_entry = output[parent_beam_idx].outputs[0].logprobs[0]
+                    new_beams.append(
                         BeamSearchSequence(
                             orig_prompt=prompt,
-                            tokens=current_beam.tokens + [eos_token_id]
-                            if include_stop_str_in_output
-                            else current_beam.tokens,
+                            tokens=current_beam.tokens + [token_id],
                             logprobs=current_beam.logprobs + [logprobs_entry],
-                            cum_logprob=float(all_beams_logprob[idx]),
-                            finish_reason="stop",
-                            stop_reason=eos_token_id,
+                            lora_request=current_beam.lora_request,
+                            cum_logprob=float(all_beams_logprob_np[idx]),
                         )
                     )
-                # After processing, set the log probability of the eos condition
-                # to negative infinity.
-                all_beams_logprob[eos_idx] = -np.inf
 
-            # Processing non-EOS tokens
-            # Get indices of the top beam_width probabilities
-            topn_idx = np.argpartition(np.negative(all_beams_logprob), beam_width)[
-                :beam_width
-            ]
+                all_beams = new_beams
 
-            for idx in topn_idx:
-                current_beam = all_beams[idx // logprobs_num]
-                result = output[idx // logprobs_num]
-                token_id = int(all_beams_token_id[idx])
-                assert result.outputs[0].logprobs is not None
-                logprobs_entry = result.outputs[0].logprobs[0]
-                new_beams.append(
-                    BeamSearchSequence(
-                        orig_prompt=prompt,
-                        tokens=current_beam.tokens + [token_id],
-                        logprobs=current_beam.logprobs + [logprobs_entry],
-                        lora_request=current_beam.lora_request,
-                        cum_logprob=float(all_beams_logprob[idx]),
-                    )
-                )
-
-            all_beams = new_beams
+        finally:
+            if so_backend is not None:
+                so_backend.destroy()
 
         completed.extend(all_beams)
         sorted_completed = sorted(completed, key=sort_beams_key, reverse=True)
@@ -399,7 +640,6 @@ class OpenAIServing:
 
         for beam in best_beams:
             if beam.tokens[-1] == eos_token_id and not ignore_eos:
-                # Skip the eos token in the text.
                 tokens = beam.tokens[tokenized_length:-1]
             else:
                 tokens = beam.tokens[tokenized_length:]
@@ -425,6 +665,37 @@ class OpenAIServing:
             finished=True,
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=None,
+        )
+
+    @staticmethod
+    def _flat_idx_to_beam(
+        flat_idx: int,
+        output: list[RequestOutput],
+        active_beams: list[BeamSearchSequence],
+        allowed_sets: list[set[int] | None],
+    ) -> int:
+        """Map a flat token index back to its parent beam index.
+
+        When logprobs are filtered (structured output), the number of
+        tokens contributed by each beam varies.  This helper walks
+        through the per-beam contribution counts to find the parent.
+        """
+        cumulative = 0
+        for beam_idx, result in enumerate(output):
+            if result.outputs[0].logprobs is not None:
+                logprobs = result.outputs[0].logprobs[0]
+                allowed = allowed_sets[beam_idx]
+                if allowed is not None:
+                    count = sum(1 for tid in logprobs if tid in allowed)
+                else:
+                    count = len(logprobs)
+                if flat_idx < cumulative + count:
+                    return beam_idx
+                cumulative += count
+        # Should not be reached; raise to surface indexing bugs.
+        raise RuntimeError(
+            f"_flat_idx_to_beam: flat_idx {flat_idx} could not be mapped "
+            f"to any beam (cumulative={cumulative})"
         )
 
     async def _preprocess(

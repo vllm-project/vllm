@@ -218,6 +218,7 @@ class CompletionRequest(OpenAIBaseModel):
             temperature=temperature,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
+            structured_outputs=self.structured_outputs,
         )
 
     def to_sampling_params(
