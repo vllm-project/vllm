@@ -68,7 +68,7 @@ def test_async_llm_startup_error(
     )
 
     # Confirm we get an exception.
-    with pytest.raises(Exception, match="initialization failed"):
+    with pytest.raises(Exception, match=r"initialization fail(ed|ure)"):
         _ = AsyncLLM.from_engine_args(engine_args)
 
     # Confirm all the processes are cleaned up.
@@ -111,7 +111,7 @@ def test_llm_startup_error(
 
         with pytest.raises(
             Exception,
-            match="initialization failed"
+            match=r"initialization fail(ed|ure)"
             if enable_multiprocessing
             else "Simulated Error in startup!",
         ):

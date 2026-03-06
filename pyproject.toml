@@ -172,6 +172,7 @@ fo = "fo"
 nd = "nd"
 eles = "eles"
 datas = "datas"
+ure = "ure"
 
 [tool.uv]
 no-build-isolation-package = ["torch"]
