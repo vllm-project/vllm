@@ -19,7 +19,7 @@ else()
   FetchContent_Declare(
         flashmla
         GIT_REPOSITORY https://github.com/vllm-project/FlashMLA
-        GIT_TAG 692917b1cda61b93ac9ee2d846ec54e75afe87b1
+        GIT_TAG f46984b4caf19409bf4ab94a540341918dd6a1a3
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
