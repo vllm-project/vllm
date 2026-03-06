@@ -550,8 +550,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         value = value.reshape(value.size(0), -1, self.head_v_dim)
         z = z.reshape(z.size(0), -1, self.head_v_dim)
         # b, a are full (all heads); reshape then take the local TP slice.
-        b = b.reshape(b.size(0), self.num_v_heads)
-        a = a.reshape(a.size(0), self.num_v_heads)
+        b = b.reshape(-1, self.num_v_heads)
+        a = a.reshape(-1, self.num_v_heads)
         v_heads_per_rank = self.num_v_heads // self.tp_size
         start = self.tp_rank * v_heads_per_rank
         end = start + v_heads_per_rank
