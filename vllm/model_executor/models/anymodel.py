@@ -26,7 +26,7 @@ Canonical block_configs schema::
             "no_op": false,
             "intermediate_size": 8192,
             "hidden_act": "silu",
-            "moe": {"num_local_experts": 8, "expert_intermediate_size": 1024},
+            "moe": {"num_local_experts": 8, "expert_intermediate_dim": 1024},
         },
     }
 """
@@ -37,6 +37,7 @@ import copy
 import functools
 import importlib
 import inspect
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
 from typing import ClassVar
@@ -318,7 +319,7 @@ def _create_layer_config(global_config, block_config, info: ArchInfo):
             moe_size_field = (
                 info.moe_intermediate_size_field or info.intermediate_size_field
             )
-            s = _get_attr(moe, "expert_intermediate_size")
+            s = _get_attr(moe, "expert_intermediate_dim")
             if s is not None:
                 setattr(config, moe_size_field, s)
 
@@ -344,6 +345,27 @@ def _apply_no_ops(layer: nn.Module, block_config, info: ArchInfo) -> None:
     if _get_block_attr(block_config, "ffn", "no_op", False):
         setattr(layer, info.ffn_module, NoOpMLP())
         setattr(layer, info.ffn_norm_module, NoOpNorm())
+
+
+def _collect_noop_prefixes(
+    block_configs: list,
+    info: ArchInfo,
+) -> frozenset[str]:
+    """Build weight-name prefixes for no-op sub-modules.
+
+    Returned prefixes end with ``"."`` so a simple ``startswith`` check
+    filters all weights belonging to a replaced module."""
+    prefixes: set[str] = set()
+    layers_path = info.layers_path
+    for idx, bc in enumerate(block_configs):
+        lp = f"{layers_path}.{idx}"
+        if _get_block_attr(bc, "attention", "no_op", False):
+            prefixes.add(f"{lp}.{info.attn_module}.")
+            prefixes.add(f"{lp}.{info.attn_norm_module}.")
+        if _get_block_attr(bc, "ffn", "no_op", False):
+            prefixes.add(f"{lp}.{info.ffn_module}.")
+            prefixes.add(f"{lp}.{info.ffn_norm_module}.")
+    return frozenset(prefixes)
 
 
 @functools.cache
@@ -411,12 +433,19 @@ def _has_overrides(block_config, info: ArchInfo | None = None) -> bool:
 
 
 def _unregister_layer(layer_prefix: str, vllm_config: VllmConfig) -> None:
-    """Remove old layer's entries from static_forward_context to avoid
-    'Duplicate layer name' errors when the replacement registers."""
-    ctx = vllm_config.compilation_config.static_forward_context
-    stale = [k for k in ctx if k.startswith(layer_prefix + ".")]
+    """Remove old layer's entries from static_forward_context and
+    static_all_moe_layers to avoid stale references after layer
+    replacement or no-op injection."""
+    cc = vllm_config.compilation_config
+    prefix_dot = layer_prefix + "."
+
+    stale = [k for k in cc.static_forward_context if k.startswith(prefix_dot)]
     for k in stale:
-        del ctx[k]
+        del cc.static_forward_context[k]
+
+    cc.static_all_moe_layers = [
+        k for k in cc.static_all_moe_layers if not k.startswith(prefix_dot)
+    ]
 
 
 def _patch_anymodel_layers(
@@ -475,6 +504,16 @@ def _patch_anymodel_layers(
             layer = new_layer
 
         _apply_no_ops(layer, block_config, arch_info)
+
+        layer_prefix = maybe_prefix(layers_prefix, str(layer_idx))
+        if _get_block_attr(block_config, "attention", "no_op", False):
+            _unregister_layer(
+                f"{layer_prefix}.{arch_info.attn_module}", vllm_config
+            )
+        if _get_block_attr(block_config, "ffn", "no_op", False):
+            _unregister_layer(
+                f"{layer_prefix}.{arch_info.ffn_module}", vllm_config
+            )   
 
 
 def _arch_info_from_config(hf_config) -> ArchInfo | None:
@@ -586,3 +625,26 @@ class AnyModel(nn.Module, HasNoOps):
         )
         super().__init__(vllm_config=vllm_config, prefix=base_init_prefix)
         _patch_anymodel_layers(self, vllm_config, arch_info, base_init_prefix)
+
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> set[str]:
+        """Filter out checkpoint weights for no-op modules, then delegate."""
+        arch_info = type(self)._anymodel_arch_info
+        if arch_info is not None:
+            config = self.config
+            layer_base_config = (
+                getattr(config, arch_info.layer_hf_config)
+                if arch_info.layer_hf_config
+                else config
+            )
+            block_configs = getattr(layer_base_config, "block_configs", None)
+            if block_configs:
+                noop_prefixes = _collect_noop_prefixes(block_configs, arch_info)
+                if noop_prefixes:
+                    weights = (
+                        (name, tensor)
+                        for name, tensor in weights
+                        if not any(name.startswith(p) for p in noop_prefixes)
+                    )
+        return super().load_weights(weights)
