@@ -864,9 +864,7 @@ class LLM:
                     beam = all_beams[i]
                     orig = beam.orig_prompt
                     if orig["type"] == "enc_dec":
-                        prompt_len = len(
-                            orig["decoder_prompt"]["prompt_token_ids"]
-                        )
+                        prompt_len = len(orig["decoder_prompt"]["prompt_token_ids"])
                     else:
                         prompt_len = len(orig["prompt_token_ids"])
                     if len(beam.tokens) > prompt_len:
