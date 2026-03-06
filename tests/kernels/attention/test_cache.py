@@ -627,6 +627,8 @@ def test_concat_and_cache_ds_mla(
         pytest.skip("concat_and_cache_mla doesn't support fp8_ds_mla on ROCm")
     if dtype.itemsize != 2:
         pytest.skip("ds_mla only supports 16-bit input")
+    if kv_lora_rank != 512:
+        pytest.skip("fp8_ds_mla requires kv_lora_rank == 512")
     kv_cache_dtype = "fp8_ds_mla"
     set_random_seed(seed)
     torch.set_default_device(device)
