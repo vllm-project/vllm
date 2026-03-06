@@ -751,8 +751,8 @@ void concat_and_cache_mla(
   } else {
     dim3 grid(num_tokens);
     dim3 block(std::min(kv_lora_rank, 512));
-    DISPATCH_BY_KV_CACHE_DTYPE(kv_c.dtype(), kv_cache_dtype,
-                               CALL_CONCAT_AND_CACHE_MLA);
+    DISPATCH_BY_KV_CACHE_DTYPE_FP8_INPUT(kv_c.dtype(), kv_cache_dtype,
+                                         CALL_CONCAT_AND_CACHE_MLA);
   }
 }
 

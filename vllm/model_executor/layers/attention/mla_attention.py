@@ -316,6 +316,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_b_proj = kv_b_proj
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
+        self.rotary_emb = extra_impl_args.get("rotary_emb")
         self.indexer = indexer
 
         self.num_kv_heads = 1
@@ -441,7 +442,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
+        positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Apply RoPE here when the fused path is not active.
+        # RoPE was moved from mla.py into this layer to enable
+        # fused RoPE+quant. When the fused path is active,
+        # skip upfront RoPE -- it will be applied per-path in forward_impl.
+
+        use_fused = getattr(self.impl, "use_fused_rope_quant", False)
+        if self.rotary_emb is not None and positions is not None and not use_fused:
+            q_nope, q_pe = q.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
+            q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+            q = torch.cat([q_nope, q_pe], dim=-1)
+
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
 
@@ -451,19 +466,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-            slot_mapping = forward_context.slot_mapping
 
-            assert isinstance(slot_mapping, dict), (
-                f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
-            )
-            self.impl.do_kv_cache_update(
-                kv_c_normed,
-                k_pe,
-                self_kv_cache,
-                slot_mapping.get(self.layer_name),
-                self.kv_cache_dtype,
-                self._k_scale,
-            )
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 self.forward_impl(
@@ -473,20 +476,19 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     self_kv_cache,
                     attn_metadata,
                     output=output,
+                    positions=positions,
                 )
                 return output
             else:
                 return self.forward_impl(
-                    q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
+                    q,
+                    kv_c_normed,
+                    k_pe,
+                    self_kv_cache,
+                    attn_metadata,
+                    positions=positions,
                 )
         else:
-            kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
-                kv_c_normed,
-                k_pe,
-                self.layer_name,
-                self.kv_cache_dtype,
-                self._k_scale,
-            )
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 torch.ops.vllm.unified_mla_attention_with_output(
@@ -495,7 +497,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     k_pe,
                     output,
                     self.layer_name,
-                    kv_cache_dummy_dep=kv_cache_dummy_dep,
+                    positions=positions,
                 )
                 return output
             else:
@@ -504,7 +506,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     kv_c_normed,
                     k_pe,
                     self.layer_name,
-                    kv_cache_dummy_dep=kv_cache_dummy_dep,
+                    positions=positions,
                 )
 
     def forward_impl(
@@ -517,6 +519,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
@@ -549,6 +552,19 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
 
+        # Check if fused RoPE+FP8 quant path should be used.
+        # When active, RoPE was NOT applied upfront in forward(), so we
+        # must apply it per-path (prefill vs decode) below.
+        if positions is not None:
+            positions = positions[: attn_metadata.num_actual_tokens]
+
+        use_fused = (
+            fp8_attention
+            and getattr(self.impl, "use_fused_rope_quant", False)
+            and self.rotary_emb is not None
+            and positions is not None
+        )
+
         num_actual_toks = attn_metadata.num_actual_tokens
 
         # Inputs and outputs may be padded for CUDA graphs
@@ -558,8 +574,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
 
-        if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
-            kv_cache = kv_cache.view(current_platform.fp8_dtype())
+        if not use_fused:
+            # Original path: RoPE was applied upfront, write ALL tokens
+            if kv_cache.numel() > 0:
+                ops.concat_and_cache_mla(
+                    k_c_normed,
+                    k_pe.squeeze(1),
+                    kv_cache,
+                    attn_metadata.slot_mapping.flatten(),
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    scale=self._k_scale,
+                )
+
+            if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
+                kv_cache = kv_cache.view(current_platform.fp8_dtype())
+        # When use_fused: cache writes happen per-section below
+        # (prefill after normal RoPE, decode after fused RoPE+quant)
 
         # Sparse MLA impls only support forward_mqa (decode-style attention)
         is_sparse_impl = isinstance(self.impl, SparseMLAAttentionImpl)
@@ -577,15 +607,53 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_mha_tokens = q.size(0) - num_mqa_tokens
 
         if num_mha_tokens > 0:
-            self.impl.forward_mha(
-                q[num_mqa_tokens:],
-                k_c_normed[num_mqa_tokens:],
-                k_pe[num_mqa_tokens:],
-                kv_cache,
-                attn_metadata,
-                self._k_scale,
-                output=output[num_mqa_tokens:],
-            )
+            if use_fused:
+                # Fused path: RoPE was NOT applied upfront, apply to
+                # prefill tokens here and write to cache separately.
+                prefill_q = q[num_mqa_tokens:]
+                prefill_k_pe = k_pe[num_mqa_tokens:]
+                prefill_positions = positions[num_mqa_tokens:]
+
+                prefill_q_nope = prefill_q[..., : self.qk_nope_head_dim]
+                prefill_q_pe = prefill_q[..., self.qk_nope_head_dim :]
+                assert self.rotary_emb is not None
+                prefill_q_pe, prefill_k_pe = self.rotary_emb(
+                    prefill_positions, prefill_q_pe, prefill_k_pe
+                )
+                prefill_q = torch.cat([prefill_q_nope, prefill_q_pe], dim=-1)
+
+                # Write prefill tokens to cache (after RoPE)
+                if kv_cache.numel() > 0:
+                    ops.concat_and_cache_mla(
+                        k_c_normed[num_mqa_tokens:],
+                        prefill_k_pe.squeeze(1),
+                        kv_cache,
+                        attn_metadata.slot_mapping[num_mqa_tokens:].flatten(),
+                        kv_cache_dtype=self.kv_cache_dtype,
+                        scale=self._k_scale,
+                    )
+
+                kv_cache_prefill = kv_cache.view(current_platform.fp8_dtype())
+
+                self.impl.forward_mha(
+                    prefill_q,
+                    k_c_normed[num_mqa_tokens:],
+                    prefill_k_pe,
+                    kv_cache_prefill,
+                    attn_metadata,
+                    self._k_scale,
+                    output=output[num_mqa_tokens:],
+                )
+            else:
+                self.impl.forward_mha(
+                    q[num_mqa_tokens:],
+                    k_c_normed[num_mqa_tokens:],
+                    k_pe[num_mqa_tokens:],
+                    kv_cache,
+                    attn_metadata,
+                    self._k_scale,
+                    output=output[num_mqa_tokens:],
+                )
 
         if num_mqa_tokens > 0:
             mqa_q = q[:num_mqa_tokens]
@@ -642,7 +710,35 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Convert from (N, B, L) to (B, N, L)
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
-            if fp8_attention and self.impl.supports_quant_query_input:
+            if use_fused:
+                decode_k_c = k_c_normed[:num_mqa_tokens]
+                decode_k_pe = k_pe[:num_mqa_tokens]
+                decode_positions = positions[:num_mqa_tokens]
+
+                mqa_q, decode_k_c_out, decode_k_pe_out = self.impl._fused_rope_quant(
+                    mqa_ql_nope,
+                    mqa_q_pe,
+                    decode_k_c,
+                    decode_k_pe.squeeze(1),
+                    decode_positions,
+                    self._q_scale,
+                    self._k_scale,
+                )
+
+                # Write decode tokens to cache (K has RoPE applied)
+                if kv_cache.numel() > 0:
+                    ops.concat_and_cache_mla(
+                        decode_k_c_out,
+                        decode_k_pe_out,
+                        kv_cache,
+                        attn_metadata.slot_mapping[:num_mqa_tokens].flatten(),
+                        kv_cache_dtype=self.kv_cache_dtype,
+                        scale=self._k_scale,
+                    )
+
+                kv_cache = kv_cache.view(current_platform.fp8_dtype())
+
+            elif fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
                 assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
                 mqa_q = self._decode_concat_quant_fp8_op(
@@ -862,14 +958,12 @@ def unified_mla_attention(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_name: str,
-    kv_cache_dummy_dep: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    # kv_cache_dummy_dep is not used but accepting it creates a data dependency
-    # that ensures torch.compile preserves ordering between KV cache update and
-    # attention forward.
-    del kv_cache_dummy_dep
     attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
-    output = layer.forward_impl(q, kv_c_normed, k_pe, kv_cache, attn_metadata)
+    output = layer.forward_impl(
+        q, kv_c_normed, k_pe, kv_cache, attn_metadata, positions=positions
+    )
 
     return output
 
@@ -879,7 +973,7 @@ def unified_mla_attention_fake(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_name: str,
-    kv_cache_dummy_dep: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(q).contiguous()
 
@@ -893,56 +987,6 @@ direct_register_custom_op(
 )
 
 
-def unified_mla_kv_cache_update(
-    kv_c_normed: torch.Tensor,
-    k_pe: torch.Tensor,
-    layer_name: str,
-    kv_cache_dtype: str,
-    k_scale: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Returns a dummy that is passed to unified_attention to signal a side effect and
-    the data dependency between them to ensure torch.compile preserves ordering.
-    """
-    forward_context = get_forward_context()
-    attn_layer = forward_context.no_compile_layers[layer_name]
-    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
-
-    slot_mapping = forward_context.slot_mapping
-    assert isinstance(slot_mapping, dict), (
-        f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
-    )
-    layer_slot_mapping = slot_mapping.get(layer_name)
-    if layer_slot_mapping is not None:
-        attn_layer.impl.do_kv_cache_update(
-            kv_c_normed,
-            k_pe,
-            kv_cache,
-            layer_slot_mapping,
-            kv_cache_dtype,
-            k_scale,
-        )
-
-    return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
-
-
-def unified_mla_kv_cache_update_fake(
-    kv_c_normed: torch.Tensor,
-    k_pe: torch.Tensor,
-    layer_name: str,
-    kv_cache_dtype: str,
-    k_scale: torch.Tensor,
-) -> torch.Tensor:
-    return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
-
-
-direct_register_custom_op(
-    op_name="unified_mla_kv_cache_update",
-    op_func=unified_mla_kv_cache_update,
-    fake_impl=unified_mla_kv_cache_update_fake,
-)
-
-
 @maybe_transfer_kv_layer
 def unified_mla_attention_with_output(
     q: torch.Tensor,
@@ -952,12 +996,8 @@ def unified_mla_attention_with_output(
     layer_name: str,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
-    kv_cache_dummy_dep: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
 ) -> None:
-    # kv_cache_dummy_dep is not used but accepting it creates a data dependency
-    # that ensures torch.compile preserves ordering between KV cache update and
-    # attention forward.
-    del kv_cache_dummy_dep
     attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
     layer.forward_impl(
         q,
@@ -968,6 +1008,7 @@ def unified_mla_attention_with_output(
         output=output,
         output_scale=output_scale,
         output_block_scale=output_block_scale,
+        positions=positions,
     )
 
 
@@ -979,7 +1020,7 @@ def unified_mla_attention_with_output_fake(
     layer_name: str,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
-    kv_cache_dummy_dep: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
 ) -> None:
     return
 
@@ -2045,6 +2086,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         kv_b_proj: ColumnParallelLinear,
         indexer: object | None = None,
         q_pad_num_heads: int | None = None,
+        rotary_emb: torch.nn.Module | None = None,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported for MLA")
@@ -2065,6 +2107,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
         self.supports_quant_query_input = True
+        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
+        self.rotary_emb = rotary_emb
 
         # Use flashinfer's optimized concat_mla_k kernel when available.
         # The kernel is optimized for DeepSeek V3 dimensions:
@@ -2682,6 +2726,23 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         else:
             output_prefill = output_prefill[..., : v.shape[-1]].flatten(start_dim=-2)
             output.copy_(output_prefill)
+
+    def _fused_rope_quant(
+        self,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        k_nope: torch.Tensor,
+        k_pe: torch.Tensor,
+        positions: torch.Tensor,
+        q_scale: torch.Tensor,
+        k_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Fused RoPE + FP8 quantization for Q and K.
+
+        Subclasses (e.g., FlashInferMLAImpl) must override with their
+        implementation. The base class raises NotImplementedError.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     def forward_mqa(
