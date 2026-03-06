@@ -37,10 +37,7 @@ def pooling(request: Request) -> OpenAIServingPooling | None:
 async def create_pooling(request: PoolingRequest, raw_request: Request):
     handler = pooling(raw_request)
     if handler is None:
-        base_server = raw_request.app.state.openai_serving_tokenization
-        return base_server.create_error_response(
-            message="The model does not support Pooling API"
-        )
+        raise NotImplementedError("The model does not support Pooling API")
 
     generator = await handler.create_pooling(request, raw_request)
 
