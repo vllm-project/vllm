@@ -55,12 +55,10 @@ def test_dynamic_shapes_compilation(
     evaluate_guards,
 ):
     """Test that all dynamic shapes types compile successfully"""
-    if use_bytecode_hook and shapes_type == DynamicShapesType.UNBACKED:
-        pytest.skip("UNBACKED dynamic shapes require VLLM_USE_BYTECODE_HOOK=0")
-
     if evaluate_guards and shapes_type == DynamicShapesType.UNBACKED:
         pytest.skip("unbacked dynamic shapes do not add guards")
 
+    # TODO is this still a requirement?
     if evaluate_guards and use_aot_compile:
         pytest.skip("evaluate_guards requires use_aot_compile=0")
 
