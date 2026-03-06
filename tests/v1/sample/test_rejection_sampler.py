@@ -14,6 +14,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID,
     RejectionSampler,
+    rejection_sample,
     sample_recovered_tokens,
 )
 from vllm.v1.sample.sampler import Sampler, SamplerOutput
@@ -903,3 +904,115 @@ def test_sample_recovered_tokens(
         device=DEVICE,
     )
     assert torch.equal(recovered_token_ids, ref_recovered_token_ids)
+
+
+################### Tests for Acceptance Threshold #####################
+
+
+def test_acceptance_threshold_full_accept():
+    """With acceptance_threshold=1.0, uniform_probs become 0, so all draft
+    tokens should be accepted regardless of how different the draft and
+    target distributions are."""
+    torch.set_default_device(DEVICE)
+    vocab_size = 100
+    batch_size = 8
+    k = 5  # num speculative tokens per request
+    num_tokens = batch_size * k
+
+    # Create very different draft and target distributions so that without
+    # the threshold most tokens would be rejected.
+    draft_probs = torch.zeros(num_tokens, vocab_size)
+    draft_probs[:, 0] = 1.0  # draft concentrates all mass on token 0
+
+    # Target concentrates mass on token 1 — maximally different from draft.
+    target_logits = torch.full((num_tokens, vocab_size), -100.0)
+    target_logits[:, 1] = 100.0
+
+    draft_token_ids = torch.zeros(num_tokens, dtype=torch.int64)  # all token 0
+    bonus_token_ids = torch.ones(batch_size, 1, dtype=torch.int64)
+
+    temperature = torch.ones(batch_size, dtype=torch.float32, device=DEVICE)
+    sampling_metadata = create_sampling_metadata(
+        all_greedy=False, temperature=temperature
+    )
+
+    spec_tokens = draft_token_ids.reshape(batch_size, k).tolist()
+    metadata = SpecDecodeMetadata.make_dummy(spec_tokens, device=DEVICE)
+
+    output = rejection_sample(
+        draft_token_ids,
+        metadata.num_draft_tokens,
+        metadata.max_spec_len,
+        metadata.cu_num_draft_tokens,
+        draft_probs,
+        target_logits,
+        bonus_token_ids,
+        sampling_metadata,
+        acceptance_threshold=1.0,
+    )
+
+    # Every draft token should be accepted (token 0) plus the bonus token (1).
+    for i in range(batch_size):
+        row = output[i].tolist()
+        # First k tokens are the accepted draft tokens.
+        assert row[:k] == [0] * k, (
+            f"Request {i}: expected all draft tokens accepted, got {row}"
+        )
+        # Bonus token appended after all accepted.
+        assert row[k] == 1, (
+            f"Request {i}: expected bonus token 1 at position {k}, got {row[k]}"
+        )
+
+
+def test_acceptance_threshold_via_rejection_sampler_class():
+    """Test that RejectionSampler properly threads acceptance_threshold
+    through to rejection_sample, accepting all tokens with threshold=1.0."""
+    vocab_size = 50
+    batch_size = 2
+    k = 3
+    num_tokens = batch_size * k
+
+    # Create mismatched distributions.
+    draft_probs = torch.zeros(num_tokens, vocab_size, device=DEVICE)
+    draft_probs[:, 0] = 1.0
+    target_logits = torch.full((num_tokens, vocab_size), -100.0, device=DEVICE)
+    target_logits[:, 1] = 100.0
+
+    draft_token_ids = torch.zeros(num_tokens, dtype=torch.int64, device=DEVICE)
+    bonus_token_ids = torch.ones(batch_size, 1, dtype=torch.int64, device=DEVICE)
+
+    temperature = torch.ones(batch_size, dtype=torch.float32, device=DEVICE)
+    sampling_metadata = create_sampling_metadata(
+        all_greedy=False, temperature=temperature
+    )
+
+    spec_tokens = draft_token_ids.reshape(batch_size, k).tolist()
+
+    # Build the full logits tensor as expected by the forward() method:
+    # [num_tokens + batch_size, vocab_size] where the last batch_size rows
+    # are for bonus logits.
+    bonus_logits = torch.full((batch_size, vocab_size), -100.0, device=DEVICE)
+    bonus_logits[:, 1] = 100.0
+    full_logits = torch.cat([target_logits, bonus_logits], dim=0)
+
+    mock_sampler = Mock(spec=Sampler)
+    mock_sampler.logprobs_mode = "raw_logprobs"
+    mock_sampler.return_value = SamplerOutput(
+        sampled_token_ids=bonus_token_ids, logprobs_tensors=None
+    )
+    sampler = RejectionSampler(mock_sampler, acceptance_threshold=1.0)
+
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(spec_tokens, device=DEVICE)
+
+    output = sampler(
+        spec_decode_metadata,
+        draft_probs=draft_probs,
+        logits=full_logits,
+        sampling_metadata=sampling_metadata,
+    )
+
+    # All draft tokens (0) should be accepted, plus bonus token (1).
+    for i in range(batch_size):
+        row = output.sampled_token_ids[i].tolist()
+        assert row[:k] == [0] * k
+        assert row[k] == 1
