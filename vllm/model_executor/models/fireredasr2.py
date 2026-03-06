@@ -41,7 +41,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.processors.fireredasr2_processor import (
+from vllm.transformers_utils.processors.fireredasr2 import (
     FireRedASR2FeatureExtractor,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape

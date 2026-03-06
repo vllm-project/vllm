@@ -50,7 +50,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.processors.funasr_processor import FunASRFeatureExtractor
+from vllm.transformers_utils.processors.funasr import FunASRFeatureExtractor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
