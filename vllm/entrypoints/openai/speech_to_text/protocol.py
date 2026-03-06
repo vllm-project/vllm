@@ -272,9 +272,9 @@ class TranscriptionRequest(OpenAIBaseModel):
                 data["vllm_xargs"] = json.loads(xargs)
             except json.JSONDecodeError as e:
                 raise VLLMValidationError(
-                    f"Failed to parse vllm_xargs. It must be a valid JSON string. Error: {e}",
+                    f"Failed to parse vllm_xargs. Must be valid JSON: {e}",
                     parameter="vllm_xargs",
-                )
+                ) from e
 
         return data
 
