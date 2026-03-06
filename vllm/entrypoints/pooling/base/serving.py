@@ -92,6 +92,7 @@ class PoolingServing:
             model_name=model_name,
             request_id=request_id,
         )
+
         self._validate_request(ctx)
         self._maybe_get_adapters(ctx)
         await self._preprocess(ctx)

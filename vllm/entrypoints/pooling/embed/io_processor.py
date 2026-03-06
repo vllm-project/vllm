@@ -8,7 +8,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
 )
-from vllm.inputs.data import ProcessorInputs, PromptType, TokensPrompt
+from vllm.inputs.data import ProcessorInputs, PromptType, token_inputs
 from vllm.outputs import PoolingRequestOutput
 from vllm.utils.collection_utils import chunk_list
 
@@ -79,7 +79,9 @@ class EmbedIOProcessor(PoolingIOProcessor):
         max_model_len = self.model_config.max_model_len
         chunked_engine_inputs: list[EngineInputs] = []
         for prompt_idx, engine_prompt in enumerate(engine_prompts):
-            prompt_token_ids = engine_prompt.get("prompt_token_ids", None)
+            prompt_token_ids: list[int] | None = engine_prompt.get(
+                "prompt_token_ids", None
+            )
             if prompt_token_ids is None:
                 raise NotImplementedError(
                     "Long Text Embedding with Chunked Processing does "
@@ -91,7 +93,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
             ):
                 chunked_engine_inputs.append(
                     EngineInputs(
-                        engine_prompt=TokensPrompt(prompt_token_ids=chunk_tokens),
+                        engine_prompt=token_inputs(prompt_token_ids=chunk_tokens),
                         request_id_item=f"{request_id}-prompt-{prompt_idx}-chunk-{chunk_idx}",
                     )
                 )
