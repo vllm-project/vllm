@@ -124,6 +124,10 @@ ENV UCX_HOME=/usr/local/ucx
 ENV RIXL_HOME=/usr/local/rixl
 ENV RIXL_BENCH_HOME=/usr/local/rixl_bench
 
+# Temporarily remove sccache from PATH for RIXL/UCX builds
+# This avoids compiler detection issues with autotools and Meson
+RUN mv /usr/bin/sccache /usr/bin/sccache.bak 2>/dev/null || true
+
 # RIXL build system dependences and RDMA support
 RUN apt-get -y update && apt-get -y install autoconf libtool pkg-config \
     libgrpc-dev \
