@@ -157,7 +157,7 @@ def run_evaluation(
     [
         ("openai/whisper-large-v3", 12.744980),
         # TODO (ekagra): add final model ckpt here
-        ("/host/engines/vllm/audio/2b-release", 11.73),
+        # ("/host/engines/vllm/audio/2b-release", 11.73),
     ],
 )
 # Original dataset is 20GB+ in size, hence we use a pre-filtered slice.
