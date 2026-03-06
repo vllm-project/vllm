@@ -20,10 +20,10 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
-    GenerationError,
     StreamOptions,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.exceptions import GenerationError
 from vllm.logger import current_formatter_type, init_logger
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
