@@ -27,6 +27,20 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 2
 
+  - label: ":docker: Build XPU image"
+    key: image-build-xpu
+    depends_on: []
+    commands:
+    - .buildkite/image_build/image_build_xpu.sh $REGISTRY $REPO $BUILDKITE_COMMIT
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+
   - label: ":docker: Build HPU image"
     soft_fail: true
     depends_on: []
