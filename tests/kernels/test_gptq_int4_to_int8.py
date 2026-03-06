@@ -33,17 +33,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.scalar_type import scalar_types
 
-# oneDNN ops: may not be available outside Docker / CPU build
-_has_onednn = False
-try:
-    from vllm import _custom_ops as ops
-    from vllm.platforms import current_platform
-    if current_platform.is_cpu():
-        _has_onednn = True
-except Exception:
-    pass
+from vllm import _custom_ops as ops
+from vllm._custom_ops import _supports_onednn
 
-requires_onednn = pytest.mark.skipif(not _has_onednn,reason="Requires vLLM CPU build with oneDNN C++ extensions")
+requires_onednn = pytest.mark.skipif(
+    not _supports_onednn,
+    reason="Requires vLLM CPU build with oneDNN C++ extensions",
+)
 
 
 

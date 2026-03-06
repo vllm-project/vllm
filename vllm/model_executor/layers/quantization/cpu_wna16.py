@@ -7,6 +7,7 @@ import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import PretrainedConfig
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
@@ -21,6 +22,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
+    pack_cols,
     unpack_cols,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -227,7 +229,54 @@ class CPUAWQLinearMethod(LinearMethodBase):
         layer.register_parameter("scales", scales)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # lyt_debug_A1 no more re-pack to int4; do dequant -> re-quantize int8 instead
+        if envs.VLLM_CPU_WOQ_INT8_MODE:
+            self._process_weights_int8(layer)
+        else:
+            self._process_weights_woq(layer)
+
+    def _process_weights_woq(self, layer: torch.nn.Module) -> None:
+        """Original WOQ int4 repack path."""
+        packed_weight = layer.qweight.data
+        packed_zeros = layer.qzeros.data
+        group_num = packed_zeros.size(0)
+        bits = self.quant_config.weight_bits
+        pack_factor = int(self.quant_config.pack_factor)
+        input_size, packed_output_size = packed_weight.size()
+        output_size = packed_output_size * pack_factor
+        isa_hint = _get_isa_hint(layer.scales.dtype)
+        layer.isa_hint = isa_hint
+
+        interleave_map = (0, 4, 1, 5, 2, 6, 3, 7)
+        weight = unpack_cols(
+            packed_weight, bits, input_size, output_size,
+        )
+        zeros = unpack_cols(
+            packed_zeros, bits, group_num, output_size,
+        )
+        weight = (
+            weight.view(input_size, -1, pack_factor)[:, :, interleave_map]
+            .reshape(input_size, output_size)
+            .contiguous()
+        )
+        zeros = (
+            zeros.view(group_num, -1, pack_factor)[:, :, interleave_map]
+            .reshape(group_num, output_size)
+            .contiguous()
+        )
+
+        zeros = pack_cols(zeros, bits, group_num, output_size).contiguous()
+        weight = pack_cols(weight, bits, input_size, output_size)
+        weight = (
+            weight.view(input_size, -1, 16 // pack_factor)
+            .permute(1, 0, 2)
+            .reshape(-1, input_size * 16 // pack_factor)
+            .contiguous()
+        )
+        layer.qweight.data = weight
+        layer.qzeros.data = zeros
+
+    def _process_weights_int8(self, layer: torch.nn.Module) -> None:
+        """Int8 oneDNN path: dequant int4 -> float -> requant int8 -> handler."""
         packed_weight = layer.qweight.data
         packed_zeros = layer.qzeros.data
         group_num = packed_zeros.size(0)
@@ -237,29 +286,19 @@ class CPUAWQLinearMethod(LinearMethodBase):
         output_size = packed_output_size * pack_factor
         group_size = input_size // group_num
 
-        print(f'lyt_debug_A1 process_weights_after_loading ENTER: '
+        print(f'lyt_debug_A1 _process_weights_int8 ENTER: '
             f'input_size(K)={input_size}, output_size(N)={output_size}, '
             f'group_num={group_num}, group_size={group_size}, '
             f'bits={bits}, pack_factor={pack_factor}')
-        print(f'lyt_debug_A1 packed_weight shape: {packed_weight.shape}, '
-            f'packed_zeros shape: {packed_zeros.shape}, scales shape: {layer.scales.shape}')
 
-        # lyt_debug: Unpack int4 values from packed int32 
         interleave_map = (0, 4, 1, 5, 2, 6, 3, 7)
         weight_int4 = unpack_cols(
-            packed_weight,
-            bits,
-            input_size,
-            output_size,
+            packed_weight, bits, input_size, output_size,
         )
         zeros_int4 = unpack_cols(
-            packed_zeros,
-            bits,
-            group_num,
-            output_size,
+            packed_zeros, bits, group_num, output_size,
         )
 
-        # lyt_debug: Reverse AWQ interleave orderring
         weight_int4 = (
             weight_int4.view(input_size, -1, pack_factor)[:, :, interleave_map]
             .reshape(input_size, output_size)
@@ -271,64 +310,37 @@ class CPUAWQLinearMethod(LinearMethodBase):
             .contiguous()
         )
 
-        print(f'lyt_debug_A1 after unpack+de-interleave: '
-              f'weight_int4 shape={weight_int4.shape}, '
-              f'zeros_int4 shape={zeros_int4.shape}')
-
-        # lyt_debug Dequant AWQ int4 -> float32 (A2)
         float_weight = _dequant_awq_to_float(
             weight_int4, zeros_int4, layer.scales.data, group_size
         )
 
-        # lyt_debug Re-quantize float32 -> int8 per-channel (A3)
         weight_int8, channel_scale = _requantize_to_int8(float_weight)
 
-        print(f'lyt_debug_A1 final weight_int8 shape: {weight_int8.shape}, '
-              f'dtype: {weight_int8.dtype}')
-        print(f'lyt_debug_A1 final channel_scale shape: {channel_scale.shape}, '
-              f'dtype: {channel_scale.dtype}')
+        channel_scale_2d = channel_scale.unsqueeze(0)
 
-        # lyt_debug_A4 create oneDNN handler for int8 GEMM, replaces old int4 path
-        channel_scale_2d = channel_scale.unsqueeze(0)  # [1, N] for oneDNN
-
-        # AZP adjustment: needed for dynamic quantization compensation
-        # Same formula as scaled_mm/cpu.py:118-119
-        azp_adj = weight_int8.sum(dim=0, keepdim=True, dtype=torch.float32)
-        azp_adj = azp_adj * channel_scale_2d
-
-        # lyt_debug_A4 oneDNN requires column-major weight: stride(0)==1
-        # Convert [K, N] row-major → [K, N] column-major via t().contiguous().t()
+        # oneDNN requires column-major weight: stride(0)==1
         weight_int8 = weight_int8.t().contiguous().t()
 
         print(f'lyt_debug_A4 creating oneDNN handler: '
             f'weight_int8 shape={weight_int8.shape}, stride={weight_int8.stride()}, '
             f'channel_scale_2d shape={channel_scale_2d.shape}')
-        print(f'lyt_debug_A4 azp_adj shape={azp_adj.shape}, '
-              f'range=[{azp_adj.min().item():.4f}, {azp_adj.max().item():.4f}]')
 
         layer.dnnl_handler = ops.create_onednn_scaled_mm(
-            weight_int8,                # [K, N] int8, column-major
-            channel_scale_2d,           # [1, N] float32
-            torch.get_default_dtype(),  # output type (typically bf16)
-            True,                       # dynamic_act_quant
-            False,                      # use_azp (symmetric input)
-            32,                         # primitive_cache_size
+            weight_int8,
+            channel_scale_2d,
+            torch.get_default_dtype(),
+            True,
+            False,
+            32,
         )
-        layer.azp_adj = torch.nn.Parameter(azp_adj, requires_grad=False)
 
         print(f'lyt_debug_A4 oneDNN handler created: '
             f'handler.k={layer.dnnl_handler.k}, handler.n={layer.dnnl_handler.n}')
 
-        # lyt_debug_A4 clean up: weight is prepacked in d'nnnn'l_handler,release old int4 params to save memory
         del weight_int8, float_weight
         layer.qweight = None
         layer.qzeros = None
         layer.scales = None
-
-        print(f'lyt_debug_A4 process_weights_after_loading DONE. '
-            f'int8 oneDNN path ready, old int4 params cleaned up.')
-
-    _apply_debug_logged = False
 
     def apply(
         self,
@@ -336,14 +348,39 @@ class CPUAWQLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # lyt_debug_A5 use oneDNN int8 GEMM instead of cpu_gemm_wna16 int4
+        if envs.VLLM_CPU_WOQ_INT8_MODE:
+            return self._apply_int8(layer, x, bias)
+        return self._apply_woq(layer, x, bias)
+
+    def _apply_woq(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Original WOQ int4 GEMM path."""
+        x = ops.cpu_gemm_wna16(
+            input=x,
+            q_weight=layer.qweight,
+            scales=layer.scales,
+            zeros=layer.qzeros,
+            g_idx=None,
+            bias=bias,
+            pack_factor=8,
+            isa_hint=layer.isa_hint,
+        )
+        return x
+
+    def _apply_int8(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Int8 oneDNN GEMM path."""
         x_shape = x.shape
         x_2d = x.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else x
 
-        if not CPUAWQLinearMethod._apply_debug_logged:
-            print(f'lyt_debug_A5 apply ENTER (first call): x shape={x.shape}, dtype={x.dtype}')
-
-        # Dynamic per-token symmetric quantization: bf16 → int8
         x_q, x_s, _ = ops.onednn_scaled_int8_quant(x_2d, None, None, True)
 
         m = x_2d.size(0)
@@ -355,18 +392,12 @@ class CPUAWQLinearMethod(LinearMethodBase):
             x_q,
             out,
             x_s,
-            None,           # input_zp (symmetric → no zero point)
-            layer.azp_adj,  # AZP adjustment
+            None,
+            None,
             bias,
         )
 
         out = out.reshape(x_shape[:-1] + (n,)) if len(x_shape) > 2 else out
-
-        if not CPUAWQLinearMethod._apply_debug_logged:
-            print(f'lyt_debug_A5 apply DONE (first call): '
-                  f'out shape={out.shape}, dtype={out.dtype}')
-            CPUAWQLinearMethod._apply_debug_logged = True
-
         return out
 
 
