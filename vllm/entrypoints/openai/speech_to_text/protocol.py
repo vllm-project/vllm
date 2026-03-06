@@ -242,11 +242,6 @@ class TranscriptionRequest(OpenAIBaseModel):
                 parameter=invalid_param,
             )
 
-        # Parse vllm_xargs from JSON string (form data sends it as a string)
-        xargs = data.get("vllm_xargs")
-        if isinstance(xargs, str):
-            data["vllm_xargs"] = json.loads(xargs)
-
         return data
 
 

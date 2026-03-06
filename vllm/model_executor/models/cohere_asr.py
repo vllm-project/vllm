@@ -2279,7 +2279,6 @@ class CohereASRForConditionalGeneration(
         task_type: Literal["transcribe", "translate"],
         request_prompt: str,
         to_language: str | None,
-        vllm_xargs: dict[str, str | int | float | bool] | None = None,
     ) -> PromptType:
         if language is None:
             raise ValueError(
@@ -2289,7 +2288,7 @@ class CohereASRForConditionalGeneration(
         # NOTE: this function is used only by online inference and not offline inference
         # CohereASR doesnt have encoder prompt
         language_tag = f"<|{language}|><|{language}|>"
-        pnc = (vllm_xargs or {}).get("pnc", True)
+        pnc = True # TODO: ekagra make this configurable later
         pnc_tag = "<|pnc|>" if pnc else "<|nopnc|>"
         default_prompt = (
             f"<|startofcontext|><|startoftranscript|>"

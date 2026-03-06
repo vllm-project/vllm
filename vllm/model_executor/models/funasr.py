@@ -893,7 +893,6 @@ class FunASRForConditionalGeneration(
         task_type: Literal["transcribe", "translate"],
         request_prompt: str,
         to_language: str | None,
-        vllm_xargs: dict[str, str | int | float | bool] | None = None,
     ) -> PromptType:
         if language is None:
             raise ValueError(
