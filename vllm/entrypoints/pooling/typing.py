@@ -62,7 +62,7 @@ AnyPoolingResponse: TypeAlias = (
 @dataclass
 class EngineInputs:
     engine_prompt: ProcessorInputs
-    request_id_item: str | None = None
+    request_id_prompt: str | None = None
 
 
 PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)

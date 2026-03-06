@@ -120,10 +120,12 @@ class PoolingServing:
 
         for i, engine_input in enumerate(ctx.engine_inputs):
             engine_prompt = engine_input.engine_prompt
-            request_id_item = engine_input.request_id_item or f"{ctx.request_id}-{i}"
+            request_id_prompt = (
+                engine_input.request_id_prompt or f"{ctx.request_id}-{i}"
+            )
 
             self._log_inputs(
-                request_id_item,
+                request_id_prompt,
                 engine_prompt,
                 params=pooling_params,
                 lora_request=ctx.lora_request,
@@ -132,7 +134,7 @@ class PoolingServing:
             generator = self.engine_client.encode(
                 engine_prompt,
                 pooling_params,
-                request_id_item,
+                request_id_prompt,
                 lora_request=ctx.lora_request,
                 trace_headers=trace_headers,
                 priority=getattr(ctx.request, "priority", 0),

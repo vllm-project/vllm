@@ -110,7 +110,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 chunked_engine_inputs.append(
                     EngineInputs(
                         engine_prompt=token_inputs(prompt_token_ids=chunk_tokens),
-                        request_id_item=f"{request_id}-prompt-{prompt_idx}-chunk-{chunk_idx}",
+                        request_id_prompt=f"{request_id}-prompt-{prompt_idx}-chunk-{chunk_idx}",
                     )
                 )
         ctx.engine_inputs = chunked_engine_inputs
