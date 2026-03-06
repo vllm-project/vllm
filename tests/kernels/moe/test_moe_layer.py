@@ -675,7 +675,7 @@ def _test_loop(
     shared_experts_config: SharedExpertsConfig | None,
     reduce_results: bool,
     test_body_fn: Callable,
-    **test_body_kwargs,
+    baseline_output: torch.Tensor | None = None,
 ) -> None:
     """Generic test loop that sets up environment and delegates to test_body_fn.
 
@@ -786,7 +786,7 @@ def _test_loop(
             top_k=top_k,
             shared_experts=shared_experts,
             reduce_results=reduce_results,
-            **test_body_kwargs,
+            baseline_output=baseline_output,
         )
 
     # Common tolerance logic
@@ -947,7 +947,7 @@ def test_moe_layer(
         shared_experts_config,
         reduce_results,
         _test_body_regular,
-        baseline_output=baseline_output,
+        baseline_output,
     )
 
 
