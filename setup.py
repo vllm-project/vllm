@@ -741,7 +741,22 @@ class precompiled_wheel_utils:
                     "https://api.github.com/repos/vllm-project/vllm/commits/main",
                 ]
             ).decode("utf-8")
-            upstream_main_commit = json.loads(resp_json)["sha"]
+            # May reach API rate limit if there is no sha return
+            if "sha" in (resp_obj := json.loads(resp_json)):
+                upstream_main_commit = resp_obj["sha"]
+            else:
+                upstream_main_commit = (
+                    subprocess.check_output(
+                        [
+                            "git",
+                            "ls-remote",
+                            "https://github.com/vllm-project/vllm",
+                            "main",
+                        ]
+                    )
+                    .decode("utf-8")
+                    .split()[0]
+                )
             print(f"Upstream main branch latest commit: {upstream_main_commit}")
 
             # In Docker build context, .git may be immutable or missing.
