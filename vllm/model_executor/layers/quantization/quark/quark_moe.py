@@ -34,7 +34,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    CK_MXFP4_MOE_DIM_ALIGNMENT,
     _swizzle_mxfp4,
     maybe_roundup_mxfp4_fused_moe_sizes,
 )
@@ -180,7 +179,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
-            torch.empty(
+            torch.zeros(
                 num_experts,
                 2 * intermediate_size_per_partition,
                 hidden_size,
@@ -192,7 +191,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         w2_weight = torch.nn.Parameter(
-            torch.empty(
+            torch.zeros(
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition,
@@ -525,7 +524,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
     ):
         params_dtype = torch.uint32
         w13_weight = torch.nn.Parameter(
-            torch.empty(
+            torch.zeros(
                 num_experts,
                 2 * intermediate_size_per_partition,
                 hidden_size // 8,  # INT32 packing for W4
@@ -534,7 +533,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
             requires_grad=False,
         )
         w2_weight = torch.nn.Parameter(
-            torch.empty(
+            torch.zeros(
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition // 8,  # INT32 packing for W4
@@ -741,32 +740,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             or not self.use_rocm_aiter_moe
         )
 
-        # CK's pre-compiled MXFP4 MoE GEMM kernel instances have dimension
-        # alignment requirements. When violated (e.g. MiniMax-M2.1 with
-        # TP=4 yields intermediate_size_per_partition=384), AITER raises:
-        # "device_gemm ... does not support this GEMM problem".
-        # Fall back to emulation in that case.
-        if (
-            not self.emulate
-            and self.use_rocm_aiter_moe
-            and self.ocp_mx_scheme is not None
-            and self.ocp_mx_scheme.startswith("w_mxfp4")
-            and moe.intermediate_size_per_partition % CK_MXFP4_MOE_DIM_ALIGNMENT != 0
-        ):
-            logger.warning_once(
-                "AITER CK MXFP4 MoE GEMM does not support "
-                "intermediate_size_per_partition=%d (not a multiple of %d). "
-                "This typically happens when intermediate_size / "
-                "tensor_parallel_size produces an incompatible dimension. "
-                "Falling back to emulation mode. To avoid this overhead, "
-                "use a compatible tensor_parallel_size or set "
-                "VLLM_ROCM_USE_AITER_MOE=0.",
-                moe.intermediate_size_per_partition,
-                CK_MXFP4_MOE_DIM_ALIGNMENT,
-            )
-            self.use_rocm_aiter_moe = False
-            self.emulate = True
-
         if self.emulate:
             logger.warning_once(
                 f"The current mode (supports_mx={current_platform.supports_mx()}, "
@@ -833,7 +806,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
-            torch.empty(
+            torch.zeros(
                 num_experts,
                 2 * intermediate_size_per_partition,
                 self.get_packed_dim(hidden_size, self.weight_dtype),
@@ -846,7 +819,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         w2_weight = torch.nn.Parameter(
-            torch.empty(
+            torch.zeros(
                 num_experts,
                 hidden_size,
                 self.get_packed_dim(intermediate_size_per_partition, self.weight_dtype),

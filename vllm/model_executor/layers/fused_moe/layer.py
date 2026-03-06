@@ -885,9 +885,12 @@ class FusedMoE(CustomOp):
         # Only narrow if the loaded_weight is not a scalar (0-dim tensor)
         # and we're not loading the full weight
         if not load_full and loaded_weight.ndim > 0:
-            loaded_weight = loaded_weight.narrow(
-                shard_dim, shard_size * tp_rank, shard_size
-            )
+            # Handle padding: loaded_weight might be smaller than shard_size on last
+            # TP rank
+            start_offset = shard_size * tp_rank
+            available = loaded_weight.shape[shard_dim] - start_offset
+            narrow_size = min(shard_size, available)
+            loaded_weight = loaded_weight.narrow(shard_dim, start_offset, narrow_size)
         # Narrow parameter and load.
         # w1, gate_proj: Load into first logical weight of w13.
         if shard_id == "w1":
@@ -896,6 +899,13 @@ class FusedMoE(CustomOp):
         else:
             assert shard_id == "w3"
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
+
+        # Handle padding: if loaded_weight is smaller than expert_data (can happen
+        # on last TP shard with padding), copy to top-left corner
+        if expert_data.shape != loaded_weight.shape:
+            expert_data = expert_data[
+                : loaded_weight.shape[0], : loaded_weight.shape[1]
+            ]
         expert_data.copy_(loaded_weight)
 
     def _load_w2(
@@ -913,10 +923,19 @@ class FusedMoE(CustomOp):
         # Only narrow if the loaded_weight is not a scalar (0-dim tensor)
         # and we're not loading the full weight
         if not load_full and loaded_weight.ndim > 0:
-            loaded_weight = loaded_weight.narrow(
-                shard_dim, shard_size * tp_rank, shard_size
-            )
+            # Handle padding: loaded_weight might be smaller than shard_size on last
+            # TP rank
+            start_offset = shard_size * tp_rank
+            available = loaded_weight.shape[shard_dim] - start_offset
+            narrow_size = min(shard_size, available)
+            loaded_weight = loaded_weight.narrow(shard_dim, start_offset, narrow_size)
         # w2, down_proj: Load into only logical weight of w2.
+        # Handle padding: if loaded_weight is smaller than expert_data (can happen
+        # on last TP shard with padding), copy to top-left corner
+        if expert_data.shape != loaded_weight.shape:
+            expert_data = expert_data[
+                : loaded_weight.shape[0], : loaded_weight.shape[1]
+            ]
         expert_data.copy_(loaded_weight)
 
     def _load_single_value(
