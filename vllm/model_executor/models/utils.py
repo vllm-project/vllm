@@ -16,6 +16,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    parallel_state,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -875,3 +876,29 @@ def get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
     if feature_layer_index < 0:
         return num_hidden_layers + feature_layer_index + 1
     return feature_layer_index
+
+
+def apply_rope_input_validation(x, freqs_cis):
+    assert x.ndim == freqs_cis.ndim + 1, (x.shape, freqs_cis.shape)
+    assert x.shape[:-2] == freqs_cis.shape[:-1], (x.shape, freqs_cis.shape)
+    assert x.shape[-1] == 2 * freqs_cis.shape[-1], (x.shape, freqs_cis.shape)
+    assert freqs_cis.dtype == torch.complex64, freqs_cis.dtype
+
+
+def all_gather_interleave(local_tensor: torch.Tensor, hidden_size: int, tp_size: int):
+    """All-gather the input tensor interleavely across model parallel group."""
+    import torch.distributed as dist
+
+    gathered_tensors = [torch.zeros_like(local_tensor) for _ in range(tp_size)]
+    dist.all_gather(
+        gathered_tensors, local_tensor, group=parallel_state.get_tp_group().device_group
+    )
+
+    gathered_tensors_split = [
+        torch.split(tensor, hidden_size // tp_size, -1) for tensor in gathered_tensors
+    ]
+    ordered_tensors = [
+        tensor for pair in zip(*gathered_tensors_split) for tensor in pair
+    ]
+    result_tensor = torch.cat(ordered_tensors, dim=-1)
+    return result_tensor

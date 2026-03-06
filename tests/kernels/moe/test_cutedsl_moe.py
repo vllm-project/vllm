@@ -20,6 +20,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
     flashinfer_cutedsl_moe_masked,
 )
+from vllm.model_executor.layers.quantization.utils import convert_swizzled_to_linear
 from vllm.utils.flashinfer import (
     flashinfer_cutedsl_grouped_gemm_nt_masked as cutedsl_gmm_masked,
 )
@@ -33,16 +34,6 @@ kE2M1ToFloat = torch.tensor(
 
 FLOAT8_E4M3_MAX = 448.0
 FLOAT4_E2M1_MAX = 6.0
-
-
-def convert_swizzled_to_linear(a_sf_swizzled: torch.Tensor, m, k, block_size):
-    m_tiles = (m + 128 - 1) // 128
-    f = block_size * 4
-    k_tiles = (k + f - 1) // f
-    tmp = torch.reshape(a_sf_swizzled, (1, m_tiles, k_tiles, 32, 4, 4))
-    tmp = torch.permute(tmp, (0, 1, 4, 3, 2, 5))
-    out = tmp.reshape(m_tiles * 128, k_tiles * f // block_size)
-    return out[0:m, 0:k]
 
 
 def dequantize_nvfp4_to_dtype(
