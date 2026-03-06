@@ -76,4 +76,3 @@ See the [NCCL](nccl.md) and [IPC](ipc.md) pages for backend-specific trainer API
 ## Extending the System
 
 The weight transfer system is designed to be extensible. You can implement custom backends by subclassing `WeightTransferEngine` and registering them with the factory. See the [Base Class](base.md) page for details.
-

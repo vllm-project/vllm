@@ -4,8 +4,6 @@ The weight transfer system is built on an abstract base class that defines the c
 
 ## WeightTransferEngine
 
-::: vllm.distributed.weight_transfer.base.WeightTransferEngine
-
 The `WeightTransferEngine` is a generic abstract class parameterized by two dataclass types:
 
 - **`TInitInfo`** (extends `WeightTransferInitInfo`): Backend-specific initialization parameters.
