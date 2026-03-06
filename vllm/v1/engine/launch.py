@@ -119,6 +119,9 @@ class LaunchEngineClient(EngineClient):
     async def is_paused(self) -> bool:
         return False
 
+    def shutdown(self, timeout: float | None = None) -> None:
+        pass
+
     async def encode(
         self,
         prompt: PromptType | ProcessorInputs,
