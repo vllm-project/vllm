@@ -1055,6 +1055,72 @@ def per_token_group_quant_fp8_packed_for_deepgemm(
     return x_q, x_s_packed
 
 
+def silu_mul_per_token_group_quant_fp8_packed_for_deepgemm(
+    x: torch.Tensor,
+    group_size: int,
+    eps: float = 1e-10,
+    out_q: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused SiLU+mul + FP8 per-token-group quantization for DeepGEMM.
+
+    Input ``x`` has shape ``[mn, 2*N]`` where the first ``N`` columns are gate
+    projections and the second ``N`` columns are up projections.  The kernel
+    computes ``SiLU(gate) * up`` and quantizes to FP8 with UE8M0-packed scales
+    in a single launch, avoiding the intermediate activation tensor.
+
+    Returns:
+        (x_q, x_s_packed)
+            x_q: FP8 activations with shape ``[mn, N]``.
+            x_s_packed: Int32 tensor with logical shape
+                        ``[mn, ceil(num_groups_per_row / 4)]``, laid out with
+                        TMA-aligned stride along the packed-K dimension.
+    """
+    assert x.ndim == 2, f"Expected 2D input, got {x.ndim}D"
+    assert x.shape[-1] % 2 == 0, "Last dim must be even (gate || up)"
+    N = x.shape[-1] // 2
+    mn = x.shape[0]
+
+    assert N % group_size == 0, f"N={N} must be divisible by group_size={group_size}"
+
+    dtype = current_platform.fp8_dtype()
+    finfo = torch.finfo(dtype)
+    fp8_min, fp8_max = finfo.min, finfo.max
+
+    num_groups_per_row = N // group_size
+    k_num_packed_sf_k = (num_groups_per_row + 3) // 4
+    tma_aligned_mn = ((mn + 3) // 4) * 4
+
+    x_s_packed = torch.empty_strided(
+        (mn, k_num_packed_sf_k),
+        (1, tma_aligned_mn),
+        device=x.device,
+        dtype=torch.int32,
+    )
+
+    assert current_platform.is_cuda(), (
+        "silu_mul_per_token_group_quant_fp8_packed_for_deepgemm is only "
+        "valid on CUDA platforms using DeepGEMM."
+    )
+
+    x_contiguous = x.contiguous()
+    if out_q is not None:
+        x_q = out_q
+    else:
+        x_q = torch.empty((mn, N), device=x.device, dtype=dtype)
+
+    torch.ops._C.silu_and_mul_fp8_quant_packed(
+        x_contiguous,
+        x_q,
+        x_s_packed,
+        group_size,
+        eps,
+        fp8_min,
+        fp8_max,
+    )
+
+    return x_q, x_s_packed
+
+
 @triton.jit
 def _w8a8_triton_block_scaled_mm(
     # Pointers to inputs and output

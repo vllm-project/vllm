@@ -10,6 +10,10 @@ import torch
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     persistent_masked_m_silu_mul_quant,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8_packed_for_deepgemm,
+    silu_mul_per_token_group_quant_fp8_packed_for_deepgemm,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT, has_deep_gemm
 from vllm.utils.math_utils import cdiv, round_up
@@ -292,3 +296,57 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
                     y_s[e, :nt],
                     ref_y_s[e, :nt],
                 )
+
+
+FUSED_PACKED_CASES = [
+    # (mn, N) where N is the half-width (output dim), input is [mn, 2*N]
+    (4, 128),
+    (8, 256),
+    (16, 128 * 3),
+    (32, 128 * 4),
+    (64, 768),
+    (128, 7168),
+    (256, 7168),
+    (512, 7168),
+    (1, 128),
+    (3, 256),
+    (7, 128 * 5),
+]
+
+
+@pytest.mark.parametrize("mn,N", FUSED_PACKED_CASES)
+@pytest.mark.skipif(
+    not (current_platform.cuda() and current_platform.is_device_family(100)),
+    reason="DeepGemm with packed UE8M0 scales is only supported on Blackwell GPUs.",
+)
+@torch.inference_mode()
+def test_silu_mul_fp8_quant_packed_for_deepgemm(mn: int, N: int):
+    group_size = 128
+    set_random_seed(42)
+
+    x = torch.randn((mn, 2 * N), dtype=torch.bfloat16, device="cuda")
+
+    # -- Reference (two-step) --
+    act_out = torch.empty((mn, N), dtype=torch.bfloat16, device="cuda")
+    torch.ops._C.silu_and_mul(act_out, x)
+    ref_q, ref_s = per_token_group_quant_fp8_packed_for_deepgemm(act_out, group_size)
+
+    # -- Fused kernel --
+    fused_q, fused_s = silu_mul_per_token_group_quant_fp8_packed_for_deepgemm(
+        x, group_size
+    )
+
+    # Compare quantized activations
+    torch.testing.assert_close(
+        fused_q.to(torch.float32),
+        ref_q.to(torch.float32),
+    )
+
+    # Compare UE8M0-packed scales (int32) via uint8 view
+    num_groups = N // group_size
+    fused_s_bytes = as_uint8(fused_s)
+    ref_s_bytes = as_uint8(ref_s)
+    torch.testing.assert_close(
+        fused_s_bytes[:, :num_groups],
+        ref_s_bytes[:, :num_groups],
+    )
