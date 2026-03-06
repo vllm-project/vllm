@@ -5418,7 +5418,6 @@ class GPUModelRunner(
         with self._freeze_gc(), graph_capture(device=self.device):
             shared_memory_estimate = {}
             per_graph_estimate = {}
-            piecewise_graphs_captured = 0
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
 
@@ -5450,12 +5449,6 @@ class GPUModelRunner(
 
                 shared_memory_estimate[mode] = first_capture
                 per_graph_estimate[mode] = per_graph * (len(descs) - 1)
-                if mode == CUDAGraphMode.PIECEWISE:
-                    # Track all PIECEWISE graphs captured (including inner layers)
-                    piecewise_graphs_captured = (
-                        compilation_counter.num_cudagraph_captured
-                        - saved_num_cudagraph_captured
-                    )
 
                 logger.debug(
                     "Estimated %s CUDA graph memory: "
@@ -5473,11 +5466,7 @@ class GPUModelRunner(
             self.model.cudagraph_wrapper.graph_pool = original_pool
         self.maybe_remove_all_loras(self.lora_config)
         self._cleanup_profiling_kv_cache()
-
-        # Preserve only PIECEWISE count (FULL will be recaptured in capture_model)
-        compilation_counter.num_cudagraph_captured = (
-            saved_num_cudagraph_captured + piecewise_graphs_captured
-        )
+        compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
 
         # FULL and PIECEWISE graphs share the global pool at runtime and are
         # never replayed concurrently, so the pool overlays their memory.
