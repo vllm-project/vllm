@@ -3,11 +3,11 @@
 
 import os
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 import torch
 from pydantic import Field, field_validator, model_validator
-from torch.distributed import ProcessGroup, ReduceOp
+from torch.distributed import ProcessGroup, ReduceOp, Store
 from typing_extensions import Self
 
 import vllm.envs as envs
@@ -234,8 +234,14 @@ class ParallelConfig:
     """distributed node rank for multi-node distributed 
     inference when distributed_executor_backend is mp."""
     nnodes: int = 1
-    """num of nodes for multi-node distributed 
+    """num of nodes for multi-node distributed
     inference when distributed_executor_backend is mp."""
+
+    distributed_timeout_seconds: int | None = None
+    """Timeout in seconds for distributed operations (e.g., init_process_group).
+    If set, this value is passed to torch.distributed.init_process_group as the
+    timeout parameter. If None, PyTorch's default timeout is used (600s for NCCL).
+    Increase this for multi-node setups where model downloads may be slow."""
 
     world_size: int = Field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
@@ -507,7 +513,17 @@ class ParallelConfig:
     def get_next_stateless_eplb_group_port(self) -> list[int]:
         return self._stateless_eplb_group_port_list.pop()
 
-    def stateless_init_dp_group(self, return_store: bool = False) -> ProcessGroup:
+    @overload
+    def stateless_init_dp_group(
+        self, return_store: Literal[False] = ...
+    ) -> ProcessGroup: ...
+    @overload
+    def stateless_init_dp_group(
+        self, return_store: Literal[True] = ...
+    ) -> tuple[ProcessGroup, Store]: ...
+    def stateless_init_dp_group(
+        self, return_store: bool = False
+    ) -> ProcessGroup | tuple[ProcessGroup, Store]:
         # NOTE: In high-concurrency scenarios multiple processes
         # can pick the same (currently free) port through a race
         # condition when calling `get_open_port()`. When the first

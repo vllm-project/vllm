@@ -106,3 +106,7 @@ imagehash==4.3.2
 bitsandbytes==0.49.2
 # Examples (tensorizer) tests
 tensorizer==2.10.1
+# Multi-modal models test (`allendou/FireRedASR2-LLM-vllm`)
+kaldi-native-fbank==1.22.3
+# Pinning numpy version
+numpy==2.2.6
