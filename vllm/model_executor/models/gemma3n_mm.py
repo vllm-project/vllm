@@ -3,7 +3,6 @@
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
-import numpy as np
 import torch
 from torch import nn
 from transformers import AutoModel, BatchFeature
@@ -19,8 +18,8 @@ from transformers.models.siglip import SiglipImageProcessorFast
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs.data import PromptType, TextPrompt
 from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.inputs.data import PromptType, TextPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import RowParallelLinear

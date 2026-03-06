@@ -13,6 +13,7 @@ from pydantic import (
     model_validator,
 )
 
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     OpenAIBaseModel,
@@ -20,7 +21,6 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,

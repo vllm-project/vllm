@@ -24,7 +24,7 @@
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -49,9 +49,9 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.inputs.data import PromptType
-from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import (

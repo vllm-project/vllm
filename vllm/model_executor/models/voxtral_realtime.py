@@ -4,7 +4,6 @@
 import asyncio
 import math
 from collections.abc import AsyncGenerator, Iterable, Iterator, Mapping
-from typing import Literal
 
 import numpy as np
 import torch
@@ -17,10 +16,10 @@ from mistral_common.tokens.tokenizers.audio import Audio, AudioConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.engine.protocol import StreamingInput
 from vllm.envs import VLLM_ENGINE_ITERATION_TIMEOUT_S
 from vllm.inputs.data import PromptType, TokensPrompt
-from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime
 from vllm.model_executor.models.voxtral import (

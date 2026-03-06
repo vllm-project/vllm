@@ -26,9 +26,8 @@
 
 import math
 from collections.abc import Iterable, Mapping
-from typing import Annotated, Literal
+from typing import Annotated
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -36,8 +35,8 @@ from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys

@@ -23,9 +23,8 @@
 """Inference-only Qwen3-ASR model."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal
+from typing import Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 from transformers.feature_extraction_utils import BatchFeature
@@ -33,8 +32,8 @@ from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,

@@ -5,7 +5,7 @@ import enum
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
-from typing import Annotated, Literal
+from typing import Annotated
 
 import numpy as np
 import torch
@@ -20,9 +20,9 @@ from transformers.models.whisper.modeling_whisper import sinusoids
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs.data import ExplicitEncoderDecoderPrompt, PromptType, TextPrompt
-from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (
