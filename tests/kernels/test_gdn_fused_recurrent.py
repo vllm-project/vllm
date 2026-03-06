@@ -83,8 +83,7 @@ def gated_delta_rule_recurrent_ref(
         for t in range(T):
             for hv in range(HV):
                 h_idx = hv // gva_ratio
-                b_g = g[b, t, hv].item()
-                h[b, hv] *= torch.exp(torch.tensor(b_g, dtype=dtype))
+                h[b, hv] *= g[b, t, hv].exp()
 
                 b_k = k[b, t, h_idx]
                 b_v = v[b, t, hv]
@@ -665,6 +664,7 @@ def test_spec_decoding_with_pad_slot_id():
     state_pool = (
         torch.randn(num_slots, HV, V, K, device=DEVICE, dtype=torch.float32) * 0.1
     )
+    state_pool_backup = state_pool.clone()
 
     # First 2 seqs valid, last padded
     ssm_indices = torch.tensor(
@@ -695,6 +695,44 @@ def test_spec_decoding_with_pad_slot_id():
         ssm_state_indices=ssm_indices,
         num_accepted_tokens=num_accepted_tokens,
     )
+
+    # Verify correctness of valid sequences against reference.
+    # In spec decoding the kernel loads the initial state from
+    # ssm_state_indices[seq, num_accepted - 1], processes all tokens in the
+    # sequence, and writes intermediate states at ssm_state_indices[seq, t].
+    valid_seqs = [
+        # (seq_idx, num_accepted, slot_indices)
+        (0, 3, [0, 1, 2, 3]),
+        (1, 2, [4, 5, 6, 7]),
+    ]
+    for seq_idx, n_acc, slots in valid_seqs:
+        init_slot = slots[n_acc - 1]
+        start = cu_seqlens[seq_idx].item()
+        end = cu_seqlens[seq_idx + 1].item()
+
+        o_ref, fs_ref = gated_delta_rule_recurrent_ref(
+            q[:, start:end],
+            k[:, start:end],
+            v[:, start:end],
+            g[:, start:end],
+            beta[:, start:end],
+            scale,
+            state_pool_backup[init_slot : init_slot + 1].clone(),
+        )
+
+        # Check output
+        torch.testing.assert_close(
+            o_kernel[:, start:end].float(), o_ref, atol=1e-3, rtol=1e-3
+        )
+
+        # Check final state (written at the last timestep slot)
+        final_slot = slots[-1]
+        torch.testing.assert_close(
+            fs_kernel[final_slot : final_slot + 1].float(),
+            fs_ref,
+            atol=1e-3,
+            rtol=1e-3,
+        )
 
 
 @pytest.mark.parametrize("T", [4, 8])
