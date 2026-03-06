@@ -19,6 +19,7 @@ _VLLM_RENDERERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Renderer"),
     "hf": ("hf", "HfRenderer"),
     "grok2": ("grok2", "Grok2Renderer"),
+    "kimi_audio": ("kimi_audio", "KimiAudioRenderer"),
     "mistral": ("mistral", "MistralRenderer"),
     "qwen_vl": ("qwen_vl", "QwenVLRenderer"),
     "terratorch": ("terratorch", "TerratorchRenderer"),

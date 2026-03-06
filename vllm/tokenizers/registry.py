@@ -34,6 +34,7 @@ logger = init_logger(__name__)
 _VLLM_TOKENIZERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
     "grok2": ("grok2", "Grok2Tokenizer"),
+    "kimi_audio": ("kimi_audio", "KimiAudioTokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
     "qwen_vl": ("qwen_vl", "QwenVLTokenizer"),
@@ -165,6 +166,14 @@ def resolve_tokenizer_args(
         revision=revision,
     ):
         tokenizer_mode = "grok2"
+
+    # Check for Kimi-Audio tiktoken tokenizer
+    if tokenizer_mode == "auto" and any_pattern_in_repo_files(
+        model_name_or_path=str(tokenizer_name),
+        allow_patterns=["tiktoken.model"],
+        revision=revision,
+    ):
+        tokenizer_mode = "kimi_audio"
 
     # Model-specific tokenizers
     if tokenizer_mode == "auto" and "/Qwen-VL" in str(tokenizer_name):

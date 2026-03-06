@@ -117,6 +117,29 @@ def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# Kimi-Audio-7B-Instruct
+def run_kimi_audio(question: str, audio_count: int) -> ModelRequestData:
+    model_name = "moonshotai/Kimi-Audio-7B-Instruct"
+
+    audio_tokens = "<|im_media_begin|><|im_kimia_text_blank|><|im_media_end|>\n"
+    audio_tokens = audio_tokens * audio_count
+    prompt = "<|im_kimia_user_msg_start|>" + audio_tokens
+    prompt += "<|im_msg_end|><|im_kimia_assistant_msg_start|>"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=5,
+        limit_mm_per_prompt={"audio": audio_count},
+        trust_remote_code=True,
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # GLM-ASR
 def run_glmasr(question: str, audio_count: int) -> ModelRequestData:
     model_name = "zai-org/GLM-ASR-Nano-2512"
@@ -480,13 +503,14 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
 
 model_example_map = {
     "audioflamingo3": run_audioflamingo3,
-    "musicflamingo": run_musicflamingo,
-    "gemma3n": run_gemma3n,
-    "glmasr": run_glmasr,
     "funaudiochat": run_funaudiochat,
+    "gemma3n": run_gemma3n,
+    "kimi_audio": run_kimi_audio,
+    "glmasr": run_glmasr,
     "granite_speech": run_granite_speech,
     "midashenglm": run_midashenglm,
     "minicpmo": run_minicpmo,
+    "musicflamingo": run_musicflamingo,
     "phi4_mm": run_phi4mm,
     "qwen2_audio": run_qwen2_audio,
     "qwen2_5_omni": run_qwen2_5_omni,
