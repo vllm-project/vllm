@@ -160,9 +160,9 @@ class MultiprocExecutor(Executor):
             # When using fork, keep track of socket file descriptors that are
             # inherited by the worker, so that we can close them in subsequent
             # workers
-            inherited_fds: list[int] | None = None
-            if context.get_start_method() == "fork":
-                inherited_fds = []
+            inherited_fds: list[int] | None = (
+                [] if context.get_start_method() == "fork" else None
+            )
 
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
@@ -179,12 +179,8 @@ class MultiprocExecutor(Executor):
                 )
                 unready_workers.append(unready_worker_handle)
                 if inherited_fds is not None:
-                    inherited_fds.extend(
-                        [
-                            unready_worker_handle.death_writer.fileno(),
-                            unready_worker_handle.ready_pipe.fileno(),
-                        ]
-                    )
+                    inherited_fds.append(unready_worker_handle.death_writer.fileno())
+                    inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -642,6 +638,9 @@ class WorkerProc:
         ready_reader, ready_writer = context.Pipe(duplex=False)
         # Death pipe to let child detect parent process exit
         death_reader, death_writer = context.Pipe(duplex=False)
+        if inherited_fds is not None:
+            inherited_fds = inherited_fds.copy()
+            inherited_fds.extend((ready_reader.fileno(), death_writer.fileno()))
         process_kwargs = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
@@ -653,10 +652,7 @@ class WorkerProc:
             "shared_worker_lock": shared_worker_lock,
             "is_driver_worker": is_driver_worker,
             # Have the worker close parent end of this worker's pipes too
-            "inherited_fds": inherited_fds
-            + [ready_reader.fileno(), death_writer.fileno()]
-            if inherited_fds is not None
-            else [],
+            "inherited_fds": inherited_fds,
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(
@@ -700,9 +696,8 @@ class WorkerProc:
         unready_proc_handles: list[UnreadyWorkerProcHandle],
     ) -> list[WorkerProcHandle]:
         e = Exception(
-            "WorkerProc initialization failed due to "
-            "an exception in a background process. "
-            "See stack trace for root cause."
+            "WorkerProc initialization failed due to an exception in a "
+            "background process. See stack trace for root cause."
         )
 
         pipes = {handle.ready_pipe: handle for handle in unready_proc_handles}
@@ -805,7 +800,7 @@ class WorkerProc:
             try:
                 os.close(fd)
             except Exception as e:
-                logger.warning("Exception closing inherited connection: %s", e)
+                logger.warning("Error closing inherited connection: %s: %s", type(e), e)
 
         try:
             # Initialize tracer
