@@ -238,6 +238,11 @@ class ForwardContext:
     all_moe_layers: list[str] | None = None
     moe_layer_index: int = 0
 
+    # Same approach for unified_kv_cache_update: avoid hard-coding attention
+    # layer name strings into the compiled graph.
+    all_kv_cache_update_layers: list[str] | None = None
+    kv_cache_update_index: int = 0
+
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -279,9 +284,27 @@ def create_forward_context(
     else:
         all_moe_layers = None
 
+    # Similar optimization for KV cache: use tri-state config flag
+    fast_kv = vllm_config.compilation_config.fast_kv_cache_cold_start
+    if fast_kv is True:
+        all_kv_cache_update_layers = (
+            vllm_config.compilation_config.static_all_kv_cache_update_layers or None
+        )
+    elif fast_kv is False:
+        all_kv_cache_update_layers = None
+    else:
+        # None — auto mode: on normally, off for speculative decoding
+        if vllm_config.speculative_config is None:
+            all_kv_cache_update_layers = (
+                vllm_config.compilation_config.static_all_kv_cache_update_layers or None
+            )
+        else:
+            all_kv_cache_update_layers = None
+
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
         all_moe_layers=all_moe_layers,
+        all_kv_cache_update_layers=all_kv_cache_update_layers,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         slot_mapping=slot_mapping or {},
