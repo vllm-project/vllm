@@ -527,12 +527,13 @@ def make_fp8_moe_kernel(
     shared_experts: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
+    is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
         quant_config=moe_quant_config,
         routing_tables=routing_tables,
         allow_new_interface=True,
-        use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
+        use_monolithic=is_monolithic,
     )
     assert prepare_finalize is not None
 
@@ -562,7 +563,9 @@ def make_fp8_moe_kernel(
         experts,
         shared_experts=(
             shared_experts
-            if moe_config.moe_parallel_config.use_all2all_kernels
+            if (
+                moe_config.moe_parallel_config.use_all2all_kernels and not is_monolithic
+            )
             else None
         ),
         moe_parallel_config=moe_config.moe_parallel_config,
