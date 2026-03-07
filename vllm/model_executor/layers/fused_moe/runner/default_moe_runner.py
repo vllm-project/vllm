@@ -234,6 +234,7 @@ class DefaultMoERunner(MoERunner):
             self.moe_config.moe_parallel_config.use_deepep_ll_kernels
             or self.moe_config.moe_parallel_config.use_mori_kernels
             or self.moe_config.moe_parallel_config.use_fi_all2allv_kernels
+            or self.moe_config.moe_parallel_config.use_nixl_ep_kernels
         ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
     def _maybe_setup_shared_experts_stream(
