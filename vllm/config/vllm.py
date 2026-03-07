@@ -1793,7 +1793,8 @@ def get_layers_from_vllm_config(
     forward_context = vllm_config.compilation_config.static_forward_context
 
     return {
-        layer_name: forward_context[layer_name]
-        for layer_name in layer_names
-        if isinstance(forward_context[layer_name], layer_type)
-    }
+            layer_name: layer
+            for layer_name in layer_names
+            if (layer := forward_context.get(layer_name)) is not None
+            and isinstance(layer, layer_type)
+        }
