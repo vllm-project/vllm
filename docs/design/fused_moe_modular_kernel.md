@@ -1,248 +1,4186 @@
-# Fused MoE Modular Kernel
+# Fus
+d MoE Modu
+ar K
+r
 
-## Introduction
 
-FusedMoEModularKernel is implemented [here](../../vllm/model_executor/layers/fused_moe/modular_kernel.py)
 
-Based on the format of the input activations, FusedMoE implementations are broadly classified into 2 types.
+## I
+troduct
+o
 
-* Contiguous / Standard / Non-Batched, and
-* Batched
+Fus
+dMoEModu
+arK
+r
 
-!!! note
-    The terms Contiguous, Standard, and Non-Batched are used interchangeably throughout the document.
 
-The input activation format completely depends on the All2All Dispatch being used.
+ 
+s 
+mp
 
-* In the Contiguous variant, the All2All Dispatch returns the activations as a contiguous tensor of shape (M, K) along with TopK Ids and TopK weights of shape (M, num_topk). Look at `DeepEPHTPrepareAndFinalize` for an example.
-* In the Batched variant, the All2All Dispatch returns the activations as a tensor of shape (num_experts, max_tokens, K). Here, the activations/tokens that subscribe to the same expert are batched together. Note that not all entries of the tensor are valid. The activations tensor is typically accompanied by an `expert_num_tokens` tensor of size `num_experts`, where `expert_num_tokens[i]` indicates the number of valid tokens that subscribe to the ith expert. Look at `DeepEPLLPrepareAndFinalize` for an example.
+m
 
-The FusedMoE operation is generally made of multiple operations, in both the Contiguous and Batched variants, as described in the diagrams below
+t
+d [h
+r
+](../../v
+m/mod
 
-![FusedMoE Non-Batched](../assets/design/fused_moe_modular_kernel/fused_moe_non_batched.png)
+_
+x
+cutor/
+ay
+rs/fus
+d_mo
+/modu
+ar_k
+r
 
-![FusedMoE Batched](../assets/design/fused_moe_modular_kernel/fused_moe_batched.png)
 
-!!! note
-    The main difference, in terms of operations, between the Batched and Non-Batched cases is the Permute / Unpermute operations. All other operations remain.
+.py)
+Bas
+d o
+ th
+ format of th
+ 
 
-## Motivation
+put act
+vat
+o
+s, Fus
+dMoE 
+mp
 
-As can be seen from the diagrams, there are a lot of operations and there can be a variety of implementations for each operation. The set of ways the operations can be put together to make a valid FusedMoE implementation quickly becomes intractable. The Modular Kernel framework addresses this issue,  by grouping the operations into logical components. This broad categorization makes the combinations manageable and prevents code-duplication. This also decouples the All2All Dispatch & Combine implementations from the FusedMoE implementations and allows for their independent development and testing. Furthermore, the Modular Kernel framework introduces Abstract classes for the different components thus providing a well-defined skeleton for future implementations.
+m
 
-The rest of the document will focus on the Contiguous / Non-Batched case. Extrapolating to the Batched case should be straight-forward.
+tat
+o
+s ar
+ broad
+y c
+ass
+f
 
-## ModularKernel Components
+d 
 
-FusedMoEModularKernel splits the FusedMoE operation into 3 parts,
+to 2 typ
+s.
+* Co
+t
+guous / Sta
+dard / No
+-Batch
+d, a
+d
+* Batch
+d
+!!! 
+ot
 
-1. TopKWeightAndReduce
-2. FusedMoEPrepareAndFinalizeModular
-3. FusedMoEExpertsModular
+    Th
+ t
+rms Co
+t
+guous, Sta
+dard, a
+d No
+-Batch
+d ar
+ us
+d 
 
-### TopKWeightAndReduce
+t
+rcha
+g
+ab
+y throughout th
+ docum
 
-The TopK Weight Application and Reduction components happen right after the Unpermute operation and before the All2All Combine. Note that the `FusedMoEExpertsModular` is responsible for the Unpermute and `FusedMoEPrepareAndFinalizeModular` is responsible for the All2All Combine. There is value in doing the TopK Weight Application and Reduction in the `FusedMoEExpertsModular`. But some implementations choose to do it `FusedMoEPrepareAndFinalizeModular`. In order to enable this flexibility, we have a TopKWeightAndReduce abstract class.
+t.
+Th
+ 
 
-Please find the implementations of TopKWeightAndReduce [here](../../vllm/model_executor/layers/fused_moe/topk_weight_and_reduce.py).
+put act
+vat
+o
+ format comp
 
-`FusedMoEPrepareAndFinalizeModular::finalize()` method accepts a `TopKWeightAndReduce` argument that is invoked inside the method.
-The `FusedMoEModularKernel` acts as a bridge between the `FusedMoEExpertsModular` and `FusedMoEPrepareAndFinalize` implementations to determine where the TopK Weight Application and Reduction happens.
+t
 
-* `FusedMoEExpertsModular::finalize_weight_and_reduce_impl` method returns `TopKWeightAndReduceNoOp` if the `FusedMoEExpertsModular` implementation does the weight application and reduction itself.
-* `FusedMoEExpertsModular::finalize_weight_and_reduce_impl` method returns `TopKWeightAndReduceContiguous` / `TopKWeightAndReduceNaiveBatched` / `TopKWeightAndReduceDelegate` if the `FusedMoEExpertsModular` implementation needs the `FusedMoEPrepareAndFinalizeModular::finalize()` to do the weight application and reduction.
+y d
+p
 
-### FusedMoEPrepareAndFinalizeModular
+ds o
+ th
+ A
+2A
+ D
+spatch b
 
-The `FusedMoEPrepareAndFinalizeModular` abstract class exposes `prepare`, `prepare_no_receive`  and `finalize` functions.
-The `prepare` function is responsible for input activation Quantization and All2All Dispatch. If implemented, The `prepare_no_receive` is like `prepare` except it does not wait to receive results from other workers.  Instead it returns a "receiver" callback that must be invoked to wait for the final results of worker. It is not required that this method is supported by all `FusedMoEPrepareAndFinalizeModular` classes, but if it is available, it can be used to interleave work with the initial all to all communication, e.g. interleaving shared experts with fused experts.  The `finalize` function is responsible for invoking the All2All Combine. Additionally the `finalize` function may or may not do the TopK weight application and reduction (Please refer to the TopKWeightAndReduce section)
 
-![FusedMoEPrepareAndFinalizeModular Blocks](../assets/design/fused_moe_modular_kernel/prepare_and_finalize_blocks.png)
+g us
+d.
+* I
+ th
+ Co
+t
+guous var
+a
+t, th
+ A
+2A
+ D
+spatch r
+tur
+s th
+ act
+vat
+o
+s as a co
+t
+guous t
 
-### FusedMoEExpertsModular
+sor of shap
+ (M, K) a
+o
+g 
 
-The `FusedMoEExpertsModular` class is where the crux of the MoE operations happen. The `FusedMoEExpertsModular` abstract class exposes a few important functions,
+th TopK Ids a
+d TopK 
 
-* apply()
-* workspace_shapes()
-* finalize_weight_and_reduce_impl()
 
-#### apply()
+ghts of shap
+ (M, 
+um_topk). Look at `D
+pEPHTPr
+par
+A
+dF
 
-The `apply` method is where the implementations perform
+a
 
-* Permute
-* Matmul with weight W1
-* Act + Mul
-* Quantization
-* Matmul with weight W2
-* Unpermute
-* Maybe TopK Weight Application + Reduction
+z
+` for a
+ 
+xamp
 
-#### workspace_shapes()
+.
+* I
+ th
+ Batch
+d var
+a
+t, th
+ A
+2A
+ D
+spatch r
+tur
+s th
+ act
+vat
+o
+s as a t
 
-The core FusedMoE implementation performs a series of operations. It would be inefficient to create output memory for each of these operations separately. To that effect, implementations are required to declare 2 workspace shapes, the workspace datatype and the FusedMoE output shape as outputs of the workspace_shapes() method. This information is used to allocate the workspace tensors and the output tensor in `FusedMoEModularKernel::forward()` and passed on to the `FusedMoEExpertsModular::apply()` method. The workspaces could then be used as intermediate buffers in the FusedMoE implementation.
+sor of shap
+ (
+um_
+xp
+rts, max_tok
 
-#### finalize_weight_and_reduce_impl()
+s, K). H
+r
+, th
+ act
+vat
+o
+s/tok
 
-It is sometimes efficient to perform TopK weight application and Reduction inside the `FusedMoEExpertsModular::apply()`. Find an example [here](https://github.com/vllm-project/vllm/pull/20228). We have a `TopKWeightAndReduce` abstract class to facilitate such implementations. Please refer to the TopKWeightAndReduce section.
-`FusedMoEExpertsModular::finalize_weight_and_reduce_impl()` returns the `TopKWeightAndReduce` object that the implementation wants the `FusedMoEPrepareAndFinalizeModular::finalize()` to use.
+s that subscr
+b
+ to th
+ sam
+ 
+xp
+rt ar
+ batch
+d tog
+th
+r. Not
+ that 
+ot a
+ 
 
-![FusedMoEExpertsModular Blocks](../assets/design/fused_moe_modular_kernel/fused_experts_blocks.png)
+tr
 
-### FusedMoEModularKernel
+s of th
+ t
 
-`FusedMoEModularKernel` is composed of the `FusedMoEPrepareAndFinalizeModular` and `FusedMoEExpertsModular` objects.
-`FusedMoEModularKernel` pseudocode/sketch,
+sor ar
+ va
 
+d. Th
+ act
+vat
+o
+s t
+
+sor 
+s typ
+ca
+y accompa
+
+
+d by a
+ `
+xp
+rt_
+um_tok
+
+s` t
+
+sor of s
+z
+ `
+um_
+xp
+rts`, 
+h
+r
+ `
+xp
+rt_
+um_tok
+
+s[
+]` 
+
+d
+cat
+s th
+ 
+umb
+r of va
+
+d tok
+
+s that subscr
+b
+ to th
+ 
+th 
+xp
+rt. Look at `D
+pEPLLPr
+par
+A
+dF
+
+a
+
+z
+` for a
+ 
+xamp
+
+.
+Th
+ Fus
+dMoE op
+rat
+o
+ 
+s g
+
+
+ra
+y mad
+ of mu
+t
+p
+
+ op
+rat
+o
+s, 
+
+ both th
+ Co
+t
+guous a
+d Batch
+d var
+a
+ts, as d
+scr
+b
+d 
+
+ th
+ d
+agrams b
+
+o
+
+![Fus
+dMoE No
+-Batch
+d](../ass
+ts/d
+s
+g
+/fus
+d_mo
+_modu
+ar_k
+r
+
+
+/fus
+d_mo
+_
+o
+_batch
+d.p
+g)
+![Fus
+dMoE Batch
+d](../ass
+ts/d
+s
+g
+/fus
+d_mo
+_modu
+ar_k
+r
+
+
+/fus
+d_mo
+_batch
+d.p
+g)
+!!! 
+ot
+
+    Th
+ ma
+
+ d
+ff
+r
+
+c
+, 
+
+ t
+rms of op
+rat
+o
+s, b
+t
+
+
+ th
+ Batch
+d a
+d No
+-Batch
+d cas
+s 
+s th
+ P
+rmut
+ / U
+p
+rmut
+ op
+rat
+o
+s. A
+ oth
+r op
+rat
+o
+s r
+ma
+
+.
+## Mot
+vat
+o
+
+As ca
+ b
+ s
+
+ from th
+ d
+agrams, th
+r
+ ar
+ a 
+ot of op
+rat
+o
+s a
+d th
+r
+ ca
+ b
+ a var
+
+ty of 
+mp
+
+m
+
+tat
+o
+s for 
+ach op
+rat
+o
+. Th
+ s
+t of 
+ays th
+ op
+rat
+o
+s ca
+ b
+ put tog
+th
+r to mak
+ a va
+
+d Fus
+dMoE 
+mp
+
+m
+
+tat
+o
+ qu
+ck
+y b
+com
+s 
+
+tractab
+
+. Th
+ Modu
+ar K
+r
+
+
+ fram
+
+ork addr
+ss
+s th
+s 
+ssu
+,  by group
+
+g th
+ op
+rat
+o
+s 
+
+to 
+og
+ca
+ compo
+
+
+ts. Th
+s broad cat
+gor
+zat
+o
+ mak
+s th
+ comb
+
+at
+o
+s ma
+ag
+ab
+
+ a
+d pr
+v
+
+ts cod
+-dup
+
+cat
+o
+. Th
+s a
+so d
+coup
+
+s th
+ A
+2A
+ D
+spatch & Comb
+
+
+ 
+mp
+
+m
+
+tat
+o
+s from th
+ Fus
+dMoE 
+mp
+
+m
+
+tat
+o
+s a
+d a
+o
+s for th
+
+r 
+
+d
+p
+
+d
+
+t d
+v
+
+opm
+
+t a
+d t
+st
+
+g. Furth
+rmor
+, th
+ Modu
+ar K
+r
+
+
+ fram
+
+ork 
+
+troduc
+s Abstract c
+ass
+s for th
+ d
+ff
+r
+
+t compo
+
+
+ts thus prov
+d
+
+g a 
+
+
+-d
+f
+
+
+d sk
+
+
+to
+ for futur
+ 
+mp
+
+m
+
+tat
+o
+s.
+Th
+ r
+st of th
+ docum
+
+t 
+
+
+ focus o
+ th
+ Co
+t
+guous / No
+-Batch
+d cas
+. Extrapo
+at
+
+g to th
+ Batch
+d cas
+ shou
+d b
+ stra
+ght-for
+ard.
+## Modu
+arK
+r
+
+
+ Compo
+
+
+ts
+Fus
+dMoEModu
+arK
+r
+
+
+ sp
+
+ts th
+ Fus
+dMoE op
+rat
+o
+ 
+
+to 3 parts,
+1. TopKW
+
+ghtA
+dR
+duc
+
+2. Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar
+3. Fus
+dMoEExp
+rtsModu
+ar
+### TopKW
+
+ghtA
+dR
+duc
+
+Th
+ TopK W
+
+ght App
+
+cat
+o
+ a
+d R
+duct
+o
+ compo
+
+
+ts happ
+
+ r
+ght aft
+r th
+ U
+p
+rmut
+ op
+rat
+o
+ a
+d b
+for
+ th
+ A
+2A
+ Comb
+
+
+. Not
+ that th
+ `Fus
+dMoEExp
+rtsModu
+ar` 
+s r
+spo
+s
+b
+
+ for th
+ U
+p
+rmut
+ a
+d `Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar` 
+s r
+spo
+s
+b
+
+ for th
+ A
+2A
+ Comb
+
+
+. Th
+r
+ 
+s va
+u
+ 
+
+ do
+
+g th
+ TopK W
+
+ght App
+
+cat
+o
+ a
+d R
+duct
+o
+ 
+
+ th
+ `Fus
+dMoEExp
+rtsModu
+ar`. But som
+ 
+mp
+
+m
+
+tat
+o
+s choos
+ to do 
+t `Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar`. I
+ ord
+r to 
+
+ab
+
+ th
+s f
+
+x
+b
+
+
+ty, 
+
+ hav
+ a TopKW
+
+ghtA
+dR
+duc
+ abstract c
+ass.
+P
+
+as
+ f
+
+d th
+ 
+mp
+
+m
+
+tat
+o
+s of TopKW
+
+ghtA
+dR
+duc
+ [h
+r
+](../../v
+m/mod
+
+_
+x
+cutor/
+ay
+rs/fus
+d_mo
+/topk_
+
+
+ght_a
+d_r
+duc
+.py).
+`Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar::f
+
+a
+
+z
+()` m
+thod acc
+pts a `TopKW
+
+ghtA
+dR
+duc
+` argum
+
+t that 
+s 
+
+vok
+d 
+
+s
+d
+ th
+ m
+thod.
+Th
+ `Fus
+dMoEModu
+arK
+r
+
+
+` acts as a br
+dg
+ b
+t
+
+
+ th
+ `Fus
+dMoEExp
+rtsModu
+ar` a
+d `Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+` 
+mp
+
+m
+
+tat
+o
+s to d
+t
+rm
+
+
+ 
+h
+r
+ th
+ TopK W
+
+ght App
+
+cat
+o
+ a
+d R
+duct
+o
+ happ
+
+s.
+* `Fus
+dMoEExp
+rtsModu
+ar::f
+
+a
+
+z
+_
+
+
+ght_a
+d_r
+duc
+_
+mp
+` m
+thod r
+tur
+s `TopKW
+
+ghtA
+dR
+duc
+NoOp` 
+f th
+ `Fus
+dMoEExp
+rtsModu
+ar` 
+mp
+
+m
+
+tat
+o
+ do
+s th
+ 
+
+
+ght app
+
+cat
+o
+ a
+d r
+duct
+o
+ 
+ts
+
+f.
+* `Fus
+dMoEExp
+rtsModu
+ar::f
+
+a
+
+z
+_
+
+
+ght_a
+d_r
+duc
+_
+mp
+` m
+thod r
+tur
+s `TopKW
+
+ghtA
+dR
+duc
+Co
+t
+guous` / `TopKW
+
+ghtA
+dR
+duc
+Na
+v
+Batch
+d` / `TopKW
+
+ghtA
+dR
+duc
+D
+
+
+gat
+` 
+f th
+ `Fus
+dMoEExp
+rtsModu
+ar` 
+mp
+
+m
+
+tat
+o
+ 
+
+ds th
+ `Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar::f
+
+a
+
+z
+()` to do th
+ 
+
+
+ght app
+
+cat
+o
+ a
+d r
+duct
+o
+.
+### Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar
+Th
+ `Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar` abstract c
+ass 
+xpos
+s `pr
+par
+`, `pr
+par
+_
+o_r
+c
+
+v
+`  a
+d `f
+
+a
+
+z
+` fu
+ct
+o
+s.
+Th
+ `pr
+par
+` fu
+ct
+o
+ 
+s r
+spo
+s
+b
+
+ for 
+
+put act
+vat
+o
+ Qua
+t
+zat
+o
+ a
+d A
+2A
+ D
+spatch. If 
+mp
+
+m
+
+t
+d, Th
+ `pr
+par
+_
+o_r
+c
+
+v
+` 
+s 
+
+k
+ `pr
+par
+` 
+xc
+pt 
+t do
+s 
+ot 
+a
+t to r
+c
+
+v
+ r
+su
+ts from oth
+r 
+ork
+rs.  I
+st
+ad 
+t r
+tur
+s a "r
+c
+
+v
+r" ca
+back that must b
+ 
+
+vok
+d to 
+a
+t for th
+ f
+
+a
+ r
+su
+ts of 
+ork
+r. It 
+s 
+ot r
+qu
+r
+d that th
+s m
+thod 
+s support
+d by a
+ `Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar` c
+ass
+s, but 
+f 
+t 
+s ava
+
+ab
+
+, 
+t ca
+ b
+ us
+d to 
+
+t
+r
+
+av
+ 
+ork 
+
+th th
+ 
+
+
+t
+a
+ a
+ to a
+ commu
+
+cat
+o
+, 
+.g. 
+
+t
+r
+
+av
+
+g shar
+d 
+xp
+rts 
+
+th fus
+d 
+xp
+rts.  Th
+ `f
+
+a
+
+z
+` fu
+ct
+o
+ 
+s r
+spo
+s
+b
+
+ for 
+
+vok
+
+g th
+ A
+2A
+ Comb
+
+
+. Add
+t
+o
+a
+y th
+ `f
+
+a
+
+z
+` fu
+ct
+o
+ may or may 
+ot do th
+ TopK 
+
+
+ght app
+
+cat
+o
+ a
+d r
+duct
+o
+ (P
+
+as
+ r
+f
+r to th
+ TopKW
+
+ghtA
+dR
+duc
+ s
+ct
+o
+)
+![Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar B
+ocks](../ass
+ts/d
+s
+g
+/fus
+d_mo
+_modu
+ar_k
+r
+
+
+/pr
+par
+_a
+d_f
+
+a
+
+z
+_b
+ocks.p
+g)
+### Fus
+dMoEExp
+rtsModu
+ar
+Th
+ `Fus
+dMoEExp
+rtsModu
+ar` c
+ass 
+s 
+h
+r
+ th
+ crux of th
+ MoE op
+rat
+o
+s happ
+
+. Th
+ `Fus
+dMoEExp
+rtsModu
+ar` abstract c
+ass 
+xpos
+s a f
+
+ 
+mporta
+t fu
+ct
+o
+s,
+* app
+y()
+* 
+orkspac
+_shap
+s()
+* f
+
+a
+
+z
+_
+
+
+ght_a
+d_r
+duc
+_
+mp
+()
+#### app
+y()
+Th
+ `app
+y` m
+thod 
+s 
+h
+r
+ th
+ 
+mp
+
+m
+
+tat
+o
+s p
+rform
+* P
+rmut
+
+* Matmu
+ 
+
+th 
+
+
+ght W1
+* Act + Mu
+
+* Qua
+t
+zat
+o
+
+* Matmu
+ 
+
+th 
+
+
+ght W2
+* U
+p
+rmut
+
+* Mayb
+ TopK W
+
+ght App
+
+cat
+o
+ + R
+duct
+o
+
+#### 
+orkspac
+_shap
+s()
+Th
+ cor
+ Fus
+dMoE 
+mp
+
+m
+
+tat
+o
+ p
+rforms a s
+r
+
+s of op
+rat
+o
+s. It 
+ou
+d b
+ 
+
+
+ff
+c
+
+
+t to cr
+at
+ output m
+mory for 
+ach of th
+s
+ op
+rat
+o
+s s
+parat
+
+y. To that 
+ff
+ct, 
+mp
+
+m
+
+tat
+o
+s ar
+ r
+qu
+r
+d to d
+c
+ar
+ 2 
+orkspac
+ shap
+s, th
+ 
+orkspac
+ datatyp
+ a
+d th
+ Fus
+dMoE output shap
+ as outputs of th
+ 
+orkspac
+_shap
+s() m
+thod. Th
+s 
+
+format
+o
+ 
+s us
+d to a
+ocat
+ th
+ 
+orkspac
+ t
+
+sors a
+d th
+ output t
+
+sor 
+
+ `Fus
+dMoEModu
+arK
+r
+
+
+::for
+ard()` a
+d pass
+d o
+ to th
+ `Fus
+dMoEExp
+rtsModu
+ar::app
+y()` m
+thod. Th
+ 
+orkspac
+s cou
+d th
+
+ b
+ us
+d as 
+
+t
+rm
+d
+at
+ buff
+rs 
+
+ th
+ Fus
+dMoE 
+mp
+
+m
+
+tat
+o
+.
+#### f
+
+a
+
+z
+_
+
+
+ght_a
+d_r
+duc
+_
+mp
+()
+It 
+s som
+t
+m
+s 
+ff
+c
+
+
+t to p
+rform TopK 
+
+
+ght app
+
+cat
+o
+ a
+d R
+duct
+o
+ 
+
+s
+d
+ th
+ `Fus
+dMoEExp
+rtsModu
+ar::app
+y()`. F
+
+d a
+ 
+xamp
+
+ [h
+r
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/20228). W
+ hav
+ a `TopKW
+
+ghtA
+dR
+duc
+` abstract c
+ass to fac
+
+
+tat
+ such 
+mp
+
+m
+
+tat
+o
+s. P
+
+as
+ r
+f
+r to th
+ TopKW
+
+ghtA
+dR
+duc
+ s
+ct
+o
+.
+`Fus
+dMoEExp
+rtsModu
+ar::f
+
+a
+
+z
+_
+
+
+ght_a
+d_r
+duc
+_
+mp
+()` r
+tur
+s th
+ `TopKW
+
+ghtA
+dR
+duc
+` obj
+ct that th
+ 
+mp
+
+m
+
+tat
+o
+ 
+a
+ts th
+ `Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar::f
+
+a
+
+z
+()` to us
+.
+![Fus
+dMoEExp
+rtsModu
+ar B
+ocks](../ass
+ts/d
+s
+g
+/fus
+d_mo
+_modu
+ar_k
+r
+
+
+/fus
+d_
+xp
+rts_b
+ocks.p
+g)
+### Fus
+dMoEModu
+arK
+r
+
+
+
+`Fus
+dMoEModu
+arK
+r
+
+
+` 
+s compos
+d of th
+ `Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar` a
+d `Fus
+dMoEExp
+rtsModu
+ar` obj
+cts.
+`Fus
+dMoEModu
+arK
+r
+
+
+` ps
+udocod
+/sk
+tch,
 ```py
-class FusedMoEModularKernel:
-    def __init__(self,
-                 prepare_finalize: FusedMoEPrepareAndFinalizeModular,
-                 fused_experts: FusedMoEExpertsModular):
+c
+ass Fus
+dMoEModu
+arK
+r
 
-        self.prepare_finalize = prepare_finalize
-        self.fused_experts = fused_experts
 
-    def forward(self, DP_A):
+:
+    d
+f __
 
-        Aq, A_scale, _, _, _ = self.prepare_finalize.prepare(DP_A, ...)
 
-        workspace13_shape, workspace2_shape, _, _ = self.fused_experts.workspace_shapes(...)
+t__(s
 
-        # allocate workspaces
-        workspace_13 = torch.empty(workspace13_shape, ...)
-        workspace_2 = torch.empty(workspace2_shape, ...)
+f,
+                 pr
+par
+_f
 
-        # execute fused_experts
-        fe_out = self.fused_experts.apply(Aq, A_scale, workspace13, workspace2, ...)
+a
 
-        # war_impl is an object of type TopKWeightAndReduceNoOp if the fused_experts implementations
-        # performs the TopK Weight Application and Reduction.
-        war_impl = self.fused_experts.finalize_weight_and_reduce_impl()
+z
+: Fus
+dMoEPr
+par
+A
+dF
 
-        output = self.prepare_finalize.finalize(fe_out, war_impl,...)
+a
 
-        return output
+z
+Modu
+ar,
+                 fus
+d_
+xp
+rts: Fus
+dMoEExp
+rtsModu
+ar):
+        s
+
+f.pr
+par
+_f
+
+a
+
+z
+ = pr
+par
+_f
+
+a
+
+z
+
+        s
+
+f.fus
+d_
+xp
+rts = fus
+d_
+xp
+rts
+    d
+f for
+ard(s
+
+f, DP_A):
+        Aq, A_sca
+
+, _, _, _ = s
+
+f.pr
+par
+_f
+
+a
+
+z
+.pr
+par
+(DP_A, ...)
+        
+orkspac
+13_shap
+, 
+orkspac
+2_shap
+, _, _ = s
+
+f.fus
+d_
+xp
+rts.
+orkspac
+_shap
+s(...)
+        # a
+ocat
+ 
+orkspac
+s
+        
+orkspac
+_13 = torch.
+mpty(
+orkspac
+13_shap
+, ...)
+        
+orkspac
+_2 = torch.
+mpty(
+orkspac
+2_shap
+, ...)
+        # 
+x
+cut
+ fus
+d_
+xp
+rts
+        f
+_out = s
+
+f.fus
+d_
+xp
+rts.app
+y(Aq, A_sca
+
+, 
+orkspac
+13, 
+orkspac
+2, ...)
+        # 
+ar_
+mp
+ 
+s a
+ obj
+ct of typ
+ TopKW
+
+ghtA
+dR
+duc
+NoOp 
+f th
+ fus
+d_
+xp
+rts 
+mp
+
+m
+
+tat
+o
+s
+        # p
+rforms th
+ TopK W
+
+ght App
+
+cat
+o
+ a
+d R
+duct
+o
+.
+        
+ar_
+mp
+ = s
+
+f.fus
+d_
+xp
+rts.f
+
+a
+
+z
+_
+
+
+ght_a
+d_r
+duc
+_
+mp
+()
+        output = s
+
+f.pr
+par
+_f
+
+a
+
+z
+.f
+
+a
+
+z
+(f
+_out, 
+ar_
+mp
+,...)
+        r
+tur
+ output
 ```
+## Ho
+-To
+### Ho
+ To Add a Fus
+dMoEPr
+par
+A
+dF
 
-## How-To
+a
 
-### How To Add a FusedMoEPrepareAndFinalizeModular Type
+z
+Modu
+ar Typ
 
-Typically a FusedMoEPrepareAndFinalizeModular type is backed by an All2All Dispatch & Combine implementation / kernel. For example,
+Typ
+ca
+y a Fus
+dMoEPr
+par
+A
+dF
 
-* DeepEPHTPrepareAndFinalize type is backed by DeepEP High-Throughput All2All kernels, and
-* DeepEPLLPrepareAndFinalize type is backed by DeepEP Low-Latency All2All kernels.
+a
 
-#### Step 1: Add an All2All manager
+z
+Modu
+ar typ
+ 
+s back
+d by a
+ A
+2A
+ D
+spatch & Comb
 
-The purpose of the All2All Manager is to set up the All2All kernel implementations. The `FusedMoEPrepareAndFinalizeModular` implementations typically fetch a kernel-implementation "handle" from the All2All Manager to invoke the Dispatch and Combine functions. Please look at the All2All Manager implementations [here](../../vllm/distributed/device_communicators/all2all.py).
 
-#### Step 2: Add a FusedMoEPrepareAndFinalizeModular Type
+ 
+mp
 
-This section describes the significance of the various functions exposed by the `FusedMoEPrepareAndFinalizeModular` abstract class.
+m
 
-`FusedMoEPrepareAndFinalizeModular::prepare()`: The prepare method implements the Quantization and All2All Dispatch. Typically the Dispatch function from the relevant All2All Manager is invoked.
+tat
+o
+ / k
+r
 
-`FusedMoEPrepareAndFinalizeModular::has_prepare_no_receive()`: Indicates whether or not this subclass implements `prepare_no_receive`. Defaults to False.
 
-`FusedMoEPrepareAndFinalizeModular::prepare_no_receive()`: The prepare_no_receive method implements the Quantization and All2All Dispatch. It does not wait for the result of the dispatch operation but instead returns a thunk that can be invoked to wait for the final results. Typically the Dispatch function from the relevant All2All Manager is invoked.
+. For 
+xamp
 
-`FusedMoEPrepareAndFinalizeModular::finalize()`: Maybe perform TopK Weight Application and Reduction and All2All Combine. Typically the Combine function from the relevant All2AllManager is invoked.
+,
+* D
+pEPHTPr
+par
+A
+dF
 
-`FusedMoEPrepareAndFinalizeModular::activation_format()`: Return `FusedMoEActivationFormat.BatchedExperts` if the output of the prepare method (i.e. the All2All dispatch) is Batched. Return `FusedMoEActivationFormat.Standard` otherwise.
+a
 
-`FusedMoEPrepareAndFinalizeModular::topk_indices_dtype()`: Data type of the TopK ids. Some All2All kernels have strict requirements pertaining to the data type of the TopK ids. This requirement is passed on to the `FusedMoe::select_experts` function so it could be respected. If there are no strict requirements return None.
+z
+ typ
+ 
+s back
+d by D
+pEP H
+gh-Throughput A
+2A
+ k
+r
 
-`FusedMoEPrepareAndFinalizeModular::max_num_tokens_per_rank()`: This is the maximum number of tokens that would be submitted to the All2All Dispatch at once.
 
-`FusedMoEPrepareAndFinalizeModular::num_dispatchers()`: Total number of dispatching units. This value determines the size of the Dispatch output. The Dispatch output is of shape (num_local_experts, max_num_tokens, K). Here max_num_tokens = num_dispatchers() * max_num_tokens_per_rank().
+s, a
+d
+* D
+pEPLLPr
+par
+A
+dF
 
-We suggest picking an already existing `FusedMoEPrepareAndFinalizeModular` implementation that matches your All2All implementation closely and using it as a reference.
+a
 
-### How To Add a FusedMoEExpertsModular Type
+z
+ typ
+ 
+s back
+d by D
+pEP Lo
+-Lat
 
-FusedMoEExpertsModular performs the core of the FusedMoE operations. The various functions exposed by the abstract class and their significance is as follows,
+cy A
+2A
+ k
+r
 
-`FusedMoEExpertsModular::activation_formats()`: Return the supported Input and Output activation formats. i.e. Contiguous / Batched format.
 
-`FusedMoEExpertsModular::supports_chunking()`: Return True if the implementation supports chunking. Typically
-implementations that input `FusedMoEActivationFormat.Standard` support chunking and `FusedMoEActivationFormat.BatchedExperts` do not.
+s.
+#### St
+p 1: Add a
+ A
+2A
+ ma
+ag
+r
+Th
+ purpos
+ of th
+ A
+2A
+ Ma
+ag
+r 
+s to s
+t up th
+ A
+2A
+ k
+r
 
-`FusedMoEExpertsModular::supports_expert_map()`: Return True if the implementation supports expert map.
 
-`FusedMoEExpertsModular::workspace_shapes()` /
-`FusedMoEExpertsModular::finalize_weight_and_reduce_impl` /
-`FusedMoEExpertsModular::apply`: Refer to `FusedMoEExpertsModular` section above.
+ 
+mp
 
-### FusedMoEModularKernel Initialization
+m
 
-`FusedMoEMethodBase` class has 3 methods that are collectively responsible in creating the `FusedMoEModularKernel` object. They are,
+tat
+o
+s. Th
+ `Fus
+dMoEPr
+par
+A
+dF
 
-* maybe_make_prepare_finalize,
-* select_gemm_impl, and
-* init_prepare_finalize
+a
 
-#### maybe_make_prepare_finalize
+z
+Modu
+ar` 
+mp
 
-The `maybe_make_prepare_finalize` method is responsible for constructing an instance of `FusedMoEPrepareAndFinalizeModular` when appropriate based on the current all2all backend, e.g. when EP + DP is enabled.  The base class method currently constructs all the `FusedMoEPrepareAndFinalizeModular` objects for the EP+DP case.  Derived classes can override this method to construct prepare/finalize objects for different scenarios, e.g. `ModelOptNvFp4FusedMoE` can construct a `FlashInferCutlassMoEPrepareAndFinalize` for the EP+TP case.
-Please refer to the implementations in,
+m
 
-* `ModelOptNvFp4FusedMoE`
+tat
+o
+s typ
+ca
+y f
+tch a k
+r
 
-#### select_gemm_impl
 
-The `select_gemm_impl` method is undefined in the base class. It is the responsibility of the derived class to implement a method that constructs a valid/appropriate `FusedMoEExpertsModular` object.
-Please refer to the implementations in,
+-
+mp
 
-* `UnquantizedFusedMoEMethod`
-* `CompressedTensorsW8A8Fp8MoEMethod`
-* `CompressedTensorsW8A8Fp8MoECutlassMethod`
-* `Fp8MoEMethod`
-* `ModelOptNvFp4FusedMoE`
-derived classes.
+m
 
-#### init_prepare_finalize
+tat
+o
+ "ha
+d
 
-Based on the input and env settings, the `init_prepare_finalize` method creates the appropriate `FusedMoEPrepareAndFinalizeModular` object. The method then queries `select_gemm_impl` for the appropriate `FusedMoEExpertsModular` object and builds the `FusedMoEModularKernel` object
+" from th
+ A
+2A
+ Ma
+ag
+r to 
 
-Please take a look at [init_prepare_finalize](https://github.com/vllm-project/vllm/blob/1cbf951ba272c230823b947631065b826409fa62/vllm/model_executor/layers/fused_moe/layer.py#L188).
-**Important**: The `FusedMoEMethodBase` derived classes use the `FusedMoEMethodBase::fused_experts` object in their `apply` methods. When settings permit the construction of a valid `FusedMoEModularKernel` object, we override `FusedMoEMethodBase::fused_experts` with it. This essentially makes the derived classes agnostic to what FusedMoE implementation is used.
+vok
+ th
+ D
+spatch a
+d Comb
 
-### How To Unit Test
 
-We have `FusedMoEModularKernel` unit tests at [test_modular_kernel_combinations.py](../../tests/kernels/moe/test_modular_kernel_combinations.py).
+ fu
+ct
+o
+s. P
 
-The unit test iterates through all combinations of `FusedMoEPrepareAndFinalizeModular` and `FusedMoEPremuteExpertsUnpermute` types and if they are
-compatible, runs some correctness tests.
-If you are adding some `FusedMoEPrepareAndFinalizeModular` / `FusedMoEExpertsModular` implementations,
+as
+ 
+ook at th
+ A
+2A
+ Ma
+ag
+r 
+mp
 
-1. Add the implementation type to `MK_ALL_PREPARE_FINALIZE_TYPES` and `MK_FUSED_EXPERT_TYPES` in [mk_objects.py](../../tests/kernels/moe/modular_kernel_tools/mk_objects.py) respectively.
-2. Update `Config::is_batched_prepare_finalize()`, `Config::is_batched_fused_experts()`, `Config::is_standard_fused_experts()`,
-`Config::is_fe_16bit_supported()`,  `Config::is_fe_fp8_supported()`, `Config::is_fe_block_fp8_supported()`,
-`Config::is_fe_supports_chunking()` methods in [/tests/kernels/moe/modular_kernel_tools/common.py](../../tests/kernels/moe/modular_kernel_tools/common.py)
+m
 
-Doing this will add the new implementation to the test suite.
+tat
+o
+s [h
+r
+](../../v
+m/d
+str
+but
+d/d
+v
+c
+_commu
 
-### How To Check `FusedMoEPrepareAndFinalizeModular` & `FusedMoEExpertsModular` Compatibility
+cators/a
+2a
+.py).
+#### St
+p 2: Add a Fus
+dMoEPr
+par
+A
+dF
 
-The unit test file [test_modular_kernel_combinations.py](../../tests/kernels/moe/test_modular_kernel_combinations.py) can also be executed as a standalone script.
-Example: `python3 -m tests.kernels.moe.test_modular_kernel_combinations --pf-type DeepEPLLPrepareAndFinalize --experts-type BatchedTritonExperts`
-As a side effect, this script can be used to test `FusedMoEPrepareAndFinalizeModular` & `FusedMoEExpertsModular` compatibility. When invoked
-with incompatible types, the script will error.
+a
 
-### How To Profile
+z
+Modu
+ar Typ
 
-Please take a look at [profile_modular_kernel.py](../../tests/kernels/moe/modular_kernel_tools/profile_modular_kernel.py)
-The script can be used to generate Torch traces for a single `FusedMoEModularKernel::forward()` call for any compatible
-`FusedMoEPrepareAndFinalizeModular` and `FusedMoEExpertsModular` types.
-Example: `python3 -m tests.kernels.moe.modular_kernel_tools.profile_modular_kernel --pf-type DeepEPLLPrepareAndFinalize --experts-type BatchedTritonExperts`
+Th
+s s
+ct
+o
+ d
+scr
+b
+s th
+ s
+g
 
-## FusedMoEPrepareAndFinalizeModular Implementations
+f
+ca
+c
+ of th
+ var
+ous fu
+ct
+o
+s 
+xpos
+d by th
+ `Fus
+dMoEPr
+par
+A
+dF
 
-See [Fused MoE Kernel features](./moe_kernel_features.md#fused-moe-modular-all2all-backends) for a list of all the available modular prepare and finalize subclasses.
+a
 
-## FusedMoEExpertsModular
+z
+Modu
+ar` abstract c
+ass.
+`Fus
+dMoEPr
+par
+A
+dF
 
-See [Fused MoE Kernel features](./moe_kernel_features.md#fused-moe-experts-kernels) for a list of all the available modular experts.
+a
+
+z
+Modu
+ar::pr
+par
+()`: Th
+ pr
+par
+ m
+thod 
+mp
+
+m
+
+ts th
+ Qua
+t
+zat
+o
+ a
+d A
+2A
+ D
+spatch. Typ
+ca
+y th
+ D
+spatch fu
+ct
+o
+ from th
+ r
+
+
+va
+t A
+2A
+ Ma
+ag
+r 
+s 
+
+vok
+d.
+`Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar::has_pr
+par
+_
+o_r
+c
+
+v
+()`: I
+d
+cat
+s 
+h
+th
+r or 
+ot th
+s subc
+ass 
+mp
+
+m
+
+ts `pr
+par
+_
+o_r
+c
+
+v
+`. D
+fau
+ts to Fa
+s
+.
+`Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar::pr
+par
+_
+o_r
+c
+
+v
+()`: Th
+ pr
+par
+_
+o_r
+c
+
+v
+ m
+thod 
+mp
+
+m
+
+ts th
+ Qua
+t
+zat
+o
+ a
+d A
+2A
+ D
+spatch. It do
+s 
+ot 
+a
+t for th
+ r
+su
+t of th
+ d
+spatch op
+rat
+o
+ but 
+
+st
+ad r
+tur
+s a thu
+k that ca
+ b
+ 
+
+vok
+d to 
+a
+t for th
+ f
+
+a
+ r
+su
+ts. Typ
+ca
+y th
+ D
+spatch fu
+ct
+o
+ from th
+ r
+
+
+va
+t A
+2A
+ Ma
+ag
+r 
+s 
+
+vok
+d.
+`Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar::f
+
+a
+
+z
+()`: Mayb
+ p
+rform TopK W
+
+ght App
+
+cat
+o
+ a
+d R
+duct
+o
+ a
+d A
+2A
+ Comb
+
+
+. Typ
+ca
+y th
+ Comb
+
+
+ fu
+ct
+o
+ from th
+ r
+
+
+va
+t A
+2A
+Ma
+ag
+r 
+s 
+
+vok
+d.
+`Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar::act
+vat
+o
+_format()`: R
+tur
+ `Fus
+dMoEAct
+vat
+o
+Format.Batch
+dExp
+rts` 
+f th
+ output of th
+ pr
+par
+ m
+thod (
+.
+. th
+ A
+2A
+ d
+spatch) 
+s Batch
+d. R
+tur
+ `Fus
+dMoEAct
+vat
+o
+Format.Sta
+dard` oth
+r
+
+s
+.
+`Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar::topk_
+
+d
+c
+s_dtyp
+()`: Data typ
+ of th
+ TopK 
+ds. Som
+ A
+2A
+ k
+r
+
+
+s hav
+ str
+ct r
+qu
+r
+m
+
+ts p
+rta
+
+
+
+g to th
+ data typ
+ of th
+ TopK 
+ds. Th
+s r
+qu
+r
+m
+
+t 
+s pass
+d o
+ to th
+ `Fus
+dMo
+::s
+
+
+ct_
+xp
+rts` fu
+ct
+o
+ so 
+t cou
+d b
+ r
+sp
+ct
+d. If th
+r
+ ar
+ 
+o str
+ct r
+qu
+r
+m
+
+ts r
+tur
+ No
+
+.
+`Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar::max_
+um_tok
+
+s_p
+r_ra
+k()`: Th
+s 
+s th
+ max
+mum 
+umb
+r of tok
+
+s that 
+ou
+d b
+ subm
+tt
+d to th
+ A
+2A
+ D
+spatch at o
+c
+.
+`Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar::
+um_d
+spatch
+rs()`: Tota
+ 
+umb
+r of d
+spatch
+
+g u
+
+ts. Th
+s va
+u
+ d
+t
+rm
+
+
+s th
+ s
+z
+ of th
+ D
+spatch output. Th
+ D
+spatch output 
+s of shap
+ (
+um_
+oca
+_
+xp
+rts, max_
+um_tok
+
+s, K). H
+r
+ max_
+um_tok
+
+s = 
+um_d
+spatch
+rs() * max_
+um_tok
+
+s_p
+r_ra
+k().
+W
+ sugg
+st p
+ck
+
+g a
+ a
+r
+ady 
+x
+st
+
+g `Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar` 
+mp
+
+m
+
+tat
+o
+ that match
+s your A
+2A
+ 
+mp
+
+m
+
+tat
+o
+ c
+os
+
+y a
+d us
+
+g 
+t as a r
+f
+r
+
+c
+.
+### Ho
+ To Add a Fus
+dMoEExp
+rtsModu
+ar Typ
+
+Fus
+dMoEExp
+rtsModu
+ar p
+rforms th
+ cor
+ of th
+ Fus
+dMoE op
+rat
+o
+s. Th
+ var
+ous fu
+ct
+o
+s 
+xpos
+d by th
+ abstract c
+ass a
+d th
+
+r s
+g
+
+f
+ca
+c
+ 
+s as fo
+o
+s,
+`Fus
+dMoEExp
+rtsModu
+ar::act
+vat
+o
+_formats()`: R
+tur
+ th
+ support
+d I
+put a
+d Output act
+vat
+o
+ formats. 
+.
+. Co
+t
+guous / Batch
+d format.
+`Fus
+dMoEExp
+rtsModu
+ar::supports_chu
+k
+
+g()`: R
+tur
+ Tru
+ 
+f th
+ 
+mp
+
+m
+
+tat
+o
+ supports chu
+k
+
+g. Typ
+ca
+y
+
+mp
+
+m
+
+tat
+o
+s that 
+
+put `Fus
+dMoEAct
+vat
+o
+Format.Sta
+dard` support chu
+k
+
+g a
+d `Fus
+dMoEAct
+vat
+o
+Format.Batch
+dExp
+rts` do 
+ot.
+`Fus
+dMoEExp
+rtsModu
+ar::supports_
+xp
+rt_map()`: R
+tur
+ Tru
+ 
+f th
+ 
+mp
+
+m
+
+tat
+o
+ supports 
+xp
+rt map.
+`Fus
+dMoEExp
+rtsModu
+ar::
+orkspac
+_shap
+s()` /
+`Fus
+dMoEExp
+rtsModu
+ar::f
+
+a
+
+z
+_
+
+
+ght_a
+d_r
+duc
+_
+mp
+` /
+`Fus
+dMoEExp
+rtsModu
+ar::app
+y`: R
+f
+r to `Fus
+dMoEExp
+rtsModu
+ar` s
+ct
+o
+ abov
+.
+### Fus
+dMoEModu
+arK
+r
+
+
+ I
+
+t
+a
+
+zat
+o
+
+`Fus
+dMoEM
+thodBas
+` c
+ass has 3 m
+thods that ar
+ co
+
+ct
+v
+
+y r
+spo
+s
+b
+
+ 
+
+ cr
+at
+
+g th
+ `Fus
+dMoEModu
+arK
+r
+
+
+` obj
+ct. Th
+y ar
+,
+* mayb
+_mak
+_pr
+par
+_f
+
+a
+
+z
+,
+* s
+
+
+ct_g
+mm_
+mp
+, a
+d
+* 
+
+
+t_pr
+par
+_f
+
+a
+
+z
+
+#### mayb
+_mak
+_pr
+par
+_f
+
+a
+
+z
+
+Th
+ `mayb
+_mak
+_pr
+par
+_f
+
+a
+
+z
+` m
+thod 
+s r
+spo
+s
+b
+
+ for co
+struct
+
+g a
+ 
+
+sta
+c
+ of `Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar` 
+h
+
+ appropr
+at
+ bas
+d o
+ th
+ curr
+
+t a
+2a
+ back
+
+d, 
+.g. 
+h
+
+ EP + DP 
+s 
+
+ab
+
+d.  Th
+ bas
+ c
+ass m
+thod curr
+
+t
+y co
+structs a
+ th
+ `Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar` obj
+cts for th
+ EP+DP cas
+.  D
+r
+v
+d c
+ass
+s ca
+ ov
+rr
+d
+ th
+s m
+thod to co
+struct pr
+par
+/f
+
+a
+
+z
+ obj
+cts for d
+ff
+r
+
+t sc
+
+ar
+os, 
+.g. `Mod
+
+OptNvFp4Fus
+dMoE` ca
+ co
+struct a `F
+ashI
+f
+rCut
+assMoEPr
+par
+A
+dF
+
+a
+
+z
+` for th
+ EP+TP cas
+.
+P
+
+as
+ r
+f
+r to th
+ 
+mp
+
+m
+
+tat
+o
+s 
+
+,
+* `Mod
+
+OptNvFp4Fus
+dMoE`
+#### s
+
+
+ct_g
+mm_
+mp
+
+Th
+ `s
+
+
+ct_g
+mm_
+mp
+` m
+thod 
+s u
+d
+f
+
+
+d 
+
+ th
+ bas
+ c
+ass. It 
+s th
+ r
+spo
+s
+b
+
+
+ty of th
+ d
+r
+v
+d c
+ass to 
+mp
+
+m
+
+t a m
+thod that co
+structs a va
+
+d/appropr
+at
+ `Fus
+dMoEExp
+rtsModu
+ar` obj
+ct.
+P
+
+as
+ r
+f
+r to th
+ 
+mp
+
+m
+
+tat
+o
+s 
+
+,
+* `U
+qua
+t
+z
+dFus
+dMoEM
+thod`
+* `Compr
+ss
+dT
+
+sorsW8A8Fp8MoEM
+thod`
+* `Compr
+ss
+dT
+
+sorsW8A8Fp8MoECut
+assM
+thod`
+* `Fp8MoEM
+thod`
+* `Mod
+
+OptNvFp4Fus
+dMoE`
+d
+r
+v
+d c
+ass
+s.
+#### 
+
+
+t_pr
+par
+_f
+
+a
+
+z
+
+Bas
+d o
+ th
+ 
+
+put a
+d 
+
+v s
+tt
+
+gs, th
+ `
+
+
+t_pr
+par
+_f
+
+a
+
+z
+` m
+thod cr
+at
+s th
+ appropr
+at
+ `Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar` obj
+ct. Th
+ m
+thod th
+
+ qu
+r
+
+s `s
+
+
+ct_g
+mm_
+mp
+` for th
+ appropr
+at
+ `Fus
+dMoEExp
+rtsModu
+ar` obj
+ct a
+d bu
+
+ds th
+ `Fus
+dMoEModu
+arK
+r
+
+
+` obj
+ct
+P
+
+as
+ tak
+ a 
+ook at [
+
+
+t_pr
+par
+_f
+
+a
+
+z
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/1cbf951ba272c230823b947631065b826409fa62/v
+m/mod
+
+_
+x
+cutor/
+ay
+rs/fus
+d_mo
+/
+ay
+r.py#L188).
+**Importa
+t**: Th
+ `Fus
+dMoEM
+thodBas
+` d
+r
+v
+d c
+ass
+s us
+ th
+ `Fus
+dMoEM
+thodBas
+::fus
+d_
+xp
+rts` obj
+ct 
+
+ th
+
+r `app
+y` m
+thods. Wh
+
+ s
+tt
+
+gs p
+rm
+t th
+ co
+struct
+o
+ of a va
+
+d `Fus
+dMoEModu
+arK
+r
+
+
+` obj
+ct, 
+
+ ov
+rr
+d
+ `Fus
+dMoEM
+thodBas
+::fus
+d_
+xp
+rts` 
+
+th 
+t. Th
+s 
+ss
+
+t
+a
+y mak
+s th
+ d
+r
+v
+d c
+ass
+s ag
+ost
+c to 
+hat Fus
+dMoE 
+mp
+
+m
+
+tat
+o
+ 
+s us
+d.
+### Ho
+ To U
+
+t T
+st
+W
+ hav
+ `Fus
+dMoEModu
+arK
+r
+
+
+` u
+
+t t
+sts at [t
+st_modu
+ar_k
+r
+
+
+_comb
+
+at
+o
+s.py](../../t
+sts/k
+r
+
+
+s/mo
+/t
+st_modu
+ar_k
+r
+
+
+_comb
+
+at
+o
+s.py).
+Th
+ u
+
+t t
+st 
+t
+rat
+s through a
+ comb
+
+at
+o
+s of `Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar` a
+d `Fus
+dMoEPr
+mut
+Exp
+rtsU
+p
+rmut
+` typ
+s a
+d 
+f th
+y ar
+
+compat
+b
+
+, ru
+s som
+ corr
+ct
+
+ss t
+sts.
+If you ar
+ add
+
+g som
+ `Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar` / `Fus
+dMoEExp
+rtsModu
+ar` 
+mp
+
+m
+
+tat
+o
+s,
+1. Add th
+ 
+mp
+
+m
+
+tat
+o
+ typ
+ to `MK_ALL_PREPARE_FINALIZE_TYPES` a
+d `MK_FUSED_EXPERT_TYPES` 
+
+ [mk_obj
+cts.py](../../t
+sts/k
+r
+
+
+s/mo
+/modu
+ar_k
+r
+
+
+_too
+s/mk_obj
+cts.py) r
+sp
+ct
+v
+
+y.
+2. Updat
+ `Co
+f
+g::
+s_batch
+d_pr
+par
+_f
+
+a
+
+z
+()`, `Co
+f
+g::
+s_batch
+d_fus
+d_
+xp
+rts()`, `Co
+f
+g::
+s_sta
+dard_fus
+d_
+xp
+rts()`,
+`Co
+f
+g::
+s_f
+_16b
+t_support
+d()`,  `Co
+f
+g::
+s_f
+_fp8_support
+d()`, `Co
+f
+g::
+s_f
+_b
+ock_fp8_support
+d()`,
+`Co
+f
+g::
+s_f
+_supports_chu
+k
+
+g()` m
+thods 
+
+ [/t
+sts/k
+r
+
+
+s/mo
+/modu
+ar_k
+r
+
+
+_too
+s/commo
+.py](../../t
+sts/k
+r
+
+
+s/mo
+/modu
+ar_k
+r
+
+
+_too
+s/commo
+.py)
+Do
+
+g th
+s 
+
+
+ add th
+ 
+
+
+ 
+mp
+
+m
+
+tat
+o
+ to th
+ t
+st su
+t
+.
+### Ho
+ To Ch
+ck `Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar` & `Fus
+dMoEExp
+rtsModu
+ar` Compat
+b
+
+
+ty
+Th
+ u
+
+t t
+st f
+
+
+ [t
+st_modu
+ar_k
+r
+
+
+_comb
+
+at
+o
+s.py](../../t
+sts/k
+r
+
+
+s/mo
+/t
+st_modu
+ar_k
+r
+
+
+_comb
+
+at
+o
+s.py) ca
+ a
+so b
+ 
+x
+cut
+d as a sta
+da
+o
+
+ scr
+pt.
+Examp
+
+: `pytho
+3 -m t
+sts.k
+r
+
+
+s.mo
+.t
+st_modu
+ar_k
+r
+
+
+_comb
+
+at
+o
+s --pf-typ
+ D
+pEPLLPr
+par
+A
+dF
+
+a
+
+z
+ --
+xp
+rts-typ
+ Batch
+dTr
+to
+Exp
+rts`
+As a s
+d
+ 
+ff
+ct, th
+s scr
+pt ca
+ b
+ us
+d to t
+st `Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar` & `Fus
+dMoEExp
+rtsModu
+ar` compat
+b
+
+
+ty. Wh
+
+ 
+
+vok
+d
+
+
+th 
+
+compat
+b
+
+ typ
+s, th
+ scr
+pt 
+
+
+ 
+rror.
+### Ho
+ To Prof
+
+
+
+P
+
+as
+ tak
+ a 
+ook at [prof
+
+
+_modu
+ar_k
+r
+
+
+.py](../../t
+sts/k
+r
+
+
+s/mo
+/modu
+ar_k
+r
+
+
+_too
+s/prof
+
+
+_modu
+ar_k
+r
+
+
+.py)
+Th
+ scr
+pt ca
+ b
+ us
+d to g
+
+
+rat
+ Torch trac
+s for a s
+
+g
+
+ `Fus
+dMoEModu
+arK
+r
+
+
+::for
+ard()` ca
+ for a
+y compat
+b
+
+
+`Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar` a
+d `Fus
+dMoEExp
+rtsModu
+ar` typ
+s.
+Examp
+
+: `pytho
+3 -m t
+sts.k
+r
+
+
+s.mo
+.modu
+ar_k
+r
+
+
+_too
+s.prof
+
+
+_modu
+ar_k
+r
+
+
+ --pf-typ
+ D
+pEPLLPr
+par
+A
+dF
+
+a
+
+z
+ --
+xp
+rts-typ
+ Batch
+dTr
+to
+Exp
+rts`
+## Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar Imp
+
+m
+
+tat
+o
+s
+S
+ [Fus
+d MoE K
+r
+
+
+ f
+atur
+s](./mo
+_k
+r
+
+
+_f
+atur
+s.md#fus
+d-mo
+-modu
+ar-a
+2a
+-back
+
+ds) for a 
+
+st of a
+ th
+ ava
+
+ab
+
+ modu
+ar pr
+par
+ a
+d f
+
+a
+
+z
+ subc
+ass
+s.
+## Fus
+dMoEExp
+rtsModu
+ar
+S
+ [Fus
+d MoE K
+r
+
+
+ f
+atur
+s](./mo
+_k
+r
+
+
+_f
+atur
+s.md#fus
+d-mo
+-
+xp
+rts-k
+r
+
+
+s) for a 
+
+st of a
+ th
+ ava
+
+ab
+
+ modu
+ar 
+xp
+rts.

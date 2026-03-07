@@ -1,9 +1,37 @@
-# vllm bench sweep serve
+# v
+m b
 
-## JSON CLI Arguments
+ch s
 
---8<-- "docs/cli/json_tip.inc.md"
+p s
+rv
 
-## Arguments
+## JSON CLI Argum
 
---8<-- "docs/generated/argparse/bench_sweep_serve.inc.md"
+ts
+--8
+-- "docs/c
+
+/jso
+_t
+p.
+
+c.md"
+## Argum
+
+ts
+--8
+-- "docs/g
+
+
+rat
+d/argpars
+/b
+
+ch_s
+
+p_s
+rv
+.
+
+c.md"

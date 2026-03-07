@@ -1,9 +1,35 @@
-# vllm bench latency
+# v
+m b
 
-## JSON CLI Arguments
+ch 
+at
 
---8<-- "docs/cli/json_tip.inc.md"
+cy
+## JSON CLI Argum
 
-## Arguments
+ts
+--8
+-- "docs/c
 
---8<-- "docs/generated/argparse/bench_latency.inc.md"
+/jso
+_t
+p.
+
+c.md"
+## Argum
+
+ts
+--8
+-- "docs/g
+
+
+rat
+d/argpars
+/b
+
+ch_
+at
+
+cy.
+
+c.md"

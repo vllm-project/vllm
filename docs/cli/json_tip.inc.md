@@ -1,9 +1,82 @@
-When passing JSON CLI arguments, the following sets of arguments are equivalent:
+Wh
 
-- `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`
-- `--json-arg.key1 value1 --json-arg.key2.key3 value2`
+ pass
 
-Additionally, list elements can be passed individually using `+`:
+g JSON CLI argum
 
-- `--json-arg '{"key4": ["value3", "value4", "value5"]}'`
-- `--json-arg.key4+ value3 --json-arg.key4+='value4,value5'`
+ts, th
+ fo
+o
+
+
+g s
+ts of argum
+
+ts ar
+ 
+qu
+va
+
+
+t:
+    - `--jso
+-arg '{"k
+y1": "va
+u
+1", "k
+y2": {"k
+y3": "va
+u
+2"}}'`
+    - `--jso
+-arg.k
+y1 va
+u
+1 --jso
+-arg.k
+y2.k
+y3 va
+u
+2`
+Add
+t
+o
+a
+y, 
+
+st 
+
+
+m
+
+ts ca
+ b
+ pass
+d 
+
+d
+v
+dua
+y us
+
+g `+`:
+    - `--jso
+-arg '{"k
+y4": ["va
+u
+3", "va
+u
+4", "va
+u
+5"]}'`
+    - `--jso
+-arg.k
+y4+ va
+u
+3 --jso
+-arg.k
+y4+='va
+u
+4,va
+u
+5'`

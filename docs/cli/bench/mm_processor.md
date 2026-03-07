@@ -1,55 +1,447 @@
-# vllm bench mm-processor
+# v
+m b
 
-## Overview
+ch mm-proc
+ssor
+## Ov
+rv
 
-`vllm bench mm-processor` profiles the multimodal input processor pipeline of
-vision-language models. It measures per-stage latency from the HuggingFace
-processor through to the encoder forward pass, helping you identify
-preprocessing bottlenecks and understand how different image resolutions or
-item counts affect end-to-end request time.
 
-The benchmark supports two data sources: synthetic random multimodal inputs
-(`random-mm`) and HuggingFace datasets (`hf`). Warmup requests are run before
-measurement to ensure stable results.
 
-## Quick Start
+`v
+m b
 
+ch mm-proc
+ssor` prof
+
+
+s th
+ mu
+t
+moda
+ 
+
+put proc
+ssor p
+p
+
+
+
+
+ of
+v
+s
+o
+-
+a
+guag
+ mod
+
+s. It m
+asur
+s p
+r-stag
+ 
+at
+
+cy from th
+ Hugg
+
+gFac
+
+proc
+ssor through to th
+ 
+
+cod
+r for
+ard pass, h
+
+p
+
+g you 
+d
+
+t
+fy
+pr
+proc
+ss
+
+g bott
+
+
+
+cks a
+d u
+d
+rsta
+d ho
+ d
+ff
+r
+
+t 
+mag
+ r
+so
+ut
+o
+s or
+
+t
+m cou
+ts aff
+ct 
+
+d-to-
+
+d r
+qu
+st t
+m
+.
+Th
+ b
+
+chmark supports t
+o data sourc
+s: sy
+th
+t
+c ra
+dom mu
+t
+moda
+ 
+
+puts
+(`ra
+dom-mm`) a
+d Hugg
+
+gFac
+ datas
+ts (`hf`). Warmup r
+qu
+sts ar
+ ru
+ b
+for
+
+m
+asur
+m
+
+t to 
+
+sur
+ stab
+
+ r
+su
+ts.
+## Qu
+ck Start
 ```bash
-vllm bench mm-processor \
-  --model Qwen/Qwen2-VL-7B-Instruct \
-  --dataset-name random-mm \
-  --num-prompts 50 \
-  --random-input-len 300 \
-  --random-output-len 40 \
-  --random-mm-base-items-per-request 2 \
-  --random-mm-limit-mm-per-prompt '{"image": 3, "video": 0}' \
-  --random-mm-bucket-config '{(256, 256, 1): 0.7, (720, 1280, 1): 0.3}'
+v
+m b
+
+ch mm-proc
+ssor \
+  --mod
+
+ Q
+
+
+/Q
+
+
+2-VL-7B-I
+struct \
+  --datas
+t-
+am
+ ra
+dom-mm \
+  --
+um-prompts 50 \
+  --ra
+dom-
+
+put-
+
+
+ 300 \
+  --ra
+dom-output-
+
+
+ 40 \
+  --ra
+dom-mm-bas
+-
+t
+ms-p
+r-r
+qu
+st 2 \
+  --ra
+dom-mm-
+
+m
+t-mm-p
+r-prompt '{"
+mag
+": 3, "v
+d
+o": 0}' \
+  --ra
+dom-mm-buck
+t-co
+f
+g '{(256, 256, 1): 0.7, (720, 1280, 1): 0.3}'
 ```
-
-## Measured Stages
-
-| Stage | Description |
+## M
+asur
+d Stag
+s
+| Stag
+ | D
+scr
+pt
+o
+ |
 |-------|-------------|
-| `get_mm_hashes_secs` | Time spent hashing multimodal inputs |
-| `get_cache_missing_items_secs` | Time spent looking up the processor cache |
-| `apply_hf_processor_secs` | Time spent in the HuggingFace processor |
-| `merge_mm_kwargs_secs` | Time spent merging multimodal kwargs |
-| `apply_prompt_updates_secs` | Time spent updating prompt tokens |
-| `preprocessor_total_secs` | Total preprocessing time |
-| `encoder_forward_secs` | Time spent in the encoder model forward pass |
-| `num_encoder_calls` | Number of encoder invocations per request |
+| `g
+t_mm_hash
+s_s
+cs` | T
+m
+ sp
 
-The benchmark also reports end-to-end latency (TTFT + decode time) per
-request. Use `--metric-percentiles` to select which percentiles to report
-(default: p99) and `--output-json` to save results.
+t hash
 
-For more examples (HF datasets, warmup, JSON output), see
-[Benchmarking CLI — Multimodal Processor Benchmark](../../benchmarking/cli.md#multimodal-processor-benchmark).
+g mu
+t
+moda
+ 
 
-## JSON CLI Arguments
+puts |
+| `g
+t_cach
+_m
+ss
 
---8<-- "docs/cli/json_tip.inc.md"
+g_
+t
+ms_s
+cs` | T
+m
+ sp
 
-## Arguments
+t 
+ook
 
---8<-- "docs/generated/argparse/bench_mm_processor.inc.md"
+g up th
+ proc
+ssor cach
+ |
+| `app
+y_hf_proc
+ssor_s
+cs` | T
+m
+ sp
+
+t 
+
+ th
+ Hugg
+
+gFac
+ proc
+ssor |
+| `m
+rg
+_mm_k
+args_s
+cs` | T
+m
+ sp
+
+t m
+rg
+
+g mu
+t
+moda
+ k
+args |
+| `app
+y_prompt_updat
+s_s
+cs` | T
+m
+ sp
+
+t updat
+
+g prompt tok
+
+s |
+| `pr
+proc
+ssor_tota
+_s
+cs` | Tota
+ pr
+proc
+ss
+
+g t
+m
+ |
+| `
+
+cod
+r_for
+ard_s
+cs` | T
+m
+ sp
+
+t 
+
+ th
+ 
+
+cod
+r mod
+
+ for
+ard pass |
+| `
+um_
+
+cod
+r_ca
+s` | Numb
+r of 
+
+cod
+r 
+
+vocat
+o
+s p
+r r
+qu
+st |
+Th
+ b
+
+chmark a
+so r
+ports 
+
+d-to-
+
+d 
+at
+
+cy (TTFT + d
+cod
+ t
+m
+) p
+r
+r
+qu
+st. Us
+ `--m
+tr
+c-p
+rc
+
+t
+
+
+s` to s
+
+
+ct 
+h
+ch p
+rc
+
+t
+
+
+s to r
+port
+(d
+fau
+t: p99) a
+d `--output-jso
+` to sav
+ r
+su
+ts.
+For mor
+ 
+xamp
+
+s (HF datas
+ts, 
+armup, JSON output), s
+
+[B
+
+chmark
+
+g CLI — Mu
+t
+moda
+ Proc
+ssor B
+
+chmark](../../b
+
+chmark
+
+g/c
+
+.md#mu
+t
+moda
+-proc
+ssor-b
+
+chmark).
+## JSON CLI Argum
+
+ts
+--8
+-- "docs/c
+
+/jso
+_t
+p.
+
+c.md"
+## Argum
+
+ts
+--8
+-- "docs/g
+
+
+rat
+d/argpars
+/b
+
+ch_mm_proc
+ssor.
+
+c.md"
