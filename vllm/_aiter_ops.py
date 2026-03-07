@@ -1966,5 +1966,56 @@ class rocm_aiter_ops:
             out_=out_,
         )
 
+    @staticmethod
+    def paged_attention_common(
+        Q: torch.Tensor,
+        K: torch.Tensor,
+        V: torch.Tensor,
+        tmp_out: torch.Tensor,
+        max_logits: torch.Tensor,
+        exp_sums: torch.Tensor,
+        max_seq_len: int,
+        block_tables: torch.Tensor,
+        context_lens: torch.Tensor,
+        block_tables_stride0: int,
+        scale: float,
+        K_QScale_hip: torch.Tensor,
+        V_QScale_hip: torch.Tensor,
+        K_QScale_asm: torch.Tensor,
+        V_QScale_asm: torch.Tensor,
+        out_: torch.Tensor,
+        kv_cache_dtype: str,
+    ):
+        """
+        Paged attention common function.
+
+        This function is NOT wrapped with @is_aiter_supported decorator
+        to allow explicit backend selection via attention_config to work
+        even when VLLM_ROCM_USE_AITER=0.
+
+        Note: This performs lazy import of aiter.paged_attention_common
+        """
+        from aiter import paged_attention_common
+
+        return paged_attention_common(
+            Q=Q,
+            K=K,
+            V=V,
+            tmp_out=tmp_out,
+            max_logits=max_logits,
+            exp_sums=exp_sums,
+            max_seq_len=max_seq_len,
+            block_tables=block_tables,
+            context_lens=context_lens,
+            block_tables_stride0=block_tables_stride0,
+            scale=scale,
+            K_QScale_hip=K_QScale_hip,
+            V_QScale_hip=V_QScale_hip,
+            K_QScale_asm=K_QScale_asm,
+            V_QScale_asm=V_QScale_asm,
+            out_=out_,
+            kv_cache_dtype=kv_cache_dtype,
+        )
+
 
 rocm_aiter_ops.register_ops_once()
