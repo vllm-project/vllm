@@ -485,9 +485,25 @@ class CpuPlatform(Platform):
         return True
 
     @classmethod
+    def is_avx512_supported(cls) -> bool:
+        if hasattr(torch._C._cpu, "_is_avx512_supported"):
+            return torch._C._cpu._is_avx512_supported()
+        elif hasattr(torch.cpu, "_is_avx512_supported"):
+            return torch.cpu._is_avx512_supported()
+        return False
+
+    @classmethod
+    def is_amx_tile_supported(cls) -> bool:
+        if hasattr(torch._C._cpu, "_is_amx_tile_supported"):
+            return torch._C._cpu._is_amx_tile_supported()
+        elif hasattr(torch.cpu, "_is_amx_tile_supported"):
+            return torch.cpu._is_amx_tile_supported()
+        return False
+
+    @classmethod
     def import_kernels(cls) -> None:
         if Platform.get_cpu_architecture() in (CpuArchEnum.X86,):
-            if torch._C._cpu._is_avx512_supported():
+            if cls.is_avx512_supported():
                 try:
                     import vllm._C  # noqa: F401
                 except ImportError as e:
