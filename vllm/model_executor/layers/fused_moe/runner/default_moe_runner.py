@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
+from torch._higher_order_ops.scan import scan as torch_scan
 
 import vllm.envs as envs
 from vllm.distributed import (
@@ -583,6 +584,169 @@ class DefaultMoERunner(MoERunner):
         else:
             return (full_shared_final_hidden_states, full_fused_final_hidden_states)
 
+    def _can_use_scan(self) -> bool:
+        """
+        Return True when forward_impl_scan() can replace forward_impl_chunked().
+
+        Conditions:
+        - VLLM_MOE_USE_SCAN_CHUNKING must be enabled.
+        - Only the DeepEP low-latency kernel path is supported; MORI and
+          FlashInfer all2allv backends read local_sizes from a context manager
+          that is not compatible with torch.scan's pure-function requirement.
+        - DBO (dynamic batching with overlapping) uses ubatch-indexed staging
+          buffers; that indexing is handled by forward_impl_chunked, not here.
+        - Monolithic quant methods have a different apply() signature; they are
+          not yet ported to the scan path.
+        """
+        if not envs.VLLM_MOE_USE_SCAN_CHUNKING:
+            return False
+        pc = self.moe_config.moe_parallel_config
+        if not pc.use_deepep_ll_kernels:
+            return False
+        if self.enable_dbo:
+            return False
+        if self.quant_method is not None and self.quant_method.is_monolithic:
+            return False
+        return True
+
+    def forward_impl_scan(
+        self,
+        layer: torch.nn.Module,
+        full_hidden_states: torch.Tensor,
+        full_router_logits: torch.Tensor,
+        full_shared_input: torch.Tensor | None,
+        has_separate_shared_experts: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """
+        Scan-based replacement for forward_impl_chunked().
+
+        Replaces the Python for-loop over DP chunks with torch.scan so that the
+        chunking loop is visible to torch.compile and can be traced without graph
+        breaks.  The original forward_impl_chunked() is preserved and is always
+        available as a fallback (VLLM_MOE_USE_SCAN_CHUNKING=0).
+
+        Design notes
+        ------------
+        * Chunks are independent (no data dependency across iterations), so the
+          scan carry is a dummy scalar used only for sequencing.
+        * Inputs are pre-staged into (num_chunks, max_tokens, H) tensors with
+          zero-padding before the scan starts. The scan body receives one chunk
+          at a time as fixed-shape slices, giving torch.compile static shapes.
+        * The chunked_sizes() context manager is NOT called inside the scan body.
+          For the DeepEP-LL path (the only backend this method supports) that
+          context is not read by the dispatch kernel, so omitting it is safe.
+          Other backends (FlashInfer, MORI) still go through forward_impl_chunked.
+        * Results are stacked by torch.scan into (num_chunks, max_tokens, H) and
+          trimmed back to (num_tokens, H) after the scan returns.
+        """
+        assert self.batched_hidden_states is not None
+        assert self.batched_router_logits is not None
+
+        ctx = get_forward_context()
+        assert ctx.dp_metadata is not None
+
+        max_tokens: int = self.moe_config.max_num_tokens
+        max_tokens_across: int = int(
+            ctx.dp_metadata.max_tokens_across_dp_cpu.item()
+        )
+        if self.moe_config.is_sequence_parallel:
+            max_tokens_across = cdiv(max_tokens_across, self.moe_config.sp_size)
+
+        num_chunks: int = cdiv(max_tokens_across, max_tokens)
+        num_tokens: int = full_hidden_states.size(0)
+        H: int = full_hidden_states.size(-1)
+        E: int = full_router_logits.size(-1)
+
+        # ------------------------------------------------------------------
+        # Pre-stage: build (num_chunks, max_tokens, H/E) tensors.
+        # Re-use the pre-allocated staging buffers when they fit; otherwise
+        # allocate fresh tensors (avoids crashes on unexpected large batches).
+        # ------------------------------------------------------------------
+        def _make_staged(src: torch.Tensor, feat_dim: int) -> torch.Tensor:
+            total_padded = num_chunks * max_tokens
+            buf = src.new_zeros(num_chunks, max_tokens, feat_dim)
+            copy_len = min(num_tokens, total_padded)
+            buf.view(-1, feat_dim)[:copy_len].copy_(
+                src[:copy_len], non_blocking=True
+            )
+            return buf
+
+        chunked_hidden = _make_staged(full_hidden_states, H)
+        chunked_router = _make_staged(full_router_logits, E)
+
+        if full_shared_input is not None:
+            H_shared = full_shared_input.size(-1)
+            chunked_shared: torch.Tensor | None = _make_staged(
+                full_shared_input, H_shared
+            )
+        else:
+            chunked_shared = None
+
+        # Dummy carry: a single scalar that threads through scan iterations.
+        # Chunks are independent, so we carry no real state.
+        dummy_carry = full_hidden_states.new_zeros(1)
+
+        # Capture references for the closure (these are module-level constants
+        # for a given forward pass, not iteration-varying data).
+        _layer = layer
+        _runner = self
+        _has_sep_shared = has_separate_shared_experts
+
+        def chunk_fn(
+            carry: torch.Tensor,
+            xs: tuple[torch.Tensor, ...],
+        ) -> tuple[torch.Tensor, torch.Tensor | tuple[torch.Tensor, torch.Tensor]]:
+            if chunked_shared is not None:
+                chunk_h, chunk_r, chunk_s = xs
+            else:
+                chunk_h, chunk_r = xs
+                chunk_s = chunk_h  # shared_input falls back to hidden_states
+
+            topk_weights, topk_ids = _runner.router.select_experts(
+                hidden_states=chunk_h,
+                router_logits=chunk_r,
+            )
+
+            chunk_out = _runner.quant_method.apply(
+                layer=_layer,
+                x=chunk_h,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                shared_experts_input=chunk_s if chunked_shared is not None else None,
+            )
+
+            if _has_sep_shared:
+                assert _runner.shared_experts is not None
+                assert not isinstance(chunk_out, tuple)
+                shared_out = _runner.shared_experts(chunk_s)
+                chunk_out = (shared_out, chunk_out)
+
+            # torch.scan requires output leaves to be tensors; tuples are
+            # supported as pytrees.
+            return carry, chunk_out
+
+        xs_tuple: tuple[torch.Tensor, ...]
+        if chunked_shared is not None:
+            xs_tuple = (chunked_hidden, chunked_router, chunked_shared)
+        else:
+            xs_tuple = (chunked_hidden, chunked_router)
+
+        _, stacked = torch_scan(chunk_fn, init=dummy_carry, xs=xs_tuple, dim=0)
+
+        # ------------------------------------------------------------------
+        # Unpack stacked outputs: (num_chunks, max_tokens, H) -> (N, H)
+        # ------------------------------------------------------------------
+        if has_separate_shared_experts:
+            assert isinstance(stacked, tuple)
+            stacked_shared, stacked_fused = stacked
+            return (
+                stacked_shared.reshape(-1, stacked_shared.size(-1))[:num_tokens],
+                stacked_fused.reshape(-1, stacked_fused.size(-1))[:num_tokens],
+            )
+        else:
+            assert isinstance(stacked, torch.Tensor)
+            return stacked.reshape(-1, H)[:num_tokens]
+
     def forward_impl(
         self,
         layer: torch.nn.Module,
@@ -618,6 +782,14 @@ class DefaultMoERunner(MoERunner):
             router_logits, _ = self.gate(hidden_states)
 
         if use_chunked_impl:
+            if self._can_use_scan():
+                return self.forward_impl_scan(
+                    layer,
+                    hidden_states,
+                    router_logits,
+                    shared_input,
+                    has_separate_shared_experts,
+                )
             return self.forward_impl_chunked(
                 layer,
                 hidden_states,
