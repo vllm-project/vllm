@@ -325,10 +325,9 @@ async def init_app_state(
     else:
         served_model_names = [args.model]
 
-    if args.enable_log_requests:
-        request_logger = RequestLogger(max_log_len=args.max_log_len)
-    else:
-        request_logger = None
+    request_logger = RequestLogger(
+        max_log_len=args.max_log_len, enable_log_requests=args.enable_log_requests
+    )
 
     base_model_paths = [
         BaseModelPath(name=name, model_path=args.model) for name in served_model_names
