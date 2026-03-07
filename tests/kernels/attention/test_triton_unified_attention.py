@@ -162,6 +162,20 @@ def test_triton_unified_attn(
         k_descale = torch.rand(scale_shape, dtype=torch.float32)
         v_descale = torch.rand(scale_shape, dtype=torch.float32)
 
+    num_queries_per_kv = num_query_heads // num_kv_heads
+    BLOCK_M = (
+        16 if num_queries_per_kv <= 16 else 1 << (num_queries_per_kv - 1).bit_length()
+    )  # next power of 2 value
+    BLOCK_Q = BLOCK_M // num_queries_per_kv
+
+    block_q_seq_boundaries_tensor = torch.empty(num_seqs + 1, dtype=torch.int32)
+    block_q_seq_boundaries_tensor[0] = 0
+    block_q_seq_boundaries_tensor[1 : cu_query_lens.numel()].copy_(cu_query_lens[1:])
+    block_q_seq_boundaries_tensor[1 : cu_query_lens.numel()].sub_(cu_query_lens[:-1])
+    block_q_seq_boundaries_tensor[1 : cu_query_lens.numel()].add_(BLOCK_Q - 1)
+    block_q_seq_boundaries_tensor[1 : cu_query_lens.numel()].floor_divide_(BLOCK_Q)
+    block_q_seq_boundaries_tensor[: cu_query_lens.numel()].cumsum_(dim=0)
+    num_q_blocks = block_q_seq_boundaries_tensor[cu_query_lens.numel() - 1]
     num_par_softmax_segments = 16
     head_size_padded = next_power_of_2(head_size)
     softmax_segm_output = torch.empty(
@@ -194,6 +208,10 @@ def test_triton_unified_attn(
         q_descale=q_descale,
         k_descale=k_descale,
         v_descale=v_descale,
+        BLOCK_M=BLOCK_M,
+        BLOCK_Q=BLOCK_Q,
+        num_q_blocks=num_q_blocks,
+        block_q_seq_boundaries_tensor=block_q_seq_boundaries_tensor,
         seq_threshold_3D=seq_threshold_3D,
         num_par_softmax_segments=num_par_softmax_segments,
         softmax_segm_output=softmax_segm_output,
@@ -283,6 +301,21 @@ def test_triton_unified_attn_fp16_input_fp8_output(
 
     output_scale = torch.tensor(0.5, dtype=torch.float32)
 
+    num_queries_per_kv = num_query_heads // num_kv_heads
+    BLOCK_M = (
+        16 if num_queries_per_kv <= 16 else 1 << (num_queries_per_kv - 1).bit_length()
+    )  # next power of 2 value
+    BLOCK_Q = BLOCK_M // num_queries_per_kv
+
+    block_q_seq_boundaries_tensor = torch.empty(num_seqs + 1, dtype=torch.int32)
+    block_q_seq_boundaries_tensor[0] = 0
+    block_q_seq_boundaries_tensor[1 : cu_query_lens.numel()].copy_(cu_query_lens[1:])
+    block_q_seq_boundaries_tensor[1 : cu_query_lens.numel()].sub_(cu_query_lens[:-1])
+    block_q_seq_boundaries_tensor[1 : cu_query_lens.numel()].add_(BLOCK_Q - 1)
+    block_q_seq_boundaries_tensor[1 : cu_query_lens.numel()].floor_divide_(BLOCK_Q)
+    block_q_seq_boundaries_tensor[: cu_query_lens.numel()].cumsum_(dim=0)
+    num_q_blocks = block_q_seq_boundaries_tensor[cu_query_lens.numel() - 1]
+
     num_par_softmax_segments = 16
     head_size_padded = next_power_of_2(head_size)
     softmax_segm_output = torch.empty(
@@ -316,6 +349,10 @@ def test_triton_unified_attn_fp16_input_fp8_output(
         k_descale=None,
         v_descale=None,
         output_scale=output_scale,
+        BLOCK_M=BLOCK_M,
+        BLOCK_Q=BLOCK_Q,
+        num_q_blocks=num_q_blocks,
+        block_q_seq_boundaries_tensor=block_q_seq_boundaries_tensor,
         seq_threshold_3D=seq_threshold_3D,
         num_par_softmax_segments=num_par_softmax_segments,
         softmax_segm_output=softmax_segm_output,
