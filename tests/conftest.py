@@ -1157,6 +1157,7 @@ class VllmRunner:
             # Ignore shutdown errors as cleanup will still proceed
             pass
         del self.llm
+        torch._dynamo.reset()
         cleanup_dist_env_and_memory()
 
 
