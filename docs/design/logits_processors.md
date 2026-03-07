@@ -10,7 +10,7 @@ This document describes how the vLLM engine interacts with logits processors, an
 
 A logits processor adjusts the next-token probability distribution, usually with the intention of steering the model towards a desired type of behavior.
 
-In vLLM, logits processors operate at batch granularity. During a given engine step, the logits processor consumes a `(num_requests) x (vocab_size)` tensor of raw logits output by the model. For all requests which enable the logits processor, the logits processor applies a transformation to the corresponding row of the logits tensor, while leaving other rows unmodified. The transformed logits tensor is then passed to softmax.  
+In vLLM, logits processors operate at batch granularity. During a given engine step, the logits processor consumes a `(num_requests) x (vocab_size)` tensor of raw logits output by the model. For all requests which enable the logits processor, the logits processor applies a transformation to the corresponding row of the logits tensor, while leaving other rows unmodified. The transformed logits tensor is then passed to softmax.
 
 ## Logits Processors in the vLLM engine
 
@@ -82,7 +82,7 @@ The pseudocode below shows the process by which the vLLM persistent batch notifi
         removed: Sequence[RemovedRequest]
         added: Sequence[AddedRequest]
         moved: Sequence[MovedRequest]
-    
+
     ```
 
 ### Applying Logits Processors to the Model Output Logits
@@ -153,7 +153,7 @@ Note that the sampler will access the logits processors via `SamplingMetadata.lo
             ...
 
             # ...perform sampling and return sampling result...
-    ``` 
+    ```
 
 At sampling time, the sampler checks whether all requests in the persistent batch employ greedy sampling. If that is the case, the sampler saves compute by skipping "argmax-invariant" logits processors. Here, "argmax" is shorthand for the token ID with the highest logit value in a given row of the logits tensor (i.e. the token which the model weighted the highest for a given request).
 

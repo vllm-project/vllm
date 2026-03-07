@@ -160,7 +160,7 @@ To implement your own resolver plugin:
    ```python
    from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
    from vllm.lora.request import LoRARequest
-   
+
    class CustomResolver(LoRAResolver):
        async def resolve_lora(self, base_model_name: str, lora_name: str) -> Optional[LoRARequest]:
            # Your custom resolution logic here

@@ -442,7 +442,7 @@ You must enable this feature via `enable_mm_embeds=True`.
         "image": {
             # Shape: (num_images, num_slices, hidden_size)
             # num_slices can differ for each image
-            "image_embeds": [torch.load(...) for image in images],  
+            "image_embeds": [torch.load(...) for image in images],
             # Shape: (num_images, 2)
             # image_sizes is needed to calculate details of the sliced image.
             "image_sizes": [image.size for image in images],

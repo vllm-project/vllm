@@ -351,9 +351,9 @@ If you use triton kernels with cuda 13, you might see an error like `ptxas fatal
 (EngineCore_0 pid=9492) triton.runtime.errors.PTXASError: PTXAS error: Internal Triton PTX codegen error
 (EngineCore_0 pid=9492) `ptxas` stderr:
 (EngineCore_0 pid=9492) ptxas fatal   : Value 'sm_110a' is not defined for option 'gpu-name'
-(EngineCore_0 pid=9492) 
+(EngineCore_0 pid=9492)
 (EngineCore_0 pid=9492) Repro command: /home/jetson/.venv/lib/python3.12/site-packages/triton/backends/nvidia/bin/ptxas -lineinfo -v --gpu-name=sm_110a /tmp/tmp95oy_b9d.ptx -o /tmp/tmp95oy_b9d.ptx.o
-(EngineCore_0 pid=9492) 
+(EngineCore_0 pid=9492)
     outputs = self.engine_core.get_output()
               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   File "/home/jetson/.venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 668, in get_output
