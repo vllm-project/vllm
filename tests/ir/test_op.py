@@ -39,13 +39,13 @@ def test_registration_overloads():
     assert custom_mul.name == "_custom_mul"
     assert custom_mul is IrOp.registry["_custom_mul"]
 
-    # Direct construction is equivalent
+    # Direct construction does not register directly
     def _custom_div(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         return x / y
 
     custom_div = IrOp("_custom_div", _custom_div)
     assert custom_div.name == "_custom_div"
-    assert custom_div is IrOp.registry["_custom_div"]
+    assert "_custom_div" not in IrOp.registry
 
 
 def test_no_kw_only_args():
