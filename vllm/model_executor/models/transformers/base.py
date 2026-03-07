@@ -538,6 +538,6 @@ class Base(
         # Ensure that the capture hooks are installed before dynamo traces the model
         maybe_install_capturing_hooks(self.model)
 
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+    def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = self.text_config.num_hidden_layers
         return (2, num_layers // 2, num_layers - 3)

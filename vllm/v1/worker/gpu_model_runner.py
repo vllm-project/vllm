@@ -4336,7 +4336,9 @@ class GPUModelRunner(
                             aux_layers,
                         )
                     else:
-                        aux_layers = self.model.get_eagle3_aux_hidden_state_layers()
+                        aux_layers = (
+                            self.model.get_eagle3_default_aux_hidden_state_layers()
+                        )
 
                     self.model.set_aux_hidden_state_layers(aux_layers)
                 time_after_load = time.perf_counter()
