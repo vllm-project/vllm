@@ -35,6 +35,52 @@ For reproducible measurements in your environment, use
 [`examples/offline_inference/spec_decode.py`](../../../examples/offline_inference/spec_decode.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
 
+## Speculative Config Options
+
+The `--speculative-config` flag allows you to pass a JSON object with configuration options for speculative decoding. This is useful when you need to configure advanced options for the speculative method.
+
+### Usage Example
+
+```bash
+vllm serve meta-llama/Llama-2-7b-hf \
+    --speculative-config '{"model": "meta-llama/Llama-2-7b-hf", "num_speculative_tokens": 5, "method": "draft_model"}'
+```
+
+### Supported Configuration Keys
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `method` | string | `"draft_model"` | Speculative method to use. Options: `"draft_model"`, `"eagle"`, `"eagle3"`, `"mtp"`, `"ngram"`, `"suffix"`, `"medusa"`, `"mlp_speculator"` |
+| `model` | string | `null` | Draft model name, EAGLE head, or additional weights |
+| `num_speculative_tokens` | int | `null` | Number of speculative tokens to generate |
+| `draft_tensor_parallel_size` | int | `null` | Tensor parallelism degree for draft model (1 or same as target) |
+| `quantization` | string | `null` | Quantization method for draft model weights |
+| `max_model_len` | int | `null` | Maximum model length of the draft model |
+| `revision` | string | `null` | Model version (branch, tag, or commit) for draft model |
+| `disable_padded_drafter_batch` | bool | `false` | Disable input padding for speculative decoding |
+| `use_local_argmax_reduction` | bool | `false` | Use local argmax instead of all-gather for draft token generation |
+| `parallel_drafting` | bool | `false` | Enable parallel drafting (for EAGLE and draft model methods) |
+
+### N-gram Specific Options
+
+When using `"method": "ngram"`:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `prompt_lookup_min` | int | `5` | Minimum size of ngram token window |
+| `prompt_lookup_max` | int | `5` | Maximum size of ngram token window |
+
+### Suffix Decoding Specific Options
+
+When using `"method": "suffix"`:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `suffix_decoding_max_tree_depth` | int | `24` | Maximum depth of suffix decoding trees |
+| `suffix_decoding_max_cached_requests` | int | `10000` | Maximum number of requests to cache |
+| `suffix_decoding_max_spec_factor` | float | `1.0` | Maximum spec factor for suffix decoding |
+| `suffix_decoding_min_token_prob` | float | `0.1` | Minimum token probability for suffix decoding |
+
 ## Lossless guarantees of Speculative Decoding
 
 In vLLM, speculative decoding aims to enhance inference efficiency while maintaining accuracy. This section addresses the lossless guarantees of

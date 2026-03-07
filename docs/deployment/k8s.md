@@ -174,7 +174,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
       stringData:
         token: "REPLACE_WITH_TOKEN"
       ```
-  
+
       Next to create the deployment file for vLLM to run the model server. The following example deploys the `Mistral-7B-Instruct-v0.3` model.
 
       Here are two examples for using NVIDIA GPU and AMD GPU.

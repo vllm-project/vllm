@@ -12,7 +12,7 @@ This document shows how to write, load and use a custom logits processor.
 
 A logits processor adjusts the next-token probability distribution, usually with the intention of steering the model towards a desired type of behavior.
 
-In vLLM, logits processors operate at batch granularity. During a given engine step, the logits processor consumes a `(num_requests) x (vocab_size)` tensor of raw logits output by the model. For all requests which enable the logits processor, the logits processor applies a transformation to the corresponding row of the logits tensor, while leaving other rows unmodified. The transformed logits tensor is then passed to softmax.  
+In vLLM, logits processors operate at batch granularity. During a given engine step, the logits processor consumes a `(num_requests) x (vocab_size)` tensor of raw logits output by the model. For all requests which enable the logits processor, the logits processor applies a transformation to the corresponding row of the logits tensor, while leaving other rows unmodified. The transformed logits tensor is then passed to softmax.
 
 ## Creating a Custom Logits Processor
 
@@ -135,7 +135,7 @@ The contrived example below implements a custom logits processor which consumes 
                 if params.extra_args and (target_token :=
                                         params.extra_args.get("target_token")):
                     self.req_info[index] = target_token
-                else: 
+                else:
                     self.req_info.pop(index, None)
 
             if self.req_info:
@@ -419,7 +419,7 @@ The examples below show how a user would pass a custom argument (`target_token`)
 ??? code "Offline: configure custom logits processor for an `LLM` request"
 
     ``` python
-    outputs_logitproc = llm.generate("your prompt", 
+    outputs_logitproc = llm.generate("your prompt",
                                      SamplingParams(...,
                                         extra_args={"target_token": 67}))
     ```
