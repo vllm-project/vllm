@@ -281,32 +281,48 @@ class Hermes2ProToolParser(ToolParser):
                     logger.debug("attempting to close tool call, but no tool call")
                     return None
                 diff = self.prev_tool_call_arr[self.current_tool_id].get("arguments")
-                if diff:
-                    diff = (
-                        diff.encode("utf-8").decode("unicode_escape")
-                        if diff is str
-                        else diff
-                    )
-                    if '"}' not in delta_text:
-                        return None
-                    end_loc = delta_text.rindex('"}')
-                    diff = delta_text[:end_loc] + '"}'
-                    logger.debug(
-                        "Finishing tool and found diff that had not "
-                        "been streamed yet: %s",
-                        diff,
-                    )
-                    self.streamed_args_for_tool[self.current_tool_id] += diff
-                    return DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_id,
-                                function=DeltaFunctionCall(arguments=diff).model_dump(
-                                    exclude_none=True
-                                ),
-                            )
-                        ]
-                    )
+                if diff is not None:
+                    # Compute the full arguments as a JSON string
+                    if isinstance(diff, str):
+                        full_args = diff
+                    else:
+                        full_args = json.dumps(diff, ensure_ascii=False)
+
+                    already_streamed = self.streamed_args_for_tool[self.current_tool_id]
+
+                    # Send any remaining unsent argument characters.
+                    # This replaces the previous '"}' substring check which
+                    # failed for non-string values (numbers, booleans, null)
+                    # and when MTP batched the closing tokens together.
+                    if full_args.startswith(already_streamed) and len(
+                        already_streamed
+                    ) < len(full_args):
+                        remaining = full_args[len(already_streamed) :]
+                        logger.debug(
+                            "Finishing tool and found diff that had not "
+                            "been streamed yet: %s",
+                            remaining,
+                        )
+                        self.streamed_args_for_tool[self.current_tool_id] = full_args
+                        return DeltaMessage(
+                            tool_calls=[
+                                DeltaToolCall(
+                                    index=self.current_tool_id,
+                                    function=DeltaFunctionCall(
+                                        arguments=remaining
+                                    ).model_dump(exclude_none=True),
+                                )
+                            ]
+                        )
+                    elif not full_args.startswith(already_streamed):
+                        logger.warning(
+                            "Closing tool call but streamed args do not "
+                            "match expected args. full_args=%r, "
+                            "already_streamed=%r",
+                            full_args,
+                            already_streamed,
+                        )
+                return None
 
             # case -- otherwise we're just generating text
             else:
