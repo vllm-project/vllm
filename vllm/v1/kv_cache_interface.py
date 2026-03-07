@@ -16,7 +16,7 @@ from vllm.utils.torch_utils import get_dtype_size
 logger = init_logger(__name__)
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True)
 class KVCacheSpec:
     """
     A base class for specifying the KV cache format of one layer.
@@ -24,12 +24,6 @@ class KVCacheSpec:
 
     # number of tokens in a block
     block_size: int
-    group_size: int = 1
-    """
-    The size of a group of attention layers.
-    Currently, it's used for Mamba models to group more than one 
-    FullAttn layers to one page.
-    """
 
     @property
     def page_size_bytes(self) -> int:
@@ -112,6 +106,12 @@ class FullAttentionSpec(AttentionSpec):
     """
     attention_chunk_size: int | None = None
 
+    group_size: int = 1
+    """
+    The size of a group of attention layers.
+    It's used for Mamba models to group more than one FullAttn layers to one page.
+    """
+
     def __post_init__(self):
         if self.head_size_v is None:
             object.__setattr__(self, "head_size_v", self.head_size)
@@ -165,7 +165,6 @@ class FullAttentionSpec(AttentionSpec):
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
-            group_size=specs[0].group_size,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             head_size_v=specs[0].head_size_v,
@@ -173,6 +172,7 @@ class FullAttentionSpec(AttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
+            group_size=specs[0].group_size,
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -228,7 +228,6 @@ class MLAAttentionSpec(FullAttentionSpec):
         )
         return cls(
             block_size=specs[0].block_size,
-            group_size=specs[0].group_size,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
@@ -282,7 +281,7 @@ class SlidingWindowSpec(AttentionSpec):
         return (cdiv(num_tokens, self.block_size) + 1) * self.page_size_bytes
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True)
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtypes: tuple[torch.dtype]
@@ -359,7 +358,6 @@ class SinkFullAttentionSpec(FullAttentionSpec):
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
-            group_size=specs[0].group_size,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             head_size_v=specs[0].head_size_v,
