@@ -19,6 +19,11 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.lora_utils import (
+    get_lora_capture_cases,
+    make_graph_key,
+    resolve_effective_num_active_loras,
+)
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -62,7 +67,11 @@ class CudaGraphManager:
             use_uniform_decode_cudagraph,
         )
 
-        self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self.lora_capture_cases = get_lora_capture_cases(
+            vllm_config.lora_config, self.compilation_config
+        )
+
+        self.graphs: dict[tuple[int, int], torch.cuda.CUDAGraph] = {}
         self.pool = None
         if self.cudagraph_mode != CUDAGraphMode.NONE:
             self.pool = torch.cuda.graph_pool_handle()
@@ -90,6 +99,7 @@ class CudaGraphManager:
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         has_lora: bool = False,
+        num_active_loras: int = 0,
         uniform_decode: bool = False,
     ) -> None:
         # select and check capture function
@@ -159,6 +169,7 @@ class CudaGraphManager:
             attn_metadata=attn_metadata,
             slot_mappings=slot_mappings,
             has_lora=has_lora,
+            num_active_loras=num_active_loras,
         )
 
     def _capture_full_graph(
@@ -171,10 +182,11 @@ class CudaGraphManager:
         attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor] | None,
         has_lora: bool = False,
+        num_active_loras: int = 0,
     ) -> None:
         assert attn_metadata is not None
-        # Capture the graph.
-        assert num_tokens not in self.graphs
+        graph_key = make_graph_key(num_tokens, num_active_loras)
+        assert graph_key not in self.graphs
         graph = torch.cuda.CUDAGraph()
 
         # Sync offloader's copy stream before capture.
@@ -211,7 +223,7 @@ class CudaGraphManager:
             if self.use_aux_hidden_state_outputs:
                 for i, aux_hidden in enumerate(aux_hidden_states):
                     self.aux_hidden_states[i][:num_tokens] = aux_hidden
-        self.graphs[num_tokens] = graph
+        self.graphs[graph_key] = graph
 
     def _capture_piecewise_graph(
         self,
@@ -223,9 +235,14 @@ class CudaGraphManager:
         attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor] | None,
         has_lora: bool = False,
+        num_active_loras: int = 0,
     ) -> None:
         # create batch descriptor for piecewise cudagraph dispatch key
-        batch_descriptor = BatchDescriptor(num_tokens=num_tokens, has_lora=has_lora)
+        batch_descriptor = BatchDescriptor(
+            num_tokens=num_tokens,
+            has_lora=has_lora,
+            num_active_loras=num_active_loras,
+        )
 
         # Capture run - CUDAGraphWrapper inside torch.compile will auto capture.
         with set_forward_context(
@@ -249,6 +266,7 @@ class CudaGraphManager:
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         has_lora: bool = False,
+        lora_capture_hook: Callable[[int, int, int], None] | None = None,
     ) -> None:
         common_kwargs = dict(
             device=self.device,
@@ -260,6 +278,8 @@ class CudaGraphManager:
             attn_groups=attn_groups,
             kv_cache_config=kv_cache_config,
             has_lora=has_lora,
+            uniform_decode_query_len=self.uniform_decode_query_len,
+            max_num_reqs=self.max_num_reqs,
         )
 
         # Phase 1: Capture for mixed prefill-decode batches if needed.
@@ -270,6 +290,8 @@ class CudaGraphManager:
                 capture_cudagraph_mode=mixed_mode,
                 desc=f"Capturing CUDA graphs (mixed, {mixed_mode.name})",
                 uniform_decode=False,
+                lora_capture_cases=self.lora_capture_cases,
+                lora_capture_hook=lora_capture_hook,
                 **common_kwargs,
             )
 
@@ -282,12 +304,19 @@ class CudaGraphManager:
                 capture_cudagraph_mode=CUDAGraphMode.FULL,
                 desc="Capturing CUDA graphs (decode, FULL)",
                 uniform_decode=True,
+                lora_capture_cases=self.lora_capture_cases,
+                lora_capture_hook=lora_capture_hook,
                 **common_kwargs,
             )
 
     def get_cudagraph_runtime_mode(
-        self, num_reqs: int, num_tokens: int, max_query_len: int
-    ) -> tuple[CUDAGraphMode, int | None]:
+        self,
+        num_reqs: int,
+        num_tokens: int,
+        max_query_len: int,
+        num_active_loras: int = 0,
+    ) -> tuple[CUDAGraphMode, int | None, int]:
+        """Returns (cudagraph_mode, cudagraph_size, effective_num_active_loras)."""
         is_uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
             num_tokens == max_query_len * num_reqs
         )
@@ -300,21 +329,29 @@ class CudaGraphManager:
         else:
             cudagraph_mode = self.cudagraph_mode.mixed_mode()
 
+        effective_num_active_loras = resolve_effective_num_active_loras(
+            num_active_loras, self.lora_capture_cases
+        )
+
         if (
             cudagraph_mode == CUDAGraphMode.FULL
             and cudagraph_size is not None
-            and cudagraph_size not in self.graphs
+            and make_graph_key(cudagraph_size, effective_num_active_loras)
+            not in self.graphs
         ):
             # If graph wasn't captured yet, fall back to eager.
             # This might happen when the dummy run is called before capture.
             cudagraph_mode = CUDAGraphMode.NONE
             cudagraph_size = None
-        return cudagraph_mode, cudagraph_size
+        return cudagraph_mode, cudagraph_size, effective_num_active_loras
 
     def run_fullgraph(
-        self, num_tokens: int
+        self, num_tokens: int, num_active_loras: int = 0
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-        assert num_tokens in self.graphs, f"No cudagraph for {num_tokens} tokens"
+        graph_key = make_graph_key(num_tokens, num_active_loras)
+        assert graph_key in self.graphs, (
+            f"No cudagraph for {num_tokens} tokens, num_active_loras={num_active_loras}"
+        )
         # Sync offloader before replay - needed when transitioning from
         # eager/piecewise to full cudagraph (e.g., prefill → decode).
         # The previous eager iteration's start_prefetch may have queued
@@ -322,7 +359,7 @@ class CudaGraphManager:
         # cannot see. Without this, replay could overwrite static buffers
         # while those copies are still in flight.
         get_offloader().sync_prev_onload()
-        self.graphs[num_tokens].replay()
+        self.graphs[graph_key].replay()
         assert self.hidden_states is not None
         hidden_states = self.hidden_states[:num_tokens]
         if not self.use_aux_hidden_state_outputs:
@@ -372,16 +409,41 @@ def capture_graphs(
     capture_fn: Callable,
     capture_cudagraph_mode: CUDAGraphMode,
     desc: str = "Capturing CUDA graphs",
+    lora_capture_cases: list[int] | None = None,
+    lora_capture_hook: Callable[[int, int, int], None] | None = None,
+    uniform_decode: bool = False,
     **capture_kwargs,
 ) -> None:
     # Capture larger graphs first.
     sizes_to_capture = sorted(set(cudagraph_sizes.values()), reverse=True)
-    if is_global_first_rank():
-        sizes_to_capture = tqdm(sizes_to_capture, desc=desc)
+    lora_cases = lora_capture_cases if lora_capture_cases is not None else [0]
 
+    # Build (size, num_active_loras) pairs for capture.
+    capture_pairs = [
+        (size, num_active_loras)
+        for size in sizes_to_capture
+        for num_active_loras in lora_cases
+    ]
+    if is_global_first_rank():
+        capture_pairs = tqdm(capture_pairs, desc=desc)
+
+    uniform_decode_query_len = capture_kwargs.pop("uniform_decode_query_len", 1)
+    max_num_reqs = capture_kwargs.pop("max_num_reqs", 256)
     with graph_capture(device=device):
-        for size in sizes_to_capture:
-            capture_fn(size, capture_cudagraph_mode, **capture_kwargs)
+        for size, num_active_loras in capture_pairs:
+            if lora_capture_hook is not None:
+                num_reqs = (
+                    min(cdiv(size, uniform_decode_query_len), max_num_reqs)
+                    if uniform_decode
+                    else min(size, max_num_reqs)
+                )
+                lora_capture_hook(num_active_loras, num_reqs, size)
+            capture_fn(
+                size,
+                capture_cudagraph_mode,
+                num_active_loras=num_active_loras,
+                **capture_kwargs,
+            )
 
 
 def prepare_inputs_to_capture(
