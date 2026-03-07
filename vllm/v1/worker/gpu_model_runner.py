@@ -118,6 +118,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
     create_fast_prefill_custom_backend,
     get_dcp_local_seq_lens,
@@ -1768,10 +1769,18 @@ class GPUModelRunner(
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
 
-        if for_cudagraph_capture:
+        if (
+            self.vllm_config.attention_config.backend
+            != AttentionBackendEnum.FLEX_ATTENTION
+            and for_cudagraph_capture
+        ):
             # For some attention backends (e.g. FA) with sliding window models we need
             # to make sure the backend see a max_seq_len that is larger to the sliding
             # window size when capturing to make sure the correct kernel is selected.
+            #
+            # For FlexAttention, warmup and capture with different max_seq_len
+            # will cause recompilation happening during graph capture.
+            # Need avoid that.
             max_seq_len = self.max_model_len
         else:
             max_seq_len = self.seq_lens.np[:num_reqs].max().item()
