@@ -28,7 +28,9 @@ from vllm.platforms import current_platform
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .matcher_utils import (
+    MatcherFusedAddGemmaRMSNorm,
     MatcherFusedAddRMSNorm,
+    MatcherGemmaRMSNorm,
     MatcherQuantFP8,
     MatcherRMSNorm,
 )
@@ -112,6 +114,37 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
         kFp8Dynamic64Sym, True
     ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
 }
+
+# Gemma RMSNorm fused ops (weight applied as 1 + weight)
+GEMMA_FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {}
+if hasattr(torch.ops._C, "gemma_rms_norm_static_fp8_quant"):
+    GEMMA_FUSED_OPS[FusedRMSQuantKey(kFp8StaticTensorSym, False)] = (
+        torch.ops._C.gemma_rms_norm_static_fp8_quant.default
+    )
+if hasattr(torch.ops._C, "gemma_fused_add_rms_norm_static_fp8_quant"):
+    GEMMA_FUSED_OPS[FusedRMSQuantKey(kFp8StaticTensorSym, True)] = (
+        torch.ops._C.gemma_fused_add_rms_norm_static_fp8_quant.default
+    )
+if hasattr(torch.ops._C, "gemma_rms_norm_dynamic_per_token_quant"):
+    GEMMA_FUSED_OPS[FusedRMSQuantKey(kFp8DynamicTokenSym, False)] = (
+        torch.ops._C.gemma_rms_norm_dynamic_per_token_quant.default
+    )
+    GEMMA_FUSED_OPS[FusedRMSQuantKey(kFp8DynamicTokenSym, True)] = (
+        torch.ops._C.gemma_rms_norm_dynamic_per_token_quant.default
+    )
+if hasattr(torch.ops._C, "gemma_rms_norm_per_block_quant"):
+    GEMMA_FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic128Sym, False)] = (
+        torch.ops._C.gemma_rms_norm_per_block_quant.default
+    )
+    GEMMA_FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic128Sym, True)] = (
+        torch.ops._C.gemma_rms_norm_per_block_quant.default
+    )
+    GEMMA_FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic64Sym, False)] = (
+        torch.ops._C.gemma_rms_norm_per_block_quant.default
+    )
+    GEMMA_FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic64Sym, True)] = (
+        torch.ops._C.gemma_rms_norm_per_block_quant.default
+    )
 
 
 class RMSNormQuantPattern:
@@ -564,10 +597,173 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
         )
 
 
+class GemmaRMSNormQuantPattern:
+    """
+    Base for GemmaRMSNorm + quant fusion patterns.
+    Sets up Gemma-specific matchers and fused ops; subclasses inherit
+    register() from the corresponding RMSNorm pattern class.
+    """
+
+    def _init_gemma(
+        self,
+        epsilon: float,
+        key: FusedRMSQuantKey,
+        has_col_major_scales: bool = False,
+        is_e8m0: bool = False,
+        is_tma_aligned: bool = False,
+    ) -> None:
+        self.epsilon = epsilon
+        self.quant_dtype = key.quant.dtype
+        config = get_current_vllm_config()
+        self.model_dtype = config.model_config.dtype if config.model_config else None
+
+        assert key in GEMMA_FUSED_OPS, (
+            f"unsupported fused gemma rmsnorm+quant op for {key}"
+        )
+        self.FUSED_OP = GEMMA_FUSED_OPS[key]
+
+        self.rmsnorm_matcher = (
+            MatcherGemmaRMSNorm(epsilon)
+            if not key.fused_add
+            else MatcherFusedAddGemmaRMSNorm(epsilon)
+        )
+        self.quant_matcher = MatcherQuantFP8(
+            key.quant,
+            has_col_major_scales=has_col_major_scales,
+            is_e8m0=is_e8m0,
+            is_tma_aligned=is_tma_aligned,
+        )
+
+
+class GemmaRMSNormStaticQuantPattern(
+    GemmaRMSNormQuantPattern, RMSNormStaticQuantPattern
+):
+    def __init__(
+        self, epsilon: float, quant_dtype: torch.dtype, symmetric: bool = True
+    ) -> None:
+        fused_key = FusedRMSQuantKey(
+            fused_add=False,
+            quant=QuantKey(
+                dtype=quant_dtype, scale=kStaticTensorScale, symmetric=symmetric
+            ),
+        )
+        self._init_gemma(epsilon, fused_key)
+
+
+class FusedAddGemmaRMSNormStaticQuantPattern(
+    GemmaRMSNormQuantPattern, FusedAddRMSNormStaticQuantPattern
+):
+    def __init__(
+        self, epsilon: float, quant_dtype: torch.dtype, symmetric: bool = True
+    ) -> None:
+        key = FusedRMSQuantKey(
+            fused_add=True,
+            quant=QuantKey(
+                dtype=quant_dtype, scale=kStaticTensorScale, symmetric=symmetric
+            ),
+        )
+        self._init_gemma(epsilon, key)
+
+
+class GemmaRMSNormDynamicQuantPattern(
+    GemmaRMSNormQuantPattern, RMSNormDynamicQuantPattern
+):
+    def __init__(
+        self,
+        epsilon: float,
+        quant_dtype: torch.dtype,
+        group_shape: GroupShape = GroupShape.PER_TOKEN,
+        symmetric: bool = True,
+    ) -> None:
+        scale = ScaleDesc(torch.float32, False, group_shape)
+        key = FusedRMSQuantKey(
+            fused_add=False,
+            quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
+        )
+        self._init_gemma(epsilon, key)
+
+
+class FusedAddGemmaRMSNormDynamicQuantPattern(
+    GemmaRMSNormQuantPattern, FusedAddRMSNormDynamicQuantPattern
+):
+    def __init__(
+        self,
+        epsilon: float,
+        quant_dtype: torch.dtype,
+        group_shape: GroupShape = GroupShape.PER_TOKEN,
+        symmetric: bool = True,
+    ) -> None:
+        scale = ScaleDesc(torch.float32, False, group_shape)
+        key = FusedRMSQuantKey(
+            fused_add=True,
+            quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
+        )
+        self._init_gemma(epsilon, key)
+
+
+class GemmaRMSNormGroupQuantPattern(GemmaRMSNormQuantPattern, RMSNormGroupQuantPattern):
+    def __init__(
+        self,
+        epsilon: float,
+        quant_dtype: torch.dtype,
+        group_shape: GroupShape,
+        symmetric: bool = True,
+        is_e8m0: bool = False,
+        has_col_major_scales: bool = True,
+        is_tma_aligned: bool = True,
+    ) -> None:
+        scale = ScaleDesc(torch.float32, False, group_shape)
+        key = FusedRMSQuantKey(
+            fused_add=False,
+            quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
+        )
+        self.group_shape = group_shape
+        self.has_col_major_scales = has_col_major_scales
+        self.is_tma_aligned = is_tma_aligned
+        self._init_gemma(
+            epsilon,
+            key,
+            has_col_major_scales=has_col_major_scales,
+            is_e8m0=is_e8m0,
+            is_tma_aligned=is_tma_aligned,
+        )
+
+
+class FusedAddGemmaRMSNormGroupQuantPattern(
+    GemmaRMSNormQuantPattern, FusedAddRMSNormGroupQuantPattern
+):
+    def __init__(
+        self,
+        epsilon: float,
+        quant_dtype: torch.dtype,
+        group_shape: GroupShape,
+        symmetric: bool = True,
+        is_e8m0: bool = False,
+        has_col_major_scales: bool = True,
+        is_tma_aligned: bool = True,
+    ) -> None:
+        scale = ScaleDesc(torch.float32, False, group_shape)
+        key = FusedRMSQuantKey(
+            fused_add=True,
+            quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
+        )
+        self.group_shape = group_shape
+        self.is_e8m0 = is_e8m0
+        self.has_col_major_scales = has_col_major_scales
+        self.is_tma_aligned = is_tma_aligned
+        self._init_gemma(
+            epsilon,
+            key,
+            has_col_major_scales=has_col_major_scales,
+            is_e8m0=is_e8m0,
+            is_tma_aligned=is_tma_aligned,
+        )
+
+
 class RMSNormQuantFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses rms_norm & quant custom ops into a fused rms_norm_quant op.
-    It also supports fused_add_rms_norm.
+    It also supports fused_add_rms_norm and gemma_rms_norm variants.
     """
 
     @enable_fake_mode
@@ -623,6 +819,67 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
                                     is_tma_aligned=is_tma_aligned,
                                 ).register(self.patterns)
 
+        # Register Gemma RMSNorm + quant fusion patterns (if ops available)
+        if GEMMA_FUSED_OPS:
+            for epsilon in [1e-5, 1e-6]:
+                # Fuse gemma_fused_add_rms_norm + static fp8 quant
+                if FusedRMSQuantKey(kFp8StaticTensorSym, True) in GEMMA_FUSED_OPS:
+                    FusedAddGemmaRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(
+                        self.patterns
+                    )
+
+                # Fuse gemma_rms_norm + static fp8 quant
+                if FusedRMSQuantKey(kFp8StaticTensorSym, False) in GEMMA_FUSED_OPS:
+                    GemmaRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(
+                        self.patterns
+                    )
+
+                # Fuse gemma_fused_add_rms_norm + dynamic per-token fp8 quant
+                if FusedRMSQuantKey(kFp8DynamicTokenSym, True) in GEMMA_FUSED_OPS:
+                    FusedAddGemmaRMSNormDynamicQuantPattern(
+                        epsilon, FP8_DTYPE
+                    ).register(self.patterns)
+
+                # Fuse gemma_rms_norm + dynamic per-token fp8 quant
+                if FusedRMSQuantKey(kFp8DynamicTokenSym, False) in GEMMA_FUSED_OPS:
+                    GemmaRMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(
+                        self.patterns
+                    )
+
+                # Gemma group quant patterns
+                if current_platform.is_cuda():
+                    for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
+                        gkey = FusedRMSQuantKey(
+                            QuantKey(
+                                dtype=FP8_DTYPE,
+                                scale=ScaleDesc(torch.float32, False, group_shape),
+                                symmetric=True,
+                            ),
+                            True,
+                        )
+                        if gkey not in GEMMA_FUSED_OPS:
+                            continue
+                        for has_col_major_scales in [True, False]:
+                            for is_e8m0 in [True, False]:
+                                for is_tma_aligned in [False, True]:
+                                    FusedAddGemmaRMSNormGroupQuantPattern(
+                                        epsilon,
+                                        FP8_DTYPE,
+                                        group_shape=group_shape,
+                                        is_e8m0=is_e8m0,
+                                        has_col_major_scales=has_col_major_scales,
+                                        is_tma_aligned=is_tma_aligned,
+                                    ).register(self.patterns)
+
+                                    GemmaRMSNormGroupQuantPattern(
+                                        epsilon,
+                                        FP8_DTYPE,
+                                        group_shape=group_shape,
+                                        is_e8m0=is_e8m0,
+                                        has_col_major_scales=has_col_major_scales,
+                                        is_tma_aligned=is_tma_aligned,
+                                    ).register(self.patterns)
+
         self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
@@ -640,4 +897,11 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             FusedAddRMSNormStaticQuantPattern,
             FusedAddRMSNormDynamicQuantPattern,
             FusedAddRMSNormGroupQuantPattern,
+            GemmaRMSNormQuantPattern,
+            GemmaRMSNormStaticQuantPattern,
+            GemmaRMSNormDynamicQuantPattern,
+            GemmaRMSNormGroupQuantPattern,
+            FusedAddGemmaRMSNormStaticQuantPattern,
+            FusedAddGemmaRMSNormDynamicQuantPattern,
+            FusedAddGemmaRMSNormGroupQuantPattern,
         )

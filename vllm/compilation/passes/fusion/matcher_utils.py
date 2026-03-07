@@ -10,7 +10,7 @@ from torch._ops import OpOverload
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -28,6 +28,8 @@ from vllm.platforms import current_platform
 
 RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
+GEMMA_RMS_OP = getattr(torch.ops._C, "gemma_rms_norm", None)
+GEMMA_RMS_ADD_OP = getattr(torch.ops._C, "gemma_fused_add_rms_norm", None)
 ROTARY_OP = torch.ops._C.rotary_embedding.default
 FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
 
@@ -470,3 +472,96 @@ class MatcherSiluAndMul(MatcherCustomOp):
         x: torch.Tensor,
     ) -> torch.Tensor:
         return SiluAndMul.forward_native(x)
+
+
+class MatcherGemmaRMSNorm(MatcherCustomOp):
+    def __init__(
+        self,
+        epsilon: float,
+        enabled: bool | None = None,
+    ) -> None:
+        if enabled is None:
+            # Use custom op path only if the non-quant op is registered
+            # and GemmaRMSNorm custom op dispatch is enabled.
+            enabled = GEMMA_RMS_OP is not None and GemmaRMSNorm.enabled()
+
+        super().__init__(enabled)
+        self.epsilon = epsilon
+
+    def inputs(self) -> list[torch.Tensor]:
+        # Always use model dtype: GemmaRMSNorm._forward_static_no_residual
+        # derives orig_dtype from input dtype, so the pattern must use model
+        # dtype to produce the correct cast ops in the traced graph.
+        input = self.empty(5, 16)
+        weight = self.empty(16)
+        return [input, weight]
+
+    def forward_custom(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+    ) -> torch.Tensor:
+        assert GEMMA_RMS_OP is not None
+        result = torch.empty_like(input)
+        _, result = auto_functionalized(
+            GEMMA_RMS_OP.default,
+            result=result,
+            input=input,
+            weight=weight,
+            epsilon=self.epsilon,
+        )
+
+        return result
+
+    def forward_native(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+    ) -> torch.Tensor:
+        return GemmaRMSNorm._forward_static_no_residual(weight, self.epsilon, input)
+
+
+class MatcherFusedAddGemmaRMSNorm(MatcherCustomOp):
+    def __init__(
+        self,
+        epsilon: float,
+        enabled: bool | None = None,
+    ) -> None:
+        if enabled is None:
+            enabled = GEMMA_RMS_ADD_OP is not None and GemmaRMSNorm.enabled()
+
+        super().__init__(enabled)
+        self.epsilon = epsilon
+
+    def inputs(self) -> list[torch.Tensor]:
+        input = self.empty(5, 16)
+        weight = self.empty(16)
+        residual = self.empty(5, 16)
+        return [input, weight, residual]
+
+    def forward_custom(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert GEMMA_RMS_ADD_OP is not None
+        _, result, residual = auto_functionalized(
+            GEMMA_RMS_ADD_OP.default,
+            input=input,
+            residual=residual,
+            weight=weight,
+            epsilon=self.epsilon,
+        )
+
+        return result, residual
+
+    def forward_native(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return GemmaRMSNorm._forward_static_with_residual(
+            weight, self.epsilon, input, residual
+        )
