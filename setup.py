@@ -85,7 +85,7 @@ def compile_grpc_protos():
     """Compile gRPC protobuf definitions during build.
 
     This generates *_pb2.py, *_pb2_grpc.py, and *_pb2.pyi files from
-    the vllm_engine.proto definition.
+    the .proto definitions in vllm/grpc/.
     """
     try:
         from grpc_tools import protoc
@@ -96,45 +96,57 @@ def compile_grpc_protos():
         )
         return False
 
-    proto_file = ROOT_DIR / "vllm" / "grpc" / "vllm_engine.proto"
-    if not proto_file.exists():
-        logger.warning("Proto file not found at %s, skipping compilation", proto_file)
-        return False
+    grpc_dir = ROOT_DIR / "vllm" / "grpc"
+    proto_names = ["vllm_engine", "vllm_render"]
 
-    logger.info("Compiling gRPC protobuf: %s", proto_file)
+    # Include well-known protobuf types (e.g. google/protobuf/struct.proto)
+    try:
+        import grpc_tools as _grpc_tools
 
-    result = protoc.main(
-        [
-            "grpc_tools.protoc",
-            f"--proto_path={ROOT_DIR}",
-            f"--python_out={ROOT_DIR}",
-            f"--grpc_python_out={ROOT_DIR}",
-            f"--pyi_out={ROOT_DIR}",
-            str(proto_file),
-        ]
-    )
+        well_known_path = str(Path(_grpc_tools.__file__).parent / "_proto")
+    except Exception:
+        well_known_path = None
 
-    if result != 0:
-        logger.error("protoc failed with exit code %s", result)
-        return False
+    proto_path_args = [f"--proto_path={ROOT_DIR}"]
+    if well_known_path:
+        proto_path_args.append(f"--proto_path={well_known_path}")
 
-    # Add SPDX headers and mypy ignore to generated files
     spdx_header = (
         "# SPDX-License-Identifier: Apache-2.0\n"
         "# SPDX-FileCopyrightText: Copyright contributors to the vLLM project\n"
         "# mypy: ignore-errors\n"
     )
 
-    grpc_dir = ROOT_DIR / "vllm" / "grpc"
-    for generated_file in [
-        grpc_dir / "vllm_engine_pb2.py",
-        grpc_dir / "vllm_engine_pb2_grpc.py",
-        grpc_dir / "vllm_engine_pb2.pyi",
-    ]:
-        if generated_file.exists():
-            content = generated_file.read_text()
-            if not content.startswith("# SPDX-License-Identifier"):
-                generated_file.write_text(spdx_header + content)
+    for proto_name in proto_names:
+        proto_file = grpc_dir / f"{proto_name}.proto"
+        if not proto_file.exists():
+            logger.warning("Proto file not found at %s, skipping", proto_file)
+            continue
+
+        logger.info("Compiling gRPC protobuf: %s", proto_file)
+
+        result = protoc.main(
+            [
+                "grpc_tools.protoc",
+                *proto_path_args,
+                f"--python_out={ROOT_DIR}",
+                f"--grpc_python_out={ROOT_DIR}",
+                f"--pyi_out={ROOT_DIR}",
+                str(proto_file),
+            ]
+        )
+
+        if result != 0:
+            logger.error("protoc failed with exit code %s", result)
+            return False
+
+        # Add SPDX headers and mypy ignore to generated files
+        for suffix in ["_pb2.py", "_pb2_grpc.py", "_pb2.pyi"]:
+            generated_file = grpc_dir / f"{proto_name}{suffix}"
+            if generated_file.exists():
+                content = generated_file.read_text()
+                if not content.startswith("# SPDX-License-Identifier"):
+                    generated_file.write_text(spdx_header + content)
 
     logger.info("gRPC protobuf compilation successful")
     return True
