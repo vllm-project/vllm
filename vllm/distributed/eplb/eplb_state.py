@@ -602,6 +602,71 @@ class EplbState:
                         - self.expert_rearrangement_step,
                     )
 
+                    # Per-layer breakdown: worst/best layers,
+                    # per-rank token counts for the worst layer
+                    worst_layer = int(per_layer_balance.argmin().item())
+                    best_layer = int(per_layer_balance.argmax().item())
+                    worst_balance = float(
+                        per_layer_balance[worst_layer].item()
+                    )
+                    best_balance = float(
+                        per_layer_balance[best_layer].item()
+                    )
+
+                    worst_layer_ranks = num_tokens_per_rank[worst_layer]
+                    worst_min_rank = int(
+                        worst_layer_ranks.argmin().item()
+                    )
+                    worst_max_rank = int(
+                        worst_layer_ranks.argmax().item()
+                    )
+
+                    logger.info(
+                        "EPLB balance breakdown: "
+                        "worst_layer=%d (balance=%.4f, "
+                        "min_rank=%d[%.0f], max_rank=%d[%.0f]), "
+                        "best_layer=%d (balance=%.4f), "
+                        "num_layers=%d",
+                        worst_layer,
+                        worst_balance,
+                        worst_min_rank,
+                        float(
+                            worst_layer_ranks[worst_min_rank].item()
+                        ),
+                        worst_max_rank,
+                        float(
+                            worst_layer_ranks[worst_max_rank].item()
+                        ),
+                        best_layer,
+                        best_balance,
+                        num_tokens_per_rank.shape[0],
+                    )
+
+                    # Log replica distribution for debug
+                    replica_count = (
+                        eplb_model_state.logical_replica_count
+                    )
+                    if (
+                        replica_count is not None
+                        and replica_count.numel() > 0
+                    ):
+                        rc_float = replica_count.float()
+                        logger.debug(
+                            "EPLB replica stats (layer avg): "
+                            "min=%.1f, max=%.1f, mean=%.2f, "
+                            "num_with_replicas=%d/%d",
+                            float(rc_float.min().item()),
+                            float(rc_float.max().item()),
+                            float(rc_float.mean().item()),
+                            int(
+                                (rc_float > 1)
+                                .any(dim=0)
+                                .sum()
+                                .item()
+                            ),
+                            replica_count.shape[-1],
+                        )
+
         # Update the expert load sliding window
         if not is_dummy:
             for eplb_model_state in self.model_states.values():
@@ -678,6 +743,40 @@ class EplbState:
             )
 
         # Map the physical expert load to global logical experts
+        if is_main_rank:
+            # Log window utilization diagnostics
+            nonzero_slots = sum(
+                int(
+                    (ms.expert_load_window.sum(dim=(1, 2)) > 0)
+                    .sum()
+                    .item()
+                )
+                for ms in self.model_states.values()
+            )
+            logger.info(
+                "EPLB window state: window_step=%d/%d, "
+                "rearrangement_step=%d/%d, "
+                "nonzero_window_slots=%d/%d",
+                self.expert_load_window_step,
+                self.expert_load_window_size,
+                self.expert_rearrangement_step,
+                self.expert_rearrangement_step_interval,
+                nonzero_slots,
+                self.expert_load_window_size,
+            )
+            if (
+                self.expert_load_window_size
+                > self.expert_rearrangement_step_interval
+            ):
+                logger.warning(
+                    "EPLB: window_size (%d) > step_interval (%d). "
+                    "Stale window entries from before the last "
+                    "rearrangement will be converted with the current "
+                    "physical->logical mapping, which may be incorrect. "
+                    "Consider setting window_size <= step_interval.",
+                    self.expert_load_window_size,
+                    self.expert_rearrangement_step_interval,
+                )
         global_expert_load_windows = []
         for eplb_model_state in self.model_states.values():
             expert_load_window = eplb_model_state.expert_load_window[
@@ -740,6 +839,40 @@ class EplbState:
         for eplb_model_state, global_expert_load_window in zip(
             self.model_states.values(), global_expert_load_windows
         ):
+            if is_main_rank:
+                # Log load statistics the algorithm will use
+                load = global_expert_load_window.float()
+                load_per_layer = load.sum(dim=-1)
+                logger.info(
+                    "EPLB rearrange input: "
+                    "num_replicas=%d, num_groups=%d, "
+                    "num_nodes=%d, num_gpus=%d, "
+                    "total_load_per_layer: "
+                    "min=%.0f, max=%.0f, mean=%.0f",
+                    num_replicas,
+                    num_groups,
+                    num_nodes,
+                    num_gpus,
+                    float(load_per_layer.min().item()),
+                    float(load_per_layer.max().item()),
+                    float(load_per_layer.mean().item()),
+                )
+                # Top-5 hottest experts (averaged across layers)
+                avg_load = load.mean(dim=0)
+                top5_vals, top5_ids = avg_load.topk(
+                    min(5, avg_load.shape[0])
+                )
+                logger.info(
+                    "EPLB top-5 hottest logical experts "
+                    "(avg across layers): %s",
+                    ", ".join(
+                        f"e{int(eid)}={float(val):.0f}"
+                        for eid, val in zip(
+                            top5_ids.tolist(), top5_vals.tolist()
+                        )
+                    ),
+                )
+
             if not self.is_async or is_profile:
                 # Get new expert mappings for the model
                 (
@@ -754,6 +887,66 @@ class EplbState:
                     num_gpus,
                     eplb_model_state.physical_to_logical_map,
                 )
+
+                if is_main_rank and not is_profile:
+                    # Log what the algorithm decided
+                    old_p2l = eplb_model_state.physical_to_logical_map
+                    new_p2l = new_physical_to_logical_map.to(
+                        old_p2l.device
+                    )
+                    changed_slots = int(
+                        (old_p2l != new_p2l).sum().item()
+                    )
+                    total_slots = old_p2l.numel()
+                    rc = new_logical_replica_count.float()
+                    logger.info(
+                        "EPLB rearrange result: "
+                        "changed_slots=%d/%d (%.1f%%), "
+                        "replica_count: "
+                        "min=%.0f, max=%.0f, mean=%.2f",
+                        changed_slots,
+                        total_slots,
+                        100.0 * changed_slots / max(total_slots, 1),
+                        float(rc.min().item()),
+                        float(rc.max().item()),
+                        float(rc.mean().item()),
+                    )
+
+                    # Simulate new per-rank load to preview
+                    # balancedness
+                    new_rc = new_logical_replica_count.to(
+                        load.device
+                    ).float()
+                    per_expert_load = load / new_rc.clamp(min=1)
+                    phys_load = per_expert_load.gather(
+                        dim=-1,
+                        index=new_p2l.to(load.device).long(),
+                    )
+                    per_rank_load = phys_load.reshape(
+                        phys_load.shape[0], num_gpus, -1
+                    ).sum(dim=-1)
+                    avg_rl = per_rank_load.mean(dim=-1)
+                    max_rl = per_rank_load.max(dim=-1).values
+                    predicted_balance = torch.where(
+                        max_rl > 0,
+                        avg_rl / max_rl,
+                        torch.ones_like(max_rl),
+                    )
+                    logger.info(
+                        "EPLB predicted post-rearrange "
+                        "balancedness: mean=%.4f, "
+                        "min=%.4f (layer %d), max=%.4f",
+                        float(
+                            predicted_balance.mean().item()
+                        ),
+                        float(predicted_balance.min().item()),
+                        int(
+                            predicted_balance.argmin().item()
+                        ),
+                        float(
+                            predicted_balance.max().item()
+                        ),
+                    )
 
                 # Update expert weights
                 rearrange_expert_weights_inplace(
