@@ -131,6 +131,7 @@ class EagleSpeculator:
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        draft_logits_out: torch.Tensor | None = None,
     ) -> None:
         pos = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -157,6 +158,9 @@ class EagleSpeculator:
                 self.seeds,
                 pos + 1,
                 apply_temperature=True,
+                processed_logits_out=draft_logits_out[:, step]
+                if draft_logits_out is not None
+                else None,
             )
             self.draft_tokens[:num_reqs, step] = draft_tokens
 
@@ -209,6 +213,8 @@ class EagleSpeculator:
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
+        # [max_num_reqs, num_speculative_steps, vocab_size]
+        draft_logits_out: torch.Tensor | None,
         num_tokens_across_dp: torch.Tensor | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
@@ -260,6 +266,7 @@ class EagleSpeculator:
         idx_mapping.copy_(input_batch.idx_mapping)
         self.temperature.copy_(temperature)
         self.seeds.copy_(seeds)
+
         # Gather the values and copy them to the pre-allocated buffers.
         pos = self.input_buffers.positions[:num_reqs]
         torch.gather(input_batch.positions, 0, last_token_indices, out=pos)
@@ -272,7 +279,11 @@ class EagleSpeculator:
             self.seeds,
             pos + 1,
             apply_temperature=True,
+            processed_logits_out=draft_logits_out[:, 0]
+            if draft_logits_out is not None
+            else None,
         )
+
         if self.num_speculative_steps == 1:
             # Early exit.
             return draft_tokens.view(-1, 1)
@@ -350,6 +361,7 @@ class EagleSpeculator:
             slot_mappings_updated,
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_mode,
+            draft_logits_out=draft_logits_out,
         )
         return self.draft_tokens[:num_reqs]
 
