@@ -49,11 +49,11 @@ def _is_oink_stride_compatible_2d(x_2d: torch.Tensor) -> bool:
 
 
 oink_rms_supported = (
-    lambda x, w, e, var_size=None: var_size is None
-    and w is not None
+    lambda x, weight, epsilon, variance_size=None: variance_size is None
+    and weight is not None
     and x.dim() >= 2
-    and x.dtype == w.dtype
-    and w.is_contiguous()
+    and x.dtype == weight.dtype
+    and weight.is_contiguous()
     and _can_view_as_2d(x)
     and _is_oink_stride_compatible_2d(x.view(-1, x.shape[-1]))
 )
