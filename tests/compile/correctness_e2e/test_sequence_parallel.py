@@ -167,6 +167,7 @@ def _compare_sp(
     num_gpus_available: int,
     use_inductor_graph_partition: bool,
     fuse_gemm_comms: bool,
+    enable_prompt_embeds: bool,
     *,
     method: Literal["generate", "encode"],
     is_multimodal: bool,
@@ -248,6 +249,8 @@ def _compare_sp(
                 "--enable-mm-embeds",
             ]
         )
+    elif enable_prompt_embeds:
+        common_args.append("--enable-prompt-embeds")
 
     compilation_config = {
         "mode": CompilationMode.VLLM_COMPILE,
@@ -257,7 +260,9 @@ def _compare_sp(
             "fuse_gemm_comms": fuse_gemm_comms,
             "fuse_norm_quant": fuse_norm_quant,
             "fuse_act_quant": fuse_act_quant,
+            "fuse_allreduce_rms": False,
             "eliminate_noops": True,
+            "sp_min_token_num": 0,
         },
         "use_inductor_graph_partition": use_inductor_graph_partition,
     }
@@ -316,6 +321,7 @@ SP_TEST_MODELS = [
 )
 @pytest.mark.parametrize("use_inductor_graph_partition", [True, False])
 @pytest.mark.parametrize("fuse_gemm_comms", [False])  # TODO: enable async TP
+@pytest.mark.parametrize("enable_prompt_embeds", [False, True])
 @create_new_process_for_each_test()
 def test_tp_sp_generation(
     model_id: str,
@@ -326,6 +332,7 @@ def test_tp_sp_generation(
     num_gpus_available,
     use_inductor_graph_partition: bool,
     fuse_gemm_comms: bool,
+    enable_prompt_embeds: bool,
 ):
     if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
@@ -347,6 +354,7 @@ def test_tp_sp_generation(
         num_gpus_available,
         use_inductor_graph_partition,
         fuse_gemm_comms=fuse_gemm_comms,
+        enable_prompt_embeds=enable_prompt_embeds,
         method="generate",
         is_multimodal=False,
     )
