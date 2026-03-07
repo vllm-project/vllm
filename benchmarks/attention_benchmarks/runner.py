@@ -443,7 +443,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
         BenchmarkResult with timing and memory statistics
     """
     device = torch.device(config.device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     backend_cfg = _get_backend_config(config.backend)
 

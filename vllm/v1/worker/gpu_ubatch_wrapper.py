@@ -74,7 +74,7 @@ class SMControlContextManager:
             "SM control is currently only supported on CUDA"
         )
 
-        total_sms = num_compute_units(torch.cuda.current_device())
+        total_sms = num_compute_units(torch.accelerator.current_device_index())
 
         assert comm_sms < total_sms
         self.total_sms = total_sms
@@ -195,7 +195,7 @@ class UBatchWrapper:
 
         @torch.inference_mode()
         def _capture_ubatch_thread(results, ubatch_metadata):
-            torch.cuda.set_device(self.device)
+            torch.accelerator.set_device_index(self.device)
             ubatch_context = ubatch_metadata.context
             with torch.cuda.stream(ubatch_context.compute_stream):
                 _ = torch.cuda.current_blas_handle()

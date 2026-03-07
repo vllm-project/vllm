@@ -60,7 +60,7 @@ class XPUWorker(Worker):
             and current_platform.is_xpu()
         ):
             self.device = torch.device(f"xpu:{self.local_rank}")
-            current_platform.set_device(self.device)
+            torch.accelerator.set_device_index(self.device)
             current_platform.check_if_supports_dtype(self.model_config.dtype)
             torch.accelerator.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(

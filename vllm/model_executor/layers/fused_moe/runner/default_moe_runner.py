@@ -296,13 +296,15 @@ class DefaultMoERunner(MoERunner):
             logits_shape = (moe.max_num_tokens, self.moe_config.num_logical_experts)
 
         self.batched_hidden_states = torch.zeros(
-            states_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
+            states_shape,
+            dtype=moe.in_dtype,
+            device=torch.accelerator.current_device_index(),
         )
 
         self.batched_router_logits = torch.zeros(
             logits_shape,
             dtype=moe.router_logits_dtype,
-            device=torch.cuda.current_device(),
+            device=torch.accelerator.current_device_index(),
         )
 
     def must_reduce_shared_expert_outputs(self) -> bool:

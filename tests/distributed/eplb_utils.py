@@ -42,7 +42,7 @@ def set_env_vars_and_device(env: dict[str, str]) -> None:
     update_environment_variables(env)
     local_rank = os.environ["LOCAL_RANK"]
     device = torch.device(f"cuda:{local_rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     # Create a minimal vllm config for init_distributed_environment
     vllm_config = VllmConfig()

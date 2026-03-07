@@ -491,7 +491,7 @@ class FlashInferAllToAllManager(All2AllManagerBase):
             self.initialize(
                 world_size=self.world_size,
                 rank=self.rank,
-                gpus_per_node=torch.cuda.device_count,
+                gpus_per_node=torch.accelerator.device_count,
             )
         return self.initialized
 

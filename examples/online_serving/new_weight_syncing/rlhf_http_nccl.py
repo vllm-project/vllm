@@ -131,7 +131,7 @@ def main():
     inference_world_size = get_world_size(BASE_URL)
     world_size = inference_world_size + 1  # +1 for the trainer
     device = f"cuda:{inference_world_size}"
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     # Load the training model
     print(f"Loading training model: {MODEL_NAME}")

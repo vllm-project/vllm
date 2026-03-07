@@ -395,7 +395,7 @@ def test_kernels(
     Tests LoRA kernels.
     """
     torch.set_default_device(device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     set_random_seed(seed)
 
     if op_type == "shrink":
@@ -448,7 +448,7 @@ def test_kernels_hidden_size(
     Tests SGMV and LoRA kernels.
     """
     torch.set_default_device(device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     set_random_seed(seed)
 
     if op_type == "shrink":

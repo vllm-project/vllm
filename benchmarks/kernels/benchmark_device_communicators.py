@@ -495,7 +495,7 @@ def main():
 
     # Set device
     device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     # Get CPU process group
     cpu_group = dist.new_group(backend="gloo")

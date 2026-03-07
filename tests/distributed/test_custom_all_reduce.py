@@ -35,7 +35,7 @@ def graph_allreduce(
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         m.delenv("HIP_VISIBLE_DEVICES", raising=False)
         device = torch.device(f"cuda:{rank}")
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
         group = get_tp_group().device_group
@@ -63,10 +63,18 @@ def graph_allreduce(
                 with graph_capture(device=device) as graph_capture_context:
                     # use integers so result matches NCCL exactly
                     inp1 = torch.randint(
-                        1, 16, (sz,), dtype=dtype, device=torch.cuda.current_device()
+                        1,
+                        16,
+                        (sz,),
+                        dtype=dtype,
+                        device=torch.accelerator.current_device_index(),
                     )
                     inp2 = torch.randint(
-                        1, 16, (sz,), dtype=dtype, device=torch.cuda.current_device()
+                        1,
+                        16,
+                        (sz,),
+                        dtype=dtype,
+                        device=torch.accelerator.current_device_index(),
                     )
                     torch.accelerator.synchronize()
                     graph = torch.cuda.CUDAGraph()
@@ -95,7 +103,7 @@ def eager_allreduce(
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         m.delenv("HIP_VISIBLE_DEVICES", raising=False)
         device = torch.device(f"cuda:{rank}")
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
         # we use the first group to communicate once
@@ -129,6 +137,6 @@ def test_custom_allreduce(
     test_target,
 ):
     world_size = tp_size * pipeline_parallel_size
-    if world_size > torch.cuda.device_count():
+    if world_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
     multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)

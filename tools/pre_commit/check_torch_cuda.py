@@ -10,6 +10,9 @@ import regex as re
 _TORCH_CUDA_PATTERNS = [
     r"\btorch\.cuda\.empty_cache\b",
     r"\btorch\.cuda\.synchronize\b",
+    r"\btorch\.cuda\.device_count\b",
+    r"\btorch\.cuda\.current_device\b",
+    r"\btorch\.cuda\.set_device\b",
 ]
 
 ALLOWED_FILES = {"vllm/platforms/", "vllm/device_allocator/"}
