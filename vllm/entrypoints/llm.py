@@ -258,6 +258,17 @@ class LLM:
     ) -> None:
         """LLM constructor."""
 
+        if "swap_space" in kwargs:
+            kwargs.pop("swap_space")
+            import warnings
+
+            warnings.warn(
+                "The 'swap_space' parameter is deprecated and ignored. "
+                "It will be removed in a future version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
 
