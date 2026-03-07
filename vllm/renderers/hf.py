@@ -5,7 +5,7 @@ import itertools
 from collections import defaultdict, deque
 from collections.abc import Set
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, cast, Optional
 
 import jinja2
 import jinja2.ext
@@ -621,6 +621,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
@@ -636,6 +637,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 model_config=model_config,
             ),
             media_io_kwargs=params.media_io_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
 
         prompt_raw = safe_apply_chat_template(
@@ -676,6 +678,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
@@ -691,6 +694,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 model_config=model_config,
             ),
             media_io_kwargs=params.media_io_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
 
         prompt_raw = safe_apply_chat_template(
