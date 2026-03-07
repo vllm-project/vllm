@@ -294,6 +294,13 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.parallel_config
         )
         self.num_heads_kv = self.model_config.get_num_kv_heads(self.parallel_config)
+
+        # TPA GQA: KV heads are sharded by TPA, not full TP.
+        tpa_size = self.parallel_config.tpa_size
+        if tpa_size < self.parallel_config.tensor_parallel_size:
+            total_kv_heads = self.model_config.get_total_num_kv_heads()
+            self.num_heads_kv = max(1, total_kv_heads // tpa_size)
+
         self.kv_cache_dtype = kv_cache_spec.dtype
         self.headdim = self.model_config.get_head_size()
         self.block_size = kv_cache_spec.block_size
@@ -844,12 +851,19 @@ class FlashAttentionImpl(AttentionImpl):
         block_table = attn_metadata.block_table
 
         query = query.contiguous()
-        query_across_dcp = get_dcp_group().all_gather(query, dim=1)
         sliding_window_size = (
             list(self.sliding_window) if self.sliding_window is not None else None
         )
+
+        from vllm.distributed.parallel_state import is_tpa_gqa_mode  # noqa: E402
+
+        tpa_gqa_mode = is_tpa_gqa_mode()
+
+        # TPA GQA: DCP ranks share the same heads, no AllGather needed.
+        context_q = query if tpa_gqa_mode else get_dcp_group().all_gather(query, dim=1)
+
         context_attn_out, context_lse = flash_attn_varlen_func(
-            q=query_across_dcp,
+            q=context_q,
             k=key_cache,
             v=value_cache,
             out=None,
@@ -901,6 +915,20 @@ class FlashAttentionImpl(AttentionImpl):
             v_descale=v_descale,
             num_splits=attn_metadata.max_num_splits,
         )
+
+        # TPA GQA: slice query output from TPA-sized to TP-sized heads
+        # to match context output shape after DCP combine.
+        if tpa_gqa_mode:
+            dcp_group = get_dcp_group()
+            dcp_rank = dcp_group.rank_in_group
+            dcp_size = dcp_group.world_size
+            num_heads = query_attn_out.shape[1]
+            heads_per_rank = num_heads // dcp_size
+            start_head = dcp_rank * heads_per_rank
+            end_head = start_head + heads_per_rank
+            query_attn_out = query_attn_out[:, start_head:end_head, :].contiguous()
+            query_lse = query_lse[start_head:end_head, :].contiguous()
+
         assert context_attn_out_cor.shape == query_attn_out.shape
         assert context_lse_cor.shape == query_lse.shape
         merge_attn_states(
