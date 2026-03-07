@@ -1272,6 +1272,9 @@ class VllmConfig:
         # Handle the KV connector configs
         self._post_init_kv_transfer_config()
 
+        # Log the custom passes that are enabled
+        self.compilation_config.pass_config.log_enabled_passes()
+
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
         # enable sequence parallelism
