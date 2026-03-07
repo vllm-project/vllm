@@ -1721,7 +1721,7 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
 
   static torch::Tensor axl_glbl =
       torch::zeros(
-          8 * 1024 * 1024,
+          128 * 1024 * 1.25 * (_DTRMNSTC ? 12 : 1),
           torch::TensorOptions().dtype(torch::kFloat32).device(in_a.device()))
           .detach();
   auto glbl = axl_glbl.data_ptr<float>();
