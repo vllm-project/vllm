@@ -1,142 +1,1222 @@
 # FP8 W8A8
+vLLM supports FP8 (8-b
+t f
+oat
 
-vLLM supports FP8 (8-bit floating point) weight and activation quantization using hardware acceleration on GPUs such as Nvidia H100 and AMD MI300x.
-Currently, only Hopper and Ada Lovelace GPUs are officially supported for W8A8.
-Turing/Ampere GPUs are supported for W8A16 (weight-only FP8) utilizing Marlin kernels.
-Quantization of models with FP8 allows for a 2x reduction in model memory requirements and up to a 1.6x improvement in throughput with minimal impact on accuracy.
+g po
 
-Please visit the HF collection of [quantized FP8 checkpoints of popular LLMs ready to use with vLLM](https://huggingface.co/collections/neuralmagic/fp8-llms-for-vllm-666742ed2b78b7ac8df13127).
+t) 
 
-The FP8 types typically supported in hardware have two distinct representations, each useful in different scenarios:
 
-- **E4M3**: Consists of 1 sign bit, 4 exponent bits, and 3 bits of mantissa. It can store values up to +/-448 and `nan`.
-- **E5M2**: Consists of 1 sign bit, 5 exponent bits, and 2 bits of mantissa. It can store values up to +/-57344, +/- `inf`, and `nan`. The tradeoff for the increased dynamic range is lower precision of the stored values.
+ght a
+d act
+vat
+o
+ qua
+t
+zat
+o
+ us
 
-!!! note
-    FP8 computation is supported on NVIDIA GPUs with compute capability >= 8.9 (Ada Lovelace, Hopper).
-    FP8 models will run on compute capability >= 7.5 (Turing) as weight-only W8A16, utilizing FP8 Marlin.
+g hard
+ar
+ acc
 
-## Installation
 
-To produce performant FP8 quantized models with vLLM, you'll need to install the [llm-compressor](https://github.com/vllm-project/llm-compressor/) library:
+rat
+o
+ o
+ GPUs such as Nv
+d
+a H100 a
+d AMD MI300x.
+Curr
 
+t
+y, o
+
+y Hopp
+r a
+d Ada Lov
+
+ac
+ GPUs ar
+ off
+c
+a
+y support
+d for W8A8.
+Tur
+
+g/Amp
+r
+ GPUs ar
+ support
+d for W8A16 (
+
+
+ght-o
+
+y FP8) ut
+
+
+z
+
+g Mar
+
+
+ k
+r
+
+
+s.
+Qua
+t
+zat
+o
+ of mod
+
+s 
+
+th FP8 a
+o
+s for a 2x r
+duct
+o
+ 
+
+ mod
+
+ m
+mory r
+qu
+r
+m
+
+ts a
+d up to a 1.6x 
+mprov
+m
+
+t 
+
+ throughput 
+
+th m
+
+
+ma
+ 
+mpact o
+ accuracy.
+P
+
+as
+ v
+s
+t th
+ HF co
+
+ct
+o
+ of [qua
+t
+z
+d FP8 ch
+ckpo
+
+ts of popu
+ar LLMs r
+ady to us
+ 
+
+th vLLM](https://hugg
+
+gfac
+.co/co
+
+ct
+o
+s/
+
+ura
+mag
+c/fp8-
+ms-for-v
+m-666742
+d2b78b7ac8df13127).
+Th
+ FP8 typ
+s typ
+ca
+y support
+d 
+
+ hard
+ar
+ hav
+ t
+o d
+st
+
+ct r
+pr
+s
+
+tat
+o
+s, 
+ach us
+fu
+ 
+
+ d
+ff
+r
+
+t sc
+
+ar
+os:
+- **E4M3**: Co
+s
+sts of 1 s
+g
+ b
+t, 4 
+xpo
+
+
+t b
+ts, a
+d 3 b
+ts of ma
+t
+ssa. It ca
+ stor
+ va
+u
+s up to +/-448 a
+d `
+a
+`.
+- **E5M2**: Co
+s
+sts of 1 s
+g
+ b
+t, 5 
+xpo
+
+
+t b
+ts, a
+d 2 b
+ts of ma
+t
+ssa. It ca
+ stor
+ va
+u
+s up to +/-57344, +/- `
+
+f`, a
+d `
+a
+`. Th
+ trad
+off for th
+ 
+
+cr
+as
+d dy
+am
+c ra
+g
+ 
+s 
+o
+
+r pr
+c
+s
+o
+ of th
+ stor
+d va
+u
+s.
+!!! 
+ot
+
+    FP8 computat
+o
+ 
+s support
+d o
+ NVIDIA GPUs 
+
+th comput
+ capab
+
+
+ty 
+= 8.9 (Ada Lov
+
+ac
+, Hopp
+r).
+    FP8 mod
+
+s 
+
+
+ ru
+ o
+ comput
+ capab
+
+
+ty 
+= 7.5 (Tur
+
+g) as 
+
+
+ght-o
+
+y W8A16, ut
+
+
+z
+
+g FP8 Mar
+
+
+.
+## I
+sta
+at
+o
+
+To produc
+ p
+rforma
+t FP8 qua
+t
+z
+d mod
+
+s 
+
+th vLLM, you'
+ 
+
+d to 
+
+sta
+ th
+ [
+m-compr
+ssor](https://g
+thub.com/v
+m-proj
+ct/
+m-compr
+ssor/) 
+
+brary:
 ```bash
-pip install llmcompressor
+p
+p 
+
+sta
+ 
+mcompr
+ssor
 ```
+## Qua
+t
+zat
+o
+ Proc
+ss
+Th
+ qua
+t
+zat
+o
+ proc
+ss 
 
-## Quantization Process
+vo
+v
+s thr
+ ma
 
-The quantization process involves three main steps:
+ st
+ps:
+1. Load
 
-1. Loading the model
-2. Applying quantization
-3. Evaluating accuracy in vLLM
+g th
+ mod
 
-### 1. Loading the Model
 
-Load your model and tokenizer using the standard `transformers` AutoModel classes:
+2. App
+y
 
-```python
-from transformers import AutoTokenizer, AutoModelForCausalLM
+g qua
+t
+zat
+o
 
-MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
-model = AutoModelForCausalLM.from_pretrained(
+3. Eva
+uat
+
+g accuracy 
+
+ vLLM
+### 1. Load
+
+g th
+ Mod
+
+
+Load your mod
+
+ a
+d tok
+
+
+z
+r us
+
+g th
+ sta
+dard `tra
+sform
+rs` AutoMod
+
+ c
+ass
+s:
+```pytho
+
+from tra
+sform
+rs 
+mport AutoTok
+
+
+z
+r, AutoMod
+
+ForCausa
+LM
+MODEL_ID = "m
+ta-
+ama/M
+ta-L
+ama-3-8B-I
+struct"
+mod
+
+ = AutoMod
+
+ForCausa
+LM.from_pr
+tra
+
+
+d(
     MODEL_ID,
-    device_map="auto",
-    dtype="auto",
+    d
+v
+c
+_map="auto",
+    dtyp
+="auto",
 )
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+tok
+
+
+z
+r = AutoTok
+
+
+z
+r.from_pr
+tra
+
+
+d(MODEL_ID)
 ```
+### 2. App
+y
 
-### 2. Applying Quantization
+g Qua
+t
+zat
+o
 
-For FP8 quantization, we can recover accuracy with simple RTN quantization. We recommend targeting all `Linear` layers using the `FP8_DYNAMIC` scheme, which uses:
+For FP8 qua
+t
+zat
+o
+, 
 
-- Static, per-channel quantization on the weights
-- Dynamic, per-token quantization on the activations
+ ca
+ r
+cov
+r accuracy 
 
-Since simple RTN does not require data for weight quantization and the activations are quantized dynamically, we do not need any calibration data for this quantization flow.
+th s
+mp
 
-??? code
+ RTN qua
+t
+zat
+o
+. W
+ r
+comm
 
-    ```python
-    from llmcompressor import oneshot
-    from llmcompressor.modifiers.quantization import QuantizationModifier
+d targ
+t
 
-    # Configure the simple PTQ quantization
-    recipe = QuantizationModifier(
-        targets="Linear",
-        scheme="FP8_DYNAMIC",
-        ignore=["lm_head"],
+g a
+ `L
+
+
+ar` 
+ay
+rs us
+
+g th
+ `FP8_DYNAMIC` sch
+m
+, 
+h
+ch us
+s:
+- Stat
+c, p
+r-cha
+
+
+ qua
+t
+zat
+o
+ o
+ th
+ 
+
+
+ghts
+- Dy
+am
+c, p
+r-tok
+
+ qua
+t
+zat
+o
+ o
+ th
+ act
+vat
+o
+s
+S
+
+c
+ s
+mp
+
+ RTN do
+s 
+ot r
+qu
+r
+ data for 
+
+
+ght qua
+t
+zat
+o
+ a
+d th
+ act
+vat
+o
+s ar
+ qua
+t
+z
+d dy
+am
+ca
+y, 
+
+ do 
+ot 
+
+d a
+y ca
+
+brat
+o
+ data for th
+s qua
+t
+zat
+o
+ f
+o
+.
+??? cod
+
+    ```pytho
+
+    from 
+mcompr
+ssor 
+mport o
+
+shot
+    from 
+mcompr
+ssor.mod
+f
+
+rs.qua
+t
+zat
+o
+ 
+mport Qua
+t
+zat
+o
+Mod
+f
+
+r
+    # Co
+f
+gur
+ th
+ s
+mp
+
+ PTQ qua
+t
+zat
+o
+
+    r
+c
+p
+ = Qua
+t
+zat
+o
+Mod
+f
+
+r(
+        targ
+ts="L
+
+
+ar",
+        sch
+m
+="FP8_DYNAMIC",
+        
+g
+or
+=["
+m_h
+ad"],
     )
+    # App
+y th
+ qua
+t
+zat
+o
+ a
+gor
+thm.
+    o
 
-    # Apply the quantization algorithm.
-    oneshot(model=model, recipe=recipe)
+shot(mod
 
-    # Save the model: Meta-Llama-3-8B-Instruct-FP8-Dynamic
-    SAVE_DIR = MODEL_ID.split("/")[1] + "-FP8-Dynamic"
-    model.save_pretrained(SAVE_DIR)
-    tokenizer.save_pretrained(SAVE_DIR)
+=mod
+
+, r
+c
+p
+=r
+c
+p
+)
+    # Sav
+ th
+ mod
+
+: M
+ta-L
+ama-3-8B-I
+struct-FP8-Dy
+am
+c
+    SAVE_DIR = MODEL_ID.sp
+
+t("/")[1] + "-FP8-Dy
+am
+c"
+    mod
+
+.sav
+_pr
+tra
+
+
+d(SAVE_DIR)
+    tok
+
+
+z
+r.sav
+_pr
+tra
+
+
+d(SAVE_DIR)
     ```
+### 3. Eva
+uat
 
-### 3. Evaluating Accuracy
+g Accuracy
+I
+sta
+ `v
+m` a
+d `
+m-
+va
+uat
+o
+-har
 
-Install `vllm` and `lm-evaluation-harness` for evaluation:
-
+ss` for 
+va
+uat
+o
+:
 ```bash
-pip install vllm "lm-eval[api]>=0.4.11"
+p
+p 
+
+sta
+ v
+m "
+m-
+va
+[ap
+]
+=0.4.11"
 ```
+Load a
+d ru
+ th
+ mod
 
-Load and run the model in `vllm`:
+ 
 
-```python
-from vllm import LLM
+ `v
+m`:
+```pytho
 
-llm = LLM("./Meta-Llama-3-8B-Instruct-FP8-Dynamic")
-result = llm.generate("Hello my name is")
-print(result[0].outputs[0].text)
+from v
+m 
+mport LLM
+
+m = LLM("./M
+ta-L
+ama-3-8B-I
+struct-FP8-Dy
+am
+c")
+r
+su
+t = 
+m.g
+
+
+rat
+("H
+
+o my 
+am
+ 
+s")
+pr
+
+t(r
+su
+t[0].outputs[0].t
+xt)
 ```
+Eva
+uat
+ accuracy 
 
-Evaluate accuracy with `lm_eval` (for example on 250 samples of `gsm8k`):
+th `
+m_
+va
+` (for 
+xamp
 
-!!! note
-    Quantized models can be sensitive to the presence of the `bos` token. `lm_eval` does not add a `bos` token by default, so make sure to include the `add_bos_token=True` argument when running your evaluations.
+ o
+ 250 samp
 
+s of `gsm8k`):
+!!! 
+ot
+
+    Qua
+t
+z
+d mod
+
+s ca
+ b
+ s
+
+s
+t
+v
+ to th
+ pr
+s
+
+c
+ of th
+ `bos` tok
+
+. `
+m_
+va
+` do
+s 
+ot add a `bos` tok
+
+ by d
+fau
+t, so mak
+ sur
+ to 
+
+c
+ud
+ th
+ `add_bos_tok
+
+=Tru
+` argum
+
+t 
+h
+
+ ru
+
+
+g your 
+va
+uat
+o
+s.
 ```bash
-MODEL=$PWD/Meta-Llama-3-8B-Instruct-FP8-Dynamic
-lm_eval \
-  --model vllm \
-  --model_args pretrained=$MODEL,add_bos_token=True \
-  --tasks gsm8k  --num_fewshot 5 --batch_size auto --limit 250
+MODEL=$PWD/M
+ta-L
+ama-3-8B-I
+struct-FP8-Dy
+am
+c
+
+m_
+va
+ \
+  --mod
+
+ v
+m \
+  --mod
+
+_args pr
+tra
+
+
+d=$MODEL,add_bos_tok
+
+=Tru
+ \
+  --tasks gsm8k  --
+um_f
+
+shot 5 --batch_s
+z
+ auto --
+
+m
+t 250
 ```
+H
+r
+'s a
+ 
+xamp
 
-Here's an example of the resulting scores:
+ of th
+ r
+su
+t
 
-```text
-|Tasks|Version|     Filter     |n-shot|  Metric   |   |Value|   |Stderr|
+g scor
+s:
+```t
+xt
+|Tasks|V
+rs
+o
+|     F
+
+t
+r     |
+-shot|  M
+tr
+c   |   |Va
+u
+|   |Std
+rr|
 |-----|------:|----------------|-----:|-----------|---|----:|---|-----:|
-|gsm8k|      3|flexible-extract|     5|exact_match|↑  |0.768|±  |0.0268|
-|     |       |strict-match    |     5|exact_match|↑  |0.768|±  |0.0268|
+|gsm8k|      3|f
+
+x
+b
+
+-
+xtract|     5|
+xact_match|↑  |0.768|±  |0.0268|
+|     |       |str
+ct-match    |     5|
+xact_match|↑  |0.768|±  |0.0268|
 ```
+## Troub
 
-## Troubleshooting and Support
+shoot
 
-If you encounter any issues or have feature requests, please open an issue on the [vllm-project/llm-compressor](https://github.com/vllm-project/llm-compressor/issues) GitHub repository.
+g a
+d Support
+If you 
 
-## Online Dynamic Quantization
+cou
+t
+r a
+y 
+ssu
+s or hav
+ f
+atur
+ r
+qu
+sts, p
 
-Dynamic quantization of an original precision BF16/FP16 model to FP8 can be achieved with vLLM without any calibration data required. You can enable the feature by specifying `--quantization="fp8"` in the command line or setting `quantization="fp8"` in the LLM constructor.
+as
+ op
 
-In this mode, all Linear modules (except for the final `lm_head`) have their weights quantized down to FP8_E4M3 precision with a per-tensor scale. Activations have their minimum and maximum values calculated during each forward pass to provide a dynamic per-tensor scale for high accuracy. As a result, latency improvements are limited in this mode.
+ a
+ 
+ssu
+ o
+ th
+ [v
+m-proj
+ct/
+m-compr
+ssor](https://g
+thub.com/v
+m-proj
+ct/
+m-compr
+ssor/
+ssu
+s) G
+tHub r
+pos
+tory.
+## O
 
-```python
-from vllm import LLM
 
-llm = LLM("facebook/opt-125m", quantization="fp8")
-# INFO 06-10 17:55:42 model_runner.py:157] Loading model weights took 0.1550 GB
-result = llm.generate("Hello, my name is")
-print(result[0].outputs[0].text)
+
+
+ Dy
+am
+c Qua
+t
+zat
+o
+
+Dy
+am
+c qua
+t
+zat
+o
+ of a
+ or
+g
+
+a
+ pr
+c
+s
+o
+ BF16/FP16 mod
+
+ to FP8 ca
+ b
+ ach
+
+v
+d 
+
+th vLLM 
+
+thout a
+y ca
+
+brat
+o
+ data r
+qu
+r
+d. You ca
+ 
+
+ab
+
+ th
+ f
+atur
+ by sp
+c
+fy
+
+g `--qua
+t
+zat
+o
+="fp8"` 
+
+ th
+ comma
+d 
+
+
+
+ or s
+tt
+
+g `qua
+t
+zat
+o
+="fp8"` 
+
+ th
+ LLM co
+structor.
+I
+ th
+s mod
+, a
+ L
+
+
+ar modu
+
+s (
+xc
+pt for th
+ f
+
+a
+ `
+m_h
+ad`) hav
+ th
+
+r 
+
+
+ghts qua
+t
+z
+d do
+
+ to FP8_E4M3 pr
+c
+s
+o
+ 
+
+th a p
+r-t
+
+sor sca
+
+. Act
+vat
+o
+s hav
+ th
+
+r m
+
+
+mum a
+d max
+mum va
+u
+s ca
+cu
+at
+d dur
+
+g 
+ach for
+ard pass to prov
+d
+ a dy
+am
+c p
+r-t
+
+sor sca
+
+ for h
+gh accuracy. As a r
+su
+t, 
+at
+
+cy 
+mprov
+m
+
+ts ar
+ 
+
+m
+t
+d 
+
+ th
+s mod
+.
+```pytho
+
+from v
+m 
+mport LLM
+
+m = LLM("fac
+book/opt-125m", qua
+t
+zat
+o
+="fp8")
+# INFO 06-10 17:55:42 mod
+
+_ru
+
+r.py:157] Load
+
+g mod
+
+ 
+
+
+ghts took 0.1550 GB
+r
+su
+t = 
+m.g
+
+
+rat
+("H
+
+o, my 
+am
+ 
+s")
+pr
+
+t(r
+su
+t[0].outputs[0].t
+xt)
 ```
+!!! 
+ar
 
-!!! warning
-    Currently, we load the model at original precision before quantizing down to 8-bits, so you need enough memory to load the whole model.
+
+g
+    Curr
+
+t
+y, 
+
+ 
+oad th
+ mod
+
+ at or
+g
+
+a
+ pr
+c
+s
+o
+ b
+for
+ qua
+t
+z
+
+g do
+
+ to 8-b
+ts, so you 
+
+d 
+
+ough m
+mory to 
+oad th
+ 
+ho
+
+ mod
+
+.

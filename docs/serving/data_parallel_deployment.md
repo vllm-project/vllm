@@ -1,133 +1,2261 @@
-# Data Parallel Deployment
+# Data Para
 
-vLLM supports Data Parallel deployment, where model weights are replicated across separate instances/GPUs to process independent batches of requests.
 
-This will work with both dense and MoE models.
+ D
+p
+oym
 
-For MoE models, particularly those like DeepSeek that employ MLA (Multi-head Latent Attention), it can be advantageous to use data parallel for the attention layers and expert or tensor parallel (EP or TP) for the expert layers.
+t
+vLLM supports Data Para
 
-In these cases, the data parallel ranks are not completely independent. Forward passes must be aligned, and expert layers across all ranks are required to synchronize during every forward pass, even when there are fewer requests to be processed than DP ranks.
 
-By default, expert layers form a tensor parallel group of size `DP × TP`. To use expert parallelism instead, include the `--enable-expert-parallel` CLI arg (on all nodes in the multi-node case). See [Expert Parallel Deployment](expert_parallel_deployment.md) for details on how attention and expert layers behave differently with EP enabled.
+ d
+p
+oym
 
-In vLLM, each DP rank is deployed as a separate "core engine" process that communicates with front-end process(es) via ZMQ sockets. Data Parallel attention can be combined with Tensor Parallel attention, in which case each DP engine owns a number of per-GPU worker processes equal to the configured TP size.
+t, 
+h
+r
+ mod
 
-For MoE models, when any requests are in progress in any rank, we must ensure that empty "dummy" forward passes are performed in all ranks that don't currently have any requests scheduled. This is handled via a separate DP Coordinator process that communicates with all ranks, and a collective operation performed every N steps to determine when all ranks become idle and can be paused. When TP is used in conjunction with DP, expert layers form a group of size `DP × TP` (using either tensor parallelism by default, or expert parallelism if `--enable-expert-parallel` is set).
+ 
 
-In all cases, it is beneficial to load-balance requests between DP ranks. For online deployments, this balancing can be optimized by taking into account the state of each DP engine - in particular its currently scheduled and waiting (queued) requests, and KV cache state. Each DP engine has an independent KV cache, and the benefit of prefix caching can be maximized by directing prompts intelligently.
 
-This document focuses on online deployments (with the API server). DP + EP is also supported for offline usage (via the LLM class), for an example see [examples/offline_inference/data_parallel.py](../../examples/offline_inference/data_parallel.py).
+ghts ar
+ r
+p
 
-There are two distinct modes supported for online deployments - self-contained with internal load balancing, or externally per-rank process deployment and load balancing.
+cat
+d across s
+parat
+ 
 
-## Internal Load Balancing
+sta
+c
+s/GPUs to proc
+ss 
 
-vLLM supports "self-contained" data parallel deployments that expose a single API endpoint.
+d
+p
 
-It can be configured by simply including e.g. `--data-parallel-size=4` in the vllm serve command line arguments. This will require 4 GPUs. It can be combined with tensor parallel, for example `--data-parallel-size=4 --tensor-parallel-size=2`, which would require 8 GPUs. When sizing DP deployments, remember that `--max-num-seqs` applies per DP rank.
+d
 
-Running a single data parallel deployment across multiple nodes requires a different `vllm serve` to be run on each node, specifying which DP ranks should run on that node. In this case, there will still be a single HTTP entrypoint - the API server(s) will run only on one node, but it doesn't necessarily need to be co-located with the DP ranks.
+t batch
+s of r
+qu
+sts.
+Th
+s 
 
-This will run DP=4, TP=2 on a single 8-GPU node:
 
+ 
+ork 
+
+th both d
+
+s
+ a
+d MoE mod
+
+s.
+For MoE mod
+
+s, part
+cu
+ar
+y thos
+ 
+
+k
+ D
+pS
+k that 
+mp
+oy MLA (Mu
+t
+-h
+ad Lat
+
+t Att
+
+t
+o
+), 
+t ca
+ b
+ adva
+tag
+ous to us
+ data para
+
+
+ for th
+ att
+
+t
+o
+ 
+ay
+rs a
+d 
+xp
+rt or t
+
+sor para
+
+
+ (EP or TP) for th
+ 
+xp
+rt 
+ay
+rs.
+I
+ th
+s
+ cas
+s, th
+ data para
+
+
+ ra
+ks ar
+ 
+ot comp
+
+t
+
+y 
+
+d
+p
+
+d
+
+t. For
+ard pass
+s must b
+ a
+
+g
+
+d, a
+d 
+xp
+rt 
+ay
+rs across a
+ ra
+ks ar
+ r
+qu
+r
+d to sy
+chro
+
+z
+ dur
+
+g 
+v
+ry for
+ard pass, 
+v
+
+ 
+h
+
+ th
+r
+ ar
+ f
+
+
+r r
+qu
+sts to b
+ proc
+ss
+d tha
+ DP ra
+ks.
+By d
+fau
+t, 
+xp
+rt 
+ay
+rs form a t
+
+sor para
+
+
+ group of s
+z
+ `DP × TP`. To us
+ 
+xp
+rt para
+
+
+
+sm 
+
+st
+ad, 
+
+c
+ud
+ th
+ `--
+
+ab
+
+-
+xp
+rt-para
+
+
+` CLI arg (o
+ a
+ 
+od
+s 
+
+ th
+ mu
+t
+-
+od
+ cas
+). S
+ [Exp
+rt Para
+
+
+ D
+p
+oym
+
+t](
+xp
+rt_para
+
+
+_d
+p
+oym
+
+t.md) for d
+ta
+
+s o
+ ho
+ att
+
+t
+o
+ a
+d 
+xp
+rt 
+ay
+rs b
+hav
+ d
+ff
+r
+
+t
+y 
+
+th EP 
+
+ab
+
+d.
+I
+ vLLM, 
+ach DP ra
+k 
+s d
+p
+oy
+d as a s
+parat
+ "cor
+ 
+
+g
+
+
+" proc
+ss that commu
+
+cat
+s 
+
+th fro
+t-
+
+d proc
+ss(
+s) v
+a ZMQ sock
+ts. Data Para
+
+
+ att
+
+t
+o
+ ca
+ b
+ comb
+
+
+d 
+
+th T
+
+sor Para
+
+
+ att
+
+t
+o
+, 
+
+ 
+h
+ch cas
+ 
+ach DP 
+
+g
+
+
+ o
+
+s a 
+umb
+r of p
+r-GPU 
+ork
+r proc
+ss
+s 
+qua
+ to th
+ co
+f
+gur
+d TP s
+z
+.
+For MoE mod
+
+s, 
+h
+
+ a
+y r
+qu
+sts ar
+ 
+
+ progr
+ss 
+
+ a
+y ra
+k, 
+
+ must 
+
+sur
+ that 
+mpty "dummy" for
+ard pass
+s ar
+ p
+rform
+d 
+
+ a
+ ra
+ks that do
+'t curr
+
+t
+y hav
+ a
+y r
+qu
+sts sch
+du
+
+d. Th
+s 
+s ha
+d
+
+d v
+a a s
+parat
+ DP Coord
+
+ator proc
+ss that commu
+
+cat
+s 
+
+th a
+ ra
+ks, a
+d a co
+
+ct
+v
+ op
+rat
+o
+ p
+rform
+d 
+v
+ry N st
+ps to d
+t
+rm
+
+
+ 
+h
+
+ a
+ ra
+ks b
+com
+ 
+d
+
+ a
+d ca
+ b
+ paus
+d. Wh
+
+ TP 
+s us
+d 
+
+ co
+ju
+ct
+o
+ 
+
+th DP, 
+xp
+rt 
+ay
+rs form a group of s
+z
+ `DP × TP` (us
+
+g 
+
+th
+r t
+
+sor para
+
+
+
+sm by d
+fau
+t, or 
+xp
+rt para
+
+
+
+sm 
+f `--
+
+ab
+
+-
+xp
+rt-para
+
+
+` 
+s s
+t).
+I
+ a
+ cas
+s, 
+t 
+s b
+
+
+f
+c
+a
+ to 
+oad-ba
+a
+c
+ r
+qu
+sts b
+t
+
+
+ DP ra
+ks. For o
+
+
+
+
+ d
+p
+oym
+
+ts, th
+s ba
+a
+c
+
+g ca
+ b
+ opt
+m
+z
+d by tak
+
+g 
+
+to accou
+t th
+ stat
+ of 
+ach DP 
+
+g
+
+
+ - 
+
+ part
+cu
+ar 
+ts curr
+
+t
+y sch
+du
+
+d a
+d 
+a
+t
+
+g (qu
+u
+d) r
+qu
+sts, a
+d KV cach
+ stat
+. Each DP 
+
+g
+
+
+ has a
+ 
+
+d
+p
+
+d
+
+t KV cach
+, a
+d th
+ b
+
+
+f
+t of pr
+f
+x cach
+
+g ca
+ b
+ max
+m
+z
+d by d
+r
+ct
+
+g prompts 
+
+t
+
+
+g
+
+t
+y.
+Th
+s docum
+
+t focus
+s o
+ o
+
+
+
+
+ d
+p
+oym
+
+ts (
+
+th th
+ API s
+rv
+r). DP + EP 
+s a
+so support
+d for off
+
+
+
+ usag
+ (v
+a th
+ LLM c
+ass), for a
+ 
+xamp
+
+ s
+ [
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/data_para
+
+
+.py](../../
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/data_para
+
+
+.py).
+Th
+r
+ ar
+ t
+o d
+st
+
+ct mod
+s support
+d for o
+
+
+
+
+ d
+p
+oym
+
+ts - s
+
+f-co
+ta
+
+
+d 
+
+th 
+
+t
+r
+a
+ 
+oad ba
+a
+c
+
+g, or 
+xt
+r
+a
+y p
+r-ra
+k proc
+ss d
+p
+oym
+
+t a
+d 
+oad ba
+a
+c
+
+g.
+## I
+t
+r
+a
+ Load Ba
+a
+c
+
+g
+vLLM supports "s
+
+f-co
+ta
+
+
+d" data para
+
+
+ d
+p
+oym
+
+ts that 
+xpos
+ a s
+
+g
+
+ API 
+
+dpo
+
+t.
+It ca
+ b
+ co
+f
+gur
+d by s
+mp
+y 
+
+c
+ud
+
+g 
+.g. `--data-para
+
+
+-s
+z
+=4` 
+
+ th
+ v
+m s
+rv
+ comma
+d 
+
+
+
+ argum
+
+ts. Th
+s 
+
+
+ r
+qu
+r
+ 4 GPUs. It ca
+ b
+ comb
+
+
+d 
+
+th t
+
+sor para
+
+
+, for 
+xamp
+
+ `--data-para
+
+
+-s
+z
+=4 --t
+
+sor-para
+
+
+-s
+z
+=2`, 
+h
+ch 
+ou
+d r
+qu
+r
+ 8 GPUs. Wh
+
+ s
+z
+
+g DP d
+p
+oym
+
+ts, r
+m
+mb
+r that `--max-
+um-s
+qs` app
+
+
+s p
+r DP ra
+k.
+Ru
+
+
+g a s
+
+g
+
+ data para
+
+
+ d
+p
+oym
+
+t across mu
+t
+p
+
+ 
+od
+s r
+qu
+r
+s a d
+ff
+r
+
+t `v
+m s
+rv
+` to b
+ ru
+ o
+ 
+ach 
+od
+, sp
+c
+fy
+
+g 
+h
+ch DP ra
+ks shou
+d ru
+ o
+ that 
+od
+. I
+ th
+s cas
+, th
+r
+ 
+
+
+ st
+
+ b
+ a s
+
+g
+
+ HTTP 
+
+trypo
+
+t - th
+ API s
+rv
+r(s) 
+
+
+ ru
+ o
+
+y o
+ o
+
+ 
+od
+, but 
+t do
+s
+'t 
+
+c
+ssar
+
+y 
+
+d to b
+ co-
+ocat
+d 
+
+th th
+ DP ra
+ks.
+Th
+s 
+
+
+ ru
+ DP=4, TP=2 o
+ a s
+
+g
+
+ 8-GPU 
+od
+:
 ```bash
-vllm serve $MODEL --data-parallel-size 4 --tensor-parallel-size 2
+v
+m s
+rv
+ $MODEL --data-para
+
+
+-s
+z
+ 4 --t
+
+sor-para
+
+
+-s
+z
+ 2
 ```
+Th
+s 
 
-This will run DP=4 with DP ranks 0 and 1 on the head node and ranks 2 and 3 on the second node:
 
+ ru
+ DP=4 
+
+th DP ra
+ks 0 a
+d 1 o
+ th
+ h
+ad 
+od
+ a
+d ra
+ks 2 a
+d 3 o
+ th
+ s
+co
+d 
+od
+:
 ```bash
-# Node 0  (with ip address 10.99.48.128)
-vllm serve $MODEL --data-parallel-size 4 --data-parallel-size-local 2 \
-                  --data-parallel-address 10.99.48.128 --data-parallel-rpc-port 13345
-# Node 1
-vllm serve $MODEL --headless --data-parallel-size 4 --data-parallel-size-local 2 \
-                  --data-parallel-start-rank 2 \
-                  --data-parallel-address 10.99.48.128 --data-parallel-rpc-port 13345
+# Nod
+ 0  (
+
+th 
+p addr
+ss 10.99.48.128)
+v
+m s
+rv
+ $MODEL --data-para
+
+
+-s
+z
+ 4 --data-para
+
+
+-s
+z
+-
+oca
+ 2 \
+                  --data-para
+
+
+-addr
+ss 10.99.48.128 --data-para
+
+
+-rpc-port 13345
+# Nod
+ 1
+v
+m s
+rv
+ $MODEL --h
+ad
+
+ss --data-para
+
+
+-s
+z
+ 4 --data-para
+
+
+-s
+z
+-
+oca
+ 2 \
+                  --data-para
+
+
+-start-ra
+k 2 \
+                  --data-para
+
+
+-addr
+ss 10.99.48.128 --data-para
+
+
+-rpc-port 13345
 ```
+Th
+s 
 
-This will run DP=4 with only the API server on the first node and all engines on the second node:
 
+ ru
+ DP=4 
+
+th o
+
+y th
+ API s
+rv
+r o
+ th
+ f
+rst 
+od
+ a
+d a
+ 
+
+g
+
+
+s o
+ th
+ s
+co
+d 
+od
+:
 ```bash
-# Node 0  (with ip address 10.99.48.128)
-vllm serve $MODEL --data-parallel-size 4 --data-parallel-size-local 0 \
-                  --data-parallel-address 10.99.48.128 --data-parallel-rpc-port 13345
-# Node 1
-vllm serve $MODEL --headless --data-parallel-size 4 --data-parallel-size-local 4 \
-                  --data-parallel-address 10.99.48.128 --data-parallel-rpc-port 13345
+# Nod
+ 0  (
+
+th 
+p addr
+ss 10.99.48.128)
+v
+m s
+rv
+ $MODEL --data-para
+
+
+-s
+z
+ 4 --data-para
+
+
+-s
+z
+-
+oca
+ 0 \
+                  --data-para
+
+
+-addr
+ss 10.99.48.128 --data-para
+
+
+-rpc-port 13345
+# Nod
+ 1
+v
+m s
+rv
+ $MODEL --h
+ad
+
+ss --data-para
+
+
+-s
+z
+ 4 --data-para
+
+
+-s
+z
+-
+oca
+ 4 \
+                  --data-para
+
+
+-addr
+ss 10.99.48.128 --data-para
+
+
+-rpc-port 13345
 ```
+Th
+s DP mod
+ ca
+ a
+so b
+ us
+d 
 
-This DP mode can also be used with Ray by specifying `--data-parallel-backend=ray`:
+th Ray by sp
+c
+fy
 
+g `--data-para
+
+
+-back
+
+d=ray`:
 ```bash
-vllm serve $MODEL --data-parallel-size 4 --data-parallel-size-local 2 \
-                  --data-parallel-backend=ray
+v
+m s
+rv
+ $MODEL --data-para
+
+
+-s
+z
+ 4 --data-para
+
+
+-s
+z
+-
+oca
+ 2 \
+                  --data-para
+
+
+-back
+
+d=ray
 ```
+Th
+r
+ ar
+ s
+v
+ra
+ 
+otab
 
-There are several notable differences when using Ray:
+ d
+ff
+r
 
-- A single launch command (on any node) is needed to start all local and remote DP ranks, therefore it is more convenient compared to launching on each node
-- There is no need to specify `--data-parallel-address`, and the node where the command is run is used as `--data-parallel-address`
-- There is no need to specify `--data-parallel-rpc-port`
-- When a single DP group requires multiple nodes, *e.g.* in case a single model replica needs to run on at least two nodes, make sure to set `VLLM_RAY_DP_PACK_STRATEGY="span"` in which case `--data-parallel-size-local` is ignored and will be automatically determined
-- Remote DP ranks will be allocated based on node resources of the Ray cluster
+c
+s 
+h
 
-Currently, the internal DP load balancing is done within the API server process(es) and is based on the running and waiting queues in each of the engines. This could be made more sophisticated in future by incorporating KV cache aware logic.
+ us
 
-When deploying large DP sizes using this method, the API server process can become a bottleneck. In this case, the orthogonal `--api-server-count` command line option can be used to scale this out (for example `--api-server-count=4`). This is transparent to users - a single HTTP endpoint / port is still exposed. Note that this API server scale-out is "internal" and still confined to the "head" node.
+g Ray:
+- A s
 
-<figure markdown="1">
-![DP Internal LB Diagram](../assets/deployment/dp_internal_lb.png)
-</figure>
+g
 
-## Hybrid Load Balancing
+ 
+au
+ch comma
+d (o
+ a
+y 
+od
+) 
+s 
 
-Hybrid load balancing sits between the internal and external approaches. Each node runs its own API server(s) that only queue requests to the data-parallel engines colocated on that node. An upstream load balancer (for example, an ingress controller or traffic router) spreads user requests across those per-node endpoints.
+d
+d to start a
+ 
+oca
+ a
+d r
+mot
+ DP ra
+ks, th
+r
+for
+ 
+t 
+s mor
+ co
+v
 
-Enable this mode with `--data-parallel-hybrid-lb` while still launching every node with the global data-parallel size. The key differences from internal load balancing are:
 
-- You must provide `--data-parallel-size-local` and `--data-parallel-start-rank` so each node knows which ranks it owns.
-- Not compatible with `--headless` since every node exposes an API endpoint.
-- Scale `--api-server-count` per node based on the number of local ranks
 
-In this configuration, each node keeps scheduling decisions local, which reduces cross-node traffic and avoids single node bottlenecks at larger DP sizes.
 
-## External Load Balancing
+t compar
+d to 
+au
+ch
 
-For larger scale deployments especially, it can make sense to handle the orchestration and load balancing of data parallel ranks externally.
+g o
+ 
+ach 
+od
 
-In this case, it's more convenient to treat each DP rank like a separate vLLM deployment, with its own endpoint, and have an external router balance HTTP requests between them, making use of appropriate real-time telemetry from each server for routing decisions.
+- Th
+r
+ 
+s 
+o 
 
-This can already be done trivially for non-MoE models, since each deployed server is fully independent. No data parallel CLI options need to be used for this.
+d to sp
+c
+fy `--data-para
 
-We support an equivalent topology for MoE DP+EP which can be configured via the following CLI arguments.
 
-If DP ranks are co-located (same node / ip address), a default RPC port is used, but a different HTTP server port must be specified for each rank:
+-addr
+ss`, a
+d th
+ 
+od
+ 
+h
+r
+ th
+ comma
+d 
+s ru
+ 
+s us
+d as `--data-para
 
+
+-addr
+ss`
+- Th
+r
+ 
+s 
+o 
+
+d to sp
+c
+fy `--data-para
+
+
+-rpc-port`
+- Wh
+
+ a s
+
+g
+
+ DP group r
+qu
+r
+s mu
+t
+p
+
+ 
+od
+s, *
+.g.* 
+
+ cas
+ a s
+
+g
+
+ mod
+
+ r
+p
+
+ca 
+
+ds to ru
+ o
+ at 
+
+ast t
+o 
+od
+s, mak
+ sur
+ to s
+t `VLLM_RAY_DP_PACK_STRATEGY="spa
+"` 
+
+ 
+h
+ch cas
+ `--data-para
+
+
+-s
+z
+-
+oca
+` 
+s 
+g
+or
+d a
+d 
+
+
+ b
+ automat
+ca
+y d
+t
+rm
+
+
+d
+- R
+mot
+ DP ra
+ks 
+
+
+ b
+ a
+ocat
+d bas
+d o
+ 
+od
+ r
+sourc
+s of th
+ Ray c
+ust
+r
+Curr
+
+t
+y, th
+ 
+
+t
+r
+a
+ DP 
+oad ba
+a
+c
+
+g 
+s do
+
+ 
+
+th
+
+ th
+ API s
+rv
+r proc
+ss(
+s) a
+d 
+s bas
+d o
+ th
+ ru
+
+
+g a
+d 
+a
+t
+
+g qu
+u
+s 
+
+ 
+ach of th
+ 
+
+g
+
+
+s. Th
+s cou
+d b
+ mad
+ mor
+ soph
+st
+cat
+d 
+
+ futur
+ by 
+
+corporat
+
+g KV cach
+ a
+ar
+ 
+og
+c.
+Wh
+
+ d
+p
+oy
+
+g 
+arg
+ DP s
+z
+s us
+
+g th
+s m
+thod, th
+ API s
+rv
+r proc
+ss ca
+ b
+com
+ a bott
+
+
+
+ck. I
+ th
+s cas
+, th
+ orthogo
+a
+ `--ap
+-s
+rv
+r-cou
+t` comma
+d 
+
+
+
+ opt
+o
+ ca
+ b
+ us
+d to sca
+
+ th
+s out (for 
+xamp
+
+ `--ap
+-s
+rv
+r-cou
+t=4`). Th
+s 
+s tra
+spar
+
+t to us
+rs - a s
+
+g
+
+ HTTP 
+
+dpo
+
+t / port 
+s st
+
+ 
+xpos
+d. Not
+ that th
+s API s
+rv
+r sca
+
+-out 
+s "
+
+t
+r
+a
+" a
+d st
+
+ co
+f
+
+
+d to th
+ "h
+ad" 
+od
+.
+f
+gur
+ markdo
+
+="1"
+
+![DP I
+t
+r
+a
+ LB D
+agram](../ass
+ts/d
+p
+oym
+
+t/dp_
+
+t
+r
+a
+_
+b.p
+g)
+/f
+gur
+
+
+## Hybr
+d Load Ba
+a
+c
+
+g
+Hybr
+d 
+oad ba
+a
+c
+
+g s
+ts b
+t
+
+
+ th
+ 
+
+t
+r
+a
+ a
+d 
+xt
+r
+a
+ approach
+s. Each 
+od
+ ru
+s 
+ts o
+
+ API s
+rv
+r(s) that o
+
+y qu
+u
+ r
+qu
+sts to th
+ data-para
+
+
+ 
+
+g
+
+
+s co
+ocat
+d o
+ that 
+od
+. A
+ upstr
+am 
+oad ba
+a
+c
+r (for 
+xamp
+
+, a
+ 
+
+gr
+ss co
+tro
+
+r or traff
+c rout
+r) spr
+ads us
+r r
+qu
+sts across thos
+ p
+r-
+od
+ 
+
+dpo
+
+ts.
+E
+ab
+
+ th
+s mod
+ 
+
+th `--data-para
+
+
+-hybr
+d-
+b` 
+h
+
+
+ st
+
+ 
+au
+ch
+
+g 
+v
+ry 
+od
+ 
+
+th th
+ g
+oba
+ data-para
+
+
+ s
+z
+. Th
+ k
+y d
+ff
+r
+
+c
+s from 
+
+t
+r
+a
+ 
+oad ba
+a
+c
+
+g ar
+:
+- You must prov
+d
+ `--data-para
+
+
+-s
+z
+-
+oca
+` a
+d `--data-para
+
+
+-start-ra
+k` so 
+ach 
+od
+ k
+o
+s 
+h
+ch ra
+ks 
+t o
+
+s.
+- Not compat
+b
+
+ 
+
+th `--h
+ad
+
+ss` s
+
+c
+ 
+v
+ry 
+od
+ 
+xpos
+s a
+ API 
+
+dpo
+
+t.
+- Sca
+
+ `--ap
+-s
+rv
+r-cou
+t` p
+r 
+od
+ bas
+d o
+ th
+ 
+umb
+r of 
+oca
+ ra
+ks
+I
+ th
+s co
+f
+gurat
+o
+, 
+ach 
+od
+ k
+ps sch
+du
+
+
+g d
+c
+s
+o
+s 
+oca
+, 
+h
+ch r
+duc
+s cross-
+od
+ traff
+c a
+d avo
+ds s
+
+g
+
+ 
+od
+ bott
+
+
+
+cks at 
+arg
+r DP s
+z
+s.
+## Ext
+r
+a
+ Load Ba
+a
+c
+
+g
+For 
+arg
+r sca
+
+ d
+p
+oym
+
+ts 
+sp
+c
+a
+y, 
+t ca
+ mak
+ s
+
+s
+ to ha
+d
+
+ th
+ orch
+strat
+o
+ a
+d 
+oad ba
+a
+c
+
+g of data para
+
+
+ ra
+ks 
+xt
+r
+a
+y.
+I
+ th
+s cas
+, 
+t's mor
+ co
+v
+
+
+
+
+t to tr
+at 
+ach DP ra
+k 
+
+k
+ a s
+parat
+ vLLM d
+p
+oym
+
+t, 
+
+th 
+ts o
+
+ 
+
+dpo
+
+t, a
+d hav
+ a
+ 
+xt
+r
+a
+ rout
+r ba
+a
+c
+ HTTP r
+qu
+sts b
+t
+
+
+ th
+m, mak
+
+g us
+ of appropr
+at
+ r
+a
+-t
+m
+ t
+
+
+m
+try from 
+ach s
+rv
+r for rout
+
+g d
+c
+s
+o
+s.
+Th
+s ca
+ a
+r
+ady b
+ do
+
+ tr
+v
+a
+y for 
+o
+-MoE mod
+
+s, s
+
+c
+ 
+ach d
+p
+oy
+d s
+rv
+r 
+s fu
+y 
+
+d
+p
+
+d
+
+t. No data para
+
+
+ CLI opt
+o
+s 
+
+d to b
+ us
+d for th
+s.
+W
+ support a
+ 
+qu
+va
+
+
+t topo
+ogy for MoE DP+EP 
+h
+ch ca
+ b
+ co
+f
+gur
+d v
+a th
+ fo
+o
+
+
+g CLI argum
+
+ts.
+If DP ra
+ks ar
+ co-
+ocat
+d (sam
+ 
+od
+ / 
+p addr
+ss), a d
+fau
+t RPC port 
+s us
+d, but a d
+ff
+r
+
+t HTTP s
+rv
+r port must b
+ sp
+c
+f
+
+d for 
+ach ra
+k:
 ```bash
-# Rank 0
-CUDA_VISIBLE_DEVICES=0 vllm serve $MODEL --data-parallel-size 2 --data-parallel-rank 0 \
+# Ra
+k 0
+CUDA_VISIBLE_DEVICES=0 v
+m s
+rv
+ $MODEL --data-para
+
+
+-s
+z
+ 2 --data-para
+
+
+-ra
+k 0 \
                                          --port 8000
-# Rank 1
-CUDA_VISIBLE_DEVICES=1 vllm serve $MODEL --data-parallel-size 2 --data-parallel-rank 1 \
+# Ra
+k 1
+CUDA_VISIBLE_DEVICES=1 v
+m s
+rv
+ $MODEL --data-para
+
+
+-s
+z
+ 2 --data-para
+
+
+-ra
+k 1 \
                                          --port 8001
 ```
+For mu
+t
+-
+od
+ cas
+s, th
+ addr
+ss/port of ra
+k 0 must a
+so b
+ sp
+c
+f
 
-For multi-node cases, the address/port of rank 0 must also be specified:
-
+d:
 ```bash
-# Rank 0  (with ip address 10.99.48.128)
-vllm serve $MODEL --data-parallel-size 2 --data-parallel-rank 0 \
-                  --data-parallel-address 10.99.48.128 --data-parallel-rpc-port 13345
-# Rank 1
-vllm serve $MODEL --data-parallel-size 2 --data-parallel-rank 1 \
-                  --data-parallel-address 10.99.48.128 --data-parallel-rpc-port 13345
+# Ra
+k 0  (
+
+th 
+p addr
+ss 10.99.48.128)
+v
+m s
+rv
+ $MODEL --data-para
+
+
+-s
+z
+ 2 --data-para
+
+
+-ra
+k 0 \
+                  --data-para
+
+
+-addr
+ss 10.99.48.128 --data-para
+
+
+-rpc-port 13345
+# Ra
+k 1
+v
+m s
+rv
+ $MODEL --data-para
+
+
+-s
+z
+ 2 --data-para
+
+
+-ra
+k 1 \
+                  --data-para
+
+
+-addr
+ss 10.99.48.128 --data-para
+
+
+-rpc-port 13345
 ```
+Th
+ coord
 
-The coordinator process also runs in this scenario, co-located with the DP rank 0 engine.
+ator proc
+ss a
+so ru
+s 
 
-<figure markdown="1">
-![DP External LB Diagram](../assets/deployment/dp_external_lb.png)
-</figure>
+ th
+s sc
 
-In the above diagram, each of the dotted boxes corresponds to a separate launch of `vllm serve` - these could be separate Kubernetes pods, for example.
+ar
+o, co-
+ocat
+d 
+
+th th
+ DP ra
+k 0 
+
+g
+
+
+.
+f
+gur
+ markdo
+
+="1"
+
+![DP Ext
+r
+a
+ LB D
+agram](../ass
+ts/d
+p
+oym
+
+t/dp_
+xt
+r
+a
+_
+b.p
+g)
+/f
+gur
+
+
+I
+ th
+ abov
+ d
+agram, 
+ach of th
+ dott
+d box
+s corr
+spo
+ds to a s
+parat
+ 
+au
+ch of `v
+m s
+rv
+` - th
+s
+ cou
+d b
+ s
+parat
+ Kub
+r
+
+t
+s pods, for 
+xamp
+
+.

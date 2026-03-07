@@ -1,198 +1,2366 @@
-# Model Runner V2 Design Document
+# Mod
 
-## Introduction
+ Ru
 
-Since vLLM V1 was first implemented, we discovered several fundamental design mistakes and accumulated significant technical debt. Many features were bolted on that were not considered in the original design. We also gained valuable insights into sampling techniques (for example, Gumbel-max sampling), tools (for example, Triton), and CUDA features (for example, UVA). With this knowledge, we implemented Model Runner V2 (MRV2) from first principles to be cleaner, more efficient, and more modular.
+r V2 D
+s
+g
+ Docum
 
-In hindsight, many of V1's design choices were suboptimal. While MRV2 is not yet feature-complete, not rigorously tested, and still has open design decisions, we believe it is a substantial improvement over V1.
+t
+## I
+troduct
+o
 
-This document describes the design of MRV2.
+S
 
-## 1. Persistent Batch
+c
+ vLLM V1 
+as f
+rst 
+mp
 
-One significant source of friction in V1 is its persistent batch implementation.
+m
 
-### Background
+t
+d, 
 
-V1 introduced persistent batches to minimize CPU overhead during input preparation. When requests are scheduled for a step, the model runner must construct contiguous input tensors (for example, block tables and per-request temperature values) to feed into the model. Building these tensors from scratch each step is often very slow in Python, especially for large tensors like block tables.
+ d
+scov
+r
+d s
+v
+ra
+ fu
+dam
 
-The persistent batch optimization exploits the fact that request batches in consecutive steps are mostly identical. Only a few requests (if any) join or finish per step. By maintaining persistent state tensors and applying incremental diffs instead of reconstructing inputs from scratch, CPU overhead can be reduced significantly.
+ta
+ d
+s
+g
+ m
+stak
+s a
+d accumu
+at
+d s
+g
 
-### Problems with V1's Approach
+f
+ca
+t t
+ch
 
-While efficient, V1's persistent batch design introduced unnecessary complexity due to coupling persistent state with input tensors. V1 uses persistent state tensors directly as model and sampler inputs, which imposes strict layout and ordering requirements. When requests join or finish, this often requires complex tensor-wide reordering rather than simple row insertion/removal.
+ca
+ d
+bt. Ma
+y f
+atur
+s 
 
-V1 also had to maintain `CachedRequestState`, a redundant backup copy of request state, because rows in persistent tensors can be overwritten while requests are still active.
+r
+ bo
+t
+d o
+ that 
 
-The result is complex bookkeeping that becomes more difficult under async scheduling.
+r
+ 
+ot co
+s
+d
+r
+d 
 
-![Persistent Batch in V1](../assets/design/model_runner_v2/persistent_batch_v1.png)
+ th
+ or
+g
 
-### MRV2's Solution
+a
+ d
+s
+g
+. W
+ a
+so ga
 
-MRV2 decouples persistent state tensors from per-step input tensors. Given request ordering for the step (usually determined by the attention backend), MRV2 gathers input tensors from persistent state.
 
-1. Pre-allocate a fixed-size tensor with `max_num_reqs` rows (1024 by default on most platforms).
-2. Assign each request a permanent row for its active lifetime (until finish or preemption).
-3. Treat preemption as completion. On resume, re-add request data as fresh state.
+d va
+uab
 
-This removes the need for `CachedRequestState` and simplifies bookkeeping. Large state tensors are mostly stored on GPU memory, so gather runs in parallel on the GPU with low overhead.
+ 
 
-![Persistent Batch in MRV2](../assets/design/model_runner_v2/persistent_batch_mrv2.png)
+s
+ghts 
 
-## 2. Async-First
+to samp
 
-vLLM now relies heavily on asynchronous scheduling. The scheduler and worker prepare inputs for step `N+1` while the GPU executes step `N`, overlapping CPU and GPU work to maximize utilization.
 
-V1 was not originally designed with async scheduling in mind, and support required retrofitted behavior and hacks. MRV2 instead assumes the core model execution loop is a CUDA stream with no CPU synchronization points. CPU entrypoints queue work onto the stream.
+g t
+ch
 
-![Async execution timeline](../assets/design/model_runner_v2/async_sched.png)
+qu
+s (for 
+xamp
 
-## 3. Removing Async Barrier
+, Gumb
 
-A key requirement for async execution is that CPU operations remain non-blocking. Both explicit sync (for example, `torch.accelerator.synchronize`) and implicit sync (for example, unpinned `.to("cuda")`) must be avoided.
+-max samp
 
-However, async execution can introduce race conditions when CPU and GPU concurrently touch the same memory.
 
-Example (unsafe):
+g), too
+s (for 
+xamp
 
-```python
-class ModelRunner:
-    def __init__(self, ...):
-        # Pinned buffer
-        self.states = torch.zeros(
-            max_num_reqs, dtype=torch.int32, device="cpu", pin_memory=True
+, Tr
+to
+), a
+d CUDA f
+atur
+s (for 
+xamp
+
+, UVA). W
+th th
+s k
+o
+
+
+dg
+, 
+
+ 
+mp
+
+m
+
+t
+d Mod
+
+ Ru
+
+r V2 (MRV2) from f
+rst pr
+
+c
+p
+
+s to b
+ c
+
+a
+
+r, mor
+ 
+ff
+c
+
+
+t, a
+d mor
+ modu
+ar.
+I
+ h
+
+ds
+ght, ma
+y of V1's d
+s
+g
+ cho
+c
+s 
+
+r
+ subopt
+ma
+. Wh
+
+
+ MRV2 
+s 
+ot y
+t f
+atur
+-comp
+
+t
+, 
+ot r
+gorous
+y t
+st
+d, a
+d st
+
+ has op
+
+ d
+s
+g
+ d
+c
+s
+o
+s, 
+
+ b
+
+
+
+v
+ 
+t 
+s a substa
+t
+a
+ 
+mprov
+m
+
+t ov
+r V1.
+Th
+s docum
+
+t d
+scr
+b
+s th
+ d
+s
+g
+ of MRV2.
+## 1. P
+rs
+st
+
+t Batch
+O
+
+ s
+g
+
+f
+ca
+t sourc
+ of fr
+ct
+o
+ 
+
+ V1 
+s 
+ts p
+rs
+st
+
+t batch 
+mp
+
+m
+
+tat
+o
+.
+### Backgrou
+d
+V1 
+
+troduc
+d p
+rs
+st
+
+t batch
+s to m
+
+
+m
+z
+ CPU ov
+rh
+ad dur
+
+g 
+
+put pr
+parat
+o
+. Wh
+
+ r
+qu
+sts ar
+ sch
+du
+
+d for a st
+p, th
+ mod
+
+ ru
+
+r must co
+struct co
+t
+guous 
+
+put t
+
+sors (for 
+xamp
+
+, b
+ock tab
+
+s a
+d p
+r-r
+qu
+st t
+mp
+ratur
+ va
+u
+s) to f
+d 
+
+to th
+ mod
+
+. Bu
+
+d
+
+g th
+s
+ t
+
+sors from scratch 
+ach st
+p 
+s oft
+
+ v
+ry s
+o
+ 
+
+ Pytho
+, 
+sp
+c
+a
+y for 
+arg
+ t
+
+sors 
+
+k
+ b
+ock tab
+
+s.
+Th
+ p
+rs
+st
+
+t batch opt
+m
+zat
+o
+ 
+xp
+o
+ts th
+ fact that r
+qu
+st batch
+s 
+
+ co
+s
+cut
+v
+ st
+ps ar
+ most
+y 
+d
+
+t
+ca
+. O
+
+y a f
+
+ r
+qu
+sts (
+f a
+y) jo
+
+ or f
+
+
+sh p
+r st
+p. By ma
+
+ta
+
+
+
+g p
+rs
+st
+
+t stat
+ t
+
+sors a
+d app
+y
+
+g 
+
+cr
+m
+
+ta
+ d
+ffs 
+
+st
+ad of r
+co
+struct
+
+g 
+
+puts from scratch, CPU ov
+rh
+ad ca
+ b
+ r
+duc
+d s
+g
+
+f
+ca
+t
+y.
+### Prob
+
+ms 
+
+th V1's Approach
+Wh
+
+
+ 
+ff
+c
+
+
+t, V1's p
+rs
+st
+
+t batch d
+s
+g
+ 
+
+troduc
+d u
+
+c
+ssary comp
+
+x
+ty du
+ to coup
+
+
+g p
+rs
+st
+
+t stat
+ 
+
+th 
+
+put t
+
+sors. V1 us
+s p
+rs
+st
+
+t stat
+ t
+
+sors d
+r
+ct
+y as mod
+
+ a
+d samp
+
+r 
+
+puts, 
+h
+ch 
+mpos
+s str
+ct 
+ayout a
+d ord
+r
+
+g r
+qu
+r
+m
+
+ts. Wh
+
+ r
+qu
+sts jo
+
+ or f
+
+
+sh, th
+s oft
+
+ r
+qu
+r
+s comp
+
+x t
+
+sor-
+
+d
+ r
+ord
+r
+
+g rath
+r tha
+ s
+mp
+
+ ro
+ 
+
+s
+rt
+o
+/r
+mova
+.
+V1 a
+so had to ma
+
+ta
+
+ `Cach
+dR
+qu
+stStat
+`, a r
+du
+da
+t backup copy of r
+qu
+st stat
+, b
+caus
+ ro
+s 
+
+ p
+rs
+st
+
+t t
+
+sors ca
+ b
+ ov
+r
+r
+tt
+
+ 
+h
+
+
+ r
+qu
+sts ar
+ st
+
+ act
+v
+.
+Th
+ r
+su
+t 
+s comp
+
+x bookk
+p
+
+g that b
+com
+s mor
+ d
+ff
+cu
+t u
+d
+r asy
+c sch
+du
+
+
+g.
+![P
+rs
+st
+
+t Batch 
+
+ V1](../ass
+ts/d
+s
+g
+/mod
+
+_ru
+
+r_v2/p
+rs
+st
+
+t_batch_v1.p
+g)
+### MRV2's So
+ut
+o
+
+MRV2 d
+coup
+
+s p
+rs
+st
+
+t stat
+ t
+
+sors from p
+r-st
+p 
+
+put t
+
+sors. G
+v
+
+ r
+qu
+st ord
+r
+
+g for th
+ st
+p (usua
+y d
+t
+rm
+
+
+d by th
+ att
+
+t
+o
+ back
+
+d), MRV2 gath
+rs 
+
+put t
+
+sors from p
+rs
+st
+
+t stat
+.
+1. Pr
+-a
+ocat
+ a f
+x
+d-s
+z
+ t
+
+sor 
+
+th `max_
+um_r
+qs` ro
+s (1024 by d
+fau
+t o
+ most p
+atforms).
+2. Ass
+g
+ 
+ach r
+qu
+st a p
+rma
+
+
+t ro
+ for 
+ts act
+v
+ 
+
+f
+t
+m
+ (u
+t
+
+ f
+
+
+sh or pr
+mpt
+o
+).
+3. Tr
+at pr
+mpt
+o
+ as comp
+
+t
+o
+. O
+ r
+sum
+, r
+-add r
+qu
+st data as fr
+sh stat
+.
+Th
+s r
+mov
+s th
+ 
+
+d for `Cach
+dR
+qu
+stStat
+` a
+d s
+mp
+
+f
+
+s bookk
+p
+
+g. Larg
+ stat
+ t
+
+sors ar
+ most
+y stor
+d o
+ GPU m
+mory, so gath
+r ru
+s 
+
+ para
+
+
+ o
+ th
+ GPU 
+
+th 
+o
+ ov
+rh
+ad.
+![P
+rs
+st
+
+t Batch 
+
+ MRV2](../ass
+ts/d
+s
+g
+/mod
+
+_ru
+
+r_v2/p
+rs
+st
+
+t_batch_mrv2.p
+g)
+## 2. Asy
+c-F
+rst
+vLLM 
+o
+ r
+
+
+
+s h
+av
+
+y o
+ asy
+chro
+ous sch
+du
+
+
+g. Th
+ sch
+du
+
+r a
+d 
+ork
+r pr
+par
+ 
+
+puts for st
+p `N+1` 
+h
+
+
+ th
+ GPU 
+x
+cut
+s st
+p `N`, ov
+r
+app
+
+g CPU a
+d GPU 
+ork to max
+m
+z
+ ut
+
+
+zat
+o
+.
+V1 
+as 
+ot or
+g
+
+a
+y d
+s
+g
+
+d 
+
+th asy
+c sch
+du
+
+
+g 
+
+ m
+
+d, a
+d support r
+qu
+r
+d r
+trof
+tt
+d b
+hav
+or a
+d hacks. MRV2 
+
+st
+ad assum
+s th
+ cor
+ mod
+
+ 
+x
+cut
+o
+ 
+oop 
+s a CUDA str
+am 
+
+th 
+o CPU sy
+chro
+
+zat
+o
+ po
+
+ts. CPU 
+
+trypo
+
+ts qu
+u
+ 
+ork o
+to th
+ str
+am.
+![Asy
+c 
+x
+cut
+o
+ t
+m
+
+
+
+
+](../ass
+ts/d
+s
+g
+/mod
+
+_ru
+
+r_v2/asy
+c_sch
+d.p
+g)
+## 3. R
+mov
+
+g Asy
+c Barr
+
+r
+A k
+y r
+qu
+r
+m
+
+t for asy
+c 
+x
+cut
+o
+ 
+s that CPU op
+rat
+o
+s r
+ma
+
+ 
+o
+-b
+ock
+
+g. Both 
+xp
+
+c
+t sy
+c (for 
+xamp
+
+, `torch.acc
+
+
+rator.sy
+chro
+
+z
+`) a
+d 
+mp
+
+c
+t sy
+c (for 
+xamp
+
+, u
+p
+
+
+d `.to("cuda")`) must b
+ avo
+d
+d.
+Ho
+
+v
+r, asy
+c 
+x
+cut
+o
+ ca
+ 
+
+troduc
+ rac
+ co
+d
+t
+o
+s 
+h
+
+ CPU a
+d GPU co
+curr
+
+t
+y touch th
+ sam
+ m
+mory.
+Examp
+
+ (u
+saf
+):
+```pytho
+
+c
+ass Mod
+
+Ru
+
+r:
+    d
+f __
+
+
+t__(s
+
+f, ...):
+        # P
+
+
+d buff
+r
+        s
+
+f.stat
+s = torch.z
+ros(
+            max_
+um_r
+qs, dtyp
+=torch.
+
+t32, d
+v
+c
+="cpu", p
+
+_m
+mory=Tru
+
         )
+    d
+f 
+x
+cut
+_st
+p(s
 
-    def execute_step(self, ...):
-        self.states[req_idx] = new_req.data
-        states = self.states.to("cuda", non_blocking=True)
+f, ...):
+        s
+
+f.stat
+s[r
+q_
+dx] = 
+
+
+_r
+q.data
+        stat
+s = s
+
+f.stat
+s.to("cuda", 
+o
+_b
+ock
+
+g=Tru
+)
 ```
+Th
+ CPU may mod
+fy `s
 
-The CPU may modify `self.states` while GPU is still reading from it via async copy.
+f.stat
+s` 
+h
 
-V1 addresses this with an async barrier around critical sections. That avoids races but has drawbacks:
 
-1. Easy to miss protected buffers (bug-prone).
-2. Inflexible organization (all CPU work must stay inside barrier).
-3. Potentially less overlap due to synchronization.
+ GPU 
+s st
 
-![Race condition with shared CPU buffer](../assets/design/model_runner_v2/async_race_condition.png)
+ r
+ad
 
-### MRV2's Solution: Eliminate the Race
+g from 
+t v
+a asy
+c copy.
+V1 addr
+ss
+s th
+s 
 
-MRV2 separates persistent CPU state from the copied tensor:
+th a
+ asy
+c barr
 
-```python
-class ModelRunner:
-    def __init__(self, ...):
-        # Not pinned
-        self.states = torch.zeros(
-            max_num_reqs, dtype=torch.int32, device="cpu", pin_memory=False
+r arou
+d cr
+t
+ca
+ s
+ct
+o
+s. That avo
+ds rac
+s but has dra
+backs:
+1. Easy to m
+ss prot
+ct
+d buff
+rs (bug-pro
+
+).
+2. I
+f
+
+x
+b
+
+ orga
+
+zat
+o
+ (a
+ CPU 
+ork must stay 
+
+s
+d
+ barr
+
+r).
+3. Pot
+
+t
+a
+y 
+
+ss ov
+r
+ap du
+ to sy
+chro
+
+zat
+o
+.
+![Rac
+ co
+d
+t
+o
+ 
+
+th shar
+d CPU buff
+r](../ass
+ts/d
+s
+g
+/mod
+
+_ru
+
+r_v2/asy
+c_rac
+_co
+d
+t
+o
+.p
+g)
+### MRV2's So
+ut
+o
+: E
+
+m
+
+at
+ th
+ Rac
+
+MRV2 s
+parat
+s p
+rs
+st
+
+t CPU stat
+ from th
+ cop
+
+d t
+
+sor:
+```pytho
+
+c
+ass Mod
+
+Ru
+
+r:
+    d
+f __
+
+
+t__(s
+
+f, ...):
+        # Not p
+
+
+d
+        s
+
+f.stat
+s = torch.z
+ros(
+            max_
+um_r
+qs, dtyp
+=torch.
+
+t32, d
+v
+c
+="cpu", p
+
+_m
+mory=Fa
+s
+
         )
+    d
+f 
+x
+cut
+_st
+p(s
 
-    def execute_step(self, ...):
-        self.states[req_idx] = new_req.data
-        tmp_states = self.states.pin_memory()
-        states = tmp_states.to("cuda", non_blocking=True)
+f, ...):
+        s
+
+f.stat
+s[r
+q_
+dx] = 
+
+
+_r
+q.data
+        tmp_stat
+s = s
+
+f.stat
+s.p
+
+_m
+mory()
+        stat
+s = tmp_stat
+s.to("cuda", 
+o
+_b
+ock
+
+g=Tru
+)
 ```
+No
+ CPU 
+r
+t
+s to `s
 
-Now CPU writes to `self.states` while GPU reads from `tmp_states`, eliminating the race without explicit synchronization.
+f.stat
+s` 
+h
 
-![No race with temporary pinned copy](../assets/design/model_runner_v2/async_no_race_condition.png)
 
-## 4. StagedWriteTensor
+ GPU r
+ads from `tmp_stat
+s`, 
 
-For large tensors like block tables, MRV2 avoids full CPU-to-GPU copies each step by using `StagedWriteTensor`:
 
-1. Keep the base tensor on GPU.
-2. Stage diffs on CPU.
-3. Pack diffs into contiguous buffers.
-4. Copy packed diffs to GPU.
-5. Launch one kernel to apply diffs.
+m
 
-Example usage:
+at
 
-```python
-# Initialize state on GPU
-state = StagedWriteTensor(size=(1024, 1000), dtype=torch.int32, device="cuda")
+g th
+ rac
+ 
 
-# Write [3, 1, 2] into row 2, starting at index 3
-state.stage_write(row=2, start=3, value=[3, 1, 2])
+thout 
+xp
 
-# Write [-1, -2, -5] into row 0, starting at index 1
-state.stage_write(row=0, start=1, value=[-1, -2, -5])
+c
+t sy
+chro
 
-# Apply staged changes
-state.apply_write()
+zat
+o
+.
+![No rac
+ 
+
+th t
+mporary p
+
+
+d copy](../ass
+ts/d
+s
+g
+/mod
+
+_ru
+
+r_v2/asy
+c_
+o_rac
+_co
+d
+t
+o
+.p
+g)
+## 4. Stag
+dWr
+t
+T
+
+sor
+For 
+arg
+ t
+
+sors 
+
+k
+ b
+ock tab
+
+s, MRV2 avo
+ds fu
+ CPU-to-GPU cop
+
+s 
+ach st
+p by us
+
+g `Stag
+dWr
+t
+T
+
+sor`:
+1. K
+p th
+ bas
+ t
+
+sor o
+ GPU.
+2. Stag
+ d
+ffs o
+ CPU.
+3. Pack d
+ffs 
+
+to co
+t
+guous buff
+rs.
+4. Copy pack
+d d
+ffs to GPU.
+5. Lau
+ch o
+
+ k
+r
+
+
+ to app
+y d
+ffs.
+Examp
+
+ usag
+:
+```pytho
+
+# I
+
+t
+a
+
+z
+ stat
+ o
+ GPU
+stat
+ = Stag
+dWr
+t
+T
+
+sor(s
+z
+=(1024, 1000), dtyp
+=torch.
+
+t32, d
+v
+c
+="cuda")
+# Wr
+t
+ [3, 1, 2] 
+
+to ro
+ 2, start
+
+g at 
+
+d
+x 3
+stat
+.stag
+_
+r
+t
+(ro
+=2, start=3, va
+u
+=[3, 1, 2])
+# Wr
+t
+ [-1, -2, -5] 
+
+to ro
+ 0, start
+
+g at 
+
+d
+x 1
+stat
+.stag
+_
+r
+t
+(ro
+=0, start=1, va
+u
+=[-1, -2, -5])
+# App
+y stag
+d cha
+g
+s
+stat
+.app
+y_
+r
+t
+()
 ```
+Th
+s supports ragg
+d updat
+s 
 
-This supports ragged updates with no CPU-GPU synchronization and minimal kernel launches. It is especially useful for block tables and mixed CPU/GPU-written states such as `num_computed_tokens`.
+th 
+o CPU-GPU sy
+chro
 
-## 5. GPU-Native Input Metadata Preparation and Output Processing
+zat
+o
+ a
+d m
 
-MRV2 uses Triton kernels to prepare inputs such as `input_ids`, `positions`, `query_start_loc`, and `seq_lens`.
 
-Benefits:
+ma
+ k
+r
 
-1. Better async behavior: GPU can derive values (for example with speculative decoding) that CPU may not know yet.
-2. Lower CPU overhead: input prep is very cheap on GPU and avoids Python bottlenecks.
 
-### Universal Virtual Addressing (UVA)
+ 
+au
+ch
+s. It 
+s 
+sp
+c
+a
+y us
+fu
+ for b
+ock tab
 
-MRV2 uses UVA in some paths to let GPU kernels access large CPU-resident tensors directly (for example `prefill_token_ids`) without duplicating those tensors into GPU memory.
+s a
+d m
+x
+d CPU/GPU-
+r
+tt
 
-## 6. Triton-Native Sampler
+ stat
+s such as `
+um_comput
+d_tok
 
-MRV2 reimplements sampling mostly in Triton for better numeric/memory control and optimization.
+s`.
+## 5. GPU-Nat
+v
+ I
+put M
+tadata Pr
+parat
+o
+ a
+d Output Proc
+ss
 
-### Gumbel Sampling Kernel
+g
+MRV2 us
+s Tr
+to
+ k
+r
 
-MRV2 introduces a Triton Gumbel sampling kernel that avoids explicit softmax materialization and uses stateless in-kernel RNG from seed input.
 
-### Efficient Top-K Logprobs
+s to pr
+par
+ 
 
-V1 materializes full-vocabulary logprobs before top-k. MRV2 identifies top-k tokens from logits first, then computes logprobs only for selected tokens. This reduces peak GPU memory usage.
+puts such as `
 
-### Memory-Efficient Prompt Logprobs
+put_
+ds`, `pos
+t
+o
+s`, `qu
+ry_start_
+oc`, a
+d `s
+q_
 
-MRV2 supports finer-grained chunking, including chunking inside a single prompt, to avoid memory spikes on long prompts.
 
-### Better Compatibility with Speculative Decoding
+s`.
+B
 
-Instead of expanding per-request sampling states to match per-logit shapes, MRV2 uses indirection (`idx_mapping`) inside kernels to map each logits vector to the right request state. This simplifies support for complex sampling parameters and logits processors.
 
-## 7. Modularity
+f
+ts:
+1. B
+tt
+r asy
+c b
+hav
+or: GPU ca
+ d
+r
+v
+ va
+u
+s (for 
+xamp
 
-MRV2 emphasizes modularity. Compared to V1's large, entangled `gpu_model_runner.py`, MRV2 splits feature logic across dedicated files (for example, `mrope_utils.py`, `penalties.py`, and many others).
+ 
 
-It also consolidates model inputs into an `InputBatch` class and reduces direct model-runner attribute coupling.
+th sp
+cu
+at
+v
+ d
+cod
 
-## 8. No Abuse of `dummy_run`
+g) that CPU may 
+ot k
+o
+ y
+t.
+2. Lo
 
-In V1, `dummy_run` handled too many responsibilities:
+r CPU ov
+rh
+ad: 
 
-- Initial memory profiling and `torch.compile`
-- CUDA graph capture
+put pr
+p 
+s v
+ry ch
+ap o
+ GPU a
+d avo
+ds Pytho
+ bott
+
+
+
+cks.
+### U
+
+v
+rsa
+ V
+rtua
+ Addr
+ss
+
+g (UVA)
+MRV2 us
+s UVA 
+
+ som
+ paths to 
+
+t GPU k
+r
+
+
+s acc
+ss 
+arg
+ CPU-r
+s
+d
+
+t t
+
+sors d
+r
+ct
+y (for 
+xamp
+
+ `pr
+f
+
+_tok
+
+_
+ds`) 
+
+thout dup
+
+cat
+
+g thos
+ t
+
+sors 
+
+to GPU m
+mory.
+## 6. Tr
+to
+-Nat
+v
+ Samp
+
+r
+MRV2 r
+
+mp
+
+m
+
+ts samp
+
+
+g most
+y 
+
+ Tr
+to
+ for b
+tt
+r 
+um
+r
+c/m
+mory co
+tro
+ a
+d opt
+m
+zat
+o
+.
+### Gumb
+
+ Samp
+
+
+g K
+r
+
+
+
+MRV2 
+
+troduc
+s a Tr
+to
+ Gumb
+
+ samp
+
+
+g k
+r
+
+
+ that avo
+ds 
+xp
+
+c
+t softmax mat
+r
+a
+
+zat
+o
+ a
+d us
+s stat
+
+
+ss 
+
+-k
+r
+
+
+ RNG from s
+d 
+
+put.
+### Eff
+c
+
+
+t Top-K Logprobs
+V1 mat
+r
+a
+
+z
+s fu
+-vocabu
+ary 
+ogprobs b
+for
+ top-k. MRV2 
+d
+
+t
+f
+
+s top-k tok
+
+s from 
+og
+ts f
+rst, th
+
+ comput
+s 
+ogprobs o
+
+y for s
+
+
+ct
+d tok
+
+s. Th
+s r
+duc
+s p
+ak GPU m
+mory usag
+.
+### M
+mory-Eff
+c
+
+
+t Prompt Logprobs
+MRV2 supports f
+
+
+r-gra
+
+
+d chu
+k
+
+g, 
+
+c
+ud
+
+g chu
+k
+
+g 
+
+s
+d
+ a s
+
+g
+
+ prompt, to avo
+d m
+mory sp
+k
+s o
+ 
+o
+g prompts.
+### B
+tt
+r Compat
+b
+
+
+ty 
+
+th Sp
+cu
+at
+v
+ D
+cod
+
+g
+I
+st
+ad of 
+xpa
+d
+
+g p
+r-r
+qu
+st samp
+
+
+g stat
+s to match p
+r-
+og
+t shap
+s, MRV2 us
+s 
+
+d
+r
+ct
+o
+ (`
+dx_mapp
+
+g`) 
+
+s
+d
+ k
+r
+
+
+s to map 
+ach 
+og
+ts v
+ctor to th
+ r
+ght r
+qu
+st stat
+. Th
+s s
+mp
+
+f
+
+s support for comp
+
+x samp
+
+
+g param
+t
+rs a
+d 
+og
+ts proc
+ssors.
+## 7. Modu
+ar
+ty
+MRV2 
+mphas
+z
+s modu
+ar
+ty. Compar
+d to V1's 
+arg
+, 
+
+ta
+g
+
+d `gpu_mod
+
+_ru
+
+r.py`, MRV2 sp
+
+ts f
+atur
+ 
+og
+c across d
+d
+cat
+d f
+
+
+s (for 
+xamp
+
+, `mrop
+_ut
+
+s.py`, `p
+
+a
+t
+
+s.py`, a
+d ma
+y oth
+rs).
+It a
+so co
+so
+
+dat
+s mod
+
+ 
+
+puts 
+
+to a
+ `I
+putBatch` c
+ass a
+d r
+duc
+s d
+r
+ct mod
+
+-ru
+
+r attr
+but
+ coup
+
+
+g.
+## 8. No Abus
+ of `dummy_ru
+`
+I
+ V1, `dummy_ru
+` ha
+d
+
+d too ma
+y r
+spo
+s
+b
+
+
+t
+
+s:
+- I
+
+t
+a
+ m
+mory prof
+
+
+
+g a
+d `torch.comp
+
+
+`
+- CUDA graph captur
+
 - Warmups
-- Empty DP forward passes for EP+DP
+- Empty DP for
+ard pass
+s for EP+DP
+MRV2 s
+mp
 
-MRV2 simplifies this:
+f
 
-1. `execute_model` supports dummy runs without affecting state.
-2. `dummy_run` delegates to `execute_model` for profiling, warmup, and empty DP forward passes.
-3. CUDA graph capture uses a separate dedicated path.
+s th
+s:
+1. `
+x
+cut
+_mod
 
-This reduces complexity and removes bugs caused by divergence between `execute_model` and `dummy_run` behavior.
+` supports dummy ru
+s 
 
-## 9. Explicit CUDA Graph Management
+thout aff
+ct
 
-V1's CUDA graph handling is implicit and hard to reason about. MRV2 uses a `CUDAGraphManager` that explicitly captures and launches full CUDA graphs through standard PyTorch APIs.
+g stat
+.
+2. `dummy_ru
+` d
 
-This makes graph lifecycle and execution mode decisions more understandable and easier to extend. Example: MRV2 can capture multiple draft-model forward passes into one CUDA graph.
 
-## Development Philosophy
+gat
+s to `
+x
+cut
+_mod
 
-MRV2 changes should meet a higher code quality bar. As feature gaps with V1 are filled, features should be reconsidered from first principles in the MRV2 design context instead of quickly porting V1 behavior.
+` for prof
 
-A key requirement is preserving modularity and clean abstraction boundaries, even if that requires more upfront design iteration.
+
+
+g, 
+armup, a
+d 
+mpty DP for
+ard pass
+s.
+3. CUDA graph captur
+ us
+s a s
+parat
+ d
+d
+cat
+d path.
+Th
+s r
+duc
+s comp
+
+x
+ty a
+d r
+mov
+s bugs caus
+d by d
+v
+rg
+
+c
+ b
+t
+
+
+ `
+x
+cut
+_mod
+
+` a
+d `dummy_ru
+` b
+hav
+or.
+## 9. Exp
+
+c
+t CUDA Graph Ma
+ag
+m
+
+t
+V1's CUDA graph ha
+d
+
+
+g 
+s 
+mp
+
+c
+t a
+d hard to r
+aso
+ about. MRV2 us
+s a `CUDAGraphMa
+ag
+r` that 
+xp
+
+c
+t
+y captur
+s a
+d 
+au
+ch
+s fu
+ CUDA graphs through sta
+dard PyTorch APIs.
+Th
+s mak
+s graph 
+
+f
+cyc
+
+ a
+d 
+x
+cut
+o
+ mod
+ d
+c
+s
+o
+s mor
+ u
+d
+rsta
+dab
+
+ a
+d 
+as
+
+r to 
+xt
+
+d. Examp
+
+: MRV2 ca
+ captur
+ mu
+t
+p
+
+ draft-mod
+
+ for
+ard pass
+s 
+
+to o
+
+ CUDA graph.
+## D
+v
+
+opm
+
+t Ph
+
+osophy
+MRV2 cha
+g
+s shou
+d m
+t a h
+gh
+r cod
+ qua
+
+ty bar. As f
+atur
+ gaps 
+
+th V1 ar
+ f
+
+
+d, f
+atur
+s shou
+d b
+ r
+co
+s
+d
+r
+d from f
+rst pr
+
+c
+p
+
+s 
+
+ th
+ MRV2 d
+s
+g
+ co
+t
+xt 
+
+st
+ad of qu
+ck
+y port
+
+g V1 b
+hav
+or.
+A k
+y r
+qu
+r
+m
+
+t 
+s pr
+s
+rv
+
+g modu
+ar
+ty a
+d c
+
+a
+ abstract
+o
+ bou
+dar
+
+s, 
+v
+
+ 
+f that r
+qu
+r
+s mor
+ upfro
+t d
+s
+g
+ 
+t
+rat
+o
+.

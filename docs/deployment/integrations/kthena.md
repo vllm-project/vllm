@@ -1,333 +1,1861 @@
-# Kthena
+# Kth
 
-[**Kthena**](https://github.com/volcano-sh/kthena) is a Kubernetes-native LLM inference platform that transforms how organizations deploy and manage Large Language Models in production. Built with declarative model lifecycle management and intelligent request routing, it provides high performance and enterprise-grade scalability for LLM inference workloads.
+a
+[**Kth
 
-This guide shows how to deploy a production-grade, **multi-node vLLM** service on Kubernetes.
+a**](https://g
+thub.com/vo
+ca
+o-sh/kth
 
-We’ll:
+a) 
+s a Kub
+r
 
-- Install the required components (Kthena + Volcano).
-- Deploy a multi-node vLLM model via Kthena’s `ModelServing` CR.
-- Validate the deployment.
+t
+s-
+at
+v
+ LLM 
 
+f
+r
+
+c
+ p
+atform that tra
+sforms ho
+ orga
+
+zat
+o
+s d
+p
+oy a
+d ma
+ag
+ Larg
+ La
+guag
+ Mod
+
+s 
+
+ product
+o
+. Bu
+
+t 
+
+th d
+c
+arat
+v
+ mod
+
+ 
+
+f
+cyc
+
+ ma
+ag
+m
+
+t a
+d 
+
+t
+
+
+g
+
+t r
+qu
+st rout
+
+g, 
+t prov
+d
+s h
+gh p
+rforma
+c
+ a
+d 
+
+t
+rpr
+s
+-grad
+ sca
+ab
+
+
+ty for LLM 
+
+f
+r
+
+c
+ 
+ork
+oads.
+Th
+s gu
+d
+ sho
+s ho
+ to d
+p
+oy a product
+o
+-grad
+, **mu
+t
+-
+od
+ vLLM** s
+rv
+c
+ o
+ Kub
+r
+
+t
+s.
+W
+’
+:
+- I
+sta
+ th
+ r
+qu
+r
+d compo
+
+
+ts (Kth
+
+a + Vo
+ca
+o).
+- D
+p
+oy a mu
+t
+-
+od
+ vLLM mod
+
+ v
+a Kth
+
+a’s `Mod
+
+S
+rv
+
+g` CR.
+- Va
+
+dat
+ th
+ d
+p
+oym
+
+t.
 ---
+## 1. Pr
+r
+qu
+s
+t
+s
+You 
 
-## 1. Prerequisites
+d:
+- A Kub
+r
 
-You need:
+t
+s c
+ust
+r 
 
-- A Kubernetes cluster with **GPU nodes**.
-- `kubectl` access with cluster-admin or equivalent permissions.
-- **Volcano** installed for gang scheduling.
-- **Kthena** installed with the `ModelServing` CRD available.
-- A valid **Hugging Face token** if loading models from Hugging Face Hub.
+th **GPU 
+od
+s**.
+- `kub
+ct
+` acc
+ss 
 
-### 1.1 Install Volcano
+th c
+ust
+r-adm
 
+ or 
+qu
+va
+
+
+t p
+rm
+ss
+o
+s.
+- **Vo
+ca
+o** 
+
+sta
+
+d for ga
+g sch
+du
+
+
+g.
+- **Kth
+
+a** 
+
+sta
+
+d 
+
+th th
+ `Mod
+
+S
+rv
+
+g` CRD ava
+
+ab
+
+.
+- A va
+
+d **Hugg
+
+g Fac
+ tok
+
+** 
+f 
+oad
+
+g mod
+
+s from Hugg
+
+g Fac
+ Hub.
+### 1.1 I
+sta
+ Vo
+ca
+o
 ```bash
-helm repo add volcano-sh https://volcano-sh.github.io/helm-charts
-helm repo update
-helm install volcano volcano-sh/volcano -n volcano-system --create-namespace
+h
+
+m r
+po add vo
+ca
+o-sh https://vo
+ca
+o-sh.g
+thub.
+o/h
+
+m-charts
+h
+
+m r
+po updat
+
+h
+
+m 
+
+sta
+ vo
+ca
+o vo
+ca
+o-sh/vo
+ca
+o -
+ vo
+ca
+o-syst
+m --cr
+at
+-
+am
+spac
+
 ```
+Th
+s prov
+d
+s th
+ ga
+g-sch
+du
 
-This provides the gang-scheduling and network topology features used by Kthena.
 
-### 1.2 Install Kthena
+g a
+d 
 
+t
+ork topo
+ogy f
+atur
+s us
+d by Kth
+
+a.
+### 1.2 I
+sta
+ Kth
+
+a
 ```bash
-helm install kthena oci://ghcr.io/volcano-sh/charts/kthena --version v0.1.0 --namespace kthena-system --create-namespace
+h
+
+m 
+
+sta
+ kth
+
+a oc
+://ghcr.
+o/vo
+ca
+o-sh/charts/kth
+
+a --v
+rs
+o
+ v0.1.0 --
+am
+spac
+ kth
+
+a-syst
+m --cr
+at
+-
+am
+spac
+
 ```
+- Th
+ `kth
 
-- The `kthena-system` namespace is created.
-- Kthena controllers and CRDs, including `ModelServing`, are installed and healthy.
+a-syst
+m` 
+am
+spac
+ 
+s cr
+at
+d.
+- Kth
 
-Validate:
+a co
+tro
 
+rs a
+d CRDs, 
+
+c
+ud
+
+g `Mod
+
+S
+rv
+
+g`, ar
+ 
+
+sta
+
+d a
+d h
+a
+thy.
+Va
+
+dat
+:
 ```bash
-kubectl get crd | grep modelserving
+kub
+ct
+ g
+t crd | gr
+p mod
+
+s
+rv
+
+g
 ```
+You shou
+d s
+:
+```t
+xt
+mod
 
-You should see:
+s
+rv
 
-```text
-modelservings.workload.serving.volcano.sh   ...
+gs.
+ork
+oad.s
+rv
+
+g.vo
+ca
+o.sh   ...
 ```
-
 ---
+## 2. Th
+ Mu
+t
+-Nod
+ vLLM `Mod
 
-## 2. The Multi-Node vLLM `ModelServing` Example
+S
+rv
 
-Kthena provides an example manifest to deploy a **multi-node vLLM cluster running Llama**. Conceptually this is equivalent to the vLLM production stack Helm deployment, but expressed with `ModelServing`.
+g` Examp
 
-A simplified version of the example (`llama-multinode`) looks like:
 
-- `spec.replicas: 1` – one `ServingGroup` (one logical model deployment).
-- `roles`:
-    - `entryTemplate` – defines **leader** pods that run:
-        - vLLM’s **multi-node cluster bootstrap script** (Ray cluster).
-        - vLLM **OpenAI-compatible API server**.
-    - `workerTemplate` – defines **worker** pods that join the leader’s Ray cluster.
+Kth
 
-Key points from the example YAML:
+a prov
+d
+s a
+ 
+xamp
 
-- **Image**: `vllm/vllm-openai:latest` (matches upstream vLLM images).
-- **Command** (leader):
+ ma
 
-  ```yaml
-  command:
+f
+st to d
+p
+oy a **mu
+t
+-
+od
+ vLLM c
+ust
+r ru
+
+
+g L
+ama**. Co
+c
+ptua
+y th
+s 
+s 
+qu
+va
+
+
+t to th
+ vLLM product
+o
+ stack H
+
+m d
+p
+oym
+
+t, but 
+xpr
+ss
+d 
+
+th `Mod
+
+S
+rv
+
+g`.
+A s
+mp
+
+f
+
+d v
+rs
+o
+ of th
+ 
+xamp
+
+ (`
+ama-mu
+t
+
+od
+`) 
+ooks 
+
+k
+:
+- `sp
+c.r
+p
+
+cas: 1` – o
+
+ `S
+rv
+
+gGroup` (o
+
+ 
+og
+ca
+ mod
+
+ d
+p
+oym
+
+t).
+- `ro
+
+s`:
+    - `
+
+tryT
+mp
+at
+` – d
+f
+
+
+s **
+
+ad
+r** pods that ru
+:
+        - vLLM’s **mu
+t
+-
+od
+ c
+ust
+r bootstrap scr
+pt** (Ray c
+ust
+r).
+        - vLLM **Op
+
+AI-compat
+b
+
+ API s
+rv
+r**.
+    - `
+ork
+rT
+mp
+at
+` – d
+f
+
+
+s **
+ork
+r** pods that jo
+
+ th
+ 
+
+ad
+r’s Ray c
+ust
+r.
+K
+y po
+
+ts from th
+ 
+xamp
+
+ YAML:
+- **Imag
+**: `v
+m/v
+m-op
+
+a
+:
+at
+st` (match
+s upstr
+am vLLM 
+mag
+s).
+- **Comma
+d** (
+
+ad
+r):
+  ```yam
+
+  comma
+d:
     - sh
     - -c
-    - >
-      bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=2;
-      python3 -m vllm.entrypoints.openai.api_server
+    - 
+
+      bash /v
+m-
+orkspac
+/
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/mu
+t
+-
+od
+-s
+rv
+
+g.sh 
+
+ad
+r --ray_c
+ust
+r_s
+z
+=2;
+      pytho
+3 -m v
+m.
+
+trypo
+
+ts.op
+
+a
+.ap
+_s
+rv
+r
         --port 8080
-        --model meta-llama/Llama-3.1-405B-Instruct
-        --tensor-parallel-size 8
-        --pipeline-parallel-size 2
+        --mod
+
+ m
+ta-
+ama/L
+ama-3.1-405B-I
+struct
+        --t
+
+sor-para
+
+
+-s
+z
+ 8
+        --p
+p
+
+
+
+
+-para
+
+
+-s
+z
+ 2
   ```
+- **Comma
+d** (
+ork
+r):
+  ```yam
 
-- **Command** (worker):
-
-  ```yaml
-  command:
+  comma
+d:
     - sh
     - -c
-    - >
-      bash /vllm-workspace/examples/online_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)
+    - 
+
+      bash /v
+m-
+orkspac
+/
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/mu
+t
+-
+od
+-s
+rv
+
+g.sh 
+ork
+r --ray_addr
+ss=$(ENTRY_ADDRESS)
   ```
-
 ---
+## 3. D
+p
+oy
 
-## 3. Deploying Multi-Node llama vLLM via Kthena
+g Mu
+t
+-Nod
+ 
+ama vLLM v
+a Kth
 
-### 3.1 Prepare the Manifest
+a
+### 3.1 Pr
+par
+ th
+ Ma
 
-**Recommended**: use a Secret instead of a raw env var:
+f
+st
+**R
+comm
 
+d
+d**: us
+ a S
+cr
+t 
+
+st
+ad of a ra
+ 
+
+v var:
 ```bash
-kubectl create secret generic hf-token \
-  -n default \
-  --from-literal=HUGGING_FACE_HUB_TOKEN='<your-token>'
+kub
+ct
+ cr
+at
+ s
+cr
+t g
+
+
+r
+c hf-tok
+
+ \
+  -
+ d
+fau
+t \
+  --from-
+
+t
+ra
+=HUGGING_FACE_HUB_TOKEN='
+your-tok
+
+
+'
 ```
+### 3.2 App
+y th
+ `Mod
 
-### 3.2 Apply the `ModelServing`
+S
+rv
 
+g`
 ```bash
-cat  <<EOF | kubectl apply -f -
-apiVersion: workload.serving.volcano.sh/v1alpha1
-kind: ModelServing
-metadata:
-  name: llama-multinode
-  namespace: default
-spec:
-  schedulerName: volcano
-  replicas: 1  # group replicas
-  template:
-    restartGracePeriodSeconds: 60
-    gangPolicy:
-      minRoleReplicas:
+cat  
+EOF | kub
+ct
+ app
+y -f -
+ap
+V
+rs
+o
+: 
+ork
+oad.s
+rv
+
+g.vo
+ca
+o.sh/v1a
+pha1
+k
+
+d: Mod
+
+S
+rv
+
+g
+m
+tadata:
+  
+am
+: 
+ama-mu
+t
+
+od
+
+  
+am
+spac
+: d
+fau
+t
+sp
+c:
+  sch
+du
+
+rNam
+: vo
+ca
+o
+  r
+p
+
+cas: 1  # group r
+p
+
+cas
+  t
+mp
+at
+:
+    r
+startGrac
+P
+r
+odS
+co
+ds: 60
+    ga
+gPo
+
+cy:
+      m
+
+Ro
+
+R
+p
+
+cas:
         405b: 1
-    roles:
-      - name: 405b
-        replicas: 2
-        entryTemplate:
-          spec:
-            containers:
-              - name: leader
-                image: vllm/vllm-openai:latest
-                env:
-                  - name: HUGGING_FACE_HUB_TOKEN
-                    valueFrom:
-                      secretKeyRef:
-                        name: hf-token
-                        key: HUGGING_FACE_HUB_TOKEN
-                command:
+    ro
+
+s:
+      - 
+am
+: 405b
+        r
+p
+
+cas: 2
+        
+
+tryT
+mp
+at
+:
+          sp
+c:
+            co
+ta
+
+
+rs:
+              - 
+am
+: 
+
+ad
+r
+                
+mag
+: v
+m/v
+m-op
+
+a
+:
+at
+st
+                
+
+v:
+                  - 
+am
+: HUGGING_FACE_HUB_TOKEN
+                    va
+u
+From:
+                      s
+cr
+tK
+yR
+f:
+                        
+am
+: hf-tok
+
+
+                        k
+y: HUGGING_FACE_HUB_TOKEN
+                comma
+d:
                   - sh
                   - -c
-                  - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=2; 
-                    python3 -m vllm.entrypoints.openai.api_server --port 8080 --model meta-llama/Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline-parallel-size 2"
-                resources:
-                  limits:
-                    nvidia.com/gpu: "8"
-                    memory: 1124Gi
-                    ephemeral-storage: 800Gi
-                  requests:
-                    ephemeral-storage: 800Gi
+                  - "bash /v
+m-
+orkspac
+/
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/mu
+t
+-
+od
+-s
+rv
+
+g.sh 
+
+ad
+r --ray_c
+ust
+r_s
+z
+=2; 
+                    pytho
+3 -m v
+m.
+
+trypo
+
+ts.op
+
+a
+.ap
+_s
+rv
+r --port 8080 --mod
+
+ m
+ta-
+ama/L
+ama-3.1-405B-I
+struct --t
+
+sor-para
+
+
+-s
+z
+ 8 --p
+p
+
+
+
+
+-para
+
+
+-s
+z
+ 2"
+                r
+sourc
+s:
+                  
+
+m
+ts:
+                    
+v
+d
+a.com/gpu: "8"
+                    m
+mory: 1124G
+
+                    
+ph
+m
+ra
+-storag
+: 800G
+
+                  r
+qu
+sts:
+                    
+ph
+m
+ra
+-storag
+: 800G
+
                     cpu: 125
                 ports:
-                  - containerPort: 8080
-                readinessProbe:
-                  tcpSocket:
+                  - co
+ta
+
+
+rPort: 8080
+                r
+ad
+
+
+ssProb
+:
+                  tcpSock
+t:
                     port: 8080
-                  initialDelaySeconds: 15
-                  periodSeconds: 10
-                volumeMounts:
-                  - mountPath: /dev/shm
-                    name: dshm
-            volumes:
-            - name: dshm
-              emptyDir:
-                medium: Memory
-                sizeLimit: 15Gi
-        workerReplicas: 1
-        workerTemplate:
-          spec:
-            containers:
-              - name: worker
-                image: vllm/vllm-openai:latest
-                command:
+                  
+
+
+t
+a
+D
+
+ayS
+co
+ds: 15
+                  p
+r
+odS
+co
+ds: 10
+                vo
+um
+Mou
+ts:
+                  - mou
+tPath: /d
+v/shm
+                    
+am
+: dshm
+            vo
+um
+s:
+            - 
+am
+: dshm
+              
+mptyD
+r:
+                m
+d
+um: M
+mory
+                s
+z
+L
+m
+t: 15G
+
+        
+ork
+rR
+p
+
+cas: 1
+        
+ork
+rT
+mp
+at
+:
+          sp
+c:
+            co
+ta
+
+
+rs:
+              - 
+am
+: 
+ork
+r
+                
+mag
+: v
+m/v
+m-op
+
+a
+:
+at
+st
+                comma
+d:
                   - sh
                   - -c
-                  - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)"
-                resources:
-                  limits:
-                    nvidia.com/gpu: "8"
-                    memory: 1124Gi
-                    ephemeral-storage: 800Gi
-                  requests:
-                    ephemeral-storage: 800Gi
+                  - "bash /v
+m-
+orkspac
+/
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/mu
+t
+-
+od
+-s
+rv
+
+g.sh 
+ork
+r --ray_addr
+ss=$(ENTRY_ADDRESS)"
+                r
+sourc
+s:
+                  
+
+m
+ts:
+                    
+v
+d
+a.com/gpu: "8"
+                    m
+mory: 1124G
+
+                    
+ph
+m
+ra
+-storag
+: 800G
+
+                  r
+qu
+sts:
+                    
+ph
+m
+ra
+-storag
+: 800G
+
                     cpu: 125
-                env:
-                  - name: HUGGING_FACE_HUB_TOKEN
-                    valueFrom:
-                      secretKeyRef:
-                        name: hf-token
-                        key: HUGGING_FACE_HUB_TOKEN
-                volumeMounts:
-                  - mountPath: /dev/shm
-                    name: dshm   
-            volumes:
-            - name: dshm
-              emptyDir:
-                medium: Memory
-                sizeLimit: 15Gi
+                
+
+v:
+                  - 
+am
+: HUGGING_FACE_HUB_TOKEN
+                    va
+u
+From:
+                      s
+cr
+tK
+yR
+f:
+                        
+am
+: hf-tok
+
+
+                        k
+y: HUGGING_FACE_HUB_TOKEN
+                vo
+um
+Mou
+ts:
+                  - mou
+tPath: /d
+v/shm
+                    
+am
+: dshm   
+            vo
+um
+s:
+            - 
+am
+: dshm
+              
+mptyD
+r:
+                m
+d
+um: M
+mory
+                s
+z
+L
+m
+t: 15G
+
 EOF
 ```
+Kth
 
-Kthena will:
+a 
 
-- Create a `ModelServing` object.
-- Derive a `PodGroup` for Volcano gang scheduling.
-- Create the leader and worker pods for each `ServingGroup` and `Role`.
 
+:
+- Cr
+at
+ a `Mod
+
+S
+rv
+
+g` obj
+ct.
+- D
+r
+v
+ a `PodGroup` for Vo
+ca
+o ga
+g sch
+du
+
+
+g.
+- Cr
+at
+ th
+ 
+
+ad
+r a
+d 
+ork
+r pods for 
+ach `S
+rv
+
+gGroup` a
+d `Ro
+
+`.
 ---
+## 4. V
+r
+fy
 
-## 4. Verifying the Deployment
+g th
+ D
+p
+oym
 
-### 4.1 Check ModelServing Status
+t
+### 4.1 Ch
+ck Mod
 
-Use the snippet from the Kthena docs:
+S
+rv
 
+g Status
+Us
+ th
+ s
+
+pp
+t from th
+ Kth
+
+a docs:
 ```bash
-kubectl get modelserving -oyaml | grep status -A 10
+kub
+ct
+ g
+t mod
+
+s
+rv
+
+g -oyam
+ | gr
+p status -A 10
 ```
+You shou
+d s
+ som
+th
 
-You should see something like:
+g 
 
-```yaml
+k
+:
+```yam
+
 status:
-  availableReplicas: 1
-  conditions:
-    - type: Available
-      status: "True"
-      reason: AllGroupsReady
-      message: All Serving groups are ready
-    - type: Progressing
-      status: "False"
+  ava
+
+ab
+
+R
+p
+
+cas: 1
+  co
+d
+t
+o
+s:
+    - typ
+: Ava
+
+ab
+
+
+      status: "Tru
+"
+      r
+aso
+: A
+GroupsR
+ady
+      m
+ssag
+: A
+ S
+rv
+
+g groups ar
+ r
+ady
+    - typ
+: Progr
+ss
+
+g
+      status: "Fa
+s
+"
       ...
-  replicas: 1
-  updatedReplicas: 1
+  r
+p
+
+cas: 1
+  updat
+dR
+p
+
+cas: 1
 ```
+### 4.2 Ch
+ck Pods
+L
+st pods for your d
+p
+oym
 
-### 4.2 Check Pods
-
-List pods for your deployment:
-
+t:
 ```bash
-kubectl get pod -owide -l modelserving.volcano.sh/name=llama-multinode
+kub
+ct
+ g
+t pod -o
+
+d
+ -
+ mod
+
+s
+rv
+
+g.vo
+ca
+o.sh/
+am
+=
+ama-mu
+t
+
+od
+
 ```
+Examp
 
-Example output (from docs):
-
-```text
+ output (from docs):
+```t
+xt
 NAMESPACE   NAME                          READY   STATUS    RESTARTS   AGE   IP            NODE           ...
-default     llama-multinode-0-405b-0-0    1/1     Running   0          15m   10.244.0.56   192.168.5.12   ...
-default     llama-multinode-0-405b-0-1    1/1     Running   0          15m   10.244.0.58   192.168.5.43   ...
-default     llama-multinode-0-405b-1-0    1/1     Running   0          15m   10.244.0.57   192.168.5.58   ...
-default     llama-multinode-0-405b-1-1    1/1     Running   0          15m   10.244.0.53   192.168.5.36   ...
+d
+fau
+t     
+ama-mu
+t
+
+od
+-0-405b-0-0    1/1     Ru
+
+
+g   0          15m   10.244.0.56   192.168.5.12   ...
+d
+fau
+t     
+ama-mu
+t
+
+od
+-0-405b-0-1    1/1     Ru
+
+
+g   0          15m   10.244.0.58   192.168.5.43   ...
+d
+fau
+t     
+ama-mu
+t
+
+od
+-0-405b-1-0    1/1     Ru
+
+
+g   0          15m   10.244.0.57   192.168.5.58   ...
+d
+fau
+t     
+ama-mu
+t
+
+od
+-0-405b-1-1    1/1     Ru
+
+
+g   0          15m   10.244.0.53   192.168.5.36   ...
 ```
+Pod 
+am
+ patt
+r
+:
+- `
+ama-mu
+t
 
-Pod name pattern:
+od
+-
+group-
+dx
+-
+ro
 
-- `llama-multinode-<group-idx>-<role-name>-<replica-idx>-<ordinal>`.
+-
+am
 
-The first number indicates `ServingGroup`. The second (`405b`) is the `Role`. The remaining indices identify the pod within the role.
+-
+r
+p
 
+ca-
+dx
+-
+ord
+
+a
+
+`.
+Th
+ f
+rst 
+umb
+r 
+
+d
+cat
+s `S
+rv
+
+gGroup`. Th
+ s
+co
+d (`405b`) 
+s th
+ `Ro
+
+`. Th
+ r
+ma
+
+
+
+g 
+
+d
+c
+s 
+d
+
+t
+fy th
+ pod 
+
+th
+
+ th
+ ro
+
+.
 ---
+## 6. Acc
+ss
 
-## 6. Accessing the vLLM OpenAI-Compatible API
+g th
+ vLLM Op
 
-Expose the entry via a Service:
+AI-Compat
+b
 
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: llama-multinode-openai
-  namespace: default
-spec:
-  selector:
-    modelserving.volcano.sh/name: llama-multinode
-    modelserving.volcano.sh/entry: "true"
-    # optionally further narrow to leader role if you label it
+ API
+Expos
+ th
+ 
+
+try v
+a a S
+rv
+c
+:
+```yam
+
+ap
+V
+rs
+o
+: v1
+k
+
+d: S
+rv
+c
+
+m
+tadata:
+  
+am
+: 
+ama-mu
+t
+
+od
+-op
+
+a
+
+  
+am
+spac
+: d
+fau
+t
+sp
+c:
+  s
+
+
+ctor:
+    mod
+
+s
+rv
+
+g.vo
+ca
+o.sh/
+am
+: 
+ama-mu
+t
+
+od
+
+    mod
+
+s
+rv
+
+g.vo
+ca
+o.sh/
+
+try: "tru
+"
+    # opt
+o
+a
+y furth
+r 
+arro
+ to 
+
+ad
+r ro
+
+ 
+f you 
+ab
+
+ 
+t
   ports:
-    - name: http
+    - 
+am
+: http
       port: 80
-      targetPort: 8080
-  type: ClusterIP
+      targ
+tPort: 8080
+  typ
+: C
+ust
+rIP
 ```
+Port-for
+ard from your 
+oca
+ mach
 
-Port-forward from your local machine:
 
+:
 ```bash
-kubectl port-forward svc/llama-multinode-openai 30080:80 -n default
+kub
+ct
+ port-for
+ard svc/
+ama-mu
+t
+
+od
+-op
+
+a
+ 30080:80 -
+ d
+fau
+t
 ```
+Th
 
-Then:
+:
+- L
+st mod
 
-- List models:
-
+s:
   ```bash
-  curl -s http://localhost:30080/v1/models
+  cur
+ -s http://
+oca
+host:30080/v1/mod
+
+s
   ```
+- S
 
-- Send a completion request (mirroring vLLM production stack docs):
+d a comp
 
+t
+o
+ r
+qu
+st (m
+rror
+
+g vLLM product
+o
+ stack docs):
   ```bash
-  curl -X POST http://localhost:30080/v1/completions \
-    -H "Content-Type: application/json" \
+  cur
+ -X POST http://
+oca
+host:30080/v1/comp
+
+t
+o
+s \
+    -H "Co
+t
+
+t-Typ
+: app
+
+cat
+o
+/jso
+" \
     -d '{
-      "model": "meta-llama/Llama-3.1-405B-Instruct",
-      "prompt": "Once upon a time,",
-      "max_tokens": 10
+      "mod
+
+": "m
+ta-
+ama/L
+ama-3.1-405B-I
+struct",
+      "prompt": "O
+c
+ upo
+ a t
+m
+,",
+      "max_tok
+
+s": 10
     }'
   ```
+You shou
+d s
+ a
+ Op
 
-You should see an OpenAI-style response from vLLM.
+AI-sty
 
+ r
+spo
+s
+ from vLLM.
 ---
+## 7. C
 
-## 7. Clean Up
+a
+ Up
+To r
+mov
+ th
+ d
+p
+oym
 
-To remove the deployment and its resources:
-
+t a
+d 
+ts r
+sourc
+s:
 ```bash
-kubectl delete modelserving llama-multinode -n default
+kub
+ct
+ d
+
+
+t
+ mod
+
+s
+rv
+
+g 
+ama-mu
+t
+
+od
+ -
+ d
+fau
+t
 ```
+If you’r
+ do
 
-If you’re done with the entire stack:
+ 
 
+th th
+ 
+
+t
+r
+ stack:
 ```bash
-helm uninstall kthena -n kthena-system   # or your Kthena release name
-helm uninstall volcano -n volcano-system
+h
+
+m u
+
+
+sta
+ kth
+
+a -
+ kth
+
+a-syst
+m   # or your Kth
+
+a r
+
+
+as
+ 
+am
+
+h
+
+m u
+
+
+sta
+ vo
+ca
+o -
+ vo
+ca
+o-syst
+m
 ```

@@ -1,44 +1,600 @@
-# Prompt Embedding Inputs
+# Prompt Emb
+dd
 
-This page teaches you how to pass prompt embedding inputs to vLLM.
+g I
+puts
+Th
+s pag
+ t
+ach
+s you ho
+ to pass prompt 
+mb
+dd
 
-## What are prompt embeddings?
+g 
 
-The traditional flow of text data for a Large Language Model goes from text to token ids (via a tokenizer) then from token ids to prompt embeddings. For a traditional decoder-only model (such as meta-llama/Llama-3.1-8B-Instruct), this step of converting token ids to prompt embeddings happens via a look-up from a learned embedding matrix, but the model is not limited to processing only the embeddings corresponding to its token vocabulary.
+puts to vLLM.
+## What ar
+ prompt 
+mb
+dd
 
-## Offline Inference
+gs?
+Th
+ trad
+t
+o
+a
+ f
+o
+ of t
+xt data for a Larg
+ La
+guag
+ Mod
 
-To input multi-modal data, follow this schema in [vllm.inputs.EmbedsPrompt][]:
+ go
+s from t
+xt to tok
 
-- `prompt_embeds`: A torch tensor representing a sequence of prompt/token embeddings. This has the shape (sequence_length, hidden_size), where sequence length is the number of tokens embeddings and hidden_size is the hidden size (embedding size) of the model.
+ 
+ds (v
+a a tok
 
-### Hugging Face Transformers Inputs
 
-You can pass prompt embeddings from Hugging Face Transformers models to the  `'prompt_embeds'` field of the prompt embedding dictionary, as shown in the following examples:
+z
+r) th
 
-[examples/offline_inference/prompt_embed_inference.py](../../examples/offline_inference/prompt_embed_inference.py)
+ from tok
 
-## Online Serving
+ 
+ds to prompt 
+mb
+dd
 
-Our OpenAI-compatible server accepts prompt embeddings inputs via the [Completions API](https://platform.openai.com/docs/api-reference/completions). Prompt embeddings inputs are added via a new `'prompt_embeds'` key in the JSON package and are enabled by the `--enable-prompt-embeds` flag in `vllm serve`.
+gs. For a trad
+t
+o
+a
+ d
+cod
+r-o
 
-When a mixture of `'prompt_embeds'` and `'prompt'` inputs are provided in a single request, the prompt embeds are always returned first.
+y mod
 
-Prompt embeddings are passed in as base64 encoded torch tensors.
+ (such as m
+ta-
+ama/L
+ama-3.1-8B-I
+struct), th
+s st
+p of co
+v
+rt
 
-!!! warning
-    The vLLM engine may crash if incorrect shape of embeddings is passed.
-    Only enable this flag for trusted users!
+g tok
 
-### Transformers Inputs via OpenAI Client
+ 
+ds to prompt 
+mb
+dd
 
-First, launch the OpenAI-compatible server:
+gs happ
 
+s v
+a a 
+ook-up from a 
+
+ar
+
+d 
+mb
+dd
+
+g matr
+x, but th
+ mod
+
+ 
+s 
+ot 
+
+m
+t
+d to proc
+ss
+
+g o
+
+y th
+ 
+mb
+dd
+
+gs corr
+spo
+d
+
+g to 
+ts tok
+
+ vocabu
+ary.
+## Off
+
+
+
+ I
+f
+r
+
+c
+
+To 
+
+put mu
+t
+-moda
+ data, fo
+o
+ th
+s sch
+ma 
+
+ [v
+m.
+
+puts.Emb
+dsPrompt][]:
+- `prompt_
+mb
+ds`: A torch t
+
+sor r
+pr
+s
+
+t
+
+g a s
+qu
+
+c
+ of prompt/tok
+
+ 
+mb
+dd
+
+gs. Th
+s has th
+ shap
+ (s
+qu
+
+c
+_
+
+
+gth, h
+dd
+
+_s
+z
+), 
+h
+r
+ s
+qu
+
+c
+ 
+
+
+gth 
+s th
+ 
+umb
+r of tok
+
+s 
+mb
+dd
+
+gs a
+d h
+dd
+
+_s
+z
+ 
+s th
+ h
+dd
+
+ s
+z
+ (
+mb
+dd
+
+g s
+z
+) of th
+ mod
+
+.
+### Hugg
+
+g Fac
+ Tra
+sform
+rs I
+puts
+You ca
+ pass prompt 
+mb
+dd
+
+gs from Hugg
+
+g Fac
+ Tra
+sform
+rs mod
+
+s to th
+  `'prompt_
+mb
+ds'` f
+
+
+d of th
+ prompt 
+mb
+dd
+
+g d
+ct
+o
+ary, as sho
+
+ 
+
+ th
+ fo
+o
+
+
+g 
+xamp
+
+s:
+[
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/prompt_
+mb
+d_
+
+f
+r
+
+c
+.py](../../
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/prompt_
+mb
+d_
+
+f
+r
+
+c
+.py)
+## O
+
+
+
+
+ S
+rv
+
+g
+Our Op
+
+AI-compat
+b
+
+ s
+rv
+r acc
+pts prompt 
+mb
+dd
+
+gs 
+
+puts v
+a th
+ [Comp
+
+t
+o
+s API](https://p
+atform.op
+
+a
+.com/docs/ap
+-r
+f
+r
+
+c
+/comp
+
+t
+o
+s). Prompt 
+mb
+dd
+
+gs 
+
+puts ar
+ add
+d v
+a a 
+
+
+ `'prompt_
+mb
+ds'` k
+y 
+
+ th
+ JSON packag
+ a
+d ar
+ 
+
+ab
+
+d by th
+ `--
+
+ab
+
+-prompt-
+mb
+ds` f
+ag 
+
+ `v
+m s
+rv
+`.
+Wh
+
+ a m
+xtur
+ of `'prompt_
+mb
+ds'` a
+d `'prompt'` 
+
+puts ar
+ prov
+d
+d 
+
+ a s
+
+g
+
+ r
+qu
+st, th
+ prompt 
+mb
+ds ar
+ a
+
+ays r
+tur
+
+d f
+rst.
+Prompt 
+mb
+dd
+
+gs ar
+ pass
+d 
+
+ as bas
+64 
+
+cod
+d torch t
+
+sors.
+!!! 
+ar
+
+
+g
+    Th
+ vLLM 
+
+g
+
+
+ may crash 
+f 
+
+corr
+ct shap
+ of 
+mb
+dd
+
+gs 
+s pass
+d.
+    O
+
+y 
+
+ab
+
+ th
+s f
+ag for trust
+d us
+rs!
+### Tra
+sform
+rs I
+puts v
+a Op
+
+AI C
+
+
+
+t
+F
+rst, 
+au
+ch th
+ Op
+
+AI-compat
+b
+
+ s
+rv
+r:
 ```bash
-vllm serve meta-llama/Llama-3.2-1B-Instruct --runner generate \
-  --max-model-len 4096 --enable-prompt-embeds
+v
+m s
+rv
+ m
+ta-
+ama/L
+ama-3.2-1B-I
+struct --ru
+
+r g
+
+
+rat
+ \
+  --max-mod
+
+-
+
+
+ 4096 --
+
+ab
+
+-prompt-
+mb
+ds
 ```
+Th
 
-Then, you can use the OpenAI client as follows:
+, you ca
+ us
+ th
+ Op
 
-[examples/online_serving/prompt_embed_inference_with_openai_client.py](../../examples/online_serving/prompt_embed_inference_with_openai_client.py)
+AI c
+
+
+
+t as fo
+o
+s:
+[
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/prompt_
+mb
+d_
+
+f
+r
+
+c
+_
+
+th_op
+
+a
+_c
+
+
+
+t.py](../../
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/prompt_
+mb
+d_
+
+f
+r
+
+c
+_
+
+th_op
+
+a
+_c
+
+
+
+t.py)

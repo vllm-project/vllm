@@ -1,83 +1,722 @@
-# Retrieval-Augmented Generation
+# R
+tr
 
-[Retrieval-augmented generation (RAG)](https://en.wikipedia.org/wiki/Retrieval-augmented_generation) is a technique that enables generative artificial intelligence (Gen AI) models to retrieve and incorporate new information. It modifies interactions with a large language model (LLM) so that the model responds to user queries with reference to a specified set of documents, using this information to supplement information from its pre-existing training data. This allows LLMs to use domain-specific and/or updated information. Use cases include providing chatbot access to internal company data or generating responses based on authoritative sources.
+va
+-Augm
 
-Here are the integrations:
+t
+d G
 
-- vLLM + [langchain](https://github.com/langchain-ai/langchain) + [milvus](https://github.com/milvus-io/milvus)
-- vLLM + [llamaindex](https://github.com/run-llama/llama_index) + [milvus](https://github.com/milvus-io/milvus)
 
-## vLLM + langchain
+rat
+o
 
-### Prerequisites
+[R
+tr
 
-Set up the vLLM and langchain environment:
+va
+-augm
 
+t
+d g
+
+
+rat
+o
+ (RAG)](https://
+
+.
+
+k
+p
+d
+a.org/
+
+k
+/R
+tr
+
+va
+-augm
+
+t
+d_g
+
+
+rat
+o
+) 
+s a t
+ch
+
+qu
+ that 
+
+ab
+
+s g
+
+
+rat
+v
+ art
+f
+c
+a
+ 
+
+t
+
+
+g
+
+c
+ (G
+
+ AI) mod
+
+s to r
+tr
+
+v
+ a
+d 
+
+corporat
+ 
+
+
+ 
+
+format
+o
+. It mod
+f
+
+s 
+
+t
+ract
+o
+s 
+
+th a 
+arg
+ 
+a
+guag
+ mod
+
+ (LLM) so that th
+ mod
+
+ r
+spo
+ds to us
+r qu
+r
+
+s 
+
+th r
+f
+r
+
+c
+ to a sp
+c
+f
+
+d s
+t of docum
+
+ts, us
+
+g th
+s 
+
+format
+o
+ to supp
+
+m
+
+t 
+
+format
+o
+ from 
+ts pr
+-
+x
+st
+
+g tra
+
+
+
+g data. Th
+s a
+o
+s LLMs to us
+ doma
+
+-sp
+c
+f
+c a
+d/or updat
+d 
+
+format
+o
+. Us
+ cas
+s 
+
+c
+ud
+ prov
+d
+
+g chatbot acc
+ss to 
+
+t
+r
+a
+ compa
+y data or g
+
+
+rat
+
+g r
+spo
+s
+s bas
+d o
+ author
+tat
+v
+ sourc
+s.
+H
+r
+ ar
+ th
+ 
+
+t
+grat
+o
+s:
+- vLLM + [
+a
+gcha
+
+](https://g
+thub.com/
+a
+gcha
+
+-a
+/
+a
+gcha
+
+) + [m
+
+vus](https://g
+thub.com/m
+
+vus-
+o/m
+
+vus)
+- vLLM + [
+ama
+
+d
+x](https://g
+thub.com/ru
+-
+ama/
+ama_
+
+d
+x) + [m
+
+vus](https://g
+thub.com/m
+
+vus-
+o/m
+
+vus)
+## vLLM + 
+a
+gcha
+
+
+### Pr
+r
+qu
+s
+t
+s
+S
+t up th
+ vLLM a
+d 
+a
+gcha
+
+ 
+
+v
+ro
+m
+
+t:
 ```bash
-pip install -U vllm \
-            langchain_milvus langchain_openai \
-            langchain_community beautifulsoup4 \
-            langchain-text-splitters
+p
+p 
+
+sta
+ -U v
+m \
+            
+a
+gcha
+
+_m
+
+vus 
+a
+gcha
+
+_op
+
+a
+ \
+            
+a
+gcha
+
+_commu
+
+ty b
+aut
+fu
+soup4 \
+            
+a
+gcha
+
+-t
+xt-sp
+
+tt
+rs
 ```
+### D
+p
+oy
+1. Start th
+ vLLM s
+rv
+r 
 
-### Deploy
+th th
+ support
+d 
+mb
+dd
 
-1. Start the vLLM server with the supported embedding model, e.g.
+g mod
 
+, 
+.g.
     ```bash
-    # Start embedding service (port 8000)
-    vllm serve ssmits/Qwen2-7B-Instruct-embed-base
+    # Start 
+mb
+dd
+
+g s
+rv
+c
+ (port 8000)
+    v
+m s
+rv
+ ssm
+ts/Q
+
+
+2-7B-I
+struct-
+mb
+d-bas
+
     ```
+1. Start th
+ vLLM s
+rv
+r 
 
-1. Start the vLLM server with the supported chat completion model, e.g.
+th th
+ support
+d chat comp
 
+t
+o
+ mod
+
+, 
+.g.
     ```bash
-    # Start chat service (port 8001)
-    vllm serve qwen/Qwen1.5-0.5B-Chat --port 8001
+    # Start chat s
+rv
+c
+ (port 8001)
+    v
+m s
+rv
+ q
+
+
+/Q
+
+
+1.5-0.5B-Chat --port 8001
     ```
+1. Us
+ th
+ scr
+pt: [
+xamp
 
-1. Use the script: [examples/online_serving/retrieval_augmented_generation_with_langchain.py](../../../examples/online_serving/retrieval_augmented_generation_with_langchain.py)
+s/o
 
-1. Run the script
 
+
+
+_s
+rv
+
+g/r
+tr
+
+va
+_augm
+
+t
+d_g
+
+
+rat
+o
+_
+
+th_
+a
+gcha
+
+.py](../../../
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/r
+tr
+
+va
+_augm
+
+t
+d_g
+
+
+rat
+o
+_
+
+th_
+a
+gcha
+
+.py)
+1. Ru
+ th
+ scr
+pt
     ```bash
-    python retrieval_augmented_generation_with_langchain.py
+    pytho
+ r
+tr
+
+va
+_augm
+
+t
+d_g
+
+
+rat
+o
+_
+
+th_
+a
+gcha
+
+.py
     ```
+## vLLM + 
+ama
 
-## vLLM + llamaindex
+d
+x
+### Pr
+r
+qu
+s
+t
+s
+S
+t up th
+ vLLM a
+d 
+ama
 
-### Prerequisites
+d
+x 
 
-Set up the vLLM and llamaindex environment:
+v
+ro
+m
 
+t:
 ```bash
-pip install vllm \
-            llama-index llama-index-readers-web \
-            llama-index-llms-openai-like    \
-            llama-index-embeddings-openai-like \
-            llama-index-vector-stores-milvus \
+p
+p 
+
+sta
+ v
+m \
+            
+ama-
+
+d
+x 
+ama-
+
+d
+x-r
+ad
+rs-
+
+b \
+            
+ama-
+
+d
+x-
+ms-op
+
+a
+-
+
+k
+    \
+            
+ama-
+
+d
+x-
+mb
+dd
+
+gs-op
+
+a
+-
+
+k
+ \
+            
+ama-
+
+d
+x-v
+ctor-stor
+s-m
+
+vus \
 ```
+### D
+p
+oy
+1. Start th
+ vLLM s
+rv
+r 
 
-### Deploy
+th th
+ support
+d 
+mb
+dd
 
-1. Start the vLLM server with the supported embedding model, e.g.
+g mod
 
+, 
+.g.
     ```bash
-    # Start embedding service (port 8000)
-    vllm serve ssmits/Qwen2-7B-Instruct-embed-base
+    # Start 
+mb
+dd
+
+g s
+rv
+c
+ (port 8000)
+    v
+m s
+rv
+ ssm
+ts/Q
+
+
+2-7B-I
+struct-
+mb
+d-bas
+
     ```
+1. Start th
+ vLLM s
+rv
+r 
 
-1. Start the vLLM server with the supported chat completion model, e.g.
+th th
+ support
+d chat comp
 
+t
+o
+ mod
+
+, 
+.g.
     ```bash
-    # Start chat service (port 8001)
-    vllm serve qwen/Qwen1.5-0.5B-Chat --port 8001
+    # Start chat s
+rv
+c
+ (port 8001)
+    v
+m s
+rv
+ q
+
+
+/Q
+
+
+1.5-0.5B-Chat --port 8001
     ```
+1. Us
+ th
+ scr
+pt: [
+xamp
 
-1. Use the script: [examples/online_serving/retrieval_augmented_generation_with_llamaindex.py](../../../examples/online_serving/retrieval_augmented_generation_with_llamaindex.py)
+s/o
 
-1. Run the script:
 
+
+
+_s
+rv
+
+g/r
+tr
+
+va
+_augm
+
+t
+d_g
+
+
+rat
+o
+_
+
+th_
+ama
+
+d
+x.py](../../../
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/r
+tr
+
+va
+_augm
+
+t
+d_g
+
+
+rat
+o
+_
+
+th_
+ama
+
+d
+x.py)
+1. Ru
+ th
+ scr
+pt:
     ```bash
-    python retrieval_augmented_generation_with_llamaindex.py
+    pytho
+ r
+tr
+
+va
+_augm
+
+t
+d_g
+
+
+rat
+o
+_
+
+th_
+ama
+
+d
+x.py
     ```

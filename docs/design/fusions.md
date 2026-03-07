@@ -1,339 +1,3635 @@
-# Fusion torch.compile passes
+# Fus
+o
+ torch.comp
 
-vLLM applies a set of kernel/operator fusions at compile time (via custom [`torch.compile`](torch_compile.md) Inductor passes)
-to separate optimizations from model definitions and avoid breaking layer abstractions in model code.
-These fusions are controlled by fields in [`PassConfig`][vllm.config.compilation.PassConfig] and are automatically enabled
-at appropriate [optimization levels](optimization_levels.md).
 
-## Quick Reference
+ pass
+s
+vLLM app
 
-The table below maps each fusion to its controlling flag/config knob, the
-operations it fuses, what level enables it by default, and an indicative speedup.
-The Fullgraph column indicates whether the fusion requires the entire model graph to be
-visible (either via Inductor partition or `splitting_ops=[]`),
-and the last column indicates whether the fusion activates for all `num_tokens`
-or just on the low or high end.
 
-!!! info
-    Speedup depends heavily on the exact model, batch size, and hardware.
-    If tuning performance by hand, always benchmark your exact use-case with and without the fusion to verify the impact.
+s a s
+t of k
+r
 
-| Fusion                                                                         | `PassConfig` flag            | Fused operations                               | Default at                     | E2E Speedup        | Fullgraph | `num_tokens` |
+
+/op
+rator fus
+o
+s at comp
+
+
+ t
+m
+ (v
+a custom [`torch.comp
+
+
+`](torch_comp
+
+
+.md) I
+ductor pass
+s)
+to s
+parat
+ opt
+m
+zat
+o
+s from mod
+
+ d
+f
+
+
+t
+o
+s a
+d avo
+d br
+ak
+
+g 
+ay
+r abstract
+o
+s 
+
+ mod
+
+ cod
+.
+Th
+s
+ fus
+o
+s ar
+ co
+tro
+
+d by f
+
+
+ds 
+
+ [`PassCo
+f
+g`][v
+m.co
+f
+g.comp
+
+at
+o
+.PassCo
+f
+g] a
+d ar
+ automat
+ca
+y 
+
+ab
+
+d
+at appropr
+at
+ [opt
+m
+zat
+o
+ 
+
+v
+
+s](opt
+m
+zat
+o
+_
+
+v
+
+s.md).
+## Qu
+ck R
+f
+r
+
+c
+
+Th
+ tab
+
+ b
+
+o
+ maps 
+ach fus
+o
+ to 
+ts co
+tro
+
+
+g f
+ag/co
+f
+g k
+ob, th
+
+op
+rat
+o
+s 
+t fus
+s, 
+hat 
+
+v
+
+ 
+
+ab
+
+s 
+t by d
+fau
+t, a
+d a
+ 
+
+d
+cat
+v
+ sp
+dup.
+Th
+ Fu
+graph co
+um
+ 
+
+d
+cat
+s 
+h
+th
+r th
+ fus
+o
+ r
+qu
+r
+s th
+ 
+
+t
+r
+ mod
+
+ graph to b
+
+v
+s
+b
+
+ (
+
+th
+r v
+a I
+ductor part
+t
+o
+ or `sp
+
+tt
+
+g_ops=[]`),
+a
+d th
+ 
+ast co
+um
+ 
+
+d
+cat
+s 
+h
+th
+r th
+ fus
+o
+ act
+vat
+s for a
+ `
+um_tok
+
+s`
+or just o
+ th
+ 
+o
+ or h
+gh 
+
+d.
+!!! 
+
+fo
+    Sp
+dup d
+p
+
+ds h
+av
+
+y o
+ th
+ 
+xact mod
+
+, batch s
+z
+, a
+d hard
+ar
+.
+    If tu
+
+
+g p
+rforma
+c
+ by ha
+d, a
+
+ays b
+
+chmark your 
+xact us
+-cas
+ 
+
+th a
+d 
+
+thout th
+ fus
+o
+ to v
+r
+fy th
+ 
+mpact.
+| Fus
+o
+                                                                         | `PassCo
+f
+g` f
+ag            | Fus
+d op
+rat
+o
+s                               | D
+fau
+t at                     | E2E Sp
+dup        | Fu
+graph | `
+um_tok
+
+s` |
 |--------------------------------------------------------------------------------|------------------------------|------------------------------------------------|--------------------------------|--------------------|-----------|--------------|
-| [AllReduce + RMSNorm](#allreduce--rmsnorm-fuse_allreduce_rms)                  | `fuse_allreduce_rms`         | All-reduce → RMSNorm (+residual_add) (→ quant) | O2 (Hopper/Blackwell + TP > 1) | 5-20%              | No        | Low          |
-| [Attention + Quant](#attention--quantization-fuse_attn_quant)                  | `fuse_attn_quant`            | Attention output → FP8/NVFP4 quant             | Off by default                 | 3-7%               | Yes       | Always       |
-| [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)             | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O1 (ROCm/AITER only)           | TBD                | No        | Low          |
-| [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion)                    | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No        | Low          |
-| [Sequence Parallelism](#sequence-parallelism-enable_sp)                        | `enable_sp`                  | AllReduce → ReduceScatter + AllGather          | Off by default                 | Prereq for AsyncTP | Yes       | High         |
-| [AsyncTP GEMM + collective](#asynctp-gemm--collective-overlap-fuse_gemm_comms) | `fuse_gemm_comms`            | GEMM → reduce-scatter / all-gather → GEMM      | Off by default                 | 7-10%              | Yes       | High         |
-| [RMSNorm + Quant](#rmsnorm--quantization-fuse_norm_quant)                      | `fuse_norm_quant`            | RMSNorm (+residual add) → FP8/FP4 quant        | O1 (conditional)               | 1-4%               | No        | Always       |
-| [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant)                      | `fuse_act_quant`             | SiLU+Mul activation → FP8/FP4 quant            | O1 (conditional)               | 1-4%               | No        | Always       |
-| [RMSNorm + Padding](#rmsnorm--padding-fuse_act_padding)                        | `fuse_act_padding`           | Residual add + RMSNorm → padding               | O1 (ROCm/AITER only)           | TBD                | No        | Always       |
+| [A
+R
+duc
+ + RMSNorm](#a
+r
+duc
+--rms
+orm-fus
+_a
+r
+duc
+_rms)                  | `fus
+_a
+r
+duc
+_rms`         | A
+-r
+duc
+ → RMSNorm (+r
+s
+dua
+_add) (→ qua
+t) | O2 (Hopp
+r/B
+ack
 
-## Support Matrix
 
-The table below lists the quantization schemes supported by each fusion on each platform.
-**—** means the fusion is not available on that platform. The latest and in-progress work is available in the tracking issue:
-[#36066](https://github.com/vllm-project/vllm/issues/36066)
+ + TP 
+ 1) | 5-20%              | No        | Lo
+          |
+| [Att
 
-| Fusion                       | SM100 (Blackwell)                        | SM90 (Hopper)                            | SM89 (Ada)                               | SM80 (Ampere) | ROCm                                     |
+t
+o
+ + Qua
+t](#att
+
+t
+o
+--qua
+t
+zat
+o
+-fus
+_att
+_qua
+t)                  | `fus
+_att
+_qua
+t`            | Att
+
+t
+o
+ output → FP8/NVFP4 qua
+t             | Off by d
+fau
+t                 | 3-7%               | Y
+s       | A
+
+ays       |
+| [RoPE + KV-Cach
+ Updat
+](#rop
+--kv-cach
+-updat
+-fus
+_rop
+_kvcach
+)             | `fus
+_rop
+_kvcach
+`          | Rotary 
+mb
+dd
+
+g → KV cach
+ 
+r
+t
+              | O1 (ROCm/AITER o
+
+y)           | TBD                | No        | Lo
+          |
+| [QK Norm + RoPE](#qk-
+orm--rop
+-
+
+ab
+
+_qk_
+orm_rop
+_fus
+o
+)                    | `
+
+ab
+
+_qk_
+orm_rop
+_fus
+o
+` | Q/K RMSNorm → rotary 
+mb
+dd
+
+g                 | Off by d
+fau
+t                 | 2-3%               | No        | Lo
+          |
+| [S
+qu
+
+c
+ Para
+
+
+
+sm](#s
+qu
+
+c
+-para
+
+
+
+sm-
+
+ab
+
+_sp)                        | `
+
+ab
+
+_sp`                  | A
+R
+duc
+ → R
+duc
+Scatt
+r + A
+Gath
+r          | Off by d
+fau
+t                 | Pr
+r
+q for Asy
+cTP | Y
+s       | H
+gh         |
+| [Asy
+cTP GEMM + co
+
+ct
+v
+](#asy
+ctp-g
+mm--co
+
+ct
+v
+-ov
+r
+ap-fus
+_g
+mm_comms) | `fus
+_g
+mm_comms`            | GEMM → r
+duc
+-scatt
+r / a
+-gath
+r → GEMM      | Off by d
+fau
+t                 | 7-10%              | Y
+s       | H
+gh         |
+| [RMSNorm + Qua
+t](#rms
+orm--qua
+t
+zat
+o
+-fus
+_
+orm_qua
+t)                      | `fus
+_
+orm_qua
+t`            | RMSNorm (+r
+s
+dua
+ add) → FP8/FP4 qua
+t        | O1 (co
+d
+t
+o
+a
+)               | 1-4%               | No        | A
+
+ays       |
+| [S
+LU+Mu
+ + Qua
+t](#s
+
+umu
+--qua
+t
+zat
+o
+-fus
+_act_qua
+t)                      | `fus
+_act_qua
+t`             | S
+LU+Mu
+ act
+vat
+o
+ → FP8/FP4 qua
+t            | O1 (co
+d
+t
+o
+a
+)               | 1-4%               | No        | A
+
+ays       |
+| [RMSNorm + Padd
+
+g](#rms
+orm--padd
+
+g-fus
+_act_padd
+
+g)                        | `fus
+_act_padd
+
+g`           | R
+s
+dua
+ add + RMSNorm → padd
+
+g               | O1 (ROCm/AITER o
+
+y)           | TBD                | No        | A
+
+ays       |
+## Support Matr
+x
+Th
+ tab
+
+ b
+
+o
+ 
+
+sts th
+ qua
+t
+zat
+o
+ sch
+m
+s support
+d by 
+ach fus
+o
+ o
+ 
+ach p
+atform.
+**—** m
+a
+s th
+ fus
+o
+ 
+s 
+ot ava
+
+ab
+
+ o
+ that p
+atform. Th
+ 
+at
+st a
+d 
+
+-progr
+ss 
+ork 
+s ava
+
+ab
+
+ 
+
+ th
+ track
+
+g 
+ssu
+:
+[#36066](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/36066)
+| Fus
+o
+                       | SM100 (B
+ack
+
+
+)                        | SM90 (Hopp
+r)                            | SM89 (Ada)                               | SM80 (Amp
+r
+) | ROCm                                     |
 |------------------------------|------------------------------------------|------------------------------------------|------------------------------------------|---------------|------------------------------------------|
-| `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVFP4             | FP16/BF16, FP8 static                    | —                                        | —             | —                                        |
-| `fuse_attn_quant`\*          | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                             |
-| `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
-| `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16†                               | FP16/BF16†    | —                                        |
-| `enable_sp`                  | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
-| `fuse_gemm_comms`            | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
-| `fuse_norm_quant`            | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | —             | FP8 static, FP8 per-token, FP8 per-group |
-| `fuse_act_quant`             | FP8 static, NVFP4                        | FP8 static                               | FP8 static                               | —             | FP8 per-group                            |
-| `fuse_act_padding`           | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
+| `fus
+_a
+r
+duc
+_rms`         | FP16/BF16, FP8 stat
+c, NVFP4             | FP16/BF16, FP8 stat
+c                    | —                                        | —             | —                                        |
+| `fus
+_att
+_qua
+t`\*          | FP8 stat
+c\*, NVFP4\*                    | FP8 stat
+c\*                             | FP8 stat
+c\*                             | —             | FP8 stat
+c\*                             |
+| `fus
+_rop
+_kvcach
+`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
+| `
 
-\* `fuse_attn_quant` support depends on the attention backend in use; not all backends support
-fused quantization output. See the [`fuse_attn_quant` section](#attention--quantization-fuse_attn_quant)
-for per-backend details.
+ab
 
-† `enable_sp` and `fuse_gemm_comms` are only autoconfigured for SM90 today;
-other architectures support requires setting `PassConfig.sp_min_token_num` explicitly.
-SM100 support also requires setting `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel`.
+_qk_
+orm_rop
+_fus
+o
+` | FP16/BF16                                | FP16/BF16                                | FP16/BF16†                               | FP16/BF16†    | —                                        |
+| `
 
-## Enabling / Disabling Fusions
+ab
 
-Fusions are exposed through `PassConfig`, which is nested inside `CompilationConfig`:
+_sp`                  | FP16/BF16, FP8 stat
+c†                   | FP16/BF16, FP8 stat
+c                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
+| `fus
+_g
+mm_comms`            | FP16/BF16, FP8 stat
+c†                   | FP16/BF16, FP8 stat
+c                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
+| `fus
+_
+orm_qua
+t`            | FP8 stat
+c, FP8 p
+r-tok
 
-```python
-from vllm import LLM
-from vllm.config import CompilationConfig, PassConfig
+, FP8 p
+r-group | FP8 stat
+c, FP8 p
+r-tok
 
-llm = LLM(
-    model="...",
-    optimization_level=2, # Default optimization level
-    compilation_config=CompilationConfig(
-        pass_config=PassConfig(
-            fuse_norm_quant=True,
-            fuse_act_quant=True,
-            fuse_allreduce_rms=False,  # disable a specific fusion
+, FP8 p
+r-group | FP8 stat
+c, FP8 p
+r-tok
+
+, FP8 p
+r-group | —             | FP8 stat
+c, FP8 p
+r-tok
+
+, FP8 p
+r-group |
+| `fus
+_act_qua
+t`             | FP8 stat
+c, NVFP4                        | FP8 stat
+c                               | FP8 stat
+c                               | —             | FP8 p
+r-group                            |
+| `fus
+_act_padd
+
+g`           | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
+\* `fus
+_att
+_qua
+t` support d
+p
+
+ds o
+ th
+ att
+
+t
+o
+ back
+
+d 
+
+ us
+; 
+ot a
+ back
+
+ds support
+fus
+d qua
+t
+zat
+o
+ output. S
+ th
+ [`fus
+_att
+_qua
+t` s
+ct
+o
+](#att
+
+t
+o
+--qua
+t
+zat
+o
+-fus
+_att
+_qua
+t)
+for p
+r-back
+
+d d
+ta
+
+s.
+† `
+
+ab
+
+_sp` a
+d `fus
+_g
+mm_comms` ar
+ o
+
+y autoco
+f
+gur
+d for SM90 today;
+oth
+r arch
+t
+ctur
+s support r
+qu
+r
+s s
+tt
+
+g `PassCo
+f
+g.sp_m
+
+_tok
+
+_
+um` 
+xp
+
+c
+t
+y.
+SM100 support a
+so r
+qu
+r
+s s
+tt
+
+g `VLLM_DISABLED_KERNELS=F
+ashI
+f
+rFP8Sca
+
+dMML
+
+
+arK
+r
+
+
+`.
+## E
+ab
+
+
+g / D
+sab
+
+
+g Fus
+o
+s
+Fus
+o
+s ar
+ 
+xpos
+d through `PassCo
+f
+g`, 
+h
+ch 
+s 
+
+st
+d 
+
+s
+d
+ `Comp
+
+at
+o
+Co
+f
+g`:
+```pytho
+
+from v
+m 
+mport LLM
+from v
+m.co
+f
+g 
+mport Comp
+
+at
+o
+Co
+f
+g, PassCo
+f
+g
+
+m = LLM(
+    mod
+
+="...",
+    opt
+m
+zat
+o
+_
+
+v
+
+=2, # D
+fau
+t opt
+m
+zat
+o
+ 
+
+v
+
+
+    comp
+
+at
+o
+_co
+f
+g=Comp
+
+at
+o
+Co
+f
+g(
+        pass_co
+f
+g=PassCo
+f
+g(
+            fus
+_
+orm_qua
+t=Tru
+,
+            fus
+_act_qua
+t=Tru
+,
+            fus
+_a
+r
+duc
+_rms=Fa
+s
+,  # d
+sab
+
+ a sp
+c
+f
+c fus
+o
+
         )
     ),
 )
 ```
+Fus
+o
+s ca
+ a
+so b
+ 
 
-Fusions can also be enabled using command-line flags with any `vllm ...` command:
+ab
 
+d us
+
+g comma
+d-
+
+
+
+ f
+ags 
+
+th a
+y `v
+m ...` comma
+d:
 ```bash
-# Enable O2 defaults, but turn off allreduce fusion
-vllm serve meta-llama/Llama-3.1-8B-Instruct -O2 -cc.pass_config.fuse_allreduce_rms=False
+# E
+ab
 
-# The above is equivalent to the more verbose:
-vllm serve meta-llama/Llama-3.1-8B-Instruct -O2 --compilation-config '{"pass_config": {"fuse_allreduce_rms": false}}'
+ O2 d
+fau
+ts, but tur
+ off a
+r
+duc
+ fus
+o
 
-# Same syntax in other commands, e.g. vllm bench:
-vllm bench latency --model=meta-llama/Llama-3.1-8B-Instruct -O2 -cc.pass_config.fuse_allreduce_rms=False
+v
+m s
+rv
+ m
+ta-
+ama/L
+ama-3.1-8B-I
+struct -O2 -cc.pass_co
+f
+g.fus
+_a
+r
+duc
+_rms=Fa
+s
+
+# Th
+ abov
+ 
+s 
+qu
+va
+
+
+t to th
+ mor
+ v
+rbos
+:
+v
+m s
+rv
+ m
+ta-
+ama/L
+ama-3.1-8B-I
+struct -O2 --comp
+
+at
+o
+-co
+f
+g '{"pass_co
+f
+g": {"fus
+_a
+r
+duc
+_rms": fa
+s
+}}'
+# Sam
+ sy
+tax 
+
+ oth
+r comma
+ds, 
+.g. v
+m b
+
+ch:
+v
+m b
+
+ch 
+at
+
+cy --mod
+
+=m
+ta-
+ama/L
+ama-3.1-8B-I
+struct -O2 -cc.pass_co
+f
+g.fus
+_a
+r
+duc
+_rms=Fa
+s
+
 ```
+F
 
-Fields set explicitly by the user always take precedence over optimization-level defaults.
 
-## Fusion Details
+ds s
+t 
+xp
 
-### AllReduce + RMSNorm (`fuse_allreduce_rms`)
+c
+t
+y by th
+ us
+r a
 
-!!! warning
-    TP+DP and TP+PP combinations are currently broken
-    ([#34458](https://github.com/vllm-project/vllm/issues/34458) and
-    [#35426](https://github.com/vllm-project/vllm/issues/35426)).
-    Only supported on NVIDIA Hopper (SM90) and Blackwell (SM100) with FlashInfer installed.
+ays tak
+ pr
+c
+d
 
-**What it fuses.** Fuses the tensor-parallel all-reduce collective with the subsequent residual add,
-RMSNorm, and optionally a quantization step into a single FlashInfer / TRT-LLM communication kernel.
-This fusion is only profitable for small `num_tokens`,
-so the fusion is only performed in the lower compiled range.
+c
+ ov
+r opt
+m
+zat
+o
+-
 
-Patterns covered:
+v
 
-- `AllReduce → RMSNorm(+residual_add)`: CUDA sm90+ with FlashInfer
-- `AllReduce → RMSNorm(+residual_add) → FP8 static quant`: CUDA sm90+ with FlashInfer
-- `AllReduce → RMSNorm(+residual_add) → NVFP4 dynamic quant`: CUDA sm100+ with FlashInfer
+ d
+fau
+ts.
+## Fus
+o
+ D
+ta
 
-The maximum tensor size below which the fused kernel is used is hardware-dependent (64 MB for TP=2
-on SM90/SM100) and configurable via `PassConfig.fi_allreduce_fusion_max_size_mb`.
+s
+### A
+R
+duc
+ + RMSNorm (`fus
+_a
+r
+duc
+_rms`)
+!!! 
+ar
 
-**Code locations.**
 
-- Pass: [`vllm/compilation/passes/fusion/allreduce_rms_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/allreduce_rms_fusion.py)
-- FlashInfer all-reduce: [`vllm/distributed/device_communicators/flashinfer_all_reduce.py`](https://github.com/vllm-project/vllm/blob/main/vllm/distributed/device_communicators/flashinfer_all_reduce.py)
-- Benchmark: [`benchmarks/kernels/benchmark_fused_collective.py`](https://github.com/vllm-project/vllm/blob/main/benchmarks/kernels/benchmark_fused_collective.py)
+g
+    TP+DP a
+d TP+PP comb
 
-### Attention + Quantization (`fuse_attn_quant`)
+at
+o
+s ar
+ curr
 
-!!! info
-    `fuse_attn_quant` is currently not enabled at any optimization level by default and must be set
-    explicitly. It requires the full model graph to be visible (Inductor partition or `splitting_ops=[]`).
+t
+y brok
 
-**What it fuses.** Fuses the attention output quantization directly after the attention computation,
-eliminating a full-precision memory round-trip of the attention output. Patterns covered:
 
-`Attention → FP8 static quant`:
+    ([#34458](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/34458) a
+d
+    [#35426](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/35426)).
+    O
 
+y support
+d o
+ NVIDIA Hopp
+r (SM90) a
+d B
+ack
+
+
+ (SM100) 
+
+th F
+ashI
+f
+r 
+
+sta
+
+d.
+**What 
+t fus
+s.** Fus
+s th
+ t
+
+sor-para
+
+
+ a
+-r
+duc
+ co
+
+ct
+v
+ 
+
+th th
+ subs
+qu
+
+t r
+s
+dua
+ add,
+RMSNorm, a
+d opt
+o
+a
+y a qua
+t
+zat
+o
+ st
+p 
+
+to a s
+
+g
+
+ F
+ashI
+f
+r / TRT-LLM commu
+
+cat
+o
+ k
+r
+
+
+.
+Th
+s fus
+o
+ 
+s o
+
+y prof
+tab
+
+ for sma
+ `
+um_tok
+
+s`,
+so th
+ fus
+o
+ 
+s o
+
+y p
+rform
+d 
+
+ th
+ 
+o
+
+r comp
+
+
+d ra
+g
+.
+Patt
+r
+s cov
+r
+d:
+- `A
+R
+duc
+ → RMSNorm(+r
+s
+dua
+_add)`: CUDA sm90+ 
+
+th F
+ashI
+f
+r
+- `A
+R
+duc
+ → RMSNorm(+r
+s
+dua
+_add) → FP8 stat
+c qua
+t`: CUDA sm90+ 
+
+th F
+ashI
+f
+r
+- `A
+R
+duc
+ → RMSNorm(+r
+s
+dua
+_add) → NVFP4 dy
+am
+c qua
+t`: CUDA sm100+ 
+
+th F
+ashI
+f
+r
+Th
+ max
+mum t
+
+sor s
+z
+ b
+
+o
+ 
+h
+ch th
+ fus
+d k
+r
+
+
+ 
+s us
+d 
+s hard
+ar
+-d
+p
+
+d
+
+t (64 MB for TP=2
+o
+ SM90/SM100) a
+d co
+f
+gurab
+
+ v
+a `PassCo
+f
+g.f
+_a
+r
+duc
+_fus
+o
+_max_s
+z
+_mb`.
+**Cod
+ 
+ocat
+o
+s.**
+- Pass: [`v
+m/comp
+
+at
+o
+/pass
+s/fus
+o
+/a
+r
+duc
+_rms_fus
+o
+.py`](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/v
+m/comp
+
+at
+o
+/pass
+s/fus
+o
+/a
+r
+duc
+_rms_fus
+o
+.py)
+- F
+ashI
+f
+r a
+-r
+duc
+: [`v
+m/d
+str
+but
+d/d
+v
+c
+_commu
+
+cators/f
+ash
+
+f
+r_a
+_r
+duc
+.py`](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/v
+m/d
+str
+but
+d/d
+v
+c
+_commu
+
+cators/f
+ash
+
+f
+r_a
+_r
+duc
+.py)
+- B
+
+chmark: [`b
+
+chmarks/k
+r
+
+
+s/b
+
+chmark_fus
+d_co
+
+ct
+v
+.py`](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/b
+
+chmarks/k
+r
+
+
+s/b
+
+chmark_fus
+d_co
+
+ct
+v
+.py)
+### Att
+
+t
+o
+ + Qua
+t
+zat
+o
+ (`fus
+_att
+_qua
+t`)
+!!! 
+
+fo
+    `fus
+_att
+_qua
+t` 
+s curr
+
+t
+y 
+ot 
+
+ab
+
+d at a
+y opt
+m
+zat
+o
+ 
+
+v
+
+ by d
+fau
+t a
+d must b
+ s
+t
+    
+xp
+
+c
+t
+y. It r
+qu
+r
+s th
+ fu
+ mod
+
+ graph to b
+ v
+s
+b
+
+ (I
+ductor part
+t
+o
+ or `sp
+
+tt
+
+g_ops=[]`).
+**What 
+t fus
+s.** Fus
+s th
+ att
+
+t
+o
+ output qua
+t
+zat
+o
+ d
+r
+ct
+y aft
+r th
+ att
+
+t
+o
+ computat
+o
+,
+
+
+
+m
+
+at
+
+g a fu
+-pr
+c
+s
+o
+ m
+mory rou
+d-tr
+p of th
+ att
+
+t
+o
+ output. Patt
+r
+s cov
+r
+d:
+`Att
+
+t
+o
+ → FP8 stat
+c qua
+t`:
 - `TRITON_ATTN`: CUDA, ROCm
-- `FLASHINFER`: CUDA sm100+ with FlashInfer installed
+- `FLASHINFER`: CUDA sm100+ 
+
+th F
+ashI
+f
+r 
+
+sta
+
+d
 - `ROCM_ATTN`: ROCm
-- `ROCM_AITER_UNIFIED_ATTN`: ROCm with AITER
+- `ROCM_AITER_UNIFIED_ATTN`: ROCm 
 
-`Attention → NVFP4 dynamic quant`:
+th AITER
+`Att
 
-- `FLASHINFER`: CUDA sm100+ with FlashInfer installed
+t
+o
+ → NVFP4 dy
+am
+c qua
+t`:
+- `FLASHINFER`: CUDA sm100+ 
 
-Other attention backends do not support fused output quantization yet.
+th F
+ashI
+f
+r 
 
-**Code locations.**
+sta
 
-- Pass: [`vllm/compilation/passes/fusion/attn_quant_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/attn_quant_fusion.py)
-- Attention backends: [`vllm/v1/attention/backends/`](https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/)
+d
+Oth
+r att
 
-### RoPE + KV-Cache Update (`fuse_rope_kvcache`)
+t
+o
+ back
 
-!!! info
-    ROCm/AITER-only. Not available on NVIDIA CUDA or CPU. The fusion is only enabled for
-    `num_tokens ≤ 256` by default due to AITER fused kernel performance issues.
-    This threshold is configurable via `PassConfig.rope_kvcache_fusion_max_token_num`.
+ds do 
+ot support fus
+d output qua
+t
+zat
+o
+ y
+t.
+**Cod
+ 
+ocat
+o
+s.**
+- Pass: [`v
+m/comp
 
-**What it fuses.** Fuses the rotary positional embedding kernel with the KV-cache scatter/write into
-a single kernel, avoiding separate reads and writes of the key and value tensors.
+at
+o
+/pass
+s/fus
+o
+/att
+_qua
+t_fus
+o
+.py`](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
 
-Requires: AMD ROCm with AITER enabled, the `rotary_embedding` custom op active (automatic),
-and the `kv_cache` update op visible in the graph: either by using Inductor graph partition
-or removed from `splitting_ops`.
-If these conditions are set, the fusion is enabled automatically for optimization level O1 and above.
+/v
+m/comp
 
-**Code locations.**
+at
+o
+/pass
+s/fus
+o
+/att
+_qua
+t_fus
+o
+.py)
+- Att
 
-- Pass: [`vllm/compilation/passes/fusion/rope_kvcache_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rope_kvcache_fusion.py)
+t
+o
+ back
 
-### Sequence Parallelism (`enable_sp`)
+ds: [`v
+m/v1/att
 
-**What it fuses.** Replaces all-reduce collectives with reduce-scatter + local RMSNorm + all-gather,
-splitting the sequence dimension across TP ranks. This restructures the graph so the subsequent AsyncTP
-pass can fuse the reduce-scatter / all-gather with the surrounding GEMMs.
+t
+o
+/back
 
-Sequence Parallelism itself does not directly improve performance; it is a prerequisite for the
-AsyncTP pass (`fuse_gemm_comms`). SP is only applied above a minimum token threshold that is
-autoconfigured based on device capability and model `hidden_size`. Currently only active on
-H100/SM90 for models with `hidden_size >= 8192`. The threshold is configurable via
-`PassConfig.sp_min_token_num`.
+ds/`](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
 
-The general transformation:
+/v
+m/v1/att
 
-```text
-Input → AllReduce → RMSNorm → Output
-becomes:
-Input → ReduceScatter → local RMSNorm → AllGather → Output
+t
+o
+/back
+
+ds/)
+### RoPE + KV-Cach
+ Updat
+ (`fus
+_rop
+_kvcach
+`)
+!!! 
+
+fo
+    ROCm/AITER-o
+
+y. Not ava
+
+ab
+
+ o
+ NVIDIA CUDA or CPU. Th
+ fus
+o
+ 
+s o
+
+y 
+
+ab
+
+d for
+    `
+um_tok
+
+s ≤ 256` by d
+fau
+t du
+ to AITER fus
+d k
+r
+
+
+ p
+rforma
+c
+ 
+ssu
+s.
+    Th
+s thr
+sho
+d 
+s co
+f
+gurab
+
+ v
+a `PassCo
+f
+g.rop
+_kvcach
+_fus
+o
+_max_tok
+
+_
+um`.
+**What 
+t fus
+s.** Fus
+s th
+ rotary pos
+t
+o
+a
+ 
+mb
+dd
+
+g k
+r
+
+
+ 
+
+th th
+ KV-cach
+ scatt
+r/
+r
+t
+ 
+
+to
+a s
+
+g
+
+ k
+r
+
+
+, avo
+d
+
+g s
+parat
+ r
+ads a
+d 
+r
+t
+s of th
+ k
+y a
+d va
+u
+ t
+
+sors.
+R
+qu
+r
+s: AMD ROCm 
+
+th AITER 
+
+ab
+
+d, th
+ `rotary_
+mb
+dd
+
+g` custom op act
+v
+ (automat
+c),
+a
+d th
+ `kv_cach
+` updat
+ op v
+s
+b
+
+ 
+
+ th
+ graph: 
+
+th
+r by us
+
+g I
+ductor graph part
+t
+o
+
+or r
+mov
+d from `sp
+
+tt
+
+g_ops`.
+If th
+s
+ co
+d
+t
+o
+s ar
+ s
+t, th
+ fus
+o
+ 
+s 
+
+ab
+
+d automat
+ca
+y for opt
+m
+zat
+o
+ 
+
+v
+
+ O1 a
+d abov
+.
+**Cod
+ 
+ocat
+o
+s.**
+- Pass: [`v
+m/comp
+
+at
+o
+/pass
+s/fus
+o
+/rop
+_kvcach
+_fus
+o
+.py`](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/v
+m/comp
+
+at
+o
+/pass
+s/fus
+o
+/rop
+_kvcach
+_fus
+o
+.py)
+### S
+qu
+
+c
+ Para
+
+
+
+sm (`
+
+ab
+
+_sp`)
+**What 
+t fus
+s.** R
+p
+ac
+s a
+-r
+duc
+ co
+
+ct
+v
+s 
+
+th r
+duc
+-scatt
+r + 
+oca
+ RMSNorm + a
+-gath
+r,
+sp
+
+tt
+
+g th
+ s
+qu
+
+c
+ d
+m
+
+s
+o
+ across TP ra
+ks. Th
+s r
+structur
+s th
+ graph so th
+ subs
+qu
+
+t Asy
+cTP
+pass ca
+ fus
+ th
+ r
+duc
+-scatt
+r / a
+-gath
+r 
+
+th th
+ surrou
+d
+
+g GEMMs.
+S
+qu
+
+c
+ Para
+
+
+
+sm 
+ts
+
+f do
+s 
+ot d
+r
+ct
+y 
+mprov
+ p
+rforma
+c
+; 
+t 
+s a pr
+r
+qu
+s
+t
+ for th
+
+Asy
+cTP pass (`fus
+_g
+mm_comms`). SP 
+s o
+
+y app
+
+
+d abov
+ a m
+
+
+mum tok
+
+ thr
+sho
+d that 
+s
+autoco
+f
+gur
+d bas
+d o
+ d
+v
+c
+ capab
+
+
+ty a
+d mod
+
+ `h
+dd
+
+_s
+z
+`. Curr
+
+t
+y o
+
+y act
+v
+ o
+
+H100/SM90 for mod
+
+s 
+
+th `h
+dd
+
+_s
+z
+ 
+= 8192`. Th
+ thr
+sho
+d 
+s co
+f
+gurab
+
+ v
+a
+`PassCo
+f
+g.sp_m
+
+_tok
+
+_
+um`.
+Th
+ g
+
+
+ra
+ tra
+sformat
+o
+:
+```t
+xt
+I
+put → A
+R
+duc
+ → RMSNorm → Output
+b
+com
+s:
+I
+put → R
+duc
+Scatt
+r → 
+oca
+ RMSNorm → A
+Gath
+r → Output
 ```
+Patt
+r
+s cov
+r
+d:
+- F
+rst b
+ock: `A
+R
+duc
+ → RMSNorm` → `R
+duc
+Scatt
+r → RMSNorm → A
+Gath
+r`
+- M
+dd
 
-Patterns covered:
+ b
+ocks: `A
+R
+duc
+ → fus
+d_add_RMSNorm` → `R
+duc
+Scatt
+r → fus
+d_add_RMSNorm → A
+Gath
+r`
+- Both 
 
-- First block: `AllReduce → RMSNorm` → `ReduceScatter → RMSNorm → AllGather`
-- Middle blocks: `AllReduce → fused_add_RMSNorm` → `ReduceScatter → fused_add_RMSNorm → AllGather`
-- Both with optional `→ FP8 static quant` suffix
+th opt
+o
+a
+ `→ FP8 stat
+c qua
+t` suff
+x
+R
+qu
+r
+s: `us
+_
 
-Requires: `use_inductor_graph_partition=True` **or** piecewise compilation with static sizes
-divisible by `tensor_parallel_size`.
+ductor_graph_part
+t
+o
+=Tru
+` **or** p
 
-Supported hardware: Only tested on NVIDIA CUDA, possibly works on ROCm. FP8 all-gather requires sm90+.
+c
 
-**Code locations.**
 
-- Pass: [`vllm/compilation/passes/fusion/sequence_parallelism.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/sequence_parallelism.py)
+s
+ comp
 
-### AsyncTP GEMM + Collective Overlap (`fuse_gemm_comms`)
+at
+o
+ 
 
-!!! info
-    Requires `enable_sp=True` (enabled automatically). This pass is a no-op if Sequence Parallelism has not been applied.
+th stat
+c s
+z
+s
+d
+v
+s
+b
 
-**What it fuses.** After Sequence Parallelism transforms the graph, fuses GEMM kernels with the
-surrounding reduce-scatter (output projection) and all-gather (input projection) using
-`torch.ops.symm_mem` symmetric-memory primitives, overlapping communication and computation.
-This overlap is only profitable for large `num_tokens`, so the fusion (and preceding SP)
-is only performed in the higher compiled range above `PassConfig.sp_min_token_num`.
+ by `t
 
-Patterns covered:
+sor_para
 
-- `GEMM → reduce-scatter` → `fused_matmul_reduce_scatter`
-- `all-gather → GEMM` → `all_gather_matmul`
-- FP8 scaled variants of both patterns
 
-Supported hardware: NVIDIA CUDA with symmetric-memory (`torch.distributed._symmetric_memory`) support.
+_s
+z
+`.
+Support
+d hard
+ar
+: O
 
-On B200, pattern-matching fp8 FlashInfer scaled MM is not supported, so it must be disabled
-([#27893](https://github.com/vllm-project/vllm/issues/27893))
+y t
+st
+d o
+ NVIDIA CUDA, poss
+b
+y 
+orks o
+ ROCm. FP8 a
+-gath
+r r
+qu
+r
+s sm90+.
+**Cod
+ 
+ocat
+o
+s.**
+- Pass: [`v
+m/comp
 
-```shell
-VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel ...
+at
+o
+/pass
+s/fus
+o
+/s
+qu
+
+c
+_para
+
+
+
+sm.py`](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/v
+m/comp
+
+at
+o
+/pass
+s/fus
+o
+/s
+qu
+
+c
+_para
+
+
+
+sm.py)
+### Asy
+cTP GEMM + Co
+
+ct
+v
+ Ov
+r
+ap (`fus
+_g
+mm_comms`)
+!!! 
+
+fo
+    R
+qu
+r
+s `
+
+ab
+
+_sp=Tru
+` (
+
+ab
+
+d automat
+ca
+y). Th
+s pass 
+s a 
+o-op 
+f S
+qu
+
+c
+ Para
+
+
+
+sm has 
+ot b
+
+ app
+
+
+d.
+**What 
+t fus
+s.** Aft
+r S
+qu
+
+c
+ Para
+
+
+
+sm tra
+sforms th
+ graph, fus
+s GEMM k
+r
+
+
+s 
+
+th th
+
+surrou
+d
+
+g r
+duc
+-scatt
+r (output proj
+ct
+o
+) a
+d a
+-gath
+r (
+
+put proj
+ct
+o
+) us
+
+g
+`torch.ops.symm_m
+m` symm
+tr
+c-m
+mory pr
+m
+t
+v
+s, ov
+r
+app
+
+g commu
+
+cat
+o
+ a
+d computat
+o
+.
+Th
+s ov
+r
+ap 
+s o
+
+y prof
+tab
+
+ for 
+arg
+ `
+um_tok
+
+s`, so th
+ fus
+o
+ (a
+d pr
+c
+d
+
+g SP)
+
+s o
+
+y p
+rform
+d 
+
+ th
+ h
+gh
+r comp
+
+
+d ra
+g
+ abov
+ `PassCo
+f
+g.sp_m
+
+_tok
+
+_
+um`.
+Patt
+r
+s cov
+r
+d:
+- `GEMM → r
+duc
+-scatt
+r` → `fus
+d_matmu
+_r
+duc
+_scatt
+r`
+- `a
+-gath
+r → GEMM` → `a
+_gath
+r_matmu
+`
+- FP8 sca
+
+d var
+a
+ts of both patt
+r
+s
+Support
+d hard
+ar
+: NVIDIA CUDA 
+
+th symm
+tr
+c-m
+mory (`torch.d
+str
+but
+d._symm
+tr
+c_m
+mory`) support.
+O
+ B200, patt
+r
+-match
+
+g fp8 F
+ashI
+f
+r sca
+
+d MM 
+s 
+ot support
+d, so 
+t must b
+ d
+sab
+
+d
+([#27893](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/27893))
+```sh
+
+
+VLLM_DISABLED_KERNELS=F
+ashI
+f
+rFP8Sca
+
+dMML
+
+
+arK
+r
+
+
+ ...
 ```
+**Cod
+ 
+ocat
+o
+s.**
+- Pass: [`v
+m/comp
 
-**Code locations.**
+at
+o
+/pass
+s/fus
+o
+/co
 
-- Pass: [`vllm/compilation/passes/fusion/collective_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/collective_fusion.py)
-- Sequence parallelism pass: [`vllm/compilation/passes/fusion/sequence_parallelism.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/sequence_parallelism.py)
+ct
+v
+_fus
+o
+.py`](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
 
-### QK Norm + RoPE (`enable_qk_norm_rope_fusion`)
+/v
+m/comp
 
-!!! info
-    Only applicable to models that apply per-head RMSNorm to Q and K before rotary positional
-    embedding (e.g. Qwen). Not enabled by default at any optimization level due to perf issues on H100:
-    [#34391](https://github.com/vllm-project/vllm/issues/34391)
+at
+o
+/pass
+s/fus
+o
+/co
 
-**What it fuses.** Fuses the sequence: split QKV → reshape → Q/K RMSNorm → reshape → rotary
-embedding into a single `fused_qk_norm_rope` CUDA kernel.
+ct
+v
+_fus
+o
+.py)
+- S
+qu
 
-```text
-# Unfused:
-q, k, v = split(qkv)
-q_norm = rms_norm(q.view(heads))
-k_norm = rms_norm(k.view(kv_heads))
-q_rope, k_rope = rotary_embedding(q_norm, k_norm, ...)
+c
+ para
 
-# Fused:
-fused_qk_norm_rope(qkv, ...)
+
+
+sm pass: [`v
+m/comp
+
+at
+o
+/pass
+s/fus
+o
+/s
+qu
+
+c
+_para
+
+
+
+sm.py`](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/v
+m/comp
+
+at
+o
+/pass
+s/fus
+o
+/s
+qu
+
+c
+_para
+
+
+
+sm.py)
+### QK Norm + RoPE (`
+
+ab
+
+_qk_
+orm_rop
+_fus
+o
+`)
+!!! 
+
+fo
+    O
+
+y app
+
+cab
+
+ to mod
+
+s that app
+y p
+r-h
+ad RMSNorm to Q a
+d K b
+for
+ rotary pos
+t
+o
+a
+
+    
+mb
+dd
+
+g (
+.g. Q
+
+
+). Not 
+
+ab
+
+d by d
+fau
+t at a
+y opt
+m
+zat
+o
+ 
+
+v
+
+ du
+ to p
+rf 
+ssu
+s o
+ H100:
+    [#34391](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/34391)
+**What 
+t fus
+s.** Fus
+s th
+ s
+qu
+
+c
+: sp
+
+t QKV → r
+shap
+ → Q/K RMSNorm → r
+shap
+ → rotary
+
+mb
+dd
+
+g 
+
+to a s
+
+g
+
+ `fus
+d_qk_
+orm_rop
+` CUDA k
+r
+
+
+.
+```t
+xt
+# U
+fus
+d:
+q, k, v = sp
+
+t(qkv)
+q_
+orm = rms_
+orm(q.v
+
+
+(h
+ads))
+k_
+orm = rms_
+orm(k.v
+
+
+(kv_h
+ads))
+q_rop
+, k_rop
+ = rotary_
+mb
+dd
+
+g(q_
+orm, k_
+orm, ...)
+# Fus
+d:
+fus
+d_qk_
+orm_rop
+(qkv, ...)
 ```
+Support
+d hard
+ar
+: CUDA (sm80+) o
 
-Supported hardware: CUDA (sm80+) only, tested only on sm90 and sm100.
+y, t
+st
+d o
 
-**Code locations.**
+y o
+ sm90 a
+d sm100.
+**Cod
+ 
+ocat
+o
+s.**
+- Pass: [`v
+m/comp
 
-- Pass: [`vllm/compilation/passes/fusion/qk_norm_rope_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/qk_norm_rope_fusion.py)
-- CUDA kernel: [`csrc/ops.h`](https://github.com/vllm-project/vllm/blob/main/csrc/ops.h) (`fused_qk_norm_rope`)
+at
+o
+/pass
+s/fus
+o
+/qk_
+orm_rop
+_fus
+o
+.py`](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
 
-### RMSNorm + Quantization (`fuse_norm_quant`)
+/v
+m/comp
 
-!!! warning
-    On NVIDIA, Inductor actually generates a faster fused kernel than our custom CUDA kernel.
-    Hence, this fusion is only enabled when either `rms_norm` or `quant_fp8` is using a custom kernel.
+at
+o
+/pass
+s/fus
+o
+/qk_
+orm_rop
+_fus
+o
+.py)
+- CUDA k
+r
 
-**What it fuses.** Combines the custom `rms_norm` / `fused_add_rms_norm`
-operations with subsequent quantization into a single fused kernel,
-eliminating an intermediate read/write of the full-precision activation tensor.
-Two variants are fused:
 
-- *Plain RMSNorm + quant*: `rms_norm(x) → quant_fp8(y)`
-- *Fused-add RMSNorm + quant*: `fused_add_rms_norm(x, residual) → quant_fp8(y)` — also updates the residual in-place.
+: [`csrc/ops.h`](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
 
-Note that AITER fusions are currently in a separate pass in `vllm.compilation.passes.fusion.rocm_aiter_fusion`.
+/csrc/ops.h) (`fus
+d_qk_
+orm_rop
+`)
+### RMSNorm + Qua
+t
+zat
+o
+ (`fus
+_
+orm_qua
+t`)
+!!! 
+ar
 
-Supported quantization scheme/hardware combinations:
 
-- FP8 static per-tensor: CUDA & HIP kernel
-- FP8 dynamic per-token: CUDA & HIP kernel, AITER
-- FP8 dynamic per-token-group (128/64): CUDA & HIP kernel, AITER
+g
+    O
+ NVIDIA, I
+ductor actua
+y g
 
-**Code locations.**
 
-- Pass: [`vllm/compilation/passes/fusion/rms_quant_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rms_quant_fusion.py)
-- ROCm AITER pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py)
-- CUDA/HIP kernels: [`csrc/layernorm_quant_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_quant_kernels.cu)
+rat
+s a fast
+r fus
+d k
+r
 
-### SiLU+Mul + Quantization (`fuse_act_quant`)
 
-!!! warning
-    Same as `fuse_norm_quant`: on NVIDIA, Inductor generates a faster fused kernel than our custom ops.
-    This fusion is only enabled when either `silu_and_mul` or `quant_fp8` are using a custom kernel,
-    or for NVFP4-quantized models (where FP4 quant is always a custom op).
+ tha
+ our custom CUDA k
+r
 
-**What it fuses.** Fuses the `silu_and_mul` gate-up projection activation with subsequent quantization into a single kernel,
-avoiding materialization of the full-precision post-activation tensor.
 
-Note that AITER fusions are in a separate pass in `vllm.compilation.passes.fusion.rocm_aiter_fusion`.
+.
+    H
 
-Supported quantization scheme/hardware combinations:
+c
+, th
+s fus
+o
+ 
+s o
 
-- FP8 static per-tensor: CUDA & HIP kernel
-- NVFP4 dynamic: CUDA sm100+ only with FlashInfer
-- FP8 per-token-group (128): ROCm AITER only
+y 
 
-**Code locations.**
+ab
 
-- Pass: [`vllm/compilation/passes/fusion/act_quant_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/act_quant_fusion.py)
-- ROCm AITER pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py)
-- CUDA/HIP kernels: [`csrc/quantization/`](https://github.com/vllm-project/vllm/blob/main/csrc/quantization/)
+d 
+h
 
-### RMSNorm + Padding (`fuse_act_padding`)
+ 
 
-!!! info
-    ROCm/AITER-only. Targeted at GPT-OSS models.
+th
+r `rms_
+orm` or `qua
+t_fp8` 
+s us
 
-**What it fuses.** Fuses a residual add + RMSNorm with a subsequent padding operation that pads
-the hidden dimension to a multiple required by downstream AITER Triton GEMM kernels.
+g a custom k
+r
 
-Requires: AMD ROCm with AITER RMSNorm enabled. Enabled by default in optimization level O1 and above
-when the hidden size is 2880 and AITER Triton GEMMs *not* enabled.
 
-**Code locations.**
+.
+**What 
+t fus
+s.** Comb
 
-- Pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py) (`RocmAiterTritonAddRMSNormPadFusionPass`)
 
-## See Also
+s th
+ custom `rms_
+orm` / `fus
+d_add_rms_
+orm`
+op
+rat
+o
+s 
 
-- [Optimization Levels](optimization_levels.md) — high-level presets that set
-  fusion defaults.
-- [torch.compile in vLLM](torch_compile.md) — how the Inductor pass pipeline
-  works.
-- [Attention Backends](attention_backends.md) — attention-specific kernel
-  selection.
+th subs
+qu
+
+t qua
+t
+zat
+o
+ 
+
+to a s
+
+g
+
+ fus
+d k
+r
+
+
+,
+
+
+
+m
+
+at
+
+g a
+ 
+
+t
+rm
+d
+at
+ r
+ad/
+r
+t
+ of th
+ fu
+-pr
+c
+s
+o
+ act
+vat
+o
+ t
+
+sor.
+T
+o var
+a
+ts ar
+ fus
+d:
+- *P
+a
+
+ RMSNorm + qua
+t*: `rms_
+orm(x) → qua
+t_fp8(y)`
+- *Fus
+d-add RMSNorm + qua
+t*: `fus
+d_add_rms_
+orm(x, r
+s
+dua
+) → qua
+t_fp8(y)` — a
+so updat
+s th
+ r
+s
+dua
+ 
+
+-p
+ac
+.
+Not
+ that AITER fus
+o
+s ar
+ curr
+
+t
+y 
+
+ a s
+parat
+ pass 
+
+ `v
+m.comp
+
+at
+o
+.pass
+s.fus
+o
+.rocm_a
+t
+r_fus
+o
+`.
+Support
+d qua
+t
+zat
+o
+ sch
+m
+/hard
+ar
+ comb
+
+at
+o
+s:
+- FP8 stat
+c p
+r-t
+
+sor: CUDA & HIP k
+r
+
+
+
+- FP8 dy
+am
+c p
+r-tok
+
+: CUDA & HIP k
+r
+
+
+, AITER
+- FP8 dy
+am
+c p
+r-tok
+
+-group (128/64): CUDA & HIP k
+r
+
+
+, AITER
+**Cod
+ 
+ocat
+o
+s.**
+- Pass: [`v
+m/comp
+
+at
+o
+/pass
+s/fus
+o
+/rms_qua
+t_fus
+o
+.py`](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/v
+m/comp
+
+at
+o
+/pass
+s/fus
+o
+/rms_qua
+t_fus
+o
+.py)
+- ROCm AITER pass: [`v
+m/comp
+
+at
+o
+/pass
+s/fus
+o
+/rocm_a
+t
+r_fus
+o
+.py`](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/v
+m/comp
+
+at
+o
+/pass
+s/fus
+o
+/rocm_a
+t
+r_fus
+o
+.py)
+- CUDA/HIP k
+r
+
+
+s: [`csrc/
+ay
+r
+orm_qua
+t_k
+r
+
+
+s.cu`](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/csrc/
+ay
+r
+orm_qua
+t_k
+r
+
+
+s.cu)
+### S
+LU+Mu
+ + Qua
+t
+zat
+o
+ (`fus
+_act_qua
+t`)
+!!! 
+ar
+
+
+g
+    Sam
+ as `fus
+_
+orm_qua
+t`: o
+ NVIDIA, I
+ductor g
+
+
+rat
+s a fast
+r fus
+d k
+r
+
+
+ tha
+ our custom ops.
+    Th
+s fus
+o
+ 
+s o
+
+y 
+
+ab
+
+d 
+h
+
+ 
+
+th
+r `s
+
+u_a
+d_mu
+` or `qua
+t_fp8` ar
+ us
+
+g a custom k
+r
+
+
+,
+    or for NVFP4-qua
+t
+z
+d mod
+
+s (
+h
+r
+ FP4 qua
+t 
+s a
+
+ays a custom op).
+**What 
+t fus
+s.** Fus
+s th
+ `s
+
+u_a
+d_mu
+` gat
+-up proj
+ct
+o
+ act
+vat
+o
+ 
+
+th subs
+qu
+
+t qua
+t
+zat
+o
+ 
+
+to a s
+
+g
+
+ k
+r
+
+
+,
+avo
+d
+
+g mat
+r
+a
+
+zat
+o
+ of th
+ fu
+-pr
+c
+s
+o
+ post-act
+vat
+o
+ t
+
+sor.
+Not
+ that AITER fus
+o
+s ar
+ 
+
+ a s
+parat
+ pass 
+
+ `v
+m.comp
+
+at
+o
+.pass
+s.fus
+o
+.rocm_a
+t
+r_fus
+o
+`.
+Support
+d qua
+t
+zat
+o
+ sch
+m
+/hard
+ar
+ comb
+
+at
+o
+s:
+- FP8 stat
+c p
+r-t
+
+sor: CUDA & HIP k
+r
+
+
+
+- NVFP4 dy
+am
+c: CUDA sm100+ o
+
+y 
+
+th F
+ashI
+f
+r
+- FP8 p
+r-tok
+
+-group (128): ROCm AITER o
+
+y
+**Cod
+ 
+ocat
+o
+s.**
+- Pass: [`v
+m/comp
+
+at
+o
+/pass
+s/fus
+o
+/act_qua
+t_fus
+o
+.py`](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/v
+m/comp
+
+at
+o
+/pass
+s/fus
+o
+/act_qua
+t_fus
+o
+.py)
+- ROCm AITER pass: [`v
+m/comp
+
+at
+o
+/pass
+s/fus
+o
+/rocm_a
+t
+r_fus
+o
+.py`](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/v
+m/comp
+
+at
+o
+/pass
+s/fus
+o
+/rocm_a
+t
+r_fus
+o
+.py)
+- CUDA/HIP k
+r
+
+
+s: [`csrc/qua
+t
+zat
+o
+/`](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/csrc/qua
+t
+zat
+o
+/)
+### RMSNorm + Padd
+
+g (`fus
+_act_padd
+
+g`)
+!!! 
+
+fo
+    ROCm/AITER-o
+
+y. Targ
+t
+d at GPT-OSS mod
+
+s.
+**What 
+t fus
+s.** Fus
+s a r
+s
+dua
+ add + RMSNorm 
+
+th a subs
+qu
+
+t padd
+
+g op
+rat
+o
+ that pads
+th
+ h
+dd
+
+ d
+m
+
+s
+o
+ to a mu
+t
+p
+
+ r
+qu
+r
+d by do
+
+str
+am AITER Tr
+to
+ GEMM k
+r
+
+
+s.
+R
+qu
+r
+s: AMD ROCm 
+
+th AITER RMSNorm 
+
+ab
+
+d. E
+ab
+
+d by d
+fau
+t 
+
+ opt
+m
+zat
+o
+ 
+
+v
+
+ O1 a
+d abov
+
+
+h
+
+ th
+ h
+dd
+
+ s
+z
+ 
+s 2880 a
+d AITER Tr
+to
+ GEMMs *
+ot* 
+
+ab
+
+d.
+**Cod
+ 
+ocat
+o
+s.**
+- Pass: [`v
+m/comp
+
+at
+o
+/pass
+s/fus
+o
+/rocm_a
+t
+r_fus
+o
+.py`](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/v
+m/comp
+
+at
+o
+/pass
+s/fus
+o
+/rocm_a
+t
+r_fus
+o
+.py) (`RocmA
+t
+rTr
+to
+AddRMSNormPadFus
+o
+Pass`)
+## S
+ A
+so
+- [Opt
+m
+zat
+o
+ L
+v
+
+s](opt
+m
+zat
+o
+_
+
+v
+
+s.md) — h
+gh-
+
+v
+
+ pr
+s
+ts that s
+t
+  fus
+o
+ d
+fau
+ts.
+- [torch.comp
+
+
+ 
+
+ vLLM](torch_comp
+
+
+.md) — ho
+ th
+ I
+ductor pass p
+p
+
+
+
+
+
+  
+orks.
+- [Att
+
+t
+o
+ Back
+
+ds](att
+
+t
+o
+_back
+
+ds.md) — att
+
+t
+o
+-sp
+c
+f
+c k
+r
+
+
+
+  s
+
+
+ct
+o
+.

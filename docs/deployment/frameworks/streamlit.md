@@ -1,38 +1,297 @@
-# Streamlit
+# Str
+am
 
-[Streamlit](https://github.com/streamlit/streamlit) lets you transform Python scripts into interactive web apps in minutes, instead of weeks. Build dashboards, generate reports, or create chat apps.
+t
+[Str
+am
 
-It can be quickly integrated with vLLM as a backend API server, enabling powerful LLM inference via API calls.
+t](https://g
+thub.com/str
+am
 
-## Prerequisites
+t/str
+am
 
-Set up the vLLM environment by installing all required packages:
+t) 
 
+ts you tra
+sform Pytho
+ scr
+pts 
+
+to 
+
+t
+ract
+v
+ 
+
+b apps 
+
+ m
+
+ut
+s, 
+
+st
+ad of 
+
+ks. Bu
+
+d dashboards, g
+
+
+rat
+ r
+ports, or cr
+at
+ chat apps.
+It ca
+ b
+ qu
+ck
+y 
+
+t
+grat
+d 
+
+th vLLM as a back
+
+d API s
+rv
+r, 
+
+ab
+
+
+g po
+
+rfu
+ LLM 
+
+f
+r
+
+c
+ v
+a API ca
+s.
+## Pr
+r
+qu
+s
+t
+s
+S
+t up th
+ vLLM 
+
+v
+ro
+m
+
+t by 
+
+sta
+
+
+g a
+ r
+qu
+r
+d packag
+s:
 ```bash
-pip install vllm streamlit openai
+p
+p 
+
+sta
+ v
+m str
+am
+
+t op
+
+a
+
 ```
+## D
+p
+oy
+1. Start th
+ vLLM s
+rv
+r 
 
-## Deploy
+th a support
+d chat comp
 
-1. Start the vLLM server with a supported chat completion model, e.g.
+t
+o
+ mod
 
+, 
+.g.
     ```bash
-    vllm serve Qwen/Qwen1.5-0.5B-Chat
+    v
+m s
+rv
+ Q
+
+
+/Q
+
+
+1.5-0.5B-Chat
     ```
+1. Us
+ th
+ scr
+pt: [
+xamp
 
-1. Use the script: [examples/online_serving/streamlit_openai_chatbot_webserver.py](../../../examples/online_serving/streamlit_openai_chatbot_webserver.py)
+s/o
 
-1. Start the streamlit web UI and start to chat:
 
+
+
+_s
+rv
+
+g/str
+am
+
+t_op
+
+a
+_chatbot_
+
+bs
+rv
+r.py](../../../
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/str
+am
+
+t_op
+
+a
+_chatbot_
+
+bs
+rv
+r.py)
+1. Start th
+ str
+am
+
+t 
+
+b UI a
+d start to chat:
     ```bash
-    streamlit run streamlit_openai_chatbot_webserver.py
+    str
+am
 
-    # or specify the VLLM_API_BASE or VLLM_API_KEY
-    VLLM_API_BASE="http://vllm-server-host:vllm-server-port/v1" \
-        streamlit run streamlit_openai_chatbot_webserver.py
+t ru
+ str
+am
 
-    # start with debug mode to view more details
-    streamlit run streamlit_openai_chatbot_webserver.py --logger.level=debug
+t_op
+
+a
+_chatbot_
+
+bs
+rv
+r.py
+    # or sp
+c
+fy th
+ VLLM_API_BASE or VLLM_API_KEY
+    VLLM_API_BASE="http://v
+m-s
+rv
+r-host:v
+m-s
+rv
+r-port/v1" \
+        str
+am
+
+t ru
+ str
+am
+
+t_op
+
+a
+_chatbot_
+
+bs
+rv
+r.py
+    # start 
+
+th d
+bug mod
+ to v
+
+
+ mor
+ d
+ta
+
+s
+    str
+am
+
+t ru
+ str
+am
+
+t_op
+
+a
+_chatbot_
+
+bs
+rv
+r.py --
+ogg
+r.
+
+v
+
+=d
+bug
     ```
+    ![Chat 
 
-    ![Chat with vLLM assistant in Streamlit](../../assets/deployment/streamlit-chat.png)
+th vLLM ass
+sta
+t 
+
+ Str
+am
+
+t](../../ass
+ts/d
+p
+oym
+
+t/str
+am
+
+t-chat.p
+g)

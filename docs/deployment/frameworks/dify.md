@@ -1,57 +1,451 @@
-# Dify
+# D
+fy
+[D
+fy](https://g
+thub.com/
+a
+gg
 
-[Dify](https://github.com/langgenius/dify) is an open-source LLM app development platform. Its intuitive interface combines agentic AI workflow, RAG pipeline, agent capabilities, model management, observability features, and more, allowing you to quickly move from prototype to production.
 
-It supports vLLM as a model provider to efficiently serve large language models.
+us/d
+fy) 
+s a
+ op
 
-This guide walks you through deploying Dify using a vLLM backend.
+-sourc
+ LLM app d
+v
 
-## Prerequisites
+opm
 
-Set up the vLLM environment:
+t p
+atform. Its 
 
+tu
+t
+v
+ 
+
+t
+rfac
+ comb
+
+
+s ag
+
+t
+c AI 
+orkf
+o
+, RAG p
+p
+
+
+
+
+, ag
+
+t capab
+
+
+t
+
+s, mod
+
+ ma
+ag
+m
+
+t, obs
+rvab
+
+
+ty f
+atur
+s, a
+d mor
+, a
+o
+
+
+g you to qu
+ck
+y mov
+ from prototyp
+ to product
+o
+.
+It supports vLLM as a mod
+
+ prov
+d
+r to 
+ff
+c
+
+
+t
+y s
+rv
+ 
+arg
+ 
+a
+guag
+ mod
+
+s.
+Th
+s gu
+d
+ 
+a
+ks you through d
+p
+oy
+
+g D
+fy us
+
+g a vLLM back
+
+d.
+## Pr
+r
+qu
+s
+t
+s
+S
+t up th
+ vLLM 
+
+v
+ro
+m
+
+t:
 ```bash
-pip install vllm
+p
+p 
+
+sta
+ v
+m
 ```
+A
+d 
 
-And install [Docker](https://docs.docker.com/engine/install/) and [Docker Compose](https://docs.docker.com/compose/install/).
+sta
+ [Dock
+r](https://docs.dock
+r.com/
 
-## Deploy
+g
 
-1. Start the vLLM server with the supported chat completion model, e.g.
 
+/
+
+sta
+/) a
+d [Dock
+r Compos
+](https://docs.dock
+r.com/compos
+/
+
+sta
+/).
+## D
+p
+oy
+1. Start th
+ vLLM s
+rv
+r 
+
+th th
+ support
+d chat comp
+
+t
+o
+ mod
+
+, 
+.g.
     ```bash
-    vllm serve Qwen/Qwen1.5-7B-Chat
+    v
+m s
+rv
+ Q
+
+
+/Q
+
+
+1.5-7B-Chat
     ```
+1. Start th
+ D
+fy s
+rv
+r 
 
-1. Start the Dify server with docker compose ([details](https://github.com/langgenius/dify?tab=readme-ov-file#quick-start)):
+th dock
+r compos
+ ([d
+ta
 
+s](https://g
+thub.com/
+a
+gg
+
+
+us/d
+fy?tab=r
+adm
+-ov-f
+
+
+#qu
+ck-start)):
     ```bash
-    git clone https://github.com/langgenius/dify.git
-    cd dify
-    cd docker
-    cp .env.example .env
-    docker compose up -d
+    g
+t c
+o
+
+ https://g
+thub.com/
+a
+gg
+
+
+us/d
+fy.g
+t
+    cd d
+fy
+    cd dock
+r
+    cp .
+
+v.
+xamp
+
+ .
+
+v
+    dock
+r compos
+ up -d
     ```
+1. Op
 
-1. Open the browser to access `http://localhost/install`, config the basic login information and login.
+ th
+ bro
+s
+r to acc
+ss `http://
+oca
+host/
 
-1. In the top-right user menu (under the profile icon), go to Settings, then click `Model Provider`, and locate the `vLLM` provider to install it.
+sta
+`, co
+f
+g th
+ bas
+c 
+og
 
-1. Fill in the model provider details as follows:
+ 
 
-    - **Model Type**: `LLM`
-    - **Model Name**: `Qwen/Qwen1.5-7B-Chat`
-    - **API Endpoint URL**: `http://{vllm_server_host}:{vllm_server_port}/v1`
-    - **Model Name for API Endpoint**: `Qwen/Qwen1.5-7B-Chat`
-    - **Completion Mode**: `Completion`
+format
+o
+ a
+d 
+og
 
-    ![Dify settings screen](../../assets/deployment/dify-settings.png)
+.
+1. I
+ th
+ top-r
+ght us
+r m
 
-1. To create a test chatbot, go to `Studio → Chatbot → Create from Blank`, then select Chatbot as the type:
+u (u
+d
+r th
+ prof
 
-    ![Dify create chatbot screen](../../assets/deployment/dify-create-chatbot.png)
 
-1. Click the chatbot you just created to open the chat interface and start interacting with the model:
+ 
+co
+), go to S
+tt
 
-    ![Dify chat screen](../../assets/deployment/dify-chat.png)
+gs, th
+
+ c
+
+ck `Mod
+
+ Prov
+d
+r`, a
+d 
+ocat
+ th
+ `vLLM` prov
+d
+r to 
+
+sta
+ 
+t.
+1. F
+
+ 
+
+ th
+ mod
+
+ prov
+d
+r d
+ta
+
+s as fo
+o
+s:
+    - **Mod
+
+ Typ
+**: `LLM`
+    - **Mod
+
+ Nam
+**: `Q
+
+
+/Q
+
+
+1.5-7B-Chat`
+    - **API E
+dpo
+
+t URL**: `http://{v
+m_s
+rv
+r_host}:{v
+m_s
+rv
+r_port}/v1`
+    - **Mod
+
+ Nam
+ for API E
+dpo
+
+t**: `Q
+
+
+/Q
+
+
+1.5-7B-Chat`
+    - **Comp
+
+t
+o
+ Mod
+**: `Comp
+
+t
+o
+`
+    ![D
+fy s
+tt
+
+gs scr
+
+](../../ass
+ts/d
+p
+oym
+
+t/d
+fy-s
+tt
+
+gs.p
+g)
+1. To cr
+at
+ a t
+st chatbot, go to `Stud
+o → Chatbot → Cr
+at
+ from B
+a
+k`, th
+
+ s
+
+
+ct Chatbot as th
+ typ
+:
+    ![D
+fy cr
+at
+ chatbot scr
+
+](../../ass
+ts/d
+p
+oym
+
+t/d
+fy-cr
+at
+-chatbot.p
+g)
+1. C
+
+ck th
+ chatbot you just cr
+at
+d to op
+
+ th
+ chat 
+
+t
+rfac
+ a
+d start 
+
+t
+ract
+
+g 
+
+th th
+ mod
+
+:
+    ![D
+fy chat scr
+
+](../../ass
+ts/d
+p
+oym
+
+t/d
+fy-chat.p
+g)

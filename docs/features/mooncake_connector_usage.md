@@ -1,69 +1,706 @@
-# MooncakeConnector Usage Guide
+# Moo
+cak
+Co
 
-## About Mooncake
+ctor Usag
+ Gu
+d
 
-Mooncake aims to enhance the inference efficiency of large language models (LLMs), especially in slow object storage environments, by constructing a multi-level caching pool on high-speed interconnected DRAM/SSD resources. Compared to traditional caching systems, Mooncake utilizes (GPUDirect) RDMA technology to transfer data directly in a zero-copy manner, while maximizing the use of multi-NIC resources on a single machine.
+## About Moo
+cak
 
-For more details about Mooncake, please refer to [Mooncake project](https://github.com/kvcache-ai/Mooncake) and [Mooncake documents](https://kvcache-ai.github.io/Mooncake/).
+Moo
+cak
+ a
+ms to 
 
-## Prerequisites
+ha
+c
+ th
+ 
 
-### Installation
+f
+r
 
-Install mooncake through pip: `uv pip install mooncake-transfer-engine`.
+c
+ 
+ff
+c
 
-Refer to [Mooncake official repository](https://github.com/kvcache-ai/Mooncake) for more installation instructions
 
-## Usage
+cy of 
+arg
+ 
+a
+guag
+ mod
 
-### Prefiller Node (192.168.0.2)
+s (LLMs), 
+sp
+c
+a
+y 
 
+ s
+o
+ obj
+ct storag
+ 
+
+v
+ro
+m
+
+ts, by co
+struct
+
+g a mu
+t
+-
+
+v
+
+ cach
+
+g poo
+ o
+ h
+gh-sp
+d 
+
+t
+rco
+
+ct
+d DRAM/SSD r
+sourc
+s. Compar
+d to trad
+t
+o
+a
+ cach
+
+g syst
+ms, Moo
+cak
+ ut
+
+
+z
+s (GPUD
+r
+ct) RDMA t
+ch
+o
+ogy to tra
+sf
+r data d
+r
+ct
+y 
+
+ a z
+ro-copy ma
+
+r, 
+h
+
+
+ max
+m
+z
+
+g th
+ us
+ of mu
+t
+-NIC r
+sourc
+s o
+ a s
+
+g
+
+ mach
+
+
+.
+For mor
+ d
+ta
+
+s about Moo
+cak
+, p
+
+as
+ r
+f
+r to [Moo
+cak
+ proj
+ct](https://g
+thub.com/kvcach
+-a
+/Moo
+cak
+) a
+d [Moo
+cak
+ docum
+
+ts](https://kvcach
+-a
+.g
+thub.
+o/Moo
+cak
+/).
+## Pr
+r
+qu
+s
+t
+s
+### I
+sta
+at
+o
+
+I
+sta
+ moo
+cak
+ through p
+p: `uv p
+p 
+
+sta
+ moo
+cak
+-tra
+sf
+r-
+
+g
+
+
+`.
+R
+f
+r to [Moo
+cak
+ off
+c
+a
+ r
+pos
+tory](https://g
+thub.com/kvcach
+-a
+/Moo
+cak
+) for mor
+ 
+
+sta
+at
+o
+ 
+
+struct
+o
+s
+## Usag
+
+### Pr
+f
+
+
+r Nod
+ (192.168.0.2)
 ```bash
-vllm serve Qwen/Qwen2.5-7B-Instruct --port 8010 --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_producer"}'
+v
+m s
+rv
+ Q
+
+
+/Q
+
+
+2.5-7B-I
+struct --port 8010 --kv-tra
+sf
+r-co
+f
+g '{"kv_co
+
+ctor":"Moo
+cak
+Co
+
+ctor","kv_ro
+
+":"kv_produc
+r"}'
 ```
-
-### Decoder Node (192.168.0.3)
-
+### D
+cod
+r Nod
+ (192.168.0.3)
 ```bash
-vllm serve Qwen/Qwen2.5-7B-Instruct --port 8020 --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_consumer"}'
-```
+v
+m s
+rv
+ Q
 
+
+/Q
+
+
+2.5-7B-I
+struct --port 8020 --kv-tra
+sf
+r-co
+f
+g '{"kv_co
+
+ctor":"Moo
+cak
+Co
+
+ctor","kv_ro
+
+":"kv_co
+sum
+r"}'
+```
 ### Proxy
-
 ```bash
-python examples/online_serving/disaggregated_serving/mooncake_connector/mooncake_connector_proxy.py --prefill http://192.168.0.2:8010 --decode http://192.168.0.3:8020
+pytho
+ 
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/d
+saggr
+gat
+d_s
+rv
+
+g/moo
+cak
+_co
+
+ctor/moo
+cak
+_co
+
+ctor_proxy.py --pr
+f
+
+ http://192.168.0.2:8010 --d
+cod
+ http://192.168.0.3:8020
 ```
+No
+ you ca
+ s
 
-Now you can send requests to the proxy server through port 8000.
+d r
+qu
+sts to th
+ proxy s
+rv
+r through port 8000.
+## E
+v
+ro
+m
 
-## Environment Variables
+t Var
+ab
 
-- `VLLM_MOONCAKE_BOOTSTRAP_PORT`: Port for Mooncake bootstrap server
-    - Default: 8998
-    - Required only for prefiller instances
-    - For headless instances, must be the same as the master instance
-    - Each instance needs a unique port on its host; using the same port number across different hosts is fine
+s
+- `VLLM_MOONCAKE_BOOTSTRAP_PORT`: Port for Moo
+cak
+ bootstrap s
+rv
+r
+    - D
+fau
+t: 8998
+    - R
+qu
+r
+d o
 
-- `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`: Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request. (Optional)
-    - Default: 480
-    - If a request is aborted and the decoder has not yet notified the prefiller, the prefill instance will release its KV-cache blocks after this timeout to avoid holding them indefinitely.
+y for pr
+f
 
-## KV Transfer Config
 
-### KV Role Options
+r 
 
-- **kv_producer**: For prefiller instances that generate KV caches
-- **kv_consumer**: For decoder instances that consume KV caches from prefiller
-- **kv_both**: Enables symmetric functionality where the connector can act as both producer and consumer. This provides flexibility for experimental setups and scenarios where the role distinction is not predetermined.
+sta
+c
+s
+    - For h
+ad
 
-### kv_connector_extra_config
+ss 
 
-- **num_workers**: Size of thread pool for one prefiller worker to transfer KV caches by mooncake. (default 10)
-- **mooncake_protocol**: Mooncake connector protocol. (default "rdma")
+sta
+c
+s, must b
+ th
+ sam
+ as th
+ mast
+r 
 
-## Example Scripts/Code
+sta
+c
 
-Refer to these example scripts in the vLLM repository:
+    - Each 
 
-- [run_mooncake_connector.sh](../../examples/online_serving/disaggregated_serving/mooncake_connector/run_mooncake_connector.sh)
-- [mooncake_connector_proxy.py](../../examples/online_serving/disaggregated_serving/mooncake_connector/mooncake_connector_proxy.py)
+sta
+c
+ 
+
+ds a u
+
+qu
+ port o
+ 
+ts host; us
+
+g th
+ sam
+ port 
+umb
+r across d
+ff
+r
+
+t hosts 
+s f
+
+
+
+- `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`: T
+m
+out (
+
+ s
+co
+ds) for automat
+ca
+y r
+
+
+as
+
+g th
+ pr
+f
+
+
+r’s KV cach
+ for a part
+cu
+ar r
+qu
+st. (Opt
+o
+a
+)
+    - D
+fau
+t: 480
+    - If a r
+qu
+st 
+s abort
+d a
+d th
+ d
+cod
+r has 
+ot y
+t 
+ot
+f
+
+d th
+ pr
+f
+
+
+r, th
+ pr
+f
+
+ 
+
+sta
+c
+ 
+
+
+ r
+
+
+as
+ 
+ts KV-cach
+ b
+ocks aft
+r th
+s t
+m
+out to avo
+d ho
+d
+
+g th
+m 
+
+d
+f
+
+
+t
+
+y.
+## KV Tra
+sf
+r Co
+f
+g
+### KV Ro
+
+ Opt
+o
+s
+- **kv_produc
+r**: For pr
+f
+
+
+r 
+
+sta
+c
+s that g
+
+
+rat
+ KV cach
+s
+- **kv_co
+sum
+r**: For d
+cod
+r 
+
+sta
+c
+s that co
+sum
+ KV cach
+s from pr
+f
+
+
+r
+- **kv_both**: E
+ab
+
+s symm
+tr
+c fu
+ct
+o
+a
+
+ty 
+h
+r
+ th
+ co
+
+ctor ca
+ act as both produc
+r a
+d co
+sum
+r. Th
+s prov
+d
+s f
+
+x
+b
+
+
+ty for 
+xp
+r
+m
+
+ta
+ s
+tups a
+d sc
+
+ar
+os 
+h
+r
+ th
+ ro
+
+ d
+st
+
+ct
+o
+ 
+s 
+ot pr
+d
+t
+rm
+
+
+d.
+### kv_co
+
+ctor_
+xtra_co
+f
+g
+- **
+um_
+ork
+rs**: S
+z
+ of thr
+ad poo
+ for o
+
+ pr
+f
+
+
+r 
+ork
+r to tra
+sf
+r KV cach
+s by moo
+cak
+. (d
+fau
+t 10)
+- **moo
+cak
+_protoco
+**: Moo
+cak
+ co
+
+ctor protoco
+. (d
+fau
+t "rdma")
+## Examp
+
+ Scr
+pts/Cod
+
+R
+f
+r to th
+s
+ 
+xamp
+
+ scr
+pts 
+
+ th
+ vLLM r
+pos
+tory:
+- [ru
+_moo
+cak
+_co
+
+ctor.sh](../../
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/d
+saggr
+gat
+d_s
+rv
+
+g/moo
+cak
+_co
+
+ctor/ru
+_moo
+cak
+_co
+
+ctor.sh)
+- [moo
+cak
+_co
+
+ctor_proxy.py](../../
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/d
+saggr
+gat
+d_s
+rv
+
+g/moo
+cak
+_co
+
+ctor/moo
+cak
+_co
+
+ctor_proxy.py)

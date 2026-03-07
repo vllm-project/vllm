@@ -1,41 +1,446 @@
-# Reproducibility
+# R
+produc
+b
 
-vLLM does not guarantee the reproducibility of the results by default, for the sake of performance. To achieve
-reproducible results:
 
-- In offline mode, you can either set `VLLM_ENABLE_V1_MULTIPROCESSING=0` which makes scheduling deterministic,
-  or enable [batch invariance](../features/batch_invariance.md) to make the outputs insensitive to scheduling.
-- In online mode, you can only enable [batch invariance](../features/batch_invariance.md).
+ty
+vLLM do
+s 
+ot guara
+t
+ th
+ r
+produc
+b
 
-Example: [examples/offline_inference/reproducibility.py](../../examples/offline_inference/reproducibility.py)
 
-!!! warning
+ty of th
+ r
+su
+ts by d
+fau
+t, for th
+ sak
+ of p
+rforma
+c
+. To ach
 
-    Setting `VLLM_ENABLE_V1_MULTIPROCESSING=0` will change the random state of user code 
-    (i.e. the code that constructs [LLM][vllm.LLM] class).
+v
 
-!!! note
+r
+produc
+b
 
-    Even with the above settings, vLLM only provides reproducibility
-    when it runs on the same hardware and the same vLLM version.
+ r
+su
+ts:
+- I
+ off
 
-## Setting the global seed
 
-The `seed` parameter in vLLM is used to control the random states for various random number generators.
 
-If a specific seed value is provided, the random states for `random`, `np.random`, and `torch.manual_seed` will be set accordingly.
+ mod
+, you ca
+ 
 
-### Default Behavior
+th
+r s
+t `VLLM_ENABLE_V1_MULTIPROCESSING=0` 
+h
+ch mak
+s sch
+du
 
-In V1, the `seed` parameter defaults to `0` which sets the random state for each worker, so the results will remain consistent for each vLLM run even if `temperature > 0`.
 
-It is impossible to un-specify a seed for V1 because different workers need to sample the same outputs
-for workflows such as speculative decoding. For more information, see: <https://github.com/vllm-project/vllm/pull/17929>
+g d
+t
+rm
 
-!!! note
 
-    The random state in user code (i.e. the code that constructs [LLM][vllm.LLM] class) is updated by vLLM 
-    only if the workers are run in the same process as user code, i.e.: `VLLM_ENABLE_V1_MULTIPROCESSING=0`.
+st
+c,
+  or 
 
-    By default, `VLLM_ENABLE_V1_MULTIPROCESSING=1` so you can use vLLM without having to worry about
-    accidentally making deterministic subsequent operations that rely on random state.
+ab
+
+ [batch 
+
+var
+a
+c
+](../f
+atur
+s/batch_
+
+var
+a
+c
+.md) to mak
+ th
+ outputs 
+
+s
+
+s
+t
+v
+ to sch
+du
+
+
+g.
+- I
+ o
+
+
+
+
+ mod
+, you ca
+ o
+
+y 
+
+ab
+
+ [batch 
+
+var
+a
+c
+](../f
+atur
+s/batch_
+
+var
+a
+c
+.md).
+Examp
+
+: [
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/r
+produc
+b
+
+
+ty.py](../../
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/r
+produc
+b
+
+
+ty.py)
+!!! 
+ar
+
+
+g
+    S
+tt
+
+g `VLLM_ENABLE_V1_MULTIPROCESSING=0` 
+
+
+ cha
+g
+ th
+ ra
+dom stat
+ of us
+r cod
+
+    (
+.
+. th
+ cod
+ that co
+structs [LLM][v
+m.LLM] c
+ass).
+!!! 
+ot
+
+    Ev
+
+ 
+
+th th
+ abov
+ s
+tt
+
+gs, vLLM o
+
+y prov
+d
+s r
+produc
+b
+
+
+ty
+    
+h
+
+ 
+t ru
+s o
+ th
+ sam
+ hard
+ar
+ a
+d th
+ sam
+ vLLM v
+rs
+o
+.
+## S
+tt
+
+g th
+ g
+oba
+ s
+d
+Th
+ `s
+d` param
+t
+r 
+
+ vLLM 
+s us
+d to co
+tro
+ th
+ ra
+dom stat
+s for var
+ous ra
+dom 
+umb
+r g
+
+
+rators.
+If a sp
+c
+f
+c s
+d va
+u
+ 
+s prov
+d
+d, th
+ ra
+dom stat
+s for `ra
+dom`, `
+p.ra
+dom`, a
+d `torch.ma
+ua
+_s
+d` 
+
+
+ b
+ s
+t accord
+
+g
+y.
+### D
+fau
+t B
+hav
+or
+I
+ V1, th
+ `s
+d` param
+t
+r d
+fau
+ts to `0` 
+h
+ch s
+ts th
+ ra
+dom stat
+ for 
+ach 
+ork
+r, so th
+ r
+su
+ts 
+
+
+ r
+ma
+
+ co
+s
+st
+
+t for 
+ach vLLM ru
+ 
+v
+
+ 
+f `t
+mp
+ratur
+ 
+ 0`.
+It 
+s 
+mposs
+b
+
+ to u
+-sp
+c
+fy a s
+d for V1 b
+caus
+ d
+ff
+r
+
+t 
+ork
+rs 
+
+d to samp
+
+ th
+ sam
+ outputs
+for 
+orkf
+o
+s such as sp
+cu
+at
+v
+ d
+cod
+
+g. For mor
+ 
+
+format
+o
+, s
+: 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/17929
+
+!!! 
+ot
+
+    Th
+ ra
+dom stat
+ 
+
+ us
+r cod
+ (
+.
+. th
+ cod
+ that co
+structs [LLM][v
+m.LLM] c
+ass) 
+s updat
+d by vLLM
+    o
+
+y 
+f th
+ 
+ork
+rs ar
+ ru
+ 
+
+ th
+ sam
+ proc
+ss as us
+r cod
+, 
+.
+.: `VLLM_ENABLE_V1_MULTIPROCESSING=0`.
+    By d
+fau
+t, `VLLM_ENABLE_V1_MULTIPROCESSING=1` so you ca
+ us
+ vLLM 
+
+thout hav
+
+g to 
+orry about
+    acc
+d
+
+ta
+y mak
+
+g d
+t
+rm
+
+
+st
+c subs
+qu
+
+t op
+rat
+o
+s that r
+
+y o
+ ra
+dom stat
+.

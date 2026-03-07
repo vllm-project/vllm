@@ -1,149 +1,1951 @@
-# Incremental Compilation Workflow
+# I
+cr
+m
 
-When working on vLLM's C++/CUDA kernels located in the `csrc/` directory, recompiling the entire project with `uv pip install -e .` for every change can be time-consuming. An incremental compilation workflow using CMake allows for faster iteration by only recompiling the necessary components after an initial setup. This guide details how to set up and use such a workflow, which complements your editable Python installation.
+ta
+ Comp
 
-## Prerequisites
+at
+o
+ Workf
+o
 
-Before setting up the incremental build:
+Wh
 
-1. **vLLM Editable Install:** Ensure you have vLLM installed from source in an editable mode. Using pre-compiled wheels for the initial editable setup can be faster, as the CMake workflow will handle subsequent kernel recompilations.
+ 
+ork
 
-    ```console
-    uv venv --python 3.12 --seed
-    source .venv/bin/activate
-    VLLM_USE_PRECOMPILED=1 uv pip install -U -e . --torch-backend=auto
+g o
+ vLLM's C++/CUDA k
+r
+
+
+s 
+ocat
+d 
+
+ th
+ `csrc/` d
+r
+ctory, r
+comp
+
+
+
+g th
+ 
+
+t
+r
+ proj
+ct 
+
+th `uv p
+p 
+
+sta
+ -
+ .` for 
+v
+ry cha
+g
+ ca
+ b
+ t
+m
+-co
+sum
+
+g. A
+ 
+
+cr
+m
+
+ta
+ comp
+
+at
+o
+ 
+orkf
+o
+ us
+
+g CMak
+ a
+o
+s for fast
+r 
+t
+rat
+o
+ by o
+
+y r
+comp
+
+
+
+g th
+ 
+
+c
+ssary compo
+
+
+ts aft
+r a
+ 
+
+
+t
+a
+ s
+tup. Th
+s gu
+d
+ d
+ta
+
+s ho
+ to s
+t up a
+d us
+ such a 
+orkf
+o
+, 
+h
+ch comp
+
+m
+
+ts your 
+d
+tab
+
+ Pytho
+ 
+
+sta
+at
+o
+.
+## Pr
+r
+qu
+s
+t
+s
+B
+for
+ s
+tt
+
+g up th
+ 
+
+cr
+m
+
+ta
+ bu
+
+d:
+1. **vLLM Ed
+tab
+
+ I
+sta
+:** E
+sur
+ you hav
+ vLLM 
+
+sta
+
+d from sourc
+ 
+
+ a
+ 
+d
+tab
+
+ mod
+. Us
+
+g pr
+-comp
+
+
+d 
+h
+
+s for th
+ 
+
+
+t
+a
+ 
+d
+tab
+
+ s
+tup ca
+ b
+ fast
+r, as th
+ CMak
+ 
+orkf
+o
+ 
+
+
+ ha
+d
+
+ subs
+qu
+
+t k
+r
+
+
+ r
+comp
+
+at
+o
+s.
+    ```co
+so
+
+
+    uv v
+
+v --pytho
+ 3.12 --s
+d
+    sourc
+ .v
+
+v/b
+
+/act
+vat
+
+    VLLM_USE_PRECOMPILED=1 uv p
+p 
+
+sta
+ -U -
+ . --torch-back
+
+d=auto
     ```
+2. **CUDA Too
+k
+t:** V
+r
+fy that th
+ NVIDIA CUDA Too
+k
+t 
+s corr
+ct
+y 
 
-2. **CUDA Toolkit:** Verify that the NVIDIA CUDA Toolkit is correctly installed and `nvcc` is accessible in your `PATH`. CMake relies on `nvcc` to compile CUDA code. You can typically find `nvcc` in `$CUDA_HOME/bin/nvcc` or by running `which nvcc`. If you encounter issues, refer to the [official CUDA Toolkit installation guides](https://developer.nvidia.com/cuda-toolkit-archive) and vLLM's main [GPU installation documentation](../getting_started/installation/gpu.md#troubleshooting) for troubleshooting. The `CMAKE_CUDA_COMPILER` variable in your `CMakeUserPresets.json` should also point to your `nvcc` binary.
+sta
 
-3. **Build Tools:** It is highly recommended to install `ccache` for fast rebuilds by caching compilation results (e.g., `sudo apt install ccache` or `conda install ccache`). Also, ensure the core build dependencies like `cmake` and `ninja` are installed. These are installable through `requirements/build.txt` or your system's package manager.
+d a
+d `
+vcc` 
+s acc
+ss
+b
 
-    ```console
-    uv pip install -r requirements/build.txt --torch-backend=auto
+ 
+
+ your `PATH`. CMak
+ r
+
+
+
+s o
+ `
+vcc` to comp
+
+
+ CUDA cod
+. You ca
+ typ
+ca
+y f
+
+d `
+vcc` 
+
+ `$CUDA_HOME/b
+
+/
+vcc` or by ru
+
+
+g `
+h
+ch 
+vcc`. If you 
+
+cou
+t
+r 
+ssu
+s, r
+f
+r to th
+ [off
+c
+a
+ CUDA Too
+k
+t 
+
+sta
+at
+o
+ gu
+d
+s](https://d
+v
+
+op
+r.
+v
+d
+a.com/cuda-too
+k
+t-arch
+v
+) a
+d vLLM's ma
+
+ [GPU 
+
+sta
+at
+o
+ docum
+
+tat
+o
+](../g
+tt
+
+g_start
+d/
+
+sta
+at
+o
+/gpu.md#troub
+
+shoot
+
+g) for troub
+
+shoot
+
+g. Th
+ `CMAKE_CUDA_COMPILER` var
+ab
+
+ 
+
+ your `CMak
+Us
+rPr
+s
+ts.jso
+` shou
+d a
+so po
+
+t to your `
+vcc` b
+
+ary.
+3. **Bu
+
+d Too
+s:** It 
+s h
+gh
+y r
+comm
+
+d
+d to 
+
+sta
+ `ccach
+` for fast r
+bu
+
+ds by cach
+
+g comp
+
+at
+o
+ r
+su
+ts (
+.g., `sudo apt 
+
+sta
+ ccach
+` or `co
+da 
+
+sta
+ ccach
+`). A
+so, 
+
+sur
+ th
+ cor
+ bu
+
+d d
+p
+
+d
+
+c
+
+s 
+
+k
+ `cmak
+` a
+d `
+
+
+ja` ar
+ 
+
+sta
+
+d. Th
+s
+ ar
+ 
+
+sta
+ab
+
+ through `r
+qu
+r
+m
+
+ts/bu
+
+d.txt` or your syst
+m's packag
+ ma
+ag
+r.
+    ```co
+so
+
+
+    uv p
+p 
+
+sta
+ -r r
+qu
+r
+m
+
+ts/bu
+
+d.txt --torch-back
+
+d=auto
     ```
+## S
+tt
 
-## Setting up the CMake Build Environment
+g up th
+ CMak
+ Bu
 
-The incremental build process is managed through CMake. You can configure your build settings using a `CMakeUserPresets.json` file at the root of the vLLM repository.
+d E
+v
+ro
+m
 
-### Generate `CMakeUserPresets.json` using the helper script
+t
+Th
+ 
 
-To simplify the setup, vLLM provides a helper script that attempts to auto-detect your system's configuration (like CUDA path, Python environment, and CPU cores) and generates the `CMakeUserPresets.json` file for you.
+cr
+m
 
-**Run the script:**
+ta
+ bu
 
-Navigate to the root of your vLLM clone and execute the following command:
+d proc
+ss 
+s ma
+ag
+d through CMak
+. You ca
+ co
+f
+gur
+ your bu
 
-```console
-python tools/generate_cmake_presets.py
+d s
+tt
+
+gs us
+
+g a `CMak
+Us
+rPr
+s
+ts.jso
+` f
+
+
+ at th
+ root of th
+ vLLM r
+pos
+tory.
+### G
+
+
+rat
+ `CMak
+Us
+rPr
+s
+ts.jso
+` us
+
+g th
+ h
+
+p
+r scr
+pt
+To s
+mp
+
+fy th
+ s
+tup, vLLM prov
+d
+s a h
+
+p
+r scr
+pt that att
+mpts to auto-d
+t
+ct your syst
+m's co
+f
+gurat
+o
+ (
+
+k
+ CUDA path, Pytho
+ 
+
+v
+ro
+m
+
+t, a
+d CPU cor
+s) a
+d g
+
+
+rat
+s th
+ `CMak
+Us
+rPr
+s
+ts.jso
+` f
+
+
+ for you.
+**Ru
+ th
+ scr
+pt:**
+Nav
+gat
+ to th
+ root of your vLLM c
+o
+
+ a
+d 
+x
+cut
+ th
+ fo
+o
+
+
+g comma
+d:
+```co
+so
+
+
+pytho
+ too
+s/g
+
+
+rat
+_cmak
+_pr
+s
+ts.py
 ```
+Th
+ scr
+pt 
 
-The script will prompt you if it cannot automatically determine certain paths (e.g., `nvcc` or a specific Python executable for your vLLM development environment). Follow the on-screen prompts. If an existing `CMakeUserPresets.json` is found, the script will ask for confirmation before overwriting it.
 
-**Force overwrite existing file:**
+ prompt you 
+f 
+t ca
+ot automat
+ca
+y d
+t
+rm
 
-To automatically overwrite an existing `CMakeUserPresets.json` without prompting, use the `--force-overwrite` flag:
 
-```console
-python tools/generate_cmake_presets.py --force-overwrite
+ c
+rta
+
+ paths (
+.g., `
+vcc` or a sp
+c
+f
+c Pytho
+ 
+x
+cutab
+
+ for your vLLM d
+v
+
+opm
+
+t 
+
+v
+ro
+m
+
+t). Fo
+o
+ th
+ o
+-scr
+
+ prompts. If a
+ 
+x
+st
+
+g `CMak
+Us
+rPr
+s
+ts.jso
+` 
+s fou
+d, th
+ scr
+pt 
+
+
+ ask for co
+f
+rmat
+o
+ b
+for
+ ov
+r
+r
+t
+
+g 
+t.
+**Forc
+ ov
+r
+r
+t
+ 
+x
+st
+
+g f
+
+
+:**
+To automat
+ca
+y ov
+r
+r
+t
+ a
+ 
+x
+st
+
+g `CMak
+Us
+rPr
+s
+ts.jso
+` 
+
+thout prompt
+
+g, us
+ th
+ `--forc
+-ov
+r
+r
+t
+` f
+ag:
+```co
+so
+
+
+pytho
+ too
+s/g
+
+
+rat
+_cmak
+_pr
+s
+ts.py --forc
+-ov
+r
+r
+t
+
 ```
+Th
+s 
+s part
+cu
+ar
+y us
+fu
+ 
 
-This is particularly useful in automated scripts or CI/CD environments where interactive prompts are not desired.
+ automat
+d scr
+pts or CI/CD 
 
-After running the script, a `CMakeUserPresets.json` file will be created in the root of your vLLM repository.
+v
+ro
+m
 
-### Example `CMakeUserPresets.json`
+ts 
+h
+r
+ 
 
-Below is an example of what the generated `CMakeUserPresets.json` might look like. The script will tailor these values based on your system and any input you provide.
+t
+ract
+v
+ prompts ar
+ 
+ot d
+s
+r
+d.
+Aft
+r ru
 
-```json
+
+g th
+ scr
+pt, a `CMak
+Us
+rPr
+s
+ts.jso
+` f
+
+
+ 
+
+
+ b
+ cr
+at
+d 
+
+ th
+ root of your vLLM r
+pos
+tory.
+### Examp
+
+ `CMak
+Us
+rPr
+s
+ts.jso
+`
+B
+
+o
+ 
+s a
+ 
+xamp
+
+ of 
+hat th
+ g
+
+
+rat
+d `CMak
+Us
+rPr
+s
+ts.jso
+` m
+ght 
+ook 
+
+k
+. Th
+ scr
+pt 
+
+
+ ta
+
+or th
+s
+ va
+u
+s bas
+d o
+ your syst
+m a
+d a
+y 
+
+put you prov
+d
+.
+```jso
+
 {
-    "version": 6,
-    "cmakeMinimumRequired": {
+    "v
+rs
+o
+": 6,
+    "cmak
+M
+
+
+mumR
+qu
+r
+d": {
         "major": 3,
-        "minor": 26,
+        "m
+
+or": 26,
         "patch": 1
     },
-    "configurePresets": [
+    "co
+f
+gur
+Pr
+s
+ts": [
         {
-            "name": "release",
-            "generator": "Ninja",
-            "binaryDir": "${sourceDir}/cmake-build-release",
-            "cacheVariables": {
-                "CMAKE_CUDA_COMPILER": "/usr/local/cuda/bin/nvcc",
-                "CMAKE_C_COMPILER_LAUNCHER": "ccache",
-                "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
-                "CMAKE_CUDA_COMPILER_LAUNCHER": "ccache",
-                "CMAKE_BUILD_TYPE": "Release",
-                "VLLM_PYTHON_EXECUTABLE": "/home/user/venvs/vllm/bin/python",
-                "CMAKE_INSTALL_PREFIX": "${sourceDir}",
+            "
+am
+": "r
+
+
+as
+",
+            "g
+
+
+rator": "N
+
+ja",
+            "b
+
+aryD
+r": "${sourc
+D
+r}/cmak
+-bu
+
+d-r
+
+
+as
+",
+            "cach
+Var
+ab
+
+s": {
+                "CMAKE_CUDA_COMPILER": "/usr/
+oca
+/cuda/b
+
+/
+vcc",
+                "CMAKE_C_COMPILER_LAUNCHER": "ccach
+",
+                "CMAKE_CXX_COMPILER_LAUNCHER": "ccach
+",
+                "CMAKE_CUDA_COMPILER_LAUNCHER": "ccach
+",
+                "CMAKE_BUILD_TYPE": "R
+
+
+as
+",
+                "VLLM_PYTHON_EXECUTABLE": "/hom
+/us
+r/v
+
+vs/v
+m/b
+
+/pytho
+",
+                "CMAKE_INSTALL_PREFIX": "${sourc
+D
+r}",
                 "CMAKE_CUDA_FLAGS": "",
                 "NVCC_THREADS": "4",
-                "CMAKE_JOB_POOLS": "compile=32"
+                "CMAKE_JOB_POOLS": "comp
+
+
+=32"
             }
         }
     ],
-    "buildPresets": [
+    "bu
+
+dPr
+s
+ts": [
         {
-            "name": "release",
-            "configurePreset": "release",
+            "
+am
+": "r
+
+
+as
+",
+            "co
+f
+gur
+Pr
+s
+t": "r
+
+
+as
+",
             "jobs": 32
         }
     ]
 }
 ```
+**What do th
+ var
+ous co
+f
+gurat
+o
+s m
+a
+?**
+- `CMAKE_CUDA_COMPILER`: Path to your `
+vcc` b
 
-**What do the various configurations mean?**
+ary. Th
+ scr
+pt att
+mpts to f
 
-- `CMAKE_CUDA_COMPILER`: Path to your `nvcc` binary. The script attempts to find this automatically.
-- `CMAKE_C_COMPILER_LAUNCHER`, `CMAKE_CXX_COMPILER_LAUNCHER`, `CMAKE_CUDA_COMPILER_LAUNCHER`: Setting these to `ccache` (or `sccache`) significantly speeds up rebuilds by caching compilation results. Ensure `ccache` is installed (e.g., `sudo apt install ccache` or `conda install ccache`). The script sets these by default.
-- `VLLM_PYTHON_EXECUTABLE`: Path to the Python executable in your vLLM development environment. The script will prompt for this, defaulting to the current Python environment if suitable.
-- `CMAKE_INSTALL_PREFIX: "${sourceDir}"`: Specifies that the compiled components should be installed back into your vLLM source directory. This is crucial for the editable install, as it makes the newly built kernels immediately available to your Python environment.
-- `CMAKE_JOB_POOLS` and `jobs` in build presets: Control the parallelism of the build. The script sets these based on the number of CPU cores detected on your system.
-- `binaryDir`: Specifies where the build artifacts will be stored (e.g., `cmake-build-release`).
+d th
+s automat
+ca
+y.
+- `CMAKE_C_COMPILER_LAUNCHER`, `CMAKE_CXX_COMPILER_LAUNCHER`, `CMAKE_CUDA_COMPILER_LAUNCHER`: S
+tt
 
-## Building and Installing with CMake
+g th
+s
+ to `ccach
+` (or `sccach
+`) s
+g
 
-Once your `CMakeUserPresets.json` is configured:
+f
+ca
+t
+y sp
+ds up r
+bu
 
-1. **Initialize the CMake build environment:**
-   This step configures the build system according to your chosen preset (e.g., `release`) and creates the build directory at `binaryDir`
+ds by cach
 
-    ```console
-    cmake --preset release
+g comp
+
+at
+o
+ r
+su
+ts. E
+sur
+ `ccach
+` 
+s 
+
+sta
+
+d (
+.g., `sudo apt 
+
+sta
+ ccach
+` or `co
+da 
+
+sta
+ ccach
+`). Th
+ scr
+pt s
+ts th
+s
+ by d
+fau
+t.
+- `VLLM_PYTHON_EXECUTABLE`: Path to th
+ Pytho
+ 
+x
+cutab
+
+ 
+
+ your vLLM d
+v
+
+opm
+
+t 
+
+v
+ro
+m
+
+t. Th
+ scr
+pt 
+
+
+ prompt for th
+s, d
+fau
+t
+
+g to th
+ curr
+
+t Pytho
+ 
+
+v
+ro
+m
+
+t 
+f su
+tab
+
+.
+- `CMAKE_INSTALL_PREFIX: "${sourc
+D
+r}"`: Sp
+c
+f
+
+s that th
+ comp
+
+
+d compo
+
+
+ts shou
+d b
+ 
+
+sta
+
+d back 
+
+to your vLLM sourc
+ d
+r
+ctory. Th
+s 
+s cruc
+a
+ for th
+ 
+d
+tab
+
+ 
+
+sta
+, as 
+t mak
+s th
+ 
+
+
+
+y bu
+
+t k
+r
+
+
+s 
+mm
+d
+at
+
+y ava
+
+ab
+
+ to your Pytho
+ 
+
+v
+ro
+m
+
+t.
+- `CMAKE_JOB_POOLS` a
+d `jobs` 
+
+ bu
+
+d pr
+s
+ts: Co
+tro
+ th
+ para
+
+
+
+sm of th
+ bu
+
+d. Th
+ scr
+pt s
+ts th
+s
+ bas
+d o
+ th
+ 
+umb
+r of CPU cor
+s d
+t
+ct
+d o
+ your syst
+m.
+- `b
+
+aryD
+r`: Sp
+c
+f
+
+s 
+h
+r
+ th
+ bu
+
+d art
+facts 
+
+
+ b
+ stor
+d (
+.g., `cmak
+-bu
+
+d-r
+
+
+as
+`).
+## Bu
+
+d
+
+g a
+d I
+sta
+
+
+g 
+
+th CMak
+
+O
+c
+ your `CMak
+Us
+rPr
+s
+ts.jso
+` 
+s co
+f
+gur
+d:
+1. **I
+
+t
+a
+
+z
+ th
+ CMak
+ bu
+
+d 
+
+v
+ro
+m
+
+t:**
+   Th
+s st
+p co
+f
+gur
+s th
+ bu
+
+d syst
+m accord
+
+g to your chos
+
+ pr
+s
+t (
+.g., `r
+
+
+as
+`) a
+d cr
+at
+s th
+ bu
+
+d d
+r
+ctory at `b
+
+aryD
+r`
+    ```co
+so
+
+
+    cmak
+ --pr
+s
+t r
+
+
+as
+
     ```
+2. **Bu
 
-2. **Build and install the vLLM components:**
-   This command compiles the code and installs the resulting binaries into your vLLM source directory, making them available to your editable Python installation.
+d a
+d 
 
-    ```console
-    cmake --build --preset release --target install
+sta
+ th
+ vLLM compo
+
+
+ts:**
+   Th
+s comma
+d comp
+
+
+s th
+ cod
+ a
+d 
+
+sta
+s th
+ r
+su
+t
+
+g b
+
+ar
+
+s 
+
+to your vLLM sourc
+ d
+r
+ctory, mak
+
+g th
+m ava
+
+ab
+
+ to your 
+d
+tab
+
+ Pytho
+ 
+
+sta
+at
+o
+.
+    ```co
+so
+
+
+    cmak
+ --bu
+
+d --pr
+s
+t r
+
+
+as
+ --targ
+t 
+
+sta
+
     ```
+3. **Mak
+ cha
+g
+s a
+d r
+p
+at!**
+    No
+ you start us
 
-3. **Make changes and repeat!**
-    Now you start using your editable install of vLLM, testing and making changes as needed. If you need to build again to update based on changes, simply run the CMake command again to build only the affected files.
+g your 
+d
+tab
 
-    ```console
-    cmake --build --preset release --target install
+ 
+
+sta
+ of vLLM, t
+st
+
+g a
+d mak
+
+g cha
+g
+s as 
+
+d
+d. If you 
+
+d to bu
+
+d aga
+
+ to updat
+ bas
+d o
+ cha
+g
+s, s
+mp
+y ru
+ th
+ CMak
+ comma
+d aga
+
+ to bu
+
+d o
+
+y th
+ aff
+ct
+d f
+
+
+s.
+    ```co
+so
+
+
+    cmak
+ --bu
+
+d --pr
+s
+t r
+
+
+as
+ --targ
+t 
+
+sta
+
     ```
+## V
+r
+fy
 
-## Verifying the Build
+g th
+ Bu
 
-After a successful build, you will find a populated build directory (e.g., `cmake-build-release/` if you used the `release` preset and the example configuration).
+d
+Aft
+r a succ
+ssfu
+ bu
 
-```console
-> ls cmake-build-release/
-bin             cmake_install.cmake      _deps                                machete_generation.log
-build.ninja     CPackConfig.cmake        detect_cuda_compute_capabilities.cu  marlin_generation.log
-_C.abi3.so      CPackSourceConfig.cmake  detect_cuda_version.cc               _moe_C.abi3.so
-CMakeCache.txt  ctest                    _flashmla_C.abi3.so                  moe_marlin_generation.log
-CMakeFiles      cumem_allocator.abi3.so  install_local_manifest.txt           vllm-flash-attn
+d, you 
+
+
+ f
+
+d a popu
+at
+d bu
+
+d d
+r
+ctory (
+.g., `cmak
+-bu
+
+d-r
+
+
+as
+/` 
+f you us
+d th
+ `r
+
+
+as
+` pr
+s
+t a
+d th
+ 
+xamp
+
+ co
+f
+gurat
+o
+).
+```co
+so
+
+
+
+ 
+s cmak
+-bu
+
+d-r
+
+
+as
+/
+b
+
+             cmak
+_
+
+sta
+.cmak
+      _d
+ps                                mach
+t
+_g
+
+
+rat
+o
+.
+og
+bu
+
+d.
+
+
+ja     CPackCo
+f
+g.cmak
+        d
+t
+ct_cuda_comput
+_capab
+
+
+t
+
+s.cu  mar
+
+
+_g
+
+
+rat
+o
+.
+og
+_C.ab
+3.so      CPackSourc
+Co
+f
+g.cmak
+  d
+t
+ct_cuda_v
+rs
+o
+.cc               _mo
+_C.ab
+3.so
+CMak
+Cach
+.txt  ct
+st                    _f
+ashm
+a_C.ab
+3.so                  mo
+_mar
+
+
+_g
+
+
+rat
+o
+.
+og
+CMak
+F
+
+
+s      cum
+m_a
+ocator.ab
+3.so  
+
+sta
+_
+oca
+_ma
+
+f
+st.txt           v
+m-f
+ash-att
+
 ```
+Th
+ `cmak
+ --bu
 
-The `cmake --build ... --target install` command copies the compiled shared libraries (like `_C.abi3.so`, `_moe_C.abi3.so`, etc.) into the appropriate `vllm` package directory within your source tree. This updates your editable installation with the newly compiled kernels.
+d ... --targ
+t 
 
-## Additional Tips
+sta
+` comma
+d cop
 
-- **Adjust Parallelism:** Fine-tune the `CMAKE_JOB_POOLS` in `configurePresets` and `jobs` in `buildPresets` in your `CMakeUserPresets.json`. Too many jobs can overload systems with limited RAM or CPU cores, leading to slower builds or system instability. Too few won't fully utilize available resources.
-- **Clean Builds When Necessary:** If you encounter persistent or strange build errors, especially after significant changes or switching branches, consider removing the CMake build directory (e.g., `rm -rf cmake-build-release`) and re-running the `cmake --preset` and `cmake --build` commands.
-- **Specific Target Builds:** For even faster iterations when working on a specific module, you can sometimes build a specific target instead of the full `install` target, though `install` ensures all necessary components are updated in your Python environment. Refer to CMake documentation for more advanced target management.
+s th
+ comp
+
+
+d shar
+d 
+
+brar
+
+s (
+
+k
+ `_C.ab
+3.so`, `_mo
+_C.ab
+3.so`, 
+tc.) 
+
+to th
+ appropr
+at
+ `v
+m` packag
+ d
+r
+ctory 
+
+th
+
+ your sourc
+ tr
+. Th
+s updat
+s your 
+d
+tab
+
+ 
+
+sta
+at
+o
+ 
+
+th th
+ 
+
+
+
+y comp
+
+
+d k
+r
+
+
+s.
+## Add
+t
+o
+a
+ T
+ps
+- **Adjust Para
+
+
+
+sm:** F
+
+
+-tu
+
+ th
+ `CMAKE_JOB_POOLS` 
+
+ `co
+f
+gur
+Pr
+s
+ts` a
+d `jobs` 
+
+ `bu
+
+dPr
+s
+ts` 
+
+ your `CMak
+Us
+rPr
+s
+ts.jso
+`. Too ma
+y jobs ca
+ ov
+r
+oad syst
+ms 
+
+th 
+
+m
+t
+d RAM or CPU cor
+s, 
+
+ad
+
+g to s
+o
+
+r bu
+
+ds or syst
+m 
+
+stab
+
+
+ty. Too f
+
+ 
+o
+'t fu
+y ut
+
+
+z
+ ava
+
+ab
+
+ r
+sourc
+s.
+- **C
+
+a
+ Bu
+
+ds Wh
+
+ N
+c
+ssary:** If you 
+
+cou
+t
+r p
+rs
+st
+
+t or stra
+g
+ bu
+
+d 
+rrors, 
+sp
+c
+a
+y aft
+r s
+g
+
+f
+ca
+t cha
+g
+s or s
+
+tch
+
+g bra
+ch
+s, co
+s
+d
+r r
+mov
+
+g th
+ CMak
+ bu
+
+d d
+r
+ctory (
+.g., `rm -rf cmak
+-bu
+
+d-r
+
+
+as
+`) a
+d r
+-ru
+
+
+g th
+ `cmak
+ --pr
+s
+t` a
+d `cmak
+ --bu
+
+d` comma
+ds.
+- **Sp
+c
+f
+c Targ
+t Bu
+
+ds:** For 
+v
+
+ fast
+r 
+t
+rat
+o
+s 
+h
+
+ 
+ork
+
+g o
+ a sp
+c
+f
+c modu
+
+, you ca
+ som
+t
+m
+s bu
+
+d a sp
+c
+f
+c targ
+t 
+
+st
+ad of th
+ fu
+ `
+
+sta
+` targ
+t, though `
+
+sta
+` 
+
+sur
+s a
+ 
+
+c
+ssary compo
+
+
+ts ar
+ updat
+d 
+
+ your Pytho
+ 
+
+v
+ro
+m
+
+t. R
+f
+r to CMak
+ docum
+
+tat
+o
+ for mor
+ adva
+c
+d targ
+t ma
+ag
+m
+
+t.

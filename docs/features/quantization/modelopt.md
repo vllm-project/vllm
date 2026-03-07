@@ -1,114 +1,821 @@
-# NVIDIA Model Optimizer
+# NVIDIA Mod
 
-The [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) is a library designed to optimize models for inference with NVIDIA GPUs. It includes tools for Post-Training Quantization (PTQ) and Quantization Aware Training (QAT) of Large Language Models (LLMs), Vision Language Models (VLMs), and diffusion models.
+ Opt
+m
+z
+r
+Th
+ [NVIDIA Mod
 
-We recommend installing the library with:
+ Opt
+m
+z
+r](https://g
+thub.com/NVIDIA/Mod
 
+-Opt
+m
+z
+r) 
+s a 
+
+brary d
+s
+g
+
+d to opt
+m
+z
+ mod
+
+s for 
+
+f
+r
+
+c
+ 
+
+th NVIDIA GPUs. It 
+
+c
+ud
+s too
+s for Post-Tra
+
+
+
+g Qua
+t
+zat
+o
+ (PTQ) a
+d Qua
+t
+zat
+o
+ A
+ar
+ Tra
+
+
+
+g (QAT) of Larg
+ La
+guag
+ Mod
+
+s (LLMs), V
+s
+o
+ La
+guag
+ Mod
+
+s (VLMs), a
+d d
+ffus
+o
+ mod
+
+s.
+W
+ r
+comm
+
+d 
+
+sta
+
+
+g th
+ 
+
+brary 
+
+th:
 ```bash
-pip install nvidia-modelopt
+p
+p 
+
+sta
+ 
+v
+d
+a-mod
+
+opt
 ```
+## Support
+d Mod
 
-## Supported ModelOpt checkpoint formats
+Opt ch
+ckpo
 
-vLLM detects ModelOpt checkpoints via `hf_quant_config.json` and supports the
-following `quantization.quant_algo` values:
+t formats
+vLLM d
+t
+cts Mod
 
-- `FP8`: per-tensor weight scale (+ optional static activation scale).
-- `FP8_PER_CHANNEL_PER_TOKEN`: per-channel weight scale and dynamic per-token activation quantization.
-- `FP8_PB_WO` (ModelOpt may emit `fp8_pb_wo`): block-scaled FP8 weight-only (typically 128×128 blocks).
-- `NVFP4`: ModelOpt NVFP4 checkpoints (use `quantization="modelopt_fp4"`).
-- `MXFP8`: ModelOpt MXFP8 checkpoints (use `quantization="modelopt_mxfp8"`).
+Opt ch
+ckpo
 
-## Quantizing HuggingFace Models with PTQ
+ts v
+a `hf_qua
+t_co
+f
+g.jso
+` a
+d supports th
 
-You can quantize HuggingFace models using the example scripts provided in the Model Optimizer repository. The primary script for LLM PTQ is typically found within the `examples/llm_ptq` directory.
+fo
+o
 
-Below is an example showing how to quantize a model using modelopt's PTQ API:
 
-??? code
+g `qua
+t
+zat
+o
+.qua
+t_a
+go` va
+u
+s:
+- `FP8`: p
+r-t
 
-    ```python
-    import modelopt.torch.quantization as mtq
-    from transformers import AutoModelForCausalLM
+sor 
 
-    # Load the model from HuggingFace
-    model = AutoModelForCausalLM.from_pretrained("<path_or_model_id>")
 
-    # Select the quantization config, for example, FP8
-    config = mtq.FP8_DEFAULT_CFG
+ght sca
 
-    # Define a forward loop function for calibration
-    def forward_loop(model):
-        for data in calib_set:
-            model(data)
+ (+ opt
+o
+a
+ stat
+c act
+vat
+o
+ sca
 
-    # PTQ with in-place replacement of quantized modules
-    model = mtq.quantize(model, config, forward_loop)
+).
+- `FP8_PER_CHANNEL_PER_TOKEN`: p
+r-cha
+
+
+ 
+
+
+ght sca
+
+ a
+d dy
+am
+c p
+r-tok
+
+ act
+vat
+o
+ qua
+t
+zat
+o
+.
+- `FP8_PB_WO` (Mod
+
+Opt may 
+m
+t `fp8_pb_
+o`): b
+ock-sca
+
+d FP8 
+
+
+ght-o
+
+y (typ
+ca
+y 128×128 b
+ocks).
+- `NVFP4`: Mod
+
+Opt NVFP4 ch
+ckpo
+
+ts (us
+ `qua
+t
+zat
+o
+="mod
+
+opt_fp4"`).
+- `MXFP8`: Mod
+
+Opt MXFP8 ch
+ckpo
+
+ts (us
+ `qua
+t
+zat
+o
+="mod
+
+opt_mxfp8"`).
+## Qua
+t
+z
+
+g Hugg
+
+gFac
+ Mod
+
+s 
+
+th PTQ
+You ca
+ qua
+t
+z
+ Hugg
+
+gFac
+ mod
+
+s us
+
+g th
+ 
+xamp
+
+ scr
+pts prov
+d
+d 
+
+ th
+ Mod
+
+ Opt
+m
+z
+r r
+pos
+tory. Th
+ pr
+mary scr
+pt for LLM PTQ 
+s typ
+ca
+y fou
+d 
+
+th
+
+ th
+ `
+xamp
+
+s/
+m_ptq` d
+r
+ctory.
+B
+
+o
+ 
+s a
+ 
+xamp
+
+ sho
+
+
+g ho
+ to qua
+t
+z
+ a mod
+
+ us
+
+g mod
+
+opt's PTQ API:
+??? cod
+
+    ```pytho
+
+    
+mport mod
+
+opt.torch.qua
+t
+zat
+o
+ as mtq
+    from tra
+sform
+rs 
+mport AutoMod
+
+ForCausa
+LM
+    # Load th
+ mod
+
+ from Hugg
+
+gFac
+
+    mod
+
+ = AutoMod
+
+ForCausa
+LM.from_pr
+tra
+
+
+d("
+path_or_mod
+
+_
+d
+")
+    # S
+
+
+ct th
+ qua
+t
+zat
+o
+ co
+f
+g, for 
+xamp
+
+, FP8
+    co
+f
+g = mtq.FP8_DEFAULT_CFG
+    # D
+f
+
+
+ a for
+ard 
+oop fu
+ct
+o
+ for ca
+
+brat
+o
+
+    d
+f for
+ard_
+oop(mod
+
+):
+        for data 
+
+ ca
+
+b_s
+t:
+            mod
+
+(data)
+    # PTQ 
+
+th 
+
+-p
+ac
+ r
+p
+ac
+m
+
+t of qua
+t
+z
+d modu
+
+s
+    mod
+
+ = mtq.qua
+t
+z
+(mod
+
+, co
+f
+g, for
+ard_
+oop)
     ```
+Aft
+r th
+ mod
 
-After the model is quantized, you can export it to a quantized checkpoint using the export API:
+ 
+s qua
+t
+z
+d, you ca
+ 
+xport 
+t to a qua
+t
+z
+d ch
+ckpo
 
-```python
-import torch
-from modelopt.torch.export import export_hf_checkpoint
+t us
 
-with torch.inference_mode():
-    export_hf_checkpoint(
-        model,  # The quantized model.
-        export_dir,  # The directory where the exported files will be stored.
+g th
+ 
+xport API:
+```pytho
+
+
+mport torch
+from mod
+
+opt.torch.
+xport 
+mport 
+xport_hf_ch
+ckpo
+
+t
+
+
+th torch.
+
+f
+r
+
+c
+_mod
+():
+    
+xport_hf_ch
+ckpo
+
+t(
+        mod
+
+,  # Th
+ qua
+t
+z
+d mod
+
+.
+        
+xport_d
+r,  # Th
+ d
+r
+ctory 
+h
+r
+ th
+ 
+xport
+d f
+
+
+s 
+
+
+ b
+ stor
+d.
     )
 ```
+Th
+ qua
+t
+z
+d ch
+ckpo
 
-The quantized checkpoint can then be deployed with vLLM. As an example, the following code shows how to deploy `nvidia/Llama-3.1-8B-Instruct-FP8`, which is the FP8 quantized checkpoint derived from `meta-llama/Llama-3.1-8B-Instruct`, using vLLM:
+t ca
+ th
 
-??? code
+ b
+ d
+p
+oy
+d 
 
-    ```python
-    from vllm import LLM, SamplingParams
+th vLLM. As a
+ 
+xamp
 
-    def main():
-        model_id = "nvidia/Llama-3.1-8B-Instruct-FP8"
+, th
+ fo
+o
 
-        # Ensure you specify quantization="modelopt" when loading the modelopt checkpoint
-        llm = LLM(model=model_id, quantization="modelopt", trust_remote_code=True)
 
-        sampling_params = SamplingParams(temperature=0.8, top_p=0.9)
+g cod
+ sho
+s ho
+ to d
+p
+oy `
+v
+d
+a/L
+ama-3.1-8B-I
+struct-FP8`, 
+h
+ch 
+s th
+ FP8 qua
+t
+z
+d ch
+ckpo
 
+t d
+r
+v
+d from `m
+ta-
+ama/L
+ama-3.1-8B-I
+struct`, us
+
+g vLLM:
+??? cod
+
+    ```pytho
+
+    from v
+m 
+mport LLM, Samp
+
+
+gParams
+    d
+f ma
+
+():
+        mod
+
+_
+d = "
+v
+d
+a/L
+ama-3.1-8B-I
+struct-FP8"
+        # E
+sur
+ you sp
+c
+fy qua
+t
+zat
+o
+="mod
+
+opt" 
+h
+
+ 
+oad
+
+g th
+ mod
+
+opt ch
+ckpo
+
+t
+        
+m = LLM(mod
+
+=mod
+
+_
+d, qua
+t
+zat
+o
+="mod
+
+opt", trust_r
+mot
+_cod
+=Tru
+)
+        samp
+
+
+g_params = Samp
+
+
+gParams(t
+mp
+ratur
+=0.8, top_p=0.9)
         prompts = [
-            "Hello, my name is",
-            "The president of the United States is",
-            "The capital of France is",
-            "The future of AI is",
+            "H
+
+o, my 
+am
+ 
+s",
+            "Th
+ pr
+s
+d
+
+t of th
+ U
+
+t
+d Stat
+s 
+s",
+            "Th
+ cap
+ta
+ of Fra
+c
+ 
+s",
+            "Th
+ futur
+ of AI 
+s",
         ]
+        outputs = 
+m.g
 
-        outputs = llm.generate(prompts, sampling_params)
 
-        for output in outputs:
+rat
+(prompts, samp
+
+
+g_params)
+        for output 
+
+ outputs:
             prompt = output.prompt
-            generated_text = output.outputs[0].text
-            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+            g
 
-    if __name__ == "__main__":
-        main()
+
+rat
+d_t
+xt = output.outputs[0].t
+xt
+            pr
+
+t(f"Prompt: {prompt!r}, G
+
+
+rat
+d t
+xt: {g
+
+
+rat
+d_t
+xt!r}")
+    
+f __
+am
+__ == "__ma
+
+__":
+        ma
+
+()
     ```
+## Ru
 
-## Running the OpenAI-compatible server
 
-To serve a local ModelOpt checkpoint via the OpenAI-compatible API:
+g th
+ Op
 
+AI-compat
+b
+
+ s
+rv
+r
+To s
+rv
+ a 
+oca
+ Mod
+
+Opt ch
+ckpo
+
+t v
+a th
+ Op
+
+AI-compat
+b
+
+ API:
 ```bash
-vllm serve <path_to_exported_checkpoint> \
-  --quantization modelopt \
+v
+m s
+rv
+ 
+path_to_
+xport
+d_ch
+ckpo
+
+t
+ \
+  --qua
+t
+zat
+o
+ mod
+
+opt \
   --host 0.0.0.0 --port 8000
 ```
+## T
+st
 
-## Testing (local checkpoints)
+g (
+oca
+ ch
+ckpo
 
-vLLM's ModelOpt unit tests are gated by local checkpoint paths and are skipped
-by default in CI. To run the tests locally:
+ts)
+vLLM's Mod
 
+Opt u
+
+t t
+sts ar
+ gat
+d by 
+oca
+ ch
+ckpo
+
+t paths a
+d ar
+ sk
+pp
+d
+by d
+fau
+t 
+
+ CI. To ru
+ th
+ t
+sts 
+oca
+y:
 ```bash
-export VLLM_TEST_MODELOPT_FP8_PC_PT_MODEL_PATH=<path_to_fp8_pc_pt_checkpoint>
-export VLLM_TEST_MODELOPT_FP8_PB_WO_MODEL_PATH=<path_to_fp8_pb_wo_checkpoint>
-pytest -q tests/quantization/test_modelopt.py
+
+xport VLLM_TEST_MODELOPT_FP8_PC_PT_MODEL_PATH=
+path_to_fp8_pc_pt_ch
+ckpo
+
+t
+
+
+xport VLLM_TEST_MODELOPT_FP8_PB_WO_MODEL_PATH=
+path_to_fp8_pb_
+o_ch
+ckpo
+
+t
+
+pyt
+st -q t
+sts/qua
+t
+zat
+o
+/t
+st_mod
+
+opt.py
 ```

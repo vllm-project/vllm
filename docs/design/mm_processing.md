@@ -1,63 +1,1117 @@
-# Multi-Modal Data Processing
+# Mu
+t
+-Moda
+ Data Proc
+ss
 
-To enable various optimizations in vLLM such as [chunked prefill](../configuration/optimization.md#chunked-prefill) and [prefix caching](../features/automatic_prefix_caching.md), we use [BaseMultiModalProcessor][vllm.multimodal.processing.BaseMultiModalProcessor] to provide the correspondence between placeholder feature tokens (e.g. `<image>`) and multi-modal inputs (e.g. the raw input image) based on the outputs of HF processor.
+g
+To 
 
-Here are the main features of [BaseMultiModalProcessor][vllm.multimodal.processing.BaseMultiModalProcessor]:
+ab
 
-## Prompt Update Detection
+ var
+ous opt
+m
+zat
+o
+s 
 
-One of the main responsibilities of HF processor is to update the prompt with placeholder tokens. For example:
+ vLLM such as [chu
+k
+d pr
+f
 
-- Insert feature placeholder tokens (e.g. `<image><image>...<image>`, the number of which equals to the feature size) at the start of the string.
-- Replace existing input placeholder tokens (e.g. `<image>` for a single image) with feature placeholder tokens (e.g. `<image><image>...<image>`, the number of which equals to the feature size).
+](../co
+f
+gurat
+o
+/opt
+m
+zat
+o
+.md#chu
+k
+d-pr
+f
 
-The information about which tokens have been updated is key to finding the correspondence between placeholder feature tokens and multi-modal inputs.
+) a
+d [pr
+f
+x cach
 
-In vLLM, this information is specified using [PromptUpdate][vllm.multimodal.processing.PromptUpdate] in [_get_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates]. We can automatically detect whether HF has updated the prompt by checking the existence of the updated tokens.
+g](../f
+atur
+s/automat
+c_pr
+f
+x_cach
 
-## Tokenized Prompt Inputs
+g.md), 
 
-To enable tokenization in a separate process, we support passing input token IDs alongside multi-modal data.
+ us
+ [Bas
+Mu
+t
+Moda
+Proc
+ssor][v
+m.mu
+t
+moda
+.proc
+ss
 
-### The problem
+g.Bas
+Mu
+t
+Moda
+Proc
+ssor] to prov
+d
+ th
+ corr
+spo
+d
 
-Consider that HF processors follow these main steps:
+c
+ b
+t
 
-1. Tokenize the text
-2. Process multi-modal inputs
-3. Perform prompt updates
 
-And we require that:
+ p
+ac
+ho
+d
+r f
+atur
+ tok
 
-- For text + multi-modal inputs, apply all steps 1--3.
-- For tokenized + multi-modal inputs, apply only steps 2--3.
+s (
+.g. `
 
-How can we achieve this without rewriting HF processors? We can try to call the HF processor several times on different inputs:
+mag
 
-- For text + multi-modal inputs, simply call the HF processor directly.
-- For tokenized + multi-modal inputs, call the processor only on the multi-modal inputs.
+`) a
+d mu
+t
+-moda
+ 
 
-While HF processors support text + multi-modal inputs natively, this is not so for tokenized + multi-modal inputs: an error is thrown if the number of input placeholder tokens do not correspond to the number of multi-modal inputs.
+puts (
+.g. th
+ ra
+ 
 
-Moreover, since the tokenized text has not passed through the HF processor, we have to apply Step 3 by ourselves to keep the output tokens and multi-modal data consistent with each other.
+put 
+mag
+) bas
+d o
+ th
+ outputs of HF proc
+ssor.
+H
+r
+ ar
+ th
+ ma
 
-### Dummy text
+ f
+atur
+s of [Bas
+Mu
+t
+Moda
+Proc
+ssor][v
+m.mu
+t
+moda
+.proc
+ss
 
-We work around the first issue by requiring each model to define how to generate dummy text based on the number of multi-modal inputs, via [get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text]. This lets us generate dummy text corresponding to the multi-modal inputs and input them together to obtain the processed multi-modal data.
+g.Bas
+Mu
+t
+Moda
+Proc
+ssor]:
+## Prompt Updat
+ D
+t
+ct
+o
 
-### Automatic prompt updating
+O
 
-We address the second issue by implementing model-agnostic code in
-[_apply_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._apply_prompt_updates] to automatically update the prompt with feature placeholder tokens based on the specification outputted by [_get_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates].
+ of th
+ ma
 
+ r
+spo
+s
+b
+
+
+t
+
+s of HF proc
+ssor 
+s to updat
+ th
+ prompt 
+
+th p
+ac
+ho
+d
+r tok
+
+s. For 
+xamp
+
+:
+- I
+s
+rt f
+atur
+ p
+ac
+ho
+d
+r tok
+
+s (
+.g. `
+
+mag
+
+
+
+mag
+
+...
+
+mag
+
+`, th
+ 
+umb
+r of 
+h
+ch 
+qua
+s to th
+ f
+atur
+ s
+z
+) at th
+ start of th
+ str
+
+g.
+- R
+p
+ac
+ 
+x
+st
+
+g 
+
+put p
+ac
+ho
+d
+r tok
+
+s (
+.g. `
+
+mag
+
+` for a s
+
+g
+
+ 
+mag
+) 
+
+th f
+atur
+ p
+ac
+ho
+d
+r tok
+
+s (
+.g. `
+
+mag
+
+
+
+mag
+
+...
+
+mag
+
+`, th
+ 
+umb
+r of 
+h
+ch 
+qua
+s to th
+ f
+atur
+ s
+z
+).
+Th
+ 
+
+format
+o
+ about 
+h
+ch tok
+
+s hav
+ b
+
+ updat
+d 
+s k
+y to f
+
+d
+
+g th
+ corr
+spo
+d
+
+c
+ b
+t
+
+
+ p
+ac
+ho
+d
+r f
+atur
+ tok
+
+s a
+d mu
+t
+-moda
+ 
+
+puts.
+I
+ vLLM, th
+s 
+
+format
+o
+ 
+s sp
+c
+f
+
+d us
+
+g [PromptUpdat
+][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.PromptUpdat
+] 
+
+ [_g
+t_prompt_updat
+s][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+Mu
+t
+Moda
+Proc
+ssor._g
+t_prompt_updat
+s]. W
+ ca
+ automat
+ca
+y d
+t
+ct 
+h
+th
+r HF has updat
+d th
+ prompt by ch
+ck
+
+g th
+ 
+x
+st
+
+c
+ of th
+ updat
+d tok
+
+s.
+## Tok
+
+
+z
+d Prompt I
+puts
+To 
+
+ab
+
+ tok
+
+
+zat
+o
+ 
+
+ a s
+parat
+ proc
+ss, 
+
+ support pass
+
+g 
+
+put tok
+
+ IDs a
+o
+gs
+d
+ mu
+t
+-moda
+ data.
+### Th
+ prob
+
+m
+Co
+s
+d
+r that HF proc
+ssors fo
+o
+ th
+s
+ ma
+
+ st
+ps:
+1. Tok
+
+
+z
+ th
+ t
+xt
+2. Proc
+ss mu
+t
+-moda
+ 
+
+puts
+3. P
+rform prompt updat
+s
+A
+d 
+
+ r
+qu
+r
+ that:
+- For t
+xt + mu
+t
+-moda
+ 
+
+puts, app
+y a
+ st
+ps 1--3.
+- For tok
+
+
+z
+d + mu
+t
+-moda
+ 
+
+puts, app
+y o
+
+y st
+ps 2--3.
+Ho
+ ca
+ 
+
+ ach
+
+v
+ th
+s 
+
+thout r
+
+r
+t
+
+g HF proc
+ssors? W
+ ca
+ try to ca
+ th
+ HF proc
+ssor s
+v
+ra
+ t
+m
+s o
+ d
+ff
+r
+
+t 
+
+puts:
+- For t
+xt + mu
+t
+-moda
+ 
+
+puts, s
+mp
+y ca
+ th
+ HF proc
+ssor d
+r
+ct
+y.
+- For tok
+
+
+z
+d + mu
+t
+-moda
+ 
+
+puts, ca
+ th
+ proc
+ssor o
+
+y o
+ th
+ mu
+t
+-moda
+ 
+
+puts.
+Wh
+
+
+ HF proc
+ssors support t
+xt + mu
+t
+-moda
+ 
+
+puts 
+at
+v
+
+y, th
+s 
+s 
+ot so for tok
+
+
+z
+d + mu
+t
+-moda
+ 
+
+puts: a
+ 
+rror 
+s thro
+
+ 
+f th
+ 
+umb
+r of 
+
+put p
+ac
+ho
+d
+r tok
+
+s do 
+ot corr
+spo
+d to th
+ 
+umb
+r of mu
+t
+-moda
+ 
+
+puts.
+Mor
+ov
+r, s
+
+c
+ th
+ tok
+
+
+z
+d t
+xt has 
+ot pass
+d through th
+ HF proc
+ssor, 
+
+ hav
+ to app
+y St
+p 3 by ours
+
+v
+s to k
+p th
+ output tok
+
+s a
+d mu
+t
+-moda
+ data co
+s
+st
+
+t 
+
+th 
+ach oth
+r.
+### Dummy t
+xt
+W
+ 
+ork arou
+d th
+ f
+rst 
+ssu
+ by r
+qu
+r
+
+g 
+ach mod
+
+ to d
+f
+
+
+ ho
+ to g
+
+
+rat
+ dummy t
+xt bas
+d o
+ th
+ 
+umb
+r of mu
+t
+-moda
+ 
+
+puts, v
+a [g
+t_dummy_t
+xt][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+DummyI
+putsBu
+
+d
+r.g
+t_dummy_t
+xt]. Th
+s 
+
+ts us g
+
+
+rat
+ dummy t
+xt corr
+spo
+d
+
+g to th
+ mu
+t
+-moda
+ 
+
+puts a
+d 
+
+put th
+m tog
+th
+r to obta
+
+ th
+ proc
+ss
+d mu
+t
+-moda
+ data.
+### Automat
+c prompt updat
+
+g
+W
+ addr
+ss th
+ s
+co
+d 
+ssu
+ by 
+mp
+
+m
+
+t
+
+g mod
+
+-ag
+ost
+c cod
+ 
+
+
+[_app
+y_prompt_updat
+s][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+Mu
+t
+Moda
+Proc
+ssor._app
+y_prompt_updat
+s] to automat
+ca
+y updat
+ th
+ prompt 
+
+th f
+atur
+ p
+ac
+ho
+d
+r tok
+
+s bas
+d o
+ th
+ sp
+c
+f
+cat
+o
+ outputt
+d by [_g
+t_prompt_updat
+s][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+Mu
+t
+Moda
+Proc
+ssor._g
+t_prompt_updat
+s].
 ### Summary
+W
+th th
+ h
 
-With the help of dummy text and automatic prompt updating, our multi-modal processor can finally accept both text and token prompts with multi-modal data. The detailed logic is shown in [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main].
+p of dummy t
+xt a
+d automat
+c prompt updat
 
-## Processor Output Caching
+g, our mu
+t
+-moda
+ proc
+ssor ca
+ f
 
-Some HF processors, such as the one for Qwen2-VL, are [very slow](https://github.com/vllm-project/vllm/issues/9238). To alleviate this problem, we cache the multi-modal outputs of HF processor to avoid processing the same multi-modal input (e.g. image) again.
+a
+y acc
+pt both t
+xt a
+d tok
 
-When new data is passed in, we first check which items are in the cache, and which ones are missing. The missing items are passed into the HF processor in a single batch and cached, before being merged with the existing items in the cache.
+ prompts 
 
-Since we only process the missing multi-modal data items, the number of input placeholder tokens no longer corresponds to the number of the multi-modal inputs, so they can't be passed alongside the text prompt to HF processor. Therefore, we process the text and multi-modal inputs separately, using [dummy text](#dummy-text) to avoid HF errors. Since this skips HF's prompt updating code, we apply [automatic prompt updating](#automatic-prompt-updating) afterwards to keep the output tokens and multi-modal data consistent with each other.
+th mu
+t
+-moda
+ data. Th
+ d
+ta
+
+
+d 
+og
+c 
+s sho
+
+ 
+
+ [_app
+y_hf_proc
+ssor_ma
+
+][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+Mu
+t
+Moda
+Proc
+ssor._app
+y_hf_proc
+ssor_ma
+
+].
+## Proc
+ssor Output Cach
+
+g
+Som
+ HF proc
+ssors, such as th
+ o
+
+ for Q
+
+
+2-VL, ar
+ [v
+ry s
+o
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/9238). To a
+
+v
+at
+ th
+s prob
+
+m, 
+
+ cach
+ th
+ mu
+t
+-moda
+ outputs of HF proc
+ssor to avo
+d proc
+ss
+
+g th
+ sam
+ mu
+t
+-moda
+ 
+
+put (
+.g. 
+mag
+) aga
+
+.
+Wh
+
+ 
+
+
+ data 
+s pass
+d 
+
+, 
+
+ f
+rst ch
+ck 
+h
+ch 
+t
+ms ar
+ 
+
+ th
+ cach
+, a
+d 
+h
+ch o
+
+s ar
+ m
+ss
+
+g. Th
+ m
+ss
+
+g 
+t
+ms ar
+ pass
+d 
+
+to th
+ HF proc
+ssor 
+
+ a s
+
+g
+
+ batch a
+d cach
+d, b
+for
+ b
+
+
+g m
+rg
+d 
+
+th th
+ 
+x
+st
+
+g 
+t
+ms 
+
+ th
+ cach
+.
+S
+
+c
+ 
+
+ o
+
+y proc
+ss th
+ m
+ss
+
+g mu
+t
+-moda
+ data 
+t
+ms, th
+ 
+umb
+r of 
+
+put p
+ac
+ho
+d
+r tok
+
+s 
+o 
+o
+g
+r corr
+spo
+ds to th
+ 
+umb
+r of th
+ mu
+t
+-moda
+ 
+
+puts, so th
+y ca
+'t b
+ pass
+d a
+o
+gs
+d
+ th
+ t
+xt prompt to HF proc
+ssor. Th
+r
+for
+, 
+
+ proc
+ss th
+ t
+xt a
+d mu
+t
+-moda
+ 
+
+puts s
+parat
+
+y, us
+
+g [dummy t
+xt](#dummy-t
+xt) to avo
+d HF 
+rrors. S
+
+c
+ th
+s sk
+ps HF's prompt updat
+
+g cod
+, 
+
+ app
+y [automat
+c prompt updat
+
+g](#automat
+c-prompt-updat
+
+g) aft
+r
+ards to k
+p th
+ output tok
+
+s a
+d mu
+t
+-moda
+ data co
+s
+st
+
+t 
+
+th 
+ach oth
+r.

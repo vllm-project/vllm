@@ -1,886 +1,13296 @@
-# Supported Models
+# Support
+d Mod
 
-vLLM supports [generative](./generative_models.md) and [pooling](./pooling_models.md) models across various tasks.
+s
+vLLM supports [g
 
-For each task, we list the model architectures that have been implemented in vLLM.
-Alongside each architecture, we include some popular models that use it.
 
-## Model Implementation
+rat
+v
+](./g
+
+
+rat
+v
+_mod
+
+s.md) a
+d [poo
+
+
+g](./poo
+
+
+g_mod
+
+s.md) mod
+
+s across var
+ous tasks.
+For 
+ach task, 
+
+ 
+
+st th
+ mod
+
+ arch
+t
+ctur
+s that hav
+ b
+
+ 
+mp
+
+m
+
+t
+d 
+
+ vLLM.
+A
+o
+gs
+d
+ 
+ach arch
+t
+ctur
+, 
+
+ 
+
+c
+ud
+ som
+ popu
+ar mod
+
+s that us
+ 
+t.
+## Mod
+
+ Imp
+
+m
+
+tat
+o
 
 ### vLLM
+If vLLM 
+at
+v
 
-If vLLM natively supports a model, its implementation can be found in [vllm/model_executor/models](../../vllm/model_executor/models).
+y supports a mod
 
-These models are what we list in [supported text models](#list-of-text-only-language-models) and [supported multimodal models](#list-of-multimodal-language-models).
+, 
+ts 
+mp
 
-### Transformers
+m
 
-vLLM also supports model implementations that are available in Transformers. You should expect the performance of a Transformers model implementation used in vLLM to be within <5% of the performance of a dedicated vLLM model implementation. We call this feature the "Transformers modeling backend".
+tat
+o
+ ca
+ b
+ fou
+d 
 
-Currently, the Transformers modeling backend works for the following:
+ [v
+m/mod
 
-- Modalities: embedding models, language models and vision-language models*
-- Architectures: encoder-only, decoder-only, mixture-of-experts
-- Attention types: full attention and/or sliding attention
+_
+x
+cutor/mod
 
-_*Vision-language models currently accept only image inputs. Support for video inputs will be added in a future release._
+s](../../v
+m/mod
 
-If the Transformers model implementation follows all the steps in [writing a custom model](#writing-custom-models) then, when used with the Transformers modeling backend, it will be compatible with the following features of vLLM:
+_
+x
+cutor/mod
 
-- All the features listed in the [compatibility matrix](../features/README.md#feature-x-feature)
-- Any combination of the following vLLM parallelisation schemes:
-    - Data parallel
-    - Tensor parallel
-    - Expert parallel
-    - Pipeline parallel
+s).
+Th
+s
+ mod
 
-Checking if the modeling backend is Transformers is as simple as:
+s ar
+ 
+hat 
 
-```python
-from vllm import LLM
-llm = LLM(model=...)  # Name or path of your model
-llm.apply_model(lambda model: print(type(model)))
+ 
+
+st 
+
+ [support
+d t
+xt mod
+
+s](#
+
+st-of-t
+xt-o
+
+y-
+a
+guag
+-mod
+
+s) a
+d [support
+d mu
+t
+moda
+ mod
+
+s](#
+
+st-of-mu
+t
+moda
+-
+a
+guag
+-mod
+
+s).
+### Tra
+sform
+rs
+vLLM a
+so supports mod
+
+ 
+mp
+
+m
+
+tat
+o
+s that ar
+ ava
+
+ab
+
+ 
+
+ Tra
+sform
+rs. You shou
+d 
+xp
+ct th
+ p
+rforma
+c
+ of a Tra
+sform
+rs mod
+
+ 
+mp
+
+m
+
+tat
+o
+ us
+d 
+
+ vLLM to b
+ 
+
+th
+
+ 
+5% of th
+ p
+rforma
+c
+ of a d
+d
+cat
+d vLLM mod
+
+ 
+mp
+
+m
+
+tat
+o
+. W
+ ca
+ th
+s f
+atur
+ th
+ "Tra
+sform
+rs mod
+
+
+
+g back
+
+d".
+Curr
+
+t
+y, th
+ Tra
+sform
+rs mod
+
+
+
+g back
+
+d 
+orks for th
+ fo
+o
+
+
+g:
+- Moda
+
+t
+
+s: 
+mb
+dd
+
+g mod
+
+s, 
+a
+guag
+ mod
+
+s a
+d v
+s
+o
+-
+a
+guag
+ mod
+
+s*
+- Arch
+t
+ctur
+s: 
+
+cod
+r-o
+
+y, d
+cod
+r-o
+
+y, m
+xtur
+-of-
+xp
+rts
+- Att
+
+t
+o
+ typ
+s: fu
+ att
+
+t
+o
+ a
+d/or s
+
+d
+
+g att
+
+t
+o
+
+_*V
+s
+o
+-
+a
+guag
+ mod
+
+s curr
+
+t
+y acc
+pt o
+
+y 
+mag
+ 
+
+puts. Support for v
+d
+o 
+
+puts 
+
+
+ b
+ add
+d 
+
+ a futur
+ r
+
+
+as
+._
+If th
+ Tra
+sform
+rs mod
+
+ 
+mp
+
+m
+
+tat
+o
+ fo
+o
+s a
+ th
+ st
+ps 
+
+ [
+r
+t
+
+g a custom mod
+
+](#
+r
+t
+
+g-custom-mod
+
+s) th
+
+, 
+h
+
+ us
+d 
+
+th th
+ Tra
+sform
+rs mod
+
+
+
+g back
+
+d, 
+t 
+
+
+ b
+ compat
+b
+
+ 
+
+th th
+ fo
+o
+
+
+g f
+atur
+s of vLLM:
+- A
+ th
+ f
+atur
+s 
+
+st
+d 
+
+ th
+ [compat
+b
+
+
+ty matr
+x](../f
+atur
+s/README.md#f
+atur
+-x-f
+atur
+)
+- A
+y comb
+
+at
+o
+ of th
+ fo
+o
+
+
+g vLLM para
+
+
+
+sat
+o
+ sch
+m
+s:
+    - Data para
+
+
+
+    - T
+
+sor para
+
+
+
+    - Exp
+rt para
+
+
+
+    - P
+p
+
+
+
+
+ para
+
+
+
+Ch
+ck
+
+g 
+f th
+ mod
+
+
+
+g back
+
+d 
+s Tra
+sform
+rs 
+s as s
+mp
+
+ as:
+```pytho
+
+from v
+m 
+mport LLM
+
+m = LLM(mod
+
+=...)  # Nam
+ or path of your mod
+
+
+
+m.app
+y_mod
+
+(
+ambda mod
+
+: pr
+
+t(typ
+(mod
+
+)))
 ```
+If th
+ pr
 
-If the printed type starts with `Transformers...` then it's using the Transformers model implementation!
+t
+d typ
+ starts 
 
-If a model has a vLLM implementation but you would prefer to use the Transformers implementation via the Transformers modeling backend, set `model_impl="transformers"` for [offline inference](../serving/offline_inference.md) or `--model-impl transformers` for the [online serving](../serving/openai_compatible_server.md).
+th `Tra
+sform
+rs...` th
 
-!!! note
-    For vision-language models, if you are loading with `dtype="auto"`, vLLM loads the whole model with config's `dtype` if it exists. In contrast the native Transformers will respect the `dtype` attribute of each backbone in the model. That might cause a slight difference in performance.
+ 
+t's us
 
-#### Custom models
+g th
+ Tra
+sform
+rs mod
 
-If a model is neither supported natively by vLLM nor Transformers, it can still be used in vLLM!
+ 
+mp
 
-For a model to be compatible with the Transformers modeling backend for vLLM it must:
+m
 
-- be a Transformers compatible custom model (see [Transformers - Customizing models](https://huggingface.co/docs/transformers/en/custom_models)):
-    - The model directory must have the correct structure (e.g. `config.json` is present).
-    - `config.json` must contain `auto_map.AutoModel`.
-- be a Transformers modeling backend for vLLM compatible model (see [Writing custom models](#writing-custom-models)):
-    - Customisation should be done in the base model (e.g. in `MyModel`, not `MyModelForCausalLM`).
+tat
+o
+!
+If a mod
 
-If the compatible model is:
+ has a vLLM 
+mp
 
-- on the Hugging Face Model Hub, simply set `trust_remote_code=True` for [offline-inference](../serving/offline_inference.md) or `--trust-remote-code` for the [openai-compatible-server](../serving/openai_compatible_server.md).
-- in a local directory, simply pass directory path to `model=<MODEL_DIR>` for [offline-inference](../serving/offline_inference.md) or `vllm serve <MODEL_DIR>` for the [openai-compatible-server](../serving/openai_compatible_server.md).
+m
 
-This means that, with the Transformers modeling backend for vLLM, new models can be used before they are officially supported in Transformers or vLLM!
+tat
+o
+ but you 
+ou
+d pr
+f
+r to us
+ th
+ Tra
+sform
+rs 
+mp
 
-#### Writing custom models
+m
 
-This section details the necessary modifications to make to a Transformers compatible custom model that make it compatible with the Transformers modeling backend for vLLM. (We assume that a Transformers compatible custom model has already been created, see [Transformers - Customizing models](https://huggingface.co/docs/transformers/en/custom_models)).
+tat
+o
+ v
+a th
+ Tra
+sform
+rs mod
 
-To make your model compatible with the Transformers modeling backend, it needs:
 
-1. `kwargs` passed down through all modules from `MyModel` to `MyAttention`.
-    - If your model is encoder-only:
-        1. Add `is_causal = False` to `MyAttention`.
-    - If your model is mixture-of-experts (MoE):
-        1. Your sparse MoE block must have an attribute called `experts`.
-        2. The class of `experts` (`MyExperts`) must either:
-            - Inherit from `nn.ModuleList` (naive).
-            - Or contain all 3D `nn.Parameters` (packed).
-        3. `MyExperts.forward` must accept `hidden_states`, `top_k_index`, `top_k_weights`.
-2. `MyAttention` must use `ALL_ATTENTION_FUNCTIONS` to call attention.
-3. `MyModel` must contain `_supports_attention_backend = True`.
 
-<details class="code">
-<summary>modeling_my_model.py</summary>
+g back
 
-```python
+d, s
+t `mod
 
-from transformers import PreTrainedModel
-from torch import nn
+_
+mp
+="tra
+sform
+rs"` for [off
 
-class MyAttention(nn.Module):
-    is_causal = False  # Only do this for encoder-only models
 
-    def forward(self, hidden_states, **kwargs):
+
+ 
+
+f
+r
+
+c
+](../s
+rv
+
+g/off
+
+
+
+_
+
+f
+r
+
+c
+.md) or `--mod
+
+-
+mp
+ tra
+sform
+rs` for th
+ [o
+
+
+
+
+ s
+rv
+
+g](../s
+rv
+
+g/op
+
+a
+_compat
+b
+
+_s
+rv
+r.md).
+!!! 
+ot
+
+    For v
+s
+o
+-
+a
+guag
+ mod
+
+s, 
+f you ar
+ 
+oad
+
+g 
+
+th `dtyp
+="auto"`, vLLM 
+oads th
+ 
+ho
+
+ mod
+
+ 
+
+th co
+f
+g's `dtyp
+` 
+f 
+t 
+x
+sts. I
+ co
+trast th
+ 
+at
+v
+ Tra
+sform
+rs 
+
+
+ r
+sp
+ct th
+ `dtyp
+` attr
+but
+ of 
+ach backbo
+
+ 
+
+ th
+ mod
+
+. That m
+ght caus
+ a s
+
+ght d
+ff
+r
+
+c
+ 
+
+ p
+rforma
+c
+.
+#### Custom mod
+
+s
+If a mod
+
+ 
+s 
+
+
+th
+r support
+d 
+at
+v
+
+y by vLLM 
+or Tra
+sform
+rs, 
+t ca
+ st
+
+ b
+ us
+d 
+
+ vLLM!
+For a mod
+
+ to b
+ compat
+b
+
+ 
+
+th th
+ Tra
+sform
+rs mod
+
+
+
+g back
+
+d for vLLM 
+t must:
+- b
+ a Tra
+sform
+rs compat
+b
+
+ custom mod
+
+ (s
+ [Tra
+sform
+rs - Custom
+z
+
+g mod
+
+s](https://hugg
+
+gfac
+.co/docs/tra
+sform
+rs/
+
+/custom_mod
+
+s)):
+    - Th
+ mod
+
+ d
+r
+ctory must hav
+ th
+ corr
+ct structur
+ (
+.g. `co
+f
+g.jso
+` 
+s pr
+s
+
+t).
+    - `co
+f
+g.jso
+` must co
+ta
+
+ `auto_map.AutoMod
+
+`.
+- b
+ a Tra
+sform
+rs mod
+
+
+
+g back
+
+d for vLLM compat
+b
+
+ mod
+
+ (s
+ [Wr
+t
+
+g custom mod
+
+s](#
+r
+t
+
+g-custom-mod
+
+s)):
+    - Custom
+sat
+o
+ shou
+d b
+ do
+
+ 
+
+ th
+ bas
+ mod
+
+ (
+.g. 
+
+ `MyMod
+
+`, 
+ot `MyMod
+
+ForCausa
+LM`).
+If th
+ compat
+b
+
+ mod
+
+ 
+s:
+- o
+ th
+ Hugg
+
+g Fac
+ Mod
+
+ Hub, s
+mp
+y s
+t `trust_r
+mot
+_cod
+=Tru
+` for [off
+
+
+
+-
+
+f
+r
+
+c
+](../s
+rv
+
+g/off
+
+
+
+_
+
+f
+r
+
+c
+.md) or `--trust-r
+mot
+-cod
+` for th
+ [op
+
+a
+-compat
+b
+
+-s
+rv
+r](../s
+rv
+
+g/op
+
+a
+_compat
+b
+
+_s
+rv
+r.md).
+- 
+
+ a 
+oca
+ d
+r
+ctory, s
+mp
+y pass d
+r
+ctory path to `mod
+
+=
+MODEL_DIR
+` for [off
+
+
+
+-
+
+f
+r
+
+c
+](../s
+rv
+
+g/off
+
+
+
+_
+
+f
+r
+
+c
+.md) or `v
+m s
+rv
+ 
+MODEL_DIR
+` for th
+ [op
+
+a
+-compat
+b
+
+-s
+rv
+r](../s
+rv
+
+g/op
+
+a
+_compat
+b
+
+_s
+rv
+r.md).
+Th
+s m
+a
+s that, 
+
+th th
+ Tra
+sform
+rs mod
+
+
+
+g back
+
+d for vLLM, 
+
+
+ mod
+
+s ca
+ b
+ us
+d b
+for
+ th
+y ar
+ off
+c
+a
+y support
+d 
+
+ Tra
+sform
+rs or vLLM!
+#### Wr
+t
+
+g custom mod
+
+s
+Th
+s s
+ct
+o
+ d
+ta
+
+s th
+ 
+
+c
+ssary mod
+f
+cat
+o
+s to mak
+ to a Tra
+sform
+rs compat
+b
+
+ custom mod
+
+ that mak
+ 
+t compat
+b
+
+ 
+
+th th
+ Tra
+sform
+rs mod
+
+
+
+g back
+
+d for vLLM. (W
+ assum
+ that a Tra
+sform
+rs compat
+b
+
+ custom mod
+
+ has a
+r
+ady b
+
+ cr
+at
+d, s
+ [Tra
+sform
+rs - Custom
+z
+
+g mod
+
+s](https://hugg
+
+gfac
+.co/docs/tra
+sform
+rs/
+
+/custom_mod
+
+s)).
+To mak
+ your mod
+
+ compat
+b
+
+ 
+
+th th
+ Tra
+sform
+rs mod
+
+
+
+g back
+
+d, 
+t 
+
+ds:
+1. `k
+args` pass
+d do
+
+ through a
+ modu
+
+s from `MyMod
+
+` to `MyAtt
+
+t
+o
+`.
+    - If your mod
+
+ 
+s 
+
+cod
+r-o
+
+y:
+        1. Add `
+s_causa
+ = Fa
+s
+` to `MyAtt
+
+t
+o
+`.
+    - If your mod
+
+ 
+s m
+xtur
+-of-
+xp
+rts (MoE):
+        1. Your spars
+ MoE b
+ock must hav
+ a
+ attr
+but
+ ca
+
+d `
+xp
+rts`.
+        2. Th
+ c
+ass of `
+xp
+rts` (`MyExp
+rts`) must 
+
+th
+r:
+            - I
+h
+r
+t from `
+.Modu
+
+L
+st` (
+a
+v
+).
+            - Or co
+ta
+
+ a
+ 3D `
+.Param
+t
+rs` (pack
+d).
+        3. `MyExp
+rts.for
+ard` must acc
+pt `h
+dd
+
+_stat
+s`, `top_k_
+
+d
+x`, `top_k_
+
+
+ghts`.
+2. `MyAtt
+
+t
+o
+` must us
+ `ALL_ATTENTION_FUNCTIONS` to ca
+ att
+
+t
+o
+.
+3. `MyMod
+
+` must co
+ta
+
+ `_supports_att
+
+t
+o
+_back
+
+d = Tru
+`.
+d
+ta
+
+s c
+ass="cod
+"
+
+summary
+mod
+
+
+
+g_my_mod
+
+.py
+/summary
+
+```pytho
+
+from tra
+sform
+rs 
+mport Pr
+Tra
+
+
+dMod
+
+
+from torch 
+mport 
+
+c
+ass MyAtt
+
+t
+o
+(
+.Modu
+
+):
+    
+s_causa
+ = Fa
+s
+  # O
+
+y do th
+s for 
+
+cod
+r-o
+
+y mod
+
+s
+    d
+f for
+ard(s
+
+f, h
+dd
+
+_stat
+s, **k
+args):
         ...
-        attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
-        attn_output, attn_weights = attention_interface(
-            self,
-            query_states,
-            key_states,
-            value_states,
-            **kwargs,
+        att
+
+t
+o
+_
+
+t
+rfac
+ = ALL_ATTENTION_FUNCTIONS[s
+
+f.co
+f
+g._att
+_
+mp
+
+m
+
+tat
+o
+]
+        att
+_output, att
+_
+
+
+ghts = att
+
+t
+o
+_
+
+t
+rfac
+(
+            s
+
+f,
+            qu
+ry_stat
+s,
+            k
+y_stat
+s,
+            va
+u
+_stat
+s,
+            **k
+args,
         )
         ...
+# O
 
-# Only do this for mixture-of-experts models
-class MyExperts(nn.ModuleList):
-    def forward(self, hidden_states, top_k_index, top_k_weights):
-        ...
+y do th
+s for m
+xtur
+-of-
+xp
+rts mod
 
-# Only do this for mixture-of-experts models
-class MySparseMoEBlock(nn.Module):
-    def __init__(self, config):
-        ...
-        self.experts = MyExperts(config)
-        ...
+s
+c
+ass MyExp
+rts(
+.Modu
 
-    def forward(self, hidden_states: torch.Tensor):
-        ...
-        hidden_states = self.experts(hidden_states, top_k_index, top_k_weights)
-        ...
+L
+st):
+    d
+f for
+ard(s
 
-class MyModel(PreTrainedModel):
-    _supports_attention_backend = True
+f, h
+dd
+
+_stat
+s, top_k_
+
+d
+x, top_k_
+
+
+ghts):
+        ...
+# O
+
+y do th
+s for m
+xtur
+-of-
+xp
+rts mod
+
+s
+c
+ass MySpars
+MoEB
+ock(
+.Modu
+
+):
+    d
+f __
+
+
+t__(s
+
+f, co
+f
+g):
+        ...
+        s
+
+f.
+xp
+rts = MyExp
+rts(co
+f
+g)
+        ...
+    d
+f for
+ard(s
+
+f, h
+dd
+
+_stat
+s: torch.T
+
+sor):
+        ...
+        h
+dd
+
+_stat
+s = s
+
+f.
+xp
+rts(h
+dd
+
+_stat
+s, top_k_
+
+d
+x, top_k_
+
+
+ghts)
+        ...
+c
+ass MyMod
+
+(Pr
+Tra
+
+
+dMod
+
+):
+    _supports_att
+
+t
+o
+_back
+
+d = Tru
+
 ```
+/d
+ta
 
-</details>
+s
 
-Here is what happens in the background when this model is loaded:
+H
+r
+ 
+s 
+hat happ
 
-1. The config is loaded.
-2. `MyModel` Python class is loaded from the `auto_map` in config, and we check that the model `is_backend_compatible()`.
-3. `MyModel` is loaded into one of the Transformers modeling backend classes in [vllm/model_executor/models/transformers](../../vllm/model_executor/models/transformers) which sets `self.config._attn_implementation = "vllm"` so that vLLM's attention layer is used.
+s 
 
-That's it!
+ th
+ backgrou
+d 
+h
 
-For your model to be compatible with vLLM's tensor parallel and/or pipeline parallel features, you must add `base_model_tp_plan` and/or `base_model_pp_plan` to your model's config class:
+ th
+s mod
 
-<details class="code">
-<summary>configuration_my_model.py</summary>
+ 
+s 
+oad
+d:
+1. Th
+ co
+f
+g 
+s 
+oad
+d.
+2. `MyMod
 
-```python
+` Pytho
+ c
+ass 
+s 
+oad
+d from th
+ `auto_map` 
 
-from transformers import PretrainedConfig
+ co
+f
+g, a
+d 
 
-class MyConfig(PretrainedConfig):
-    base_model_tp_plan = {
-        "layers.*.self_attn.k_proj": "colwise",
-        "layers.*.self_attn.v_proj": "colwise",
-        "layers.*.self_attn.o_proj": "rowwise",
-        "layers.*.mlp.gate_proj": "colwise",
-        "layers.*.mlp.up_proj": "colwise",
-        "layers.*.mlp.down_proj": "rowwise",
+ ch
+ck that th
+ mod
+
+ `
+s_back
+
+d_compat
+b
+
+()`.
+3. `MyMod
+
+` 
+s 
+oad
+d 
+
+to o
+
+ of th
+ Tra
+sform
+rs mod
+
+
+
+g back
+
+d c
+ass
+s 
+
+ [v
+m/mod
+
+_
+x
+cutor/mod
+
+s/tra
+sform
+rs](../../v
+m/mod
+
+_
+x
+cutor/mod
+
+s/tra
+sform
+rs) 
+h
+ch s
+ts `s
+
+f.co
+f
+g._att
+_
+mp
+
+m
+
+tat
+o
+ = "v
+m"` so that vLLM's att
+
+t
+o
+ 
+ay
+r 
+s us
+d.
+That's 
+t!
+For your mod
+
+ to b
+ compat
+b
+
+ 
+
+th vLLM's t
+
+sor para
+
+
+ a
+d/or p
+p
+
+
+
+
+ para
+
+
+ f
+atur
+s, you must add `bas
+_mod
+
+_tp_p
+a
+` a
+d/or `bas
+_mod
+
+_pp_p
+a
+` to your mod
+
+'s co
+f
+g c
+ass:
+d
+ta
+
+s c
+ass="cod
+"
+
+summary
+co
+f
+gurat
+o
+_my_mod
+
+.py
+/summary
+
+```pytho
+
+from tra
+sform
+rs 
+mport Pr
+tra
+
+
+dCo
+f
+g
+c
+ass MyCo
+f
+g(Pr
+tra
+
+
+dCo
+f
+g):
+    bas
+_mod
+
+_tp_p
+a
+ = {
+        "
+ay
+rs.*.s
+
+f_att
+.k_proj": "co
+
+
+s
+",
+        "
+ay
+rs.*.s
+
+f_att
+.v_proj": "co
+
+
+s
+",
+        "
+ay
+rs.*.s
+
+f_att
+.o_proj": "ro
+
+s
+",
+        "
+ay
+rs.*.m
+p.gat
+_proj": "co
+
+
+s
+",
+        "
+ay
+rs.*.m
+p.up_proj": "co
+
+
+s
+",
+        "
+ay
+rs.*.m
+p.do
+
+_proj": "ro
+
+s
+",
     }
-    base_model_pp_plan = {
-        "embed_tokens": (["input_ids"], ["inputs_embeds"]),
-        "layers": (["hidden_states", "attention_mask"], ["hidden_states"]),
-        "norm": (["hidden_states"], ["hidden_states"]),
+    bas
+_mod
+
+_pp_p
+a
+ = {
+        "
+mb
+d_tok
+
+s": (["
+
+put_
+ds"], ["
+
+puts_
+mb
+ds"]),
+        "
+ay
+rs": (["h
+dd
+
+_stat
+s", "att
+
+t
+o
+_mask"], ["h
+dd
+
+_stat
+s"]),
+        "
+orm": (["h
+dd
+
+_stat
+s"], ["h
+dd
+
+_stat
+s"]),
     }
 ```
+/d
+ta
 
-</details>
+s
 
-- `base_model_tp_plan` is a `dict` that maps fully qualified layer name patterns to tensor parallel styles (currently only `"colwise"` and `"rowwise"` are supported).
-- `base_model_pp_plan` is a `dict` that maps direct child layer names to `tuple`s of `list`s of `str`s:
-    - You only need to do this for layers which are not present on all pipeline stages
-    - vLLM assumes that there will be only one `nn.ModuleList`, which is distributed across the pipeline stages
-    - The `list` in the first element of the `tuple` contains the names of the input arguments
-    - The `list` in the last element of the `tuple` contains the names of the variables the layer outputs to in your modeling code
+- `bas
+_mod
 
-### Plugins
+_tp_p
+a
+` 
+s a `d
+ct` that maps fu
+y qua
 
-Some model architectures are supported via vLLM plugins. These plugins extend vLLM's capabilities through the [plugin system](../design/plugin_system.md).
+f
 
-| Architecture | Models | Plugin Repository |
+d 
+ay
+r 
+am
+ patt
+r
+s to t
+
+sor para
+
+
+ sty
+
+s (curr
+
+t
+y o
+
+y `"co
+
+
+s
+"` a
+d `"ro
+
+s
+"` ar
+ support
+d).
+- `bas
+_mod
+
+_pp_p
+a
+` 
+s a `d
+ct` that maps d
+r
+ct ch
+
+d 
+ay
+r 
+am
+s to `tup
+
+`s of `
+
+st`s of `str`s:
+    - You o
+
+y 
+
+d to do th
+s for 
+ay
+rs 
+h
+ch ar
+ 
+ot pr
+s
+
+t o
+ a
+ p
+p
+
+
+
+
+ stag
+s
+    - vLLM assum
+s that th
+r
+ 
+
+
+ b
+ o
+
+y o
+
+ `
+.Modu
+
+L
+st`, 
+h
+ch 
+s d
+str
+but
+d across th
+ p
+p
+
+
+
+
+ stag
+s
+    - Th
+ `
+
+st` 
+
+ th
+ f
+rst 
+
+
+m
+
+t of th
+ `tup
+
+` co
+ta
+
+s th
+ 
+am
+s of th
+ 
+
+put argum
+
+ts
+    - Th
+ `
+
+st` 
+
+ th
+ 
+ast 
+
+
+m
+
+t of th
+ `tup
+
+` co
+ta
+
+s th
+ 
+am
+s of th
+ var
+ab
+
+s th
+ 
+ay
+r outputs to 
+
+ your mod
+
+
+
+g cod
+
+### P
+ug
+
+s
+Som
+ mod
+
+ arch
+t
+ctur
+s ar
+ support
+d v
+a vLLM p
+ug
+
+s. Th
+s
+ p
+ug
+
+s 
+xt
+
+d vLLM's capab
+
+
+t
+
+s through th
+ [p
+ug
+
+ syst
+m](../d
+s
+g
+/p
+ug
+
+_syst
+m.md).
+| Arch
+t
+ctur
+ | Mod
+
+s | P
+ug
+
+ R
+pos
+tory |
 |--------------|--------|-------------------|
-| `BartForConditionalGeneration` | BART | [bart-plugin](https://github.com/vllm-project/bart-plugin) |
-| `Florence2ForConditionalGeneration` | Florence-2 | [bart-plugin](https://github.com/vllm-project/bart-plugin) |
+| `BartForCo
+d
+t
+o
+a
+G
 
-For other model architectures not natively supported, in particular for Encoder-Decoder models, we recommend following a similar pattern by implementing support through the plugin system.
 
-## Loading a Model
+rat
+o
+` | BART | [bart-p
+ug
 
-### Hugging Face Hub
+](https://g
+thub.com/v
+m-proj
+ct/bart-p
+ug
 
-By default, vLLM loads models from [Hugging Face (HF) Hub](https://huggingface.co/models). To change the download path for models, you can set the `HF_HOME` environment variable; for more details, refer to [their official documentation](https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#hfhome).
+) |
+| `F
+or
 
-To determine whether a given model is natively supported, you can check the `config.json` file inside the HF repository.
-If the `"architectures"` field contains a model architecture listed below, then it should be natively supported.
+c
+2ForCo
+d
+t
+o
+a
+G
 
-Models do not _need_ to be natively supported to be used in vLLM.
-The [Transformers modeling backend](#transformers) enables you to run models directly using their Transformers implementation (or even remote code on the Hugging Face Model Hub!).
 
-!!! tip
-    The easiest way to check if your model is really supported at runtime is to run the program below:
+rat
+o
+` | F
+or
 
-    ```python
-    from vllm import LLM
+c
+-2 | [bart-p
+ug
 
-    # For generative models (runner=generate) only
-    llm = LLM(model=..., runner="generate")  # Name or path of your model
-    output = llm.generate("Hello, my name is")
-    print(output)
+](https://g
+thub.com/v
+m-proj
+ct/bart-p
+ug
 
-    # For pooling models (runner=pooling) only
-    llm = LLM(model=..., runner="pooling")  # Name or path of your model
-    output = llm.encode("Hello, my name is")
-    print(output)
+) |
+For oth
+r mod
+
+ arch
+t
+ctur
+s 
+ot 
+at
+v
+
+y support
+d, 
+
+ part
+cu
+ar for E
+cod
+r-D
+cod
+r mod
+
+s, 
+
+ r
+comm
+
+d fo
+o
+
+
+g a s
+m
+
+ar patt
+r
+ by 
+mp
+
+m
+
+t
+
+g support through th
+ p
+ug
+
+ syst
+m.
+## Load
+
+g a Mod
+
+
+### Hugg
+
+g Fac
+ Hub
+By d
+fau
+t, vLLM 
+oads mod
+
+s from [Hugg
+
+g Fac
+ (HF) Hub](https://hugg
+
+gfac
+.co/mod
+
+s). To cha
+g
+ th
+ do
+
+
+oad path for mod
+
+s, you ca
+ s
+t th
+ `HF_HOME` 
+
+v
+ro
+m
+
+t var
+ab
+
+; for mor
+ d
+ta
+
+s, r
+f
+r to [th
+
+r off
+c
+a
+ docum
+
+tat
+o
+](https://hugg
+
+gfac
+.co/docs/hugg
+
+gfac
+_hub/packag
+_r
+f
+r
+
+c
+/
+
+v
+ro
+m
+
+t_var
+ab
+
+s#hfhom
+).
+To d
+t
+rm
+
+
+ 
+h
+th
+r a g
+v
+
+ mod
+
+ 
+s 
+at
+v
+
+y support
+d, you ca
+ ch
+ck th
+ `co
+f
+g.jso
+` f
+
+
+ 
+
+s
+d
+ th
+ HF r
+pos
+tory.
+If th
+ `"arch
+t
+ctur
+s"` f
+
+
+d co
+ta
+
+s a mod
+
+ arch
+t
+ctur
+ 
+
+st
+d b
+
+o
+, th
+
+ 
+t shou
+d b
+ 
+at
+v
+
+y support
+d.
+Mod
+
+s do 
+ot _
+
+d_ to b
+ 
+at
+v
+
+y support
+d to b
+ us
+d 
+
+ vLLM.
+Th
+ [Tra
+sform
+rs mod
+
+
+
+g back
+
+d](#tra
+sform
+rs) 
+
+ab
+
+s you to ru
+ mod
+
+s d
+r
+ct
+y us
+
+g th
+
+r Tra
+sform
+rs 
+mp
+
+m
+
+tat
+o
+ (or 
+v
+
+ r
+mot
+ cod
+ o
+ th
+ Hugg
+
+g Fac
+ Mod
+
+ Hub!).
+!!! t
+p
+    Th
+ 
+as
+
+st 
+ay to ch
+ck 
+f your mod
+
+ 
+s r
+a
+y support
+d at ru
+t
+m
+ 
+s to ru
+ th
+ program b
+
+o
+:
+    ```pytho
+
+    from v
+m 
+mport LLM
+    # For g
+
+
+rat
+v
+ mod
+
+s (ru
+
+r=g
+
+
+rat
+) o
+
+y
+    
+m = LLM(mod
+
+=..., ru
+
+r="g
+
+
+rat
+")  # Nam
+ or path of your mod
+
+
+    output = 
+m.g
+
+
+rat
+("H
+
+o, my 
+am
+ 
+s")
+    pr
+
+t(output)
+    # For poo
+
+
+g mod
+
+s (ru
+
+r=poo
+
+
+g) o
+
+y
+    
+m = LLM(mod
+
+=..., ru
+
+r="poo
+
+
+g")  # Nam
+ or path of your mod
+
+
+    output = 
+m.
+
+cod
+("H
+
+o, my 
+am
+ 
+s")
+    pr
+
+t(output)
     ```
+    If vLLM succ
+ssfu
+y r
+tur
+s t
+xt (for g
 
-    If vLLM successfully returns text (for generative models) or hidden states (for pooling models), it indicates that your model is supported.
 
-Otherwise, please refer to [Adding a New Model](../contributing/model/README.md) for instructions on how to implement your model in vLLM.
-Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
+rat
+v
+ mod
 
-#### Download a model
+s) or h
+dd
 
-If you prefer, you can use the Hugging Face CLI to [download a model](https://huggingface.co/docs/huggingface_hub/guides/cli#huggingface-cli-download) or specific files from a model repository:
+ stat
+s (for poo
 
+
+g mod
+
+s), 
+t 
+
+d
+cat
+s that your mod
+
+ 
+s support
+d.
+Oth
+r
+
+s
+, p
+
+as
+ r
+f
+r to [Add
+
+g a N
+
+ Mod
+
+](../co
+tr
+but
+
+g/mod
+
+/README.md) for 
+
+struct
+o
+s o
+ ho
+ to 
+mp
+
+m
+
+t your mod
+
+ 
+
+ vLLM.
+A
+t
+r
+at
+v
+
+y, you ca
+ [op
+
+ a
+ 
+ssu
+ o
+ G
+tHub](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/
+
+
+/choos
+) to r
+qu
+st vLLM support.
+#### Do
+
+
+oad a mod
+
+
+If you pr
+f
+r, you ca
+ us
+ th
+ Hugg
+
+g Fac
+ CLI to [do
+
+
+oad a mod
+
+](https://hugg
+
+gfac
+.co/docs/hugg
+
+gfac
+_hub/gu
+d
+s/c
+
+#hugg
+
+gfac
+-c
+
+-do
+
+
+oad) or sp
+c
+f
+c f
+
+
+s from a mod
+
+ r
+pos
+tory:
 ```bash
-# Download a model
-hf download HuggingFaceH4/zephyr-7b-beta
+# Do
 
-# Specify a custom cache directory
-hf download HuggingFaceH4/zephyr-7b-beta --cache-dir ./path/to/cache
 
-# Download a specific file from a model repo
-hf download HuggingFaceH4/zephyr-7b-beta eval_results.json
+oad a mod
+
+
+hf do
+
+
+oad Hugg
+
+gFac
+H4/z
+phyr-7b-b
+ta
+# Sp
+c
+fy a custom cach
+ d
+r
+ctory
+hf do
+
+
+oad Hugg
+
+gFac
+H4/z
+phyr-7b-b
+ta --cach
+-d
+r ./path/to/cach
+
+# Do
+
+
+oad a sp
+c
+f
+c f
+
+
+ from a mod
+
+ r
+po
+hf do
+
+
+oad Hugg
+
+gFac
+H4/z
+phyr-7b-b
+ta 
+va
+_r
+su
+ts.jso
+
 ```
+#### L
+st th
+ do
 
-#### List the downloaded models
 
-Use the Hugging Face CLI to [manage models](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#scan-your-cache) stored in local cache:
+oad
+d mod
 
+s
+Us
+ th
+ Hugg
+
+g Fac
+ CLI to [ma
+ag
+ mod
+
+s](https://hugg
+
+gfac
+.co/docs/hugg
+
+gfac
+_hub/gu
+d
+s/ma
+ag
+-cach
+#sca
+-your-cach
+) stor
+d 
+
+ 
+oca
+ cach
+:
 ```bash
-# List cached models
-hf scan-cache
+# L
+st cach
+d mod
 
-# Show detailed (verbose) output
-hf scan-cache -v
+s
+hf sca
+-cach
 
-# Specify a custom cache directory
-hf scan-cache --dir ~/.cache/huggingface/hub
+# Sho
+ d
+ta
+
+
+d (v
+rbos
+) output
+hf sca
+-cach
+ -v
+# Sp
+c
+fy a custom cach
+ d
+r
+ctory
+hf sca
+-cach
+ --d
+r ~/.cach
+/hugg
+
+gfac
+/hub
 ```
+#### D
 
-#### Delete a cached model
 
-Use the Hugging Face CLI to interactively [delete downloaded model](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#clean-your-cache) from the cache:
+t
+ a cach
+d mod
 
-<details>
-<summary>Commands</summary>
 
-```console
-# The `delete-cache` command requires extra dependencies to work with the TUI.
-# Please run `pip install huggingface_hub[cli]` to install them.
+Us
+ th
+ Hugg
 
-# Launch the interactive TUI to select models to delete
-$ hf delete-cache
-? Select revisions to delete: 1 revisions selected counting for 438.9M.
-  ○ None of the following (if selected, nothing will be deleted).
-Model BAAI/bge-base-en-v1.5 (438.9M, used 1 week ago)
-❯ ◉ a5beb1e3: main # modified 1 week ago
+g Fac
+ CLI to 
 
-Model BAAI/bge-large-en-v1.5 (1.3G, used 1 week ago)
-  ○ d4aa6901: main # modified 1 week ago
+t
+ract
+v
 
-Model BAAI/bge-reranker-base (1.1G, used 4 weeks ago)
-  ○ 2cfc18c9: main # modified 4 weeks ago
+y [d
 
-Press <space> to select, <enter> to validate and <ctrl+c> to quit without modification.
 
-# Need to confirm after selected
-? Select revisions to delete: 1 revision(s) selected.
-? 1 revisions selected counting for 438.9M. Confirm deletion ? Yes
-Start deletion.
-Done. Deleted 1 repo(s) and 0 revision(s) for a total of 438.9M.
+t
+ do
+
+
+oad
+d mod
+
+](https://hugg
+
+gfac
+.co/docs/hugg
+
+gfac
+_hub/gu
+d
+s/ma
+ag
+-cach
+#c
+
+a
+-your-cach
+) from th
+ cach
+:
+d
+ta
+
+s
+
+summary
+Comma
+ds
+/summary
+
+```co
+so
+
+
+# Th
+ `d
+
+
+t
+-cach
+` comma
+d r
+qu
+r
+s 
+xtra d
+p
+
+d
+
+c
+
+s to 
+ork 
+
+th th
+ TUI.
+# P
+
+as
+ ru
+ `p
+p 
+
+sta
+ hugg
+
+gfac
+_hub[c
+
+]` to 
+
+sta
+ th
+m.
+# Lau
+ch th
+ 
+
+t
+ract
+v
+ TUI to s
+
+
+ct mod
+
+s to d
+
+
+t
+
+$ hf d
+
+
+t
+-cach
+
+? S
+
+
+ct r
+v
+s
+o
+s to d
+
+
+t
+: 1 r
+v
+s
+o
+s s
+
+
+ct
+d cou
+t
+
+g for 438.9M.
+  ○ No
+
+ of th
+ fo
+o
+
+
+g (
+f s
+
+
+ct
+d, 
+oth
+
+g 
+
+
+ b
+ d
+
+
+t
+d).
+Mod
+
+ BAAI/bg
+-bas
+-
+
+-v1.5 (438.9M, us
+d 1 
+
+k ago)
+❯ ◉ a5b
+b1
+3: ma
+
+ # mod
+f
+
+d 1 
+
+k ago
+Mod
+
+ BAAI/bg
+-
+arg
+-
+
+-v1.5 (1.3G, us
+d 1 
+
+k ago)
+  ○ d4aa6901: ma
+
+ # mod
+f
+
+d 1 
+
+k ago
+Mod
+
+ BAAI/bg
+-r
+ra
+k
+r-bas
+ (1.1G, us
+d 4 
+
+ks ago)
+  ○ 2cfc18c9: ma
+
+ # mod
+f
+
+d 4 
+
+ks ago
+Pr
+ss 
+spac
+
+ to s
+
+
+ct, 
+
+
+t
+r
+ to va
+
+dat
+ a
+d 
+ctr
++c
+ to qu
+t 
+
+thout mod
+f
+cat
+o
+.
+# N
+d to co
+f
+rm aft
+r s
+
+
+ct
+d
+? S
+
+
+ct r
+v
+s
+o
+s to d
+
+
+t
+: 1 r
+v
+s
+o
+(s) s
+
+
+ct
+d.
+? 1 r
+v
+s
+o
+s s
+
+
+ct
+d cou
+t
+
+g for 438.9M. Co
+f
+rm d
+
+
+t
+o
+ ? Y
+s
+Start d
+
+
+t
+o
+.
+Do
+
+. D
+
+
+t
+d 1 r
+po(s) a
+d 0 r
+v
+s
+o
+(s) for a tota
+ of 438.9M.
 ```
+/d
+ta
 
-</details>
+s
 
-#### Using a proxy
+#### Us
 
-Here are some tips for loading/downloading models from Hugging Face using a proxy:
+g a proxy
+H
+r
+ ar
+ som
+ t
+ps for 
+oad
 
-- Set the proxy globally for your session (or set it in the profile file):
+g/do
 
-```shell
-export http_proxy=http://your.proxy.server:port
-export https_proxy=http://your.proxy.server:port
+
+oad
+
+g mod
+
+s from Hugg
+
+g Fac
+ us
+
+g a proxy:
+- S
+t th
+ proxy g
+oba
+y for your s
+ss
+o
+ (or s
+t 
+t 
+
+ th
+ prof
+
+
+ f
+
+
+):
+```sh
+
+
+
+xport http_proxy=http://your.proxy.s
+rv
+r:port
+
+xport https_proxy=http://your.proxy.s
+rv
+r:port
 ```
+- S
+t th
+ proxy for just th
+ curr
 
-- Set the proxy for just the current command:
+t comma
+d:
+```sh
 
-```shell
-https_proxy=http://your.proxy.server:port hf download <model_name>
 
-# or use vllm cmd directly
-https_proxy=http://your.proxy.server:port  vllm serve <model_name>
+https_proxy=http://your.proxy.s
+rv
+r:port hf do
+
+
+oad 
+mod
+
+_
+am
+
+
+# or us
+ v
+m cmd d
+r
+ct
+y
+https_proxy=http://your.proxy.s
+rv
+r:port  v
+m s
+rv
+ 
+mod
+
+_
+am
+
+
 ```
+- S
+t th
+ proxy 
 
-- Set the proxy in Python interpreter:
+ Pytho
+ 
 
-```python
-import os
+t
+rpr
+t
+r:
+```pytho
 
-os.environ["http_proxy"] = "http://your.proxy.server:port"
-os.environ["https_proxy"] = "http://your.proxy.server:port"
+
+mport os
+os.
+
+v
+ro
+["http_proxy"] = "http://your.proxy.s
+rv
+r:port"
+os.
+
+v
+ro
+["https_proxy"] = "http://your.proxy.s
+rv
+r:port"
 ```
+### Mod
 
-### ModelScope
+Scop
 
-To use models from [ModelScope](https://www.modelscope.cn) instead of Hugging Face Hub, set an environment variable:
+To us
+ mod
 
-```shell
-export VLLM_USE_MODELSCOPE=True
+s from [Mod
+
+Scop
+](https://
+.mod
+
+scop
+.c
+) 
+
+st
+ad of Hugg
+
+g Fac
+ Hub, s
+t a
+ 
+
+v
+ro
+m
+
+t var
+ab
+
+:
+```sh
+
+
+
+xport VLLM_USE_MODELSCOPE=Tru
+
 ```
+A
+d us
+ 
 
-And use with `trust_remote_code=True`.
+th `trust_r
+mot
+_cod
+=Tru
+`.
+```pytho
 
-```python
-from vllm import LLM
+from v
+m 
+mport LLM
 
-llm = LLM(model=..., revision=..., runner=..., trust_remote_code=True)
+m = LLM(mod
 
-# For generative models (runner=generate) only
-output = llm.generate("Hello, my name is")
-print(output)
+=..., r
+v
+s
+o
+=..., ru
 
-# For pooling models (runner=pooling) only
-output = llm.encode("Hello, my name is")
-print(output)
+r=..., trust_r
+mot
+_cod
+=Tru
+)
+# For g
+
+
+rat
+v
+ mod
+
+s (ru
+
+r=g
+
+
+rat
+) o
+
+y
+output = 
+m.g
+
+
+rat
+("H
+
+o, my 
+am
+ 
+s")
+pr
+
+t(output)
+# For poo
+
+
+g mod
+
+s (ru
+
+r=poo
+
+
+g) o
+
+y
+output = 
+m.
+
+cod
+("H
+
+o, my 
+am
+ 
+s")
+pr
+
+t(output)
 ```
+## F
+atur
+ Status L
+g
 
-## Feature Status Legend
+d
+- ✅︎ 
 
-- ✅︎ indicates that the feature is supported for the model.
+d
+cat
+s that th
+ f
+atur
+ 
+s support
+d for th
+ mod
 
-- 🚧 indicates that the feature is planned but not yet supported for the model.
+.
+- 🚧 
 
-- ⚠️ indicates that the feature is available but may have known issues or limitations.
+d
+cat
+s that th
+ f
+atur
+ 
+s p
+a
 
-## List of Text-only Language Models
+d but 
+ot y
+t support
+d for th
+ mod
 
-### Generative Models
+.
+- ⚠️ 
 
-See [this page](generative_models.md) for more information on how to use generative models.
+d
+cat
+s that th
+ f
+atur
+ 
+s ava
 
-#### Text Generation
+ab
 
-These models primarily accept the [`LLM.generate`](./generative_models.md#llmgenerate) API. Chat/Instruct models additionally support the [`LLM.chat`](./generative_models.md#llmchat) API.
+ but may hav
+ k
+o
 
-<style>
+ 
+ssu
+s or 
+
+m
+tat
+o
+s.
+## L
+st of T
+xt-o
+
+y La
+guag
+ Mod
+
+s
+### G
+
+
+rat
+v
+ Mod
+
+s
+S
+ [th
+s pag
+](g
+
+
+rat
+v
+_mod
+
+s.md) for mor
+ 
+
+format
+o
+ o
+ ho
+ to us
+ g
+
+
+rat
+v
+ mod
+
+s.
+#### T
+xt G
+
+
+rat
+o
+
+Th
+s
+ mod
+
+s pr
+mar
+
+y acc
+pt th
+ [`LLM.g
+
+
+rat
+`](./g
+
+
+rat
+v
+_mod
+
+s.md#
+mg
+
+
+rat
+) API. Chat/I
+struct mod
+
+s add
+t
+o
+a
+y support th
+ [`LLM.chat`](./g
+
+
+rat
+v
+_mod
+
+s.md#
+mchat) API.
+sty
+
+
+
 th {
-  white-space: nowrap;
-  min-width: 0 !important;
+  
+h
+t
+-spac
+: 
+o
+rap;
+  m
+
+-
+
+dth: 0 !
+mporta
+t;
 }
-</style>
+/sty
 
-| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
+
+
+| Arch
+t
+ctur
+ | Mod
+
+s | Examp
+
+ HF Mod
+
+s | [LoRA](../f
+atur
+s/
+ora.md) | [PP](../s
+rv
+
+g/para
+
+
+
+sm_sca
+
+
+g.md) |
 |--------------|--------|-------------------|----------------------|---------------------------|
-| `AfmoeForCausalLM` | Afmoe | TBA | ✅︎ | ✅︎ |
-| `ApertusForCausalLM` | Apertus | `swiss-ai/Apertus-8B-2509`, `swiss-ai/Apertus-70B-Instruct-2509`, etc. | ✅︎ | ✅︎ |
-| `AquilaForCausalLM` | Aquila, Aquila2 | `BAAI/Aquila-7B`, `BAAI/AquilaChat-7B`, etc. | ✅︎ | ✅︎ |
-| `ArceeForCausalLM` | Arcee (AFM) | `arcee-ai/AFM-4.5B-Base`, etc. | ✅︎ | ✅︎ |
-| `ArcticForCausalLM` | Arctic | `Snowflake/snowflake-arctic-base`, `Snowflake/snowflake-arctic-instruct`, etc. | | ✅︎ |
-| `AXK1ForCausalLM` | A.X-K1 | `skt/A.X-K1`, etc. | | ✅︎ |
-| `BaiChuanForCausalLM` | Baichuan2, Baichuan | `baichuan-inc/Baichuan2-13B-Chat`, `baichuan-inc/Baichuan-7B`, etc. | ✅︎ | ✅︎ |
-| `BailingMoeForCausalLM` | Ling | `inclusionAI/Ling-lite-1.5`, `inclusionAI/Ling-plus`, etc. | ✅︎ | ✅︎ |
-| `BailingMoeV2ForCausalLM` | Ling | `inclusionAI/Ling-mini-2.0`, etc. | ✅︎ | ✅︎ |
-| `BailingMoeV2_5ForCausalLM` | Ling | `inclusionAI/Ling-2.5-1T`, `inclusionAI/Ring-2.5-1T` | | ✅︎ |
-| `BambaForCausalLM` | Bamba | `ibm-ai-platform/Bamba-9B-fp8`, `ibm-ai-platform/Bamba-9B` | ✅︎ | ✅︎ |
-| `BloomForCausalLM` | BLOOM, BLOOMZ, BLOOMChat | `bigscience/bloom`, `bigscience/bloomz`, etc. | | ✅︎ |
-| `ChatGLMModel`, `ChatGLMForConditionalGeneration` | ChatGLM | `zai-org/chatglm2-6b`, `zai-org/chatglm3-6b`, `thu-coai/ShieldLM-6B-chatglm3`, etc. | ✅︎ | ✅︎ |
-| `CohereForCausalLM`, `Cohere2ForCausalLM` | Command-R, Command-A | `CohereLabs/c4ai-command-r-v01`, `CohereLabs/c4ai-command-r7b-12-2024`, `CohereLabs/c4ai-command-a-03-2025`, `CohereLabs/command-a-reasoning-08-2025`, etc. | ✅︎ | ✅︎ |
-| `CwmForCausalLM` | CWM | `facebook/cwm`, etc. | ✅︎ | ✅︎ |
-| `DbrxForCausalLM` | DBRX | `databricks/dbrx-base`, `databricks/dbrx-instruct`, etc. | | ✅︎ |
-| `DeciLMForCausalLM` | DeciLM | `nvidia/Llama-3_3-Nemotron-Super-49B-v1`, etc. | ✅︎ | ✅︎ |
-| `DeepseekForCausalLM` | DeepSeek | `deepseek-ai/deepseek-llm-67b-base`, `deepseek-ai/deepseek-llm-7b-chat`, etc. | ✅︎ | ✅︎ |
-| `DeepseekV2ForCausalLM` | DeepSeek-V2 | `deepseek-ai/DeepSeek-V2`, `deepseek-ai/DeepSeek-V2-Chat`, etc. | ✅︎ | ✅︎ |
-| `DeepseekV3ForCausalLM` | DeepSeek-V3 | `deepseek-ai/DeepSeek-V3`, `deepseek-ai/DeepSeek-R1`, `deepseek-ai/DeepSeek-V3.1`, etc. | ✅︎ | ✅︎ |
-| `Dots1ForCausalLM` | dots.llm1 | `rednote-hilab/dots.llm1.base`, `rednote-hilab/dots.llm1.inst`, etc. | | ✅︎ |
-| `DotsOCRForCausalLM` | dots_ocr | `rednote-hilab/dots.ocr` | ✅︎ | ✅︎ |
-| `Ernie4_5ForCausalLM` | Ernie4.5 | `baidu/ERNIE-4.5-0.3B-PT`, etc. | ✅︎ | ✅︎ |
-| `Ernie4_5_MoeForCausalLM` | Ernie4.5MoE | `baidu/ERNIE-4.5-21B-A3B-PT`, `baidu/ERNIE-4.5-300B-A47B-PT`, etc. |✅︎| ✅︎ |
-| `ExaoneForCausalLM` | EXAONE-3 | `LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct`, etc. | ✅︎ | ✅︎ |
-| `ExaoneMoEForCausalLM` | K-EXAONE | `LGAI-EXAONE/K-EXAONE-236B-A23B`, etc. | | |
-| `Exaone4ForCausalLM` | EXAONE-4 | `LGAI-EXAONE/EXAONE-4.0-32B`, etc. | ✅︎ | ✅︎ |
-| `Fairseq2LlamaForCausalLM` | Llama (fairseq2 format) | `mgleize/fairseq2-dummy-Llama-3.2-1B`, etc. | ✅︎ | ✅︎ |
-| `FalconForCausalLM` | Falcon | `tiiuae/falcon-7b`, `tiiuae/falcon-40b`, `tiiuae/falcon-rw-7b`, etc. | | ✅︎ |
-| `FalconMambaForCausalLM` | FalconMamba | `tiiuae/falcon-mamba-7b`, `tiiuae/falcon-mamba-7b-instruct`, etc. | | ✅︎ |
-| `FalconH1ForCausalLM` | Falcon-H1 | `tiiuae/Falcon-H1-34B-Base`, `tiiuae/Falcon-H1-34B-Instruct`, etc. | ✅︎ | ✅︎ |
-| `FlexOlmoForCausalLM` | FlexOlmo | `allenai/FlexOlmo-7x7B-1T`, `allenai/FlexOlmo-7x7B-1T-RT`, etc. | | ✅︎ |
-| `GemmaForCausalLM` | Gemma | `google/gemma-2b`, `google/gemma-1.1-2b-it`, etc. | ✅︎ | ✅︎ |
-| `Gemma2ForCausalLM` | Gemma 2 | `google/gemma-2-9b`, `google/gemma-2-27b`, etc. | ✅︎ | ✅︎ |
-| `Gemma3ForCausalLM` | Gemma 3 | `google/gemma-3-1b-it`, etc. | ✅︎ | ✅︎ |
-| `Gemma3nForCausalLM` | Gemma 3n | `google/gemma-3n-E2B-it`, `google/gemma-3n-E4B-it`, etc. | | |
-| `GlmForCausalLM` | GLM-4 | `zai-org/glm-4-9b-chat-hf`, etc. | ✅︎ | ✅︎ |
-| `Glm4ForCausalLM` | GLM-4-0414 | `zai-org/GLM-4-32B-0414`, etc. | ✅︎ | ✅︎ |
-| `Glm4MoeForCausalLM` | GLM-4.5, GLM-4.6, GLM-4.7 | `zai-org/GLM-4.5`, etc. | ✅︎ | ✅︎ |
-| `Glm4MoeLiteForCausalLM` | GLM-4.7-Flash | `zai-org/GLM-4.7-Flash`, etc. | ✅︎ | ✅︎ |
-| `GPT2LMHeadModel` | GPT-2 | `openai-community/gpt2`, `openai-community/gpt2-xl`, etc. | | ✅︎ |
-| `GPTBigCodeForCausalLM` | StarCoder, SantaCoder, WizardCoder | `bigcode/starcoder`, `bigcode/gpt_bigcode-santacoder`, `WizardLM/WizardCoder-15B-V1.0`, etc. | ✅︎ | ✅︎ |
-| `GPTJForCausalLM` | GPT-J | `EleutherAI/gpt-j-6b`, `nomic-ai/gpt4all-j`, etc. | | ✅︎ |
-| `GPTNeoXForCausalLM` | GPT-NeoX, Pythia, OpenAssistant, Dolly V2, StableLM | `EleutherAI/gpt-neox-20b`, `EleutherAI/pythia-12b`, `OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5`, `databricks/dolly-v2-12b`, `stabilityai/stablelm-tuned-alpha-7b`, etc. | | ✅︎ |
-| `GptOssForCausalLM` | GPT-OSS | `openai/gpt-oss-120b`, `openai/gpt-oss-20b` | ✅︎ | ✅︎ |
-| `GraniteForCausalLM` | Granite 3.0, Granite 3.1, PowerLM | `ibm-granite/granite-3.0-2b-base`, `ibm-granite/granite-3.1-8b-instruct`, `ibm/PowerLM-3b`, etc. | ✅︎ | ✅︎ |
-| `GraniteMoeForCausalLM` | Granite 3.0 MoE, PowerMoE | `ibm-granite/granite-3.0-1b-a400m-base`, `ibm-granite/granite-3.0-3b-a800m-instruct`, `ibm/PowerMoE-3b`, etc. | ✅︎ | ✅︎ |
-| `GraniteMoeHybridForCausalLM` | Granite 4.0 MoE Hybrid | `ibm-granite/granite-4.0-tiny-preview`, etc. | ✅︎ | ✅︎ |
-| `GraniteMoeSharedForCausalLM` | Granite MoE Shared | `ibm-research/moe-7b-1b-active-shared-experts` (test model) | ✅︎ | ✅︎ |
-| `GritLM` | GritLM | `parasail-ai/GritLM-7B-vllm`. | ✅︎ | ✅︎ |
-| `Grok1ModelForCausalLM` | Grok1 | `hpcai-tech/grok-1`. | ✅︎ | ✅︎ |
-| `Grok1ForCausalLM` | Grok2 | `xai-org/grok-2` | ✅︎ | ✅︎ |
-| `HunYuanDenseV1ForCausalLM` | Hunyuan Dense | `tencent/Hunyuan-7B-Instruct` | ✅︎ | ✅︎ |
-| `HunYuanMoEV1ForCausalLM` | Hunyuan-A13B | `tencent/Hunyuan-A13B-Instruct`, `tencent/Hunyuan-A13B-Pretrain`, `tencent/Hunyuan-A13B-Instruct-FP8`, etc. | ✅︎ | ✅︎ |
-| `InternLMForCausalLM` | InternLM | `internlm/internlm-7b`, `internlm/internlm-chat-7b`, etc. | ✅︎ | ✅︎ |
-| `InternLM2ForCausalLM` | InternLM2 | `internlm/internlm2-7b`, `internlm/internlm2-chat-7b`, etc. | ✅︎ | ✅︎ |
-| `InternLM3ForCausalLM` | InternLM3 | `internlm/internlm3-8b-instruct`, etc. | ✅︎ | ✅︎ |
-| `IQuestCoderForCausalLM` | IQuestCoderV1 | `IQuestLab/IQuest-Coder-V1-40B-Instruct`, etc. | | |
-| `IQuestLoopCoderForCausalLM` | IQuestLoopCoderV1 | `IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct`, etc. | | |
-| `JAISLMHeadModel` | Jais | `inceptionai/jais-13b`, `inceptionai/jais-13b-chat`, `inceptionai/jais-30b-v3`, `inceptionai/jais-30b-chat-v3`, etc. | | ✅︎ |
-| `Jais2ForCausalLM` | Jais2 | `inceptionai/Jais-2-8B-Chat`, `inceptionai/Jais-2-70B-Chat`, etc. | | ✅︎ |
-| `JambaForCausalLM` | Jamba | `ai21labs/AI21-Jamba-1.5-Large`, `ai21labs/AI21-Jamba-1.5-Mini`, `ai21labs/Jamba-v0.1`, etc. | ✅︎ | ✅︎ |
-| `KimiLinearForCausalLM` | Kimi-Linear-48B-A3B-Base, Kimi-Linear-48B-A3B-Instruct | `moonshotai/Kimi-Linear-48B-A3B-Base`, `moonshotai/Kimi-Linear-48B-A3B-Instruct` | | ✅︎ |
-| `Lfm2ForCausalLM`  | LFM2  | `LiquidAI/LFM2-1.2B`, `LiquidAI/LFM2-700M`, `LiquidAI/LFM2-350M`, etc. | ✅︎ | ✅︎ |
-| `Lfm2MoeForCausalLM`  | LFM2MoE  | `LiquidAI/LFM2-8B-A1B-preview`, etc. | ✅︎ | ✅︎ |
-| `LlamaForCausalLM` | Llama 3.1, Llama 3, Llama 2, LLaMA, Yi | `meta-llama/Meta-Llama-3.1-405B-Instruct`, `meta-llama/Meta-Llama-3.1-70B`, `meta-llama/Meta-Llama-3-70B-Instruct`, `meta-llama/Llama-2-70b-hf`, `01-ai/Yi-34B`, etc. | ✅︎ | ✅︎ |
-| `LongcatFlashForCausalLM` | LongCat-Flash | `meituan-longcat/LongCat-Flash-Chat`, `meituan-longcat/LongCat-Flash-Chat-FP8` | ✅︎ | ✅︎ |
-| `MambaForCausalLM` | Mamba | `state-spaces/mamba-130m-hf`, `state-spaces/mamba-790m-hf`, `state-spaces/mamba-2.8b-hf`, etc. | | ✅︎ |
-| `Mamba2ForCausalLM` | Mamba2 | `mistralai/Mamba-Codestral-7B-v0.1`, etc. | | ✅︎ |
-| `MiMoForCausalLM` | MiMo | `XiaomiMiMo/MiMo-7B-RL`, etc. | ✅︎ | ✅︎ |
-| `MiMoV2FlashForCausalLM` | MiMoV2Flash | `XiaomiMiMo/MiMo-V2-Flash`, etc. | ︎| ✅︎ |
-| `MiniCPMForCausalLM` | MiniCPM | `openbmb/MiniCPM-2B-sft-bf16`, `openbmb/MiniCPM-2B-dpo-bf16`, `openbmb/MiniCPM-S-1B-sft`, etc. | ✅︎ | ✅︎ |
-| `MiniCPM3ForCausalLM` | MiniCPM3 | `openbmb/MiniCPM3-4B`, etc. | ✅︎ | ✅︎ |
-| `MiniMaxForCausalLM` | MiniMax-Text | `MiniMaxAI/MiniMax-Text-01-hf`, etc. | | |
-| `MiniMaxM2ForCausalLM` | MiniMax-M2, MiniMax-M2.1 |`MiniMaxAI/MiniMax-M2`, etc. | ✅︎ | ✅︎ |
-| `MistralForCausalLM` | Ministral-3, Mistral, Mistral-Instruct | `mistralai/Ministral-3-3B-Instruct-2512`, `mistralai/Mistral-7B-v0.1`, `mistralai/Mistral-7B-Instruct-v0.1`, etc. | ✅︎ | ✅︎ |
-| `MistralLarge3ForCausalLM` | Mistral-Large-3-675B-Base-2512, Mistral-Large-3-675B-Instruct-2512 | `mistralai/Mistral-Large-3-675B-Base-2512`, `mistralai/Mistral-Large-3-675B-Instruct-2512`, etc. | ✅︎ | ✅︎ |
-| `MixtralForCausalLM` | Mixtral-8x7B, Mixtral-8x7B-Instruct | `mistralai/Mixtral-8x7B-v0.1`, `mistralai/Mixtral-8x7B-Instruct-v0.1`, `mistral-community/Mixtral-8x22B-v0.1`, etc. | ✅︎ | ✅︎ |
-| `MPTForCausalLM` | MPT, MPT-Instruct, MPT-Chat, MPT-StoryWriter | `mosaicml/mpt-7b`, `mosaicml/mpt-7b-storywriter`, `mosaicml/mpt-30b`, etc. | | ✅︎ |
-| `NemotronForCausalLM` | Nemotron-3, Nemotron-4, Minitron | `nvidia/Minitron-8B-Base`, `mgoin/Nemotron-4-340B-Base-hf-FP8`, etc. | ✅︎ | ✅︎ |
-| `NemotronHForCausalLM` | Nemotron-H | `nvidia/Nemotron-H-8B-Base-8K`, `nvidia/Nemotron-H-47B-Base-8K`, `nvidia/Nemotron-H-56B-Base-8K`, etc. | ✅︎ | ✅︎ |
-| `OlmoForCausalLM` | OLMo | `allenai/OLMo-1B-hf`, `allenai/OLMo-7B-hf`, etc. | ✅︎ | ✅︎ |
-| `Olmo2ForCausalLM` | OLMo2 | `allenai/OLMo-2-0425-1B`, etc. | ✅︎ | ✅︎ |
-| `Olmo3ForCausalLM` | OLMo3 | `allenai/Olmo-3-7B-Instruct`, `allenai/Olmo-3-32B-Think`, etc. | ✅︎ | ✅︎ |
-| `OlmoHybridForCausalLM` | OLMo Hybrid | `allenai/Olmo-Hybrid-7B` | ✅︎ | ✅︎ |
-| `OlmoeForCausalLM` | OLMoE | `allenai/OLMoE-1B-7B-0924`, `allenai/OLMoE-1B-7B-0924-Instruct`, etc. | | ✅︎ |
-| `OPTForCausalLM` | OPT, OPT-IML | `facebook/opt-66b`, `facebook/opt-iml-max-30b`, etc. | ✅︎ | ✅︎ |
-| `OrionForCausalLM` | Orion | `OrionStarAI/Orion-14B-Base`, `OrionStarAI/Orion-14B-Chat`, etc. | | ✅︎ |
-| `OuroForCausalLM` | ouro | `ByteDance/Ouro-1.4B`, `ByteDance/Ouro-2.6B`, etc. | ✅︎ | |
-| `PanguEmbeddedForCausalLM` |openPangu-Embedded-7B | `FreedomIntelligence/openPangu-Embedded-7B-V1.1` | ✅︎ | ✅︎ |
-| `PanguProMoEV2ForCausalLM` |openpangu-pro-moe-v2 | | ✅︎ | ✅︎ |
-| `PanguUltraMoEForCausalLM` |openpangu-ultra-moe-718b-model | `FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1` | ✅︎ | ✅︎ |
-| `PhiForCausalLM` | Phi | `microsoft/phi-1_5`, `microsoft/phi-2`, etc. | ✅︎ | ✅︎ |
-| `Phi3ForCausalLM` | Phi-4, Phi-3 | `microsoft/Phi-4-mini-instruct`, `microsoft/Phi-4`, `microsoft/Phi-3-mini-4k-instruct`, `microsoft/Phi-3-mini-128k-instruct`, `microsoft/Phi-3-medium-128k-instruct`, etc. | ✅︎ | ✅︎ |
-| `PhiMoEForCausalLM` | Phi-3.5-MoE | `microsoft/Phi-3.5-MoE-instruct`, etc. | ✅︎ | ✅︎ |
-| `PersimmonForCausalLM` | Persimmon | `adept/persimmon-8b-base`, `adept/persimmon-8b-chat`, etc. | | ✅︎ |
-| `Plamo2ForCausalLM` | PLaMo2 | `pfnet/plamo-2-1b`, `pfnet/plamo-2-8b`, etc. | ✅ | ✅︎ |
-| `Plamo3ForCausalLM` | PLaMo3 | `pfnet/plamo-3-nict-2b-base`, `pfnet/plamo-3-nict-8b-base`, etc. | ✅ | ✅︎ |
-| `QWenLMHeadModel` | Qwen | `Qwen/Qwen-7B`, `Qwen/Qwen-7B-Chat`, etc. | ✅︎ | ✅︎ |
-| `Qwen2ForCausalLM` | QwQ, Qwen2 | `Qwen/QwQ-32B-Preview`, `Qwen/Qwen2-7B-Instruct`, `Qwen/Qwen2-7B`, etc. | ✅︎ | ✅︎ |
-| `Qwen2MoeForCausalLM` | Qwen2MoE | `Qwen/Qwen1.5-MoE-A2.7B`, `Qwen/Qwen1.5-MoE-A2.7B-Chat`, etc. | ✅︎ | ✅︎ |
-| `Qwen3ForCausalLM` | Qwen3 | `Qwen/Qwen3-8B`, etc. | ✅︎ | ✅︎ |
-| `Qwen3MoeForCausalLM` | Qwen3MoE | `Qwen/Qwen3-30B-A3B`, etc. | ✅︎ | ✅︎ |
-| `Qwen3NextForCausalLM` | Qwen3NextMoE | `Qwen/Qwen3-Next-80B-A3B-Instruct`, etc. | ✅︎ | ✅︎ |
-| `RWForCausalLM` | Falcon RW | `tiiuae/falcon-40b`, etc. | | ✅︎ |
-| `SeedOssForCausalLM` | SeedOss | `ByteDance-Seed/Seed-OSS-36B-Instruct`, etc. | ✅︎ | ✅︎ |
-| `SolarForCausalLM` | Solar Pro | `upstage/solar-pro-preview-instruct`, etc. | ✅︎ | ✅︎ |
-| `StableLmForCausalLM` | StableLM | `stabilityai/stablelm-3b-4e1t`, `stabilityai/stablelm-base-alpha-7b-v2`, etc. | | |
-| `StableLMEpochForCausalLM` | StableLM Epoch | `stabilityai/stablelm-zephyr-3b`, etc. | | ✅︎ |
-| `Starcoder2ForCausalLM` | Starcoder2 | `bigcode/starcoder2-3b`, `bigcode/starcoder2-7b`, `bigcode/starcoder2-15b`, etc. | | ✅︎ |
-| `Step1ForCausalLM` | Step-Audio | `stepfun-ai/Step-Audio-EditX`, etc. | ✅︎ | ✅︎ |
-| `Step3p5ForCausalLM` | Step-3.5-flash | `stepfun-ai/Step-3.5-Flash`, etc. |  | ✅︎ |
-| `TeleChatForCausalLM` | TeleChat | `chuhac/TeleChat2-35B`, etc. | ✅︎ | ✅︎ |
-| `TeleChat2ForCausalLM` | TeleChat2 | `Tele-AI/TeleChat2-3B`, `Tele-AI/TeleChat2-7B`, `Tele-AI/TeleChat2-35B`, etc. | ✅︎ | ✅︎ |
-| `TeleFLMForCausalLM` | TeleFLM | `CofeAI/FLM-2-52B-Instruct-2407`, `CofeAI/Tele-FLM`, etc. | ✅︎ | ✅︎ |
-| `XverseForCausalLM` | XVERSE | `xverse/XVERSE-7B-Chat`, `xverse/XVERSE-13B-Chat`, `xverse/XVERSE-65B-Chat`, etc. | ✅︎ | ✅︎ |
-| `MiniMaxM1ForCausalLM` | MiniMax-Text | `MiniMaxAI/MiniMax-M1-40k`, `MiniMaxAI/MiniMax-M1-80k`, etc. | | |
-| `MiniMaxText01ForCausalLM` | MiniMax-Text | `MiniMaxAI/MiniMax-Text-01`, etc. | | |
-| `Zamba2ForCausalLM` | Zamba2 | `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc. | | |
+| `Afmo
+ForCausa
+LM` | Afmo
+ | TBA | ✅︎ | ✅︎ |
+| `Ap
+rtusForCausa
+LM` | Ap
+rtus | `s
 
-!!! note
-    Grok2 requires `tokenizer.tok.json` with `tiktoken` installed. You can optionally override MoE router renormalization with `moe_router_renormalize`.
+ss-a
+/Ap
+rtus-8B-2509`, `s
 
-Some models are supported only via the [Transformers modeling backend](#transformers). The purpose of the table below is to acknowledge models which we officially support in this way. The logs will say that the Transformers modeling backend is being used, and you will see no warning that this is fallback behaviour. This means that, if you have issues with any of the models listed below, please [make an issue](https://github.com/vllm-project/vllm/issues/new/choose) and we'll do our best to fix it!
+ss-a
+/Ap
+rtus-70B-I
+struct-2509`, 
+tc. | ✅︎ | ✅︎ |
+| `Aqu
 
-| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
+aForCausa
+LM` | Aqu
+
+a, Aqu
+
+a2 | `BAAI/Aqu
+
+a-7B`, `BAAI/Aqu
+
+aChat-7B`, 
+tc. | ✅︎ | ✅︎ |
+| `Arc
+ForCausa
+LM` | Arc
+ (AFM) | `arc
+-a
+/AFM-4.5B-Bas
+`, 
+tc. | ✅︎ | ✅︎ |
+| `Arct
+cForCausa
+LM` | Arct
+c | `S
+o
+f
+ak
+/s
+o
+f
+ak
+-arct
+c-bas
+`, `S
+o
+f
+ak
+/s
+o
+f
+ak
+-arct
+c-
+
+struct`, 
+tc. | | ✅︎ |
+| `AXK1ForCausa
+LM` | A.X-K1 | `skt/A.X-K1`, 
+tc. | | ✅︎ |
+| `Ba
+Chua
+ForCausa
+LM` | Ba
+chua
+2, Ba
+chua
+ | `ba
+chua
+-
+
+c/Ba
+chua
+2-13B-Chat`, `ba
+chua
+-
+
+c/Ba
+chua
+-7B`, 
+tc. | ✅︎ | ✅︎ |
+| `Ba
+
+
+
+gMo
+ForCausa
+LM` | L
+
+g | `
+
+c
+us
+o
+AI/L
+
+g-
+
+t
+-1.5`, `
+
+c
+us
+o
+AI/L
+
+g-p
+us`, 
+tc. | ✅︎ | ✅︎ |
+| `Ba
+
+
+
+gMo
+V2ForCausa
+LM` | L
+
+g | `
+
+c
+us
+o
+AI/L
+
+g-m
+
+
+-2.0`, 
+tc. | ✅︎ | ✅︎ |
+| `Ba
+
+
+
+gMo
+V2_5ForCausa
+LM` | L
+
+g | `
+
+c
+us
+o
+AI/L
+
+g-2.5-1T`, `
+
+c
+us
+o
+AI/R
+
+g-2.5-1T` | | ✅︎ |
+| `BambaForCausa
+LM` | Bamba | `
+bm-a
+-p
+atform/Bamba-9B-fp8`, `
+bm-a
+-p
+atform/Bamba-9B` | ✅︎ | ✅︎ |
+| `B
+oomForCausa
+LM` | BLOOM, BLOOMZ, BLOOMChat | `b
+gsc
+
+
+c
+/b
+oom`, `b
+gsc
+
+
+c
+/b
+oomz`, 
+tc. | | ✅︎ |
+| `ChatGLMMod
+
+`, `ChatGLMForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | ChatGLM | `za
+-org/chatg
+m2-6b`, `za
+-org/chatg
+m3-6b`, `thu-coa
+/Sh
+
+
+dLM-6B-chatg
+m3`, 
+tc. | ✅︎ | ✅︎ |
+| `Coh
+r
+ForCausa
+LM`, `Coh
+r
+2ForCausa
+LM` | Comma
+d-R, Comma
+d-A | `Coh
+r
+Labs/c4a
+-comma
+d-r-v01`, `Coh
+r
+Labs/c4a
+-comma
+d-r7b-12-2024`, `Coh
+r
+Labs/c4a
+-comma
+d-a-03-2025`, `Coh
+r
+Labs/comma
+d-a-r
+aso
+
+
+g-08-2025`, 
+tc. | ✅︎ | ✅︎ |
+| `C
+mForCausa
+LM` | CWM | `fac
+book/c
+m`, 
+tc. | ✅︎ | ✅︎ |
+| `DbrxForCausa
+LM` | DBRX | `databr
+cks/dbrx-bas
+`, `databr
+cks/dbrx-
+
+struct`, 
+tc. | | ✅︎ |
+| `D
+c
+LMForCausa
+LM` | D
+c
+LM | `
+v
+d
+a/L
+ama-3_3-N
+motro
+-Sup
+r-49B-v1`, 
+tc. | ✅︎ | ✅︎ |
+| `D
+ps
+kForCausa
+LM` | D
+pS
+k | `d
+ps
+k-a
+/d
+ps
+k-
+m-67b-bas
+`, `d
+ps
+k-a
+/d
+ps
+k-
+m-7b-chat`, 
+tc. | ✅︎ | ✅︎ |
+| `D
+ps
+kV2ForCausa
+LM` | D
+pS
+k-V2 | `d
+ps
+k-a
+/D
+pS
+k-V2`, `d
+ps
+k-a
+/D
+pS
+k-V2-Chat`, 
+tc. | ✅︎ | ✅︎ |
+| `D
+ps
+kV3ForCausa
+LM` | D
+pS
+k-V3 | `d
+ps
+k-a
+/D
+pS
+k-V3`, `d
+ps
+k-a
+/D
+pS
+k-R1`, `d
+ps
+k-a
+/D
+pS
+k-V3.1`, 
+tc. | ✅︎ | ✅︎ |
+| `Dots1ForCausa
+LM` | dots.
+m1 | `r
+d
+ot
+-h
+
+ab/dots.
+m1.bas
+`, `r
+d
+ot
+-h
+
+ab/dots.
+m1.
+
+st`, 
+tc. | | ✅︎ |
+| `DotsOCRForCausa
+LM` | dots_ocr | `r
+d
+ot
+-h
+
+ab/dots.ocr` | ✅︎ | ✅︎ |
+| `Er
+
+
+4_5ForCausa
+LM` | Er
+
+
+4.5 | `ba
+du/ERNIE-4.5-0.3B-PT`, 
+tc. | ✅︎ | ✅︎ |
+| `Er
+
+
+4_5_Mo
+ForCausa
+LM` | Er
+
+
+4.5MoE | `ba
+du/ERNIE-4.5-21B-A3B-PT`, `ba
+du/ERNIE-4.5-300B-A47B-PT`, 
+tc. |✅︎| ✅︎ |
+| `Exao
+
+ForCausa
+LM` | EXAONE-3 | `LGAI-EXAONE/EXAONE-3.0-7.8B-I
+struct`, 
+tc. | ✅︎ | ✅︎ |
+| `Exao
+
+MoEForCausa
+LM` | K-EXAONE | `LGAI-EXAONE/K-EXAONE-236B-A23B`, 
+tc. | | |
+| `Exao
+
+4ForCausa
+LM` | EXAONE-4 | `LGAI-EXAONE/EXAONE-4.0-32B`, 
+tc. | ✅︎ | ✅︎ |
+| `Fa
+rs
+q2L
+amaForCausa
+LM` | L
+ama (fa
+rs
+q2 format) | `mg
+
+
+z
+/fa
+rs
+q2-dummy-L
+ama-3.2-1B`, 
+tc. | ✅︎ | ✅︎ |
+| `Fa
+co
+ForCausa
+LM` | Fa
+co
+ | `t
+ua
+/fa
+co
+-7b`, `t
+ua
+/fa
+co
+-40b`, `t
+ua
+/fa
+co
+-r
+-7b`, 
+tc. | | ✅︎ |
+| `Fa
+co
+MambaForCausa
+LM` | Fa
+co
+Mamba | `t
+ua
+/fa
+co
+-mamba-7b`, `t
+ua
+/fa
+co
+-mamba-7b-
+
+struct`, 
+tc. | | ✅︎ |
+| `Fa
+co
+H1ForCausa
+LM` | Fa
+co
+-H1 | `t
+ua
+/Fa
+co
+-H1-34B-Bas
+`, `t
+ua
+/Fa
+co
+-H1-34B-I
+struct`, 
+tc. | ✅︎ | ✅︎ |
+| `F
+
+xO
+moForCausa
+LM` | F
+
+xO
+mo | `a
+
+
+a
+/F
+
+xO
+mo-7x7B-1T`, `a
+
+
+a
+/F
+
+xO
+mo-7x7B-1T-RT`, 
+tc. | | ✅︎ |
+| `G
+mmaForCausa
+LM` | G
+mma | `goog
+
+/g
+mma-2b`, `goog
+
+/g
+mma-1.1-2b-
+t`, 
+tc. | ✅︎ | ✅︎ |
+| `G
+mma2ForCausa
+LM` | G
+mma 2 | `goog
+
+/g
+mma-2-9b`, `goog
+
+/g
+mma-2-27b`, 
+tc. | ✅︎ | ✅︎ |
+| `G
+mma3ForCausa
+LM` | G
+mma 3 | `goog
+
+/g
+mma-3-1b-
+t`, 
+tc. | ✅︎ | ✅︎ |
+| `G
+mma3
+ForCausa
+LM` | G
+mma 3
+ | `goog
+
+/g
+mma-3
+-E2B-
+t`, `goog
+
+/g
+mma-3
+-E4B-
+t`, 
+tc. | | |
+| `G
+mForCausa
+LM` | GLM-4 | `za
+-org/g
+m-4-9b-chat-hf`, 
+tc. | ✅︎ | ✅︎ |
+| `G
+m4ForCausa
+LM` | GLM-4-0414 | `za
+-org/GLM-4-32B-0414`, 
+tc. | ✅︎ | ✅︎ |
+| `G
+m4Mo
+ForCausa
+LM` | GLM-4.5, GLM-4.6, GLM-4.7 | `za
+-org/GLM-4.5`, 
+tc. | ✅︎ | ✅︎ |
+| `G
+m4Mo
+L
+t
+ForCausa
+LM` | GLM-4.7-F
+ash | `za
+-org/GLM-4.7-F
+ash`, 
+tc. | ✅︎ | ✅︎ |
+| `GPT2LMH
+adMod
+
+` | GPT-2 | `op
+
+a
+-commu
+
+ty/gpt2`, `op
+
+a
+-commu
+
+ty/gpt2-x
+`, 
+tc. | | ✅︎ |
+| `GPTB
+gCod
+ForCausa
+LM` | StarCod
+r, Sa
+taCod
+r, W
+zardCod
+r | `b
+gcod
+/starcod
+r`, `b
+gcod
+/gpt_b
+gcod
+-sa
+tacod
+r`, `W
+zardLM/W
+zardCod
+r-15B-V1.0`, 
+tc. | ✅︎ | ✅︎ |
+| `GPTJForCausa
+LM` | GPT-J | `E
+
+uth
+rAI/gpt-j-6b`, `
+om
+c-a
+/gpt4a
+-j`, 
+tc. | | ✅︎ |
+| `GPTN
+oXForCausa
+LM` | GPT-N
+oX, Pyth
+a, Op
+
+Ass
+sta
+t, Do
+y V2, Stab
+
+LM | `E
+
+uth
+rAI/gpt-
+
+ox-20b`, `E
+
+uth
+rAI/pyth
+a-12b`, `Op
+
+Ass
+sta
+t/oasst-sft-4-pyth
+a-12b-
+poch-3.5`, `databr
+cks/do
+y-v2-12b`, `stab
+
+
+tya
+/stab
+
+
+m-tu
+
+d-a
+pha-7b`, 
+tc. | | ✅︎ |
+| `GptOssForCausa
+LM` | GPT-OSS | `op
+
+a
+/gpt-oss-120b`, `op
+
+a
+/gpt-oss-20b` | ✅︎ | ✅︎ |
+| `Gra
+
+t
+ForCausa
+LM` | Gra
+
+t
+ 3.0, Gra
+
+t
+ 3.1, Po
+
+rLM | `
+bm-gra
+
+t
+/gra
+
+t
+-3.0-2b-bas
+`, `
+bm-gra
+
+t
+/gra
+
+t
+-3.1-8b-
+
+struct`, `
+bm/Po
+
+rLM-3b`, 
+tc. | ✅︎ | ✅︎ |
+| `Gra
+
+t
+Mo
+ForCausa
+LM` | Gra
+
+t
+ 3.0 MoE, Po
+
+rMoE | `
+bm-gra
+
+t
+/gra
+
+t
+-3.0-1b-a400m-bas
+`, `
+bm-gra
+
+t
+/gra
+
+t
+-3.0-3b-a800m-
+
+struct`, `
+bm/Po
+
+rMoE-3b`, 
+tc. | ✅︎ | ✅︎ |
+| `Gra
+
+t
+Mo
+Hybr
+dForCausa
+LM` | Gra
+
+t
+ 4.0 MoE Hybr
+d | `
+bm-gra
+
+t
+/gra
+
+t
+-4.0-t
+
+y-pr
+v
+
+
+`, 
+tc. | ✅︎ | ✅︎ |
+| `Gra
+
+t
+Mo
+Shar
+dForCausa
+LM` | Gra
+
+t
+ MoE Shar
+d | `
+bm-r
+s
+arch/mo
+-7b-1b-act
+v
+-shar
+d-
+xp
+rts` (t
+st mod
+
+) | ✅︎ | ✅︎ |
+| `Gr
+tLM` | Gr
+tLM | `parasa
+
+-a
+/Gr
+tLM-7B-v
+m`. | ✅︎ | ✅︎ |
+| `Grok1Mod
+
+ForCausa
+LM` | Grok1 | `hpca
+-t
+ch/grok-1`. | ✅︎ | ✅︎ |
+| `Grok1ForCausa
+LM` | Grok2 | `xa
+-org/grok-2` | ✅︎ | ✅︎ |
+| `Hu
+Yua
+D
+
+s
+V1ForCausa
+LM` | Hu
+yua
+ D
+
+s
+ | `t
+
+c
+
+t/Hu
+yua
+-7B-I
+struct` | ✅︎ | ✅︎ |
+| `Hu
+Yua
+MoEV1ForCausa
+LM` | Hu
+yua
+-A13B | `t
+
+c
+
+t/Hu
+yua
+-A13B-I
+struct`, `t
+
+c
+
+t/Hu
+yua
+-A13B-Pr
+tra
+
+`, `t
+
+c
+
+t/Hu
+yua
+-A13B-I
+struct-FP8`, 
+tc. | ✅︎ | ✅︎ |
+| `I
+t
+r
+LMForCausa
+LM` | I
+t
+r
+LM | `
+
+t
+r
+
+m/
+
+t
+r
+
+m-7b`, `
+
+t
+r
+
+m/
+
+t
+r
+
+m-chat-7b`, 
+tc. | ✅︎ | ✅︎ |
+| `I
+t
+r
+LM2ForCausa
+LM` | I
+t
+r
+LM2 | `
+
+t
+r
+
+m/
+
+t
+r
+
+m2-7b`, `
+
+t
+r
+
+m/
+
+t
+r
+
+m2-chat-7b`, 
+tc. | ✅︎ | ✅︎ |
+| `I
+t
+r
+LM3ForCausa
+LM` | I
+t
+r
+LM3 | `
+
+t
+r
+
+m/
+
+t
+r
+
+m3-8b-
+
+struct`, 
+tc. | ✅︎ | ✅︎ |
+| `IQu
+stCod
+rForCausa
+LM` | IQu
+stCod
+rV1 | `IQu
+stLab/IQu
+st-Cod
+r-V1-40B-I
+struct`, 
+tc. | | |
+| `IQu
+stLoopCod
+rForCausa
+LM` | IQu
+stLoopCod
+rV1 | `IQu
+stLab/IQu
+st-Cod
+r-V1-40B-Loop-I
+struct`, 
+tc. | | |
+| `JAISLMH
+adMod
+
+` | Ja
+s | `
+
+c
+pt
+o
+a
+/ja
+s-13b`, `
+
+c
+pt
+o
+a
+/ja
+s-13b-chat`, `
+
+c
+pt
+o
+a
+/ja
+s-30b-v3`, `
+
+c
+pt
+o
+a
+/ja
+s-30b-chat-v3`, 
+tc. | | ✅︎ |
+| `Ja
+s2ForCausa
+LM` | Ja
+s2 | `
+
+c
+pt
+o
+a
+/Ja
+s-2-8B-Chat`, `
+
+c
+pt
+o
+a
+/Ja
+s-2-70B-Chat`, 
+tc. | | ✅︎ |
+| `JambaForCausa
+LM` | Jamba | `a
+21
+abs/AI21-Jamba-1.5-Larg
+`, `a
+21
+abs/AI21-Jamba-1.5-M
+
+
+`, `a
+21
+abs/Jamba-v0.1`, 
+tc. | ✅︎ | ✅︎ |
+| `K
+m
+L
+
+
+arForCausa
+LM` | K
+m
+-L
+
+
+ar-48B-A3B-Bas
+, K
+m
+-L
+
+
+ar-48B-A3B-I
+struct | `moo
+shota
+/K
+m
+-L
+
+
+ar-48B-A3B-Bas
+`, `moo
+shota
+/K
+m
+-L
+
+
+ar-48B-A3B-I
+struct` | | ✅︎ |
+| `Lfm2ForCausa
+LM`  | LFM2  | `L
+qu
+dAI/LFM2-1.2B`, `L
+qu
+dAI/LFM2-700M`, `L
+qu
+dAI/LFM2-350M`, 
+tc. | ✅︎ | ✅︎ |
+| `Lfm2Mo
+ForCausa
+LM`  | LFM2MoE  | `L
+qu
+dAI/LFM2-8B-A1B-pr
+v
+
+
+`, 
+tc. | ✅︎ | ✅︎ |
+| `L
+amaForCausa
+LM` | L
+ama 3.1, L
+ama 3, L
+ama 2, LLaMA, Y
+ | `m
+ta-
+ama/M
+ta-L
+ama-3.1-405B-I
+struct`, `m
+ta-
+ama/M
+ta-L
+ama-3.1-70B`, `m
+ta-
+ama/M
+ta-L
+ama-3-70B-I
+struct`, `m
+ta-
+ama/L
+ama-2-70b-hf`, `01-a
+/Y
+-34B`, 
+tc. | ✅︎ | ✅︎ |
+| `Lo
+gcatF
+ashForCausa
+LM` | Lo
+gCat-F
+ash | `m
+
+tua
+-
+o
+gcat/Lo
+gCat-F
+ash-Chat`, `m
+
+tua
+-
+o
+gcat/Lo
+gCat-F
+ash-Chat-FP8` | ✅︎ | ✅︎ |
+| `MambaForCausa
+LM` | Mamba | `stat
+-spac
+s/mamba-130m-hf`, `stat
+-spac
+s/mamba-790m-hf`, `stat
+-spac
+s/mamba-2.8b-hf`, 
+tc. | | ✅︎ |
+| `Mamba2ForCausa
+LM` | Mamba2 | `m
+stra
+a
+/Mamba-Cod
+stra
+-7B-v0.1`, 
+tc. | | ✅︎ |
+| `M
+MoForCausa
+LM` | M
+Mo | `X
+aom
+M
+Mo/M
+Mo-7B-RL`, 
+tc. | ✅︎ | ✅︎ |
+| `M
+MoV2F
+ashForCausa
+LM` | M
+MoV2F
+ash | `X
+aom
+M
+Mo/M
+Mo-V2-F
+ash`, 
+tc. | ︎| ✅︎ |
+| `M
+
+
+CPMForCausa
+LM` | M
+
+
+CPM | `op
+
+bmb/M
+
+
+CPM-2B-sft-bf16`, `op
+
+bmb/M
+
+
+CPM-2B-dpo-bf16`, `op
+
+bmb/M
+
+
+CPM-S-1B-sft`, 
+tc. | ✅︎ | ✅︎ |
+| `M
+
+
+CPM3ForCausa
+LM` | M
+
+
+CPM3 | `op
+
+bmb/M
+
+
+CPM3-4B`, 
+tc. | ✅︎ | ✅︎ |
+| `M
+
+
+MaxForCausa
+LM` | M
+
+
+Max-T
+xt | `M
+
+
+MaxAI/M
+
+
+Max-T
+xt-01-hf`, 
+tc. | | |
+| `M
+
+
+MaxM2ForCausa
+LM` | M
+
+
+Max-M2, M
+
+
+Max-M2.1 |`M
+
+
+MaxAI/M
+
+
+Max-M2`, 
+tc. | ✅︎ | ✅︎ |
+| `M
+stra
+ForCausa
+LM` | M
+
+
+stra
+-3, M
+stra
+, M
+stra
+-I
+struct | `m
+stra
+a
+/M
+
+
+stra
+-3-3B-I
+struct-2512`, `m
+stra
+a
+/M
+stra
+-7B-v0.1`, `m
+stra
+a
+/M
+stra
+-7B-I
+struct-v0.1`, 
+tc. | ✅︎ | ✅︎ |
+| `M
+stra
+Larg
+3ForCausa
+LM` | M
+stra
+-Larg
+-3-675B-Bas
+-2512, M
+stra
+-Larg
+-3-675B-I
+struct-2512 | `m
+stra
+a
+/M
+stra
+-Larg
+-3-675B-Bas
+-2512`, `m
+stra
+a
+/M
+stra
+-Larg
+-3-675B-I
+struct-2512`, 
+tc. | ✅︎ | ✅︎ |
+| `M
+xtra
+ForCausa
+LM` | M
+xtra
+-8x7B, M
+xtra
+-8x7B-I
+struct | `m
+stra
+a
+/M
+xtra
+-8x7B-v0.1`, `m
+stra
+a
+/M
+xtra
+-8x7B-I
+struct-v0.1`, `m
+stra
+-commu
+
+ty/M
+xtra
+-8x22B-v0.1`, 
+tc. | ✅︎ | ✅︎ |
+| `MPTForCausa
+LM` | MPT, MPT-I
+struct, MPT-Chat, MPT-StoryWr
+t
+r | `mosa
+cm
+/mpt-7b`, `mosa
+cm
+/mpt-7b-story
+r
+t
+r`, `mosa
+cm
+/mpt-30b`, 
+tc. | | ✅︎ |
+| `N
+motro
+ForCausa
+LM` | N
+motro
+-3, N
+motro
+-4, M
+
+
+tro
+ | `
+v
+d
+a/M
+
+
+tro
+-8B-Bas
+`, `mgo
+
+/N
+motro
+-4-340B-Bas
+-hf-FP8`, 
+tc. | ✅︎ | ✅︎ |
+| `N
+motro
+HForCausa
+LM` | N
+motro
+-H | `
+v
+d
+a/N
+motro
+-H-8B-Bas
+-8K`, `
+v
+d
+a/N
+motro
+-H-47B-Bas
+-8K`, `
+v
+d
+a/N
+motro
+-H-56B-Bas
+-8K`, 
+tc. | ✅︎ | ✅︎ |
+| `O
+moForCausa
+LM` | OLMo | `a
+
+
+a
+/OLMo-1B-hf`, `a
+
+
+a
+/OLMo-7B-hf`, 
+tc. | ✅︎ | ✅︎ |
+| `O
+mo2ForCausa
+LM` | OLMo2 | `a
+
+
+a
+/OLMo-2-0425-1B`, 
+tc. | ✅︎ | ✅︎ |
+| `O
+mo3ForCausa
+LM` | OLMo3 | `a
+
+
+a
+/O
+mo-3-7B-I
+struct`, `a
+
+
+a
+/O
+mo-3-32B-Th
+
+k`, 
+tc. | ✅︎ | ✅︎ |
+| `O
+moHybr
+dForCausa
+LM` | OLMo Hybr
+d | `a
+
+
+a
+/O
+mo-Hybr
+d-7B` | ✅︎ | ✅︎ |
+| `O
+mo
+ForCausa
+LM` | OLMoE | `a
+
+
+a
+/OLMoE-1B-7B-0924`, `a
+
+
+a
+/OLMoE-1B-7B-0924-I
+struct`, 
+tc. | | ✅︎ |
+| `OPTForCausa
+LM` | OPT, OPT-IML | `fac
+book/opt-66b`, `fac
+book/opt-
+m
+-max-30b`, 
+tc. | ✅︎ | ✅︎ |
+| `Or
+o
+ForCausa
+LM` | Or
+o
+ | `Or
+o
+StarAI/Or
+o
+-14B-Bas
+`, `Or
+o
+StarAI/Or
+o
+-14B-Chat`, 
+tc. | | ✅︎ |
+| `OuroForCausa
+LM` | ouro | `Byt
+Da
+c
+/Ouro-1.4B`, `Byt
+Da
+c
+/Ouro-2.6B`, 
+tc. | ✅︎ | |
+| `Pa
+guEmb
+dd
+dForCausa
+LM` |op
+
+Pa
+gu-Emb
+dd
+d-7B | `Fr
+domI
+t
+
+
+g
+
+c
+/op
+
+Pa
+gu-Emb
+dd
+d-7B-V1.1` | ✅︎ | ✅︎ |
+| `Pa
+guProMoEV2ForCausa
+LM` |op
+
+pa
+gu-pro-mo
+-v2 | | ✅︎ | ✅︎ |
+| `Pa
+guU
+traMoEForCausa
+LM` |op
+
+pa
+gu-u
+tra-mo
+-718b-mod
+
+ | `Fr
+domI
+t
+
+
+g
+
+c
+/op
+
+Pa
+gu-U
+tra-MoE-718B-V1.1` | ✅︎ | ✅︎ |
+| `Ph
+ForCausa
+LM` | Ph
+ | `m
+crosoft/ph
+-1_5`, `m
+crosoft/ph
+-2`, 
+tc. | ✅︎ | ✅︎ |
+| `Ph
+3ForCausa
+LM` | Ph
+-4, Ph
+-3 | `m
+crosoft/Ph
+-4-m
+
+
+-
+
+struct`, `m
+crosoft/Ph
+-4`, `m
+crosoft/Ph
+-3-m
+
+
+-4k-
+
+struct`, `m
+crosoft/Ph
+-3-m
+
+
+-128k-
+
+struct`, `m
+crosoft/Ph
+-3-m
+d
+um-128k-
+
+struct`, 
+tc. | ✅︎ | ✅︎ |
+| `Ph
+MoEForCausa
+LM` | Ph
+-3.5-MoE | `m
+crosoft/Ph
+-3.5-MoE-
+
+struct`, 
+tc. | ✅︎ | ✅︎ |
+| `P
+rs
+mmo
+ForCausa
+LM` | P
+rs
+mmo
+ | `ad
+pt/p
+rs
+mmo
+-8b-bas
+`, `ad
+pt/p
+rs
+mmo
+-8b-chat`, 
+tc. | | ✅︎ |
+| `P
+amo2ForCausa
+LM` | PLaMo2 | `pf
+
+t/p
+amo-2-1b`, `pf
+
+t/p
+amo-2-8b`, 
+tc. | ✅ | ✅︎ |
+| `P
+amo3ForCausa
+LM` | PLaMo3 | `pf
+
+t/p
+amo-3-
+
+ct-2b-bas
+`, `pf
+
+t/p
+amo-3-
+
+ct-8b-bas
+`, 
+tc. | ✅ | ✅︎ |
+| `QW
+
+LMH
+adMod
+
+` | Q
+
+
+ | `Q
+
+
+/Q
+
+
+-7B`, `Q
+
+
+/Q
+
+
+-7B-Chat`, 
+tc. | ✅︎ | ✅︎ |
+| `Q
+
+
+2ForCausa
+LM` | Q
+Q, Q
+
+
+2 | `Q
+
+
+/Q
+Q-32B-Pr
+v
+
+
+`, `Q
+
+
+/Q
+
+
+2-7B-I
+struct`, `Q
+
+
+/Q
+
+
+2-7B`, 
+tc. | ✅︎ | ✅︎ |
+| `Q
+
+
+2Mo
+ForCausa
+LM` | Q
+
+
+2MoE | `Q
+
+
+/Q
+
+
+1.5-MoE-A2.7B`, `Q
+
+
+/Q
+
+
+1.5-MoE-A2.7B-Chat`, 
+tc. | ✅︎ | ✅︎ |
+| `Q
+
+
+3ForCausa
+LM` | Q
+
+
+3 | `Q
+
+
+/Q
+
+
+3-8B`, 
+tc. | ✅︎ | ✅︎ |
+| `Q
+
+
+3Mo
+ForCausa
+LM` | Q
+
+
+3MoE | `Q
+
+
+/Q
+
+
+3-30B-A3B`, 
+tc. | ✅︎ | ✅︎ |
+| `Q
+
+
+3N
+xtForCausa
+LM` | Q
+
+
+3N
+xtMoE | `Q
+
+
+/Q
+
+
+3-N
+xt-80B-A3B-I
+struct`, 
+tc. | ✅︎ | ✅︎ |
+| `RWForCausa
+LM` | Fa
+co
+ RW | `t
+ua
+/fa
+co
+-40b`, 
+tc. | | ✅︎ |
+| `S
+dOssForCausa
+LM` | S
+dOss | `Byt
+Da
+c
+-S
+d/S
+d-OSS-36B-I
+struct`, 
+tc. | ✅︎ | ✅︎ |
+| `So
+arForCausa
+LM` | So
+ar Pro | `upstag
+/so
+ar-pro-pr
+v
+
+
+-
+
+struct`, 
+tc. | ✅︎ | ✅︎ |
+| `Stab
+
+LmForCausa
+LM` | Stab
+
+LM | `stab
+
+
+tya
+/stab
+
+
+m-3b-4
+1t`, `stab
+
+
+tya
+/stab
+
+
+m-bas
+-a
+pha-7b-v2`, 
+tc. | | |
+| `Stab
+
+LMEpochForCausa
+LM` | Stab
+
+LM Epoch | `stab
+
+
+tya
+/stab
+
+
+m-z
+phyr-3b`, 
+tc. | | ✅︎ |
+| `Starcod
+r2ForCausa
+LM` | Starcod
+r2 | `b
+gcod
+/starcod
+r2-3b`, `b
+gcod
+/starcod
+r2-7b`, `b
+gcod
+/starcod
+r2-15b`, 
+tc. | | ✅︎ |
+| `St
+p1ForCausa
+LM` | St
+p-Aud
+o | `st
+pfu
+-a
+/St
+p-Aud
+o-Ed
+tX`, 
+tc. | ✅︎ | ✅︎ |
+| `St
+p3p5ForCausa
+LM` | St
+p-3.5-f
+ash | `st
+pfu
+-a
+/St
+p-3.5-F
+ash`, 
+tc. |  | ✅︎ |
+| `T
+
+
+ChatForCausa
+LM` | T
+
+
+Chat | `chuhac/T
+
+
+Chat2-35B`, 
+tc. | ✅︎ | ✅︎ |
+| `T
+
+
+Chat2ForCausa
+LM` | T
+
+
+Chat2 | `T
+
+
+-AI/T
+
+
+Chat2-3B`, `T
+
+
+-AI/T
+
+
+Chat2-7B`, `T
+
+
+-AI/T
+
+
+Chat2-35B`, 
+tc. | ✅︎ | ✅︎ |
+| `T
+
+
+FLMForCausa
+LM` | T
+
+
+FLM | `Cof
+AI/FLM-2-52B-I
+struct-2407`, `Cof
+AI/T
+
+
+-FLM`, 
+tc. | ✅︎ | ✅︎ |
+| `Xv
+rs
+ForCausa
+LM` | XVERSE | `xv
+rs
+/XVERSE-7B-Chat`, `xv
+rs
+/XVERSE-13B-Chat`, `xv
+rs
+/XVERSE-65B-Chat`, 
+tc. | ✅︎ | ✅︎ |
+| `M
+
+
+MaxM1ForCausa
+LM` | M
+
+
+Max-T
+xt | `M
+
+
+MaxAI/M
+
+
+Max-M1-40k`, `M
+
+
+MaxAI/M
+
+
+Max-M1-80k`, 
+tc. | | |
+| `M
+
+
+MaxT
+xt01ForCausa
+LM` | M
+
+
+Max-T
+xt | `M
+
+
+MaxAI/M
+
+
+Max-T
+xt-01`, 
+tc. | | |
+| `Zamba2ForCausa
+LM` | Zamba2 | `Zyphra/Zamba2-7B-
+
+struct`, `Zyphra/Zamba2-2.7B-
+
+struct`, `Zyphra/Zamba2-1.2B-
+
+struct`, 
+tc. | | |
+!!! 
+ot
+
+    Grok2 r
+qu
+r
+s `tok
+
+
+z
+r.tok.jso
+` 
+
+th `t
+ktok
+
+` 
+
+sta
+
+d. You ca
+ opt
+o
+a
+y ov
+rr
+d
+ MoE rout
+r r
+
+orma
+
+zat
+o
+ 
+
+th `mo
+_rout
+r_r
+
+orma
+
+z
+`.
+Som
+ mod
+
+s ar
+ support
+d o
+
+y v
+a th
+ [Tra
+sform
+rs mod
+
+
+
+g back
+
+d](#tra
+sform
+rs). Th
+ purpos
+ of th
+ tab
+
+ b
+
+o
+ 
+s to ack
+o
+
+
+dg
+ mod
+
+s 
+h
+ch 
+
+ off
+c
+a
+y support 
+
+ th
+s 
+ay. Th
+ 
+ogs 
+
+
+ say that th
+ Tra
+sform
+rs mod
+
+
+
+g back
+
+d 
+s b
+
+
+g us
+d, a
+d you 
+
+
+ s
+ 
+o 
+ar
+
+
+g that th
+s 
+s fa
+back b
+hav
+our. Th
+s m
+a
+s that, 
+f you hav
+ 
+ssu
+s 
+
+th a
+y of th
+ mod
+
+s 
+
+st
+d b
+
+o
+, p
+
+as
+ [mak
+ a
+ 
+ssu
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/
+
+
+/choos
+) a
+d 
+
+'
+ do our b
+st to f
+x 
+t!
+| Arch
+t
+ctur
+ | Mod
+
+s | Examp
+
+ HF Mod
+
+s | [LoRA](../f
+atur
+s/
+ora.md) | [PP](../s
+rv
+
+g/para
+
+
+
+sm_sca
+
+
+g.md) |
 |--------------|--------|-------------------|----------------------|---------------------------|
-| `SmolLM3ForCausalLM` | SmolLM3 | `HuggingFaceTB/SmolLM3-3B` | ✅︎ | ✅︎ |
+| `Smo
+LM3ForCausa
+LM` | Smo
+LM3 | `Hugg
 
-!!! note
-    Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
+gFac
+TB/Smo
+LM3-3B` | ✅︎ | ✅︎ |
+!!! 
+ot
 
-### Pooling Models
+    Curr
 
-See [this page](./pooling_models.md) for more information on how to use pooling models.
+t
+y, th
+ ROCm v
+rs
+o
+ of vLLM supports M
+stra
+ a
+d M
+xtra
+ o
 
-!!! important
-    Since some model architectures support both generative and pooling tasks,
-    you should explicitly specify `--runner pooling` to ensure that the model is used in pooling mode instead of generative mode.
+y for co
+t
+xt 
 
-#### Embedding
 
-These models primarily support the [`LLM.embed`](./pooling_models.md#llmembed) API.
+gths up to 4096.
+### Poo
 
-| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
+
+g Mod
+
+s
+S
+ [th
+s pag
+](./poo
+
+
+g_mod
+
+s.md) for mor
+ 
+
+format
+o
+ o
+ ho
+ to us
+ poo
+
+
+g mod
+
+s.
+!!! 
+mporta
+t
+    S
+
+c
+ som
+ mod
+
+ arch
+t
+ctur
+s support both g
+
+
+rat
+v
+ a
+d poo
+
+
+g tasks,
+    you shou
+d 
+xp
+
+c
+t
+y sp
+c
+fy `--ru
+
+r poo
+
+
+g` to 
+
+sur
+ that th
+ mod
+
+ 
+s us
+d 
+
+ poo
+
+
+g mod
+ 
+
+st
+ad of g
+
+
+rat
+v
+ mod
+.
+#### Emb
+dd
+
+g
+Th
+s
+ mod
+
+s pr
+mar
+
+y support th
+ [`LLM.
+mb
+d`](./poo
+
+
+g_mod
+
+s.md#
+m
+mb
+d) API.
+| Arch
+t
+ctur
+ | Mod
+
+s | Examp
+
+ HF Mod
+
+s | [LoRA](../f
+atur
+s/
+ora.md) | [PP](../s
+rv
+
+g/para
+
+
+
+sm_sca
+
+
+g.md) |
 |--------------|--------|-------------------|----------------------|---------------------------|
-| `BertModel`<sup>C</sup> | BERT-based | `BAAI/bge-base-en-v1.5`, `Snowflake/snowflake-arctic-embed-xs`, etc. | | |
-| `BertSpladeSparseEmbeddingModel` | SPLADE | `naver/splade-v3` | | |
-| `Gemma2Model`<sup>C</sup> | Gemma 2-based | `BAAI/bge-multilingual-gemma2`, etc. | ✅︎ | ✅︎ |
-| `Gemma3TextModel`<sup>C</sup> | Gemma 3-based | `google/embeddinggemma-300m`, etc. | ✅︎ | ✅︎ |
-| `GritLM` | GritLM | `parasail-ai/GritLM-7B-vllm`. | ✅︎ | ✅︎ |
-| `GteModel`<sup>C</sup> | Arctic-Embed-2.0-M | `Snowflake/snowflake-arctic-embed-m-v2.0`. |  |  |
-| `GteNewModel`<sup>C</sup> | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-base`, etc. |  |  |
-| `ModernBertModel`<sup>C</sup> | ModernBERT-based | `Alibaba-NLP/gte-modernbert-base`, etc. |  |  |
-| `NomicBertModel`<sup>C</sup> | Nomic BERT | `nomic-ai/nomic-embed-text-v1`, `nomic-ai/nomic-embed-text-v2-moe`, `Snowflake/snowflake-arctic-embed-m-long`, etc. |  |  |
-| `LlamaBidirectionalModel`<sup>C</sup> | Llama-based with bidirectional attention | `nvidia/llama-nemotron-embed-1b-v2`, etc. | ✅︎ | ✅︎ |
-| `LlamaModel`<sup>C</sup>, `LlamaForCausalLM`<sup>C</sup>, `MistralModel`<sup>C</sup>, etc. | Llama-based | `intfloat/e5-mistral-7b-instruct`, etc. | ✅︎ | ✅︎ |
-| `Qwen2Model`<sup>C</sup>, `Qwen2ForCausalLM`<sup>C</sup> | Qwen2-based | `ssmits/Qwen2-7B-Instruct-embed-base` (see note), `Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc. | ✅︎ | ✅︎ |
-| `Qwen3Model`<sup>C</sup>, `Qwen3ForCausalLM`<sup>C</sup> | Qwen3-based | `Qwen/Qwen3-Embedding-0.6B`, etc. | ✅︎ | ✅︎ |
-| `VoyageQwen3BidirectionalEmbedModel`<sup>C</sup> | Voyage Qwen3-based with bidirectional attention | `voyageai/voyage-4-nano`, etc. | ✅︎ | ✅︎ |
-| `RobertaModel`, `RobertaForMaskedLM` | RoBERTa-based | `sentence-transformers/all-roberta-large-v1`, etc. | | |
-| `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
+| `B
+rtMod
 
-<sup>C</sup> Automatically converted into an embedding model via `--convert embed`. ([details](./pooling_models.md#model-conversion))  
-\* Feature support is the same as that of the original model.
+`
+sup
+C
+/sup
+ | BERT-bas
+d | `BAAI/bg
+-bas
+-
 
-!!! note
-    `ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
-    You need to manually set mean pooling by passing `--pooler-config '{"pooling_type": "MEAN"}'`.
+-v1.5`, `S
+o
+f
+ak
+/s
+o
+f
+ak
+-arct
+c-
+mb
+d-xs`, 
+tc. | | |
+| `B
+rtSp
+ad
+Spars
+Emb
+dd
 
-!!! note
-    For `Alibaba-NLP/gte-Qwen2-*`, you need to enable `--trust-remote-code` for the correct tokenizer to be loaded.
-    See [relevant issue on HF Transformers](https://github.com/huggingface/transformers/issues/34882).
+gMod
 
-!!! note
-    `jinaai/jina-embeddings-v3` supports multiple tasks through LoRA, while vllm temporarily only supports text-matching tasks by merging LoRA weights.
+` | SPLADE | `
+av
+r/sp
+ad
+-v3` | | |
+| `G
+mma2Mod
 
-!!! note
-    The second-generation GTE model (mGTE-TRM) is named `NewModel`. The name `NewModel` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewModel"]}'` to specify the use of the `GteNewModel` architecture.
+`
+sup
+C
+/sup
+ | G
+mma 2-bas
+d | `BAAI/bg
+-mu
+t
 
-If your model is not in the above list, we will try to automatically convert the model using
-[as_embedding_model][vllm.model_executor.models.adapters.as_embedding_model]. By default, the embeddings
-of the whole prompt are extracted from the normalized hidden state corresponding to the last token.
 
-#### Classification
 
-These models primarily support the [`LLM.classify`](./pooling_models.md#llmclassify) API.
+gua
+-g
+mma2`, 
+tc. | ✅︎ | ✅︎ |
+| `G
+mma3T
+xtMod
 
-| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
+`
+sup
+C
+/sup
+ | G
+mma 3-bas
+d | `goog
+
+/
+mb
+dd
+
+gg
+mma-300m`, 
+tc. | ✅︎ | ✅︎ |
+| `Gr
+tLM` | Gr
+tLM | `parasa
+
+-a
+/Gr
+tLM-7B-v
+m`. | ✅︎ | ✅︎ |
+| `Gt
+Mod
+
+`
+sup
+C
+/sup
+ | Arct
+c-Emb
+d-2.0-M | `S
+o
+f
+ak
+/s
+o
+f
+ak
+-arct
+c-
+mb
+d-m-v2.0`. |  |  |
+| `Gt
+N
+
+Mod
+
+`
+sup
+C
+/sup
+ | mGTE-TRM (s
+ 
+ot
+) | `A
+
+baba-NLP/gt
+-mu
+t
+
+
+
+gua
+-bas
+`, 
+tc. |  |  |
+| `Mod
+r
+B
+rtMod
+
+`
+sup
+C
+/sup
+ | Mod
+r
+BERT-bas
+d | `A
+
+baba-NLP/gt
+-mod
+r
+b
+rt-bas
+`, 
+tc. |  |  |
+| `Nom
+cB
+rtMod
+
+`
+sup
+C
+/sup
+ | Nom
+c BERT | `
+om
+c-a
+/
+om
+c-
+mb
+d-t
+xt-v1`, `
+om
+c-a
+/
+om
+c-
+mb
+d-t
+xt-v2-mo
+`, `S
+o
+f
+ak
+/s
+o
+f
+ak
+-arct
+c-
+mb
+d-m-
+o
+g`, 
+tc. |  |  |
+| `L
+amaB
+d
+r
+ct
+o
+a
+Mod
+
+`
+sup
+C
+/sup
+ | L
+ama-bas
+d 
+
+th b
+d
+r
+ct
+o
+a
+ att
+
+t
+o
+ | `
+v
+d
+a/
+ama-
+
+motro
+-
+mb
+d-1b-v2`, 
+tc. | ✅︎ | ✅︎ |
+| `L
+amaMod
+
+`
+sup
+C
+/sup
+, `L
+amaForCausa
+LM`
+sup
+C
+/sup
+, `M
+stra
+Mod
+
+`
+sup
+C
+/sup
+, 
+tc. | L
+ama-bas
+d | `
+
+tf
+oat/
+5-m
+stra
+-7b-
+
+struct`, 
+tc. | ✅︎ | ✅︎ |
+| `Q
+
+
+2Mod
+
+`
+sup
+C
+/sup
+, `Q
+
+
+2ForCausa
+LM`
+sup
+C
+/sup
+ | Q
+
+
+2-bas
+d | `ssm
+ts/Q
+
+
+2-7B-I
+struct-
+mb
+d-bas
+` (s
+ 
+ot
+), `A
+
+baba-NLP/gt
+-Q
+
+
+2-7B-
+
+struct` (s
+ 
+ot
+), 
+tc. | ✅︎ | ✅︎ |
+| `Q
+
+
+3Mod
+
+`
+sup
+C
+/sup
+, `Q
+
+
+3ForCausa
+LM`
+sup
+C
+/sup
+ | Q
+
+
+3-bas
+d | `Q
+
+
+/Q
+
+
+3-Emb
+dd
+
+g-0.6B`, 
+tc. | ✅︎ | ✅︎ |
+| `Voyag
+Q
+
+
+3B
+d
+r
+ct
+o
+a
+Emb
+dMod
+
+`
+sup
+C
+/sup
+ | Voyag
+ Q
+
+
+3-bas
+d 
+
+th b
+d
+r
+ct
+o
+a
+ att
+
+t
+o
+ | `voyag
+a
+/voyag
+-4-
+a
+o`, 
+tc. | ✅︎ | ✅︎ |
+| `Rob
+rtaMod
+
+`, `Rob
+rtaForMask
+dLM` | RoBERTa-bas
+d | `s
+
+t
+
+c
+-tra
+sform
+rs/a
+-rob
+rta-
+arg
+-v1`, 
+tc. | | |
+| `*Mod
+
+`
+sup
+C
+/sup
+, `*ForCausa
+LM`
+sup
+C
+/sup
+, 
+tc. | G
+
+
+rat
+v
+ mod
+
+s | N/A | \* | \* |
+sup
+C
+/sup
+ Automat
+ca
+y co
+v
+rt
+d 
+
+to a
+ 
+mb
+dd
+
+g mod
+
+ v
+a `--co
+v
+rt 
+mb
+d`. ([d
+ta
+
+s](./poo
+
+
+g_mod
+
+s.md#mod
+
+-co
+v
+rs
+o
+))
+\* F
+atur
+ support 
+s th
+ sam
+ as that of th
+ or
+g
+
+a
+ mod
+
+.
+!!! 
+ot
+
+    `ssm
+ts/Q
+
+
+2-7B-I
+struct-
+mb
+d-bas
+` has a
+ 
+mprop
+r
+y d
+f
+
+
+d S
+
+t
+
+c
+ Tra
+sform
+rs co
+f
+g.
+    You 
+
+d to ma
+ua
+y s
+t m
+a
+ poo
+
+
+g by pass
+
+g `--poo
+
+r-co
+f
+g '{"poo
+
+
+g_typ
+": "MEAN"}'`.
+!!! 
+ot
+
+    For `A
+
+baba-NLP/gt
+-Q
+
+
+2-*`, you 
+
+d to 
+
+ab
+
+ `--trust-r
+mot
+-cod
+` for th
+ corr
+ct tok
+
+
+z
+r to b
+ 
+oad
+d.
+    S
+ [r
+
+
+va
+t 
+ssu
+ o
+ HF Tra
+sform
+rs](https://g
+thub.com/hugg
+
+gfac
+/tra
+sform
+rs/
+ssu
+s/34882).
+!!! 
+ot
+
+    `j
+
+aa
+/j
+
+a-
+mb
+dd
+
+gs-v3` supports mu
+t
+p
+
+ tasks through LoRA, 
+h
+
+
+ v
+m t
+mporar
+
+y o
+
+y supports t
+xt-match
+
+g tasks by m
+rg
+
+g LoRA 
+
+
+ghts.
+!!! 
+ot
+
+    Th
+ s
+co
+d-g
+
+
+rat
+o
+ GTE mod
+
+ (mGTE-TRM) 
+s 
+am
+d `N
+
+Mod
+
+`. Th
+ 
+am
+ `N
+
+Mod
+
+` 
+s too g
+
+
+r
+c, you shou
+d s
+t `--hf-ov
+rr
+d
+s '{"arch
+t
+ctur
+s": ["Gt
+N
+
+Mod
+
+"]}'` to sp
+c
+fy th
+ us
+ of th
+ `Gt
+N
+
+Mod
+
+` arch
+t
+ctur
+.
+If your mod
+
+ 
+s 
+ot 
+
+ th
+ abov
+ 
+
+st, 
+
+ 
+
+
+ try to automat
+ca
+y co
+v
+rt th
+ mod
+
+ us
+
+g
+[as_
+mb
+dd
+
+g_mod
+
+][v
+m.mod
+
+_
+x
+cutor.mod
+
+s.adapt
+rs.as_
+mb
+dd
+
+g_mod
+
+]. By d
+fau
+t, th
+ 
+mb
+dd
+
+gs
+of th
+ 
+ho
+
+ prompt ar
+ 
+xtract
+d from th
+ 
+orma
+
+z
+d h
+dd
+
+ stat
+ corr
+spo
+d
+
+g to th
+ 
+ast tok
+
+.
+#### C
+ass
+f
+cat
+o
+
+Th
+s
+ mod
+
+s pr
+mar
+
+y support th
+ [`LLM.c
+ass
+fy`](./poo
+
+
+g_mod
+
+s.md#
+mc
+ass
+fy) API.
+| Arch
+t
+ctur
+ | Mod
+
+s | Examp
+
+ HF Mod
+
+s | [LoRA](../f
+atur
+s/
+ora.md) | [PP](../s
+rv
+
+g/para
+
+
+
+sm_sca
+
+
+g.md) |
 |--------------|--------|-------------------|----------------------|---------------------------|
-| `JambaForSequenceClassification` | Jamba | `ai21labs/Jamba-tiny-reward-dev`, etc. | ✅︎ | ✅︎ |
-| `GPT2ForSequenceClassification` | GPT2 | `nie3e/sentiment-polish-gpt2-small` | | |
-| `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
+| `JambaForS
+qu
 
-<sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./pooling_models.md#model-conversion))  
-\* Feature support is the same as that of the original model.
+c
+C
+ass
+f
+cat
+o
+` | Jamba | `a
+21
+abs/Jamba-t
 
-If your model is not in the above list, we will try to automatically convert the model using
-[as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
+y-r
 
-#### Cross-encoder / Reranker
+ard-d
+v`, 
+tc. | ✅︎ | ✅︎ |
+| `GPT2ForS
+qu
 
-Cross-encoder and reranker models are a subset of classification models that accept two prompts as input.
-These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) API.
+c
+C
+ass
+f
+cat
+o
+` | GPT2 | `
 
-| Architecture | Models | Example HF Models | Score template (see note) | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
+
+3
+/s
+
+t
+m
+
+t-po
+
+sh-gpt2-sma
+` | | |
+| `*Mod
+
+`
+sup
+C
+/sup
+, `*ForCausa
+LM`
+sup
+C
+/sup
+, 
+tc. | G
+
+
+rat
+v
+ mod
+
+s | N/A | \* | \* |
+sup
+C
+/sup
+ Automat
+ca
+y co
+v
+rt
+d 
+
+to a c
+ass
+f
+cat
+o
+ mod
+
+ v
+a `--co
+v
+rt c
+ass
+fy`. ([d
+ta
+
+s](./poo
+
+
+g_mod
+
+s.md#mod
+
+-co
+v
+rs
+o
+))
+\* F
+atur
+ support 
+s th
+ sam
+ as that of th
+ or
+g
+
+a
+ mod
+
+.
+If your mod
+
+ 
+s 
+ot 
+
+ th
+ abov
+ 
+
+st, 
+
+ 
+
+
+ try to automat
+ca
+y co
+v
+rt th
+ mod
+
+ us
+
+g
+[as_s
+q_c
+s_mod
+
+][v
+m.mod
+
+_
+x
+cutor.mod
+
+s.adapt
+rs.as_s
+q_c
+s_mod
+
+]. By d
+fau
+t, th
+ c
+ass probab
+
+
+t
+
+s ar
+ 
+xtract
+d from th
+ softmax
+d h
+dd
+
+ stat
+ corr
+spo
+d
+
+g to th
+ 
+ast tok
+
+.
+#### Cross-
+
+cod
+r / R
+ra
+k
+r
+Cross-
+
+cod
+r a
+d r
+ra
+k
+r mod
+
+s ar
+ a subs
+t of c
+ass
+f
+cat
+o
+ mod
+
+s that acc
+pt t
+o prompts as 
+
+put.
+Th
+s
+ mod
+
+s pr
+mar
+
+y support th
+ [`LLM.scor
+`](./poo
+
+
+g_mod
+
+s.md#
+mscor
+) API.
+| Arch
+t
+ctur
+ | Mod
+
+s | Examp
+
+ HF Mod
+
+s | Scor
+ t
+mp
+at
+ (s
+ 
+ot
+) | [LoRA](../f
+atur
+s/
+ora.md) | [PP](../s
+rv
+
+g/para
+
+
+
+sm_sca
+
+
+g.md) |
 |--------------|--------|-------------------|---------------------------|-----------------------------|-----------------------------------------|
-| `BertForSequenceClassification` | BERT-based | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc. | N/A | | |
-| `GemmaForSequenceClassification` | Gemma-based | `BAAI/bge-reranker-v2-gemma`(see note), etc. | [bge-reranker-v2-gemma.jinja](../../examples/pooling/score/template/bge-reranker-v2-gemma.jinja) | ✅︎ | ✅︎ |
-| `GteNewForSequenceClassification` | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-reranker-base`, etc. | N/A | | |
-| `LlamaBidirectionalForSequenceClassification`<sup>C</sup> | Llama-based with bidirectional attention | `nvidia/llama-nemotron-rerank-1b-v2`, etc. | [nemotron-rerank.jinja](../../examples/pooling/score/template/nemotron-rerank.jinja) | ✅︎ | ✅︎ |
-| `Qwen2ForSequenceClassification`<sup>C</sup> | Qwen2-based | `mixedbread-ai/mxbai-rerank-base-v2`(see note), etc. | [mxbai_rerank_v2.jinja](../../examples/pooling/score/template/mxbai_rerank_v2.jinja) | ✅︎ | ✅︎ |
-| `Qwen3ForSequenceClassification`<sup>C</sup> | Qwen3-based | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B`(see note), etc. | [qwen3_reranker.jinja](../../examples/pooling/score/template/qwen3_reranker.jinja) | ✅︎ | ✅︎ |
-| `RobertaForSequenceClassification` | RoBERTa-based | `cross-encoder/quora-roberta-base`, etc. | N/A | | |
-| `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc. | N/A | | |
-| `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | N/A | \* | \* |
+| `B
+rtForS
+qu
 
-<sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./pooling_models.md#model-conversion))  
-\* Feature support is the same as that of the original model.
+c
+C
+ass
+f
+cat
+o
+` | BERT-bas
+d | `cross-
 
-!!! note
-    Some models require a specific prompt format to work correctly.
+cod
+r/ms-marco-M
 
-    You can find Example HF Models's corresponding score template in [examples/pooling/score/template/](../../examples/pooling/score/template)
 
-    Examples : [examples/pooling/score/using_template_offline.py](../../examples/pooling/score/using_template_offline.py) [examples/pooling/score/using_template_online.py](../../examples/pooling/score/using_template_online.py)
+LM-L-6-v2`, 
+tc. | N/A | | |
+| `G
+mmaForS
+qu
 
-!!! note
-    Load the official original `BAAI/bge-reranker-v2-gemma` by using the following command.
+c
+C
+ass
+f
+cat
+o
+` | G
+mma-bas
+d | `BAAI/bg
+-r
+ra
+k
+r-v2-g
+mma`(s
+ 
+ot
+), 
+tc. | [bg
+-r
+ra
+k
+r-v2-g
+mma.j
 
+ja](../../
+xamp
+
+s/poo
+
+
+g/scor
+/t
+mp
+at
+/bg
+-r
+ra
+k
+r-v2-g
+mma.j
+
+ja) | ✅︎ | ✅︎ |
+| `Gt
+N
+
+ForS
+qu
+
+c
+C
+ass
+f
+cat
+o
+` | mGTE-TRM (s
+ 
+ot
+) | `A
+
+baba-NLP/gt
+-mu
+t
+
+
+
+gua
+-r
+ra
+k
+r-bas
+`, 
+tc. | N/A | | |
+| `L
+amaB
+d
+r
+ct
+o
+a
+ForS
+qu
+
+c
+C
+ass
+f
+cat
+o
+`
+sup
+C
+/sup
+ | L
+ama-bas
+d 
+
+th b
+d
+r
+ct
+o
+a
+ att
+
+t
+o
+ | `
+v
+d
+a/
+ama-
+
+motro
+-r
+ra
+k-1b-v2`, 
+tc. | [
+
+motro
+-r
+ra
+k.j
+
+ja](../../
+xamp
+
+s/poo
+
+
+g/scor
+/t
+mp
+at
+/
+
+motro
+-r
+ra
+k.j
+
+ja) | ✅︎ | ✅︎ |
+| `Q
+
+
+2ForS
+qu
+
+c
+C
+ass
+f
+cat
+o
+`
+sup
+C
+/sup
+ | Q
+
+
+2-bas
+d | `m
+x
+dbr
+ad-a
+/mxba
+-r
+ra
+k-bas
+-v2`(s
+ 
+ot
+), 
+tc. | [mxba
+_r
+ra
+k_v2.j
+
+ja](../../
+xamp
+
+s/poo
+
+
+g/scor
+/t
+mp
+at
+/mxba
+_r
+ra
+k_v2.j
+
+ja) | ✅︎ | ✅︎ |
+| `Q
+
+
+3ForS
+qu
+
+c
+C
+ass
+f
+cat
+o
+`
+sup
+C
+/sup
+ | Q
+
+
+3-bas
+d | `tomaars
+
+/Q
+
+
+3-R
+ra
+k
+r-0.6B-s
+q-c
+s`, `Q
+
+
+/Q
+
+
+3-R
+ra
+k
+r-0.6B`(s
+ 
+ot
+), 
+tc. | [q
+
+
+3_r
+ra
+k
+r.j
+
+ja](../../
+xamp
+
+s/poo
+
+
+g/scor
+/t
+mp
+at
+/q
+
+
+3_r
+ra
+k
+r.j
+
+ja) | ✅︎ | ✅︎ |
+| `Rob
+rtaForS
+qu
+
+c
+C
+ass
+f
+cat
+o
+` | RoBERTa-bas
+d | `cross-
+
+cod
+r/quora-rob
+rta-bas
+`, 
+tc. | N/A | | |
+| `XLMRob
+rtaForS
+qu
+
+c
+C
+ass
+f
+cat
+o
+` | XLM-RoBERTa-bas
+d | `BAAI/bg
+-r
+ra
+k
+r-v2-m3`, 
+tc. | N/A | | |
+| `*Mod
+
+`
+sup
+C
+/sup
+, `*ForCausa
+LM`
+sup
+C
+/sup
+, 
+tc. | G
+
+
+rat
+v
+ mod
+
+s | N/A | N/A | \* | \* |
+sup
+C
+/sup
+ Automat
+ca
+y co
+v
+rt
+d 
+
+to a c
+ass
+f
+cat
+o
+ mod
+
+ v
+a `--co
+v
+rt c
+ass
+fy`. ([d
+ta
+
+s](./poo
+
+
+g_mod
+
+s.md#mod
+
+-co
+v
+rs
+o
+))
+\* F
+atur
+ support 
+s th
+ sam
+ as that of th
+ or
+g
+
+a
+ mod
+
+.
+!!! 
+ot
+
+    Som
+ mod
+
+s r
+qu
+r
+ a sp
+c
+f
+c prompt format to 
+ork corr
+ct
+y.
+    You ca
+ f
+
+d Examp
+
+ HF Mod
+
+s's corr
+spo
+d
+
+g scor
+ t
+mp
+at
+ 
+
+ [
+xamp
+
+s/poo
+
+
+g/scor
+/t
+mp
+at
+/](../../
+xamp
+
+s/poo
+
+
+g/scor
+/t
+mp
+at
+)
+    Examp
+
+s : [
+xamp
+
+s/poo
+
+
+g/scor
+/us
+
+g_t
+mp
+at
+_off
+
+
+
+.py](../../
+xamp
+
+s/poo
+
+
+g/scor
+/us
+
+g_t
+mp
+at
+_off
+
+
+
+.py) [
+xamp
+
+s/poo
+
+
+g/scor
+/us
+
+g_t
+mp
+at
+_o
+
+
+
+
+.py](../../
+xamp
+
+s/poo
+
+
+g/scor
+/us
+
+g_t
+mp
+at
+_o
+
+
+
+
+.py)
+!!! 
+ot
+
+    Load th
+ off
+c
+a
+ or
+g
+
+a
+ `BAAI/bg
+-r
+ra
+k
+r-v2-g
+mma` by us
+
+g th
+ fo
+o
+
+
+g comma
+d.
     ```bash
-    vllm serve BAAI/bge-reranker-v2-gemma --hf_overrides '{"architectures": ["GemmaForSequenceClassification"],"classifier_from_token": ["Yes"],"method": "no_post_processing"}'
+    v
+m s
+rv
+ BAAI/bg
+-r
+ra
+k
+r-v2-g
+mma --hf_ov
+rr
+d
+s '{"arch
+t
+ctur
+s": ["G
+mmaForS
+qu
+
+c
+C
+ass
+f
+cat
+o
+"],"c
+ass
+f
+
+r_from_tok
+
+": ["Y
+s"],"m
+thod": "
+o_post_proc
+ss
+
+g"}'
     ```
+!!! 
+ot
 
-!!! note
-    The second-generation GTE model (mGTE-TRM) is named `NewForSequenceClassification`. The name `NewForSequenceClassification` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewForSequenceClassification"]}'` to specify the use of the `GteNewForSequenceClassification` architecture.
+    Th
+ s
+co
+d-g
 
-!!! note
-    Load the official original `mxbai-rerank-v2` by using the following command.
 
+rat
+o
+ GTE mod
+
+ (mGTE-TRM) 
+s 
+am
+d `N
+
+ForS
+qu
+
+c
+C
+ass
+f
+cat
+o
+`. Th
+ 
+am
+ `N
+
+ForS
+qu
+
+c
+C
+ass
+f
+cat
+o
+` 
+s too g
+
+
+r
+c, you shou
+d s
+t `--hf-ov
+rr
+d
+s '{"arch
+t
+ctur
+s": ["Gt
+N
+
+ForS
+qu
+
+c
+C
+ass
+f
+cat
+o
+"]}'` to sp
+c
+fy th
+ us
+ of th
+ `Gt
+N
+
+ForS
+qu
+
+c
+C
+ass
+f
+cat
+o
+` arch
+t
+ctur
+.
+!!! 
+ot
+
+    Load th
+ off
+c
+a
+ or
+g
+
+a
+ `mxba
+-r
+ra
+k-v2` by us
+
+g th
+ fo
+o
+
+
+g comma
+d.
     ```bash
-    vllm serve mixedbread-ai/mxbai-rerank-base-v2 --hf_overrides '{"architectures": ["Qwen2ForSequenceClassification"],"classifier_from_token": ["0", "1"], "method": "from_2_way_softmax"}'
+    v
+m s
+rv
+ m
+x
+dbr
+ad-a
+/mxba
+-r
+ra
+k-bas
+-v2 --hf_ov
+rr
+d
+s '{"arch
+t
+ctur
+s": ["Q
+
+
+2ForS
+qu
+
+c
+C
+ass
+f
+cat
+o
+"],"c
+ass
+f
+
+r_from_tok
+
+": ["0", "1"], "m
+thod": "from_2_
+ay_softmax"}'
     ```
+!!! 
+ot
 
-!!! note
-    Load the official original `Qwen3 Reranker` by using the following command. More information can be found at: [examples/pooling/score/qwen3_reranker_offline.py](../../examples/pooling/score/qwen3_reranker_offline.py) [examples/pooling/score/qwen3_reranker_online.py](../../examples/pooling/score/qwen3_reranker_online.py).
+    Load th
+ off
+c
+a
+ or
+g
 
+a
+ `Q
+
+
+3 R
+ra
+k
+r` by us
+
+g th
+ fo
+o
+
+
+g comma
+d. Mor
+ 
+
+format
+o
+ ca
+ b
+ fou
+d at: [
+xamp
+
+s/poo
+
+
+g/scor
+/q
+
+
+3_r
+ra
+k
+r_off
+
+
+
+.py](../../
+xamp
+
+s/poo
+
+
+g/scor
+/q
+
+
+3_r
+ra
+k
+r_off
+
+
+
+.py) [
+xamp
+
+s/poo
+
+
+g/scor
+/q
+
+
+3_r
+ra
+k
+r_o
+
+
+
+
+.py](../../
+xamp
+
+s/poo
+
+
+g/scor
+/q
+
+
+3_r
+ra
+k
+r_o
+
+
+
+
+.py).
     ```bash
-    vllm serve Qwen/Qwen3-Reranker-0.6B --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
+    v
+m s
+rv
+ Q
+
+
+/Q
+
+
+3-R
+ra
+k
+r-0.6B --hf_ov
+rr
+d
+s '{"arch
+t
+ctur
+s": ["Q
+
+
+3ForS
+qu
+
+c
+C
+ass
+f
+cat
+o
+"],"c
+ass
+f
+
+r_from_tok
+
+": ["
+o", "y
+s"],"
+s_or
+g
+
+a
+_q
+
+
+3_r
+ra
+k
+r": tru
+}'
     ```
+#### R
 
-#### Reward Modeling
+ard Mod
 
-These models primarily support the [`LLM.reward`](./pooling_models.md#llmreward) API.
 
-| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
+
+g
+Th
+s
+ mod
+
+s pr
+mar
+
+y support th
+ [`LLM.r
+
+ard`](./poo
+
+
+g_mod
+
+s.md#
+mr
+
+ard) API.
+| Arch
+t
+ctur
+ | Mod
+
+s | Examp
+
+ HF Mod
+
+s | [LoRA](../f
+atur
+s/
+ora.md) | [PP](../s
+rv
+
+g/para
+
+
+
+sm_sca
+
+
+g.md) |
 |--------------|--------|-------------------|----------------------|---------------------------|
-| `InternLM2ForRewardModel` | InternLM2-based | `internlm/internlm2-1_8b-reward`, `internlm/internlm2-7b-reward`, etc. | ✅︎ | ✅︎ |
-| `LlamaForCausalLM` | Llama-based | `peiyi9979/math-shepherd-mistral-7b-prm`, etc. | ✅︎ | ✅︎ |
-| `Qwen2ForRewardModel` | Qwen2-based | `Qwen/Qwen2.5-Math-RM-72B`, etc. | ✅︎ | ✅︎ |
-| `Qwen2ForProcessRewardModel` | Qwen2-based | `Qwen/Qwen2.5-Math-PRM-7B`, etc. | ✅︎ | ✅︎ |
+| `I
+t
+r
+LM2ForR
 
-!!! important
-    For process-supervised reward models such as `peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
-    e.g.: `--pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
+ardMod
 
-#### Token Classification
+` | I
+t
+r
+LM2-bas
+d | `
 
-These models primarily support the [`LLM.encode`](./pooling_models.md#llmencode) API.
+t
+r
 
-| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
+m/
+
+t
+r
+
+m2-1_8b-r
+
+ard`, `
+
+t
+r
+
+m/
+
+t
+r
+
+m2-7b-r
+
+ard`, 
+tc. | ✅︎ | ✅︎ |
+| `L
+amaForCausa
+LM` | L
+ama-bas
+d | `p
+
+y
+9979/math-sh
+ph
+rd-m
+stra
+-7b-prm`, 
+tc. | ✅︎ | ✅︎ |
+| `Q
+
+
+2ForR
+
+ardMod
+
+` | Q
+
+
+2-bas
+d | `Q
+
+
+/Q
+
+
+2.5-Math-RM-72B`, 
+tc. | ✅︎ | ✅︎ |
+| `Q
+
+
+2ForProc
+ssR
+
+ardMod
+
+` | Q
+
+
+2-bas
+d | `Q
+
+
+/Q
+
+
+2.5-Math-PRM-7B`, 
+tc. | ✅︎ | ✅︎ |
+!!! 
+mporta
+t
+    For proc
+ss-sup
+rv
+s
+d r
+
+ard mod
+
+s such as `p
+
+y
+9979/math-sh
+ph
+rd-m
+stra
+-7b-prm`, th
+ poo
+
+
+g co
+f
+g shou
+d b
+ s
+t 
+xp
+
+c
+t
+y,
+    
+.g.: `--poo
+
+r-co
+f
+g '{"poo
+
+
+g_typ
+": "STEP", "st
+p_tag_
+d": 123, "r
+tur
+
+d_tok
+
+_
+ds": [456, 789]}'`.
+#### Tok
+
+ C
+ass
+f
+cat
+o
+
+Th
+s
+ mod
+
+s pr
+mar
+
+y support th
+ [`LLM.
+
+cod
+`](./poo
+
+
+g_mod
+
+s.md#
+m
+
+cod
+) API.
+| Arch
+t
+ctur
+ | Mod
+
+s | Examp
+
+ HF Mod
+
+s | [LoRA](../f
+atur
+s/
+ora.md) | [PP](../s
+rv
+
+g/para
+
+
+
+sm_sca
+
+
+g.md) |
 |--------------|--------|-------------------|-----------------------------|-----------------------------------------|
-| `BertForTokenClassification` | bert-based | `boltuix/NeuroBERT-NER` (see note), etc. |  |  |
-| `ModernBertForTokenClassification` | ModernBERT-based | `disham993/electrical-ner-ModernBERT-base` |  |  |
+| `B
+rtForTok
 
-!!! note
-    Named Entity Recognition (NER) usage, please refer to [examples/pooling/token_classify/ner_offline.py](../../examples/pooling/token_classify/ner_offline.py), [examples/pooling/token_classify/ner_online.py](../../examples/pooling/token_classify/ner_online.py).
+C
+ass
+f
+cat
+o
+` | b
+rt-bas
+d | `bo
+tu
+x/N
+uroBERT-NER` (s
+ 
+ot
+), 
+tc. |  |  |
+| `Mod
+r
+B
+rtForTok
 
-## List of Multimodal Language Models
+C
+ass
+f
+cat
+o
+` | Mod
+r
+BERT-bas
+d | `d
+sham993/
 
-The following modalities are supported depending on the model:
 
-- **T**ext
-- **I**mage
-- **V**ideo
-- **A**udio
+ctr
+ca
+-
 
-Any combination of modalities joined by `+` are supported.
+r-Mod
+r
+BERT-bas
+` |  |  |
+!!! 
+ot
 
-- e.g.: `T + I` means that the model supports text-only, image-only, and text-with-image inputs.
+    Nam
+d E
+t
+ty R
+cog
 
-On the other hand, modalities separated by `/` are mutually exclusive.
+t
+o
+ (NER) usag
+, p
 
-- e.g.: `T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
+as
+ r
+f
+r to [
+xamp
 
-See [this page](../features/multimodal_inputs.md) on how to pass multi-modal inputs to the model.
+s/poo
 
-!!! tip
-    For hybrid-only models such as Llama-4, Step3, Mistral-3 and Qwen-3.5, a text-only mode can be enabled by setting all supported multimodal modalities to 0 (`--language-model-only`) so that their multimodal modules will not be loaded to free up more GPU memory for KV cache.
 
-!!! note
-    vLLM currently supports adding LoRA adapters to the language backbone for most multimodal models. Additionally, vLLM now experimentally supports adding LoRA to the tower and connector modules for some multimodal models. See [this page](../features/lora.md).
+g/tok
 
-### Generative Models
+_c
+ass
+fy/
 
-See [this page](generative_models.md) for more information on how to use generative models.
+r_off
 
-#### Text Generation
 
-These models primarily accept the [`LLM.generate`](./generative_models.md#llmgenerate) API. Chat/Instruct models additionally support the [`LLM.chat`](./generative_models.md#llmchat) API.
 
-| Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
+.py](../../
+xamp
+
+s/poo
+
+
+g/tok
+
+_c
+ass
+fy/
+
+r_off
+
+
+
+.py), [
+xamp
+
+s/poo
+
+
+g/tok
+
+_c
+ass
+fy/
+
+r_o
+
+
+
+
+.py](../../
+xamp
+
+s/poo
+
+
+g/tok
+
+_c
+ass
+fy/
+
+r_o
+
+
+
+
+.py).
+## L
+st of Mu
+t
+moda
+ La
+guag
+ Mod
+
+s
+Th
+ fo
+o
+
+
+g moda
+
+t
+
+s ar
+ support
+d d
+p
+
+d
+
+g o
+ th
+ mod
+
+:
+- **T**
+xt
+- **I**mag
+
+- **V**
+d
+o
+- **A**ud
+o
+A
+y comb
+
+at
+o
+ of moda
+
+t
+
+s jo
+
+
+d by `+` ar
+ support
+d.
+- 
+.g.: `T + I` m
+a
+s that th
+ mod
+
+ supports t
+xt-o
+
+y, 
+mag
+-o
+
+y, a
+d t
+xt-
+
+th-
+mag
+ 
+
+puts.
+O
+ th
+ oth
+r ha
+d, moda
+
+t
+
+s s
+parat
+d by `/` ar
+ mutua
+y 
+xc
+us
+v
+.
+- 
+.g.: `T / I` m
+a
+s that th
+ mod
+
+ supports t
+xt-o
+
+y a
+d 
+mag
+-o
+
+y 
+
+puts, but 
+ot t
+xt-
+
+th-
+mag
+ 
+
+puts.
+S
+ [th
+s pag
+](../f
+atur
+s/mu
+t
+moda
+_
+
+puts.md) o
+ ho
+ to pass mu
+t
+-moda
+ 
+
+puts to th
+ mod
+
+.
+!!! t
+p
+    For hybr
+d-o
+
+y mod
+
+s such as L
+ama-4, St
+p3, M
+stra
+-3 a
+d Q
+
+
+-3.5, a t
+xt-o
+
+y mod
+ ca
+ b
+ 
+
+ab
+
+d by s
+tt
+
+g a
+ support
+d mu
+t
+moda
+ moda
+
+t
+
+s to 0 (`--
+a
+guag
+-mod
+
+-o
+
+y`) so that th
+
+r mu
+t
+moda
+ modu
+
+s 
+
+
+ 
+ot b
+ 
+oad
+d to fr
+ up mor
+ GPU m
+mory for KV cach
+.
+!!! 
+ot
+
+    vLLM curr
+
+t
+y supports add
+
+g LoRA adapt
+rs to th
+ 
+a
+guag
+ backbo
+
+ for most mu
+t
+moda
+ mod
+
+s. Add
+t
+o
+a
+y, vLLM 
+o
+ 
+xp
+r
+m
+
+ta
+y supports add
+
+g LoRA to th
+ to
+
+r a
+d co
+
+ctor modu
+
+s for som
+ mu
+t
+moda
+ mod
+
+s. S
+ [th
+s pag
+](../f
+atur
+s/
+ora.md).
+### G
+
+
+rat
+v
+ Mod
+
+s
+S
+ [th
+s pag
+](g
+
+
+rat
+v
+_mod
+
+s.md) for mor
+ 
+
+format
+o
+ o
+ ho
+ to us
+ g
+
+
+rat
+v
+ mod
+
+s.
+#### T
+xt G
+
+
+rat
+o
+
+Th
+s
+ mod
+
+s pr
+mar
+
+y acc
+pt th
+ [`LLM.g
+
+
+rat
+`](./g
+
+
+rat
+v
+_mod
+
+s.md#
+mg
+
+
+rat
+) API. Chat/I
+struct mod
+
+s add
+t
+o
+a
+y support th
+ [`LLM.chat`](./g
+
+
+rat
+v
+_mod
+
+s.md#
+mchat) API.
+| Arch
+t
+ctur
+ | Mod
+
+s | I
+puts | Examp
+
+ HF Mod
+
+s | [LoRA](../f
+atur
+s/
+ora.md) | [PP](../s
+rv
+
+g/para
+
+
+
+sm_sca
+
+
+g.md) |
 |--------------|--------|--------|-------------------|----------------------|---------------------------|
-| `AriaForConditionalGeneration` | Aria | T + I<sup>+</sup> | `rhymes-ai/Aria` | | |
-| `AudioFlamingo3ForConditionalGeneration` | AudioFlamingo3 | T + A | `nvidia/audio-flamingo-3-hf`, `nvidia/music-flamingo-2601-hf` | ✅︎ | ✅︎ |
-| `AyaVisionForConditionalGeneration` | Aya Vision | T + I<sup>+</sup> | `CohereLabs/aya-vision-8b`, `CohereLabs/aya-vision-32b`, etc. | | ✅︎ |
-| `BagelForConditionalGeneration` | BAGEL | T + I<sup>+</sup> | `ByteDance-Seed/BAGEL-7B-MoT` | ✅︎ | ✅︎ |
-| `BeeForConditionalGeneration` | Bee-8B | T + I<sup>E+</sup> | `Open-Bee/Bee-8B-RL`, `Open-Bee/Bee-8B-SFT` | | ✅︎ |
-| `Blip2ForConditionalGeneration` | BLIP-2 | T + I<sup>E</sup> | `Salesforce/blip2-opt-2.7b`, `Salesforce/blip2-opt-6.7b`, etc. | ✅︎ | ✅︎ |
-| `ChameleonForConditionalGeneration` | Chameleon | T + I | `facebook/chameleon-7b`, etc. | | ✅︎ |
-| `Cohere2VisionForConditionalGeneration` | Command A Vision | T + I<sup>+</sup> | `CohereLabs/command-a-vision-07-2025`, etc. | | ✅︎ |
-| `DeepseekVLV2ForCausalLM` | DeepSeek-VL2 | T + I<sup>+</sup> | `deepseek-ai/deepseek-vl2-tiny`, `deepseek-ai/deepseek-vl2-small`, `deepseek-ai/deepseek-vl2`, etc. | | ✅︎ |
-| `DeepseekOCRForCausalLM` | DeepSeek-OCR | T + I<sup>+</sup> | `deepseek-ai/DeepSeek-OCR`, etc. | ✅︎ | ✅︎ |
-| `DeepseekOCR2ForCausalLM` | DeepSeek-OCR-2 | T + I<sup>+</sup> | `deepseek-ai/DeepSeek-OCR-2`, etc. | ✅︎ | ✅︎ |
-| `Eagle2_5_VLForConditionalGeneration` | Eagle2.5-VL | T + I<sup>E+</sup> | `nvidia/Eagle2.5-8B`, etc. | ✅︎ | ✅︎ |
-| `Ernie4_5_VLMoeForConditionalGeneration` | Ernie4.5-VL | T + I<sup>+</sup>/ V<sup>+</sup> | `baidu/ERNIE-4.5-VL-28B-A3B-PT`, `baidu/ERNIE-4.5-VL-424B-A47B-PT` | | ✅︎ |
-| `FuyuForCausalLM` | Fuyu | T + I | `adept/fuyu-8b`, etc. | | ✅︎ |
-| `Gemma3ForConditionalGeneration` | Gemma 3 | T + I<sup>E+</sup> | `google/gemma-3-4b-it`, `google/gemma-3-27b-it`, etc. | ✅︎ | ✅︎ |
-| `Gemma3nForConditionalGeneration` | Gemma 3n | T + I + A | `google/gemma-3n-E2B-it`, `google/gemma-3n-E4B-it`, etc. | | |
-| `GLM4VForCausalLM`<sup>^</sup> | GLM-4V | T + I | `zai-org/glm-4v-9b`, `zai-org/cogagent-9b-20241220`, etc. | ✅︎ | ✅︎ |
-| `Glm4vForConditionalGeneration` | GLM-4.1V-Thinking | T + I<sup>E+</sup> + V<sup>E+</sup> | `zai-org/GLM-4.1V-9B-Thinking`, etc. | ✅︎ | ✅︎ |
-| `Glm4vMoeForConditionalGeneration` | GLM-4.5V | T + I<sup>E+</sup> + V<sup>E+</sup> | `zai-org/GLM-4.5V`, etc. | ✅︎ | ✅︎ |
-| `GlmOcrForConditionalGeneration` | GLM-OCR | T + I<sup>E+</sup>  | `zai-org/GLM-OCR`, etc. | ✅︎ | ✅︎ |
-| `GraniteSpeechForConditionalGeneration` | Granite Speech | T + A | `ibm-granite/granite-speech-3.3-8b` | ✅︎ | ✅︎ |
-| `HCXVisionForCausalLM` | HyperCLOVAX-SEED-Vision-Instruct-3B | T + I<sup>+</sup> + V<sup>+</sup> | `naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B` | | |
-| `H2OVLChatModel` | H2OVL | T + I<sup>E+</sup> | `h2oai/h2ovl-mississippi-800m`, `h2oai/h2ovl-mississippi-2b`, etc. | | ✅︎ |
-| `HunYuanVLForConditionalGeneration` | HunyuanOCR | T + I<sup>E+</sup> | `tencent/HunyuanOCR`, etc. | ✅︎ | ✅︎ |
-| `Idefics3ForConditionalGeneration` | Idefics3 | T + I | `HuggingFaceM4/Idefics3-8B-Llama3`, etc. | ✅︎ | |
-| `IsaacForConditionalGeneration` | Isaac | T + I<sup>+</sup> | `PerceptronAI/Isaac-0.1` | ✅︎ | ✅︎ |
-| `InternS1ForConditionalGeneration` | Intern-S1 | T + I<sup>E+</sup> + V<sup>E+</sup> | `internlm/Intern-S1`, `internlm/Intern-S1-mini`, etc. | ✅︎ | ✅︎ |
-| `InternS1ProForConditionalGeneration` | Intern-S1-Pro | T + I<sup>E+</sup> + V<sup>E+</sup> | `internlm/Intern-S1-Pro`, etc. | ✅︎ | ✅︎ |
-| `InternVLChatModel` | InternVL 3.5, InternVL 3.0, InternVideo 2.5, InternVL 2.5, Mono-InternVL, InternVL 2.0 | T + I<sup>E+</sup> + (V<sup>E+</sup>) | `OpenGVLab/InternVL3_5-14B`, `OpenGVLab/InternVL3-9B`, `OpenGVLab/InternVideo2_5_Chat_8B`, `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc. | ✅︎ | ✅︎ |
-| `InternVLForConditionalGeneration` | InternVL 3.0 (HF format) | T + I<sup>E+</sup> + V<sup>E+</sup> | `OpenGVLab/InternVL3-1B-hf`, etc. | ✅︎ | ✅︎ |
-| `KananaVForConditionalGeneration` | Kanana-V | T + I<sup>+</sup> | `kakaocorp/kanana-1.5-v-3b-instruct`, etc. | | ✅︎ |
-| `KeyeForConditionalGeneration` | Keye-VL-8B-Preview | T + I<sup>E+</sup> + V<sup>E+</sup> | `Kwai-Keye/Keye-VL-8B-Preview` | ✅︎ | ✅︎ |
-| `KeyeVL1_5ForConditionalGeneration` | Keye-VL-1_5-8B | T + I<sup>E+</sup> + V<sup>E+</sup> | `Kwai-Keye/Keye-VL-1_5-8B` | ✅︎ | ✅︎ |
-| `KimiVLForConditionalGeneration` | Kimi-VL-A3B-Instruct, Kimi-VL-A3B-Thinking | T + I<sup>+</sup> | `moonshotai/Kimi-VL-A3B-Instruct`, `moonshotai/Kimi-VL-A3B-Thinking` | | ✅︎ |
-| `KimiK25ForConditionalGeneration` | Kimi-K2.5 | T + I<sup>+</sup> | `moonshotai/Kimi-K2.5` | | ✅︎ |
-| `LightOnOCRForConditionalGeneration`  | LightOnOCR-1B  | T + I<sup>+</sup> | `lightonai/LightOnOCR-1B`, etc | ✅︎ | ✅︎ |
-| `Lfm2VlForConditionalGeneration` | LFM2-VL | T + I<sup>+</sup> | `LiquidAI/LFM2-VL-450M`, `LiquidAI/LFM2-VL-3B`, `LiquidAI/LFM2-VL-8B-A1B`, etc. | ✅︎ | ✅︎ |
-| `Llama4ForConditionalGeneration` | Llama 4 | T + I<sup>+</sup> | `meta-llama/Llama-4-Scout-17B-16E-Instruct`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct`, etc. | ✅︎ | ✅︎ |
-| `Llama_Nemotron_Nano_VL` | Llama Nemotron Nano VL | T + I<sup>E+</sup> | `nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1` | ✅︎ | ✅︎ |
-| `LlavaForConditionalGeneration` | LLaVA-1.5, Pixtral (HF Transformers) | T + I<sup>E+</sup> | `llava-hf/llava-1.5-7b-hf`, `TIGER-Lab/Mantis-8B-siglip-llama3` (see note), `mistral-community/pixtral-12b`, etc. | ✅︎ | ✅︎ |
-| `LlavaNextForConditionalGeneration` | LLaVA-NeXT | T + I<sup>E+</sup> | `llava-hf/llava-v1.6-mistral-7b-hf`, `llava-hf/llava-v1.6-vicuna-7b-hf`, etc. | | ✅︎ |
-| `LlavaNextVideoForConditionalGeneration` | LLaVA-NeXT-Video | T + V | `llava-hf/LLaVA-NeXT-Video-7B-hf`, etc. | | ✅︎ |
-| `LlavaOnevisionForConditionalGeneration` | LLaVA-Onevision | T + I<sup>+</sup> + V<sup>+</sup> | `llava-hf/llava-onevision-qwen2-7b-ov-hf`, `llava-hf/llava-onevision-qwen2-0.5b-ov-hf`, etc. | | ✅︎ |
-| `MiDashengLMModel` | MiDashengLM | T + A<sup>+</sup> | `mispeech/midashenglm-7b` | | ✅︎ |
-| `MiniCPMO` | MiniCPM-O | T + I<sup>E+</sup> + V<sup>E+</sup> + A<sup>E+</sup> | `openbmb/MiniCPM-o-2_6`, etc. | ✅︎ | ✅︎ |
-| `MiniCPMV` | MiniCPM-V | T + I<sup>E+</sup> + V<sup>E+</sup> | `openbmb/MiniCPM-V-2` (see note), `openbmb/MiniCPM-Llama3-V-2_5`, `openbmb/MiniCPM-V-2_6`, `openbmb/MiniCPM-V-4`, `openbmb/MiniCPM-V-4_5`, etc. | ✅︎ | |
-| `MiniMaxVL01ForConditionalGeneration` | MiniMax-VL | T + I<sup>E+</sup> | `MiniMaxAI/MiniMax-VL-01`, etc. | | ✅︎ |
-| `Mistral3ForConditionalGeneration` | Mistral3 (HF Transformers) | T + I<sup>+</sup> | `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, etc. | ✅︎ | ✅︎ |
-| `MolmoForCausalLM` | Molmo | T + I<sup>+</sup> | `allenai/Molmo-7B-D-0924`, `allenai/Molmo-7B-O-0924`, etc. | ✅︎ | ✅︎ |
-| `Molmo2ForConditionalGeneration` | Molmo2 | T + I<sup>+</sup> / V | `allenai/Molmo2-4B`, `allenai/Molmo2-8B`, `allenai/Molmo2-O-7B` | ✅︎ | ✅︎ |
-| `NVLM_D_Model` | NVLM-D 1.0 | T + I<sup>+</sup> | `nvidia/NVLM-D-72B`, etc. | | ✅︎ |
-| `OpenCUAForConditionalGeneration` | OpenCUA-7B | T + I<sup>E+</sup> | `xlangai/OpenCUA-7B` | ✅︎ | ✅︎ |
-| `OpenPanguVLForConditionalGeneration` | openpangu-VL | T + I<sup>E+</sup> + V<sup>E+</sup> |`FreedomIntelligence/openPangu-VL-7B` | ✅︎ | ✅︎ |
-| `Ovis` | Ovis2, Ovis1.6 | T + I<sup>+</sup> | `AIDC-AI/Ovis2-1B`, `AIDC-AI/Ovis1.6-Llama3.2-3B`, etc. | | ✅︎ |
-| `Ovis2_5` | Ovis2.5 | T + I<sup>+</sup> + V | `AIDC-AI/Ovis2.5-9B`, etc. | | |
-| `Ovis2_6ForCausalLM` | Ovis2.6 | T + I<sup>+</sup> + V | `AIDC-AI/Ovis2.6-2B`, etc. | | |
-| `Ovis2_6_MoeForCausalLM` | Ovis2.6 | T + I<sup>+</sup> + V | `AIDC-AI/Ovis2.6-30B-A3B`, etc. | | |
-| `PaddleOCRVLForConditionalGeneration` | Paddle-OCR | T + I<sup>+</sup> | `PaddlePaddle/PaddleOCR-VL`, etc. | | |
-| `PaliGemmaForConditionalGeneration` | PaliGemma, PaliGemma 2 | T + I<sup>E</sup> | `google/paligemma-3b-pt-224`, `google/paligemma-3b-mix-224`, `google/paligemma2-3b-ft-docci-448`, etc. | ✅︎ | ✅︎ |
-| `Phi3VForCausalLM` | Phi-3-Vision, Phi-3.5-Vision | T + I<sup>E+</sup> | `microsoft/Phi-3-vision-128k-instruct`, `microsoft/Phi-3.5-vision-instruct`, etc. | | ✅︎ |
-| `Phi4MMForCausalLM` | Phi-4-multimodal | T + I<sup>+</sup> / T + A<sup>+</sup> / I<sup>+</sup> + A<sup>+</sup> | `microsoft/Phi-4-multimodal-instruct`, etc. | ✅︎ | ✅︎ |
-| `PixtralForConditionalGeneration` | Ministral 3 (Mistral format), Mistral 3 (Mistral format), Mistral Large 3 (Mistral format), Pixtral (Mistral format) | T + I<sup>+</sup> | `mistralai/Ministral-3-3B-Instruct-2512`, `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, `mistralai/Mistral-Large-3-675B-Instruct-2512` `mistralai/Pixtral-12B-2409` etc. | ✅︎ | ✅︎ |
-| `QwenVLForConditionalGeneration`<sup>^</sup> | Qwen-VL | T + I<sup>E+</sup> | `Qwen/Qwen-VL`, `Qwen/Qwen-VL-Chat`, etc. | ✅︎ | ✅︎ |
-| `Qwen2AudioForConditionalGeneration` | Qwen2-Audio | T + A<sup>+</sup> | `Qwen/Qwen2-Audio-7B-Instruct` | | ✅︎ |
-| `Qwen2VLForConditionalGeneration` | QVQ, Qwen2-VL | T + I<sup>E+</sup> + V<sup>E+</sup> | `Qwen/QVQ-72B-Preview`, `Qwen/Qwen2-VL-7B-Instruct`, `Qwen/Qwen2-VL-72B-Instruct`, etc. | ✅︎ | ✅︎ |
-| `Qwen2_5_VLForConditionalGeneration` | Qwen2.5-VL | T + I<sup>E+</sup> + V<sup>E+</sup> | `Qwen/Qwen2.5-VL-3B-Instruct`, `Qwen/Qwen2.5-VL-72B-Instruct`, etc. | ✅︎ | ✅︎ |
-| `Qwen2_5OmniThinkerForConditionalGeneration` | Qwen2.5-Omni | T + I<sup>E+</sup> + V<sup>E+</sup> + A<sup>+</sup> | `Qwen/Qwen2.5-Omni-3B`, `Qwen/Qwen2.5-Omni-7B` | ✅︎ | ✅︎ |
-| `Qwen3_5ForConditionalGeneration` | Qwen3.5 | T + I<sup>E+</sup> + V<sup>E+</sup> | `Qwen/Qwen3.5-9B-Instruct`, etc. | ✅︎ | ✅︎ |
-| `Qwen3_5MoeForConditionalGeneration` | Qwen3.5-MOE | T + I<sup>E+</sup> + V<sup>E+</sup> | `Qwen/Qwen3.5-35B-A3B-Instruct`, etc. | ✅︎ | ✅︎ |
-| `Qwen3VLForConditionalGeneration` | Qwen3-VL | T + I<sup>E+</sup> + V<sup>E+</sup> | `Qwen/Qwen3-VL-4B-Instruct`, etc. | ✅︎ | ✅︎ |
-| `Qwen3VLMoeForConditionalGeneration` | Qwen3-VL-MOE | T + I<sup>E+</sup> + V<sup>E+</sup> | `Qwen/Qwen3-VL-30B-A3B-Instruct`, etc. | ✅︎ | ✅︎ |
-| `Qwen3OmniMoeThinkerForConditionalGeneration` | Qwen3-Omni | T + I<sup>E+</sup> + V<sup>E+</sup> + A<sup>+</sup> | `Qwen/Qwen3-Omni-30B-A3B-Instruct`, `Qwen/Qwen3-Omni-30B-A3B-Thinking` | ✅︎ | ✅︎ |
-| `Qwen3ASRForConditionalGeneration` | Qwen3-ASR | T + A<sup>+</sup> | `Qwen/Qwen3-ASR-1.7B` | ✅︎ | ✅︎ |
-| `RForConditionalGeneration` | R-VL-4B | T + I<sup>E+</sup> | `YannQi/R-4B` | | ✅︎ |
-| `SkyworkR1VChatModel` | Skywork-R1V-38B | T + I | `Skywork/Skywork-R1V-38B` | | ✅︎ |
-| `SmolVLMForConditionalGeneration` | SmolVLM2 | T + I | `SmolVLM2-2.2B-Instruct` | ✅︎ | |
-| `Step3VLForConditionalGeneration` | Step3-VL | T + I<sup>+</sup> | `stepfun-ai/step3` | | ✅︎ |
-| `StepVLForConditionalGeneration` | Step3-VL-10B | T + I<sup>+</sup> | `stepfun-ai/Step3-VL-10B` | | ✅︎ |
-| `TarsierForConditionalGeneration` | Tarsier | T + I<sup>E+</sup> | `omni-search/Tarsier-7b`, `omni-search/Tarsier-34b` | | ✅︎ |
-| `Tarsier2ForConditionalGeneration`<sup>^</sup> | Tarsier2 | T + I<sup>E+</sup> + V<sup>E+</sup> | `omni-research/Tarsier2-Recap-7b`, `omni-research/Tarsier2-7b-0115` | | ✅︎ |
-| `UltravoxModel` | Ultravox | T + A<sup>E+</sup> | `fixie-ai/ultravox-v0_5-llama-3_2-1b` | ✅︎ | ✅︎ |
+| `Ar
+aForCo
+d
+t
+o
+a
+G
 
-Some models are supported only via the [Transformers modeling backend](#transformers). The purpose of the table below is to acknowledge models which we officially support in this way. The logs will say that the Transformers modeling backend is being used, and you will see no warning that this is fallback behaviour. This means that, if you have issues with any of the models listed below, please [make an issue](https://github.com/vllm-project/vllm/issues/new/choose) and we'll do our best to fix it!
 
-| Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
+rat
+o
+` | Ar
+a | T + I
+sup
++
+/sup
+ | `rhym
+s-a
+/Ar
+a` | | |
+| `Aud
+oF
+am
+
+go3ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Aud
+oF
+am
+
+go3 | T + A | `
+v
+d
+a/aud
+o-f
+am
+
+go-3-hf`, `
+v
+d
+a/mus
+c-f
+am
+
+go-2601-hf` | ✅︎ | ✅︎ |
+| `AyaV
+s
+o
+ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Aya V
+s
+o
+ | T + I
+sup
++
+/sup
+ | `Coh
+r
+Labs/aya-v
+s
+o
+-8b`, `Coh
+r
+Labs/aya-v
+s
+o
+-32b`, 
+tc. | | ✅︎ |
+| `Bag
+
+ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | BAGEL | T + I
+sup
++
+/sup
+ | `Byt
+Da
+c
+-S
+d/BAGEL-7B-MoT` | ✅︎ | ✅︎ |
+| `B
+ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | B
+-8B | T + I
+sup
+E+
+/sup
+ | `Op
+
+-B
+/B
+-8B-RL`, `Op
+
+-B
+/B
+-8B-SFT` | | ✅︎ |
+| `B
+
+p2ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | BLIP-2 | T + I
+sup
+E
+/sup
+ | `Sa
+
+sforc
+/b
+
+p2-opt-2.7b`, `Sa
+
+sforc
+/b
+
+p2-opt-6.7b`, 
+tc. | ✅︎ | ✅︎ |
+| `Cham
+
+
+o
+ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Cham
+
+
+o
+ | T + I | `fac
+book/cham
+
+
+o
+-7b`, 
+tc. | | ✅︎ |
+| `Coh
+r
+2V
+s
+o
+ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Comma
+d A V
+s
+o
+ | T + I
+sup
++
+/sup
+ | `Coh
+r
+Labs/comma
+d-a-v
+s
+o
+-07-2025`, 
+tc. | | ✅︎ |
+| `D
+ps
+kVLV2ForCausa
+LM` | D
+pS
+k-VL2 | T + I
+sup
++
+/sup
+ | `d
+ps
+k-a
+/d
+ps
+k-v
+2-t
+
+y`, `d
+ps
+k-a
+/d
+ps
+k-v
+2-sma
+`, `d
+ps
+k-a
+/d
+ps
+k-v
+2`, 
+tc. | | ✅︎ |
+| `D
+ps
+kOCRForCausa
+LM` | D
+pS
+k-OCR | T + I
+sup
++
+/sup
+ | `d
+ps
+k-a
+/D
+pS
+k-OCR`, 
+tc. | ✅︎ | ✅︎ |
+| `D
+ps
+kOCR2ForCausa
+LM` | D
+pS
+k-OCR-2 | T + I
+sup
++
+/sup
+ | `d
+ps
+k-a
+/D
+pS
+k-OCR-2`, 
+tc. | ✅︎ | ✅︎ |
+| `Eag
+
+2_5_VLForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Eag
+
+2.5-VL | T + I
+sup
+E+
+/sup
+ | `
+v
+d
+a/Eag
+
+2.5-8B`, 
+tc. | ✅︎ | ✅︎ |
+| `Er
+
+
+4_5_VLMo
+ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Er
+
+
+4.5-VL | T + I
+sup
++
+/sup
+/ V
+sup
++
+/sup
+ | `ba
+du/ERNIE-4.5-VL-28B-A3B-PT`, `ba
+du/ERNIE-4.5-VL-424B-A47B-PT` | | ✅︎ |
+| `FuyuForCausa
+LM` | Fuyu | T + I | `ad
+pt/fuyu-8b`, 
+tc. | | ✅︎ |
+| `G
+mma3ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | G
+mma 3 | T + I
+sup
+E+
+/sup
+ | `goog
+
+/g
+mma-3-4b-
+t`, `goog
+
+/g
+mma-3-27b-
+t`, 
+tc. | ✅︎ | ✅︎ |
+| `G
+mma3
+ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | G
+mma 3
+ | T + I + A | `goog
+
+/g
+mma-3
+-E2B-
+t`, `goog
+
+/g
+mma-3
+-E4B-
+t`, 
+tc. | | |
+| `GLM4VForCausa
+LM`
+sup
+^
+/sup
+ | GLM-4V | T + I | `za
+-org/g
+m-4v-9b`, `za
+-org/cogag
+
+t-9b-20241220`, 
+tc. | ✅︎ | ✅︎ |
+| `G
+m4vForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | GLM-4.1V-Th
+
+k
+
+g | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ | `za
+-org/GLM-4.1V-9B-Th
+
+k
+
+g`, 
+tc. | ✅︎ | ✅︎ |
+| `G
+m4vMo
+ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | GLM-4.5V | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ | `za
+-org/GLM-4.5V`, 
+tc. | ✅︎ | ✅︎ |
+| `G
+mOcrForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | GLM-OCR | T + I
+sup
+E+
+/sup
+  | `za
+-org/GLM-OCR`, 
+tc. | ✅︎ | ✅︎ |
+| `Gra
+
+t
+Sp
+chForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Gra
+
+t
+ Sp
+ch | T + A | `
+bm-gra
+
+t
+/gra
+
+t
+-sp
+ch-3.3-8b` | ✅︎ | ✅︎ |
+| `HCXV
+s
+o
+ForCausa
+LM` | Hyp
+rCLOVAX-SEED-V
+s
+o
+-I
+struct-3B | T + I
+sup
++
+/sup
+ + V
+sup
++
+/sup
+ | `
+av
+r-hyp
+rc
+ovax/Hyp
+rCLOVAX-SEED-V
+s
+o
+-I
+struct-3B` | | |
+| `H2OVLChatMod
+
+` | H2OVL | T + I
+sup
+E+
+/sup
+ | `h2oa
+/h2ov
+-m
+ss
+ss
+pp
+-800m`, `h2oa
+/h2ov
+-m
+ss
+ss
+pp
+-2b`, 
+tc. | | ✅︎ |
+| `Hu
+Yua
+VLForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Hu
+yua
+OCR | T + I
+sup
+E+
+/sup
+ | `t
+
+c
+
+t/Hu
+yua
+OCR`, 
+tc. | ✅︎ | ✅︎ |
+| `Id
+f
+cs3ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Id
+f
+cs3 | T + I | `Hugg
+
+gFac
+M4/Id
+f
+cs3-8B-L
+ama3`, 
+tc. | ✅︎ | |
+| `IsaacForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Isaac | T + I
+sup
++
+/sup
+ | `P
+rc
+ptro
+AI/Isaac-0.1` | ✅︎ | ✅︎ |
+| `I
+t
+r
+S1ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | I
+t
+r
+-S1 | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ | `
+
+t
+r
+
+m/I
+t
+r
+-S1`, `
+
+t
+r
+
+m/I
+t
+r
+-S1-m
+
+
+`, 
+tc. | ✅︎ | ✅︎ |
+| `I
+t
+r
+S1ProForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | I
+t
+r
+-S1-Pro | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ | `
+
+t
+r
+
+m/I
+t
+r
+-S1-Pro`, 
+tc. | ✅︎ | ✅︎ |
+| `I
+t
+r
+VLChatMod
+
+` | I
+t
+r
+VL 3.5, I
+t
+r
+VL 3.0, I
+t
+r
+V
+d
+o 2.5, I
+t
+r
+VL 2.5, Mo
+o-I
+t
+r
+VL, I
+t
+r
+VL 2.0 | T + I
+sup
+E+
+/sup
+ + (V
+sup
+E+
+/sup
+) | `Op
+
+GVLab/I
+t
+r
+VL3_5-14B`, `Op
+
+GVLab/I
+t
+r
+VL3-9B`, `Op
+
+GVLab/I
+t
+r
+V
+d
+o2_5_Chat_8B`, `Op
+
+GVLab/I
+t
+r
+VL2_5-4B`, `Op
+
+GVLab/Mo
+o-I
+t
+r
+VL-2B`, `Op
+
+GVLab/I
+t
+r
+VL2-4B`, 
+tc. | ✅︎ | ✅︎ |
+| `I
+t
+r
+VLForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | I
+t
+r
+VL 3.0 (HF format) | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ | `Op
+
+GVLab/I
+t
+r
+VL3-1B-hf`, 
+tc. | ✅︎ | ✅︎ |
+| `Ka
+a
+aVForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Ka
+a
+a-V | T + I
+sup
++
+/sup
+ | `kakaocorp/ka
+a
+a-1.5-v-3b-
+
+struct`, 
+tc. | | ✅︎ |
+| `K
+y
+ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | K
+y
+-VL-8B-Pr
+v
+
+
+ | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ | `K
+a
+-K
+y
+/K
+y
+-VL-8B-Pr
+v
+
+
+` | ✅︎ | ✅︎ |
+| `K
+y
+VL1_5ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | K
+y
+-VL-1_5-8B | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ | `K
+a
+-K
+y
+/K
+y
+-VL-1_5-8B` | ✅︎ | ✅︎ |
+| `K
+m
+VLForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | K
+m
+-VL-A3B-I
+struct, K
+m
+-VL-A3B-Th
+
+k
+
+g | T + I
+sup
++
+/sup
+ | `moo
+shota
+/K
+m
+-VL-A3B-I
+struct`, `moo
+shota
+/K
+m
+-VL-A3B-Th
+
+k
+
+g` | | ✅︎ |
+| `K
+m
+K25ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | K
+m
+-K2.5 | T + I
+sup
++
+/sup
+ | `moo
+shota
+/K
+m
+-K2.5` | | ✅︎ |
+| `L
+ghtO
+OCRForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+`  | L
+ghtO
+OCR-1B  | T + I
+sup
++
+/sup
+ | `
+
+ghto
+a
+/L
+ghtO
+OCR-1B`, 
+tc | ✅︎ | ✅︎ |
+| `Lfm2V
+ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | LFM2-VL | T + I
+sup
++
+/sup
+ | `L
+qu
+dAI/LFM2-VL-450M`, `L
+qu
+dAI/LFM2-VL-3B`, `L
+qu
+dAI/LFM2-VL-8B-A1B`, 
+tc. | ✅︎ | ✅︎ |
+| `L
+ama4ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | L
+ama 4 | T + I
+sup
++
+/sup
+ | `m
+ta-
+ama/L
+ama-4-Scout-17B-16E-I
+struct`, `m
+ta-
+ama/L
+ama-4-Mav
+r
+ck-17B-128E-I
+struct-FP8`, `m
+ta-
+ama/L
+ama-4-Mav
+r
+ck-17B-128E-I
+struct`, 
+tc. | ✅︎ | ✅︎ |
+| `L
+ama_N
+motro
+_Na
+o_VL` | L
+ama N
+motro
+ Na
+o VL | T + I
+sup
+E+
+/sup
+ | `
+v
+d
+a/L
+ama-3.1-N
+motro
+-Na
+o-VL-8B-V1` | ✅︎ | ✅︎ |
+| `L
+avaForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | LLaVA-1.5, P
+xtra
+ (HF Tra
+sform
+rs) | T + I
+sup
+E+
+/sup
+ | `
+ava-hf/
+ava-1.5-7b-hf`, `TIGER-Lab/Ma
+t
+s-8B-s
+g
+
+p-
+ama3` (s
+ 
+ot
+), `m
+stra
+-commu
+
+ty/p
+xtra
+-12b`, 
+tc. | ✅︎ | ✅︎ |
+| `L
+avaN
+xtForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | LLaVA-N
+XT | T + I
+sup
+E+
+/sup
+ | `
+ava-hf/
+ava-v1.6-m
+stra
+-7b-hf`, `
+ava-hf/
+ava-v1.6-v
+cu
+a-7b-hf`, 
+tc. | | ✅︎ |
+| `L
+avaN
+xtV
+d
+oForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | LLaVA-N
+XT-V
+d
+o | T + V | `
+ava-hf/LLaVA-N
+XT-V
+d
+o-7B-hf`, 
+tc. | | ✅︎ |
+| `L
+avaO
+
+v
+s
+o
+ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | LLaVA-O
+
+v
+s
+o
+ | T + I
+sup
++
+/sup
+ + V
+sup
++
+/sup
+ | `
+ava-hf/
+ava-o
+
+v
+s
+o
+-q
+
+
+2-7b-ov-hf`, `
+ava-hf/
+ava-o
+
+v
+s
+o
+-q
+
+
+2-0.5b-ov-hf`, 
+tc. | | ✅︎ |
+| `M
+Dash
+
+gLMMod
+
+` | M
+Dash
+
+gLM | T + A
+sup
++
+/sup
+ | `m
+sp
+ch/m
+dash
+
+g
+m-7b` | | ✅︎ |
+| `M
+
+
+CPMO` | M
+
+
+CPM-O | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ + A
+sup
+E+
+/sup
+ | `op
+
+bmb/M
+
+
+CPM-o-2_6`, 
+tc. | ✅︎ | ✅︎ |
+| `M
+
+
+CPMV` | M
+
+
+CPM-V | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ | `op
+
+bmb/M
+
+
+CPM-V-2` (s
+ 
+ot
+), `op
+
+bmb/M
+
+
+CPM-L
+ama3-V-2_5`, `op
+
+bmb/M
+
+
+CPM-V-2_6`, `op
+
+bmb/M
+
+
+CPM-V-4`, `op
+
+bmb/M
+
+
+CPM-V-4_5`, 
+tc. | ✅︎ | |
+| `M
+
+
+MaxVL01ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | M
+
+
+Max-VL | T + I
+sup
+E+
+/sup
+ | `M
+
+
+MaxAI/M
+
+
+Max-VL-01`, 
+tc. | | ✅︎ |
+| `M
+stra
+3ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | M
+stra
+3 (HF Tra
+sform
+rs) | T + I
+sup
++
+/sup
+ | `m
+stra
+a
+/M
+stra
+-Sma
+-3.1-24B-I
+struct-2503`, 
+tc. | ✅︎ | ✅︎ |
+| `Mo
+moForCausa
+LM` | Mo
+mo | T + I
+sup
++
+/sup
+ | `a
+
+
+a
+/Mo
+mo-7B-D-0924`, `a
+
+
+a
+/Mo
+mo-7B-O-0924`, 
+tc. | ✅︎ | ✅︎ |
+| `Mo
+mo2ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Mo
+mo2 | T + I
+sup
++
+/sup
+ / V | `a
+
+
+a
+/Mo
+mo2-4B`, `a
+
+
+a
+/Mo
+mo2-8B`, `a
+
+
+a
+/Mo
+mo2-O-7B` | ✅︎ | ✅︎ |
+| `NVLM_D_Mod
+
+` | NVLM-D 1.0 | T + I
+sup
++
+/sup
+ | `
+v
+d
+a/NVLM-D-72B`, 
+tc. | | ✅︎ |
+| `Op
+
+CUAForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Op
+
+CUA-7B | T + I
+sup
+E+
+/sup
+ | `x
+a
+ga
+/Op
+
+CUA-7B` | ✅︎ | ✅︎ |
+| `Op
+
+Pa
+guVLForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | op
+
+pa
+gu-VL | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ |`Fr
+domI
+t
+
+
+g
+
+c
+/op
+
+Pa
+gu-VL-7B` | ✅︎ | ✅︎ |
+| `Ov
+s` | Ov
+s2, Ov
+s1.6 | T + I
+sup
++
+/sup
+ | `AIDC-AI/Ov
+s2-1B`, `AIDC-AI/Ov
+s1.6-L
+ama3.2-3B`, 
+tc. | | ✅︎ |
+| `Ov
+s2_5` | Ov
+s2.5 | T + I
+sup
++
+/sup
+ + V | `AIDC-AI/Ov
+s2.5-9B`, 
+tc. | | |
+| `Ov
+s2_6ForCausa
+LM` | Ov
+s2.6 | T + I
+sup
++
+/sup
+ + V | `AIDC-AI/Ov
+s2.6-2B`, 
+tc. | | |
+| `Ov
+s2_6_Mo
+ForCausa
+LM` | Ov
+s2.6 | T + I
+sup
++
+/sup
+ + V | `AIDC-AI/Ov
+s2.6-30B-A3B`, 
+tc. | | |
+| `Padd
+
+OCRVLForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Padd
+
+-OCR | T + I
+sup
++
+/sup
+ | `Padd
+
+Padd
+
+/Padd
+
+OCR-VL`, 
+tc. | | |
+| `Pa
+
+G
+mmaForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Pa
+
+G
+mma, Pa
+
+G
+mma 2 | T + I
+sup
+E
+/sup
+ | `goog
+
+/pa
+
+g
+mma-3b-pt-224`, `goog
+
+/pa
+
+g
+mma-3b-m
+x-224`, `goog
+
+/pa
+
+g
+mma2-3b-ft-docc
+-448`, 
+tc. | ✅︎ | ✅︎ |
+| `Ph
+3VForCausa
+LM` | Ph
+-3-V
+s
+o
+, Ph
+-3.5-V
+s
+o
+ | T + I
+sup
+E+
+/sup
+ | `m
+crosoft/Ph
+-3-v
+s
+o
+-128k-
+
+struct`, `m
+crosoft/Ph
+-3.5-v
+s
+o
+-
+
+struct`, 
+tc. | | ✅︎ |
+| `Ph
+4MMForCausa
+LM` | Ph
+-4-mu
+t
+moda
+ | T + I
+sup
++
+/sup
+ / T + A
+sup
++
+/sup
+ / I
+sup
++
+/sup
+ + A
+sup
++
+/sup
+ | `m
+crosoft/Ph
+-4-mu
+t
+moda
+-
+
+struct`, 
+tc. | ✅︎ | ✅︎ |
+| `P
+xtra
+ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | M
+
+
+stra
+ 3 (M
+stra
+ format), M
+stra
+ 3 (M
+stra
+ format), M
+stra
+ Larg
+ 3 (M
+stra
+ format), P
+xtra
+ (M
+stra
+ format) | T + I
+sup
++
+/sup
+ | `m
+stra
+a
+/M
+
+
+stra
+-3-3B-I
+struct-2512`, `m
+stra
+a
+/M
+stra
+-Sma
+-3.1-24B-I
+struct-2503`, `m
+stra
+a
+/M
+stra
+-Larg
+-3-675B-I
+struct-2512` `m
+stra
+a
+/P
+xtra
+-12B-2409` 
+tc. | ✅︎ | ✅︎ |
+| `Q
+
+
+VLForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+`
+sup
+^
+/sup
+ | Q
+
+
+-VL | T + I
+sup
+E+
+/sup
+ | `Q
+
+
+/Q
+
+
+-VL`, `Q
+
+
+/Q
+
+
+-VL-Chat`, 
+tc. | ✅︎ | ✅︎ |
+| `Q
+
+
+2Aud
+oForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Q
+
+
+2-Aud
+o | T + A
+sup
++
+/sup
+ | `Q
+
+
+/Q
+
+
+2-Aud
+o-7B-I
+struct` | | ✅︎ |
+| `Q
+
+
+2VLForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | QVQ, Q
+
+
+2-VL | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ | `Q
+
+
+/QVQ-72B-Pr
+v
+
+
+`, `Q
+
+
+/Q
+
+
+2-VL-7B-I
+struct`, `Q
+
+
+/Q
+
+
+2-VL-72B-I
+struct`, 
+tc. | ✅︎ | ✅︎ |
+| `Q
+
+
+2_5_VLForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Q
+
+
+2.5-VL | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ | `Q
+
+
+/Q
+
+
+2.5-VL-3B-I
+struct`, `Q
+
+
+/Q
+
+
+2.5-VL-72B-I
+struct`, 
+tc. | ✅︎ | ✅︎ |
+| `Q
+
+
+2_5Om
+
+Th
+
+k
+rForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Q
+
+
+2.5-Om
+
+ | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ + A
+sup
++
+/sup
+ | `Q
+
+
+/Q
+
+
+2.5-Om
+
+-3B`, `Q
+
+
+/Q
+
+
+2.5-Om
+
+-7B` | ✅︎ | ✅︎ |
+| `Q
+
+
+3_5ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Q
+
+
+3.5 | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ | `Q
+
+
+/Q
+
+
+3.5-9B-I
+struct`, 
+tc. | ✅︎ | ✅︎ |
+| `Q
+
+
+3_5Mo
+ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Q
+
+
+3.5-MOE | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ | `Q
+
+
+/Q
+
+
+3.5-35B-A3B-I
+struct`, 
+tc. | ✅︎ | ✅︎ |
+| `Q
+
+
+3VLForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Q
+
+
+3-VL | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ | `Q
+
+
+/Q
+
+
+3-VL-4B-I
+struct`, 
+tc. | ✅︎ | ✅︎ |
+| `Q
+
+
+3VLMo
+ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Q
+
+
+3-VL-MOE | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ | `Q
+
+
+/Q
+
+
+3-VL-30B-A3B-I
+struct`, 
+tc. | ✅︎ | ✅︎ |
+| `Q
+
+
+3Om
+
+Mo
+Th
+
+k
+rForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Q
+
+
+3-Om
+
+ | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ + A
+sup
++
+/sup
+ | `Q
+
+
+/Q
+
+
+3-Om
+
+-30B-A3B-I
+struct`, `Q
+
+
+/Q
+
+
+3-Om
+
+-30B-A3B-Th
+
+k
+
+g` | ✅︎ | ✅︎ |
+| `Q
+
+
+3ASRForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Q
+
+
+3-ASR | T + A
+sup
++
+/sup
+ | `Q
+
+
+/Q
+
+
+3-ASR-1.7B` | ✅︎ | ✅︎ |
+| `RForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | R-VL-4B | T + I
+sup
+E+
+/sup
+ | `Ya
+Q
+/R-4B` | | ✅︎ |
+| `Sky
+orkR1VChatMod
+
+` | Sky
+ork-R1V-38B | T + I | `Sky
+ork/Sky
+ork-R1V-38B` | | ✅︎ |
+| `Smo
+VLMForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Smo
+VLM2 | T + I | `Smo
+VLM2-2.2B-I
+struct` | ✅︎ | |
+| `St
+p3VLForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | St
+p3-VL | T + I
+sup
++
+/sup
+ | `st
+pfu
+-a
+/st
+p3` | | ✅︎ |
+| `St
+pVLForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | St
+p3-VL-10B | T + I
+sup
++
+/sup
+ | `st
+pfu
+-a
+/St
+p3-VL-10B` | | ✅︎ |
+| `Tars
+
+rForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Tars
+
+r | T + I
+sup
+E+
+/sup
+ | `om
+
+-s
+arch/Tars
+
+r-7b`, `om
+
+-s
+arch/Tars
+
+r-34b` | | ✅︎ |
+| `Tars
+
+r2ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+`
+sup
+^
+/sup
+ | Tars
+
+r2 | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ | `om
+
+-r
+s
+arch/Tars
+
+r2-R
+cap-7b`, `om
+
+-r
+s
+arch/Tars
+
+r2-7b-0115` | | ✅︎ |
+| `U
+travoxMod
+
+` | U
+travox | T + A
+sup
+E+
+/sup
+ | `f
+x
+
+-a
+/u
+travox-v0_5-
+ama-3_2-1b` | ✅︎ | ✅︎ |
+Som
+ mod
+
+s ar
+ support
+d o
+
+y v
+a th
+ [Tra
+sform
+rs mod
+
+
+
+g back
+
+d](#tra
+sform
+rs). Th
+ purpos
+ of th
+ tab
+
+ b
+
+o
+ 
+s to ack
+o
+
+
+dg
+ mod
+
+s 
+h
+ch 
+
+ off
+c
+a
+y support 
+
+ th
+s 
+ay. Th
+ 
+ogs 
+
+
+ say that th
+ Tra
+sform
+rs mod
+
+
+
+g back
+
+d 
+s b
+
+
+g us
+d, a
+d you 
+
+
+ s
+ 
+o 
+ar
+
+
+g that th
+s 
+s fa
+back b
+hav
+our. Th
+s m
+a
+s that, 
+f you hav
+ 
+ssu
+s 
+
+th a
+y of th
+ mod
+
+s 
+
+st
+d b
+
+o
+, p
+
+as
+ [mak
+ a
+ 
+ssu
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/
+
+
+/choos
+) a
+d 
+
+'
+ do our b
+st to f
+x 
+t!
+| Arch
+t
+ctur
+ | Mod
+
+s | I
+puts | Examp
+
+ HF Mod
+
+s | [LoRA](../f
+atur
+s/
+ora.md) | [PP](../s
+rv
+
+g/para
+
+
+
+sm_sca
+
+
+g.md) |
 |--------------|--------|--------|-------------------|-----------------------------|-----------------------------------------|
-| `Emu3ForConditionalGeneration` | Emu3 | T + I | `BAAI/Emu3-Chat-hf` | ✅︎ | ✅︎ |
+| `Emu3ForCo
+d
+t
+o
+a
+G
 
-<sup>^</sup> You need to set the architecture name via `--hf-overrides` to match the one in vLLM.</br>
-<sup>E</sup> Pre-computed embeddings can be inputted for this modality.</br>
-<sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
-!!! note
-    `Gemma3nForConditionalGeneration` is only supported on V1 due to shared KV caching and it depends on `timm>=1.0.17` to make use of its
-    MobileNet-v5 vision backbone.
-  
-    Performance is not yet fully optimized mainly due to:
-  
-    - Both audio and vision MM encoders use `transformers.AutoModel` implementation.  
-    - There's no PLE caching or out-of-memory swapping support, as described in [Google's blog](https://developers.googleblog.com/en/introducing-gemma-3n/). These features might be too model-specific for vLLM, and swapping in particular may be better suited for constrained setups.
+rat
+o
+` | Emu3 | T + I | `BAAI/Emu3-Chat-hf` | ✅︎ | ✅︎ |
+sup
+^
+/sup
+ You 
 
-!!! note
-    For `InternVLChatModel`, only InternVL2.5 with Qwen2.5 text backbone (`OpenGVLab/InternVL2.5-1B` etc.), InternVL3 and InternVL3.5 have video inputs support currently.
+d to s
+t th
+ arch
+t
+ctur
+ 
+am
+ v
+a `--hf-ov
+rr
+d
+s` to match th
+ o
 
-!!! note
-    To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
+ 
 
-!!! note
-    The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
-    For more details, please see: <https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630>
+ vLLM.
+/br
 
-#### Transcription
+sup
+E
+/sup
+ Pr
+-comput
+d 
+mb
+dd
 
-Speech2Text models trained specifically for Automatic Speech Recognition.
+gs ca
+ b
+ 
 
-| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
+putt
+d for th
+s moda
+
+ty.
+/br
+
+sup
++
+/sup
+ Mu
+t
+p
+
+ 
+t
+ms ca
+ b
+ 
+
+putt
+d p
+r t
+xt prompt for th
+s moda
+
+ty.
+!!! 
+ot
+
+    `G
+mma3
+ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` 
+s o
+
+y support
+d o
+ V1 du
+ to shar
+d KV cach
+
+g a
+d 
+t d
+p
+
+ds o
+ `t
+mm
+=1.0.17` to mak
+ us
+ of 
+ts
+    Mob
+
+
+N
+t-v5 v
+s
+o
+ backbo
+
+.
+    P
+rforma
+c
+ 
+s 
+ot y
+t fu
+y opt
+m
+z
+d ma
+
+
+y du
+ to:
+    - Both aud
+o a
+d v
+s
+o
+ MM 
+
+cod
+rs us
+ `tra
+sform
+rs.AutoMod
+
+` 
+mp
+
+m
+
+tat
+o
+.
+    - Th
+r
+'s 
+o PLE cach
+
+g or out-of-m
+mory s
+app
+
+g support, as d
+scr
+b
+d 
+
+ [Goog
+
+'s b
+og](https://d
+v
+
+op
+rs.goog
+
+b
+og.com/
+
+/
+
+troduc
+
+g-g
+mma-3
+/). Th
+s
+ f
+atur
+s m
+ght b
+ too mod
+
+-sp
+c
+f
+c for vLLM, a
+d s
+app
+
+g 
+
+ part
+cu
+ar may b
+ b
+tt
+r su
+t
+d for co
+stra
+
+
+d s
+tups.
+!!! 
+ot
+
+    For `I
+t
+r
+VLChatMod
+
+`, o
+
+y I
+t
+r
+VL2.5 
+
+th Q
+
+
+2.5 t
+xt backbo
+
+ (`Op
+
+GVLab/I
+t
+r
+VL2.5-1B` 
+tc.), I
+t
+r
+VL3 a
+d I
+t
+r
+VL3.5 hav
+ v
+d
+o 
+
+puts support curr
+
+t
+y.
+!!! 
+ot
+
+    To us
+ `TIGER-Lab/Ma
+t
+s-8B-s
+g
+
+p-
+ama3`, you hav
+ to pass `--hf_ov
+rr
+d
+s '{"arch
+t
+ctur
+s": ["Ma
+t
+sForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+"]}'` 
+h
+
+ ru
+
+
+g vLLM.
+!!! 
+ot
+
+    Th
+ off
+c
+a
+ `op
+
+bmb/M
+
+
+CPM-V-2` do
+s
+'t 
+ork y
+t, so 
+
+ 
+
+d to us
+ a fork (`H
+H/M
+
+
+CPM-V-2`) for 
+o
+.
+    For mor
+ d
+ta
+
+s, p
+
+as
+ s
+: 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/4087#
+ssu
+comm
+
+t-2250397630
+
+#### Tra
+scr
+pt
+o
+
+Sp
+ch2T
+xt mod
+
+s tra
+
+
+d sp
+c
+f
+ca
+y for Automat
+c Sp
+ch R
+cog
+
+t
+o
+.
+| Arch
+t
+ctur
+ | Mod
+
+s | Examp
+
+ HF Mod
+
+s | [LoRA](../f
+atur
+s/
+ora.md) | [PP](../s
+rv
+
+g/para
+
+
+
+sm_sca
+
+
+g.md) |
 |--------------|--------|-------------------|----------------------|---------------------------|
-| `FireRedASR2ForConditionalGeneration` | FireRedASR2 | `allendou/FireRedASR2-LLM-vllm`, etc. | | |
-| `FunASRForConditionalGeneration` | FunASR | `allendou/Fun-ASR-Nano-2512-vllm`, etc. | | |
-| `Gemma3nForConditionalGeneration` | Gemma3n | `google/gemma-3n-E2B-it`, `google/gemma-3n-E4B-it`, etc. | | |
-| `GlmAsrForConditionalGeneration` | GLM-ASR | `zai-org/GLM-ASR-Nano-2512` | ✅︎ | ✅︎ |
-| `GraniteSpeechForConditionalGeneration` | Granite Speech | `ibm-granite/granite-speech-3.3-2b`, `ibm-granite/granite-speech-3.3-8b`, etc. | ✅︎ | ✅︎ |
-| `Qwen3ASRForConditionalGeneration` | Qwen3-ASR | `Qwen/Qwen3-ASR-1.7B`, etc. | | ✅︎ |
-| `Qwen3OmniMoeThinkerForConditionalGeneration` | Qwen3-Omni | `Qwen/Qwen3-Omni-30B-A3B-Instruct`, etc. | | ✅︎ |
-| `VoxtralForConditionalGeneration` | Voxtral (Mistral format) | `mistralai/Voxtral-Mini-3B-2507`, `mistralai/Voxtral-Small-24B-2507`, etc. | ✅︎ | ✅︎ |
-| `WhisperForConditionalGeneration` | Whisper | `openai/whisper-small`, `openai/whisper-large-v3-turbo`, etc. | | |
+| `F
+r
+R
+dASR2ForCo
+d
+t
+o
+a
+G
 
-!!! note
-    `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.
 
-### Pooling Models
+rat
+o
+` | F
+r
+R
+dASR2 | `a
 
-See [this page](./pooling_models.md) for more information on how to use pooling models.
 
-#### Embedding
+dou/F
+r
+R
+dASR2-LLM-v
+m`, 
+tc. | | |
+| `Fu
+ASRForCo
+d
+t
+o
+a
+G
 
-These models primarily support the [`LLM.embed`](./pooling_models.md#llmembed) API.
 
-!!! note
-    To get the best results, you should use pooling models that are specifically trained as such.
+rat
+o
+` | Fu
+ASR | `a
 
-The following table lists those that are tested in vLLM.
 
-| Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
+dou/Fu
+-ASR-Na
+o-2512-v
+m`, 
+tc. | | |
+| `G
+mma3
+ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | G
+mma3
+ | `goog
+
+/g
+mma-3
+-E2B-
+t`, `goog
+
+/g
+mma-3
+-E4B-
+t`, 
+tc. | | |
+| `G
+mAsrForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | GLM-ASR | `za
+-org/GLM-ASR-Na
+o-2512` | ✅︎ | ✅︎ |
+| `Gra
+
+t
+Sp
+chForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Gra
+
+t
+ Sp
+ch | `
+bm-gra
+
+t
+/gra
+
+t
+-sp
+ch-3.3-2b`, `
+bm-gra
+
+t
+/gra
+
+t
+-sp
+ch-3.3-8b`, 
+tc. | ✅︎ | ✅︎ |
+| `Q
+
+
+3ASRForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Q
+
+
+3-ASR | `Q
+
+
+/Q
+
+
+3-ASR-1.7B`, 
+tc. | | ✅︎ |
+| `Q
+
+
+3Om
+
+Mo
+Th
+
+k
+rForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Q
+
+
+3-Om
+
+ | `Q
+
+
+/Q
+
+
+3-Om
+
+-30B-A3B-I
+struct`, 
+tc. | | ✅︎ |
+| `Voxtra
+ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Voxtra
+ (M
+stra
+ format) | `m
+stra
+a
+/Voxtra
+-M
+
+
+-3B-2507`, `m
+stra
+a
+/Voxtra
+-Sma
+-24B-2507`, 
+tc. | ✅︎ | ✅︎ |
+| `Wh
+sp
+rForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` | Wh
+sp
+r | `op
+
+a
+/
+h
+sp
+r-sma
+`, `op
+
+a
+/
+h
+sp
+r-
+arg
+-v3-turbo`, 
+tc. | | |
+!!! 
+ot
+
+    `Voxtra
+ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` r
+qu
+r
+s `m
+stra
+-commo
+[aud
+o]` to b
+ 
+
+sta
+
+d.
+### Poo
+
+
+g Mod
+
+s
+S
+ [th
+s pag
+](./poo
+
+
+g_mod
+
+s.md) for mor
+ 
+
+format
+o
+ o
+ ho
+ to us
+ poo
+
+
+g mod
+
+s.
+#### Emb
+dd
+
+g
+Th
+s
+ mod
+
+s pr
+mar
+
+y support th
+ [`LLM.
+mb
+d`](./poo
+
+
+g_mod
+
+s.md#
+m
+mb
+d) API.
+!!! 
+ot
+
+    To g
+t th
+ b
+st r
+su
+ts, you shou
+d us
+ poo
+
+
+g mod
+
+s that ar
+ sp
+c
+f
+ca
+y tra
+
+
+d as such.
+Th
+ fo
+o
+
+
+g tab
+
+ 
+
+sts thos
+ that ar
+ t
+st
+d 
+
+ vLLM.
+| Arch
+t
+ctur
+ | Mod
+
+s | I
+puts | Examp
+
+ HF Mod
+
+s | [LoRA](../f
+atur
+s/
+ora.md) | [PP](../s
+rv
+
+g/para
+
+
+
+sm_sca
+
+
+g.md) |
 |--------------|--------|--------|-------------------|----------------------|---------------------------|
-| `CLIPModel` | CLIP | T / I | `openai/clip-vit-base-patch32`, `openai/clip-vit-large-patch14`, etc. | | |
-| `ColModernVBertForRetrieval` | ColModernVBERT | T / I | `ModernVBERT/colmodernvbert-merged` | | |
-| `LlamaNemotronVLModel` | Llama Nemotron Embedding + SigLIP | T + I | `nvidia/llama-nemotron-embed-vl-1b-v2` | | |
-| `LlavaNextForConditionalGeneration`<sup>C</sup> | LLaVA-NeXT-based | T / I | `royokong/e5-v` | | ✅︎ |
-| `Phi3VForCausalLM`<sup>C</sup> | Phi-3-Vision-based | T + I | `TIGER-Lab/VLM2Vec-Full` | | ✅︎ |
-| `Qwen3VLForConditionalGeneration`<sup>C</sup> | Qwen3-VL | T + I + V | `Qwen/Qwen3-VL-Embedding-2B`, etc. | ✅︎ | ✅︎ |
-| `SiglipModel` | SigLIP, SigLIP2 | T / I | `google/siglip-base-patch16-224`, `google/siglip2-base-patch16-224` | | |
-| `*ForConditionalGeneration`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | \* | N/A | \* | \* |
+| `CLIPMod
 
-<sup>C</sup> Automatically converted into an embedding model via `--convert embed`. ([details](./pooling_models.md#model-conversion))  
-\* Feature support is the same as that of the original model.
+` | CLIP | T / I | `op
 
+a
+/c
+
+p-v
+t-bas
+-patch32`, `op
+
+a
+/c
+
+p-v
+t-
+arg
+-patch14`, 
+tc. | | |
+| `Co
+Mod
+r
+VB
+rtForR
+tr
+
+va
+` | Co
+Mod
+r
+VBERT | T / I | `Mod
+r
+VBERT/co
+mod
+r
+vb
+rt-m
+rg
+d` | | |
+| `L
+amaN
+motro
+VLMod
+
+` | L
+ama N
+motro
+ Emb
+dd
+
+g + S
+gLIP | T + I | `
+v
+d
+a/
+ama-
+
+motro
+-
+mb
+d-v
+-1b-v2` | | |
+| `L
+avaN
+xtForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+`
+sup
+C
+/sup
+ | LLaVA-N
+XT-bas
+d | T / I | `royoko
+g/
+5-v` | | ✅︎ |
+| `Ph
+3VForCausa
+LM`
+sup
+C
+/sup
+ | Ph
+-3-V
+s
+o
+-bas
+d | T + I | `TIGER-Lab/VLM2V
+c-Fu
+` | | ✅︎ |
+| `Q
+
+
+3VLForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+`
+sup
+C
+/sup
+ | Q
+
+
+3-VL | T + I + V | `Q
+
+
+/Q
+
+
+3-VL-Emb
+dd
+
+g-2B`, 
+tc. | ✅︎ | ✅︎ |
+| `S
+g
+
+pMod
+
+` | S
+gLIP, S
+gLIP2 | T / I | `goog
+
+/s
+g
+
+p-bas
+-patch16-224`, `goog
+
+/s
+g
+
+p2-bas
+-patch16-224` | | |
+| `*ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+`
+sup
+C
+/sup
+, `*ForCausa
+LM`
+sup
+C
+/sup
+, 
+tc. | G
+
+
+rat
+v
+ mod
+
+s | \* | N/A | \* | \* |
+sup
+C
+/sup
+ Automat
+ca
+y co
+v
+rt
+d 
+
+to a
+ 
+mb
+dd
+
+g mod
+
+ v
+a `--co
+v
+rt 
+mb
+d`. ([d
+ta
+
+s](./poo
+
+
+g_mod
+
+s.md#mod
+
+-co
+v
+rs
+o
+))
+\* F
+atur
+ support 
+s th
+ sam
+ as that of th
+ or
+g
+
+a
+ mod
+
+.
 ---
+#### Cross-
 
-#### Cross-encoder / Reranker
+cod
+r / R
+ra
+k
+r
+Cross-
 
-Cross-encoder and reranker models are a subset of classification models that accept two prompts as input.
-These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) API.
+cod
+r a
+d r
+ra
+k
+r mod
 
-| Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
+s ar
+ a subs
+t of c
+ass
+f
+cat
+o
+ mod
+
+s that acc
+pt t
+o prompts as 
+
+put.
+Th
+s
+ mod
+
+s pr
+mar
+
+y support th
+ [`LLM.scor
+`](./poo
+
+
+g_mod
+
+s.md#
+mscor
+) API.
+| Arch
+t
+ctur
+ | Mod
+
+s | I
+puts | Examp
+
+ HF Mod
+
+s | [LoRA](../f
+atur
+s/
+ora.md) | [PP](../s
+rv
+
+g/para
+
+
+
+sm_sca
+
+
+g.md) |
 |--------------|--------|--------|-------------------|----------------------|---------------------------|
-| `JinaVLForSequenceClassification` | JinaVL-based | T + I<sup>E+</sup> | `jinaai/jina-reranker-m0`, etc. | ✅︎ | ✅︎ |
-| `LlamaNemotronVLForSequenceClassification` | Llama Nemotron Reranker + SigLIP | T + I<sup>E+</sup> | `nvidia/llama-nemotron-rerank-vl-1b-v2` | | |
-| `Qwen3VLForSequenceClassification` | Qwen3-VL-Reranker | T + I<sup>E+</sup> + V<sup>E+</sup> | `Qwen/Qwen3-VL-Reranker-2B`(see note), etc. | ✅︎ | ✅︎ |
+| `J
 
-<sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./pooling_models.md#model-conversion))  
-\* Feature support is the same as that of the original model.
+aVLForS
+qu
 
-!!! note
-    Similar to Qwen3-Reranker, you need to use the following `--hf_overrides` to load the official original `Qwen3-VL-Reranker`.
+c
+C
+ass
+f
+cat
+o
+` | J
 
+aVL-bas
+d | T + I
+sup
+E+
+/sup
+ | `j
+
+aa
+/j
+
+a-r
+ra
+k
+r-m0`, 
+tc. | ✅︎ | ✅︎ |
+| `L
+amaN
+motro
+VLForS
+qu
+
+c
+C
+ass
+f
+cat
+o
+` | L
+ama N
+motro
+ R
+ra
+k
+r + S
+gLIP | T + I
+sup
+E+
+/sup
+ | `
+v
+d
+a/
+ama-
+
+motro
+-r
+ra
+k-v
+-1b-v2` | | |
+| `Q
+
+
+3VLForS
+qu
+
+c
+C
+ass
+f
+cat
+o
+` | Q
+
+
+3-VL-R
+ra
+k
+r | T + I
+sup
+E+
+/sup
+ + V
+sup
+E+
+/sup
+ | `Q
+
+
+/Q
+
+
+3-VL-R
+ra
+k
+r-2B`(s
+ 
+ot
+), 
+tc. | ✅︎ | ✅︎ |
+sup
+C
+/sup
+ Automat
+ca
+y co
+v
+rt
+d 
+
+to a c
+ass
+f
+cat
+o
+ mod
+
+ v
+a `--co
+v
+rt c
+ass
+fy`. ([d
+ta
+
+s](./poo
+
+
+g_mod
+
+s.md#mod
+
+-co
+v
+rs
+o
+))
+\* F
+atur
+ support 
+s th
+ sam
+ as that of th
+ or
+g
+
+a
+ mod
+
+.
+!!! 
+ot
+
+    S
+m
+
+ar to Q
+
+
+3-R
+ra
+k
+r, you 
+
+d to us
+ th
+ fo
+o
+
+
+g `--hf_ov
+rr
+d
+s` to 
+oad th
+ off
+c
+a
+ or
+g
+
+a
+ `Q
+
+
+3-VL-R
+ra
+k
+r`.
     ```bash
-    vllm serve Qwen/Qwen3-VL-Reranker-2B --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
+    v
+m s
+rv
+ Q
+
+
+/Q
+
+
+3-VL-R
+ra
+k
+r-2B --hf_ov
+rr
+d
+s '{"arch
+t
+ctur
+s": ["Q
+
+
+3VLForS
+qu
+
+c
+C
+ass
+f
+cat
+o
+"],"c
+ass
+f
+
+r_from_tok
+
+": ["
+o", "y
+s"],"
+s_or
+g
+
+a
+_q
+
+
+3_r
+ra
+k
+r": tru
+}'
     ```
+## Mod
 
-## Model Support Policy
+ Support Po
 
-At vLLM, we are committed to facilitating the integration and support of third-party models within our ecosystem. Our approach is designed to balance the need for robustness and the practical limitations of supporting a wide range of models. Here’s how we manage third-party model support:
+cy
+At vLLM, 
 
-1. **Community-Driven Support**: We encourage community contributions for adding new models. When a user requests support for a new model, we welcome pull requests (PRs) from the community. These contributions are evaluated primarily on the sensibility of the output they generate, rather than strict consistency with existing implementations such as those in transformers. **Call for contribution:** PRs coming directly from model vendors are greatly appreciated!
+ ar
+ comm
+tt
+d to fac
 
-2. **Best-Effort Consistency**: While we aim to maintain a level of consistency between the models implemented in vLLM and other frameworks like transformers, complete alignment is not always feasible. Factors like acceleration techniques and the use of low-precision computations can introduce discrepancies. Our commitment is to ensure that the implemented models are functional and produce sensible results.
 
-    !!! tip
-        When comparing the output of `model.generate` from Hugging Face Transformers with the output of `llm.generate` from vLLM, note that the former reads the model's generation config file (i.e., [generation_config.json](https://github.com/huggingface/transformers/blob/19dabe96362803fb0a9ae7073d03533966598b17/src/transformers/generation/utils.py#L1945)) and applies the default parameters for generation, while the latter only uses the parameters passed to the function. Ensure all sampling parameters are identical when comparing outputs.
+tat
 
-3. **Issue Resolution and Model Updates**: Users are encouraged to report any bugs or issues they encounter with third-party models. Proposed fixes should be submitted via PRs, with a clear explanation of the problem and the rationale behind the proposed solution. If a fix for one model impacts another, we rely on the community to highlight and address these cross-model dependencies. Note: for bugfix PRs, it is good etiquette to inform the original author to seek their feedback.
+g th
+ 
 
-4. **Monitoring and Updates**: Users interested in specific models should monitor the commit history for those models (e.g., by tracking changes in the main/vllm/model_executor/models directory). This proactive approach helps users stay informed about updates and changes that may affect the models they use.
+t
+grat
+o
+ a
+d support of th
+rd-party mod
 
-5. **Selective Focus**: Our resources are primarily directed towards models with significant user interest and impact. Models that are less frequently used may receive less attention, and we rely on the community to play a more active role in their upkeep and improvement.
+s 
 
-Through this approach, vLLM fosters a collaborative environment where both the core development team and the broader community contribute to the robustness and diversity of the third-party models supported in our ecosystem.
+th
 
-Note that, as an inference engine, vLLM does not introduce new models. Therefore, all models supported by vLLM are third-party models in this regard.
+ our 
+cosyst
+m. Our approach 
+s d
+s
+g
 
-We have the following levels of testing for models:
+d to ba
+a
+c
+ th
+ 
 
-1. **Strict Consistency**: We compare the output of the model with the output of the model in the HuggingFace Transformers library under greedy decoding. This is the most stringent test. Please refer to [models tests](https://github.com/vllm-project/vllm/blob/main/tests/models) for the models that have passed this test.
-2. **Output Sensibility**: We check if the output of the model is sensible and coherent, by measuring the perplexity of the output and checking for any obvious errors. This is a less stringent test.
-3. **Runtime Functionality**: We check if the model can be loaded and run without errors. This is the least stringent test. Please refer to [functionality tests](../../tests) and [examples](../../examples) for the models that have passed this test.
-4. **Community Feedback**: We rely on the community to provide feedback on the models. If a model is broken or not working as expected, we encourage users to raise issues to report it or open pull requests to fix it. The rest of the models fall under this category.
+d for robust
+
+ss a
+d th
+ pract
+ca
+ 
+
+m
+tat
+o
+s of support
+
+g a 
+
+d
+ ra
+g
+ of mod
+
+s. H
+r
+’s ho
+ 
+
+ ma
+ag
+ th
+rd-party mod
+
+ support:
+1. **Commu
+
+ty-Dr
+v
+
+ Support**: W
+ 
+
+courag
+ commu
+
+ty co
+tr
+but
+o
+s for add
+
+g 
+
+
+ mod
+
+s. Wh
+
+ a us
+r r
+qu
+sts support for a 
+
+
+ mod
+
+, 
+
+ 
+
+
+com
+ pu
+ r
+qu
+sts (PRs) from th
+ commu
+
+ty. Th
+s
+ co
+tr
+but
+o
+s ar
+ 
+va
+uat
+d pr
+mar
+
+y o
+ th
+ s
+
+s
+b
+
+
+ty of th
+ output th
+y g
+
+
+rat
+, rath
+r tha
+ str
+ct co
+s
+st
+
+cy 
+
+th 
+x
+st
+
+g 
+mp
+
+m
+
+tat
+o
+s such as thos
+ 
+
+ tra
+sform
+rs. **Ca
+ for co
+tr
+but
+o
+:** PRs com
+
+g d
+r
+ct
+y from mod
+
+ v
+
+dors ar
+ gr
+at
+y appr
+c
+at
+d!
+2. **B
+st-Effort Co
+s
+st
+
+cy**: Wh
+
+
+ 
+
+ a
+m to ma
+
+ta
+
+ a 
+
+v
+
+ of co
+s
+st
+
+cy b
+t
+
+
+ th
+ mod
+
+s 
+mp
+
+m
+
+t
+d 
+
+ vLLM a
+d oth
+r fram
+
+orks 
+
+k
+ tra
+sform
+rs, comp
+
+t
+ a
+
+g
+m
+
+t 
+s 
+ot a
+
+ays f
+as
+b
+
+. Factors 
+
+k
+ acc
+
+
+rat
+o
+ t
+ch
+
+qu
+s a
+d th
+ us
+ of 
+o
+-pr
+c
+s
+o
+ computat
+o
+s ca
+ 
+
+troduc
+ d
+scr
+pa
+c
+
+s. Our comm
+tm
+
+t 
+s to 
+
+sur
+ that th
+ 
+mp
+
+m
+
+t
+d mod
+
+s ar
+ fu
+ct
+o
+a
+ a
+d produc
+ s
+
+s
+b
+
+ r
+su
+ts.
+    !!! t
+p
+        Wh
+
+ compar
+
+g th
+ output of `mod
+
+.g
+
+
+rat
+` from Hugg
+
+g Fac
+ Tra
+sform
+rs 
+
+th th
+ output of `
+m.g
+
+
+rat
+` from vLLM, 
+ot
+ that th
+ form
+r r
+ads th
+ mod
+
+'s g
+
+
+rat
+o
+ co
+f
+g f
+
+
+ (
+.
+., [g
+
+
+rat
+o
+_co
+f
+g.jso
+](https://g
+thub.com/hugg
+
+gfac
+/tra
+sform
+rs/b
+ob/19dab
+96362803fb0a9a
+7073d03533966598b17/src/tra
+sform
+rs/g
+
+
+rat
+o
+/ut
+
+s.py#L1945)) a
+d app
+
+
+s th
+ d
+fau
+t param
+t
+rs for g
+
+
+rat
+o
+, 
+h
+
+
+ th
+ 
+att
+r o
+
+y us
+s th
+ param
+t
+rs pass
+d to th
+ fu
+ct
+o
+. E
+sur
+ a
+ samp
+
+
+g param
+t
+rs ar
+ 
+d
+
+t
+ca
+ 
+h
+
+ compar
+
+g outputs.
+3. **Issu
+ R
+so
+ut
+o
+ a
+d Mod
+
+ Updat
+s**: Us
+rs ar
+ 
+
+courag
+d to r
+port a
+y bugs or 
+ssu
+s th
+y 
+
+cou
+t
+r 
+
+th th
+rd-party mod
+
+s. Propos
+d f
+x
+s shou
+d b
+ subm
+tt
+d v
+a PRs, 
+
+th a c
+
+ar 
+xp
+a
+at
+o
+ of th
+ prob
+
+m a
+d th
+ rat
+o
+a
+
+ b
+h
+
+d th
+ propos
+d so
+ut
+o
+. If a f
+x for o
+
+ mod
+
+ 
+mpacts a
+oth
+r, 
+
+ r
+
+y o
+ th
+ commu
+
+ty to h
+gh
+
+ght a
+d addr
+ss th
+s
+ cross-mod
+
+ d
+p
+
+d
+
+c
+
+s. Not
+: for bugf
+x PRs, 
+t 
+s good 
+t
+qu
+tt
+ to 
+
+form th
+ or
+g
+
+a
+ author to s
+k th
+
+r f
+dback.
+4. **Mo
+
+tor
+
+g a
+d Updat
+s**: Us
+rs 
+
+t
+r
+st
+d 
+
+ sp
+c
+f
+c mod
+
+s shou
+d mo
+
+tor th
+ comm
+t h
+story for thos
+ mod
+
+s (
+.g., by track
+
+g cha
+g
+s 
+
+ th
+ ma
+
+/v
+m/mod
+
+_
+x
+cutor/mod
+
+s d
+r
+ctory). Th
+s proact
+v
+ approach h
+
+ps us
+rs stay 
+
+form
+d about updat
+s a
+d cha
+g
+s that may aff
+ct th
+ mod
+
+s th
+y us
+.
+5. **S
+
+
+ct
+v
+ Focus**: Our r
+sourc
+s ar
+ pr
+mar
+
+y d
+r
+ct
+d to
+ards mod
+
+s 
+
+th s
+g
+
+f
+ca
+t us
+r 
+
+t
+r
+st a
+d 
+mpact. Mod
+
+s that ar
+ 
+
+ss fr
+qu
+
+t
+y us
+d may r
+c
+
+v
+ 
+
+ss att
+
+t
+o
+, a
+d 
+
+ r
+
+y o
+ th
+ commu
+
+ty to p
+ay a mor
+ act
+v
+ ro
+
+ 
+
+ th
+
+r upk
+p a
+d 
+mprov
+m
+
+t.
+Through th
+s approach, vLLM fost
+rs a co
+aborat
+v
+ 
+
+v
+ro
+m
+
+t 
+h
+r
+ both th
+ cor
+ d
+v
+
+opm
+
+t t
+am a
+d th
+ broad
+r commu
+
+ty co
+tr
+but
+ to th
+ robust
+
+ss a
+d d
+v
+rs
+ty of th
+ th
+rd-party mod
+
+s support
+d 
+
+ our 
+cosyst
+m.
+Not
+ that, as a
+ 
+
+f
+r
+
+c
+ 
+
+g
+
+
+, vLLM do
+s 
+ot 
+
+troduc
+ 
+
+
+ mod
+
+s. Th
+r
+for
+, a
+ mod
+
+s support
+d by vLLM ar
+ th
+rd-party mod
+
+s 
+
+ th
+s r
+gard.
+W
+ hav
+ th
+ fo
+o
+
+
+g 
+
+v
+
+s of t
+st
+
+g for mod
+
+s:
+1. **Str
+ct Co
+s
+st
+
+cy**: W
+ compar
+ th
+ output of th
+ mod
+
+ 
+
+th th
+ output of th
+ mod
+
+ 
+
+ th
+ Hugg
+
+gFac
+ Tra
+sform
+rs 
+
+brary u
+d
+r gr
+dy d
+cod
+
+g. Th
+s 
+s th
+ most str
+
+g
+
+t t
+st. P
+
+as
+ r
+f
+r to [mod
+
+s t
+sts](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/t
+sts/mod
+
+s) for th
+ mod
+
+s that hav
+ pass
+d th
+s t
+st.
+2. **Output S
+
+s
+b
+
+
+ty**: W
+ ch
+ck 
+f th
+ output of th
+ mod
+
+ 
+s s
+
+s
+b
+
+ a
+d coh
+r
+
+t, by m
+asur
+
+g th
+ p
+rp
+
+x
+ty of th
+ output a
+d ch
+ck
+
+g for a
+y obv
+ous 
+rrors. Th
+s 
+s a 
+
+ss str
+
+g
+
+t t
+st.
+3. **Ru
+t
+m
+ Fu
+ct
+o
+a
+
+ty**: W
+ ch
+ck 
+f th
+ mod
+
+ ca
+ b
+ 
+oad
+d a
+d ru
+ 
+
+thout 
+rrors. Th
+s 
+s th
+ 
+
+ast str
+
+g
+
+t t
+st. P
+
+as
+ r
+f
+r to [fu
+ct
+o
+a
+
+ty t
+sts](../../t
+sts) a
+d [
+xamp
+
+s](../../
+xamp
+
+s) for th
+ mod
+
+s that hav
+ pass
+d th
+s t
+st.
+4. **Commu
+
+ty F
+dback**: W
+ r
+
+y o
+ th
+ commu
+
+ty to prov
+d
+ f
+dback o
+ th
+ mod
+
+s. If a mod
+
+ 
+s brok
+
+ or 
+ot 
+ork
+
+g as 
+xp
+ct
+d, 
+
+ 
+
+courag
+ us
+rs to ra
+s
+ 
+ssu
+s to r
+port 
+t or op
+
+ pu
+ r
+qu
+sts to f
+x 
+t. Th
+ r
+st of th
+ mod
+
+s fa
+ u
+d
+r th
+s cat
+gory.

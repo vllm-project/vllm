@@ -1,403 +1,2361 @@
-# Using Kubernetes
+# Us
 
-Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine learning models. This guide walks you through deploying vLLM using native Kubernetes.
+g Kub
+r
 
-- [Deployment with CPUs](#deployment-with-cpus)
-- [Deployment with GPUs](#deployment-with-gpus)
-- [Troubleshooting](#troubleshooting)
-    - [Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"](#startup-probe-or-readiness-probe-failure-container-log-contains-keyboardinterrupt-terminated)
-- [Conclusion](#conclusion)
+t
+s
+D
+p
+oy
 
-Alternatively, you can deploy vLLM to Kubernetes using any of the following:
+g vLLM o
+ Kub
+r
 
-- [Helm](frameworks/helm.md)
-- [NVIDIA Dynamo](integrations/dynamo.md)
-- [InftyAI/llmaz](integrations/llmaz.md)
-- [llm-d](integrations/llm-d.md)
-- [KAITO](integrations/kaito.md)
-- [KServe](integrations/kserve.md)
-- [Kthena](integrations/kthena.md)
-- [KubeRay](integrations/kuberay.md)
-- [kubernetes-sigs/lws](frameworks/lws.md)
-- [meta-llama/llama-stack](integrations/llamastack.md)
-- [substratusai/kubeai](integrations/kubeai.md)
-- [vllm-project/AIBrix](integrations/aibrix.md)
-- [vllm-project/production-stack](integrations/production-stack.md)
+t
+s 
+s a sca
+ab
 
-## Deployment with CPUs
+ a
+d 
+ff
+c
 
-!!! note
-    The use of CPUs here is for demonstration and testing purposes only and its performance will not be on par with GPUs.
 
-First, create a Kubernetes PVC and Secret for downloading and storing Hugging Face model:
+t 
+ay to s
+rv
+ mach
 
-??? console "Config"
 
+ 
+
+ar
+
+
+g mod
+
+s. Th
+s gu
+d
+ 
+a
+ks you through d
+p
+oy
+
+g vLLM us
+
+g 
+at
+v
+ Kub
+r
+
+t
+s.
+- [D
+p
+oym
+
+t 
+
+th CPUs](#d
+p
+oym
+
+t-
+
+th-cpus)
+- [D
+p
+oym
+
+t 
+
+th GPUs](#d
+p
+oym
+
+t-
+
+th-gpus)
+- [Troub
+
+shoot
+
+g](#troub
+
+shoot
+
+g)
+    - [Startup Prob
+ or R
+ad
+
+
+ss Prob
+ Fa
+
+ur
+, co
+ta
+
+
+r 
+og co
+ta
+
+s "K
+yboardI
+t
+rrupt: t
+rm
+
+at
+d"](#startup-prob
+-or-r
+ad
+
+
+ss-prob
+-fa
+
+ur
+-co
+ta
+
+
+r-
+og-co
+ta
+
+s-k
+yboard
+
+t
+rrupt-t
+rm
+
+at
+d)
+- [Co
+c
+us
+o
+](#co
+c
+us
+o
+)
+A
+t
+r
+at
+v
+
+y, you ca
+ d
+p
+oy vLLM to Kub
+r
+
+t
+s us
+
+g a
+y of th
+ fo
+o
+
+
+g:
+- [H
+
+m](fram
+
+orks/h
+
+m.md)
+- [NVIDIA Dy
+amo](
+
+t
+grat
+o
+s/dy
+amo.md)
+- [I
+ftyAI/
+maz](
+
+t
+grat
+o
+s/
+maz.md)
+- [
+m-d](
+
+t
+grat
+o
+s/
+m-d.md)
+- [KAITO](
+
+t
+grat
+o
+s/ka
+to.md)
+- [KS
+rv
+](
+
+t
+grat
+o
+s/ks
+rv
+.md)
+- [Kth
+
+a](
+
+t
+grat
+o
+s/kth
+
+a.md)
+- [Kub
+Ray](
+
+t
+grat
+o
+s/kub
+ray.md)
+- [kub
+r
+
+t
+s-s
+gs/
+
+s](fram
+
+orks/
+
+s.md)
+- [m
+ta-
+ama/
+ama-stack](
+
+t
+grat
+o
+s/
+amastack.md)
+- [substratusa
+/kub
+a
+](
+
+t
+grat
+o
+s/kub
+a
+.md)
+- [v
+m-proj
+ct/AIBr
+x](
+
+t
+grat
+o
+s/a
+br
+x.md)
+- [v
+m-proj
+ct/product
+o
+-stack](
+
+t
+grat
+o
+s/product
+o
+-stack.md)
+## D
+p
+oym
+
+t 
+
+th CPUs
+!!! 
+ot
+
+    Th
+ us
+ of CPUs h
+r
+ 
+s for d
+mo
+strat
+o
+ a
+d t
+st
+
+g purpos
+s o
+
+y a
+d 
+ts p
+rforma
+c
+ 
+
+
+ 
+ot b
+ o
+ par 
+
+th GPUs.
+F
+rst, cr
+at
+ a Kub
+r
+
+t
+s PVC a
+d S
+cr
+t for do
+
+
+oad
+
+g a
+d stor
+
+g Hugg
+
+g Fac
+ mod
+
+:
+??? co
+so
+
+ "Co
+f
+g"
     ```bash
-    cat <<EOF |kubectl apply -f -
-    apiVersion: v1
-    kind: PersistentVolumeClaim
-    metadata:
-      name: vllm-models
-    spec:
-      accessModes:
-        - ReadWriteOnce
-      volumeMode: Filesystem
-      resources:
-        requests:
-          storage: 50Gi
+    cat 
+EOF |kub
+ct
+ app
+y -f -
+    ap
+V
+rs
+o
+: v1
+    k
+
+d: P
+rs
+st
+
+tVo
+um
+C
+a
+m
+    m
+tadata:
+      
+am
+: v
+m-mod
+
+s
+    sp
+c:
+      acc
+ssMod
+s:
+        - R
+adWr
+t
+O
+c
+
+      vo
+um
+Mod
+: F
+
+
+syst
+m
+      r
+sourc
+s:
+        r
+qu
+sts:
+          storag
+: 50G
+
     ---
-    apiVersion: v1
-    kind: Secret
-    metadata:
-      name: hf-token-secret
-    type: Opaque
-    stringData:
-      token: "REPLACE_WITH_TOKEN"
+    ap
+V
+rs
+o
+: v1
+    k
+
+d: S
+cr
+t
+    m
+tadata:
+      
+am
+: hf-tok
+
+-s
+cr
+t
+    typ
+: Opaqu
+
+    str
+
+gData:
+      tok
+
+: "REPLACE_WITH_TOKEN"
     EOF
     ```
+H
+r
+, th
+ `tok
 
-Here, the `token` field stores your **Hugging Face access token**. For details on how to generate a token,
-see the [Hugging Face documentation](https://huggingface.co/docs/hub/en/security-tokens).
+` f
 
-Next, start the vLLM server as a Kubernetes Deployment and Service.
 
-Note that you will want to configure your vLLM image based on your processor arch:
+d stor
+s your **Hugg
 
-??? console "Config"
+g Fac
+ acc
+ss tok
 
+**. For d
+ta
+
+s o
+ ho
+ to g
+
+
+rat
+ a tok
+
+,
+s
+ th
+ [Hugg
+
+g Fac
+ docum
+
+tat
+o
+](https://hugg
+
+gfac
+.co/docs/hub/
+
+/s
+cur
+ty-tok
+
+s).
+N
+xt, start th
+ vLLM s
+rv
+r as a Kub
+r
+
+t
+s D
+p
+oym
+
+t a
+d S
+rv
+c
+.
+Not
+ that you 
+
+
+ 
+a
+t to co
+f
+gur
+ your vLLM 
+mag
+ bas
+d o
+ your proc
+ssor arch:
+??? co
+so
+
+ "Co
+f
+g"
     ```bash
-    VLLM_IMAGE=public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest       # use this for x86_64
-    VLLM_IMAGE=public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest # use this for arm64
-    cat <<EOF |kubectl apply -f -
-    apiVersion: apps/v1
-    kind: Deployment
-    metadata:
-      name: vllm-server
-    spec:
-      replicas: 1
-      selector:
-        matchLabels:
-          app.kubernetes.io/name: vllm
-      template:
-        metadata:
-          labels:
-            app.kubernetes.io/name: vllm
-        spec:
-          containers:
-          - name: vllm
-            image: $VLLM_IMAGE
-            command: ["/bin/sh", "-c"]
+    VLLM_IMAGE=pub
+
+c.
+cr.a
+s/q9t5s3a7/v
+m-cpu-r
+
+
+as
+-r
+po:
+at
+st       # us
+ th
+s for x86_64
+    VLLM_IMAGE=pub
+
+c.
+cr.a
+s/q9t5s3a7/v
+m-arm64-cpu-r
+
+
+as
+-r
+po:
+at
+st # us
+ th
+s for arm64
+    cat 
+EOF |kub
+ct
+ app
+y -f -
+    ap
+V
+rs
+o
+: apps/v1
+    k
+
+d: D
+p
+oym
+
+t
+    m
+tadata:
+      
+am
+: v
+m-s
+rv
+r
+    sp
+c:
+      r
+p
+
+cas: 1
+      s
+
+
+ctor:
+        matchLab
+
+s:
+          app.kub
+r
+
+t
+s.
+o/
+am
+: v
+m
+      t
+mp
+at
+:
+        m
+tadata:
+          
+ab
+
+s:
+            app.kub
+r
+
+t
+s.
+o/
+am
+: v
+m
+        sp
+c:
+          co
+ta
+
+
+rs:
+          - 
+am
+: v
+m
+            
+mag
+: $VLLM_IMAGE
+            comma
+d: ["/b
+
+/sh", "-c"]
             args: [
-              "vllm serve meta-llama/Llama-3.2-1B-Instruct"
+              "v
+m s
+rv
+ m
+ta-
+ama/L
+ama-3.2-1B-I
+struct"
             ]
-            env:
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: hf-token-secret
-                  key: token
+            
+
+v:
+            - 
+am
+: HF_TOKEN
+              va
+u
+From:
+                s
+cr
+tK
+yR
+f:
+                  
+am
+: hf-tok
+
+-s
+cr
+t
+                  k
+y: tok
+
+
             ports:
-              - containerPort: 8000
-            volumeMounts:
-              - name: llama-storage
-                mountPath: /root/.cache/huggingface
-          volumes:
-          - name: llama-storage
-            persistentVolumeClaim:
-              claimName: vllm-models
+              - co
+ta
+
+
+rPort: 8000
+            vo
+um
+Mou
+ts:
+              - 
+am
+: 
+ama-storag
+
+                mou
+tPath: /root/.cach
+/hugg
+
+gfac
+
+          vo
+um
+s:
+          - 
+am
+: 
+ama-storag
+
+            p
+rs
+st
+
+tVo
+um
+C
+a
+m:
+              c
+a
+mNam
+: v
+m-mod
+
+s
     ---
-    apiVersion: v1
-    kind: Service
-    metadata:
-      name: vllm-server
-    spec:
-      selector:
-        app.kubernetes.io/name: vllm
+    ap
+V
+rs
+o
+: v1
+    k
+
+d: S
+rv
+c
+
+    m
+tadata:
+      
+am
+: v
+m-s
+rv
+r
+    sp
+c:
+      s
+
+
+ctor:
+        app.kub
+r
+
+t
+s.
+o/
+am
+: v
+m
       ports:
-      - protocol: TCP
+      - protoco
+: TCP
         port: 8000
-        targetPort: 8000
-      type: ClusterIP
+        targ
+tPort: 8000
+      typ
+: C
+ust
+rIP
     EOF
     ```
+W
+ ca
+ v
+r
+fy that th
+ vLLM s
+rv
+r has start
+d succ
+ssfu
+y v
+a th
+ 
+ogs (th
+s m
+ght tak
+ a coup
 
-We can verify that the vLLM server has started successfully via the logs (this might take a couple of minutes to download the model):
+ of m
 
+ut
+s to do
+
+
+oad th
+ mod
+
+):
 ```bash
-kubectl logs -l app.kubernetes.io/name=vllm
+kub
+ct
+ 
+ogs -
+ app.kub
+r
+
+t
+s.
+o/
+am
+=v
+m
 ...
-INFO:     Started server process [1]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Start
+d s
+rv
+r proc
+ss [1]
+INFO:     Wa
+t
+
+g for app
+
+cat
+o
+ startup.
+INFO:     App
+
+cat
+o
+ startup comp
+
+t
+.
+INFO:     Uv
+cor
+ ru
+
+
+g o
+ http://0.0.0.0:8000 (Pr
+ss CTRL+C to qu
+t)
 ```
+## D
+p
+oym
 
-## Deployment with GPUs
+t 
 
-**Pre-requisite**: Ensure that you have a running [Kubernetes cluster with GPUs](https://kubernetes.io/docs/tasks/manage-gpus/scheduling-gpus/).
+th GPUs
+**Pr
+-r
+qu
+s
+t
+**: E
+sur
+ that you hav
+ a ru
 
-1. Create a PVC, Secret and Deployment for vLLM
 
-      PVC is used to store the model cache and it is optional, you can use hostPath or other storage options
+g [Kub
+r
 
-      <details>
-      <summary>Yaml</summary>
+t
+s c
+ust
+r 
 
-      ```yaml
-      apiVersion: v1
-      kind: PersistentVolumeClaim
-      metadata:
-        name: mistral-7b
-        namespace: default
-      spec:
-        accessModes:
-        - ReadWriteOnce
-        resources:
-          requests:
-            storage: 50Gi
-        storageClassName: default
-        volumeMode: Filesystem
+th GPUs](https://kub
+r
+
+t
+s.
+o/docs/tasks/ma
+ag
+-gpus/sch
+du
+
+
+g-gpus/).
+1. Cr
+at
+ a PVC, S
+cr
+t a
+d D
+p
+oym
+
+t for vLLM
+      PVC 
+s us
+d to stor
+ th
+ mod
+
+ cach
+ a
+d 
+t 
+s opt
+o
+a
+, you ca
+ us
+ hostPath or oth
+r storag
+ opt
+o
+s
+      
+d
+ta
+
+s
+
+      
+summary
+Yam
+
+/summary
+
+      ```yam
+
+      ap
+V
+rs
+o
+: v1
+      k
+
+d: P
+rs
+st
+
+tVo
+um
+C
+a
+m
+      m
+tadata:
+        
+am
+: m
+stra
+-7b
+        
+am
+spac
+: d
+fau
+t
+      sp
+c:
+        acc
+ssMod
+s:
+        - R
+adWr
+t
+O
+c
+
+        r
+sourc
+s:
+          r
+qu
+sts:
+            storag
+: 50G
+
+        storag
+C
+assNam
+: d
+fau
+t
+        vo
+um
+Mod
+: F
+
+
+syst
+m
       ```
+      
+/d
+ta
 
-      </details>
+s
 
-      Secret is optional and only required for accessing gated models, you can skip this step if you are not using gated models
+      S
+cr
+t 
+s opt
+o
+a
+ a
+d o
 
-      ```yaml
-      apiVersion: v1
-      kind: Secret
-      metadata:
-        name: hf-token-secret
-        namespace: default
-      type: Opaque
-      stringData:
-        token: "REPLACE_WITH_TOKEN"
+y r
+qu
+r
+d for acc
+ss
+
+g gat
+d mod
+
+s, you ca
+ sk
+p th
+s st
+p 
+f you ar
+ 
+ot us
+
+g gat
+d mod
+
+s
+      ```yam
+
+      ap
+V
+rs
+o
+: v1
+      k
+
+d: S
+cr
+t
+      m
+tadata:
+        
+am
+: hf-tok
+
+-s
+cr
+t
+        
+am
+spac
+: d
+fau
+t
+      typ
+: Opaqu
+
+      str
+
+gData:
+        tok
+
+: "REPLACE_WITH_TOKEN"
       ```
-  
-      Next to create the deployment file for vLLM to run the model server. The following example deploys the `Mistral-7B-Instruct-v0.3` model.
+      N
+xt to cr
+at
+ th
+ d
+p
+oym
 
-      Here are two examples for using NVIDIA GPU and AMD GPU.
+t f
 
+
+ for vLLM to ru
+ th
+ mod
+
+ s
+rv
+r. Th
+ fo
+o
+
+
+g 
+xamp
+
+ d
+p
+oys th
+ `M
+stra
+-7B-I
+struct-v0.3` mod
+
+.
+      H
+r
+ ar
+ t
+o 
+xamp
+
+s for us
+
+g NVIDIA GPU a
+d AMD GPU.
       NVIDIA GPU:
+      
+d
+ta
 
-      <details>
-      <summary>Yaml</summary>
+s
 
-      ```yaml
-      apiVersion: apps/v1
-      kind: Deployment
-      metadata:
-        name: mistral-7b
-        namespace: default
-        labels:
-          app: mistral-7b
-      spec:
-        replicas: 1
-        selector:
-          matchLabels:
-            app: mistral-7b
-        template:
-          metadata:
-            labels:
-              app: mistral-7b
-          spec:
-            volumes:
-            - name: cache-volume
-              persistentVolumeClaim:
-                claimName: mistral-7b
-            # vLLM needs to access the host's shared memory for tensor parallel inference.
-            - name: shm
-              emptyDir:
-                medium: Memory
-                sizeLimit: "2Gi"
-            containers:
-            - name: mistral-7b
-              image: vllm/vllm-openai:latest
-              command: ["/bin/sh", "-c"]
+      
+summary
+Yam
+
+/summary
+
+      ```yam
+
+      ap
+V
+rs
+o
+: apps/v1
+      k
+
+d: D
+p
+oym
+
+t
+      m
+tadata:
+        
+am
+: m
+stra
+-7b
+        
+am
+spac
+: d
+fau
+t
+        
+ab
+
+s:
+          app: m
+stra
+-7b
+      sp
+c:
+        r
+p
+
+cas: 1
+        s
+
+
+ctor:
+          matchLab
+
+s:
+            app: m
+stra
+-7b
+        t
+mp
+at
+:
+          m
+tadata:
+            
+ab
+
+s:
+              app: m
+stra
+-7b
+          sp
+c:
+            vo
+um
+s:
+            - 
+am
+: cach
+-vo
+um
+
+              p
+rs
+st
+
+tVo
+um
+C
+a
+m:
+                c
+a
+mNam
+: m
+stra
+-7b
+            # vLLM 
+
+ds to acc
+ss th
+ host's shar
+d m
+mory for t
+
+sor para
+
+
+ 
+
+f
+r
+
+c
+.
+            - 
+am
+: shm
+              
+mptyD
+r:
+                m
+d
+um: M
+mory
+                s
+z
+L
+m
+t: "2G
+"
+            co
+ta
+
+
+rs:
+            - 
+am
+: m
+stra
+-7b
+              
+mag
+: v
+m/v
+m-op
+
+a
+:
+at
+st
+              comma
+d: ["/b
+
+/sh", "-c"]
               args: [
-                "vllm serve mistralai/Mistral-7B-Instruct-v0.3 --trust-remote-code --enable-chunked-prefill --max_num_batched_tokens 1024"
-              ]
-              env:
-              - name: HF_TOKEN
-                valueFrom:
-                  secretKeyRef:
-                    name: hf-token-secret
-                    key: token
-              ports:
-              - containerPort: 8000
-              resources:
-                limits:
-                  cpu: "10"
-                  memory: 20G
-                  nvidia.com/gpu: "1"
-                requests:
-                  cpu: "2"
-                  memory: 6G
-                  nvidia.com/gpu: "1"
-              volumeMounts:
-              - mountPath: /root/.cache/huggingface
-                name: cache-volume
-              - name: shm
-                mountPath: /dev/shm
-              livenessProbe:
-                httpGet:
-                  path: /health
-                  port: 8000
-                initialDelaySeconds: 60
-                periodSeconds: 10
-              readinessProbe:
-                httpGet:
-                  path: /health
-                  port: 8000
-                initialDelaySeconds: 60
-                periodSeconds: 5
-      ```
+                "v
+m s
+rv
+ m
+stra
+a
+/M
+stra
+-7B-I
+struct-v0.3 --trust-r
+mot
+-cod
+ --
 
-      </details>
+ab
+
+-chu
+k
+d-pr
+f
+
+ --max_
+um_batch
+d_tok
+
+s 1024"
+              ]
+              
+
+v:
+              - 
+am
+: HF_TOKEN
+                va
+u
+From:
+                  s
+cr
+tK
+yR
+f:
+                    
+am
+: hf-tok
+
+-s
+cr
+t
+                    k
+y: tok
+
+
+              ports:
+              - co
+ta
+
+
+rPort: 8000
+              r
+sourc
+s:
+                
+
+m
+ts:
+                  cpu: "10"
+                  m
+mory: 20G
+                  
+v
+d
+a.com/gpu: "1"
+                r
+qu
+sts:
+                  cpu: "2"
+                  m
+mory: 6G
+                  
+v
+d
+a.com/gpu: "1"
+              vo
+um
+Mou
+ts:
+              - mou
+tPath: /root/.cach
+/hugg
+
+gfac
+
+                
+am
+: cach
+-vo
+um
+
+              - 
+am
+: shm
+                mou
+tPath: /d
+v/shm
+              
+
+v
+
+
+ssProb
+:
+                httpG
+t:
+                  path: /h
+a
+th
+                  port: 8000
+                
+
+
+t
+a
+D
+
+ayS
+co
+ds: 60
+                p
+r
+odS
+co
+ds: 10
+              r
+ad
+
+
+ssProb
+:
+                httpG
+t:
+                  path: /h
+a
+th
+                  port: 8000
+                
+
+
+t
+a
+D
+
+ayS
+co
+ds: 60
+                p
+r
+odS
+co
+ds: 5
+      ```
+      
+/d
+ta
+
+s
 
       AMD GPU:
+      You ca
+ r
+f
+r to th
+ `d
+p
+oym
 
-      You can refer to the `deployment.yaml` below if using AMD ROCm GPU like MI300X.
+t.yam
+` b
 
-      <details>
-      <summary>Yaml</summary>
+o
+ 
+f us
 
-      ```yaml
-      apiVersion: apps/v1
-      kind: Deployment
-      metadata:
-        name: mistral-7b
-        namespace: default
-        labels:
-          app: mistral-7b
-      spec:
-        replicas: 1
-        selector:
-          matchLabels:
-            app: mistral-7b
-        template:
-          metadata:
-            labels:
-              app: mistral-7b
-          spec:
-            volumes:
+g AMD ROCm GPU 
+
+k
+ MI300X.
+      
+d
+ta
+
+s
+
+      
+summary
+Yam
+
+/summary
+
+      ```yam
+
+      ap
+V
+rs
+o
+: apps/v1
+      k
+
+d: D
+p
+oym
+
+t
+      m
+tadata:
+        
+am
+: m
+stra
+-7b
+        
+am
+spac
+: d
+fau
+t
+        
+ab
+
+s:
+          app: m
+stra
+-7b
+      sp
+c:
+        r
+p
+
+cas: 1
+        s
+
+
+ctor:
+          matchLab
+
+s:
+            app: m
+stra
+-7b
+        t
+mp
+at
+:
+          m
+tadata:
+            
+ab
+
+s:
+              app: m
+stra
+-7b
+          sp
+c:
+            vo
+um
+s:
             # PVC
-            - name: cache-volume
-              persistentVolumeClaim:
-                claimName: mistral-7b
-            # vLLM needs to access the host's shared memory for tensor parallel inference.
-            - name: shm
-              emptyDir:
-                medium: Memory
-                sizeLimit: "8Gi"
-            hostNetwork: true
-            hostIPC: true
-            containers:
-            - name: mistral-7b
-              image: rocm/vllm:rocm6.2_mi300_ubuntu20.04_py3.9_vllm_0.6.4
-              securityContext:
-                seccompProfile:
-                  type: Unconfined
-                runAsGroup: 44
-                capabilities:
+            - 
+am
+: cach
+-vo
+um
+
+              p
+rs
+st
+
+tVo
+um
+C
+a
+m:
+                c
+a
+mNam
+: m
+stra
+-7b
+            # vLLM 
+
+ds to acc
+ss th
+ host's shar
+d m
+mory for t
+
+sor para
+
+
+ 
+
+f
+r
+
+c
+.
+            - 
+am
+: shm
+              
+mptyD
+r:
+                m
+d
+um: M
+mory
+                s
+z
+L
+m
+t: "8G
+"
+            hostN
+t
+ork: tru
+
+            hostIPC: tru
+
+            co
+ta
+
+
+rs:
+            - 
+am
+: m
+stra
+-7b
+              
+mag
+: rocm/v
+m:rocm6.2_m
+300_ubu
+tu20.04_py3.9_v
+m_0.6.4
+              s
+cur
+tyCo
+t
+xt:
+                s
+ccompProf
+
+
+:
+                  typ
+: U
+co
+f
+
+
+d
+                ru
+AsGroup: 44
+                capab
+
+
+t
+
+s:
                   add:
                   - SYS_PTRACE
-              command: ["/bin/sh", "-c"]
+              comma
+d: ["/b
+
+/sh", "-c"]
               args: [
-                "vllm serve mistralai/Mistral-7B-v0.3 --port 8000 --trust-remote-code --enable-chunked-prefill --max_num_batched_tokens 1024"
+                "v
+m s
+rv
+ m
+stra
+a
+/M
+stra
+-7B-v0.3 --port 8000 --trust-r
+mot
+-cod
+ --
+
+ab
+
+-chu
+k
+d-pr
+f
+
+ --max_
+um_batch
+d_tok
+
+s 1024"
               ]
-              env:
-              - name: HF_TOKEN
-                valueFrom:
-                  secretKeyRef:
-                    name: hf-token-secret
-                    key: token
+              
+
+v:
+              - 
+am
+: HF_TOKEN
+                va
+u
+From:
+                  s
+cr
+tK
+yR
+f:
+                    
+am
+: hf-tok
+
+-s
+cr
+t
+                    k
+y: tok
+
+
               ports:
-              - containerPort: 8000
-              resources:
-                limits:
+              - co
+ta
+
+
+rPort: 8000
+              r
+sourc
+s:
+                
+
+m
+ts:
                   cpu: "10"
-                  memory: 20G
+                  m
+mory: 20G
                   amd.com/gpu: "1"
-                requests:
+                r
+qu
+sts:
                   cpu: "6"
-                  memory: 6G
+                  m
+mory: 6G
                   amd.com/gpu: "1"
-              volumeMounts:
-              - name: cache-volume
-                mountPath: /root/.cache/huggingface
-              - name: shm
-                mountPath: /dev/shm
+              vo
+um
+Mou
+ts:
+              - 
+am
+: cach
+-vo
+um
+
+                mou
+tPath: /root/.cach
+/hugg
+
+gfac
+
+              - 
+am
+: shm
+                mou
+tPath: /d
+v/shm
       ```
+      
+/d
+ta
 
-      </details>
+s
 
-      You can get the full example with steps and sample yaml files from <https://github.com/ROCm/k8s-device-plugin/tree/master/example/vllm-serve>.
+      You ca
+ g
+t th
+ fu
+ 
+xamp
 
-2. Create a Kubernetes Service for vLLM
+ 
 
-      Next, create a Kubernetes Service file to expose the `mistral-7b` deployment:
+th st
+ps a
+d samp
 
-      <details>
-      <summary>Yaml</summary>
+ yam
+ f
 
-      ```yaml
-      apiVersion: v1
-      kind: Service
-      metadata:
-        name: mistral-7b
-        namespace: default
-      spec:
+
+s from 
+https://g
+thub.com/ROCm/k8s-d
+v
+c
+-p
+ug
+
+/tr
+/mast
+r/
+xamp
+
+/v
+m-s
+rv
+
+.
+2. Cr
+at
+ a Kub
+r
+
+t
+s S
+rv
+c
+ for vLLM
+      N
+xt, cr
+at
+ a Kub
+r
+
+t
+s S
+rv
+c
+ f
+
+
+ to 
+xpos
+ th
+ `m
+stra
+-7b` d
+p
+oym
+
+t:
+      
+d
+ta
+
+s
+
+      
+summary
+Yam
+
+/summary
+
+      ```yam
+
+      ap
+V
+rs
+o
+: v1
+      k
+
+d: S
+rv
+c
+
+      m
+tadata:
+        
+am
+: m
+stra
+-7b
+        
+am
+spac
+: d
+fau
+t
+      sp
+c:
         ports:
-        - name: http-mistral-7b
+        - 
+am
+: http-m
+stra
+-7b
           port: 80
-          protocol: TCP
-          targetPort: 8000
-        # The label selector should match the deployment labels & it is useful for prefix caching feature
-        selector:
-          app: mistral-7b
-        sessionAffinity: None
-        type: ClusterIP
+          protoco
+: TCP
+          targ
+tPort: 8000
+        # Th
+ 
+ab
+
+ s
+
+
+ctor shou
+d match th
+ d
+p
+oym
+
+t 
+ab
+
+s & 
+t 
+s us
+fu
+ for pr
+f
+x cach
+
+g f
+atur
+
+        s
+
+
+ctor:
+          app: m
+stra
+-7b
+        s
+ss
+o
+Aff
+
+
+ty: No
+
+
+        typ
+: C
+ust
+rIP
       ```
+      
+/d
+ta
 
-      </details>
+s
 
-3. Deploy and Test
+3. D
+p
+oy a
+d T
+st
+      App
+y th
+ d
+p
+oym
 
-      Apply the deployment and service configurations using `kubectl apply -f <filename>`:
+t a
+d s
+rv
+c
+ co
+f
+gurat
+o
+s us
 
+g `kub
+ct
+ app
+y -f 
+f
+
+
+
+am
+
+`:
       ```bash
-      kubectl apply -f deployment.yaml
-      kubectl apply -f service.yaml
+      kub
+ct
+ app
+y -f d
+p
+oym
+
+t.yam
+
+      kub
+ct
+ app
+y -f s
+rv
+c
+.yam
+
       ```
+      To t
+st th
+ d
+p
+oym
 
-      To test the deployment, run the following `curl` command:
+t, ru
+ th
+ fo
+o
 
+
+g `cur
+` comma
+d:
       ```bash
-      curl http://mistral-7b.default.svc.cluster.local/v1/completions \
-        -H "Content-Type: application/json" \
+      cur
+ http://m
+stra
+-7b.d
+fau
+t.svc.c
+ust
+r.
+oca
+/v1/comp
+
+t
+o
+s \
+        -H "Co
+t
+
+t-Typ
+: app
+
+cat
+o
+/jso
+" \
         -d '{
-              "model": "mistralai/Mistral-7B-Instruct-v0.3",
-              "prompt": "San Francisco is a",
-              "max_tokens": 7,
-              "temperature": 0
+              "mod
+
+": "m
+stra
+a
+/M
+stra
+-7B-I
+struct-v0.3",
+              "prompt": "Sa
+ Fra
+c
+sco 
+s a",
+              "max_tok
+
+s": 7,
+              "t
+mp
+ratur
+": 0
             }'
       ```
+      If th
+ s
+rv
+c
+ 
+s corr
+ct
+y d
+p
+oy
+d, you shou
+d r
+c
 
-      If the service is correctly deployed, you should receive a response from the vLLM model.
+v
+ a r
+spo
+s
+ from th
+ vLLM mod
 
-## Troubleshooting
+.
+## Troub
 
-### Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"
+shoot
 
-If the startup or readiness probe failureThreshold is too low for the time needed to start up the server, Kubernetes scheduler will kill the container. A couple of indications that this has happened:
+g
+### Startup Prob
+ or R
+ad
 
-1. container log contains "KeyboardInterrupt: terminated"
-2. `kubectl get events` shows message `Container $NAME failed startup probe, will be restarted`
 
-To mitigate, increase the failureThreshold to allow more time for the model server to start serving. You can identify an ideal failureThreshold by removing the probes from the manifest and measuring how much time it takes for the model server to show it's ready to serve.
+ss Prob
+ Fa
 
-## Conclusion
+ur
+, co
+ta
 
-Deploying vLLM with Kubernetes allows for efficient scaling and management of ML models leveraging GPU resources. By following the steps outlined above, you should be able to set up and test a vLLM deployment within your Kubernetes cluster. If you encounter any issues or have suggestions, please feel free to contribute to the documentation.
+
+r 
+og co
+ta
+
+s "K
+yboardI
+t
+rrupt: t
+rm
+
+at
+d"
+If th
+ startup or r
+ad
+
+
+ss prob
+ fa
+
+ur
+Thr
+sho
+d 
+s too 
+o
+ for th
+ t
+m
+ 
+
+d
+d to start up th
+ s
+rv
+r, Kub
+r
+
+t
+s sch
+du
+
+r 
+
+
+ k
+
+ th
+ co
+ta
+
+
+r. A coup
+
+ of 
+
+d
+cat
+o
+s that th
+s has happ
+
+
+d:
+1. co
+ta
+
+
+r 
+og co
+ta
+
+s "K
+yboardI
+t
+rrupt: t
+rm
+
+at
+d"
+2. `kub
+ct
+ g
+t 
+v
+
+ts` sho
+s m
+ssag
+ `Co
+ta
+
+
+r $NAME fa
+
+
+d startup prob
+, 
+
+
+ b
+ r
+start
+d`
+To m
+t
+gat
+, 
+
+cr
+as
+ th
+ fa
+
+ur
+Thr
+sho
+d to a
+o
+ mor
+ t
+m
+ for th
+ mod
+
+ s
+rv
+r to start s
+rv
+
+g. You ca
+ 
+d
+
+t
+fy a
+ 
+d
+a
+ fa
+
+ur
+Thr
+sho
+d by r
+mov
+
+g th
+ prob
+s from th
+ ma
+
+f
+st a
+d m
+asur
+
+g ho
+ much t
+m
+ 
+t tak
+s for th
+ mod
+
+ s
+rv
+r to sho
+ 
+t's r
+ady to s
+rv
+.
+## Co
+c
+us
+o
+
+D
+p
+oy
+
+g vLLM 
+
+th Kub
+r
+
+t
+s a
+o
+s for 
+ff
+c
+
+
+t sca
+
+
+g a
+d ma
+ag
+m
+
+t of ML mod
+
+s 
+
+v
+rag
+
+g GPU r
+sourc
+s. By fo
+o
+
+
+g th
+ st
+ps out
+
+
+
+d abov
+, you shou
+d b
+ ab
+
+ to s
+t up a
+d t
+st a vLLM d
+p
+oym
+
+t 
+
+th
+
+ your Kub
+r
+
+t
+s c
+ust
+r. If you 
+
+cou
+t
+r a
+y 
+ssu
+s or hav
+ sugg
+st
+o
+s, p
+
+as
+ f
+
+ fr
+ to co
+tr
+but
+ to th
+ docum
+
+tat
+o
+.

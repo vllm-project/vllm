@@ -1,265 +1,3396 @@
-# Security
-
-## Inter-Node Communication
-
-All communications between nodes in a multi-node vLLM deployment are **insecure by default** and must be protected by placing the nodes on an isolated network. This includes:
-
-1. PyTorch Distributed communications
-2. KV cache transfer communications
-3. Tensor, Pipeline, and Data parallel communications
-
-### Configuration Options for Inter-Node Communications
-
-The following options control internode communications in vLLM:
-
-#### 1. **Environment Variables:**
-
-- `VLLM_HOST_IP`: Sets the IP address for vLLM processes to communicate on
-
-#### 2. **KV Cache Transfer Configuration:**
-
-- `--kv-ip`: The IP address for KV cache transfer communications (default: 127.0.0.1)
-- `--kv-port`: The port for KV cache transfer communications (default: 14579)
-
-#### 3. **Data Parallel Configuration:**
-
-- `data_parallel_master_ip`: IP of the data parallel master (default: 127.0.0.1)
-- `data_parallel_master_port`: Port of the data parallel master (default: 29500)
-
-### Notes on PyTorch Distributed
-
-vLLM uses PyTorch's distributed features for some internode communication. For
-detailed information about PyTorch Distributed security considerations, please
-refer to the [PyTorch Security
-Guide](https://github.com/pytorch/pytorch/security/policy#using-distributed-features).
-
-Key points from the PyTorch security guide:
-
-- PyTorch Distributed features are intended for internal communication only
-- They are not built for use in untrusted environments or networks
-- No authorization protocol is included for performance reasons
-- Messages are sent unencrypted
-- Connections are accepted from anywhere without checks
-
-### Security Recommendations
-
-#### 1. **Network Isolation:**
-
-- Deploy vLLM nodes on a dedicated, isolated network
-- Use network segmentation to prevent unauthorized access
-- Implement appropriate firewall rules
-
-#### 2. **Configuration Best Practices:**
-
-- Always set `VLLM_HOST_IP` to a specific IP address rather than using defaults
-- Configure firewalls to only allow necessary ports between nodes
-
-#### 3. **Access Control:**
-
-- Restrict physical and network access to the deployment environment
-- Implement proper authentication and authorization for management interfaces
-- Follow the principle of least privilege for all system components
-
-### 4. **Restrict Domains Access for Media URLs:**
-
-Restrict domains that vLLM can access for media URLs by setting
-`--allowed-media-domains` to prevent Server-Side Request Forgery (SSRF) attacks.
-(e.g. `--allowed-media-domains upload.wikimedia.org github.com www.bogotobogo.com`)
-
-Also, consider setting `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0` to prevent HTTP
-redirects from being followed to bypass domain restrictions.
-
-## Security and Firewalls: Protecting Exposed vLLM Systems
-
-While vLLM is designed to allow unsafe network services to be isolated to
-private networks, there are components—such as dependencies and underlying
-frameworks—that may open insecure services listening on all network interfaces,
-sometimes outside of vLLM's direct control.
-
-A major concern is the use of `torch.distributed`, which vLLM leverages for
-distributed communication, including when using vLLM on a single host. When vLLM
-uses TCP initialization (see [PyTorch TCP Initialization
-documentation](https://docs.pytorch.org/docs/stable/distributed.html#tcp-initialization)),
-PyTorch creates a `TCPStore` that, by default, listens on all network
-interfaces. This means that unless additional protections are put in place,
-these services may be accessible to any host that can reach your machine via any
-network interface.
-
-**From a PyTorch perspective, any use of `torch.distributed` should be
-considered insecure by default.** This is a known and intentional behavior from
-the PyTorch team.
-
-### Firewall Configuration Guidance
-
-The best way to protect your vLLM system is to carefully configure a firewall to
-expose only the minimum network surface area necessary. In most cases, this
-means:
-
-- **Block all incoming connections except to the TCP port the API server is
-listening on.**
-
-- Ensure that ports used for internal communication (such as those for
-`torch.distributed` and KV cache transfer) are only accessible from trusted
-hosts or networks.
-
-- Never expose these internal ports to the public internet or untrusted
-networks.
-
-Consult your operating system or application platform documentation for specific
-firewall configuration instructions.
-
-## API Key Authentication Limitations
-
-### Overview
-
-The `--api-key` flag (or `VLLM_API_KEY` environment variable) provides authentication for vLLM's HTTP server, but **only for OpenAI-compatible API endpoints under the `/v1` path prefix**. Many other sensitive endpoints are exposed on the same HTTP server without any authentication enforcement.
-
-**Important:** Do not rely exclusively on `--api-key` for securing access to vLLM. Additional security measures are required for production deployments.
-
-### Protected Endpoints (Require API Key)
-
-When `--api-key` is configured, the following `/v1` endpoints require Bearer token authentication:
-
-- `/v1/models` - List available models
-- `/v1/chat/completions` - Chat completions
-- `/v1/completions` - Text completions
-- `/v1/embeddings` - Generate embeddings
-- `/v1/audio/transcriptions` - Audio transcription
-- `/v1/audio/translations` - Audio translation
-- `/v1/messages` - Anthropic-compatible messages API
-- `/v1/responses` - Response management
-- `/v1/score` - Scoring API
-- `/v1/rerank` - Reranking API
-
-### Unprotected Endpoints (No API Key Required)
-
-The following endpoints **do not require authentication** even when `--api-key` is configured:
-
-**Inference endpoints:**
-
-- `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints)
-- `/inference/v1/generate` - Generate completions
-- `/pooling` - Pooling API
-- `/classify` - Classification API
-- `/score` - Scoring API (non-`/v1` variant)
-- `/rerank` - Reranking API (non-`/v1` variant)
-
-**Operational control endpoints (always enabled):**
-
-- `/pause` - Pause generation (causes denial of service)
-- `/resume` - Resume generation
-- `/scale_elastic_ep` - Trigger scaling operations
-
-**Utility endpoints:**
-
-- `/tokenize` - Tokenize text
-- `/detokenize` - Detokenize tokens
-- `/health` - Health check
-- `/ping` - SageMaker health check
-- `/version` - Version information
-- `/load` - Server load metrics
-
-**Tokenizer information endpoint (only when `--enable-tokenizer-info-endpoint` is set):**
-
-This endpoint is **only available when the `--enable-tokenizer-info-endpoint` flag is set**. It may expose sensitive information such as chat templates and tokenizer configuration:
-
-- `/tokenizer_info` - Get comprehensive tokenizer information including chat templates and configuration
-
-**Development endpoints (only when `VLLM_SERVER_DEV_MODE=1`):**
-
-These endpoints are **only available when the environment variable `VLLM_SERVER_DEV_MODE` is set to `1`**. They are intended for development and debugging purposes and should never be enabled in production:
-
-- `/server_info` - Get detailed server configuration
-- `/reset_prefix_cache` - Reset prefix cache (can disrupt service)
-- `/reset_mm_cache` - Reset multimodal cache (can disrupt service)
-- `/reset_encoder_cache` - Reset encoder cache (can disrupt service)
-- `/sleep` - Put engine to sleep (causes denial of service)
-- `/wake_up` - Wake engine from sleep
-- `/is_sleeping` - Check if engine is sleeping
-- `/collective_rpc` - Execute arbitrary RPC methods on the engine (extremely dangerous)
-
-**Profiler endpoints (only when profiling is enabled via `--profiler-config`):**
-
-These endpoints are only available when profiling is enabled and should only be used for local development:
-
-- `/start_profile` - Start PyTorch profiler
-- `/stop_profile` - Stop PyTorch profiler
-
-**Note:** The `/invocations` endpoint is particularly concerning as it provides unauthenticated access to the same inference capabilities as the protected `/v1` endpoints.
-
-### Security Implications
-
-An attacker who can reach the vLLM HTTP server can:
-
-1. **Bypass authentication** by using non-`/v1` endpoints like `/invocations`, `/inference/v1/generate`, `/pooling`, `/classify`, `/score`, or `/rerank` to run arbitrary inference without credentials
-2. **Cause denial of service** by calling `/pause` or `/scale_elastic_ep` without a token
-3. **Access operational controls** to manipulate server state (e.g., pausing generation)
-4. **If `--enable-tokenizer-info-endpoint` is set:** Access sensitive tokenizer configuration including chat templates, which may reveal prompt engineering strategies or other implementation details
-5. **If `VLLM_SERVER_DEV_MODE=1` is set:** Execute arbitrary RPC commands via `/collective_rpc`, reset caches, put the engine to sleep, and access detailed server configuration
-
-### Recommended Security Practices
-
-#### 1. Minimize Exposed Endpoints
-
-**CRITICAL:** Never set `VLLM_SERVER_DEV_MODE=1` in production environments. Development endpoints expose extremely dangerous functionality including:
-
-- Arbitrary RPC execution via `/collective_rpc`
-- Cache manipulation that can disrupt service
-- Detailed server configuration disclosure
-
-Similarly, never enable profiler endpoints in production.
-
-**Be cautious with `--enable-tokenizer-info-endpoint`:** Only enable the `/tokenizer_info` endpoint if you need to expose tokenizer configuration information. This endpoint reveals chat templates and tokenizer settings that may contain sensitive implementation details or prompt engineering strategies.
-
-#### 2. Deploy Behind a Reverse Proxy
-
-The most effective approach is to deploy vLLM behind a reverse proxy (such as nginx, Envoy, or a Kubernetes Gateway) that:
-
-- Explicitly allowlists only the endpoints you want to expose to end users
-- Blocks all other endpoints, including the unauthenticated inference and operational control endpoints
-- Implements additional authentication, rate limiting, and logging at the proxy layer
-
-## Tool Server and MCP Security
-
-vLLM supports connecting to external tool servers via the `--tool-server` argument. This enables models to call tools through the Responses API (`/v1/responses`). Tool server support works with all models — it is not limited to specific model architectures.
-
-**Important:** No tool servers are enabled by default. They must be explicitly opted into via configuration.
-
-### Built-in Demo Tools (GPT-OSS)
-
-Passing `--tool-server demo` enables built-in demo tools that work with any model that supports tool calling. The tool implementations are not part of vLLM — they are provided by the separately installed [`gpt-oss`](https://github.com/openai/gpt-oss) package. vLLM provides thin wrappers that delegate to `gpt-oss`.
-
-- **Code interpreter** (`python`): Python execution via Docker (via `gpt_oss.tools.python_docker`)
-- **Web browser** (`browser`): Search via Exa API, requires `EXA_API_KEY` (via `gpt_oss.tools.simple_browser`)
-
-#### Code Interpreter (Python Tool) Security Risks
-
-The code interpreter executes model-generated code inside a Docker container. However, the container is **not configured with network isolation by default**. It inherits the host's Docker networking configuration (e.g., default bridge network or `--network=host`), which means:
-
-- The container may be able to access the host network and LAN.
-- Internal services reachable from the container may be exploited via SSRF (Server-Side Request Forgery).
-- Cloud metadata services (e.g., `169.254.169.254`) may be accessible.
-- If vulnerable internal services (such as `torch.distributed` endpoints) are reachable from the container, this could be used to attack them.
-
-This is particularly concerning because the code being executed is generated by the model, which may be influenced by adversarial inputs (prompt injection).
-
-#### Controlling Built-in Tool Availability
-
-Built-in demo tools are controlled by two settings:
-
-1. **`--tool-server demo`**: Enables the built-in demo tools (browser and Python code interpreter).
-
-2. **`VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS`**: When built-in tools are requested via the `mcp` tool type in the Responses API, this comma-separated allowlist controls which tool labels are permitted. Valid values are:
-   - `container` - Container tool
-   - `code_interpreter` - Python code execution tool
-   - `web_search_preview` - Web search/browser tool
-
-   If this variable is not set or is empty, no built-in tools requested via MCP tool type will be enabled.
-
-To disable the Python code interpreter specifically, omit `code_interpreter` from `VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS`.
-
-**Consider a custom implementation**: The GPT-OSS Python tool is a reference implementation. For production deployments, consider implementing a custom code execution sandbox with stricter isolation guarantees. See the [GPT-OSS documentation](https://github.com/openai/gpt-oss?tab=readme-ov-file#python) for guidance.
-
-## Reporting Security Vulnerabilities
-
-If you believe you have found a security vulnerability in vLLM, please report it following the project's security policy. For more information on how to report security issues and the project's security policy, please see the [vLLM Security Policy](https://github.com/vllm-project/vllm/blob/main/SECURITY.md).
+# S
+cur
+ty
+## I
+t
+r-Nod
+ Commu
+
+cat
+o
+
+A
+ commu
+
+cat
+o
+s b
+t
+
+
+ 
+od
+s 
+
+ a mu
+t
+-
+od
+ vLLM d
+p
+oym
+
+t ar
+ **
+
+s
+cur
+ by d
+fau
+t** a
+d must b
+ prot
+ct
+d by p
+ac
+
+g th
+ 
+od
+s o
+ a
+ 
+so
+at
+d 
+
+t
+ork. Th
+s 
+
+c
+ud
+s:
+1. PyTorch D
+str
+but
+d commu
+
+cat
+o
+s
+2. KV cach
+ tra
+sf
+r commu
+
+cat
+o
+s
+3. T
+
+sor, P
+p
+
+
+
+
+, a
+d Data para
+
+
+ commu
+
+cat
+o
+s
+### Co
+f
+gurat
+o
+ Opt
+o
+s for I
+t
+r-Nod
+ Commu
+
+cat
+o
+s
+Th
+ fo
+o
+
+
+g opt
+o
+s co
+tro
+ 
+
+t
+r
+od
+ commu
+
+cat
+o
+s 
+
+ vLLM:
+#### 1. **E
+v
+ro
+m
+
+t Var
+ab
+
+s:**
+- `VLLM_HOST_IP`: S
+ts th
+ IP addr
+ss for vLLM proc
+ss
+s to commu
+
+cat
+ o
+
+#### 2. **KV Cach
+ Tra
+sf
+r Co
+f
+gurat
+o
+:**
+- `--kv-
+p`: Th
+ IP addr
+ss for KV cach
+ tra
+sf
+r commu
+
+cat
+o
+s (d
+fau
+t: 127.0.0.1)
+- `--kv-port`: Th
+ port for KV cach
+ tra
+sf
+r commu
+
+cat
+o
+s (d
+fau
+t: 14579)
+#### 3. **Data Para
+
+
+ Co
+f
+gurat
+o
+:**
+- `data_para
+
+
+_mast
+r_
+p`: IP of th
+ data para
+
+
+ mast
+r (d
+fau
+t: 127.0.0.1)
+- `data_para
+
+
+_mast
+r_port`: Port of th
+ data para
+
+
+ mast
+r (d
+fau
+t: 29500)
+### Not
+s o
+ PyTorch D
+str
+but
+d
+vLLM us
+s PyTorch's d
+str
+but
+d f
+atur
+s for som
+ 
+
+t
+r
+od
+ commu
+
+cat
+o
+. For
+d
+ta
+
+
+d 
+
+format
+o
+ about PyTorch D
+str
+but
+d s
+cur
+ty co
+s
+d
+rat
+o
+s, p
+
+as
+
+r
+f
+r to th
+ [PyTorch S
+cur
+ty
+Gu
+d
+](https://g
+thub.com/pytorch/pytorch/s
+cur
+ty/po
+
+cy#us
+
+g-d
+str
+but
+d-f
+atur
+s).
+K
+y po
+
+ts from th
+ PyTorch s
+cur
+ty gu
+d
+:
+- PyTorch D
+str
+but
+d f
+atur
+s ar
+ 
+
+t
+
+d
+d for 
+
+t
+r
+a
+ commu
+
+cat
+o
+ o
+
+y
+- Th
+y ar
+ 
+ot bu
+
+t for us
+ 
+
+ u
+trust
+d 
+
+v
+ro
+m
+
+ts or 
+
+t
+orks
+- No author
+zat
+o
+ protoco
+ 
+s 
+
+c
+ud
+d for p
+rforma
+c
+ r
+aso
+s
+- M
+ssag
+s ar
+ s
+
+t u
+
+
+crypt
+d
+- Co
+
+ct
+o
+s ar
+ acc
+pt
+d from a
+y
+h
+r
+ 
+
+thout ch
+cks
+### S
+cur
+ty R
+comm
+
+dat
+o
+s
+#### 1. **N
+t
+ork Iso
+at
+o
+:**
+- D
+p
+oy vLLM 
+od
+s o
+ a d
+d
+cat
+d, 
+so
+at
+d 
+
+t
+ork
+- Us
+ 
+
+t
+ork s
+gm
+
+tat
+o
+ to pr
+v
+
+t u
+author
+z
+d acc
+ss
+- Imp
+
+m
+
+t appropr
+at
+ f
+r
+
+a
+ ru
+
+s
+#### 2. **Co
+f
+gurat
+o
+ B
+st Pract
+c
+s:**
+- A
+
+ays s
+t `VLLM_HOST_IP` to a sp
+c
+f
+c IP addr
+ss rath
+r tha
+ us
+
+g d
+fau
+ts
+- Co
+f
+gur
+ f
+r
+
+a
+s to o
+
+y a
+o
+ 
+
+c
+ssary ports b
+t
+
+
+ 
+od
+s
+#### 3. **Acc
+ss Co
+tro
+:**
+- R
+str
+ct phys
+ca
+ a
+d 
+
+t
+ork acc
+ss to th
+ d
+p
+oym
+
+t 
+
+v
+ro
+m
+
+t
+- Imp
+
+m
+
+t prop
+r auth
+
+t
+cat
+o
+ a
+d author
+zat
+o
+ for ma
+ag
+m
+
+t 
+
+t
+rfac
+s
+- Fo
+o
+ th
+ pr
+
+c
+p
+
+ of 
+
+ast pr
+v
+
+
+g
+ for a
+ syst
+m compo
+
+
+ts
+### 4. **R
+str
+ct Doma
+
+s Acc
+ss for M
+d
+a URLs:**
+R
+str
+ct doma
+
+s that vLLM ca
+ acc
+ss for m
+d
+a URLs by s
+tt
+
+g
+`--a
+o
+
+d-m
+d
+a-doma
+
+s` to pr
+v
+
+t S
+rv
+r-S
+d
+ R
+qu
+st Forg
+ry (SSRF) attacks.
+(
+.g. `--a
+o
+
+d-m
+d
+a-doma
+
+s up
+oad.
+
+k
+m
+d
+a.org g
+thub.com 
+.bogotobogo.com`)
+A
+so, co
+s
+d
+r s
+tt
+
+g `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0` to pr
+v
+
+t HTTP
+r
+d
+r
+cts from b
+
+
+g fo
+o
+
+d to bypass doma
+
+ r
+str
+ct
+o
+s.
+## S
+cur
+ty a
+d F
+r
+
+a
+s: Prot
+ct
+
+g Expos
+d vLLM Syst
+ms
+Wh
+
+
+ vLLM 
+s d
+s
+g
+
+d to a
+o
+ u
+saf
+ 
+
+t
+ork s
+rv
+c
+s to b
+ 
+so
+at
+d to
+pr
+vat
+ 
+
+t
+orks, th
+r
+ ar
+ compo
+
+
+ts—such as d
+p
+
+d
+
+c
+
+s a
+d u
+d
+r
+y
+
+g
+fram
+
+orks—that may op
+
+ 
+
+s
+cur
+ s
+rv
+c
+s 
+
+st
+
+
+
+g o
+ a
+ 
+
+t
+ork 
+
+t
+rfac
+s,
+som
+t
+m
+s outs
+d
+ of vLLM's d
+r
+ct co
+tro
+.
+A major co
+c
+r
+ 
+s th
+ us
+ of `torch.d
+str
+but
+d`, 
+h
+ch vLLM 
+
+v
+rag
+s for
+d
+str
+but
+d commu
+
+cat
+o
+, 
+
+c
+ud
+
+g 
+h
+
+ us
+
+g vLLM o
+ a s
+
+g
+
+ host. Wh
+
+ vLLM
+us
+s TCP 
+
+
+t
+a
+
+zat
+o
+ (s
+ [PyTorch TCP I
+
+t
+a
+
+zat
+o
+
+docum
+
+tat
+o
+](https://docs.pytorch.org/docs/stab
+
+/d
+str
+but
+d.htm
+#tcp-
+
+
+t
+a
+
+zat
+o
+)),
+PyTorch cr
+at
+s a `TCPStor
+` that, by d
+fau
+t, 
+
+st
+
+s o
+ a
+ 
+
+t
+ork
+
+
+t
+rfac
+s. Th
+s m
+a
+s that u
+
+
+ss add
+t
+o
+a
+ prot
+ct
+o
+s ar
+ put 
+
+ p
+ac
+,
+th
+s
+ s
+rv
+c
+s may b
+ acc
+ss
+b
+
+ to a
+y host that ca
+ r
+ach your mach
+
+
+ v
+a a
+y
+
+
+t
+ork 
+
+t
+rfac
+.
+**From a PyTorch p
+rsp
+ct
+v
+, a
+y us
+ of `torch.d
+str
+but
+d` shou
+d b
+
+co
+s
+d
+r
+d 
+
+s
+cur
+ by d
+fau
+t.** Th
+s 
+s a k
+o
+
+ a
+d 
+
+t
+
+t
+o
+a
+ b
+hav
+or from
+th
+ PyTorch t
+am.
+### F
+r
+
+a
+ Co
+f
+gurat
+o
+ Gu
+da
+c
+
+Th
+ b
+st 
+ay to prot
+ct your vLLM syst
+m 
+s to car
+fu
+y co
+f
+gur
+ a f
+r
+
+a
+ to
+
+xpos
+ o
+
+y th
+ m
+
+
+mum 
+
+t
+ork surfac
+ ar
+a 
+
+c
+ssary. I
+ most cas
+s, th
+s
+m
+a
+s:
+- **B
+ock a
+ 
+
+com
+
+g co
+
+ct
+o
+s 
+xc
+pt to th
+ TCP port th
+ API s
+rv
+r 
+s
+
+
+st
+
+
+
+g o
+.**
+- E
+sur
+ that ports us
+d for 
+
+t
+r
+a
+ commu
+
+cat
+o
+ (such as thos
+ for
+`torch.d
+str
+but
+d` a
+d KV cach
+ tra
+sf
+r) ar
+ o
+
+y acc
+ss
+b
+
+ from trust
+d
+hosts or 
+
+t
+orks.
+- N
+v
+r 
+xpos
+ th
+s
+ 
+
+t
+r
+a
+ ports to th
+ pub
+
+c 
+
+t
+r
+
+t or u
+trust
+d
+
+
+t
+orks.
+Co
+su
+t your op
+rat
+
+g syst
+m or app
+
+cat
+o
+ p
+atform docum
+
+tat
+o
+ for sp
+c
+f
+c
+f
+r
+
+a
+ co
+f
+gurat
+o
+ 
+
+struct
+o
+s.
+## API K
+y Auth
+
+t
+cat
+o
+ L
+m
+tat
+o
+s
+### Ov
+rv
+
+
+
+Th
+ `--ap
+-k
+y` f
+ag (or `VLLM_API_KEY` 
+
+v
+ro
+m
+
+t var
+ab
+
+) prov
+d
+s auth
+
+t
+cat
+o
+ for vLLM's HTTP s
+rv
+r, but **o
+
+y for Op
+
+AI-compat
+b
+
+ API 
+
+dpo
+
+ts u
+d
+r th
+ `/v1` path pr
+f
+x**. Ma
+y oth
+r s
+
+s
+t
+v
+ 
+
+dpo
+
+ts ar
+ 
+xpos
+d o
+ th
+ sam
+ HTTP s
+rv
+r 
+
+thout a
+y auth
+
+t
+cat
+o
+ 
+
+forc
+m
+
+t.
+**Importa
+t:** Do 
+ot r
+
+y 
+xc
+us
+v
+
+y o
+ `--ap
+-k
+y` for s
+cur
+
+g acc
+ss to vLLM. Add
+t
+o
+a
+ s
+cur
+ty m
+asur
+s ar
+ r
+qu
+r
+d for product
+o
+ d
+p
+oym
+
+ts.
+### Prot
+ct
+d E
+dpo
+
+ts (R
+qu
+r
+ API K
+y)
+Wh
+
+ `--ap
+-k
+y` 
+s co
+f
+gur
+d, th
+ fo
+o
+
+
+g `/v1` 
+
+dpo
+
+ts r
+qu
+r
+ B
+ar
+r tok
+
+ auth
+
+t
+cat
+o
+:
+- `/v1/mod
+
+s` - L
+st ava
+
+ab
+
+ mod
+
+s
+- `/v1/chat/comp
+
+t
+o
+s` - Chat comp
+
+t
+o
+s
+- `/v1/comp
+
+t
+o
+s` - T
+xt comp
+
+t
+o
+s
+- `/v1/
+mb
+dd
+
+gs` - G
+
+
+rat
+ 
+mb
+dd
+
+gs
+- `/v1/aud
+o/tra
+scr
+pt
+o
+s` - Aud
+o tra
+scr
+pt
+o
+
+- `/v1/aud
+o/tra
+s
+at
+o
+s` - Aud
+o tra
+s
+at
+o
+
+- `/v1/m
+ssag
+s` - A
+throp
+c-compat
+b
+
+ m
+ssag
+s API
+- `/v1/r
+spo
+s
+s` - R
+spo
+s
+ ma
+ag
+m
+
+t
+- `/v1/scor
+` - Scor
+
+g API
+- `/v1/r
+ra
+k` - R
+ra
+k
+
+g API
+### U
+prot
+ct
+d E
+dpo
+
+ts (No API K
+y R
+qu
+r
+d)
+Th
+ fo
+o
+
+
+g 
+
+dpo
+
+ts **do 
+ot r
+qu
+r
+ auth
+
+t
+cat
+o
+** 
+v
+
+ 
+h
+
+ `--ap
+-k
+y` 
+s co
+f
+gur
+d:
+**I
+f
+r
+
+c
+ 
+
+dpo
+
+ts:**
+- `/
+
+vocat
+o
+s` - Sag
+Mak
+r-compat
+b
+
+ 
+
+dpo
+
+t (rout
+s to th
+ sam
+ 
+
+f
+r
+
+c
+ fu
+ct
+o
+s as `/v1` 
+
+dpo
+
+ts)
+- `/
+
+f
+r
+
+c
+/v1/g
+
+
+rat
+` - G
+
+
+rat
+ comp
+
+t
+o
+s
+- `/poo
+
+
+g` - Poo
+
+
+g API
+- `/c
+ass
+fy` - C
+ass
+f
+cat
+o
+ API
+- `/scor
+` - Scor
+
+g API (
+o
+-`/v1` var
+a
+t)
+- `/r
+ra
+k` - R
+ra
+k
+
+g API (
+o
+-`/v1` var
+a
+t)
+**Op
+rat
+o
+a
+ co
+tro
+ 
+
+dpo
+
+ts (a
+
+ays 
+
+ab
+
+d):**
+- `/paus
+` - Paus
+ g
+
+
+rat
+o
+ (caus
+s d
+
+
+a
+ of s
+rv
+c
+)
+- `/r
+sum
+` - R
+sum
+ g
+
+
+rat
+o
+
+- `/sca
+
+_
+
+ast
+c_
+p` - Tr
+gg
+r sca
+
+
+g op
+rat
+o
+s
+**Ut
+
+
+ty 
+
+dpo
+
+ts:**
+- `/tok
+
+
+z
+` - Tok
+
+
+z
+ t
+xt
+- `/d
+tok
+
+
+z
+` - D
+tok
+
+
+z
+ tok
+
+s
+- `/h
+a
+th` - H
+a
+th ch
+ck
+- `/p
+
+g` - Sag
+Mak
+r h
+a
+th ch
+ck
+- `/v
+rs
+o
+` - V
+rs
+o
+ 
+
+format
+o
+
+- `/
+oad` - S
+rv
+r 
+oad m
+tr
+cs
+**Tok
+
+
+z
+r 
+
+format
+o
+ 
+
+dpo
+
+t (o
+
+y 
+h
+
+ `--
+
+ab
+
+-tok
+
+
+z
+r-
+
+fo-
+
+dpo
+
+t` 
+s s
+t):**
+Th
+s 
+
+dpo
+
+t 
+s **o
+
+y ava
+
+ab
+
+ 
+h
+
+ th
+ `--
+
+ab
+
+-tok
+
+
+z
+r-
+
+fo-
+
+dpo
+
+t` f
+ag 
+s s
+t**. It may 
+xpos
+ s
+
+s
+t
+v
+ 
+
+format
+o
+ such as chat t
+mp
+at
+s a
+d tok
+
+
+z
+r co
+f
+gurat
+o
+:
+- `/tok
+
+
+z
+r_
+
+fo` - G
+t compr
+h
+
+s
+v
+ tok
+
+
+z
+r 
+
+format
+o
+ 
+
+c
+ud
+
+g chat t
+mp
+at
+s a
+d co
+f
+gurat
+o
+
+**D
+v
+
+opm
+
+t 
+
+dpo
+
+ts (o
+
+y 
+h
+
+ `VLLM_SERVER_DEV_MODE=1`):**
+Th
+s
+ 
+
+dpo
+
+ts ar
+ **o
+
+y ava
+
+ab
+
+ 
+h
+
+ th
+ 
+
+v
+ro
+m
+
+t var
+ab
+
+ `VLLM_SERVER_DEV_MODE` 
+s s
+t to `1`**. Th
+y ar
+ 
+
+t
+
+d
+d for d
+v
+
+opm
+
+t a
+d d
+bugg
+
+g purpos
+s a
+d shou
+d 
+
+v
+r b
+ 
+
+ab
+
+d 
+
+ product
+o
+:
+- `/s
+rv
+r_
+
+fo` - G
+t d
+ta
+
+
+d s
+rv
+r co
+f
+gurat
+o
+
+- `/r
+s
+t_pr
+f
+x_cach
+` - R
+s
+t pr
+f
+x cach
+ (ca
+ d
+srupt s
+rv
+c
+)
+- `/r
+s
+t_mm_cach
+` - R
+s
+t mu
+t
+moda
+ cach
+ (ca
+ d
+srupt s
+rv
+c
+)
+- `/r
+s
+t_
+
+cod
+r_cach
+` - R
+s
+t 
+
+cod
+r cach
+ (ca
+ d
+srupt s
+rv
+c
+)
+- `/s
+
+p` - Put 
+
+g
+
+
+ to s
+
+p (caus
+s d
+
+
+a
+ of s
+rv
+c
+)
+- `/
+ak
+_up` - Wak
+ 
+
+g
+
+
+ from s
+
+p
+- `/
+s_s
+
+p
+
+g` - Ch
+ck 
+f 
+
+g
+
+
+ 
+s s
+
+p
+
+g
+- `/co
+
+ct
+v
+_rpc` - Ex
+cut
+ arb
+trary RPC m
+thods o
+ th
+ 
+
+g
+
+
+ (
+xtr
+m
+
+y da
+g
+rous)
+**Prof
+
+
+r 
+
+dpo
+
+ts (o
+
+y 
+h
+
+ prof
+
+
+
+g 
+s 
+
+ab
+
+d v
+a `--prof
+
+
+r-co
+f
+g`):**
+Th
+s
+ 
+
+dpo
+
+ts ar
+ o
+
+y ava
+
+ab
+
+ 
+h
+
+ prof
+
+
+
+g 
+s 
+
+ab
+
+d a
+d shou
+d o
+
+y b
+ us
+d for 
+oca
+ d
+v
+
+opm
+
+t:
+- `/start_prof
+
+
+` - Start PyTorch prof
+
+
+r
+- `/stop_prof
+
+
+` - Stop PyTorch prof
+
+
+r
+**Not
+:** Th
+ `/
+
+vocat
+o
+s` 
+
+dpo
+
+t 
+s part
+cu
+ar
+y co
+c
+r
+
+
+g as 
+t prov
+d
+s u
+auth
+
+t
+cat
+d acc
+ss to th
+ sam
+ 
+
+f
+r
+
+c
+ capab
+
+
+t
+
+s as th
+ prot
+ct
+d `/v1` 
+
+dpo
+
+ts.
+### S
+cur
+ty Imp
+
+cat
+o
+s
+A
+ attack
+r 
+ho ca
+ r
+ach th
+ vLLM HTTP s
+rv
+r ca
+:
+1. **Bypass auth
+
+t
+cat
+o
+** by us
+
+g 
+o
+-`/v1` 
+
+dpo
+
+ts 
+
+k
+ `/
+
+vocat
+o
+s`, `/
+
+f
+r
+
+c
+/v1/g
+
+
+rat
+`, `/poo
+
+
+g`, `/c
+ass
+fy`, `/scor
+`, or `/r
+ra
+k` to ru
+ arb
+trary 
+
+f
+r
+
+c
+ 
+
+thout cr
+d
+
+t
+a
+s
+2. **Caus
+ d
+
+
+a
+ of s
+rv
+c
+** by ca
+
+
+g `/paus
+` or `/sca
+
+_
+
+ast
+c_
+p` 
+
+thout a tok
+
+
+3. **Acc
+ss op
+rat
+o
+a
+ co
+tro
+s** to ma
+
+pu
+at
+ s
+rv
+r stat
+ (
+.g., paus
+
+g g
+
+
+rat
+o
+)
+4. **If `--
+
+ab
+
+-tok
+
+
+z
+r-
+
+fo-
+
+dpo
+
+t` 
+s s
+t:** Acc
+ss s
+
+s
+t
+v
+ tok
+
+
+z
+r co
+f
+gurat
+o
+ 
+
+c
+ud
+
+g chat t
+mp
+at
+s, 
+h
+ch may r
+v
+a
+ prompt 
+
+g
+
+
+r
+
+g strat
+g
+
+s or oth
+r 
+mp
+
+m
+
+tat
+o
+ d
+ta
+
+s
+5. **If `VLLM_SERVER_DEV_MODE=1` 
+s s
+t:** Ex
+cut
+ arb
+trary RPC comma
+ds v
+a `/co
+
+ct
+v
+_rpc`, r
+s
+t cach
+s, put th
+ 
+
+g
+
+
+ to s
+
+p, a
+d acc
+ss d
+ta
+
+
+d s
+rv
+r co
+f
+gurat
+o
+
+### R
+comm
+
+d
+d S
+cur
+ty Pract
+c
+s
+#### 1. M
+
+
+m
+z
+ Expos
+d E
+dpo
+
+ts
+**CRITICAL:** N
+v
+r s
+t `VLLM_SERVER_DEV_MODE=1` 
+
+ product
+o
+ 
+
+v
+ro
+m
+
+ts. D
+v
+
+opm
+
+t 
+
+dpo
+
+ts 
+xpos
+ 
+xtr
+m
+
+y da
+g
+rous fu
+ct
+o
+a
+
+ty 
+
+c
+ud
+
+g:
+- Arb
+trary RPC 
+x
+cut
+o
+ v
+a `/co
+
+ct
+v
+_rpc`
+- Cach
+ ma
+
+pu
+at
+o
+ that ca
+ d
+srupt s
+rv
+c
+
+- D
+ta
+
+
+d s
+rv
+r co
+f
+gurat
+o
+ d
+sc
+osur
+
+S
+m
+
+ar
+y, 
+
+v
+r 
+
+ab
+
+ prof
+
+
+r 
+
+dpo
+
+ts 
+
+ product
+o
+.
+**B
+ caut
+ous 
+
+th `--
+
+ab
+
+-tok
+
+
+z
+r-
+
+fo-
+
+dpo
+
+t`:** O
+
+y 
+
+ab
+
+ th
+ `/tok
+
+
+z
+r_
+
+fo` 
+
+dpo
+
+t 
+f you 
+
+d to 
+xpos
+ tok
+
+
+z
+r co
+f
+gurat
+o
+ 
+
+format
+o
+. Th
+s 
+
+dpo
+
+t r
+v
+a
+s chat t
+mp
+at
+s a
+d tok
+
+
+z
+r s
+tt
+
+gs that may co
+ta
+
+ s
+
+s
+t
+v
+ 
+mp
+
+m
+
+tat
+o
+ d
+ta
+
+s or prompt 
+
+g
+
+
+r
+
+g strat
+g
+
+s.
+#### 2. D
+p
+oy B
+h
+
+d a R
+v
+rs
+ Proxy
+Th
+ most 
+ff
+ct
+v
+ approach 
+s to d
+p
+oy vLLM b
+h
+
+d a r
+v
+rs
+ proxy (such as 
+g
+
+x, E
+voy, or a Kub
+r
+
+t
+s Gat
+
+ay) that:
+- Exp
+
+c
+t
+y a
+o
+
+
+sts o
+
+y th
+ 
+
+dpo
+
+ts you 
+a
+t to 
+xpos
+ to 
+
+d us
+rs
+- B
+ocks a
+ oth
+r 
+
+dpo
+
+ts, 
+
+c
+ud
+
+g th
+ u
+auth
+
+t
+cat
+d 
+
+f
+r
+
+c
+ a
+d op
+rat
+o
+a
+ co
+tro
+ 
+
+dpo
+
+ts
+- Imp
+
+m
+
+ts add
+t
+o
+a
+ auth
+
+t
+cat
+o
+, rat
+ 
+
+m
+t
+
+g, a
+d 
+ogg
+
+g at th
+ proxy 
+ay
+r
+## Too
+ S
+rv
+r a
+d MCP S
+cur
+ty
+vLLM supports co
+
+ct
+
+g to 
+xt
+r
+a
+ too
+ s
+rv
+rs v
+a th
+ `--too
+-s
+rv
+r` argum
+
+t. Th
+s 
+
+ab
+
+s mod
+
+s to ca
+ too
+s through th
+ R
+spo
+s
+s API (`/v1/r
+spo
+s
+s`). Too
+ s
+rv
+r support 
+orks 
+
+th a
+ mod
+
+s — 
+t 
+s 
+ot 
+
+m
+t
+d to sp
+c
+f
+c mod
+
+ arch
+t
+ctur
+s.
+**Importa
+t:** No too
+ s
+rv
+rs ar
+ 
+
+ab
+
+d by d
+fau
+t. Th
+y must b
+ 
+xp
+
+c
+t
+y opt
+d 
+
+to v
+a co
+f
+gurat
+o
+.
+### Bu
+
+t-
+
+ D
+mo Too
+s (GPT-OSS)
+Pass
+
+g `--too
+-s
+rv
+r d
+mo` 
+
+ab
+
+s bu
+
+t-
+
+ d
+mo too
+s that 
+ork 
+
+th a
+y mod
+
+ that supports too
+ ca
+
+
+g. Th
+ too
+ 
+mp
+
+m
+
+tat
+o
+s ar
+ 
+ot part of vLLM — th
+y ar
+ prov
+d
+d by th
+ s
+parat
+
+y 
+
+sta
+
+d [`gpt-oss`](https://g
+thub.com/op
+
+a
+/gpt-oss) packag
+. vLLM prov
+d
+s th
+
+ 
+rapp
+rs that d
+
+
+gat
+ to `gpt-oss`.
+- **Cod
+ 
+
+t
+rpr
+t
+r** (`pytho
+`): Pytho
+ 
+x
+cut
+o
+ v
+a Dock
+r (v
+a `gpt_oss.too
+s.pytho
+_dock
+r`)
+- **W
+b bro
+s
+r** (`bro
+s
+r`): S
+arch v
+a Exa API, r
+qu
+r
+s `EXA_API_KEY` (v
+a `gpt_oss.too
+s.s
+mp
+
+_bro
+s
+r`)
+#### Cod
+ I
+t
+rpr
+t
+r (Pytho
+ Too
+) S
+cur
+ty R
+sks
+Th
+ cod
+ 
+
+t
+rpr
+t
+r 
+x
+cut
+s mod
+
+-g
+
+
+rat
+d cod
+ 
+
+s
+d
+ a Dock
+r co
+ta
+
+
+r. Ho
+
+v
+r, th
+ co
+ta
+
+
+r 
+s **
+ot co
+f
+gur
+d 
+
+th 
+
+t
+ork 
+so
+at
+o
+ by d
+fau
+t**. It 
+
+h
+r
+ts th
+ host's Dock
+r 
+
+t
+ork
+
+g co
+f
+gurat
+o
+ (
+.g., d
+fau
+t br
+dg
+ 
+
+t
+ork or `--
+
+t
+ork=host`), 
+h
+ch m
+a
+s:
+- Th
+ co
+ta
+
+
+r may b
+ ab
+
+ to acc
+ss th
+ host 
+
+t
+ork a
+d LAN.
+- I
+t
+r
+a
+ s
+rv
+c
+s r
+achab
+
+ from th
+ co
+ta
+
+
+r may b
+ 
+xp
+o
+t
+d v
+a SSRF (S
+rv
+r-S
+d
+ R
+qu
+st Forg
+ry).
+- C
+oud m
+tadata s
+rv
+c
+s (
+.g., `169.254.169.254`) may b
+ acc
+ss
+b
+
+.
+- If vu
+
+
+rab
+
+ 
+
+t
+r
+a
+ s
+rv
+c
+s (such as `torch.d
+str
+but
+d` 
+
+dpo
+
+ts) ar
+ r
+achab
+
+ from th
+ co
+ta
+
+
+r, th
+s cou
+d b
+ us
+d to attack th
+m.
+Th
+s 
+s part
+cu
+ar
+y co
+c
+r
+
+
+g b
+caus
+ th
+ cod
+ b
+
+
+g 
+x
+cut
+d 
+s g
+
+
+rat
+d by th
+ mod
+
+, 
+h
+ch may b
+ 
+
+f
+u
+
+c
+d by adv
+rsar
+a
+ 
+
+puts (prompt 
+
+j
+ct
+o
+).
+#### Co
+tro
+
+
+g Bu
+
+t-
+
+ Too
+ Ava
+
+ab
+
+
+ty
+Bu
+
+t-
+
+ d
+mo too
+s ar
+ co
+tro
+
+d by t
+o s
+tt
+
+gs:
+1. **`--too
+-s
+rv
+r d
+mo`**: E
+ab
+
+s th
+ bu
+
+t-
+
+ d
+mo too
+s (bro
+s
+r a
+d Pytho
+ cod
+ 
+
+t
+rpr
+t
+r).
+2. **`VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS`**: Wh
+
+ bu
+
+t-
+
+ too
+s ar
+ r
+qu
+st
+d v
+a th
+ `mcp` too
+ typ
+ 
+
+ th
+ R
+spo
+s
+s API, th
+s comma-s
+parat
+d a
+o
+
+
+st co
+tro
+s 
+h
+ch too
+ 
+ab
+
+s ar
+ p
+rm
+tt
+d. Va
+
+d va
+u
+s ar
+:
+   - `co
+ta
+
+
+r` - Co
+ta
+
+
+r too
+
+   - `cod
+_
+
+t
+rpr
+t
+r` - Pytho
+ cod
+ 
+x
+cut
+o
+ too
+
+   - `
+
+b_s
+arch_pr
+v
+
+
+` - W
+b s
+arch/bro
+s
+r too
+
+   If th
+s var
+ab
+
+ 
+s 
+ot s
+t or 
+s 
+mpty, 
+o bu
+
+t-
+
+ too
+s r
+qu
+st
+d v
+a MCP too
+ typ
+ 
+
+
+ b
+ 
+
+ab
+
+d.
+To d
+sab
+
+ th
+ Pytho
+ cod
+ 
+
+t
+rpr
+t
+r sp
+c
+f
+ca
+y, om
+t `cod
+_
+
+t
+rpr
+t
+r` from `VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS`.
+**Co
+s
+d
+r a custom 
+mp
+
+m
+
+tat
+o
+**: Th
+ GPT-OSS Pytho
+ too
+ 
+s a r
+f
+r
+
+c
+ 
+mp
+
+m
+
+tat
+o
+. For product
+o
+ d
+p
+oym
+
+ts, co
+s
+d
+r 
+mp
+
+m
+
+t
+
+g a custom cod
+ 
+x
+cut
+o
+ sa
+dbox 
+
+th str
+ct
+r 
+so
+at
+o
+ guara
+t
+s. S
+ th
+ [GPT-OSS docum
+
+tat
+o
+](https://g
+thub.com/op
+
+a
+/gpt-oss?tab=r
+adm
+-ov-f
+
+
+#pytho
+) for gu
+da
+c
+.
+## R
+port
+
+g S
+cur
+ty Vu
+
+
+rab
+
+
+t
+
+s
+If you b
+
+
+
+v
+ you hav
+ fou
+d a s
+cur
+ty vu
+
+
+rab
+
+
+ty 
+
+ vLLM, p
+
+as
+ r
+port 
+t fo
+o
+
+
+g th
+ proj
+ct's s
+cur
+ty po
+
+cy. For mor
+ 
+
+format
+o
+ o
+ ho
+ to r
+port s
+cur
+ty 
+ssu
+s a
+d th
+ proj
+ct's s
+cur
+ty po
+
+cy, p
+
+as
+ s
+ th
+ [vLLM S
+cur
+ty Po
+
+cy](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/SECURITY.md).

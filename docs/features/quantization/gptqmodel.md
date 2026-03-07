@@ -1,99 +1,867 @@
-# GPTQModel
+# GPTQMod
 
-To create a new 4-bit or 8-bit GPTQ quantized model, you can leverage [GPTQModel](https://github.com/ModelCloud/GPTQModel) from ModelCloud.AI.
 
-Quantization reduces the model's precision from BF16/FP16 (16-bits) to INT4 (4-bits) or INT8 (8-bits) which significantly reduces the
-total model memory footprint while at-the-same-time increasing inference performance.
+To cr
+at
+ a 
 
-Compatible GPTQModel quantized models can leverage the `Marlin` and `Machete` vLLM custom kernels to maximize batching
-transactions-per-second `tps` and token-latency performance for both Ampere (A100+) and Hopper (H100+) Nvidia GPUs.
-These two kernels are highly optimized by vLLM and NeuralMagic (now part of Redhat) to allow world-class inference performance of quantized GPTQ
-models.
 
-GPTQModel is one of the few quantization toolkits in the world that allows `Dynamic` per-module quantization where different layers and/or modules within a llm model can be further optimized with custom quantization parameters. `Dynamic` quantization
-is fully integrated into vLLM and backed up by support from the ModelCloud.AI team. Please refer to [GPTQModel readme](https://github.com/ModelCloud/GPTQModel?tab=readme-ov-file#dynamic-quantization-per-module-quantizeconfig-override)
-for more details on this and other advanced features.
+ 4-b
+t or 8-b
+t GPTQ qua
+t
+z
+d mod
 
-## Installation
+, you ca
+ 
 
-You can quantize your own models by installing [GPTQModel](https://github.com/ModelCloud/GPTQModel) or picking one of the [5000+ models on Huggingface](https://huggingface.co/models?search=gptq).
+v
+rag
+ [GPTQMod
 
+](https://g
+thub.com/Mod
+
+C
+oud/GPTQMod
+
+) from Mod
+
+C
+oud.AI.
+Qua
+t
+zat
+o
+ r
+duc
+s th
+ mod
+
+'s pr
+c
+s
+o
+ from BF16/FP16 (16-b
+ts) to INT4 (4-b
+ts) or INT8 (8-b
+ts) 
+h
+ch s
+g
+
+f
+ca
+t
+y r
+duc
+s th
+
+tota
+ mod
+
+ m
+mory footpr
+
+t 
+h
+
+
+ at-th
+-sam
+-t
+m
+ 
+
+cr
+as
+
+g 
+
+f
+r
+
+c
+ p
+rforma
+c
+.
+Compat
+b
+
+ GPTQMod
+
+ qua
+t
+z
+d mod
+
+s ca
+ 
+
+v
+rag
+ th
+ `Mar
+
+
+` a
+d `Mach
+t
+` vLLM custom k
+r
+
+
+s to max
+m
+z
+ batch
+
+g
+tra
+sact
+o
+s-p
+r-s
+co
+d `tps` a
+d tok
+
+-
+at
+
+cy p
+rforma
+c
+ for both Amp
+r
+ (A100+) a
+d Hopp
+r (H100+) Nv
+d
+a GPUs.
+Th
+s
+ t
+o k
+r
+
+
+s ar
+ h
+gh
+y opt
+m
+z
+d by vLLM a
+d N
+ura
+Mag
+c (
+o
+ part of R
+dhat) to a
+o
+ 
+or
+d-c
+ass 
+
+f
+r
+
+c
+ p
+rforma
+c
+ of qua
+t
+z
+d GPTQ
+mod
+
+s.
+GPTQMod
+
+ 
+s o
+
+ of th
+ f
+
+ qua
+t
+zat
+o
+ too
+k
+ts 
+
+ th
+ 
+or
+d that a
+o
+s `Dy
+am
+c` p
+r-modu
+
+ qua
+t
+zat
+o
+ 
+h
+r
+ d
+ff
+r
+
+t 
+ay
+rs a
+d/or modu
+
+s 
+
+th
+
+ a 
+m mod
+
+ ca
+ b
+ furth
+r opt
+m
+z
+d 
+
+th custom qua
+t
+zat
+o
+ param
+t
+rs. `Dy
+am
+c` qua
+t
+zat
+o
+
+
+s fu
+y 
+
+t
+grat
+d 
+
+to vLLM a
+d back
+d up by support from th
+ Mod
+
+C
+oud.AI t
+am. P
+
+as
+ r
+f
+r to [GPTQMod
+
+ r
+adm
+](https://g
+thub.com/Mod
+
+C
+oud/GPTQMod
+
+?tab=r
+adm
+-ov-f
+
+
+#dy
+am
+c-qua
+t
+zat
+o
+-p
+r-modu
+
+-qua
+t
+z
+co
+f
+g-ov
+rr
+d
+)
+for mor
+ d
+ta
+
+s o
+ th
+s a
+d oth
+r adva
+c
+d f
+atur
+s.
+## I
+sta
+at
+o
+
+You ca
+ qua
+t
+z
+ your o
+
+ mod
+
+s by 
+
+sta
+
+
+g [GPTQMod
+
+](https://g
+thub.com/Mod
+
+C
+oud/GPTQMod
+
+) or p
+ck
+
+g o
+
+ of th
+ [5000+ mod
+
+s o
+ Hugg
+
+gfac
+](https://hugg
+
+gfac
+.co/mod
+
+s?s
+arch=gptq).
 ```bash
-pip install -U gptqmodel --no-build-isolation -v
+p
+p 
+
+sta
+ -U gptqmod
+
+ --
+o-bu
+
+d-
+so
+at
+o
+ -v
 ```
+## Qua
+t
+z
 
-## Quantizing a model
+g a mod
 
-After installing GPTQModel, you are ready to quantize a model. Please refer to the [GPTQModel readme](https://github.com/ModelCloud/GPTQModel/?tab=readme-ov-file#quantization) for further details.
 
-Here is an example of how to quantize `meta-llama/Llama-3.2-1B-Instruct`:
+Aft
+r 
 
-??? code
+sta
 
-    ```python
-    from datasets import load_dataset
-    from gptqmodel import GPTQModel, QuantizeConfig
 
-    model_id = "meta-llama/Llama-3.2-1B-Instruct"
-    quant_path = "Llama-3.2-1B-Instruct-gptqmodel-4bit"
+g GPTQMod
 
-    calibration_dataset = load_dataset(
-        "allenai/c4",
-        data_files="en/c4-train.00001-of-01024.json.gz",
-        split="train",
-    ).select(range(1024))["text"]
+, you ar
+ r
+ady to qua
+t
+z
+ a mod
 
-    quant_config = QuantizeConfig(bits=4, group_size=128)
+. P
 
-    model = GPTQModel.load(model_id, quant_config)
+as
+ r
+f
+r to th
+ [GPTQMod
 
-    # increase `batch_size` to match gpu/vram specs to speed up quantization
-    model.quantize(calibration_dataset, batch_size=2)
+ r
+adm
+](https://g
+thub.com/Mod
 
-    model.save(quant_path)
+C
+oud/GPTQMod
+
+/?tab=r
+adm
+-ov-f
+
+
+#qua
+t
+zat
+o
+) for furth
+r d
+ta
+
+s.
+H
+r
+ 
+s a
+ 
+xamp
+
+ of ho
+ to qua
+t
+z
+ `m
+ta-
+ama/L
+ama-3.2-1B-I
+struct`:
+??? cod
+
+    ```pytho
+
+    from datas
+ts 
+mport 
+oad_datas
+t
+    from gptqmod
+
+ 
+mport GPTQMod
+
+, Qua
+t
+z
+Co
+f
+g
+    mod
+
+_
+d = "m
+ta-
+ama/L
+ama-3.2-1B-I
+struct"
+    qua
+t_path = "L
+ama-3.2-1B-I
+struct-gptqmod
+
+-4b
+t"
+    ca
+
+brat
+o
+_datas
+t = 
+oad_datas
+t(
+        "a
+
+
+a
+/c4",
+        data_f
+
+
+s="
+
+/c4-tra
+
+.00001-of-01024.jso
+.gz",
+        sp
+
+t="tra
+
+",
+    ).s
+
+
+ct(ra
+g
+(1024))["t
+xt"]
+    qua
+t_co
+f
+g = Qua
+t
+z
+Co
+f
+g(b
+ts=4, group_s
+z
+=128)
+    mod
+
+ = GPTQMod
+
+.
+oad(mod
+
+_
+d, qua
+t_co
+f
+g)
+    # 
+
+cr
+as
+ `batch_s
+z
+` to match gpu/vram sp
+cs to sp
+d up qua
+t
+zat
+o
+
+    mod
+
+.qua
+t
+z
+(ca
+
+brat
+o
+_datas
+t, batch_s
+z
+=2)
+    mod
+
+.sav
+(qua
+t_path)
     ```
+## Ru
 
-## Running a quantized model with vLLM
 
-To run an GPTQModel quantized model with vLLM, you can use [DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2](https://huggingface.co/ModelCloud/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2) with the following command:
+g a qua
+t
+z
+d mod
 
+ 
+
+th vLLM
+To ru
+ a
+ GPTQMod
+
+ qua
+t
+z
+d mod
+
+ 
+
+th vLLM, you ca
+ us
+ [D
+pS
+k-R1-D
+st
+
+-Q
+
+
+-7B-gptqmod
+
+-4b
+t-vort
+x-v2](https://hugg
+
+gfac
+.co/Mod
+
+C
+oud/D
+pS
+k-R1-D
+st
+
+-Q
+
+
+-7B-gptqmod
+
+-4b
+t-vort
+x-v2) 
+
+th th
+ fo
+o
+
+
+g comma
+d:
 ```bash
-python examples/offline_inference/llm_engine_example.py \
-    --model ModelCloud/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2
+pytho
+ 
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/
+m_
+
+g
+
+
+_
+xamp
+
+.py \
+    --mod
+
+ Mod
+
+C
+oud/D
+pS
+k-R1-D
+st
+
+-Q
+
+
+-7B-gptqmod
+
+-4b
+t-vort
+x-v2
 ```
+## Us
 
-## Using GPTQModel with vLLM's Python API
+g GPTQMod
 
-GPTQModel quantized models are also supported directly through the LLM entrypoint:
+ 
 
-??? code
+th vLLM's Pytho
+ API
+GPTQMod
 
-    ```python
-    from vllm import LLM, SamplingParams
+ qua
+t
+z
+d mod
 
-    # Sample prompts.
+s ar
+ a
+so support
+d d
+r
+ct
+y through th
+ LLM 
+
+trypo
+
+t:
+??? cod
+
+    ```pytho
+
+    from v
+m 
+mport LLM, Samp
+
+
+gParams
+    # Samp
+
+ prompts.
     prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
+        "H
+
+o, my 
+am
+ 
+s",
+        "Th
+ pr
+s
+d
+
+t of th
+ U
+
+t
+d Stat
+s 
+s",
+        "Th
+ cap
+ta
+ of Fra
+c
+ 
+s",
+        "Th
+ futur
+ of AI 
+s",
     ]
+    # Cr
+at
+ a samp
 
-    # Create a sampling params object.
-    sampling_params = SamplingParams(temperature=0.6, top_p=0.9)
 
-    # Create an LLM.
-    llm = LLM(model="ModelCloud/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2")
+g params obj
+ct.
+    samp
 
-    # Generate texts from the prompts. The output is a list of RequestOutput objects
-    # that contain the prompt, generated text, and other information.
-    outputs = llm.generate(prompts, sampling_params)
 
-    # Print the outputs.
-    print("-"*50)
-    for output in outputs:
+g_params = Samp
+
+
+gParams(t
+mp
+ratur
+=0.6, top_p=0.9)
+    # Cr
+at
+ a
+ LLM.
+    
+m = LLM(mod
+
+="Mod
+
+C
+oud/D
+pS
+k-R1-D
+st
+
+-Q
+
+
+-7B-gptqmod
+
+-4b
+t-vort
+x-v2")
+    # G
+
+
+rat
+ t
+xts from th
+ prompts. Th
+ output 
+s a 
+
+st of R
+qu
+stOutput obj
+cts
+    # that co
+ta
+
+ th
+ prompt, g
+
+
+rat
+d t
+xt, a
+d oth
+r 
+
+format
+o
+.
+    outputs = 
+m.g
+
+
+rat
+(prompts, samp
+
+
+g_params)
+    # Pr
+
+t th
+ outputs.
+    pr
+
+t("-"*50)
+    for output 
+
+ outputs:
         prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
-        print("-"*50)
+        g
+
+
+rat
+d_t
+xt = output.outputs[0].t
+xt
+        pr
+
+t(f"Prompt: {prompt!r}\
+G
+
+
+rat
+d t
+xt: {g
+
+
+rat
+d_t
+xt!r}")
+        pr
+
+t("-"*50)
     ```

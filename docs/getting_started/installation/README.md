@@ -1,19 +1,141 @@
-# Installation
+# I
+sta
+at
+o
 
-vLLM supports the following hardware platforms:
+vLLM supports th
+ fo
+o
 
+
+g hard
+ar
+ p
+atforms:
 - [GPU](gpu.md)
-    - [NVIDIA CUDA](gpu.md#nvidia-cuda)
+    - [NVIDIA CUDA](gpu.md#
+v
+d
+a-cuda)
     - [AMD ROCm](gpu.md#amd-rocm)
-    - [Intel XPU](gpu.md#intel-xpu)
+    - [I
+t
+
+ XPU](gpu.md#
+
+t
+
+-xpu)
 - [CPU](cpu.md)
-    - [Intel/AMD x86](cpu.md#intelamd-x86)
+    - [I
+t
+
+/AMD x86](cpu.md#
+
+t
+
+amd-x86)
     - [ARM AArch64](cpu.md#arm-aarch64)
-    - [Apple silicon](cpu.md#apple-silicon)
-    - [IBM Z (S390X)](cpu.md#ibm-z-s390x)
+    - [App
 
-## Hardware Plugins
+ s
 
-vLLM supports third-party hardware plugins that live **outside** the main `vllm` repository. These follow the [Hardware-Pluggable RFC](../../design/plugin_system.md).
 
-A list of all supported hardware can be found on the [vllm.ai website](https://vllm.ai/#hardware). If you want to add new hardware, please contact us on [Slack](https://slack.vllm.ai/) or [Email](mailto:collaboration@vllm.ai).
+co
+](cpu.md#app
+
+-s
+
+
+co
+)
+    - [IBM Z (S390X)](cpu.md#
+bm-z-s390x)
+## Hard
+ar
+ P
+ug
+
+s
+vLLM supports th
+rd-party hard
+ar
+ p
+ug
+
+s that 
+
+v
+ **outs
+d
+** th
+ ma
+
+ `v
+m` r
+pos
+tory. Th
+s
+ fo
+o
+ th
+ [Hard
+ar
+-P
+uggab
+
+ RFC](../../d
+s
+g
+/p
+ug
+
+_syst
+m.md).
+A 
+
+st of a
+ support
+d hard
+ar
+ ca
+ b
+ fou
+d o
+ th
+ [v
+m.a
+ 
+
+bs
+t
+](https://v
+m.a
+/#hard
+ar
+). If you 
+a
+t to add 
+
+
+ hard
+ar
+, p
+
+as
+ co
+tact us o
+ [S
+ack](https://s
+ack.v
+m.a
+/) or [Ema
+
+](ma
+
+to:co
+aborat
+o
+@v
+m.a
+).

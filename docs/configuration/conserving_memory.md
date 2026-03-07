@@ -1,185 +1,1533 @@
-# Conserving Memory
+# Co
+s
+rv
 
-Large models might cause your machine to run out of memory (OOM). Here are some options that help alleviate this problem.
+g M
+mory
+Larg
+ mod
 
-## Tensor Parallelism (TP)
+s m
+ght caus
+ your mach
 
-Tensor parallelism (`tensor_parallel_size` option) can be used to split the model across multiple GPUs.
 
-The following code splits the model across 2 GPUs.
+ to ru
+ out of m
+mory (OOM). H
+r
+ ar
+ som
+ opt
+o
+s that h
 
-```python
-from vllm import LLM
+p a
 
-llm = LLM(model="ibm-granite/granite-3.1-8b-instruct", tensor_parallel_size=2)
+v
+at
+ th
+s prob
+
+m.
+## T
+
+sor Para
+
+
+
+sm (TP)
+T
+
+sor para
+
+
+
+sm (`t
+
+sor_para
+
+
+_s
+z
+` opt
+o
+) ca
+ b
+ us
+d to sp
+
+t th
+ mod
+
+ across mu
+t
+p
+
+ GPUs.
+Th
+ fo
+o
+
+
+g cod
+ sp
+
+ts th
+ mod
+
+ across 2 GPUs.
+```pytho
+
+from v
+m 
+mport LLM
+
+m = LLM(mod
+
+="
+bm-gra
+
+t
+/gra
+
+t
+-3.1-8b-
+
+struct", t
+
+sor_para
+
+
+_s
+z
+=2)
 ```
+!!! 
+ar
 
-!!! warning
-    To ensure that vLLM initializes CUDA correctly, you should avoid calling related functions (e.g. [torch.cuda.set_device][])
-    before initializing vLLM. Otherwise, you may run into an error like `RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
 
-    To control which devices are used, please instead set the `CUDA_VISIBLE_DEVICES` environment variable.
+g
+    To 
 
-!!! note
-    With tensor parallelism enabled, each process will read the whole model and split it into chunks, which makes the disk reading time even longer (proportional to the size of tensor parallelism).
+sur
+ that vLLM 
 
-    You can convert the model checkpoint to a sharded checkpoint using [examples/offline_inference/save_sharded_state.py](../../examples/offline_inference/save_sharded_state.py). The conversion process might take some time, but later you can load the sharded checkpoint much faster. The model loading time should remain constant regardless of the size of tensor parallelism.
 
-## Quantization
+t
+a
 
-Quantized models take less memory at the cost of lower precision.
+z
+s CUDA corr
+ct
+y, you shou
+d avo
+d ca
 
-Statically quantized models can be downloaded from HF Hub (some popular ones are available at [Red Hat AI](https://huggingface.co/RedHatAI))
-and used directly without extra configuration.
 
-Dynamic quantization is also supported via the `quantization` option -- see [here](../features/quantization/README.md) for more details.
+g r
 
-## Context length and batch size
+at
+d fu
+ct
+o
+s (
+.g. [torch.cuda.s
+t_d
+v
+c
+][])
+    b
+for
+ 
 
-You can further reduce memory usage by limiting the context length of the model (`max_model_len` option)
-and the maximum batch size (`max_num_seqs` option).
 
-```python
-from vllm import LLM
+t
+a
 
-llm = LLM(model="adept/fuyu-8b", max_model_len=2048, max_num_seqs=2)
+z
+
+g vLLM. Oth
+r
+
+s
+, you may ru
+ 
+
+to a
+ 
+rror 
+
+k
+ `Ru
+t
+m
+Error: Ca
+ot r
+-
+
+
+t
+a
+
+z
+ CUDA 
+
+ fork
+d subproc
+ss`.
+    To co
+tro
+ 
+h
+ch d
+v
+c
+s ar
+ us
+d, p
+
+as
+ 
+
+st
+ad s
+t th
+ `CUDA_VISIBLE_DEVICES` 
+
+v
+ro
+m
+
+t var
+ab
+
+.
+!!! 
+ot
+
+    W
+th t
+
+sor para
+
+
+
+sm 
+
+ab
+
+d, 
+ach proc
+ss 
+
+
+ r
+ad th
+ 
+ho
+
+ mod
+
+ a
+d sp
+
+t 
+t 
+
+to chu
+ks, 
+h
+ch mak
+s th
+ d
+sk r
+ad
+
+g t
+m
+ 
+v
+
+ 
+o
+g
+r (proport
+o
+a
+ to th
+ s
+z
+ of t
+
+sor para
+
+
+
+sm).
+    You ca
+ co
+v
+rt th
+ mod
+
+ ch
+ckpo
+
+t to a shard
+d ch
+ckpo
+
+t us
+
+g [
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/sav
+_shard
+d_stat
+.py](../../
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/sav
+_shard
+d_stat
+.py). Th
+ co
+v
+rs
+o
+ proc
+ss m
+ght tak
+ som
+ t
+m
+, but 
+at
+r you ca
+ 
+oad th
+ shard
+d ch
+ckpo
+
+t much fast
+r. Th
+ mod
+
+ 
+oad
+
+g t
+m
+ shou
+d r
+ma
+
+ co
+sta
+t r
+gard
+
+ss of th
+ s
+z
+ of t
+
+sor para
+
+
+
+sm.
+## Qua
+t
+zat
+o
+
+Qua
+t
+z
+d mod
+
+s tak
+ 
+
+ss m
+mory at th
+ cost of 
+o
+
+r pr
+c
+s
+o
+.
+Stat
+ca
+y qua
+t
+z
+d mod
+
+s ca
+ b
+ do
+
+
+oad
+d from HF Hub (som
+ popu
+ar o
+
+s ar
+ ava
+
+ab
+
+ at [R
+d Hat AI](https://hugg
+
+gfac
+.co/R
+dHatAI))
+a
+d us
+d d
+r
+ct
+y 
+
+thout 
+xtra co
+f
+gurat
+o
+.
+Dy
+am
+c qua
+t
+zat
+o
+ 
+s a
+so support
+d v
+a th
+ `qua
+t
+zat
+o
+` opt
+o
+ -- s
+ [h
+r
+](../f
+atur
+s/qua
+t
+zat
+o
+/README.md) for mor
+ d
+ta
+
+s.
+## Co
+t
+xt 
+
+
+gth a
+d batch s
+z
+
+You ca
+ furth
+r r
+duc
+ m
+mory usag
+ by 
+
+m
+t
+
+g th
+ co
+t
+xt 
+
+
+gth of th
+ mod
+
+ (`max_mod
+
+_
+
+
+` opt
+o
+)
+a
+d th
+ max
+mum batch s
+z
+ (`max_
+um_s
+qs` opt
+o
+).
+```pytho
+
+from v
+m 
+mport LLM
+
+m = LLM(mod
+
+="ad
+pt/fuyu-8b", max_mod
+
+_
+
+
+=2048, max_
+um_s
+qs=2)
 ```
+## R
+duc
+ CUDA Graphs
+By d
+fau
+t, 
 
-## Reduce CUDA Graphs
+ opt
+m
+z
+ mod
 
-By default, we optimize model inference using CUDA graphs which take up extra memory in the GPU.
+ 
 
-You can adjust `compilation_config` to achieve a better balance between inference speed and memory usage:
+f
+r
 
-??? code
+c
+ us
 
-    ```python
-    from vllm import LLM
-    from vllm.config import CompilationConfig, CompilationMode
+g CUDA graphs 
+h
+ch tak
+ up 
+xtra m
+mory 
 
-    llm = LLM(
-        model="meta-llama/Llama-3.1-8B-Instruct",
-        compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-            # By default, it goes up to max_num_seqs
-            cudagraph_capture_sizes=[1, 2, 4, 8, 16],
+ th
+ GPU.
+You ca
+ adjust `comp
+
+at
+o
+_co
+f
+g` to ach
+
+v
+ a b
+tt
+r ba
+a
+c
+ b
+t
+
+
+ 
+
+f
+r
+
+c
+ sp
+d a
+d m
+mory usag
+:
+??? cod
+
+    ```pytho
+
+    from v
+m 
+mport LLM
+    from v
+m.co
+f
+g 
+mport Comp
+
+at
+o
+Co
+f
+g, Comp
+
+at
+o
+Mod
+
+    
+m = LLM(
+        mod
+
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct",
+        comp
+
+at
+o
+_co
+f
+g=Comp
+
+at
+o
+Co
+f
+g(
+            mod
+=Comp
+
+at
+o
+Mod
+.VLLM_COMPILE,
+            # By d
+fau
+t, 
+t go
+s up to max_
+um_s
+qs
+            cudagraph_captur
+_s
+z
+s=[1, 2, 4, 8, 16],
         ),
     )
     ```
+You ca
+ d
+sab
 
-You can disable graph capturing completely via the `enforce_eager` flag:
+ graph captur
 
-```python
-from vllm import LLM
+g comp
 
-llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", enforce_eager=True)
-```
+t
 
-## Adjust cache size
+y v
+a th
+ `
 
-If you run out of CPU RAM, try the following options:
+forc
+_
+ag
+r` f
+ag:
+```pytho
 
-- (Multi-modal models only) you can set the size of multi-modal cache by setting `mm_processor_cache_gb` engine argument (default 4 GiB).
-- (CPU backend only) you can set the size of KV cache using `VLLM_CPU_KVCACHE_SPACE` environment variable (default 4 GiB).
+from v
+m 
+mport LLM
 
-## Multi-modal input limits
+m = LLM(mod
 
-You can allow a smaller number of multi-modal items per prompt to reduce the memory footprint of the model:
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct", 
 
-```python
-from vllm import LLM
-
-# Accept up to 3 images and 1 video per prompt
-llm = LLM(
-    model="Qwen/Qwen2.5-VL-3B-Instruct",
-    limit_mm_per_prompt={"image": 3, "video": 1},
+forc
+_
+ag
+r=Tru
 )
 ```
+## Adjust cach
+ s
+z
 
-You can go a step further and disable unused modalities completely by setting its limit to zero.
-For example, if your application only accepts image input, there is no need to allocate any memory for videos.
+If you ru
+ out of CPU RAM, try th
+ fo
+o
 
-```python
-from vllm import LLM
 
-# Accept any number of images but no videos
-llm = LLM(
-    model="Qwen/Qwen2.5-VL-3B-Instruct",
-    limit_mm_per_prompt={"video": 0},
+g opt
+o
+s:
+- (Mu
+t
+-moda
+ mod
+
+s o
+
+y) you ca
+ s
+t th
+ s
+z
+ of mu
+t
+-moda
+ cach
+ by s
+tt
+
+g `mm_proc
+ssor_cach
+_gb` 
+
+g
+
+
+ argum
+
+t (d
+fau
+t 4 G
+B).
+- (CPU back
+
+d o
+
+y) you ca
+ s
+t th
+ s
+z
+ of KV cach
+ us
+
+g `VLLM_CPU_KVCACHE_SPACE` 
+
+v
+ro
+m
+
+t var
+ab
+
+ (d
+fau
+t 4 G
+B).
+## Mu
+t
+-moda
+ 
+
+put 
+
+m
+ts
+You ca
+ a
+o
+ a sma
+
+r 
+umb
+r of mu
+t
+-moda
+ 
+t
+ms p
+r prompt to r
+duc
+ th
+ m
+mory footpr
+
+t of th
+ mod
+
+:
+```pytho
+
+from v
+m 
+mport LLM
+# Acc
+pt up to 3 
+mag
+s a
+d 1 v
+d
+o p
+r prompt
+
+m = LLM(
+    mod
+
+="Q
+
+
+/Q
+
+
+2.5-VL-3B-I
+struct",
+    
+
+m
+t_mm_p
+r_prompt={"
+mag
+": 3, "v
+d
+o": 1},
 )
 ```
+You ca
+ go a st
+p furth
+r a
+d d
+sab
 
-You can even run a multi-modal model for text-only inference:
+ u
+us
+d moda
 
-```python
-from vllm import LLM
+t
 
-# Don't accept images. Just text.
-llm = LLM(
-    model="google/gemma-3-27b-it",
-    limit_mm_per_prompt={"image": 0},
+s comp
+
+t
+
+y by s
+tt
+
+g 
+ts 
+
+m
+t to z
+ro.
+For 
+xamp
+
+, 
+f your app
+
+cat
+o
+ o
+
+y acc
+pts 
+mag
+ 
+
+put, th
+r
+ 
+s 
+o 
+
+d to a
+ocat
+ a
+y m
+mory for v
+d
+os.
+```pytho
+
+from v
+m 
+mport LLM
+# Acc
+pt a
+y 
+umb
+r of 
+mag
+s but 
+o v
+d
+os
+
+m = LLM(
+    mod
+
+="Q
+
+
+/Q
+
+
+2.5-VL-3B-I
+struct",
+    
+
+m
+t_mm_p
+r_prompt={"v
+d
+o": 0},
 )
 ```
+You ca
+ 
+v
 
-### Configurable options
+ ru
+ a mu
+t
+-moda
+ mod
 
-`limit_mm_per_prompt` also accepts configurable options per modality. In the configurable form, you still specify `count`, and you may optionally provide size hints that control how vLLM profiles and reserves memory for your multi‑modal inputs. This helps you tune memory for the actual media you expect, instead of the model’s absolute maxima.
+ for t
+xt-o
 
-Configurable options by modality:
+y 
 
-- `image`: `{"count": int, "width": int, "height": int}`
-- `video`: `{"count": int, "num_frames": int, "width": int, "height": int}`
-- `audio`: `{"count": int, "length": int}`
+f
+r
 
-Details could be found in [`ImageDummyOptions`][vllm.config.multimodal.ImageDummyOptions], [`VideoDummyOptions`][vllm.config.multimodal.VideoDummyOptions], and [`AudioDummyOptions`][vllm.config.multimodal.AudioDummyOptions].
+c
+:
+```pytho
 
-Examples:
+from v
+m 
+mport LLM
+# Do
+'t acc
+pt 
+mag
+s. Just t
+xt.
 
-```python
-from vllm import LLM
+m = LLM(
+    mod
 
-# Up to 5 images per prompt, profile with 512x512.
-# Up to 1 video per prompt, profile with 32 frames at 640x640.
-llm = LLM(
-    model="Qwen/Qwen2.5-VL-3B-Instruct",
-    limit_mm_per_prompt={
-        "image": {"count": 5, "width": 512, "height": 512},
-        "video": {"count": 1, "num_frames": 32, "width": 640, "height": 640},
+="goog
+
+/g
+mma-3-27b-
+t",
+    
+
+m
+t_mm_p
+r_prompt={"
+mag
+": 0},
+)
+```
+### Co
+f
+gurab
+
+ opt
+o
+s
+`
+
+m
+t_mm_p
+r_prompt` a
+so acc
+pts co
+f
+gurab
+
+ opt
+o
+s p
+r moda
+
+ty. I
+ th
+ co
+f
+gurab
+
+ form, you st
+
+ sp
+c
+fy `cou
+t`, a
+d you may opt
+o
+a
+y prov
+d
+ s
+z
+ h
+
+ts that co
+tro
+ ho
+ vLLM prof
+
+
+s a
+d r
+s
+rv
+s m
+mory for your mu
+t
+‑moda
+ 
+
+puts. Th
+s h
+
+ps you tu
+
+ m
+mory for th
+ actua
+ m
+d
+a you 
+xp
+ct, 
+
+st
+ad of th
+ mod
+
+’s abso
+ut
+ max
+ma.
+Co
+f
+gurab
+
+ opt
+o
+s by moda
+
+ty:
+- `
+mag
+`: `{"cou
+t": 
+
+t, "
+
+dth": 
+
+t, "h
+
+ght": 
+
+t}`
+- `v
+d
+o`: `{"cou
+t": 
+
+t, "
+um_fram
+s": 
+
+t, "
+
+dth": 
+
+t, "h
+
+ght": 
+
+t}`
+- `aud
+o`: `{"cou
+t": 
+
+t, "
+
+
+gth": 
+
+t}`
+D
+ta
+
+s cou
+d b
+ fou
+d 
+
+ [`Imag
+DummyOpt
+o
+s`][v
+m.co
+f
+g.mu
+t
+moda
+.Imag
+DummyOpt
+o
+s], [`V
+d
+oDummyOpt
+o
+s`][v
+m.co
+f
+g.mu
+t
+moda
+.V
+d
+oDummyOpt
+o
+s], a
+d [`Aud
+oDummyOpt
+o
+s`][v
+m.co
+f
+g.mu
+t
+moda
+.Aud
+oDummyOpt
+o
+s].
+Examp
+
+s:
+```pytho
+
+from v
+m 
+mport LLM
+# Up to 5 
+mag
+s p
+r prompt, prof
+
+
+ 
+
+th 512x512.
+# Up to 1 v
+d
+o p
+r prompt, prof
+
+
+ 
+
+th 32 fram
+s at 640x640.
+
+m = LLM(
+    mod
+
+="Q
+
+
+/Q
+
+
+2.5-VL-3B-I
+struct",
+    
+
+m
+t_mm_p
+r_prompt={
+        "
+mag
+": {"cou
+t": 5, "
+
+dth": 512, "h
+
+ght": 512},
+        "v
+d
+o": {"cou
+t": 1, "
+um_fram
+s": 32, "
+
+dth": 640, "h
+
+ght": 640},
     },
 )
 ```
+For back
+ard compat
+b
 
-For backward compatibility, passing an integer works as before and is interpreted as `{"count": <int>}`. For example:
 
-- `limit_mm_per_prompt={"image": 5}` is equivalent to `limit_mm_per_prompt={"image": {"count": 5}}`
-- You can mix formats: `limit_mm_per_prompt={"image": 5, "video": {"count": 1, "num_frames": 32, "width": 640, "height": 640}}`
+ty, pass
 
-!!! note
-    - The size hints affect memory profiling only. They shape the dummy inputs used to compute reserved activation sizes. They do not change how inputs are actually processed at inference time.
-    - If a hint exceeds what the model can accept, vLLM clamps it to the model's effective maximum and may log a warning.
+g a
+ 
 
-!!! warning
-    These size hints currently only affect activation memory profiling. Encoder cache size is determined by the actual inputs at runtime and is not limited by these hints.
+t
+g
+r 
+orks as b
+for
+ a
+d 
+s 
 
-## Multi-modal processor arguments
+t
+rpr
+t
+d as `{"cou
+t": 
 
-For certain models, you can adjust the multi-modal processor arguments to
-reduce the size of the processed multi-modal inputs, which in turn saves memory.
 
-Here are some examples:
+t
+}`. For 
+xamp
 
-```python
-from vllm import LLM
+:
+- `
 
-# Available for Qwen2-VL series models
-llm = LLM(
-    model="Qwen/Qwen2.5-VL-3B-Instruct",
-    mm_processor_kwargs={"max_pixels": 768 * 768},  # Default is 1280 * 28 * 28
+m
+t_mm_p
+r_prompt={"
+mag
+": 5}` 
+s 
+qu
+va
+
+
+t to `
+
+m
+t_mm_p
+r_prompt={"
+mag
+": {"cou
+t": 5}}`
+- You ca
+ m
+x formats: `
+
+m
+t_mm_p
+r_prompt={"
+mag
+": 5, "v
+d
+o": {"cou
+t": 1, "
+um_fram
+s": 32, "
+
+dth": 640, "h
+
+ght": 640}}`
+!!! 
+ot
+
+    - Th
+ s
+z
+ h
+
+ts aff
+ct m
+mory prof
+
+
+
+g o
+
+y. Th
+y shap
+ th
+ dummy 
+
+puts us
+d to comput
+ r
+s
+rv
+d act
+vat
+o
+ s
+z
+s. Th
+y do 
+ot cha
+g
+ ho
+ 
+
+puts ar
+ actua
+y proc
+ss
+d at 
+
+f
+r
+
+c
+ t
+m
+.
+    - If a h
+
+t 
+xc
+ds 
+hat th
+ mod
+
+ ca
+ acc
+pt, vLLM c
+amps 
+t to th
+ mod
+
+'s 
+ff
+ct
+v
+ max
+mum a
+d may 
+og a 
+ar
+
+
+g.
+!!! 
+ar
+
+
+g
+    Th
+s
+ s
+z
+ h
+
+ts curr
+
+t
+y o
+
+y aff
+ct act
+vat
+o
+ m
+mory prof
+
+
+
+g. E
+cod
+r cach
+ s
+z
+ 
+s d
+t
+rm
+
+
+d by th
+ actua
+ 
+
+puts at ru
+t
+m
+ a
+d 
+s 
+ot 
+
+m
+t
+d by th
+s
+ h
+
+ts.
+## Mu
+t
+-moda
+ proc
+ssor argum
+
+ts
+For c
+rta
+
+ mod
+
+s, you ca
+ adjust th
+ mu
+t
+-moda
+ proc
+ssor argum
+
+ts to
+r
+duc
+ th
+ s
+z
+ of th
+ proc
+ss
+d mu
+t
+-moda
+ 
+
+puts, 
+h
+ch 
+
+ tur
+ sav
+s m
+mory.
+H
+r
+ ar
+ som
+ 
+xamp
+
+s:
+```pytho
+
+from v
+m 
+mport LLM
+# Ava
+
+ab
+
+ for Q
+
+
+2-VL s
+r
+
+s mod
+
+s
+
+m = LLM(
+    mod
+
+="Q
+
+
+/Q
+
+
+2.5-VL-3B-I
+struct",
+    mm_proc
+ssor_k
+args={"max_p
+x
+
+s": 768 * 768},  # D
+fau
+t 
+s 1280 * 28 * 28
 )
+# Ava
 
-# Available for InternVL series models
-llm = LLM(
-    model="OpenGVLab/InternVL2-2B",
-    mm_processor_kwargs={"max_dynamic_patch": 4},  # Default is 12
+ab
+
+ for I
+t
+r
+VL s
+r
+
+s mod
+
+s
+
+m = LLM(
+    mod
+
+="Op
+
+GVLab/I
+t
+r
+VL2-2B",
+    mm_proc
+ssor_k
+args={"max_dy
+am
+c_patch": 4},  # D
+fau
+t 
+s 12
 )
 ```

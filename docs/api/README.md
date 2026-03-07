@@ -1,93 +1,549 @@
 # Summary
+## Co
+f
+gurat
+o
 
-## Configuration
+API docum
 
-API documentation for vLLM's configuration classes.
+tat
+o
+ for vLLM's co
+f
+gurat
+o
+ c
+ass
+s.
+- [v
+m.co
+f
+g.Mod
 
-- [vllm.config.ModelConfig][]
-- [vllm.config.CacheConfig][]
-- [vllm.config.LoadConfig][]
-- [vllm.config.ParallelConfig][]
-- [vllm.config.SchedulerConfig][]
-- [vllm.config.DeviceConfig][]
-- [vllm.config.SpeculativeConfig][]
-- [vllm.config.LoRAConfig][]
-- [vllm.config.MultiModalConfig][]
-- [vllm.config.PoolerConfig][]
-- [vllm.config.StructuredOutputsConfig][]
-- [vllm.config.ProfilerConfig][]
-- [vllm.config.ObservabilityConfig][]
-- [vllm.config.KVTransferConfig][]
-- [vllm.config.CompilationConfig][]
-- [vllm.config.VllmConfig][]
+Co
+f
+g][]
+- [v
+m.co
+f
+g.Cach
+Co
+f
+g][]
+- [v
+m.co
+f
+g.LoadCo
+f
+g][]
+- [v
+m.co
+f
+g.Para
 
-## Offline Inference
 
-LLM Class.
+Co
+f
+g][]
+- [v
+m.co
+f
+g.Sch
+du
 
-- [vllm.LLM][]
+rCo
+f
+g][]
+- [v
+m.co
+f
+g.D
+v
+c
+Co
+f
+g][]
+- [v
+m.co
+f
+g.Sp
+cu
+at
+v
+Co
+f
+g][]
+- [v
+m.co
+f
+g.LoRACo
+f
+g][]
+- [v
+m.co
+f
+g.Mu
+t
+Moda
+Co
+f
+g][]
+- [v
+m.co
+f
+g.Poo
 
-LLM Inputs.
+rCo
+f
+g][]
+- [v
+m.co
+f
+g.Structur
+dOutputsCo
+f
+g][]
+- [v
+m.co
+f
+g.Prof
 
-- [vllm.inputs.PromptType][]
-- [vllm.inputs.TextPrompt][]
-- [vllm.inputs.TokensPrompt][]
 
-## vLLM Engines
+rCo
+f
+g][]
+- [v
+m.co
+f
+g.Obs
+rvab
 
-Engine classes for offline and online inference.
 
-- [vllm.LLMEngine][]
-- [vllm.AsyncLLMEngine][]
+tyCo
+f
+g][]
+- [v
+m.co
+f
+g.KVTra
+sf
+rCo
+f
+g][]
+- [v
+m.co
+f
+g.Comp
 
-## Inference Parameters
+at
+o
+Co
+f
+g][]
+- [v
+m.co
+f
+g.V
+mCo
+f
+g][]
+## Off
 
-Inference parameters for vLLM APIs.
 
-- [vllm.SamplingParams][]
-- [vllm.PoolingParams][]
 
-## Multi-Modality
+ I
+f
+r
 
-vLLM provides experimental support for multi-modal models through the [vllm.multimodal][] package.
+c
 
-Multi-modal inputs can be passed alongside text and token prompts to [supported models](../models/supported_models.md#list-of-multimodal-language-models)
-via the `multi_modal_data` field in [vllm.inputs.PromptType][].
+LLM C
+ass.
+- [v
+m.LLM][]
+LLM I
+puts.
+- [v
+m.
 
-Looking to add your own multi-modal model? Please follow the instructions listed [here](../contributing/model/multimodal.md).
+puts.PromptTyp
+][]
+- [v
+m.
 
-- [vllm.multimodal.MULTIMODAL_REGISTRY][]
+puts.T
+xtPrompt][]
+- [v
+m.
 
-### Inputs
+puts.Tok
 
-User-facing inputs.
+sPrompt][]
+## vLLM E
+g
 
-- [vllm.multimodal.inputs.MultiModalDataDict][]
 
-Internal data structures.
+s
+E
+g
 
-- [vllm.multimodal.inputs.PlaceholderRange][]
-- [vllm.multimodal.inputs.NestedTensors][]
-- [vllm.multimodal.inputs.MultiModalFieldElem][]
-- [vllm.multimodal.inputs.MultiModalFieldConfig][]
-- [vllm.multimodal.inputs.MultiModalKwargsItem][]
-- [vllm.multimodal.inputs.MultiModalKwargsItems][]
-- [vllm.multimodal.inputs.MultiModalInputs][]
 
-### Data Parsing
+ c
+ass
+s for off
 
-- [vllm.multimodal.parse][]
 
-### Data Processing
 
-- [vllm.multimodal.processing][]
+ a
+d o
 
-### Registry
 
-- [vllm.multimodal.registry][]
 
-## Model Development
 
-- [vllm.model_executor.models.interfaces_base][]
-- [vllm.model_executor.models.interfaces][]
-- [vllm.model_executor.models.adapters][]
+ 
+
+f
+r
+
+c
+.
+- [v
+m.LLME
+g
+
+
+][]
+- [v
+m.Asy
+cLLME
+g
+
+
+][]
+## I
+f
+r
+
+c
+ Param
+t
+rs
+I
+f
+r
+
+c
+ param
+t
+rs for vLLM APIs.
+- [v
+m.Samp
+
+
+gParams][]
+- [v
+m.Poo
+
+
+gParams][]
+## Mu
+t
+-Moda
+
+ty
+vLLM prov
+d
+s 
+xp
+r
+m
+
+ta
+ support for mu
+t
+-moda
+ mod
+
+s through th
+ [v
+m.mu
+t
+moda
+][] packag
+.
+Mu
+t
+-moda
+ 
+
+puts ca
+ b
+ pass
+d a
+o
+gs
+d
+ t
+xt a
+d tok
+
+ prompts to [support
+d mod
+
+s](../mod
+
+s/support
+d_mod
+
+s.md#
+
+st-of-mu
+t
+moda
+-
+a
+guag
+-mod
+
+s)
+v
+a th
+ `mu
+t
+_moda
+_data` f
+
+
+d 
+
+ [v
+m.
+
+puts.PromptTyp
+][].
+Look
+
+g to add your o
+
+ mu
+t
+-moda
+ mod
+
+? P
+
+as
+ fo
+o
+ th
+ 
+
+struct
+o
+s 
+
+st
+d [h
+r
+](../co
+tr
+but
+
+g/mod
+
+/mu
+t
+moda
+.md).
+- [v
+m.mu
+t
+moda
+.MULTIMODAL_REGISTRY][]
+### I
+puts
+Us
+r-fac
+
+g 
+
+puts.
+- [v
+m.mu
+t
+moda
+.
+
+puts.Mu
+t
+Moda
+DataD
+ct][]
+I
+t
+r
+a
+ data structur
+s.
+- [v
+m.mu
+t
+moda
+.
+
+puts.P
+ac
+ho
+d
+rRa
+g
+][]
+- [v
+m.mu
+t
+moda
+.
+
+puts.N
+st
+dT
+
+sors][]
+- [v
+m.mu
+t
+moda
+.
+
+puts.Mu
+t
+Moda
+F
+
+
+dE
+
+m][]
+- [v
+m.mu
+t
+moda
+.
+
+puts.Mu
+t
+Moda
+F
+
+
+dCo
+f
+g][]
+- [v
+m.mu
+t
+moda
+.
+
+puts.Mu
+t
+Moda
+K
+argsIt
+m][]
+- [v
+m.mu
+t
+moda
+.
+
+puts.Mu
+t
+Moda
+K
+argsIt
+ms][]
+- [v
+m.mu
+t
+moda
+.
+
+puts.Mu
+t
+Moda
+I
+puts][]
+### Data Pars
+
+g
+- [v
+m.mu
+t
+moda
+.pars
+][]
+### Data Proc
+ss
+
+g
+- [v
+m.mu
+t
+moda
+.proc
+ss
+
+g][]
+### R
+g
+stry
+- [v
+m.mu
+t
+moda
+.r
+g
+stry][]
+## Mod
+
+ D
+v
+
+opm
+
+t
+- [v
+m.mod
+
+_
+x
+cutor.mod
+
+s.
+
+t
+rfac
+s_bas
+][]
+- [v
+m.mod
+
+_
+x
+cutor.mod
+
+s.
+
+t
+rfac
+s][]
+- [v
+m.mod
+
+_
+x
+cutor.mod
+
+s.adapt
+rs][]

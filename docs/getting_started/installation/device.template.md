@@ -1,17 +1,52 @@
-# Installation
+# I
+sta
+at
+o
 
-## Requirements
+## R
+qu
+r
+m
 
-## Set up using Python
+ts
+## S
+t up us
 
-### Pre-built wheels
+g Pytho
 
-### Build wheel from source
+### Pr
+-bu
 
-## Set up using Docker
+t 
+h
 
-### Pre-built images
+s
+### Bu
 
-### Build image from source
+d 
+h
 
-## Extra information
+ from sourc
+
+## S
+t up us
+
+g Dock
+r
+### Pr
+-bu
+
+t 
+mag
+s
+### Bu
+
+d 
+mag
+ from sourc
+
+## Extra 
+
+format
+o
+
