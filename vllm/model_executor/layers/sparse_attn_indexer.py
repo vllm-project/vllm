@@ -230,7 +230,7 @@ def sparse_attn_indexer(
             )
         else:
             if current_platform.is_xpu():
-                 topk_indices = _pytorch_decode_topk_with_masking(
+                topk_indices = ops.decode_topk_with_masking_torch(
                     logits,
                     batch_size,
                     next_n,
