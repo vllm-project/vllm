@@ -149,6 +149,23 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         input_quant = scheme_dict.get("input_activations")
         format = scheme_dict.get("format")
 
+        if quant_config._is_xpu_w8a16_fp8(weight_quant, input_quant):
+            return CompressedTensorsW8A16Fp8MoEMethod(
+                quant_config, layer.moe_config, layer
+            )
+
+        # 2. Check for W4A16 INT4
+        if quant_config._is_xpu_w4a16_int4(weight_quant, input_quant):
+            return CompressedTensorsW4A16Int4MoEMethod(
+                quant_config, layer.moe_config, layer
+            )
+
+        # 3. Check for W4A16 MXFP4
+        if quant_config._is_xpu_w4a16_mxfp4(weight_quant, input_quant):
+            return CompressedTensorsW4A16Mxfp4MoEMethod(
+                quant_config, layer.moe_config, layer
+            )
+
         if quant_config._is_mxfp4(weight_quant):
             return CompressedTensorsW4A4Mxfp4MoEMethod(layer.moe_config)
 
@@ -229,6 +246,557 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             raise RuntimeError(
                 f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}"
             )
+
+
+class CompressedTensorsW4A16Mxfp4MoEMethod(CompressedTensorsMoEMethod):
+    """
+    MoE method for W4A16 MXFP4 (Microscaling) quantization on Intel XPU hardware.
+
+    Specs:
+    - Weights: 4-bit floats packed into uint8 (2 weights per byte).
+    - Scales:  8-bit E8M0 floats stored as uint8.
+    - Block Size: Strictly 32.
+    """
+
+    def __init__(self, quant_config, moe_config, layer: torch.nn.Module):
+        super().__init__(moe_config)
+        self.quant_config = quant_config
+        # MXFP4 standard mandates block_size=32.
+        # We enforce this regardless of config to ensure hardware compatibility.
+        self.group_size = 32
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        """
+        Allocate packed MXFP4 weights (uint8) and block scales (uint8).
+        """
+        # --- Type Definition ---
+        # Weight: 4-bit packed -> uint8
+        weight_dtype = torch.uint8
+        # Scale: E8M0 format -> uint8 (Crucial for MXFP4)
+        scale_dtype = torch.uint8
+
+        # --- Dimension Validation ---
+        # MXFP4 kernels rely on strict alignment.
+        if hidden_size % self.group_size != 0:
+            raise ValueError(f"Hidden size {hidden_size} must be divisible \
+                    by MXFP4 block size {self.group_size}")
+        if intermediate_size_per_partition % self.group_size != 0:
+            raise ValueError(
+                f"Intermediate size {intermediate_size_per_partition} must be divisible \
+                    by MXFP4 block size {self.group_size}"
+            )
+
+        layer.intermediate_size_per_partition = intermediate_size_per_partition
+        layer.hidden_size = hidden_size
+        layer.num_experts = num_experts
+        layer.orig_dtype = params_dtype
+        layer.weight_block_size = None
+
+        # --- Weight Allocation (Packed) ---
+        # Logic: 1 uint8 holds 2 int4 weights. Shape K is divided by 2.
+
+        # W13: [Experts, 2 * Inter, Hidden // 2]
+        w13_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // 2,
+                dtype=weight_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_packed", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        # W2: [Experts, Hidden, Inter // 2]
+        w2_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // 2,
+                dtype=weight_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_packed", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        # --- Scale Allocation (Block-wise) ---
+        # Logic: 1 scale per 32 elements. Shape K is divided by 32.
+
+        num_groups_w13 = hidden_size // self.group_size
+        num_groups_w2 = intermediate_size_per_partition // self.group_size
+
+        # W13 Scales: [Experts, 2 * Inter, Hidden // 32]
+        w13_weight_scale = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                num_groups_w13,
+                dtype=scale_dtype,  # <--- Strictly uint8
+            ),
+            requires_grad=False,
+        )
+
+        # W2 Scales: [Experts, Hidden, Inter // 32]
+        w2_weight_scale = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                num_groups_w2,
+                dtype=scale_dtype,  # <--- Strictly uint8
+            ),
+            requires_grad=False,
+        )
+
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.GROUP.value}
+        )
+
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+
+        # Input scales are not used in W4A16
+        layer.w13_input_scale = None
+        layer.w2_input_scale = None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """
+        Post-processing / Validation for MXFP4.
+        """
+        device = layer.w13_weight_packed.device
+
+        # Ensure scales are on the correct device
+        if layer.w13_weight_scale.device != device:
+            layer.w13_weight_scale.data = layer.w13_weight_scale.data.to(device)
+        if layer.w2_weight_scale.device != device:
+            layer.w2_weight_scale.data = layer.w2_weight_scale.data.to(device)
+
+        # Strict Type Checking
+        # This prevents scenarios where a loader might accidentally cast scales to float
+        if layer.w13_weight_scale.dtype != torch.uint8:
+            raise ValueError(f"W13 scales expected torch.uint8 for MXFP4, \
+                got {layer.w13_weight_scale.dtype}")
+
+        if layer.w2_weight_scale.dtype != torch.uint8:
+            raise ValueError(f"W2 scales expected torch.uint8 for MXFP4, \
+                got {layer.w2_weight_scale.dtype}")
+
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> FusedMoEQuantConfig | None:
+        return None
+
+    def apply(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """
+        Execute the MoE Layer with MXFP4 XPU Kernel.
+        """
+        from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
+
+        return xpu_fused_moe(
+            hidden_states=x,
+            w13=layer.w13_weight_packed,
+            w13_scales=layer.w13_weight_scale,
+            w13_bias=layer.w13_bias if self.moe.has_bias else None,
+            w2=layer.w2_weight_packed,
+            w2_scales=layer.w2_weight_scale,
+            w2_bias=layer.w2_bias if self.moe.has_bias else None,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            n_experts_per_token=layer.top_k,
+            activation=layer.activation.value,
+            num_experts=layer.global_num_experts
+            // self.moe.moe_parallel_config.ep_size,
+            ep_rank=self.moe.moe_parallel_config.ep_rank,
+            ep_size=self.moe.moe_parallel_config.ep_size,
+            is_mxfp4=True,
+        )
+
+
+class CompressedTensorsW4A16Int4MoEMethod(CompressedTensorsMoEMethod):
+    """
+    MoE method for W4A16 INT4 quantization on Intel XPU hardware.
+
+    This class handles the initialization and execution of INT4 MoE layers.
+    It packs 4-bit weights into uint8 (2 weights per byte) and supports
+    group-wise quantization scales (typically group_size=128).
+    """
+
+    def __init__(self, quant_config, moe_config, layer: torch.nn.Module):
+        super().__init__(moe_config)
+        self.quant_config = quant_config
+        # Default to 128 if not specified in config
+        self.group_size = getattr(quant_config, "group_size", 128)
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        """
+        Allocate packed INT4 weights (uint8) and group-wise scales.
+        """
+        weight_dtype = torch.int32
+        # Scales are usually kept in high precision (bf16/fp16)
+        scale_dtype = params_dtype if params_dtype else torch.bfloat16
+
+        layer.intermediate_size_per_partition = intermediate_size_per_partition
+        layer.hidden_size = hidden_size
+        layer.num_experts = num_experts
+        layer.orig_dtype = params_dtype
+        layer.weight_block_size = None
+
+        # --- Weight Allocation (Packed) ---
+
+        # W13: [Experts, 2 * Inter, Hidden // 2]
+        # Packing happens on the input dimension (K dimension)
+        w13_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // 8,  # <--- Packed: 8 int4 weights into one int32
+                dtype=weight_dtype,
+            ),
+            requires_grad=False,
+        )
+
+        layer.register_parameter("w13_weight_packed", w13_weight)
+        # set_weight_attrs(w13_weight, weight_loader_attrs)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        # W2: [Experts, Hidden, Inter // 2]
+        # Packing happens on the input dimension (K dimension)
+        w2_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // 8,  # <--- Packed
+                dtype=weight_dtype,
+            ),
+            requires_grad=False,
+        )
+
+        layer.register_parameter("w2_weight_packed", w2_weight)
+        # set_weight_attrs(w2_weight, weight_loader_attrs)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        # --- Scale Allocation (Group-wise) ---
+
+        # Calculate number of groups for the K dimension
+        num_groups_w13 = hidden_size // self.group_size
+        num_groups_w2 = intermediate_size_per_partition // self.group_size
+
+        # W13 Scales: [Experts, 2 * Inter, Num_Groups]
+        w13_weight_scale = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                num_groups_w13,
+                dtype=scale_dtype,
+            ),
+            requires_grad=False,
+        )
+
+        # W2 Scales: [Experts, Hidden, Num_Groups]
+        w2_weight_scale = torch.nn.Parameter(
+            torch.empty(num_experts, hidden_size, num_groups_w2, dtype=scale_dtype),
+            requires_grad=False,
+        )
+
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.GROUP.value}
+        )
+
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+
+        # Input scales are not used in W4A16
+        layer.w13_input_scale = None
+        layer.w2_input_scale = None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """
+        Post-processing for INT4.
+        Unlike FP8, we usually don't need to merge W1/W3 scales because
+        the kernel supports per-group/per-channel scales naturally, and
+        the scales are 3D tensors [Experts, Out, Groups], so W1 and W3
+        scales are simply concatenated along the 'Out' dimension.
+        """
+        # Ensure scales are on the correct device
+        device = layer.w13_weight_packed.device
+        if layer.w13_weight_scale.device != device:
+            layer.w13_weight_scale.data = layer.w13_weight_scale.data.to(device)
+        if layer.w2_weight_scale.device != device:
+            layer.w2_weight_scale.data = layer.w2_weight_scale.data.to(device)
+
+        assert (
+            layer.w13_weight_packed.dtype == torch.int32
+        ), "W13 packed weights must have dtype torch.int32 for INT4"
+        assert (
+            layer.w2_weight_packed.dtype == torch.int32
+        ), "W2 packed weights must have dtype torch.int32 for INT4"
+
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> FusedMoEQuantConfig | None:
+        return None
+
+    def apply(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
+
+        # int32 (K/8) -> uint8 (K/2)
+        w13_uint8 = layer.w13_weight_packed.view(torch.uint8)
+        w2_uint8 = layer.w2_weight_packed.view(torch.uint8)
+
+        return xpu_fused_moe(
+            hidden_states=x,
+            w13=w13_uint8,
+            w13_scales=layer.w13_weight_scale,
+            w13_bias=layer.w13_bias if self.moe.has_bias else None,
+            w2=w2_uint8,
+            w2_scales=layer.w2_weight_scale,
+            w2_bias=layer.w2_bias if self.moe.has_bias else None,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            n_experts_per_token=layer.top_k,
+            activation=layer.activation.value,
+            num_experts=layer.global_num_experts
+            // self.moe.moe_parallel_config.ep_size,
+            ep_rank=self.moe.moe_parallel_config.ep_rank,
+            ep_size=self.moe.moe_parallel_config.ep_size,
+            is_int4=True,
+        )
+
+
+class CompressedTensorsW8A16Fp8MoEMethod(CompressedTensorsMoEMethod):
+    """
+    MoE method for FP8 quantization on Intel XPU hardware.
+
+    This class handles the initialization, weight loading, and execution of
+    FP8 MoE layers. It specifically addresses the compatibility between
+    checkpoint formats (often split scales for W1/W3) and XPU kernel
+    requirements (unified scales).
+    """
+
+    def __init__(self, quant_config, moe_config, layer: torch.nn.Module):
+        super().__init__(moe_config)
+        self.quant_config = quant_config
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        """
+        Allocate weights and scales for the MoE layer.
+        """
+        # Currently defaults to e4m3fn
+        weight_dtype = torch.float8_e4m3fn
+
+        layer.intermediate_size_per_partition = intermediate_size_per_partition
+        layer.hidden_size = hidden_size
+        layer.num_experts = num_experts
+        layer.orig_dtype = params_dtype
+        layer.weight_block_size = None
+
+        # --- Weight Allocation ---
+        # W13: The fused Gate (W1) and Up (W3) projections.
+        w13_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size,
+                dtype=weight_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        # W2: The Down projection.
+        w2_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition,
+                dtype=weight_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        # --- Scale Allocation ---
+        # allocate 2 scales for W13 (Gate+Up)
+        # with checkpoints where W1 and W3 are quantized separately.
+        w13_weight_scale = torch.nn.Parameter(
+            torch.ones(num_experts, 2, dtype=torch.float32), requires_grad=False
+        )
+        w2_weight_scale = torch.nn.Parameter(
+            torch.ones(num_experts, dtype=torch.float32), requires_grad=False
+        )
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+
+        # Update attributes to indicate Tensor-wise quantization
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
+        )
+
+        # Apply attributes to scales (crucial for correct loading logic)
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+
+        # Input scales are not used in Weight-Only quantization (W8A16)
+        layer.w13_input_scale = None
+        layer.w2_input_scale = None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """
+        Post-processing logic to align loaded weights with XPU kernel requirements.
+
+        Primary Goal: Resolve the conflict between separate W1/W3 scales found in
+        standard FP8 checkpoints and the XPU kernel's requirement for a unified
+        per-tensor scale.
+        """
+
+        fp8_dtype = torch.float8_e4m3fn
+        assert layer.w13_weight.dtype == fp8_dtype
+
+        # Handle Split Scales for W13 (Gate + Up)
+        # Check if scales are split [Num_Experts, 2] and merge them.
+        if layer.w13_weight_scale.dim() == 2 and layer.w13_weight_scale.shape[1] == 2:
+            num_experts = layer.num_experts
+            full_inter_dim = layer.w13_weight.shape[1]
+            inter_dim = full_inter_dim // 2
+
+            # 1. Extract original independent scales
+            old_scales = layer.w13_weight_scale.to(torch.float32)
+            w1_scales = old_scales[:, 0].reshape(num_experts, 1, 1)
+            w3_scales = old_scales[:, 1].reshape(num_experts, 1, 1)
+
+            # 2. Calculate the new unified scale (Max of W1 and W3)
+            # This ensures the range covers both distributions to prevent overflow.
+            unified_scales, _ = torch.max(old_scales, dim=1, keepdim=True)
+            unified_scales_expanded = unified_scales.reshape(num_experts, 1, 1)
+
+            # 3. Calculate Correction Factors
+            # Logic: adjust the weight values to compensate for the scale change.
+            # Real_Value = FP8_Old * Old_Scale
+            # New_FP8    = Real_Value / New_Scale
+            # Therefore: New_FP8 = FP8_Old * (Old_Scale / New_Scale)
+            w1_correction = w1_scales / (
+                unified_scales_expanded + 1e-6
+            )  # Add epsilon to avoid div-by-zero
+            w3_correction = w3_scales / (unified_scales_expanded + 1e-6)
+
+            # 4. Extract current FP8 weight shards
+            w1_weight_fp8 = layer.w13_weight[:, :inter_dim, :]
+            w3_weight_fp8 = layer.w13_weight[:, inter_dim:, :]
+
+            # 5. Re-align weights (Dequantize -> Scale -> Requantize logic)
+            # Note: We perform the multiplication in FP32 for precision.
+            w1_aligned = w1_weight_fp8.to(torch.float32) * w1_correction
+            w3_aligned = w3_weight_fp8.to(torch.float32) * w3_correction
+
+            # 6. Concatenate and cast back to FP8
+            # Workaround: XPU `torch.cat` may not support FP8 inputs directly,
+            # so we concatenate in FP32 and then cast to the target FP8 dtype.
+            w13_new = torch.cat([w1_aligned, w3_aligned], dim=1).to(fp8_dtype)
+
+            # 7. Update the Layer Parameters
+            replace_parameter(layer, "w13_weight", w13_new)
+
+            # Update the scale to the single unified value [Num_Experts]
+            replace_parameter(layer, "w13_weight_scale", unified_scales.squeeze())
+
+        # Logic 2: Handle W2 (Down) Scales
+        # Ensure W2 scales are strictly 1D [Num_Experts] as required by the kernel.
+        if layer.w2_weight_scale.dim() > 1:
+            replace_parameter(
+                layer, "w2_weight_scale", layer.w2_weight_scale.data.squeeze()
+            )
+
+        device = layer.w13_weight.device
+        layer.w13_weight_scale.data = layer.w13_weight_scale.data.to(device)
+        layer.w2_weight_scale.data = layer.w2_weight_scale.data.to(device)
+
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> FusedMoEQuantConfig | None:
+        return None
+
+    def apply(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """
+        Execute the MoE Layer: Router -> Expert Computation (XPU Kernel).
+        """
+
+        # 1. Expert Computation: Invoke the XPU Fused MoE Kernel
+        # Lazy import to prevent ImportError on non-XPU environments
+        from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
+
+        return xpu_fused_moe(
+            hidden_states=x,
+            w13=layer.w13_weight,
+            w13_scales=layer.w13_weight_scale,
+            w13_bias=layer.w13_bias if self.moe.has_bias else None,
+            w2=layer.w2_weight,
+            w2_scales=layer.w2_weight_scale,
+            w2_bias=layer.w2_bias if self.moe.has_bias else None,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,  # Contains the selected expert indices
+            n_experts_per_token=layer.top_k,
+            activation=layer.activation.value,
+            # Calculate local number of experts per partition
+            num_experts=layer.global_num_experts
+            // self.moe.moe_parallel_config.ep_size,
+            ep_rank=self.moe.moe_parallel_config.ep_rank,
+            ep_size=self.moe.moe_parallel_config.ep_size,
+            is_fp8=True,
+        )
 
 
 class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
@@ -1145,9 +1713,9 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         super().__init__(moe)
         self.weight_quant = weight_quant
         self.input_quant = input_quant
-        assert weight_quant.symmetric, (
-            "Only symmetric quantization is supported for MoE"
-        )
+        assert (
+            weight_quant.symmetric
+        ), "Only symmetric quantization is supported for MoE"
         # Extract properties from weight_quant
         self.num_bits = weight_quant.num_bits
         self.packed_factor = 32 // weight_quant.num_bits
@@ -1188,13 +1756,13 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         for weight scales.
         """
         if weight_name == "w13_scale":
-            assert num_groups_w13 is not None, (
-                "num_groups_w13 must be provided for weight scales"
-            )
+            assert (
+                num_groups_w13 is not None
+            ), "num_groups_w13 must be provided for weight scales"
         if weight_name == "w2_scale":
-            assert num_groups_w2 is not None, (
-                "num_groups_w2 must be provided for weight scales"
-            )
+            assert (
+                num_groups_w2 is not None
+            ), "num_groups_w2 must be provided for weight scales"
         w13_num_shards = 2 if self.moe.is_act_and_mul else 1
         shape_map = {
             "w13_weight": {
@@ -1677,9 +2245,9 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         self.group_size = weight_quant.group_size
         # grouped actorder isn't supported by this kernel
         assert weight_quant.actorder != "group"
-        assert weight_quant.symmetric, (
-            "Only symmetric quantization is supported for MoE"
-        )
+        assert (
+            weight_quant.symmetric
+        ), "Only symmetric quantization is supported for MoE"
 
     def create_weights(
         self,
@@ -2236,9 +2804,9 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self.num_bits = self.weight_quant.num_bits
         self.packed_factor = 32 // self.num_bits
 
-        assert self.weight_quant.symmetric, (
-            "Only symmetric quantization is supported for W4A8 MoE"
-        )
+        assert (
+            self.weight_quant.symmetric
+        ), "Only symmetric quantization is supported for W4A8 MoE"
         assert self.weight_quant.actorder != "group"
         assert self.group_size == 128, "Only group size 128 supported for W4A8 MoE"
 
@@ -2269,9 +2837,9 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         # requirement for CUTLASS reorder_tensor
         assert hidden_size % 256 == 0, f"{hidden_size=} must be divisible by 256"
-        assert intermediate_size_per_partition % 256 == 0, (
-            f"{intermediate_size_per_partition=} must be divisible by 256"
-        )
+        assert (
+            intermediate_size_per_partition % 256 == 0
+        ), f"{intermediate_size_per_partition=} must be divisible by 256"
         # storage type, pack 8xint4 into int32
         params_dtype = torch.int32
 
