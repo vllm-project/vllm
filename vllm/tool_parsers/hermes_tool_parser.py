@@ -385,6 +385,7 @@ class Hermes2ProToolParser(ToolParser):
             prev_arguments = self.prev_tool_call_arr[self.current_tool_id].get(
                 "arguments"
             )
+            assert current_tool_call is not None
             cur_arguments = current_tool_call.get("arguments")
 
             logger.debug("diffing old arguments: %s", prev_arguments)
