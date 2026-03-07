@@ -361,6 +361,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         num_ep_ranks: int,
         num_global_experts: int,
         num_local_experts: int,
+        buffer_index: int = 0,
     ) -> dict[Any, Any]:
         """
         max_num_tokens_per_dp_rank : the maximum number of tokens a DP rank
@@ -369,6 +370,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         num_ep_ranks: the number of EP group ranks.
         num_global_experts: Number of experts in the model.
         num_local_experts: Number of experts in an EP rank.
+        buffer_index: Index of the buffer (for double buffering).
         """
         import deep_ep  # type: ignore[import-not-found]
 
@@ -392,6 +394,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
             allow_nvlink_for_low_latency_mode=True,
             allow_mnnvl=envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL,
             explicitly_destroy=True,
+            buffer_index=buffer_index,
         )
 
     def get_handle(self, kwargs):
@@ -403,8 +406,14 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
 
         buffer_kwargs = self._make_all2all_kwargs(**kwargs)
         logger.debug("DeepEP all2all args %s", buffer_kwargs)
+
+        def create_buffer(**kwargs):
+            # Remove buffer_index as it is not an argument for deep_ep.Buffer
+            kwargs.pop("buffer_index", None)
+            return deep_ep.Buffer(**kwargs)
+
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
-            buffer_kwargs, deep_ep.Buffer
+            buffer_kwargs, create_buffer
         )
         return handle
 
