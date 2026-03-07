@@ -1,14 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton kernel for FP8 paged MQA logits.
-
-This implementation is optimized for decode workloads by:
-- using a matrix-style head reduction (tl.dot) instead of per-head loops,
-- splitting KV data/scales in Python as zero-copy views to avoid byte-wise
-  scale reconstruction in the kernel,
-- preserving CUDA Graph compatibility (single launch, fixed output shape,
-  mask-based stores).
-"""
+"""Triton kernel for FP8 paged MQA logits."""
 
 import torch
 

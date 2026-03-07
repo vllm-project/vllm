@@ -464,79 +464,6 @@ def fp8_mqa_logits_torch(
     return logits
 
 
-def _fp8_paged_mqa_logits_torch_impl(
-    q: torch.Tensor,
-    kv_cache: torch.Tensor,
-    weights: torch.Tensor,
-    context_lens: torch.Tensor,
-    block_tables: torch.Tensor,
-    max_model_len: int,
-) -> torch.Tensor:
-    """Compute FP8 MQA logits using paged KV-cache (CUDA fallback).
-
-    This is a pure PyTorch fallback for CUDA when DeepGEMM is not available.
-    Handles head_dim = 132 (128 + 4 for RoPE).
-
-    Args:
-        q: Query tensor of shape [B, next_n, H, D].
-        kv_cache: Paged KV-cache in packed FP8+scale layout with shape
-            [num_blocks, block_size, 1, D+4], dtype `torch.uint8`. The last
-            4 bytes per (block,pos) store the `float` dequant scale.
-        weights: Tensor of shape [B * next_n, H], dtype `torch.float32`.
-        context_lens: Tensor of shape [B], dtype int32; effective context length
-            for each batch element.
-        block_tables: Tensor of shape [B, max_blocks], dtype int32; maps logical
-            block indices to physical blocks in the paged cache.
-        max_model_len: Maximum sequence length used to size the logits output.
-
-    Returns:
-        Logits tensor of shape [B * next_n, max_model_len], dtype
-        `torch.float32`.
-    """
-    fp8_dtype = current_platform.fp8_dtype()
-    batch_size, next_n, heads, dim = q.size()
-    kv_cache, scale = kv_cache[..., :dim], kv_cache[..., dim:]
-    scale = scale.contiguous().view(torch.float)
-    q = q.float()
-    kv_cache = kv_cache.view(fp8_dtype).float() * scale
-    num_blocks, block_size, _, dim = kv_cache.size()
-    logits = torch.full(
-        [batch_size * next_n, max_model_len],
-        float("-inf"),
-        device=q.device,
-        dtype=torch.float32,
-    )
-    for i in range(batch_size):
-        context_len = context_lens[i].item()
-        q_offsets = torch.arange(context_len - next_n, context_len, device=q.device)
-        weight_slice = (
-            weights[i * next_n : (i + 1) * next_n, :].transpose(0, 1).contiguous()
-        )
-        for block_idx in range(cdiv(context_len, block_size)):
-            block_id = block_tables[i][block_idx]
-            qx, kx = q[i], kv_cache[block_id]
-            k_offsets = torch.arange(
-                block_idx * block_size, (block_idx + 1) * block_size, device=q.device
-            )
-            mask = (k_offsets[None, :] < context_len) & (
-                k_offsets[None, :] <= q_offsets[:, None]
-            )
-            s = torch.where(
-                mask[None, :, :],
-                (qx.transpose(0, 1) @ kx.transpose(0, 1).transpose(1, 2)).to(
-                    logits.dtype
-                ),
-                float("-inf"),
-            )
-            s = torch.relu(s) * weight_slice[..., None]
-            s = s.sum(dim=0)
-            logits[
-                i * next_n : (i + 1) * next_n,
-                block_idx * block_size : (block_idx + 1) * block_size,
-            ] = torch.where(k_offsets[None, :] <= q_offsets[:, None], s, float("-inf"))
-    return logits
-
-
 def fp8_paged_mqa_logits_torch(
     q: torch.Tensor,
     kv_cache: torch.Tensor,
@@ -546,12 +473,6 @@ def fp8_paged_mqa_logits_torch(
     max_model_len: int,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits using paged KV-cache (Triton kernel).
-
-    This implementation uses a Triton kernel to avoid memory blow-up during
-    CUDA Graph capture. Key features:
-    1. Single kernel launch (no Python loops)
-    2. On-the-fly FP8 dequantization in kernel
-    3. Direct paged memory access via block tables
 
     Args:
         q: Query tensor of shape [B, next_n, H, D]. Casted to
