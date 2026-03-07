@@ -155,7 +155,7 @@ is_gather_supported = hasattr(triton.language, "gather")
 is_tma_supported = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 9) and (
     hasattr(triton.language, "_experimental_make_tensor_descriptor")
     or hasattr(triton.language, "make_tensor_descriptor")
-)
+) and torch.cuda.get_device_capability(0)[0] < 12  # Disable on Blackwell (sm_12x): Triton autotuner OOM
 
 
 def get_all_max_shared_mem():
