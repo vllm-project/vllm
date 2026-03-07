@@ -615,6 +615,8 @@ class WorkerProc:
             self.setup_proc_title_and_log_prefix(
                 enable_ep=vllm_config.parallel_config.enable_expert_parallel
             )
+        self._init_message_queues(input_shm_handle, vllm_config)
+        if not is_eep_new_worker:
             self.worker.load_model()
 
         # Initialize message queues after init_device() since multi-node setups
