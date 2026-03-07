@@ -59,6 +59,32 @@ class LoRAModel:
         """Get LoRA for a given module by name"""
         return self.loras.get(module_name, None)
 
+    def get_lora_by_indexed_name(
+        self, module_name: str
+    ) -> LoRALayerWeights | None:
+        """Get LoRA by trying numeric-suffix variants of the module name.
+
+        Handles PEFT checkpoints where modules inside nn.Sequential or
+        nn.ModuleList are targeted by numeric index. For example, the PEFT
+        checkpoint stores weights under ``to_out.0`` but the vLLM model
+        registers the module as ``to_out``.
+
+        Args:
+            module_name: The vLLM model's module path,
+                e.g. ``transformer_blocks.0.attn.to_out``.
+
+        Returns:
+            The matching LoRALayerWeights if a numeric-suffix variant is
+            found, otherwise None.
+        """
+        prefix = module_name + "."
+        for lora_name in self.loras:
+            if lora_name.startswith(prefix):
+                trailing = lora_name[len(prefix):]
+                if trailing.isdigit():
+                    return self.loras[lora_name]
+        return None
+
     def check_lora_name(self, lora_name: str) -> bool:
         return lora_name in self.loras
 
@@ -69,6 +95,25 @@ class LoRAModel:
             if f".{prefix}" in module_name or module_name.startswith(prefix):
                 return True
         return False
+
+    @staticmethod
+    def _get_effective_module_suffix(module_name: str) -> str:
+        """Extract the effective module suffix, handling indexed modules.
+
+        For modules inside ``nn.Sequential`` or ``nn.ModuleList`` where the
+        path ends with a numeric index (e.g. ``to_out.0``), returns the
+        parent module name (``to_out``) instead of the numeric index.
+
+        Examples:
+            - ``transformer_blocks.0.attn.to_k``    → ``to_k``
+            - ``transformer_blocks.0.attn.to_out.0`` → ``to_out``
+            - ``q_proj``                             → ``q_proj``
+        """
+        parts = module_name.rsplit(".", 2)
+        suffix = parts[-1]
+        if suffix.isdigit() and len(parts) > 1:
+            suffix = parts[-2]
+        return suffix
 
     @classmethod
     def from_lora_tensors(
@@ -181,8 +226,10 @@ class LoRAModel:
                     if expert_suffix not in expected_lora_modules:
                         unexpected_modules.append(module_name)
 
-                elif module_name.rsplit(".", 1)[-1] not in expected_lora_modules:
-                    unexpected_modules.append(module_name)
+                else:
+                    suffix = cls._get_effective_module_suffix(module_name)
+                    if suffix not in expected_lora_modules:
+                        unexpected_modules.append(module_name)
 
             if unexpected_modules:
                 raise ValueError(
