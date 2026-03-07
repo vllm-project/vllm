@@ -7,7 +7,6 @@ bf16 MLA decode. This backend requires plan()/run() API with CSR-format
 page indices and supports returning LSE for DCP.
 """
 
-import math
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -32,7 +31,11 @@ from vllm.v1.attention.backend import (
     AttentionType,
 )
 from vllm.v1.attention.backends.flashinfer import _copy_page_indices_kernel
-from vllm.v1.attention.backends.utils import KVCacheLayoutType
+from vllm.v1.attention.backends.utils import (
+    KVCacheLayoutType,
+    get_per_layer_parameters,
+    infer_global_hyperparameters,
+)
 
 logger = init_logger(__name__)
 
@@ -63,7 +66,8 @@ class FlashInferFA2MLABackend(MLACommonBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability.major == 12
+        # Supported on SM 8.x+ except SM 10.x (which has dedicated backends).
+        return capability.major != 10
 
     @classmethod
     def supports_combination(
@@ -106,8 +110,8 @@ class FlashInferFA2MLAMetadataBuilder(
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device, **kwargs):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device, **kwargs)
 
         self._mla_dims = get_mla_dims(self.model_config)
 
@@ -135,9 +139,12 @@ class FlashInferFA2MLAMetadataBuilder(
 
         # Pre-compute constant plan() parameters.
         self._num_heads = self.num_heads * self.dcp_world_size
-        self._sm_scale = 1.0 / math.sqrt(
-            self._mla_dims.qk_nope_head_dim + self._mla_dims.qk_rope_head_dim
+        # Derive sm_scale from the model's attention layers so it includes
+        # any model-specific corrections (e.g. YaRN mscale for DeepSeek).
+        global_params = infer_global_hyperparameters(
+            get_per_layer_parameters(vllm_config, layer_names, MLACommonImpl)  # type: ignore[type-abstract]
         )
+        self._sm_scale = global_params.sm_scale
 
     def _get_wrapper(self, batch_size: int) -> BatchMLAPagedAttentionWrapper:
         wrapper = self._wrappers.get(batch_size)
@@ -182,11 +189,12 @@ class FlashInferFA2MLAMetadataBuilder(
         kv_indptr[0] = 0
         torch.cumsum(num_blocks, dim=0, out=kv_indptr[1:])
 
-        # Flatten block_table into kv_indices via Triton kernel
-        total_pages = kv_indptr[num_decodes].item()
-        kv_indices = self._kv_indices_buf[:total_pages]
+        # Flatten block_table into kv_indices via Triton kernel.
+        # The full pre-allocated buffer is passed rather than slicing to
+        # total_pages, since kv_indptr delimits the valid range and plan()
+        # copies only the entries within that range.
         _copy_page_indices_kernel[(num_decodes,)](
-            kv_indices,
+            self._kv_indices_buf,
             block_table_tensor,
             block_table_tensor.stride(0),
             kv_indptr,
@@ -210,7 +218,7 @@ class FlashInferFA2MLAMetadataBuilder(
         wrapper.plan(
             qo_indptr,
             kv_indptr,
-            kv_indices,
+            self._kv_indices_buf,
             kv_lens,
             self._num_heads,
             self._mla_dims.kv_lora_rank,
@@ -293,9 +301,13 @@ class FlashInferFA2MLAImpl(
         assert attn_metadata.decode is not None
         assert attn_metadata.decode.wrapper is not None
 
-        # Override the scale set during plan() with the model's actual scale,
-        # which includes corrections like YaRN mscale.
-        attn_metadata.decode.wrapper._sm_scale = self.scale
+        # Verify the wrapper's sm_scale (set during plan()) matches the
+        # model layer's scale. These must agree for correct attention output.
+        assert attn_metadata.decode.wrapper._sm_scale == self.scale, (
+            f"FlashInfer FA2 MLA wrapper sm_scale "
+            f"({attn_metadata.decode.wrapper._sm_scale}) does not match "
+            f"model scale ({self.scale})."
+        )
 
         # Split query into nope and rope components
         if isinstance(q, tuple):
@@ -314,8 +326,7 @@ class FlashInferFA2MLAImpl(
             ckv_cache,
             kpe_cache,
             return_lse=True,
-            # DCP merge kernel expects base-e LSE (uses exp/log, not exp2/log2).
-            # FlashInfer defaults to base-2 when return_lse_base_on_e=False.
+            # Return LSE in base-e to match the DCP output-merging kernel.
             return_lse_base_on_e=True,
         )
 
