@@ -1,61 +1,413 @@
-# Usage Stats Collection
+# Usag
+ Stats Co
 
-vLLM collects anonymous usage data by default to help the engineering team better understand which hardware and model configurations are widely used. This data allows them to prioritize their efforts on the most common workloads. The collected data is transparent, does not contain any sensitive information.
+ct
+o
 
-A subset of the data, after cleaning and aggregation, will be publicly released for the community's benefit. For example, you can see the 2024 usage report [here](https://2024.vllm.ai).
+vLLM co
 
-## What data is collected?
+cts a
+o
+ymous usag
+ data by d
+fau
+t to h
 
-The list of data collected by the latest version of vLLM can be found here: [vllm/usage/usage_lib.py](../../vllm/usage/usage_lib.py)
+p th
+ 
 
-Here is an example as of v0.4.0:
+g
 
-??? console "Output"
 
-    ```json
+r
+
+g t
+am b
+tt
+r u
+d
+rsta
+d 
+h
+ch hard
+ar
+ a
+d mod
+
+ co
+f
+gurat
+o
+s ar
+ 
+
+d
+
+y us
+d. Th
+s data a
+o
+s th
+m to pr
+or
+t
+z
+ th
+
+r 
+fforts o
+ th
+ most commo
+ 
+ork
+oads. Th
+ co
+
+ct
+d data 
+s tra
+spar
+
+t, do
+s 
+ot co
+ta
+
+ a
+y s
+
+s
+t
+v
+ 
+
+format
+o
+.
+A subs
+t of th
+ data, aft
+r c
+
+a
+
+
+g a
+d aggr
+gat
+o
+, 
+
+
+ b
+ pub
+
+c
+y r
+
+
+as
+d for th
+ commu
+
+ty's b
+
+
+f
+t. For 
+xamp
+
+, you ca
+ s
+ th
+ 2024 usag
+ r
+port [h
+r
+](https://2024.v
+m.a
+).
+## What data 
+s co
+
+ct
+d?
+Th
+ 
+
+st of data co
+
+ct
+d by th
+ 
+at
+st v
+rs
+o
+ of vLLM ca
+ b
+ fou
+d h
+r
+: [v
+m/usag
+/usag
+_
+
+b.py](../../v
+m/usag
+/usag
+_
+
+b.py)
+H
+r
+ 
+s a
+ 
+xamp
+
+ as of v0.4.0:
+??? co
+so
+
+ "Output"
+    ```jso
+
     {
-      "uuid": "fbe880e9-084d-4cab-a395-8984c50f1109",
-      "provider": "GCP",
-      "num_cpu": 24,
-      "cpu_type": "Intel(R) Xeon(R) CPU @ 2.20GHz",
-      "cpu_family_model_stepping": "6,85,7",
-      "total_memory": 101261135872,
-      "architecture": "x86_64",
-      "platform": "Linux-5.10.0-28-cloud-amd64-x86_64-with-glibc2.31",
-      "gpu_count": 2,
-      "gpu_type": "NVIDIA L4",
-      "gpu_memory_per_device": 23580639232,
-      "model_architecture": "OPTForCausalLM",
-      "vllm_version": "0.3.2+cu123",
-      "context": "LLM_CLASS",
-      "log_time": 1711663373492490000,
-      "source": "production",
-      "dtype": "torch.float16",
-      "tensor_parallel_size": 1,
-      "block_size": 16,
-      "gpu_memory_utilization": 0.9,
-      "quantization": null,
-      "kv_cache_dtype": "auto",
-      "enable_lora": false,
-      "enable_prefix_caching": false,
-      "enforce_eager": false,
-      "disable_custom_all_reduce": true
+      "uu
+d": "fb
+880
+9-084d-4cab-a395-8984c50f1109",
+      "prov
+d
+r": "GCP",
+      "
+um_cpu": 24,
+      "cpu_typ
+": "I
+t
+
+(R) X
+o
+(R) CPU @ 2.20GHz",
+      "cpu_fam
+
+y_mod
+
+_st
+pp
+
+g": "6,85,7",
+      "tota
+_m
+mory": 101261135872,
+      "arch
+t
+ctur
+": "x86_64",
+      "p
+atform": "L
+
+ux-5.10.0-28-c
+oud-amd64-x86_64-
+
+th-g
+
+bc2.31",
+      "gpu_cou
+t": 2,
+      "gpu_typ
+": "NVIDIA L4",
+      "gpu_m
+mory_p
+r_d
+v
+c
+": 23580639232,
+      "mod
+
+_arch
+t
+ctur
+": "OPTForCausa
+LM",
+      "v
+m_v
+rs
+o
+": "0.3.2+cu123",
+      "co
+t
+xt": "LLM_CLASS",
+      "
+og_t
+m
+": 1711663373492490000,
+      "sourc
+": "product
+o
+",
+      "dtyp
+": "torch.f
+oat16",
+      "t
+
+sor_para
+
+
+_s
+z
+": 1,
+      "b
+ock_s
+z
+": 16,
+      "gpu_m
+mory_ut
+
+
+zat
+o
+": 0.9,
+      "qua
+t
+zat
+o
+": 
+u
+,
+      "kv_cach
+_dtyp
+": "auto",
+      "
+
+ab
+
+_
+ora": fa
+s
+,
+      "
+
+ab
+
+_pr
+f
+x_cach
+
+g": fa
+s
+,
+      "
+
+forc
+_
+ag
+r": fa
+s
+,
+      "d
+sab
+
+_custom_a
+_r
+duc
+": tru
+
     }
-    ```
-
-You can preview the collected data by running the following command:
-
-```bash
-tail ~/.config/vllm/usage_stats.json
 ```
+You ca
+ pr
+v
 
-## Opting out
 
-You can opt out of usage stats collection by setting the `VLLM_NO_USAGE_STATS` or `DO_NOT_TRACK` environment variable, or by creating a `~/.config/vllm/do_not_track` file:
+ th
+ co
 
+ct
+d data by ru
+
+
+g th
+ fo
+o
+
+
+g comma
+d:
 ```bash
-# Any of the following methods can disable usage stats collection
-export VLLM_NO_USAGE_STATS=1
-export DO_NOT_TRACK=1
-mkdir -p ~/.config/vllm && touch ~/.config/vllm/do_not_track
+ta
+
+ ~/.co
+f
+g/v
+m/usag
+_stats.jso
+
+```
+## Opt
+
+g out
+You ca
+ opt out of usag
+ stats co
+
+ct
+o
+ by s
+tt
+
+g th
+ `VLLM_NO_USAGE_STATS` or `DO_NOT_TRACK` 
+
+v
+ro
+m
+
+t var
+ab
+
+, or by cr
+at
+
+g a `~/.co
+f
+g/v
+m/do_
+ot_track` f
+
+
+:
+```bash
+# A
+y of th
+ fo
+o
+
+
+g m
+thods ca
+ d
+sab
+
+ usag
+ stats co
+
+ct
+o
+
+
+xport VLLM_NO_USAGE_STATS=1
+
+xport DO_NOT_TRACK=1
+mkd
+r -p ~/.co
+f
+g/v
+m && touch ~/.co
+f
+g/v
+m/do_
+ot_track
 ```

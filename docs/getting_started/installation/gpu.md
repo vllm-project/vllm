@@ -1,143 +1,756 @@
 ---
-toc_depth: 3
+toc_d
+pth: 3
 ---
-
 # GPU
+vLLM 
+s a Pytho
+ 
 
-vLLM is a Python library that supports the following GPU variants. Select your GPU type to see vendor specific instructions:
+brary that supports th
+ fo
+o
+
+
+g GPU var
+a
+ts. S
+
+
+ct your GPU typ
+ to s
+ v
+
+dor sp
+c
+f
+c 
+
+struct
+o
+s:
+=== "NVIDIA CUDA"
+    --8
+-- "docs/g
+tt
+
+g_start
+d/
+
+sta
+at
+o
+/gpu.cuda.
+
+c.md:
+
+sta
+at
+o
+"
+=== "AMD ROCm"
+    --8
+-- "docs/g
+tt
+
+g_start
+d/
+
+sta
+at
+o
+/gpu.rocm.
+
+c.md:
+
+sta
+at
+o
+"
+=== "I
+t
+
+ XPU"
+    --8
+-- "docs/g
+tt
+
+g_start
+d/
+
+sta
+at
+o
+/gpu.xpu.
+
+c.md:
+
+sta
+at
+o
+"
+## R
+qu
+r
+m
+
+ts
+    - OS: L
+
+ux
+    - Pytho
+: 3.10 -- 3.13
+!!! 
+ot
+
+    vLLM do
+s 
+ot support W
+
+do
+s 
+at
+v
+
+y. To ru
+ vLLM o
+ W
+
+do
+s, you ca
+ us
+ th
+ W
+
+do
+s Subsyst
+m for L
+
+ux (WSL) 
+
+th a compat
+b
+
+ L
+
+ux d
+str
+but
+o
+, or us
+ som
+ commu
+
+ty-ma
+
+ta
+
+
+d forks, 
+.g. [https://g
+thub.com/Syst
+mPa
+
+c/v
+m-
+
+
+do
+s](https://g
+thub.com/Syst
+mPa
+
+c/v
+m-
+
+
+do
+s).
+=== "NVIDIA CUDA"
+    --8
+-- "docs/g
+tt
+
+g_start
+d/
+
+sta
+at
+o
+/gpu.cuda.
+
+c.md:r
+qu
+r
+m
+
+ts"
+=== "AMD ROCm"
+    --8
+-- "docs/g
+tt
+
+g_start
+d/
+
+sta
+at
+o
+/gpu.rocm.
+
+c.md:r
+qu
+r
+m
+
+ts"
+=== "I
+t
+
+ XPU"
+    --8
+-- "docs/g
+tt
+
+g_start
+d/
+
+sta
+at
+o
+/gpu.xpu.
+
+c.md:r
+qu
+r
+m
+
+ts"
+## S
+t up us
+
+g Pytho
+
+### Cr
+at
+ a 
+
+
+ Pytho
+ 
+
+v
+ro
+m
+
+t
+--8
+-- "docs/g
+tt
+
+g_start
+d/
+
+sta
+at
+o
+/pytho
+_
+
+v_s
+tup.
+
+c.md"
+=== "NVIDIA CUDA"
+    --8
+-- "docs/g
+tt
+
+g_start
+d/
+
+sta
+at
+o
+/gpu.cuda.
+
+c.md:s
+t-up-us
+
+g-pytho
+"
+=== "AMD ROCm"
+    --8
+-- "docs/g
+tt
+
+g_start
+d/
+
+sta
+at
+o
+/gpu.rocm.
+
+c.md:s
+t-up-us
+
+g-pytho
+"
+=== "I
+t
+
+ XPU"
+    --8
+-- "docs/g
+tt
+
+g_start
+d/
+
+sta
+at
+o
+/gpu.xpu.
+
+c.md:s
+t-up-us
+
+g-pytho
+"
+### Pr
+-bu
+
+t 
+h
+
+s {#pr
+-bu
+
+t-
+h
+
+s}
+=== "NVIDIA CUDA"
+    --8
+-- "docs/g
+tt
+
+g_start
+d/
+
+sta
+at
+o
+/gpu.cuda.
+
+c.md:pr
+-bu
+
+t-
+h
+
+s"
+=== "AMD ROCm"
+    --8
+-- "docs/g
+tt
+
+g_start
+d/
+
+sta
+at
+o
+/gpu.rocm.
+
+c.md:pr
+-bu
+
+t-
+h
+
+s"
+=== "I
+t
+
+ XPU"
+    --8
+-- "docs/g
+tt
+
+g_start
+d/
+
+sta
+at
+o
+/gpu.xpu.
+
+c.md:pr
+-bu
+
+t-
+h
+
+s"
+### Bu
+
+d 
+h
+
+ from sourc
 
 === "NVIDIA CUDA"
+    --8
+-- "docs/g
+tt
 
-    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:installation"
+g_start
+d/
 
+sta
+at
+o
+/gpu.cuda.
+
+c.md:bu
+
+d-
+h
+
+-from-sourc
+"
 === "AMD ROCm"
+    --8
+-- "docs/g
+tt
 
-    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:installation"
+g_start
+d/
 
-=== "Intel XPU"
+sta
+at
+o
+/gpu.rocm.
 
-    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:installation"
+c.md:bu
 
-## Requirements
+d-
+h
 
-- OS: Linux
-- Python: 3.10 -- 3.13
+-from-sourc
+"
+=== "I
+t
 
-!!! note
-    vLLM does not support Windows natively. To run vLLM on Windows, you can use the Windows Subsystem for Linux (WSL) with a compatible Linux distribution, or use some community-maintained forks, e.g. [https://github.com/SystemPanic/vllm-windows](https://github.com/SystemPanic/vllm-windows).
+ XPU"
+    --8
+-- "docs/g
+tt
 
+g_start
+d/
+
+sta
+at
+o
+/gpu.xpu.
+
+c.md:bu
+
+d-
+h
+
+-from-sourc
+"
+## S
+t up us
+
+g Dock
+r
+### Pr
+-bu
+
+t 
+mag
+s
+!-- markdo
+
+
+
+
+t-d
+sab
+
+ MD025 --
+
+# --8
+-- [start:pr
+-bu
+
+t-
+mag
+s]
 === "NVIDIA CUDA"
+    --8
+-- "docs/g
+tt
 
-    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:requirements"
+g_start
+d/
 
+sta
+at
+o
+/gpu.cuda.
+
+c.md:pr
+-bu
+
+t-
+mag
+s"
 === "AMD ROCm"
+    --8
+-- "docs/g
+tt
 
-    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:requirements"
+g_start
+d/
 
-=== "Intel XPU"
+sta
+at
+o
+/gpu.rocm.
 
-    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:requirements"
+c.md:pr
+-bu
 
-## Set up using Python
+t-
+mag
+s"
+=== "I
+t
 
-### Create a new Python environment
+ XPU"
+    --8
+-- "docs/g
+tt
 
---8<-- "docs/getting_started/installation/python_env_setup.inc.md"
+g_start
+d/
 
+sta
+at
+o
+/gpu.xpu.
+
+c.md:pr
+-bu
+
+t-
+mag
+s"
+# --8
+-- [
+
+d:pr
+-bu
+
+t-
+mag
+s]
+!-- markdo
+
+
+
+
+t-
+
+ab
+
+ MD025 --
+
+!-- markdo
+
+
+
+
+t-d
+sab
+
+ MD001 --
+
+### Bu
+
+d 
+mag
+ from sourc
+
+!-- markdo
+
+
+
+
+t-
+
+ab
+
+ MD001 --
+
+!-- markdo
+
+
+
+
+t-d
+sab
+
+ MD025 --
+
+# --8
+-- [start:bu
+
+d-
+mag
+-from-sourc
+]
 === "NVIDIA CUDA"
+    --8
+-- "docs/g
+tt
 
-    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:set-up-using-python"
+g_start
+d/
 
+sta
+at
+o
+/gpu.cuda.
+
+c.md:bu
+
+d-
+mag
+-from-sourc
+"
 === "AMD ROCm"
+    --8
+-- "docs/g
+tt
 
-    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:set-up-using-python"
+g_start
+d/
 
-=== "Intel XPU"
+sta
+at
+o
+/gpu.rocm.
 
-    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:set-up-using-python"
+c.md:bu
 
-### Pre-built wheels {#pre-built-wheels}
+d-
+mag
+-from-sourc
+"
+=== "I
+t
 
+ XPU"
+    --8
+-- "docs/g
+tt
+
+g_start
+d/
+
+sta
+at
+o
+/gpu.xpu.
+
+c.md:bu
+
+d-
+mag
+-from-sourc
+"
+# --8
+-- [
+
+d:bu
+
+d-
+mag
+-from-sourc
+]
+!-- markdo
+
+
+
+
+t-
+
+ab
+
+ MD025 --
+
+## Support
+d f
+atur
+s
 === "NVIDIA CUDA"
+    --8
+-- "docs/g
+tt
 
-    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:pre-built-wheels"
+g_start
+d/
 
+sta
+at
+o
+/gpu.cuda.
+
+c.md:support
+d-f
+atur
+s"
 === "AMD ROCm"
+    --8
+-- "docs/g
+tt
 
-    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:pre-built-wheels"
+g_start
+d/
 
-=== "Intel XPU"
+sta
+at
+o
+/gpu.rocm.
 
-    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:pre-built-wheels"
+c.md:support
+d-f
+atur
+s"
+=== "I
+t
 
-### Build wheel from source
+ XPU"
+    --8
+-- "docs/g
+tt
 
-=== "NVIDIA CUDA"
+g_start
+d/
 
-    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:build-wheel-from-source"
+sta
+at
+o
+/gpu.xpu.
 
-=== "AMD ROCm"
-
-    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:build-wheel-from-source"
-
-=== "Intel XPU"
-
-    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:build-wheel-from-source"
-
-## Set up using Docker
-
-### Pre-built images
-
-<!-- markdownlint-disable MD025 -->
-# --8<-- [start:pre-built-images]
-
-=== "NVIDIA CUDA"
-
-    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:pre-built-images"
-
-=== "AMD ROCm"
-
-    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:pre-built-images"
-
-=== "Intel XPU"
-
-    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:pre-built-images"
-
-# --8<-- [end:pre-built-images]
-<!-- markdownlint-enable MD025 -->
-
-<!-- markdownlint-disable MD001 -->
-### Build image from source
-<!-- markdownlint-enable MD001 -->
-
-<!-- markdownlint-disable MD025 -->
-# --8<-- [start:build-image-from-source]
-
-=== "NVIDIA CUDA"
-
-    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:build-image-from-source"
-
-=== "AMD ROCm"
-
-    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:build-image-from-source"
-
-=== "Intel XPU"
-
-    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:build-image-from-source"
-
-# --8<-- [end:build-image-from-source]
-<!-- markdownlint-enable MD025 -->
-
-## Supported features
-
-=== "NVIDIA CUDA"
-
-    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:supported-features"
-
-=== "AMD ROCm"
-
-    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:supported-features"
-
-=== "Intel XPU"
-
-    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:supported-features"
+c.md:support
+d-f
+atur
+s"

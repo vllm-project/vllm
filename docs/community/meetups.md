@@ -1,5 +1,62 @@
-# Meetups
+# M
+tups
+W
+ host r
+gu
+ar m
+tups arou
+d th
+ 
+or
+d. W
+ 
 
-We host regular meetups around the world. We will share the project updates from the vLLM team and have guest speakers from the industry to share their experience and insights.
 
-Please visit [vllm.ai/events](https://vllm.ai/events) to learn more.
+ shar
+ th
+ proj
+ct updat
+s from th
+ vLLM t
+am a
+d hav
+ gu
+st sp
+ak
+rs from th
+ 
+
+dustry to shar
+ th
+
+r 
+xp
+r
+
+
+c
+ a
+d 
+
+s
+ghts.
+P
+
+as
+ v
+s
+t [v
+m.a
+/
+v
+
+ts](https://v
+m.a
+/
+v
+
+ts) to 
+
+ar
+ mor
+.

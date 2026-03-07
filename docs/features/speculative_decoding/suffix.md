@@ -1,35 +1,406 @@
-# Suffix Decoding
+# Suff
+x D
+cod
 
-The following code configures vLLM to use speculative decoding where proposals are generated using Suffix Decoding ([technical report](https://arxiv.org/abs/2411.04975)).
+g
+Th
+ fo
+o
 
-Like n-gram, Suffix Decoding can generate draft tokens by pattern-matching using the last `n` generated tokens. Unlike n-gram, Suffix Decoding (1) can pattern-match against both the prompt and previous generations, (2) uses frequency counts to propose the most likely continuations, and (3) speculates an adaptive number of tokens for each request at each iteration to get better acceptance rates.
 
-Suffix Decoding can achieve better performance for tasks with high repetition, such as code-editing, agentic loops (e.g. self-reflection, self-consistency), and RL rollouts.
+g cod
+ co
+f
+gur
+s vLLM to us
+ sp
+cu
+at
+v
+ d
+cod
 
-!!! tip "Install Arctic Inference"
-    Suffix Decoding requires [Arctic Inference](https://github.com/snowflakedb/ArcticInference). You can install it with `pip install arctic-inference`.
+g 
+h
+r
+ proposa
+s ar
+ g
 
-!!! tip "Suffix Decoding Speculative Tokens"
-    Suffix Decoding will speculate a dynamic number of tokens for each request at each decoding step, so the `num_speculative_tokens` configuration specifies the *maximum* number of speculative tokens. It is suggested to use a high number such as `16` or `32` (default).
 
-```python
-from vllm import LLM, SamplingParams
+rat
+d us
 
-prompts = ["The future of AI is"]
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+g Suff
+x D
+cod
 
-llm = LLM(
-    model="Qwen/Qwen3-8B",
-    tensor_parallel_size=1,
-    speculative_config={
-        "method": "suffix",
-        "num_speculative_tokens": 32,
+g ([t
+ch
+
+ca
+ r
+port](https://arx
+v.org/abs/2411.04975)).
+L
+k
+ 
+-gram, Suff
+x D
+cod
+
+g ca
+ g
+
+
+rat
+ draft tok
+
+s by patt
+r
+-match
+
+g us
+
+g th
+ 
+ast `
+` g
+
+
+rat
+d tok
+
+s. U
+
+
+k
+ 
+-gram, Suff
+x D
+cod
+
+g (1) ca
+ patt
+r
+-match aga
+
+st both th
+ prompt a
+d pr
+v
+ous g
+
+
+rat
+o
+s, (2) us
+s fr
+qu
+
+cy cou
+ts to propos
+ th
+ most 
+
+k
+
+y co
+t
+
+uat
+o
+s, a
+d (3) sp
+cu
+at
+s a
+ adapt
+v
+ 
+umb
+r of tok
+
+s for 
+ach r
+qu
+st at 
+ach 
+t
+rat
+o
+ to g
+t b
+tt
+r acc
+pta
+c
+ rat
+s.
+Suff
+x D
+cod
+
+g ca
+ ach
+
+v
+ b
+tt
+r p
+rforma
+c
+ for tasks 
+
+th h
+gh r
+p
+t
+t
+o
+, such as cod
+-
+d
+t
+
+g, ag
+
+t
+c 
+oops (
+.g. s
+
+f-r
+f
+
+ct
+o
+, s
+
+f-co
+s
+st
+
+cy), a
+d RL ro
+outs.
+!!! t
+p "I
+sta
+ Arct
+c I
+f
+r
+
+c
+"
+    Suff
+x D
+cod
+
+g r
+qu
+r
+s [Arct
+c I
+f
+r
+
+c
+](https://g
+thub.com/s
+o
+f
+ak
+db/Arct
+cI
+f
+r
+
+c
+). You ca
+ 
+
+sta
+ 
+t 
+
+th `p
+p 
+
+sta
+ arct
+c-
+
+f
+r
+
+c
+`.
+!!! t
+p "Suff
+x D
+cod
+
+g Sp
+cu
+at
+v
+ Tok
+
+s"
+    Suff
+x D
+cod
+
+g 
+
+
+ sp
+cu
+at
+ a dy
+am
+c 
+umb
+r of tok
+
+s for 
+ach r
+qu
+st at 
+ach d
+cod
+
+g st
+p, so th
+ `
+um_sp
+cu
+at
+v
+_tok
+
+s` co
+f
+gurat
+o
+ sp
+c
+f
+
+s th
+ *max
+mum* 
+umb
+r of sp
+cu
+at
+v
+ tok
+
+s. It 
+s sugg
+st
+d to us
+ a h
+gh 
+umb
+r such as `16` or `32` (d
+fau
+t).
+```pytho
+
+from v
+m 
+mport LLM, Samp
+
+
+gParams
+prompts = ["Th
+ futur
+ of AI 
+s"]
+samp
+
+
+g_params = Samp
+
+
+gParams(t
+mp
+ratur
+=0.8, top_p=0.95)
+
+m = LLM(
+    mod
+
+="Q
+
+
+/Q
+
+
+3-8B",
+    t
+
+sor_para
+
+
+_s
+z
+=1,
+    sp
+cu
+at
+v
+_co
+f
+g={
+        "m
+thod": "suff
+x",
+        "
+um_sp
+cu
+at
+v
+_tok
+
+s": 32,
     },
 )
-outputs = llm.generate(prompts, sampling_params)
+outputs = 
+m.g
 
-for output in outputs:
+
+rat
+(prompts, samp
+
+
+g_params)
+for output 
+
+ outputs:
     prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    g
+
+
+rat
+d_t
+xt = output.outputs[0].t
+xt
+    pr
+
+t(f"Prompt: {prompt!r}, G
+
+
+rat
+d t
+xt: {g
+
+
+rat
+d_t
+xt!r}")
 ```

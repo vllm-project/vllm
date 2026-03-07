@@ -1,170 +1,2316 @@
-# Hugging Face Inference Endpoints
+# Hugg
 
-## Overview
+g Fac
+ I
+f
+r
 
-Models compatible with vLLM can be deployed on Hugging Face Inference Endpoints, either starting from the [Hugging Face Hub](https://huggingface.co) or directly from the [Inference Endpoints](https://endpoints.huggingface.co/) interface. This allows you to serve models in a fully managed environment with GPU acceleration, auto-scaling, and monitoring, without managing the infrastructure manually.
+c
+ E
+dpo
 
-For advanced details on vLLM integration and deployment options, see [Advanced Deployment Details](#advanced-deployment-details).
+ts
+## Ov
+rv
 
-## Deployment Methods
 
-- [**Method 1: Deploy from the Catalog.**](#method-1-deploy-from-the-catalog) One-click deploy models from the Hugging Face Hub with ready-made optimized configurations.
-- [**Method 2: Guided Deployment (Transformers Models).**](#method-2-guided-deployment-transformers-models) Instantly deploy models tagged with `transformers` from the Hub UI using the **Deploy** button.
-- [**Method 3: Manual Deployment (Advanced Models).**](#method-3-manual-deployment-advanced-models) For models that either use custom code with the `transformers` tag, or don’t run with standard `transformers` but are supported by vLLM. This method requires manual configuration.
 
-### Method 1: Deploy from the Catalog
+Mod
 
-This is the easiest way to get started with vLLM on Hugging Face Inference Endpoints. You can browse a catalog of models with verified and optimized deployment configuration at [Inference Endpoints](https://endpoints.huggingface.co/catalog) to maximize performance.
+s compat
+b
 
-1. Go to [Endpoints Catalog](https://endpoints.huggingface.co/catalog) and in the **Inference Server** options, select `vLLM`.This will display the current list of models with optimized preconfigured options.
+ 
 
-    ![Endpoints Catalog](../../assets/deployment/hf-inference-endpoints-catalog.png)
+th vLLM ca
+ b
+ d
+p
+oy
+d o
+ Hugg
 
-1. Select the desired model and click **Create Endpoint**.
+g Fac
+ I
+f
+r
 
-    ![Create Endpoint](../../assets/deployment/hf-inference-endpoints-create-endpoint.png)
+c
+ E
+dpo
 
-1. Once the deployment is ready, you can use the endpoint. Update the `DEPLOYMENT_URL` with the URL provided in the console, remembering to append `/v1` as required.
+ts, 
 
-    ```python
-    # pip install openai
-    from openai import OpenAI
-    import os
+th
+r start
 
-    client = OpenAI(
-        base_url=DEPLOYMENT_URL,
-        api_key=os.environ["HF_TOKEN"],  # https://huggingface.co/settings/tokens
+g from th
+ [Hugg
+
+g Fac
+ Hub](https://hugg
+
+gfac
+.co) or d
+r
+ct
+y from th
+ [I
+f
+r
+
+c
+ E
+dpo
+
+ts](https://
+
+dpo
+
+ts.hugg
+
+gfac
+.co/) 
+
+t
+rfac
+. Th
+s a
+o
+s you to s
+rv
+ mod
+
+s 
+
+ a fu
+y ma
+ag
+d 
+
+v
+ro
+m
+
+t 
+
+th GPU acc
+
+
+rat
+o
+, auto-sca
+
+
+g, a
+d mo
+
+tor
+
+g, 
+
+thout ma
+ag
+
+g th
+ 
+
+frastructur
+ ma
+ua
+y.
+For adva
+c
+d d
+ta
+
+s o
+ vLLM 
+
+t
+grat
+o
+ a
+d d
+p
+oym
+
+t opt
+o
+s, s
+ [Adva
+c
+d D
+p
+oym
+
+t D
+ta
+
+s](#adva
+c
+d-d
+p
+oym
+
+t-d
+ta
+
+s).
+## D
+p
+oym
+
+t M
+thods
+    - [**M
+thod 1: D
+p
+oy from th
+ Cata
+og.**](#m
+thod-1-d
+p
+oy-from-th
+-cata
+og) O
+
+-c
+
+ck d
+p
+oy mod
+
+s from th
+ Hugg
+
+g Fac
+ Hub 
+
+th r
+ady-mad
+ opt
+m
+z
+d co
+f
+gurat
+o
+s.
+    - [**M
+thod 2: Gu
+d
+d D
+p
+oym
+
+t (Tra
+sform
+rs Mod
+
+s).**](#m
+thod-2-gu
+d
+d-d
+p
+oym
+
+t-tra
+sform
+rs-mod
+
+s) I
+sta
+t
+y d
+p
+oy mod
+
+s tagg
+d 
+
+th `tra
+sform
+rs` from th
+ Hub UI us
+
+g th
+ **D
+p
+oy** butto
+.
+    - [**M
+thod 3: Ma
+ua
+ D
+p
+oym
+
+t (Adva
+c
+d Mod
+
+s).**](#m
+thod-3-ma
+ua
+-d
+p
+oym
+
+t-adva
+c
+d-mod
+
+s) For mod
+
+s that 
+
+th
+r us
+ custom cod
+ 
+
+th th
+ `tra
+sform
+rs` tag, or do
+’t ru
+ 
+
+th sta
+dard `tra
+sform
+rs` but ar
+ support
+d by vLLM. Th
+s m
+thod r
+qu
+r
+s ma
+ua
+ co
+f
+gurat
+o
+.
+### M
+thod 1: D
+p
+oy from th
+ Cata
+og
+Th
+s 
+s th
+ 
+as
+
+st 
+ay to g
+t start
+d 
+
+th vLLM o
+ Hugg
+
+g Fac
+ I
+f
+r
+
+c
+ E
+dpo
+
+ts. You ca
+ bro
+s
+ a cata
+og of mod
+
+s 
+
+th v
+r
+f
+
+d a
+d opt
+m
+z
+d d
+p
+oym
+
+t co
+f
+gurat
+o
+ at [I
+f
+r
+
+c
+ E
+dpo
+
+ts](https://
+
+dpo
+
+ts.hugg
+
+gfac
+.co/cata
+og) to max
+m
+z
+ p
+rforma
+c
+.
+1. Go to [E
+dpo
+
+ts Cata
+og](https://
+
+dpo
+
+ts.hugg
+
+gfac
+.co/cata
+og) a
+d 
+
+ th
+ **I
+f
+r
+
+c
+ S
+rv
+r** opt
+o
+s, s
+
+
+ct `vLLM`.Th
+s 
+
+
+ d
+sp
+ay th
+ curr
+
+t 
+
+st of mod
+
+s 
+
+th opt
+m
+z
+d pr
+co
+f
+gur
+d opt
+o
+s.
+    ![E
+dpo
+
+ts Cata
+og](../../ass
+ts/d
+p
+oym
+
+t/hf-
+
+f
+r
+
+c
+-
+
+dpo
+
+ts-cata
+og.p
+g)
+1. S
+
+
+ct th
+ d
+s
+r
+d mod
+
+ a
+d c
+
+ck **Cr
+at
+ E
+dpo
+
+t**.
+    ![Cr
+at
+ E
+dpo
+
+t](../../ass
+ts/d
+p
+oym
+
+t/hf-
+
+f
+r
+
+c
+-
+
+dpo
+
+ts-cr
+at
+-
+
+dpo
+
+t.p
+g)
+1. O
+c
+ th
+ d
+p
+oym
+
+t 
+s r
+ady, you ca
+ us
+ th
+ 
+
+dpo
+
+t. Updat
+ th
+ `DEPLOYMENT_URL` 
+
+th th
+ URL prov
+d
+d 
+
+ th
+ co
+so
+
+, r
+m
+mb
+r
+
+g to app
+
+d `/v1` as r
+qu
+r
+d.
+    ```pytho
+
+    # p
+p 
+
+sta
+ op
+
+a
+
+    from op
+
+a
+ 
+mport Op
+
+AI
+    
+mport os
+    c
+
+
+
+t = Op
+
+AI(
+        bas
+_ur
+=DEPLOYMENT_URL,
+        ap
+_k
+y=os.
+
+v
+ro
+["HF_TOKEN"],  # https://hugg
+
+gfac
+.co/s
+tt
+
+gs/tok
+
+s
     )
+    chat_comp
 
-    chat_completion = client.chat.completions.create(
-        model="HuggingFaceTB/SmolLM3-3B",
-        messages=[
+t
+o
+ = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+="Hugg
+
+gFac
+TB/Smo
+LM3-3B",
+        m
+ssag
+s=[
             {
-                "role": "user",
-                "content": [
+                "ro
+
+": "us
+r",
+                "co
+t
+
+t": [
                     {
-                        "type": "text",
-                        "text": "Give me a brief explanation of gravity in simple terms.",
+                        "typ
+": "t
+xt",
+                        "t
+xt": "G
+v
+ m
+ a br
+
+f 
+xp
+a
+at
+o
+ of grav
+ty 
+
+ s
+mp
+
+ t
+rms.",
                     }
                 ],
             }
         ],
-        stream=True,
+        str
+am=Tru
+,
     )
+    for m
+ssag
+ 
 
-    for message in chat_completion:
-        print(message.choices[0].delta.content, end="")
-    ```
+ chat_comp
 
-!!! note
-    The catalog provides models optimized for vLLM, including GPU settings and inference engine configurations. You can monitor the endpoint and update the **container or its configuration** from the Inference Endpoints UI.
+t
+o
+:
+        pr
 
-### Method 2: Guided Deployment (Transformers Models)
+t(m
+ssag
+.cho
+c
+s[0].d
 
-This method applies to models with the [`transformers` library tag](https://huggingface.co/models?library=transformers) in their metadata. It allows you to deploy a model directly from the Hub UI without manual configuration.
+ta.co
+t
 
-1. Navigate to a model on [Hugging Face Hub](https://huggingface.co/models).  
-   For this example we will use the [`ibm-granite/granite-docling-258M`](https://huggingface.co/ibm-granite/granite-docling-258M) model. You can verify that the model is compatible by checking the front matter in the [README](https://huggingface.co/ibm-granite/granite-docling-258M/blob/main/README.md), where the library is tagged as `library: transformers`.
+t, 
 
-2. Locate the **Deploy** button. The button appears for models tagged with `transformers` at the top right of the [model card](https://huggingface.co/ibm-granite/granite-docling-258M).
+d="")
+```
+!!! 
+ot
 
-    ![Locate deploy button](../../assets/deployment/hf-inference-endpoints-locate-deploy-button.png)
+    Th
+ cata
+og prov
+d
+s mod
 
-3. Click the **Deploy** button > **HF Inference Endpoints**. You will be taken to the Inference Endpoints interface to configure the deployment.
+s opt
+m
+z
+d for vLLM, 
 
-    ![Click deploy button](../../assets/deployment/hf-inference-endpoints-click-deploy-button.png)
+c
+ud
 
-4. Select the Hardware (we choose AWS>GPU>T4 for the example) and Container Configuration. Choose `vLLM` as the container type and finalize the deployment pressing **Create Endpoint**.
+g GPU s
+tt
 
-    ![Select Hardware](../../assets/deployment/hf-inference-endpoints-select-hardware.png)
+gs a
+d 
 
-5. Use the deployed endpoint. Update the `DEPLOYMENT_URL` with the URL provided in the console (remember to add `/v1` needed). You can then use your endpoint programmatically or via the SDK.
+f
+r
 
-    ```python
-    # pip install openai
-    from openai import OpenAI
-    import os
+c
+ 
 
-    client = OpenAI(
-        base_url=DEPLOYMENT_URL,
-        api_key=os.environ["HF_TOKEN"],  # https://huggingface.co/settings/tokens
+g
+
+
+ co
+f
+gurat
+o
+s. You ca
+ mo
+
+tor th
+ 
+
+dpo
+
+t a
+d updat
+ th
+ **co
+ta
+
+
+r or 
+ts co
+f
+gurat
+o
+** from th
+ I
+f
+r
+
+c
+ E
+dpo
+
+ts UI.
+### M
+thod 2: Gu
+d
+d D
+p
+oym
+
+t (Tra
+sform
+rs Mod
+
+s)
+Th
+s m
+thod app
+
+
+s to mod
+
+s 
+
+th th
+ [`tra
+sform
+rs` 
+
+brary tag](https://hugg
+
+gfac
+.co/mod
+
+s?
+
+brary=tra
+sform
+rs) 
+
+ th
+
+r m
+tadata. It a
+o
+s you to d
+p
+oy a mod
+
+ d
+r
+ct
+y from th
+ Hub UI 
+
+thout ma
+ua
+ co
+f
+gurat
+o
+.
+1. Nav
+gat
+ to a mod
+
+ o
+ [Hugg
+
+g Fac
+ Hub](https://hugg
+
+gfac
+.co/mod
+
+s).  
+   For th
+s 
+xamp
+
+ 
+
+ 
+
+
+ us
+ th
+ [`
+bm-gra
+
+t
+/gra
+
+t
+-doc
+
+
+g-258M`](https://hugg
+
+gfac
+.co/
+bm-gra
+
+t
+/gra
+
+t
+-doc
+
+
+g-258M) mod
+
+. You ca
+ v
+r
+fy that th
+ mod
+
+ 
+s compat
+b
+
+ by ch
+ck
+
+g th
+ fro
+t matt
+r 
+
+ th
+ [README](https://hugg
+
+gfac
+.co/
+bm-gra
+
+t
+/gra
+
+t
+-doc
+
+
+g-258M/b
+ob/ma
+
+/README.md), 
+h
+r
+ th
+ 
+
+brary 
+s tagg
+d as `
+
+brary: tra
+sform
+rs`.
+2. Locat
+ th
+ **D
+p
+oy** butto
+. Th
+ butto
+ app
+ars for mod
+
+s tagg
+d 
+
+th `tra
+sform
+rs` at th
+ top r
+ght of th
+ [mod
+
+ card](https://hugg
+
+gfac
+.co/
+bm-gra
+
+t
+/gra
+
+t
+-doc
+
+
+g-258M).
+    ![Locat
+ d
+p
+oy butto
+](../../ass
+ts/d
+p
+oym
+
+t/hf-
+
+f
+r
+
+c
+-
+
+dpo
+
+ts-
+ocat
+-d
+p
+oy-butto
+.p
+g)
+3. C
+
+ck th
+ **D
+p
+oy** butto
+ 
+ **HF I
+f
+r
+
+c
+ E
+dpo
+
+ts**. You 
+
+
+ b
+ tak
+
+ to th
+ I
+f
+r
+
+c
+ E
+dpo
+
+ts 
+
+t
+rfac
+ to co
+f
+gur
+ th
+ d
+p
+oym
+
+t.
+    ![C
+
+ck d
+p
+oy butto
+](../../ass
+ts/d
+p
+oym
+
+t/hf-
+
+f
+r
+
+c
+-
+
+dpo
+
+ts-c
+
+ck-d
+p
+oy-butto
+.p
+g)
+4. S
+
+
+ct th
+ Hard
+ar
+ (
+
+ choos
+ AWS
+GPU
+T4 for th
+ 
+xamp
+
+) a
+d Co
+ta
+
+
+r Co
+f
+gurat
+o
+. Choos
+ `vLLM` as th
+ co
+ta
+
+
+r typ
+ a
+d f
+
+a
+
+z
+ th
+ d
+p
+oym
+
+t pr
+ss
+
+g **Cr
+at
+ E
+dpo
+
+t**.
+    ![S
+
+
+ct Hard
+ar
+](../../ass
+ts/d
+p
+oym
+
+t/hf-
+
+f
+r
+
+c
+-
+
+dpo
+
+ts-s
+
+
+ct-hard
+ar
+.p
+g)
+5. Us
+ th
+ d
+p
+oy
+d 
+
+dpo
+
+t. Updat
+ th
+ `DEPLOYMENT_URL` 
+
+th th
+ URL prov
+d
+d 
+
+ th
+ co
+so
+
+ (r
+m
+mb
+r to add `/v1` 
+
+d
+d). You ca
+ th
+
+ us
+ your 
+
+dpo
+
+t programmat
+ca
+y or v
+a th
+ SDK.
+    ```pytho
+
+    # p
+p 
+
+sta
+ op
+
+a
+
+    from op
+
+a
+ 
+mport Op
+
+AI
+    
+mport os
+    c
+
+
+
+t = Op
+
+AI(
+        bas
+_ur
+=DEPLOYMENT_URL,
+        ap
+_k
+y=os.
+
+v
+ro
+["HF_TOKEN"],  # https://hugg
+
+gfac
+.co/s
+tt
+
+gs/tok
+
+s
     )
+    chat_comp
 
-    chat_completion = client.chat.completions.create(
-        model="ibm-granite/granite-docling-258M",
-        messages=[
+t
+o
+ = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+="
+bm-gra
+
+t
+/gra
+
+t
+-doc
+
+
+g-258M",
+        m
+ssag
+s=[
             {
-                "role": "user",
-                "content": [
+                "ro
+
+": "us
+r",
+                "co
+t
+
+t": [
                     {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": "https://huggingface.co/ibm-granite/granite-docling-258M/resolve/main/assets/new_arxiv.png",
+                        "typ
+": "
+mag
+_ur
+",
+                        "
+mag
+_ur
+": {
+                            "ur
+": "https://hugg
+
+gfac
+.co/
+bm-gra
+
+t
+/gra
+
+t
+-doc
+
+
+g-258M/r
+so
+v
+/ma
+
+/ass
+ts/
+
+
+_arx
+v.p
+g",
                         },
                     },
                     {
-                        "type": "text",
-                        "text": "Convert this page to docling.",
+                        "typ
+": "t
+xt",
+                        "t
+xt": "Co
+v
+rt th
+s pag
+ to doc
+
+
+g.",
                     },
                 ]
             }
         ],
-        stream=True,
+        str
+am=Tru
+,
     )
+    for m
+ssag
+ 
 
-    for message in chat_completion:
-        print(message.choices[0].delta.content, end="")
-    ```
+ chat_comp
 
-!!! note
-    This method uses best-guess defaults. You may need to adjust the configuration to fit your specific requirements.
+t
+o
+:
+        pr
 
-### Method 3: Manual Deployment (Advanced Models)
+t(m
+ssag
+.cho
+c
+s[0].d
 
-Some models require manual deployment because they:
+ta.co
+t
 
-- Use custom code with the `transformers` tag
-- Don't run with standard `transformers` but are supported by `vLLM`
+t, 
 
-These models cannot be deployed using the **Deploy** button on the model card.
+d="")
+```
+!!! 
+ot
 
-In this guide, we demonstrate manual deployment using the [`rednote-hilab/dots.ocr`](https://huggingface.co/rednote-hilab/dots.ocr) model, an OCR model integrated with vLLM (see vLLM [PR](https://github.com/vllm-project/vllm/pull/24645)).
+    Th
+s m
+thod us
+s b
+st-gu
+ss d
+fau
+ts. You may 
 
-1. Start a new deployment. Go to [Inference Endpoints](https://endpoints.huggingface.co/) and click `New`.
+d to adjust th
+ co
+f
+gurat
+o
+ to f
+t your sp
+c
+f
+c r
+qu
+r
+m
 
-    ![New Endpoint](../../assets/deployment/hf-inference-endpoints-new-endpoint.png)
+ts.
+### M
+thod 3: Ma
+ua
+ D
+p
+oym
 
-2. Search the model in the Hub. In the dialog, switch to **Hub** and search for the desired model.
+t (Adva
+c
+d Mod
 
-    ![Select model](../../assets/deployment/hf-inference-endpoints-select-model.png)
+s)
+Som
+ mod
 
-3. Choosing infrastructure. On the configuration page, select the cloud provider and hardware from the available options.  
-   For this demo, we choose AWS and L4 GPU. Adjust according to your hardware needs.
+s r
+qu
+r
+ ma
+ua
+ d
+p
+oym
 
-    ![Choose Infra](../../assets/deployment/hf-inference-endpoints-choose-infra.png)
+t b
+caus
+ th
+y:
+    - Us
+ custom cod
+ 
 
-4. Configure the container. Scroll to the **Container Configuration** and select `vLLM` as the container type.
+th th
+ `tra
+sform
+rs` tag
+    - Do
+'t ru
+ 
 
-    ![Configure Container](../../assets/deployment/hf-inference-endpoints-configure-container.png)
+th sta
+dard `tra
+sform
+rs` but ar
+ support
+d by `vLLM`
+Th
+s
+ mod
 
-5. Create the endpoint. Click **Create Endpoint** to deploy the model.
+s ca
+ot b
+ d
+p
+oy
+d us
 
-    Once the endpoint is ready, you can use it with the OpenAI Completion API, cURL, or other SDKs. Remember to append `/v1` to the deployment URL if needed.
+g th
+ **D
+p
+oy** butto
+ o
+ th
+ mod
 
-!!! note
-    You can adjust the **container settings** (Container URI, Container Arguments) from the Inference Endpoints UI and press **Update Endpoint**. This redeploys the endpoint with the updated container configuration. Changes to the model itself require creating a new endpoint or redeploying with a different model. For example, for this demo, you may need to update the Container URI to the nightly image (`vllm/vllm-openai:nightly`) and add the `--trust-remote-code` flag in the container arguments.
+ card.
+I
+ th
+s gu
+d
+, 
 
-## Advanced Deployment Details
+ d
+mo
+strat
+ ma
+ua
+ d
+p
+oym
 
-With the [Transformers modeling backend integration](https://blog.vllm.ai/2025/04/11/transformers-backend.html), vLLM now offers Day 0 support for any model compatible with `transformers`. This means you can deploy such models immediately, leveraging vLLM’s optimized inference without additional backend modifications.
+t us
 
-Hugging Face Inference Endpoints provides a fully managed environment for serving models via vLLM. You can deploy models without configuring servers, installing dependencies, or managing clusters. Endpoints also support deployment across multiple cloud providers (AWS, Azure, GCP) without the need for separate accounts.
+g th
+ [`r
+d
+ot
+-h
 
-The platform integrates seamlessly with the Hugging Face Hub, allowing you to deploy any vLLM- or `transformers`-compatible model, track usage, and update the inference engine directly. The vLLM engine comes preconfigured, enabling optimized inference and easy switching between models or engines without modifying your code. This setup simplifies production deployment: endpoints are ready in minutes, include monitoring and logging, and let you focus on serving models rather than maintaining infrastructure.
+ab/dots.ocr`](https://hugg
 
-## Next Steps
+gfac
+.co/r
+d
+ot
+-h
 
-- Explore the [Inference Endpoints](https://endpoints.huggingface.co/catalog) model catalog
-- Read the Inference Endpoints [documentation](https://huggingface.co/docs/inference-endpoints/en/index)
-- Learn about [Inference Endpoints engines](https://huggingface.co/docs/inference-endpoints/en/engines/vllm)
-- Understand the [Transformers modeling backend integration](https://blog.vllm.ai/2025/04/11/transformers-backend.html)
+ab/dots.ocr) mod
+
+, a
+ OCR mod
+
+ 
+
+t
+grat
+d 
+
+th vLLM (s
+ vLLM [PR](https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/24645)).
+1. Start a 
+
+
+ d
+p
+oym
+
+t. Go to [I
+f
+r
+
+c
+ E
+dpo
+
+ts](https://
+
+dpo
+
+ts.hugg
+
+gfac
+.co/) a
+d c
+
+ck `N
+
+`.
+    ![N
+
+ E
+dpo
+
+t](../../ass
+ts/d
+p
+oym
+
+t/hf-
+
+f
+r
+
+c
+-
+
+dpo
+
+ts-
+
+
+-
+
+dpo
+
+t.p
+g)
+2. S
+arch th
+ mod
+
+ 
+
+ th
+ Hub. I
+ th
+ d
+a
+og, s
+
+tch to **Hub** a
+d s
+arch for th
+ d
+s
+r
+d mod
+
+.
+    ![S
+
+
+ct mod
+
+](../../ass
+ts/d
+p
+oym
+
+t/hf-
+
+f
+r
+
+c
+-
+
+dpo
+
+ts-s
+
+
+ct-mod
+
+.p
+g)
+3. Choos
+
+g 
+
+frastructur
+. O
+ th
+ co
+f
+gurat
+o
+ pag
+, s
+
+
+ct th
+ c
+oud prov
+d
+r a
+d hard
+ar
+ from th
+ ava
+
+ab
+
+ opt
+o
+s.  
+   For th
+s d
+mo, 
+
+ choos
+ AWS a
+d L4 GPU. Adjust accord
+
+g to your hard
+ar
+ 
+
+ds.
+    ![Choos
+ I
+fra](../../ass
+ts/d
+p
+oym
+
+t/hf-
+
+f
+r
+
+c
+-
+
+dpo
+
+ts-choos
+-
+
+fra.p
+g)
+4. Co
+f
+gur
+ th
+ co
+ta
+
+
+r. Scro
+ to th
+ **Co
+ta
+
+
+r Co
+f
+gurat
+o
+** a
+d s
+
+
+ct `vLLM` as th
+ co
+ta
+
+
+r typ
+.
+    ![Co
+f
+gur
+ Co
+ta
+
+
+r](../../ass
+ts/d
+p
+oym
+
+t/hf-
+
+f
+r
+
+c
+-
+
+dpo
+
+ts-co
+f
+gur
+-co
+ta
+
+
+r.p
+g)
+5. Cr
+at
+ th
+ 
+
+dpo
+
+t. C
+
+ck **Cr
+at
+ E
+dpo
+
+t** to d
+p
+oy th
+ mod
+
+.
+    O
+c
+ th
+ 
+
+dpo
+
+t 
+s r
+ady, you ca
+ us
+ 
+t 
+
+th th
+ Op
+
+AI Comp
+
+t
+o
+ API, cURL, or oth
+r SDKs. R
+m
+mb
+r to app
+
+d `/v1` to th
+ d
+p
+oym
+
+t URL 
+f 
+
+d
+d.
+!!! 
+ot
+
+    You ca
+ adjust th
+ **co
+ta
+
+
+r s
+tt
+
+gs** (Co
+ta
+
+
+r URI, Co
+ta
+
+
+r Argum
+
+ts) from th
+ I
+f
+r
+
+c
+ E
+dpo
+
+ts UI a
+d pr
+ss **Updat
+ E
+dpo
+
+t**. Th
+s r
+d
+p
+oys th
+ 
+
+dpo
+
+t 
+
+th th
+ updat
+d co
+ta
+
+
+r co
+f
+gurat
+o
+. Cha
+g
+s to th
+ mod
+
+ 
+ts
+
+f r
+qu
+r
+ cr
+at
+
+g a 
+
+
+ 
+
+dpo
+
+t or r
+d
+p
+oy
+
+g 
+
+th a d
+ff
+r
+
+t mod
+
+. For 
+xamp
+
+, for th
+s d
+mo, you may 
+
+d to updat
+ th
+ Co
+ta
+
+
+r URI to th
+ 
+
+ght
+y 
+mag
+ (`v
+m/v
+m-op
+
+a
+:
+
+ght
+y`) a
+d add th
+ `--trust-r
+mot
+-cod
+` f
+ag 
+
+ th
+ co
+ta
+
+
+r argum
+
+ts.
+## Adva
+c
+d D
+p
+oym
+
+t D
+ta
+
+s
+W
+th th
+ [Tra
+sform
+rs mod
+
+
+
+g back
+
+d 
+
+t
+grat
+o
+](https://b
+og.v
+m.a
+/2025/04/11/tra
+sform
+rs-back
+
+d.htm
+), vLLM 
+o
+ off
+rs Day 0 support for a
+y mod
+
+ compat
+b
+
+ 
+
+th `tra
+sform
+rs`. Th
+s m
+a
+s you ca
+ d
+p
+oy such mod
+
+s 
+mm
+d
+at
+
+y, 
+
+v
+rag
+
+g vLLM’s opt
+m
+z
+d 
+
+f
+r
+
+c
+ 
+
+thout add
+t
+o
+a
+ back
+
+d mod
+f
+cat
+o
+s.
+Hugg
+
+g Fac
+ I
+f
+r
+
+c
+ E
+dpo
+
+ts prov
+d
+s a fu
+y ma
+ag
+d 
+
+v
+ro
+m
+
+t for s
+rv
+
+g mod
+
+s v
+a vLLM. You ca
+ d
+p
+oy mod
+
+s 
+
+thout co
+f
+gur
+
+g s
+rv
+rs, 
+
+sta
+
+
+g d
+p
+
+d
+
+c
+
+s, or ma
+ag
+
+g c
+ust
+rs. E
+dpo
+
+ts a
+so support d
+p
+oym
+
+t across mu
+t
+p
+
+ c
+oud prov
+d
+rs (AWS, Azur
+, GCP) 
+
+thout th
+ 
+
+d for s
+parat
+ accou
+ts.
+Th
+ p
+atform 
+
+t
+grat
+s s
+am
+
+ss
+y 
+
+th th
+ Hugg
+
+g Fac
+ Hub, a
+o
+
+
+g you to d
+p
+oy a
+y vLLM- or `tra
+sform
+rs`-compat
+b
+
+ mod
+
+, track usag
+, a
+d updat
+ th
+ 
+
+f
+r
+
+c
+ 
+
+g
+
+
+ d
+r
+ct
+y. Th
+ vLLM 
+
+g
+
+
+ com
+s pr
+co
+f
+gur
+d, 
+
+ab
+
+
+g opt
+m
+z
+d 
+
+f
+r
+
+c
+ a
+d 
+asy s
+
+tch
+
+g b
+t
+
+
+ mod
+
+s or 
+
+g
+
+
+s 
+
+thout mod
+fy
+
+g your cod
+. Th
+s s
+tup s
+mp
+
+f
+
+s product
+o
+ d
+p
+oym
+
+t: 
+
+dpo
+
+ts ar
+ r
+ady 
+
+ m
+
+ut
+s, 
+
+c
+ud
+ mo
+
+tor
+
+g a
+d 
+ogg
+
+g, a
+d 
+
+t you focus o
+ s
+rv
+
+g mod
+
+s rath
+r tha
+ ma
+
+ta
+
+
+
+g 
+
+frastructur
+.
+## N
+xt St
+ps
+    - Exp
+or
+ th
+ [I
+f
+r
+
+c
+ E
+dpo
+
+ts](https://
+
+dpo
+
+ts.hugg
+
+gfac
+.co/cata
+og) mod
+
+ cata
+og
+    - R
+ad th
+ I
+f
+r
+
+c
+ E
+dpo
+
+ts [docum
+
+tat
+o
+](https://hugg
+
+gfac
+.co/docs/
+
+f
+r
+
+c
+-
+
+dpo
+
+ts/
+
+/
+
+d
+x)
+    - L
+ar
+ about [I
+f
+r
+
+c
+ E
+dpo
+
+ts 
+
+g
+
+
+s](https://hugg
+
+gfac
+.co/docs/
+
+f
+r
+
+c
+-
+
+dpo
+
+ts/
+
+/
+
+g
+
+
+s/v
+m)
+    - U
+d
+rsta
+d th
+ [Tra
+sform
+rs mod
+
+
+
+g back
+
+d 
+
+t
+grat
+o
+](https://b
+og.v
+m.a
+/2025/04/11/tra
+sform
+rs-back
+
+d.htm
+)

@@ -1,191 +1,1908 @@
-# Python Multiprocessing
+# Pytho
+ Mu
+t
+proc
+ss
 
-## Debugging
+g
+## D
+bugg
 
-Please see the [Troubleshooting](../usage/troubleshooting.md#python-multiprocessing)
-page for information on known issues and how to solve them.
+g
+P
 
-## Introduction
+as
+ s
+ th
+ [Troub
 
-!!! important
-    The source code references are to the state of the code at the time of writing in December 2024.
+shoot
 
-The use of Python multiprocessing in vLLM is complicated by:
+g](../usag
+/troub
 
-- using vLLM as a library, which limits control over its internal code;
-- incompatibilities between certain multiprocessing methods and vLLM dependencies.
+shoot
 
-This document describes how vLLM deals with these challenges.
+g.md#pytho
+-mu
+t
+proc
+ss
 
-## Multiprocessing Methods
+g)
+pag
+ for 
 
-[Python multiprocessing methods](https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods) include:
+format
+o
+ o
+ k
+o
 
-- `spawn` - Spawn a new Python process. The default on Windows and macOS.
-- `fork` - Use `os.fork()` to fork the Python interpreter. The default on
-  Linux for Python versions prior to 3.14.
-- `forkserver` - Spawn a server process that will fork a new process on request.
-  The default on Linux for Python version 3.14 and newer.
+ 
+ssu
+s a
+d ho
+ to so
+v
+ th
+m.
+## I
+troduct
+o
 
-### Tradeoffs
+!!! 
+mporta
+t
+    Th
+ sourc
+ cod
+ r
+f
+r
 
-`fork` is the fastest method, but is incompatible with dependencies that use
-threads. If you are under macOS, using `fork` may cause the process to crash.
+c
+s ar
+ to th
+ stat
+ of th
+ cod
+ at th
+ t
+m
+ of 
+r
+t
 
-`spawn` is more compatible with dependencies, but can be problematic when vLLM
-is used as a library. If the consuming code does not use a `__main__` guard
-(`if __name__ == "__main__":`), the code will be inadvertently re-executed when vLLM
-spawns a new process. This can lead to infinite recursion, among other problems.
+g 
 
-`forkserver` will spawn a new server process that will fork new processes on
-demand. This unfortunately has the same problem as `spawn` when vLLM is used as
-a library. The server process is created as a spawned new process, which will
-re-execute code not protected by a `__main__` guard.
+ D
+c
+mb
+r 2024.
+Th
+ us
+ of Pytho
+ mu
+t
+proc
+ss
 
-For both `spawn` and `forkserver`, the process must not depend on inheriting any
-global state as would be the case with `fork`.
+g 
 
-## Compatibility with Dependencies
+ vLLM 
+s comp
 
-Multiple vLLM dependencies indicate either a preference or requirement for using
-`spawn`:
+cat
+d by:
+    - us
 
-- <https://pytorch.org/docs/stable/notes/multiprocessing.html#cuda-in-multiprocessing>
-- <https://pytorch.org/docs/stable/multiprocessing.html#sharing-cuda-tensors>
-- <https://docs.habana.ai/en/latest/PyTorch/Getting_Started_with_PyTorch_and_Gaudi/Getting_Started_with_PyTorch.html?highlight=multiprocessing#torch-multiprocessing-for-dataloaders>
+g vLLM as a 
 
-Known issues exist when using `fork` after initializing these dependencies.
+brary, 
+h
+ch 
 
-## Current State (v0)
+m
+ts co
+tro
+ ov
+r 
+ts 
 
-The environment variable `VLLM_WORKER_MULTIPROC_METHOD` can be used to control which method is used by vLLM. The current default is `fork`.
+t
+r
+a
+ cod
+;
+    - 
 
-- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/envs.py#L339-L342>
+compat
+b
 
-If the main process is controlled via the `vllm` command,
-`spawn` is used because it's the most widely compatible.
 
-- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/scripts.py#L123-L140>
+t
 
-The `multiproc_xpu_executor` forces the use of `spawn`.
+s b
+t
 
-- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/executor/multiproc_xpu_executor.py#L14-L18>
 
-There are other miscellaneous places hard-coding the use of `spawn`:
+ c
+rta
 
-- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/distributed/device_communicators/all_reduce_utils.py#L135>
-- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/entrypoints/openai/api_server.py#L184>
+ mu
+t
+proc
+ss
 
-Related PRs:
+g m
+thods a
+d vLLM d
+p
 
-- <https://github.com/vllm-project/vllm/pull/8823>
+d
 
-## Prior State in v1
+c
 
-There was an environment variable to control whether multiprocessing is used in
-the v1 engine core, `VLLM_ENABLE_V1_MULTIPROCESSING`. This defaulted to off.
+s.
+Th
+s docum
 
-- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/envs.py#L452-L454>
+t d
+scr
+b
+s ho
+ vLLM d
+a
+s 
 
-When it was enabled, the v1 `LLMEngine` would create a new process to run the
-engine core.
+th th
+s
+ cha
 
-- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/v1/engine/llm_engine.py#L93-L95>
-- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/v1/engine/llm_engine.py#L70-L77>
-- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/v1/engine/core_client.py#L44-L45>
 
-It was off by default for all the reasons mentioned above - compatibility with
-dependencies and code using vLLM as a library.
+g
+s.
+## Mu
+t
+proc
+ss
 
-### Changes Made in v1
+g M
+thods
+[Pytho
+ mu
+t
+proc
+ss
 
-There is not an easy solution with Python's `multiprocessing` that will work
-everywhere. As a first step, we can get v1 into a state where it does
-"best effort" choice of multiprocessing method to maximize compatibility.
+g m
+thods](https://docs.pytho
+.org/3/
 
-- Default to `fork`.
-- Use `spawn` when we know we control the main process (`vllm` was executed).
-- If we detect `cuda` was previously initialized, force `spawn` and emit a
-  warning. We know `fork` will break, so this is the best we can do.
+brary/mu
+t
+proc
+ss
 
-The case that is known to still break in this scenario is code using vLLM as a
-library that initializes `cuda` before calling vLLM. The warning we emit should
-instruct users to either add a `__main__` guard or to disable multiprocessing.
+g.htm
+#co
+t
+xts-a
+d-start-m
+thods) 
 
-If that known-failure case occurs, the user will see two messages that explain
-what is happening. First, a log message from vLLM:
+c
+ud
+:
+    - `spa
 
-```console
-WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
-    initialized. We must use the `spawn` multiprocessing start method. Setting
-    VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. See
-    https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-multiprocessing
-    for more information.
+` - Spa
+
+ a 
+
+
+ Pytho
+ proc
+ss. Th
+ d
+fau
+t o
+ W
+
+do
+s a
+d macOS.
+    - `fork` - Us
+ `os.fork()` to fork th
+ Pytho
+ 
+
+t
+rpr
+t
+r. Th
+ d
+fau
+t o
+
+  L
+
+ux for Pytho
+ v
+rs
+o
+s pr
+or to 3.14.
+    - `forks
+rv
+r` - Spa
+
+ a s
+rv
+r proc
+ss that 
+
+
+ fork a 
+
+
+ proc
+ss o
+ r
+qu
+st.
+  Th
+ d
+fau
+t o
+ L
+
+ux for Pytho
+ v
+rs
+o
+ 3.14 a
+d 
+
+
+
+r.
+### Trad
+offs
+`fork` 
+s th
+ fast
+st m
+thod, but 
+s 
+
+compat
+b
+
+ 
+
+th d
+p
+
+d
+
+c
+
+s that us
+
+thr
+ads. If you ar
+ u
+d
+r macOS, us
+
+g `fork` may caus
+ th
+ proc
+ss to crash.
+`spa
+
+` 
+s mor
+ compat
+b
+
+ 
+
+th d
+p
+
+d
+
+c
+
+s, but ca
+ b
+ prob
+
+mat
+c 
+h
+
+ vLLM
+
+s us
+d as a 
+
+brary. If th
+ co
+sum
+
+g cod
+ do
+s 
+ot us
+ a `__ma
+
+__` guard
+(`
+f __
+am
+__ == "__ma
+
+__":`), th
+ cod
+ 
+
+
+ b
+ 
+
+adv
+rt
+
+t
+y r
+-
+x
+cut
+d 
+h
+
+ vLLM
+spa
+
+s a 
+
+
+ proc
+ss. Th
+s ca
+ 
+
+ad to 
+
+f
+
+
+t
+ r
+curs
+o
+, amo
+g oth
+r prob
+
+ms.
+`forks
+rv
+r` 
+
+
+ spa
+
+ a 
+
+
+ s
+rv
+r proc
+ss that 
+
+
+ fork 
+
+
+ proc
+ss
+s o
+
+d
+ma
+d. Th
+s u
+fortu
+at
+
+y has th
+ sam
+ prob
+
+m as `spa
+
+` 
+h
+
+ vLLM 
+s us
+d as
+a 
+
+brary. Th
+ s
+rv
+r proc
+ss 
+s cr
+at
+d as a spa
+
+
+d 
+
+
+ proc
+ss, 
+h
+ch 
+
+
+
+r
+-
+x
+cut
+ cod
+ 
+ot prot
+ct
+d by a `__ma
+
+__` guard.
+For both `spa
+
+` a
+d `forks
+rv
+r`, th
+ proc
+ss must 
+ot d
+p
+
+d o
+ 
+
+h
+r
+t
+
+g a
+y
+g
+oba
+ stat
+ as 
+ou
+d b
+ th
+ cas
+ 
+
+th `fork`.
+## Compat
+b
+
+
+ty 
+
+th D
+p
+
+d
+
+c
+
+s
+Mu
+t
+p
+
+ vLLM d
+p
+
+d
+
+c
+
+s 
+
+d
+cat
+ 
+
+th
+r a pr
+f
+r
+
+c
+ or r
+qu
+r
+m
+
+t for us
+
+g
+`spa
+
+`:
+    - 
+https://pytorch.org/docs/stab
+
+/
+ot
+s/mu
+t
+proc
+ss
+
+g.htm
+#cuda-
+
+-mu
+t
+proc
+ss
+
+g
+
+    - 
+https://pytorch.org/docs/stab
+
+/mu
+t
+proc
+ss
+
+g.htm
+#shar
+
+g-cuda-t
+
+sors
+
+    - 
+https://docs.haba
+a.a
+/
+
+/
+at
+st/PyTorch/G
+tt
+
+g_Start
+d_
+
+th_PyTorch_a
+d_Gaud
+/G
+tt
+
+g_Start
+d_
+
+th_PyTorch.htm
+?h
+gh
+
+ght=mu
+t
+proc
+ss
+
+g#torch-mu
+t
+proc
+ss
+
+g-for-data
+oad
+rs
+
+K
+o
+
+ 
+ssu
+s 
+x
+st 
+h
+
+ us
+
+g `fork` aft
+r 
+
+
+t
+a
+
+z
+
+g th
+s
+ d
+p
+
+d
+
+c
+
+s.
+## Curr
+
+t Stat
+ (v0)
+Th
+ 
+
+v
+ro
+m
+
+t var
+ab
+
+ `VLLM_WORKER_MULTIPROC_METHOD` ca
+ b
+ us
+d to co
+tro
+ 
+h
+ch m
+thod 
+s us
+d by vLLM. Th
+ curr
+
+t d
+fau
+t 
+s `fork`.
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/d05f88679b
+dd73939251a17c3d785a354b2946c/v
+m/
+
+vs.py#L339-L342
+
+If th
+ ma
+
+ proc
+ss 
+s co
+tro
+
+d v
+a th
+ `v
+m` comma
+d,
+`spa
+
+` 
+s us
+d b
+caus
+ 
+t's th
+ most 
+
+d
+
+y compat
+b
+
+.
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/d05f88679b
+dd73939251a17c3d785a354b2946c/v
+m/scr
+pts.py#L123-L140
+
+Th
+ `mu
+t
+proc_xpu_
+x
+cutor` forc
+s th
+ us
+ of `spa
+
+`.
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/d05f88679b
+dd73939251a17c3d785a354b2946c/v
+m/
+x
+cutor/mu
+t
+proc_xpu_
+x
+cutor.py#L14-L18
+
+Th
+r
+ ar
+ oth
+r m
+sc
+
+a
+
+ous p
+ac
+s hard-cod
+
+g th
+ us
+ of `spa
+
+`:
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/d05f88679b
+dd73939251a17c3d785a354b2946c/v
+m/d
+str
+but
+d/d
+v
+c
+_commu
+
+cators/a
+_r
+duc
+_ut
+
+s.py#L135
+
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/d05f88679b
+dd73939251a17c3d785a354b2946c/v
+m/
+
+trypo
+
+ts/op
+
+a
+/ap
+_s
+rv
+r.py#L184
+
+R
+
+at
+d PRs:
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/8823
+
+## Pr
+or Stat
+ 
+
+ v1
+Th
+r
+ 
+as a
+ 
+
+v
+ro
+m
+
+t var
+ab
+
+ to co
+tro
+ 
+h
+th
+r mu
+t
+proc
+ss
+
+g 
+s us
+d 
+
+
+th
+ v1 
+
+g
+
+
+ cor
+, `VLLM_ENABLE_V1_MULTIPROCESSING`. Th
+s d
+fau
+t
+d to off.
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/d05f88679b
+dd73939251a17c3d785a354b2946c/v
+m/
+
+vs.py#L452-L454
+
+Wh
+
+ 
+t 
+as 
+
+ab
+
+d, th
+ v1 `LLME
+g
+
+
+` 
+ou
+d cr
+at
+ a 
+
+
+ proc
+ss to ru
+ th
+
+
+
+g
+
+
+ cor
+.
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/d05f88679b
+dd73939251a17c3d785a354b2946c/v
+m/v1/
+
+g
+
+
+/
+m_
+
+g
+
+
+.py#L93-L95
+
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/d05f88679b
+dd73939251a17c3d785a354b2946c/v
+m/v1/
+
+g
+
+
+/
+m_
+
+g
+
+
+.py#L70-L77
+
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/d05f88679b
+dd73939251a17c3d785a354b2946c/v
+m/v1/
+
+g
+
+
+/cor
+_c
+
+
+
+t.py#L44-L45
+
+It 
+as off by d
+fau
+t for a
+ th
+ r
+aso
+s m
+
+t
+o
+
+d abov
+ - compat
+b
+
+
+ty 
+
+th
+d
+p
+
+d
+
+c
+
+s a
+d cod
+ us
+
+g vLLM as a 
+
+brary.
+### Cha
+g
+s Mad
+ 
+
+ v1
+Th
+r
+ 
+s 
+ot a
+ 
+asy so
+ut
+o
+ 
+
+th Pytho
+'s `mu
+t
+proc
+ss
+
+g` that 
+
+
+ 
+ork
+
+v
+ry
+h
+r
+. As a f
+rst st
+p, 
+
+ ca
+ g
+t v1 
+
+to a stat
+ 
+h
+r
+ 
+t do
+s
+"b
+st 
+ffort" cho
+c
+ of mu
+t
+proc
+ss
+
+g m
+thod to max
+m
+z
+ compat
+b
+
+
+ty.
+    - D
+fau
+t to `fork`.
+    - Us
+ `spa
+
+` 
+h
+
+ 
+
+ k
+o
+ 
+
+ co
+tro
+ th
+ ma
+
+ proc
+ss (`v
+m` 
+as 
+x
+cut
+d).
+    - If 
+
+ d
+t
+ct `cuda` 
+as pr
+v
+ous
+y 
+
+
+t
+a
+
+z
+d, forc
+ `spa
+
+` a
+d 
+m
+t a
+  
+ar
+
+
+g. W
+ k
+o
+ `fork` 
+
+
+ br
+ak, so th
+s 
+s th
+ b
+st 
+
+ ca
+ do.
+Th
+ cas
+ that 
+s k
+o
+
+ to st
+
+ br
+ak 
+
+ th
+s sc
+
+ar
+o 
+s cod
+ us
+
+g vLLM as a
+
+
+brary that 
+
+
+t
+a
+
+z
+s `cuda` b
+for
+ ca
+
+
+g vLLM. Th
+ 
+ar
+
+
+g 
+
+ 
+m
+t shou
+d
+
+
+struct us
+rs to 
+
+th
+r add a `__ma
+
+__` guard or to d
+sab
+
+ mu
+t
+proc
+ss
+
+g.
+If that k
+o
+
+-fa
+
+ur
+ cas
+ occurs, th
+ us
+r 
+
+
+ s
+ t
+o m
+ssag
+s that 
+xp
+a
+
+
+
+hat 
+s happ
+
+
+
+g. F
+rst, a 
+og m
+ssag
+ from vLLM:
+```co
+so
+
+
+WARNING 12-11 14:50:37 mu
+t
+proc_
+ork
+r_ut
+
+s.py:281] CUDA 
+as pr
+v
+ous
+y
+    
+
+
+t
+a
+
+z
+d. W
+ must us
+ th
+ `spa
+
+` mu
+t
+proc
+ss
+
+g start m
+thod. S
+tt
+
+g
+    VLLM_WORKER_MULTIPROC_METHOD to 'spa
+
+'. S
+
+    https://docs.v
+m.a
+/
+
+/
+at
+st/usag
+/troub
+
+shoot
+
+g.htm
+#pytho
+-mu
+t
+proc
+ss
+
+g
+    for mor
+ 
+
+format
+o
+.
 ```
+S
+co
+d, Pytho
+ 
+ts
 
-Second, Python itself will raise an exception with a nice explanation:
+f 
 
-```console
-RuntimeError:
-        An attempt has been made to start a new process before the
-        current process has finished its bootstrapping phase.
 
-        This probably means that you are not using fork to start your
-        child processes and you have forgotten to use the proper idiom
-        in the main module:
+ ra
+s
+ a
+ 
+xc
+pt
+o
+ 
 
-            if __name__ == '__main__':
-                freeze_support()
+th a 
+
+c
+ 
+xp
+a
+at
+o
+:
+```co
+so
+
+
+Ru
+t
+m
+Error:
+        A
+ att
+mpt has b
+
+ mad
+ to start a 
+
+
+ proc
+ss b
+for
+ th
+
+        curr
+
+t proc
+ss has f
+
+
+sh
+d 
+ts bootstrapp
+
+g phas
+.
+        Th
+s probab
+y m
+a
+s that you ar
+ 
+ot us
+
+g fork to start your
+        ch
+
+d proc
+ss
+s a
+d you hav
+ forgott
+
+ to us
+ th
+ prop
+r 
+d
+om
+        
+
+ th
+ ma
+
+ modu
+
+:
+            
+f __
+am
+__ == '__ma
+
+__':
+                fr
+z
+_support()
                 ...
+        Th
+ "fr
+z
+_support()" 
 
-        The "freeze_support()" line can be omitted if the program
-        is not going to be frozen to produce an executable.
 
-        To fix this issue, refer to the "Safe importing of main module"
-        section in https://docs.python.org/3/library/multiprocessing.html
+
+ ca
+ b
+ om
+tt
+d 
+f th
+ program
+        
+s 
+ot go
+
+g to b
+ froz
+
+ to produc
+ a
+ 
+x
+cutab
+
+.
+        To f
+x th
+s 
+ssu
+, r
+f
+r to th
+ "Saf
+ 
+mport
+
+g of ma
+
+ modu
+
+"
+        s
+ct
+o
+ 
+
+ https://docs.pytho
+.org/3/
+
+brary/mu
+t
+proc
+ss
+
+g.htm
+
 ```
+## A
+t
+r
+at
+v
+s Co
+s
+d
+r
+d
+### D
+t
+ct 
+f a `__ma
 
-## Alternatives Considered
+__` guard 
+s pr
+s
 
-### Detect if a `__main__` guard is present
+t
+It has b
 
-It has been suggested that we could behave better if we could detect whether
-code using vLLM as a library has a `__main__` guard in place. This
-[post on Stack Overflow](https://stackoverflow.com/questions/77220442/multiprocessing-pool-in-a-python-class-without-name-main-guard)
-was from a library author facing the same question.
+ sugg
+st
+d that 
 
-It is possible to detect whether we are in the original, `__main__` process, or
-a subsequent spawned process. However, it does not appear to be straight forward
-to detect whether a `__main__` guard is present in the code.
+ cou
+d b
+hav
+ b
+tt
+r 
+f 
 
-This option has been discarded as impractical.
+ cou
+d d
+t
+ct 
+h
+th
+r
+cod
+ us
 
-### Use `forkserver`
+g vLLM as a 
 
-At first it appears that `forkserver` is a nice solution to the problem.
-However, the way it works presents the same challenges that `spawn` does when
-vLLM is used as a library.
+brary has a `__ma
 
-### Force `spawn` all the time
+__` guard 
 
-One way to clean this up is to just force the use of `spawn` all the time and
-document that the use of a `__main__` guard is required when using vLLM as a
-library. This would unfortunately break existing code and make vLLM harder to
-use, violating the desire to make the `LLM` class as easy as possible to use.
+ p
+ac
+. Th
+s
+[post o
+ Stack Ov
+rf
+o
+](https://stackov
+rf
+o
+.com/qu
+st
+o
+s/77220442/mu
+t
+proc
+ss
 
-Instead of pushing this on our users, we will retain the complexity to do our
-best to make things work.
+g-poo
+-
 
-## Future Work
+-a-pytho
+-c
+ass-
 
-We may want to consider a different worker management approach in the future
-that works around these challenges.
+thout-
+am
+-ma
 
-1. We could implement something `forkserver`-like, but have the process manager
-   be something we initially launch by running our own subprocess and a custom
-   entrypoint for worker management (launch a `vllm-manager` process).
+-guard)
 
-2. We can explore other libraries that may better suit our needs. Examples to
-   consider:
+as from a 
 
-    - <https://github.com/joblib/loky>
+brary author fac
+
+g th
+ sam
+ qu
+st
+o
+.
+It 
+s poss
+b
+
+ to d
+t
+ct 
+h
+th
+r 
+
+ ar
+ 
+
+ th
+ or
+g
+
+a
+, `__ma
+
+__` proc
+ss, or
+a subs
+qu
+
+t spa
+
+
+d proc
+ss. Ho
+
+v
+r, 
+t do
+s 
+ot app
+ar to b
+ stra
+ght for
+ard
+to d
+t
+ct 
+h
+th
+r a `__ma
+
+__` guard 
+s pr
+s
+
+t 
+
+ th
+ cod
+.
+Th
+s opt
+o
+ has b
+
+ d
+scard
+d as 
+mpract
+ca
+.
+### Us
+ `forks
+rv
+r`
+At f
+rst 
+t app
+ars that `forks
+rv
+r` 
+s a 
+
+c
+ so
+ut
+o
+ to th
+ prob
+
+m.
+Ho
+
+v
+r, th
+ 
+ay 
+t 
+orks pr
+s
+
+ts th
+ sam
+ cha
+
+
+g
+s that `spa
+
+` do
+s 
+h
+
+
+vLLM 
+s us
+d as a 
+
+brary.
+### Forc
+ `spa
+
+` a
+ th
+ t
+m
+
+O
+
+ 
+ay to c
+
+a
+ th
+s up 
+s to just forc
+ th
+ us
+ of `spa
+
+` a
+ th
+ t
+m
+ a
+d
+docum
+
+t that th
+ us
+ of a `__ma
+
+__` guard 
+s r
+qu
+r
+d 
+h
+
+ us
+
+g vLLM as a
+
+
+brary. Th
+s 
+ou
+d u
+fortu
+at
+
+y br
+ak 
+x
+st
+
+g cod
+ a
+d mak
+ vLLM hard
+r to
+us
+, v
+o
+at
+
+g th
+ d
+s
+r
+ to mak
+ th
+ `LLM` c
+ass as 
+asy as poss
+b
+
+ to us
+.
+I
+st
+ad of push
+
+g th
+s o
+ our us
+rs, 
+
+ 
+
+
+ r
+ta
+
+ th
+ comp
+
+x
+ty to do our
+b
+st to mak
+ th
+
+gs 
+ork.
+## Futur
+ Work
+W
+ may 
+a
+t to co
+s
+d
+r a d
+ff
+r
+
+t 
+ork
+r ma
+ag
+m
+
+t approach 
+
+ th
+ futur
+
+that 
+orks arou
+d th
+s
+ cha
+
+
+g
+s.
+1. W
+ cou
+d 
+mp
+
+m
+
+t som
+th
+
+g `forks
+rv
+r`-
+
+k
+, but hav
+ th
+ proc
+ss ma
+ag
+r
+   b
+ som
+th
+
+g 
+
+ 
+
+
+t
+a
+y 
+au
+ch by ru
+
+
+g our o
+
+ subproc
+ss a
+d a custom
+   
+
+trypo
+
+t for 
+ork
+r ma
+ag
+m
+
+t (
+au
+ch a `v
+m-ma
+ag
+r` proc
+ss).
+2. W
+ ca
+ 
+xp
+or
+ oth
+r 
+
+brar
+
+s that may b
+tt
+r su
+t our 
+
+ds. Examp
+
+s to
+   co
+s
+d
+r:
+    - 
+https://g
+thub.com/job
+
+b/
+oky
+

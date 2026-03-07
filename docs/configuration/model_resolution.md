@@ -1,23 +1,243 @@
-# Model Resolution
+# Mod
 
-vLLM loads HuggingFace-compatible models by inspecting the `architectures` field in `config.json` of the model repository
-and finding the corresponding implementation that is registered to vLLM.
-Nevertheless, our model resolution may fail for the following reasons:
+ R
+so
+ut
+o
 
-- The `config.json` of the model repository lacks the `architectures` field.
-- Unofficial repositories refer to a model using alternative names which are not recorded in vLLM.
-- The same architecture name is used for multiple models, creating ambiguity as to which model should be loaded.
+vLLM 
+oads Hugg
 
-To fix this, explicitly specify the model architecture by passing `config.json` overrides to the `hf_overrides` option.
-For example:
+gFac
+-compat
+b
 
-```python
-from vllm import LLM
+ mod
 
-llm = LLM(
-    model="cerebras/Cerebras-GPT-1.3B",
-    hf_overrides={"architectures": ["GPT2LMHeadModel"]},  # GPT-2
+s by 
+
+sp
+ct
+
+g th
+ `arch
+t
+ctur
+s` f
+
+
+d 
+
+ `co
+f
+g.jso
+` of th
+ mod
+
+ r
+pos
+tory
+a
+d f
+
+d
+
+g th
+ corr
+spo
+d
+
+g 
+mp
+
+m
+
+tat
+o
+ that 
+s r
+g
+st
+r
+d to vLLM.
+N
+v
+rth
+
+
+ss, our mod
+
+ r
+so
+ut
+o
+ may fa
+
+ for th
+ fo
+o
+
+
+g r
+aso
+s:
+    - Th
+ `co
+f
+g.jso
+` of th
+ mod
+
+ r
+pos
+tory 
+acks th
+ `arch
+t
+ctur
+s` f
+
+
+d.
+    - U
+off
+c
+a
+ r
+pos
+tor
+
+s r
+f
+r to a mod
+
+ us
+
+g a
+t
+r
+at
+v
+ 
+am
+s 
+h
+ch ar
+ 
+ot r
+cord
+d 
+
+ vLLM.
+    - Th
+ sam
+ arch
+t
+ctur
+ 
+am
+ 
+s us
+d for mu
+t
+p
+
+ mod
+
+s, cr
+at
+
+g amb
+gu
+ty as to 
+h
+ch mod
+
+ shou
+d b
+ 
+oad
+d.
+To f
+x th
+s, 
+xp
+
+c
+t
+y sp
+c
+fy th
+ mod
+
+ arch
+t
+ctur
+ by pass
+
+g `co
+f
+g.jso
+` ov
+rr
+d
+s to th
+ `hf_ov
+rr
+d
+s` opt
+o
+.
+For 
+xamp
+
+:
+```pytho
+
+from v
+m 
+mport LLM
+
+m = LLM(
+    mod
+
+="c
+r
+bras/C
+r
+bras-GPT-1.3B",
+    hf_ov
+rr
+d
+s={"arch
+t
+ctur
+s": ["GPT2LMH
+adMod
+
+"]},  # GPT-2
 )
 ```
+Our [
 
-Our [list of supported models](../models/supported_models.md) shows the model architectures that are recognized by vLLM.
+st of support
+d mod
+
+s](../mod
+
+s/support
+d_mod
+
+s.md) sho
+s th
+ mod
+
+ arch
+t
+ctur
+s that ar
+ r
+cog
+
+z
+d by vLLM.

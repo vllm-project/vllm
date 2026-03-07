@@ -1,49 +1,350 @@
-# Custom Arguments
+# Custom Argum
 
-You can use vLLM *custom arguments* to pass in arguments which are not part of the vLLM `SamplingParams` and REST API specifications. Adding or removing a vLLM custom argument does not require recompiling vLLM, since the custom arguments are passed in as a dictionary.
+ts
+You ca
+ us
+ vLLM *custom argum
 
-Custom arguments can be useful if, for example, you want to use a [custom logits processor](./custom_logitsprocs.md) without modifying the vLLM source code.
+ts* to pass 
 
-!!! note
-    Make sure your custom logits processor have implemented `validate_params` for custom arguments. Otherwise, invalid custom arguments can cause unexpected behaviour.
+ argum
 
-## Offline Custom Arguments
+ts 
+h
+ch ar
+ 
+ot part of th
+ vLLM `Samp
 
-Custom arguments passed to `SamplingParams.extra_args` as a `dict` will be visible to any code which has access to `SamplingParams`:
 
-``` python
-SamplingParams(extra_args={"your_custom_arg_name": 67})
+gParams` a
+d REST API sp
+c
+f
+cat
+o
+s. Add
+
+g or r
+mov
+
+g a vLLM custom argum
+
+t do
+s 
+ot r
+qu
+r
+ r
+comp
+
+
+
+g vLLM, s
+
+c
+ th
+ custom argum
+
+ts ar
+ pass
+d 
+
+ as a d
+ct
+o
+ary.
+Custom argum
+
+ts ca
+ b
+ us
+fu
+ 
+f, for 
+xamp
+
+, you 
+a
+t to us
+ a [custom 
+og
+ts proc
+ssor](./custom_
+og
+tsprocs.md) 
+
+thout mod
+fy
+
+g th
+ vLLM sourc
+ cod
+.
+!!! 
+ot
+
+    Mak
+ sur
+ your custom 
+og
+ts proc
+ssor hav
+ 
+mp
+
+m
+
+t
+d `va
+
+dat
+_params` for custom argum
+
+ts. Oth
+r
+
+s
+, 
+
+va
+
+d custom argum
+
+ts ca
+ caus
+ u
+
+xp
+ct
+d b
+hav
+our.
+## Off
+
+
+
+ Custom Argum
+
+ts
+Custom argum
+
+ts pass
+d to `Samp
+
+
+gParams.
+xtra_args` as a `d
+ct` 
+
+
+ b
+ v
+s
+b
+
+ to a
+y cod
+ 
+h
+ch has acc
+ss to `Samp
+
+
+gParams`:
+``` pytho
+
+Samp
+
+
+gParams(
+xtra_args={"your_custom_arg_
+am
+": 67})
 ```
+Th
+s a
+o
+s argum
 
-This allows arguments which are not already part of `SamplingParams` to be passed into `LLM` as part of a request.
+ts 
+h
+ch ar
+ 
+ot a
+r
+ady part of `Samp
 
-## Online Custom Arguments
 
-The vLLM REST API allows custom arguments to be passed to the vLLM server via `vllm_xargs`. The example below integrates custom arguments into a vLLM REST API request:
+gParams` to b
+ pass
+d 
 
+to `LLM` as part of a r
+qu
+st.
+## O
+
+
+
+
+ Custom Argum
+
+ts
+Th
+ vLLM REST API a
+o
+s custom argum
+
+ts to b
+ pass
+d to th
+ vLLM s
+rv
+r v
+a `v
+m_xargs`. Th
+ 
+xamp
+
+ b
+
+o
+ 
+
+t
+grat
+s custom argum
+
+ts 
+
+to a vLLM REST API r
+qu
+st:
 ``` bash
-curl http://localhost:8000/v1/completions \
-    -H "Content-Type: application/json" \
+cur
+ http://
+oca
+host:8000/v1/comp
+
+t
+o
+s \
+    -H "Co
+t
+
+t-Typ
+: app
+
+cat
+o
+/jso
+" \
     -d '{
-        "model": "Qwen/Qwen2.5-1.5B-Instruct",
+        "mod
+
+": "Q
+
+
+/Q
+
+
+2.5-1.5B-I
+struct",
         ...
-        "vllm_xargs": {"your_custom_arg": 67}
+        "v
+m_xargs": {"your_custom_arg": 67}
     }'
 ```
+Furth
+rmor
+, Op
 
-Furthermore, OpenAI SDK users can access `vllm_xargs` via the `extra_body` argument:
+AI SDK us
+rs ca
+ acc
+ss `v
+m_xargs` v
+a th
+ `
+xtra_body` argum
 
-``` python
-batch = await client.completions.create(
-    model="Qwen/Qwen2.5-1.5B-Instruct",
+t:
+``` pytho
+
+batch = a
+a
+t c
+
+
+
+t.comp
+
+t
+o
+s.cr
+at
+(
+    mod
+
+="Q
+
+
+/Q
+
+
+2.5-1.5B-I
+struct",
     ...,
-    extra_body={
-        "vllm_xargs": {
+    
+xtra_body={
+        "v
+m_xargs": {
             "your_custom_arg": 67
         }
     }
 )
 ```
+!!! 
+ot
 
-!!! note
-    `vllm_xargs` is assigned to `SamplingParams.extra_args` under the hood, so code which uses `SamplingParams.extra_args` is compatible with both offline and online scenarios.
+    `v
+m_xargs` 
+s ass
+g
+
+d to `Samp
+
+
+gParams.
+xtra_args` u
+d
+r th
+ hood, so cod
+ 
+h
+ch us
+s `Samp
+
+
+gParams.
+xtra_args` 
+s compat
+b
+
+ 
+
+th both off
+
+
+
+ a
+d o
+
+
+
+
+ sc
+
+ar
+os.

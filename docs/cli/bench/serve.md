@@ -1,9 +1,33 @@
-# vllm bench serve
+# v
+m b
 
-## JSON CLI Arguments
+ch s
+rv
 
---8<-- "docs/cli/json_tip.inc.md"
+## JSON CLI Argum
 
-## Arguments
+ts
+--8
+-- "docs/c
 
---8<-- "docs/generated/argparse/bench_serve.inc.md"
+/jso
+_t
+p.
+
+c.md"
+## Argum
+
+ts
+--8
+-- "docs/g
+
+
+rat
+d/argpars
+/b
+
+ch_s
+rv
+.
+
+c.md"

@@ -1,111 +1,608 @@
-# Cerebrium
+# C
+r
+br
+um
+p a
 
-<p align="center">
-    <img src="https://i.ibb.co/hHcScTT/Screenshot-2024-06-13-at-10-14-54.png" alt="vLLM_plus_cerebrium"/>
-</p>
+g
+="c
 
-vLLM can be run on a cloud based GPU machine with [Cerebrium](https://www.cerebrium.ai/), a serverless AI infrastructure platform that makes it easier for companies to build and deploy AI based applications.
+t
+r"
 
-To install the Cerebrium client, run:
+    
 
+mg src="https://
+.
+bb.co/hHcScTT/Scr
+
+shot-2024-06-13-at-10-14-54.p
+g" a
+t="vLLM_p
+us_c
+r
+br
+um"/
+
+/p
+
+vLLM ca
+ b
+ ru
+ o
+ a c
+oud bas
+d GPU mach
+
+
+ 
+
+th [C
+r
+br
+um](https://
+.c
+r
+br
+um.a
+/), a s
+rv
+r
+
+ss AI 
+
+frastructur
+ p
+atform that mak
+s 
+t 
+as
+
+r for compa
+
+
+s to bu
+
+d a
+d d
+p
+oy AI bas
+d app
+
+cat
+o
+s.
+To 
+
+sta
+ th
+ C
+r
+br
+um c
+
+
+
+t, ru
+:
 ```bash
-pip install cerebrium
-cerebrium login
+p
+p 
+
+sta
+ c
+r
+br
+um
+c
+r
+br
+um 
+og
+
+
 ```
-
-Next, create your Cerebrium project, run:
-
+N
+xt, cr
+at
+ your C
+r
+br
+um proj
+ct, ru
+:
 ```bash
-cerebrium init vllm-project
+c
+r
+br
+um 
+
+
+t v
+m-proj
+ct
 ```
+N
+xt, to 
 
-Next, to install the required packages, add the following to your cerebrium.toml:
+sta
+ th
+ r
+qu
+r
+d packag
+s, add th
+ fo
+o
 
-```toml
-[cerebrium.deployment]
-docker_base_image_url = "nvidia/cuda:12.1.1-runtime-ubuntu22.04"
 
-[cerebrium.dependencies.pip]
-vllm = "latest"
+g to your c
+r
+br
+um.tom
+:
+```tom
+
+[c
+r
+br
+um.d
+p
+oym
+
+t]
+dock
+r_bas
+_
+mag
+_ur
+ = "
+v
+d
+a/cuda:12.1.1-ru
+t
+m
+-ubu
+tu22.04"
+[c
+r
+br
+um.d
+p
+
+d
+
+c
+
+s.p
+p]
+v
+m = "
+at
+st"
 ```
+N
+xt, 
 
-Next, let us add our code to handle inference for the LLM of your choice (`mistralai/Mistral-7B-Instruct-v0.1` for this example), add the following code to your `main.py`:
+t us add our cod
+ to ha
+d
 
-??? code
+ 
 
-    ```python
-    from vllm import LLM, SamplingParams
+f
+r
 
-    llm = LLM(model="mistralai/Mistral-7B-Instruct-v0.1")
+c
+ for th
+ LLM of your cho
+c
+ (`m
+stra
+a
+/M
+stra
+-7B-I
+struct-v0.1` for th
+s 
+xamp
 
-    def run(prompts: list[str], temperature: float = 0.8, top_p: float = 0.95):
+), add th
+ fo
+o
 
-        sampling_params = SamplingParams(temperature=temperature, top_p=top_p)
-        outputs = llm.generate(prompts, sampling_params)
 
-        # Print the outputs.
-        results = []
-        for output in outputs:
+g cod
+ to your `ma
+
+.py`:
+??? cod
+
+    ```pytho
+
+    from v
+m 
+mport LLM, Samp
+
+
+gParams
+    
+m = LLM(mod
+
+="m
+stra
+a
+/M
+stra
+-7B-I
+struct-v0.1")
+    d
+f ru
+(prompts: 
+
+st[str], t
+mp
+ratur
+: f
+oat = 0.8, top_p: f
+oat = 0.95):
+        samp
+
+
+g_params = Samp
+
+
+gParams(t
+mp
+ratur
+=t
+mp
+ratur
+, top_p=top_p)
+        outputs = 
+m.g
+
+
+rat
+(prompts, samp
+
+
+g_params)
+        # Pr
+
+t th
+ outputs.
+        r
+su
+ts = []
+        for output 
+
+ outputs:
             prompt = output.prompt
-            generated_text = output.outputs[0].text
-            results.append({"prompt": prompt, "generated_text": generated_text})
+            g
 
-        return {"results": results}
-    ```
 
-Then, run the following code to deploy it to the cloud:
+rat
+d_t
+xt = output.outputs[0].t
+xt
+            r
+su
+ts.app
 
-```bash
-cerebrium deploy
+d({"prompt": prompt, "g
+
+
+rat
+d_t
+xt": g
+
+
+rat
+d_t
+xt})
+        r
+tur
+ {"r
+su
+ts": r
+su
+ts}
 ```
+Th
 
-If successful, you should be returned a CURL command that you can call inference against. Just remember to end the url with the function name you are calling (in our case `/run`)
+, ru
+ th
+ fo
+o
 
-??? console "Command"
 
+g cod
+ to d
+p
+oy 
+t to th
+ c
+oud:
+```bash
+c
+r
+br
+um d
+p
+oy
+```
+If succ
+ssfu
+, you shou
+d b
+ r
+tur
+
+d a CURL comma
+d that you ca
+ ca
+ 
+
+f
+r
+
+c
+ aga
+
+st. Just r
+m
+mb
+r to 
+
+d th
+ ur
+ 
+
+th th
+ fu
+ct
+o
+ 
+am
+ you ar
+ ca
+
+
+g (
+
+ our cas
+ `/ru
+`)
+??? co
+so
+
+ "Comma
+d"
     ```bash
-    curl -X POST https://api.cortex.cerebrium.ai/v4/p-xxxxxx/vllm/run \
-    -H 'Content-Type: application/json' \
-    -H 'Authorization: <JWT TOKEN>' \
+    cur
+ -X POST https://ap
+.cort
+x.c
+r
+br
+um.a
+/v4/p-xxxxxx/v
+m/ru
+ \
+    -H 'Co
+t
+
+t-Typ
+: app
+
+cat
+o
+/jso
+' \
+    -H 'Author
+zat
+o
+: 
+JWT TOKEN
+' \
     --data '{
     "prompts": [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is"
+        "H
+
+o, my 
+am
+ 
+s",
+        "Th
+ pr
+s
+d
+
+t of th
+ U
+
+t
+d Stat
+s 
+s",
+        "Th
+ cap
+ta
+ of Fra
+c
+ 
+s",
+        "Th
+ futur
+ of AI 
+s"
     ]
     }'
-    ```
+```
+You shou
+d g
+t a r
+spo
+s
+ 
 
-You should get a response like:
+k
+:
+??? co
+so
 
-??? console "Response"
+ "R
+spo
+s
+"
+    ```jso
 
-    ```json
     {
-        "run_id": "52911756-3066-9ae8-bcc9-d9129d1bd262",
-        "result": {
-            "result": [
+        "ru
+_
+d": "52911756-3066-9a
+8-bcc9-d9129d1bd262",
+        "r
+su
+t": {
+            "r
+su
+t": [
                 {
-                    "prompt": "Hello, my name is",
-                    "generated_text": " Sarah, and I'm a teacher. I teach elementary school students. One of"
+                    "prompt": "H
+
+o, my 
+am
+ 
+s",
+                    "g
+
+
+rat
+d_t
+xt": " Sarah, a
+d I'm a t
+ach
+r. I t
+ach 
+
+
+m
+
+tary schoo
+ stud
+
+ts. O
+
+ of"
                 },
                 {
-                    "prompt": "The president of the United States is",
-                    "generated_text": " elected every four years. This is a democratic system.\n\n5. What"
+                    "prompt": "Th
+ pr
+s
+d
+
+t of th
+ U
+
+t
+d Stat
+s 
+s",
+                    "g
+
+
+rat
+d_t
+xt": " 
+
+
+ct
+d 
+v
+ry four y
+ars. Th
+s 
+s a d
+mocrat
+c syst
+m.\
+\
+5. What"
                 },
                 {
-                    "prompt": "The capital of France is",
-                    "generated_text": " Paris.\n"
+                    "prompt": "Th
+ cap
+ta
+ of Fra
+c
+ 
+s",
+                    "g
+
+
+rat
+d_t
+xt": " Par
+s.\
+"
                 },
                 {
-                    "prompt": "The future of AI is",
-                    "generated_text": " bright, but it's important to approach it with a balanced and nuanced perspective."
+                    "prompt": "Th
+ futur
+ of AI 
+s",
+                    "g
+
+
+rat
+d_t
+xt": " br
+ght, but 
+t's 
+mporta
+t to approach 
+t 
+
+th a ba
+a
+c
+d a
+d 
+ua
+c
+d p
+rsp
+ct
+v
+."
                 }
             ]
         },
-        "run_time_ms": 152.53663063049316
+        "ru
+_t
+m
+_ms": 152.53663063049316
     }
-    ```
+```
+You 
+o
+ hav
+ a
+ autosca
 
-You now have an autoscaling endpoint where you only pay for the compute you use!
+
+g 
+
+dpo
+
+t 
+h
+r
+ you o
+
+y pay for th
+ comput
+ you us
+!

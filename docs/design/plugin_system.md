@@ -1,158 +1,2670 @@
-# Plugin System
+# P
+ug
 
-The community frequently requests the ability to extend vLLM with custom features. To facilitate this, vLLM includes a plugin system that allows users to add custom features without modifying the vLLM codebase. This document explains how plugins work in vLLM and how to create a plugin for vLLM.
+ Syst
+m
+Th
+ commu
 
-## How Plugins Work in vLLM
+ty fr
+qu
 
-Plugins are user-registered code that vLLM executes. Given vLLM's architecture (see [Arch Overview](arch_overview.md)), multiple processes may be involved, especially when using distributed inference with various parallelism techniques. To enable plugins successfully, every process created by vLLM needs to load the plugin. This is done by the [load_plugins_by_group][vllm.plugins.load_plugins_by_group] function in the `vllm.plugins` module.
+t
+y r
+qu
+sts th
+ ab
 
-## How vLLM Discovers Plugins
 
-vLLM's plugin system uses the standard Python `entry_points` mechanism. This mechanism allows developers to register functions in their Python packages for use by other packages. An example of a plugin:
+ty to 
+xt
 
-??? code
+d vLLM 
 
-    ```python
-    # inside `setup.py` file
-    from setuptools import setup
+th custom f
+atur
+s. To fac
 
-    setup(name='vllm_add_dummy_model',
-        version='0.1',
-        packages=['vllm_add_dummy_model'],
-        entry_points={
-            'vllm.general_plugins':
-            ["register_dummy_model = vllm_add_dummy_model:register"]
+
+tat
+ th
+s, vLLM 
+
+c
+ud
+s a p
+ug
+
+ syst
+m that a
+o
+s us
+rs to add custom f
+atur
+s 
+
+thout mod
+fy
+
+g th
+ vLLM cod
+bas
+. Th
+s docum
+
+t 
+xp
+a
+
+s ho
+ p
+ug
+
+s 
+ork 
+
+ vLLM a
+d ho
+ to cr
+at
+ a p
+ug
+
+ for vLLM.
+## Ho
+ P
+ug
+
+s Work 
+
+ vLLM
+P
+ug
+
+s ar
+ us
+r-r
+g
+st
+r
+d cod
+ that vLLM 
+x
+cut
+s. G
+v
+
+ vLLM's arch
+t
+ctur
+ (s
+ [Arch Ov
+rv
+
+
+](arch_ov
+rv
+
+
+.md)), mu
+t
+p
+
+ proc
+ss
+s may b
+ 
+
+vo
+v
+d, 
+sp
+c
+a
+y 
+h
+
+ us
+
+g d
+str
+but
+d 
+
+f
+r
+
+c
+ 
+
+th var
+ous para
+
+
+
+sm t
+ch
+
+qu
+s. To 
+
+ab
+
+ p
+ug
+
+s succ
+ssfu
+y, 
+v
+ry proc
+ss cr
+at
+d by vLLM 
+
+ds to 
+oad th
+ p
+ug
+
+. Th
+s 
+s do
+
+ by th
+ [
+oad_p
+ug
+
+s_by_group][v
+m.p
+ug
+
+s.
+oad_p
+ug
+
+s_by_group] fu
+ct
+o
+ 
+
+ th
+ `v
+m.p
+ug
+
+s` modu
+
+.
+## Ho
+ vLLM D
+scov
+rs P
+ug
+
+s
+vLLM's p
+ug
+
+ syst
+m us
+s th
+ sta
+dard Pytho
+ `
+
+try_po
+
+ts` m
+cha
+
+sm. Th
+s m
+cha
+
+sm a
+o
+s d
+v
+
+op
+rs to r
+g
+st
+r fu
+ct
+o
+s 
+
+ th
+
+r Pytho
+ packag
+s for us
+ by oth
+r packag
+s. A
+ 
+xamp
+
+ of a p
+ug
+
+:
+??? cod
+
+    ```pytho
+
+    # 
+
+s
+d
+ `s
+tup.py` f
+
+
+
+    from s
+tuptoo
+s 
+mport s
+tup
+    s
+tup(
+am
+='v
+m_add_dummy_mod
+
+',
+        v
+rs
+o
+='0.1',
+        packag
+s=['v
+m_add_dummy_mod
+
+'],
+        
+
+try_po
+
+ts={
+            'v
+m.g
+
+
+ra
+_p
+ug
+
+s':
+            ["r
+g
+st
+r_dummy_mod
+
+ = v
+m_add_dummy_mod
+
+:r
+g
+st
+r"]
         })
+    # 
 
-    # inside `vllm_add_dummy_model/__init__.py` file
-    def register():
-        from vllm import ModelRegistry
+s
+d
+ `v
+m_add_dummy_mod
 
-        if "MyLlava" not in ModelRegistry.get_supported_archs():
-            ModelRegistry.register_model(
-                "MyLlava",
-                "vllm_add_dummy_model.my_llava:MyLlava",
+/__
+
+
+t__.py` f
+
+
+
+    d
+f r
+g
+st
+r():
+        from v
+m 
+mport Mod
+
+R
+g
+stry
+        
+f "MyL
+ava" 
+ot 
+
+ Mod
+
+R
+g
+stry.g
+t_support
+d_archs():
+            Mod
+
+R
+g
+stry.r
+g
+st
+r_mod
+
+(
+                "MyL
+ava",
+                "v
+m_add_dummy_mod
+
+.my_
+ava:MyL
+ava",
             )
-    ```
+```
+For mor
+ 
 
-For more information on adding entry points to your package, please check the [official documentation](https://setuptools.pypa.io/en/latest/userguide/entry_point.html).
+format
+o
+ o
+ add
 
-Every plugin has three parts:
+g 
 
-1. **Plugin group**: The name of the entry point group. vLLM uses the entry point group `vllm.general_plugins` to register general plugins. This is the key of `entry_points` in the `setup.py` file. Always use `vllm.general_plugins` for vLLM's general plugins.
-2. **Plugin name**: The name of the plugin. This is the value in the dictionary of the `entry_points` dictionary. In the example above, the plugin name is `register_dummy_model`. Plugins can be filtered by their names using the `VLLM_PLUGINS` environment variable. To load only a specific plugin, set `VLLM_PLUGINS` to the plugin name.
-3. **Plugin value**: The fully qualified name of the function or module to register in the plugin system. In the example above, the plugin value is `vllm_add_dummy_model:register`, which refers to a function named `register` in the `vllm_add_dummy_model` module.
+try po
 
-## Types of supported plugins
+ts to your packag
+, p
 
-- **General plugins** (with group name `vllm.general_plugins`): The primary use case for these plugins is to register custom, out-of-the-tree models into vLLM. This is done by calling `ModelRegistry.register_model` to register the model inside the plugin function. For an example of an official model plugin, see the [bart-plugin](https://github.com/vllm-project/bart-plugin) which adds support for `BartForConditionalGeneration`.
+as
+ ch
+ck th
+ [off
+c
+a
+ docum
 
-- **Platform plugins** (with group name `vllm.platform_plugins`): The primary use case for these plugins is to register custom, out-of-the-tree platforms into vLLM. The plugin function should return `None` when the platform is not supported in the current environment, or the platform class's fully qualified name when the platform is supported.
+tat
+o
+](https://s
+tuptoo
+s.pypa.
+o/
 
-- **IO Processor plugins** (with group name `vllm.io_processor_plugins`): The primary use case for these plugins is to register custom pre-/post-processing of the model prompt and model output for pooling models. The plugin function returns the IOProcessor's class fully qualified name.
+/
+at
+st/us
+rgu
+d
+/
 
-- **Stat logger plugins** (with group name `vllm.stat_logger_plugins`): The primary use case for these plugins is to register custom, out-of-the-tree loggers into vLLM. The entry point should be a class that subclasses StatLoggerBase.
+try_po
 
-## Guidelines for Writing Plugins
+t.htm
+).
+Ev
+ry p
+ug
 
-- **Being re-entrant**: The function specified in the entry point should be re-entrant, meaning it can be called multiple times without causing issues. This is necessary because the function might be called multiple times in some processes.
+ has thr
+ parts:
+1. **P
+ug
 
-### Platform plugins guidelines
+ group**: Th
+ 
+am
+ of th
+ 
 
-1. Create a platform plugin project, for example, `vllm_add_dummy_platform`. The project structure should look like this:
+try po
 
-    ```shell
-    vllm_add_dummy_platform/
-    ├── vllm_add_dummy_platform/
-    │   ├── __init__.py
-    │   ├── my_dummy_platform.py
-    │   ├── my_dummy_worker.py
-    │   ├── my_dummy_attention.py
-    │   ├── my_dummy_device_communicator.py
+t group. vLLM us
+s th
+ 
+
+try po
+
+t group `v
+m.g
+
+
+ra
+_p
+ug
+
+s` to r
+g
+st
+r g
+
+
+ra
+ p
+ug
+
+s. Th
+s 
+s th
+ k
+y of `
+
+try_po
+
+ts` 
+
+ th
+ `s
+tup.py` f
+
+
+. A
+
+ays us
+ `v
+m.g
+
+
+ra
+_p
+ug
+
+s` for vLLM's g
+
+
+ra
+ p
+ug
+
+s.
+2. **P
+ug
+
+ 
+am
+**: Th
+ 
+am
+ of th
+ p
+ug
+
+. Th
+s 
+s th
+ va
+u
+ 
+
+ th
+ d
+ct
+o
+ary of th
+ `
+
+try_po
+
+ts` d
+ct
+o
+ary. I
+ th
+ 
+xamp
+
+ abov
+, th
+ p
+ug
+
+ 
+am
+ 
+s `r
+g
+st
+r_dummy_mod
+
+`. P
+ug
+
+s ca
+ b
+ f
+
+t
+r
+d by th
+
+r 
+am
+s us
+
+g th
+ `VLLM_PLUGINS` 
+
+v
+ro
+m
+
+t var
+ab
+
+. To 
+oad o
+
+y a sp
+c
+f
+c p
+ug
+
+, s
+t `VLLM_PLUGINS` to th
+ p
+ug
+
+ 
+am
+.
+3. **P
+ug
+
+ va
+u
+**: Th
+ fu
+y qua
+
+f
+
+d 
+am
+ of th
+ fu
+ct
+o
+ or modu
+
+ to r
+g
+st
+r 
+
+ th
+ p
+ug
+
+ syst
+m. I
+ th
+ 
+xamp
+
+ abov
+, th
+ p
+ug
+
+ va
+u
+ 
+s `v
+m_add_dummy_mod
+
+:r
+g
+st
+r`, 
+h
+ch r
+f
+rs to a fu
+ct
+o
+ 
+am
+d `r
+g
+st
+r` 
+
+ th
+ `v
+m_add_dummy_mod
+
+` modu
+
+.
+## Typ
+s of support
+d p
+ug
+
+s
+    - **G
+
+
+ra
+ p
+ug
+
+s** (
+
+th group 
+am
+ `v
+m.g
+
+
+ra
+_p
+ug
+
+s`): Th
+ pr
+mary us
+ cas
+ for th
+s
+ p
+ug
+
+s 
+s to r
+g
+st
+r custom, out-of-th
+-tr
+ mod
+
+s 
+
+to vLLM. Th
+s 
+s do
+
+ by ca
+
+
+g `Mod
+
+R
+g
+stry.r
+g
+st
+r_mod
+
+` to r
+g
+st
+r th
+ mod
+
+ 
+
+s
+d
+ th
+ p
+ug
+
+ fu
+ct
+o
+. For a
+ 
+xamp
+
+ of a
+ off
+c
+a
+ mod
+
+ p
+ug
+
+, s
+ th
+ [bart-p
+ug
+
+](https://g
+thub.com/v
+m-proj
+ct/bart-p
+ug
+
+) 
+h
+ch adds support for `BartForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+`.
+    - **P
+atform p
+ug
+
+s** (
+
+th group 
+am
+ `v
+m.p
+atform_p
+ug
+
+s`): Th
+ pr
+mary us
+ cas
+ for th
+s
+ p
+ug
+
+s 
+s to r
+g
+st
+r custom, out-of-th
+-tr
+ p
+atforms 
+
+to vLLM. Th
+ p
+ug
+
+ fu
+ct
+o
+ shou
+d r
+tur
+ `No
+
+` 
+h
+
+ th
+ p
+atform 
+s 
+ot support
+d 
+
+ th
+ curr
+
+t 
+
+v
+ro
+m
+
+t, or th
+ p
+atform c
+ass's fu
+y qua
+
+f
+
+d 
+am
+ 
+h
+
+ th
+ p
+atform 
+s support
+d.
+    - **IO Proc
+ssor p
+ug
+
+s** (
+
+th group 
+am
+ `v
+m.
+o_proc
+ssor_p
+ug
+
+s`): Th
+ pr
+mary us
+ cas
+ for th
+s
+ p
+ug
+
+s 
+s to r
+g
+st
+r custom pr
+-/post-proc
+ss
+
+g of th
+ mod
+
+ prompt a
+d mod
+
+ output for poo
+
+
+g mod
+
+s. Th
+ p
+ug
+
+ fu
+ct
+o
+ r
+tur
+s th
+ IOProc
+ssor's c
+ass fu
+y qua
+
+f
+
+d 
+am
+.
+    - **Stat 
+ogg
+r p
+ug
+
+s** (
+
+th group 
+am
+ `v
+m.stat_
+ogg
+r_p
+ug
+
+s`): Th
+ pr
+mary us
+ cas
+ for th
+s
+ p
+ug
+
+s 
+s to r
+g
+st
+r custom, out-of-th
+-tr
+ 
+ogg
+rs 
+
+to vLLM. Th
+ 
+
+try po
+
+t shou
+d b
+ a c
+ass that subc
+ass
+s StatLogg
+rBas
+.
+## Gu
+d
+
+
+
+
+s for Wr
+t
+
+g P
+ug
+
+s
+    - **B
+
+
+g r
+-
+
+tra
+t**: Th
+ fu
+ct
+o
+ sp
+c
+f
+
+d 
+
+ th
+ 
+
+try po
+
+t shou
+d b
+ r
+-
+
+tra
+t, m
+a
+
+
+g 
+t ca
+ b
+ ca
+
+d mu
+t
+p
+
+ t
+m
+s 
+
+thout caus
+
+g 
+ssu
+s. Th
+s 
+s 
+
+c
+ssary b
+caus
+ th
+ fu
+ct
+o
+ m
+ght b
+ ca
+
+d mu
+t
+p
+
+ t
+m
+s 
+
+ som
+ proc
+ss
+s.
+### P
+atform p
+ug
+
+s gu
+d
+
+
+
+
+s
+1. Cr
+at
+ a p
+atform p
+ug
+
+ proj
+ct, for 
+xamp
+
+, `v
+m_add_dummy_p
+atform`. Th
+ proj
+ct structur
+ shou
+d 
+ook 
+
+k
+ th
+s:
+    ```sh
+
+
+    v
+m_add_dummy_p
+atform/
+    ├── v
+m_add_dummy_p
+atform/
+    │   ├── __
+
+
+t__.py
+    │   ├── my_dummy_p
+atform.py
+    │   ├── my_dummy_
+ork
+r.py
+    │   ├── my_dummy_att
+
+t
+o
+.py
+    │   ├── my_dummy_d
+v
+c
+_commu
+
+cator.py
     │   ├── my_dummy_custom_ops.py
-    ├── setup.py
-    ```
+    ├── s
+tup.py
+```
+2. I
+ th
+ `s
+tup.py` f
 
-2. In the `setup.py` file, add the following entry point:
 
-    ```python
-    setup(
-        name="vllm_add_dummy_platform",
+, add th
+ fo
+o
+
+
+g 
+
+try po
+
+t:
+    ```pytho
+
+    s
+tup(
+        
+am
+="v
+m_add_dummy_p
+atform",
         ...
-        entry_points={
-            "vllm.platform_plugins": [
-                "my_dummy_platform = vllm_add_dummy_platform:register"
+        
+
+try_po
+
+ts={
+            "v
+m.p
+atform_p
+ug
+
+s": [
+                "my_dummy_p
+atform = v
+m_add_dummy_p
+atform:r
+g
+st
+r"
             ]
         },
         ...
     )
-    ```
+```
+    P
 
-    Please make sure `vllm_add_dummy_platform:register` is a callable function and returns the platform class's fully qualified name. for example:
+as
+ mak
+ sur
+ `v
+m_add_dummy_p
+atform:r
+g
+st
+r` 
+s a ca
+ab
 
-    ```python
-    def register():
-        return "vllm_add_dummy_platform.my_dummy_platform.MyDummyPlatform"
-    ```
+ fu
+ct
+o
+ a
+d r
+tur
+s th
+ p
+atform c
+ass's fu
+y qua
 
-3. Implement the platform class `MyDummyPlatform` in `my_dummy_platform.py`. The platform class should inherit from `vllm.platforms.interface.Platform`. Please follow the interface to implement the functions one by one. There are some important functions and properties that should be implemented at least:
+f
 
-    - `_enum`: This property is the device enumeration from [PlatformEnum][vllm.platforms.interface.PlatformEnum]. Usually, it should be `PlatformEnum.OOT`, which means the platform is out-of-tree.
-    - `device_type`: This property should return the type of the device which pytorch uses. For example, `"cpu"`, `"cuda"`, etc.
-    - `device_name`: This property is set the same as `device_type` usually. It's mainly used for logging purposes.
-    - `check_and_update_config`: This function is called very early in the vLLM's initialization process. It's used for plugins to update the vllm configuration. For example, the block size, graph mode config, etc., can be updated in this function. The most important thing is that the **worker_cls** should be set in this function to let vLLM know which worker class to use for the worker process.
-    - `get_attn_backend_cls`: This function should return the attention backend class's fully qualified name.
-    - `get_device_communicator_cls`: This function should return the device communicator class's fully qualified name.
+d 
+am
+. for 
+xamp
 
-4. Implement the worker class `MyDummyWorker` in `my_dummy_worker.py`. The worker class should inherit from [WorkerBase][vllm.v1.worker.worker_base.WorkerBase]. Please follow the interface to implement the functions one by one. Basically, all interfaces in the base class should be implemented, since they are called here and there in vLLM. To make sure a model can be executed, the basic functions should be implemented are:
+:
+    ```pytho
 
-    - `init_device`: This function is called to set up the device for the worker.
-    - `initialize_cache`: This function is called to set cache config for the worker.
-    - `load_model`: This function is called to load the model weights to device.
-    - `get_kv_cache_spec`: This function is called to generate the kv cache spec for the model.
-    - `determine_available_memory`: This function is called to profiles the peak memory usage of the model to determine how much memory can be used for KV cache without OOMs.
-    - `initialize_from_config`: This function is called to allocate device KV cache with the specified kv_cache_config
-    - `execute_model`: This function is called every step to inference the model.
+    d
+f r
+g
+st
+r():
+        r
+tur
+ "v
+m_add_dummy_p
+atform.my_dummy_p
+atform.MyDummyP
+atform"
+```
+3. Imp
 
-    Additional functions that can be implemented are:
+m
 
-    - If the plugin wants to support sleep mode feature, please implement the `sleep` and `wakeup` functions.
-    - If the plugin wants to support graph mode feature, please implement the `compile_or_warm_up_model` function.
-    - If the plugin wants to support speculative decoding feature, please implement the `take_draft_token_ids` function.
-    - If the plugin wants to support lora feature, please implement the `add_lora`,`remove_lora`,`list_loras` and `pin_lora` functions.
-    - If the plugin wants to support data parallelism feature, please implement the `execute_dummy_batch` functions.
+t th
+ p
+atform c
+ass `MyDummyP
+atform` 
 
-    Please look at the worker base class [WorkerBase][vllm.v1.worker.worker_base.WorkerBase] for more functions that can be implemented.
+ `my_dummy_p
+atform.py`. Th
+ p
+atform c
+ass shou
+d 
 
-5. Implement the attention backend class `MyDummyAttention` in `my_dummy_attention.py`. The attention backend class should inherit from [AttentionBackend][vllm.v1.attention.backend.AttentionBackend]. It's used to calculate attentions with your device. Take `vllm.v1.attention.backends` as examples, it contains many attention backend implementations.
+h
+r
+t from `v
+m.p
+atforms.
 
-6. Implement custom ops for high performance. Most ops can be run by pytorch native implementation, while the performance may not be good. In this case, you can implement specific custom ops for your plugins. Currently, there are kinds of custom ops vLLM supports:
+t
+rfac
+.P
+atform`. P
 
+as
+ fo
+o
+ th
+ 
+
+t
+rfac
+ to 
+mp
+
+m
+
+t th
+ fu
+ct
+o
+s o
+
+ by o
+
+. Th
+r
+ ar
+ som
+ 
+mporta
+t fu
+ct
+o
+s a
+d prop
+rt
+
+s that shou
+d b
+ 
+mp
+
+m
+
+t
+d at 
+
+ast:
+    - `_
+
+um`: Th
+s prop
+rty 
+s th
+ d
+v
+c
+ 
+
+um
+rat
+o
+ from [P
+atformE
+um][v
+m.p
+atforms.
+
+t
+rfac
+.P
+atformE
+um]. Usua
+y, 
+t shou
+d b
+ `P
+atformE
+um.OOT`, 
+h
+ch m
+a
+s th
+ p
+atform 
+s out-of-tr
+.
+    - `d
+v
+c
+_typ
+`: Th
+s prop
+rty shou
+d r
+tur
+ th
+ typ
+ of th
+ d
+v
+c
+ 
+h
+ch pytorch us
+s. For 
+xamp
+
+, `"cpu"`, `"cuda"`, 
+tc.
+    - `d
+v
+c
+_
+am
+`: Th
+s prop
+rty 
+s s
+t th
+ sam
+ as `d
+v
+c
+_typ
+` usua
+y. It's ma
+
+
+y us
+d for 
+ogg
+
+g purpos
+s.
+    - `ch
+ck_a
+d_updat
+_co
+f
+g`: Th
+s fu
+ct
+o
+ 
+s ca
+
+d v
+ry 
+ar
+y 
+
+ th
+ vLLM's 
+
+
+t
+a
+
+zat
+o
+ proc
+ss. It's us
+d for p
+ug
+
+s to updat
+ th
+ v
+m co
+f
+gurat
+o
+. For 
+xamp
+
+, th
+ b
+ock s
+z
+, graph mod
+ co
+f
+g, 
+tc., ca
+ b
+ updat
+d 
+
+ th
+s fu
+ct
+o
+. Th
+ most 
+mporta
+t th
+
+g 
+s that th
+ **
+ork
+r_c
+s** shou
+d b
+ s
+t 
+
+ th
+s fu
+ct
+o
+ to 
+
+t vLLM k
+o
+ 
+h
+ch 
+ork
+r c
+ass to us
+ for th
+ 
+ork
+r proc
+ss.
+    - `g
+t_att
+_back
+
+d_c
+s`: Th
+s fu
+ct
+o
+ shou
+d r
+tur
+ th
+ att
+
+t
+o
+ back
+
+d c
+ass's fu
+y qua
+
+f
+
+d 
+am
+.
+    - `g
+t_d
+v
+c
+_commu
+
+cator_c
+s`: Th
+s fu
+ct
+o
+ shou
+d r
+tur
+ th
+ d
+v
+c
+ commu
+
+cator c
+ass's fu
+y qua
+
+f
+
+d 
+am
+.
+4. Imp
+
+m
+
+t th
+ 
+ork
+r c
+ass `MyDummyWork
+r` 
+
+ `my_dummy_
+ork
+r.py`. Th
+ 
+ork
+r c
+ass shou
+d 
+
+h
+r
+t from [Work
+rBas
+][v
+m.v1.
+ork
+r.
+ork
+r_bas
+.Work
+rBas
+]. P
+
+as
+ fo
+o
+ th
+ 
+
+t
+rfac
+ to 
+mp
+
+m
+
+t th
+ fu
+ct
+o
+s o
+
+ by o
+
+. Bas
+ca
+y, a
+ 
+
+t
+rfac
+s 
+
+ th
+ bas
+ c
+ass shou
+d b
+ 
+mp
+
+m
+
+t
+d, s
+
+c
+ th
+y ar
+ ca
+
+d h
+r
+ a
+d th
+r
+ 
+
+ vLLM. To mak
+ sur
+ a mod
+
+ ca
+ b
+ 
+x
+cut
+d, th
+ bas
+c fu
+ct
+o
+s shou
+d b
+ 
+mp
+
+m
+
+t
+d ar
+:
+    - `
+
+
+t_d
+v
+c
+`: Th
+s fu
+ct
+o
+ 
+s ca
+
+d to s
+t up th
+ d
+v
+c
+ for th
+ 
+ork
+r.
+    - `
+
+
+t
+a
+
+z
+_cach
+`: Th
+s fu
+ct
+o
+ 
+s ca
+
+d to s
+t cach
+ co
+f
+g for th
+ 
+ork
+r.
+    - `
+oad_mod
+
+`: Th
+s fu
+ct
+o
+ 
+s ca
+
+d to 
+oad th
+ mod
+
+ 
+
+
+ghts to d
+v
+c
+.
+    - `g
+t_kv_cach
+_sp
+c`: Th
+s fu
+ct
+o
+ 
+s ca
+
+d to g
+
+
+rat
+ th
+ kv cach
+ sp
+c for th
+ mod
+
+.
+    - `d
+t
+rm
+
+
+_ava
+
+ab
+
+_m
+mory`: Th
+s fu
+ct
+o
+ 
+s ca
+
+d to prof
+
+
+s th
+ p
+ak m
+mory usag
+ of th
+ mod
+
+ to d
+t
+rm
+
+
+ ho
+ much m
+mory ca
+ b
+ us
+d for KV cach
+ 
+
+thout OOMs.
+    - `
+
+
+t
+a
+
+z
+_from_co
+f
+g`: Th
+s fu
+ct
+o
+ 
+s ca
+
+d to a
+ocat
+ d
+v
+c
+ KV cach
+ 
+
+th th
+ sp
+c
+f
+
+d kv_cach
+_co
+f
+g
+    - `
+x
+cut
+_mod
+
+`: Th
+s fu
+ct
+o
+ 
+s ca
+
+d 
+v
+ry st
+p to 
+
+f
+r
+
+c
+ th
+ mod
+
+.
+    Add
+t
+o
+a
+ fu
+ct
+o
+s that ca
+ b
+ 
+mp
+
+m
+
+t
+d ar
+:
+    - If th
+ p
+ug
+
+ 
+a
+ts to support s
+
+p mod
+ f
+atur
+, p
+
+as
+ 
+mp
+
+m
+
+t th
+ `s
+
+p` a
+d `
+ak
+up` fu
+ct
+o
+s.
+    - If th
+ p
+ug
+
+ 
+a
+ts to support graph mod
+ f
+atur
+, p
+
+as
+ 
+mp
+
+m
+
+t th
+ `comp
+
+
+_or_
+arm_up_mod
+
+` fu
+ct
+o
+.
+    - If th
+ p
+ug
+
+ 
+a
+ts to support sp
+cu
+at
+v
+ d
+cod
+
+g f
+atur
+, p
+
+as
+ 
+mp
+
+m
+
+t th
+ `tak
+_draft_tok
+
+_
+ds` fu
+ct
+o
+.
+    - If th
+ p
+ug
+
+ 
+a
+ts to support 
+ora f
+atur
+, p
+
+as
+ 
+mp
+
+m
+
+t th
+ `add_
+ora`,`r
+mov
+_
+ora`,`
+
+st_
+oras` a
+d `p
+
+_
+ora` fu
+ct
+o
+s.
+    - If th
+ p
+ug
+
+ 
+a
+ts to support data para
+
+
+
+sm f
+atur
+, p
+
+as
+ 
+mp
+
+m
+
+t th
+ `
+x
+cut
+_dummy_batch` fu
+ct
+o
+s.
+    P
+
+as
+ 
+ook at th
+ 
+ork
+r bas
+ c
+ass [Work
+rBas
+][v
+m.v1.
+ork
+r.
+ork
+r_bas
+.Work
+rBas
+] for mor
+ fu
+ct
+o
+s that ca
+ b
+ 
+mp
+
+m
+
+t
+d.
+5. Imp
+
+m
+
+t th
+ att
+
+t
+o
+ back
+
+d c
+ass `MyDummyAtt
+
+t
+o
+` 
+
+ `my_dummy_att
+
+t
+o
+.py`. Th
+ att
+
+t
+o
+ back
+
+d c
+ass shou
+d 
+
+h
+r
+t from [Att
+
+t
+o
+Back
+
+d][v
+m.v1.att
+
+t
+o
+.back
+
+d.Att
+
+t
+o
+Back
+
+d]. It's us
+d to ca
+cu
+at
+ att
+
+t
+o
+s 
+
+th your d
+v
+c
+. Tak
+ `v
+m.v1.att
+
+t
+o
+.back
+
+ds` as 
+xamp
+
+s, 
+t co
+ta
+
+s ma
+y att
+
+t
+o
+ back
+
+d 
+mp
+
+m
+
+tat
+o
+s.
+6. Imp
+
+m
+
+t custom ops for h
+gh p
+rforma
+c
+. Most ops ca
+ b
+ ru
+ by pytorch 
+at
+v
+ 
+mp
+
+m
+
+tat
+o
+, 
+h
+
+
+ th
+ p
+rforma
+c
+ may 
+ot b
+ good. I
+ th
+s cas
+, you ca
+ 
+mp
+
+m
+
+t sp
+c
+f
+c custom ops for your p
+ug
+
+s. Curr
+
+t
+y, th
+r
+ ar
+ k
+
+ds of custom ops vLLM supports:
     - pytorch ops
-      there are 3 kinds of pytorch ops:
+      th
+r
+ ar
+ 3 k
 
-        - `communicator ops`: Device communicator op. Such as all-reduce, all-gather, etc.
-          Please implement the device communicator class `MyDummyDeviceCommunicator` in `my_dummy_device_communicator.py`. The device communicator class should inherit from [DeviceCommunicatorBase][vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase].
-        - `common ops`: Common ops. Such as matmul, softmax, etc.
-          Please implement the common ops by register oot way. See more detail in [CustomOp][vllm.model_executor.custom_op.CustomOp] class.
-        - `csrc ops`: C++ ops. This kind of ops are implemented in C++ and are registered as torch custom ops.
-          Following csrc module and `vllm._custom_ops` to implement your ops.
+ds of pytorch ops:
+        - `commu
 
-    - triton ops
-      Custom way doesn't work for triton ops now.
+cator ops`: D
+v
+c
+ commu
 
-7. (optional) Implement other pluggable modules, such as lora, graph backend, quantization, mamba attention backend, etc.
+cator op. Such as a
+-r
+duc
+, a
+-gath
+r, 
+tc.
+          P
 
-## Compatibility Guarantee
+as
+ 
+mp
 
-vLLM guarantees the interface of documented plugins, such as `ModelRegistry.register_model`, will always be available for plugins to register models. However, it is the responsibility of plugin developers to ensure their plugins are compatible with the version of vLLM they are targeting. For example, `"vllm_add_dummy_model.my_llava:MyLlava"` should be compatible with the version of vLLM that the plugin targets.
+m
 
-The interface for the model/module may change during vLLM's development. If you see any deprecation log info, please upgrade your plugin to the latest version.
+t th
+ d
+v
+c
+ commu
 
-## Deprecation announcement
+cator c
+ass `MyDummyD
+v
+c
+Commu
 
-!!! warning "Deprecations"
-    - `use_v1` parameter in `Platform.get_attn_backend_cls` is deprecated. It has been removed in v0.13.0.
-    - `_Backend` in `vllm.attention` is deprecated. It has been removed in v0.13.0. Please use `vllm.v1.attention.backends.registry.register_backend` to add new attention backend to `AttentionBackendEnum` instead.
-    - `seed_everything` platform interface is deprecated. It has been removed in v0.16.0. Please use `vllm.utils.torch_utils.set_random_seed` instead.
-    - `prompt` in `Platform.validate_request` is deprecated and will be removed in v0.18.0.
+cator` 
+
+ `my_dummy_d
+v
+c
+_commu
+
+cator.py`. Th
+ d
+v
+c
+ commu
+
+cator c
+ass shou
+d 
+
+h
+r
+t from [D
+v
+c
+Commu
+
+catorBas
+][v
+m.d
+str
+but
+d.d
+v
+c
+_commu
+
+cators.bas
+_d
+v
+c
+_commu
+
+cator.D
+v
+c
+Commu
+
+catorBas
+].
+        - `commo
+ ops`: Commo
+ ops. Such as matmu
+, softmax, 
+tc.
+          P
+
+as
+ 
+mp
+
+m
+
+t th
+ commo
+ ops by r
+g
+st
+r oot 
+ay. S
+ mor
+ d
+ta
+
+ 
+
+ [CustomOp][v
+m.mod
+
+_
+x
+cutor.custom_op.CustomOp] c
+ass.
+        - `csrc ops`: C++ ops. Th
+s k
+
+d of ops ar
+ 
+mp
+
+m
+
+t
+d 
+
+ C++ a
+d ar
+ r
+g
+st
+r
+d as torch custom ops.
+          Fo
+o
+
+
+g csrc modu
+
+ a
+d `v
+m._custom_ops` to 
+mp
+
+m
+
+t your ops.
+    - tr
+to
+ ops
+      Custom 
+ay do
+s
+'t 
+ork for tr
+to
+ ops 
+o
+.
+7. (opt
+o
+a
+) Imp
+
+m
+
+t oth
+r p
+uggab
+
+ modu
+
+s, such as 
+ora, graph back
+
+d, qua
+t
+zat
+o
+, mamba att
+
+t
+o
+ back
+
+d, 
+tc.
+## Compat
+b
+
+
+ty Guara
+t
+
+vLLM guara
+t
+s th
+ 
+
+t
+rfac
+ of docum
+
+t
+d p
+ug
+
+s, such as `Mod
+
+R
+g
+stry.r
+g
+st
+r_mod
+
+`, 
+
+
+ a
+
+ays b
+ ava
+
+ab
+
+ for p
+ug
+
+s to r
+g
+st
+r mod
+
+s. Ho
+
+v
+r, 
+t 
+s th
+ r
+spo
+s
+b
+
+
+ty of p
+ug
+
+ d
+v
+
+op
+rs to 
+
+sur
+ th
+
+r p
+ug
+
+s ar
+ compat
+b
+
+ 
+
+th th
+ v
+rs
+o
+ of vLLM th
+y ar
+ targ
+t
+
+g. For 
+xamp
+
+, `"v
+m_add_dummy_mod
+
+.my_
+ava:MyL
+ava"` shou
+d b
+ compat
+b
+
+ 
+
+th th
+ v
+rs
+o
+ of vLLM that th
+ p
+ug
+
+ targ
+ts.
+Th
+ 
+
+t
+rfac
+ for th
+ mod
+
+/modu
+
+ may cha
+g
+ dur
+
+g vLLM's d
+v
+
+opm
+
+t. If you s
+ a
+y d
+pr
+cat
+o
+ 
+og 
+
+fo, p
+
+as
+ upgrad
+ your p
+ug
+
+ to th
+ 
+at
+st v
+rs
+o
+.
+## D
+pr
+cat
+o
+ a
+ou
+c
+m
+
+t
+!!! 
+ar
+
+
+g "D
+pr
+cat
+o
+s"
+    - `us
+_v1` param
+t
+r 
+
+ `P
+atform.g
+t_att
+_back
+
+d_c
+s` 
+s d
+pr
+cat
+d. It has b
+
+ r
+mov
+d 
+
+ v0.13.0.
+    - `_Back
+
+d` 
+
+ `v
+m.att
+
+t
+o
+` 
+s d
+pr
+cat
+d. It has b
+
+ r
+mov
+d 
+
+ v0.13.0. P
+
+as
+ us
+ `v
+m.v1.att
+
+t
+o
+.back
+
+ds.r
+g
+stry.r
+g
+st
+r_back
+
+d` to add 
+
+
+ att
+
+t
+o
+ back
+
+d to `Att
+
+t
+o
+Back
+
+dE
+um` 
+
+st
+ad.
+    - `s
+d_
+v
+ryth
+
+g` p
+atform 
+
+t
+rfac
+ 
+s d
+pr
+cat
+d. It has b
+
+ r
+mov
+d 
+
+ v0.16.0. P
+
+as
+ us
+ `v
+m.ut
+
+s.torch_ut
+
+s.s
+t_ra
+dom_s
+d` 
+
+st
+ad.
+    - `prompt` 
+
+ `P
+atform.va
+
+dat
+_r
+qu
+st` 
+s d
+pr
+cat
+d a
+d 
+
+
+ b
+ r
+mov
+d 
+
+ v0.18.0.
