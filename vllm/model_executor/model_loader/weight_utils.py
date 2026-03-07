@@ -433,11 +433,15 @@ def download_gguf(
     # - *-{quant_type}-*.gguf (root sharded)
     # - */*-{quant_type}.gguf (subdir)
     # - */*-{quant_type}-*.gguf (subdir sharded)
+    # - mmproj-{quant_type}.gguf (multimodal projector root)
+    # - */mmproj-{quant_type}.gguf (multimodal projector subdir)
     allow_patterns = [
         f"*-{quant_type}.gguf",
         f"*-{quant_type}-*.gguf",
         f"*/*-{quant_type}.gguf",
         f"*/*-{quant_type}-*.gguf",
+        f"mmproj-{quant_type}.gguf",
+        f"*/mmproj-{quant_type}.gguf",
     ]
 
     # Use download_weights_from_hf which handles caching and downloading
