@@ -1539,9 +1539,8 @@ class GPUModelRunner(
         self,
         scheduler_output: "SchedulerOutput",
         num_scheduled_tokens: np.ndarray,
-        pcp_req_indices: np.ndarray | None = None,
-        pcp_positions: np.ndarray | None = None,
-        pcp_cu_num_tokens: np.ndarray | None = None,
+        pcp_virtual_num_computed: np.ndarray | None = None,
+        pcp_virtual_to_physical: np.ndarray | None = None,
     ) -> tuple[
         torch.Tensor,
         SpecDecodeMetadata | None,
@@ -1554,46 +1553,44 @@ class GPUModelRunner(
         Args:
             scheduler_output: The scheduler output.
             num_scheduled_tokens: Token counts per (virtual) request.
-            pcp_req_indices: Pre-computed request indices for PCP. Maps each
-                token to its physical request index. If None, computed normally.
-            pcp_positions: Pre-computed position values for PCP. If None,
-                computed normally.
-            pcp_cu_num_tokens: Pre-computed cumulative token counts for PCP.
-                If None, computed normally.
+            pcp_virtual_num_computed: Starting positions per virtual request.
+                Used for position computation with PCP.
+            pcp_virtual_to_physical: Maps virtual req idx to physical req idx.
+                Used for block table lookups with PCP.
         """
         total_num_scheduled_tokens = int(num_scheduled_tokens.sum())
         assert total_num_scheduled_tokens > 0
-        num_reqs = self.input_batch.num_reqs
-        assert num_reqs > 0
+        num_reqs = len(num_scheduled_tokens)  # May be virtual reqs with PCP
+        num_physical_reqs = self.input_batch.num_reqs
+        assert num_physical_reqs > 0
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table.commit_block_table(num_reqs)
+        self.input_batch.block_table.commit_block_table(num_physical_reqs)
 
-        # Get request indices.
+        # Get request indices (virtual req indices for PCP).
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
-        if pcp_req_indices is not None:
-            req_indices = pcp_req_indices
+        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+
+        # For physical request lookups (block table, token_ids, etc.)
+        if pcp_virtual_to_physical is not None:
+            physical_req_indices = pcp_virtual_to_physical[req_indices]
         else:
-            req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+            physical_req_indices = req_indices
 
         # cu_num_tokens: [2, 5, 3] -> [2, 7, 10]
         # arange: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        if pcp_cu_num_tokens is not None:
-            cu_num_tokens = pcp_cu_num_tokens
-            # Compute arange from cumsum
-            arange = (
-                np.concatenate([np.arange(n) for n in num_scheduled_tokens])
-                if len(num_scheduled_tokens) > 0
-                else np.array([], dtype=np.int64)
-            )
-        else:
-            cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
+        cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
 
         # Get positions.
         positions_np = self.positions.np[:total_num_scheduled_tokens]
-        if pcp_positions is not None:
-            np.copyto(positions_np, pcp_positions)
+        if pcp_virtual_num_computed is not None:
+            # PCP: position = virtual_num_computed[virtual_req] + local_arange
+            np.add(
+                pcp_virtual_num_computed[req_indices],
+                arange,
+                out=positions_np,
+            )
         else:
             np.add(
                 self.input_batch.num_computed_tokens_cpu[req_indices],
@@ -1615,8 +1612,10 @@ class GPUModelRunner(
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
         # where M is the max_model_len.
+        # Use physical_req_indices for token_ids lookup (indexed by physical request)
         token_indices = (
-            positions_np + req_indices * self.input_batch.token_ids_cpu.shape[1]
+            positions_np
+            + physical_req_indices * self.input_batch.token_ids_cpu.shape[1]
         )
         token_indices_tensor = torch.from_numpy(token_indices)
 
@@ -1643,11 +1642,21 @@ class GPUModelRunner(
         # spots in the GpuModelRunner's pre-allocated prompt_embeds tensor.
         if self.input_batch.req_prompt_embeds:
             output_idx = 0
-            for req_idx in range(num_reqs):
-                num_sched = num_scheduled_tokens[req_idx]
+            for vreq_idx in range(num_reqs):
+                num_sched = num_scheduled_tokens[vreq_idx]
+
+                # Map virtual req to physical req for embeddings lookup
+                if pcp_virtual_to_physical is not None:
+                    phys_req_idx = int(pcp_virtual_to_physical[vreq_idx])
+                    start_pos = int(pcp_virtual_num_computed[vreq_idx])
+                else:
+                    phys_req_idx = vreq_idx
+                    start_pos = int(
+                        self.input_batch.num_computed_tokens_cpu[phys_req_idx]
+                    )
 
                 # Skip if this request doesn't have embeddings
-                if req_idx not in self.input_batch.req_prompt_embeds:
+                if phys_req_idx not in self.input_batch.req_prompt_embeds:
                     output_idx += num_sched
                     continue
 
@@ -1656,8 +1665,7 @@ class GPUModelRunner(
                     output_idx += num_sched
                     continue
 
-                req_embeds = self.input_batch.req_prompt_embeds[req_idx]
-                start_pos = self.input_batch.num_computed_tokens_cpu[req_idx]
+                req_embeds = self.input_batch.req_prompt_embeds[phys_req_idx]
 
                 # Skip if trying to read beyond available embeddings
                 if start_pos >= req_embeds.shape[0]:
@@ -1676,7 +1684,10 @@ class GPUModelRunner(
 
                 output_idx += num_sched
 
-        self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
+        # Use physical_req_indices for block table lookup (indexed by physical request)
+        self.input_batch.block_table.compute_slot_mapping(
+            physical_req_indices, positions_np
+        )
         self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
 
         # Prepare the attention metadata.
@@ -1688,21 +1699,34 @@ class GPUModelRunner(
         self.query_start_loc.copy_to_gpu()
         query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
 
-        self.seq_lens.np[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
-        )
+        # seq_lens = num_computed + num_scheduled for each (virtual) request
+        if pcp_virtual_num_computed is not None:
+            self.seq_lens.np[:num_reqs] = (
+                pcp_virtual_num_computed[:num_reqs] + num_scheduled_tokens
+            )
+        else:
+            self.seq_lens.np[:num_reqs] = (
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                + num_scheduled_tokens
+            )
         # Fill unused with 0 for full cuda graph mode.
         self.seq_lens.np[num_reqs:].fill(0)
         self.seq_lens.copy_to_gpu()
 
-        num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
-        num_tokens_np = np.array(num_tokens, dtype=np.int32)
-
-        # Record which requests should not be sampled,
-        # so that we could clear the sampled tokens before returning
-        self.discard_request_mask.np[:num_reqs] = (
-            self.seq_lens.np[:num_reqs] < num_tokens_np
-        )
+        # For discard_request_mask, we need physical request info
+        # With PCP virtual requests, we don't discard based on seq_lens < num_tokens
+        # because virtual requests have partial seq_lens by design
+        if pcp_virtual_to_physical is not None:
+            # PCP: Don't discard any tokens during prefill (handled by restore)
+            self.discard_request_mask.np[:num_reqs] = False
+        else:
+            num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
+            num_tokens_np = np.array(num_tokens, dtype=np.int32)
+            # Record which requests should not be sampled,
+            # so that we could clear the sampled tokens before returning
+            self.discard_request_mask.np[:num_reqs] = (
+                self.seq_lens.np[:num_reqs] < num_tokens_np
+            )
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
         # Copy the tensors to the GPU.
@@ -3513,30 +3537,28 @@ class GPUModelRunner(
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
-            # PCP: Partition inputs for this rank
-            pcp_req_indices = None
-            pcp_positions = None
-            pcp_cu_num_tokens = None
+            # PCP: Partition into virtual requests for this rank
+            pcp_virtual_num_computed = None
+            pcp_virtual_to_physical = None
             if self.pcp_manager is not None:
                 (
-                    num_scheduled_tokens_np,
-                    pcp_req_indices,
-                    pcp_positions,
-                    pcp_cu_num_tokens,
+                    num_scheduled_tokens_np,  # Now per virtual request
+                    pcp_virtual_num_computed,
+                    pcp_virtual_to_physical,
                 ) = self.pcp_manager.partition(
                     num_scheduled_tokens_np,
                     self.input_batch.num_computed_tokens_cpu[:num_reqs],
                 )
-                # Update num_tokens for this rank's partition
+                # Update counts for virtual requests
+                num_reqs = len(num_scheduled_tokens_np)  # Now 2x physical reqs
                 num_tokens_unpadded = int(num_scheduled_tokens_np.sum())
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
 
             logits_indices, spec_decode_metadata = self._prepare_inputs(
                 scheduler_output,
                 num_scheduled_tokens_np,
-                pcp_req_indices=pcp_req_indices,
-                pcp_positions=pcp_positions,
-                pcp_cu_num_tokens=pcp_cu_num_tokens,
+                pcp_virtual_num_computed=pcp_virtual_num_computed,
+                pcp_virtual_to_physical=pcp_virtual_to_physical,
             )
 
             cascade_attn_prefix_lens = None

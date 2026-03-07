@@ -4,20 +4,23 @@
 
 
 This module implements PCP using a "virtual request" approach with DualChunkSwap
-for load balancing. Each physical request is partitioned such that each PCP rank
-handles both head and tail tokens. This keeps PCP-specific logic isolated from
-the main input preparation code.
+for load balancing. Each physical request is split into 2 virtual requests
+(head and tail), allowing _prepare_inputs to be PCP-agnostic.
 
 For PCP=2, a physical request with N tokens becomes:
-  - Rank 0: head tokens [0, N/4) AND tail tokens [3N/4, N)
-  - Rank 1: head tokens [N/4, N/2) AND tail tokens [N/2, 3N/4)
+  Rank 0:
+    - Virtual req 0 (head): tokens [0, N/4), num_computed=0
+    - Virtual req 1 (tail): tokens [3N/4, N), num_computed=3N/4
+  Rank 1:
+    - Virtual req 0 (head): tokens [N/4, N/2), num_computed=N/4
+    - Virtual req 1 (tail): tokens [N/2, 3N/4), num_computed=N/2
 
-Example with 8 tokens [0,1,2,3,4,5,6,7] and PCP=2:
-  - Rank 0: positions [0,1,6,7] (head=[0,1], tail=[6,7])
-  - Rank 1: positions [2,3,4,5] (head=[2,3], tail=[4,5])
+Example with 8 tokens and PCP=2:
+  Rank 0: vreq0 (head, 2 tokens, computed=0), vreq1 (tail, 2 tokens, computed=6)
+  Rank 1: vreq0 (head, 2 tokens, computed=2), vreq1 (tail, 2 tokens, computed=4)
 
-This balances attention workload since head tokens attend to fewer KV and
-tail tokens attend to more. After KV all-gather, all ranks have full KV [0, N).
+The standard position formula (num_computed + arange) produces correct positions.
+After KV all-gather, all ranks have full KV [0, N).
 """
 
 from typing import TYPE_CHECKING
@@ -55,61 +58,76 @@ class PCPVirtualRequestManager:
         self._allgather_restore_idx: torch.Tensor | None = None
         self._local_num_tokens: int = 0
         self._global_num_tokens: int = 0
-        self._padded_local_num_tokens: int = 0
 
         # State for KV restore (reordering after all-gather)
         self._kv_restore_idx: torch.Tensor | None = None
 
         # State from partition()
-        self._num_reqs: int = 0
+        self._num_physical_reqs: int = 0
         self._per_rank_tokens: np.ndarray | None = None
-        self._num_scheduled_tokens: np.ndarray | None = None
+        self._physical_num_scheduled: np.ndarray | None = None
 
-        # Pre-allocated buffers for partitioning
-        self._virtual_num_scheduled = np.zeros(max_num_reqs, dtype=np.int32)
-        self._virtual_positions = np.zeros(max_num_batched_tokens, dtype=np.int64)
-        self._virtual_req_indices = np.zeros(max_num_batched_tokens, dtype=np.int64)
+        # Pre-allocated buffers for virtual requests (2 per physical request)
+        max_virtual_reqs = 2 * max_num_reqs
+        self._virtual_num_scheduled = np.zeros(max_virtual_reqs, dtype=np.int32)
+        self._virtual_num_computed = np.zeros(max_virtual_reqs, dtype=np.int64)
+        self._virtual_to_physical = np.zeros(max_virtual_reqs, dtype=np.int64)
 
     def partition(
         self,
         num_scheduled_tokens: np.ndarray,
         num_computed_tokens: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Partition physical requests using DualChunkSwap for load balancing.
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Partition physical requests into virtual requests using DualChunkSwap.
 
-        Each rank gets both head and tail tokens:
-        - Rank r head tokens: [r*chunk, (r+1)*chunk)
-        - Rank r tail tokens: [N - (r+1)*chunk, N - r*chunk)
+        Each physical request becomes 2 virtual requests (head + tail).
+        This allows _prepare_inputs to be PCP-agnostic - it just sees
+        virtual requests with their own num_scheduled and num_computed.
 
-        Example N=8, PCP=2:
-          Rank 0: head=[0,1], tail=[6,7]  -> positions [0,1,6,7]
-          Rank 1: head=[2,3], tail=[4,5]  -> positions [2,3,4,5]
+        Example N=8, PCP=2, physical request with num_computed=100:
+          Rank 0:
+            - vreq 0 (head): num_scheduled=2, num_computed=100
+            - vreq 1 (tail): num_scheduled=2, num_computed=106
+          Rank 1:
+            - vreq 0 (head): num_scheduled=2, num_computed=102
+            - vreq 1 (tail): num_scheduled=2, num_computed=104
 
         Args:
             num_scheduled_tokens: Token counts per physical request [num_reqs]
             num_computed_tokens: Already computed tokens per request [num_reqs]
 
         Returns:
-            virtual_num_scheduled: Token counts for this rank's virtual requests
-            virtual_req_indices: Maps virtual tokens to physical request indices
-            virtual_positions: Position values for this rank's tokens
-            cu_num_tokens: Cumulative token counts for query_start_loc
+            virtual_num_scheduled: Token counts per virtual request [2*num_reqs]
+            virtual_num_computed: Starting positions per virtual request [2*num_reqs]
+            virtual_to_physical: Maps virtual req idx to physical req idx [2*num_reqs]
         """
         num_reqs = len(num_scheduled_tokens)
+        num_virtual_reqs = 2 * num_reqs
         pcp_size = self.pcp_world_size
         pcp_rank = self.pcp_rank
 
-        # For DualChunkSwap, we divide tokens into 2*pcp_size chunks
-        # Each rank gets one head chunk and one tail chunk
-        virtual_num_scheduled = np.zeros(num_reqs, dtype=np.int32)
+        # Output arrays for virtual requests
+        virtual_num_scheduled = self._virtual_num_scheduled[:num_virtual_reqs]
+        virtual_num_computed = self._virtual_num_computed[:num_virtual_reqs]
+        virtual_to_physical = self._virtual_to_physical[:num_virtual_reqs]
 
         # Pre-compute per-rank token assignments for all ranks (needed for restore)
-        # per_rank_tokens[rank, req] = number of tokens for that rank on that request
         per_rank_tokens = np.zeros((pcp_size, num_reqs), dtype=np.int32)
 
         for req_idx in range(num_reqs):
             n_tokens = num_scheduled_tokens[req_idx]
+            base_computed = num_computed_tokens[req_idx]
+
             if n_tokens == 0:
+                # Empty request -> empty virtual requests
+                head_vreq = 2 * req_idx
+                tail_vreq = 2 * req_idx + 1
+                virtual_num_scheduled[head_vreq] = 0
+                virtual_num_scheduled[tail_vreq] = 0
+                virtual_num_computed[head_vreq] = base_computed
+                virtual_num_computed[tail_vreq] = base_computed
+                virtual_to_physical[head_vreq] = req_idx
+                virtual_to_physical[tail_vreq] = req_idx
                 continue
 
             # Divide into 2*pcp_size chunks, distribute remainder to first chunks
@@ -123,98 +141,72 @@ class PCPVirtualRequestManager:
                 dtype=np.int32,
             )
 
-            # Each rank r gets:
-            #   - head chunk: chunk r (from start)
-            #   - tail chunk: chunk (num_chunks - 1 - r) (from end)
-            for r in range(pcp_size):
-                head_chunk_idx = r
-                tail_chunk_idx = num_chunks - 1 - r
-                per_rank_tokens[r, req_idx] = (
-                    chunk_sizes[head_chunk_idx] + chunk_sizes[tail_chunk_idx]
-                )
-
-        virtual_num_scheduled = per_rank_tokens[pcp_rank].copy()
-        total_virtual_tokens = int(virtual_num_scheduled.sum())
-
-        # Build virtual positions and req_indices with head+tail interleaving
-        virtual_positions = self._virtual_positions[:total_virtual_tokens]
-        virtual_req_indices = self._virtual_req_indices[:total_virtual_tokens]
-
-        out_idx = 0
-        for req_idx in range(num_reqs):
-            n_tokens = num_scheduled_tokens[req_idx]
-            n_local = virtual_num_scheduled[req_idx]
-            if n_local == 0:
-                continue
-
-            base_pos = num_computed_tokens[req_idx]
-
-            # Recompute chunk sizes for this request
-            num_chunks = 2 * pcp_size
-            chunk_size = n_tokens // num_chunks
-            remainder = n_tokens % num_chunks
-            chunk_sizes = np.array(
-                [chunk_size + (1 if i < remainder else 0) for i in range(num_chunks)],
-                dtype=np.int32,
-            )
-
             # Compute cumulative start positions for each chunk
             chunk_starts = np.zeros(num_chunks + 1, dtype=np.int32)
             for i in range(num_chunks):
                 chunk_starts[i + 1] = chunk_starts[i] + chunk_sizes[i]
 
-            # This rank's head chunk and tail chunk
+            # Store per-rank tokens for all ranks (needed for restore indices)
+            for r in range(pcp_size):
+                head_idx = r
+                tail_idx = num_chunks - 1 - r
+                per_rank_tokens[r, req_idx] = (
+                    chunk_sizes[head_idx] + chunk_sizes[tail_idx]
+                )
+
+            # This rank's head and tail chunks
             head_chunk_idx = pcp_rank
             tail_chunk_idx = num_chunks - 1 - pcp_rank
 
-            # Head positions
-            head_start = chunk_starts[head_chunk_idx]
-            head_count = chunk_sizes[head_chunk_idx]
-            for i in range(head_count):
-                virtual_positions[out_idx] = base_pos + head_start + i
-                virtual_req_indices[out_idx] = req_idx
-                out_idx += 1
+            # Virtual request indices
+            head_vreq = 2 * req_idx
+            tail_vreq = 2 * req_idx + 1
 
-            # Tail positions
-            tail_start = chunk_starts[tail_chunk_idx]
-            tail_count = chunk_sizes[tail_chunk_idx]
-            for i in range(tail_count):
-                virtual_positions[out_idx] = base_pos + tail_start + i
-                virtual_req_indices[out_idx] = req_idx
-                out_idx += 1
+            # Head virtual request
+            virtual_num_scheduled[head_vreq] = chunk_sizes[head_chunk_idx]
+            virtual_num_computed[head_vreq] = (
+                base_computed + chunk_starts[head_chunk_idx]
+            )
+            virtual_to_physical[head_vreq] = req_idx
 
-        cu_num_tokens = np.cumsum(virtual_num_scheduled[:num_reqs])
+            # Tail virtual request
+            virtual_num_scheduled[tail_vreq] = chunk_sizes[tail_chunk_idx]
+            virtual_num_computed[tail_vreq] = (
+                base_computed + chunk_starts[tail_chunk_idx]
+            )
+            virtual_to_physical[tail_vreq] = req_idx
+
+        total_virtual_tokens = int(virtual_num_scheduled.sum())
 
         # Store state for restore_hidden_states and KV restore
         self._local_num_tokens = total_virtual_tokens
-        self._num_reqs = num_reqs
+        self._num_physical_reqs = num_reqs
         self._per_rank_tokens = per_rank_tokens
-        self._num_scheduled_tokens = num_scheduled_tokens.copy()
-        self._setup_restore_indices(num_reqs, per_rank_tokens, virtual_num_scheduled)
+        self._physical_num_scheduled = num_scheduled_tokens.copy()
+        self._setup_restore_indices(num_reqs, per_rank_tokens)
         self._setup_kv_restore_indices(num_reqs, num_scheduled_tokens, per_rank_tokens)
 
         logger.info(
-            "PCP partition (DualChunkSwap): rank=%d/%d, num_reqs=%d, "
-            "total_tokens=%d -> local_tokens=%d",
+            "PCP partition (DualChunkSwap): rank=%d/%d, physical_reqs=%d, "
+            "virtual_reqs=%d, total_tokens=%d -> local_tokens=%d",
             pcp_rank,
             pcp_size,
             num_reqs,
+            num_virtual_reqs,
             int(num_scheduled_tokens.sum()),
             total_virtual_tokens,
         )
 
         return (
-            virtual_num_scheduled[:num_reqs].copy(),
-            virtual_req_indices[:total_virtual_tokens].copy(),
-            virtual_positions[:total_virtual_tokens].copy(),
-            cu_num_tokens,
+            virtual_num_scheduled[:num_virtual_reqs].copy(),
+            virtual_num_computed[:num_virtual_reqs].copy(),
+            virtual_to_physical[:num_virtual_reqs].copy(),
         )
 
     def _setup_restore_indices(
         self,
         num_reqs: int,
         per_rank_tokens: np.ndarray,
-        _virtual_num_scheduled: np.ndarray,
     ) -> None:
         """Set up indices for restoring hidden states after all-gather.
 
