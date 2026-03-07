@@ -3865,6 +3865,10 @@ class GPUModelRunner(
                 else:
                     logger.error("RoutedExpertsCapturer not initialized.")
 
+            eplb_stats = (
+                self.eplb_state.last_eplb_stats if self.eplb_state is not None else None
+            )
+
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
                 req_id_to_index=req_id_to_index_output_copy,
@@ -3877,6 +3881,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                eplb_stats=eplb_stats,
             )
 
         if not self.use_async_scheduling:

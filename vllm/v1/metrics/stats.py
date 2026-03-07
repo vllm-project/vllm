@@ -168,6 +168,18 @@ class KVCacheEvictionEvent:
 
 
 @dataclass
+class EplbMetricsStats:
+    """EPLB balancedness stats computed per step for Prometheus export."""
+
+    min_balancedness: float
+    p50_balancedness: float
+    p90_balancedness: float
+    avg_balancedness: float
+    rearrangements: int
+    last_rearrangement_seconds: float
+
+
+@dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
@@ -195,6 +207,8 @@ class SchedulerStats:
     cudagraph_stats: CUDAGraphStat | None = None
 
     perf_stats: PerfStats | None = None
+
+    eplb_stats: EplbMetricsStats | None = None
 
 
 @dataclass

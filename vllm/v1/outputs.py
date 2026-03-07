@@ -15,9 +15,11 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+    from vllm.v1.metrics.stats import EplbMetricsStats
 else:
     KVConnectorStats = object
     KVConnectorKVEvents = object
+    EplbMetricsStats = object
 
 
 class LogprobsLists(NamedTuple):
@@ -246,6 +248,9 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+
+    # EPLB balancedness stats
+    eplb_stats: "EplbMetricsStats | None" = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.
