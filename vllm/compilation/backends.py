@@ -408,6 +408,21 @@ class SplitItem:
 def split_graph(
     graph: fx.GraphModule, splitting_ops: list[str]
 ) -> tuple[fx.GraphModule, list[SplitItem]]:
+    # Move sym_size.int nodes to right after their tensor operand so they
+    # end up in the producer subgraph. This avoids passing the tensor to
+    # consumer subgraphs just for .size() calls — only the SymInt result
+    # crosses the boundary.
+    for node in list(graph.graph.nodes):
+        if node.op == "call_function" and node.target == torch.ops.aten.sym_size.int:
+            tensor_node = node.args[0]
+            with graph.graph.inserting_after(tensor_node):
+                new_node = graph.graph.call_function(
+                    torch.ops.aten.sym_size.int, args=node.args
+                )
+                new_node.meta = node.meta.copy()
+            node.replace_all_uses_with(new_node)
+            graph.graph.erase_node(node)
+
     # split graph by ops
     subgraph_id = 0
     node_to_subgraph_id: dict[fx.Node, int] = {}
