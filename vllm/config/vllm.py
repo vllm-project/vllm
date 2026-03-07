@@ -327,6 +327,12 @@ class VllmConfig:
     weight_transfer_config: WeightTransferConfig | None = None
     """The configurations for weight transfer during RL training."""
 
+    shutdown_timeout: int = Field(default=0, ge=0)
+    """Shutdown grace period for in-flight requests. Shutdown will be delayed for
+    up to this amount of time to allow already-running requests to complete. Any
+    remaining requests are aborted once the timeout is reached.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -667,8 +673,6 @@ class VllmConfig:
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
-
-        self.cache_config.verify_with_parallel_config(self.parallel_config)
 
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
@@ -1265,6 +1269,9 @@ class VllmConfig:
 
         # Handle the KV connector configs
         self._post_init_kv_transfer_config()
+
+        # Log the custom passes that are enabled
+        self.compilation_config.pass_config.log_enabled_passes()
 
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
