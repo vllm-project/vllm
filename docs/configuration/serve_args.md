@@ -1,35 +1,251 @@
-# Server Arguments
+# S
+rv
+r Argum
 
-The `vllm serve` command is used to launch the OpenAI-compatible server.
+ts
+Th
+ `v
+m s
+rv
+` comma
+d 
+s us
+d to 
+au
+ch th
+ Op
 
-## CLI Arguments
+AI-compat
+b
 
-The `vllm serve` command is used to launch the OpenAI-compatible server.
-To see the available options, take a look at the [CLI Reference](../cli/README.md)!
+ s
+rv
+r.
+## CLI Argum
 
-## Configuration file
+ts
+Th
+ `v
+m s
+rv
+` comma
+d 
+s us
+d to 
+au
+ch th
+ Op
 
-You can load CLI arguments via a [YAML](https://yaml.org/) config file.
-The argument names must be the long form of those outlined [above](serve_args.md).
+AI-compat
+b
 
-For example:
+ s
+rv
+r.
+To s
+ th
+ ava
 
-```yaml
-# config.yaml
+ab
 
-model: meta-llama/Llama-3.1-8B-Instruct
+ opt
+o
+s, tak
+ a 
+ook at th
+ [CLI R
+f
+r
+
+c
+](../c
+
+/README.md)!
+## Co
+f
+gurat
+o
+ f
+
+
+
+You ca
+ 
+oad CLI argum
+
+ts v
+a a [YAML](https://yam
+.org/) co
+f
+g f
+
+
+.
+Th
+ argum
+
+t 
+am
+s must b
+ th
+ 
+o
+g form of thos
+ out
+
+
+
+d [abov
+](s
+rv
+_args.md).
+For 
+xamp
+
+:
+```yam
+
+# co
+f
+g.yam
+
+mod
+
+: m
+ta-
+ama/L
+ama-3.1-8B-I
+struct
 host: "127.0.0.1"
 port: 6379
-uvicorn-log-level: "info"
+uv
+cor
+-
+og-
+
+v
+
+: "
+
+fo"
 ```
+To us
+ th
+ abov
+ co
+f
+g f
 
-To use the above config file:
 
+:
 ```bash
-vllm serve --config config.yaml
-```
+v
+m s
+rv
+ --co
+f
+g co
+f
+g.yam
 
-!!! note
-    In case an argument is supplied simultaneously using command line and the config file, the value from the command line will take precedence.
-    The order of priorities is `command line > config file values > defaults`.
-    e.g. `vllm serve SOME_MODEL --config config.yaml`, SOME_MODEL takes precedence over `model` in config file.
+```
+!!! 
+ot
+
+    I
+ cas
+ a
+ argum
+
+t 
+s supp
+
+
+d s
+mu
+ta
+
+ous
+y us
+
+g comma
+d 
+
+
+
+ a
+d th
+ co
+f
+g f
+
+
+, th
+ va
+u
+ from th
+ comma
+d 
+
+
+
+ 
+
+
+ tak
+ pr
+c
+d
+
+c
+.
+    Th
+ ord
+r of pr
+or
+t
+
+s 
+s `comma
+d 
+
+
+
+ 
+ co
+f
+g f
+
+
+ va
+u
+s 
+ d
+fau
+ts`.
+    
+.g. `v
+m s
+rv
+ SOME_MODEL --co
+f
+g co
+f
+g.yam
+`, SOME_MODEL tak
+s pr
+c
+d
+
+c
+ ov
+r `mod
+
+` 
+
+ co
+f
+g f
+
+
+.

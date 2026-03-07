@@ -1,118 +1,885 @@
-# CI Failures
+# CI Fa
 
-What should I do when a CI job fails on my PR, but I don't think my PR caused
-the failure?
+ur
+s
+What shou
+d I do 
+h
 
-- Check the dashboard of current CI test failures:  
-  👉 [CI Failures Dashboard](https://github.com/orgs/vllm-project/projects/20)
+ a CI job fa
 
-- If your failure **is already listed**, it's likely unrelated to your PR.
-  Help fixing it is always welcome!
-    - Leave comments with links to additional instances of the failure.
-    - React with a 👍 to signal how many are affected.
+s o
+ my PR, but I do
+'t th
 
-- If your failure **is not listed**, you should **file an issue**.
+k my PR caus
+d
+th
+ fa
 
-## Filing a CI Test Failure Issue
+ur
+?
+    - Ch
+ck th
+ dashboard of curr
 
-- **File a bug report:**  
-    👉 [New CI Failure Report](https://github.com/vllm-project/vllm/issues/new?template=450-ci-failure.yml)
+t CI t
+st fa
 
-- **Use this title format:**
+ur
+s:  
+  👉 [CI Fa
 
-    ```text
-    [CI Failure]: failing-test-job - regex/matching/failing:test
+ur
+s Dashboard](https://g
+thub.com/orgs/v
+m-proj
+ct/proj
+cts/20)
+    - If your fa
+
+ur
+ **
+s a
+r
+ady 
+
+st
+d**, 
+t's 
+
+k
+
+y u
+r
+
+at
+d to your PR.
+  H
+
+p f
+x
+
+g 
+t 
+s a
+
+ays 
+
+
+com
+!
+    - L
+av
+ comm
+
+ts 
+
+th 
+
+
+ks to add
+t
+o
+a
+ 
+
+sta
+c
+s of th
+ fa
+
+ur
+.
+    - R
+act 
+
+th a 👍 to s
+g
+a
+ ho
+ ma
+y ar
+ aff
+ct
+d.
+    - If your fa
+
+ur
+ **
+s 
+ot 
+
+st
+d**, you shou
+d **f
+
+
+ a
+ 
+ssu
+**.
+## F
+
+
+
+g a CI T
+st Fa
+
+ur
+ Issu
+
+    - **F
+
+
+ a bug r
+port:**  
+    👉 [N
+
+ CI Fa
+
+ur
+ R
+port](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/
+
+
+?t
+mp
+at
+=450-c
+-fa
+
+ur
+.ym
+)
+    - **Us
+ th
+s t
+t
+
+ format:**
+    ```t
+xt
+    [CI Fa
+
+ur
+]: fa
+
+
+
+g-t
+st-job - r
+g
+x/match
+
+g/fa
+
+
+
+g:t
+st
     ```
+    - **For th
+ 
 
-- **For the environment field:**
+v
+ro
+m
 
-    ```text
-    Still failing on main as of commit abcdef123
+t f
+
+
+d:**
+    ```t
+xt
+    St
+
+ fa
+
+
+
+g o
+ ma
+
+ as of comm
+t abcd
+f123
     ```
+    - **I
+ th
+ d
+scr
+pt
+o
+, 
 
-- **In the description, include failing tests:**
+c
+ud
+ fa
 
-    ```text
-    FAILED failing/test.py:failing_test1 - Failure description
-    FAILED failing/test.py:failing_test2 - Failure description
-    https://github.com/orgs/vllm-project/projects/20
-    https://github.com/vllm-project/vllm/issues/new?template=400-bug-report.yml
-    FAILED failing/test.py:failing_test3 - Failure description
+
+
+g t
+sts:**
+    ```t
+xt
+    FAILED fa
+
+
+
+g/t
+st.py:fa
+
+
+
+g_t
+st1 - Fa
+
+ur
+ d
+scr
+pt
+o
+
+    FAILED fa
+
+
+
+g/t
+st.py:fa
+
+
+
+g_t
+st2 - Fa
+
+ur
+ d
+scr
+pt
+o
+
+    https://g
+thub.com/orgs/v
+m-proj
+ct/proj
+cts/20
+    https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/
+
+
+?t
+mp
+at
+=400-bug-r
+port.ym
+
+    FAILED fa
+
+
+
+g/t
+st.py:fa
+
+
+
+g_t
+st3 - Fa
+
+ur
+ d
+scr
+pt
+o
+
     ```
+    - **Attach 
+ogs** (co
+aps
+b
 
-- **Attach logs** (collapsible section example):
-    <details>
-    <summary>Logs:</summary>
+ s
+ct
+o
+ 
+xamp
 
-    ```text
-    ERROR 05-20 03:26:38 [dump_input.py:68] Dumping input data
-    --- Logging error ---  
-    Traceback (most recent call last):  
-      File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core.py", line 203, in execute_model  
-        return self.model_executor.execute_model(scheduler_output)
+):
+    
+d
+ta
+
+s
+
+    
+summary
+Logs:
+/summary
+
+    ```t
+xt
+    ERROR 05-20 03:26:38 [dump_
+
+put.py:68] Dump
+
+g 
+
+put data
+    --- Logg
+
+g 
+rror ---  
+    Trac
+back (most r
+c
+
+t ca
+ 
+ast):  
+      F
+
+
+ "/usr/
+oca
+/
+
+b/pytho
+3.12/d
+st-packag
+s/v
+m/v1/
+
+g
+
+
+/cor
+.py", 
+
+
+
+ 203, 
+
+ 
+x
+cut
+_mod
+
+  
+        r
+tur
+ s
+
+f.mod
+
+_
+x
+cutor.
+x
+cut
+_mod
+
+(sch
+du
+
+r_output)
     ...
-    FAILED failing/test.py:failing_test1 - Failure description
-    FAILED failing/test.py:failing_test2 - Failure description
-    FAILED failing/test.py:failing_test3 - Failure description
+    FAILED fa
+
+
+
+g/t
+st.py:fa
+
+
+
+g_t
+st1 - Fa
+
+ur
+ d
+scr
+pt
+o
+
+    FAILED fa
+
+
+
+g/t
+st.py:fa
+
+
+
+g_t
+st2 - Fa
+
+ur
+ d
+scr
+pt
+o
+
+    FAILED fa
+
+
+
+g/t
+st.py:fa
+
+
+
+g_t
+st3 - Fa
+
+ur
+ d
+scr
+pt
+o
+
     ```
+    
+/d
+ta
 
-    </details>
+s
 
-## Logs Wrangling
+## Logs Wra
+g
 
-Download the full log file from Buildkite locally.
 
-Strip timestamps and colorization:
+g
+Do
 
-[.buildkite/scripts/ci-clean-log.sh](../../../.buildkite/scripts/ci-clean-log.sh)
 
+oad th
+ fu
+ 
+og f
+
+
+ from Bu
+
+dk
+t
+ 
+oca
+y.
+Str
+p t
+m
+stamps a
+d co
+or
+zat
+o
+:
+[.bu
+
+dk
+t
+/scr
+pts/c
+-c
+
+a
+-
+og.sh](../../../.bu
+
+dk
+t
+/scr
+pts/c
+-c
+
+a
+-
+og.sh)
 ```bash
-./ci-clean-log.sh ci.log
+./c
+-c
+
+a
+-
+og.sh c
+.
+og
 ```
+Us
+ a too
+ [
 
-Use a tool [wl-clipboard](https://github.com/bugaevc/wl-clipboard) for quick copy-pasting:
+-c
 
+pboard](https://g
+thub.com/buga
+vc/
+
+-c
+
+pboard) for qu
+ck copy-past
+
+g:
 ```bash
-tail -525 ci_build.log | wl-copy
+ta
+
+ -525 c
+_bu
+
+d.
+og | 
+
+-copy
 ```
+## I
+v
+st
+gat
 
-## Investigating a CI Test Failure
+g a CI T
+st Fa
 
-1. Go to 👉 [Buildkite main branch](https://buildkite.com/vllm/ci/builds?branch=main)
-2. Bisect to find the first build that shows the issue.  
-3. Add your findings to the GitHub issue.  
-4. If you find a strong candidate PR, mention it in the issue and ping contributors.
+ur
 
-## Reproducing a Failure
+1. Go to 👉 [Bu
 
-CI test failures may be flaky. Use a bash loop to run repeatedly:
+dk
+t
+ ma
 
-[.buildkite/scripts/rerun-test.sh](../../../.buildkite/scripts/rerun-test.sh)
+ bra
+ch](https://bu
 
+dk
+t
+.com/v
+m/c
+/bu
+
+ds?bra
+ch=ma
+
+)
+2. B
+s
+ct to f
+
+d th
+ f
+rst bu
+
+d that sho
+s th
+ 
+ssu
+.  
+3. Add your f
+
+d
+
+gs to th
+ G
+tHub 
+ssu
+.  
+4. If you f
+
+d a stro
+g ca
+d
+dat
+ PR, m
+
+t
+o
+ 
+t 
+
+ th
+ 
+ssu
+ a
+d p
+
+g co
+tr
+butors.
+## R
+produc
+
+g a Fa
+
+ur
+
+CI t
+st fa
+
+ur
+s may b
+ f
+aky. Us
+ a bash 
+oop to ru
+ r
+p
+at
+d
+y:
+[.bu
+
+dk
+t
+/scr
+pts/r
+ru
+-t
+st.sh](../../../.bu
+
+dk
+t
+/scr
+pts/r
+ru
+-t
+st.sh)
 ```bash
-./rerun-test.sh tests/v1/engine/test_engine_core_client.py::test_kv_cache_events[True-tcp]
+./r
+ru
+-t
+st.sh t
+sts/v1/
+
+g
+
+
+/t
+st_
+
+g
+
+
+_cor
+_c
+
+
+
+t.py::t
+st_kv_cach
+_
+v
+
+ts[Tru
+-tcp]
 ```
+## Subm
+tt
 
-## Submitting a PR
+g a PR
+If you subm
+t a PR to f
+x a CI fa
 
-If you submit a PR to fix a CI failure:
+ur
+:
+    - L
 
-- Link the PR to the issue:
-  Add `Closes #12345` to the PR description.
-- Add the `ci-failure` label:
-  This helps track it in the [CI Failures GitHub Project](https://github.com/orgs/vllm-project/projects/20).
+k th
+ PR to th
+ 
+ssu
+:
+  Add `C
+os
+s #12345` to th
+ PR d
+scr
+pt
+o
+.
+    - Add th
+ `c
+-fa
 
-## Other Resources
+ur
+` 
+ab
 
-- 🔍 [Test Reliability on `main`](https://buildkite.com/organizations/vllm/analytics/suites/ci-1/tests?branch=main&order=ASC&sort_by=reliability)
-- 🧪 [Latest Buildkite CI Runs](https://buildkite.com/vllm/ci/builds?branch=main)
+:
+  Th
+s h
 
-## Daily Triage
+ps track 
+t 
 
-Use [Buildkite analytics (2-day view)](https://buildkite.com/organizations/vllm/analytics/suites/ci-1/tests?branch=main&period=2days) to:
+ th
+ [CI Fa
 
-- Identify recent test failures **on `main`**.
-- Exclude legitimate test failures on PRs.
-- (Optional) Ignore tests with 0% reliability.
+ur
+s G
+tHub Proj
+ct](https://g
+thub.com/orgs/v
+m-proj
+ct/proj
+cts/20).
+## Oth
+r R
+sourc
+s
+    - 🔍 [T
+st R
 
-Compare to the [CI Failures Dashboard](https://github.com/orgs/vllm-project/projects/20).
+
+ab
+
+
+ty o
+ `ma
+
+`](https://bu
+
+dk
+t
+.com/orga
+
+zat
+o
+s/v
+m/a
+a
+yt
+cs/su
+t
+s/c
+-1/t
+sts?bra
+ch=ma
+
+&ord
+r=ASC&sort_by=r
+
+
+ab
+
+
+ty)
+    - 🧪 [Lat
+st Bu
+
+dk
+t
+ CI Ru
+s](https://bu
+
+dk
+t
+.com/v
+m/c
+/bu
+
+ds?bra
+ch=ma
+
+)
+## Da
+
+y Tr
+ag
+
+Us
+ [Bu
+
+dk
+t
+ a
+a
+yt
+cs (2-day v
+
+
+)](https://bu
+
+dk
+t
+.com/orga
+
+zat
+o
+s/v
+m/a
+a
+yt
+cs/su
+t
+s/c
+-1/t
+sts?bra
+ch=ma
+
+&p
+r
+od=2days) to:
+    - Id
+
+t
+fy r
+c
+
+t t
+st fa
+
+ur
+s **o
+ `ma
+
+`**.
+    - Exc
+ud
+ 
+
+g
+t
+mat
+ t
+st fa
+
+ur
+s o
+ PRs.
+    - (Opt
+o
+a
+) Ig
+or
+ t
+sts 
+
+th 0% r
+
+
+ab
+
+
+ty.
+Compar
+ to th
+ [CI Fa
+
+ur
+s Dashboard](https://g
+thub.com/orgs/v
+m-proj
+ct/proj
+cts/20).

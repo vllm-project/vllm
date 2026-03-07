@@ -1,250 +1,1931 @@
-# --8<-- [start:installation]
+# --8
+-- [start:
 
-vLLM offers basic model inferencing and serving on Arm CPU platform, with support for NEON, data types FP32, FP16 and BF16.
+sta
+at
+o
+]
+vLLM off
+rs bas
+c mod
 
-# --8<-- [end:installation]
-# --8<-- [start:requirements]
+ 
 
-- OS: Linux
-- Compiler: `gcc/g++ >= 12.3.0` (optional, recommended)
-- Instruction Set Architecture (ISA): NEON support is required
+f
+r
 
-# --8<-- [end:requirements]
-# --8<-- [start:set-up-using-python]
+c
 
-# --8<-- [end:set-up-using-python]
-# --8<-- [start:pre-built-wheels]
+g a
+d s
+rv
 
-Pre-built vLLM wheels for Arm are available since version 0.11.2. These wheels contain pre-compiled C++ binaries.
+g o
+ Arm CPU p
+atform, 
 
+th support for NEON, data typ
+s FP32, FP16 a
+d BF16.
+# --8
+-- [
+
+d:
+
+sta
+at
+o
+]
+# --8
+-- [start:r
+qu
+r
+m
+
+ts]
+    - OS: L
+
+ux
+    - Comp
+
+
+r: `gcc/g++ 
+= 12.3.0` (opt
+o
+a
+, r
+comm
+
+d
+d)
+    - I
+struct
+o
+ S
+t Arch
+t
+ctur
+ (ISA): NEON support 
+s r
+qu
+r
+d
+# --8
+-- [
+
+d:r
+qu
+r
+m
+
+ts]
+# --8
+-- [start:s
+t-up-us
+
+g-pytho
+]
+# --8
+-- [
+
+d:s
+t-up-us
+
+g-pytho
+]
+# --8
+-- [start:pr
+-bu
+
+t-
+h
+
+s]
+Pr
+-bu
+
+t vLLM 
+h
+
+s for Arm ar
+ ava
+
+ab
+
+ s
+
+c
+ v
+rs
+o
+ 0.11.2. Th
+s
+ 
+h
+
+s co
+ta
+
+ pr
+-comp
+
+
+d C++ b
+
+ar
+
+s.
 ```bash
-export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
-uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_35_aarch64.whl
+
+xport VLLM_VERSION=$(cur
+ -s https://ap
+.g
+thub.com/r
+pos/v
+m-proj
+ct/v
+m/r
+
+
+as
+s/
+at
+st | jq -r .tag_
+am
+ | s
+d 's/^v//')
+uv p
+p 
+
+sta
+ https://g
+thub.com/v
+m-proj
+ct/v
+m/r
+
+
+as
+s/do
+
+
+oad/v${VLLM_VERSION}/v
+m-${VLLM_VERSION}+cpu-cp38-ab
+3-ma
+y
+
+
+ux_2_35_aarch64.
+h
+
 ```
+??? co
+so
 
-??? console "pip"
+ "p
+p"
     ```bash
-    pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_35_aarch64.whl
+    p
+p 
+
+sta
+ https://g
+thub.com/v
+m-proj
+ct/v
+m/r
+
+
+as
+s/do
+
+
+oad/v${VLLM_VERSION}/v
+m-${VLLM_VERSION}+cpu-cp38-ab
+3-ma
+y
+
+
+ux_2_35_aarch64.
+h
+
     ```
+!!! 
+ar
 
-!!! warning "set `LD_PRELOAD`"
-    Before use vLLM CPU installed via wheels, make sure TCMalloc is installed and added to `LD_PRELOAD`:
+
+g "s
+t `LD_PRELOAD`"
+    B
+for
+ us
+ vLLM CPU 
+
+sta
+
+d v
+a 
+h
+
+s, mak
+ sur
+ TCMa
+oc 
+s 
+
+sta
+
+d a
+d add
+d to `LD_PRELOAD`:
     ```bash
-    # install TCMalloc
-    sudo apt-get install -y --no-install-recommends libtcmalloc-minimal4
+    # 
 
-    # manually find the path
-    sudo find / -iname *libtcmalloc_minimal.so.4
+sta
+ TCMa
+oc
+    sudo apt-g
+t 
+
+sta
+ -y --
+o-
+
+sta
+-r
+comm
+
+ds 
+
+btcma
+oc-m
+
+
+ma
+4
+    # ma
+ua
+y f
+
+d th
+ path
+    sudo f
+
+d / -
+
+am
+ *
+
+btcma
+oc_m
+
+
+ma
+.so.4
     TC_PATH=...
-
-    # add them to LD_PRELOAD
-    export LD_PRELOAD="$TC_PATH:$LD_PRELOAD"
+    # add th
+m to LD_PRELOAD
+    
+xport LD_PRELOAD="$TC_PATH:$LD_PRELOAD"
     ```
+Th
+ `uv` approach 
+orks for vLLM `v0.6.6` a
+d 
+at
+r. A u
 
-The `uv` approach works for vLLM `v0.6.6` and later. A unique feature of `uv` is that packages in `--extra-index-url` have [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). If the latest public release is `v0.6.6.post1`, `uv`'s behavior allows installing a commit before `v0.6.6.post1` by specifying the `--extra-index-url`. In contrast, `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version.
+qu
+ f
+atur
+ of `uv` 
+s that packag
+s 
 
-**Install the latest code**
+ `--
+xtra-
 
-LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides working pre-built Arm CPU wheels for every commit since `v0.11.2` on <https://wheels.vllm.ai/nightly>. For native CPU wheels, this index should be used:
+d
+x-ur
+` hav
+ [h
+gh
+r pr
+or
+ty tha
+ th
+ d
+fau
+t 
 
-* `https://wheels.vllm.ai/nightly/cpu/vllm`
+d
+x](https://docs.astra
+.sh/uv/p
+p/compat
+b
 
-To install from nightly index, run:
+
+ty/#packag
+s-that-
+x
+st-o
+-mu
+t
+p
+
+-
+
+d
+x
+s). If th
+ 
+at
+st pub
+
+c r
+
+
+as
+ 
+s `v0.6.6.post1`, `uv`'s b
+hav
+or a
+o
+s 
+
+sta
+
+
+g a comm
+t b
+for
+ `v0.6.6.post1` by sp
+c
+fy
+
+g th
+ `--
+xtra-
+
+d
+x-ur
+`. I
+ co
+trast, `p
+p` comb
+
+
+s packag
+s from `--
+xtra-
+
+d
+x-ur
+` a
+d th
+ d
+fau
+t 
+
+d
+x, choos
+
+g o
+
+y th
+ 
+at
+st v
+rs
+o
+, 
+h
+ch mak
+s 
+t d
+ff
+cu
+t to 
+
+sta
+ a d
+v
+
+opm
+
+t v
+rs
+o
+ pr
+or to th
+ r
+
+
+as
+d v
+rs
+o
+.
+**I
+sta
+ th
+ 
+at
+st cod
+**
+LLM 
+
+f
+r
+
+c
+ 
+s a fast-
+vo
+v
+
+g f
+
+
+d, a
+d th
+ 
+at
+st cod
+ may co
+ta
+
+ bug f
+x
+s, p
+rforma
+c
+ 
+mprov
+m
+
+ts, a
+d 
+
+
+ f
+atur
+s that ar
+ 
+ot r
+
+
+as
+d y
+t. To a
+o
+ us
+rs to try th
+ 
+at
+st cod
+ 
+
+thout 
+a
+t
+
+g for th
+ 
+
+xt r
+
+
+as
+, vLLM prov
+d
+s 
+ork
+
+g pr
+-bu
+
+t Arm CPU 
+h
+
+s for 
+v
+ry comm
+t s
+
+c
+ `v0.11.2` o
+ 
+https://
+h
+
+s.v
+m.a
+/
+
+ght
+y
+. For 
+at
+v
+ CPU 
+h
+
+s, th
+s 
+
+d
+x shou
+d b
+ us
+d:
+* `https://
+h
+
+s.v
+m.a
+/
+
+ght
+y/cpu/v
+m`
+To 
+
+sta
+ from 
+
+ght
+y 
+
+d
+x, ru
+:
 ```bash
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/cpu --index-strategy first-index
+uv p
+p 
+
+sta
+ v
+m --
+xtra-
+
+d
+x-ur
+ https://
+h
+
+s.v
+m.a
+/
+
+ght
+y/cpu --
+
+d
+x-strat
+gy f
+rst-
+
+d
+x
 ```
+??? co
+so
 
-??? console "pip (there's a caveat)"
+ "p
+p (th
+r
+'s a cav
+at)"
+    Us
 
-    Using `pip` to install from nightly indices is _not supported_, because `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version. In contrast, `uv` gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes).
+g `p
+p` to 
 
-    If you insist on using `pip`, you have to specify the full URL (link address) of the wheel file (which can be obtained from https://wheels.vllm.ai/nightly/cpu/vllm).
+sta
+ from 
 
+ght
+y 
+
+d
+c
+s 
+s _
+ot support
+d_, b
+caus
+ `p
+p` comb
+
+
+s packag
+s from `--
+xtra-
+
+d
+x-ur
+` a
+d th
+ d
+fau
+t 
+
+d
+x, choos
+
+g o
+
+y th
+ 
+at
+st v
+rs
+o
+, 
+h
+ch mak
+s 
+t d
+ff
+cu
+t to 
+
+sta
+ a d
+v
+
+opm
+
+t v
+rs
+o
+ pr
+or to th
+ r
+
+
+as
+d v
+rs
+o
+. I
+ co
+trast, `uv` g
+v
+s th
+ 
+xtra 
+
+d
+x [h
+gh
+r pr
+or
+ty tha
+ th
+ d
+fau
+t 
+
+d
+x](https://docs.astra
+.sh/uv/p
+p/compat
+b
+
+
+ty/#packag
+s-that-
+x
+st-o
+-mu
+t
+p
+
+-
+
+d
+x
+s).
+    If you 
+
+s
+st o
+ us
+
+g `p
+p`, you hav
+ to sp
+c
+fy th
+ fu
+ URL (
+
+
+k addr
+ss) of th
+ 
+h
+
+ f
+
+
+ (
+h
+ch ca
+ b
+ obta
+
+
+d from https://
+h
+
+s.v
+m.a
+/
+
+ght
+y/cpu/v
+m).
     ```bash
-    pip install https://wheels.vllm.ai/4fa7ce46f31cbd97b4651694caf9991cc395a259/vllm-0.13.0rc2.dev104%2Bg4fa7ce46f.cpu-cp38-abi3-manylinux_2_35_aarch64.whl # current nightly build (the filename will change!)
+    p
+p 
+
+sta
+ https://
+h
+
+s.v
+m.a
+/4fa7c
+46f31cbd97b4651694caf9991cc395a259/v
+m-0.13.0rc2.d
+v104%2Bg4fa7c
+46f.cpu-cp38-ab
+3-ma
+y
+
+
+ux_2_35_aarch64.
+h
+ # curr
+
+t 
+
+ght
+y bu
+
+d (th
+ f
+
+
+
+am
+ 
+
+
+ cha
+g
+!)
     ```
+**I
+sta
+ sp
+c
+f
+c r
+v
+s
+o
+s**
+If you 
+a
+t to acc
+ss th
+ 
+h
 
-**Install specific revisions**
+s for pr
+v
+ous comm
+ts (
+.g. to b
+s
+ct th
+ b
+hav
+or cha
+g
+, p
+rforma
+c
+ r
+gr
+ss
+o
+), you ca
+ sp
+c
+fy th
+ comm
+t hash 
 
-If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), you can specify the commit hash in the URL:
-
+ th
+ URL:
 ```bash
-export VLLM_COMMIT=730bd35378bf2a5b56b6d3a45be28b3092d26519 # use full commit hash from the main branch
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}/cpu --index-strategy first-index
+
+xport VLLM_COMMIT=730bd35378bf2a5b56b6d3a45b
+28b3092d26519 # us
+ fu
+ comm
+t hash from th
+ ma
+
+ bra
+ch
+uv p
+p 
+
+sta
+ v
+m --
+xtra-
+
+d
+x-ur
+ https://
+h
+
+s.v
+m.a
+/${VLLM_COMMIT}/cpu --
+
+d
+x-strat
+gy f
+rst-
+
+d
+x
 ```
+# --8
+-- [
 
-# --8<-- [end:pre-built-wheels]
-# --8<-- [start:build-wheel-from-source]
+d:pr
+-bu
 
-First, install the recommended compiler. We recommend using `gcc/g++ >= 12.3.0` as the default compiler to avoid potential problems. For example, on Ubuntu 22.4, you can run:
+t-
+h
 
+s]
+# --8
+-- [start:bu
+
+d-
+h
+
+-from-sourc
+]
+F
+rst, 
+
+sta
+ th
+ r
+comm
+
+d
+d comp
+
+
+r. W
+ r
+comm
+
+d us
+
+g `gcc/g++ 
+= 12.3.0` as th
+ d
+fau
+t comp
+
+
+r to avo
+d pot
+
+t
+a
+ prob
+
+ms. For 
+xamp
+
+, o
+ Ubu
+tu 22.4, you ca
+ ru
+:
 ```bash
-sudo apt-get update  -y
-sudo apt-get install -y --no-install-recommends ccache git curl wget ca-certificates gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof
-sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
+sudo apt-g
+t updat
+  -y
+sudo apt-g
+t 
+
+sta
+ -y --
+o-
+
+sta
+-r
+comm
+
+ds ccach
+ g
+t cur
+ 
+g
+t ca-c
+rt
+f
+cat
+s gcc-12 g++-12 
+
+btcma
+oc-m
+
+
+ma
+4 
+
+b
+uma-d
+v ffmp
+g 
+
+bsm6 
+
+bx
+xt6 
+
+bg
+1 jq 
+sof
+sudo updat
+-a
+t
+r
+at
+v
+s --
+
+sta
+ /usr/b
+
+/gcc gcc /usr/b
+
+/gcc-12 10 --s
+av
+ /usr/b
+
+/g++ g++ /usr/b
+
+/g++-12
 ```
+S
+co
+d, c
+o
 
-Second, clone the vLLM project:
-
+ th
+ vLLM proj
+ct:
 ```bash
-git clone https://github.com/vllm-project/vllm.git vllm_source
-cd vllm_source
+g
+t c
+o
+
+ https://g
+thub.com/v
+m-proj
+ct/v
+m.g
+t v
+m_sourc
+
+cd v
+m_sourc
+
 ```
+Th
+rd, 
 
-Third, install required dependencies:
+sta
+ r
+qu
+r
+d d
+p
 
+d
+
+c
+
+s:
 ```bash
-uv pip install -r requirements/cpu-build.txt --torch-backend cpu
-uv pip install -r requirements/cpu.txt --torch-backend cpu
-```
+uv p
+p 
 
-??? console "pip"
+sta
+ -r r
+qu
+r
+m
+
+ts/cpu-bu
+
+d.txt --torch-back
+
+d cpu
+uv p
+p 
+
+sta
+ -r r
+qu
+r
+m
+
+ts/cpu.txt --torch-back
+
+d cpu
+```
+??? co
+so
+
+ "p
+p"
     ```bash
-    pip install --upgrade pip
-    pip install -v -r requirements/cpu-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
-    pip install -v -r requirements/cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
+    p
+p 
+
+sta
+ --upgrad
+ p
+p
+    p
+p 
+
+sta
+ -v -r r
+qu
+r
+m
+
+ts/cpu-bu
+
+d.txt --
+xtra-
+
+d
+x-ur
+ https://do
+
+
+oad.pytorch.org/
+h
+/cpu
+    p
+p 
+
+sta
+ -v -r r
+qu
+r
+m
+
+ts/cpu.txt --
+xtra-
+
+d
+x-ur
+ https://do
+
+
+oad.pytorch.org/
+h
+/cpu
     ```
+F
 
-Finally, build and install vLLM:
+a
+y, bu
 
+d a
+d 
+
+sta
+ vLLM:
 ```bash
-VLLM_TARGET_DEVICE=cpu uv pip install . --no-build-isolation
+VLLM_TARGET_DEVICE=cpu uv p
+p 
+
+sta
+ . --
+o-bu
+
+d-
+so
+at
+o
+
 ```
+If you 
+a
+t to d
+v
 
-If you want to develop vLLM, install it in editable mode instead.
+op vLLM, 
 
+sta
+ 
+t 
+
+ 
+d
+tab
+
+ mod
+ 
+
+st
+ad.
 ```bash
-VLLM_TARGET_DEVICE=cpu uv pip install -e . --no-build-isolation
+VLLM_TARGET_DEVICE=cpu uv p
+p 
+
+sta
+ -
+ . --
+o-bu
+
+d-
+so
+at
+o
+
 ```
+T
+st
 
-Testing has been conducted on AWS Graviton3 instances for compatibility.
+g has b
 
-!!! warning "set `LD_PRELOAD`"
-    Before use vLLM CPU installed via wheels, make sure TCMalloc is installed and added to `LD_PRELOAD`:
+ co
+duct
+d o
+ AWS Grav
+to
+3 
+
+sta
+c
+s for compat
+b
+
+
+ty.
+!!! 
+ar
+
+
+g "s
+t `LD_PRELOAD`"
+    B
+for
+ us
+ vLLM CPU 
+
+sta
+
+d v
+a 
+h
+
+s, mak
+ sur
+ TCMa
+oc 
+s 
+
+sta
+
+d a
+d add
+d to `LD_PRELOAD`:
     ```bash
-    # install TCMalloc
-    sudo apt-get install -y --no-install-recommends libtcmalloc-minimal4
+    # 
 
-    # manually find the path
-    sudo find / -iname *libtcmalloc_minimal.so.4
+sta
+ TCMa
+oc
+    sudo apt-g
+t 
+
+sta
+ -y --
+o-
+
+sta
+-r
+comm
+
+ds 
+
+btcma
+oc-m
+
+
+ma
+4
+    # ma
+ua
+y f
+
+d th
+ path
+    sudo f
+
+d / -
+
+am
+ *
+
+btcma
+oc_m
+
+
+ma
+.so.4
     TC_PATH=...
-
-    # add them to LD_PRELOAD
-    export LD_PRELOAD="$TC_PATH:$LD_PRELOAD"
+    # add th
+m to LD_PRELOAD
+    
+xport LD_PRELOAD="$TC_PATH:$LD_PRELOAD"
     ```
+# --8
+-- [
 
-# --8<-- [end:build-wheel-from-source]
-# --8<-- [start:pre-built-images]
+d:bu
 
-To pull the latest image from Docker Hub:
+d-
+h
 
+-from-sourc
+]
+# --8
+-- [start:pr
+-bu
+
+t-
+mag
+s]
+To pu
+ th
+ 
+at
+st 
+mag
+ from Dock
+r Hub:
 ```bash
-docker pull vllm/vllm-openai-cpu:latest-arm64
+dock
+r pu
+ v
+m/v
+m-op
+
+a
+-cpu:
+at
+st-arm64
 ```
+To pu
+ a
+ 
+mag
+ 
 
-To pull an image with a specific vLLM version:
-
+th a sp
+c
+f
+c vLLM v
+rs
+o
+:
 ```bash
-export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
-docker pull vllm/vllm-openai-cpu:v${VLLM_VERSION}-arm64
+
+xport VLLM_VERSION=$(cur
+ -s https://ap
+.g
+thub.com/r
+pos/v
+m-proj
+ct/v
+m/r
+
+
+as
+s/
+at
+st | jq -r .tag_
+am
+ | s
+d 's/^v//')
+dock
+r pu
+ v
+m/v
+m-op
+
+a
+-cpu:v${VLLM_VERSION}-arm64
 ```
+A
+ ava
 
-All available image tags are here: [https://hub.docker.com/r/vllm/vllm-openai-cpu/tags](https://hub.docker.com/r/vllm/vllm-openai-cpu/tags).
+ab
 
-You can run these images via:
+ 
+mag
+ tags ar
+ h
+r
+: [https://hub.dock
+r.com/r/v
+m/v
+m-op
 
+a
+-cpu/tags](https://hub.dock
+r.com/r/v
+m/v
+m-op
+
+a
+-cpu/tags).
+You ca
+ ru
+ th
+s
+ 
+mag
+s v
+a:
 ```bash
-docker run \
-    -v ~/.cache/huggingface:/root/.cache/huggingface \
+dock
+r ru
+ \
+    -v ~/.cach
+/hugg
+
+gfac
+:/root/.cach
+/hugg
+
+gfac
+ \
     -p 8000:8000 \
-    --env "HF_TOKEN=<secret>" \
-    vllm/vllm-openai-cpu:latest-arm64 <args...>
+    --
+
+v "HF_TOKEN=
+s
+cr
+t
+" \
+    v
+m/v
+m-op
+
+a
+-cpu:
+at
+st-arm64 
+args...
+
 ```
+You ca
+ a
+so acc
+ss th
+ 
+at
+st cod
+ 
 
-You can also access the latest code with Docker images. These are not intended for production use and are meant for CI and testing only. They will expire after several days.
+th Dock
+r 
+mag
+s. Th
+s
+ ar
+ 
+ot 
 
-The latest code can contain bugs and may not be stable. Please use it with caution.
+t
 
+d
+d for product
+o
+ us
+ a
+d ar
+ m
+a
+t for CI a
+d t
+st
+
+g o
+
+y. Th
+y 
+
+
+ 
+xp
+r
+ aft
+r s
+v
+ra
+ days.
+Th
+ 
+at
+st cod
+ ca
+ co
+ta
+
+ bugs a
+d may 
+ot b
+ stab
+
+. P
+
+as
+ us
+ 
+t 
+
+th caut
+o
+.
 ```bash
-export VLLM_COMMIT=6299628d326f429eba78736acb44e76749b281f5 # use full commit hash from the main branch
-docker pull public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:${VLLM_COMMIT}-arm64-cpu
+
+xport VLLM_COMMIT=6299628d326f429
+ba78736acb44
+76749b281f5 # us
+ fu
+ comm
+t hash from th
+ ma
+
+ bra
+ch
+dock
+r pu
+ pub
+
+c.
+cr.a
+s/q9t5s3a7/v
+m-c
+-postm
+rg
+-r
+po:${VLLM_COMMIT}-arm64-cpu
 ```
+# --8
+-- [
 
-# --8<-- [end:pre-built-images]
-# --8<-- [start:build-image-from-source]
+d:pr
+-bu
 
-## Building for your target ARM CPU
+t-
+mag
+s]
+# --8
+-- [start:bu
 
+d-
+mag
+-from-sourc
+]
+## Bu
+
+d
+
+g for your targ
+t ARM CPU
 ```bash
-docker build -f docker/Dockerfile.cpu \
-        --platform=linux/arm64 \
-        --build-arg VLLM_CPU_ARM_BF16=<false (default)|true> \
-        --tag vllm-cpu-env \
-        --target vllm-openai .
+dock
+r bu
+
+d -f dock
+r/Dock
+rf
+
+
+.cpu \
+        --p
+atform=
+
+
+ux/arm64 \
+        --bu
+
+d-arg VLLM_CPU_ARM_BF16=
+fa
+s
+ (d
+fau
+t)|tru
+
+ \
+        --tag v
+m-cpu-
+
+v \
+        --targ
+t v
+m-op
+
+a
+ .
 ```
+!!! 
+ot
+ "Auto-d
+t
+ct
+o
+ by d
+fau
+t"
+    By d
+fau
+t, ARM CPU 
 
-!!! note "Auto-detection by default"
-    By default, ARM CPU instruction sets (BF16, NEON, etc.) are automatically detected from the build system's CPU flags. The `VLLM_CPU_ARM_BF16` build argument is used for cross-compilation:
+struct
+o
+ s
+ts (BF16, NEON, 
+tc.) ar
+ automat
+ca
+y d
+t
+ct
+d from th
+ bu
 
-    - `VLLM_CPU_ARM_BF16=true` - Force-enable ARM BF16 support (build with BF16 regardless of build system capabilities)
-    - `VLLM_CPU_ARM_BF16=false` - Rely on auto-detection (default)
+d syst
+m's CPU f
+ags. Th
+ `VLLM_CPU_ARM_BF16` bu
 
-### Examples
+d argum
 
-**Auto-detection build (native ARM)**
+t 
+s us
+d for cross-comp
 
+at
+o
+:
+    - `VLLM_CPU_ARM_BF16=tru
+` - Forc
+-
+
+ab
+
+ ARM BF16 support (bu
+
+d 
+
+th BF16 r
+gard
+
+ss of bu
+
+d syst
+m capab
+
+
+t
+
+s)
+    - `VLLM_CPU_ARM_BF16=fa
+s
+` - R
+
+y o
+ auto-d
+t
+ct
+o
+ (d
+fau
+t)
+### Examp
+
+s
+**Auto-d
+t
+ct
+o
+ bu
+
+d (
+at
+v
+ ARM)**
 ```bash
-# Building on ARM64 system - platform auto-detected
-docker build -f docker/Dockerfile.cpu \
-        --tag vllm-cpu-arm64 \
-        --target vllm-openai .
+# Bu
+
+d
+
+g o
+ ARM64 syst
+m - p
+atform auto-d
+t
+ct
+d
+dock
+r bu
+
+d -f dock
+r/Dock
+rf
+
+
+.cpu \
+        --tag v
+m-cpu-arm64 \
+        --targ
+t v
+m-op
+
+a
+ .
 ```
+**Cross-comp
 
-**Cross-compile for ARM with BF16 support**
 
+ for ARM 
+
+th BF16 support**
 ```bash
-# Building on ARM64 for newer ARM CPUs with BF16
-docker build -f docker/Dockerfile.cpu \
-        --build-arg VLLM_CPU_ARM_BF16=true \
-        --tag vllm-cpu-arm64-bf16 \
-        --target vllm-openai .
+# Bu
+
+d
+
+g o
+ ARM64 for 
+
+
+
+r ARM CPUs 
+
+th BF16
+dock
+r bu
+
+d -f dock
+r/Dock
+rf
+
+
+.cpu \
+        --bu
+
+d-arg VLLM_CPU_ARM_BF16=tru
+ \
+        --tag v
+m-cpu-arm64-bf16 \
+        --targ
+t v
+m-op
+
+a
+ .
 ```
+**Cross-comp
 
-**Cross-compile from x86_64 to ARM64 with BF16**
 
+ from x86_64 to ARM64 
+
+th BF16**
 ```bash
-# Requires Docker buildx with ARM emulation (QEMU)
-docker buildx build -f docker/Dockerfile.cpu \
-        --platform=linux/arm64 \
-        --build-arg VLLM_CPU_ARM_BF16=true \
-        --build-arg max_jobs=4 \
-        --tag vllm-cpu-arm64-bf16 \
-        --target vllm-openai \
-        --load .
+# R
+qu
+r
+s Dock
+r bu
+
+dx 
+
+th ARM 
+mu
+at
+o
+ (QEMU)
+dock
+r bu
+
+dx bu
+
+d -f dock
+r/Dock
+rf
+
+
+.cpu \
+        --p
+atform=
+
+
+ux/arm64 \
+        --bu
+
+d-arg VLLM_CPU_ARM_BF16=tru
+ \
+        --bu
+
+d-arg max_jobs=4 \
+        --tag v
+m-cpu-arm64-bf16 \
+        --targ
+t v
+m-op
+
+a
+ \
+        --
+oad .
 ```
+!!! 
+ot
+ "ARM BF16 r
+qu
+r
+m
 
-!!! note "ARM BF16 requirements"
-    ARM BF16 support requires ARMv8.6-A or later (FEAT_BF16). Supported on AWS Graviton3/4, AmpereOne, and other recent ARM processors.
+ts"
+    ARM BF16 support r
+qu
+r
+s ARMv8.6-A or 
+at
+r (FEAT_BF16). Support
+d o
+ AWS Grav
+to
+3/4, Amp
+r
+O
 
-## Launching the OpenAI server
+, a
+d oth
+r r
+c
 
+t ARM proc
+ssors.
+## Lau
+ch
+
+g th
+ Op
+
+AI s
+rv
+r
 ```bash
-docker run --rm \
-            --security-opt seccomp=unconfined \
+dock
+r ru
+ --rm \
+            --s
+cur
+ty-opt s
+ccomp=u
+co
+f
+
+
+d \
             --cap-add SYS_NICE \
-            --shm-size=4g \
+            --shm-s
+z
+=4g \
             -p 8000:8000 \
-            -e VLLM_CPU_KVCACHE_SPACE=<KV cache space> \
-            -e VLLM_CPU_OMP_THREADS_BIND=<CPU cores for inference> \
-            vllm-cpu-arm64 \
-            meta-llama/Llama-3.2-1B-Instruct \
-            --dtype=bfloat16 \
-            other vLLM OpenAI server arguments
+            -
+ VLLM_CPU_KVCACHE_SPACE=
+KV cach
+ spac
+
+ \
+            -
+ VLLM_CPU_OMP_THREADS_BIND=
+CPU cor
+s for 
+
+f
+r
+
+c
+
+ \
+            v
+m-cpu-arm64 \
+            m
+ta-
+ama/L
+ama-3.2-1B-I
+struct \
+            --dtyp
+=bf
+oat16 \
+            oth
+r vLLM Op
+
+AI s
+rv
+r argum
+
+ts
 ```
+!!! t
+p "A
+t
+r
+at
+v
+ to --pr
+v
 
-!!! tip "Alternative to --privileged"
-    Instead of `--privileged=true`, use `--cap-add SYS_NICE --security-opt seccomp=unconfined` for better security.
 
-# --8<-- [end:build-image-from-source]
-# --8<-- [start:extra-information]
-# --8<-- [end:extra-information]
+g
+d"
+    I
+st
+ad of `--pr
+v
+
+
+g
+d=tru
+`, us
+ `--cap-add SYS_NICE --s
+cur
+ty-opt s
+ccomp=u
+co
+f
+
+
+d` for b
+tt
+r s
+cur
+ty.
+# --8
+-- [
+
+d:bu
+
+d-
+mag
+-from-sourc
+]
+# --8
+-- [start:
+xtra-
+
+format
+o
+]
+# --8
+-- [
+
+d:
+xtra-
+
+format
+o
+]

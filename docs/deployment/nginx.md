@@ -1,137 +1,745 @@
-# Using Nginx
+# Us
 
-This document shows how to launch multiple vLLM serving containers and use Nginx to act as a load balancer between the servers.
+g Ng
 
-## Build Nginx Container
+x
+Th
+s docum
 
-This guide assumes that you have just cloned the vLLM project and you're currently in the vllm root directory.
+t sho
+s ho
+ to 
+au
+ch mu
+t
+p
 
+ vLLM s
+rv
+
+g co
+ta
+
+
+rs a
+d us
+ Ng
+
+x to act as a 
+oad ba
+a
+c
+r b
+t
+
+
+ th
+ s
+rv
+rs.
+## Bu
+
+d Ng
+
+x Co
+ta
+
+
+r
+Th
+s gu
+d
+ assum
+s that you hav
+ just c
+o
+
+d th
+ vLLM proj
+ct a
+d you'r
+ curr
+
+t
+y 
+
+ th
+ v
+m root d
+r
+ctory.
 ```bash
-export vllm_root=`pwd`
+
+xport v
+m_root=`p
+d`
 ```
+Cr
+at
+ a f
 
-Create a file named `Dockerfile.nginx`:
 
-```dockerfile
-FROM nginx:latest
-RUN rm /etc/nginx/conf.d/default.conf
+ 
+am
+d `Dock
+rf
+
+
+.
+g
+
+x`:
+```dock
+rf
+
+
+
+FROM 
+g
+
+x:
+at
+st
+RUN rm /
+tc/
+g
+
+x/co
+f.d/d
+fau
+t.co
+f
 EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["
+g
+
+x", "-g", "da
+mo
+ off;"]
 ```
+Bu
 
-Build the container:
+d th
+ co
+ta
 
+
+r:
 ```bash
-docker build . -f Dockerfile.nginx --tag nginx-lb
+dock
+r bu
+
+d . -f Dock
+rf
+
+
+.
+g
+
+x --tag 
+g
+
+x-
+b
 ```
+## Cr
+at
+ S
+mp
 
-## Create Simple Nginx Config file
+ Ng
 
-Create a file named `nginx_conf/nginx.conf`. Note that you can add as many servers as you'd like. In the below example we'll start with two. To add more, add another `server vllmN:8000 max_fails=3 fail_timeout=10000s;` entry to `upstream backend`.
+x Co
+f
+g f
 
-??? console "Config"
 
-    ```console
-    upstream backend {
-        least_conn;
-        server vllm0:8000 max_fails=3 fail_timeout=10000s;
-        server vllm1:8000 max_fails=3 fail_timeout=10000s;
+
+Cr
+at
+ a f
+
+
+ 
+am
+d `
+g
+
+x_co
+f/
+g
+
+x.co
+f`. Not
+ that you ca
+ add as ma
+y s
+rv
+rs as you'd 
+
+k
+. I
+ th
+ b
+
+o
+ 
+xamp
+
+ 
+
+'
+ start 
+
+th t
+o. To add mor
+, add a
+oth
+r `s
+rv
+r v
+mN:8000 max_fa
+
+s=3 fa
+
+_t
+m
+out=10000s;` 
+
+try to `upstr
+am back
+
+d`.
+??? co
+so
+
+ "Co
+f
+g"
+    ```co
+so
+
+
+    upstr
+am back
+
+d {
+        
+
+ast_co
+;
+        s
+rv
+r v
+m0:8000 max_fa
+
+s=3 fa
+
+_t
+m
+out=10000s;
+        s
+rv
+r v
+m1:8000 max_fa
+
+s=3 fa
+
+_t
+m
+out=10000s;
     }
-    server {
-        listen 80;
-        location / {
-            proxy_pass http://backend;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
+    s
+rv
+r {
+        
+
+st
+
+ 80;
+        
+ocat
+o
+ / {
+            proxy_pass http://back
+
+d;
+            proxy_s
+t_h
+ad
+r Host $host;
+            proxy_s
+t_h
+ad
+r X-R
+a
+-IP $r
+mot
+_addr;
+            proxy_s
+t_h
+ad
+r X-For
+ard
+d-For $proxy_add_x_for
+ard
+d_for;
+            proxy_s
+t_h
+ad
+r X-For
+ard
+d-Proto $sch
+m
+;
         }
     }
     ```
+## Bu
 
-## Build vLLM Container
+d vLLM Co
+ta
 
+
+r
 ```bash
-cd $vllm_root
-docker build -f docker/Dockerfile . --tag vllm
+cd $v
+m_root
+dock
+r bu
+
+d -f dock
+r/Dock
+rf
+
+
+ . --tag v
+m
 ```
+If you ar
+ b
+h
 
-If you are behind proxy, you can pass the proxy settings to the docker build command as shown below:
+d proxy, you ca
+ pass th
+ proxy s
+tt
 
+gs to th
+ dock
+r bu
+
+d comma
+d as sho
+
+ b
+
+o
+:
 ```bash
-cd $vllm_root
-docker build \
-    -f docker/Dockerfile . \
-    --tag vllm \
-    --build-arg http_proxy=$http_proxy \
-    --build-arg https_proxy=$https_proxy
+cd $v
+m_root
+dock
+r bu
+
+d \
+    -f dock
+r/Dock
+rf
+
+
+ . \
+    --tag v
+m \
+    --bu
+
+d-arg http_proxy=$http_proxy \
+    --bu
+
+d-arg https_proxy=$https_proxy
 ```
-
-## Create Docker Network
-
+## Cr
+at
+ Dock
+r N
+t
+ork
 ```bash
-docker network create vllm_nginx
+dock
+r 
+
+t
+ork cr
+at
+ v
+m_
+g
+
+x
 ```
+## Lau
+ch vLLM Co
+ta
 
-## Launch vLLM Containers
 
-Notes:
+rs
+Not
+s:
+    - If you hav
+ your Hugg
 
-- If you have your HuggingFace models cached somewhere else, update `hf_cache_dir` below.
-- If you don't have an existing HuggingFace cache you will want to start `vllm0` and wait for the model to complete downloading and the server to be ready. This will ensure that `vllm1` can leverage the model you just downloaded and it won't have to be downloaded again.
-- The below example assumes GPU backend used. If you are using CPU backend, remove `--gpus device=ID`, add `VLLM_CPU_KVCACHE_SPACE` and `VLLM_CPU_OMP_THREADS_BIND` environment variables to the docker run command.
-- Adjust the model name that you want to use in your vLLM servers if you don't want to use `Llama-2-7b-chat-hf`.
+gFac
+ mod
 
-??? console "Commands"
+s cach
+d som
 
-    ```console
-    mkdir -p ~/.cache/huggingface/hub/
-    hf_cache_dir=~/.cache/huggingface/
-    docker run \
-        -itd \
-        --ipc host \
-        --network vllm_nginx \
-        --gpus device=0 \
-        --shm-size=10.24gb \
-        -v $hf_cache_dir:/root/.cache/huggingface/ \
+h
+r
+ 
+
+s
+, updat
+ `hf_cach
+_d
+r` b
+
+o
+.
+    - If you do
+'t hav
+ a
+ 
+x
+st
+
+g Hugg
+
+gFac
+ cach
+ you 
+
+
+ 
+a
+t to start `v
+m0` a
+d 
+a
+t for th
+ mod
+
+ to comp
+
+t
+ do
+
+
+oad
+
+g a
+d th
+ s
+rv
+r to b
+ r
+ady. Th
+s 
+
+
+ 
+
+sur
+ that `v
+m1` ca
+ 
+
+v
+rag
+ th
+ mod
+
+ you just do
+
+
+oad
+d a
+d 
+t 
+o
+'t hav
+ to b
+ do
+
+
+oad
+d aga
+
+.
+    - Th
+ b
+
+o
+ 
+xamp
+
+ assum
+s GPU back
+
+d us
+d. If you ar
+ us
+
+g CPU back
+
+d, r
+mov
+ `--gpus d
+v
+c
+=ID`, add `VLLM_CPU_KVCACHE_SPACE` a
+d `VLLM_CPU_OMP_THREADS_BIND` 
+
+v
+ro
+m
+
+t var
+ab
+
+s to th
+ dock
+r ru
+ comma
+d.
+    - Adjust th
+ mod
+
+ 
+am
+ that you 
+a
+t to us
+ 
+
+ your vLLM s
+rv
+rs 
+f you do
+'t 
+a
+t to us
+ `L
+ama-2-7b-chat-hf`.
+??? co
+so
+
+ "Comma
+ds"
+    ```co
+so
+
+
+    mkd
+r -p ~/.cach
+/hugg
+
+gfac
+/hub/
+    hf_cach
+_d
+r=~/.cach
+/hugg
+
+gfac
+/
+    dock
+r ru
+ \
+        -
+td \
+        --
+pc host \
+        --
+
+t
+ork v
+m_
+g
+
+x \
+        --gpus d
+v
+c
+=0 \
+        --shm-s
+z
+=10.24gb \
+        -v $hf_cach
+_d
+r:/root/.cach
+/hugg
+
+gfac
+/ \
         -p 8081:8000 \
-        --name vllm0 vllm \
-        --model meta-llama/Llama-2-7b-chat-hf
-    docker run \
-        -itd \
-        --ipc host \
-        --network vllm_nginx \
-        --gpus device=1 \
-        --shm-size=10.24gb \
-        -v $hf_cache_dir:/root/.cache/huggingface/ \
+        --
+am
+ v
+m0 v
+m \
+        --mod
+
+ m
+ta-
+ama/L
+ama-2-7b-chat-hf
+    dock
+r ru
+ \
+        -
+td \
+        --
+pc host \
+        --
+
+t
+ork v
+m_
+g
+
+x \
+        --gpus d
+v
+c
+=1 \
+        --shm-s
+z
+=10.24gb \
+        -v $hf_cach
+_d
+r:/root/.cach
+/hugg
+
+gfac
+/ \
         -p 8082:8000 \
-        --name vllm1 vllm \
-        --model meta-llama/Llama-2-7b-chat-hf
+        --
+am
+ v
+m1 v
+m \
+        --mod
+
+ m
+ta-
+ama/L
+ama-2-7b-chat-hf
     ```
+!!! 
+ot
 
-!!! note
-    If you are behind proxy, you can pass the proxy settings to the docker run command via `-e http_proxy=$http_proxy -e https_proxy=$https_proxy`.
+    If you ar
+ b
+h
 
-## Launch Nginx
+d proxy, you ca
+ pass th
+ proxy s
+tt
 
+gs to th
+ dock
+r ru
+ comma
+d v
+a `-
+ http_proxy=$http_proxy -
+ https_proxy=$https_proxy`.
+## Lau
+ch Ng
+
+x
 ```bash
-docker run \
-    -itd \
+dock
+r ru
+ \
+    -
+td \
     -p 8000:80 \
-    --network vllm_nginx \
-    -v ./nginx_conf/:/etc/nginx/conf.d/ \
-    --name nginx-lb nginx-lb:latest
+    --
+
+t
+ork v
+m_
+g
+
+x \
+    -v ./
+g
+
+x_co
+f/:/
+tc/
+g
+
+x/co
+f.d/ \
+    --
+am
+ 
+g
+
+x-
+b 
+g
+
+x-
+b:
+at
+st
 ```
-
-## Verify That vLLM Servers Are Ready
-
+## V
+r
+fy That vLLM S
+rv
+rs Ar
+ R
+ady
 ```bash
-docker logs vllm0 | grep Uvicorn
-docker logs vllm1 | grep Uvicorn
+dock
+r 
+ogs v
+m0 | gr
+p Uv
+cor
+
+dock
+r 
+ogs v
+m1 | gr
+p Uv
+cor
+
 ```
+Both outputs shou
+d 
+ook 
 
-Both outputs should look like this:
+k
+ th
+s:
+```co
+so
 
-```console
-INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+
+INFO:     Uv
+cor
+ ru
+
+
+g o
+ http://0.0.0.0:8000 (Pr
+ss CTRL+C to qu
+t)
 ```

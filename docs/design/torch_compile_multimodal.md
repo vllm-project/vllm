@@ -1,111 +1,1343 @@
-# torch.compile with Multimodal Encoders
+# torch.comp
 
-`torch.compile` can now be applied to multimodal encoders and miscellaneous nn modules in vLLM, including vision-language models like LLaMA 4, Qwen-VL,
-and similar encoder-based architectures.
 
-This document covers the basics of how the `torch.compile` integration works for multimodal encoders in vLLM, as well as how to apply the decorator
-to new models to improve performance.
+ 
 
-!!! note
-    For general information about `torch.compile` integration in vLLM, see the [torch.compile design document](./torch_compile.md).
+th Mu
+t
+moda
+ E
+cod
+rs
+`torch.comp
 
-## Overview
 
-We have recently enabled the `@support_torch_compile` decorator to work for multiple nn module components within a model type; this enables
-turning compile on for multimodal encoders, bringing performance improvements to additional components of the stack.
+` ca
+ 
+o
+ b
+ app
 
-When applied to the vision block of [`Qwen2_5_vl`](https://github.com/vllm-project/vllm/pull/23207) we observe ~4.5% e2e perf improvements with
-some increase in compilation time
 
-This feature is off by default, but can be enabled by setting `compile_mm_encoder: true` in the compilation config when models have the
-`@support_torch_compile` decorator.
+d to mu
+t
+moda
+ 
 
-## How Compilation Works for Multimodal Components
+cod
+rs a
+d m
+sc
 
-### APIs for Enablement
+a
 
-To compile a multimodal component such as an encoder, we follow the same mechanism as the LLM text backbone, with a few additional scaffoldings:
+ous 
+ modu
 
-1. The `@support_torch_compile` decorator should include `enable_if=should_torch_compile_mm_vit`. This will gate the compilation behind our
-`compile_mm_encoder` configuration
+s 
 
-2. `with set_model_tag("<component_name>", is_encoder=True)` context manager should be used around the nn.Module's instantiation. Since torch.compile
-relies on caching artifacts to reduce start time, we must properly propagate the `<component_name>` information to the cache in order to avoid collisions
-with the LLM text-backbone, or other instances of the same artifact (as is the case with vision block). `is_encoder=True` is also needed for encoder
-components (see Compile Range Integration).
+ vLLM, 
 
-3. `with set_forward_context` context manager should be used around the nn.Module's forward call. This will properly forward the vllm_config which is needed
-for torch.compile integration.
+c
+ud
 
-### CompilationConfig
+g v
+s
+o
+-
+a
+guag
+ mod
 
-With the exception of `compile_mm_encoder: true`, the multimodal encoder will inherit from the same compilation config as the text LLM. We may extend
-this for more configuration in the future.
+s 
 
-## Applying torch.compile to a New Multimodal Model/Component
+k
+ LLaMA 4, Q
 
-To apply `support_torch_compile` to a new general nn.Module, we advise following the same steps in [`debug_vllm_compile`](./debug_vllm_compile.md); this includes:
 
-1. Applying `support_torch_compile` on initially small modules (such as basic MLP layers), then raising to more general modules until one reaches a good performance
-tradeoff
+-VL,
+a
+d s
+m
 
-2. Leveraging [`tlparse`](https://github.com/meta-pytorch/tlparse) to identify and eliminate the source of recompiles and graph breaks
+ar 
 
-3. Using `dynamic_arg_dims` and proper `dynamic_shapes_config` to handle dynamism.
+cod
+r-bas
+d arch
+t
+ctur
+s.
+Th
+s docum
 
-### Common pitfalls
+t cov
+rs th
+ bas
+cs of ho
+ th
+ `torch.comp
 
-## VllmBackend Feature Support
 
-### Compile ranges
+` 
 
-The torch.compile integration will try to rely on max_batch_size to infer compilation ranges for dynamic shapes; however, for modules used in the encoder, this
-shape can be difficult to infer due to the unspecified range of shapes the encoder may see as input. Therefore, we rely on `is_encoder=True` in the `set_model_tag`
-to alert torch.compile to the fact that this range cannot be inferred, and we default to the range (1, MAX_INT).
+t
+grat
+o
+ 
+orks for mu
+t
+moda
+ 
 
-!!! note
-    We may seek to tighten this range for better performance in the future
+cod
+rs 
+
+ vLLM, as 
+
+
+ as ho
+ to app
+y th
+ d
+corator
+to 
+
+
+ mod
+
+s to 
+mprov
+ p
+rforma
+c
+.
+!!! 
+ot
+
+    For g
+
+
+ra
+ 
+
+format
+o
+ about `torch.comp
+
+
+` 
+
+t
+grat
+o
+ 
+
+ vLLM, s
+ th
+ [torch.comp
+
+
+ d
+s
+g
+ docum
+
+t](./torch_comp
+
+
+.md).
+## Ov
+rv
+
+
+
+W
+ hav
+ r
+c
+
+t
+y 
+
+ab
+
+d th
+ `@support_torch_comp
+
+
+` d
+corator to 
+ork for mu
+t
+p
+
+ 
+ modu
+
+ compo
+
+
+ts 
+
+th
+
+ a mod
+
+ typ
+; th
+s 
+
+ab
+
+s
+tur
+
+
+g comp
+
+
+ o
+ for mu
+t
+moda
+ 
+
+cod
+rs, br
+
+g
+
+g p
+rforma
+c
+ 
+mprov
+m
+
+ts to add
+t
+o
+a
+ compo
+
+
+ts of th
+ stack.
+Wh
+
+ app
+
+
+d to th
+ v
+s
+o
+ b
+ock of [`Q
+
+
+2_5_v
+`](https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/23207) 
+
+ obs
+rv
+ ~4.5% 
+2
+ p
+rf 
+mprov
+m
+
+ts 
+
+th
+som
+ 
+
+cr
+as
+ 
+
+ comp
+
+at
+o
+ t
+m
+
+Th
+s f
+atur
+ 
+s off by d
+fau
+t, but ca
+ b
+ 
+
+ab
+
+d by s
+tt
+
+g `comp
+
+
+_mm_
+
+cod
+r: tru
+` 
+
+ th
+ comp
+
+at
+o
+ co
+f
+g 
+h
+
+ mod
+
+s hav
+ th
+
+`@support_torch_comp
+
+
+` d
+corator.
+## Ho
+ Comp
+
+at
+o
+ Works for Mu
+t
+moda
+ Compo
+
+
+ts
+### APIs for E
+ab
+
+m
+
+t
+To comp
+
+
+ a mu
+t
+moda
+ compo
+
+
+t such as a
+ 
+
+cod
+r, 
+
+ fo
+o
+ th
+ sam
+ m
+cha
+
+sm as th
+ LLM t
+xt backbo
+
+, 
+
+th a f
+
+ add
+t
+o
+a
+ scaffo
+d
+
+gs:
+1. Th
+ `@support_torch_comp
+
+
+` d
+corator shou
+d 
+
+c
+ud
+ `
+
+ab
+
+_
+f=shou
+d_torch_comp
+
+
+_mm_v
+t`. Th
+s 
+
+
+ gat
+ th
+ comp
+
+at
+o
+ b
+h
+
+d our
+`comp
+
+
+_mm_
+
+cod
+r` co
+f
+gurat
+o
+
+2. `
+
+th s
+t_mod
+
+_tag("
+compo
+
+
+t_
+am
+
+", 
+s_
+
+cod
+r=Tru
+)` co
+t
+xt ma
+ag
+r shou
+d b
+ us
+d arou
+d th
+ 
+.Modu
+
+'s 
+
+sta
+t
+at
+o
+. S
+
+c
+ torch.comp
+
+
+
+r
+
+
+
+s o
+ cach
+
+g art
+facts to r
+duc
+ start t
+m
+, 
+
+ must prop
+r
+y propagat
+ th
+ `
+compo
+
+
+t_
+am
+
+` 
+
+format
+o
+ to th
+ cach
+ 
+
+ ord
+r to avo
+d co
+
+s
+o
+s
+
+
+th th
+ LLM t
+xt-backbo
+
+, or oth
+r 
+
+sta
+c
+s of th
+ sam
+ art
+fact (as 
+s th
+ cas
+ 
+
+th v
+s
+o
+ b
+ock). `
+s_
+
+cod
+r=Tru
+` 
+s a
+so 
+
+d
+d for 
+
+cod
+r
+compo
+
+
+ts (s
+ Comp
+
+
+ Ra
+g
+ I
+t
+grat
+o
+).
+3. `
+
+th s
+t_for
+ard_co
+t
+xt` co
+t
+xt ma
+ag
+r shou
+d b
+ us
+d arou
+d th
+ 
+.Modu
+
+'s for
+ard ca
+. Th
+s 
+
+
+ prop
+r
+y for
+ard th
+ v
+m_co
+f
+g 
+h
+ch 
+s 
+
+d
+d
+for torch.comp
+
+
+ 
+
+t
+grat
+o
+.
+### Comp
+
+at
+o
+Co
+f
+g
+W
+th th
+ 
+xc
+pt
+o
+ of `comp
+
+
+_mm_
+
+cod
+r: tru
+`, th
+ mu
+t
+moda
+ 
+
+cod
+r 
+
+
+ 
+
+h
+r
+t from th
+ sam
+ comp
+
+at
+o
+ co
+f
+g as th
+ t
+xt LLM. W
+ may 
+xt
+
+d
+th
+s for mor
+ co
+f
+gurat
+o
+ 
+
+ th
+ futur
+.
+## App
+y
+
+g torch.comp
+
+
+ to a N
+
+ Mu
+t
+moda
+ Mod
+
+/Compo
+
+
+t
+To app
+y `support_torch_comp
+
+
+` to a 
+
+
+ g
+
+
+ra
+ 
+.Modu
+
+, 
+
+ adv
+s
+ fo
+o
+
+
+g th
+ sam
+ st
+ps 
+
+ [`d
+bug_v
+m_comp
+
+
+`](./d
+bug_v
+m_comp
+
+
+.md); th
+s 
+
+c
+ud
+s:
+1. App
+y
+
+g `support_torch_comp
+
+
+` o
+ 
+
+
+t
+a
+y sma
+ modu
+
+s (such as bas
+c MLP 
+ay
+rs), th
+
+ ra
+s
+
+g to mor
+ g
+
+
+ra
+ modu
+
+s u
+t
+
+ o
+
+ r
+ach
+s a good p
+rforma
+c
+
+trad
+off
+2. L
+v
+rag
+
+g [`t
+pars
+`](https://g
+thub.com/m
+ta-pytorch/t
+pars
+) to 
+d
+
+t
+fy a
+d 
+
+
+m
+
+at
+ th
+ sourc
+ of r
+comp
+
+
+s a
+d graph br
+aks
+3. Us
+
+g `dy
+am
+c_arg_d
+ms` a
+d prop
+r `dy
+am
+c_shap
+s_co
+f
+g` to ha
+d
+
+ dy
+am
+sm.
+### Commo
+ p
+tfa
+s
+## V
+mBack
+
+d F
+atur
+ Support
+### Comp
+
+
+ ra
+g
+s
+Th
+ torch.comp
+
+
+ 
+
+t
+grat
+o
+ 
+
+
+ try to r
+
+y o
+ max_batch_s
+z
+ to 
+
+f
+r comp
+
+at
+o
+ ra
+g
+s for dy
+am
+c shap
+s; ho
+
+v
+r, for modu
+
+s us
+d 
+
+ th
+ 
+
+cod
+r, th
+s
+shap
+ ca
+ b
+ d
+ff
+cu
+t to 
+
+f
+r du
+ to th
+ u
+sp
+c
+f
+
+d ra
+g
+ of shap
+s th
+ 
+
+cod
+r may s
+ as 
+
+put. Th
+r
+for
+, 
+
+ r
+
+y o
+ `
+s_
+
+cod
+r=Tru
+` 
+
+ th
+ `s
+t_mod
+
+_tag`
+to a
+
+rt torch.comp
+
+
+ to th
+ fact that th
+s ra
+g
+ ca
+ot b
+ 
+
+f
+rr
+d, a
+d 
+
+ d
+fau
+t to th
+ ra
+g
+ (1, MAX_INT).
+!!! 
+ot
+
+    W
+ may s
+k to t
+ght
+
+ th
+s ra
+g
+ for b
+tt
+r p
+rforma
+c
+ 
+
+ th
+ futur
 
 ### Cudagraphs
+W
+ hav
+ 
+ot y
+t 
+xp
+or
+d comp
 
-We have not yet explored compilation for multimodal encoders with CUDAGraph integration; behavior is currently unspecified.
+at
+o
+ for mu
+t
+moda
+ 
 
-## Troubleshooting
+cod
+rs 
 
-### Graph Breaks in Vision Encoders
+th CUDAGraph 
 
-Some vision encoder operations may cause graph breaks. To identify them:
+t
+grat
+o
+; b
+hav
+or 
+s curr
 
+t
+y u
+sp
+c
+f
+
+d.
+## Troub
+
+shoot
+
+g
+### Graph Br
+aks 
+
+ V
+s
+o
+ E
+cod
+rs
+Som
+ v
+s
+o
+ 
+
+cod
+r op
+rat
+o
+s may caus
+ graph br
+aks. To 
+d
+
+t
+fy th
+m:
 ```bash
-TORCH_LOGS="+dynamo" vllm serve <MODEL>
+TORCH_LOGS="+dy
+amo" v
+m s
+rv
+ 
+MODEL
+
 ```
+Commo
+ caus
+s of graph br
+aks 
 
-Common causes of graph breaks in multimodal models:
+ mu
+t
+moda
+ mod
 
-- **Dynamic image sizes**: Use `dynamic_shapes_config` to handle variable resolutions
-- **Untraceable operations**: Some operations (such as to_list) may not be supported by Dynamo
-- **Conditional processing**: Data-dependent branching based on image properties
+s:
+    - **Dy
+am
+c 
+mag
+ s
+z
+s**: Us
+ `dy
+am
+c_shap
+s_co
+f
+g` to ha
+d
 
-### Compilation Errors
+ var
+ab
 
-If compilation fails for a multimodal model:
+ r
+so
+ut
+o
+s
+    - **U
+trac
+ab
 
-1. **Disable and test**: First verify the model works without compilation:
+ op
+rat
+o
+s**: Som
+ op
+rat
+o
+s (such as to_
+
+st) may 
+ot b
+ support
+d by Dy
+amo
+    - **Co
+d
+t
+o
+a
+ proc
+ss
+
+g**: Data-d
+p
+
+d
+
+t bra
+ch
+
+g bas
+d o
+ 
+mag
+ prop
+rt
+
+s
+### Comp
+
+at
+o
+ Errors
+If comp
+
+at
+o
+ fa
+
+s for a mu
+t
+moda
+ mod
+
+:
+1. **D
+sab
+
+ a
+d t
+st**: F
+rst v
+r
+fy th
+ mod
+
+ 
+orks 
+
+thout comp
+
+at
+o
+:
    ```bash
-   VLLM_TORCH_COMPILE_LEVEL=0 vllm serve <model> --compilation-config='{"compile_mm_encoder":"false"}'
-   ```
+   VLLM_TORCH_COMPILE_LEVEL=0 v
+m s
+rv
+ 
+mod
 
-2. **Check logs**: Enable debug logging to see compilation details:
+
+ --comp
+
+at
+o
+-co
+f
+g='{"comp
+
+
+_mm_
+
+cod
+r":"fa
+s
+"}'
+   ```
+2. **Ch
+ck 
+ogs**: E
+ab
+
+ d
+bug 
+ogg
+
+g to s
+ comp
+
+at
+o
+ d
+ta
+
+s:
    ```bash
-   VLLM_LOGGING_LEVEL=DEBUG vllm serve <model> --compilation-config='{"compile_mm_encoder":"true"}'
+   VLLM_LOGGING_LEVEL=DEBUG v
+m s
+rv
+ 
+mod
+
+
+ --comp
+
+at
+o
+-co
+f
+g='{"comp
+
+
+_mm_
+
+cod
+r":"tru
+"}'
    ```
+3. **R
+port 
+ssu
+s**: If you f
 
-3. **Report issues**: If you find a bug, [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose)
+d a bug, [op
 
-## See Also
+ a
+ 
+ssu
+ o
+ G
+tHub](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/
 
-- [torch.compile Integration](./torch_compile.md) - Core design document
-- [Debugging torch.compile](./debug_vllm_compile.md) - Detailed debugging guide
-- [Multimodal Inputs](../features/multimodal_inputs.md) - How to pass multimodal data
-- [Disaggregated Encoder](../features/disagg_encoder.md) - Scaling vision encoders
-- [Supported Multimodal Models](../models/supported_models.md#list-of-multimodal-language-models) - Model compatibility
+
+/choos
+)
+## S
+ A
+so
+    - [torch.comp
+
+
+ I
+t
+grat
+o
+](./torch_comp
+
+
+.md) - Cor
+ d
+s
+g
+ docum
+
+t
+    - [D
+bugg
+
+g torch.comp
+
+
+](./d
+bug_v
+m_comp
+
+
+.md) - D
+ta
+
+
+d d
+bugg
+
+g gu
+d
+
+    - [Mu
+t
+moda
+ I
+puts](../f
+atur
+s/mu
+t
+moda
+_
+
+puts.md) - Ho
+ to pass mu
+t
+moda
+ data
+    - [D
+saggr
+gat
+d E
+cod
+r](../f
+atur
+s/d
+sagg_
+
+cod
+r.md) - Sca
+
+
+g v
+s
+o
+ 
+
+cod
+rs
+    - [Support
+d Mu
+t
+moda
+ Mod
+
+s](../mod
+
+s/support
+d_mod
+
+s.md#
+
+st-of-mu
+t
+moda
+-
+a
+guag
+-mod
+
+s) - Mod
+
+ compat
+b
+
+
+ty

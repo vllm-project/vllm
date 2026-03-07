@@ -1,81 +1,691 @@
-# Features
+# F
+atur
+s
+## Compat
+b
 
-## Compatibility Matrix
 
-The tables below show mutually exclusive features and the support on some hardware.
+ty Matr
+x
+Th
+ tab
 
-The symbols used have the following meanings:
+s b
 
-- ✅ = Full compatibility
-- 🟠 = Partial compatibility
-- ❌ = No compatibility
-- ❔ = Unknown or TBD
+o
+ sho
+ mutua
+y 
+xc
+us
+v
+ f
+atur
+s a
+d th
+ support o
+ som
+ hard
+ar
+.
+Th
+ symbo
+s us
+d hav
+ th
+ fo
+o
 
-!!! note
-    Check the ❌ or 🟠 with links to see tracking issue for unsupported feature/hardware combination.
 
-### Feature x Feature
+g m
+a
 
-<style>
-td:not(:first-child) {
-  text-align: center !important;
+
+gs:
+    - ✅ = Fu
+ compat
+b
+
+
+ty
+    - 🟠 = Part
+a
+ compat
+b
+
+
+ty
+    - ❌ = No compat
+b
+
+
+ty
+    - ❔ = U
+k
+o
+
+ or TBD
+!!! 
+ot
+
+    Ch
+ck th
+ ❌ or 🟠 
+
+th 
+
+
+ks to s
+ track
+
+g 
+ssu
+ for u
+support
+d f
+atur
+/hard
+ar
+ comb
+
+at
+o
+.
+### F
+atur
+ x F
+atur
+
+sty
+
+
+
+td:
+ot(:f
+rst-ch
+
+d) {
+  t
+xt-a
+
+g
+: c
+
+t
+r !
+mporta
+t;
 }
 td {
-  padding: 0.5rem !important;
-  white-space: nowrap;
-}
+  padd
 
+g: 0.5r
+m !
+mporta
+t;
+  
+h
+t
+-spac
+: 
+o
+rap;
+}
 th {
-  padding: 0.5rem !important;
-  min-width: 0 !important;
-}
+  padd
 
-th:not(:first-child) {
-  writing-mode: vertical-lr;
-  transform: rotate(180deg)
-}
-</style>
+g: 0.5r
+m !
+mporta
+t;
+  m
 
-| Feature | [CP](../configuration/optimization.md#chunked-prefill) | [APC](automatic_prefix_caching.md) | [LoRA](lora.md) | [SD](speculative_decoding/README.md) | CUDA graph | [pooling](../models/pooling_models.md) | <abbr title="Encoder-Decoder Models">enc-dec</abbr> | <abbr title="Logprobs">logP</abbr> | <abbr title="Prompt Logprobs">prmpt logP</abbr> | <abbr title="Async Output Processing">async output</abbr> | multi-step | <abbr title="Multimodal Inputs">mm</abbr> | best-of | beam-search | [prompt-embeds](prompt_embeds.md) |
+-
+
+dth: 0 !
+mporta
+t;
+}
+th:
+ot(:f
+rst-ch
+
+d) {
+  
+r
+t
+
+g-mod
+: v
+rt
+ca
+-
+r;
+  tra
+sform: rotat
+(180d
+g)
+}
+/sty
+
+
+
+| F
+atur
+ | [CP](../co
+f
+gurat
+o
+/opt
+m
+zat
+o
+.md#chu
+k
+d-pr
+f
+
+) | [APC](automat
+c_pr
+f
+x_cach
+
+g.md) | [LoRA](
+ora.md) | [SD](sp
+cu
+at
+v
+_d
+cod
+
+g/README.md) | CUDA graph | [poo
+
+
+g](../mod
+
+s/poo
+
+
+g_mod
+
+s.md) | 
+abbr t
+t
+
+="E
+cod
+r-D
+cod
+r Mod
+
+s"
+
+
+c-d
+c
+/abbr
+ | 
+abbr t
+t
+
+="Logprobs"
+
+ogP
+/abbr
+ | 
+abbr t
+t
+
+="Prompt Logprobs"
+prmpt 
+ogP
+/abbr
+ | 
+abbr t
+t
+
+="Asy
+c Output Proc
+ss
+
+g"
+asy
+c output
+/abbr
+ | mu
+t
+-st
+p | 
+abbr t
+t
+
+="Mu
+t
+moda
+ I
+puts"
+mm
+/abbr
+ | b
+st-of | b
+am-s
+arch | [prompt-
+mb
+ds](prompt_
+mb
+ds.md) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| [CP](../configuration/optimization.md#chunked-prefill) | ✅ | | | | | | | | | | | | | | |
-| [APC](automatic_prefix_caching.md) | ✅ | ✅ | | | | | | | | | | | | | |
-| [LoRA](lora.md) | ✅ | ✅ | ✅ | | | | | | | | | | | | |
-| [SD](speculative_decoding/README.md) | ✅ | ✅ | ❌ | ✅ | | | | | | | | | | | |
+| [CP](../co
+f
+gurat
+o
+/opt
+m
+zat
+o
+.md#chu
+k
+d-pr
+f
+
+) | ✅ | | | | | | | | | | | | | | |
+| [APC](automat
+c_pr
+f
+x_cach
+
+g.md) | ✅ | ✅ | | | | | | | | | | | | | |
+| [LoRA](
+ora.md) | ✅ | ✅ | ✅ | | | | | | | | | | | | |
+| [SD](sp
+cu
+at
+v
+_d
+cod
+
+g/README.md) | ✅ | ✅ | ❌ | ✅ | | | | | | | | | | | |
 | CUDA graph | ✅ | ✅ | ✅ | ✅ | ✅ | | | | | | | | | | |
-| [pooling](../models/pooling_models.md) | 🟠\* | 🟠\* | ✅ | ❌ | ✅ | ✅ | | | | | | | | | |
-| <abbr title="Encoder-Decoder Models">enc-dec</abbr> | ❌ | [❌](https://github.com/vllm-project/vllm/issues/7366) | ❌ | [❌](https://github.com/vllm-project/vllm/issues/7366) | ✅ | ✅ | ✅ | | | | | | | | |
-| <abbr title="Logprobs">logP</abbr> | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | | | | | | | |
-| <abbr title="Prompt Logprobs">prmpt logP</abbr> | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | | | | | | |
-| <abbr title="Async Output Processing">async output</abbr> | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | | | | | |
-| multi-step | ❌ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | | | | |
-| [mm](multimodal_inputs.md) | ✅ | ✅ | [🟠](https://github.com/vllm-project/vllm/pull/4194)<sup>^</sup> | ❔ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | | | |
-| best-of | ✅ | ✅ | ✅ | [❌](https://github.com/vllm-project/vllm/issues/6137) | ✅ | ❌ | ✅ | ✅ | ✅ | ❔ | [❌](https://github.com/vllm-project/vllm/issues/7968) | ✅ | ✅ | | |
-| beam-search | ✅ | ✅ | ✅ | [❌](https://github.com/vllm-project/vllm/issues/6137) | ✅ | ❌ | ✅ | ✅ | ✅ | ❔ | [❌](https://github.com/vllm-project/vllm/issues/7968) | ❔ | ✅ | ✅ | |
-| [prompt-embeds](prompt_embeds.md) | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ | ❌ | ❔ | ❔ | ❌ | ❔ | ❔ | ✅ |
+| [poo
 
-\* Chunked prefill and prefix caching are only applicable to last-token or all pooling with causal attention.  
-<sup>^</sup> LoRA is only applicable to the language backbone of multimodal models.
 
-### Feature x Hardware
+g](../mod
 
-| Feature                                                   | Volta               | Turing    | Ampere    | Ada    | Hopper     | CPU                | AMD    | Intel GPU |
+s/poo
+
+
+g_mod
+
+s.md) | 🟠\* | 🟠\* | ✅ | ❌ | ✅ | ✅ | | | | | | | | | |
+| 
+abbr t
+t
+
+="E
+cod
+r-D
+cod
+r Mod
+
+s"
+
+
+c-d
+c
+/abbr
+ | ❌ | [❌](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/7366) | ❌ | [❌](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/7366) | ✅ | ✅ | ✅ | | | | | | | | |
+| 
+abbr t
+t
+
+="Logprobs"
+
+ogP
+/abbr
+ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | | | | | | | |
+| 
+abbr t
+t
+
+="Prompt Logprobs"
+prmpt 
+ogP
+/abbr
+ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | | | | | | |
+| 
+abbr t
+t
+
+="Asy
+c Output Proc
+ss
+
+g"
+asy
+c output
+/abbr
+ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | | | | | |
+| mu
+t
+-st
+p | ❌ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | | | | |
+| [mm](mu
+t
+moda
+_
+
+puts.md) | ✅ | ✅ | [🟠](https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/4194)
+sup
+^
+/sup
+ | ❔ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | | | |
+| b
+st-of | ✅ | ✅ | ✅ | [❌](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/6137) | ✅ | ❌ | ✅ | ✅ | ✅ | ❔ | [❌](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/7968) | ✅ | ✅ | | |
+| b
+am-s
+arch | ✅ | ✅ | ✅ | [❌](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/6137) | ✅ | ❌ | ✅ | ✅ | ✅ | ❔ | [❌](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/7968) | ❔ | ✅ | ✅ | |
+| [prompt-
+mb
+ds](prompt_
+mb
+ds.md) | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ | ❌ | ❔ | ❔ | ❌ | ❔ | ❔ | ✅ |
+\* Chu
+k
+d pr
+f
+
+ a
+d pr
+f
+x cach
+
+g ar
+ o
+
+y app
+
+cab
+
+ to 
+ast-tok
+
+ or a
+ poo
+
+
+g 
+
+th causa
+ att
+
+t
+o
+.
+sup
+^
+/sup
+ LoRA 
+s o
+
+y app
+
+cab
+
+ to th
+ 
+a
+guag
+ backbo
+
+ of mu
+t
+moda
+ mod
+
+s.
+### F
+atur
+ x Hard
+ar
+
+| F
+atur
+                                                   | Vo
+ta               | Tur
+
+g    | Amp
+r
+    | Ada    | Hopp
+r     | CPU                | AMD    | I
+t
+
+ GPU |
 |-----------------------------------------------------------|---------------------|-----------|-----------|--------|------------|--------------------|--------| ------------|
-| [CP](../configuration/optimization.md#chunked-prefill)                                     | [❌](https://github.com/vllm-project/vllm/issues/2729) | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
-| [APC](automatic_prefix_caching.md)                        | [❌](https://github.com/vllm-project/vllm/issues/3687) | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
-| [LoRA](lora.md)                                           | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
-| [SD](speculative_decoding/README.md)                        | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ✅     | ✅        |
-| CUDA graph                                                | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ✅     | [❌](https://github.com/vllm-project/vllm/issues/26970)        |
-| [pooling](../models/pooling_models.md)                    | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
-| <abbr title="Encoder-Decoder Models">enc-dec</abbr>       | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ❌     | ✅        |
-| [mm](multimodal_inputs.md)                                | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
-| [prompt-embeds](prompt_embeds.md)                         | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ❔     | ✅        |
-| <abbr title="Logprobs">logP</abbr>                        | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
-| <abbr title="Prompt Logprobs">prmpt logP</abbr>           | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
-| <abbr title="Async Output Processing">async output</abbr> | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ❌     | ✅        |
-| multi-step                                                | ✅                  | ✅        | ✅        | ✅     | ✅        | [❌](https://github.com/vllm-project/vllm/issues/8477) | ✅     | ✅        |
-| best-of                                                   | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
-| beam-search                                               | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
+| [CP](../co
+f
+gurat
+o
+/opt
+m
+zat
+o
+.md#chu
+k
+d-pr
+f
 
-!!! note
-    For information on feature support on Google TPU, please refer to the [TPU-Inference Recommended Models and Features](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models_features/) documentation.
+)                                     | [❌](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/2729) | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
+| [APC](automat
+c_pr
+f
+x_cach
+
+g.md)                        | [❌](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/3687) | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
+| [LoRA](
+ora.md)                                           | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
+| [SD](sp
+cu
+at
+v
+_d
+cod
+
+g/README.md)                        | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ✅     | ✅        |
+| CUDA graph                                                | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ✅     | [❌](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/26970)        |
+| [poo
+
+
+g](../mod
+
+s/poo
+
+
+g_mod
+
+s.md)                    | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
+| 
+abbr t
+t
+
+="E
+cod
+r-D
+cod
+r Mod
+
+s"
+
+
+c-d
+c
+/abbr
+       | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ❌     | ✅        |
+| [mm](mu
+t
+moda
+_
+
+puts.md)                                | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
+| [prompt-
+mb
+ds](prompt_
+mb
+ds.md)                         | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ❔     | ✅        |
+| 
+abbr t
+t
+
+="Logprobs"
+
+ogP
+/abbr
+                        | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
+| 
+abbr t
+t
+
+="Prompt Logprobs"
+prmpt 
+ogP
+/abbr
+           | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
+| 
+abbr t
+t
+
+="Asy
+c Output Proc
+ss
+
+g"
+asy
+c output
+/abbr
+ | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ❌     | ✅        |
+| mu
+t
+-st
+p                                                | ✅                  | ✅        | ✅        | ✅     | ✅        | [❌](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/8477) | ✅     | ✅        |
+| b
+st-of                                                   | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
+| b
+am-s
+arch                                               | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅        |
+!!! 
+ot
+
+    For 
+
+format
+o
+ o
+ f
+atur
+ support o
+ Goog
+
+ TPU, p
+
+as
+ r
+f
+r to th
+ [TPU-I
+f
+r
+
+c
+ R
+comm
+
+d
+d Mod
+
+s a
+d F
+atur
+s](https://docs.v
+m.a
+/proj
+cts/tpu/
+
+/
+at
+st/r
+comm
+
+d
+d_mod
+
+s_f
+atur
+s/) docum
+
+tat
+o
+.

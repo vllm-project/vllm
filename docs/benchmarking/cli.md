@@ -1,1143 +1,8296 @@
-# Benchmark CLI
+# B
 
-This section guides you through running benchmark tests with the extensive datasets supported on vLLM.
+chmark CLI
+Th
+s s
+ct
+o
+ gu
+d
+s you through ru
 
-It's a living document, updated as new features and datasets become available.
 
-!!! tip
-    The benchmarks described on this page are mainly for evaluating specific vLLM features as well as regression testing.
+g b
 
-    For benchmarking production vLLM servers, we recommend [GuideLLM](https://github.com/vllm-project/guidellm), an established performance benchmarking framework with live progress updates and automatic report generation. It is also more flexible than `vllm bench serve` in terms of dataset loading, request formatting, and workload patterns.
+chmark t
+sts 
 
-## Dataset Overview
+th th
+ 
+xt
 
-<style>
+s
+v
+ datas
+ts support
+d o
+ vLLM.
+It's a 
+
+v
+
+g docum
+
+t, updat
+d as 
+
+
+ f
+atur
+s a
+d datas
+ts b
+com
+ ava
+
+ab
+
+.
+!!! t
+p
+    Th
+ b
+
+chmarks d
+scr
+b
+d o
+ th
+s pag
+ ar
+ ma
+
+
+y for 
+va
+uat
+
+g sp
+c
+f
+c vLLM f
+atur
+s as 
+
+
+ as r
+gr
+ss
+o
+ t
+st
+
+g.
+    For b
+
+chmark
+
+g product
+o
+ vLLM s
+rv
+rs, 
+
+ r
+comm
+
+d [Gu
+d
+LLM](https://g
+thub.com/v
+m-proj
+ct/gu
+d
+
+m), a
+ 
+stab
+
+sh
+d p
+rforma
+c
+ b
+
+chmark
+
+g fram
+
+ork 
+
+th 
+
+v
+ progr
+ss updat
+s a
+d automat
+c r
+port g
+
+
+rat
+o
+. It 
+s a
+so mor
+ f
+
+x
+b
+
+ tha
+ `v
+m b
+
+ch s
+rv
+` 
+
+ t
+rms of datas
+t 
+oad
+
+g, r
+qu
+st formatt
+
+g, a
+d 
+ork
+oad patt
+r
+s.
+## Datas
+t Ov
+rv
+
+
+
+sty
+
+
+
 th {
-  min-width: 0 !important;
+  m
+
+-
+
+dth: 0 !
+mporta
+t;
 }
-</style>
+/sty
 
-| Dataset | Online | Offline | Data Path |
+
+
+| Datas
+t | O
+
+
+
+
+ | Off
+
+
+
+ | Data Path |
 |---------|--------|---------|-----------|
-| ShareGPT | ✅ | ✅ | `wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json` |
-| ShareGPT4V (Image) | ✅ | ✅ | `wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/resolve/main/sharegpt4v_instruct_gpt4-vision_cap100k.json`<br>Note that the images need to be downloaded separately. For example, to download COCO's 2017 Train images:<br>`wget http://images.cocodataset.org/zips/train2017.zip` |
-| ShareGPT4Video (Video) | ✅ | ✅ | `git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video` |
-| BurstGPT | ✅ | ✅ | `wget https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv` |
-| Sonnet (deprecated) | ✅ | ✅ | Local file: `benchmarks/sonnet.txt` |
-| Random | ✅ | ✅ | `synthetic` |
-| RandomMultiModal (Image/Video) | ✅ | ✅ | `synthetic` |
-| RandomForReranking | ✅ | ✅ | `synthetic` |
-| Prefix Repetition | ✅ | ✅ | `synthetic` |
-| HuggingFace-VisionArena | ✅ | ✅ | `lmarena-ai/VisionArena-Chat` |
-| HuggingFace-MMVU | ✅ | ✅ | `yale-nlp/MMVU` |
-| HuggingFace-InstructCoder | ✅ | ✅ | `likaixin/InstructCoder` |
-| HuggingFace-AIMO | ✅ | ✅ | `AI-MO/aimo-validation-aime`, `AI-MO/NuminaMath-1.5`, `AI-MO/NuminaMath-CoT` |
-| HuggingFace-Other | ✅ | ✅ | `lmms-lab/LLaVA-OneVision-Data`, `Aeala/ShareGPT_Vicuna_unfiltered` |
-| HuggingFace-MTBench | ✅ | ✅ | `philschmid/mt-bench` |
-| HuggingFace-Blazedit | ✅ | ✅ | `vdaita/edit_5k_char`, `vdaita/edit_10k_char` |
-| HuggingFace-ASR | ✅ | ✅ | `openslr/librispeech_asr`, `facebook/voxpopuli`,  `LIUM/tedlium`, `edinburghcstr/ami`,        `speechcolab/gigaspeech`,        `kensho/spgispeech` |
-| Spec Bench | ✅ | ✅ | `wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl` |
-| Custom | ✅ | ✅ | Local file: `data.jsonl` |
-| Custom MM | ✅ | ✅ | Local file: `mm_data.jsonl` |
+| Shar
+GPT | ✅ | ✅ | `
+g
+t https://hugg
 
-Legend:
+gfac
+.co/datas
+ts/a
+o
+8231489123/Shar
+GPT_V
+cu
+a_u
+f
 
-- ✅ - supported
-- 🟡 - Partial support
-- 🚧 - to be supported
+t
+r
+d/r
+so
+v
+/ma
 
-!!! note
-    HuggingFace dataset's `dataset-name` should be set to `hf`.
-    For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
+/Shar
+GPT_V3_u
+f
+
+t
+r
+d_c
+
+a
+
+d_sp
+
+t.jso
+` |
+| Shar
+GPT4V (Imag
+) | ✅ | ✅ | `
+g
+t https://hugg
+
+gfac
+.co/datas
+ts/L
+
+-Ch
+
+/Shar
+GPT4V/r
+so
+v
+/ma
+
+/shar
+gpt4v_
+
+struct_gpt4-v
+s
+o
+_cap100k.jso
+`
+br
+Not
+ that th
+ 
+mag
+s 
+
+d to b
+ do
+
+
+oad
+d s
+parat
+
+y. For 
+xamp
+
+, to do
+
+
+oad COCO's 2017 Tra
+
+ 
+mag
+s:
+br
+`
+g
+t http://
+mag
+s.cocodatas
+t.org/z
+ps/tra
+
+2017.z
+p` |
+| Shar
+GPT4V
+d
+o (V
+d
+o) | ✅ | ✅ | `g
+t c
+o
+
+ https://hugg
+
+gfac
+.co/datas
+ts/Shar
+GPT4V
+d
+o/Shar
+GPT4V
+d
+o` |
+| BurstGPT | ✅ | ✅ | `
+g
+t https://g
+thub.com/HPMLL/BurstGPT/r
+
+
+as
+s/do
+
+
+oad/v1.1/BurstGPT_
+
+thout_fa
+
+s_2.csv` |
+| So
+
+t (d
+pr
+cat
+d) | ✅ | ✅ | Loca
+ f
+
+
+: `b
+
+chmarks/so
+
+t.txt` |
+| Ra
+dom | ✅ | ✅ | `sy
+th
+t
+c` |
+| Ra
+domMu
+t
+Moda
+ (Imag
+/V
+d
+o) | ✅ | ✅ | `sy
+th
+t
+c` |
+| Ra
+domForR
+ra
+k
+
+g | ✅ | ✅ | `sy
+th
+t
+c` |
+| Pr
+f
+x R
+p
+t
+t
+o
+ | ✅ | ✅ | `sy
+th
+t
+c` |
+| Hugg
+
+gFac
+-V
+s
+o
+Ar
+
+a | ✅ | ✅ | `
+mar
+
+a-a
+/V
+s
+o
+Ar
+
+a-Chat` |
+| Hugg
+
+gFac
+-MMVU | ✅ | ✅ | `ya
+
+-
+
+p/MMVU` |
+| Hugg
+
+gFac
+-I
+structCod
+r | ✅ | ✅ | `
+
+ka
+x
+
+/I
+structCod
+r` |
+| Hugg
+
+gFac
+-AIMO | ✅ | ✅ | `AI-MO/a
+mo-va
+
+dat
+o
+-a
+m
+`, `AI-MO/Num
+
+aMath-1.5`, `AI-MO/Num
+
+aMath-CoT` |
+| Hugg
+
+gFac
+-Oth
+r | ✅ | ✅ | `
+mms-
+ab/LLaVA-O
+
+V
+s
+o
+-Data`, `A
+a
+a/Shar
+GPT_V
+cu
+a_u
+f
+
+t
+r
+d` |
+| Hugg
+
+gFac
+-MTB
+
+ch | ✅ | ✅ | `ph
+
+schm
+d/mt-b
+
+ch` |
+| Hugg
+
+gFac
+-B
+az
+d
+t | ✅ | ✅ | `vda
+ta/
+d
+t_5k_char`, `vda
+ta/
+d
+t_10k_char` |
+| Hugg
+
+gFac
+-ASR | ✅ | ✅ | `op
+
+s
+r/
+
+br
+sp
+ch_asr`, `fac
+book/voxpopu
+
+`,  `LIUM/t
+d
+
+um`, `
+d
+
+burghcstr/am
+`,        `sp
+chco
+ab/g
+gasp
+ch`,        `k
+
+sho/spg
+sp
+ch` |
+| Sp
+c B
+
+ch | ✅ | ✅ | `
+g
+t https://ra
+.g
+thubus
+rco
+t
+
+t.com/h
+m
+
+gkx/Sp
+c-B
+
+ch/r
+fs/h
+ads/ma
+
+/data/sp
+c_b
+
+ch/qu
+st
+o
+.jso
+
+` |
+| Custom | ✅ | ✅ | Loca
+ f
+
+
+: `data.jso
+
+` |
+| Custom MM | ✅ | ✅ | Loca
+ f
+
+
+: `mm_data.jso
+
+` |
+L
+g
+
+d:
+    - ✅ - support
+d
+    - 🟡 - Part
+a
+ support
+    - 🚧 - to b
+ support
+d
+!!! 
+ot
+
+    Hugg
+
+gFac
+ datas
+t's `datas
+t-
+am
+` shou
+d b
+ s
+t to `hf`.
+    For 
+oca
+ `datas
+t-path`, p
+
+as
+ s
+t `hf-
+am
+` to 
+ts Hugg
+
+g Fac
+ ID 
+
+k
 
     ```bash
-    --dataset-path /datasets/VisionArena-Chat/ --hf-name lmarena-ai/VisionArena-Chat
+    --datas
+t-path /datas
+ts/V
+s
+o
+Ar
+
+a-Chat/ --hf-
+am
+ 
+mar
+
+a-a
+/V
+s
+o
+Ar
+
+a-Chat
     ```
+## Examp
 
-## Examples
+s
+### 🚀 O
 
-### 🚀 Online Benchmark
 
-<details class="admonition abstract" markdown="1">
-<summary>Show more</summary>
 
-First start serving your model:
 
+ B
+
+chmark
+d
+ta
+
+s c
+ass="admo
+
+t
+o
+ abstract" markdo
+
+="1"
+
+summary
+Sho
+ mor
+
+/summary
+
+F
+rst start s
+rv
+
+g your mod
+
+:
 ```bash
-vllm serve NousResearch/Hermes-3-Llama-3.1-8B
+v
+m s
+rv
+ NousR
+s
+arch/H
+rm
+s-3-L
+ama-3.1-8B
 ```
+Th
 
-Then run the benchmarking script:
+ ru
+ th
+ b
 
+chmark
+
+g scr
+pt:
 ```bash
-# download dataset
-# wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-vllm bench serve \
-  --backend vllm \
-  --model NousResearch/Hermes-3-Llama-3.1-8B \
-  --endpoint /v1/completions \
-  --dataset-name sharegpt \
-  --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
-  --num-prompts 10
+# do
+
+
+oad datas
+t
+# 
+g
+t https://hugg
+
+gfac
+.co/datas
+ts/a
+o
+8231489123/Shar
+GPT_V
+cu
+a_u
+f
+
+t
+r
+d/r
+so
+v
+/ma
+
+/Shar
+GPT_V3_u
+f
+
+t
+r
+d_c
+
+a
+
+d_sp
+
+t.jso
+
+v
+m b
+
+ch s
+rv
+ \
+  --back
+
+d v
+m \
+  --mod
+
+ NousR
+s
+arch/H
+rm
+s-3-L
+ama-3.1-8B \
+  --
+
+dpo
+
+t /v1/comp
+
+t
+o
+s \
+  --datas
+t-
+am
+ shar
+gpt \
+  --datas
+t-path 
+your data path
+/Shar
+GPT_V3_u
+f
+
+t
+r
+d_c
+
+a
+
+d_sp
+
+t.jso
+ \
+  --
+um-prompts 10
 ```
+If succ
+ssfu
+, you 
 
-If successful, you will see the following output:
 
-```text
-============ Serving Benchmark Result ============
-Successful requests:                     10
-Benchmark duration (s):                  5.78
-Total input tokens:                      1369
-Total generated tokens:                  2212
-Request throughput (req/s):              1.73
-Output token throughput (tok/s):         382.89
-Total token throughput (tok/s):          619.85
----------------Time to First Token----------------
-Mean TTFT (ms):                          71.54
-Median TTFT (ms):                        73.88
+ s
+ th
+ fo
+o
+
+
+g output:
+```t
+xt
+============ S
+rv
+
+g B
+
+chmark R
+su
+t ============
+Succ
+ssfu
+ r
+qu
+sts:                     10
+B
+
+chmark durat
+o
+ (s):                  5.78
+Tota
+ 
+
+put tok
+
+s:                      1369
+Tota
+ g
+
+
+rat
+d tok
+
+s:                  2212
+R
+qu
+st throughput (r
+q/s):              1.73
+Output tok
+
+ throughput (tok/s):         382.89
+Tota
+ tok
+
+ throughput (tok/s):          619.85
+---------------T
+m
+ to F
+rst Tok
+
+----------------
+M
+a
+ TTFT (ms):                          71.54
+M
+d
+a
+ TTFT (ms):                        73.88
 P99 TTFT (ms):                           79.49
------Time per Output Token (excl. 1st token)------
-Mean TPOT (ms):                          7.91
-Median TPOT (ms):                        7.96
+-----T
+m
+ p
+r Output Tok
+
+ (
+xc
+. 1st tok
+
+)------
+M
+a
+ TPOT (ms):                          7.91
+M
+d
+a
+ TPOT (ms):                        7.96
 P99 TPOT (ms):                           8.03
----------------Inter-token Latency----------------
-Mean ITL (ms):                           7.74
-Median ITL (ms):                         7.70
+---------------I
+t
+r-tok
+
+ Lat
+
+cy----------------
+M
+a
+ ITL (ms):                           7.74
+M
+d
+a
+ ITL (ms):                         7.70
 P99 ITL (ms):                            8.39
 ==================================================
 ```
+#### Custom Datas
+t
+If th
+ datas
+t you 
+a
+t to b
 
-#### Custom Dataset
+chmark 
+s 
+ot support
+d y
+t 
 
-If the dataset you want to benchmark is not supported yet in vLLM, even then you can benchmark on it using `CustomDataset`. Your data needs to be in `.jsonl` format and needs to have "prompt" field per entry, e.g., data.jsonl
+ vLLM, 
+v
 
-```json
-{"prompt": "What is the capital of India?"}
-{"prompt": "What is the capital of Iran?"}
-{"prompt": "What is the capital of China?"}
+ th
+
+ you ca
+ b
+
+chmark o
+ 
+t us
+
+g `CustomDatas
+t`. Your data 
+
+ds to b
+ 
+
+ `.jso
+
+` format a
+d 
+
+ds to hav
+ "prompt" f
+
+
+d p
+r 
+
+try, 
+.g., data.jso
+
+
+```jso
+
+{"prompt": "What 
+s th
+ cap
+ta
+ of I
+d
+a?"}
+{"prompt": "What 
+s th
+ cap
+ta
+ of Ira
+?"}
+{"prompt": "What 
+s th
+ cap
+ta
+ of Ch
+
+a?"}
 ```
-
 ```bash
-# start server
-vllm serve meta-llama/Llama-3.1-8B-Instruct
+# start s
+rv
+r
+v
+m s
+rv
+ m
+ta-
+ama/L
+ama-3.1-8B-I
+struct
 ```
-
 ```bash
-# run benchmarking script
-vllm bench serve --port 9001 --save-result --save-detailed \
-  --backend vllm \
-  --model meta-llama/Llama-3.1-8B-Instruct \
-  --endpoint /v1/completions \
-  --dataset-name custom \
-  --dataset-path <path-to-your-data-jsonl> \
-  --custom-skip-chat-template \
-  --num-prompts 80 \
-  --max-concurrency 1 \
-  --temperature=0.3 \
+# ru
+ b
+
+chmark
+
+g scr
+pt
+v
+m b
+
+ch s
+rv
+ --port 9001 --sav
+-r
+su
+t --sav
+-d
+ta
+
+
+d \
+  --back
+
+d v
+m \
+  --mod
+
+ m
+ta-
+ama/L
+ama-3.1-8B-I
+struct \
+  --
+
+dpo
+
+t /v1/comp
+
+t
+o
+s \
+  --datas
+t-
+am
+ custom \
+  --datas
+t-path 
+path-to-your-data-jso
+
+
+ \
+  --custom-sk
+p-chat-t
+mp
+at
+ \
+  --
+um-prompts 80 \
+  --max-co
+curr
+
+cy 1 \
+  --t
+mp
+ratur
+=0.3 \
   --top-p=0.75 \
-  --result-dir "./log/"
+  --r
+su
+t-d
+r "./
+og/"
 ```
+You ca
+ sk
+p app
+y
 
-You can skip applying chat template if your data already has it by using `--custom-skip-chat-template`.
+g chat t
+mp
+at
+ 
+f your data a
+r
+ady has 
+t by us
 
-#### Custom multimodal dataset
+g `--custom-sk
+p-chat-t
+mp
+at
+`.
+#### Custom mu
+t
+moda
+ datas
+t
+If th
+ mu
+t
+moda
+ datas
+t you 
+a
+t to b
 
-If the multimodal dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomMMDataset`. Your data needs to be in `.jsonl` format and needs to have "prompt" and "image_files" field per entry, e.g., `mm_data.jsonl`:
+chmark 
+s 
+ot support
+d y
+t 
 
-```json
-{"prompt": "How many animals are present in the given image?", "image_files": ["/path/to/image/folder/horsepony.jpg"]}
-{"prompt": "What colour is the bird shown in the image?", "image_files": ["/path/to/image/folder/flycatcher.jpeg"]}
+ vLLM, th
+
+ you ca
+ b
+
+chmark o
+ 
+t us
+
+g `CustomMMDatas
+t`. Your data 
+
+ds to b
+ 
+
+ `.jso
+
+` format a
+d 
+
+ds to hav
+ "prompt" a
+d "
+mag
+_f
+
+
+s" f
+
+
+d p
+r 
+
+try, 
+.g., `mm_data.jso
+
+`:
+```jso
+
+{"prompt": "Ho
+ ma
+y a
+
+ma
+s ar
+ pr
+s
+
+t 
+
+ th
+ g
+v
+
+ 
+mag
+?", "
+mag
+_f
+
+
+s": ["/path/to/
+mag
+/fo
+d
+r/hors
+po
+y.jpg"]}
+{"prompt": "What co
+our 
+s th
+ b
+rd sho
+
+ 
+
+ th
+ 
+mag
+?", "
+mag
+_f
+
+
+s": ["/path/to/
+mag
+/fo
+d
+r/f
+ycatch
+r.jp
+g"]}
 ```
-
 ```bash
-# need a model with vision capability here
-vllm serve Qwen/Qwen2-VL-7B-Instruct
-```
+# 
 
+d a mod
+
+ 
+
+th v
+s
+o
+ capab
+
+
+ty h
+r
+
+v
+m s
+rv
+ Q
+
+
+/Q
+
+
+2-VL-7B-I
+struct
+```
 ```bash
-# run benchmarking script
-vllm bench serve--save-result --save-detailed \
-  --backend openai-chat \
-  --model Qwen/Qwen2-VL-7B-Instruct \
-  --endpoint /v1/chat/completions \
-  --dataset-name custom_mm \
-  --dataset-path <path-to-your-mm-data-jsonl> \
-  --allowed-local-media-path /path/to/image/folder
+# ru
+ b
+
+chmark
+
+g scr
+pt
+v
+m b
+
+ch s
+rv
+--sav
+-r
+su
+t --sav
+-d
+ta
+
+
+d \
+  --back
+
+d op
+
+a
+-chat \
+  --mod
+
+ Q
+
+
+/Q
+
+
+2-VL-7B-I
+struct \
+  --
+
+dpo
+
+t /v1/chat/comp
+
+t
+o
+s \
+  --datas
+t-
+am
+ custom_mm \
+  --datas
+t-path 
+path-to-your-mm-data-jso
+
+
+ \
+  --a
+o
+
+d-
+oca
+-m
+d
+a-path /path/to/
+mag
+/fo
+d
+r
 ```
+Not
+ that 
 
-Note that we need to use the `openai-chat` backend and `/v1/chat/completions` endpoint for multimodal inputs.
+ 
 
-#### VisionArena Benchmark for Vision Language Models
+d to us
+ th
+ `op
 
+a
+-chat` back
+
+d a
+d `/v1/chat/comp
+
+t
+o
+s` 
+
+dpo
+
+t for mu
+t
+moda
+ 
+
+puts.
+#### V
+s
+o
+Ar
+
+a B
+
+chmark for V
+s
+o
+ La
+guag
+ Mod
+
+s
 ```bash
-# need a model with vision capability here
-vllm serve Qwen/Qwen2-VL-7B-Instruct
-```
+# 
 
+d a mod
+
+ 
+
+th v
+s
+o
+ capab
+
+
+ty h
+r
+
+v
+m s
+rv
+ Q
+
+
+/Q
+
+
+2-VL-7B-I
+struct
+```
 ```bash
-vllm bench serve \
-  --backend openai-chat \
-  --model Qwen/Qwen2-VL-7B-Instruct \
-  --endpoint /v1/chat/completions \
-  --dataset-name hf \
-  --dataset-path lmarena-ai/VisionArena-Chat \
-  --hf-split train \
-  --num-prompts 1000
+v
+m b
+
+ch s
+rv
+ \
+  --back
+
+d op
+
+a
+-chat \
+  --mod
+
+ Q
+
+
+/Q
+
+
+2-VL-7B-I
+struct \
+  --
+
+dpo
+
+t /v1/chat/comp
+
+t
+o
+s \
+  --datas
+t-
+am
+ hf \
+  --datas
+t-path 
+mar
+
+a-a
+/V
+s
+o
+Ar
+
+a-Chat \
+  --hf-sp
+
+t tra
+
+ \
+  --
+um-prompts 1000
 ```
+#### I
+structCod
+r B
 
-#### InstructCoder Benchmark with Speculative Decoding
+chmark 
 
+th Sp
+cu
+at
+v
+ D
+cod
+
+g
 ``` bash
-vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
-    --speculative-config $'{"method": "ngram",
-    "num_speculative_tokens": 5, "prompt_lookup_max": 5,
-    "prompt_lookup_min": 2}'
-```
+v
+m s
+rv
+ m
+ta-
+ama/M
+ta-L
+ama-3-8B-I
+struct \
+    --sp
+cu
+at
+v
+-co
+f
+g $'{"m
+thod": "
+gram",
+    "
+um_sp
+cu
+at
+v
+_tok
 
+s": 5, "prompt_
+ookup_max": 5,
+    "prompt_
+ookup_m
+
+": 2}'
+```
 ``` bash
-vllm bench serve \
-    --model meta-llama/Meta-Llama-3-8B-Instruct \
-    --dataset-name hf \
-    --dataset-path likaixin/InstructCoder \
-    --num-prompts 2048
+v
+m b
+
+ch s
+rv
+ \
+    --mod
+
+ m
+ta-
+ama/M
+ta-L
+ama-3-8B-I
+struct \
+    --datas
+t-
+am
+ hf \
+    --datas
+t-path 
+
+ka
+x
+
+/I
+structCod
+r \
+    --
+um-prompts 2048
 ```
+#### Sp
+c B
 
-#### Spec Bench Benchmark with Speculative Decoding
+ch B
 
+chmark 
+
+th Sp
+cu
+at
+v
+ D
+cod
+
+g
 ``` bash
-vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
-    --speculative-config $'{"method": "ngram",
-    "num_speculative_tokens": 5, "prompt_lookup_max": 5,
-    "prompt_lookup_min": 2}'
+v
+m s
+rv
+ m
+ta-
+ama/M
+ta-L
+ama-3-8B-I
+struct \
+    --sp
+cu
+at
+v
+-co
+f
+g $'{"m
+thod": "
+gram",
+    "
+um_sp
+cu
+at
+v
+_tok
+
+s": 5, "prompt_
+ookup_max": 5,
+    "prompt_
+ookup_m
+
+": 2}'
 ```
+[Sp
+cB
 
-[SpecBench dataset](https://github.com/hemingkx/Spec-Bench)
+ch datas
+t](https://g
+thub.com/h
+m
 
-Run all categories:
+gkx/Sp
+c-B
 
+ch)
+Ru
+ a
+ cat
+gor
+
+s:
 ``` bash
-# Download the dataset using:
-# wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl
+# Do
 
-vllm bench serve \
-    --model meta-llama/Meta-Llama-3-8B-Instruct \
-    --dataset-name spec_bench \
-    --dataset-path "<YOUR_DOWNLOADED_PATH>/data/spec_bench/question.jsonl" \
-    --num-prompts -1
+
+oad th
+ datas
+t us
+
+g:
+# 
+g
+t https://ra
+.g
+thubus
+rco
+t
+
+t.com/h
+m
+
+gkx/Sp
+c-B
+
+ch/r
+fs/h
+ads/ma
+
+/data/sp
+c_b
+
+ch/qu
+st
+o
+.jso
+
+
+v
+m b
+
+ch s
+rv
+ \
+    --mod
+
+ m
+ta-
+ama/M
+ta-L
+ama-3-8B-I
+struct \
+    --datas
+t-
+am
+ sp
+c_b
+
+ch \
+    --datas
+t-path "
+YOUR_DOWNLOADED_PATH
+/data/sp
+c_b
+
+ch/qu
+st
+o
+.jso
+
+" \
+    --
+um-prompts -1
 ```
+Ava
 
-Available categories include `[writing, roleplay, reasoning, math, coding, extraction, stem, humanities, translation, summarization, qa, math_reasoning, rag]`.
+ab
 
-Run only a specific category like "summarization":
+ cat
+gor
 
+s 
+
+c
+ud
+ `[
+r
+t
+
+g, ro
+
+p
+ay, r
+aso
+
+
+g, math, cod
+
+g, 
+xtract
+o
+, st
+m, huma
+
+t
+
+s, tra
+s
+at
+o
+, summar
+zat
+o
+, qa, math_r
+aso
+
+
+g, rag]`.
+Ru
+ o
+
+y a sp
+c
+f
+c cat
+gory 
+
+k
+ "summar
+zat
+o
+":
 ``` bash
-vllm bench serve \
-    --model meta-llama/Meta-Llama-3-8B-Instruct \
-    --dataset-name spec_bench \
-    --dataset-path "<YOUR_DOWNLOADED_PATH>/data/spec_bench/question.jsonl" \
-    --num-prompts -1
-    --spec-bench-category "summarization"
+v
+m b
+
+ch s
+rv
+ \
+    --mod
+
+ m
+ta-
+ama/M
+ta-L
+ama-3-8B-I
+struct \
+    --datas
+t-
+am
+ sp
+c_b
+
+ch \
+    --datas
+t-path "
+YOUR_DOWNLOADED_PATH
+/data/sp
+c_b
+
+ch/qu
+st
+o
+.jso
+
+" \
+    --
+um-prompts -1
+    --sp
+c-b
+
+ch-cat
+gory "summar
+zat
+o
+"
 ```
+#### Oth
+r Hugg
 
-#### Other HuggingFaceDataset Examples
+gFac
+Datas
+t Examp
 
+s
 ```bash
-vllm serve Qwen/Qwen2-VL-7B-Instruct
+v
+m s
+rv
+ Q
+
+
+/Q
+
+
+2-VL-7B-I
+struct
 ```
+`
+mms-
+ab/LLaVA-O
 
-`lmms-lab/LLaVA-OneVision-Data`:
-
+V
+s
+o
+-Data`:
 ```bash
-vllm bench serve \
-  --backend openai-chat \
-  --model Qwen/Qwen2-VL-7B-Instruct \
-  --endpoint /v1/chat/completions \
-  --dataset-name hf \
-  --dataset-path lmms-lab/LLaVA-OneVision-Data \
-  --hf-split train \
-  --hf-subset "chart2text(cauldron)" \
-  --num-prompts 10
+v
+m b
+
+ch s
+rv
+ \
+  --back
+
+d op
+
+a
+-chat \
+  --mod
+
+ Q
+
+
+/Q
+
+
+2-VL-7B-I
+struct \
+  --
+
+dpo
+
+t /v1/chat/comp
+
+t
+o
+s \
+  --datas
+t-
+am
+ hf \
+  --datas
+t-path 
+mms-
+ab/LLaVA-O
+
+V
+s
+o
+-Data \
+  --hf-sp
+
+t tra
+
+ \
+  --hf-subs
+t "chart2t
+xt(cau
+dro
+)" \
+  --
+um-prompts 10
 ```
+`A
+a
+a/Shar
+GPT_V
+cu
+a_u
+f
 
-`Aeala/ShareGPT_Vicuna_unfiltered`:
-
+t
+r
+d`:
 ```bash
-vllm bench serve \
-  --backend openai-chat \
-  --model Qwen/Qwen2-VL-7B-Instruct \
-  --endpoint /v1/chat/completions \
-  --dataset-name hf \
-  --dataset-path Aeala/ShareGPT_Vicuna_unfiltered \
-  --hf-split train \
-  --num-prompts 10
+v
+m b
+
+ch s
+rv
+ \
+  --back
+
+d op
+
+a
+-chat \
+  --mod
+
+ Q
+
+
+/Q
+
+
+2-VL-7B-I
+struct \
+  --
+
+dpo
+
+t /v1/chat/comp
+
+t
+o
+s \
+  --datas
+t-
+am
+ hf \
+  --datas
+t-path A
+a
+a/Shar
+GPT_V
+cu
+a_u
+f
+
+t
+r
+d \
+  --hf-sp
+
+t tra
+
+ \
+  --
+um-prompts 10
 ```
+`AI-MO/a
+mo-va
 
-`AI-MO/aimo-validation-aime`:
-
+dat
+o
+-a
+m
+`:
 ``` bash
-vllm bench serve \
-    --model Qwen/QwQ-32B \
-    --dataset-name hf \
-    --dataset-path AI-MO/aimo-validation-aime \
-    --num-prompts 10 \
-    --seed 42
+v
+m b
+
+ch s
+rv
+ \
+    --mod
+
+ Q
+
+
+/Q
+Q-32B \
+    --datas
+t-
+am
+ hf \
+    --datas
+t-path AI-MO/a
+mo-va
+
+dat
+o
+-a
+m
+ \
+    --
+um-prompts 10 \
+    --s
+d 42
 ```
+`ph
 
-`philschmid/mt-bench`:
+schm
+d/mt-b
 
+ch`:
 ``` bash
-vllm bench serve \
-    --model Qwen/QwQ-32B \
-    --dataset-name hf \
-    --dataset-path philschmid/mt-bench \
-    --num-prompts 80
+v
+m b
+
+ch s
+rv
+ \
+    --mod
+
+ Q
+
+
+/Q
+Q-32B \
+    --datas
+t-
+am
+ hf \
+    --datas
+t-path ph
+
+schm
+d/mt-b
+
+ch \
+    --
+um-prompts 80
 ```
-
-`vdaita/edit_5k_char` or `vdaita/edit_10k_char`:
-
+`vda
+ta/
+d
+t_5k_char` or `vda
+ta/
+d
+t_10k_char`:
 ``` bash
-vllm bench serve \
-    --model Qwen/QwQ-32B \
-    --dataset-name hf \
-    --dataset-path vdaita/edit_5k_char \
-    --num-prompts 90 \
-    --blazedit-min-distance 0.01 \
-    --blazedit-max-distance 0.99
+v
+m b
+
+ch s
+rv
+ \
+    --mod
+
+ Q
+
+
+/Q
+Q-32B \
+    --datas
+t-
+am
+ hf \
+    --datas
+t-path vda
+ta/
+d
+t_5k_char \
+    --
+um-prompts 90 \
+    --b
+az
+d
+t-m
+
+-d
+sta
+c
+ 0.01 \
+    --b
+az
+d
+t-max-d
+sta
+c
+ 0.99
 ```
+`op
 
-`openslr/librispeech_asr`, `facebook/voxpopuli`, `LIUM/tedlium`, `edinburghcstr/ami`, `speechcolab/gigaspeech`, `kensho/spgispeech`
+s
+r/
 
+br
+sp
+ch_asr`, `fac
+book/voxpopu
+
+`, `LIUM/t
+d
+
+um`, `
+d
+
+burghcstr/am
+`, `sp
+chco
+ab/g
+gasp
+ch`, `k
+
+sho/spg
+sp
+ch`
 ```bash
-vllm bench serve \
-    --model openai/whisper-large-v3-turbo \
-    --backend openai-audio \
-    --dataset-name hf \
-    --dataset-path facebook/voxpopuli --hf-subset en --hf-split test --no-stream --trust-remote-code \
-    --num-prompts 99999999 \
-    --no-oversample \
-    --endpoint /v1/audio/transcriptions \
-    --ready-check-timeout-sec 600 \
-    --save-result \
-    --max-concurrency 512
+v
+m b
+
+ch s
+rv
+ \
+    --mod
+
+ op
+
+a
+/
+h
+sp
+r-
+arg
+-v3-turbo \
+    --back
+
+d op
+
+a
+-aud
+o \
+    --datas
+t-
+am
+ hf \
+    --datas
+t-path fac
+book/voxpopu
+
+ --hf-subs
+t 
+
+ --hf-sp
+
+t t
+st --
+o-str
+am --trust-r
+mot
+-cod
+ \
+    --
+um-prompts 99999999 \
+    --
+o-ov
+rsamp
+
+ \
+    --
+
+dpo
+
+t /v1/aud
+o/tra
+scr
+pt
+o
+s \
+    --r
+ady-ch
+ck-t
+m
+out-s
+c 600 \
+    --sav
+-r
+su
+t \
+    --max-co
+curr
+
+cy 512
 ```
+#### Ru
 
-#### Running With Sampling Parameters
 
-When using OpenAI-compatible backends such as `vllm`, optional sampling
-parameters can be specified. Example client command:
+g W
+th Samp
 
+
+g Param
+t
+rs
+Wh
+
+ us
+
+g Op
+
+AI-compat
+b
+
+ back
+
+ds such as `v
+m`, opt
+o
+a
+ samp
+
+
+g
+param
+t
+rs ca
+ b
+ sp
+c
+f
+
+d. Examp
+
+ c
+
+
+
+t comma
+d:
 ```bash
-vllm bench serve \
-  --backend vllm \
-  --model NousResearch/Hermes-3-Llama-3.1-8B \
-  --endpoint /v1/completions \
-  --dataset-name sharegpt \
-  --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
+v
+m b
+
+ch s
+rv
+ \
+  --back
+
+d v
+m \
+  --mod
+
+ NousR
+s
+arch/H
+rm
+s-3-L
+ama-3.1-8B \
+  --
+
+dpo
+
+t /v1/comp
+
+t
+o
+s \
+  --datas
+t-
+am
+ shar
+gpt \
+  --datas
+t-path 
+your data path
+/Shar
+GPT_V3_u
+f
+
+t
+r
+d_c
+
+a
+
+d_sp
+
+t.jso
+ \
   --top-k 10 \
   --top-p 0.9 \
-  --temperature 0.5 \
-  --num-prompts 10
+  --t
+mp
+ratur
+ 0.5 \
+  --
+um-prompts 10
 ```
+#### Ru
 
-#### Running With Ramp-Up Request Rate
 
-The benchmark tool also supports ramping up the request rate over the
-duration of the benchmark run. This can be useful for stress testing the
-server or finding the maximum throughput that it can handle, given some latency budget.
+g W
+th Ramp-Up R
+qu
+st Rat
 
-Two ramp-up strategies are supported:
+Th
+ b
 
-- `linear`: Increases the request rate linearly from a start value to an end value.
-- `exponential`: Increases the request rate exponentially.
+chmark too
+ a
+so supports ramp
 
-The following arguments can be used to control the ramp-up:
+g up th
+ r
+qu
+st rat
+ ov
+r th
 
-- `--ramp-up-strategy`: The ramp-up strategy to use (`linear` or `exponential`).
-- `--ramp-up-start-rps`: The request rate at the beginning of the benchmark.
-- `--ramp-up-end-rps`: The request rate at the end of the benchmark.
+durat
+o
+ of th
+ b
 
-#### Load Pattern Configuration
+chmark ru
+. Th
+s ca
+ b
+ us
+fu
+ for str
+ss t
+st
 
-vLLM's benchmark serving script provides sophisticated load pattern simulation capabilities through three key parameters that control request generation and concurrency behavior:
+g th
 
-##### Load Pattern Control Parameters
+s
+rv
+r or f
 
-- `--request-rate`: Controls the target request generation rate (requests per second). Set to `inf` for maximum throughput testing or finite values for controlled load simulation.
-- `--burstiness`: Controls traffic variability using a Gamma distribution (range: > 0). Lower values create bursty traffic, higher values create uniform traffic.
-- `--max-concurrency`: Limits concurrent outstanding requests. If this argument is not provided, concurrency is unlimited. Set a value to simulate backpressure.
+d
 
-These parameters work together to create realistic load patterns with carefully chosen defaults. The `--request-rate` parameter defaults to `inf` (infinite), which sends all requests immediately for maximum throughput testing. When set to finite values, it uses either a Poisson process (default `--burstiness=1.0`) or Gamma distribution for realistic request timing. The `--burstiness` parameter only takes effect when `--request-rate` is not infinite - a value of 1.0 creates natural Poisson traffic, while lower values (0.1-0.5) create bursty patterns and higher values (2.0-5.0) create uniform spacing. The `--max-concurrency` parameter defaults to `None` (unlimited) but can be set to simulate real-world constraints where a load balancer or API gateway limits concurrent connections. When combined, these parameters allow you to simulate everything from unrestricted stress testing (`--request-rate=inf`) to production-like scenarios with realistic arrival patterns and resource constraints.
+g th
+ max
+mum throughput that 
+t ca
+ ha
+d
 
-The `--burstiness` parameter mathematically controls request arrival patterns using a Gamma distribution where:
+, g
+v
 
-- Shape parameter: `burstiness` value
-- Coefficient of Variation (CV): $\frac{1}{\sqrt{burstiness}}$
-- Traffic characteristics:
-    - `burstiness = 0.1`: Highly bursty traffic (CV ≈ 3.16) - stress testing
-    - `burstiness = 1.0`: Natural Poisson traffic (CV = 1.0) - realistic simulation  
-    - `burstiness = 5.0`: Uniform traffic (CV ≈ 0.45) - controlled load testing
+ som
+ 
+at
 
-![Load Pattern Examples](../assets/contributing/load-pattern-examples.png)
+cy budg
+t.
+T
+o ramp-up strat
+g
 
-*Figure: Load pattern examples for each use case. Top row: Request arrival timelines showing cumulative requests over time. Bottom row: Inter-arrival time distributions showing traffic variability patterns. Each column represents a different use case with its specific parameter settings and resulting traffic characteristics.*
+s ar
+ support
+d:
+    - `
 
-Load Pattern Recommendations by Use Case:
 
-| Use Case           | Burstiness   | Request Rate    | Max Concurrency | Description                                               |
+
+ar`: I
+cr
+as
+s th
+ r
+qu
+st rat
+ 
+
+
+
+ar
+y from a start va
+u
+ to a
+ 
+
+d va
+u
+.
+    - `
+xpo
+
+
+t
+a
+`: I
+cr
+as
+s th
+ r
+qu
+st rat
+ 
+xpo
+
+
+t
+a
+y.
+Th
+ fo
+o
+
+
+g argum
+
+ts ca
+ b
+ us
+d to co
+tro
+ th
+ ramp-up:
+    - `--ramp-up-strat
+gy`: Th
+ ramp-up strat
+gy to us
+ (`
+
+
+
+ar` or `
+xpo
+
+
+t
+a
+`).
+    - `--ramp-up-start-rps`: Th
+ r
+qu
+st rat
+ at th
+ b
+g
+
+
+
+g of th
+ b
+
+chmark.
+    - `--ramp-up-
+
+d-rps`: Th
+ r
+qu
+st rat
+ at th
+ 
+
+d of th
+ b
+
+chmark.
+#### Load Patt
+r
+ Co
+f
+gurat
+o
+
+vLLM's b
+
+chmark s
+rv
+
+g scr
+pt prov
+d
+s soph
+st
+cat
+d 
+oad patt
+r
+ s
+mu
+at
+o
+ capab
+
+
+t
+
+s through thr
+ k
+y param
+t
+rs that co
+tro
+ r
+qu
+st g
+
+
+rat
+o
+ a
+d co
+curr
+
+cy b
+hav
+or:
+##### Load Patt
+r
+ Co
+tro
+ Param
+t
+rs
+    - `--r
+qu
+st-rat
+`: Co
+tro
+s th
+ targ
+t r
+qu
+st g
+
+
+rat
+o
+ rat
+ (r
+qu
+sts p
+r s
+co
+d). S
+t to `
+
+f` for max
+mum throughput t
+st
+
+g or f
+
+
+t
+ va
+u
+s for co
+tro
+
+d 
+oad s
+mu
+at
+o
+.
+    - `--burst
+
+
+ss`: Co
+tro
+s traff
+c var
+ab
+
+
+ty us
+
+g a Gamma d
+str
+but
+o
+ (ra
+g
+: 
+ 0). Lo
+
+r va
+u
+s cr
+at
+ bursty traff
+c, h
+gh
+r va
+u
+s cr
+at
+ u
+
+form traff
+c.
+    - `--max-co
+curr
+
+cy`: L
+m
+ts co
+curr
+
+t outsta
+d
+
+g r
+qu
+sts. If th
+s argum
+
+t 
+s 
+ot prov
+d
+d, co
+curr
+
+cy 
+s u
+
+
+m
+t
+d. S
+t a va
+u
+ to s
+mu
+at
+ backpr
+ssur
+.
+Th
+s
+ param
+t
+rs 
+ork tog
+th
+r to cr
+at
+ r
+a
+
+st
+c 
+oad patt
+r
+s 
+
+th car
+fu
+y chos
+
+ d
+fau
+ts. Th
+ `--r
+qu
+st-rat
+` param
+t
+r d
+fau
+ts to `
+
+f` (
+
+f
+
+
+t
+), 
+h
+ch s
+
+ds a
+ r
+qu
+sts 
+mm
+d
+at
+
+y for max
+mum throughput t
+st
+
+g. Wh
+
+ s
+t to f
+
+
+t
+ va
+u
+s, 
+t us
+s 
+
+th
+r a Po
+sso
+ proc
+ss (d
+fau
+t `--burst
+
+
+ss=1.0`) or Gamma d
+str
+but
+o
+ for r
+a
+
+st
+c r
+qu
+st t
+m
+
+g. Th
+ `--burst
+
+
+ss` param
+t
+r o
+
+y tak
+s 
+ff
+ct 
+h
+
+ `--r
+qu
+st-rat
+` 
+s 
+ot 
+
+f
+
+
+t
+ - a va
+u
+ of 1.0 cr
+at
+s 
+atura
+ Po
+sso
+ traff
+c, 
+h
+
+
+ 
+o
+
+r va
+u
+s (0.1-0.5) cr
+at
+ bursty patt
+r
+s a
+d h
+gh
+r va
+u
+s (2.0-5.0) cr
+at
+ u
+
+form spac
+
+g. Th
+ `--max-co
+curr
+
+cy` param
+t
+r d
+fau
+ts to `No
+
+` (u
+
+
+m
+t
+d) but ca
+ b
+ s
+t to s
+mu
+at
+ r
+a
+-
+or
+d co
+stra
+
+ts 
+h
+r
+ a 
+oad ba
+a
+c
+r or API gat
+
+ay 
+
+m
+ts co
+curr
+
+t co
+
+ct
+o
+s. Wh
+
+ comb
+
+
+d, th
+s
+ param
+t
+rs a
+o
+ you to s
+mu
+at
+ 
+v
+ryth
+
+g from u
+r
+str
+ct
+d str
+ss t
+st
+
+g (`--r
+qu
+st-rat
+=
+
+f`) to product
+o
+-
+
+k
+ sc
+
+ar
+os 
+
+th r
+a
+
+st
+c arr
+va
+ patt
+r
+s a
+d r
+sourc
+ co
+stra
+
+ts.
+Th
+ `--burst
+
+
+ss` param
+t
+r math
+mat
+ca
+y co
+tro
+s r
+qu
+st arr
+va
+ patt
+r
+s us
+
+g a Gamma d
+str
+but
+o
+ 
+h
+r
+:
+    - Shap
+ param
+t
+r: `burst
+
+
+ss` va
+u
+
+    - Co
+ff
+c
+
+
+t of Var
+at
+o
+ (CV): $\frac{1}{\sqrt{burst
+
+
+ss}}$
+    - Traff
+c charact
+r
+st
+cs:
+    - `burst
+
+
+ss = 0.1`: H
+gh
+y bursty traff
+c (CV ≈ 3.16) - str
+ss t
+st
+
+g
+    - `burst
+
+
+ss = 1.0`: Natura
+ Po
+sso
+ traff
+c (CV = 1.0) - r
+a
+
+st
+c s
+mu
+at
+o
+
+    - `burst
+
+
+ss = 5.0`: U
+
+form traff
+c (CV ≈ 0.45) - co
+tro
+
+d 
+oad t
+st
+
+g
+![Load Patt
+r
+ Examp
+
+s](../ass
+ts/co
+tr
+but
+
+g/
+oad-patt
+r
+-
+xamp
+
+s.p
+g)
+*F
+gur
+: Load patt
+r
+ 
+xamp
+
+s for 
+ach us
+ cas
+. Top ro
+: R
+qu
+st arr
+va
+ t
+m
+
+
+
+
+s sho
+
+
+g cumu
+at
+v
+ r
+qu
+sts ov
+r t
+m
+. Bottom ro
+: I
+t
+r-arr
+va
+ t
+m
+ d
+str
+but
+o
+s sho
+
+
+g traff
+c var
+ab
+
+
+ty patt
+r
+s. Each co
+um
+ r
+pr
+s
+
+ts a d
+ff
+r
+
+t us
+ cas
+ 
+
+th 
+ts sp
+c
+f
+c param
+t
+r s
+tt
+
+gs a
+d r
+su
+t
+
+g traff
+c charact
+r
+st
+cs.*
+Load Patt
+r
+ R
+comm
+
+dat
+o
+s by Us
+ Cas
+:
+| Us
+ Cas
+           | Burst
+
+
+ss   | R
+qu
+st Rat
+    | Max Co
+curr
+
+cy | D
+scr
+pt
+o
+                                               |
 | ---                | ---          | ---             | ---             | ---                                                       |
-| Maximum Throughput | N/A          | Infinite        | Limited         | **Most common**: Simulates load balancer/gateway limits with unlimited user demand |
-| Realistic Testing  | 1.0          | Moderate (5-20) | Infinite        | Natural Poisson traffic patterns for baseline performance |
-| Stress Testing     | 0.1-0.5      | High (20-100)   | Infinite        | Challenging burst patterns to test resilience             |
-| Latency Profiling  | 2.0-5.0      | Low (1-10)      | Infinite        | Uniform load for consistent timing analysis               |
-| Capacity Planning  | 1.0          | Variable        | Limited         | Test resource limits with realistic constraints           |
-| SLA Validation     | 1.0          | Target rate     | SLA limit       | Production-like constraints for compliance testing        |
+| Max
+mum Throughput | N/A          | I
+f
 
-These load patterns help evaluate different aspects of your vLLM deployment, from basic performance characteristics to resilience under challenging traffic conditions.
 
-The **Maximum Throughput** pattern (`--request-rate=inf --max-concurrency=<limit>`) is the most commonly used configuration for production benchmarking. This simulates real-world deployment architectures where:
+t
+        | L
+m
+t
+d         | **Most commo
+**: S
+mu
+at
+s 
+oad ba
+a
+c
+r/gat
 
-- Users send requests as fast as they can (infinite rate)
-- A load balancer or API gateway controls the maximum concurrent connections
-- The system operates at its concurrency limit, revealing true throughput capacity
-- `--burstiness` has no effect since request timing is not controlled when rate is infinite
+ay 
 
-This pattern helps determine optimal concurrency settings for your production load balancer configuration.
+m
+ts 
 
-To effectively configure load patterns, especially for **Capacity Planning** and **SLA Validation** use cases, you need to understand your system's resource limits. During startup, vLLM reports KV cache configuration that directly impacts your load testing parameters:
+th u
 
-```text
-GPU KV cache size: 15,728,640 tokens
-Maximum concurrency for 8,192 tokens per request: 1920
+
+m
+t
+d us
+r d
+ma
+d |
+| R
+a
+
+st
+c T
+st
+
+g  | 1.0          | Mod
+rat
+ (5-20) | I
+f
+
+
+t
+        | Natura
+ Po
+sso
+ traff
+c patt
+r
+s for bas
+
+
+
+
+ p
+rforma
+c
+ |
+| Str
+ss T
+st
+
+g     | 0.1-0.5      | H
+gh (20-100)   | I
+f
+
+
+t
+        | Cha
+
+
+g
+
+g burst patt
+r
+s to t
+st r
+s
+
+
+
+
+c
+             |
+| Lat
+
+cy Prof
+
+
+
+g  | 2.0-5.0      | Lo
+ (1-10)      | I
+f
+
+
+t
+        | U
+
+form 
+oad for co
+s
+st
+
+t t
+m
+
+g a
+a
+ys
+s               |
+| Capac
+ty P
+a
+
+
+g  | 1.0          | Var
+ab
+
+        | L
+m
+t
+d         | T
+st r
+sourc
+ 
+
+m
+ts 
+
+th r
+a
+
+st
+c co
+stra
+
+ts           |
+| SLA Va
+
+dat
+o
+     | 1.0          | Targ
+t rat
+     | SLA 
+
+m
+t       | Product
+o
+-
+
+k
+ co
+stra
+
+ts for comp
+
+a
+c
+ t
+st
+
+g        |
+Th
+s
+ 
+oad patt
+r
+s h
+
+p 
+va
+uat
+ d
+ff
+r
+
+t asp
+cts of your vLLM d
+p
+oym
+
+t, from bas
+c p
+rforma
+c
+ charact
+r
+st
+cs to r
+s
+
+
+
+
+c
+ u
+d
+r cha
+
+
+g
+
+g traff
+c co
+d
+t
+o
+s.
+Th
+ **Max
+mum Throughput** patt
+r
+ (`--r
+qu
+st-rat
+=
+
+f --max-co
+curr
+
+cy=
+
+
+m
+t
+`) 
+s th
+ most commo
+
+y us
+d co
+f
+gurat
+o
+ for product
+o
+ b
+
+chmark
+
+g. Th
+s s
+mu
+at
+s r
+a
+-
+or
+d d
+p
+oym
+
+t arch
+t
+ctur
+s 
+h
+r
+:
+    - Us
+rs s
+
+d r
+qu
+sts as fast as th
+y ca
+ (
+
+f
+
+
+t
+ rat
+)
+    - A 
+oad ba
+a
+c
+r or API gat
+
+ay co
+tro
+s th
+ max
+mum co
+curr
+
+t co
+
+ct
+o
+s
+    - Th
+ syst
+m op
+rat
+s at 
+ts co
+curr
+
+cy 
+
+m
+t, r
+v
+a
+
+
+g tru
+ throughput capac
+ty
+    - `--burst
+
+
+ss` has 
+o 
+ff
+ct s
+
+c
+ r
+qu
+st t
+m
+
+g 
+s 
+ot co
+tro
+
+d 
+h
+
+ rat
+ 
+s 
+
+f
+
+
+t
+
+Th
+s patt
+r
+ h
+
+ps d
+t
+rm
+
+
+ opt
+ma
+ co
+curr
+
+cy s
+tt
+
+gs for your product
+o
+ 
+oad ba
+a
+c
+r co
+f
+gurat
+o
+.
+To 
+ff
+ct
+v
+
+y co
+f
+gur
+ 
+oad patt
+r
+s, 
+sp
+c
+a
+y for **Capac
+ty P
+a
+
+
+g** a
+d **SLA Va
+
+dat
+o
+** us
+ cas
+s, you 
+
+d to u
+d
+rsta
+d your syst
+m's r
+sourc
+ 
+
+m
+ts. Dur
+
+g startup, vLLM r
+ports KV cach
+ co
+f
+gurat
+o
+ that d
+r
+ct
+y 
+mpacts your 
+oad t
+st
+
+g param
+t
+rs:
+```t
+xt
+GPU KV cach
+ s
+z
+: 15,728,640 tok
+
+s
+Max
+mum co
+curr
+
+cy for 8,192 tok
+
+s p
+r r
+qu
+st: 1920
 ```
+Wh
+r
+:
+    - GPU KV cach
+ s
+z
+: Tota
+ tok
 
-Where:
+s that ca
+ b
+ cach
+d across a
+ co
+curr
 
-- GPU KV cache size: Total tokens that can be cached across all concurrent requests
-- Maximum concurrency: Theoretical maximum concurrent requests for the given `max_model_len`
-- Calculation: `max_concurrency = kv_cache_size / max_model_len`
+t r
+qu
+sts
+    - Max
+mum co
+curr
 
-Using KV cache metrics for load pattern configuration:
+cy: Th
+or
+t
+ca
+ max
+mum co
+curr
 
-- For Capacity Planning: Set `--max-concurrency` to 80-90% of the reported maximum to test realistic resource constraints
-- For SLA Validation: Use the reported maximum as your SLA limit to ensure compliance testing matches production capacity
-- For Realistic Testing: Monitor memory usage when approaching theoretical limits to understand sustainable request rates
-- Request rate guidance: Use the KV cache size to estimate sustainable request rates for your specific workload and sequence lengths
+t r
+qu
+sts for th
+ g
+v
 
-</details>
+ `max_mod
 
-### 📈 Offline Throughput Benchmark
+_
 
-<details class="admonition abstract" markdown="1">
-<summary>Show more</summary>
+
+`
+    - Ca
+cu
+at
+o
+: `max_co
+curr
+
+cy = kv_cach
+_s
+z
+ / max_mod
+
+_
+
+
+`
+Us
+
+g KV cach
+ m
+tr
+cs for 
+oad patt
+r
+ co
+f
+gurat
+o
+:
+    - For Capac
+ty P
+a
+
+
+g: S
+t `--max-co
+curr
+
+cy` to 80-90% of th
+ r
+port
+d max
+mum to t
+st r
+a
+
+st
+c r
+sourc
+ co
+stra
+
+ts
+    - For SLA Va
+
+dat
+o
+: Us
+ th
+ r
+port
+d max
+mum as your SLA 
+
+m
+t to 
+
+sur
+ comp
+
+a
+c
+ t
+st
+
+g match
+s product
+o
+ capac
+ty
+    - For R
+a
+
+st
+c T
+st
+
+g: Mo
+
+tor m
+mory usag
+ 
+h
+
+ approach
+
+g th
+or
+t
+ca
+ 
+
+m
+ts to u
+d
+rsta
+d susta
+
+ab
+
+ r
+qu
+st rat
+s
+    - R
+qu
+st rat
+ gu
+da
+c
+: Us
+ th
+ KV cach
+ s
+z
+ to 
+st
+mat
+ susta
+
+ab
+
+ r
+qu
+st rat
+s for your sp
+c
+f
+c 
+ork
+oad a
+d s
+qu
+
+c
+ 
+
+
+gths
+/d
+ta
+
+s
+
+### 📈 Off
+
+
+
+ Throughput B
+
+chmark
+d
+ta
+
+s c
+ass="admo
+
+t
+o
+ abstract" markdo
+
+="1"
+
+summary
+Sho
+ mor
+
+/summary
 
 ```bash
-vllm bench throughput \
-  --model NousResearch/Hermes-3-Llama-3.1-8B \
-  --dataset-name sonnet \
-  --dataset-path vllm/benchmarks/sonnet.txt \
-  --num-prompts 10
+v
+m b
+
+ch throughput \
+  --mod
+
+ NousR
+s
+arch/H
+rm
+s-3-L
+ama-3.1-8B \
+  --datas
+t-
+am
+ so
+
+t \
+  --datas
+t-path v
+m/b
+
+chmarks/so
+
+t.txt \
+  --
+um-prompts 10
 ```
+If succ
+ssfu
+, you 
 
-If successful, you will see the following output
 
-```text
-Throughput: 7.15 requests/s, 4656.00 total tokens/s, 1072.15 output tokens/s
-Total num prompt tokens:  5014
-Total num output tokens:  1500
+ s
+ th
+ fo
+o
+
+
+g output
+```t
+xt
+Throughput: 7.15 r
+qu
+sts/s, 4656.00 tota
+ tok
+
+s/s, 1072.15 output tok
+
+s/s
+Tota
+ 
+um prompt tok
+
+s:  5014
+Tota
+ 
+um output tok
+
+s:  1500
 ```
+#### V
+s
+o
+Ar
 
-#### VisionArena Benchmark for Vision Language Models
+a B
 
+chmark for V
+s
+o
+ La
+guag
+ Mod
+
+s
 ```bash
-vllm bench throughput \
-  --model Qwen/Qwen2-VL-7B-Instruct \
-  --backend vllm-chat \
-  --dataset-name hf \
-  --dataset-path lmarena-ai/VisionArena-Chat \
-  --num-prompts 1000 \
-  --hf-split train
+v
+m b
+
+ch throughput \
+  --mod
+
+ Q
+
+
+/Q
+
+
+2-VL-7B-I
+struct \
+  --back
+
+d v
+m-chat \
+  --datas
+t-
+am
+ hf \
+  --datas
+t-path 
+mar
+
+a-a
+/V
+s
+o
+Ar
+
+a-Chat \
+  --
+um-prompts 1000 \
+  --hf-sp
+
+t tra
+
+
 ```
+Th
+ `
+um prompt tok
 
-The `num prompt tokens` now includes image token counts
+s` 
+o
+ 
 
-```text
-Throughput: 2.55 requests/s, 4036.92 total tokens/s, 326.90 output tokens/s
-Total num prompt tokens:  14527
-Total num output tokens:  1280
+c
+ud
+s 
+mag
+ tok
+
+ cou
+ts
+```t
+xt
+Throughput: 2.55 r
+qu
+sts/s, 4036.92 tota
+ tok
+
+s/s, 326.90 output tok
+
+s/s
+Tota
+ 
+um prompt tok
+
+s:  14527
+Tota
+ 
+um output tok
+
+s:  1280
 ```
+#### I
+structCod
+r B
 
-#### InstructCoder Benchmark with Speculative Decoding
+chmark 
 
+th Sp
+cu
+at
+v
+ D
+cod
+
+g
 ``` bash
-VLLM_WORKER_MULTIPROC_METHOD=spawn \
-vllm bench throughput \
-    --dataset-name=hf \
-    --dataset-path=likaixin/InstructCoder \
-    --model=meta-llama/Meta-Llama-3-8B-Instruct \
-    --input-len=1000 \
-    --output-len=100 \
-    --num-prompts=2048 \
-    --async-engine \
-    --speculative-config $'{"method": "ngram",
-    "num_speculative_tokens": 5, "prompt_lookup_max": 5,
-    "prompt_lookup_min": 2}'
+VLLM_WORKER_MULTIPROC_METHOD=spa
+
+ \
+v
+m b
+
+ch throughput \
+    --datas
+t-
+am
+=hf \
+    --datas
+t-path=
+
+ka
+x
+
+/I
+structCod
+r \
+    --mod
+
+=m
+ta-
+ama/M
+ta-L
+ama-3-8B-I
+struct \
+    --
+
+put-
+
+
+=1000 \
+    --output-
+
+
+=100 \
+    --
+um-prompts=2048 \
+    --asy
+c-
+
+g
+
+
+ \
+    --sp
+cu
+at
+v
+-co
+f
+g $'{"m
+thod": "
+gram",
+    "
+um_sp
+cu
+at
+v
+_tok
+
+s": 5, "prompt_
+ookup_max": 5,
+    "prompt_
+ookup_m
+
+": 2}'
 ```
+```t
+xt
+Throughput: 104.77 r
+qu
+sts/s, 23836.22 tota
+ tok
 
-```text
-Throughput: 104.77 requests/s, 23836.22 total tokens/s, 10477.10 output tokens/s
-Total num prompt tokens:  261136
-Total num output tokens:  204800
+s/s, 10477.10 output tok
+
+s/s
+Tota
+ 
+um prompt tok
+
+s:  261136
+Tota
+ 
+um output tok
+
+s:  204800
 ```
+#### Oth
+r Hugg
 
-#### Other HuggingFaceDataset Examples
+gFac
+Datas
+t Examp
 
-`lmms-lab/LLaVA-OneVision-Data`:
+s
+`
+mms-
+ab/LLaVA-O
 
+V
+s
+o
+-Data`:
 ```bash
-vllm bench throughput \
-  --model Qwen/Qwen2-VL-7B-Instruct \
-  --backend vllm-chat \
-  --dataset-name hf \
-  --dataset-path lmms-lab/LLaVA-OneVision-Data \
-  --hf-split train \
-  --hf-subset "chart2text(cauldron)" \
-  --num-prompts 10
+v
+m b
+
+ch throughput \
+  --mod
+
+ Q
+
+
+/Q
+
+
+2-VL-7B-I
+struct \
+  --back
+
+d v
+m-chat \
+  --datas
+t-
+am
+ hf \
+  --datas
+t-path 
+mms-
+ab/LLaVA-O
+
+V
+s
+o
+-Data \
+  --hf-sp
+
+t tra
+
+ \
+  --hf-subs
+t "chart2t
+xt(cau
+dro
+)" \
+  --
+um-prompts 10
 ```
+`A
+a
+a/Shar
+GPT_V
+cu
+a_u
+f
 
-`Aeala/ShareGPT_Vicuna_unfiltered`:
-
+t
+r
+d`:
 ```bash
-vllm bench throughput \
-  --model Qwen/Qwen2-VL-7B-Instruct \
-  --backend vllm-chat \
-  --dataset-name hf \
-  --dataset-path Aeala/ShareGPT_Vicuna_unfiltered \
-  --hf-split train \
-  --num-prompts 10
+v
+m b
+
+ch throughput \
+  --mod
+
+ Q
+
+
+/Q
+
+
+2-VL-7B-I
+struct \
+  --back
+
+d v
+m-chat \
+  --datas
+t-
+am
+ hf \
+  --datas
+t-path A
+a
+a/Shar
+GPT_V
+cu
+a_u
+f
+
+t
+r
+d \
+  --hf-sp
+
+t tra
+
+ \
+  --
+um-prompts 10
 ```
+`AI-MO/a
+mo-va
 
-`AI-MO/aimo-validation-aime`:
-
+dat
+o
+-a
+m
+`:
 ```bash
-vllm bench throughput \
-  --model Qwen/QwQ-32B \
-  --backend vllm \
-  --dataset-name hf \
-  --dataset-path AI-MO/aimo-validation-aime \
-  --hf-split train \
-  --num-prompts 10
+v
+m b
+
+ch throughput \
+  --mod
+
+ Q
+
+
+/Q
+Q-32B \
+  --back
+
+d v
+m \
+  --datas
+t-
+am
+ hf \
+  --datas
+t-path AI-MO/a
+mo-va
+
+dat
+o
+-a
+m
+ \
+  --hf-sp
+
+t tra
+
+ \
+  --
+um-prompts 10
 ```
+B
 
-Benchmark with LoRA adapters:
+chmark 
 
+th LoRA adapt
+rs:
 ``` bash
-# download dataset
-# wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-vllm bench throughput \
-  --model meta-llama/Llama-2-7b-hf \
-  --backend vllm \
-  --dataset_path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
-  --dataset_name sharegpt \
-  --num-prompts 10 \
-  --max-loras 2 \
-  --max-lora-rank 8 \
-  --enable-lora \
-  --lora-path yard1/llama-2-7b-sql-lora-test
+# do
+
+
+oad datas
+t
+# 
+g
+t https://hugg
+
+gfac
+.co/datas
+ts/a
+o
+8231489123/Shar
+GPT_V
+cu
+a_u
+f
+
+t
+r
+d/r
+so
+v
+/ma
+
+/Shar
+GPT_V3_u
+f
+
+t
+r
+d_c
+
+a
+
+d_sp
+
+t.jso
+
+v
+m b
+
+ch throughput \
+  --mod
+
+ m
+ta-
+ama/L
+ama-2-7b-hf \
+  --back
+
+d v
+m \
+  --datas
+t_path 
+your data path
+/Shar
+GPT_V3_u
+f
+
+t
+r
+d_c
+
+a
+
+d_sp
+
+t.jso
+ \
+  --datas
+t_
+am
+ shar
+gpt \
+  --
+um-prompts 10 \
+  --max-
+oras 2 \
+  --max-
+ora-ra
+k 8 \
+  --
+
+ab
+
+-
+ora \
+  --
+ora-path yard1/
+ama-2-7b-sq
+-
+ora-t
+st
 ```
+#### Sy
+th
+t
+c Ra
+dom Mu
+t
+moda
+ (ra
+dom-mm)
+G
 
-#### Synthetic Random Multimodal (random-mm)
 
-Generate synthetic multimodal inputs for offline throughput testing without external datasets.
-Use `--backend vllm-chat` so that image tokens are counted correctly.
+rat
+ sy
+th
+t
+c mu
+t
+moda
+ 
 
+puts for off
+
+
+
+ throughput t
+st
+
+g 
+
+thout 
+xt
+r
+a
+ datas
+ts.
+Us
+ `--back
+
+d v
+m-chat` so that 
+mag
+ tok
+
+s ar
+ cou
+t
+d corr
+ct
+y.
 ```bash
-vllm bench throughput \
-  --model Qwen/Qwen2-VL-7B-Instruct \
-  --backend vllm-chat \
-  --dataset-name random-mm \
-  --num-prompts 100 \
-  --random-input-len 300 \
-  --random-output-len 40 \
-  --random-mm-base-items-per-request 2 \
-  --random-mm-limit-mm-per-prompt '{"image": 3, "video": 0}' \
-  --random-mm-bucket-config '{(256, 256, 1): 0.7, (720, 1280, 1): 0.3}'
+v
+m b
+
+ch throughput \
+  --mod
+
+ Q
+
+
+/Q
+
+
+2-VL-7B-I
+struct \
+  --back
+
+d v
+m-chat \
+  --datas
+t-
+am
+ ra
+dom-mm \
+  --
+um-prompts 100 \
+  --ra
+dom-
+
+put-
+
+
+ 300 \
+  --ra
+dom-output-
+
+
+ 40 \
+  --ra
+dom-mm-bas
+-
+t
+ms-p
+r-r
+qu
+st 2 \
+  --ra
+dom-mm-
+
+m
+t-mm-p
+r-prompt '{"
+mag
+": 3, "v
+d
+o": 0}' \
+  --ra
+dom-mm-buck
+t-co
+f
+g '{(256, 256, 1): 0.7, (720, 1280, 1): 0.3}'
 ```
+/d
+ta
 
-</details>
+s
 
-### 🛠️ Structured Output Benchmark
+### 🛠️ Structur
+d Output B
 
-<details class="admonition abstract" markdown="1">
-<summary>Show more</summary>
+chmark
+d
+ta
 
-Benchmark the performance of structured output generation (JSON, grammar, regex).
+s c
+ass="admo
 
-#### Server Setup
+t
+o
+ abstract" markdo
 
+="1"
+
+summary
+Sho
+ mor
+
+/summary
+
+B
+
+chmark th
+ p
+rforma
+c
+ of structur
+d output g
+
+
+rat
+o
+ (JSON, grammar, r
+g
+x).
+#### S
+rv
+r S
+tup
 ```bash
-vllm serve NousResearch/Hermes-3-Llama-3.1-8B
+v
+m s
+rv
+ NousR
+s
+arch/H
+rm
+s-3-L
+ama-3.1-8B
 ```
+#### JSON Sch
+ma B
 
-#### JSON Schema Benchmark
-
+chmark
 ```bash
-python3 benchmarks/benchmark_serving_structured_output.py \
-  --backend vllm \
-  --model NousResearch/Hermes-3-Llama-3.1-8B \
-  --dataset json \
-  --structured-output-ratio 1.0 \
-  --request-rate 10 \
-  --num-prompts 1000
+pytho
+3 b
+
+chmarks/b
+
+chmark_s
+rv
+
+g_structur
+d_output.py \
+  --back
+
+d v
+m \
+  --mod
+
+ NousR
+s
+arch/H
+rm
+s-3-L
+ama-3.1-8B \
+  --datas
+t jso
+ \
+  --structur
+d-output-rat
+o 1.0 \
+  --r
+qu
+st-rat
+ 10 \
+  --
+um-prompts 1000
 ```
+#### Grammar-bas
+d G
 
-#### Grammar-based Generation Benchmark
 
+rat
+o
+ B
+
+chmark
 ```bash
-python3 benchmarks/benchmark_serving_structured_output.py \
-  --backend vllm \
-  --model NousResearch/Hermes-3-Llama-3.1-8B \
-  --dataset grammar \
-  --structure-type grammar \
-  --request-rate 10 \
-  --num-prompts 1000
+pytho
+3 b
+
+chmarks/b
+
+chmark_s
+rv
+
+g_structur
+d_output.py \
+  --back
+
+d v
+m \
+  --mod
+
+ NousR
+s
+arch/H
+rm
+s-3-L
+ama-3.1-8B \
+  --datas
+t grammar \
+  --structur
+-typ
+ grammar \
+  --r
+qu
+st-rat
+ 10 \
+  --
+um-prompts 1000
 ```
+#### R
+g
+x-bas
+d G
 
-#### Regex-based Generation Benchmark
 
+rat
+o
+ B
+
+chmark
 ```bash
-python3 benchmarks/benchmark_serving_structured_output.py \
-  --backend vllm \
-  --model NousResearch/Hermes-3-Llama-3.1-8B \
-  --dataset regex \
-  --request-rate 10 \
-  --num-prompts 1000
+pytho
+3 b
+
+chmarks/b
+
+chmark_s
+rv
+
+g_structur
+d_output.py \
+  --back
+
+d v
+m \
+  --mod
+
+ NousR
+s
+arch/H
+rm
+s-3-L
+ama-3.1-8B \
+  --datas
+t r
+g
+x \
+  --r
+qu
+st-rat
+ 10 \
+  --
+um-prompts 1000
 ```
+#### Cho
+c
+-bas
+d G
 
-#### Choice-based Generation Benchmark
 
+rat
+o
+ B
+
+chmark
 ```bash
-python3 benchmarks/benchmark_serving_structured_output.py \
-  --backend vllm \
-  --model NousResearch/Hermes-3-Llama-3.1-8B \
-  --dataset choice \
-  --request-rate 10 \
-  --num-prompts 1000
+pytho
+3 b
+
+chmarks/b
+
+chmark_s
+rv
+
+g_structur
+d_output.py \
+  --back
+
+d v
+m \
+  --mod
+
+ NousR
+s
+arch/H
+rm
+s-3-L
+ama-3.1-8B \
+  --datas
+t cho
+c
+ \
+  --r
+qu
+st-rat
+ 10 \
+  --
+um-prompts 1000
 ```
+#### XGrammar B
 
-#### XGrammar Benchmark Dataset
-
+chmark Datas
+t
 ```bash
-python3 benchmarks/benchmark_serving_structured_output.py \
-  --backend vllm \
-  --model NousResearch/Hermes-3-Llama-3.1-8B \
-  --dataset xgrammar_bench \
-  --request-rate 10 \
-  --num-prompts 1000
+pytho
+3 b
+
+chmarks/b
+
+chmark_s
+rv
+
+g_structur
+d_output.py \
+  --back
+
+d v
+m \
+  --mod
+
+ NousR
+s
+arch/H
+rm
+s-3-L
+ama-3.1-8B \
+  --datas
+t xgrammar_b
+
+ch \
+  --r
+qu
+st-rat
+ 10 \
+  --
+um-prompts 1000
 ```
+/d
+ta
 
-</details>
+s
 
-### 📚 Long Document QA Benchmark
+### 📚 Lo
+g Docum
 
-<details class="admonition abstract" markdown="1">
-<summary>Show more</summary>
+t QA B
 
-Benchmark the performance of long document question-answering with prefix caching.
+chmark
+d
+ta
 
-#### Basic Long Document QA Test
+s c
+ass="admo
 
+t
+o
+ abstract" markdo
+
+="1"
+
+summary
+Sho
+ mor
+
+/summary
+
+B
+
+chmark th
+ p
+rforma
+c
+ of 
+o
+g docum
+
+t qu
+st
+o
+-a
+s
+
+r
+
+g 
+
+th pr
+f
+x cach
+
+g.
+#### Bas
+c Lo
+g Docum
+
+t QA T
+st
 ```bash
-python3 benchmarks/benchmark_long_document_qa_throughput.py \
-  --model meta-llama/Llama-2-7b-chat-hf \
-  --enable-prefix-caching \
-  --num-documents 16 \
-  --document-length 2000 \
-  --output-len 50 \
-  --repeat-count 5
+pytho
+3 b
+
+chmarks/b
+
+chmark_
+o
+g_docum
+
+t_qa_throughput.py \
+  --mod
+
+ m
+ta-
+ama/L
+ama-2-7b-chat-hf \
+  --
+
+ab
+
+-pr
+f
+x-cach
+
+g \
+  --
+um-docum
+
+ts 16 \
+  --docum
+
+t-
+
+
+gth 2000 \
+  --output-
+
+
+ 50 \
+  --r
+p
+at-cou
+t 5
 ```
+#### D
+ff
+r
 
-#### Different Repeat Modes
-
+t R
+p
+at Mod
+s
 ```bash
-# Random mode (default) - shuffle prompts randomly
-python3 benchmarks/benchmark_long_document_qa_throughput.py \
-  --model meta-llama/Llama-2-7b-chat-hf \
-  --enable-prefix-caching \
-  --num-documents 8 \
-  --document-length 3000 \
-  --repeat-count 3 \
-  --repeat-mode random
+# Ra
+dom mod
+ (d
+fau
+t) - shuff
 
-# Tile mode - repeat entire prompt list in sequence
-python3 benchmarks/benchmark_long_document_qa_throughput.py \
-  --model meta-llama/Llama-2-7b-chat-hf \
-  --enable-prefix-caching \
-  --num-documents 8 \
-  --document-length 3000 \
-  --repeat-count 3 \
-  --repeat-mode tile
+ prompts ra
+dom
+y
+pytho
+3 b
 
-# Interleave mode - repeat each prompt consecutively
-python3 benchmarks/benchmark_long_document_qa_throughput.py \
-  --model meta-llama/Llama-2-7b-chat-hf \
-  --enable-prefix-caching \
-  --num-documents 8 \
-  --document-length 3000 \
-  --repeat-count 3 \
-  --repeat-mode interleave
+chmarks/b
+
+chmark_
+o
+g_docum
+
+t_qa_throughput.py \
+  --mod
+
+ m
+ta-
+ama/L
+ama-2-7b-chat-hf \
+  --
+
+ab
+
+-pr
+f
+x-cach
+
+g \
+  --
+um-docum
+
+ts 8 \
+  --docum
+
+t-
+
+
+gth 3000 \
+  --r
+p
+at-cou
+t 3 \
+  --r
+p
+at-mod
+ ra
+dom
+# T
+
+
+ mod
+ - r
+p
+at 
+
+t
+r
+ prompt 
+
+st 
+
+ s
+qu
+
+c
+
+pytho
+3 b
+
+chmarks/b
+
+chmark_
+o
+g_docum
+
+t_qa_throughput.py \
+  --mod
+
+ m
+ta-
+ama/L
+ama-2-7b-chat-hf \
+  --
+
+ab
+
+-pr
+f
+x-cach
+
+g \
+  --
+um-docum
+
+ts 8 \
+  --docum
+
+t-
+
+
+gth 3000 \
+  --r
+p
+at-cou
+t 3 \
+  --r
+p
+at-mod
+ t
+
+
+
+# I
+t
+r
+
+av
+ mod
+ - r
+p
+at 
+ach prompt co
+s
+cut
+v
+
+y
+pytho
+3 b
+
+chmarks/b
+
+chmark_
+o
+g_docum
+
+t_qa_throughput.py \
+  --mod
+
+ m
+ta-
+ama/L
+ama-2-7b-chat-hf \
+  --
+
+ab
+
+-pr
+f
+x-cach
+
+g \
+  --
+um-docum
+
+ts 8 \
+  --docum
+
+t-
+
+
+gth 3000 \
+  --r
+p
+at-cou
+t 3 \
+  --r
+p
+at-mod
+ 
+
+t
+r
+
+av
+
 ```
+/d
+ta
 
-</details>
+s
 
-### 🗂️ Prefix Caching Benchmark
+### 🗂️ Pr
+f
+x Cach
 
-<details class="admonition abstract" markdown="1">
-<summary>Show more</summary>
+g B
 
-Benchmark the efficiency of automatic prefix caching.
+chmark
+d
+ta
 
-#### Fixed Prompt with Prefix Caching
+s c
+ass="admo
 
+t
+o
+ abstract" markdo
+
+="1"
+
+summary
+Sho
+ mor
+
+/summary
+
+B
+
+chmark th
+ 
+ff
+c
+
+
+cy of automat
+c pr
+f
+x cach
+
+g.
+#### F
+x
+d Prompt 
+
+th Pr
+f
+x Cach
+
+g
 ```bash
-python3 benchmarks/benchmark_prefix_caching.py \
-  --model meta-llama/Llama-2-7b-chat-hf \
-  --enable-prefix-caching \
-  --num-prompts 1 \
-  --repeat-count 100 \
-  --input-length-range 128:256
+pytho
+3 b
+
+chmarks/b
+
+chmark_pr
+f
+x_cach
+
+g.py \
+  --mod
+
+ m
+ta-
+ama/L
+ama-2-7b-chat-hf \
+  --
+
+ab
+
+-pr
+f
+x-cach
+
+g \
+  --
+um-prompts 1 \
+  --r
+p
+at-cou
+t 100 \
+  --
+
+put-
+
+
+gth-ra
+g
+ 128:256
 ```
+#### Shar
+GPT Datas
+t 
 
-#### ShareGPT Dataset with Prefix Caching
+th Pr
+f
+x Cach
 
+g
 ```bash
-# download dataset
-# wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+# do
 
-python3 benchmarks/benchmark_prefix_caching.py \
-  --model meta-llama/Llama-2-7b-chat-hf \
-  --dataset-path /path/ShareGPT_V3_unfiltered_cleaned_split.json \
-  --enable-prefix-caching \
-  --num-prompts 20 \
-  --repeat-count 5 \
-  --input-length-range 128:256
+
+oad datas
+t
+# 
+g
+t https://hugg
+
+gfac
+.co/datas
+ts/a
+o
+8231489123/Shar
+GPT_V
+cu
+a_u
+f
+
+t
+r
+d/r
+so
+v
+/ma
+
+/Shar
+GPT_V3_u
+f
+
+t
+r
+d_c
+
+a
+
+d_sp
+
+t.jso
+
+pytho
+3 b
+
+chmarks/b
+
+chmark_pr
+f
+x_cach
+
+g.py \
+  --mod
+
+ m
+ta-
+ama/L
+ama-2-7b-chat-hf \
+  --datas
+t-path /path/Shar
+GPT_V3_u
+f
+
+t
+r
+d_c
+
+a
+
+d_sp
+
+t.jso
+ \
+  --
+
+ab
+
+-pr
+f
+x-cach
+
+g \
+  --
+um-prompts 20 \
+  --r
+p
+at-cou
+t 5 \
+  --
+
+put-
+
+
+gth-ra
+g
+ 128:256
 ```
-
-##### Prefix Repetition Dataset
-
+##### Pr
+f
+x R
+p
+t
+t
+o
+ Datas
+t
 ```bash
-vllm bench serve \
-  --backend openai \
-  --model meta-llama/Llama-2-7b-chat-hf \
-  --dataset-name prefix_repetition \
-  --num-prompts 100 \
-  --prefix-repetition-prefix-len 512 \
-  --prefix-repetition-suffix-len 128 \
-  --prefix-repetition-num-prefixes 5 \
-  --prefix-repetition-output-len 128
+v
+m b
+
+ch s
+rv
+ \
+  --back
+
+d op
+
+a
+ \
+  --mod
+
+ m
+ta-
+ama/L
+ama-2-7b-chat-hf \
+  --datas
+t-
+am
+ pr
+f
+x_r
+p
+t
+t
+o
+ \
+  --
+um-prompts 100 \
+  --pr
+f
+x-r
+p
+t
+t
+o
+-pr
+f
+x-
+
+
+ 512 \
+  --pr
+f
+x-r
+p
+t
+t
+o
+-suff
+x-
+
+
+ 128 \
+  --pr
+f
+x-r
+p
+t
+t
+o
+-
+um-pr
+f
+x
+s 5 \
+  --pr
+f
+x-r
+p
+t
+t
+o
+-output-
+
+
+ 128
 ```
+/d
+ta
 
-</details>
+s
 
-### 🧪 Hashing Benchmarks
+### 🧪 Hash
 
-<details class="admonition abstract" markdown="1">
-<summary>Show more</summary>
+g B
 
-Two helper scripts live in `benchmarks/` to compare hashing options used by prefix caching and related utilities. They are standalone (no server required) and help choose a hash algorithm before enabling prefix caching in production.
+chmarks
+d
+ta
 
-- `benchmarks/benchmark_hash.py`: Micro-benchmark that measures per-call latency of three implementations on a representative `(bytes, tuple[int])` payload.
+s c
+ass="admo
 
+t
+o
+ abstract" markdo
+
+="1"
+
+summary
+Sho
+ mor
+
+/summary
+
+T
+o h
+
+p
+r scr
+pts 
+
+v
+ 
+
+ `b
+
+chmarks/` to compar
+ hash
+
+g opt
+o
+s us
+d by pr
+f
+x cach
+
+g a
+d r
+
+at
+d ut
+
+
+t
+
+s. Th
+y ar
+ sta
+da
+o
+
+ (
+o s
+rv
+r r
+qu
+r
+d) a
+d h
+
+p choos
+ a hash a
+gor
+thm b
+for
+ 
+
+ab
+
+
+g pr
+f
+x cach
+
+g 
+
+ product
+o
+.
+    - `b
+
+chmarks/b
+
+chmark_hash.py`: M
+cro-b
+
+chmark that m
+asur
+s p
+r-ca
+ 
+at
+
+cy of thr
+ 
+mp
+
+m
+
+tat
+o
+s o
+ a r
+pr
+s
+
+tat
+v
+ `(byt
+s, tup
+
+[
+
+t])` pay
+oad.
 ```bash
-python benchmarks/benchmark_hash.py --iterations 20000 --seed 42
+pytho
+ b
+
+chmarks/b
+
+chmark_hash.py --
+t
+rat
+o
+s 20000 --s
+d 42
 ```
+    - `b
 
-- `benchmarks/benchmark_prefix_block_hash.py`: End-to-end block hashing benchmark that runs the full prefix-cache hash pipeline (`hash_block_tokens`) across many fake blocks and reports throughput.
+chmarks/b
 
+chmark_pr
+f
+x_b
+ock_hash.py`: E
+d-to-
+
+d b
+ock hash
+
+g b
+
+chmark that ru
+s th
+ fu
+ pr
+f
+x-cach
+ hash p
+p
+
+
+
+
+ (`hash_b
+ock_tok
+
+s`) across ma
+y fak
+ b
+ocks a
+d r
+ports throughput.
 ```bash
-python benchmarks/benchmark_prefix_block_hash.py --num-blocks 20000 --block-size 32 --trials 5
+pytho
+ b
+
+chmarks/b
+
+chmark_pr
+f
+x_b
+ock_hash.py --
+um-b
+ocks 20000 --b
+ock-s
+z
+ 32 --tr
+a
+s 5
 ```
-
-Supported algorithms: `sha256`, `sha256_cbor`, `xxhash`, `xxhash_cbor`. Install optional deps to exercise all variants:
-
+Support
+d a
+gor
+thms: `sha256`, `sha256_cbor`, `xxhash`, `xxhash_cbor`. I
+sta
+ opt
+o
+a
+ d
+ps to 
+x
+rc
+s
+ a
+ var
+a
+ts:
 ```bash
-uv pip install xxhash cbor2
+uv p
+p 
+
+sta
+ xxhash cbor2
 ```
+If a
+ a
+gor
+thm’s d
+p
 
-If an algorithm’s dependency is missing, the script will skip it and continue.
+d
 
-</details>
+cy 
+s m
+ss
 
-### ⚡ Request Prioritization Benchmark
+g, th
+ scr
+pt 
 
-<details class="admonition abstract" markdown="1">
-<summary>Show more</summary>
 
-Benchmark the performance of request prioritization in vLLM.
+ sk
+p 
+t a
+d co
+t
 
-#### Basic Prioritization Test
+u
+.
+/d
+ta
 
+s
+
+### ⚡ R
+qu
+st Pr
+or
+t
+zat
+o
+ B
+
+chmark
+d
+ta
+
+s c
+ass="admo
+
+t
+o
+ abstract" markdo
+
+="1"
+
+summary
+Sho
+ mor
+
+/summary
+
+B
+
+chmark th
+ p
+rforma
+c
+ of r
+qu
+st pr
+or
+t
+zat
+o
+ 
+
+ vLLM.
+#### Bas
+c Pr
+or
+t
+zat
+o
+ T
+st
 ```bash
-python3 benchmarks/benchmark_prioritization.py \
-  --model meta-llama/Llama-2-7b-chat-hf \
-  --input-len 128 \
-  --output-len 64 \
-  --num-prompts 100 \
-  --scheduling-policy priority
+pytho
+3 b
+
+chmarks/b
+
+chmark_pr
+or
+t
+zat
+o
+.py \
+  --mod
+
+ m
+ta-
+ama/L
+ama-2-7b-chat-hf \
+  --
+
+put-
+
+
+ 128 \
+  --output-
+
+
+ 64 \
+  --
+um-prompts 100 \
+  --sch
+du
+
+
+g-po
+
+cy pr
+or
+ty
 ```
+#### Mu
+t
+p
 
-#### Multiple Sequences per Prompt
+ S
+qu
 
+c
+s p
+r Prompt
 ```bash
-python3 benchmarks/benchmark_prioritization.py \
-  --model meta-llama/Llama-2-7b-chat-hf \
-  --input-len 128 \
-  --output-len 64 \
-  --num-prompts 100 \
-  --scheduling-policy priority \
-  --n 2
+pytho
+3 b
+
+chmarks/b
+
+chmark_pr
+or
+t
+zat
+o
+.py \
+  --mod
+
+ m
+ta-
+ama/L
+ama-2-7b-chat-hf \
+  --
+
+put-
+
+
+ 128 \
+  --output-
+
+
+ 64 \
+  --
+um-prompts 100 \
+  --sch
+du
+
+
+g-po
+
+cy pr
+or
+ty \
+  --
+ 2
 ```
+/d
+ta
 
-</details>
+s
 
-### 👁️ Multi-Modal Benchmark
+### 👁️ Mu
+t
+-Moda
+ B
 
-<details class="admonition abstract" markdown="1">
-<summary>Show more</summary>
+chmark
+d
+ta
 
-Benchmark the performance of multi-modal requests in vLLM.
+s c
+ass="admo
 
-#### Images (ShareGPT4V)
+t
+o
+ abstract" markdo
 
+="1"
+
+summary
+Sho
+ mor
+
+/summary
+
+B
+
+chmark th
+ p
+rforma
+c
+ of mu
+t
+-moda
+ r
+qu
+sts 
+
+ vLLM.
+#### Imag
+s (Shar
+GPT4V)
 Start vLLM:
-
 ```bash
-vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
-  --dtype bfloat16 \
-  --limit-mm-per-prompt '{"image": 1}' \
-  --allowed-local-media-path /path/to/sharegpt4v/images
+v
+m s
+rv
+ Q
+
+
+/Q
+
+
+2.5-VL-7B-I
+struct \
+  --dtyp
+ bf
+oat16 \
+  --
+
+m
+t-mm-p
+r-prompt '{"
+mag
+": 1}' \
+  --a
+o
+
+d-
+oca
+-m
+d
+a-path /path/to/shar
+gpt4v/
+mag
+s
 ```
+S
 
-Send requests with images:
+d r
+qu
+sts 
 
+th 
+mag
+s:
 ```bash
-vllm bench serve \
-  --backend openai-chat \
-  --model Qwen/Qwen2.5-VL-7B-Instruct \
-  --dataset-name sharegpt \
-  --dataset-path /path/to/ShareGPT4V/sharegpt4v_instruct_gpt4-vision_cap100k.json \
-  --num-prompts 100 \
-  --save-result \
-  --result-dir ~/vllm_benchmark_results \
-  --save-detailed \
-  --endpoint /v1/chat/completions
+v
+m b
+
+ch s
+rv
+ \
+  --back
+
+d op
+
+a
+-chat \
+  --mod
+
+ Q
+
+
+/Q
+
+
+2.5-VL-7B-I
+struct \
+  --datas
+t-
+am
+ shar
+gpt \
+  --datas
+t-path /path/to/Shar
+GPT4V/shar
+gpt4v_
+
+struct_gpt4-v
+s
+o
+_cap100k.jso
+ \
+  --
+um-prompts 100 \
+  --sav
+-r
+su
+t \
+  --r
+su
+t-d
+r ~/v
+m_b
+
+chmark_r
+su
+ts \
+  --sav
+-d
+ta
+
+
+d \
+  --
+
+dpo
+
+t /v1/chat/comp
+
+t
+o
+s
 ```
-
-#### Videos (ShareGPT4Video)
-
+#### V
+d
+os (Shar
+GPT4V
+d
+o)
 Start vLLM:
-
 ```bash
-vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
-  --dtype bfloat16 \
-  --limit-mm-per-prompt '{"video": 1}' \
-  --allowed-local-media-path /path/to/sharegpt4video/videos
+v
+m s
+rv
+ Q
+
+
+/Q
+
+
+2.5-VL-7B-I
+struct \
+  --dtyp
+ bf
+oat16 \
+  --
+
+m
+t-mm-p
+r-prompt '{"v
+d
+o": 1}' \
+  --a
+o
+
+d-
+oca
+-m
+d
+a-path /path/to/shar
+gpt4v
+d
+o/v
+d
+os
 ```
+S
 
-Send requests with videos:
+d r
+qu
+sts 
 
+th v
+d
+os:
 ```bash
-vllm bench serve \
-  --backend openai-chat \
-  --model Qwen/Qwen2.5-VL-7B-Instruct \
-  --dataset-name sharegpt \
-  --dataset-path /path/to/ShareGPT4Video/llava_v1_5_mix665k_with_video_chatgpt72k_share4video28k.json \
-  --num-prompts 100 \
-  --save-result \
-  --result-dir ~/vllm_benchmark_results \
-  --save-detailed \
-  --endpoint /v1/chat/completions
+v
+m b
+
+ch s
+rv
+ \
+  --back
+
+d op
+
+a
+-chat \
+  --mod
+
+ Q
+
+
+/Q
+
+
+2.5-VL-7B-I
+struct \
+  --datas
+t-
+am
+ shar
+gpt \
+  --datas
+t-path /path/to/Shar
+GPT4V
+d
+o/
+ava_v1_5_m
+x665k_
+
+th_v
+d
+o_chatgpt72k_shar
+4v
+d
+o28k.jso
+ \
+  --
+um-prompts 100 \
+  --sav
+-r
+su
+t \
+  --r
+su
+t-d
+r ~/v
+m_b
+
+chmark_r
+su
+ts \
+  --sav
+-d
+ta
+
+
+d \
+  --
+
+dpo
+
+t /v1/chat/comp
+
+t
+o
+s
 ```
+#### Sy
+th
+t
+c Ra
+dom Imag
+s (ra
+dom-mm)
+G
 
-#### Synthetic Random Images (random-mm)
 
-Generate synthetic image inputs alongside random text prompts to stress-test vision models without external datasets.
+rat
+ sy
+th
+t
+c 
+mag
+ 
 
-Notes:
+puts a
+o
+gs
+d
+ ra
+dom t
+xt prompts to str
+ss-t
+st v
+s
+o
+ mod
 
-- For online benchmarks, use `--backend openai-chat` with endpoint `/v1/chat/completions`.
-- For offline benchmarks, use `--backend vllm-chat` (see [Offline Throughput Benchmark](#-offline-throughput-benchmark) for an example).
+s 
 
-Start the server (example):
+thout 
+xt
+r
+a
+ datas
+ts.
+Not
+s:
+    - For o
 
+
+
+
+ b
+
+chmarks, us
+ `--back
+
+d op
+
+a
+-chat` 
+
+th 
+
+dpo
+
+t `/v1/chat/comp
+
+t
+o
+s`.
+    - For off
+
+
+
+ b
+
+chmarks, us
+ `--back
+
+d v
+m-chat` (s
+ [Off
+
+
+
+ Throughput B
+
+chmark](#-off
+
+
+
+-throughput-b
+
+chmark) for a
+ 
+xamp
+
+).
+Start th
+ s
+rv
+r (
+xamp
+
+):
 ```bash
-vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
-  --dtype bfloat16 \
-  --max-model-len 16384 \
-  --limit-mm-per-prompt '{"image": 3, "video": 0}' \
-  --mm-processor-kwargs max_pixels=1003520
+v
+m s
+rv
+ Q
+
+
+/Q
+
+
+2.5-VL-3B-I
+struct \
+  --dtyp
+ bf
+oat16 \
+  --max-mod
+
+-
+
+
+ 16384 \
+  --
+
+m
+t-mm-p
+r-prompt '{"
+mag
+": 3, "v
+d
+o": 0}' \
+  --mm-proc
+ssor-k
+args max_p
+x
+
+s=1003520
 ```
+B
 
-Benchmark. It is recommended to use the flag `--ignore-eos` to simulate real responses. You can set the size of the output via the arg `random-output-len`.
+chmark. It 
+s r
+comm
 
-Ex.1: Fixed number of items and a single image resolution, enforcing generation of approx 40 tokens:
+d
+d to us
+ th
+ f
+ag `--
+g
+or
+-
+os` to s
+mu
+at
+ r
+a
+ r
+spo
+s
+s. You ca
+ s
+t th
+ s
+z
+ of th
+ output v
+a th
+ arg `ra
+dom-output-
 
+
+`.
+Ex.1: F
+x
+d 
+umb
+r of 
+t
+ms a
+d a s
+
+g
+
+ 
+mag
+ r
+so
+ut
+o
+, 
+
+forc
+
+g g
+
+
+rat
+o
+ of approx 40 tok
+
+s:
 ```bash
-vllm bench serve \
-  --backend openai-chat \
-  --model Qwen/Qwen2.5-VL-3B-Instruct \
-  --endpoint /v1/chat/completions \
-  --dataset-name random-mm \
-  --num-prompts 100 \
-  --max-concurrency 10 \
-  --random-prefix-len 25 \
-  --random-input-len 300 \
-  --random-output-len 40 \
-  --random-range-ratio 0.2 \
-  --random-mm-base-items-per-request 2 \
-  --random-mm-limit-mm-per-prompt '{"image": 3, "video": 0}' \
-  --random-mm-bucket-config '{(224, 224, 1): 1.0}' \
-  --request-rate inf \
-  --ignore-eos \
-  --seed 42
+v
+m b
+
+ch s
+rv
+ \
+  --back
+
+d op
+
+a
+-chat \
+  --mod
+
+ Q
+
+
+/Q
+
+
+2.5-VL-3B-I
+struct \
+  --
+
+dpo
+
+t /v1/chat/comp
+
+t
+o
+s \
+  --datas
+t-
+am
+ ra
+dom-mm \
+  --
+um-prompts 100 \
+  --max-co
+curr
+
+cy 10 \
+  --ra
+dom-pr
+f
+x-
+
+
+ 25 \
+  --ra
+dom-
+
+put-
+
+
+ 300 \
+  --ra
+dom-output-
+
+
+ 40 \
+  --ra
+dom-ra
+g
+-rat
+o 0.2 \
+  --ra
+dom-mm-bas
+-
+t
+ms-p
+r-r
+qu
+st 2 \
+  --ra
+dom-mm-
+
+m
+t-mm-p
+r-prompt '{"
+mag
+": 3, "v
+d
+o": 0}' \
+  --ra
+dom-mm-buck
+t-co
+f
+g '{(224, 224, 1): 1.0}' \
+  --r
+qu
+st-rat
+ 
+
+f \
+  --
+g
+or
+-
+os \
+  --s
+d 42
 ```
+Th
+ 
+umb
+r of 
+t
+ms p
+r r
+qu
+st ca
+ b
+ co
+tro
 
-The number of items per request can be controlled by passing multiple image buckets:
+d by pass
 
+g mu
+t
+p
+
+ 
+mag
+ buck
+ts:
 ```bash
-  --random-mm-base-items-per-request 2 \
-  --random-mm-num-mm-items-range-ratio 0.5 \
-  --random-mm-limit-mm-per-prompt '{"image": 4, "video": 0}' \
-  --random-mm-bucket-config '{(256, 256, 1): 0.7, (720, 1280, 1): 0.3}' \
+  --ra
+dom-mm-bas
+-
+t
+ms-p
+r-r
+qu
+st 2 \
+  --ra
+dom-mm-
+um-mm-
+t
+ms-ra
+g
+-rat
+o 0.5 \
+  --ra
+dom-mm-
+
+m
+t-mm-p
+r-prompt '{"
+mag
+": 4, "v
+d
+o": 0}' \
+  --ra
+dom-mm-buck
+t-co
+f
+g '{(256, 256, 1): 0.7, (720, 1280, 1): 0.3}' \
 ```
+F
+ags sp
+c
+f
+c to `ra
+dom-mm`:
+    - `--ra
+dom-mm-bas
+-
+t
+ms-p
+r-r
+qu
+st`: bas
+ 
+umb
+r of mu
+t
+moda
+ 
+t
+ms p
+r r
+qu
+st.
+    - `--ra
+dom-mm-
+um-mm-
+t
+ms-ra
+g
+-rat
+o`: vary 
+t
+m cou
+t u
 
-Flags specific to `random-mm`:
+form
+y 
 
-- `--random-mm-base-items-per-request`: base number of multimodal items per request.
-- `--random-mm-num-mm-items-range-ratio`: vary item count uniformly in the closed integer range [floor(n·(1−r)), ceil(n·(1+r))]. Set r=0 to keep it fixed; r=1 allows 0 items.
-- `--random-mm-limit-mm-per-prompt`: per-modality hard caps, e.g. '{"image": 3, "video": 0}'.
-- `--random-mm-bucket-config`: dict mapping (H, W, T) → probability. Entries with probability 0 are removed; remaining probabilities are renormalized to sum to 1. Use T=1 for images. Set any T>1 for videos (video sampling not yet supported).
+ th
+ c
+os
+d 
 
-Behavioral notes:
+t
+g
+r ra
+g
+ [f
+oor(
+·(1−r)), c
 
-- If the requested base item count cannot be satisfied under the provided per-prompt limits, the tool raises an error rather than silently clamping.
 
-How sampling works:
+(
+·(1+r))]. S
+t r=0 to k
+p 
+t f
+x
+d; r=1 a
+o
+s 0 
+t
+ms.
+    - `--ra
+dom-mm-
 
-- Determine per-request item count k by sampling uniformly from the integer range defined by `--random-mm-base-items-per-request` and `--random-mm-num-mm-items-range-ratio`, then clamp k to at most the sum of per-modality limits.
-- For each of the k items, sample a bucket (H, W, T) according to the normalized probabilities in `--random-mm-bucket-config`, while tracking how many items of each modality have been added.
-- If a modality (e.g., image) reaches its limit from `--random-mm-limit-mm-per-prompt`, all buckets of that modality are excluded and the remaining bucket probabilities are renormalized before continuing.
-This should be seen as an edge case, and if this behavior can be avoided by setting `--random-mm-limit-mm-per-prompt` to a large number. Note that this might result in errors due to engine config `--limit-mm-per-prompt`.
-- The resulting request contains synthetic image data in `multi_modal_data` (OpenAI Chat format). When `random-mm` is used with the OpenAI Chat backend, prompts remain text and MM content is attached via `multi_modal_data`.
+m
+t-mm-p
+r-prompt`: p
+r-moda
 
-</details>
+ty hard caps, 
+.g. '{"
+mag
+": 3, "v
+d
+o": 0}'.
+    - `--ra
+dom-mm-buck
+t-co
+f
+g`: d
+ct mapp
 
-### 🔬 Multimodal Processor Benchmark
+g (H, W, T) → probab
 
-Benchmark per-stage latency of the multimodal (MM) input processor pipeline, including the encoder forward pass. This is useful for profiling preprocessing bottlenecks in vision-language models.
 
-<details class="admonition abstract" markdown="1">
-<summary>Show more</summary>
+ty. E
+tr
 
-The benchmark measures the following stages for each request:
+s 
 
-| Stage | Description |
+th probab
+
+
+ty 0 ar
+ r
+mov
+d; r
+ma
+
+
+
+g probab
+
+
+t
+
+s ar
+ r
+
+orma
+
+z
+d to sum to 1. Us
+ T=1 for 
+mag
+s. S
+t a
+y T
+1 for v
+d
+os (v
+d
+o samp
+
+
+g 
+ot y
+t support
+d).
+B
+hav
+ora
+ 
+ot
+s:
+    - If th
+ r
+qu
+st
+d bas
+ 
+t
+m cou
+t ca
+ot b
+ sat
+sf
+
+d u
+d
+r th
+ prov
+d
+d p
+r-prompt 
+
+m
+ts, th
+ too
+ ra
+s
+s a
+ 
+rror rath
+r tha
+ s
+
+
+
+t
+y c
+amp
+
+g.
+Ho
+ samp
+
+
+g 
+orks:
+    - D
+t
+rm
+
+
+ p
+r-r
+qu
+st 
+t
+m cou
+t k by samp
+
+
+g u
+
+form
+y from th
+ 
+
+t
+g
+r ra
+g
+ d
+f
+
+
+d by `--ra
+dom-mm-bas
+-
+t
+ms-p
+r-r
+qu
+st` a
+d `--ra
+dom-mm-
+um-mm-
+t
+ms-ra
+g
+-rat
+o`, th
+
+ c
+amp k to at most th
+ sum of p
+r-moda
+
+ty 
+
+m
+ts.
+    - For 
+ach of th
+ k 
+t
+ms, samp
+
+ a buck
+t (H, W, T) accord
+
+g to th
+ 
+orma
+
+z
+d probab
+
+
+t
+
+s 
+
+ `--ra
+dom-mm-buck
+t-co
+f
+g`, 
+h
+
+
+ track
+
+g ho
+ ma
+y 
+t
+ms of 
+ach moda
+
+ty hav
+ b
+
+ add
+d.
+    - If a moda
+
+ty (
+.g., 
+mag
+) r
+ach
+s 
+ts 
+
+m
+t from `--ra
+dom-mm-
+
+m
+t-mm-p
+r-prompt`, a
+ buck
+ts of that moda
+
+ty ar
+ 
+xc
+ud
+d a
+d th
+ r
+ma
+
+
+
+g buck
+t probab
+
+
+t
+
+s ar
+ r
+
+orma
+
+z
+d b
+for
+ co
+t
+
+u
+
+g.
+Th
+s shou
+d b
+ s
+
+ as a
+ 
+dg
+ cas
+, a
+d 
+f th
+s b
+hav
+or ca
+ b
+ avo
+d
+d by s
+tt
+
+g `--ra
+dom-mm-
+
+m
+t-mm-p
+r-prompt` to a 
+arg
+ 
+umb
+r. Not
+ that th
+s m
+ght r
+su
+t 
+
+ 
+rrors du
+ to 
+
+g
+
+
+ co
+f
+g `--
+
+m
+t-mm-p
+r-prompt`.
+    - Th
+ r
+su
+t
+
+g r
+qu
+st co
+ta
+
+s sy
+th
+t
+c 
+mag
+ data 
+
+ `mu
+t
+_moda
+_data` (Op
+
+AI Chat format). Wh
+
+ `ra
+dom-mm` 
+s us
+d 
+
+th th
+ Op
+
+AI Chat back
+
+d, prompts r
+ma
+
+ t
+xt a
+d MM co
+t
+
+t 
+s attach
+d v
+a `mu
+t
+_moda
+_data`.
+/d
+ta
+
+s
+
+### 🔬 Mu
+t
+moda
+ Proc
+ssor B
+
+chmark
+B
+
+chmark p
+r-stag
+ 
+at
+
+cy of th
+ mu
+t
+moda
+ (MM) 
+
+put proc
+ssor p
+p
+
+
+
+
+, 
+
+c
+ud
+
+g th
+ 
+
+cod
+r for
+ard pass. Th
+s 
+s us
+fu
+ for prof
+
+
+
+g pr
+proc
+ss
+
+g bott
+
+
+
+cks 
+
+ v
+s
+o
+-
+a
+guag
+ mod
+
+s.
+d
+ta
+
+s c
+ass="admo
+
+t
+o
+ abstract" markdo
+
+="1"
+
+summary
+Sho
+ mor
+
+/summary
+
+Th
+ b
+
+chmark m
+asur
+s th
+ fo
+o
+
+
+g stag
+s for 
+ach r
+qu
+st:
+| Stag
+ | D
+scr
+pt
+o
+ |
 |-------|-------------|
-| `get_mm_hashes_secs` | Time spent hashing multimodal inputs |
-| `get_cache_missing_items_secs` | Time spent looking up the processor cache |
-| `apply_hf_processor_secs` | Time spent in the HuggingFace processor |
-| `merge_mm_kwargs_secs` | Time spent merging multimodal kwargs |
-| `apply_prompt_updates_secs` | Time spent updating prompt tokens |
-| `preprocessor_total_secs` | Total preprocessing time |
-| `encoder_forward_secs` | Time spent in the encoder model forward pass |
-| `num_encoder_calls` | Number of encoder invocations per request |
+| `g
+t_mm_hash
+s_s
+cs` | T
+m
+ sp
 
-The benchmark also reports end-to-end latency (TTFT + decode time) per
-request. Use `--metric-percentiles` to select which percentiles to report
-(default: p99) and `--output-json` to save results.
+t hash
 
-#### Basic Example with Synthetic Data (random-mm)
+g mu
+t
+moda
+ 
 
+puts |
+| `g
+t_cach
+_m
+ss
+
+g_
+t
+ms_s
+cs` | T
+m
+ sp
+
+t 
+ook
+
+g up th
+ proc
+ssor cach
+ |
+| `app
+y_hf_proc
+ssor_s
+cs` | T
+m
+ sp
+
+t 
+
+ th
+ Hugg
+
+gFac
+ proc
+ssor |
+| `m
+rg
+_mm_k
+args_s
+cs` | T
+m
+ sp
+
+t m
+rg
+
+g mu
+t
+moda
+ k
+args |
+| `app
+y_prompt_updat
+s_s
+cs` | T
+m
+ sp
+
+t updat
+
+g prompt tok
+
+s |
+| `pr
+proc
+ssor_tota
+_s
+cs` | Tota
+ pr
+proc
+ss
+
+g t
+m
+ |
+| `
+
+cod
+r_for
+ard_s
+cs` | T
+m
+ sp
+
+t 
+
+ th
+ 
+
+cod
+r mod
+
+ for
+ard pass |
+| `
+um_
+
+cod
+r_ca
+s` | Numb
+r of 
+
+cod
+r 
+
+vocat
+o
+s p
+r r
+qu
+st |
+Th
+ b
+
+chmark a
+so r
+ports 
+
+d-to-
+
+d 
+at
+
+cy (TTFT + d
+cod
+ t
+m
+) p
+r
+r
+qu
+st. Us
+ `--m
+tr
+c-p
+rc
+
+t
+
+
+s` to s
+
+
+ct 
+h
+ch p
+rc
+
+t
+
+
+s to r
+port
+(d
+fau
+t: p99) a
+d `--output-jso
+` to sav
+ r
+su
+ts.
+#### Bas
+c Examp
+
+ 
+
+th Sy
+th
+t
+c Data (ra
+dom-mm)
 ```bash
-vllm bench mm-processor \
-  --model Qwen/Qwen2-VL-7B-Instruct \
-  --dataset-name random-mm \
-  --num-prompts 50 \
-  --random-input-len 300 \
-  --random-output-len 40 \
-  --random-mm-base-items-per-request 2 \
-  --random-mm-limit-mm-per-prompt '{"image": 3, "video": 0}' \
-  --random-mm-bucket-config '{(256, 256, 1): 0.7, (720, 1280, 1): 0.3}'
+v
+m b
+
+ch mm-proc
+ssor \
+  --mod
+
+ Q
+
+
+/Q
+
+
+2-VL-7B-I
+struct \
+  --datas
+t-
+am
+ ra
+dom-mm \
+  --
+um-prompts 50 \
+  --ra
+dom-
+
+put-
+
+
+ 300 \
+  --ra
+dom-output-
+
+
+ 40 \
+  --ra
+dom-mm-bas
+-
+t
+ms-p
+r-r
+qu
+st 2 \
+  --ra
+dom-mm-
+
+m
+t-mm-p
+r-prompt '{"
+mag
+": 3, "v
+d
+o": 0}' \
+  --ra
+dom-mm-buck
+t-co
+f
+g '{(256, 256, 1): 0.7, (720, 1280, 1): 0.3}'
 ```
+#### Us
 
-#### Using a HuggingFace Dataset
+g a Hugg
 
+gFac
+ Datas
+t
 ```bash
-vllm bench mm-processor \
-  --model Qwen/Qwen2-VL-7B-Instruct \
-  --dataset-name hf \
-  --dataset-path lmarena-ai/VisionArena-Chat \
-  --hf-split train \
-  --num-prompts 100
+v
+m b
+
+ch mm-proc
+ssor \
+  --mod
+
+ Q
+
+
+/Q
+
+
+2-VL-7B-I
+struct \
+  --datas
+t-
+am
+ hf \
+  --datas
+t-path 
+mar
+
+a-a
+/V
+s
+o
+Ar
+
+a-Chat \
+  --hf-sp
+
+t tra
+
+ \
+  --
+um-prompts 100
 ```
+#### Warmup, Custom P
+rc
 
-#### Warmup, Custom Percentiles, and JSON Output
+t
 
+
+s, a
+d JSON Output
 ```bash
-vllm bench mm-processor \
-  --model Qwen/Qwen2-VL-7B-Instruct \
-  --dataset-name random-mm \
-  --num-prompts 200 \
-  --num-warmups 5 \
-  --random-input-len 300 \
-  --random-output-len 40 \
-  --random-mm-base-items-per-request 1 \
-  --metric-percentiles 50,90,95,99 \
-  --output-json results.json
+v
+m b
+
+ch mm-proc
+ssor \
+  --mod
+
+ Q
+
+
+/Q
+
+
+2-VL-7B-I
+struct \
+  --datas
+t-
+am
+ ra
+dom-mm \
+  --
+um-prompts 200 \
+  --
+um-
+armups 5 \
+  --ra
+dom-
+
+put-
+
+
+ 300 \
+  --ra
+dom-output-
+
+
+ 40 \
+  --ra
+dom-mm-bas
+-
+t
+ms-p
+r-r
+qu
+st 1 \
+  --m
+tr
+c-p
+rc
+
+t
+
+
+s 50,90,95,99 \
+  --output-jso
+ r
+su
+ts.jso
+
 ```
+S
+ [`v
+m b
 
-See [`vllm bench mm-processor`](../cli/bench/mm_processor.md) for the full argument reference.
+ch mm-proc
+ssor`](../c
 
-</details>
+/b
 
-### Embedding Benchmark
+ch/mm_proc
+ssor.md) for th
+ fu
+ argum
 
-Benchmark the performance of embedding requests in vLLM.
+t r
+f
+r
 
-<details class="admonition abstract" markdown="1">
-<summary>Show more</summary>
+c
+.
+/d
+ta
 
-#### Text Embeddings
+s
 
-Unlike generative models which use Completions API or Chat Completions API,
-you should set `--backend openai-embeddings` and `--endpoint /v1/embeddings` to use the Embeddings API.
+### Emb
+dd
 
-You can use any text dataset to benchmark the model, such as ShareGPT.
+g B
 
-Start the server:
+chmark
+B
 
+chmark th
+ p
+rforma
+c
+ of 
+mb
+dd
+
+g r
+qu
+sts 
+
+ vLLM.
+d
+ta
+
+s c
+ass="admo
+
+t
+o
+ abstract" markdo
+
+="1"
+
+summary
+Sho
+ mor
+
+/summary
+
+#### T
+xt Emb
+dd
+
+gs
+U
+
+
+k
+ g
+
+
+rat
+v
+ mod
+
+s 
+h
+ch us
+ Comp
+
+t
+o
+s API or Chat Comp
+
+t
+o
+s API,
+you shou
+d s
+t `--back
+
+d op
+
+a
+-
+mb
+dd
+
+gs` a
+d `--
+
+dpo
+
+t /v1/
+mb
+dd
+
+gs` to us
+ th
+ Emb
+dd
+
+gs API.
+You ca
+ us
+ a
+y t
+xt datas
+t to b
+
+chmark th
+ mod
+
+, such as Shar
+GPT.
+Start th
+ s
+rv
+r:
 ```bash
-vllm serve jinaai/jina-embeddings-v3 --trust-remote-code
+v
+m s
+rv
+ j
+
+aa
+/j
+
+a-
+mb
+dd
+
+gs-v3 --trust-r
+mot
+-cod
+
 ```
+Ru
+ th
+ b
 
-Run the benchmark:
-
+chmark:
 ```bash
-# download dataset
-# wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-vllm bench serve \
-  --model jinaai/jina-embeddings-v3 \
-  --backend openai-embeddings \
-  --endpoint /v1/embeddings \
-  --dataset-name sharegpt \
-  --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json
+# do
+
+
+oad datas
+t
+# 
+g
+t https://hugg
+
+gfac
+.co/datas
+ts/a
+o
+8231489123/Shar
+GPT_V
+cu
+a_u
+f
+
+t
+r
+d/r
+so
+v
+/ma
+
+/Shar
+GPT_V3_u
+f
+
+t
+r
+d_c
+
+a
+
+d_sp
+
+t.jso
+
+v
+m b
+
+ch s
+rv
+ \
+  --mod
+
+ j
+
+aa
+/j
+
+a-
+mb
+dd
+
+gs-v3 \
+  --back
+
+d op
+
+a
+-
+mb
+dd
+
+gs \
+  --
+
+dpo
+
+t /v1/
+mb
+dd
+
+gs \
+  --datas
+t-
+am
+ shar
+gpt \
+  --datas
+t-path 
+your data path
+/Shar
+GPT_V3_u
+f
+
+t
+r
+d_c
+
+a
+
+d_sp
+
+t.jso
+
 ```
+#### Mu
+t
+-moda
+ Emb
+dd
 
-#### Multi-modal Embeddings
+gs
+U
 
-Unlike generative models which use Completions API or Chat Completions API,
-you should set `--endpoint /v1/embeddings` to use the Embeddings API. The backend to use depends on the model:
 
-- CLIP: `--backend openai-embeddings-clip`
-- VLM2Vec: `--backend openai-embeddings-vlm2vec`
+k
+ g
 
-For other models, please add your own implementation inside [vllm/benchmarks/lib/endpoint_request_func.py](../../vllm/benchmarks/lib/endpoint_request_func.py) to match the expected instruction format.
 
-You can use any text or multi-modal dataset to benchmark the model, as long as the model supports it.
-For example, you can use ShareGPT and VisionArena to benchmark vision-language embeddings.
+rat
+v
+ mod
 
-Serve and benchmark CLIP:
+s 
+h
+ch us
+ Comp
 
+t
+o
+s API or Chat Comp
+
+t
+o
+s API,
+you shou
+d s
+t `--
+
+dpo
+
+t /v1/
+mb
+dd
+
+gs` to us
+ th
+ Emb
+dd
+
+gs API. Th
+ back
+
+d to us
+ d
+p
+
+ds o
+ th
+ mod
+
+:
+    - CLIP: `--back
+
+d op
+
+a
+-
+mb
+dd
+
+gs-c
+
+p`
+    - VLM2V
+c: `--back
+
+d op
+
+a
+-
+mb
+dd
+
+gs-v
+m2v
+c`
+For oth
+r mod
+
+s, p
+
+as
+ add your o
+
+ 
+mp
+
+m
+
+tat
+o
+ 
+
+s
+d
+ [v
+m/b
+
+chmarks/
+
+b/
+
+dpo
+
+t_r
+qu
+st_fu
+c.py](../../v
+m/b
+
+chmarks/
+
+b/
+
+dpo
+
+t_r
+qu
+st_fu
+c.py) to match th
+ 
+xp
+ct
+d 
+
+struct
+o
+ format.
+You ca
+ us
+ a
+y t
+xt or mu
+t
+-moda
+ datas
+t to b
+
+chmark th
+ mod
+
+, as 
+o
+g as th
+ mod
+
+ supports 
+t.
+For 
+xamp
+
+, you ca
+ us
+ Shar
+GPT a
+d V
+s
+o
+Ar
+
+a to b
+
+chmark v
+s
+o
+-
+a
+guag
+ 
+mb
+dd
+
+gs.
+S
+rv
+ a
+d b
+
+chmark CLIP:
 ```bash
-# Run this in another process
-vllm serve openai/clip-vit-base-patch32
+# Ru
+ th
+s 
 
-# Run these one by one after the server is up
-# download dataset
-# wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-vllm bench serve \
-  --model openai/clip-vit-base-patch32 \
-  --backend openai-embeddings-clip \
-  --endpoint /v1/embeddings \
-  --dataset-name sharegpt \
-  --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json
+ a
+oth
+r proc
+ss
+v
+m s
+rv
+ op
 
-vllm bench serve \
-  --model openai/clip-vit-base-patch32 \
-  --backend openai-embeddings-clip \
-  --endpoint /v1/embeddings \
-  --dataset-name hf \
-  --dataset-path lmarena-ai/VisionArena-Chat
+a
+/c
+
+p-v
+t-bas
+-patch32
+# Ru
+ th
+s
+ o
+
+ by o
+
+ aft
+r th
+ s
+rv
+r 
+s up
+# do
+
+
+oad datas
+t
+# 
+g
+t https://hugg
+
+gfac
+.co/datas
+ts/a
+o
+8231489123/Shar
+GPT_V
+cu
+a_u
+f
+
+t
+r
+d/r
+so
+v
+/ma
+
+/Shar
+GPT_V3_u
+f
+
+t
+r
+d_c
+
+a
+
+d_sp
+
+t.jso
+
+v
+m b
+
+ch s
+rv
+ \
+  --mod
+
+ op
+
+a
+/c
+
+p-v
+t-bas
+-patch32 \
+  --back
+
+d op
+
+a
+-
+mb
+dd
+
+gs-c
+
+p \
+  --
+
+dpo
+
+t /v1/
+mb
+dd
+
+gs \
+  --datas
+t-
+am
+ shar
+gpt \
+  --datas
+t-path 
+your data path
+/Shar
+GPT_V3_u
+f
+
+t
+r
+d_c
+
+a
+
+d_sp
+
+t.jso
+
+v
+m b
+
+ch s
+rv
+ \
+  --mod
+
+ op
+
+a
+/c
+
+p-v
+t-bas
+-patch32 \
+  --back
+
+d op
+
+a
+-
+mb
+dd
+
+gs-c
+
+p \
+  --
+
+dpo
+
+t /v1/
+mb
+dd
+
+gs \
+  --datas
+t-
+am
+ hf \
+  --datas
+t-path 
+mar
+
+a-a
+/V
+s
+o
+Ar
+
+a-Chat
 ```
+S
+rv
+ a
+d b
 
-Serve and benchmark VLM2Vec:
-
+chmark VLM2V
+c:
 ```bash
-# Run this in another process
-vllm serve TIGER-Lab/VLM2Vec-Full --runner pooling \
-  --trust-remote-code \
-  --chat-template examples/template_vlm2vec_phi3v.jinja
+# Ru
+ th
+s 
 
-# Run these one by one after the server is up
-# download dataset
-# wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-vllm bench serve \
-  --model TIGER-Lab/VLM2Vec-Full \
-  --backend openai-embeddings-vlm2vec \
-  --endpoint /v1/embeddings \
-  --dataset-name sharegpt \
-  --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json
+ a
+oth
+r proc
+ss
+v
+m s
+rv
+ TIGER-Lab/VLM2V
+c-Fu
+ --ru
 
-vllm bench serve \
-  --model TIGER-Lab/VLM2Vec-Full \
-  --backend openai-embeddings-vlm2vec \
-  --endpoint /v1/embeddings \
-  --dataset-name hf \
-  --dataset-path lmarena-ai/VisionArena-Chat
+r poo
+
+
+g \
+  --trust-r
+mot
+-cod
+ \
+  --chat-t
+mp
+at
+ 
+xamp
+
+s/t
+mp
+at
+_v
+m2v
+c_ph
+3v.j
+
+ja
+# Ru
+ th
+s
+ o
+
+ by o
+
+ aft
+r th
+ s
+rv
+r 
+s up
+# do
+
+
+oad datas
+t
+# 
+g
+t https://hugg
+
+gfac
+.co/datas
+ts/a
+o
+8231489123/Shar
+GPT_V
+cu
+a_u
+f
+
+t
+r
+d/r
+so
+v
+/ma
+
+/Shar
+GPT_V3_u
+f
+
+t
+r
+d_c
+
+a
+
+d_sp
+
+t.jso
+
+v
+m b
+
+ch s
+rv
+ \
+  --mod
+
+ TIGER-Lab/VLM2V
+c-Fu
+ \
+  --back
+
+d op
+
+a
+-
+mb
+dd
+
+gs-v
+m2v
+c \
+  --
+
+dpo
+
+t /v1/
+mb
+dd
+
+gs \
+  --datas
+t-
+am
+ shar
+gpt \
+  --datas
+t-path 
+your data path
+/Shar
+GPT_V3_u
+f
+
+t
+r
+d_c
+
+a
+
+d_sp
+
+t.jso
+
+v
+m b
+
+ch s
+rv
+ \
+  --mod
+
+ TIGER-Lab/VLM2V
+c-Fu
+ \
+  --back
+
+d op
+
+a
+-
+mb
+dd
+
+gs-v
+m2v
+c \
+  --
+
+dpo
+
+t /v1/
+mb
+dd
+
+gs \
+  --datas
+t-
+am
+ hf \
+  --datas
+t-path 
+mar
+
+a-a
+/V
+s
+o
+Ar
+
+a-Chat
 ```
+/d
+ta
 
-</details>
+s
 
-### Reranker Benchmark
+### R
+ra
+k
+r B
 
-Benchmark the performance of rerank requests in vLLM.
+chmark
+B
 
-<details class="admonition abstract" markdown="1">
-<summary>Show more</summary>
+chmark th
+ p
+rforma
+c
+ of r
+ra
+k r
+qu
+sts 
 
-Unlike generative models which use Completions API or Chat Completions API,
-you should set `--backend vllm-rerank` and `--endpoint /v1/rerank` to use the Reranker API.
+ vLLM.
+d
+ta
 
-For reranking, the only supported dataset is `--dataset-name random-rerank`
+s c
+ass="admo
 
-Start the server:
+t
+o
+ abstract" markdo
 
+="1"
+
+summary
+Sho
+ mor
+
+/summary
+
+U
+
+
+k
+ g
+
+
+rat
+v
+ mod
+
+s 
+h
+ch us
+ Comp
+
+t
+o
+s API or Chat Comp
+
+t
+o
+s API,
+you shou
+d s
+t `--back
+
+d v
+m-r
+ra
+k` a
+d `--
+
+dpo
+
+t /v1/r
+ra
+k` to us
+ th
+ R
+ra
+k
+r API.
+For r
+ra
+k
+
+g, th
+ o
+
+y support
+d datas
+t 
+s `--datas
+t-
+am
+ ra
+dom-r
+ra
+k`
+Start th
+ s
+rv
+r:
 ```bash
-vllm serve BAAI/bge-reranker-v2-m3
+v
+m s
+rv
+ BAAI/bg
+-r
+ra
+k
+r-v2-m3
 ```
+Ru
+ th
+ b
 
-Run the benchmark:
-
+chmark:
 ```bash
-vllm bench serve \
-  --model BAAI/bge-reranker-v2-m3 \
-  --backend vllm-rerank \
-  --endpoint /v1/rerank \
-  --dataset-name random-rerank \
-  --tokenizer BAAI/bge-reranker-v2-m3 \
-  --random-input-len 512 \
-  --num-prompts 10 \
-  --random-batch-size 5
+v
+m b
+
+ch s
+rv
+ \
+  --mod
+
+ BAAI/bg
+-r
+ra
+k
+r-v2-m3 \
+  --back
+
+d v
+m-r
+ra
+k \
+  --
+
+dpo
+
+t /v1/r
+ra
+k \
+  --datas
+t-
+am
+ ra
+dom-r
+ra
+k \
+  --tok
+
+
+z
+r BAAI/bg
+-r
+ra
+k
+r-v2-m3 \
+  --ra
+dom-
+
+put-
+
+
+ 512 \
+  --
+um-prompts 10 \
+  --ra
+dom-batch-s
+z
+ 5
 ```
+For r
+ra
+k
+r mod
 
-For reranker models, this will create `num_prompts / random_batch_size` requests with
-`random_batch_size` "documents" where each one has close to `random_input_len` tokens.
-In the example above, this results in 2 rerank requests with 5 "documents" each where
-each document has close to 512 tokens.
+s, th
+s 
 
-Please note that the `/v1/rerank` is also supported by embedding models. So if you're running
-with an embedding model, also set `--no_reranker`. Because in this case the query is
-treated as an individual prompt by the server, here we send `random_batch_size - 1` documents
-to account for the extra prompt which is the query. The token accounting to report the
-throughput numbers correctly is also adjusted.
 
-</details>
+ cr
+at
+ `
+um_prompts / ra
+dom_batch_s
+z
+` r
+qu
+sts 
+
+th
+`ra
+dom_batch_s
+z
+` "docum
+
+ts" 
+h
+r
+ 
+ach o
+
+ has c
+os
+ to `ra
+dom_
+
+put_
+
+
+` tok
+
+s.
+I
+ th
+ 
+xamp
+
+ abov
+, th
+s r
+su
+ts 
+
+ 2 r
+ra
+k r
+qu
+sts 
+
+th 5 "docum
+
+ts" 
+ach 
+h
+r
+
+
+ach docum
+
+t has c
+os
+ to 512 tok
+
+s.
+P
+
+as
+ 
+ot
+ that th
+ `/v1/r
+ra
+k` 
+s a
+so support
+d by 
+mb
+dd
+
+g mod
+
+s. So 
+f you'r
+ ru
+
+
+g
+
+
+th a
+ 
+mb
+dd
+
+g mod
+
+, a
+so s
+t `--
+o_r
+ra
+k
+r`. B
+caus
+ 
+
+ th
+s cas
+ th
+ qu
+ry 
+s
+tr
+at
+d as a
+ 
+
+d
+v
+dua
+ prompt by th
+ s
+rv
+r, h
+r
+ 
+
+ s
+
+d `ra
+dom_batch_s
+z
+ - 1` docum
+
+ts
+to accou
+t for th
+ 
+xtra prompt 
+h
+ch 
+s th
+ qu
+ry. Th
+ tok
+
+ accou
+t
+
+g to r
+port th
+
+throughput 
+umb
+rs corr
+ct
+y 
+s a
+so adjust
+d.
+/d
+ta
+
+s
+

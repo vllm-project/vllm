@@ -1,76 +1,464 @@
-# LiteLLM
+# L
+t
+LLM
+[L
+t
+LLM](https://g
+thub.com/B
+rr
+AI/
 
-[LiteLLM](https://github.com/BerriAI/litellm) call all LLM APIs using the OpenAI format [Bedrock, Huggingface, VertexAI, TogetherAI, Azure, OpenAI, Groq etc.]
+t
 
-LiteLLM manages:
+m) ca
+ a
+ LLM APIs us
 
-- Translate inputs to provider's `completion`, `embedding`, and `image_generation` endpoints
-- [Consistent output](https://docs.litellm.ai/docs/completion/output), text responses will always be available at `['choices'][0]['message']['content']`
-- Retry/fallback logic across multiple deployments (e.g. Azure/OpenAI) - [Router](https://docs.litellm.ai/docs/routing)
-- Set Budgets & Rate limits per project, api key, model [LiteLLM Proxy Server (LLM Gateway)](https://docs.litellm.ai/docs/simple_proxy)
+g th
+ Op
 
-And LiteLLM supports all models on VLLM.
+AI format [B
+drock, Hugg
 
-## Prerequisites
+gfac
+, V
+rt
+xAI, Tog
+th
+rAI, Azur
+, Op
 
-Set up the vLLM and litellm environment:
+AI, Groq 
+tc.]
+L
+t
+LLM ma
+ag
+s:
+    - Tra
+s
+at
+ 
 
+puts to prov
+d
+r's `comp
+
+t
+o
+`, `
+mb
+dd
+
+g`, a
+d `
+mag
+_g
+
+
+rat
+o
+` 
+
+dpo
+
+ts
+    - [Co
+s
+st
+
+t output](https://docs.
+
+t
+
+m.a
+/docs/comp
+
+t
+o
+/output), t
+xt r
+spo
+s
+s 
+
+
+ a
+
+ays b
+ ava
+
+ab
+
+ at `['cho
+c
+s'][0]['m
+ssag
+']['co
+t
+
+t']`
+    - R
+try/fa
+back 
+og
+c across mu
+t
+p
+
+ d
+p
+oym
+
+ts (
+.g. Azur
+/Op
+
+AI) - [Rout
+r](https://docs.
+
+t
+
+m.a
+/docs/rout
+
+g)
+    - S
+t Budg
+ts & Rat
+ 
+
+m
+ts p
+r proj
+ct, ap
+ k
+y, mod
+
+ [L
+t
+LLM Proxy S
+rv
+r (LLM Gat
+
+ay)](https://docs.
+
+t
+
+m.a
+/docs/s
+mp
+
+_proxy)
+A
+d L
+t
+LLM supports a
+ mod
+
+s o
+ VLLM.
+## Pr
+r
+qu
+s
+t
+s
+S
+t up th
+ vLLM a
+d 
+
+t
+
+m 
+
+v
+ro
+m
+
+t:
 ```bash
-pip install vllm litellm
+p
+p 
+
+sta
+ v
+m 
+
+t
+
+m
 ```
+## D
+p
+oy
+### Chat comp
 
-## Deploy
+t
+o
 
-### Chat completion
+1. Start th
+ vLLM s
+rv
+r 
 
-1. Start the vLLM server with the supported chat completion model, e.g.
+th th
+ support
+d chat comp
 
+t
+o
+ mod
+
+, 
+.g.
     ```bash
-    vllm serve qwen/Qwen1.5-0.5B-Chat
+    v
+m s
+rv
+ q
+
+
+/Q
+
+
+1.5-0.5B-Chat
     ```
+1. Ca
+ 
+t 
 
-1. Call it with litellm:
+th 
 
-??? code
+t
 
-    ```python
-    import litellm 
+m:
+??? cod
 
-    messages = [{"content": "Hello, how are you?", "role": "user"}]
+    ```pytho
 
-    # hosted_vllm is prefix key word and necessary
-    response = litellm.completion(
-        model="hosted_vllm/qwen/Qwen1.5-0.5B-Chat", # pass the vllm model name
-        messages=messages,
-        api_base="http://{your-vllm-server-host}:{your-vllm-server-port}/v1",
-        temperature=0.2,
-        max_tokens=80,
+    
+mport 
+
+t
+
+m 
+    m
+ssag
+s = [{"co
+t
+
+t": "H
+
+o, ho
+ ar
+ you?", "ro
+
+": "us
+r"}]
+    # host
+d_v
+m 
+s pr
+f
+x k
+y 
+ord a
+d 
+
+c
+ssary
+    r
+spo
+s
+ = 
+
+t
+
+m.comp
+
+t
+o
+(
+        mod
+
+="host
+d_v
+m/q
+
+
+/Q
+
+
+1.5-0.5B-Chat", # pass th
+ v
+m mod
+
+ 
+am
+
+        m
+ssag
+s=m
+ssag
+s,
+        ap
+_bas
+="http://{your-v
+m-s
+rv
+r-host}:{your-v
+m-s
+rv
+r-port}/v1",
+        t
+mp
+ratur
+=0.2,
+        max_tok
+
+s=80,
     )
+    pr
 
-    print(response)
+t(r
+spo
+s
+)
     ```
+### Emb
+dd
 
-### Embeddings
+gs
+1. Start th
+ vLLM s
+rv
+r 
 
-1. Start the vLLM server with the supported embedding model, e.g.
+th th
+ support
+d 
+mb
+dd
 
+g mod
+
+, 
+.g.
     ```bash
-    vllm serve BAAI/bge-base-en-v1.5
+    v
+m s
+rv
+ BAAI/bg
+-bas
+-
+
+-v1.5
     ```
+1. Ca
+ 
+t 
 
-1. Call it with litellm:
+th 
 
-```python
-from litellm import embedding   
-import os
+t
 
-os.environ["HOSTED_VLLM_API_BASE"] = "http://{your-vllm-server-host}:{your-vllm-server-port}/v1"
+m:
+```pytho
 
-# hosted_vllm is prefix key word and necessary
-# pass the vllm model name
-embedding = embedding(model="hosted_vllm/BAAI/bge-base-en-v1.5", input=["Hello world"])
+from 
 
-print(embedding)
+t
+
+m 
+mport 
+mb
+dd
+
+g   
+
+mport os
+os.
+
+v
+ro
+["HOSTED_VLLM_API_BASE"] = "http://{your-v
+m-s
+rv
+r-host}:{your-v
+m-s
+rv
+r-port}/v1"
+# host
+d_v
+m 
+s pr
+f
+x k
+y 
+ord a
+d 
+
+c
+ssary
+# pass th
+ v
+m mod
+
+ 
+am
+
+
+mb
+dd
+
+g = 
+mb
+dd
+
+g(mod
+
+="host
+d_v
+m/BAAI/bg
+-bas
+-
+
+-v1.5", 
+
+put=["H
+
+o 
+or
+d"])
+pr
+
+t(
+mb
+dd
+
+g)
 ```
+For d
+ta
 
-For details, see the tutorial [Using vLLM in LiteLLM](https://docs.litellm.ai/docs/providers/vllm).
+s, s
+ th
+ tutor
+a
+ [Us
+
+g vLLM 
+
+ L
+t
+LLM](https://docs.
+
+t
+
+m.a
+/docs/prov
+d
+rs/v
+m).

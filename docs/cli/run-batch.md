@@ -1,9 +1,27 @@
-# vllm run-batch
+# v
+m ru
+-batch
+## JSON CLI Argum
 
-## JSON CLI Arguments
+ts
+--8
+-- "docs/c
 
---8<-- "docs/cli/json_tip.inc.md"
+/jso
+_t
+p.
 
-## Arguments
+c.md"
+## Argum
 
---8<-- "docs/generated/argparse/run-batch.inc.md"
+ts
+--8
+-- "docs/g
+
+
+rat
+d/argpars
+/ru
+-batch.
+
+c.md"

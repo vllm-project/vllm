@@ -1,144 +1,1252 @@
-# Generative Models
+# G
 
-vLLM provides first-class support for generative models, which covers most of LLMs.
 
-In vLLM, generative models implement the [VllmModelForTextGeneration][vllm.model_executor.models.VllmModelForTextGeneration] interface.
-Based on the final hidden states of the input, these models output log probabilities of the tokens to generate,
-which are then passed through [Sampler][vllm.v1.sample.sampler.Sampler] to obtain the final text.
+rat
+v
+ Mod
 
-## Configuration
+s
+vLLM prov
+d
+s f
+rst-c
+ass support for g
 
-### Model Runner (`--runner`)
 
-Run a model in generation mode via the option `--runner generate`.
+rat
+v
+ mod
 
-!!! tip
-    There is no need to set this option in the vast majority of cases as vLLM can automatically
-    detect the model runner to use via `--runner auto`.
+s, 
+h
+ch cov
+rs most of LLMs.
+I
+ vLLM, g
 
-## Offline Inference
 
-The [LLM][vllm.LLM] class provides various methods for offline inference.
-See [configuration](../api/README.md#configuration) for a list of options when initializing the model.
+rat
+v
+ mod
 
-### `LLM.generate`
+s 
+mp
 
-The [generate][vllm.LLM.generate] method is available to all generative models in vLLM.
-It is similar to [its counterpart in HF Transformers](https://huggingface.co/docs/transformers/main/en/main_classes/text_generation#transformers.GenerationMixin.generate),
-except that tokenization and detokenization are also performed automatically.
+m
 
-```python
-from vllm import LLM
+t th
+ [V
+mMod
 
-llm = LLM(model="facebook/opt-125m")
-outputs = llm.generate("Hello, my name is")
+ForT
+xtG
 
-for output in outputs:
+
+rat
+o
+][v
+m.mod
+
+_
+x
+cutor.mod
+
+s.V
+mMod
+
+ForT
+xtG
+
+
+rat
+o
+] 
+
+t
+rfac
+.
+Bas
+d o
+ th
+ f
+
+a
+ h
+dd
+
+ stat
+s of th
+ 
+
+put, th
+s
+ mod
+
+s output 
+og probab
+
+
+t
+
+s of th
+ tok
+
+s to g
+
+
+rat
+,
+
+h
+ch ar
+ th
+
+ pass
+d through [Samp
+
+r][v
+m.v1.samp
+
+.samp
+
+r.Samp
+
+r] to obta
+
+ th
+ f
+
+a
+ t
+xt.
+## Co
+f
+gurat
+o
+
+### Mod
+
+ Ru
+
+r (`--ru
+
+r`)
+Ru
+ a mod
+
+ 
+
+ g
+
+
+rat
+o
+ mod
+ v
+a th
+ opt
+o
+ `--ru
+
+r g
+
+
+rat
+`.
+!!! t
+p
+    Th
+r
+ 
+s 
+o 
+
+d to s
+t th
+s opt
+o
+ 
+
+ th
+ vast major
+ty of cas
+s as vLLM ca
+ automat
+ca
+y
+    d
+t
+ct th
+ mod
+
+ ru
+
+r to us
+ v
+a `--ru
+
+r auto`.
+## Off
+
+
+
+ I
+f
+r
+
+c
+
+Th
+ [LLM][v
+m.LLM] c
+ass prov
+d
+s var
+ous m
+thods for off
+
+
+
+ 
+
+f
+r
+
+c
+.
+S
+ [co
+f
+gurat
+o
+](../ap
+/README.md#co
+f
+gurat
+o
+) for a 
+
+st of opt
+o
+s 
+h
+
+ 
+
+
+t
+a
+
+z
+
+g th
+ mod
+
+.
+### `LLM.g
+
+
+rat
+`
+Th
+ [g
+
+
+rat
+][v
+m.LLM.g
+
+
+rat
+] m
+thod 
+s ava
+
+ab
+
+ to a
+ g
+
+
+rat
+v
+ mod
+
+s 
+
+ vLLM.
+It 
+s s
+m
+
+ar to [
+ts cou
+t
+rpart 
+
+ HF Tra
+sform
+rs](https://hugg
+
+gfac
+.co/docs/tra
+sform
+rs/ma
+
+/
+
+/ma
+
+_c
+ass
+s/t
+xt_g
+
+
+rat
+o
+#tra
+sform
+rs.G
+
+
+rat
+o
+M
+x
+
+.g
+
+
+rat
+),
+
+xc
+pt that tok
+
+
+zat
+o
+ a
+d d
+tok
+
+
+zat
+o
+ ar
+ a
+so p
+rform
+d automat
+ca
+y.
+```pytho
+
+from v
+m 
+mport LLM
+
+m = LLM(mod
+
+="fac
+book/opt-125m")
+outputs = 
+m.g
+
+
+rat
+("H
+
+o, my 
+am
+ 
+s")
+for output 
+
+ outputs:
     prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    g
+
+
+rat
+d_t
+xt = output.outputs[0].t
+xt
+    pr
+
+t(f"Prompt: {prompt!r}, G
+
+
+rat
+d t
+xt: {g
+
+
+rat
+d_t
+xt!r}")
 ```
+You ca
+ opt
+o
+a
+y co
+tro
+ th
+ 
+a
+guag
+ g
 
-You can optionally control the language generation by passing [SamplingParams][vllm.SamplingParams].
-For example, you can use greedy sampling by setting `temperature=0`:
 
-```python
-from vllm import LLM, SamplingParams
+rat
+o
+ by pass
 
-llm = LLM(model="facebook/opt-125m")
-params = SamplingParams(temperature=0)
-outputs = llm.generate("Hello, my name is", params)
+g [Samp
 
-for output in outputs:
+
+gParams][v
+m.Samp
+
+
+gParams].
+For 
+xamp
+
+, you ca
+ us
+ gr
+dy samp
+
+
+g by s
+tt
+
+g `t
+mp
+ratur
+=0`:
+```pytho
+
+from v
+m 
+mport LLM, Samp
+
+
+gParams
+
+m = LLM(mod
+
+="fac
+book/opt-125m")
+params = Samp
+
+
+gParams(t
+mp
+ratur
+=0)
+outputs = 
+m.g
+
+
+rat
+("H
+
+o, my 
+am
+ 
+s", params)
+for output 
+
+ outputs:
     prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    g
+
+
+rat
+d_t
+xt = output.outputs[0].t
+xt
+    pr
+
+t(f"Prompt: {prompt!r}, G
+
+
+rat
+d t
+xt: {g
+
+
+rat
+d_t
+xt!r}")
 ```
+!!! 
+mporta
+t
+    By d
+fau
+t, vLLM 
 
-!!! important
-    By default, vLLM will use sampling parameters recommended by model creator by applying the `generation_config.json` from the huggingface model repository if it exists. In most cases, this will provide you with the best results by default if [SamplingParams][vllm.SamplingParams] is not specified.
 
-    However, if vLLM's default sampling parameters are preferred, please pass `generation_config="vllm"` when creating the [LLM][vllm.LLM] instance.
-A code example can be found here: [examples/offline_inference/basic/basic.py](../../examples/offline_inference/basic/basic.py)
+ us
+ samp
 
-### `LLM.beam_search`
 
-The [beam_search][vllm.LLM.beam_search] method implements [beam search](https://huggingface.co/docs/transformers/en/generation_strategies#beam-search) on top of [generate][vllm.LLM.generate].
-For example, to search using 5 beams and output at most 50 tokens:
+g param
+t
+rs r
+comm
 
-```python
-from vllm import LLM
-from vllm.sampling_params import BeamSearchParams
+d
+d by mod
 
-llm = LLM(model="facebook/opt-125m")
-params = BeamSearchParams(beam_width=5, max_tokens=50)
-outputs = llm.beam_search([{"prompt": "Hello, my name is "}], params)
+ cr
+ator by app
+y
 
-for output in outputs:
-    generated_text = output.sequences[0].text
-    print(f"Generated text: {generated_text!r}")
+g th
+ `g
+
+
+rat
+o
+_co
+f
+g.jso
+` from th
+ hugg
+
+gfac
+ mod
+
+ r
+pos
+tory 
+f 
+t 
+x
+sts. I
+ most cas
+s, th
+s 
+
+
+ prov
+d
+ you 
+
+th th
+ b
+st r
+su
+ts by d
+fau
+t 
+f [Samp
+
+
+gParams][v
+m.Samp
+
+
+gParams] 
+s 
+ot sp
+c
+f
+
+d.
+    Ho
+
+v
+r, 
+f vLLM's d
+fau
+t samp
+
+
+g param
+t
+rs ar
+ pr
+f
+rr
+d, p
+
+as
+ pass `g
+
+
+rat
+o
+_co
+f
+g="v
+m"` 
+h
+
+ cr
+at
+
+g th
+ [LLM][v
+m.LLM] 
+
+sta
+c
+.
+A cod
+ 
+xamp
+
+ ca
+ b
+ fou
+d h
+r
+: [
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/bas
+c/bas
+c.py](../../
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/bas
+c/bas
+c.py)
+### `LLM.b
+am_s
+arch`
+Th
+ [b
+am_s
+arch][v
+m.LLM.b
+am_s
+arch] m
+thod 
+mp
+
+m
+
+ts [b
+am s
+arch](https://hugg
+
+gfac
+.co/docs/tra
+sform
+rs/
+
+/g
+
+
+rat
+o
+_strat
+g
+
+s#b
+am-s
+arch) o
+ top of [g
+
+
+rat
+][v
+m.LLM.g
+
+
+rat
+].
+For 
+xamp
+
+, to s
+arch us
+
+g 5 b
+ams a
+d output at most 50 tok
+
+s:
+```pytho
+
+from v
+m 
+mport LLM
+from v
+m.samp
+
+
+g_params 
+mport B
+amS
+archParams
+
+m = LLM(mod
+
+="fac
+book/opt-125m")
+params = B
+amS
+archParams(b
+am_
+
+dth=5, max_tok
+
+s=50)
+outputs = 
+m.b
+am_s
+arch([{"prompt": "H
+
+o, my 
+am
+ 
+s "}], params)
+for output 
+
+ outputs:
+    g
+
+
+rat
+d_t
+xt = output.s
+qu
+
+c
+s[0].t
+xt
+    pr
+
+t(f"G
+
+
+rat
+d t
+xt: {g
+
+
+rat
+d_t
+xt!r}")
 ```
-
 ### `LLM.chat`
+Th
+ [chat][v
+m.LLM.chat] m
+thod 
+mp
 
-The [chat][vllm.LLM.chat] method implements chat functionality on top of [generate][vllm.LLM.generate].
-In particular, it accepts input similar to [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat)
-and automatically applies the model's [chat template](https://huggingface.co/docs/transformers/en/chat_templating) to format the prompt.
+m
 
-!!! important
-    In general, only instruction-tuned models have a chat template.
-    Base models may perform poorly as they are not trained to respond to the chat conversation.
+ts chat fu
+ct
+o
+a
 
-??? code
+ty o
+ top of [g
 
-    ```python
-    from vllm import LLM
 
-    llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct")
-    conversation = [
+rat
+][v
+m.LLM.g
+
+
+rat
+].
+I
+ part
+cu
+ar, 
+t acc
+pts 
+
+put s
+m
+
+ar to [Op
+
+AI Chat Comp
+
+t
+o
+s API](https://p
+atform.op
+
+a
+.com/docs/ap
+-r
+f
+r
+
+c
+/chat)
+a
+d automat
+ca
+y app
+
+
+s th
+ mod
+
+'s [chat t
+mp
+at
+](https://hugg
+
+gfac
+.co/docs/tra
+sform
+rs/
+
+/chat_t
+mp
+at
+
+g) to format th
+ prompt.
+!!! 
+mporta
+t
+    I
+ g
+
+
+ra
+, o
+
+y 
+
+struct
+o
+-tu
+
+d mod
+
+s hav
+ a chat t
+mp
+at
+.
+    Bas
+ mod
+
+s may p
+rform poor
+y as th
+y ar
+ 
+ot tra
+
+
+d to r
+spo
+d to th
+ chat co
+v
+rsat
+o
+.
+??? cod
+
+    ```pytho
+
+    from v
+m 
+mport LLM
+    
+m = LLM(mod
+
+="m
+ta-
+ama/M
+ta-L
+ama-3-8B-I
+struct")
+    co
+v
+rsat
+o
+ = [
         {
-            "role": "system",
-            "content": "You are a helpful assistant",
+            "ro
+
+": "syst
+m",
+            "co
+t
+
+t": "You ar
+ a h
+
+pfu
+ ass
+sta
+t",
         },
         {
-            "role": "user",
-            "content": "Hello",
+            "ro
+
+": "us
+r",
+            "co
+t
+
+t": "H
+
+o",
         },
         {
-            "role": "assistant",
-            "content": "Hello! How can I assist you today?",
+            "ro
+
+": "ass
+sta
+t",
+            "co
+t
+
+t": "H
+
+o! Ho
+ ca
+ I ass
+st you today?",
         },
         {
-            "role": "user",
-            "content": "Write an essay about the importance of higher education.",
+            "ro
+
+": "us
+r",
+            "co
+t
+
+t": "Wr
+t
+ a
+ 
+ssay about th
+ 
+mporta
+c
+ of h
+gh
+r 
+ducat
+o
+.",
         },
     ]
-    outputs = llm.chat(conversation)
+    outputs = 
+m.chat(co
+v
+rsat
+o
+)
+    for output 
 
-    for output in outputs:
+ outputs:
         prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        g
+
+
+rat
+d_t
+xt = output.outputs[0].t
+xt
+        pr
+
+t(f"Prompt: {prompt!r}, G
+
+
+rat
+d t
+xt: {g
+
+
+rat
+d_t
+xt!r}")
     ```
+A cod
+ 
+xamp
 
-A code example can be found here: [examples/offline_inference/basic/chat.py](../../examples/offline_inference/basic/chat.py)
+ ca
+ b
+ fou
+d h
+r
+: [
+xamp
 
-If the model doesn't have a chat template or you want to specify another one,
-you can explicitly pass a chat template:
+s/off
 
-```python
-from vllm.entrypoints.chat_utils import load_chat_template
 
-# You can find a list of existing chat templates under `examples/`
-custom_template = load_chat_template(chat_template="<path_to_template>")
-print("Loaded chat template:", custom_template)
 
-outputs = llm.chat(conversation, chat_template=custom_template)
+_
+
+f
+r
+
+c
+/bas
+c/chat.py](../../
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/bas
+c/chat.py)
+If th
+ mod
+
+ do
+s
+'t hav
+ a chat t
+mp
+at
+ or you 
+a
+t to sp
+c
+fy a
+oth
+r o
+
+,
+you ca
+ 
+xp
+
+c
+t
+y pass a chat t
+mp
+at
+:
+```pytho
+
+from v
+m.
+
+trypo
+
+ts.chat_ut
+
+s 
+mport 
+oad_chat_t
+mp
+at
+
+# You ca
+ f
+
+d a 
+
+st of 
+x
+st
+
+g chat t
+mp
+at
+s u
+d
+r `
+xamp
+
+s/`
+custom_t
+mp
+at
+ = 
+oad_chat_t
+mp
+at
+(chat_t
+mp
+at
+="
+path_to_t
+mp
+at
+
+")
+pr
+
+t("Load
+d chat t
+mp
+at
+:", custom_t
+mp
+at
+)
+outputs = 
+m.chat(co
+v
+rsat
+o
+, chat_t
+mp
+at
+=custom_t
+mp
+at
+)
 ```
+## O
 
-## Online Serving
 
-Our [OpenAI-Compatible Server](../serving/openai_compatible_server.md) provides endpoints that correspond to the offline APIs:
 
-- [Completions API](../serving/openai_compatible_server.md#completions-api) is similar to `LLM.generate` but only accepts text.
-- [Chat API](../serving/openai_compatible_server.md#chat-api)  is similar to `LLM.chat`, accepting both text and [multi-modal inputs](../features/multimodal_inputs.md) for models with a chat template.
+
+ S
+rv
+
+g
+Our [Op
+
+AI-Compat
+b
+
+ S
+rv
+r](../s
+rv
+
+g/op
+
+a
+_compat
+b
+
+_s
+rv
+r.md) prov
+d
+s 
+
+dpo
+
+ts that corr
+spo
+d to th
+ off
+
+
+
+ APIs:
+    - [Comp
+
+t
+o
+s API](../s
+rv
+
+g/op
+
+a
+_compat
+b
+
+_s
+rv
+r.md#comp
+
+t
+o
+s-ap
+) 
+s s
+m
+
+ar to `LLM.g
+
+
+rat
+` but o
+
+y acc
+pts t
+xt.
+    - [Chat API](../s
+rv
+
+g/op
+
+a
+_compat
+b
+
+_s
+rv
+r.md#chat-ap
+)  
+s s
+m
+
+ar to `LLM.chat`, acc
+pt
+
+g both t
+xt a
+d [mu
+t
+-moda
+ 
+
+puts](../f
+atur
+s/mu
+t
+moda
+_
+
+puts.md) for mod
+
+s 
+
+th a chat t
+mp
+at
+.

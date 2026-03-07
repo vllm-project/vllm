@@ -1,118 +1,959 @@
-# Interleaved Thinking
+# I
+t
+r
 
-## Introduction
+av
+d Th
 
-Interleaved thinking allows models to reason between tool calls, enabling more sophisticated decision-making after receiving tool results. This feature helps models chain multiple tool calls with reasoning steps in between and make nuanced decisions based on intermediate results.
+k
 
-Important: Interleaved thinking increases token usage and response latency. Consider your budget and performance requirements when enabling this feature.
+g
+## I
+troduct
+o
 
-## How Interleaved Thinking Works
+I
+t
+r
 
-With interleaved thinking, the model can:
+av
+d th
 
-- Reason about the results of a tool call before deciding what to do next
-- Chain multiple tool calls with reasoning steps in between
-- Make more nuanced decisions based on intermediate results
-- Provide transparent reasoning for its tool selection process
+k
 
-## Supported Models
+g a
+o
+s mod
 
-vLLM currently supports the following interleaved thinking models:
+s to r
+aso
+ b
+t
 
-| Model Series | Reasoning Parser Name |
+
+ too
+ ca
+s, 
+
+ab
+
+
+g mor
+ soph
+st
+cat
+d d
+c
+s
+o
+-mak
+
+g aft
+r r
+c
+
+v
+
+g too
+ r
+su
+ts. Th
+s f
+atur
+ h
+
+ps mod
+
+s cha
+
+ mu
+t
+p
+
+ too
+ ca
+s 
+
+th r
+aso
+
+
+g st
+ps 
+
+ b
+t
+
+
+ a
+d mak
+ 
+ua
+c
+d d
+c
+s
+o
+s bas
+d o
+ 
+
+t
+rm
+d
+at
+ r
+su
+ts.
+Importa
+t: I
+t
+r
+
+av
+d th
+
+k
+
+g 
+
+cr
+as
+s tok
+
+ usag
+ a
+d r
+spo
+s
+ 
+at
+
+cy. Co
+s
+d
+r your budg
+t a
+d p
+rforma
+c
+ r
+qu
+r
+m
+
+ts 
+h
+
+ 
+
+ab
+
+
+g th
+s f
+atur
+.
+## Ho
+ I
+t
+r
+
+av
+d Th
+
+k
+
+g Works
+W
+th 
+
+t
+r
+
+av
+d th
+
+k
+
+g, th
+ mod
+
+ ca
+:
+    - R
+aso
+ about th
+ r
+su
+ts of a too
+ ca
+ b
+for
+ d
+c
+d
+
+g 
+hat to do 
+
+xt
+    - Cha
+
+ mu
+t
+p
+
+ too
+ ca
+s 
+
+th r
+aso
+
+
+g st
+ps 
+
+ b
+t
+
+
+
+    - Mak
+ mor
+ 
+ua
+c
+d d
+c
+s
+o
+s bas
+d o
+ 
+
+t
+rm
+d
+at
+ r
+su
+ts
+    - Prov
+d
+ tra
+spar
+
+t r
+aso
+
+
+g for 
+ts too
+ s
+
+
+ct
+o
+ proc
+ss
+## Support
+d Mod
+
+s
+vLLM curr
+
+t
+y supports th
+ fo
+o
+
+
+g 
+
+t
+r
+
+av
+d th
+
+k
+
+g mod
+
+s:
+| Mod
+
+ S
+r
+
+s | R
+aso
+
+
+g Pars
+r Nam
+ |
 |--------------|-----------------------|
-| moonshotai/Kimi-K2-Thinking    |  kimi_k2  |
-| MiniMaxAI/MiniMax-M2           |  minimax_m2  |
+| moo
+shota
+/K
+m
+-K2-Th
 
-## Example Usage
+k
 
-To use interleaved thinking with tool calls, specify a model that supports this feature and enable tool calls in your chat completion request. Here's an example:
+g    |  k
+m
+_k2  |
+| M
 
-??? code
 
-    ```python
+MaxAI/M
+
+
+Max-M2           |  m
+
+
+max_m2  |
+## Examp
+
+ Usag
+
+To us
+ 
+
+t
+r
+
+av
+d th
+
+k
+
+g 
+
+th too
+ ca
+s, sp
+c
+fy a mod
+
+ that supports th
+s f
+atur
+ a
+d 
+
+ab
+
+ too
+ ca
+s 
+
+ your chat comp
+
+t
+o
+ r
+qu
+st. H
+r
+'s a
+ 
+xamp
+
+:
+??? cod
+
+    ```pytho
+
     """
-    vllm serve MiniMaxAI/MiniMax-M2 \
-      --tensor-parallel-size 4 \
-      --tool-call-parser minimax_m2 \
-      --reasoning-parser minimax_m2 \
-      --enable-auto-tool-choice
+    v
+m s
+rv
+ M
+
+
+MaxAI/M
+
+
+Max-M2 \
+      --t
+
+sor-para
+
+
+-s
+z
+ 4 \
+      --too
+-ca
+-pars
+r m
+
+
+max_m2 \
+      --r
+aso
+
+
+g-pars
+r m
+
+
+max_m2 \
+      --
+
+ab
+
+-auto-too
+-cho
+c
+
     """
-    import json
     
-    from openai import OpenAI
-    
-    client = OpenAI(base_url="http://localhost:8000/v1",     api_key="dummy")
-    
-    
-    def get_current_weather(location: str, unit: "str"):
-        """Get the current weather in a given location"""
-        if unit == "celsius":
-            return f"The current temperature in {location} is 22°C."
-        else:
-            return f"The current temperature in {location} is 72°F."
-    
-    
-    tools = [
+mport jso
+
+    from op
+
+a
+ 
+mport Op
+
+AI
+    c
+
+
+
+t = Op
+
+AI(bas
+_ur
+="http://
+oca
+host:8000/v1",     ap
+_k
+y="dummy")
+    d
+f g
+t_curr
+
+t_
+
+ath
+r(
+ocat
+o
+: str, u
+
+t: "str"):
+        """G
+t th
+ curr
+
+t 
+
+ath
+r 
+
+ a g
+v
+
+ 
+ocat
+o
+"""
+        
+f u
+
+t == "c
+
+s
+us":
+            r
+tur
+ f"Th
+ curr
+
+t t
+mp
+ratur
+ 
+
+ {
+ocat
+o
+} 
+s 22°C."
+        
+
+s
+:
+            r
+tur
+ f"Th
+ curr
+
+t t
+mp
+ratur
+ 
+
+ {
+ocat
+o
+} 
+s 72°F."
+    too
+s = [
         {
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "description": "Get the current weather in a given     location",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "location": {
-                            "type": "string",
-                            "description": "City and state, e.g.,     'San Francisco, CA'",
+            "typ
+": "fu
+ct
+o
+",
+            "fu
+ct
+o
+": {
+                "
+am
+": "g
+t_
+
+ath
+r",
+                "d
+scr
+pt
+o
+": "G
+t th
+ curr
+
+t 
+
+ath
+r 
+
+ a g
+v
+
+     
+ocat
+o
+",
+                "param
+t
+rs": {
+                    "typ
+": "obj
+ct",
+                    "prop
+rt
+
+s": {
+                        "
+ocat
+o
+": {
+                            "typ
+": "str
+
+g",
+                            "d
+scr
+pt
+o
+": "C
+ty a
+d stat
+, 
+.g.,     'Sa
+ Fra
+c
+sco, CA'",
                         },
-                        "unit": {"type": "string", "enum":     ["celsius", "fahrenheit"]},
+                        "u
+
+t": {"typ
+": "str
+
+g", "
+
+um":     ["c
+
+s
+us", "fahr
+
+h
+
+t"]},
                     },
-                    "required": ["location", "unit"],
+                    "r
+qu
+r
+d": ["
+ocat
+o
+", "u
+
+t"],
                 },
             },
         }
     ]
-    messages = [{"role": "user", "content": "What's the weather in Fahrenheit like in San Francisco?"}]
-    response = client.chat.completions.create(
-        model=client.models.list().data[0].id,
-        messages=messages,
-        tools=tools,
-        tool_choice="auto",
+    m
+ssag
+s = [{"ro
+
+": "us
+r", "co
+t
+
+t": "What's th
+ 
+
+ath
+r 
+
+ Fahr
+
+h
+
+t 
+
+k
+ 
+
+ Sa
+ Fra
+c
+sco?"}]
+    r
+spo
+s
+ = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+=c
+
+
+
+t.mod
+
+s.
+
+st().data[0].
+d,
+        m
+ssag
+s=m
+ssag
+s,
+        too
+s=too
+s,
+        too
+_cho
+c
+="auto",
     )
-    
-    tool_call = response.choices[0].message.tool_calls[0].function
-    
-    messages.append(
+    too
+_ca
+ = r
+spo
+s
+.cho
+c
+s[0].m
+ssag
+.too
+_ca
+s[0].fu
+ct
+o
+
+    m
+ssag
+s.app
+
+d(
         {
-            "role": "assistant",
-            "tool_calls": response.choices[0].message.tool_calls,
-            "reasoning": response.choices[0].message.reasoning, # append reasoning
+            "ro
+
+": "ass
+sta
+t",
+            "too
+_ca
+s": r
+spo
+s
+.cho
+c
+s[0].m
+ssag
+.too
+_ca
+s,
+            "r
+aso
+
+
+g": r
+spo
+s
+.cho
+c
+s[0].m
+ssag
+.r
+aso
+
+
+g, # app
+
+d r
+aso
+
+
+g
         }
     )
-    
-    # Simulate tool execution
-    available_tools = {"get_weather": get_current_weather}
-    
-    completion_tool_calls = response.choices[0].message.tool_calls
-    for call in completion_tool_calls:
-        tool_to_call = available_tools[call.function.name]
-        args = json.loads(call.function.arguments)
-        result = tool_to_call(**args)
-        messages.append(
+    # S
+mu
+at
+ too
+ 
+x
+cut
+o
+
+    ava
+
+ab
+
+_too
+s = {"g
+t_
+
+ath
+r": g
+t_curr
+
+t_
+
+ath
+r}
+    comp
+
+t
+o
+_too
+_ca
+s = r
+spo
+s
+.cho
+c
+s[0].m
+ssag
+.too
+_ca
+s
+    for ca
+ 
+
+ comp
+
+t
+o
+_too
+_ca
+s:
+        too
+_to_ca
+ = ava
+
+ab
+
+_too
+s[ca
+.fu
+ct
+o
+.
+am
+]
+        args = jso
+.
+oads(ca
+.fu
+ct
+o
+.argum
+
+ts)
+        r
+su
+t = too
+_to_ca
+(**args)
+        m
+ssag
+s.app
+
+d(
             {
-                "role": "tool",
-                "content": result,
-                "tool_call_id": call.id,
-                "name": call.function.name,
+                "ro
+
+": "too
+",
+                "co
+t
+
+t": r
+su
+t,
+                "too
+_ca
+_
+d": ca
+.
+d,
+                "
+am
+": ca
+.fu
+ct
+o
+.
+am
+,
             }
         )
-    response_2 = client.chat.completions.create(
-        model=client.models.list().data[0].id,
-        messages=messages,
-        tools=tools,
-        tool_choice="auto",
+    r
+spo
+s
+_2 = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+=c
+
+
+
+t.mod
+
+s.
+
+st().data[0].
+d,
+        m
+ssag
+s=m
+ssag
+s,
+        too
+s=too
+s,
+        too
+_cho
+c
+="auto",
     )
-    print(response_2.choices[0].message.content)
+    pr
+
+t(r
+spo
+s
+_2.cho
+c
+s[0].m
+ssag
+.co
+t
+
+t)
     ```
-This example demonstrates how to set up interleaved thinking with tool calls using a weather retrieval function. The model reasons about the tool results before generating the final response.
+Th
+s 
+xamp
+
+ d
+mo
+strat
+s ho
+ to s
+t up 
+
+t
+r
+
+av
+d th
+
+k
+
+g 
+
+th too
+ ca
+s us
+
+g a 
+
+ath
+r r
+tr
+
+va
+ fu
+ct
+o
+. Th
+ mod
+
+ r
+aso
+s about th
+ too
+ r
+su
+ts b
+for
+ g
+
+
+rat
+
+g th
+ f
+
+a
+ r
+spo
+s
+.

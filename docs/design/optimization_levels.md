@@ -1,86 +1,686 @@
-# Optimization Levels
+# Opt
+m
+zat
+o
+ L
+v
 
-## Overview
+s
+## Ov
+rv
 
-vLLM provides 4 optimization levels (`-O0`, `-O1`, `-O2`, `-O3`) that allow users to trade off startup time for performance:
 
-- `-O0`: No optimization. Fastest startup time, but lowest performance.
-- `-O1`: Fast optimization. Simple compilation and fast fusions, and PIECEWISE cudagraphs.
-- `-O2`: Default optimization. Additional compilation ranges, additional fusions, FULL_AND_PIECEWISE cudagraphs.
-- `-O3`: Aggressive optimization. Currently equal to `-O2`, but may include additional time-consuming or experimental optimizations in the future.
 
-All optimization level defaults can be achieved by manually setting the underlying flags.
-User-set flags take precedence over optimization level defaults.
+vLLM prov
+d
+s 4 opt
+m
+zat
+o
+ 
 
-## Level Summaries and Usage Examples
+v
 
+s (`-O0`, `-O1`, `-O2`, `-O3`) that a
+o
+ us
+rs to trad
+ off startup t
+m
+ for p
+rforma
+c
+:
+    - `-O0`: No opt
+m
+zat
+o
+. Fast
+st startup t
+m
+, but 
+o
+
+st p
+rforma
+c
+.
+    - `-O1`: Fast opt
+m
+zat
+o
+. S
+mp
+
+ comp
+
+at
+o
+ a
+d fast fus
+o
+s, a
+d PIECEWISE cudagraphs.
+    - `-O2`: D
+fau
+t opt
+m
+zat
+o
+. Add
+t
+o
+a
+ comp
+
+at
+o
+ ra
+g
+s, add
+t
+o
+a
+ fus
+o
+s, FULL_AND_PIECEWISE cudagraphs.
+    - `-O3`: Aggr
+ss
+v
+ opt
+m
+zat
+o
+. Curr
+
+t
+y 
+qua
+ to `-O2`, but may 
+
+c
+ud
+ add
+t
+o
+a
+ t
+m
+-co
+sum
+
+g or 
+xp
+r
+m
+
+ta
+ opt
+m
+zat
+o
+s 
+
+ th
+ futur
+.
+A
+ opt
+m
+zat
+o
+ 
+
+v
+
+ d
+fau
+ts ca
+ b
+ ach
+
+v
+d by ma
+ua
+y s
+tt
+
+g th
+ u
+d
+r
+y
+
+g f
+ags.
+Us
+r-s
+t f
+ags tak
+ pr
+c
+d
+
+c
+ ov
+r opt
+m
+zat
+o
+ 
+
+v
+
+ d
+fau
+ts.
+## L
+v
+
+ Summar
+
+s a
+d Usag
+ Examp
+
+s
 ```bash
-# CLI usage
-python -m vllm.entrypoints.api_server --model RedHatAI/Llama-3.2-1B-FP8 -O1
+# CLI usag
 
-# Python API usage
-from vllm.entrypoints.llm import LLM
+pytho
+ -m v
+m.
 
-llm = LLM(
-    model="RedHatAI/Llama-3.2-1B-FP8",
-    optimization_level=2 # equivalent to -O2
+trypo
+
+ts.ap
+_s
+rv
+r --mod
+
+ R
+dHatAI/L
+ama-3.2-1B-FP8 -O1
+# Pytho
+ API usag
+
+from v
+m.
+
+trypo
+
+ts.
+m 
+mport LLM
+
+m = LLM(
+    mod
+
+="R
+dHatAI/L
+ama-3.2-1B-FP8",
+    opt
+m
+zat
+o
+_
+
+v
+
+=2 # 
+qu
+va
+
+
+t to -O2
 )
 ```
+### `-O0`: No Opt
+m
+zat
+o
 
-### `-O0`: No Optimization
+Startup as fast as poss
+b
 
-Startup as fast as possible - no autotuning, no compilation, and no cudagraphs.
-This level is good for initial phases of development and debugging.
+ - 
+o autotu
 
-Settings:
 
-- `-cc.cudagraph_mode=NONE`
-- `-cc.mode=NONE` (also resulting in `-cc.custom_ops=["none"]`)
-- `-cc.pass_config.fuse_...=False` (all fusions disabled)
-- `--kernel-config.enable_flashinfer_autotune=False`
+g, 
+o comp
 
-### `-O1`: Fast Optimization
+at
+o
+, a
+d 
+o cudagraphs.
+Th
+s 
 
-Prioritize fast startup, but still enable basic optimizations like compilation and cudagraphs.
-This level is a good balance for most development scenarios where you want faster startup but
-still make sure your code does not break cudagraphs or compilation.
+v
 
-Settings:
+ 
+s good for 
 
-- `-cc.cudagraph_mode=PIECEWISE`
-- `-cc.mode=VLLM_COMPILE`
-- `--kernel-config.enable_flashinfer_autotune=True`
 
-Fusions:
+t
+a
+ phas
+s of d
+v
 
-- `-cc.pass_config.fuse_norm_quant=True`*
-- `-cc.pass_config.fuse_act_quant=True`*
-- `-cc.pass_config.fuse_act_padding=True`†
-- `-cc.pass_config.fuse_rope_kvcache=True`† (will be moved to O2)
+opm
 
-\* These fusions are only enabled when either op is using a custom kernel, otherwise Inductor fusion is better.</br>
-† These fusions are ROCm-only and require AITER.
+t a
+d d
+bugg
 
-### `-O2`: Full Optimization (Default)
+g.
+S
+tt
 
-Prioritize performance at the expense of additional startup time.
-This level is recommended for production workloads and is hence the default.
-Fusions in this level _may_ take longer due to additional compile ranges.
+gs:
+    - `-cc.cudagraph_mod
+=NONE`
+    - `-cc.mod
+=NONE` (a
+so r
+su
+t
 
-Settings (on top of `-O1`):
+g 
 
-- `-cc.cudagraph_mode=FULL_AND_PIECEWISE`
-- `-cc.pass_config.fuse_allreduce_rms=True`
+ `-cc.custom_ops=["
+o
 
-### `-O3`: Aggressive Optimization
+"]`)
+    - `-cc.pass_co
+f
+g.fus
+_...=Fa
+s
+` (a
+ fus
+o
+s d
+sab
 
-This level is currently the same as `-O2`, but may include additional optimizations
-in the future that are more time-consuming or experimental.
+d)
+    - `--k
+r
 
-## Troubleshooting
 
-### Common Issues
+-co
+f
+g.
 
-1. **Startup Time Too Long**: Use `-O0` or `-O1` for faster startup
-2. **Compilation Errors**: Use `debug_dump_path` for additional debugging information
-3. **Performance Issues**: Ensure using `-O2` for production
+ab
+
+_f
+ash
+
+f
+r_autotu
+
+=Fa
+s
+`
+### `-O1`: Fast Opt
+m
+zat
+o
+
+Pr
+or
+t
+z
+ fast startup, but st
+
+ 
+
+ab
+
+ bas
+c opt
+m
+zat
+o
+s 
+
+k
+ comp
+
+at
+o
+ a
+d cudagraphs.
+Th
+s 
+
+v
+
+ 
+s a good ba
+a
+c
+ for most d
+v
+
+opm
+
+t sc
+
+ar
+os 
+h
+r
+ you 
+a
+t fast
+r startup but
+st
+
+ mak
+ sur
+ your cod
+ do
+s 
+ot br
+ak cudagraphs or comp
+
+at
+o
+.
+S
+tt
+
+gs:
+    - `-cc.cudagraph_mod
+=PIECEWISE`
+    - `-cc.mod
+=VLLM_COMPILE`
+    - `--k
+r
+
+
+-co
+f
+g.
+
+ab
+
+_f
+ash
+
+f
+r_autotu
+
+=Tru
+`
+Fus
+o
+s:
+    - `-cc.pass_co
+f
+g.fus
+_
+orm_qua
+t=Tru
+`*
+    - `-cc.pass_co
+f
+g.fus
+_act_qua
+t=Tru
+`*
+    - `-cc.pass_co
+f
+g.fus
+_act_padd
+
+g=Tru
+`†
+    - `-cc.pass_co
+f
+g.fus
+_rop
+_kvcach
+=Tru
+`† (
+
+
+ b
+ mov
+d to O2)
+\* Th
+s
+ fus
+o
+s ar
+ o
+
+y 
+
+ab
+
+d 
+h
+
+ 
+
+th
+r op 
+s us
+
+g a custom k
+r
+
+
+, oth
+r
+
+s
+ I
+ductor fus
+o
+ 
+s b
+tt
+r.
+/br
+
+† Th
+s
+ fus
+o
+s ar
+ ROCm-o
+
+y a
+d r
+qu
+r
+ AITER.
+### `-O2`: Fu
+ Opt
+m
+zat
+o
+ (D
+fau
+t)
+Pr
+or
+t
+z
+ p
+rforma
+c
+ at th
+ 
+xp
+
+s
+ of add
+t
+o
+a
+ startup t
+m
+.
+Th
+s 
+
+v
+
+ 
+s r
+comm
+
+d
+d for product
+o
+ 
+ork
+oads a
+d 
+s h
+
+c
+ th
+ d
+fau
+t.
+Fus
+o
+s 
+
+ th
+s 
+
+v
+
+ _may_ tak
+ 
+o
+g
+r du
+ to add
+t
+o
+a
+ comp
+
+
+ ra
+g
+s.
+S
+tt
+
+gs (o
+ top of `-O1`):
+    - `-cc.cudagraph_mod
+=FULL_AND_PIECEWISE`
+    - `-cc.pass_co
+f
+g.fus
+_a
+r
+duc
+_rms=Tru
+`
+### `-O3`: Aggr
+ss
+v
+ Opt
+m
+zat
+o
+
+Th
+s 
+
+v
+
+ 
+s curr
+
+t
+y th
+ sam
+ as `-O2`, but may 
+
+c
+ud
+ add
+t
+o
+a
+ opt
+m
+zat
+o
+s
+
+
+ th
+ futur
+ that ar
+ mor
+ t
+m
+-co
+sum
+
+g or 
+xp
+r
+m
+
+ta
+.
+## Troub
+
+shoot
+
+g
+### Commo
+ Issu
+s
+1. **Startup T
+m
+ Too Lo
+g**: Us
+ `-O0` or `-O1` for fast
+r startup
+2. **Comp
+
+at
+o
+ Errors**: Us
+ `d
+bug_dump_path` for add
+t
+o
+a
+ d
+bugg
+
+g 
+
+format
+o
+
+3. **P
+rforma
+c
+ Issu
+s**: E
+sur
+ us
+
+g `-O2` for product
+o
+

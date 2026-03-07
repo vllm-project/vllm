@@ -1,177 +1,1276 @@
 # INT4 W4A16
+vLLM supports qua
+t
+z
 
-vLLM supports quantizing weights to INT4 for memory savings and inference acceleration. This quantization method is particularly useful for reducing model size and maintaining low latency in workloads with low queries per second (QPS).
+g 
 
-Please visit the HF collection of [quantized INT4 checkpoints of popular LLMs ready to use with vLLM](https://huggingface.co/collections/neuralmagic/int4-llms-for-vllm-668ec34bf3c9fa45f857df2c).
 
-!!! note
-    INT4 computation is supported on NVIDIA GPUs with compute capability > 8.0 (Ampere, Ada Lovelace, Hopper, Blackwell).
+ghts to INT4 for m
+mory sav
 
-## Prerequisites
+gs a
+d 
 
-To use INT4 quantization with vLLM, you'll need to install the [llm-compressor](https://github.com/vllm-project/llm-compressor/) library:
+f
+r
 
+c
+ acc
+
+
+rat
+o
+. Th
+s qua
+t
+zat
+o
+ m
+thod 
+s part
+cu
+ar
+y us
+fu
+ for r
+duc
+
+g mod
+
+ s
+z
+ a
+d ma
+
+ta
+
+
+
+g 
+o
+ 
+at
+
+cy 
+
+ 
+ork
+oads 
+
+th 
+o
+ qu
+r
+
+s p
+r s
+co
+d (QPS).
+P
+
+as
+ v
+s
+t th
+ HF co
+
+ct
+o
+ of [qua
+t
+z
+d INT4 ch
+ckpo
+
+ts of popu
+ar LLMs r
+ady to us
+ 
+
+th vLLM](https://hugg
+
+gfac
+.co/co
+
+ct
+o
+s/
+
+ura
+mag
+c/
+
+t4-
+ms-for-v
+m-668
+c34bf3c9fa45f857df2c).
+!!! 
+ot
+
+    INT4 computat
+o
+ 
+s support
+d o
+ NVIDIA GPUs 
+
+th comput
+ capab
+
+
+ty 
+ 8.0 (Amp
+r
+, Ada Lov
+
+ac
+, Hopp
+r, B
+ack
+
+
+).
+## Pr
+r
+qu
+s
+t
+s
+To us
+ INT4 qua
+t
+zat
+o
+ 
+
+th vLLM, you'
+ 
+
+d to 
+
+sta
+ th
+ [
+m-compr
+ssor](https://g
+thub.com/v
+m-proj
+ct/
+m-compr
+ssor/) 
+
+brary:
 ```bash
-pip install llmcompressor
+p
+p 
+
+sta
+ 
+mcompr
+ssor
 ```
+Add
+t
+o
+a
+y, 
 
-Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
+sta
+ `v
+m` a
+d `
+m-
+va
+uat
+o
+-har
 
+ss` for 
+va
+uat
+o
+:
 ```bash
-pip install vllm "lm-eval[api]>=0.4.11"
+p
+p 
+
+sta
+ v
+m "
+m-
+va
+[ap
+]
+=0.4.11"
 ```
+## Qua
+t
+zat
+o
+ Proc
+ss
+Th
+ qua
+t
+zat
+o
+ proc
+ss 
 
-## Quantization Process
+vo
+v
+s four ma
 
-The quantization process involves four main steps:
+ st
+ps:
+1. Load
 
-1. Loading the model
-2. Preparing calibration data
-3. Applying quantization
-4. Evaluating accuracy in vLLM
+g th
+ mod
 
-### 1. Loading the Model
 
-Load your model and tokenizer using the standard `transformers` AutoModel classes:
+2. Pr
+par
 
-```python
-from transformers import AutoTokenizer, AutoModelForCausalLM
+g ca
 
-MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
-model = AutoModelForCausalLM.from_pretrained(
+brat
+o
+ data
+3. App
+y
+
+g qua
+t
+zat
+o
+
+4. Eva
+uat
+
+g accuracy 
+
+ vLLM
+### 1. Load
+
+g th
+ Mod
+
+
+Load your mod
+
+ a
+d tok
+
+
+z
+r us
+
+g th
+ sta
+dard `tra
+sform
+rs` AutoMod
+
+ c
+ass
+s:
+```pytho
+
+from tra
+sform
+rs 
+mport AutoTok
+
+
+z
+r, AutoMod
+
+ForCausa
+LM
+MODEL_ID = "m
+ta-
+ama/M
+ta-L
+ama-3-8B-I
+struct"
+mod
+
+ = AutoMod
+
+ForCausa
+LM.from_pr
+tra
+
+
+d(
     MODEL_ID,
-    device_map="auto",
-    dtype="auto",
+    d
+v
+c
+_map="auto",
+    dtyp
+="auto",
 )
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+tok
+
+
+z
+r = AutoTok
+
+
+z
+r.from_pr
+tra
+
+
+d(MODEL_ID)
 ```
+### 2. Pr
+par
 
-### 2. Preparing Calibration Data
+g Ca
 
-When quantizing weights to INT4, you need sample data to estimate the weight updates and calibrated scales.
-It's best to use calibration data that closely matches your deployment data.
-For a general-purpose instruction-tuned model, you can use a dataset like `ultrachat`:
+brat
+o
+ Data
+Wh
 
-??? code
+ qua
+t
+z
 
-    ```python
-    from datasets import load_dataset
+g 
 
+
+ghts to INT4, you 
+
+d samp
+
+ data to 
+st
+mat
+ th
+ 
+
+
+ght updat
+s a
+d ca
+
+brat
+d sca
+
+s.
+It's b
+st to us
+ ca
+
+brat
+o
+ data that c
+os
+
+y match
+s your d
+p
+oym
+
+t data.
+For a g
+
+
+ra
+-purpos
+ 
+
+struct
+o
+-tu
+
+d mod
+
+, you ca
+ us
+ a datas
+t 
+
+k
+ `u
+trachat`:
+??? cod
+
+    ```pytho
+
+    from datas
+ts 
+mport 
+oad_datas
+t
     NUM_CALIBRATION_SAMPLES = 512
     MAX_SEQUENCE_LENGTH = 2048
+    # Load a
+d pr
+proc
+ss th
+ datas
+t
+    ds = 
+oad_datas
+t("Hugg
 
-    # Load and preprocess the dataset
-    ds = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft")
-    ds = ds.shuffle(seed=42).select(range(NUM_CALIBRATION_SAMPLES))
+gFac
+H4/u
+trachat_200k", sp
 
-    def preprocess(example):
-        return {"text": tokenizer.apply_chat_template(example["messages"], tokenize=False)}
-    ds = ds.map(preprocess)
+t="tra
 
-    def tokenize(sample):
-        return tokenizer(sample["text"], padding=False, max_length=MAX_SEQUENCE_LENGTH, truncation=True, add_special_tokens=False)
-    ds = ds.map(tokenize, remove_columns=ds.column_names)
+_sft")
+    ds = ds.shuff
+
+(s
+d=42).s
+
+
+ct(ra
+g
+(NUM_CALIBRATION_SAMPLES))
+    d
+f pr
+proc
+ss(
+xamp
+
+):
+        r
+tur
+ {"t
+xt": tok
+
+
+z
+r.app
+y_chat_t
+mp
+at
+(
+xamp
+
+["m
+ssag
+s"], tok
+
+
+z
+=Fa
+s
+)}
+    ds = ds.map(pr
+proc
+ss)
+    d
+f tok
+
+
+z
+(samp
+
+):
+        r
+tur
+ tok
+
+
+z
+r(samp
+
+["t
+xt"], padd
+
+g=Fa
+s
+, max_
+
+
+gth=MAX_SEQUENCE_LENGTH, tru
+cat
+o
+=Tru
+, add_sp
+c
+a
+_tok
+
+s=Fa
+s
+)
+    ds = ds.map(tok
+
+
+z
+, r
+mov
+_co
+um
+s=ds.co
+um
+_
+am
+s)
     ```
+### 3. App
+y
 
-### 3. Applying Quantization
+g Qua
+t
+zat
+o
 
-Now, apply the quantization algorithms:
+No
+, app
+y th
+ qua
+t
+zat
+o
+ a
+gor
+thms:
+??? cod
 
-??? code
+    ```pytho
 
-    ```python
-    from llmcompressor import oneshot
-    from llmcompressor.modifiers.quantization import GPTQModifier
-    from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
+    from 
+mcompr
+ssor 
+mport o
 
-    # Configure the quantization algorithms
-    recipe = GPTQModifier(targets="Linear", scheme="W4A16", ignore=["lm_head"])
+shot
+    from 
+mcompr
+ssor.mod
+f
 
-    # Apply quantization
-    oneshot(
-        model=model,
-        dataset=ds,
-        recipe=recipe,
-        max_seq_length=MAX_SEQUENCE_LENGTH,
-        num_calibration_samples=NUM_CALIBRATION_SAMPLES,
+rs.qua
+t
+zat
+o
+ 
+mport GPTQMod
+f
+
+r
+    from 
+mcompr
+ssor.mod
+f
+
+rs.smoothqua
+t 
+mport SmoothQua
+tMod
+f
+
+r
+    # Co
+f
+gur
+ th
+ qua
+t
+zat
+o
+ a
+gor
+thms
+    r
+c
+p
+ = GPTQMod
+f
+
+r(targ
+ts="L
+
+
+ar", sch
+m
+="W4A16", 
+g
+or
+=["
+m_h
+ad"])
+    # App
+y qua
+t
+zat
+o
+
+    o
+
+shot(
+        mod
+
+=mod
+
+,
+        datas
+t=ds,
+        r
+c
+p
+=r
+c
+p
+,
+        max_s
+q_
+
+
+gth=MAX_SEQUENCE_LENGTH,
+        
+um_ca
+
+brat
+o
+_samp
+
+s=NUM_CALIBRATION_SAMPLES,
     )
+    # Sav
+ th
+ compr
+ss
+d mod
 
-    # Save the compressed model: Meta-Llama-3-8B-Instruct-W4A16-G128
-    SAVE_DIR = MODEL_ID.split("/")[1] + "-W4A16-G128"
-    model.save_pretrained(SAVE_DIR, save_compressed=True)
-    tokenizer.save_pretrained(SAVE_DIR)
+: M
+ta-L
+ama-3-8B-I
+struct-W4A16-G128
+    SAVE_DIR = MODEL_ID.sp
+
+t("/")[1] + "-W4A16-G128"
+    mod
+
+.sav
+_pr
+tra
+
+
+d(SAVE_DIR, sav
+_compr
+ss
+d=Tru
+)
+    tok
+
+
+z
+r.sav
+_pr
+tra
+
+
+d(SAVE_DIR)
     ```
+Th
+s proc
+ss cr
+at
+s a W4A16 mod
 
-This process creates a W4A16 model with weights quantized to 4-bit integers.
+ 
 
-### 4. Evaluating Accuracy
+th 
 
-After quantization, you can load and run the model in vLLM:
 
-```python
-from vllm import LLM
+ghts qua
+t
+z
+d to 4-b
+t 
 
-llm = LLM("./Meta-Llama-3-8B-Instruct-W4A16-G128")
+t
+g
+rs.
+### 4. Eva
+uat
+
+g Accuracy
+Aft
+r qua
+t
+zat
+o
+, you ca
+ 
+oad a
+d ru
+ th
+ mod
+
+ 
+
+ vLLM:
+```pytho
+
+from v
+m 
+mport LLM
+
+m = LLM("./M
+ta-L
+ama-3-8B-I
+struct-W4A16-G128")
 ```
-
-To evaluate accuracy, you can use `lm_eval`:
-
+To 
+va
+uat
+ accuracy, you ca
+ us
+ `
+m_
+va
+`:
 ```bash
-lm_eval --model vllm \
-  --model_args pretrained="./Meta-Llama-3-8B-Instruct-W4A16-G128",add_bos_token=true \
+
+m_
+va
+ --mod
+
+ v
+m \
+  --mod
+
+_args pr
+tra
+
+
+d="./M
+ta-L
+ama-3-8B-I
+struct-W4A16-G128",add_bos_tok
+
+=tru
+ \
   --tasks gsm8k \
-  --num_fewshot 5 \
-  --limit 250 \
-  --batch_size 'auto'
+  --
+um_f
+
+shot 5 \
+  --
+
+m
+t 250 \
+  --batch_s
+z
+ 'auto'
 ```
+!!! 
+ot
 
-!!! note
-    Quantized models can be sensitive to the presence of the `bos` token. Make sure to include the `add_bos_token=True` argument when running evaluations.
+    Qua
+t
+z
+d mod
 
-## Best Practices
+s ca
+ b
+ s
 
-- Start with 512 samples for calibration data, and increase if accuracy drops
-- Ensure the calibration data contains a high variety of samples to prevent overfitting towards a specific use case
-- Use a sequence length of 2048 as a starting point
-- Employ the chat template or instruction template that the model was trained with
-- If you've fine-tuned a model, consider using a sample of your training data for calibration
-- Tune key hyperparameters to the quantization algorithm:
-    - `dampening_frac` sets how much influence the GPTQ algorithm has. Lower values can improve accuracy, but can lead to numerical instabilities that cause the algorithm to fail.
-    - `actorder` sets the activation ordering. When compressing the weights of a layer weight, the order in which channels are quantized matters. Setting `actorder="weight"` can improve accuracy without added latency.
+s
+t
+v
+ to th
+ pr
+s
 
-The following is an example of an expanded quantization recipe you can tune to your own use case:
+c
+ of th
+ `bos` tok
 
-??? code
+. Mak
+ sur
+ to 
 
-    ```python
-    from compressed_tensors.quantization import (
-        QuantizationArgs,
-        QuantizationScheme,
-        QuantizationStrategy,
-        QuantizationType,
+c
+ud
+ th
+ `add_bos_tok
+
+=Tru
+` argum
+
+t 
+h
+
+ ru
+
+
+g 
+va
+uat
+o
+s.
+## B
+st Pract
+c
+s
+    - Start 
+
+th 512 samp
+
+s for ca
+
+brat
+o
+ data, a
+d 
+
+cr
+as
+ 
+f accuracy drops
+    - E
+sur
+ th
+ ca
+
+brat
+o
+ data co
+ta
+
+s a h
+gh var
+
+ty of samp
+
+s to pr
+v
+
+t ov
+rf
+tt
+
+g to
+ards a sp
+c
+f
+c us
+ cas
+
+    - Us
+ a s
+qu
+
+c
+ 
+
+
+gth of 2048 as a start
+
+g po
+
+t
+    - Emp
+oy th
+ chat t
+mp
+at
+ or 
+
+struct
+o
+ t
+mp
+at
+ that th
+ mod
+
+ 
+as tra
+
+
+d 
+
+th
+    - If you'v
+ f
+
+
+-tu
+
+d a mod
+
+, co
+s
+d
+r us
+
+g a samp
+
+ of your tra
+
+
+
+g data for ca
+
+brat
+o
+
+    - Tu
+
+ k
+y hyp
+rparam
+t
+rs to th
+ qua
+t
+zat
+o
+ a
+gor
+thm:
+    - `damp
+
+
+
+g_frac` s
+ts ho
+ much 
+
+f
+u
+
+c
+ th
+ GPTQ a
+gor
+thm has. Lo
+
+r va
+u
+s ca
+ 
+mprov
+ accuracy, but ca
+ 
+
+ad to 
+um
+r
+ca
+ 
+
+stab
+
+
+t
+
+s that caus
+ th
+ a
+gor
+thm to fa
+
+.
+    - `actord
+r` s
+ts th
+ act
+vat
+o
+ ord
+r
+
+g. Wh
+
+ compr
+ss
+
+g th
+ 
+
+
+ghts of a 
+ay
+r 
+
+
+ght, th
+ ord
+r 
+
+ 
+h
+ch cha
+
+
+s ar
+ qua
+t
+z
+d matt
+rs. S
+tt
+
+g `actord
+r="
+
+
+ght"` ca
+ 
+mprov
+ accuracy 
+
+thout add
+d 
+at
+
+cy.
+Th
+ fo
+o
+
+
+g 
+s a
+ 
+xamp
+
+ of a
+ 
+xpa
+d
+d qua
+t
+zat
+o
+ r
+c
+p
+ you ca
+ tu
+
+ to your o
+
+ us
+ cas
+:
+??? cod
+
+    ```pytho
+
+    from compr
+ss
+d_t
+
+sors.qua
+t
+zat
+o
+ 
+mport (
+        Qua
+t
+zat
+o
+Args,
+        Qua
+t
+zat
+o
+Sch
+m
+,
+        Qua
+t
+zat
+o
+Strat
+gy,
+        Qua
+t
+zat
+o
+Typ
+,
     ) 
-    recipe = GPTQModifier(
-        targets="Linear",
-        config_groups={
-            "config_group": QuantizationScheme(
-                targets=["Linear"],
-                weights=QuantizationArgs(
-                    num_bits=4,
-                    type=QuantizationType.INT,
-                    strategy=QuantizationStrategy.GROUP,
-                    group_size=128,
-                    symmetric=True,
-                    dynamic=False,
-                    actorder="weight",
+    r
+c
+p
+ = GPTQMod
+f
+
+r(
+        targ
+ts="L
+
+
+ar",
+        co
+f
+g_groups={
+            "co
+f
+g_group": Qua
+t
+zat
+o
+Sch
+m
+(
+                targ
+ts=["L
+
+
+ar"],
+                
+
+
+ghts=Qua
+t
+zat
+o
+Args(
+                    
+um_b
+ts=4,
+                    typ
+=Qua
+t
+zat
+o
+Typ
+.INT,
+                    strat
+gy=Qua
+t
+zat
+o
+Strat
+gy.GROUP,
+                    group_s
+z
+=128,
+                    symm
+tr
+c=Tru
+,
+                    dy
+am
+c=Fa
+s
+,
+                    actord
+r="
+
+
+ght",
                 ),
             ),
         },
-        ignore=["lm_head"],
-        update_size=NUM_CALIBRATION_SAMPLES,
-        dampening_frac=0.01,
+        
+g
+or
+=["
+m_h
+ad"],
+        updat
+_s
+z
+=NUM_CALIBRATION_SAMPLES,
+        damp
+
+
+
+g_frac=0.01,
     )
     ```
+## Troub
 
-## Troubleshooting and Support
+shoot
 
-If you encounter any issues or have feature requests, please open an issue on the [vllm-project/llm-compressor](https://github.com/vllm-project/llm-compressor/issues) GitHub repository. The full INT4 quantization example in `llm-compressor` is available [here](https://github.com/vllm-project/llm-compressor/blob/main/examples/quantization_w4a16/llama3_example.py).
+g a
+d Support
+If you 
+
+cou
+t
+r a
+y 
+ssu
+s or hav
+ f
+atur
+ r
+qu
+sts, p
+
+as
+ op
+
+ a
+ 
+ssu
+ o
+ th
+ [v
+m-proj
+ct/
+m-compr
+ssor](https://g
+thub.com/v
+m-proj
+ct/
+m-compr
+ssor/
+ssu
+s) G
+tHub r
+pos
+tory. Th
+ fu
+ INT4 qua
+t
+zat
+o
+ 
+xamp
+
+ 
+
+ `
+m-compr
+ssor` 
+s ava
+
+ab
+
+ [h
+r
+](https://g
+thub.com/v
+m-proj
+ct/
+m-compr
+ssor/b
+ob/ma
+
+/
+xamp
+
+s/qua
+t
+zat
+o
+_
+4a16/
+ama3_
+xamp
+
+.py).

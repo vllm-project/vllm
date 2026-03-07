@@ -1,60 +1,565 @@
-# Offline Inference
+# Off
 
-Offline inference is possible in your own code using vLLM's [`LLM`][vllm.LLM] class.
 
-For example, the following code downloads the [`facebook/opt-125m`](https://huggingface.co/facebook/opt-125m) model from HuggingFace
-and runs it in vLLM using the default configuration.
 
-```python
-from vllm import LLM
+ I
+f
+r
 
-# Initialize the vLLM engine.
-llm = LLM(model="facebook/opt-125m")
+c
+
+Off
+
+
+
+ 
+
+f
+r
+
+c
+ 
+s poss
+b
+
+ 
+
+ your o
+
+ cod
+ us
+
+g vLLM's [`LLM`][v
+m.LLM] c
+ass.
+For 
+xamp
+
+, th
+ fo
+o
+
+
+g cod
+ do
+
+
+oads th
+ [`fac
+book/opt-125m`](https://hugg
+
+gfac
+.co/fac
+book/opt-125m) mod
+
+ from Hugg
+
+gFac
+
+a
+d ru
+s 
+t 
+
+ vLLM us
+
+g th
+ d
+fau
+t co
+f
+gurat
+o
+.
+```pytho
+
+from v
+m 
+mport LLM
+# I
+
+t
+a
+
+z
+ th
+ vLLM 
+
+g
+
+
+.
+
+m = LLM(mod
+
+="fac
+book/opt-125m")
 ```
+Aft
+r 
 
-After initializing the `LLM` instance, use the available APIs to perform model inference.
-The available APIs depend on the model type:
 
-- [Generative models](../models/generative_models.md) output logprobs which are sampled from to obtain the final output text.
-- [Pooling models](../models/pooling_models.md) output their hidden states directly.
+t
+a
 
-!!! info
-    [API Reference](../api/README.md#offline-inference)
+z
 
+g th
+ `LLM` 
+
+sta
+c
+, us
+ th
+ ava
+
+ab
+
+ APIs to p
+rform mod
+
+ 
+
+f
+r
+
+c
+.
+Th
+ ava
+
+ab
+
+ APIs d
+p
+
+d o
+ th
+ mod
+
+ typ
+:
+    - [G
+
+
+rat
+v
+ mod
+
+s](../mod
+
+s/g
+
+
+rat
+v
+_mod
+
+s.md) output 
+ogprobs 
+h
+ch ar
+ samp
+
+d from to obta
+
+ th
+ f
+
+a
+ output t
+xt.
+    - [Poo
+
+
+g mod
+
+s](../mod
+
+s/poo
+
+
+g_mod
+
+s.md) output th
+
+r h
+dd
+
+ stat
+s d
+r
+ct
+y.
+!!! 
+
+fo
+    [API R
+f
+r
+
+c
+](../ap
+/README.md#off
+
+
+
+-
+
+f
+r
+
+c
+)
 ## Ray Data LLM API
+Ray Data LLM 
+s a
+ a
+t
+r
+at
+v
+ off
 
-Ray Data LLM is an alternative offline inference API that uses vLLM as the underlying engine.
-This API adds several batteries-included capabilities that simplify large-scale, GPU-efficient inference:
 
-- Streaming execution processes datasets that exceed aggregate cluster memory.
-- Automatic sharding, load balancing, and autoscaling distribute work across a Ray cluster with built-in fault tolerance.
-- Continuous batching keeps vLLM replicas saturated and maximizes GPU utilization.
-- Transparent support for tensor and pipeline parallelism enables efficient multi-GPU inference.
-- Reading and writing to most popular file formats and cloud object storage.
-- Scaling up the workload without code changes.
 
-??? code
+ 
 
-    ```python
-    import ray  # Requires ray>=2.44.1
-    from ray.data.llm import vLLMEngineProcessorConfig, build_llm_processor
+f
+r
 
-    config = vLLMEngineProcessorConfig(model_source="unsloth/Llama-3.2-1B-Instruct")
-    processor = build_llm_processor(
-        config,
-        preprocess=lambda row: {
-            "messages": [
-                {"role": "system", "content": "You are a bot that completes unfinished haikus."},
-                {"role": "user", "content": row["item"]},
+c
+ API that us
+s vLLM as th
+ u
+d
+r
+y
+
+g 
+
+g
+
+
+.
+Th
+s API adds s
+v
+ra
+ batt
+r
+
+s-
+
+c
+ud
+d capab
+
+
+t
+
+s that s
+mp
+
+fy 
+arg
+-sca
+
+, GPU-
+ff
+c
+
+
+t 
+
+f
+r
+
+c
+:
+    - Str
+am
+
+g 
+x
+cut
+o
+ proc
+ss
+s datas
+ts that 
+xc
+d aggr
+gat
+ c
+ust
+r m
+mory.
+    - Automat
+c shard
+
+g, 
+oad ba
+a
+c
+
+g, a
+d autosca
+
+
+g d
+str
+but
+ 
+ork across a Ray c
+ust
+r 
+
+th bu
+
+t-
+
+ fau
+t to
+
+ra
+c
+.
+    - Co
+t
+
+uous batch
+
+g k
+ps vLLM r
+p
+
+cas saturat
+d a
+d max
+m
+z
+s GPU ut
+
+
+zat
+o
+.
+    - Tra
+spar
+
+t support for t
+
+sor a
+d p
+p
+
+
+
+
+ para
+
+
+
+sm 
+
+ab
+
+s 
+ff
+c
+
+
+t mu
+t
+-GPU 
+
+f
+r
+
+c
+.
+    - R
+ad
+
+g a
+d 
+r
+t
+
+g to most popu
+ar f
+
+
+ formats a
+d c
+oud obj
+ct storag
+.
+    - Sca
+
+
+g up th
+ 
+ork
+oad 
+
+thout cod
+ cha
+g
+s.
+??? cod
+
+    ```pytho
+
+    
+mport ray  # R
+qu
+r
+s ray
+=2.44.1
+    from ray.data.
+m 
+mport vLLME
+g
+
+
+Proc
+ssorCo
+f
+g, bu
+
+d_
+m_proc
+ssor
+    co
+f
+g = vLLME
+g
+
+
+Proc
+ssorCo
+f
+g(mod
+
+_sourc
+="u
+s
+oth/L
+ama-3.2-1B-I
+struct")
+    proc
+ssor = bu
+
+d_
+m_proc
+ssor(
+        co
+f
+g,
+        pr
+proc
+ss=
+ambda ro
+: {
+            "m
+ssag
+s": [
+                {"ro
+
+": "syst
+m", "co
+t
+
+t": "You ar
+ a bot that comp
+
+t
+s u
+f
+
+
+sh
+d ha
+kus."},
+                {"ro
+
+": "us
+r", "co
+t
+
+t": ro
+["
+t
+m"]},
             ],
-            "sampling_params": {"temperature": 0.3, "max_tokens": 250},
+            "samp
+
+
+g_params": {"t
+mp
+ratur
+": 0.3, "max_tok
+
+s": 250},
         },
-        postprocess=lambda row: {"answer": row["generated_text"]},
+        postproc
+ss=
+ambda ro
+: {"a
+s
+
+r": ro
+["g
+
+
+rat
+d_t
+xt"]},
     )
+    ds = ray.data.from_
+t
+ms(["A
+ o
+d s
 
-    ds = ray.data.from_items(["An old silent pond..."])
-    ds = processor(ds)
-    ds.write_parquet("local:///tmp/data/")
+
+
+t po
+d..."])
+    ds = proc
+ssor(ds)
+    ds.
+r
+t
+_parqu
+t("
+oca
+:///tmp/data/")
     ```
+For mor
+ 
 
-For more information about the Ray Data LLM API, see the [Ray Data LLM documentation](https://docs.ray.io/en/latest/data/working-with-llms.html).
+format
+o
+ about th
+ Ray Data LLM API, s
+ th
+ [Ray Data LLM docum
+
+tat
+o
+](https://docs.ray.
+o/
+
+/
+at
+st/data/
+ork
+
+g-
+
+th-
+ms.htm
+).

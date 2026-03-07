@@ -1,296 +1,2914 @@
-# Quickstart
+# Qu
+ckstart
+Th
+s gu
+d
+ 
 
-This guide will help you quickly get started with vLLM to perform:
 
-- [Offline batched inference](#offline-batched-inference)
-- [Online serving using OpenAI-compatible server](#openai-compatible-server)
+ h
 
-## Prerequisites
+p you qu
+ck
+y g
+t start
+d 
 
-- OS: Linux
-- Python: 3.10 -- 3.13
+th vLLM to p
+rform:
+    - [Off
 
-## Installation
+
+
+ batch
+d 
+
+f
+r
+
+c
+](#off
+
+
+
+-batch
+d-
+
+f
+r
+
+c
+)
+    - [O
+
+
+
+
+ s
+rv
+
+g us
+
+g Op
+
+AI-compat
+b
+
+ s
+rv
+r](#op
+
+a
+-compat
+b
+
+-s
+rv
+r)
+## Pr
+r
+qu
+s
+t
+s
+    - OS: L
+
+ux
+    - Pytho
+: 3.10 -- 3.13
+## I
+sta
+at
+o
 
 === "NVIDIA CUDA"
+    If you ar
+ us
 
-    If you are using NVIDIA GPUs, you can install vLLM using [pip](https://pypi.org/project/vllm/) directly.
+g NVIDIA GPUs, you ca
+ 
 
-    It's recommended to use [uv](https://docs.astral.sh/uv/), a very fast Python environment manager, to create and manage Python environments. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment and install vLLM using the following commands:
+sta
+ vLLM us
 
+g [p
+p](https://pyp
+.org/proj
+ct/v
+m/) d
+r
+ct
+y.
+    It's r
+comm
+
+d
+d to us
+ [uv](https://docs.astra
+.sh/uv/), a v
+ry fast Pytho
+ 
+
+v
+ro
+m
+
+t ma
+ag
+r, to cr
+at
+ a
+d ma
+ag
+ Pytho
+ 
+
+v
+ro
+m
+
+ts. P
+
+as
+ fo
+o
+ th
+ [docum
+
+tat
+o
+](https://docs.astra
+.sh/uv/#g
+tt
+
+g-start
+d) to 
+
+sta
+ `uv`. Aft
+r 
+
+sta
+
+
+g `uv`, you ca
+ cr
+at
+ a 
+
+
+ Pytho
+ 
+
+v
+ro
+m
+
+t a
+d 
+
+sta
+ vLLM us
+
+g th
+ fo
+o
+
+
+g comma
+ds:
     ```bash
-    uv venv --python 3.12 --seed
-    source .venv/bin/activate
-    uv pip install vllm --torch-backend=auto
+    uv v
+
+v --pytho
+ 3.12 --s
+d
+    sourc
+ .v
+
+v/b
+
+/act
+vat
+
+    uv p
+p 
+
+sta
+ v
+m --torch-back
+
+d=auto
     ```
+    `uv` ca
+ [automat
+ca
+y s
 
-    `uv` can [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu126`), set `--torch-backend=cu126` (or `UV_TORCH_BACKEND=cu126`).
 
-    Another delightful way is to use `uv run` with `--with [dependency]` option, which allows you to run commands such as `vllm serve` without creating any permanent environment:
+ct th
+ appropr
+at
+ PyTorch 
 
+d
+x at ru
+t
+m
+](https://docs.astra
+.sh/uv/gu
+d
+s/
+
+t
+grat
+o
+/pytorch/#automat
+c-back
+
+d-s
+
+
+ct
+o
+) by 
+
+sp
+ct
+
+g th
+ 
+
+sta
+
+d CUDA dr
+v
+r v
+rs
+o
+ v
+a `--torch-back
+
+d=auto` (or `UV_TORCH_BACKEND=auto`). To s
+
+
+ct a sp
+c
+f
+c back
+
+d (
+.g., `cu126`), s
+t `--torch-back
+
+d=cu126` (or `UV_TORCH_BACKEND=cu126`).
+    A
+oth
+r d
+
+
+ghtfu
+ 
+ay 
+s to us
+ `uv ru
+` 
+
+th `--
+
+th [d
+p
+
+d
+
+cy]` opt
+o
+, 
+h
+ch a
+o
+s you to ru
+ comma
+ds such as `v
+m s
+rv
+` 
+
+thout cr
+at
+
+g a
+y p
+rma
+
+
+t 
+
+v
+ro
+m
+
+t:
     ```bash
-    uv run --with vllm vllm --help
+    uv ru
+ --
+
+th v
+m v
+m --h
+
+p
     ```
+    You ca
+ a
+so us
+ [co
+da](https://docs.co
+da.
+o/proj
+cts/co
+da/
 
-    You can also use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments. You can install `uv` to the conda environment through `pip` if you want to manage it within the environment.
+/
+at
+st/us
+r-gu
+d
+/g
+tt
 
+g-start
+d.htm
+) to cr
+at
+ a
+d ma
+ag
+ Pytho
+ 
+
+v
+ro
+m
+
+ts. You ca
+ 
+
+sta
+ `uv` to th
+ co
+da 
+
+v
+ro
+m
+
+t through `p
+p` 
+f you 
+a
+t to ma
+ag
+ 
+t 
+
+th
+
+ th
+ 
+
+v
+ro
+m
+
+t.
     ```bash
-    conda create -n myenv python=3.12 -y
-    conda activate myenv
-    pip install --upgrade uv
-    uv pip install vllm --torch-backend=auto
-    ```
+    co
+da cr
+at
+ -
+ my
 
+v pytho
+=3.12 -y
+    co
+da act
+vat
+ my
+
+v
+    p
+p 
+
+sta
+ --upgrad
+ uv
+    uv p
+p 
+
+sta
+ v
+m --torch-back
+
+d=auto
+    ```
 === "AMD ROCm"
+    If you ar
+ us
 
-    If you are using AMD GPUs, you can install vLLM using `uv`.
+g AMD GPUs, you ca
+ 
 
-    It's recommended to use [uv](https://docs.astral.sh/uv/), as it gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). `uv` is also a very fast Python environment manager, to create and manage Python environments. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment and install vLLM using the following commands:
+sta
+ vLLM us
 
+g `uv`.
+    It's r
+comm
+
+d
+d to us
+ [uv](https://docs.astra
+.sh/uv/), as 
+t g
+v
+s th
+ 
+xtra 
+
+d
+x [h
+gh
+r pr
+or
+ty tha
+ th
+ d
+fau
+t 
+
+d
+x](https://docs.astra
+.sh/uv/p
+p/compat
+b
+
+
+ty/#packag
+s-that-
+x
+st-o
+-mu
+t
+p
+
+-
+
+d
+x
+s). `uv` 
+s a
+so a v
+ry fast Pytho
+ 
+
+v
+ro
+m
+
+t ma
+ag
+r, to cr
+at
+ a
+d ma
+ag
+ Pytho
+ 
+
+v
+ro
+m
+
+ts. P
+
+as
+ fo
+o
+ th
+ [docum
+
+tat
+o
+](https://docs.astra
+.sh/uv/#g
+tt
+
+g-start
+d) to 
+
+sta
+ `uv`. Aft
+r 
+
+sta
+
+
+g `uv`, you ca
+ cr
+at
+ a 
+
+
+ Pytho
+ 
+
+v
+ro
+m
+
+t a
+d 
+
+sta
+ vLLM us
+
+g th
+ fo
+o
+
+
+g comma
+ds:
     ```bash
-    uv venv --python 3.12 --seed
-    source .venv/bin/activate
-    uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+    uv v
+
+v --pytho
+ 3.12 --s
+d
+    sourc
+ .v
+
+v/b
+
+/act
+vat
+
+    uv p
+p 
+
+sta
+ v
+m --
+xtra-
+
+d
+x-ur
+ https://
+h
+
+s.v
+m.a
+/rocm/
     ```
+    !!! 
+ot
 
-    !!! note
-        It currently supports Python 3.12, ROCm 7.0 and `glibc >= 2.35`.
+        It curr
 
-    !!! note    
-        Note that, previously, docker images were published using AMD's docker release pipeline and were located `rocm/vllm-dev`. This is being deprecated by using vLLM's docker release pipeline.
+t
+y supports Pytho
+ 3.12, ROCm 7.0 a
+d `g
 
-=== "Google TPU"
+bc 
+= 2.35`.
+    !!! 
+ot
 
-    To run vLLM on Google TPUs, you need to install the `vllm-tpu` package.
-    
+        Not
+ that, pr
+v
+ous
+y, dock
+r 
+mag
+s 
+
+r
+ pub
+
+sh
+d us
+
+g AMD's dock
+r r
+
+
+as
+ p
+p
+
+
+
+
+ a
+d 
+
+r
+ 
+ocat
+d `rocm/v
+m-d
+v`. Th
+s 
+s b
+
+
+g d
+pr
+cat
+d by us
+
+g vLLM's dock
+r r
+
+
+as
+ p
+p
+
+
+
+
+.
+=== "Goog
+
+ TPU"
+    To ru
+ vLLM o
+ Goog
+
+ TPUs, you 
+
+d to 
+
+sta
+ th
+ `v
+m-tpu` packag
+.
     ```bash
-    uv pip install vllm-tpu
+    uv p
+p 
+
+sta
+ v
+m-tpu
     ```
+    !!! 
+ot
 
-    !!! note
-        For more detailed instructions, including Docker, installing from source, and troubleshooting, please refer to the [vLLM on TPU documentation](https://docs.vllm.ai/projects/tpu/en/latest/).
+        For mor
+ d
+ta
 
-!!! note
-    For more detail and non-CUDA platforms, please refer to the [installation guide](installation/README.md) for specific instructions on how to install vLLM.
 
-## Offline Batched Inference
+d 
 
-With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: [examples/offline_inference/basic/basic.py](../../examples/offline_inference/basic/basic.py)
+struct
+o
+s, 
 
-The first line of this example imports the classes [LLM][vllm.LLM] and [SamplingParams][vllm.SamplingParams]:
+c
+ud
 
-- [LLM][vllm.LLM] is the main class for running offline inference with vLLM engine.
-- [SamplingParams][vllm.SamplingParams] specifies the parameters for the sampling process.
+g Dock
+r, 
 
-```python
-from vllm import LLM, SamplingParams
+sta
+
+
+g from sourc
+, a
+d troub
+
+shoot
+
+g, p
+
+as
+ r
+f
+r to th
+ [vLLM o
+ TPU docum
+
+tat
+o
+](https://docs.v
+m.a
+/proj
+cts/tpu/
+
+/
+at
+st/).
+!!! 
+ot
+
+    For mor
+ d
+ta
+
+ a
+d 
+o
+-CUDA p
+atforms, p
+
+as
+ r
+f
+r to th
+ [
+
+sta
+at
+o
+ gu
+d
+](
+
+sta
+at
+o
+/README.md) for sp
+c
+f
+c 
+
+struct
+o
+s o
+ ho
+ to 
+
+sta
+ vLLM.
+## Off
+
+
+
+ Batch
+d I
+f
+r
+
+c
+
+W
+th vLLM 
+
+sta
+
+d, you ca
+ start g
+
+
+rat
+
+g t
+xts for 
+
+st of 
+
+put prompts (
+.
+. off
+
+
+
+ batch 
+
+f
+r
+
+c
+
+g). S
+ th
+ 
+xamp
+
+ scr
+pt: [
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/bas
+c/bas
+c.py](../../
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/bas
+c/bas
+c.py)
+Th
+ f
+rst 
+
+
+
+ of th
+s 
+xamp
+
+ 
+mports th
+ c
+ass
+s [LLM][v
+m.LLM] a
+d [Samp
+
+
+gParams][v
+m.Samp
+
+
+gParams]:
+    - [LLM][v
+m.LLM] 
+s th
+ ma
+
+ c
+ass for ru
+
+
+g off
+
+
+
+ 
+
+f
+r
+
+c
+ 
+
+th vLLM 
+
+g
+
+
+.
+    - [Samp
+
+
+gParams][v
+m.Samp
+
+
+gParams] sp
+c
+f
+
+s th
+ param
+t
+rs for th
+ samp
+
+
+g proc
+ss.
+```pytho
+
+from v
+m 
+mport LLM, Samp
+
+
+gParams
 ```
+Th
+ 
 
-The next section defines a list of input prompts and sampling parameters for text generation. The [sampling temperature](https://arxiv.org/html/2402.05201v1) is set to `0.8` and the [nucleus sampling probability](https://en.wikipedia.org/wiki/Top-p_sampling) is set to `0.95`. You can find more information about the sampling parameters [here](../api/README.md#inference-parameters).
+xt s
+ct
+o
+ d
+f
 
-!!! important
-    By default, vLLM will use sampling parameters recommended by model creator by applying the `generation_config.json` from the Hugging Face model repository if it exists. In most cases, this will provide you with the best results by default if [SamplingParams][vllm.SamplingParams] is not specified.
 
-    However, if vLLM's default sampling parameters are preferred, please set `generation_config="vllm"` when creating the [LLM][vllm.LLM] instance.
+s a 
 
-```python
+st of 
+
+put prompts a
+d samp
+
+
+g param
+t
+rs for t
+xt g
+
+
+rat
+o
+. Th
+ [samp
+
+
+g t
+mp
+ratur
+](https://arx
+v.org/htm
+/2402.05201v1) 
+s s
+t to `0.8` a
+d th
+ [
+uc
+
+us samp
+
+
+g probab
+
+
+ty](https://
+
+.
+
+k
+p
+d
+a.org/
+
+k
+/Top-p_samp
+
+
+g) 
+s s
+t to `0.95`. You ca
+ f
+
+d mor
+ 
+
+format
+o
+ about th
+ samp
+
+
+g param
+t
+rs [h
+r
+](../ap
+/README.md#
+
+f
+r
+
+c
+-param
+t
+rs).
+!!! 
+mporta
+t
+    By d
+fau
+t, vLLM 
+
+
+ us
+ samp
+
+
+g param
+t
+rs r
+comm
+
+d
+d by mod
+
+ cr
+ator by app
+y
+
+g th
+ `g
+
+
+rat
+o
+_co
+f
+g.jso
+` from th
+ Hugg
+
+g Fac
+ mod
+
+ r
+pos
+tory 
+f 
+t 
+x
+sts. I
+ most cas
+s, th
+s 
+
+
+ prov
+d
+ you 
+
+th th
+ b
+st r
+su
+ts by d
+fau
+t 
+f [Samp
+
+
+gParams][v
+m.Samp
+
+
+gParams] 
+s 
+ot sp
+c
+f
+
+d.
+    Ho
+
+v
+r, 
+f vLLM's d
+fau
+t samp
+
+
+g param
+t
+rs ar
+ pr
+f
+rr
+d, p
+
+as
+ s
+t `g
+
+
+rat
+o
+_co
+f
+g="v
+m"` 
+h
+
+ cr
+at
+
+g th
+ [LLM][v
+m.LLM] 
+
+sta
+c
+.
+```pytho
+
 prompts = [
-    "Hello, my name is",
-    "The president of the United States is",
-    "The capital of France is",
-    "The future of AI is",
+    "H
+
+o, my 
+am
+ 
+s",
+    "Th
+ pr
+s
+d
+
+t of th
+ U
+
+t
+d Stat
+s 
+s",
+    "Th
+ cap
+ta
+ of Fra
+c
+ 
+s",
+    "Th
+ futur
+ of AI 
+s",
 ]
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+samp
+
+
+g_params = Samp
+
+
+gParams(t
+mp
+ratur
+=0.8, top_p=0.95)
 ```
+Th
+ [LLM][v
+m.LLM] c
+ass 
 
-The [LLM][vllm.LLM] class initializes vLLM's engine and the [OPT-125M model](https://arxiv.org/abs/2205.01068) for offline inference. The list of supported models can be found [here](../models/supported_models.md).
 
-```python
-llm = LLM(model="facebook/opt-125m")
+t
+a
+
+z
+s vLLM's 
+
+g
+
+
+ a
+d th
+ [OPT-125M mod
+
+](https://arx
+v.org/abs/2205.01068) for off
+
+
+
+ 
+
+f
+r
+
+c
+. Th
+ 
+
+st of support
+d mod
+
+s ca
+ b
+ fou
+d [h
+r
+](../mod
+
+s/support
+d_mod
+
+s.md).
+```pytho
+
+
+m = LLM(mod
+
+="fac
+book/opt-125m")
 ```
+!!! 
+ot
 
-!!! note
-    By default, vLLM downloads models from [Hugging Face](https://huggingface.co/). If you would like to use models from [ModelScope](https://www.modelscope.cn), set the environment variable `VLLM_USE_MODELSCOPE` before initializing the engine.
+    By d
+fau
+t, vLLM do
 
-    ```shell
-    export VLLM_USE_MODELSCOPE=True
+
+oads mod
+
+s from [Hugg
+
+g Fac
+](https://hugg
+
+gfac
+.co/). If you 
+ou
+d 
+
+k
+ to us
+ mod
+
+s from [Mod
+
+Scop
+](https://
+.mod
+
+scop
+.c
+), s
+t th
+ 
+
+v
+ro
+m
+
+t var
+ab
+
+ `VLLM_USE_MODELSCOPE` b
+for
+ 
+
+
+t
+a
+
+z
+
+g th
+ 
+
+g
+
+
+.
+    ```sh
+
+
+    
+xport VLLM_USE_MODELSCOPE=Tru
+
     ```
+No
+, th
+ fu
+ part! Th
+ outputs ar
+ g
 
-Now, the fun part! The outputs are generated using `llm.generate`. It adds the input prompts to the vLLM engine's waiting queue and executes the vLLM engine to generate the outputs with high throughput. The outputs are returned as a list of `RequestOutput` objects, which include all of the output tokens.
 
-```python
-outputs = llm.generate(prompts, sampling_params)
+rat
+d us
 
-for output in outputs:
+g `
+m.g
+
+
+rat
+`. It adds th
+ 
+
+put prompts to th
+ vLLM 
+
+g
+
+
+'s 
+a
+t
+
+g qu
+u
+ a
+d 
+x
+cut
+s th
+ vLLM 
+
+g
+
+
+ to g
+
+
+rat
+ th
+ outputs 
+
+th h
+gh throughput. Th
+ outputs ar
+ r
+tur
+
+d as a 
+
+st of `R
+qu
+stOutput` obj
+cts, 
+h
+ch 
+
+c
+ud
+ a
+ of th
+ output tok
+
+s.
+```pytho
+
+outputs = 
+m.g
+
+
+rat
+(prompts, samp
+
+
+g_params)
+for output 
+
+ outputs:
     prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    g
+
+
+rat
+d_t
+xt = output.outputs[0].t
+xt
+    pr
+
+t(f"Prompt: {prompt!r}, G
+
+
+rat
+d t
+xt: {g
+
+
+rat
+d_t
+xt!r}")
 ```
+!!! 
+ot
 
-!!! note
-    The `llm.generate` method does not automatically apply the model's chat template to the input prompt. Therefore, if you are using an Instruct model or Chat model, you should manually apply the corresponding chat template to ensure the expected behavior. Alternatively, you can use the `llm.chat` method and pass a list of messages which have the same format as those passed to OpenAI's `client.chat.completions`:
+    Th
+ `
+m.g
 
-    ??? code
-    
-        ```python
-        # Using tokenizer to apply chat template
-        from transformers import AutoTokenizer
-    
-        tokenizer = AutoTokenizer.from_pretrained("/path/to/chat_model")
-        messages_list = [
-            [{"role": "user", "content": prompt}]
-            for prompt in prompts
+
+rat
+` m
+thod do
+s 
+ot automat
+ca
+y app
+y th
+ mod
+
+'s chat t
+mp
+at
+ to th
+ 
+
+put prompt. Th
+r
+for
+, 
+f you ar
+ us
+
+g a
+ I
+struct mod
+
+ or Chat mod
+
+, you shou
+d ma
+ua
+y app
+y th
+ corr
+spo
+d
+
+g chat t
+mp
+at
+ to 
+
+sur
+ th
+ 
+xp
+ct
+d b
+hav
+or. A
+t
+r
+at
+v
+
+y, you ca
+ us
+ th
+ `
+m.chat` m
+thod a
+d pass a 
+
+st of m
+ssag
+s 
+h
+ch hav
+ th
+ sam
+ format as thos
+ pass
+d to Op
+
+AI's `c
+
+
+
+t.chat.comp
+
+t
+o
+s`:
+    ??? cod
+
+        ```pytho
+
+        # Us
+
+g tok
+
+
+z
+r to app
+y chat t
+mp
+at
+
+        from tra
+sform
+rs 
+mport AutoTok
+
+
+z
+r
+        tok
+
+
+z
+r = AutoTok
+
+
+z
+r.from_pr
+tra
+
+
+d("/path/to/chat_mod
+
+")
+        m
+ssag
+s_
+
+st = [
+            [{"ro
+
+": "us
+r", "co
+t
+
+t": prompt}]
+            for prompt 
+
+ prompts
         ]
-        texts = tokenizer.apply_chat_template(
-            messages_list,
-            tokenize=False,
-            add_generation_prompt=True,
+        t
+xts = tok
+
+
+z
+r.app
+y_chat_t
+mp
+at
+(
+            m
+ssag
+s_
+
+st,
+            tok
+
+
+z
+=Fa
+s
+,
+            add_g
+
+
+rat
+o
+_prompt=Tru
+,
         )
-        
-        # Generate outputs
-        outputs = llm.generate(texts, sampling_params)
-        
-        # Print the outputs.
-        for output in outputs:
+        # G
+
+
+rat
+ outputs
+        outputs = 
+m.g
+
+
+rat
+(t
+xts, samp
+
+
+g_params)
+        # Pr
+
+t th
+ outputs.
+        for output 
+
+ outputs:
             prompt = output.prompt
-            generated_text = output.outputs[0].text
-            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-    
-        # Using chat interface.
-        outputs = llm.chat(messages_list, sampling_params)
-        for idx, output in enumerate(outputs):
-            prompt = prompts[idx]
-            generated_text = output.outputs[0].text
-            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+            g
+
+
+rat
+d_t
+xt = output.outputs[0].t
+xt
+            pr
+
+t(f"Prompt: {prompt!r}, G
+
+
+rat
+d t
+xt: {g
+
+
+rat
+d_t
+xt!r}")
+        # Us
+
+g chat 
+
+t
+rfac
+.
+        outputs = 
+m.chat(m
+ssag
+s_
+
+st, samp
+
+
+g_params)
+        for 
+dx, output 
+
+ 
+
+um
+rat
+(outputs):
+            prompt = prompts[
+dx]
+            g
+
+
+rat
+d_t
+xt = output.outputs[0].t
+xt
+            pr
+
+t(f"Prompt: {prompt!r}, G
+
+
+rat
+d t
+xt: {g
+
+
+rat
+d_t
+xt!r}")
         ```
+## Op
 
-## OpenAI-Compatible Server
+AI-Compat
+b
 
-vLLM can be deployed as a server that implements the OpenAI API protocol. This allows vLLM to be used as a drop-in replacement for applications using OpenAI API.
-By default, it starts the server at `http://localhost:8000`. You can specify the address with `--host` and `--port` arguments. The server currently hosts one model at a time and implements endpoints such as [list models](https://platform.openai.com/docs/api-reference/models/list), [create chat completion](https://platform.openai.com/docs/api-reference/chat/completions/create), and [create completion](https://platform.openai.com/docs/api-reference/completions/create) endpoints.
+ S
+rv
+r
+vLLM ca
+ b
+ d
+p
+oy
+d as a s
+rv
+r that 
+mp
 
-Run the following command to start the vLLM server with the [Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct) model:
+m
 
+ts th
+ Op
+
+AI API protoco
+. Th
+s a
+o
+s vLLM to b
+ us
+d as a drop-
+
+ r
+p
+ac
+m
+
+t for app
+
+cat
+o
+s us
+
+g Op
+
+AI API.
+By d
+fau
+t, 
+t starts th
+ s
+rv
+r at `http://
+oca
+host:8000`. You ca
+ sp
+c
+fy th
+ addr
+ss 
+
+th `--host` a
+d `--port` argum
+
+ts. Th
+ s
+rv
+r curr
+
+t
+y hosts o
+
+ mod
+
+ at a t
+m
+ a
+d 
+mp
+
+m
+
+ts 
+
+dpo
+
+ts such as [
+
+st mod
+
+s](https://p
+atform.op
+
+a
+.com/docs/ap
+-r
+f
+r
+
+c
+/mod
+
+s/
+
+st), [cr
+at
+ chat comp
+
+t
+o
+](https://p
+atform.op
+
+a
+.com/docs/ap
+-r
+f
+r
+
+c
+/chat/comp
+
+t
+o
+s/cr
+at
+), a
+d [cr
+at
+ comp
+
+t
+o
+](https://p
+atform.op
+
+a
+.com/docs/ap
+-r
+f
+r
+
+c
+/comp
+
+t
+o
+s/cr
+at
+) 
+
+dpo
+
+ts.
+Ru
+ th
+ fo
+o
+
+
+g comma
+d to start th
+ vLLM s
+rv
+r 
+
+th th
+ [Q
+
+
+2.5-1.5B-I
+struct](https://hugg
+
+gfac
+.co/Q
+
+
+/Q
+
+
+2.5-1.5B-I
+struct) mod
+
+:
 ```bash
-vllm serve Qwen/Qwen2.5-1.5B-Instruct
+v
+m s
+rv
+ Q
+
+
+/Q
+
+
+2.5-1.5B-I
+struct
 ```
+!!! 
+ot
 
-!!! note
-    By default, the server uses a predefined chat template stored in the tokenizer.
-    You can learn about overriding it [here](../serving/openai_compatible_server.md#chat-template).
-!!! important
-    By default, the server applies `generation_config.json` from the huggingface model repository if it exists. This means the default values of certain sampling parameters can be overridden by those recommended by the model creator.
+    By d
+fau
+t, th
+ s
+rv
+r us
+s a pr
+d
+f
 
-    To disable this behavior, please pass `--generation-config vllm` when launching the server.
 
-This server can be queried in the same format as OpenAI API. For example, to list the models:
+d chat t
+mp
+at
+ stor
+d 
 
+ th
+ tok
+
+
+z
+r.
+    You ca
+ 
+
+ar
+ about ov
+rr
+d
+
+g 
+t [h
+r
+](../s
+rv
+
+g/op
+
+a
+_compat
+b
+
+_s
+rv
+r.md#chat-t
+mp
+at
+).
+!!! 
+mporta
+t
+    By d
+fau
+t, th
+ s
+rv
+r app
+
+
+s `g
+
+
+rat
+o
+_co
+f
+g.jso
+` from th
+ hugg
+
+gfac
+ mod
+
+ r
+pos
+tory 
+f 
+t 
+x
+sts. Th
+s m
+a
+s th
+ d
+fau
+t va
+u
+s of c
+rta
+
+ samp
+
+
+g param
+t
+rs ca
+ b
+ ov
+rr
+dd
+
+ by thos
+ r
+comm
+
+d
+d by th
+ mod
+
+ cr
+ator.
+    To d
+sab
+
+ th
+s b
+hav
+or, p
+
+as
+ pass `--g
+
+
+rat
+o
+-co
+f
+g v
+m` 
+h
+
+ 
+au
+ch
+
+g th
+ s
+rv
+r.
+Th
+s s
+rv
+r ca
+ b
+ qu
+r
+
+d 
+
+ th
+ sam
+ format as Op
+
+AI API. For 
+xamp
+
+, to 
+
+st th
+ mod
+
+s:
 ```bash
-curl http://localhost:8000/v1/models
+cur
+ http://
+oca
+host:8000/v1/mod
+
+s
 ```
+You ca
+ pass 
 
-You can pass in the argument `--api-key` or environment variable `VLLM_API_KEY` to enable the server to check for API key in the header.
-You can pass multiple keys after `--api-key`, and the server will accept any of the keys passed, this can be useful for key rotation.
+ th
+ argum
 
-### OpenAI Completions API with vLLM
+t `--ap
+-k
+y` or 
 
-Once your server is started, you can query the model with input prompts:
+v
+ro
+m
 
+t var
+ab
+
+ `VLLM_API_KEY` to 
+
+ab
+
+ th
+ s
+rv
+r to ch
+ck for API k
+y 
+
+ th
+ h
+ad
+r.
+You ca
+ pass mu
+t
+p
+
+ k
+ys aft
+r `--ap
+-k
+y`, a
+d th
+ s
+rv
+r 
+
+
+ acc
+pt a
+y of th
+ k
+ys pass
+d, th
+s ca
+ b
+ us
+fu
+ for k
+y rotat
+o
+.
+### Op
+
+AI Comp
+
+t
+o
+s API 
+
+th vLLM
+O
+c
+ your s
+rv
+r 
+s start
+d, you ca
+ qu
+ry th
+ mod
+
+ 
+
+th 
+
+put prompts:
 ```bash
-curl http://localhost:8000/v1/completions \
-    -H "Content-Type: application/json" \
+cur
+ http://
+oca
+host:8000/v1/comp
+
+t
+o
+s \
+    -H "Co
+t
+
+t-Typ
+: app
+
+cat
+o
+/jso
+" \
     -d '{
-        "model": "Qwen/Qwen2.5-1.5B-Instruct",
-        "prompt": "San Francisco is a",
-        "max_tokens": 7,
-        "temperature": 0
+        "mod
+
+": "Q
+
+
+/Q
+
+
+2.5-1.5B-I
+struct",
+        "prompt": "Sa
+ Fra
+c
+sco 
+s a",
+        "max_tok
+
+s": 7,
+        "t
+mp
+ratur
+": 0
     }'
 ```
+S
 
-Since this server is compatible with OpenAI API, you can use it as a drop-in replacement for any applications using OpenAI API. For example, another way to query the server is via the `openai` Python package:
+c
+ th
+s s
+rv
+r 
+s compat
+b
 
-??? code
+ 
 
-    ```python
-    from openai import OpenAI
+th Op
 
-    # Modify OpenAI's API key and API base to use vLLM's API server.
-    openai_api_key = "EMPTY"
-    openai_api_base = "http://localhost:8000/v1"
-    client = OpenAI(
-        api_key=openai_api_key,
-        base_url=openai_api_base,
+AI API, you ca
+ us
+ 
+t as a drop-
+
+ r
+p
+ac
+m
+
+t for a
+y app
+
+cat
+o
+s us
+
+g Op
+
+AI API. For 
+xamp
+
+, a
+oth
+r 
+ay to qu
+ry th
+ s
+rv
+r 
+s v
+a th
+ `op
+
+a
+` Pytho
+ packag
+:
+??? cod
+
+    ```pytho
+
+    from op
+
+a
+ 
+mport Op
+
+AI
+    # Mod
+fy Op
+
+AI's API k
+y a
+d API bas
+ to us
+ vLLM's API s
+rv
+r.
+    op
+
+a
+_ap
+_k
+y = "EMPTY"
+    op
+
+a
+_ap
+_bas
+ = "http://
+oca
+host:8000/v1"
+    c
+
+
+
+t = Op
+
+AI(
+        ap
+_k
+y=op
+
+a
+_ap
+_k
+y,
+        bas
+_ur
+=op
+
+a
+_ap
+_bas
+,
     )
-    completion = client.completions.create(
-        model="Qwen/Qwen2.5-1.5B-Instruct",
-        prompt="San Francisco is a",
+    comp
+
+t
+o
+ = c
+
+
+
+t.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+="Q
+
+
+/Q
+
+
+2.5-1.5B-I
+struct",
+        prompt="Sa
+ Fra
+c
+sco 
+s a",
     )
-    print("Completion result:", completion)
+    pr
+
+t("Comp
+
+t
+o
+ r
+su
+t:", comp
+
+t
+o
+)
     ```
+A mor
+ d
+ta
 
-A more detailed client example can be found here: [examples/offline_inference/basic/basic.py](../../examples/offline_inference/basic/basic.py)
 
-### OpenAI Chat Completions API with vLLM
+d c
 
-vLLM is designed to also support the OpenAI Chat Completions API. The chat interface is a more dynamic, interactive way to communicate with the model, allowing back-and-forth exchanges that can be stored in the chat history. This is useful for tasks that require context or more detailed explanations.
 
-You can use the [create chat completion](https://platform.openai.com/docs/api-reference/chat/completions/create) endpoint to interact with the model:
 
+t 
+xamp
+
+ ca
+ b
+ fou
+d h
+r
+: [
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/bas
+c/bas
+c.py](../../
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/bas
+c/bas
+c.py)
+### Op
+
+AI Chat Comp
+
+t
+o
+s API 
+
+th vLLM
+vLLM 
+s d
+s
+g
+
+d to a
+so support th
+ Op
+
+AI Chat Comp
+
+t
+o
+s API. Th
+ chat 
+
+t
+rfac
+ 
+s a mor
+ dy
+am
+c, 
+
+t
+ract
+v
+ 
+ay to commu
+
+cat
+ 
+
+th th
+ mod
+
+, a
+o
+
+
+g back-a
+d-forth 
+xcha
+g
+s that ca
+ b
+ stor
+d 
+
+ th
+ chat h
+story. Th
+s 
+s us
+fu
+ for tasks that r
+qu
+r
+ co
+t
+xt or mor
+ d
+ta
+
+
+d 
+xp
+a
+at
+o
+s.
+You ca
+ us
+ th
+ [cr
+at
+ chat comp
+
+t
+o
+](https://p
+atform.op
+
+a
+.com/docs/ap
+-r
+f
+r
+
+c
+/chat/comp
+
+t
+o
+s/cr
+at
+) 
+
+dpo
+
+t to 
+
+t
+ract 
+
+th th
+ mod
+
+:
 ```bash
-curl http://localhost:8000/v1/chat/completions \
-    -H "Content-Type: application/json" \
+cur
+ http://
+oca
+host:8000/v1/chat/comp
+
+t
+o
+s \
+    -H "Co
+t
+
+t-Typ
+: app
+
+cat
+o
+/jso
+" \
     -d '{
-        "model": "Qwen/Qwen2.5-1.5B-Instruct",
-        "messages": [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "Who won the world series in 2020?"}
+        "mod
+
+": "Q
+
+
+/Q
+
+
+2.5-1.5B-I
+struct",
+        "m
+ssag
+s": [
+            {"ro
+
+": "syst
+m", "co
+t
+
+t": "You ar
+ a h
+
+pfu
+ ass
+sta
+t."},
+            {"ro
+
+": "us
+r", "co
+t
+
+t": "Who 
+o
+ th
+ 
+or
+d s
+r
+
+s 
+
+ 2020?"}
         ]
     }'
 ```
+A
+t
+r
+at
+v
 
-Alternatively, you can use the `openai` Python package:
+y, you ca
+ us
+ th
+ `op
 
-??? code
+a
+` Pytho
+ packag
+:
+??? cod
 
-    ```python
-    from openai import OpenAI
-    # Set OpenAI's API key and API base to use vLLM's API server.
-    openai_api_key = "EMPTY"
-    openai_api_base = "http://localhost:8000/v1"
+    ```pytho
 
-    client = OpenAI(
-        api_key=openai_api_key,
-        base_url=openai_api_base,
+    from op
+
+a
+ 
+mport Op
+
+AI
+    # S
+t Op
+
+AI's API k
+y a
+d API bas
+ to us
+ vLLM's API s
+rv
+r.
+    op
+
+a
+_ap
+_k
+y = "EMPTY"
+    op
+
+a
+_ap
+_bas
+ = "http://
+oca
+host:8000/v1"
+    c
+
+
+
+t = Op
+
+AI(
+        ap
+_k
+y=op
+
+a
+_ap
+_k
+y,
+        bas
+_ur
+=op
+
+a
+_ap
+_bas
+,
     )
+    chat_r
+spo
+s
+ = c
 
-    chat_response = client.chat.completions.create(
-        model="Qwen/Qwen2.5-1.5B-Instruct",
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "Tell me a joke."},
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+="Q
+
+
+/Q
+
+
+2.5-1.5B-I
+struct",
+        m
+ssag
+s=[
+            {"ro
+
+": "syst
+m", "co
+t
+
+t": "You ar
+ a h
+
+pfu
+ ass
+sta
+t."},
+            {"ro
+
+": "us
+r", "co
+t
+
+t": "T
+
+ m
+ a jok
+."},
         ],
     )
-    print("Chat response:", chat_response)
+    pr
+
+t("Chat r
+spo
+s
+:", chat_r
+spo
+s
+)
     ```
+## O
+ Att
 
-## On Attention Backends
+t
+o
+ Back
 
-Currently, vLLM supports multiple backends for efficient Attention computation across different platforms and accelerator architectures. It automatically selects the most performant backend compatible with your system and model specifications.
+ds
+Curr
 
-If desired, you can also manually set the backend of your choice using the `--attention-backend` CLI argument:
+t
+y, vLLM supports mu
+t
+p
 
+ back
+
+ds for 
+ff
+c
+
+
+t Att
+
+t
+o
+ computat
+o
+ across d
+ff
+r
+
+t p
+atforms a
+d acc
+
+
+rator arch
+t
+ctur
+s. It automat
+ca
+y s
+
+
+cts th
+ most p
+rforma
+t back
+
+d compat
+b
+
+ 
+
+th your syst
+m a
+d mod
+
+ sp
+c
+f
+cat
+o
+s.
+If d
+s
+r
+d, you ca
+ a
+so ma
+ua
+y s
+t th
+ back
+
+d of your cho
+c
+ us
+
+g th
+ `--att
+
+t
+o
+-back
+
+d` CLI argum
+
+t:
 ```bash
-# For online serving
-vllm serve Qwen/Qwen2.5-1.5B-Instruct --attention-backend FLASH_ATTN
+# For o
 
-# For offline inference
-python script.py --attention-backend FLASHINFER
+
+
+
+ s
+rv
+
+g
+v
+m s
+rv
+ Q
+
+
+/Q
+
+
+2.5-1.5B-I
+struct --att
+
+t
+o
+-back
+
+d FLASH_ATTN
+# For off
+
+
+
+ 
+
+f
+r
+
+c
+
+pytho
+ scr
+pt.py --att
+
+t
+o
+-back
+
+d FLASHINFER
 ```
+Som
+ of th
+ ava
 
-Some of the available backend options include:
+ab
 
-- On NVIDIA CUDA: `FLASH_ATTN` or `FLASHINFER`.
-- On AMD ROCm: `TRITON_ATTN`, `ROCM_ATTN`, `ROCM_AITER_FA`, `ROCM_AITER_UNIFIED_ATTN`, `TRITON_MLA`, `ROCM_AITER_MLA` or `ROCM_AITER_TRITON_MLA`.
+ back
 
-!!! warning
-    There are no pre-built vllm wheels containing Flash Infer, so you must install it in your environment first. Refer to the [Flash Infer official docs](https://docs.flashinfer.ai/) or see [docker/Dockerfile](../../docker/Dockerfile) for instructions on how to install it.
+d opt
+o
+s 
+
+c
+ud
+:
+    - O
+ NVIDIA CUDA: `FLASH_ATTN` or `FLASHINFER`.
+    - O
+ AMD ROCm: `TRITON_ATTN`, `ROCM_ATTN`, `ROCM_AITER_FA`, `ROCM_AITER_UNIFIED_ATTN`, `TRITON_MLA`, `ROCM_AITER_MLA` or `ROCM_AITER_TRITON_MLA`.
+!!! 
+ar
+
+
+g
+    Th
+r
+ ar
+ 
+o pr
+-bu
+
+t v
+m 
+h
+
+s co
+ta
+
+
+
+g F
+ash I
+f
+r, so you must 
+
+sta
+ 
+t 
+
+ your 
+
+v
+ro
+m
+
+t f
+rst. R
+f
+r to th
+ [F
+ash I
+f
+r off
+c
+a
+ docs](https://docs.f
+ash
+
+f
+r.a
+/) or s
+ [dock
+r/Dock
+rf
+
+
+](../../dock
+r/Dock
+rf
+
+
+) for 
+
+struct
+o
+s o
+ ho
+ to 
+
+sta
+ 
+t.

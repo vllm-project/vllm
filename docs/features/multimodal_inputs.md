@@ -1,1069 +1,7191 @@
-# Multimodal Inputs
+# Mu
+t
+moda
+ I
+puts
+Th
+s pag
+ t
+ach
+s you ho
+ to pass mu
+t
+-moda
+ 
 
-This page teaches you how to pass multi-modal inputs to [multi-modal models](../models/supported_models.md#list-of-multimodal-language-models) in vLLM.
+puts to [mu
+t
+-moda
+ mod
 
-!!! note
-    We are actively iterating on multi-modal support. See [this RFC](https://github.com/vllm-project/vllm/issues/4194) for upcoming changes,
-    and [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) if you have any feedback or feature requests.
+s](../mod
 
-!!! tip
-    When serving multi-modal models, consider setting `--allowed-media-domains` to restrict domain that vLLM can access to prevent it from accessing arbitrary endpoints that can potentially be vulnerable to Server-Side Request Forgery (SSRF) attacks. You can provide a list of domains for this arg. For example: `--allowed-media-domains upload.wikimedia.org github.com www.bogotobogo.com`
+s/support
+d_mod
 
-    Also, consider setting `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0` to prevent HTTP redirects from being followed to bypass domain restrictions.
+s.md#
 
-    This restriction is especially important if you run vLLM in a containerized environment where the vLLM pods may have unrestricted access to internal networks.
+st-of-mu
+t
+moda
+-
+a
+guag
+-mod
 
-## Offline Inference
+s) 
 
-To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:
+ vLLM.
+!!! 
+ot
 
-- `prompt`: The prompt should follow the format that is documented on HuggingFace.
-- `multi_modal_data`: This is a dictionary that follows the schema defined in [vllm.multimodal.inputs.MultiModalDataDict][].
+    W
+ ar
+ act
+v
 
-### Image Inputs
+y 
+t
+rat
 
-You can pass a single image to the `'image'` field of the multi-modal dictionary, as shown in the following examples:
+g o
+ mu
+t
+-moda
+ support. S
+ [th
+s RFC](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/4194) for upcom
 
-??? code
+g cha
+g
+s,
+    a
+d [op
 
-    ```python
-    from vllm import LLM
+ a
+ 
+ssu
+ o
+ G
+tHub](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/
 
-    llm = LLM(model="llava-hf/llava-1.5-7b-hf")
 
-    # Refer to the HuggingFace repo for the correct format to use
-    prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"
+/choos
+) 
+f you hav
+ a
+y f
+dback or f
+atur
+ r
+qu
+sts.
+!!! t
+p
+    Wh
 
-    # Load the image using PIL.Image
-    image = PIL.Image.open(...)
+ s
+rv
 
-    # Single prompt inference
-    outputs = llm.generate({
+g mu
+t
+-moda
+ mod
+
+s, co
+s
+d
+r s
+tt
+
+g `--a
+o
+
+d-m
+d
+a-doma
+
+s` to r
+str
+ct doma
+
+ that vLLM ca
+ acc
+ss to pr
+v
+
+t 
+t from acc
+ss
+
+g arb
+trary 
+
+dpo
+
+ts that ca
+ pot
+
+t
+a
+y b
+ vu
+
+
+rab
+
+ to S
+rv
+r-S
+d
+ R
+qu
+st Forg
+ry (SSRF) attacks. You ca
+ prov
+d
+ a 
+
+st of doma
+
+s for th
+s arg. For 
+xamp
+
+: `--a
+o
+
+d-m
+d
+a-doma
+
+s up
+oad.
+
+k
+m
+d
+a.org g
+thub.com 
+.bogotobogo.com`
+    A
+so, co
+s
+d
+r s
+tt
+
+g `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0` to pr
+v
+
+t HTTP r
+d
+r
+cts from b
+
+
+g fo
+o
+
+d to bypass doma
+
+ r
+str
+ct
+o
+s.
+    Th
+s r
+str
+ct
+o
+ 
+s 
+sp
+c
+a
+y 
+mporta
+t 
+f you ru
+ vLLM 
+
+ a co
+ta
+
+
+r
+z
+d 
+
+v
+ro
+m
+
+t 
+h
+r
+ th
+ vLLM pods may hav
+ u
+r
+str
+ct
+d acc
+ss to 
+
+t
+r
+a
+ 
+
+t
+orks.
+## Off
+
+
+
+ I
+f
+r
+
+c
+
+To 
+
+put mu
+t
+-moda
+ data, fo
+o
+ th
+s sch
+ma 
+
+ [v
+m.
+
+puts.PromptTyp
+][]:
+    - `prompt`: Th
+ prompt shou
+d fo
+o
+ th
+ format that 
+s docum
+
+t
+d o
+ Hugg
+
+gFac
+.
+    - `mu
+t
+_moda
+_data`: Th
+s 
+s a d
+ct
+o
+ary that fo
+o
+s th
+ sch
+ma d
+f
+
+
+d 
+
+ [v
+m.mu
+t
+moda
+.
+
+puts.Mu
+t
+Moda
+DataD
+ct][].
+### Imag
+ I
+puts
+You ca
+ pass a s
+
+g
+
+ 
+mag
+ to th
+ `'
+mag
+'` f
+
+
+d of th
+ mu
+t
+-moda
+ d
+ct
+o
+ary, as sho
+
+ 
+
+ th
+ fo
+o
+
+
+g 
+xamp
+
+s:
+??? cod
+
+    ```pytho
+
+    from v
+m 
+mport LLM
+    
+m = LLM(mod
+
+="
+ava-hf/
+ava-1.5-7b-hf")
+    # R
+f
+r to th
+ Hugg
+
+gFac
+ r
+po for th
+ corr
+ct format to us
+
+    prompt = "USER: 
+
+mag
+
+\
+What 
+s th
+ co
+t
+
+t of th
+s 
+mag
+?\
+ASSISTANT:"
+    # Load th
+ 
+mag
+ us
+
+g PIL.Imag
+
+    
+mag
+ = PIL.Imag
+.op
+
+(...)
+    # S
+
+g
+
+ prompt 
+
+f
+r
+
+c
+
+    outputs = 
+m.g
+
+
+rat
+({
         "prompt": prompt,
-        "multi_modal_data": {"image": image},
+        "mu
+t
+_moda
+_data": {"
+mag
+": 
+mag
+},
     })
+    for o 
 
-    for o in outputs:
-        generated_text = o.outputs[0].text
-        print(generated_text)
+ outputs:
+        g
 
-    # Batch inference
-    image_1 = PIL.Image.open(...)
-    image_2 = PIL.Image.open(...)
-    outputs = llm.generate(
+
+rat
+d_t
+xt = o.outputs[0].t
+xt
+        pr
+
+t(g
+
+
+rat
+d_t
+xt)
+    # Batch 
+
+f
+r
+
+c
+
+    
+mag
+_1 = PIL.Imag
+.op
+
+(...)
+    
+mag
+_2 = PIL.Imag
+.op
+
+(...)
+    outputs = 
+m.g
+
+
+rat
+(
         [
             {
-                "prompt": "USER: <image>\nWhat is the content of this image?\nASSISTANT:",
-                "multi_modal_data": {"image": image_1},
+                "prompt": "USER: 
+
+mag
+
+\
+What 
+s th
+ co
+t
+
+t of th
+s 
+mag
+?\
+ASSISTANT:",
+                "mu
+t
+_moda
+_data": {"
+mag
+": 
+mag
+_1},
             },
             {
-                "prompt": "USER: <image>\nWhat's the color of this image?\nASSISTANT:",
-                "multi_modal_data": {"image": image_2},
+                "prompt": "USER: 
+
+mag
+
+\
+What's th
+ co
+or of th
+s 
+mag
+?\
+ASSISTANT:",
+                "mu
+t
+_moda
+_data": {"
+mag
+": 
+mag
+_2},
             }
         ]
     )
+    for o 
 
-    for o in outputs:
-        generated_text = o.outputs[0].text
-        print(generated_text)
+ outputs:
+        g
+
+
+rat
+d_t
+xt = o.outputs[0].t
+xt
+        pr
+
+t(g
+
+
+rat
+d_t
+xt)
     ```
+Fu
+ 
+xamp
 
-Full example: [examples/offline_inference/vision_language.py](../../examples/offline_inference/vision_language.py)
+: [
+xamp
 
-To substitute multiple images inside the same text prompt, you can pass in a list of images instead:
+s/off
 
-??? code
 
-    ```python
-    from vllm import LLM
 
-    llm = LLM(
-        model="microsoft/Phi-3.5-vision-instruct",
-        trust_remote_code=True,  # Required to load Phi-3.5-vision
-        max_model_len=4096,  # Otherwise, it may not fit in smaller GPUs
-        limit_mm_per_prompt={"image": 2},  # The maximum number to accept
+_
+
+f
+r
+
+c
+/v
+s
+o
+_
+a
+guag
+.py](../../
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/v
+s
+o
+_
+a
+guag
+.py)
+To subst
+tut
+ mu
+t
+p
+
+ 
+mag
+s 
+
+s
+d
+ th
+ sam
+ t
+xt prompt, you ca
+ pass 
+
+ a 
+
+st of 
+mag
+s 
+
+st
+ad:
+??? cod
+
+    ```pytho
+
+    from v
+m 
+mport LLM
+    
+m = LLM(
+        mod
+
+="m
+crosoft/Ph
+-3.5-v
+s
+o
+-
+
+struct",
+        trust_r
+mot
+_cod
+=Tru
+,  # R
+qu
+r
+d to 
+oad Ph
+-3.5-v
+s
+o
+
+        max_mod
+
+_
+
+
+=4096,  # Oth
+r
+
+s
+, 
+t may 
+ot f
+t 
+
+ sma
+
+r GPUs
+        
+
+m
+t_mm_p
+r_prompt={"
+mag
+": 2},  # Th
+ max
+mum 
+umb
+r to acc
+pt
     )
+    # R
+f
+r to th
+ Hugg
 
-    # Refer to the HuggingFace repo for the correct format to use
-    prompt = "<|user|>\n<|image_1|>\n<|image_2|>\nWhat is the content of each image?<|end|>\n<|assistant|>\n"
+gFac
+ r
+po for th
+ corr
+ct format to us
 
-    # Load the images using PIL.Image
-    image1 = PIL.Image.open(...)
-    image2 = PIL.Image.open(...)
+    prompt = "
+|us
+r|
+\
 
-    outputs = llm.generate({
+|
+mag
+_1|
+\
+
+|
+mag
+_2|
+\
+What 
+s th
+ co
+t
+
+t of 
+ach 
+mag
+?
+|
+
+d|
+\
+
+|ass
+sta
+t|
+\
+"
+    # Load th
+ 
+mag
+s us
+
+g PIL.Imag
+
+    
+mag
+1 = PIL.Imag
+.op
+
+(...)
+    
+mag
+2 = PIL.Imag
+.op
+
+(...)
+    outputs = 
+m.g
+
+
+rat
+({
         "prompt": prompt,
-        "multi_modal_data": {"image": [image1, image2]},
+        "mu
+t
+_moda
+_data": {"
+mag
+": [
+mag
+1, 
+mag
+2]},
     })
+    for o 
 
-    for o in outputs:
-        generated_text = o.outputs[0].text
-        print(generated_text)
+ outputs:
+        g
+
+
+rat
+d_t
+xt = o.outputs[0].t
+xt
+        pr
+
+t(g
+
+
+rat
+d_t
+xt)
     ```
+Fu
+ 
+xamp
 
-Full example: [examples/offline_inference/vision_language_multi_image.py](../../examples/offline_inference/vision_language_multi_image.py)
+: [
+xamp
 
-If using the [LLM.chat](../models/generative_models.md#llmchat) method, you can pass images directly in the message content using various formats: image URLs, PIL Image objects, or pre-computed embeddings:
+s/off
 
-??? code
 
-    ```python
-    from vllm import LLM
-    from vllm.assets.image import ImageAsset
 
-    llm = LLM(model="llava-hf/llava-1.5-7b-hf")
-    image_url = "https://picsum.photos/id/32/512/512"
-    image_pil = ImageAsset('cherry_blossom').pil_image
-    image_embeds = torch.load(...)
+_
 
-    conversation = [
-        {"role": "system", "content": "You are a helpful assistant"},
-        {"role": "user", "content": "Hello"},
-        {"role": "assistant", "content": "Hello! How can I assist you today?"},
+f
+r
+
+c
+/v
+s
+o
+_
+a
+guag
+_mu
+t
+_
+mag
+.py](../../
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/v
+s
+o
+_
+a
+guag
+_mu
+t
+_
+mag
+.py)
+If us
+
+g th
+ [LLM.chat](../mod
+
+s/g
+
+
+rat
+v
+_mod
+
+s.md#
+mchat) m
+thod, you ca
+ pass 
+mag
+s d
+r
+ct
+y 
+
+ th
+ m
+ssag
+ co
+t
+
+t us
+
+g var
+ous formats: 
+mag
+ URLs, PIL Imag
+ obj
+cts, or pr
+-comput
+d 
+mb
+dd
+
+gs:
+??? cod
+
+    ```pytho
+
+    from v
+m 
+mport LLM
+    from v
+m.ass
+ts.
+mag
+ 
+mport Imag
+Ass
+t
+    
+m = LLM(mod
+
+="
+ava-hf/
+ava-1.5-7b-hf")
+    
+mag
+_ur
+ = "https://p
+csum.photos/
+d/32/512/512"
+    
+mag
+_p
+
+ = Imag
+Ass
+t('ch
+rry_b
+ossom').p
+
+_
+mag
+
+    
+mag
+_
+mb
+ds = torch.
+oad(...)
+    co
+v
+rsat
+o
+ = [
+        {"ro
+
+": "syst
+m", "co
+t
+
+t": "You ar
+ a h
+
+pfu
+ ass
+sta
+t"},
+        {"ro
+
+": "us
+r", "co
+t
+
+t": "H
+
+o"},
+        {"ro
+
+": "ass
+sta
+t", "co
+t
+
+t": "H
+
+o! Ho
+ ca
+ I ass
+st you today?"},
         {
-            "role": "user",
-            "content": [
+            "ro
+
+": "us
+r",
+            "co
+t
+
+t": [
                 {
-                    "type": "image_url",
-                    "image_url": {"url": image_url},
+                    "typ
+": "
+mag
+_ur
+",
+                    "
+mag
+_ur
+": {"ur
+": 
+mag
+_ur
+},
                 },
                 {
-                    "type": "image_pil",
-                    "image_pil": image_pil,
+                    "typ
+": "
+mag
+_p
+
+",
+                    "
+mag
+_p
+
+": 
+mag
+_p
+
+,
                 },
                 {
-                    "type": "image_embeds",
-                    "image_embeds": image_embeds,
+                    "typ
+": "
+mag
+_
+mb
+ds",
+                    "
+mag
+_
+mb
+ds": 
+mag
+_
+mb
+ds,
                 },
                 {
-                    "type": "text",
-                    "text": "What's in these images?",
+                    "typ
+": "t
+xt",
+                    "t
+xt": "What's 
+
+ th
+s
+ 
+mag
+s?",
                 },
             ],
         },
     ]
+    # P
+rform 
 
-    # Perform inference and log output.
-    outputs = llm.chat(conversation)
+f
+r
 
-    for o in outputs:
-        generated_text = o.outputs[0].text
-        print(generated_text)
+c
+ a
+d 
+og output.
+    outputs = 
+m.chat(co
+v
+rsat
+o
+)
+    for o 
+
+ outputs:
+        g
+
+
+rat
+d_t
+xt = o.outputs[0].t
+xt
+        pr
+
+t(g
+
+
+rat
+d_t
+xt)
     ```
+Mu
+t
+-
+mag
+ 
 
-Multi-image input can be extended to perform video captioning. We show this with [Qwen2-VL](https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct) as it supports videos:
+put ca
+ b
+ 
+xt
 
-??? code
+d
+d to p
+rform v
+d
+o capt
+o
 
-    ```python
-    from vllm import LLM
 
-    # Specify the maximum number of frames per video to be 4. This can be changed.
-    llm = LLM("Qwen/Qwen2-VL-2B-Instruct", limit_mm_per_prompt={"image": 4})
+g. W
+ sho
+ th
+s 
 
-    # Create the request payload.
-    video_frames = ... # load your video making sure it only has the number of frames specified earlier.
-    message = {
-        "role": "user",
-        "content": [
+th [Q
+
+
+2-VL](https://hugg
+
+gfac
+.co/Q
+
+
+/Q
+
+
+2-VL-2B-I
+struct) as 
+t supports v
+d
+os:
+??? cod
+
+    ```pytho
+
+    from v
+m 
+mport LLM
+    # Sp
+c
+fy th
+ max
+mum 
+umb
+r of fram
+s p
+r v
+d
+o to b
+ 4. Th
+s ca
+ b
+ cha
+g
+d.
+    
+m = LLM("Q
+
+
+/Q
+
+
+2-VL-2B-I
+struct", 
+
+m
+t_mm_p
+r_prompt={"
+mag
+": 4})
+    # Cr
+at
+ th
+ r
+qu
+st pay
+oad.
+    v
+d
+o_fram
+s = ... # 
+oad your v
+d
+o mak
+
+g sur
+ 
+t o
+
+y has th
+ 
+umb
+r of fram
+s sp
+c
+f
+
+d 
+ar
+
+
+r.
+    m
+ssag
+ = {
+        "ro
+
+": "us
+r",
+        "co
+t
+
+t": [
             {
-                "type": "text",
-                "text": "Describe this set of frames. Consider the frames to be a part of the same video.",
+                "typ
+": "t
+xt",
+                "t
+xt": "D
+scr
+b
+ th
+s s
+t of fram
+s. Co
+s
+d
+r th
+ fram
+s to b
+ a part of th
+ sam
+ v
+d
+o.",
             },
         ],
     }
-    for i in range(len(video_frames)):
-        base64_image = encode_image(video_frames[i]) # base64 encoding.
-        new_image = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-        message["content"].append(new_image)
+    for 
+ 
 
-    # Perform inference and log output.
-    outputs = llm.chat([message])
+ ra
+g
+(
 
-    for o in outputs:
-        generated_text = o.outputs[0].text
-        print(generated_text)
+
+(v
+d
+o_fram
+s)):
+        bas
+64_
+mag
+ = 
+
+cod
+_
+mag
+(v
+d
+o_fram
+s[
+]) # bas
+64 
+
+cod
+
+g.
+        
+
+
+_
+mag
+ = {"typ
+": "
+mag
+_ur
+", "
+mag
+_ur
+": {"ur
+": f"data:
+mag
+/jp
+g;bas
+64,{bas
+64_
+mag
+}"}}
+        m
+ssag
+["co
+t
+
+t"].app
+
+d(
+
+
+_
+mag
+)
+    # P
+rform 
+
+f
+r
+
+c
+ a
+d 
+og output.
+    outputs = 
+m.chat([m
+ssag
+])
+    for o 
+
+ outputs:
+        g
+
+
+rat
+d_t
+xt = o.outputs[0].t
+xt
+        pr
+
+t(g
+
+
+rat
+d_t
+xt)
     ```
+#### Custom RGBA Backgrou
+d Co
+or
+Wh
 
-#### Custom RGBA Background Color
+ 
+oad
 
-When loading RGBA images (images with transparency), vLLM converts them to RGB format. By default, transparent pixels are replaced with white background. You can customize this background color using the `rgba_background_color` parameter in `media_io_kwargs`.
+g RGBA 
+mag
+s (
+mag
+s 
 
-??? code
+th tra
+spar
 
-    ```python
-    from vllm import LLM
+cy), vLLM co
+v
+rts th
+m to RGB format. By d
+fau
+t, tra
+spar
 
-    # Default white background (no configuration needed)
-    llm = LLM(model="llava-hf/llava-1.5-7b-hf")
+t p
+x
 
-    # Custom black background for dark theme
-    llm = LLM(
-        model="llava-hf/llava-1.5-7b-hf",
-        media_io_kwargs={"image": {"rgba_background_color": [0, 0, 0]}},
+s ar
+ r
+p
+ac
+d 
+
+th 
+h
+t
+ backgrou
+d. You ca
+ custom
+z
+ th
+s backgrou
+d co
+or us
+
+g th
+ `rgba_backgrou
+d_co
+or` param
+t
+r 
+
+ `m
+d
+a_
+o_k
+args`.
+??? cod
+
+    ```pytho
+
+    from v
+m 
+mport LLM
+    # D
+fau
+t 
+h
+t
+ backgrou
+d (
+o co
+f
+gurat
+o
+ 
+
+d
+d)
+    
+m = LLM(mod
+
+="
+ava-hf/
+ava-1.5-7b-hf")
+    # Custom b
+ack backgrou
+d for dark th
+m
+
+    
+m = LLM(
+        mod
+
+="
+ava-hf/
+ava-1.5-7b-hf",
+        m
+d
+a_
+o_k
+args={"
+mag
+": {"rgba_backgrou
+d_co
+or": [0, 0, 0]}},
     )
+    # Custom bra
+d co
+or backgrou
+d (
+.g., b
+u
+)
+    
+m = LLM(
+        mod
 
-    # Custom brand color background (e.g., blue)
-    llm = LLM(
-        model="llava-hf/llava-1.5-7b-hf",
-        media_io_kwargs={"image": {"rgba_background_color": [0, 0, 255]}},
+="
+ava-hf/
+ava-1.5-7b-hf",
+        m
+d
+a_
+o_k
+args={"
+mag
+": {"rgba_backgrou
+d_co
+or": [0, 0, 255]}},
     )
     ```
+!!! 
+ot
 
-!!! note
-    - The `rgba_background_color` accepts RGB values as a list `[R, G, B]` or tuple `(R, G, B)` where each value is 0-255
-    - This setting only affects RGBA images with transparency; RGB images are unchanged
-    - If not specified, the default white background `(255, 255, 255)` is used for backward compatibility
+    - Th
+ `rgba_backgrou
+d_co
+or` acc
+pts RGB va
+u
+s as a 
 
-### Video Inputs
+st `[R, G, B]` or tup
 
-You can pass a list of NumPy arrays directly to the `'video'` field of the multi-modal dictionary
-instead of using multi-image input.
+ `(R, G, B)` 
+h
+r
+ 
+ach va
+u
+ 
+s 0-255
+    - Th
+s s
+tt
 
-Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown in this example using Qwen2.5-VL:
+g o
 
-??? code
+y aff
+cts RGBA 
+mag
+s 
 
-    ```python
-    from transformers import AutoProcessor
-    from vllm import LLM, SamplingParams
-    from qwen_vl_utils import process_vision_info
+th tra
+spar
 
-    model_path = "Qwen/Qwen2.5-VL-3B-Instruct"
-    video_path = "https://content.pexels.com/videos/free-videos.mp4"
+cy; RGB 
+mag
+s ar
+ u
+cha
+g
+d
+    - If 
+ot sp
+c
+f
 
-    llm = LLM(
-        model=model_path,
-        gpu_memory_utilization=0.8,
-        enforce_eager=True,
-        limit_mm_per_prompt={"video": 1},
+d, th
+ d
+fau
+t 
+h
+t
+ backgrou
+d `(255, 255, 255)` 
+s us
+d for back
+ard compat
+b
+
+
+ty
+### V
+d
+o I
+puts
+You ca
+ pass a 
+
+st of NumPy arrays d
+r
+ct
+y to th
+ `'v
+d
+o'` f
+
+
+d of th
+ mu
+t
+-moda
+ d
+ct
+o
+ary
+
+
+st
+ad of us
+
+g mu
+t
+-
+mag
+ 
+
+put.
+I
+st
+ad of NumPy arrays, you ca
+ a
+so pass `'torch.T
+
+sor'` 
+
+sta
+c
+s, as sho
+
+ 
+
+ th
+s 
+xamp
+
+ us
+
+g Q
+
+
+2.5-VL:
+??? cod
+
+    ```pytho
+
+    from tra
+sform
+rs 
+mport AutoProc
+ssor
+    from v
+m 
+mport LLM, Samp
+
+
+gParams
+    from q
+
+
+_v
+_ut
+
+s 
+mport proc
+ss_v
+s
+o
+_
+
+fo
+    mod
+
+_path = "Q
+
+
+/Q
+
+
+2.5-VL-3B-I
+struct"
+    v
+d
+o_path = "https://co
+t
+
+t.p
+x
+
+s.com/v
+d
+os/fr
+-v
+d
+os.mp4"
+    
+m = LLM(
+        mod
+
+=mod
+
+_path,
+        gpu_m
+mory_ut
+
+
+zat
+o
+=0.8,
+        
+
+forc
+_
+ag
+r=Tru
+,
+        
+
+m
+t_mm_p
+r_prompt={"v
+d
+o": 1},
     )
+    samp
 
-    sampling_params = SamplingParams(max_tokens=1024)
 
-    video_messages = [
+g_params = Samp
+
+
+gParams(max_tok
+
+s=1024)
+    v
+d
+o_m
+ssag
+s = [
         {
-            "role": "system",
-            "content": "You are a helpful assistant.",
+            "ro
+
+": "syst
+m",
+            "co
+t
+
+t": "You ar
+ a h
+
+pfu
+ ass
+sta
+t.",
         },
         {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "describe this video."},
+            "ro
+
+": "us
+r",
+            "co
+t
+
+t": [
+                {"typ
+": "t
+xt", "t
+xt": "d
+scr
+b
+ th
+s v
+d
+o."},
                 {
-                    "type": "video",
-                    "video": video_path,
-                    "total_pixels": 20480 * 28 * 28,
-                    "min_pixels": 16 * 28 * 28,
+                    "typ
+": "v
+d
+o",
+                    "v
+d
+o": v
+d
+o_path,
+                    "tota
+_p
+x
+
+s": 20480 * 28 * 28,
+                    "m
+
+_p
+x
+
+s": 16 * 28 * 28,
                 },
             ]
         },
     ]
+    m
+ssag
+s = v
+d
+o_m
+ssag
+s
+    proc
+ssor = AutoProc
+ssor.from_pr
+tra
 
-    messages = video_messages
-    processor = AutoProcessor.from_pretrained(model_path)
-    prompt = processor.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
+
+d(mod
+
+_path)
+    prompt = proc
+ssor.app
+y_chat_t
+mp
+at
+(
+        m
+ssag
+s,
+        tok
+
+
+z
+=Fa
+s
+,
+        add_g
+
+
+rat
+o
+_prompt=Tru
+,
     )
+    
+mag
+_
 
-    image_inputs, video_inputs = process_vision_info(messages)
+puts, v
+d
+o_
+
+puts = proc
+ss_v
+s
+o
+_
+
+fo(m
+ssag
+s)
     mm_data = {}
-    if video_inputs is not None:
-        mm_data["video"] = video_inputs
+    
+f v
+d
+o_
 
-    llm_inputs = {
+puts 
+s 
+ot No
+
+:
+        mm_data["v
+d
+o"] = v
+d
+o_
+
+puts
+    
+m_
+
+puts = {
         "prompt": prompt,
-        "multi_modal_data": mm_data,
+        "mu
+t
+_moda
+_data": mm_data,
     }
+    outputs = 
+m.g
 
-    outputs = llm.generate([llm_inputs], sampling_params=sampling_params)
-    for o in outputs:
-        generated_text = o.outputs[0].text
-        print(generated_text)
+
+rat
+([
+m_
+
+puts], samp
+
+
+g_params=samp
+
+
+g_params)
+    for o 
+
+ outputs:
+        g
+
+
+rat
+d_t
+xt = o.outputs[0].t
+xt
+        pr
+
+t(g
+
+
+rat
+d_t
+xt)
     ```
+    !!! 
+ot
 
-    !!! note
-        'process_vision_info' is only applicable to Qwen2.5-VL and similar models.
+        'proc
+ss_v
+s
+o
+_
 
-Full example: [examples/offline_inference/vision_language.py](../../examples/offline_inference/vision_language.py)
+fo' 
+s o
 
-### Audio Inputs
+y app
 
-You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the multi-modal dictionary.
+cab
 
-Full example: [examples/offline_inference/audio_language.py](../../examples/offline_inference/audio_language.py)
+ to Q
 
-#### Chunking Long Audio for Transcription
 
-Speech-to-text models like Whisper have a maximum audio length they can process (typically 30 seconds). For longer audio files, vLLM provides a utility to intelligently split audio into chunks at quiet points to minimize cutting through speech.
+2.5-VL a
+d s
+m
 
-```python
-import librosa
-from vllm import LLM, SamplingParams
-from vllm.multimodal.audio import split_audio
+ar mod
 
-# Load long audio file
-audio, sr = librosa.load("long_audio.wav", sr=16000)
+s.
+Fu
+ 
+xamp
 
-# Split into chunks at low-energy (quiet) regions
-chunks = split_audio(
-    audio_data=audio,
-    sample_rate=sr,
-    max_clip_duration_s=30.0,      # Maximum chunk length in seconds
-    overlap_duration_s=1.0,         # Search window for finding quiet split points
-    min_energy_window_size=1600,    # Window size for energy calculation (~100ms at 16kHz)
+: [
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/v
+s
+o
+_
+a
+guag
+.py](../../
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/v
+s
+o
+_
+a
+guag
+.py)
+### Aud
+o I
+puts
+You ca
+ pass a tup
+
+ `(array, samp
+
+
+g_rat
+)` to th
+ `'aud
+o'` f
+
+
+d of th
+ mu
+t
+-moda
+ d
+ct
+o
+ary.
+Fu
+ 
+xamp
+
+: [
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/aud
+o_
+a
+guag
+.py](../../
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/aud
+o_
+a
+guag
+.py)
+#### Chu
+k
+
+g Lo
+g Aud
+o for Tra
+scr
+pt
+o
+
+Sp
+ch-to-t
+xt mod
+
+s 
+
+k
+ Wh
+sp
+r hav
+ a max
+mum aud
+o 
+
+
+gth th
+y ca
+ proc
+ss (typ
+ca
+y 30 s
+co
+ds). For 
+o
+g
+r aud
+o f
+
+
+s, vLLM prov
+d
+s a ut
+
+
+ty to 
+
+t
+
+
+g
+
+t
+y sp
+
+t aud
+o 
+
+to chu
+ks at qu
+
+t po
+
+ts to m
+
+
+m
+z
+ cutt
+
+g through sp
+ch.
+```pytho
+
+
+mport 
+
+brosa
+from v
+m 
+mport LLM, Samp
+
+
+gParams
+from v
+m.mu
+t
+moda
+.aud
+o 
+mport sp
+
+t_aud
+o
+# Load 
+o
+g aud
+o f
+
+
+
+aud
+o, sr = 
+
+brosa.
+oad("
+o
+g_aud
+o.
+av", sr=16000)
+# Sp
+
+t 
+
+to chu
+ks at 
+o
+-
+
+
+rgy (qu
+
+t) r
+g
+o
+s
+chu
+ks = sp
+
+t_aud
+o(
+    aud
+o_data=aud
+o,
+    samp
+
+_rat
+=sr,
+    max_c
+
+p_durat
+o
+_s=30.0,      # Max
+mum chu
+k 
+
+
+gth 
+
+ s
+co
+ds
+    ov
+r
+ap_durat
+o
+_s=1.0,         # S
+arch 
+
+
+do
+ for f
+
+d
+
+g qu
+
+t sp
+
+t po
+
+ts
+    m
+
+_
+
+
+rgy_
+
+
+do
+_s
+z
+=1600,    # W
+
+do
+ s
+z
+ for 
+
+
+rgy ca
+cu
+at
+o
+ (~100ms at 16kHz)
 )
+# I
 
-# Initialize Whisper model
-llm = LLM(model="openai/whisper-large-v3-turbo")
-sampling_params = SamplingParams(temperature=0, max_tokens=256)
+t
+a
 
-# Transcribe each chunk
-transcriptions = []
-for chunk in chunks:
-    outputs = llm.generate({
-        "prompt": "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>",
-        "multi_modal_data": {"audio": (chunk, sr)},
-    }, sampling_params)
-    transcriptions.append(outputs[0].outputs[0].text)
+z
+ Wh
+sp
+r mod
 
-# Combine results
-full_transcription = " ".join(transcriptions)
+
+
+m = LLM(mod
+
+="op
+
+a
+/
+h
+sp
+r-
+arg
+-v3-turbo")
+samp
+
+
+g_params = Samp
+
+
+gParams(t
+mp
+ratur
+=0, max_tok
+
+s=256)
+# Tra
+scr
+b
+ 
+ach chu
+k
+tra
+scr
+pt
+o
+s = []
+for chu
+k 
+
+ chu
+ks:
+    outputs = 
+m.g
+
+
+rat
+({
+        "prompt": "
+|startoftra
+scr
+pt|
+
+|
+
+|
+
+|tra
+scr
+b
+|
+
+|
+ot
+m
+stamps|
+",
+        "mu
+t
+_moda
+_data": {"aud
+o": (chu
+k, sr)},
+    }, samp
+
+
+g_params)
+    tra
+scr
+pt
+o
+s.app
+
+d(outputs[0].outputs[0].t
+xt)
+# Comb
+
+
+ r
+su
+ts
+fu
+_tra
+scr
+pt
+o
+ = " ".jo
+
+(tra
+scr
+pt
+o
+s)
 ```
+Th
+ `sp
 
-The `split_audio` function:
+t_aud
+o` fu
+ct
+o
+:
+    - Sp
 
-- Splits audio at quiet points to avoid cutting through speech
-- Uses RMS energy to find low-amplitude regions within the overlap window
-- Preserves all audio samples (no data loss)
-- Supports any sample rate
+ts aud
+o at qu
 
-#### Automatic Audio Channel Normalization
+t po
 
-vLLM automatically normalizes audio channels for models that require specific audio formats. When loading audio with libraries like `torchaudio`, stereo files return shape `[channels, time]`, but many audio models (particularly Whisper-based models) expect mono audio with shape `[time]`.
+ts to avo
+d cutt
 
-**Supported models with automatic mono conversion:**
+g through sp
+ch
+    - Us
+s RMS 
 
-- **Whisper** and all Whisper-based models
-- **Qwen2-Audio**
-- **Qwen2.5-Omni** / **Qwen3-Omni** (inherits from Qwen2.5-Omni)
-- **Ultravox**
 
-For these models, vLLM automatically:
+rgy to f
 
-1. Detects if the model requires mono audio via the feature extractor
-2. Converts multi-channel audio to mono using channel averaging
-3. Handles both `(channels, time)` format (torchaudio) and `(time, channels)` format (soundfile)
+d 
+o
+-amp
 
-**Example with stereo audio:**
+tud
+ r
+g
+o
+s 
 
-```python
-import torchaudio
-from vllm import LLM
+th
 
-# Load stereo audio file - returns (channels, time) shape
-audio, sr = torchaudio.load("stereo_audio.wav")
-print(f"Original shape: {audio.shape}")  # e.g., torch.Size([2, 16000])
+ th
+ ov
+r
+ap 
 
-# vLLM automatically converts to mono for Whisper-based models
-llm = LLM(model="openai/whisper-large-v3")
 
-outputs = llm.generate({
+do
+
+    - Pr
+s
+rv
+s a
+ aud
+o samp
+
+s (
+o data 
+oss)
+    - Supports a
+y samp
+
+ rat
+
+#### Automat
+c Aud
+o Cha
+
+
+ Norma
+
+zat
+o
+
+vLLM automat
+ca
+y 
+orma
+
+z
+s aud
+o cha
+
+
+s for mod
+
+s that r
+qu
+r
+ sp
+c
+f
+c aud
+o formats. Wh
+
+ 
+oad
+
+g aud
+o 
+
+th 
+
+brar
+
+s 
+
+k
+ `torchaud
+o`, st
+r
+o f
+
+
+s r
+tur
+ shap
+ `[cha
+
+
+s, t
+m
+]`, but ma
+y aud
+o mod
+
+s (part
+cu
+ar
+y Wh
+sp
+r-bas
+d mod
+
+s) 
+xp
+ct mo
+o aud
+o 
+
+th shap
+ `[t
+m
+]`.
+**Support
+d mod
+
+s 
+
+th automat
+c mo
+o co
+v
+rs
+o
+:**
+    - **Wh
+sp
+r** a
+d a
+ Wh
+sp
+r-bas
+d mod
+
+s
+    - **Q
+
+
+2-Aud
+o**
+    - **Q
+
+
+2.5-Om
+
+** / **Q
+
+
+3-Om
+
+** (
+
+h
+r
+ts from Q
+
+
+2.5-Om
+
+)
+    - **U
+travox**
+For th
+s
+ mod
+
+s, vLLM automat
+ca
+y:
+1. D
+t
+cts 
+f th
+ mod
+
+ r
+qu
+r
+s mo
+o aud
+o v
+a th
+ f
+atur
+ 
+xtractor
+2. Co
+v
+rts mu
+t
+-cha
+
+
+ aud
+o to mo
+o us
+
+g cha
+
+
+ av
+rag
+
+g
+3. Ha
+d
+
+s both `(cha
+
+
+s, t
+m
+)` format (torchaud
+o) a
+d `(t
+m
+, cha
+
+
+s)` format (sou
+df
+
+
+)
+**Examp
+
+ 
+
+th st
+r
+o aud
+o:**
+```pytho
+
+
+mport torchaud
+o
+from v
+m 
+mport LLM
+# Load st
+r
+o aud
+o f
+
+
+ - r
+tur
+s (cha
+
+
+s, t
+m
+) shap
+
+aud
+o, sr = torchaud
+o.
+oad("st
+r
+o_aud
+o.
+av")
+pr
+
+t(f"Or
+g
+
+a
+ shap
+: {aud
+o.shap
+}")  # 
+.g., torch.S
+z
+([2, 16000])
+# vLLM automat
+ca
+y co
+v
+rts to mo
+o for Wh
+sp
+r-bas
+d mod
+
+s
+
+m = LLM(mod
+
+="op
+
+a
+/
+h
+sp
+r-
+arg
+-v3")
+outputs = 
+m.g
+
+
+rat
+({
     "prompt": "",
-    "multi_modal_data": {"audio": (audio.numpy(), sr)},
+    "mu
+t
+_moda
+_data": {"aud
+o": (aud
+o.
+umpy(), sr)},
 })
 ```
+No ma
+ua
+ co
+v
+rs
+o
+ 
+s 
 
-No manual conversion is needed - vLLM handles the channel normalization automatically based on the model's requirements.
+d
+d - vLLM ha
+d
 
-### Embedding Inputs
+s th
+ cha
 
-To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
-pass a tensor of shape `(..., hidden_size of LM)` to the corresponding field of the multi-modal dictionary.
-The exact shape depends on the model being used.
 
-You must enable this feature via `enable_mm_embeds=True`.
+ 
+orma
 
-!!! warning
-    The vLLM engine may crash if incorrect shape of embeddings is passed.
-    Only enable this flag for trusted users!
+zat
+o
+ automat
+ca
+y bas
+d o
+ th
+ mod
 
-#### Image Embeddings
+'s r
+qu
+r
+m
 
-??? code
+ts.
+### Emb
+dd
 
-    ```python
-    from vllm import LLM
+g I
+puts
+To 
 
-    # Inference with image embeddings as input
-    llm = LLM(model="llava-hf/llava-1.5-7b-hf", enable_mm_embeds=True)
+put pr
+-comput
+d 
+mb
+dd
 
-    # Refer to the HuggingFace repo for the correct format to use
-    prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"
+gs b
 
-    # For most models, `image_embeds` has shape: (num_images, image_feature_size, hidden_size)
-    image_embeds = torch.load(...)
+o
+g
 
-    outputs = llm.generate({
+g to a data typ
+ (
+.
+. 
+mag
+, v
+d
+o, or aud
+o) d
+r
+ct
+y to th
+ 
+a
+guag
+ mod
+
+,
+pass a t
+
+sor of shap
+ `(..., h
+dd
+
+_s
+z
+ of LM)` to th
+ corr
+spo
+d
+
+g f
+
+
+d of th
+ mu
+t
+-moda
+ d
+ct
+o
+ary.
+Th
+ 
+xact shap
+ d
+p
+
+ds o
+ th
+ mod
+
+ b
+
+
+g us
+d.
+You must 
+
+ab
+
+ th
+s f
+atur
+ v
+a `
+
+ab
+
+_mm_
+mb
+ds=Tru
+`.
+!!! 
+ar
+
+
+g
+    Th
+ vLLM 
+
+g
+
+
+ may crash 
+f 
+
+corr
+ct shap
+ of 
+mb
+dd
+
+gs 
+s pass
+d.
+    O
+
+y 
+
+ab
+
+ th
+s f
+ag for trust
+d us
+rs!
+#### Imag
+ Emb
+dd
+
+gs
+??? cod
+
+    ```pytho
+
+    from v
+m 
+mport LLM
+    # I
+f
+r
+
+c
+ 
+
+th 
+mag
+ 
+mb
+dd
+
+gs as 
+
+put
+    
+m = LLM(mod
+
+="
+ava-hf/
+ava-1.5-7b-hf", 
+
+ab
+
+_mm_
+mb
+ds=Tru
+)
+    # R
+f
+r to th
+ Hugg
+
+gFac
+ r
+po for th
+ corr
+ct format to us
+
+    prompt = "USER: 
+
+mag
+
+\
+What 
+s th
+ co
+t
+
+t of th
+s 
+mag
+?\
+ASSISTANT:"
+    # For most mod
+
+s, `
+mag
+_
+mb
+ds` has shap
+: (
+um_
+mag
+s, 
+mag
+_f
+atur
+_s
+z
+, h
+dd
+
+_s
+z
+)
+    
+mag
+_
+mb
+ds = torch.
+oad(...)
+    outputs = 
+m.g
+
+
+rat
+({
         "prompt": prompt,
-        "multi_modal_data": {"image": image_embeds},
+        "mu
+t
+_moda
+_data": {"
+mag
+": 
+mag
+_
+mb
+ds},
     })
+    for o 
 
-    for o in outputs:
-        generated_text = o.outputs[0].text
-        print(generated_text)
+ outputs:
+        g
 
-    # Additional examples for models that require extra fields
-    llm = LLM(
-        "Qwen/Qwen2-VL-2B-Instruct",
-        limit_mm_per_prompt={"image": 4},
-        enable_mm_embeds=True,
+
+rat
+d_t
+xt = o.outputs[0].t
+xt
+        pr
+
+t(g
+
+
+rat
+d_t
+xt)
+    # Add
+t
+o
+a
+ 
+xamp
+
+s for mod
+
+s that r
+qu
+r
+ 
+xtra f
+
+
+ds
+    
+m = LLM(
+        "Q
+
+
+/Q
+
+
+2-VL-2B-I
+struct",
+        
+
+m
+t_mm_p
+r_prompt={"
+mag
+": 4},
+        
+
+ab
+
+_mm_
+mb
+ds=Tru
+,
     )
     mm_data = {
-        "image": {
-            # Shape: (total_feature_size, hidden_size)
-            # total_feature_size = sum(image_feature_size for image in images)
-            "image_embeds": torch.load(...),
-            # Shape: (num_images, 3)
-            # image_grid_thw is needed to calculate positional encoding.
-            "image_grid_thw": torch.load(...),
+        "
+mag
+": {
+            # Shap
+: (tota
+_f
+atur
+_s
+z
+, h
+dd
+
+_s
+z
+)
+            # tota
+_f
+atur
+_s
+z
+ = sum(
+mag
+_f
+atur
+_s
+z
+ for 
+mag
+ 
+
+ 
+mag
+s)
+            "
+mag
+_
+mb
+ds": torch.
+oad(...),
+            # Shap
+: (
+um_
+mag
+s, 3)
+            # 
+mag
+_gr
+d_th
+ 
+s 
+
+d
+d to ca
+cu
+at
+ pos
+t
+o
+a
+ 
+
+cod
+
+g.
+            "
+mag
+_gr
+d_th
+": torch.
+oad(...),
         }
     }
+    
+m = LLM(
+        "op
 
-    llm = LLM(
-        "openbmb/MiniCPM-V-2_6",
-        trust_remote_code=True,
-        limit_mm_per_prompt={"image": 4},
-        enable_mm_embeds=True,
+bmb/M
+
+
+CPM-V-2_6",
+        trust_r
+mot
+_cod
+=Tru
+,
+        
+
+m
+t_mm_p
+r_prompt={"
+mag
+": 4},
+        
+
+ab
+
+_mm_
+mb
+ds=Tru
+,
     )
     mm_data = {
-        "image": {
-            # Shape: (num_images, num_slices, hidden_size)
-            # num_slices can differ for each image
-            "image_embeds": [torch.load(...) for image in images],  
-            # Shape: (num_images, 2)
-            # image_sizes is needed to calculate details of the sliced image.
-            "image_sizes": [image.size for image in images],
+        "
+mag
+": {
+            # Shap
+: (
+um_
+mag
+s, 
+um_s
+
+c
+s, h
+dd
+
+_s
+z
+)
+            # 
+um_s
+
+c
+s ca
+ d
+ff
+r for 
+ach 
+mag
+
+            "
+mag
+_
+mb
+ds": [torch.
+oad(...) for 
+mag
+ 
+
+ 
+mag
+s],
+            # Shap
+: (
+um_
+mag
+s, 2)
+            # 
+mag
+_s
+z
+s 
+s 
+
+d
+d to ca
+cu
+at
+ d
+ta
+
+s of th
+ s
+
+c
+d 
+mag
+.
+            "
+mag
+_s
+z
+s": [
+mag
+.s
+z
+ for 
+mag
+ 
+
+ 
+mag
+s],
         }
     }
     ```
+For Q
 
-For Qwen3-VL, the `image_embeds` should contain both the base image embedding and deepstack features.
 
-#### Audio Embedding Inputs
+3-VL, th
+ `
+mag
+_
+mb
+ds` shou
+d co
+ta
 
-You can pass pre-computed audio embeddings similar to image embeddings:
+ both th
+ bas
+ 
+mag
+ 
+mb
+dd
 
-??? code
+g a
+d d
+pstack f
+atur
+s.
+#### Aud
+o Emb
+dd
 
-    ```python
-    from vllm import LLM
-    import torch
+g I
+puts
+You ca
+ pass pr
+-comput
+d aud
+o 
+mb
+dd
 
-    # Enable audio embeddings support
-    llm = LLM(model="fixie-ai/ultravox-v0_5-llama-3_2-1b", enable_mm_embeds=True)
+gs s
+m
 
-    # Refer to the HuggingFace repo for the correct format to use
-    prompt = "USER: <audio>\nWhat is in this audio?\nASSISTANT:"
+ar to 
+mag
+ 
+mb
+dd
 
-    # Load pre-computed audio embeddings, usually with shape:
-    # (num_audios, audio_feature_size, hidden_size of LM)
-    audio_embeds = torch.load(...)
+gs:
+??? cod
 
-    outputs = llm.generate({
+    ```pytho
+
+    from v
+m 
+mport LLM
+    
+mport torch
+    # E
+ab
+
+ aud
+o 
+mb
+dd
+
+gs support
+    
+m = LLM(mod
+
+="f
+x
+
+-a
+/u
+travox-v0_5-
+ama-3_2-1b", 
+
+ab
+
+_mm_
+mb
+ds=Tru
+)
+    # R
+f
+r to th
+ Hugg
+
+gFac
+ r
+po for th
+ corr
+ct format to us
+
+    prompt = "USER: 
+aud
+o
+\
+What 
+s 
+
+ th
+s aud
+o?\
+ASSISTANT:"
+    # Load pr
+-comput
+d aud
+o 
+mb
+dd
+
+gs, usua
+y 
+
+th shap
+:
+    # (
+um_aud
+os, aud
+o_f
+atur
+_s
+z
+, h
+dd
+
+_s
+z
+ of LM)
+    aud
+o_
+mb
+ds = torch.
+oad(...)
+    outputs = 
+m.g
+
+
+rat
+({
         "prompt": prompt,
-        "multi_modal_data": {"audio": audio_embeds},
+        "mu
+t
+_moda
+_data": {"aud
+o": aud
+o_
+mb
+ds},
     })
+    for o 
 
-    for o in outputs:
-        generated_text = o.outputs[0].text
-        print(generated_text)
+ outputs:
+        g
+
+
+rat
+d_t
+xt = o.outputs[0].t
+xt
+        pr
+
+t(g
+
+
+rat
+d_t
+xt)
     ```
+### Cach
+d I
+puts
+Wh
 
-### Cached Inputs
+ us
 
-When using multi-modal inputs, vLLM normally hashes each media item by content to enable caching across requests. You can optionally pass `multi_modal_uuids` to provide your own stable IDs for each item so caching can reuse work across requests without rehashing the raw content.
+g mu
+t
+-moda
+ 
 
-??? code
+puts, vLLM 
+orma
+y hash
+s 
+ach m
+d
+a 
+t
+m by co
+t
 
-    ```python
-    from vllm import LLM
-    from PIL import Image
+t to 
 
-    # Qwen2.5-VL example with two images
-    llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct")
+ab
 
-    prompt = "USER: <image><image>\nDescribe the differences.\nASSISTANT:"
-    img_a = Image.open("/path/to/a.jpg")
-    img_b = Image.open("/path/to/b.jpg")
+ cach
 
-    outputs = llm.generate({
+g across r
+qu
+sts. You ca
+ opt
+o
+a
+y pass `mu
+t
+_moda
+_uu
+ds` to prov
+d
+ your o
+
+ stab
+
+ IDs for 
+ach 
+t
+m so cach
+
+g ca
+ r
+us
+ 
+ork across r
+qu
+sts 
+
+thout r
+hash
+
+g th
+ ra
+ co
+t
+
+t.
+??? cod
+
+    ```pytho
+
+    from v
+m 
+mport LLM
+    from PIL 
+mport Imag
+
+    # Q
+
+
+2.5-VL 
+xamp
+
+ 
+
+th t
+o 
+mag
+s
+    
+m = LLM(mod
+
+="Q
+
+
+/Q
+
+
+2.5-VL-3B-I
+struct")
+    prompt = "USER: 
+
+mag
+
+
+
+mag
+
+\
+D
+scr
+b
+ th
+ d
+ff
+r
+
+c
+s.\
+ASSISTANT:"
+    
+mg_a = Imag
+.op
+
+("/path/to/a.jpg")
+    
+mg_b = Imag
+.op
+
+("/path/to/b.jpg")
+    outputs = 
+m.g
+
+
+rat
+({
         "prompt": prompt,
-        "multi_modal_data": {"image": [img_a, img_b]},
-        # Provide stable IDs for caching.
-        # Requirements (matched by this example):
-        #  - Include every modality present in multi_modal_data.
-        #  - For lists, provide the same number of entries.
-        #  - Use None to fall back to content hashing for that item.
-        "multi_modal_uuids": {"image": ["sku-1234-a", None]},
+        "mu
+t
+_moda
+_data": {"
+mag
+": [
+mg_a, 
+mg_b]},
+        # Prov
+d
+ stab
+
+ IDs for cach
+
+g.
+        # R
+qu
+r
+m
+
+ts (match
+d by th
+s 
+xamp
+
+):
+        #  - I
+c
+ud
+ 
+v
+ry moda
+
+ty pr
+s
+
+t 
+
+ mu
+t
+_moda
+_data.
+        #  - For 
+
+sts, prov
+d
+ th
+ sam
+ 
+umb
+r of 
+
+tr
+
+s.
+        #  - Us
+ No
+
+ to fa
+ back to co
+t
+
+t hash
+
+g for that 
+t
+m.
+        "mu
+t
+_moda
+_uu
+ds": {"
+mag
+": ["sku-1234-a", No
+
+]},
     })
+    for o 
 
-    for o in outputs:
-        print(o.outputs[0].text)
+ outputs:
+        pr
+
+t(o.outputs[0].t
+xt)
     ```
+Us
 
-Using UUIDs, you can also skip sending media data entirely if you expect cache hits for respective items. Note that the request will fail if the skipped media doesn't have a corresponding UUID, or if the UUID fails to hit the cache.
+g UUIDs, you ca
+ a
+so sk
+p s
 
-??? code
+d
 
-    ```python
-    from vllm import LLM
-    from PIL import Image
+g m
+d
+a data 
 
-    # Qwen2.5-VL example with two images
-    llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct")
+t
+r
 
-    prompt = "USER: <image><image>\nDescribe the differences.\nASSISTANT:"
-    img_b = Image.open("/path/to/b.jpg")
+y 
+f you 
+xp
+ct cach
+ h
+ts for r
+sp
+ct
+v
+ 
+t
+ms. Not
+ that th
+ r
+qu
+st 
 
-    outputs = llm.generate({
+
+ fa
+
+ 
+f th
+ sk
+pp
+d m
+d
+a do
+s
+'t hav
+ a corr
+spo
+d
+
+g UUID, or 
+f th
+ UUID fa
+
+s to h
+t th
+ cach
+.
+??? cod
+
+    ```pytho
+
+    from v
+m 
+mport LLM
+    from PIL 
+mport Imag
+
+    # Q
+
+
+2.5-VL 
+xamp
+
+ 
+
+th t
+o 
+mag
+s
+    
+m = LLM(mod
+
+="Q
+
+
+/Q
+
+
+2.5-VL-3B-I
+struct")
+    prompt = "USER: 
+
+mag
+
+
+
+mag
+
+\
+D
+scr
+b
+ th
+ d
+ff
+r
+
+c
+s.\
+ASSISTANT:"
+    
+mg_b = Imag
+.op
+
+("/path/to/b.jpg")
+    outputs = 
+m.g
+
+
+rat
+({
         "prompt": prompt,
-        "multi_modal_data": {"image": [None, img_b]},
-        # Since img_a is expected to be cached, we can skip sending the actual
-        # image entirely.
-        "multi_modal_uuids": {"image": ["sku-1234-a", None]},
+        "mu
+t
+_moda
+_data": {"
+mag
+": [No
+
+, 
+mg_b]},
+        # S
+
+c
+ 
+mg_a 
+s 
+xp
+ct
+d to b
+ cach
+d, 
+
+ ca
+ sk
+p s
+
+d
+
+g th
+ actua
+
+        # 
+mag
+ 
+
+t
+r
+
+y.
+        "mu
+t
+_moda
+_uu
+ds": {"
+mag
+": ["sku-1234-a", No
+
+]},
     })
+    for o 
 
-    for o in outputs:
-        print(o.outputs[0].text)
+ outputs:
+        pr
+
+t(o.outputs[0].t
+xt)
     ```
+!!! 
+ar
 
-!!! warning
-    If both multimodal processor caching and prefix caching are disabled, user-provided `multi_modal_uuids` are ignored.
 
-## Online Serving
+g
+    If both mu
+t
+moda
+ proc
+ssor cach
 
-Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat). Media inputs also support optional UUIDs users can provide to uniquely identify each media, which is used to cache the media results across requests.
+g a
+d pr
+f
+x cach
 
-!!! important
-    A chat template is **required** to use Chat Completions API.
-    For HF format models, the default chat template is defined inside `chat_template.json` or `tokenizer_config.json`.
+g ar
+ d
+sab
 
-    If no default chat template is available, we will first look for a built-in fallback in [vllm/transformers_utils/chat_templates/registry.py](../../vllm/transformers_utils/chat_templates/registry.py).
-    If no fallback is available, an error is raised and you have to provide the chat template manually via the `--chat-template` argument.
+d, us
+r-prov
+d
+d `mu
+t
+_moda
+_uu
+ds` ar
+ 
+g
+or
+d.
+## O
 
-    For certain models, we provide alternative chat templates inside [examples](../../examples).
-    For example, VLM2Vec uses [examples/pooling/embed/template/vlm2vec_phi3v.jinja](../../examples/pooling/embed/template/vlm2vec_phi3v.jinja) which is different from the default one for Phi-3-Vision.
 
-### Image Inputs
 
-Image input is supported according to [OpenAI Vision API](https://platform.openai.com/docs/guides/vision).
-Here is a simple example using Phi-3.5-Vision.
 
-First, launch the OpenAI-compatible server:
+ S
+rv
 
+g
+Our Op
+
+AI-compat
+b
+
+ s
+rv
+r acc
+pts mu
+t
+-moda
+ data v
+a th
+ [Chat Comp
+
+t
+o
+s API](https://p
+atform.op
+
+a
+.com/docs/ap
+-r
+f
+r
+
+c
+/chat). M
+d
+a 
+
+puts a
+so support opt
+o
+a
+ UUIDs us
+rs ca
+ prov
+d
+ to u
+
+qu
+
+y 
+d
+
+t
+fy 
+ach m
+d
+a, 
+h
+ch 
+s us
+d to cach
+ th
+ m
+d
+a r
+su
+ts across r
+qu
+sts.
+!!! 
+mporta
+t
+    A chat t
+mp
+at
+ 
+s **r
+qu
+r
+d** to us
+ Chat Comp
+
+t
+o
+s API.
+    For HF format mod
+
+s, th
+ d
+fau
+t chat t
+mp
+at
+ 
+s d
+f
+
+
+d 
+
+s
+d
+ `chat_t
+mp
+at
+.jso
+` or `tok
+
+
+z
+r_co
+f
+g.jso
+`.
+    If 
+o d
+fau
+t chat t
+mp
+at
+ 
+s ava
+
+ab
+
+, 
+
+ 
+
+
+ f
+rst 
+ook for a bu
+
+t-
+
+ fa
+back 
+
+ [v
+m/tra
+sform
+rs_ut
+
+s/chat_t
+mp
+at
+s/r
+g
+stry.py](../../v
+m/tra
+sform
+rs_ut
+
+s/chat_t
+mp
+at
+s/r
+g
+stry.py).
+    If 
+o fa
+back 
+s ava
+
+ab
+
+, a
+ 
+rror 
+s ra
+s
+d a
+d you hav
+ to prov
+d
+ th
+ chat t
+mp
+at
+ ma
+ua
+y v
+a th
+ `--chat-t
+mp
+at
+` argum
+
+t.
+    For c
+rta
+
+ mod
+
+s, 
+
+ prov
+d
+ a
+t
+r
+at
+v
+ chat t
+mp
+at
+s 
+
+s
+d
+ [
+xamp
+
+s](../../
+xamp
+
+s).
+    For 
+xamp
+
+, VLM2V
+c us
+s [
+xamp
+
+s/poo
+
+
+g/
+mb
+d/t
+mp
+at
+/v
+m2v
+c_ph
+3v.j
+
+ja](../../
+xamp
+
+s/poo
+
+
+g/
+mb
+d/t
+mp
+at
+/v
+m2v
+c_ph
+3v.j
+
+ja) 
+h
+ch 
+s d
+ff
+r
+
+t from th
+ d
+fau
+t o
+
+ for Ph
+-3-V
+s
+o
+.
+### Imag
+ I
+puts
+Imag
+ 
+
+put 
+s support
+d accord
+
+g to [Op
+
+AI V
+s
+o
+ API](https://p
+atform.op
+
+a
+.com/docs/gu
+d
+s/v
+s
+o
+).
+H
+r
+ 
+s a s
+mp
+
+ 
+xamp
+
+ us
+
+g Ph
+-3.5-V
+s
+o
+.
+F
+rst, 
+au
+ch th
+ Op
+
+AI-compat
+b
+
+ s
+rv
+r:
 ```bash
-vllm serve microsoft/Phi-3.5-vision-instruct --runner generate \
-  --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt.image 2
+v
+m s
+rv
+ m
+crosoft/Ph
+-3.5-v
+s
+o
+-
+
+struct --ru
+
+r g
+
+
+rat
+ \
+  --trust-r
+mot
+-cod
+ --max-mod
+
+-
+
+
+ 4096 --
+
+m
+t-mm-p
+r-prompt.
+mag
+ 2
 ```
+Th
 
-Then, you can use the OpenAI client as follows:
+, you ca
+ us
+ th
+ Op
 
-??? code
+AI c
 
-    ```python
-    import os
-    from openai import OpenAI
 
-    openai_api_key = "EMPTY"
-    openai_api_base = "http://localhost:8000/v1"
 
-    client = OpenAI(
-        api_key=openai_api_key,
-        base_url=openai_api_base,
+t as fo
+o
+s:
+??? cod
+
+    ```pytho
+
+    
+mport os
+    from op
+
+a
+ 
+mport Op
+
+AI
+    op
+
+a
+_ap
+_k
+y = "EMPTY"
+    op
+
+a
+_ap
+_bas
+ = "http://
+oca
+host:8000/v1"
+    c
+
+
+
+t = Op
+
+AI(
+        ap
+_k
+y=op
+
+a
+_ap
+_k
+y,
+        bas
+_ur
+=op
+
+a
+_ap
+_bas
+,
     )
+    # S
 
-    # Single-image input inference
+g
 
-    # Public image URL for testing remote image processing
-    image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+-
+mag
+ 
 
-    # Create chat completion with remote image
-    chat_response = client.chat.completions.create(
-        model="microsoft/Phi-3.5-vision-instruct",
-        messages=[
+put 
+
+f
+r
+
+c
+
+    # Pub
+
+c 
+mag
+ URL for t
+st
+
+g r
+mot
+ 
+mag
+ proc
+ss
+
+g
+    
+mag
+_ur
+ = "https://v
+m-pub
+
+c-ass
+ts.s3.us-
+
+st-2.amazo
+a
+s.com/v
+s
+o
+_mod
+
+_
+mag
+s/2560px-Gfp-
+
+sco
+s
+
+-mad
+so
+-th
+-
+atur
+-board
+a
+k.jpg"
+    # Cr
+at
+ chat comp
+
+t
+o
+ 
+
+th r
+mot
+ 
+mag
+
+    chat_r
+spo
+s
+ = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+="m
+crosoft/Ph
+-3.5-v
+s
+o
+-
+
+struct",
+        m
+ssag
+s=[
             {
-                "role": "user",
-                "content": [
-                    # NOTE: The prompt formatting with the image token `<image>` is not needed
-                    # since the prompt will be processed automatically by the API server.
+                "ro
+
+": "us
+r",
+                "co
+t
+
+t": [
+                    # NOTE: Th
+ prompt formatt
+
+g 
+
+th th
+ 
+mag
+ tok
+
+ `
+
+mag
+
+` 
+s 
+ot 
+
+d
+d
+                    # s
+
+c
+ th
+ prompt 
+
+
+ b
+ proc
+ss
+d automat
+ca
+y by th
+ API s
+rv
+r.
                     {
-                        "type": "text",
-                        "text": "What’s in this image?",
+                        "typ
+": "t
+xt",
+                        "t
+xt": "What’s 
+
+ th
+s 
+mag
+?",
                     },
                     {
-                        "type": "image_url",
-                        "image_url": {"url": image_url},
-                        "uuid": image_url,  # Optional
+                        "typ
+": "
+mag
+_ur
+",
+                        "
+mag
+_ur
+": {"ur
+": 
+mag
+_ur
+},
+                        "uu
+d": 
+mag
+_ur
+,  # Opt
+o
+a
+
                     },
                 ],
             }
         ],
     )
-    print("Chat completion output:", chat_response.choices[0].message.content)
+    pr
 
-    # Local image file path (update this to point to your actual image file)
-    image_file = "/path/to/image.jpg"
+t("Chat comp
 
-    # Create chat completion with local image file
-    # Launch the API server/engine with the --allowed-local-media-path argument.
-    if os.path.exists(image_file):
-        chat_completion_from_local_image_url = client.chat.completions.create(
-            model="microsoft/Phi-3.5-vision-instruct",
-            messages=[
+t
+o
+ output:", chat_r
+spo
+s
+.cho
+c
+s[0].m
+ssag
+.co
+t
+
+t)
+    # Loca
+ 
+mag
+ f
+
+
+ path (updat
+ th
+s to po
+
+t to your actua
+ 
+mag
+ f
+
+
+)
+    
+mag
+_f
+
+
+ = "/path/to/
+mag
+.jpg"
+    # Cr
+at
+ chat comp
+
+t
+o
+ 
+
+th 
+oca
+ 
+mag
+ f
+
+
+
+    # Lau
+ch th
+ API s
+rv
+r/
+
+g
+
+
+ 
+
+th th
+ --a
+o
+
+d-
+oca
+-m
+d
+a-path argum
+
+t.
+    
+f os.path.
+x
+sts(
+mag
+_f
+
+
+):
+        chat_comp
+
+t
+o
+_from_
+oca
+_
+mag
+_ur
+ = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+            mod
+
+="m
+crosoft/Ph
+-3.5-v
+s
+o
+-
+
+struct",
+            m
+ssag
+s=[
                 {
-                    "role": "user",
-                    "content": [
+                    "ro
+
+": "us
+r",
+                    "co
+t
+
+t": [
                         {
-                            "type": "text",
-                            "text": "What’s in this image?",
+                            "typ
+": "t
+xt",
+                            "t
+xt": "What’s 
+
+ th
+s 
+mag
+?",
                         },
                         {
-                            "type": "image_url",
-                            "image_url": {"url": f"file://{image_file}"},
+                            "typ
+": "
+mag
+_ur
+",
+                            "
+mag
+_ur
+": {"ur
+": f"f
+
+
+://{
+mag
+_f
+
+
+}"},
                         },
                     ],
                 }
             ],
         )
-        result = chat_completion_from_local_image_url.choices[0].message.content
-        print("Chat completion output from local image file:\n", result)
-    else:
-        print(f"Local image file not found at {image_file}, skipping local file test.")
+        r
+su
+t = chat_comp
 
-    # Multi-image input inference
-    image_url_duck = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg"
-    image_url_lion = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/lion.jpg"
+t
+o
+_from_
+oca
+_
+mag
+_ur
+.cho
+c
+s[0].m
+ssag
+.co
+t
 
-    chat_response = client.chat.completions.create(
-        model="microsoft/Phi-3.5-vision-instruct",
-        messages=[
+t
+        pr
+
+t("Chat comp
+
+t
+o
+ output from 
+oca
+ 
+mag
+ f
+
+
+:\
+", r
+su
+t)
+    
+
+s
+:
+        pr
+
+t(f"Loca
+ 
+mag
+ f
+
+
+ 
+ot fou
+d at {
+mag
+_f
+
+
+}, sk
+pp
+
+g 
+oca
+ f
+
+
+ t
+st.")
+    # Mu
+t
+-
+mag
+ 
+
+put 
+
+f
+r
+
+c
+
+    
+mag
+_ur
+_duck = "https://v
+m-pub
+
+c-ass
+ts.s3.us-
+
+st-2.amazo
+a
+s.com/mu
+t
+moda
+_ass
+t/duck.jpg"
+    
+mag
+_ur
+_
+
+o
+ = "https://v
+m-pub
+
+c-ass
+ts.s3.us-
+
+st-2.amazo
+a
+s.com/mu
+t
+moda
+_ass
+t/
+
+o
+.jpg"
+    chat_r
+spo
+s
+ = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+="m
+crosoft/Ph
+-3.5-v
+s
+o
+-
+
+struct",
+        m
+ssag
+s=[
             {
-                "role": "user",
-                "content": [
+                "ro
+
+": "us
+r",
+                "co
+t
+
+t": [
                     {
-                        "type": "text",
-                        "text": "What are the animals in these images?",
+                        "typ
+": "t
+xt",
+                        "t
+xt": "What ar
+ th
+ a
+
+ma
+s 
+
+ th
+s
+ 
+mag
+s?",
                     },
                     {
-                        "type": "image_url",
-                        "image_url": {"url": image_url_duck},
-                        "uuid": image_url_duck,  # Optional
+                        "typ
+": "
+mag
+_ur
+",
+                        "
+mag
+_ur
+": {"ur
+": 
+mag
+_ur
+_duck},
+                        "uu
+d": 
+mag
+_ur
+_duck,  # Opt
+o
+a
+
                     },
                     {
-                        "type": "image_url",
-                        "image_url": {"url": image_url_lion},
-                        "uuid": image_url_lion,  # Optional
+                        "typ
+": "
+mag
+_ur
+",
+                        "
+mag
+_ur
+": {"ur
+": 
+mag
+_ur
+_
+
+o
+},
+                        "uu
+d": 
+mag
+_ur
+_
+
+o
+,  # Opt
+o
+a
+
                     },
                 ],
             }
         ],
     )
-    print("Chat completion output:", chat_response.choices[0].message.content)
+    pr
+
+t("Chat comp
+
+t
+o
+ output:", chat_r
+spo
+s
+.cho
+c
+s[0].m
+ssag
+.co
+t
+
+t)
     ```
+Fu
+ 
+xamp
 
-Full example: [examples/online_serving/openai_chat_completion_client_for_multimodal.py](../../examples/online_serving/openai_chat_completion_client_for_multimodal.py)
+: [
+xamp
 
-!!! tip
-    Loading from local file paths is also supported on vLLM: You can specify the allowed local media path via `--allowed-local-media-path` when launching the API server/engine,
-    and pass the file path as `url` in the API request.
+s/o
 
-!!! tip
-    There is no need to place image placeholders in the text content of the API request - they are already represented by the image content.
-    In fact, you can place image placeholders in the middle of the text by interleaving text and image content.
 
-!!! note
-    By default, the timeout for fetching images through HTTP URL is `5` seconds.
-    You can override this by setting the environment variable:
 
+
+_s
+rv
+
+g/op
+
+a
+_chat_comp
+
+t
+o
+_c
+
+
+
+t_for_mu
+t
+moda
+.py](../../
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/op
+
+a
+_chat_comp
+
+t
+o
+_c
+
+
+
+t_for_mu
+t
+moda
+.py)
+!!! t
+p
+    Load
+
+g from 
+oca
+ f
+
+
+ paths 
+s a
+so support
+d o
+ vLLM: You ca
+ sp
+c
+fy th
+ a
+o
+
+d 
+oca
+ m
+d
+a path v
+a `--a
+o
+
+d-
+oca
+-m
+d
+a-path` 
+h
+
+ 
+au
+ch
+
+g th
+ API s
+rv
+r/
+
+g
+
+
+,
+    a
+d pass th
+ f
+
+
+ path as `ur
+` 
+
+ th
+ API r
+qu
+st.
+!!! t
+p
+    Th
+r
+ 
+s 
+o 
+
+d to p
+ac
+ 
+mag
+ p
+ac
+ho
+d
+rs 
+
+ th
+ t
+xt co
+t
+
+t of th
+ API r
+qu
+st - th
+y ar
+ a
+r
+ady r
+pr
+s
+
+t
+d by th
+ 
+mag
+ co
+t
+
+t.
+    I
+ fact, you ca
+ p
+ac
+ 
+mag
+ p
+ac
+ho
+d
+rs 
+
+ th
+ m
+dd
+
+ of th
+ t
+xt by 
+
+t
+r
+
+av
+
+g t
+xt a
+d 
+mag
+ co
+t
+
+t.
+!!! 
+ot
+
+    By d
+fau
+t, th
+ t
+m
+out for f
+tch
+
+g 
+mag
+s through HTTP URL 
+s `5` s
+co
+ds.
+    You ca
+ ov
+rr
+d
+ th
+s by s
+tt
+
+g th
+ 
+
+v
+ro
+m
+
+t var
+ab
+
+:
     ```bash
-    export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
+    
+xport VLLM_IMAGE_FETCH_TIMEOUT=
+t
+m
+out
+
     ```
+### V
+d
+o I
+puts
+I
+st
+ad of `
+mag
+_ur
+`, you ca
+ pass a v
+d
+o f
 
-### Video Inputs
 
-Instead of `image_url`, you can pass a video file via `video_url`. Here is a simple example using [LLaVA-OneVision](https://huggingface.co/llava-hf/llava-onevision-qwen2-0.5b-ov-hf).
+ v
+a `v
+d
+o_ur
+`. H
+r
+ 
+s a s
+mp
 
-First, launch the OpenAI-compatible server:
+ 
+xamp
 
+ us
+
+g [LLaVA-O
+
+V
+s
+o
+](https://hugg
+
+gfac
+.co/
+ava-hf/
+ava-o
+
+v
+s
+o
+-q
+
+
+2-0.5b-ov-hf).
+F
+rst, 
+au
+ch th
+ Op
+
+AI-compat
+b
+
+ s
+rv
+r:
 ```bash
-vllm serve llava-hf/llava-onevision-qwen2-0.5b-ov-hf --runner generate --max-model-len 8192
+v
+m s
+rv
+ 
+ava-hf/
+ava-o
+
+v
+s
+o
+-q
+
+
+2-0.5b-ov-hf --ru
+
+r g
+
+
+rat
+ --max-mod
+
+-
+
+
+ 8192
 ```
+Th
 
-Then, you can use the OpenAI client as follows:
+, you ca
+ us
+ th
+ Op
 
-??? code
+AI c
 
-    ```python
-    from openai import OpenAI
 
-    openai_api_key = "EMPTY"
-    openai_api_base = "http://localhost:8000/v1"
 
-    client = OpenAI(
-        api_key=openai_api_key,
-        base_url=openai_api_base,
+t as fo
+o
+s:
+??? cod
+
+    ```pytho
+
+    from op
+
+a
+ 
+mport Op
+
+AI
+    op
+
+a
+_ap
+_k
+y = "EMPTY"
+    op
+
+a
+_ap
+_bas
+ = "http://
+oca
+host:8000/v1"
+    c
+
+
+
+t = Op
+
+AI(
+        ap
+_k
+y=op
+
+a
+_ap
+_k
+y,
+        bas
+_ur
+=op
+
+a
+_ap
+_bas
+,
     )
+    v
+d
+o_ur
+ = "http://commo
+datastorag
+.goog
 
-    video_url = "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4"
+ap
+s.com/gtv-v
+d
+os-buck
+t/samp
 
-    ## Use video url in the payload
-    chat_completion_from_url = client.chat.completions.create(
-        messages=[
+/ForB
+gg
+rFu
+.mp4"
+    ## Us
+ v
+d
+o ur
+ 
+
+ th
+ pay
+oad
+    chat_comp
+
+t
+o
+_from_ur
+ = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        m
+ssag
+s=[
             {
-                "role": "user",
-                "content": [
+                "ro
+
+": "us
+r",
+                "co
+t
+
+t": [
                     {
-                        "type": "text",
-                        "text": "What's in this video?",
+                        "typ
+": "t
+xt",
+                        "t
+xt": "What's 
+
+ th
+s v
+d
+o?",
                     },
                     {
-                        "type": "video_url",
-                        "video_url": {"url": video_url},
-                        "uuid": video_url,  # Optional
+                        "typ
+": "v
+d
+o_ur
+",
+                        "v
+d
+o_ur
+": {"ur
+": v
+d
+o_ur
+},
+                        "uu
+d": v
+d
+o_ur
+,  # Opt
+o
+a
+
                     },
                 ],
             }
         ],
-        model=model,
-        max_completion_tokens=64,
+        mod
+
+=mod
+
+,
+        max_comp
+
+t
+o
+_tok
+
+s=64,
     )
+    r
+su
+t = chat_comp
 
-    result = chat_completion_from_url.choices[0].message.content
-    print("Chat completion output from image url:", result)
+t
+o
+_from_ur
+.cho
+c
+s[0].m
+ssag
+.co
+t
+
+t
+    pr
+
+t("Chat comp
+
+t
+o
+ output from 
+mag
+ ur
+:", r
+su
+t)
     ```
+Fu
+ 
+xamp
 
-Full example: [examples/online_serving/openai_chat_completion_client_for_multimodal.py](../../examples/online_serving/openai_chat_completion_client_for_multimodal.py)
+: [
+xamp
 
-!!! note
-    By default, the timeout for fetching videos through HTTP URL is `30` seconds.
-    You can override this by setting the environment variable:
+s/o
 
+
+
+
+_s
+rv
+
+g/op
+
+a
+_chat_comp
+
+t
+o
+_c
+
+
+
+t_for_mu
+t
+moda
+.py](../../
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/op
+
+a
+_chat_comp
+
+t
+o
+_c
+
+
+
+t_for_mu
+t
+moda
+.py)
+!!! 
+ot
+
+    By d
+fau
+t, th
+ t
+m
+out for f
+tch
+
+g v
+d
+os through HTTP URL 
+s `30` s
+co
+ds.
+    You ca
+ ov
+rr
+d
+ th
+s by s
+tt
+
+g th
+ 
+
+v
+ro
+m
+
+t var
+ab
+
+:
     ```bash
-    export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
+    
+xport VLLM_VIDEO_FETCH_TIMEOUT=
+t
+m
+out
+
     ```
+#### V
+d
+o Fram
+ R
+cov
+ry
+For 
+mprov
+d robust
 
-#### Video Frame Recovery
+ss 
+h
 
-For improved robustness when processing potentially corrupted or truncated video files, vLLM supports optional frame recovery using a dynamic window forward-scan approach. When enabled, if a target frame fails to load during sequential reading, the next successfully grabbed frame (before the next target frame) will be used in its place.
+ proc
+ss
 
-To enable video frame recovery, pass the `frame_recovery` parameter via `--media-io-kwargs`:
+g pot
 
+t
+a
+y corrupt
+d or tru
+cat
+d v
+d
+o f
+
+
+s, vLLM supports opt
+o
+a
+ fram
+ r
+cov
+ry us
+
+g a dy
+am
+c 
+
+
+do
+ for
+ard-sca
+ approach. Wh
+
+ 
+
+ab
+
+d, 
+f a targ
+t fram
+ fa
+
+s to 
+oad dur
+
+g s
+qu
+
+t
+a
+ r
+ad
+
+g, th
+ 
+
+xt succ
+ssfu
+y grabb
+d fram
+ (b
+for
+ th
+ 
+
+xt targ
+t fram
+) 
+
+
+ b
+ us
+d 
+
+ 
+ts p
+ac
+.
+To 
+
+ab
+
+ v
+d
+o fram
+ r
+cov
+ry, pass th
+ `fram
+_r
+cov
+ry` param
+t
+r v
+a `--m
+d
+a-
+o-k
+args`:
 ```bash
-# Example: Enable frame recovery
-vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
-  --media-io-kwargs '{"video": {"frame_recovery": true}}'
+# Examp
+
+: E
+ab
+
+ fram
+ r
+cov
+ry
+v
+m s
+rv
+ Q
+
+
+/Q
+
+
+3-VL-30B-A3B-I
+struct \
+  --m
+d
+a-
+o-k
+args '{"v
+d
+o": {"fram
+_r
+cov
+ry": tru
+}}'
 ```
+**Param
+t
+rs:**
+    - `fram
+_r
+cov
+ry`: Boo
 
-**Parameters:**
+a
+ f
+ag to 
 
-- `frame_recovery`: Boolean flag to enable forward-scan recovery. When `true`, failed frames are recovered using the next available frame within the dynamic window (up to the next target frame). Default is `false`.
+ab
 
-**How it works:**
+ for
+ard-sca
+ r
+cov
+ry. Wh
 
-1. The system reads frames sequentially
-2. If a target frame fails to grab, it's marked as "failed"
-3. The next successfully grabbed frame (before reaching the next target) is used to recover the failed frame
-4. This approach handles both mid-video corruption and end-of-video truncation
+ `tru
+`, fa
 
-Works with common video formats like MP4 when using OpenCV backends.
 
-#### Custom RGBA Background Color
+d fram
+s ar
+ r
+cov
+r
+d us
 
-To use a custom background color for RGBA images, pass the `rgba_background_color` parameter via `--media-io-kwargs`:
+g th
+ 
 
+xt ava
+
+ab
+
+ fram
+ 
+
+th
+
+ th
+ dy
+am
+c 
+
+
+do
+ (up to th
+ 
+
+xt targ
+t fram
+). D
+fau
+t 
+s `fa
+s
+`.
+**Ho
+ 
+t 
+orks:**
+1. Th
+ syst
+m r
+ads fram
+s s
+qu
+
+t
+a
+y
+2. If a targ
+t fram
+ fa
+
+s to grab, 
+t's mark
+d as "fa
+
+
+d"
+3. Th
+ 
+
+xt succ
+ssfu
+y grabb
+d fram
+ (b
+for
+ r
+ach
+
+g th
+ 
+
+xt targ
+t) 
+s us
+d to r
+cov
+r th
+ fa
+
+
+d fram
+
+4. Th
+s approach ha
+d
+
+s both m
+d-v
+d
+o corrupt
+o
+ a
+d 
+
+d-of-v
+d
+o tru
+cat
+o
+
+Works 
+
+th commo
+ v
+d
+o formats 
+
+k
+ MP4 
+h
+
+ us
+
+g Op
+
+CV back
+
+ds.
+#### Custom RGBA Backgrou
+d Co
+or
+To us
+ a custom backgrou
+d co
+or for RGBA 
+mag
+s, pass th
+ `rgba_backgrou
+d_co
+or` param
+t
+r v
+a `--m
+d
+a-
+o-k
+args`:
 ```bash
-# Example: Black background for dark theme
-vllm serve llava-hf/llava-1.5-7b-hf \
-  --media-io-kwargs '{"image": {"rgba_background_color": [0, 0, 0]}}'
+# Examp
 
-# Example: Custom gray background
-vllm serve llava-hf/llava-1.5-7b-hf \
-  --media-io-kwargs '{"image": {"rgba_background_color": [128, 128, 128]}}'
+: B
+ack backgrou
+d for dark th
+m
+
+v
+m s
+rv
+ 
+ava-hf/
+ava-1.5-7b-hf \
+  --m
+d
+a-
+o-k
+args '{"
+mag
+": {"rgba_backgrou
+d_co
+or": [0, 0, 0]}}'
+# Examp
+
+: Custom gray backgrou
+d
+v
+m s
+rv
+ 
+ava-hf/
+ava-1.5-7b-hf \
+  --m
+d
+a-
+o-k
+args '{"
+mag
+": {"rgba_backgrou
+d_co
+or": [128, 128, 128]}}'
 ```
+### Aud
+o I
+puts
+Aud
+o 
 
-### Audio Inputs
+put 
+s support
+d accord
 
-Audio input is supported according to [OpenAI Audio API](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in).
-Here is a simple example using Ultravox-v0.5-1B.
+g to [Op
 
-First, launch the OpenAI-compatible server:
+AI Aud
+o API](https://p
+atform.op
 
+a
+.com/docs/gu
+d
+s/aud
+o?aud
+o-g
+
+
+rat
+o
+-qu
+ckstart-
+xamp
+
+=aud
+o-
+
+).
+H
+r
+ 
+s a s
+mp
+
+ 
+xamp
+
+ us
+
+g U
+travox-v0.5-1B.
+F
+rst, 
+au
+ch th
+ Op
+
+AI-compat
+b
+
+ s
+rv
+r:
 ```bash
-vllm serve fixie-ai/ultravox-v0_5-llama-3_2-1b
+v
+m s
+rv
+ f
+x
+
+-a
+/u
+travox-v0_5-
+ama-3_2-1b
 ```
+Th
 
-Then, you can use the OpenAI client as follows:
+, you ca
+ us
+ th
+ Op
 
-??? code
+AI c
 
-    ```python
-    import base64
-    import requests
-    from openai import OpenAI
-    from vllm.assets.audio import AudioAsset
 
-    def encode_base64_content_from_url(content_url: str) -> str:
-        """Encode a content retrieved from a remote url to base64 format."""
 
-        with requests.get(content_url) as response:
-            response.raise_for_status()
-            result = base64.b64encode(response.content).decode('utf-8')
+t as fo
+o
+s:
+??? cod
 
-        return result
+    ```pytho
 
-    openai_api_key = "EMPTY"
-    openai_api_base = "http://localhost:8000/v1"
+    
+mport bas
+64
+    
+mport r
+qu
+sts
+    from op
 
-    client = OpenAI(
-        api_key=openai_api_key,
-        base_url=openai_api_base,
+a
+ 
+mport Op
+
+AI
+    from v
+m.ass
+ts.aud
+o 
+mport Aud
+oAss
+t
+    d
+f 
+
+cod
+_bas
+64_co
+t
+
+t_from_ur
+(co
+t
+
+t_ur
+: str) -
+ str:
+        """E
+cod
+ a co
+t
+
+t r
+tr
+
+v
+d from a r
+mot
+ ur
+ to bas
+64 format."""
+        
+
+th r
+qu
+sts.g
+t(co
+t
+
+t_ur
+) as r
+spo
+s
+:
+            r
+spo
+s
+.ra
+s
+_for_status()
+            r
+su
+t = bas
+64.b64
+
+cod
+(r
+spo
+s
+.co
+t
+
+t).d
+cod
+('utf-8')
+        r
+tur
+ r
+su
+t
+    op
+
+a
+_ap
+_k
+y = "EMPTY"
+    op
+
+a
+_ap
+_bas
+ = "http://
+oca
+host:8000/v1"
+    c
+
+
+
+t = Op
+
+AI(
+        ap
+_k
+y=op
+
+a
+_ap
+_k
+y,
+        bas
+_ur
+=op
+
+a
+_ap
+_bas
+,
     )
+    # A
+y format support
+d by 
 
-    # Any format supported by librosa is supported
-    audio_url = AudioAsset("winning_call").url
-    audio_base64 = encode_base64_content_from_url(audio_url)
+brosa 
+s support
+d
+    aud
+o_ur
+ = Aud
+oAss
+t("
 
-    chat_completion_from_base64 = client.chat.completions.create(
-        messages=[
+
+
+
+g_ca
+").ur
+
+    aud
+o_bas
+64 = 
+
+cod
+_bas
+64_co
+t
+
+t_from_ur
+(aud
+o_ur
+)
+    chat_comp
+
+t
+o
+_from_bas
+64 = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        m
+ssag
+s=[
             {
-                "role": "user",
-                "content": [
+                "ro
+
+": "us
+r",
+                "co
+t
+
+t": [
                     {
-                        "type": "text",
-                        "text": "What's in this audio?",
+                        "typ
+": "t
+xt",
+                        "t
+xt": "What's 
+
+ th
+s aud
+o?",
                     },
                     {
-                        "type": "input_audio",
-                        "input_audio": {
-                            "data": audio_base64,
-                            "format": "wav",
+                        "typ
+": "
+
+put_aud
+o",
+                        "
+
+put_aud
+o": {
+                            "data": aud
+o_bas
+64,
+                            "format": "
+av",
                         },
-                        "uuid": audio_url,  # Optional
+                        "uu
+d": aud
+o_ur
+,  # Opt
+o
+a
+
                     },
                 ],
             },
         ],
-        model=model,
-        max_completion_tokens=64,
+        mod
+
+=mod
+
+,
+        max_comp
+
+t
+o
+_tok
+
+s=64,
     )
+    r
+su
+t = chat_comp
 
-    result = chat_completion_from_base64.choices[0].message.content
-    print("Chat completion output from input audio:", result)
+t
+o
+_from_bas
+64.cho
+c
+s[0].m
+ssag
+.co
+t
+
+t
+    pr
+
+t("Chat comp
+
+t
+o
+ output from 
+
+put aud
+o:", r
+su
+t)
     ```
+A
+t
+r
+at
+v
 
-Alternatively, you can pass `audio_url`, which is the audio counterpart of `image_url` for image input:
+y, you ca
+ pass `aud
+o_ur
+`, 
+h
+ch 
+s th
+ aud
+o cou
+t
+rpart of `
+mag
+_ur
+` for 
+mag
+ 
 
-??? code
+put:
+??? cod
 
-    ```python
-    chat_completion_from_url = client.chat.completions.create(
-        messages=[
+    ```pytho
+
+    chat_comp
+
+t
+o
+_from_ur
+ = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        m
+ssag
+s=[
             {
-                "role": "user",
-                "content": [
+                "ro
+
+": "us
+r",
+                "co
+t
+
+t": [
                     {
-                        "type": "text",
-                        "text": "What's in this audio?",
+                        "typ
+": "t
+xt",
+                        "t
+xt": "What's 
+
+ th
+s aud
+o?",
                     },
                     {
-                        "type": "audio_url",
-                        "audio_url": {"url": audio_url},
-                        "uuid": audio_url,  # Optional
+                        "typ
+": "aud
+o_ur
+",
+                        "aud
+o_ur
+": {"ur
+": aud
+o_ur
+},
+                        "uu
+d": aud
+o_ur
+,  # Opt
+o
+a
+
                     },
                 ],
             }
         ],
-        model=model,
-        max_completion_tokens=64,
+        mod
+
+=mod
+
+,
+        max_comp
+
+t
+o
+_tok
+
+s=64,
     )
+    r
+su
+t = chat_comp
 
-    result = chat_completion_from_url.choices[0].message.content
-    print("Chat completion output from audio url:", result)
+t
+o
+_from_ur
+.cho
+c
+s[0].m
+ssag
+.co
+t
+
+t
+    pr
+
+t("Chat comp
+
+t
+o
+ output from aud
+o ur
+:", r
+su
+t)
     ```
+Fu
+ 
+xamp
 
-Full example: [examples/online_serving/openai_chat_completion_client_for_multimodal.py](../../examples/online_serving/openai_chat_completion_client_for_multimodal.py)
+: [
+xamp
 
-!!! note
-    By default, the timeout for fetching audios through HTTP URL is `10` seconds.
-    You can override this by setting the environment variable:
+s/o
 
+
+
+
+_s
+rv
+
+g/op
+
+a
+_chat_comp
+
+t
+o
+_c
+
+
+
+t_for_mu
+t
+moda
+.py](../../
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/op
+
+a
+_chat_comp
+
+t
+o
+_c
+
+
+
+t_for_mu
+t
+moda
+.py)
+!!! 
+ot
+
+    By d
+fau
+t, th
+ t
+m
+out for f
+tch
+
+g aud
+os through HTTP URL 
+s `10` s
+co
+ds.
+    You ca
+ ov
+rr
+d
+ th
+s by s
+tt
+
+g th
+ 
+
+v
+ro
+m
+
+t var
+ab
+
+:
     ```bash
-    export VLLM_AUDIO_FETCH_TIMEOUT=<timeout>
+    
+xport VLLM_AUDIO_FETCH_TIMEOUT=
+t
+m
+out
+
     ```
+### Emb
+dd
 
-### Embedding Inputs
+g I
+puts
+To 
 
-To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
-pass a tensor of shape `(..., hidden_size of LM)` for each item to the corresponding field of the multi-modal dictionary.
+put pr
+-comput
+d 
+mb
+dd
 
-!!! important
-    Unlike offline inference, the embeddings for each item must be passed separately
-    in order for placeholder tokens to be applied correctly by the chat template.
+gs b
 
-You must enable this feature via the `--enable-mm-embeds` flag in `vllm serve`.
+o
+g
 
-!!! warning
-    The vLLM engine may crash if incorrect shape of embeddings is passed.
-    Only enable this flag for trusted users!
+g to a data typ
+ (
+.
+. 
+mag
+, v
+d
+o, or aud
+o) d
+r
+ct
+y to th
+ 
+a
+guag
+ mod
 
-#### Image Embedding Inputs
+,
+pass a t
 
-For image embeddings, you can pass the base64-encoded tensor to the `image_embeds` field.
-The following example demonstrates how to pass image embeddings to the OpenAI server:
+sor of shap
+ `(..., h
+dd
 
-??? code
+_s
+z
+ of LM)` for 
+ach 
+t
+m to th
+ corr
+spo
+d
 
-    ```python
-    from vllm.utils.serial_utils import tensor2base64
+g f
 
-    client = OpenAI(
-        # defaults to os.environ.get("OPENAI_API_KEY")
-        api_key=openai_api_key,
-        base_url=openai_api_base,
+
+d of th
+ mu
+t
+-moda
+ d
+ct
+o
+ary.
+!!! 
+mporta
+t
+    U
+
+
+k
+ off
+
+
+
+ 
+
+f
+r
+
+c
+, th
+ 
+mb
+dd
+
+gs for 
+ach 
+t
+m must b
+ pass
+d s
+parat
+
+y
+    
+
+ ord
+r for p
+ac
+ho
+d
+r tok
+
+s to b
+ app
+
+
+d corr
+ct
+y by th
+ chat t
+mp
+at
+.
+You must 
+
+ab
+
+ th
+s f
+atur
+ v
+a th
+ `--
+
+ab
+
+-mm-
+mb
+ds` f
+ag 
+
+ `v
+m s
+rv
+`.
+!!! 
+ar
+
+
+g
+    Th
+ vLLM 
+
+g
+
+
+ may crash 
+f 
+
+corr
+ct shap
+ of 
+mb
+dd
+
+gs 
+s pass
+d.
+    O
+
+y 
+
+ab
+
+ th
+s f
+ag for trust
+d us
+rs!
+#### Imag
+ Emb
+dd
+
+g I
+puts
+For 
+mag
+ 
+mb
+dd
+
+gs, you ca
+ pass th
+ bas
+64-
+
+cod
+d t
+
+sor to th
+ `
+mag
+_
+mb
+ds` f
+
+
+d.
+Th
+ fo
+o
+
+
+g 
+xamp
+
+ d
+mo
+strat
+s ho
+ to pass 
+mag
+ 
+mb
+dd
+
+gs to th
+ Op
+
+AI s
+rv
+r:
+??? cod
+
+    ```pytho
+
+    from v
+m.ut
+
+s.s
+r
+a
+_ut
+
+s 
+mport t
+
+sor2bas
+64
+    c
+
+
+
+t = Op
+
+AI(
+        # d
+fau
+ts to os.
+
+v
+ro
+.g
+t("OPENAI_API_KEY")
+        ap
+_k
+y=op
+
+a
+_ap
+_k
+y,
+        bas
+_ur
+=op
+
+a
+_ap
+_bas
+,
     )
+    # Bas
+c usag
+ - th
+s 
+s 
+qu
+va
 
-    # Basic usage - this is equivalent to the LLaVA example for offline inference
-    model = "llava-hf/llava-1.5-7b-hf"
-    embeds = {
-        "type": "image_embeds",
-        "image_embeds": tensor2base64(torch.load(...)),  # Shape: (image_feature_size, hidden_size)
-        "uuid": image_url,  # Optional
+
+t to th
+ LLaVA 
+xamp
+
+ for off
+
+
+
+ 
+
+f
+r
+
+c
+
+    mod
+
+ = "
+ava-hf/
+ava-1.5-7b-hf"
+    
+mb
+ds = {
+        "typ
+": "
+mag
+_
+mb
+ds",
+        "
+mag
+_
+mb
+ds": t
+
+sor2bas
+64(torch.
+oad(...)),  # Shap
+: (
+mag
+_f
+atur
+_s
+z
+, h
+dd
+
+_s
+z
+)
+        "uu
+d": 
+mag
+_ur
+,  # Opt
+o
+a
+
     }
+    # Add
+t
+o
+a
+ 
+xamp
+
+s for mod
+
+s that r
+qu
+r
+ 
+xtra f
 
 
-    # Additional examples for models that require extra fields
-    model = "Qwen/Qwen2-VL-2B-Instruct"
-    embeds = {
-        "type": "image_embeds",
-        "image_embeds": {
-            "image_embeds": tensor2base64(torch.load(...)),  # Shape: (image_feature_size, hidden_size)
-            "image_grid_thw": tensor2base64(torch.load(...)),  # Shape: (3,)
+ds
+    mod
+
+ = "Q
+
+
+/Q
+
+
+2-VL-2B-I
+struct"
+    
+mb
+ds = {
+        "typ
+": "
+mag
+_
+mb
+ds",
+        "
+mag
+_
+mb
+ds": {
+            "
+mag
+_
+mb
+ds": t
+
+sor2bas
+64(torch.
+oad(...)),  # Shap
+: (
+mag
+_f
+atur
+_s
+z
+, h
+dd
+
+_s
+z
+)
+            "
+mag
+_gr
+d_th
+": t
+
+sor2bas
+64(torch.
+oad(...)),  # Shap
+: (3,)
         },
-        "uuid": image_url,  # Optional
-    }
+        "uu
+d": 
+mag
+_ur
+,  # Opt
+o
+a
 
-    model = "openbmb/MiniCPM-V-2_6"
-    embeds = {
-        "type": "image_embeds",
-        "image_embeds": {
-            "image_embeds": tensor2base64(torch.load(...)),  # Shape: (num_slices, hidden_size)
-            "image_sizes": tensor2base64(torch.load(...)),  # Shape: (2,)
+    }
+    mod
+
+ = "op
+
+bmb/M
+
+
+CPM-V-2_6"
+    
+mb
+ds = {
+        "typ
+": "
+mag
+_
+mb
+ds",
+        "
+mag
+_
+mb
+ds": {
+            "
+mag
+_
+mb
+ds": t
+
+sor2bas
+64(torch.
+oad(...)),  # Shap
+: (
+um_s
+
+c
+s, h
+dd
+
+_s
+z
+)
+            "
+mag
+_s
+z
+s": t
+
+sor2bas
+64(torch.
+oad(...)),  # Shap
+: (2,)
         },
-        "uuid": image_url,  # Optional
+        "uu
+d": 
+mag
+_ur
+,  # Opt
+o
+a
+
     }
+    # S
 
-    # Single image input
-    chat_completion = client.chat.completions.create(
-        messages=[
+g
+
+ 
+mag
+ 
+
+put
+    chat_comp
+
+t
+o
+ = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        m
+ssag
+s=[
             {
-                "role": "system",
-                "content": "You are a helpful assistant.",
+                "ro
+
+": "syst
+m",
+                "co
+t
+
+t": "You ar
+ a h
+
+pfu
+ ass
+sta
+t.",
             },
             {
-                "role": "user",
-                "content": [
+                "ro
+
+": "us
+r",
+                "co
+t
+
+t": [
                     {
-                        "type": "text",
-                        "text": "What's in this image?",
+                        "typ
+": "t
+xt",
+                        "t
+xt": "What's 
+
+ th
+s 
+mag
+?",
                     },
-                    embeds,
+                    
+mb
+ds,
                 ],
             },
         ],
-        model=model,
+        mod
+
+=mod
+
+,
     )
+    # Mu
+t
+ 
+mag
+ 
 
-    # Multi image input
-    chat_completion = client.chat.completions.create(
-        messages=[
+put
+    chat_comp
+
+t
+o
+ = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        m
+ssag
+s=[
             {
-                "role": "system",
-                "content": "You are a helpful assistant.",
+                "ro
+
+": "syst
+m",
+                "co
+t
+
+t": "You ar
+ a h
+
+pfu
+ ass
+sta
+t.",
             },
             {
-                "role": "user",
-                "content": [
+                "ro
+
+": "us
+r",
+                "co
+t
+
+t": [
                     {
-                        "type": "text",
-                        "text": "What's in this image?",
+                        "typ
+": "t
+xt",
+                        "t
+xt": "What's 
+
+ th
+s 
+mag
+?",
                     },
-                    embeds,
-                    embeds,
+                    
+mb
+ds,
+                    
+mb
+ds,
                 ],
             },
         ],
-        model=model,
+        mod
+
+=mod
+
+,
     )
+    # Mu
+t
+ 
+mag
+ 
 
-    # Multi image input (interleaved)
-    chat_completion = client.chat.completions.create(
-        messages=[
+put (
+
+t
+r
+
+av
+d)
+    chat_comp
+
+t
+o
+ = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        m
+ssag
+s=[
             {
-                "role": "system",
-                "content": "You are a helpful assistant.",
+                "ro
+
+": "syst
+m",
+                "co
+t
+
+t": "You ar
+ a h
+
+pfu
+ ass
+sta
+t.",
             },
             {
-                "role": "user",
-                "content": [
-                    embeds,
+                "ro
+
+": "us
+r",
+                "co
+t
+
+t": [
+                    
+mb
+ds,
                     {
-                        "type": "text",
-                        "text": "What's in this image?",
+                        "typ
+": "t
+xt",
+                        "t
+xt": "What's 
+
+ th
+s 
+mag
+?",
                     },
-                    embeds,
+                    
+mb
+ds,
                 ],
             },
         ],
-        model=model,
+        mod
+
+=mod
+
+,
     )
     ```
+### Cach
+d I
+puts
+Just 
 
-### Cached Inputs
+k
+ 
 
-Just like with offline inference, you can skip sending media if you expect cache hits with provided UUIDs. You can do so by sending media like this:
+th off
 
-??? code
 
-    ```python
-        # Image/video/audio URL:
+
+ 
+
+f
+r
+
+c
+, you ca
+ sk
+p s
+
+d
+
+g m
+d
+a 
+f you 
+xp
+ct cach
+ h
+ts 
+
+th prov
+d
+d UUIDs. You ca
+ do so by s
+
+d
+
+g m
+d
+a 
+
+k
+ th
+s:
+??? cod
+
+    ```pytho
+
+        # Imag
+/v
+d
+o/aud
+o URL:
         {
-            "type": "image_url",
-            "image_url": None,
-            "uuid": image_uuid,
-        },
+            "typ
+": "
+mag
+_ur
+",
+            "
+mag
+_ur
+": No
 
-        # image_embeds
+,
+            "uu
+d": 
+mag
+_uu
+d,
+        },
+        # 
+mag
+_
+mb
+ds
         {
-            "type": "image_embeds",
-            "image_embeds": None,
-            "uuid": image_uuid,
-        },
+            "typ
+": "
+mag
+_
+mb
+ds",
+            "
+mag
+_
+mb
+ds": No
 
-        # input_audio:
+,
+            "uu
+d": 
+mag
+_uu
+d,
+        },
+        # 
+
+put_aud
+o:
         {
-            "type": "input_audio",
-            "input_audio": None,
-            "uuid": audio_uuid,
-        },
+            "typ
+": "
 
-        # PIL Image:
+put_aud
+o",
+            "
+
+put_aud
+o": No
+
+,
+            "uu
+d": aud
+o_uu
+d,
+        },
+        # PIL Imag
+:
         {
-            "type": "image_pil",
-            "image_pil": None,
-            "uuid": image_uuid,
-        },
+            "typ
+": "
+mag
+_p
 
+",
+            "
+mag
+_p
+
+": No
+
+,
+            "uu
+d": 
+mag
+_uu
+d,
+        },
     ```

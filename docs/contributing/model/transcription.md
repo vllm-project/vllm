@@ -1,287 +1,2386 @@
-# Speech-to-Text (Transcription/Translation) Support
+# Sp
+ch-to-T
+xt (Tra
+scr
+pt
+o
+/Tra
+s
+at
+o
+) Support
+Th
+s docum
 
-This document walks you through the steps to add support for speech-to-text (ASR) models to vLLM’s transcription and translation APIs by implementing [SupportsTranscription][vllm.model_executor.models.interfaces.SupportsTranscription].
-Please refer to the [supported models](../../models/supported_models.md#transcription) for further guidance.
+t 
+a
+ks you through th
+ st
+ps to add support for sp
+ch-to-t
+xt (ASR) mod
 
-## Update the base vLLM model
+s to vLLM’s tra
+scr
+pt
+o
+ a
+d tra
+s
+at
+o
+ APIs by 
+mp
 
-It is assumed you have already implemented your model in vLLM according to the basic model guide. Extend your model with the [SupportsTranscription][vllm.model_executor.models.interfaces.SupportsTranscription] interface and implement the following class attributes and methods.
+m
 
-### `supported_languages` and `supports_transcription_only`
+t
 
-Declare supported languages and capabilities:
+g [SupportsTra
+scr
+pt
+o
+][v
+m.mod
 
-- The `supported_languages` mapping is validated at init time.
-- Set `supports_transcription_only=True` if the model should not serve text generation (eg Whisper).
+_
+x
+cutor.mod
 
-??? code "supported_languages and supports_transcription_only"
+s.
 
-    ```python
-    from typing import ClassVar, Mapping, Literal
-    import numpy as np
-    import torch
-    from torch import nn
+t
+rfac
+s.SupportsTra
+scr
+pt
+o
+].
+P
 
-    from vllm.config import ModelConfig, SpeechToTextConfig
-    from vllm.inputs.data import PromptType
-    from vllm.model_executor.models.interfaces import SupportsTranscription
+as
+ r
+f
+r to th
+ [support
+d mod
+
+s](../../mod
+
+s/support
+d_mod
+
+s.md#tra
+scr
+pt
+o
+) for furth
+r gu
+da
+c
+.
+## Updat
+ th
+ bas
+ vLLM mod
+
+
+It 
+s assum
+d you hav
+ a
+r
+ady 
+mp
+
+m
+
+t
+d your mod
+
+ 
+
+ vLLM accord
+
+g to th
+ bas
+c mod
+
+ gu
+d
+. Ext
+
+d your mod
+
+ 
+
+th th
+ [SupportsTra
+scr
+pt
+o
+][v
+m.mod
+
+_
+x
+cutor.mod
+
+s.
+
+t
+rfac
+s.SupportsTra
+scr
+pt
+o
+] 
+
+t
+rfac
+ a
+d 
+mp
+
+m
+
+t th
+ fo
+o
+
+
+g c
+ass attr
+but
+s a
+d m
+thods.
+### `support
+d_
+a
+guag
+s` a
+d `supports_tra
+scr
+pt
+o
+_o
+
+y`
+D
+c
+ar
+ support
+d 
+a
+guag
+s a
+d capab
+
+
+t
+
+s:
+    - Th
+ `support
+d_
+a
+guag
+s` mapp
+
+g 
+s va
+
+dat
+d at 
+
+
+t t
+m
+.
+    - S
+t `supports_tra
+scr
+pt
+o
+_o
+
+y=Tru
+` 
+f th
+ mod
+
+ shou
+d 
+ot s
+rv
+ t
+xt g
+
+
+rat
+o
+ (
+g Wh
+sp
+r).
+??? cod
+ "support
+d_
+a
+guag
+s a
+d supports_tra
+scr
+pt
+o
+_o
+
+y"
+    ```pytho
+
+    from typ
+
+g 
+mport C
+assVar, Mapp
+
+g, L
+t
+ra
+
     
-    class YourASRModel(nn.Module, SupportsTranscription):
-        # Map of ISO 639-1 language codes to language names
-        supported_languages: ClassVar[Mapping[str, str]] = {
-            "en": "English",
-            "it": "Italian",
-            # ... add more as needed
+mport 
+umpy as 
+p
+    
+mport torch
+    from torch 
+mport 
+
+    from v
+m.co
+f
+g 
+mport Mod
+
+Co
+f
+g, Sp
+chToT
+xtCo
+f
+g
+    from v
+m.
+
+puts.data 
+mport PromptTyp
+
+    from v
+m.mod
+
+_
+x
+cutor.mod
+
+s.
+
+t
+rfac
+s 
+mport SupportsTra
+scr
+pt
+o
+
+    
+    c
+ass YourASRMod
+
+(
+.Modu
+
+, SupportsTra
+scr
+pt
+o
+):
+        # Map of ISO 639-1 
+a
+guag
+ cod
+s to 
+a
+guag
+ 
+am
+s
+        support
+d_
+a
+guag
+s: C
+assVar[Mapp
+
+g[str, str]] = {
+            "
+
+": "E
+g
+
+sh",
+            "
+t": "Ita
+
+a
+",
+            # ... add mor
+ as 
+
+d
+d
         }
         
-        # If your model only supports audio-conditioned generation
-        # (no text-only generation), enable this flag.
-        supports_transcription_only: ClassVar[bool] = True
+        # If your mod
+
+ o
+
+y supports aud
+o-co
+d
+t
+o
+
+d g
+
+
+rat
+o
+
+        # (
+o t
+xt-o
+
+y g
+
+
+rat
+o
+), 
+
+ab
+
+ th
+s f
+ag.
+        supports_tra
+scr
+pt
+o
+_o
+
+y: C
+assVar[boo
+] = Tru
+
     ```
+Prov
+d
+ a
+ ASR co
+f
+gurat
+o
+ v
+a [g
+t_sp
+ch_to_t
+xt_co
+f
+g][v
+m.mod
 
-Provide an ASR configuration via [get_speech_to_text_config][vllm.model_executor.models.interfaces.SupportsTranscription.get_speech_to_text_config].
+_
+x
+cutor.mod
 
-This is for controlling general behavior of the API when serving your model:
+s.
 
-??? code "get_speech_to_text_config()"
+t
+rfac
+s.SupportsTra
+scr
+pt
+o
+.g
+t_sp
+ch_to_t
+xt_co
+f
+g].
+Th
+s 
+s for co
+tro
 
-    ```python
-    class YourASRModel(nn.Module, SupportsTranscription):
+
+g g
+
+
+ra
+ b
+hav
+or of th
+ API 
+h
+
+ s
+rv
+
+g your mod
+
+:
+??? cod
+ "g
+t_sp
+ch_to_t
+xt_co
+f
+g()"
+    ```pytho
+
+    c
+ass YourASRMod
+
+(
+.Modu
+
+, SupportsTra
+scr
+pt
+o
+):
         ...
+        @c
+assm
+thod
+        d
+f g
+t_sp
+ch_to_t
+xt_co
+f
+g(
+            c
+s,
+            mod
 
-        @classmethod
-        def get_speech_to_text_config(
-            cls,
-            model_config: ModelConfig,
-            task_type: Literal["transcribe", "translate"],
-        ) -> SpeechToTextConfig:
-            return SpeechToTextConfig(
-                sample_rate=16_000,
-                max_audio_clip_s=30,
-                # Set to None to disable server-side chunking if your
-                # model/processor handles it already
-                min_energy_split_window_size=None,
+_co
+f
+g: Mod
+
+Co
+f
+g,
+            task_typ
+: L
+t
+ra
+["tra
+scr
+b
+", "tra
+s
+at
+"],
+        ) -
+ Sp
+chToT
+xtCo
+f
+g:
+            r
+tur
+ Sp
+chToT
+xtCo
+f
+g(
+                samp
+
+_rat
+=16_000,
+                max_aud
+o_c
+
+p_s=30,
+                # S
+t to No
+
+ to d
+sab
+
+ s
+rv
+r-s
+d
+ chu
+k
+
+g 
+f your
+                # mod
+
+/proc
+ssor ha
+d
+
+s 
+t a
+r
+ady
+                m
+
+_
+
+
+rgy_sp
+
+t_
+
+
+do
+_s
+z
+=No
+
+,
             )
     ```
+S
+ [Aud
+o pr
+proc
+ss
 
-See [Audio preprocessing and chunking](#audio-preprocessing-and-chunking) for what each field controls.
+g a
+d chu
+k
 
-Implement the prompt construction via [get_generation_prompt][vllm.model_executor.models.interfaces.SupportsTranscription.get_generation_prompt]. The server passes you the resampled waveform and task parameters; you return a valid [PromptType][vllm.inputs.data.PromptType]. There are two common patterns:
+g](#aud
+o-pr
+proc
+ss
 
-#### Multimodal LLM with audio embeddings (e.g., Voxtral, Gemma3n)
+g-a
+d-chu
+k
 
-Return a dict containing `multi_modal_data` with the audio, and either a `prompt` string or `prompt_token_ids`:
+g) for 
+hat 
+ach f
 
-??? code "get_generation_prompt()"
 
-    ```python
-    class YourASRModel(nn.Module, SupportsTranscription):
+d co
+tro
+s.
+Imp
+
+m
+
+t th
+ prompt co
+struct
+o
+ v
+a [g
+t_g
+
+
+rat
+o
+_prompt][v
+m.mod
+
+_
+x
+cutor.mod
+
+s.
+
+t
+rfac
+s.SupportsTra
+scr
+pt
+o
+.g
+t_g
+
+
+rat
+o
+_prompt]. Th
+ s
+rv
+r pass
+s you th
+ r
+samp
+
+d 
+av
+form a
+d task param
+t
+rs; you r
+tur
+ a va
+
+d [PromptTyp
+][v
+m.
+
+puts.data.PromptTyp
+]. Th
+r
+ ar
+ t
+o commo
+ patt
+r
+s:
+#### Mu
+t
+moda
+ LLM 
+
+th aud
+o 
+mb
+dd
+
+gs (
+.g., Voxtra
+, G
+mma3
+)
+R
+tur
+ a d
+ct co
+ta
+
+
+
+g `mu
+t
+_moda
+_data` 
+
+th th
+ aud
+o, a
+d 
+
+th
+r a `prompt` str
+
+g or `prompt_tok
+
+_
+ds`:
+??? cod
+ "g
+t_g
+
+
+rat
+o
+_prompt()"
+    ```pytho
+
+    c
+ass YourASRMod
+
+(
+.Modu
+
+, SupportsTra
+scr
+pt
+o
+):
         ...
+        @c
+assm
+thod
+        d
+f g
+t_g
 
-        @classmethod
-        def get_generation_prompt(
-            cls,
-            audio: np.ndarray,
-            stt_config: SpeechToTextConfig,
-            model_config: ModelConfig,
-            language: str | None,
-            task_type: Literal["transcribe", "translate"],
-            request_prompt: str,
-            to_language: str | None,
-        ) -> PromptType:
-            # Example with a free-form instruction prompt
-            task_word = "Transcribe" if task_type == "transcribe" else "Translate"
+
+rat
+o
+_prompt(
+            c
+s,
+            aud
+o: 
+p.
+darray,
+            stt_co
+f
+g: Sp
+chToT
+xtCo
+f
+g,
+            mod
+
+_co
+f
+g: Mod
+
+Co
+f
+g,
+            
+a
+guag
+: str | No
+
+,
+            task_typ
+: L
+t
+ra
+["tra
+scr
+b
+", "tra
+s
+at
+"],
+            r
+qu
+st_prompt: str,
+            to_
+a
+guag
+: str | No
+
+,
+        ) -
+ PromptTyp
+:
+            # Examp
+
+ 
+
+th a fr
+-form 
+
+struct
+o
+ prompt
+            task_
+ord = "Tra
+scr
+b
+" 
+f task_typ
+ == "tra
+scr
+b
+" 
+
+s
+ "Tra
+s
+at
+"
             prompt = (
-                "<start_of_turn>user\n"
-                f"{task_word} this audio: <audio_soft_token>"
-                "<end_of_turn>\n<start_of_turn>model\n"
-            )
+                "
+start_of_tur
 
-            return {
-                "multi_modal_data": {"audio": (audio, stt_config.sample_rate)},
+us
+r\
+"
+                f"{task_
+ord} th
+s aud
+o: 
+aud
+o_soft_tok
+
+
+"
+                "
+
+
+d_of_tur
+
+\
+
+start_of_tur
+
+mod
+
+\
+"
+            )
+            r
+tur
+ {
+                "mu
+t
+_moda
+_data": {"aud
+o": (aud
+o, stt_co
+f
+g.samp
+
+_rat
+)},
                 "prompt": prompt,
             }
     ```
+    For furth
+r c
+ar
+f
+cat
+o
+ o
+ mu
+t
+ moda
+ 
 
-    For further clarification on multi modal inputs, please refer to [Multi-Modal Inputs](../../features/multimodal_inputs.md).
+puts, p
 
-#### Encoder–decoder audio-only (e.g., Whisper)
+as
+ r
+f
+r to [Mu
+t
+-Moda
+ I
+puts](../../f
+atur
+s/mu
+t
+moda
+_
 
-Return a dict with separate `encoder_prompt` and `decoder_prompt` entries:
+puts.md).
+#### E
+cod
+r–d
+cod
+r aud
+o-o
 
-??? code "get_generation_prompt()"
+y (
+.g., Wh
+sp
+r)
+R
+tur
+ a d
+ct 
 
-    ```python
-    class YourASRModel(nn.Module, SupportsTranscription):
+th s
+parat
+ `
+
+cod
+r_prompt` a
+d `d
+cod
+r_prompt` 
+
+tr
+
+s:
+??? cod
+ "g
+t_g
+
+
+rat
+o
+_prompt()"
+    ```pytho
+
+    c
+ass YourASRMod
+
+(
+.Modu
+
+, SupportsTra
+scr
+pt
+o
+):
         ...
+        @c
+assm
+thod
+        d
+f g
+t_g
 
-        @classmethod
-        def get_generation_prompt(
-            cls,
-            audio: np.ndarray,
-            stt_config: SpeechToTextConfig,
-            model_config: ModelConfig,
-            language: str | None,
-            task_type: Literal["transcribe", "translate"],
-            request_prompt: str,
-            to_language: str | None,
-        ) -> PromptType:
-            if language is None:
-                raise ValueError("Language must be specified")
 
+rat
+o
+_prompt(
+            c
+s,
+            aud
+o: 
+p.
+darray,
+            stt_co
+f
+g: Sp
+chToT
+xtCo
+f
+g,
+            mod
+
+_co
+f
+g: Mod
+
+Co
+f
+g,
+            
+a
+guag
+: str | No
+
+,
+            task_typ
+: L
+t
+ra
+["tra
+scr
+b
+", "tra
+s
+at
+"],
+            r
+qu
+st_prompt: str,
+            to_
+a
+guag
+: str | No
+
+,
+        ) -
+ PromptTyp
+:
+            
+f 
+a
+guag
+ 
+s No
+
+:
+                ra
+s
+ Va
+u
+Error("La
+guag
+ must b
+ sp
+c
+f
+
+d")
             prompt = {
-                "encoder_prompt": {
+                "
+
+cod
+r_prompt": {
                     "prompt": "",
-                    "multi_modal_data": {
-                        "audio": (audio, stt_config.sample_rate),
+                    "mu
+t
+_moda
+_data": {
+                        "aud
+o": (aud
+o, stt_co
+f
+g.samp
+
+_rat
+),
                     },
                 },
-                "decoder_prompt": (
-                    (f"<|prev|>{request_prompt}" if request_prompt else "")
-                    + f"<|startoftranscript|><|{language}|>"
-                    + f"<|{task_type}|><|notimestamps|>"
+                "d
+cod
+r_prompt": (
+                    (f"
+|pr
+v|
+{r
+qu
+st_prompt}" 
+f r
+qu
+st_prompt 
+
+s
+ "")
+                    + f"
+|startoftra
+scr
+pt|
+
+|{
+a
+guag
+}|
+"
+                    + f"
+|{task_typ
+}|
+
+|
+ot
+m
+stamps|
+"
                 ),
             }
-            return cast(PromptType, prompt)
+            r
+tur
+ cast(PromptTyp
+, prompt)
     ```
+### `va
 
-### `validate_language` (optional)
+dat
+_
+a
+guag
+` (opt
+o
+a
+)
+La
+guag
+ va
 
-Language validation via [validate_language][vllm.model_executor.models.interfaces.SupportsTranscription.validate_language]
+dat
+o
+ v
+a [va
 
-If your model requires a language and you want a default, override this method (see Whisper):
+dat
+_
+a
+guag
+][v
+m.mod
 
-??? code "validate_language()"
+_
+x
+cutor.mod
 
-    ```python
-    @classmethod
-    def validate_language(cls, language: str | None) -> str | None:
-        if language is None:
-            logger.warning(
-                "Defaulting to language='en'. If you wish to transcribe "
-                "audio in a different language, pass the `language` field "
-                "in the TranscriptionRequest."
+s.
+
+t
+rfac
+s.SupportsTra
+scr
+pt
+o
+.va
+
+dat
+_
+a
+guag
+]
+If your mod
+
+ r
+qu
+r
+s a 
+a
+guag
+ a
+d you 
+a
+t a d
+fau
+t, ov
+rr
+d
+ th
+s m
+thod (s
+ Wh
+sp
+r):
+??? cod
+ "va
+
+dat
+_
+a
+guag
+()"
+    ```pytho
+
+    @c
+assm
+thod
+    d
+f va
+
+dat
+_
+a
+guag
+(c
+s, 
+a
+guag
+: str | No
+
+) -
+ str | No
+
+:
+        
+f 
+a
+guag
+ 
+s No
+
+:
+            
+ogg
+r.
+ar
+
+
+g(
+                "D
+fau
+t
+
+g to 
+a
+guag
+='
+
+'. If you 
+
+sh to tra
+scr
+b
+ "
+                "aud
+o 
+
+ a d
+ff
+r
+
+t 
+a
+guag
+, pass th
+ `
+a
+guag
+` f
+
+
+d "
+                "
+
+ th
+ Tra
+scr
+pt
+o
+R
+qu
+st."
             )
-            language = "en"
-        return super().validate_language(language)
+            
+a
+guag
+ = "
+
+"
+        r
+tur
+ sup
+r().va
+
+dat
+_
+a
+guag
+(
+a
+guag
+)
     ```
+### `g
+t_
+um_aud
+o_tok
 
-### `get_num_audio_tokens` (optional)
+s` (opt
+o
+a
+)
+Tok
 
-Token accounting for streaming via [get_num_audio_tokens][vllm.model_executor.models.interfaces.SupportsTranscription.get_num_audio_tokens]
+ accou
+t
 
-Provide a fast duration→token estimate to improve streaming usage statistics:
+g for str
+am
 
-??? code "get_num_audio_tokens()"
+g v
+a [g
+t_
+um_aud
+o_tok
 
-    ```python
-    class YourASRModel(nn.Module, SupportsTranscription):
+s][v
+m.mod
+
+_
+x
+cutor.mod
+
+s.
+
+t
+rfac
+s.SupportsTra
+scr
+pt
+o
+.g
+t_
+um_aud
+o_tok
+
+s]
+Prov
+d
+ a fast durat
+o
+→tok
+
+ 
+st
+mat
+ to 
+mprov
+ str
+am
+
+g usag
+ stat
+st
+cs:
+??? cod
+ "g
+t_
+um_aud
+o_tok
+
+s()"
+    ```pytho
+
+    c
+ass YourASRMod
+
+(
+.Modu
+
+, SupportsTra
+scr
+pt
+o
+):
         ...
+        @c
+assm
+thod
+        d
+f g
+t_
+um_aud
+o_tok
 
-        @classmethod
-        def get_num_audio_tokens(
-            cls,
-            audio_duration_s: float,
-            stt_config: SpeechToTextConfig,
-            model_config: ModelConfig,
-        ) -> int | None:
-            # Return None if unknown; otherwise return an estimate.
-            return int(audio_duration_s * stt_config.sample_rate // 320)  # example
+s(
+            c
+s,
+            aud
+o_durat
+o
+_s: f
+oat,
+            stt_co
+f
+g: Sp
+chToT
+xtCo
+f
+g,
+            mod
+
+_co
+f
+g: Mod
+
+Co
+f
+g,
+        ) -
+ 
+
+t | No
+
+:
+            # R
+tur
+ No
+
+ 
+f u
+k
+o
+
+; oth
+r
+
+s
+ r
+tur
+ a
+ 
+st
+mat
+.
+            r
+tur
+ 
+
+t(aud
+o_durat
+o
+_s * stt_co
+f
+g.samp
+
+_rat
+ // 320)  # 
+xamp
+
+
     ```
+## Aud
+o pr
+proc
+ss
 
-## Audio preprocessing and chunking
+g a
+d chu
+k
 
-The API server takes care of basic audio I/O and optional chunking before building prompts:
+g
+Th
+ API s
+rv
+r tak
+s car
+ of bas
+c aud
+o I/O a
+d opt
+o
+a
+ chu
+k
 
-- Resampling: Input audio is resampled to `SpeechToTextConfig.sample_rate` using `librosa`.
-- Chunking: If `SpeechToTextConfig.allow_audio_chunking` is True and the duration exceeds `max_audio_clip_s`, the server splits the audio into overlapping chunks and generates a prompt per chunk. Overlap is controlled by `overlap_chunk_second`.
-- Energy-aware splitting: When `min_energy_split_window_size` is set, the server finds low-energy regions to minimize cutting within words.
+g b
+for
+ bu
 
-Relevant server logic:
+d
 
-??? code "_preprocess_speech_to_text()"
+g prompts:
+    - R
+samp
 
-    ```python
-    # vllm/entrypoints/openai/speech_to_text.py
-    async def _preprocess_speech_to_text(...):
-        language = self.model_cls.validate_language(request.language)
+
+g: I
+put aud
+o 
+s r
+samp
+
+d to `Sp
+chToT
+xtCo
+f
+g.samp
+
+_rat
+` us
+
+g `
+
+brosa`.
+    - Chu
+k
+
+g: If `Sp
+chToT
+xtCo
+f
+g.a
+o
+_aud
+o_chu
+k
+
+g` 
+s Tru
+ a
+d th
+ durat
+o
+ 
+xc
+ds `max_aud
+o_c
+
+p_s`, th
+ s
+rv
+r sp
+
+ts th
+ aud
+o 
+
+to ov
+r
+app
+
+g chu
+ks a
+d g
+
+
+rat
+s a prompt p
+r chu
+k. Ov
+r
+ap 
+s co
+tro
+
+d by `ov
+r
+ap_chu
+k_s
+co
+d`.
+    - E
+
+rgy-a
+ar
+ sp
+
+tt
+
+g: Wh
+
+ `m
+
+_
+
+
+rgy_sp
+
+t_
+
+
+do
+_s
+z
+` 
+s s
+t, th
+ s
+rv
+r f
+
+ds 
+o
+-
+
+
+rgy r
+g
+o
+s to m
+
+
+m
+z
+ cutt
+
+g 
+
+th
+
+ 
+ords.
+R
+
+
+va
+t s
+rv
+r 
+og
+c:
+??? cod
+ "_pr
+proc
+ss_sp
+ch_to_t
+xt()"
+    ```pytho
+
+    # v
+m/
+
+trypo
+
+ts/op
+
+a
+/sp
+ch_to_t
+xt.py
+    asy
+c d
+f _pr
+proc
+ss_sp
+ch_to_t
+xt(...):
+        
+a
+guag
+ = s
+
+f.mod
+
+_c
+s.va
+
+dat
+_
+a
+guag
+(r
+qu
+st.
+a
+guag
+)
         ...
-        y, sr = librosa.load(bytes_, sr=self.asr_config.sample_rate)
-        duration = librosa.get_duration(y=y, sr=sr)
-        do_split_audio = (self.asr_config.allow_audio_chunking
-                        and duration > self.asr_config.max_audio_clip_s)
-        chunks = [y] if not do_split_audio else self._split_audio(y, int(sr))
+        y, sr = 
+
+brosa.
+oad(byt
+s_, sr=s
+
+f.asr_co
+f
+g.samp
+
+_rat
+)
+        durat
+o
+ = 
+
+brosa.g
+t_durat
+o
+(y=y, sr=sr)
+        do_sp
+
+t_aud
+o = (s
+
+f.asr_co
+f
+g.a
+o
+_aud
+o_chu
+k
+
+g
+                        a
+d durat
+o
+ 
+ s
+
+f.asr_co
+f
+g.max_aud
+o_c
+
+p_s)
+        chu
+ks = [y] 
+f 
+ot do_sp
+
+t_aud
+o 
+
+s
+ s
+
+f._sp
+
+t_aud
+o(y, 
+
+t(sr))
         prompts = []
-        for chunk in chunks:
-            prompt = self.model_cls.get_generation_prompt(
-                audio=chunk,
-                stt_config=self.asr_config,
-                model_config=self.model_config,
-                language=language,
-                task_type=self.task_type,
-                request_prompt=request.prompt,
-                to_language=to_language,
+        for chu
+k 
+
+ chu
+ks:
+            prompt = s
+
+f.mod
+
+_c
+s.g
+t_g
+
+
+rat
+o
+_prompt(
+                aud
+o=chu
+k,
+                stt_co
+f
+g=s
+
+f.asr_co
+f
+g,
+                mod
+
+_co
+f
+g=s
+
+f.mod
+
+_co
+f
+g,
+                
+a
+guag
+=
+a
+guag
+,
+                task_typ
+=s
+
+f.task_typ
+,
+                r
+qu
+st_prompt=r
+qu
+st.prompt,
+                to_
+a
+guag
+=to_
+a
+guag
+,
             )
-            prompts.append(prompt)
-        return prompts, duration
+            prompts.app
+
+d(prompt)
+        r
+tur
+ prompts, durat
+o
+
     ```
+## Expos
 
-## Exposing tasks automatically
+g tasks automat
+ca
+y
+vLLM automat
+ca
+y adv
+rt
+s
+s tra
+scr
+pt
+o
+ support 
+f your mod
 
-vLLM automatically advertises transcription support if your model implements the interface:
+ 
+mp
 
-```python
-if supports_transcription(model):
-    if model.supports_transcription_only:
-        return ["transcription"]
-    supported_tasks.append("transcription")
+m
+
+ts th
+ 
+
+t
+rfac
+:
+```pytho
+
+
+f supports_tra
+scr
+pt
+o
+(mod
+
+):
+    
+f mod
+
+.supports_tra
+scr
+pt
+o
+_o
+
+y:
+        r
+tur
+ ["tra
+scr
+pt
+o
+"]
+    support
+d_tasks.app
+
+d("tra
+scr
+pt
+o
+")
 ```
+Wh
 
-When enabled, the server initializes the transcription and translation handlers:
+ 
 
-```python
-state.openai_serving_transcription = OpenAIServingTranscription(...) if "transcription" in supported_tasks else None
-state.openai_serving_translation = OpenAIServingTranslation(...) if "transcription" in supported_tasks else None
+ab
+
+d, th
+ s
+rv
+r 
+
+
+t
+a
+
+z
+s th
+ tra
+scr
+pt
+o
+ a
+d tra
+s
+at
+o
+ ha
+d
+
+rs:
+```pytho
+
+stat
+.op
+
+a
+_s
+rv
+
+g_tra
+scr
+pt
+o
+ = Op
+
+AIS
+rv
+
+gTra
+scr
+pt
+o
+(...) 
+f "tra
+scr
+pt
+o
+" 
+
+ support
+d_tasks 
+
+s
+ No
+
+
+stat
+.op
+
+a
+_s
+rv
+
+g_tra
+s
+at
+o
+ = Op
+
+AIS
+rv
+
+gTra
+s
+at
+o
+(...) 
+f "tra
+scr
+pt
+o
+" 
+
+ support
+d_tasks 
+
+s
+ No
+
+
 ```
+No 
+xtra r
+g
+strat
+o
+ 
+s r
+qu
+r
+d b
+yo
+d hav
 
-No extra registration is required beyond having your model class available via the model registry and implementing `SupportsTranscription`.
+g your mod
 
-## Examples in-tree
+ c
+ass ava
 
-- Whisper encoder–decoder (audio-only): [vllm/model_executor/models/whisper.py](../../../vllm/model_executor/models/whisper.py)
-- Voxtral decoder-only (audio embeddings + LLM): [vllm/model_executor/models/voxtral.py](../../../vllm/model_executor/models/voxtral.py). Make sure to have installed `mistral-common[audio]`.
-- Gemma3n decoder-only with fixed instruction prompt: [vllm/model_executor/models/gemma3n_mm.py](../../../vllm/model_executor/models/gemma3n_mm.py)
-- Qwen3-Omni multimodal with audio embeddings: [vllm/model_executor/models/qwen3_omni_moe_thinker.py](../../../vllm/model_executor/models/qwen3_omni_moe_thinker.py)
+ab
 
-## Test with the API
+ v
+a th
+ mod
 
-Once your model implements `SupportsTranscription`, you can test the endpoints (API mimics OpenAI):
+ r
+g
+stry a
+d 
+mp
 
-- Transcription (ASR):
+m
 
+t
+
+g `SupportsTra
+scr
+pt
+o
+`.
+## Examp
+
+s 
+
+-tr
+
+    - Wh
+sp
+r 
+
+cod
+r–d
+cod
+r (aud
+o-o
+
+y): [v
+m/mod
+
+_
+x
+cutor/mod
+
+s/
+h
+sp
+r.py](../../../v
+m/mod
+
+_
+x
+cutor/mod
+
+s/
+h
+sp
+r.py)
+    - Voxtra
+ d
+cod
+r-o
+
+y (aud
+o 
+mb
+dd
+
+gs + LLM): [v
+m/mod
+
+_
+x
+cutor/mod
+
+s/voxtra
+.py](../../../v
+m/mod
+
+_
+x
+cutor/mod
+
+s/voxtra
+.py). Mak
+ sur
+ to hav
+ 
+
+sta
+
+d `m
+stra
+-commo
+[aud
+o]`.
+    - G
+mma3
+ d
+cod
+r-o
+
+y 
+
+th f
+x
+d 
+
+struct
+o
+ prompt: [v
+m/mod
+
+_
+x
+cutor/mod
+
+s/g
+mma3
+_mm.py](../../../v
+m/mod
+
+_
+x
+cutor/mod
+
+s/g
+mma3
+_mm.py)
+    - Q
+
+
+3-Om
+
+ mu
+t
+moda
+ 
+
+th aud
+o 
+mb
+dd
+
+gs: [v
+m/mod
+
+_
+x
+cutor/mod
+
+s/q
+
+
+3_om
+
+_mo
+_th
+
+k
+r.py](../../../v
+m/mod
+
+_
+x
+cutor/mod
+
+s/q
+
+
+3_om
+
+_mo
+_th
+
+k
+r.py)
+## T
+st 
+
+th th
+ API
+O
+c
+ your mod
+
+ 
+mp
+
+m
+
+ts `SupportsTra
+scr
+pt
+o
+`, you ca
+ t
+st th
+ 
+
+dpo
+
+ts (API m
+m
+cs Op
+
+AI):
+    - Tra
+scr
+pt
+o
+ (ASR):
     ```bash
-    curl -s -X POST \
-      -H "Authorization: Bearer $VLLM_API_KEY" \
-      -H "Content-Type: multipart/form-data" \
-      -F "file=@/path/to/audio.wav" \
-      -F "model=$MODEL_ID" \
-      http://localhost:8000/v1/audio/transcriptions
+    cur
+ -s -X POST \
+      -H "Author
+zat
+o
+: B
+ar
+r $VLLM_API_KEY" \
+      -H "Co
+t
+
+t-Typ
+: mu
+t
+part/form-data" \
+      -F "f
+
+
+=@/path/to/aud
+o.
+av" \
+      -F "mod
+
+=$MODEL_ID" \
+      http://
+oca
+host:8000/v1/aud
+o/tra
+scr
+pt
+o
+s
     ```
+    - Tra
+s
+at
+o
+ (sourc
+ → E
+g
 
-- Translation (source → English unless otherwise supported):
+sh u
 
+
+ss oth
+r
+
+s
+ support
+d):
     ```bash
-    curl -s -X POST \
-      -H "Authorization: Bearer $VLLM_API_KEY" \
-      -H "Content-Type: multipart/form-data" \
-      -F "file=@/path/to/audio.wav" \
-      -F "model=$MODEL_ID" \
-      http://localhost:8000/v1/audio/translations
+    cur
+ -s -X POST \
+      -H "Author
+zat
+o
+: B
+ar
+r $VLLM_API_KEY" \
+      -H "Co
+t
+
+t-Typ
+: mu
+t
+part/form-data" \
+      -F "f
+
+
+=@/path/to/aud
+o.
+av" \
+      -F "mod
+
+=$MODEL_ID" \
+      http://
+oca
+host:8000/v1/aud
+o/tra
+s
+at
+o
+s
     ```
+Or ch
+ck out mor
+ 
+xamp
 
-Or check out more examples in [examples/online_serving](../../../examples/online_serving).
+s 
 
-!!! note
-    - If your model handles chunking internally (e.g., via its processor or encoder), set `min_energy_split_window_size=None` in the returned `SpeechToTextConfig` to disable server-side chunking.
-    - Implementing `get_num_audio_tokens` improves accuracy of streaming usage metrics (`prompt_tokens`) without an extra forward pass.
-    - For multilingual behavior, keep `supported_languages` aligned with actual model capabilities.
+ [
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g](../../../
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g).
+!!! 
+ot
+
+    - If your mod
+
+ ha
+d
+
+s chu
+k
+
+g 
+
+t
+r
+a
+y (
+.g., v
+a 
+ts proc
+ssor or 
+
+cod
+r), s
+t `m
+
+_
+
+
+rgy_sp
+
+t_
+
+
+do
+_s
+z
+=No
+
+` 
+
+ th
+ r
+tur
+
+d `Sp
+chToT
+xtCo
+f
+g` to d
+sab
+
+ s
+rv
+r-s
+d
+ chu
+k
+
+g.
+    - Imp
+
+m
+
+t
+
+g `g
+t_
+um_aud
+o_tok
+
+s` 
+mprov
+s accuracy of str
+am
+
+g usag
+ m
+tr
+cs (`prompt_tok
+
+s`) 
+
+thout a
+ 
+xtra for
+ard pass.
+    - For mu
+t
+
+
+
+gua
+ b
+hav
+or, k
+p `support
+d_
+a
+guag
+s` a
+
+g
+
+d 
+
+th actua
+ mod
+
+ capab
+
+
+t
+
+s.

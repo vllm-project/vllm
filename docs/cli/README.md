@@ -1,188 +1,901 @@
-# vLLM CLI Guide
+# vLLM CLI Gu
+d
 
-The vllm command-line tool is used to run and manage vLLM models. You can start by viewing the help message with:
+Th
+ v
+m comma
+d-
 
+
+
+ too
+ 
+s us
+d to ru
+ a
+d ma
+ag
+ vLLM mod
+
+s. You ca
+ start by v
+
+
+
+
+g th
+ h
+
+p m
+ssag
+ 
+
+th:
 ```bash
-vllm --help
+v
+m --h
+
+p
 ```
+Ava
 
-Available Commands:
+ab
 
+ Comma
+ds:
 ```bash
-vllm {chat,complete,serve,bench,collect-env,run-batch}
+v
+m {chat,comp
+
+t
+,s
+rv
+,b
+
+ch,co
+
+ct-
+
+v,ru
+-batch}
 ```
+## s
+rv
 
-## serve
+Starts th
+ vLLM Op
 
-Starts the vLLM OpenAI Compatible API server.
+AI Compat
+b
 
-Start with a model:
+ API s
+rv
+r.
+Start 
 
+th a mod
+
+:
 ```bash
-vllm serve meta-llama/Llama-2-7b-hf
+v
+m s
+rv
+ m
+ta-
+ama/L
+ama-2-7b-hf
 ```
-
-Specify the port:
-
+Sp
+c
+fy th
+ port:
 ```bash
-vllm serve meta-llama/Llama-2-7b-hf --port 8100
+v
+m s
+rv
+ m
+ta-
+ama/L
+ama-2-7b-hf --port 8100
 ```
+S
+rv
+ ov
+r a U
 
-Serve over a Unix domain socket:
+x doma
 
+ sock
+t:
 ```bash
-vllm serve meta-llama/Llama-2-7b-hf --uds /tmp/vllm.sock
+v
+m s
+rv
+ m
+ta-
+ama/L
+ama-2-7b-hf --uds /tmp/v
+m.sock
 ```
+Ch
+ck 
 
-Check with --help for more options:
+th --h
 
+p for mor
+ opt
+o
+s:
 ```bash
-# To list all groups
-vllm serve --help=listgroup
+# To 
 
-# To view a argument group
-vllm serve --help=ModelConfig
+st a
+ groups
+v
+m s
+rv
+ --h
 
-# To view a single argument
-vllm serve --help=max-num-seqs
+p=
 
-# To search by keyword
-vllm serve --help=max
+stgroup
+# To v
 
-# To view full help with pager (less/more)
-vllm serve --help=page
+
+ a argum
+
+t group
+v
+m s
+rv
+ --h
+
+p=Mod
+
+Co
+f
+g
+# To v
+
+
+ a s
+
+g
+
+ argum
+
+t
+v
+m s
+rv
+ --h
+
+p=max-
+um-s
+qs
+# To s
+arch by k
+y
+ord
+v
+m s
+rv
+ --h
+
+p=max
+# To v
+
+
+ fu
+ h
+
+p 
+
+th pag
+r (
+
+ss/mor
+)
+v
+m s
+rv
+ --h
+
+p=pag
+
 ```
+S
+ [v
+m s
+rv
+](./s
+rv
+.md) for th
+ fu
+ r
+f
+r
 
-See [vllm serve](./serve.md) for the full reference of all available arguments.
+c
+ of a
+ ava
 
+ab
+
+ argum
+
+ts.
 ## chat
+G
 
-Generate chat completions via the running API server.
 
+rat
+ chat comp
+
+t
+o
+s v
+a th
+ ru
+
+
+g API s
+rv
+r.
 ```bash
-# Directly connect to localhost API without arguments
-vllm chat
+# D
+r
+ct
+y co
 
-# Specify API url
-vllm chat --url http://{vllm-serve-host}:{vllm-serve-port}/v1
+ct to 
+oca
+host API 
 
-# Quick chat with a single prompt
-vllm chat --quick "hi"
+thout argum
+
+ts
+v
+m chat
+# Sp
+c
+fy API ur
+
+v
+m chat --ur
+ http://{v
+m-s
+rv
+-host}:{v
+m-s
+rv
+-port}/v1
+# Qu
+ck chat 
+
+th a s
+
+g
+
+ prompt
+v
+m chat --qu
+ck "h
+"
 ```
+S
+ [v
+m chat](./chat.md) for th
+ fu
+ r
+f
+r
 
-See [vllm chat](./chat.md) for the full reference of all available arguments.
+c
+ of a
+ ava
 
-## complete
+ab
 
-Generate text completions based on the given prompt via the running API server.
+ argum
 
+ts.
+## comp
+
+t
+
+G
+
+
+rat
+ t
+xt comp
+
+t
+o
+s bas
+d o
+ th
+ g
+v
+
+ prompt v
+a th
+ ru
+
+
+g API s
+rv
+r.
 ```bash
-# Directly connect to localhost API without arguments
-vllm complete
+# D
+r
+ct
+y co
 
-# Specify API url
-vllm complete --url http://{vllm-serve-host}:{vllm-serve-port}/v1
+ct to 
+oca
+host API 
 
-# Quick complete with a single prompt
-vllm complete --quick "The future of AI is"
+thout argum
+
+ts
+v
+m comp
+
+t
+
+# Sp
+c
+fy API ur
+
+v
+m comp
+
+t
+ --ur
+ http://{v
+m-s
+rv
+-host}:{v
+m-s
+rv
+-port}/v1
+# Qu
+ck comp
+
+t
+ 
+
+th a s
+
+g
+
+ prompt
+v
+m comp
+
+t
+ --qu
+ck "Th
+ futur
+ of AI 
+s"
 ```
+S
+ [v
+m comp
 
-See [vllm complete](./complete.md) for the full reference of all available arguments.
+t
+](./comp
 
-## bench
+t
+.md) for th
+ fu
+ r
+f
+r
 
-Run benchmark tests for latency online serving throughput and offline inference throughput.
+c
+ of a
+ ava
 
-To use benchmark commands, please install with extra dependencies using `pip install vllm[bench]`.
+ab
 
-Available Commands:
+ argum
 
+ts.
+## b
+
+ch
+Ru
+ b
+
+chmark t
+sts for 
+at
+
+cy o
+
+
+
+
+ s
+rv
+
+g throughput a
+d off
+
+
+
+ 
+
+f
+r
+
+c
+ throughput.
+To us
+ b
+
+chmark comma
+ds, p
+
+as
+ 
+
+sta
+ 
+
+th 
+xtra d
+p
+
+d
+
+c
+
+s us
+
+g `p
+p 
+
+sta
+ v
+m[b
+
+ch]`.
+Ava
+
+ab
+
+ Comma
+ds:
 ```bash
-vllm bench {latency, serve, throughput}
+v
+m b
+
+ch {
+at
+
+cy, s
+rv
+, throughput}
 ```
+### 
+at
 
-### latency
+cy
+B
 
-Benchmark the latency of a single batch of requests.
+chmark th
+ 
+at
 
+cy of a s
+
+g
+
+ batch of r
+qu
+sts.
 ```bash
-vllm bench latency \
-    --model meta-llama/Llama-3.2-1B-Instruct \
-    --input-len 32 \
-    --output-len 1 \
-    --enforce-eager \
-    --load-format dummy
+v
+m b
+
+ch 
+at
+
+cy \
+    --mod
+
+ m
+ta-
+ama/L
+ama-3.2-1B-I
+struct \
+    --
+
+put-
+
+
+ 32 \
+    --output-
+
+
+ 1 \
+    --
+
+forc
+-
+ag
+r \
+    --
+oad-format dummy
 ```
+S
+ [v
+m b
 
-See [vllm bench latency](./bench/latency.md) for the full reference of all available arguments.
+ch 
+at
 
-### serve
+cy](./b
 
-Benchmark the online serving throughput.
+ch/
+at
 
+cy.md) for th
+ fu
+ r
+f
+r
+
+c
+ of a
+ ava
+
+ab
+
+ argum
+
+ts.
+### s
+rv
+
+B
+
+chmark th
+ o
+
+
+
+
+ s
+rv
+
+g throughput.
 ```bash
-vllm bench serve \
-    --model meta-llama/Llama-3.2-1B-Instruct \
-    --host server-host \
-    --port server-port \
-    --random-input-len 32 \
-    --random-output-len 4  \
-    --num-prompts  5
+v
+m b
+
+ch s
+rv
+ \
+    --mod
+
+ m
+ta-
+ama/L
+ama-3.2-1B-I
+struct \
+    --host s
+rv
+r-host \
+    --port s
+rv
+r-port \
+    --ra
+dom-
+
+put-
+
+
+ 32 \
+    --ra
+dom-output-
+
+
+ 4  \
+    --
+um-prompts  5
 ```
+S
+ [v
+m b
 
-See [vllm bench serve](./bench/serve.md) for the full reference of all available arguments.
+ch s
+rv
+](./b
 
+ch/s
+rv
+.md) for th
+ fu
+ r
+f
+r
+
+c
+ of a
+ ava
+
+ab
+
+ argum
+
+ts.
 ### throughput
+B
 
-Benchmark offline inference throughput.
+chmark off
 
+
+
+ 
+
+f
+r
+
+c
+ throughput.
 ```bash
-vllm bench throughput \
-    --model meta-llama/Llama-3.2-1B-Instruct \
-    --input-len 32 \
-    --output-len 1 \
-    --enforce-eager \
-    --load-format dummy
+v
+m b
+
+ch throughput \
+    --mod
+
+ m
+ta-
+ama/L
+ama-3.2-1B-I
+struct \
+    --
+
+put-
+
+
+ 32 \
+    --output-
+
+
+ 1 \
+    --
+
+forc
+-
+ag
+r \
+    --
+oad-format dummy
 ```
+S
+ [v
+m b
 
-See [vllm bench throughput](./bench/throughput.md) for the full reference of all available arguments.
+ch throughput](./b
 
-## collect-env
+ch/throughput.md) for th
+ fu
+ r
+f
+r
 
-Start collecting environment information.
+c
+ of a
+ ava
 
+ab
+
+ argum
+
+ts.
+## co
+
+ct-
+
+v
+Start co
+
+ct
+
+g 
+
+v
+ro
+m
+
+t 
+
+format
+o
+.
 ```bash
-vllm collect-env
+v
+m co
+
+ct-
+
+v
 ```
+## ru
+-batch
+Ru
+ batch prompts a
+d 
+r
+t
+ r
+su
+ts to f
 
-## run-batch
 
-Run batch prompts and write results to file.
+.
+Ru
 
-Running with a local file:
 
+g 
+
+th a 
+oca
+ f
+
+
+:
 ```bash
-vllm run-batch \
-    -i offline_inference/openai_batch/openai_example_batch.jsonl \
-    -o results.jsonl \
-    --model meta-llama/Meta-Llama-3-8B-Instruct
+v
+m ru
+-batch \
+    -
+ off
+
+
+
+_
+
+f
+r
+
+c
+/op
+
+a
+_batch/op
+
+a
+_
+xamp
+
+_batch.jso
+
+ \
+    -o r
+su
+ts.jso
+
+ \
+    --mod
+
+ m
+ta-
+ama/M
+ta-L
+ama-3-8B-I
+struct
 ```
+Us
 
-Using remote file:
+g r
+mot
+ f
 
+
+:
 ```bash
-vllm run-batch \
-    -i https://raw.githubusercontent.com/vllm-project/vllm/main/examples/offline_inference/openai_batch/openai_example_batch.jsonl \
-    -o results.jsonl \
-    --model meta-llama/Meta-Llama-3-8B-Instruct
+v
+m ru
+-batch \
+    -
+ https://ra
+.g
+thubus
+rco
+t
+
+t.com/v
+m-proj
+ct/v
+m/ma
+
+/
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/op
+
+a
+_batch/op
+
+a
+_
+xamp
+
+_batch.jso
+
+ \
+    -o r
+su
+ts.jso
+
+ \
+    --mod
+
+ m
+ta-
+ama/M
+ta-L
+ama-3-8B-I
+struct
 ```
+S
+ [v
+m ru
+-batch](./ru
+-batch.md) for th
+ fu
+ r
+f
+r
 
-See [vllm run-batch](./run-batch.md) for the full reference of all available arguments.
+c
+ of a
+ ava
 
-## More Help
+ab
 
-For detailed options of any subcommand, use:
+ argum
 
+ts.
+## Mor
+ H
+
+p
+For d
+ta
+
+
+d opt
+o
+s of a
+y subcomma
+d, us
+:
 ```bash
-vllm <subcommand> --help
+v
+m 
+subcomma
+d
+ --h
+
+p
 ```

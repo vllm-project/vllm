@@ -1,701 +1,8005 @@
-# Metrics
+# M
+tr
+cs
+vLLM 
+xpos
+s a r
+ch s
+t of m
+tr
+cs to support obs
+rvab
 
-vLLM exposes a rich set of metrics to support observability and capacity planning for the V1 engine.
 
-## Objectives
+ty a
+d capac
+ty p
+a
 
-- Provide comprehensive coverage of engine and request level metrics to aid production monitoring.
-- Prioritize Prometheus integrations, as this is what we expect to be used in production environments.
-- Offer logging support (i.e. printing metrics to the info log) for ad-hoc testing, debugging, development, and exploratory use cases.
 
-## Background
+g for th
+ V1 
 
-Metrics in vLLM can be categorized as follows:
+g
 
-1. Server-level metrics: Global metrics that track the state and performance of the LLM engine. These are typically exposed as Gauges or Counters in Prometheus.
-2. Request-level metrics: Metrics that track the characteristics (e.g. size and timing) of individual requests. These are typically exposed as Histograms in Prometheus and are often the SLOs that an SRE monitoring vLLM will be tracking.
 
-The mental model is that server-level metrics help explain the values of request-level metrics.
+.
+## Obj
+ct
+v
+s
+    - Prov
+d
+ compr
+h
 
-### Metrics Overview
+s
+v
+ cov
+rag
+ of 
 
-### v1 Metrics
+g
 
-In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/metrics` endpoint using the `vllm:` prefix, for example:
 
-- `vllm:num_requests_running` (Gauge) - Number of requests currently running.
-- `vllm:kv_cache_usage_perc` (Gauge) - Fraction of used KV cache blocks (0–1).
-- `vllm:prefix_cache_queries` (Counter) - Number of prefix cache queries.
-- `vllm:prefix_cache_hits` (Counter) - Number of prefix cache hits.
-- `vllm:prompt_tokens_total` (Counter) - Total number of prompt tokens processed.
-- `vllm:generation_tokens_total` (Counter) - Total number of generated tokens.
-- `vllm:request_success_total` (Counter) - Number of finished requests (by finish reason).
-- `vllm:request_prompt_tokens` (Histogram) - Histogram of input prompt token counts.
-- `vllm:request_generation_tokens` (Histogram) - Histogram of generation token counts.
-- `vllm:time_to_first_token_seconds` (Histogram) - Time to first token (TTFT).
-- `vllm:inter_token_latency_seconds` (Histogram) - Inter-token latency.
-- `vllm:e2e_request_latency_seconds` (Histogram) - End-to-end request latency.
-- `vllm:request_prefill_time_seconds` (Histogram) - Request prefill time.
-- `vllm:request_decode_time_seconds` (Histogram) - Request decode time.
+ a
+d r
+qu
+st 
 
-These are documented under [Inferencing and Serving -> Production Metrics](../usage/metrics.md).
+v
 
-### Grafana Dashboard
+ m
+tr
+cs to a
+d product
+o
+ mo
 
-vLLM also provides [a reference example](../../examples/online_serving/prometheus_grafana/README.md) for how to collect and store these metrics using Prometheus and visualize them using a Grafana dashboard.
+tor
 
-The subset of metrics exposed in the Grafana dashboard gives us an indication of which metrics are especially important:
+g.
+    - Pr
+or
+t
+z
+ Prom
+th
+us 
 
-- `vllm:e2e_request_latency_seconds_bucket` - End to end request latency measured in seconds.
-- `vllm:prompt_tokens` - Prompt tokens.
-- `vllm:generation_tokens` - Generation tokens.
-- `vllm:inter_token_latency_seconds` - Inter-token latency (Time Per Output Token, TPOT) in seconds.
-- `vllm:time_to_first_token_seconds` - Time to First Token (TTFT) latency in seconds.
-- `vllm:num_requests_running` (also, `_swapped` and `_waiting`) - Number of requests in the RUNNING, WAITING, and SWAPPED states.
-- `vllm:kv_cache_usage_perc` - Percentage of used cache blocks by vLLM.
-- `vllm:request_prompt_tokens` - Request prompt length.
-- `vllm:request_generation_tokens` - Request generation length.
-- `vllm:request_success` - Number of finished requests by their finish reason: either an EOS token was generated or the max sequence length was reached.
-- `vllm:request_queue_time_seconds` - Queue time.
-- `vllm:request_prefill_time_seconds` - Requests prefill time.
-- `vllm:request_decode_time_seconds` - Requests decode time.
-- `vllm:request_max_num_generation_tokens` - Max generation tokens in a sequence group.
+t
+grat
+o
+s, as th
+s 
+s 
+hat 
 
-See [the PR which added this Dashboard](https://github.com/vllm-project/vllm/pull/2316) for interesting and useful background on the choices made here.
+ 
+xp
+ct to b
+ us
+d 
 
-### Prometheus Client Library
+ product
+o
+ 
 
-Prometheus support was initially added [using the aioprometheus library](https://github.com/vllm-project/vllm/pull/1890), but a switch was made quickly to [prometheus_client](https://github.com/vllm-project/vllm/pull/2730). The rationale is discussed in both linked PRs.
+v
+ro
+m
 
-During those migrations we briefly lost a `MetricsMiddleware` to track HTTP metrics, but this was reinstated [using prometheus_fastapi_instrumentator](https://github.com/vllm-project/vllm/pull/15657):
+ts.
+    - Off
+r 
+ogg
 
+g support (
+.
+. pr
+
+t
+
+g m
+tr
+cs to th
+ 
+
+fo 
+og) for ad-hoc t
+st
+
+g, d
+bugg
+
+g, d
+v
+
+opm
+
+t, a
+d 
+xp
+oratory us
+ cas
+s.
+## Backgrou
+d
+M
+tr
+cs 
+
+ vLLM ca
+ b
+ cat
+gor
+z
+d as fo
+o
+s:
+1. S
+rv
+r-
+
+v
+
+ m
+tr
+cs: G
+oba
+ m
+tr
+cs that track th
+ stat
+ a
+d p
+rforma
+c
+ of th
+ LLM 
+
+g
+
+
+. Th
+s
+ ar
+ typ
+ca
+y 
+xpos
+d as Gaug
+s or Cou
+t
+rs 
+
+ Prom
+th
+us.
+2. R
+qu
+st-
+
+v
+
+ m
+tr
+cs: M
+tr
+cs that track th
+ charact
+r
+st
+cs (
+.g. s
+z
+ a
+d t
+m
+
+g) of 
+
+d
+v
+dua
+ r
+qu
+sts. Th
+s
+ ar
+ typ
+ca
+y 
+xpos
+d as H
+stograms 
+
+ Prom
+th
+us a
+d ar
+ oft
+
+ th
+ SLOs that a
+ SRE mo
+
+tor
+
+g vLLM 
+
+
+ b
+ track
+
+g.
+Th
+ m
+
+ta
+ mod
+
+ 
+s that s
+rv
+r-
+
+v
+
+ m
+tr
+cs h
+
+p 
+xp
+a
+
+ th
+ va
+u
+s of r
+qu
+st-
+
+v
+
+ m
+tr
+cs.
+### M
+tr
+cs Ov
+rv
+
+
+
+### v1 M
+tr
+cs
+I
+ v1, a
+ 
+xt
+
+s
+v
+ s
+t of m
+tr
+cs ar
+ 
+xpos
+d v
+a a Prom
+th
+us-compat
+b
+
+ `/m
+tr
+cs` 
+
+dpo
+
+t us
+
+g th
+ `v
+m:` pr
+f
+x, for 
+xamp
+
+:
+    - `v
+m:
+um_r
+qu
+sts_ru
+
+
+g` (Gaug
+) - Numb
+r of r
+qu
+sts curr
+
+t
+y ru
+
+
+g.
+    - `v
+m:kv_cach
+_usag
+_p
+rc` (Gaug
+) - Fract
+o
+ of us
+d KV cach
+ b
+ocks (0–1).
+    - `v
+m:pr
+f
+x_cach
+_qu
+r
+
+s` (Cou
+t
+r) - Numb
+r of pr
+f
+x cach
+ qu
+r
+
+s.
+    - `v
+m:pr
+f
+x_cach
+_h
+ts` (Cou
+t
+r) - Numb
+r of pr
+f
+x cach
+ h
+ts.
+    - `v
+m:prompt_tok
+
+s_tota
+` (Cou
+t
+r) - Tota
+ 
+umb
+r of prompt tok
+
+s proc
+ss
+d.
+    - `v
+m:g
+
+
+rat
+o
+_tok
+
+s_tota
+` (Cou
+t
+r) - Tota
+ 
+umb
+r of g
+
+
+rat
+d tok
+
+s.
+    - `v
+m:r
+qu
+st_succ
+ss_tota
+` (Cou
+t
+r) - Numb
+r of f
+
+
+sh
+d r
+qu
+sts (by f
+
+
+sh r
+aso
+).
+    - `v
+m:r
+qu
+st_prompt_tok
+
+s` (H
+stogram) - H
+stogram of 
+
+put prompt tok
+
+ cou
+ts.
+    - `v
+m:r
+qu
+st_g
+
+
+rat
+o
+_tok
+
+s` (H
+stogram) - H
+stogram of g
+
+
+rat
+o
+ tok
+
+ cou
+ts.
+    - `v
+m:t
+m
+_to_f
+rst_tok
+
+_s
+co
+ds` (H
+stogram) - T
+m
+ to f
+rst tok
+
+ (TTFT).
+    - `v
+m:
+
+t
+r_tok
+
+_
+at
+
+cy_s
+co
+ds` (H
+stogram) - I
+t
+r-tok
+
+ 
+at
+
+cy.
+    - `v
+m:
+2
+_r
+qu
+st_
+at
+
+cy_s
+co
+ds` (H
+stogram) - E
+d-to-
+
+d r
+qu
+st 
+at
+
+cy.
+    - `v
+m:r
+qu
+st_pr
+f
+
+_t
+m
+_s
+co
+ds` (H
+stogram) - R
+qu
+st pr
+f
+
+ t
+m
+.
+    - `v
+m:r
+qu
+st_d
+cod
+_t
+m
+_s
+co
+ds` (H
+stogram) - R
+qu
+st d
+cod
+ t
+m
+.
+Th
+s
+ ar
+ docum
+
+t
+d u
+d
+r [I
+f
+r
+
+c
+
+g a
+d S
+rv
+
+g -
+ Product
+o
+ M
+tr
+cs](../usag
+/m
+tr
+cs.md).
+### Grafa
+a Dashboard
+vLLM a
+so prov
+d
+s [a r
+f
+r
+
+c
+ 
+xamp
+
+](../../
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/prom
+th
+us_grafa
+a/README.md) for ho
+ to co
+
+ct a
+d stor
+ th
+s
+ m
+tr
+cs us
+
+g Prom
+th
+us a
+d v
+sua
+
+z
+ th
+m us
+
+g a Grafa
+a dashboard.
+Th
+ subs
+t of m
+tr
+cs 
+xpos
+d 
+
+ th
+ Grafa
+a dashboard g
+v
+s us a
+ 
+
+d
+cat
+o
+ of 
+h
+ch m
+tr
+cs ar
+ 
+sp
+c
+a
+y 
+mporta
+t:
+    - `v
+m:
+2
+_r
+qu
+st_
+at
+
+cy_s
+co
+ds_buck
+t` - E
+d to 
+
+d r
+qu
+st 
+at
+
+cy m
+asur
+d 
+
+ s
+co
+ds.
+    - `v
+m:prompt_tok
+
+s` - Prompt tok
+
+s.
+    - `v
+m:g
+
+
+rat
+o
+_tok
+
+s` - G
+
+
+rat
+o
+ tok
+
+s.
+    - `v
+m:
+
+t
+r_tok
+
+_
+at
+
+cy_s
+co
+ds` - I
+t
+r-tok
+
+ 
+at
+
+cy (T
+m
+ P
+r Output Tok
+
+, TPOT) 
+
+ s
+co
+ds.
+    - `v
+m:t
+m
+_to_f
+rst_tok
+
+_s
+co
+ds` - T
+m
+ to F
+rst Tok
+
+ (TTFT) 
+at
+
+cy 
+
+ s
+co
+ds.
+    - `v
+m:
+um_r
+qu
+sts_ru
+
+
+g` (a
+so, `_s
+app
+d` a
+d `_
+a
+t
+
+g`) - Numb
+r of r
+qu
+sts 
+
+ th
+ RUNNING, WAITING, a
+d SWAPPED stat
+s.
+    - `v
+m:kv_cach
+_usag
+_p
+rc` - P
+rc
+
+tag
+ of us
+d cach
+ b
+ocks by vLLM.
+    - `v
+m:r
+qu
+st_prompt_tok
+
+s` - R
+qu
+st prompt 
+
+
+gth.
+    - `v
+m:r
+qu
+st_g
+
+
+rat
+o
+_tok
+
+s` - R
+qu
+st g
+
+
+rat
+o
+ 
+
+
+gth.
+    - `v
+m:r
+qu
+st_succ
+ss` - Numb
+r of f
+
+
+sh
+d r
+qu
+sts by th
+
+r f
+
+
+sh r
+aso
+: 
+
+th
+r a
+ EOS tok
+
+ 
+as g
+
+
+rat
+d or th
+ max s
+qu
+
+c
+ 
+
+
+gth 
+as r
+ach
+d.
+    - `v
+m:r
+qu
+st_qu
+u
+_t
+m
+_s
+co
+ds` - Qu
+u
+ t
+m
+.
+    - `v
+m:r
+qu
+st_pr
+f
+
+_t
+m
+_s
+co
+ds` - R
+qu
+sts pr
+f
+
+ t
+m
+.
+    - `v
+m:r
+qu
+st_d
+cod
+_t
+m
+_s
+co
+ds` - R
+qu
+sts d
+cod
+ t
+m
+.
+    - `v
+m:r
+qu
+st_max_
+um_g
+
+
+rat
+o
+_tok
+
+s` - Max g
+
+
+rat
+o
+ tok
+
+s 
+
+ a s
+qu
+
+c
+ group.
+S
+ [th
+ PR 
+h
+ch add
+d th
+s Dashboard](https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/2316) for 
+
+t
+r
+st
+
+g a
+d us
+fu
+ backgrou
+d o
+ th
+ cho
+c
+s mad
+ h
+r
+.
+### Prom
+th
+us C
+
+
+
+t L
+brary
+Prom
+th
+us support 
+as 
+
+
+t
+a
+y add
+d [us
+
+g th
+ a
+oprom
+th
+us 
+
+brary](https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/1890), but a s
+
+tch 
+as mad
+ qu
+ck
+y to [prom
+th
+us_c
+
+
+
+t](https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/2730). Th
+ rat
+o
+a
+
+ 
+s d
+scuss
+d 
+
+ both 
+
+
+k
+d PRs.
+Dur
+
+g thos
+ m
+grat
+o
+s 
+
+ br
+
+f
+y 
+ost a `M
+tr
+csM
+dd
+
+
+ar
+` to track HTTP m
+tr
+cs, but th
+s 
+as r
+
+
+stat
+d [us
+
+g prom
+th
+us_fastap
+_
+
+strum
+
+tator](https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/15657):
 ```bash
-$ curl http://0.0.0.0:8000/metrics 2>/dev/null  | grep -P '^http_(?!.*(_bucket|_created|_sum)).*'
-http_requests_total{handler="/v1/completions",method="POST",status="2xx"} 201.0
-http_request_size_bytes_count{handler="/v1/completions"} 201.0
-http_response_size_bytes_count{handler="/v1/completions"} 201.0
-http_request_duration_highr_seconds_count 201.0
-http_request_duration_seconds_count{handler="/v1/completions",method="POST"} 201.0
+$ cur
+ http://0.0.0.0:8000/m
+tr
+cs 2
+/d
+v/
+u
+  | gr
+p -P '^http_(?!.*(_buck
+t|_cr
+at
+d|_sum)).*'
+http_r
+qu
+sts_tota
+{ha
+d
+
+r="/v1/comp
+
+t
+o
+s",m
+thod="POST",status="2xx"} 201.0
+http_r
+qu
+st_s
+z
+_byt
+s_cou
+t{ha
+d
+
+r="/v1/comp
+
+t
+o
+s"} 201.0
+http_r
+spo
+s
+_s
+z
+_byt
+s_cou
+t{ha
+d
+
+r="/v1/comp
+
+t
+o
+s"} 201.0
+http_r
+qu
+st_durat
+o
+_h
+ghr_s
+co
+ds_cou
+t 201.0
+http_r
+qu
+st_durat
+o
+_s
+co
+ds_cou
+t{ha
+d
+
+r="/v1/comp
+
+t
+o
+s",m
+thod="POST"} 201.0
 ```
+### Mu
+t
+-proc
+ss Mod
+
+H
+stor
+ca
+y, m
+tr
+cs 
+
+r
+ co
+
+ct
+d 
+
+ th
+ 
+
+g
+
+
+ cor
+ proc
+ss a
+d mu
+t
+proc
+ss mod
+ 
+as us
+d to mak
+ th
+m ava
+
+ab
+
+ 
+
+ th
+ API s
+rv
+r proc
+ss. S
+ 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/7279
+.
+Mor
+ r
+c
+
+t
+y, m
+tr
+cs ar
+ co
+
+ct
+d 
+
+ th
+ API s
+rv
+r proc
+ss a
+d mu
+t
+proc
+ss mod
+ 
+s o
+
+y us
+d 
+h
+
+ `--ap
+-s
+rv
+r-cou
+t 
+ 1`. S
+ 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/17546
+ a
+d d
+ta
+
+s o
+ [API s
+rv
+r sca
+
+-out](../s
+rv
+
+g/data_para
+
+
+_d
+p
+oym
+
+t.md#
+
+t
+r
+a
+-
+oad-ba
+a
+c
+
+g).
+### Bu
+
+t 
+
+ Pytho
+/Proc
+ss M
+tr
+cs
+Th
+ fo
+o
+
+
+g m
+tr
+cs ar
+ support
+d by d
+fau
+t by `prom
+th
+us_c
+
+
+
+t`, but th
+y ar
+ 
+ot 
+xpos
+d 
+h
+
+ mu
+t
+proc
+ss mod
+ 
+s us
+d:
+    - `pytho
+_gc_obj
+cts_co
+
+ct
+d_tota
+`
+    - `pytho
+_gc_obj
+cts_u
+co
+
+ctab
+
+_tota
+`
+    - `pytho
+_gc_co
+
+ct
+o
+s_tota
+`
+    - `pytho
+_
+
+fo`
+    - `proc
+ss_v
+rtua
+_m
+mory_byt
+s`
+    - `proc
+ss_r
+s
+d
+
+t_m
+mory_byt
+s`
+    - `proc
+ss_start_t
+m
+_s
+co
+ds`
+    - `proc
+ss_cpu_s
+co
+ds_tota
+`
+    - `proc
+ss_op
+
+_fds`
+    - `proc
+ss_max_fds`
+Th
+r
+for
+, th
+s
+ m
+tr
+cs ar
+ u
+ava
+
+ab
+
+ 
+h
+
+ `--ap
+-s
+rv
+r-cou
+t 
+ 1`. It's qu
+st
+o
+ab
+
+ ho
+ r
+
+
+va
+t th
+s
+ ar
+ s
+
+c
+ th
+y do 
+ot aggr
+gat
+ th
+s
+ stats for a
+ proc
+ss
+s that mak
+ up a vLLM 
+
+sta
+c
+.
+## M
+tr
+cs D
+s
+g
+
+Th
+ ["Ev
+
+ B
+tt
+r Obs
+rvab
+
+
+ty"](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/3616) f
+atur
+ 
+h
+r
+ 
+as 
+h
+r
+ much of th
+ m
+tr
+cs d
+s
+g
+ 
+as p
+a
+
+d. For 
+xamp
+
+, s
+ 
+h
+r
+ [a d
+ta
+
+
+d roadmap 
+as 
+a
+d out](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/3616#
+ssu
+comm
+
+t-2030858781).
+### L
+gacy PRs
+To h
+
+p u
+d
+rsta
+d th
+ backgrou
+d to th
+ m
+tr
+cs d
+s
+g
+, h
+r
+ ar
+ som
+ of th
+ r
+
+
+va
+t PRs 
+h
+ch add
+d th
+ or
+g
+
+a
+, 
+o
+ 
+
+gacy, m
+tr
+cs:
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/1890
+
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/2316
+
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/2730
+
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/4464
+
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/7279
+
+### M
+tr
+cs Imp
+
+m
+
+tat
+o
+ PRs
+For backgrou
+d, h
+r
+ ar
+ th
+ r
+
+
+va
+t PRs r
+
+at
+
+g to th
+ m
+tr
+cs 
+mp
+
+m
+
+tat
+o
+ 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/10582
+:
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/11962
+
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/11973
+
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/10907
+
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/12416
+
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/12478
+
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/12516
+
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/12530
+
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/12561
+
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/12579
+
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/12592
+
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/12644
+
+### M
+tr
+cs Co
+
+ct
+o
+
+I
+ v1, 
+
+ 
+
+sh to mov
+ computat
+o
+ a
+d ov
+rh
+ad out of th
+ 
+
+g
+
+
+ cor
+
+proc
+ss to m
+
+
+m
+z
+ th
+ t
+m
+ b
+t
+
+
+ 
+ach for
+ard pass.
+Th
+ ov
+ra
+ 
+d
+a of V1 E
+g
+
+
+Cor
+ d
+s
+g
+ 
+s:
+    - E
+g
+
+
+Cor
+ 
+s th
+ 
+
+
+r 
+oop. P
+rforma
+c
+ 
+s most cr
+t
+ca
+ h
+r
+
+    - Asy
+cLLM 
+s th
+ out
+r 
+oop. Th
+s 
+s ov
+r
+app
+d 
+
+th GPU 
+x
+cut
+o
+
+  (
+d
+a
+y), so th
+s 
+s 
+h
+r
+ a
+y "ov
+rh
+ads" shou
+d b
+ 
+f
+  poss
+b
+
+. So Asy
+cLLM.output_ha
+d
+
+r_
+oop 
+s th
+ 
+d
+a
+ p
+ac
+ for th
+
+  m
+tr
+cs bookk
+p
+
+g 
+f poss
+b
+
+.
+W
+ 
+
+
+ ach
+
+v
+ th
+s by co
+
+ct
+
+g m
+tr
+cs 
+
+ th
+ fro
+t
+
+d API s
+rv
+r,
+a
+d bas
+ th
+s
+ m
+tr
+cs o
+ 
+
+format
+o
+ 
+
+ ca
+ g
+
+a
+ from th
+
+`E
+g
+
+
+Cor
+Outputs` r
+tur
+
+d by th
+ 
+
+g
+
+
+ cor
+ proc
+ss to th
+
+fro
+t
+
+d.
+### I
+t
+rva
+ Ca
+cu
+at
+o
+s
+Ma
+y of our m
+tr
+cs ar
+ th
+ t
+m
+ 
+
+t
+rva
+ b
+t
+
+
+ var
+ous 
+v
+
+ts 
+
+
+th
+ proc
+ss
+
+g of a r
+qu
+st. It 
+s b
+st pract
+c
+ to us
+ t
+m
+stamps
+bas
+d o
+ "mo
+oto
+
+c t
+m
+" (`t
+m
+.mo
+oto
+
+c()`) rath
+r tha
+ "
+a
+-c
+ock
+t
+m
+" (`t
+m
+.t
+m
+()`) to ca
+cu
+at
+ 
+
+t
+rva
+s as th
+ form
+r 
+s
+u
+aff
+ct
+d by syst
+m c
+ock cha
+g
+s (
+.g. from NTP).
+It's a
+so 
+mporta
+t to 
+ot
+ that mo
+oto
+
+c c
+ocks d
+ff
+r b
+t
+
+
+
+proc
+ss
+s - 
+ach proc
+ss has 
+ts o
+
+ r
+f
+r
+
+c
+ po
+
+t. So 
+t 
+s
+m
+a
+
+
+g
+
+ss to compar
+ mo
+oto
+
+c t
+m
+stamps from d
+ff
+r
+
+t proc
+ss
+s.
+Th
+r
+for
+, 
+
+ ord
+r to ca
+cu
+at
+ a
+ 
+
+t
+rva
+, 
+
+ must compar
+ t
+o
+mo
+oto
+
+c t
+m
+stamps from th
+ sam
+ proc
+ss.
+### Sch
+du
+
+r Stats
+Th
+ 
+
+g
+
+
+ cor
+ proc
+ss 
+
+
+ co
+
+ct som
+ k
+y stat
+st
+cs from th
+
+sch
+du
+
+r - 
+.g. th
+ 
+umb
+r of r
+qu
+sts that 
+
+r
+ sch
+du
+
+d or 
+a
+t
+
+g
+aft
+r th
+ 
+ast sch
+du
+
+r pass - a
+d 
+
+c
+ud
+ thos
+ stat
+st
+cs 
+
+
+`E
+g
+
+
+Cor
+Outputs`.
+### E
+g
+
+
+ Cor
+ Ev
+
+ts
+Th
+ 
+
+g
+
+
+ cor
+ 
+
+
+ a
+so r
+cord th
+ t
+m
+stamp of c
+rta
+
+ p
+r-r
+qu
+st
+
+v
+
+ts so that th
+ fro
+t
+
+d ca
+ ca
+cu
+at
+ th
+ 
+
+t
+rva
+ b
+t
+
+
+ th
+s
+
+
+v
+
+ts.
+Th
+ 
+v
+
+ts ar
+:
+    - `QUEUED` - 
+h
+
+ th
+ r
+qu
+st 
+as r
+c
+
+v
+d by th
+ 
+
+g
+
+
+ cor
+ a
+d
+  add
+d to th
+ sch
+du
+
+r qu
+u
+.
+    - `SCHEDULED` - 
+h
+
+ th
+ r
+qu
+st 
+as f
+rst sch
+du
+
+d for 
+x
+cut
+o
+.
+    - `PREEMPTED` - th
+ r
+qu
+st has b
+
+ put back 
+
+ th
+ 
+a
+t
+
+g qu
+u
 
-### Multi-process Mode
-
-Historically, metrics were collected in the engine core process and multiprocess mode was used to make them available in the API server process. See <https://github.com/vllm-project/vllm/pull/7279>.
-
-More recently, metrics are collected in the API server process and multiprocess mode is only used when `--api-server-count > 1`. See <https://github.com/vllm-project/vllm/pull/17546> and details on [API server scale-out](../serving/data_parallel_deployment.md#internal-load-balancing).
-
-### Built in Python/Process Metrics
-
-The following metrics are supported by default by `prometheus_client`, but they are not exposed when multiprocess mode is used:
-
-- `python_gc_objects_collected_total`
-- `python_gc_objects_uncollectable_total`
-- `python_gc_collections_total`
-- `python_info`
-- `process_virtual_memory_bytes`
-- `process_resident_memory_bytes`
-- `process_start_time_seconds`
-- `process_cpu_seconds_total`
-- `process_open_fds`
-- `process_max_fds`
-
-Therefore, these metrics are unavailable when `--api-server-count > 1`. It's questionable how relevant these are since they do not aggregate these stats for all processes that make up a vLLM instance.
-
-## Metrics Design
-
-The ["Even Better Observability"](https://github.com/vllm-project/vllm/issues/3616) feature where was where much of the metrics design was planned. For example, see where [a detailed roadmap was laid out](https://github.com/vllm-project/vllm/issues/3616#issuecomment-2030858781).
-
-### Legacy PRs
-
-To help understand the background to the metrics design, here are some of the relevant PRs which added the original, now legacy, metrics:
-
-- <https://github.com/vllm-project/vllm/pull/1890>
-- <https://github.com/vllm-project/vllm/pull/2316>
-- <https://github.com/vllm-project/vllm/pull/2730>
-- <https://github.com/vllm-project/vllm/pull/4464>
-- <https://github.com/vllm-project/vllm/pull/7279>
-
-### Metrics Implementation PRs
-
-For background, here are the relevant PRs relating to the metrics implementation <https://github.com/vllm-project/vllm/issues/10582>:
-
-- <https://github.com/vllm-project/vllm/pull/11962>
-- <https://github.com/vllm-project/vllm/pull/11973>
-- <https://github.com/vllm-project/vllm/pull/10907>
-- <https://github.com/vllm-project/vllm/pull/12416>
-- <https://github.com/vllm-project/vllm/pull/12478>
-- <https://github.com/vllm-project/vllm/pull/12516>
-- <https://github.com/vllm-project/vllm/pull/12530>
-- <https://github.com/vllm-project/vllm/pull/12561>
-- <https://github.com/vllm-project/vllm/pull/12579>
-- <https://github.com/vllm-project/vllm/pull/12592>
-- <https://github.com/vllm-project/vllm/pull/12644>
-
-### Metrics Collection
-
-In v1, we wish to move computation and overhead out of the engine core
-process to minimize the time between each forward pass.
-
-The overall idea of V1 EngineCore design is:
-
-- EngineCore is the inner loop. Performance is most critical here
-- AsyncLLM is the outer loop. This is overlapped with GPU execution
-  (ideally), so this is where any "overheads" should be if
-  possible. So AsyncLLM.output_handler_loop is the ideal place for the
-  metrics bookkeeping if possible.
-
-We will achieve this by collecting metrics in the frontend API server,
-and base these metrics on information we can glean from the
-`EngineCoreOutputs` returned by the engine core process to the
-frontend.
-
-### Interval Calculations
-
-Many of our metrics are the time interval between various events in
-the processing of a request. It is best practice to use timestamps
-based on "monotonic time" (`time.monotonic()`) rather than "wall-clock
-time" (`time.time()`) to calculate intervals as the former is
-unaffected by system clock changes (e.g. from NTP).
-
-It's also important to note that monotonic clocks differ between
-processes - each process has its own reference point. So it is
-meaningless to compare monotonic timestamps from different processes.
-
-Therefore, in order to calculate an interval, we must compare two
-monotonic timestamps from the same process.
-
-### Scheduler Stats
-
-The engine core process will collect some key statistics from the
-scheduler - e.g. the number of requests that were scheduled or waiting
-after the last scheduler pass - and include those statistics in
-`EngineCoreOutputs`.
-
-### Engine Core Events
-
-The engine core will also record the timestamp of certain per-request
-events so that the frontend can calculate the interval between these
-events.
-
-The events are:
-
-- `QUEUED` - when the request was received by the engine core and
-  added to the scheduler queue.
-- `SCHEDULED` - when the request was first scheduled for execution.
-- `PREEMPTED` - the request has been put back in the waiting queue
-  in order to make room for other requests to complete. It will be
-  re-scheduled in future and re-start its prefill phase.
-- `NEW_TOKENS` - when the output included in `EngineCoreOutput` was
-  generated. Since this is common to all requests in a given
-  iteration, we use a single timestamp on `EngineCoreOutputs` to
-  record this event.
-
-And the calculated intervals are:
-
-- Queue interval - between `QUEUED` and most recent `SCHEDULED`.
-- Prefill interval - between most recent `SCHEDULED` and the subsequent
-  first `NEW_TOKENS`.
-- Decode interval - between first (after the most recent `SCHEDULED`) and
-  last `NEW_TOKENS`.
-- Inference interval - between most recent `SCHEDULED` and last `NEW_TOKENS`.
-- Inter-token interval - between successive `NEW_TOKENS`.
-
-Put another way:
-
-![Interval calculations - common case](../assets/design/metrics/intervals-1.png)
-
-We explored the possibility of having the frontend calculate these
-intervals using the timing of events visible by the frontend. However,
-the frontend does not have visibility into the timing of the `QUEUED`
-and `SCHEDULED` events and, since we need to calculate intervals based
-on monotonic timestamps from the same process ... we need the engine
-core to record timestamps for all of these events.
-
-#### Interval Calculations vs Preemptions
-
-When a preemption occurs during decode, since any already generated
-tokens are reused, we consider the preemption as affecting the
-inter-token, decode, and inference intervals.
-
-![Interval calculations - preempted decode](../assets/design/metrics/intervals-2.png)
-
-When a preemption occurs during prefill (assuming such an event
-is possible), we consider the preemption as affecting the
-time-to-first-token and prefill intervals.
-
-![Interval calculations - preempted prefill](../assets/design/metrics/intervals-3.png)
-
-### Frontend Stats Collection
-
-As the frontend processes a single `EngineCoreOutputs` - i.e. the
-output from a single engine core iteration - it collects various
-statistics relating to that iteration:
-
-- The total number of new tokens generated in this iteration.
-- The total number of prompt tokens processed by the prefills that
-  completed in this iteration.
-- The queue intervals for any requests that were scheduled in this
-  iteration.
-- The prefill intervals for any requests that completed prefill in
-  this iteration.
-- The inter-token intervals (Time Per Output Token, TPOT), for all
-  requests included in this iteration.
-- The Time-To-First-Token (TTFT) for any requests that completed
-  prefill in this iteration. However, we calculate this interval
-  relative to when the request was first received by the frontend
-  (`arrival_time`) in order to account for input processing time.
-
-For any requests that were completed in a given iteration, we also
-record:
-
-- The inference and decode intervals - relative to the scheduled and
-  first token events, as described above.
-- End-to-end latency - the interval between frontend `arrival_time`
-  and the frontend receiving the final token.
-
-### KV Cache Residency Metrics
-
-We also emit a set of histograms that describe how long sampled KV cache
-blocks stay resident and how often they are reused. Sampling
-(`--kv-cache-metrics-sample`) keeps the overhead tiny; when a block is
-chosen we record:
-
-- `lifetime` – allocation ⟶ eviction
-- `idle before eviction` – last touch ⟶ eviction
-- `reuse gaps` – the pauses between touches when the block gets reused
-
-Those map directly to the Prometheus metrics:
-
-- `vllm:kv_block_lifetime_seconds` – how long each sampled block exists.
-- `vllm:kv_block_idle_before_evict_seconds` – idle tail after the final access.
-- `vllm:kv_block_reuse_gap_seconds` – time between consecutive touches.
-
-The engine core only ships raw eviction events via `SchedulerStats`; the
-frontend drains them, turns them into Prometheus observations, and also
-exposes the same data through `LLM.get_metrics()` when logging is on.
-Looking at lifetime and idle time on one chart makes it easy to spot
-stranded cache or workloads that pin prompts for a long decode.
-
-### Metrics Publishing - Logging
-
-The `LoggingStatLogger` metrics publisher outputs a log `INFO` message
-every 5 seconds with some key metrics:
-
-- The current number of running/waiting requests
-- The current GPU cache usage
-- The number of prompt tokens processed per second over the past 5
-  seconds
-- The number of new tokens generated per second over the past 5
-  seconds
-- The prefix cache hit rate over the most recent 1k kv-cache block queries
-
-### Metrics Publishing - Prometheus
-
-The `PrometheusStatLogger` metrics publisher makes the metrics
-available via a `/metrics` HTTP endpoint in a Prometheus-compatible
-format. A Prometheus instance can then be configured to poll this
-endpoint (e.g. every second) and record the values in its time-series
-database. Prometheus is often used via Grafana, allowing these metrics
-to be graphed over time.
-
-Prometheus supports the following metric types:
-
-- Counter: a value that will increase over time, never reducing, and
-  generally reset to zero when the vLLM instance restarts. For
-  example, the number of tokens generated over the lifetime of the
-  instance.
-- Gauge: a value that goes up and down, for example the number of
-  requests currently scheduled for execution.
-- Histogram: a count of metric samples, recorded in buckets. For
-  example, the number of requests whose TTFT was <1ms, <5ms, <10ms,
-  <20ms, and so on.
-
-Prometheus metrics can also be labelled, allowing metrics to be
-combined according to matching labels. In vLLM, we add a `model_name`
-label to every metric which includes the name of the model served by
-that instance.
-
-Example output:
-
-```bash
-$ curl http://0.0.0.0:8000/metrics
-# HELP vllm:num_requests_running Number of requests in model execution batches.
-# TYPE vllm:num_requests_running gauge
-vllm:num_requests_running{model_name="meta-llama/Llama-3.1-8B-Instruct"} 8.0
-...
-# HELP vllm:generation_tokens_total Number of generation tokens processed.
-# TYPE vllm:generation_tokens_total counter
-vllm:generation_tokens_total{model_name="meta-llama/Llama-3.1-8B-Instruct"} 27453.0
-...
-# HELP vllm:request_success_total Count of successfully processed requests.
-# TYPE vllm:request_success_total counter
-vllm:request_success_total{finished_reason="stop",model_name="meta-llama/Llama-3.1-8B-Instruct"} 1.0
-vllm:request_success_total{finished_reason="length",model_name="meta-llama/Llama-3.1-8B-Instruct"} 131.0
-vllm:request_success_total{finished_reason="abort",model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0
-...
-# HELP vllm:time_to_first_token_seconds Histogram of time to first token in seconds.
-# TYPE vllm:time_to_first_token_seconds histogram
-vllm:time_to_first_token_seconds_bucket{le="0.001",model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0
-vllm:time_to_first_token_seconds_bucket{le="0.005",model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0
-vllm:time_to_first_token_seconds_bucket{le="0.01",model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0
-vllm:time_to_first_token_seconds_bucket{le="0.02",model_name="meta-llama/Llama-3.1-8B-Instruct"} 13.0
-vllm:time_to_first_token_seconds_bucket{le="0.04",model_name="meta-llama/Llama-3.1-8B-Instruct"} 97.0
-vllm:time_to_first_token_seconds_bucket{le="0.06",model_name="meta-llama/Llama-3.1-8B-Instruct"} 123.0
-vllm:time_to_first_token_seconds_bucket{le="0.08",model_name="meta-llama/Llama-3.1-8B-Instruct"} 138.0
-vllm:time_to_first_token_seconds_bucket{le="0.1",model_name="meta-llama/Llama-3.1-8B-Instruct"} 140.0
-vllm:time_to_first_token_seconds_count{model_name="meta-llama/Llama-3.1-8B-Instruct"} 140.0
-```
-
-!!! note
-    The choice of histogram buckets to be most useful to users
-    across a broad set of use cases is not straightforward and will
-    require refinement over time.
-
-### Cache Config Info
-
-`prometheus_client` has support for
-[Info metrics](https://prometheus.github.io/client_python/instrumenting/info/)
-which are equivalent to a `Gauge` whose value is permanently set to 1,
-but exposes interesting key/value pair information via labels. This is
-used for information about an instance that does not change - so it
-only needs to be observed at startup - and allows comparing across
-instances in Prometheus.
-
-We use this concept for the `vllm:cache_config_info` metric:
-
-```text
-# HELP vllm:cache_config_info Information of the LLMEngine CacheConfig
-# TYPE vllm:cache_config_info gauge
-vllm:cache_config_info{block_size="16",cache_dtype="auto",calculate_kv_scales="False",cpu_offload_gb="0",enable_prefix_caching="False",gpu_memory_utilization="0.9",...} 1.0
-```
-
-However, `prometheus_client` has
-[never supported Info metrics in multiprocessing mode](https://github.com/prometheus/client_python/pull/300) -
-for [unclear reasons](gh-pr:7279#discussion_r1710417152). We
-simply use a `Gauge` metric set to 1 and
-`multiprocess_mode="mostrecent"` instead.
-
-### LoRA Metrics
-
-The `vllm:lora_requests_info` `Gauge` is somewhat similar, except the
-value is the current wall-clock time, and is updated every iteration.
-
-The label names used are:
-
-- `running_lora_adapters`: a per-adapter count of the number requests
-  running using that adapter, formatted as a comma-separated string.
-- `waiting_lora_adapters`: similar, except counting requests that are
-  waiting to be scheduled.
-- `max_lora` - the static "max number of LoRAs in a single batch."
-  configuration.
-
-Encoding a running/waiting counts for multiple adapters in a
-comma-separated string seems quite misguided - we could use labels to
-distinguish between per-adapter counts. This should be revisited.
-
-Note that `multiprocess_mode="livemostrecent"` is used - the most
-recent metric is used, but only from currently running processes.
-
-This was added in <https://github.com/vllm-project/vllm/pull/9477> and there is
-[at least one known user](https://github.com/kubernetes-sigs/gateway-api-inference-extension/pull/54).
-If we revisit this design and deprecate the old metric, we should
-coordinate with downstream users so they can migrate before the removal.
-
-### Prefix Cache metrics
-
-The discussion in <https://github.com/vllm-project/vllm/issues/10582> about adding prefix cache metrics yielded
-some interesting points which may be relevant to how we approach
-future metrics.
-
-Every time the prefix cache is queried, we record the number of tokens
-queried and the number of queried tokens present in the cache
-(i.e. hits).
-
-However, the metric of interest is the hit rate - i.e. the number of
-hits per query.
-
-In the case of logging, we expect the user is best served by
-calculating the hit rate over a fixed number of the most recent
-queries (the interval is fixed to 1k most recent queries for now).
-
-In the case of Prometheus though, we should take advantage of the
-time-series nature of Prometheus and allow the user to calculate the
-hit rate over an interval of their choosing. For example, a PromQL
-query to calculate the hit interval of the past 5 minutes:
-
-```text
-rate(cache_query_hit[5m]) / rate(cache_query_total[5m])
-```
-
-To achieve this, we should record the queries and hits as counters in
-Prometheus, rather than recording the hit rate as a gauge.
-
-## Deprecated Metrics
-
-### How To Deprecate
-
-Deprecating metrics shouldn't be taken lightly. Users may not notice a
-metric has been deprecated, and may be quite inconvenienced when it is
-suddenly (from their perspective) when it is removed, even if there is
-an equivalent metric for them to use.
-
-As an example, see how `vllm:avg_prompt_throughput_toks_per_s` was
-[deprecated](https://github.com/vllm-project/vllm/pull/2764) (with a comment in the code),
-[removed](https://github.com/vllm-project/vllm/pull/12383), and then [noticed by a user](https://github.com/vllm-project/vllm/issues/13218).
-
-In general:
-
-1. We should be cautious about deprecating metrics, especially since
-   it can be hard to predict the user impact.
-2. We should include a prominent deprecation notice in the help string
-   that is included in the `/metrics' output.
-3. We should list deprecated metrics in user-facing documentation and
-   release notes.
-4. We should consider hiding deprecated metrics behind a CLI argument
-   in order to give administrators
-   [an escape hatch](https://kubernetes.io/docs/concepts/cluster-administration/system-metrics/#show-hidden-metrics)
-   for some time before deleting them.
-
-See the [deprecation policy](../contributing/deprecation_policy.md) for
-the project-wide deprecation policy.
-
-### Unimplemented - `vllm:tokens_total`
-
-Added by <https://github.com/vllm-project/vllm/pull/4464>, but apparently never implemented. This can just be
-removed.
-
-### Duplicated - Queue Time
-
-The `vllm:time_in_queue_requests` Histogram metric was added by
-<https://github.com/vllm-project/vllm/pull/9659> and its calculation is:
-
-```python
-    self.metrics.first_scheduled_time = now
-    self.metrics.time_in_queue = now - self.metrics.arrival_time
-```
-
-Two weeks later, <https://github.com/vllm-project/vllm/pull/4464> added `vllm:request_queue_time_seconds` leaving
-us with:
-
-```python
-if seq_group.is_finished():
-    if (seq_group.metrics.first_scheduled_time is not None and
-            seq_group.metrics.first_token_time is not None):
-        time_queue_requests.append(
-            seq_group.metrics.first_scheduled_time -
-            seq_group.metrics.arrival_time)
-    ...
-    if seq_group.metrics.time_in_queue is not None:
-        time_in_queue_requests.append(
-            seq_group.metrics.time_in_queue)
-```
-
-This seems duplicative, and one of them should be removed. The latter
-is used by the Grafana dashboard, so we should deprecate or remove the
-former.
-
-### Prefix Cache Hit Rate
-
-See above - we now expose 'queries' and 'hits' counters rather than a
-'hit rate' gauge.
-
-### KV Cache Offloading
-
-Two legacy metrics relate to a "swapped" preemption mode that is no
-longer relevant in v1:
-
-- `vllm:num_requests_swapped`
-- `vllm:cpu_cache_usage_perc`
-
-In this mode, when a request was preempted (e.g. to make room in KV
-cache to complete other requests), kv cache blocks were swapped out to
-CPU memory. The `--swap-space` flag has been removed as this feature
-is no longer used in V1.
-
-Historically, [vLLM has long supported beam search](https://github.com/vllm-project/vllm/issues/6226). The
-SequenceGroup encapsulated the idea of N Sequences which
-all shared the same prompt kv blocks. This enabled KV cache block
-sharing between requests, and copy-on-write to do branching. CPU
-swapping was intended for these beam search like cases.
-
-Later, the concept of prefix caching was introduced, which allowed KV
-cache blocks to be shared implicitly. This proved to be a better
-option than CPU swapping since blocks can be evicted slowly on demand
-and the part of the prompt that was evicted can be recomputed.
-
-SequenceGroup was removed in V1, although a replacement will be
-required for "parallel sampling" (`n>1`).
-[Beam search was moved out of the core](https://github.com/vllm-project/vllm/issues/8306). There was a
-lot of complex code for a very uncommon feature.
-
-In V1, with prefix caching being better (zero over head) and therefore
-on by default, the preemption and recompute strategy should work
-better.
-
-## Future Work
-
-### Parallel Sampling
-
-Some legacy metrics are only relevant in the context of "parallel
-sampling". This is where the `n` parameter in a request is used to
-request multiple completions from the same prompt.
-
-As part of adding parallel sampling support in <https://github.com/vllm-project/vllm/pull/10980>, we should
-also add these metrics.
-
-- `vllm:request_params_n` (Histogram)
-
-  Observes the value of the 'n' parameter of every finished request.
-
-- `vllm:request_max_num_generation_tokens` (Histogram)
-
-  Observes the maximum output length of all sequences in every finished
-  sequence group. In the absence of parallel sampling, this is
-  equivalent to `vllm:request_generation_tokens`.
-
-### Speculative Decoding
-
-Some legacy metrics are specific to "speculative decoding". This is where
-we generate candidate tokens using a faster, approximate method or
-model and then validate those tokens with the larger model.
-
-- `vllm:spec_decode_draft_acceptance_rate` (Gauge)
-- `vllm:spec_decode_efficiency` (Gauge)
-- `vllm:spec_decode_num_accepted_tokens` (Counter)
-- `vllm:spec_decode_num_draft_tokens` (Counter)
-- `vllm:spec_decode_num_emitted_tokens` (Counter)
-
-There is a PR under review (<https://github.com/vllm-project/vllm/pull/12193>) to add "prompt lookup (ngram)"
-speculative decoding to v1. Other techniques will follow. We should
-revisit these metrics in this context.
-
-!!! note
-    We should probably expose acceptance rate as separate accepted
-    and draft counters, like we do for prefix caching hit rate. Efficiency
-    likely also needs similar treatment.
-
-### Autoscaling and Load-balancing
-
-A common use case for our metrics is to support automated scaling of
-vLLM instances.
-
-For related discussion from the
-[Kubernetes Serving Working Group](https://github.com/kubernetes/community/tree/master/wg-serving),
-see:
-
-- [Standardizing Large Model Server Metrics in Kubernetes](https://docs.google.com/document/d/1SpSp1E6moa4HSrJnS4x3NpLuj88sMXr2tbofKlzTZpk)
-- [Benchmarking LLM Workloads for Performance Evaluation and Autoscaling in Kubernetes](https://docs.google.com/document/d/1k4Q4X14hW4vftElIuYGDu5KDe2LtV1XammoG-Xi3bbQ)
-- [Inference Perf](https://github.com/kubernetes-sigs/wg-serving/tree/main/proposals/013-inference-perf)
-- <https://github.com/vllm-project/vllm/issues/5041> and <https://github.com/vllm-project/vllm/pull/12726>.
   
-This is a non-trivial topic. Consider this comment from Rob:
 
-> I think this metric should focus on trying to estimate what the max
-> concurrency that will cause the average request length > queries per
-> second ... since this is really what will "saturate" the server.
+ ord
+r to mak
+ room for oth
+r r
+qu
+sts to comp
 
-A clear goal is that we should expose the metrics required to detect
-this saturation point, so administrators can implement auto-scaling
-rules based on those. However, in order to do so, we need to have a
-clear view on how an administrator (and automated monitoring system)
-should judge an instance as approaching saturation:
+t
+. It 
 
-> To identify, what is the saturation point for model server compute
-> (the inflection point where we cannot get more throughput with a
-> higher request rate, but start to incur additional latency) so we
-> can autoscale effectively?
 
-### Metric Naming
+ b
 
-Our approach to naming metrics probably deserves to be revisited:
+  r
+-sch
+du
 
-1. The use of colons in metric names seems contrary to
-   ["colons are reserved for user defined recording rules"](https://prometheus.io/docs/concepts/data_model/#metric-names-and-labels).
-2. Most of our metrics follow the convention of ending with units, but
-   not all do.
-3. Some of our metric names end with `_total`:
+d 
 
-    If there is a suffix of `_total` on the metric name, it will be removed. When
-    exposing the time series for counter, a `_total` suffix will be added. This is
-    for compatibility between OpenMetrics and the Prometheus text format, as OpenMetrics
-    requires the `_total` suffix.
+ futur
+ a
+d r
+-start 
+ts pr
+f
 
-### Adding More Metrics
+ phas
+.
+    - `NEW_TOKENS` - 
+h
 
-There is no shortage of ideas for new metrics:
+ th
+ output 
 
-- Examples from other projects like
-  [TGI](https://github.com/IBM/text-generation-inference?tab=readme-ov-file#metrics)
-- Proposals arising from specific use cases, like the Kubernetes
-  auto-scaling topic above
-- Proposals that might arise out of standardisation efforts like
-  [OpenTelemetry Semantic Conventions for Gen AI](https://github.com/open-telemetry/semantic-conventions/tree/main/docs/gen-ai).
+c
+ud
+d 
 
-We should be cautious in our approach to adding new metrics. While
-metrics are often relatively straightforward to add:
+ `E
+g
 
-1. They can be difficult to remove - see the section on deprecation
-   above.
-2. They can have a meaningful performance impact when enabled. And
-   metrics are usually of very limited use unless they can be enabled
-   by default and in production.
-3. They have an impact on development and maintenance of the
-   project. Every metric added over time has made this effort more
-   time-consuming, and perhaps not all metrics justify this ongoing
-   investment in their maintenance.
 
-## Tracing - OpenTelemetry
+Cor
+Output` 
+as
+  g
 
-Metrics provide an aggregated view over time of the system's
-performance and health. Tracing, on the other hand, tracks individual
-requests as they move through different services and components. Both
-fall under the more general heading of "Observability".
 
-vLLM has support for OpenTelemetry tracing:
+rat
+d. S
 
-- Added by <https://github.com/vllm-project/vllm/pull/4687> and reinstated by <https://github.com/vllm-project/vllm/pull/20372>
-- Configured with `--oltp-traces-endpoint` and `--collect-detailed-traces`
-- [OpenTelemetry blog post](https://opentelemetry.io/blog/2024/llm-observability/)
-- [User-facing docs](../../examples/online_serving/opentelemetry/README.md)
-- [Blog post](https://medium.com/@ronen.schaffer/follow-the-trail-supercharging-vllm-with-opentelemetry-distributed-tracing-aa655229b46f)
-- [IBM product docs](https://www.ibm.com/docs/en/instana-observability/current?topic=mgaa-monitoring-large-language-models-llms-vllm-public-preview)
+c
+ th
+s 
+s commo
+ to a
+ r
+qu
+sts 
 
-OpenTelemetry has a
-[Gen AI Working Group](https://github.com/open-telemetry/community/blob/main/projects/gen-ai.md).
+ a g
+v
 
-Since metrics is a big enough topic on its own, we consider the topic
-of tracing to be quite separate from metrics.
 
-### OpenTelemetry Model Forward vs Execute Time
+  
+t
+rat
+o
+, 
 
-The current implementation exposes the following two metrics:
+ us
+ a s
 
-- `vllm:model_forward_time_milliseconds` (Histogram) - The time spent
-  in the model forward pass when this request was in the batch.
-- `vllm:model_execute_time_milliseconds` (Histogram) - The time spent
-  in the model execute function. This will include model forward,
-  block/sync across workers, cpu-gpu sync time and sampling time.
+g
 
-These metrics are only enabled when OpenTelemetry tracing is enabled
-and if `--collect-detailed-traces=all/model/worker` is used. The
-documentation for this option states:
+ t
+m
+stamp o
+ `E
+g
 
-> collect detailed traces for the specified modules. This involves
-> use of possibly costly and or blocking operations and hence might
-> have a performance impact.
 
-The metrics were added by <https://github.com/vllm-project/vllm/pull/7089> and who up in an OpenTelemetry trace
-as:
+Cor
+Outputs` to
+  r
+cord th
+s 
+v
 
-```text
--> gen_ai.latency.time_in_scheduler: Double(0.017550230026245117)
--> gen_ai.latency.time_in_model_forward: Double(3.151565277099609)
--> gen_ai.latency.time_in_model_execute: Double(3.6468167304992676)
+t.
+A
+d th
+ ca
+cu
+at
+d 
+
+t
+rva
+s ar
+:
+    - Qu
+u
+ 
+
+t
+rva
+ - b
+t
+
+
+ `QUEUED` a
+d most r
+c
+
+t `SCHEDULED`.
+    - Pr
+f
+
+ 
+
+t
+rva
+ - b
+t
+
+
+ most r
+c
+
+t `SCHEDULED` a
+d th
+ subs
+qu
+
+t
+  f
+rst `NEW_TOKENS`.
+    - D
+cod
+ 
+
+t
+rva
+ - b
+t
+
+
+ f
+rst (aft
+r th
+ most r
+c
+
+t `SCHEDULED`) a
+d
+  
+ast `NEW_TOKENS`.
+    - I
+f
+r
+
+c
+ 
+
+t
+rva
+ - b
+t
+
+
+ most r
+c
+
+t `SCHEDULED` a
+d 
+ast `NEW_TOKENS`.
+    - I
+t
+r-tok
+
+ 
+
+t
+rva
+ - b
+t
+
+
+ succ
+ss
+v
+ `NEW_TOKENS`.
+Put a
+oth
+r 
+ay:
+![I
+t
+rva
+ ca
+cu
+at
+o
+s - commo
+ cas
+](../ass
+ts/d
+s
+g
+/m
+tr
+cs/
+
+t
+rva
+s-1.p
+g)
+W
+ 
+xp
+or
+d th
+ poss
+b
+
+
+ty of hav
+
+g th
+ fro
+t
+
+d ca
+cu
+at
+ th
+s
+
+
+
+t
+rva
+s us
+
+g th
+ t
+m
+
+g of 
+v
+
+ts v
+s
+b
+
+ by th
+ fro
+t
+
+d. Ho
+
+v
+r,
+th
+ fro
+t
+
+d do
+s 
+ot hav
+ v
+s
+b
+
+
+ty 
+
+to th
+ t
+m
+
+g of th
+ `QUEUED`
+a
+d `SCHEDULED` 
+v
+
+ts a
+d, s
+
+c
+ 
+
+ 
+
+d to ca
+cu
+at
+ 
+
+t
+rva
+s bas
+d
+o
+ mo
+oto
+
+c t
+m
+stamps from th
+ sam
+ proc
+ss ... 
+
+ 
+
+d th
+ 
+
+g
+
+
+
+cor
+ to r
+cord t
+m
+stamps for a
+ of th
+s
+ 
+v
+
+ts.
+#### I
+t
+rva
+ Ca
+cu
+at
+o
+s vs Pr
+mpt
+o
+s
+Wh
+
+ a pr
+mpt
+o
+ occurs dur
+
+g d
+cod
+, s
+
+c
+ a
+y a
+r
+ady g
+
+
+rat
+d
+tok
+
+s ar
+ r
+us
+d, 
+
+ co
+s
+d
+r th
+ pr
+mpt
+o
+ as aff
+ct
+
+g th
+
+
+
+t
+r-tok
+
+, d
+cod
+, a
+d 
+
+f
+r
+
+c
+ 
+
+t
+rva
+s.
+![I
+t
+rva
+ ca
+cu
+at
+o
+s - pr
+mpt
+d d
+cod
+](../ass
+ts/d
+s
+g
+/m
+tr
+cs/
+
+t
+rva
+s-2.p
+g)
+Wh
+
+ a pr
+mpt
+o
+ occurs dur
+
+g pr
+f
+
+ (assum
+
+g such a
+ 
+v
+
+t
+
+s poss
+b
+
+), 
+
+ co
+s
+d
+r th
+ pr
+mpt
+o
+ as aff
+ct
+
+g th
+
+t
+m
+-to-f
+rst-tok
+
+ a
+d pr
+f
+
+ 
+
+t
+rva
+s.
+![I
+t
+rva
+ ca
+cu
+at
+o
+s - pr
+mpt
+d pr
+f
+
+](../ass
+ts/d
+s
+g
+/m
+tr
+cs/
+
+t
+rva
+s-3.p
+g)
+### Fro
+t
+
+d Stats Co
+
+ct
+o
+
+As th
+ fro
+t
+
+d proc
+ss
+s a s
+
+g
+
+ `E
+g
+
+
+Cor
+Outputs` - 
+.
+. th
+
+output from a s
+
+g
+
+ 
+
+g
+
+
+ cor
+ 
+t
+rat
+o
+ - 
+t co
+
+cts var
+ous
+stat
+st
+cs r
+
+at
+
+g to that 
+t
+rat
+o
+:
+    - Th
+ tota
+ 
+umb
+r of 
+
+
+ tok
+
+s g
+
+
+rat
+d 
+
+ th
+s 
+t
+rat
+o
+.
+    - Th
+ tota
+ 
+umb
+r of prompt tok
+
+s proc
+ss
+d by th
+ pr
+f
+
+s that
+  comp
+
+t
+d 
+
+ th
+s 
+t
+rat
+o
+.
+    - Th
+ qu
+u
+ 
+
+t
+rva
+s for a
+y r
+qu
+sts that 
+
+r
+ sch
+du
+
+d 
+
+ th
+s
+  
+t
+rat
+o
+.
+    - Th
+ pr
+f
+
+ 
+
+t
+rva
+s for a
+y r
+qu
+sts that comp
+
+t
+d pr
+f
+
+ 
+
+
+  th
+s 
+t
+rat
+o
+.
+    - Th
+ 
+
+t
+r-tok
+
+ 
+
+t
+rva
+s (T
+m
+ P
+r Output Tok
+
+, TPOT), for a
+
+  r
+qu
+sts 
+
+c
+ud
+d 
+
+ th
+s 
+t
+rat
+o
+.
+    - Th
+ T
+m
+-To-F
+rst-Tok
+
+ (TTFT) for a
+y r
+qu
+sts that comp
+
+t
+d
+  pr
+f
+
+ 
+
+ th
+s 
+t
+rat
+o
+. Ho
+
+v
+r, 
+
+ ca
+cu
+at
+ th
+s 
+
+t
+rva
+
+  r
+
+at
+v
+ to 
+h
+
+ th
+ r
+qu
+st 
+as f
+rst r
+c
+
+v
+d by th
+ fro
+t
+
+d
+  (`arr
+va
+_t
+m
+`) 
+
+ ord
+r to accou
+t for 
+
+put proc
+ss
+
+g t
+m
+.
+For a
+y r
+qu
+sts that 
+
+r
+ comp
+
+t
+d 
+
+ a g
+v
+
+ 
+t
+rat
+o
+, 
+
+ a
+so
+r
+cord:
+    - Th
+ 
+
+f
+r
+
+c
+ a
+d d
+cod
+ 
+
+t
+rva
+s - r
+
+at
+v
+ to th
+ sch
+du
+
+d a
+d
+  f
+rst tok
+
+ 
+v
+
+ts, as d
+scr
+b
+d abov
+.
+    - E
+d-to-
+
+d 
+at
+
+cy - th
+ 
+
+t
+rva
+ b
+t
+
+
+ fro
+t
+
+d `arr
+va
+_t
+m
+`
+  a
+d th
+ fro
+t
+
+d r
+c
+
+v
+
+g th
+ f
+
+a
+ tok
+
+.
+### KV Cach
+ R
+s
+d
+
+cy M
+tr
+cs
+W
+ a
+so 
+m
+t a s
+t of h
+stograms that d
+scr
+b
+ ho
+ 
+o
+g samp
+
+d KV cach
+
+b
+ocks stay r
+s
+d
+
+t a
+d ho
+ oft
+
+ th
+y ar
+ r
+us
+d. Samp
+
+
+g
+(`--kv-cach
+-m
+tr
+cs-samp
+
+`) k
+ps th
+ ov
+rh
+ad t
+
+y; 
+h
+
+ a b
+ock 
+s
+chos
+
+ 
+
+ r
+cord:
+    - `
+
+f
+t
+m
+` – a
+ocat
+o
+ ⟶ 
+v
+ct
+o
+
+    - `
+d
+
+ b
+for
+ 
+v
+ct
+o
+` – 
+ast touch ⟶ 
+v
+ct
+o
+
+    - `r
+us
+ gaps` – th
+ paus
+s b
+t
+
+
+ touch
+s 
+h
+
+ th
+ b
+ock g
+ts r
+us
+d
+Thos
+ map d
+r
+ct
+y to th
+ Prom
+th
+us m
+tr
+cs:
+    - `v
+m:kv_b
+ock_
+
+f
+t
+m
+_s
+co
+ds` – ho
+ 
+o
+g 
+ach samp
+
+d b
+ock 
+x
+sts.
+    - `v
+m:kv_b
+ock_
+d
+
+_b
+for
+_
+v
+ct_s
+co
+ds` – 
+d
+
+ ta
+
+ aft
+r th
+ f
+
+a
+ acc
+ss.
+    - `v
+m:kv_b
+ock_r
+us
+_gap_s
+co
+ds` – t
+m
+ b
+t
+
+
+ co
+s
+cut
+v
+ touch
+s.
+Th
+ 
+
+g
+
+
+ cor
+ o
+
+y sh
+ps ra
+ 
+v
+ct
+o
+ 
+v
+
+ts v
+a `Sch
+du
+
+rStats`; th
+
+fro
+t
+
+d dra
+
+s th
+m, tur
+s th
+m 
+
+to Prom
+th
+us obs
+rvat
+o
+s, a
+d a
+so
+
+xpos
+s th
+ sam
+ data through `LLM.g
+t_m
+tr
+cs()` 
+h
+
+ 
+ogg
+
+g 
+s o
+.
+Look
+
+g at 
+
+f
+t
+m
+ a
+d 
+d
+
+ t
+m
+ o
+ o
+
+ chart mak
+s 
+t 
+asy to spot
+stra
+d
+d cach
+ or 
+ork
+oads that p
+
+ prompts for a 
+o
+g d
+cod
+.
+### M
+tr
+cs Pub
+
+sh
+
+g - Logg
+
+g
+Th
+ `Logg
+
+gStatLogg
+r` m
+tr
+cs pub
+
+sh
+r outputs a 
+og `INFO` m
+ssag
+
+
+v
+ry 5 s
+co
+ds 
+
+th som
+ k
+y m
+tr
+cs:
+    - Th
+ curr
+
+t 
+umb
+r of ru
+
+
+g/
+a
+t
+
+g r
+qu
+sts
+    - Th
+ curr
+
+t GPU cach
+ usag
+
+    - Th
+ 
+umb
+r of prompt tok
+
+s proc
+ss
+d p
+r s
+co
+d ov
+r th
+ past 5
+  s
+co
+ds
+    - Th
+ 
+umb
+r of 
+
+
+ tok
+
+s g
+
+
+rat
+d p
+r s
+co
+d ov
+r th
+ past 5
+  s
+co
+ds
+    - Th
+ pr
+f
+x cach
+ h
+t rat
+ ov
+r th
+ most r
+c
+
+t 1k kv-cach
+ b
+ock qu
+r
+
+s
+### M
+tr
+cs Pub
+
+sh
+
+g - Prom
+th
+us
+Th
+ `Prom
+th
+usStatLogg
+r` m
+tr
+cs pub
+
+sh
+r mak
+s th
+ m
+tr
+cs
+ava
+
+ab
+
+ v
+a a `/m
+tr
+cs` HTTP 
+
+dpo
+
+t 
+
+ a Prom
+th
+us-compat
+b
+
+
+format. A Prom
+th
+us 
+
+sta
+c
+ ca
+ th
+
+ b
+ co
+f
+gur
+d to po
+ th
+s
+
+
+dpo
+
+t (
+.g. 
+v
+ry s
+co
+d) a
+d r
+cord th
+ va
+u
+s 
+
+ 
+ts t
+m
+-s
+r
+
+s
+databas
+. Prom
+th
+us 
+s oft
+
+ us
+d v
+a Grafa
+a, a
+o
+
+
+g th
+s
+ m
+tr
+cs
+to b
+ graph
+d ov
+r t
+m
+.
+Prom
+th
+us supports th
+ fo
+o
+
+
+g m
+tr
+c typ
+s:
+    - Cou
+t
+r: a va
+u
+ that 
+
+
+ 
+
+cr
+as
+ ov
+r t
+m
+, 
+
+v
+r r
+duc
+
+g, a
+d
+  g
+
+
+ra
+y r
+s
+t to z
+ro 
+h
+
+ th
+ vLLM 
+
+sta
+c
+ r
+starts. For
+  
+xamp
+
+, th
+ 
+umb
+r of tok
+
+s g
+
+
+rat
+d ov
+r th
+ 
+
+f
+t
+m
+ of th
+
+  
+
+sta
+c
+.
+    - Gaug
+: a va
+u
+ that go
+s up a
+d do
+
+, for 
+xamp
+
+ th
+ 
+umb
+r of
+  r
+qu
+sts curr
+
+t
+y sch
+du
+
+d for 
+x
+cut
+o
+.
+    - H
+stogram: a cou
+t of m
+tr
+c samp
+
+s, r
+cord
+d 
+
+ buck
+ts. For
+  
+xamp
+
+, th
+ 
+umb
+r of r
+qu
+sts 
+hos
+ TTFT 
+as 
+1ms, 
+5ms, 
+10ms,
+  
+20ms, a
+d so o
+.
+Prom
+th
+us m
+tr
+cs ca
+ a
+so b
+ 
+ab
+
+
+d, a
+o
+
+
+g m
+tr
+cs to b
+
+comb
+
+
+d accord
+
+g to match
+
+g 
+ab
+
+s. I
+ vLLM, 
+
+ add a `mod
+
+_
+am
+`
+
+ab
+
+ to 
+v
+ry m
+tr
+c 
+h
+ch 
+
+c
+ud
+s th
+ 
+am
+ of th
+ mod
+
+ s
+rv
+d by
+that 
+
+sta
+c
+.
+Examp
+
+ output:
+```bash
+$ cur
+ http://0.0.0.0:8000/m
+tr
+cs
+# HELP v
+m:
+um_r
+qu
+sts_ru
+
+
+g Numb
+r of r
+qu
+sts 
+
+ mod
+
+ 
+x
+cut
+o
+ batch
+s.
+# TYPE v
+m:
+um_r
+qu
+sts_ru
+
+
+g gaug
+
+v
+m:
+um_r
+qu
+sts_ru
+
+
+g{mod
+
+_
+am
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct"} 8.0
+...
+# HELP v
+m:g
+
+
+rat
+o
+_tok
+
+s_tota
+ Numb
+r of g
+
+
+rat
+o
+ tok
+
+s proc
+ss
+d.
+# TYPE v
+m:g
+
+
+rat
+o
+_tok
+
+s_tota
+ cou
+t
+r
+v
+m:g
+
+
+rat
+o
+_tok
+
+s_tota
+{mod
+
+_
+am
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct"} 27453.0
+...
+# HELP v
+m:r
+qu
+st_succ
+ss_tota
+ Cou
+t of succ
+ssfu
+y proc
+ss
+d r
+qu
+sts.
+# TYPE v
+m:r
+qu
+st_succ
+ss_tota
+ cou
+t
+r
+v
+m:r
+qu
+st_succ
+ss_tota
+{f
+
+
+sh
+d_r
+aso
+="stop",mod
+
+_
+am
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct"} 1.0
+v
+m:r
+qu
+st_succ
+ss_tota
+{f
+
+
+sh
+d_r
+aso
+="
+
+
+gth",mod
+
+_
+am
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct"} 131.0
+v
+m:r
+qu
+st_succ
+ss_tota
+{f
+
+
+sh
+d_r
+aso
+="abort",mod
+
+_
+am
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct"} 0.0
+...
+# HELP v
+m:t
+m
+_to_f
+rst_tok
+
+_s
+co
+ds H
+stogram of t
+m
+ to f
+rst tok
+
+ 
+
+ s
+co
+ds.
+# TYPE v
+m:t
+m
+_to_f
+rst_tok
+
+_s
+co
+ds h
+stogram
+v
+m:t
+m
+_to_f
+rst_tok
+
+_s
+co
+ds_buck
+t{
+
+="0.001",mod
+
+_
+am
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct"} 0.0
+v
+m:t
+m
+_to_f
+rst_tok
+
+_s
+co
+ds_buck
+t{
+
+="0.005",mod
+
+_
+am
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct"} 0.0
+v
+m:t
+m
+_to_f
+rst_tok
+
+_s
+co
+ds_buck
+t{
+
+="0.01",mod
+
+_
+am
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct"} 0.0
+v
+m:t
+m
+_to_f
+rst_tok
+
+_s
+co
+ds_buck
+t{
+
+="0.02",mod
+
+_
+am
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct"} 13.0
+v
+m:t
+m
+_to_f
+rst_tok
+
+_s
+co
+ds_buck
+t{
+
+="0.04",mod
+
+_
+am
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct"} 97.0
+v
+m:t
+m
+_to_f
+rst_tok
+
+_s
+co
+ds_buck
+t{
+
+="0.06",mod
+
+_
+am
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct"} 123.0
+v
+m:t
+m
+_to_f
+rst_tok
+
+_s
+co
+ds_buck
+t{
+
+="0.08",mod
+
+_
+am
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct"} 138.0
+v
+m:t
+m
+_to_f
+rst_tok
+
+_s
+co
+ds_buck
+t{
+
+="0.1",mod
+
+_
+am
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct"} 140.0
+v
+m:t
+m
+_to_f
+rst_tok
+
+_s
+co
+ds_cou
+t{mod
+
+_
+am
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct"} 140.0
 ```
+!!! 
+ot
 
-We already have `inference_time` and `decode_time` metrics, so the
-question is whether there are sufficiently common use cases for the
-higher-resolution timings to justify the overhead.
+    Th
+ cho
+c
+ of h
+stogram buck
+ts to b
+ most us
+fu
+ to us
+rs
+    across a broad s
+t of us
+ cas
+s 
+s 
+ot stra
+ghtfor
+ard a
+d 
 
-Since we are going to treat the question of OpenTelemetry support
-separately, we will include these particular metrics under that topic.
+
+
+    r
+qu
+r
+ r
+f
+
+
+m
+
+t ov
+r t
+m
+.
+### Cach
+ Co
+f
+g I
+fo
+`prom
+th
+us_c
+
+
+
+t` has support for
+[I
+fo m
+tr
+cs](https://prom
+th
+us.g
+thub.
+o/c
+
+
+
+t_pytho
+/
+
+strum
+
+t
+
+g/
+
+fo/)
+
+h
+ch ar
+ 
+qu
+va
+
+
+t to a `Gaug
+` 
+hos
+ va
+u
+ 
+s p
+rma
+
+
+t
+y s
+t to 1,
+but 
+xpos
+s 
+
+t
+r
+st
+
+g k
+y/va
+u
+ pa
+r 
+
+format
+o
+ v
+a 
+ab
+
+s. Th
+s 
+s
+us
+d for 
+
+format
+o
+ about a
+ 
+
+sta
+c
+ that do
+s 
+ot cha
+g
+ - so 
+t
+o
+
+y 
+
+ds to b
+ obs
+rv
+d at startup - a
+d a
+o
+s compar
+
+g across
+
+
+sta
+c
+s 
+
+ Prom
+th
+us.
+W
+ us
+ th
+s co
+c
+pt for th
+ `v
+m:cach
+_co
+f
+g_
+
+fo` m
+tr
+c:
+```t
+xt
+# HELP v
+m:cach
+_co
+f
+g_
+
+fo I
+format
+o
+ of th
+ LLME
+g
+
+
+ Cach
+Co
+f
+g
+# TYPE v
+m:cach
+_co
+f
+g_
+
+fo gaug
+
+v
+m:cach
+_co
+f
+g_
+
+fo{b
+ock_s
+z
+="16",cach
+_dtyp
+="auto",ca
+cu
+at
+_kv_sca
+
+s="Fa
+s
+",cpu_off
+oad_gb="0",
+
+ab
+
+_pr
+f
+x_cach
+
+g="Fa
+s
+",gpu_m
+mory_ut
+
+
+zat
+o
+="0.9",...} 1.0
+```
+Ho
+
+v
+r, `prom
+th
+us_c
+
+
+
+t` has
+[
+
+v
+r support
+d I
+fo m
+tr
+cs 
+
+ mu
+t
+proc
+ss
+
+g mod
+](https://g
+thub.com/prom
+th
+us/c
+
+
+
+t_pytho
+/pu
+/300) -
+for [u
+c
+
+ar r
+aso
+s](gh-pr:7279#d
+scuss
+o
+_r1710417152). W
+
+s
+mp
+y us
+ a `Gaug
+` m
+tr
+c s
+t to 1 a
+d
+`mu
+t
+proc
+ss_mod
+="mostr
+c
+
+t"` 
+
+st
+ad.
+### LoRA M
+tr
+cs
+Th
+ `v
+m:
+ora_r
+qu
+sts_
+
+fo` `Gaug
+` 
+s som
+
+hat s
+m
+
+ar, 
+xc
+pt th
+
+va
+u
+ 
+s th
+ curr
+
+t 
+a
+-c
+ock t
+m
+, a
+d 
+s updat
+d 
+v
+ry 
+t
+rat
+o
+.
+Th
+ 
+ab
+
+ 
+am
+s us
+d ar
+:
+    - `ru
+
+
+g_
+ora_adapt
+rs`: a p
+r-adapt
+r cou
+t of th
+ 
+umb
+r r
+qu
+sts
+  ru
+
+
+g us
+
+g that adapt
+r, formatt
+d as a comma-s
+parat
+d str
+
+g.
+    - `
+a
+t
+
+g_
+ora_adapt
+rs`: s
+m
+
+ar, 
+xc
+pt cou
+t
+
+g r
+qu
+sts that ar
+
+  
+a
+t
+
+g to b
+ sch
+du
+
+d.
+    - `max_
+ora` - th
+ stat
+c "max 
+umb
+r of LoRAs 
+
+ a s
+
+g
+
+ batch."
+  co
+f
+gurat
+o
+.
+E
+cod
+
+g a ru
+
+
+g/
+a
+t
+
+g cou
+ts for mu
+t
+p
+
+ adapt
+rs 
+
+ a
+comma-s
+parat
+d str
+
+g s
+ms qu
+t
+ m
+sgu
+d
+d - 
+
+ cou
+d us
+ 
+ab
+
+s to
+d
+st
+
+gu
+sh b
+t
+
+
+ p
+r-adapt
+r cou
+ts. Th
+s shou
+d b
+ r
+v
+s
+t
+d.
+Not
+ that `mu
+t
+proc
+ss_mod
+="
+
+v
+mostr
+c
+
+t"` 
+s us
+d - th
+ most
+r
+c
+
+t m
+tr
+c 
+s us
+d, but o
+
+y from curr
+
+t
+y ru
+
+
+g proc
+ss
+s.
+Th
+s 
+as add
+d 
+
+ 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/9477
+ a
+d th
+r
+ 
+s
+[at 
+
+ast o
+
+ k
+o
+
+ us
+r](https://g
+thub.com/kub
+r
+
+t
+s-s
+gs/gat
+
+ay-ap
+-
+
+f
+r
+
+c
+-
+xt
+
+s
+o
+/pu
+/54).
+If 
+
+ r
+v
+s
+t th
+s d
+s
+g
+ a
+d d
+pr
+cat
+ th
+ o
+d m
+tr
+c, 
+
+ shou
+d
+coord
+
+at
+ 
+
+th do
+
+str
+am us
+rs so th
+y ca
+ m
+grat
+ b
+for
+ th
+ r
+mova
+.
+### Pr
+f
+x Cach
+ m
+tr
+cs
+Th
+ d
+scuss
+o
+ 
+
+ 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/10582
+ about add
+
+g pr
+f
+x cach
+ m
+tr
+cs y
+
+
+d
+d
+som
+ 
+
+t
+r
+st
+
+g po
+
+ts 
+h
+ch may b
+ r
+
+
+va
+t to ho
+ 
+
+ approach
+futur
+ m
+tr
+cs.
+Ev
+ry t
+m
+ th
+ pr
+f
+x cach
+ 
+s qu
+r
+
+d, 
+
+ r
+cord th
+ 
+umb
+r of tok
+
+s
+qu
+r
+
+d a
+d th
+ 
+umb
+r of qu
+r
+
+d tok
+
+s pr
+s
+
+t 
+
+ th
+ cach
+
+(
+.
+. h
+ts).
+Ho
+
+v
+r, th
+ m
+tr
+c of 
+
+t
+r
+st 
+s th
+ h
+t rat
+ - 
+.
+. th
+ 
+umb
+r of
+h
+ts p
+r qu
+ry.
+I
+ th
+ cas
+ of 
+ogg
+
+g, 
+
+ 
+xp
+ct th
+ us
+r 
+s b
+st s
+rv
+d by
+ca
+cu
+at
+
+g th
+ h
+t rat
+ ov
+r a f
+x
+d 
+umb
+r of th
+ most r
+c
+
+t
+qu
+r
+
+s (th
+ 
+
+t
+rva
+ 
+s f
+x
+d to 1k most r
+c
+
+t qu
+r
+
+s for 
+o
+).
+I
+ th
+ cas
+ of Prom
+th
+us though, 
+
+ shou
+d tak
+ adva
+tag
+ of th
+
+t
+m
+-s
+r
+
+s 
+atur
+ of Prom
+th
+us a
+d a
+o
+ th
+ us
+r to ca
+cu
+at
+ th
+
+h
+t rat
+ ov
+r a
+ 
+
+t
+rva
+ of th
+
+r choos
+
+g. For 
+xamp
+
+, a PromQL
+qu
+ry to ca
+cu
+at
+ th
+ h
+t 
+
+t
+rva
+ of th
+ past 5 m
+
+ut
+s:
+```t
+xt
+rat
+(cach
+_qu
+ry_h
+t[5m]) / rat
+(cach
+_qu
+ry_tota
+[5m])
+```
+To ach
+
+v
+ th
+s, 
+
+ shou
+d r
+cord th
+ qu
+r
+
+s a
+d h
+ts as cou
+t
+rs 
+
+
+Prom
+th
+us, rath
+r tha
+ r
+cord
+
+g th
+ h
+t rat
+ as a gaug
+.
+## D
+pr
+cat
+d M
+tr
+cs
+### Ho
+ To D
+pr
+cat
+
+D
+pr
+cat
+
+g m
+tr
+cs shou
+d
+'t b
+ tak
+
+ 
+
+ght
+y. Us
+rs may 
+ot 
+ot
+c
+ a
+m
+tr
+c has b
+
+ d
+pr
+cat
+d, a
+d may b
+ qu
+t
+ 
+
+co
+v
+
+
+
+
+c
+d 
+h
+
+ 
+t 
+s
+sudd
+
+
+y (from th
+
+r p
+rsp
+ct
+v
+) 
+h
+
+ 
+t 
+s r
+mov
+d, 
+v
+
+ 
+f th
+r
+ 
+s
+a
+ 
+qu
+va
+
+
+t m
+tr
+c for th
+m to us
+.
+As a
+ 
+xamp
+
+, s
+ ho
+ `v
+m:avg_prompt_throughput_toks_p
+r_s` 
+as
+[d
+pr
+cat
+d](https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/2764) (
+
+th a comm
+
+t 
+
+ th
+ cod
+),
+[r
+mov
+d](https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/12383), a
+d th
+
+ [
+ot
+c
+d by a us
+r](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/13218).
+I
+ g
+
+
+ra
+:
+1. W
+ shou
+d b
+ caut
+ous about d
+pr
+cat
+
+g m
+tr
+cs, 
+sp
+c
+a
+y s
+
+c
+
+   
+t ca
+ b
+ hard to pr
+d
+ct th
+ us
+r 
+mpact.
+2. W
+ shou
+d 
+
+c
+ud
+ a prom
+
+
+
+t d
+pr
+cat
+o
+ 
+ot
+c
+ 
+
+ th
+ h
+
+p str
+
+g
+   that 
+s 
+
+c
+ud
+d 
+
+ th
+ `/m
+tr
+cs' output.
+3. W
+ shou
+d 
+
+st d
+pr
+cat
+d m
+tr
+cs 
+
+ us
+r-fac
+
+g docum
+
+tat
+o
+ a
+d
+   r
+
+
+as
+ 
+ot
+s.
+4. W
+ shou
+d co
+s
+d
+r h
+d
+
+g d
+pr
+cat
+d m
+tr
+cs b
+h
+
+d a CLI argum
+
+t
+   
+
+ ord
+r to g
+v
+ adm
+
+
+strators
+   [a
+ 
+scap
+ hatch](https://kub
+r
+
+t
+s.
+o/docs/co
+c
+pts/c
+ust
+r-adm
+
+
+strat
+o
+/syst
+m-m
+tr
+cs/#sho
+-h
+dd
+
+-m
+tr
+cs)
+   for som
+ t
+m
+ b
+for
+ d
+
+
+t
+
+g th
+m.
+S
+ th
+ [d
+pr
+cat
+o
+ po
+
+cy](../co
+tr
+but
+
+g/d
+pr
+cat
+o
+_po
+
+cy.md) for
+th
+ proj
+ct-
+
+d
+ d
+pr
+cat
+o
+ po
+
+cy.
+### U
+
+mp
+
+m
+
+t
+d - `v
+m:tok
+
+s_tota
+`
+Add
+d by 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/4464
+, but appar
+
+t
+y 
+
+v
+r 
+mp
+
+m
+
+t
+d. Th
+s ca
+ just b
+
+r
+mov
+d.
+### Dup
+
+cat
+d - Qu
+u
+ T
+m
+
+Th
+ `v
+m:t
+m
+_
+
+_qu
+u
+_r
+qu
+sts` H
+stogram m
+tr
+c 
+as add
+d by
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/9659
+ a
+d 
+ts ca
+cu
+at
+o
+ 
+s:
+```pytho
+
+    s
+
+f.m
+tr
+cs.f
+rst_sch
+du
+
+d_t
+m
+ = 
+o
+
+    s
+
+f.m
+tr
+cs.t
+m
+_
+
+_qu
+u
+ = 
+o
+ - s
+
+f.m
+tr
+cs.arr
+va
+_t
+m
+
+```
+T
+o 
+
+ks 
+at
+r, 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/4464
+ add
+d `v
+m:r
+qu
+st_qu
+u
+_t
+m
+_s
+co
+ds` 
+
+av
+
+g
+us 
+
+th:
+```pytho
+
+
+f s
+q_group.
+s_f
+
+
+sh
+d():
+    
+f (s
+q_group.m
+tr
+cs.f
+rst_sch
+du
+
+d_t
+m
+ 
+s 
+ot No
+
+ a
+d
+            s
+q_group.m
+tr
+cs.f
+rst_tok
+
+_t
+m
+ 
+s 
+ot No
+
+):
+        t
+m
+_qu
+u
+_r
+qu
+sts.app
+
+d(
+            s
+q_group.m
+tr
+cs.f
+rst_sch
+du
+
+d_t
+m
+ -
+            s
+q_group.m
+tr
+cs.arr
+va
+_t
+m
+)
+    ...
+    
+f s
+q_group.m
+tr
+cs.t
+m
+_
+
+_qu
+u
+ 
+s 
+ot No
+
+:
+        t
+m
+_
+
+_qu
+u
+_r
+qu
+sts.app
+
+d(
+            s
+q_group.m
+tr
+cs.t
+m
+_
+
+_qu
+u
+)
+```
+Th
+s s
+ms dup
+
+cat
+v
+, a
+d o
+
+ of th
+m shou
+d b
+ r
+mov
+d. Th
+ 
+att
+r
+
+s us
+d by th
+ Grafa
+a dashboard, so 
+
+ shou
+d d
+pr
+cat
+ or r
+mov
+ th
+
+form
+r.
+### Pr
+f
+x Cach
+ H
+t Rat
+
+S
+ abov
+ - 
+
+ 
+o
+ 
+xpos
+ 'qu
+r
+
+s' a
+d 'h
+ts' cou
+t
+rs rath
+r tha
+ a
+'h
+t rat
+' gaug
+.
+### KV Cach
+ Off
+oad
+
+g
+T
+o 
+
+gacy m
+tr
+cs r
+
+at
+ to a "s
+app
+d" pr
+mpt
+o
+ mod
+ that 
+s 
+o
+
+o
+g
+r r
+
+
+va
+t 
+
+ v1:
+    - `v
+m:
+um_r
+qu
+sts_s
+app
+d`
+    - `v
+m:cpu_cach
+_usag
+_p
+rc`
+I
+ th
+s mod
+, 
+h
+
+ a r
+qu
+st 
+as pr
+mpt
+d (
+.g. to mak
+ room 
+
+ KV
+cach
+ to comp
+
+t
+ oth
+r r
+qu
+sts), kv cach
+ b
+ocks 
+
+r
+ s
+app
+d out to
+CPU m
+mory. Th
+ `--s
+ap-spac
+` f
+ag has b
+
+ r
+mov
+d as th
+s f
+atur
+
+
+s 
+o 
+o
+g
+r us
+d 
+
+ V1.
+H
+stor
+ca
+y, [vLLM has 
+o
+g support
+d b
+am s
+arch](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/6226). Th
+
+S
+qu
+
+c
+Group 
+
+capsu
+at
+d th
+ 
+d
+a of N S
+qu
+
+c
+s 
+h
+ch
+a
+ shar
+d th
+ sam
+ prompt kv b
+ocks. Th
+s 
+
+ab
+
+d KV cach
+ b
+ock
+shar
+
+g b
+t
+
+
+ r
+qu
+sts, a
+d copy-o
+-
+r
+t
+ to do bra
+ch
+
+g. CPU
+s
+app
+
+g 
+as 
+
+t
+
+d
+d for th
+s
+ b
+am s
+arch 
+
+k
+ cas
+s.
+Lat
+r, th
+ co
+c
+pt of pr
+f
+x cach
+
+g 
+as 
+
+troduc
+d, 
+h
+ch a
+o
+
+d KV
+cach
+ b
+ocks to b
+ shar
+d 
+mp
+
+c
+t
+y. Th
+s prov
+d to b
+ a b
+tt
+r
+opt
+o
+ tha
+ CPU s
+app
+
+g s
+
+c
+ b
+ocks ca
+ b
+ 
+v
+ct
+d s
+o
+
+y o
+ d
+ma
+d
+a
+d th
+ part of th
+ prompt that 
+as 
+v
+ct
+d ca
+ b
+ r
+comput
+d.
+S
+qu
+
+c
+Group 
+as r
+mov
+d 
+
+ V1, a
+though a r
+p
+ac
+m
+
+t 
+
+
+ b
+
+r
+qu
+r
+d for "para
+
+
+ samp
+
+
+g" (`
+
+1`).
+[B
+am s
+arch 
+as mov
+d out of th
+ cor
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/8306). Th
+r
+ 
+as a
+
+ot of comp
+
+x cod
+ for a v
+ry u
+commo
+ f
+atur
+.
+I
+ V1, 
+
+th pr
+f
+x cach
+
+g b
+
+
+g b
+tt
+r (z
+ro ov
+r h
+ad) a
+d th
+r
+for
+
+o
+ by d
+fau
+t, th
+ pr
+mpt
+o
+ a
+d r
+comput
+ strat
+gy shou
+d 
+ork
+b
+tt
+r.
+## Futur
+ Work
+### Para
+
+
+ Samp
+
+
+g
+Som
+ 
+
+gacy m
+tr
+cs ar
+ o
+
+y r
+
+
+va
+t 
+
+ th
+ co
+t
+xt of "para
+
+
+
+samp
+
+
+g". Th
+s 
+s 
+h
+r
+ th
+ `
+` param
+t
+r 
+
+ a r
+qu
+st 
+s us
+d to
+r
+qu
+st mu
+t
+p
+
+ comp
+
+t
+o
+s from th
+ sam
+ prompt.
+As part of add
+
+g para
+
+
+ samp
+
+
+g support 
+
+ 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/10980
+, 
+
+ shou
+d
+a
+so add th
+s
+ m
+tr
+cs.
+    - `v
+m:r
+qu
+st_params_
+` (H
+stogram)
+  Obs
+rv
+s th
+ va
+u
+ of th
+ '
+' param
+t
+r of 
+v
+ry f
+
+
+sh
+d r
+qu
+st.
+    - `v
+m:r
+qu
+st_max_
+um_g
+
+
+rat
+o
+_tok
+
+s` (H
+stogram)
+  Obs
+rv
+s th
+ max
+mum output 
+
+
+gth of a
+ s
+qu
+
+c
+s 
+
+ 
+v
+ry f
+
+
+sh
+d
+  s
+qu
+
+c
+ group. I
+ th
+ abs
+
+c
+ of para
+
+
+ samp
+
+
+g, th
+s 
+s
+  
+qu
+va
+
+
+t to `v
+m:r
+qu
+st_g
+
+
+rat
+o
+_tok
+
+s`.
+### Sp
+cu
+at
+v
+ D
+cod
+
+g
+Som
+ 
+
+gacy m
+tr
+cs ar
+ sp
+c
+f
+c to "sp
+cu
+at
+v
+ d
+cod
+
+g". Th
+s 
+s 
+h
+r
+
+
+
+ g
+
+
+rat
+ ca
+d
+dat
+ tok
+
+s us
+
+g a fast
+r, approx
+mat
+ m
+thod or
+mod
+
+ a
+d th
+
+ va
+
+dat
+ thos
+ tok
+
+s 
+
+th th
+ 
+arg
+r mod
+
+.
+    - `v
+m:sp
+c_d
+cod
+_draft_acc
+pta
+c
+_rat
+` (Gaug
+)
+    - `v
+m:sp
+c_d
+cod
+_
+ff
+c
+
+
+cy` (Gaug
+)
+    - `v
+m:sp
+c_d
+cod
+_
+um_acc
+pt
+d_tok
+
+s` (Cou
+t
+r)
+    - `v
+m:sp
+c_d
+cod
+_
+um_draft_tok
+
+s` (Cou
+t
+r)
+    - `v
+m:sp
+c_d
+cod
+_
+um_
+m
+tt
+d_tok
+
+s` (Cou
+t
+r)
+Th
+r
+ 
+s a PR u
+d
+r r
+v
+
+
+ (
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/12193
+) to add "prompt 
+ookup (
+gram)"
+sp
+cu
+at
+v
+ d
+cod
+
+g to v1. Oth
+r t
+ch
+
+qu
+s 
+
+
+ fo
+o
+. W
+ shou
+d
+r
+v
+s
+t th
+s
+ m
+tr
+cs 
+
+ th
+s co
+t
+xt.
+!!! 
+ot
+
+    W
+ shou
+d probab
+y 
+xpos
+ acc
+pta
+c
+ rat
+ as s
+parat
+ acc
+pt
+d
+    a
+d draft cou
+t
+rs, 
+
+k
+ 
+
+ do for pr
+f
+x cach
+
+g h
+t rat
+. Eff
+c
+
+
+cy
+    
+
+k
+
+y a
+so 
+
+ds s
+m
+
+ar tr
+atm
+
+t.
+### Autosca
+
+
+g a
+d Load-ba
+a
+c
+
+g
+A commo
+ us
+ cas
+ for our m
+tr
+cs 
+s to support automat
+d sca
+
+
+g of
+vLLM 
+
+sta
+c
+s.
+For r
+
+at
+d d
+scuss
+o
+ from th
+
+[Kub
+r
+
+t
+s S
+rv
+
+g Work
+
+g Group](https://g
+thub.com/kub
+r
+
+t
+s/commu
+
+ty/tr
+/mast
+r/
+g-s
+rv
+
+g),
+s
+:
+    - [Sta
+dard
+z
+
+g Larg
+ Mod
+
+ S
+rv
+r M
+tr
+cs 
+
+ Kub
+r
+
+t
+s](https://docs.goog
+
+.com/docum
+
+t/d/1SpSp1E6moa4HSrJ
+S4x3NpLuj88sMXr2tbofK
+zTZpk)
+    - [B
+
+chmark
+
+g LLM Work
+oads for P
+rforma
+c
+ Eva
+uat
+o
+ a
+d Autosca
+
+
+g 
+
+ Kub
+r
+
+t
+s](https://docs.goog
+
+.com/docum
+
+t/d/1k4Q4X14hW4vftE
+IuYGDu5KD
+2LtV1XammoG-X
+3bbQ)
+    - [I
+f
+r
+
+c
+ P
+rf](https://g
+thub.com/kub
+r
+
+t
+s-s
+gs/
+g-s
+rv
+
+g/tr
+/ma
+
+/proposa
+s/013-
+
+f
+r
+
+c
+-p
+rf)
+    - 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/5041
+ a
+d 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/12726
+.
+Th
+s 
+s a 
+o
+-tr
+v
+a
+ top
+c. Co
+s
+d
+r th
+s comm
+
+t from Rob:
+
+ I th
+
+k th
+s m
+tr
+c shou
+d focus o
+ try
+
+g to 
+st
+mat
+ 
+hat th
+ max
+
+ co
+curr
+
+cy that 
+
+
+ caus
+ th
+ av
+rag
+ r
+qu
+st 
+
+
+gth 
+ qu
+r
+
+s p
+r
+
+ s
+co
+d ... s
+
+c
+ th
+s 
+s r
+a
+y 
+hat 
+
+
+ "saturat
+" th
+ s
+rv
+r.
+A c
+
+ar goa
+ 
+s that 
+
+ shou
+d 
+xpos
+ th
+ m
+tr
+cs r
+qu
+r
+d to d
+t
+ct
+th
+s saturat
+o
+ po
+
+t, so adm
+
+
+strators ca
+ 
+mp
+
+m
+
+t auto-sca
+
+
+g
+ru
+
+s bas
+d o
+ thos
+. Ho
+
+v
+r, 
+
+ ord
+r to do so, 
+
+ 
+
+d to hav
+ a
+c
+
+ar v
+
+
+ o
+ ho
+ a
+ adm
+
+
+strator (a
+d automat
+d mo
+
+tor
+
+g syst
+m)
+shou
+d judg
+ a
+ 
+
+sta
+c
+ as approach
+
+g saturat
+o
+:
+
+ To 
+d
+
+t
+fy, 
+hat 
+s th
+ saturat
+o
+ po
+
+t for mod
+
+ s
+rv
+r comput
+
+
+ (th
+ 
+
+f
+
+ct
+o
+ po
+
+t 
+h
+r
+ 
+
+ ca
+ot g
+t mor
+ throughput 
+
+th a
+
+ h
+gh
+r r
+qu
+st rat
+, but start to 
+
+cur add
+t
+o
+a
+ 
+at
+
+cy) so 
+
+
+
+ ca
+ autosca
+
+ 
+ff
+ct
+v
+
+y?
+### M
+tr
+c Nam
+
+g
+Our approach to 
+am
+
+g m
+tr
+cs probab
+y d
+s
+rv
+s to b
+ r
+v
+s
+t
+d:
+1. Th
+ us
+ of co
+o
+s 
+
+ m
+tr
+c 
+am
+s s
+ms co
+trary to
+   ["co
+o
+s ar
+ r
+s
+rv
+d for us
+r d
+f
+
+
+d r
+cord
+
+g ru
+
+s"](https://prom
+th
+us.
+o/docs/co
+c
+pts/data_mod
+
+/#m
+tr
+c-
+am
+s-a
+d-
+ab
+
+s).
+2. Most of our m
+tr
+cs fo
+o
+ th
+ co
+v
+
+t
+o
+ of 
+
+d
+
+g 
+
+th u
+
+ts, but
+   
+ot a
+ do.
+3. Som
+ of our m
+tr
+c 
+am
+s 
+
+d 
+
+th `_tota
+`:
+    If th
+r
+ 
+s a suff
+x of `_tota
+` o
+ th
+ m
+tr
+c 
+am
+, 
+t 
+
+
+ b
+ r
+mov
+d. Wh
+
+
+    
+xpos
+
+g th
+ t
+m
+ s
+r
+
+s for cou
+t
+r, a `_tota
+` suff
+x 
+
+
+ b
+ add
+d. Th
+s 
+s
+    for compat
+b
+
+
+ty b
+t
+
+
+ Op
+
+M
+tr
+cs a
+d th
+ Prom
+th
+us t
+xt format, as Op
+
+M
+tr
+cs
+    r
+qu
+r
+s th
+ `_tota
+` suff
+x.
+### Add
+
+g Mor
+ M
+tr
+cs
+Th
+r
+ 
+s 
+o shortag
+ of 
+d
+as for 
+
+
+ m
+tr
+cs:
+    - Examp
+
+s from oth
+r proj
+cts 
+
+k
+
+  [TGI](https://g
+thub.com/IBM/t
+xt-g
+
+
+rat
+o
+-
+
+f
+r
+
+c
+?tab=r
+adm
+-ov-f
+
+
+#m
+tr
+cs)
+    - Proposa
+s ar
+s
+
+g from sp
+c
+f
+c us
+ cas
+s, 
+
+k
+ th
+ Kub
+r
+
+t
+s
+  auto-sca
+
+
+g top
+c abov
+
+    - Proposa
+s that m
+ght ar
+s
+ out of sta
+dard
+sat
+o
+ 
+fforts 
+
+k
+
+  [Op
+
+T
+
+
+m
+try S
+ma
+t
+c Co
+v
+
+t
+o
+s for G
+
+ AI](https://g
+thub.com/op
+
+-t
+
+
+m
+try/s
+ma
+t
+c-co
+v
+
+t
+o
+s/tr
+/ma
+
+/docs/g
+
+-a
+).
+W
+ shou
+d b
+ caut
+ous 
+
+ our approach to add
+
+g 
+
+
+ m
+tr
+cs. Wh
+
+
+
+m
+tr
+cs ar
+ oft
+
+ r
+
+at
+v
+
+y stra
+ghtfor
+ard to add:
+1. Th
+y ca
+ b
+ d
+ff
+cu
+t to r
+mov
+ - s
+ th
+ s
+ct
+o
+ o
+ d
+pr
+cat
+o
+
+   abov
+.
+2. Th
+y ca
+ hav
+ a m
+a
+
+
+gfu
+ p
+rforma
+c
+ 
+mpact 
+h
+
+ 
+
+ab
+
+d. A
+d
+   m
+tr
+cs ar
+ usua
+y of v
+ry 
+
+m
+t
+d us
+ u
+
+
+ss th
+y ca
+ b
+ 
+
+ab
+
+d
+   by d
+fau
+t a
+d 
+
+ product
+o
+.
+3. Th
+y hav
+ a
+ 
+mpact o
+ d
+v
+
+opm
+
+t a
+d ma
+
+t
+
+a
+c
+ of th
+
+   proj
+ct. Ev
+ry m
+tr
+c add
+d ov
+r t
+m
+ has mad
+ th
+s 
+ffort mor
+
+   t
+m
+-co
+sum
+
+g, a
+d p
+rhaps 
+ot a
+ m
+tr
+cs just
+fy th
+s o
+go
+
+g
+   
+
+v
+stm
+
+t 
+
+ th
+
+r ma
+
+t
+
+a
+c
+.
+## Trac
+
+g - Op
+
+T
+
+
+m
+try
+M
+tr
+cs prov
+d
+ a
+ aggr
+gat
+d v
+
+
+ ov
+r t
+m
+ of th
+ syst
+m's
+p
+rforma
+c
+ a
+d h
+a
+th. Trac
+
+g, o
+ th
+ oth
+r ha
+d, tracks 
+
+d
+v
+dua
+
+r
+qu
+sts as th
+y mov
+ through d
+ff
+r
+
+t s
+rv
+c
+s a
+d compo
+
+
+ts. Both
+fa
+ u
+d
+r th
+ mor
+ g
+
+
+ra
+ h
+ad
+
+g of "Obs
+rvab
+
+
+ty".
+vLLM has support for Op
+
+T
+
+
+m
+try trac
+
+g:
+    - Add
+d by 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/4687
+ a
+d r
+
+
+stat
+d by 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/20372
+
+    - Co
+f
+gur
+d 
+
+th `--o
+tp-trac
+s-
+
+dpo
+
+t` a
+d `--co
+
+ct-d
+ta
+
+
+d-trac
+s`
+    - [Op
+
+T
+
+
+m
+try b
+og post](https://op
+
+t
+
+
+m
+try.
+o/b
+og/2024/
+m-obs
+rvab
+
+
+ty/)
+    - [Us
+r-fac
+
+g docs](../../
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/op
+
+t
+
+
+m
+try/README.md)
+    - [B
+og post](https://m
+d
+um.com/@ro
+
+
+.schaff
+r/fo
+o
+-th
+-tra
+
+-sup
+rcharg
+
+g-v
+m-
+
+th-op
+
+t
+
+
+m
+try-d
+str
+but
+d-trac
+
+g-aa655229b46f)
+    - [IBM product docs](https://
+.
+bm.com/docs/
+
+/
+
+sta
+a-obs
+rvab
+
+
+ty/curr
+
+t?top
+c=mgaa-mo
+
+tor
+
+g-
+arg
+-
+a
+guag
+-mod
+
+s-
+ms-v
+m-pub
+
+c-pr
+v
+
+
+)
+Op
+
+T
+
+
+m
+try has a
+[G
+
+ AI Work
+
+g Group](https://g
+thub.com/op
+
+-t
+
+
+m
+try/commu
+
+ty/b
+ob/ma
+
+/proj
+cts/g
+
+-a
+.md).
+S
+
+c
+ m
+tr
+cs 
+s a b
+g 
+
+ough top
+c o
+ 
+ts o
+
+, 
+
+ co
+s
+d
+r th
+ top
+c
+of trac
+
+g to b
+ qu
+t
+ s
+parat
+ from m
+tr
+cs.
+### Op
+
+T
+
+
+m
+try Mod
+
+ For
+ard vs Ex
+cut
+ T
+m
+
+Th
+ curr
+
+t 
+mp
+
+m
+
+tat
+o
+ 
+xpos
+s th
+ fo
+o
+
+
+g t
+o m
+tr
+cs:
+    - `v
+m:mod
+
+_for
+ard_t
+m
+_m
+
+
+s
+co
+ds` (H
+stogram) - Th
+ t
+m
+ sp
+
+t
+  
+
+ th
+ mod
+
+ for
+ard pass 
+h
+
+ th
+s r
+qu
+st 
+as 
+
+ th
+ batch.
+    - `v
+m:mod
+
+_
+x
+cut
+_t
+m
+_m
+
+
+s
+co
+ds` (H
+stogram) - Th
+ t
+m
+ sp
+
+t
+  
+
+ th
+ mod
+
+ 
+x
+cut
+ fu
+ct
+o
+. Th
+s 
+
+
+ 
+
+c
+ud
+ mod
+
+ for
+ard,
+  b
+ock/sy
+c across 
+ork
+rs, cpu-gpu sy
+c t
+m
+ a
+d samp
+
+
+g t
+m
+.
+Th
+s
+ m
+tr
+cs ar
+ o
+
+y 
+
+ab
+
+d 
+h
+
+ Op
+
+T
+
+
+m
+try trac
+
+g 
+s 
+
+ab
+
+d
+a
+d 
+f `--co
+
+ct-d
+ta
+
+
+d-trac
+s=a
+/mod
+
+/
+ork
+r` 
+s us
+d. Th
+
+docum
+
+tat
+o
+ for th
+s opt
+o
+ stat
+s:
+
+ co
+
+ct d
+ta
+
+
+d trac
+s for th
+ sp
+c
+f
+
+d modu
+
+s. Th
+s 
+
+vo
+v
+s
+
+ us
+ of poss
+b
+y cost
+y a
+d or b
+ock
+
+g op
+rat
+o
+s a
+d h
+
+c
+ m
+ght
+
+ hav
+ a p
+rforma
+c
+ 
+mpact.
+Th
+ m
+tr
+cs 
+
+r
+ add
+d by 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/7089
+ a
+d 
+ho up 
+
+ a
+ Op
+
+T
+
+
+m
+try trac
+
+as:
+```t
+xt
+-
+ g
+
+_a
+.
+at
+
+cy.t
+m
+_
+
+_sch
+du
+
+r: Doub
+
+(0.017550230026245117)
+-
+ g
+
+_a
+.
+at
+
+cy.t
+m
+_
+
+_mod
+
+_for
+ard: Doub
+
+(3.151565277099609)
+-
+ g
+
+_a
+.
+at
+
+cy.t
+m
+_
+
+_mod
+
+_
+x
+cut
+: Doub
+
+(3.6468167304992676)
+```
+W
+ a
+r
+ady hav
+ `
+
+f
+r
+
+c
+_t
+m
+` a
+d `d
+cod
+_t
+m
+` m
+tr
+cs, so th
+
+qu
+st
+o
+ 
+s 
+h
+th
+r th
+r
+ ar
+ suff
+c
+
+
+t
+y commo
+ us
+ cas
+s for th
+
+h
+gh
+r-r
+so
+ut
+o
+ t
+m
+
+gs to just
+fy th
+ ov
+rh
+ad.
+S
+
+c
+ 
+
+ ar
+ go
+
+g to tr
+at th
+ qu
+st
+o
+ of Op
+
+T
+
+
+m
+try support
+s
+parat
+
+y, 
+
+ 
+
+
+ 
+
+c
+ud
+ th
+s
+ part
+cu
+ar m
+tr
+cs u
+d
+r that top
+c.

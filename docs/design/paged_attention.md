@@ -1,498 +1,4702 @@
-# Paged Attention
+# Pag
+d Att
 
-!!! warning
-    This is a historical document based on the [original paper for vLLM](https://arxiv.org/abs/2309.06180).
-    It no longer describes the code used in vLLM today.
+t
+o
 
-Currently, vLLM utilizes its own implementation of a multi-head query
-attention kernel (`csrc/attention/attention_kernels.cu`).
-This kernel is designed to be compatible with
-vLLM's paged KV caches, where the key and value cache are stored in
-separate blocks (note that this block concept differs from the GPU
-thread block. So in a later document, I will refer to vLLM paged
-attention block as "block", while refer to GPU thread block as
-"thread block").
+!!! 
+ar
 
-To achieve high performance, this kernel relies on a specially
-designed memory layout and access method, specifically when threads
-read data from global memory to shared memory. The purpose of this
-document is to provide a high-level explanation of the kernel
-implementation step by step, aiding those who wish to learn about the
-vLLM multi-head query attention kernel. After going through this
-document, users will likely have a better understanding and feel easier
-to follow the actual implementation.
 
-Please note that this document may not cover all details, such as how
-to calculate the correct index for the corresponding data or the dot
-multiplication implementation. However, after reading this document
-and becoming familiar with the high-level logic flow, it should be
-easier for you to read the actual code and understand the details.
+g
+    Th
+s 
+s a h
+stor
+ca
+ docum
 
-## Inputs
+t bas
+d o
+ th
+ [or
+g
 
-The kernel function takes a list of arguments for the current thread
-to perform its assigned work. The three most important arguments are
-the input pointers `q`, `k_cache`, and `v_cache`, which point
-to query, key, and value data on global memory that need to be read
-and processed. The output pointer `out` points to global memory
-where the result should be written. These four pointers actually
-refer to multidimensional arrays, but each thread only accesses the
-portion of data assigned to it. I have omitted all other runtime
-parameters here for simplicity.
+a
+ pap
+r for vLLM](https://arx
+v.org/abs/2309.06180).
+    It 
+o 
+o
+g
+r d
+scr
+b
+s th
+ cod
+ us
+d 
 
+ vLLM today.
+Curr
+
+t
+y, vLLM ut
+
+
+z
+s 
+ts o
+
+ 
+mp
+
+m
+
+tat
+o
+ of a mu
+t
+-h
+ad qu
+ry
+att
+
+t
+o
+ k
+r
+
+
+ (`csrc/att
+
+t
+o
+/att
+
+t
+o
+_k
+r
+
+
+s.cu`).
+Th
+s k
+r
+
+
+ 
+s d
+s
+g
+
+d to b
+ compat
+b
+
+ 
+
+th
+vLLM's pag
+d KV cach
+s, 
+h
+r
+ th
+ k
+y a
+d va
+u
+ cach
+ ar
+ stor
+d 
+
+
+s
+parat
+ b
+ocks (
+ot
+ that th
+s b
+ock co
+c
+pt d
+ff
+rs from th
+ GPU
+thr
+ad b
+ock. So 
+
+ a 
+at
+r docum
+
+t, I 
+
+
+ r
+f
+r to vLLM pag
+d
+att
+
+t
+o
+ b
+ock as "b
+ock", 
+h
+
+
+ r
+f
+r to GPU thr
+ad b
+ock as
+"thr
+ad b
+ock").
+To ach
+
+v
+ h
+gh p
+rforma
+c
+, th
+s k
+r
+
+
+ r
+
+
+
+s o
+ a sp
+c
+a
+y
+d
+s
+g
+
+d m
+mory 
+ayout a
+d acc
+ss m
+thod, sp
+c
+f
+ca
+y 
+h
+
+ thr
+ads
+r
+ad data from g
+oba
+ m
+mory to shar
+d m
+mory. Th
+ purpos
+ of th
+s
+docum
+
+t 
+s to prov
+d
+ a h
+gh-
+
+v
+
+ 
+xp
+a
+at
+o
+ of th
+ k
+r
+
+
+
+
+mp
+
+m
+
+tat
+o
+ st
+p by st
+p, a
+d
+
+g thos
+ 
+ho 
+
+sh to 
+
+ar
+ about th
+
+vLLM mu
+t
+-h
+ad qu
+ry att
+
+t
+o
+ k
+r
+
+
+. Aft
+r go
+
+g through th
+s
+docum
+
+t, us
+rs 
+
+
+ 
+
+k
+
+y hav
+ a b
+tt
+r u
+d
+rsta
+d
+
+g a
+d f
+
+ 
+as
+
+r
+to fo
+o
+ th
+ actua
+ 
+mp
+
+m
+
+tat
+o
+.
+P
+
+as
+ 
+ot
+ that th
+s docum
+
+t may 
+ot cov
+r a
+ d
+ta
+
+s, such as ho
+
+to ca
+cu
+at
+ th
+ corr
+ct 
+
+d
+x for th
+ corr
+spo
+d
+
+g data or th
+ dot
+mu
+t
+p
+
+cat
+o
+ 
+mp
+
+m
+
+tat
+o
+. Ho
+
+v
+r, aft
+r r
+ad
+
+g th
+s docum
+
+t
+a
+d b
+com
+
+g fam
+
+
+ar 
+
+th th
+ h
+gh-
+
+v
+
+ 
+og
+c f
+o
+, 
+t shou
+d b
+
+
+as
+
+r for you to r
+ad th
+ actua
+ cod
+ a
+d u
+d
+rsta
+d th
+ d
+ta
+
+s.
+## I
+puts
+Th
+ k
+r
+
+
+ fu
+ct
+o
+ tak
+s a 
+
+st of argum
+
+ts for th
+ curr
+
+t thr
+ad
+to p
+rform 
+ts ass
+g
+
+d 
+ork. Th
+ thr
+ most 
+mporta
+t argum
+
+ts ar
+
+th
+ 
+
+put po
+
+t
+rs `q`, `k_cach
+`, a
+d `v_cach
+`, 
+h
+ch po
+
+t
+to qu
+ry, k
+y, a
+d va
+u
+ data o
+ g
+oba
+ m
+mory that 
+
+d to b
+ r
+ad
+a
+d proc
+ss
+d. Th
+ output po
+
+t
+r `out` po
+
+ts to g
+oba
+ m
+mory
+
+h
+r
+ th
+ r
+su
+t shou
+d b
+ 
+r
+tt
+
+. Th
+s
+ four po
+
+t
+rs actua
+y
+r
+f
+r to mu
+t
+d
+m
+
+s
+o
+a
+ arrays, but 
+ach thr
+ad o
+
+y acc
+ss
+s th
+
+port
+o
+ of data ass
+g
+
+d to 
+t. I hav
+ om
+tt
+d a
+ oth
+r ru
+t
+m
+
+param
+t
+rs h
+r
+ for s
+mp
+
+c
+ty.
 ```cpp
-template<typename scalar_t, int HEAD_SIZE, int BLOCK_SIZE, int NUM_THREADS, int PARTITION_SIZE = 0>
-__device__ void paged_attention_kernel(
-    ... // Other side args.
-    const scalar_t* __restrict__ out,       // [num_seqs, num_heads, max_num_partitions, head_size]
-    const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
-    const scalar_t* __restrict__ k_cache,   // [num_blocks, num_kv_heads, head_size/x, block_size, x]
-    const scalar_t* __restrict__ v_cache,   // [num_blocks, num_kv_heads, head_size, block_size]
-    ... // Other side args.
+t
+mp
+at
+
+typ
+
+am
+ sca
+ar_t, 
+
+t HEAD_SIZE, 
+
+t BLOCK_SIZE, 
+
+t NUM_THREADS, 
+
+t PARTITION_SIZE = 0
+
+__d
+v
+c
+__ vo
+d pag
+d_att
+
+t
+o
+_k
+r
+
+
+(
+    ... // Oth
+r s
+d
+ args.
+    co
+st sca
+ar_t* __r
+str
+ct__ out,       // [
+um_s
+qs, 
+um_h
+ads, max_
+um_part
+t
+o
+s, h
+ad_s
+z
+]
+    co
+st sca
+ar_t* __r
+str
+ct__ q,         // [
+um_s
+qs, 
+um_h
+ads, h
+ad_s
+z
+]
+    co
+st sca
+ar_t* __r
+str
+ct__ k_cach
+,   // [
+um_b
+ocks, 
+um_kv_h
+ads, h
+ad_s
+z
+/x, b
+ock_s
+z
+, x]
+    co
+st sca
+ar_t* __r
+str
+ct__ v_cach
+,   // [
+um_b
+ocks, 
+um_kv_h
+ads, h
+ad_s
+z
+, b
+ock_s
+z
+]
+    ... // Oth
+r s
+d
+ args.
 )
 ```
+Th
+r
+ ar
+ a
+so a 
 
-There are also a list of template arguments above the function
-signature that are determined during compilation time. `scalar_t`
-represents the data type of the query, key, and value data elements,
-such as FP16. `HEAD_SIZE` indicates the number of elements in each
-head. `BLOCK_SIZE` refers to the number of tokens in each block.
-`NUM_THREADS` denotes the number of threads in each thread block.
-`PARTITION_SIZE` represents the number of tensor parallel GPUs (For
-simplicity, we assume this is 0 and tensor parallel is disabled).
+st of t
+mp
+at
+ argum
 
-With these arguments, we need to perform a sequence of preparations.
-This includes calculating the current head index, block index, and
-other necessary variables. However, for now, we can ignore these
-preparations and proceed directly to the actual calculations. It will
-be easier to understand them once we grasp the entire flow.
+ts abov
+ th
+ fu
+ct
+o
 
-## Concepts
+s
+g
+atur
+ that ar
+ d
+t
+rm
 
-Just before we dive into the calculation flow, I want to describe a
-few concepts that are needed for later sections. However, you may
-skip this section and return later if you encounter any confusing
-terminologies.
 
-- **Sequence**: A sequence represents a client request. For example,
-  the data pointed to by `q` has a shape of
-  `[num_seqs, num_heads, head_size]`. That represents there are total
-  `num_seqs` of query sequence data are pointed by `q`. Since this
-  kernel is a single query attention kernel, each sequence only has one
-  query token. Hence, the `num_seqs` equals the total number of tokens
-  that are processed in the batch.
-- **Context**: The context consists of the generated tokens from the
-  sequence. For instance, `["What", "is", "your"]` are the context
-  tokens, and the input query token is `"name"`. The model might
-  generate the token `"?"`.
-- **Vec**: The vec is a list of elements that are fetched and
-  calculated together. For query and key data, the vec size
-  (`VEC_SIZE`) is determined so that each thread group can fetch and
-  calculate 16 bytes of data at a time. For value data, the vec size
-  (`V_VEC_SIZE`) is determined so that each thread can fetch and
-  calculate 16 bytes of data at a time. For example, if the
-  `scalar_t` is FP16 (2 bytes) and `THREAD_GROUP_SIZE` is 2, the
-  `VEC_SIZE` will be 4, while the `V_VEC_SIZE` will be 8.
-- **Thread group**: The thread group is a small group of
-  threads(`THREAD_GROUP_SIZE`) that fetches and calculates one
-  query token and one key token at a time. Each thread handles only a
-  portion of the token data. The total number of elements processed by
-  one thread group is referred as `x`. For example, if the thread
-  group contains 2 threads and the head size is 8, then thread 0
-  handles the query and key elements at index 0, 2, 4, 6, while thread
-  1 handles the elements at index 1, 3, 5, 7.
-- **Block**: The key and value cache data in vLLM are split into
-  blocks. Each block stores data for a fixed number(`BLOCK_SIZE`)
-  of tokens at one head. Each block may contain only a portion of the
-  whole context tokens. For example, if the block size is 16 and the
-  head size is 128, then for one head, one block can store 16 * 128 =
-  2048 elements.
-- **Warp**: A warp is a group of 32 threads(`WARP_SIZE`) that
-  execute simultaneously on a stream multiprocessor (SM). In this
-  kernel, each warp processes the calculation between one query token
-  and key tokens of one entire block at a time (it may process multiple
-  blocks in multiple iterations). For example, if there are 4 warps and
-  6 blocks for one context, the assignment would be like warp 0 handles
-  the 0th, 4th blocks, warp 1 handles the 1st, 5th blocks, warp 2
-  handles the 2nd block and warp 3 handles the 3rd block.
-- **Thread block**: A thread block is a group of
-  threads(`NUM_THREADS`) that can access the same shared memory.
-  Each thread block contains multiple warps(`NUM_WARPS`), and in
-  this kernel, each thread block processes the calculation between one
-  query token and key tokens of a whole context.
-- **Grid**: A grid is a collection of thread blocks and defines the
-  shape of the collection. In this kernel, the shape is
-  `(num_heads, num_seqs, max_num_partitions)`. Therefore, each thread
-  block only handles the calculation for one head, one sequence, and
-  one partition.
+d dur
 
-## Query
+g comp
 
-This section will introduce how query data is stored in memory and
-fetched by each thread. As mentioned above, each thread group fetches
-one query token data, while each thread itself only handles a part of
-one query token data. Within each warp, every thread group will fetch
-the same query token data, but will multiply it with different key
-token data.
+at
+o
+ t
+m
+. `sca
+ar_t`
+r
+pr
+s
 
+ts th
+ data typ
+ of th
+ qu
+ry, k
+y, a
+d va
+u
+ data 
+
+
+m
+
+ts,
+such as FP16. `HEAD_SIZE` 
+
+d
+cat
+s th
+ 
+umb
+r of 
+
+
+m
+
+ts 
+
+ 
+ach
+h
+ad. `BLOCK_SIZE` r
+f
+rs to th
+ 
+umb
+r of tok
+
+s 
+
+ 
+ach b
+ock.
+`NUM_THREADS` d
+
+ot
+s th
+ 
+umb
+r of thr
+ads 
+
+ 
+ach thr
+ad b
+ock.
+`PARTITION_SIZE` r
+pr
+s
+
+ts th
+ 
+umb
+r of t
+
+sor para
+
+
+ GPUs (For
+s
+mp
+
+c
+ty, 
+
+ assum
+ th
+s 
+s 0 a
+d t
+
+sor para
+
+
+ 
+s d
+sab
+
+d).
+W
+th th
+s
+ argum
+
+ts, 
+
+ 
+
+d to p
+rform a s
+qu
+
+c
+ of pr
+parat
+o
+s.
+Th
+s 
+
+c
+ud
+s ca
+cu
+at
+
+g th
+ curr
+
+t h
+ad 
+
+d
+x, b
+ock 
+
+d
+x, a
+d
+oth
+r 
+
+c
+ssary var
+ab
+
+s. Ho
+
+v
+r, for 
+o
+, 
+
+ ca
+ 
+g
+or
+ th
+s
+
+pr
+parat
+o
+s a
+d proc
+d d
+r
+ct
+y to th
+ actua
+ ca
+cu
+at
+o
+s. It 
+
+
+
+b
+ 
+as
+
+r to u
+d
+rsta
+d th
+m o
+c
+ 
+
+ grasp th
+ 
+
+t
+r
+ f
+o
+.
+## Co
+c
+pts
+Just b
+for
+ 
+
+ d
+v
+ 
+
+to th
+ ca
+cu
+at
+o
+ f
+o
+, I 
+a
+t to d
+scr
+b
+ a
+f
+
+ co
+c
+pts that ar
+ 
+
+d
+d for 
+at
+r s
+ct
+o
+s. Ho
+
+v
+r, you may
+sk
+p th
+s s
+ct
+o
+ a
+d r
+tur
+ 
+at
+r 
+f you 
+
+cou
+t
+r a
+y co
+fus
+
+g
+t
+rm
+
+o
+og
+
+s.
+    - **S
+qu
+
+c
+**: A s
+qu
+
+c
+ r
+pr
+s
+
+ts a c
+
+
+
+t r
+qu
+st. For 
+xamp
+
+,
+  th
+ data po
+
+t
+d to by `q` has a shap
+ of
+  `[
+um_s
+qs, 
+um_h
+ads, h
+ad_s
+z
+]`. That r
+pr
+s
+
+ts th
+r
+ ar
+ tota
+
+  `
+um_s
+qs` of qu
+ry s
+qu
+
+c
+ data ar
+ po
+
+t
+d by `q`. S
+
+c
+ th
+s
+  k
+r
+
+
+ 
+s a s
+
+g
+
+ qu
+ry att
+
+t
+o
+ k
+r
+
+
+, 
+ach s
+qu
+
+c
+ o
+
+y has o
+
+
+  qu
+ry tok
+
+. H
+
+c
+, th
+ `
+um_s
+qs` 
+qua
+s th
+ tota
+ 
+umb
+r of tok
+
+s
+  that ar
+ proc
+ss
+d 
+
+ th
+ batch.
+    - **Co
+t
+xt**: Th
+ co
+t
+xt co
+s
+sts of th
+ g
+
+
+rat
+d tok
+
+s from th
+
+  s
+qu
+
+c
+. For 
+
+sta
+c
+, `["What", "
+s", "your"]` ar
+ th
+ co
+t
+xt
+  tok
+
+s, a
+d th
+ 
+
+put qu
+ry tok
+
+ 
+s `"
+am
+"`. Th
+ mod
+
+ m
+ght
+  g
+
+
+rat
+ th
+ tok
+
+ `"?"`.
+    - **V
+c**: Th
+ v
+c 
+s a 
+
+st of 
+
+
+m
+
+ts that ar
+ f
+tch
+d a
+d
+  ca
+cu
+at
+d tog
+th
+r. For qu
+ry a
+d k
+y data, th
+ v
+c s
+z
+
+  (`VEC_SIZE`) 
+s d
+t
+rm
+
+
+d so that 
+ach thr
+ad group ca
+ f
+tch a
+d
+  ca
+cu
+at
+ 16 byt
+s of data at a t
+m
+. For va
+u
+ data, th
+ v
+c s
+z
+
+  (`V_VEC_SIZE`) 
+s d
+t
+rm
+
+
+d so that 
+ach thr
+ad ca
+ f
+tch a
+d
+  ca
+cu
+at
+ 16 byt
+s of data at a t
+m
+. For 
+xamp
+
+, 
+f th
+
+  `sca
+ar_t` 
+s FP16 (2 byt
+s) a
+d `THREAD_GROUP_SIZE` 
+s 2, th
+
+  `VEC_SIZE` 
+
+
+ b
+ 4, 
+h
+
+
+ th
+ `V_VEC_SIZE` 
+
+
+ b
+ 8.
+    - **Thr
+ad group**: Th
+ thr
+ad group 
+s a sma
+ group of
+  thr
+ads(`THREAD_GROUP_SIZE`) that f
+tch
+s a
+d ca
+cu
+at
+s o
+
+
+  qu
+ry tok
+
+ a
+d o
+
+ k
+y tok
+
+ at a t
+m
+. Each thr
+ad ha
+d
+
+s o
+
+y a
+  port
+o
+ of th
+ tok
+
+ data. Th
+ tota
+ 
+umb
+r of 
+
+
+m
+
+ts proc
+ss
+d by
+  o
+
+ thr
+ad group 
+s r
+f
+rr
+d as `x`. For 
+xamp
+
+, 
+f th
+ thr
+ad
+  group co
+ta
+
+s 2 thr
+ads a
+d th
+ h
+ad s
+z
+ 
+s 8, th
+
+ thr
+ad 0
+  ha
+d
+
+s th
+ qu
+ry a
+d k
+y 
+
+
+m
+
+ts at 
+
+d
+x 0, 2, 4, 6, 
+h
+
+
+ thr
+ad
+  1 ha
+d
+
+s th
+ 
+
+
+m
+
+ts at 
+
+d
+x 1, 3, 5, 7.
+    - **B
+ock**: Th
+ k
+y a
+d va
+u
+ cach
+ data 
+
+ vLLM ar
+ sp
+
+t 
+
+to
+  b
+ocks. Each b
+ock stor
+s data for a f
+x
+d 
+umb
+r(`BLOCK_SIZE`)
+  of tok
+
+s at o
+
+ h
+ad. Each b
+ock may co
+ta
+
+ o
+
+y a port
+o
+ of th
+
+  
+ho
+
+ co
+t
+xt tok
+
+s. For 
+xamp
+
+, 
+f th
+ b
+ock s
+z
+ 
+s 16 a
+d th
+
+  h
+ad s
+z
+ 
+s 128, th
+
+ for o
+
+ h
+ad, o
+
+ b
+ock ca
+ stor
+ 16 * 128 =
+  2048 
+
+
+m
+
+ts.
+    - **Warp**: A 
+arp 
+s a group of 32 thr
+ads(`WARP_SIZE`) that
+  
+x
+cut
+ s
+mu
+ta
+
+ous
+y o
+ a str
+am mu
+t
+proc
+ssor (SM). I
+ th
+s
+  k
+r
+
+
+, 
+ach 
+arp proc
+ss
+s th
+ ca
+cu
+at
+o
+ b
+t
+
+
+ o
+
+ qu
+ry tok
+
+
+  a
+d k
+y tok
+
+s of o
+
+ 
+
+t
+r
+ b
+ock at a t
+m
+ (
+t may proc
+ss mu
+t
+p
+
+
+  b
+ocks 
+
+ mu
+t
+p
+
+ 
+t
+rat
+o
+s). For 
+xamp
+
+, 
+f th
+r
+ ar
+ 4 
+arps a
+d
+  6 b
+ocks for o
+
+ co
+t
+xt, th
+ ass
+g
+m
+
+t 
+ou
+d b
+ 
+
+k
+ 
+arp 0 ha
+d
+
+s
+  th
+ 0th, 4th b
+ocks, 
+arp 1 ha
+d
+
+s th
+ 1st, 5th b
+ocks, 
+arp 2
+  ha
+d
+
+s th
+ 2
+d b
+ock a
+d 
+arp 3 ha
+d
+
+s th
+ 3rd b
+ock.
+    - **Thr
+ad b
+ock**: A thr
+ad b
+ock 
+s a group of
+  thr
+ads(`NUM_THREADS`) that ca
+ acc
+ss th
+ sam
+ shar
+d m
+mory.
+  Each thr
+ad b
+ock co
+ta
+
+s mu
+t
+p
+
+ 
+arps(`NUM_WARPS`), a
+d 
+
+
+  th
+s k
+r
+
+
+, 
+ach thr
+ad b
+ock proc
+ss
+s th
+ ca
+cu
+at
+o
+ b
+t
+
+
+ o
+
+
+  qu
+ry tok
+
+ a
+d k
+y tok
+
+s of a 
+ho
+
+ co
+t
+xt.
+    - **Gr
+d**: A gr
+d 
+s a co
+
+ct
+o
+ of thr
+ad b
+ocks a
+d d
+f
+
+
+s th
+
+  shap
+ of th
+ co
+
+ct
+o
+. I
+ th
+s k
+r
+
+
+, th
+ shap
+ 
+s
+  `(
+um_h
+ads, 
+um_s
+qs, max_
+um_part
+t
+o
+s)`. Th
+r
+for
+, 
+ach thr
+ad
+  b
+ock o
+
+y ha
+d
+
+s th
+ ca
+cu
+at
+o
+ for o
+
+ h
+ad, o
+
+ s
+qu
+
+c
+, a
+d
+  o
+
+ part
+t
+o
+.
+## Qu
+ry
+Th
+s s
+ct
+o
+ 
+
+
+ 
+
+troduc
+ ho
+ qu
+ry data 
+s stor
+d 
+
+ m
+mory a
+d
+f
+tch
+d by 
+ach thr
+ad. As m
+
+t
+o
+
+d abov
+, 
+ach thr
+ad group f
+tch
+s
+o
+
+ qu
+ry tok
+
+ data, 
+h
+
+
+ 
+ach thr
+ad 
+ts
+
+f o
+
+y ha
+d
+
+s a part of
+o
+
+ qu
+ry tok
+
+ data. W
+th
+
+ 
+ach 
+arp, 
+v
+ry thr
+ad group 
+
+
+ f
+tch
+th
+ sam
+ qu
+ry tok
+
+ data, but 
+
+
+ mu
+t
+p
+y 
+t 
+
+th d
+ff
+r
+
+t k
+y
+tok
+
+ data.
 ```cpp
-const scalar_t* q_ptr = q + seq_idx * q_stride + head_idx * HEAD_SIZE;
+co
+st sca
+ar_t* q_ptr = q + s
+q_
+dx * q_str
+d
+ + h
+ad_
+dx * HEAD_SIZE;
 ```
+![qu
+ry](../ass
+ts/d
+s
+g
+/pag
+d_att
 
-![query](../assets/design/paged_attention/query.png)
+t
+o
+/qu
+ry.p
+g)
+Each thr
+ad d
+f
 
-Each thread defines its own `q_ptr` which points to the assigned
-query token data on global memory. For example, if `VEC_SIZE` is 4
-and `HEAD_SIZE` is 128, the `q_ptr` points to data that contains
-total of 128 elements divided into 128 / 4 = 32 vecs.
 
-![q_vecs](../assets/design/paged_attention/q_vecs.png)
+s 
+ts o
 
+ `q_ptr` 
+h
+ch po
+
+ts to th
+ ass
+g
+
+d
+qu
+ry tok
+
+ data o
+ g
+oba
+ m
+mory. For 
+xamp
+
+, 
+f `VEC_SIZE` 
+s 4
+a
+d `HEAD_SIZE` 
+s 128, th
+ `q_ptr` po
+
+ts to data that co
+ta
+
+s
+tota
+ of 128 
+
+
+m
+
+ts d
+v
+d
+d 
+
+to 128 / 4 = 32 v
+cs.
+![q_v
+cs](../ass
+ts/d
+s
+g
+/pag
+d_att
+
+t
+o
+/q_v
+cs.p
+g)
 ```cpp
-__shared__ Q_vec q_vecs[THREAD_GROUP_SIZE][NUM_VECS_PER_THREAD];
+__shar
+d__ Q_v
+c q_v
+cs[THREAD_GROUP_SIZE][NUM_VECS_PER_THREAD];
 ```
+N
+xt, 
 
-Next, we need to read the global memory data pointed to by `q_ptr`
-into shared memory as `q_vecs`. It is important to note that each
-vecs is assigned to a different row. For example, if the
-`THREAD_GROUP_SIZE` is 2, thread 0 will handle the 0th row vecs,
-while thread 1 handles the 1st row vecs. By reading the query data in
-this way, neighboring threads like thread 0 and thread 1 can read
-neighbor memory, achieving the memory coalescing to improve
-performance.
+ 
 
-## Key
+d to r
+ad th
+ g
+oba
+ m
+mory data po
 
-Similar to the "Query" section, this section introduces memory layout
-and assignment for keys. While each thread group only handle one
-query token one kernel run, it may handle multiple key tokens across
-multiple iterations. Meanwhile, each warp will process multiple blocks
-of key tokens in multiple iterations, ensuring that all context
-tokens are processed by the entire thread group after the kernel run.
-In this context, "handle" refers to performing the dot multiplication
-between query data and key data.
+t
+d to by `q_ptr`
 
+
+to shar
+d m
+mory as `q_v
+cs`. It 
+s 
+mporta
+t to 
+ot
+ that 
+ach
+v
+cs 
+s ass
+g
+
+d to a d
+ff
+r
+
+t ro
+. For 
+xamp
+
+, 
+f th
+
+`THREAD_GROUP_SIZE` 
+s 2, thr
+ad 0 
+
+
+ ha
+d
+
+ th
+ 0th ro
+ v
+cs,
+
+h
+
+
+ thr
+ad 1 ha
+d
+
+s th
+ 1st ro
+ v
+cs. By r
+ad
+
+g th
+ qu
+ry data 
+
+
+th
+s 
+ay, 
+
+
+ghbor
+
+g thr
+ads 
+
+k
+ thr
+ad 0 a
+d thr
+ad 1 ca
+ r
+ad
+
+
+
+ghbor m
+mory, ach
+
+v
+
+g th
+ m
+mory coa
+
+sc
+
+g to 
+mprov
+
+p
+rforma
+c
+.
+## K
+y
+S
+m
+
+ar to th
+ "Qu
+ry" s
+ct
+o
+, th
+s s
+ct
+o
+ 
+
+troduc
+s m
+mory 
+ayout
+a
+d ass
+g
+m
+
+t for k
+ys. Wh
+
+
+ 
+ach thr
+ad group o
+
+y ha
+d
+
+ o
+
+
+qu
+ry tok
+
+ o
+
+ k
+r
+
+
+ ru
+, 
+t may ha
+d
+
+ mu
+t
+p
+
+ k
+y tok
+
+s across
+mu
+t
+p
+
+ 
+t
+rat
+o
+s. M
+a
+
+h
+
+
+, 
+ach 
+arp 
+
+
+ proc
+ss mu
+t
+p
+
+ b
+ocks
+of k
+y tok
+
+s 
+
+ mu
+t
+p
+
+ 
+t
+rat
+o
+s, 
+
+sur
+
+g that a
+ co
+t
+xt
+tok
+
+s ar
+ proc
+ss
+d by th
+ 
+
+t
+r
+ thr
+ad group aft
+r th
+ k
+r
+
+
+ ru
+.
+I
+ th
+s co
+t
+xt, "ha
+d
+
+" r
+f
+rs to p
+rform
+
+g th
+ dot mu
+t
+p
+
+cat
+o
+
+b
+t
+
+
+ qu
+ry data a
+d k
+y data.
 ```cpp
-const scalar_t* k_ptr = k_cache + physical_block_number * kv_block_stride
-                    + kv_head_idx * kv_head_stride
-                    + physical_block_offset * x;
+co
+st sca
+ar_t* k_ptr = k_cach
+ + phys
+ca
+_b
+ock_
+umb
+r * kv_b
+ock_str
+d
+
+                    + kv_h
+ad_
+dx * kv_h
+ad_str
+d
+
+                    + phys
+ca
+_b
+ock_offs
+t * x;
 ```
+U
 
-Unlike to `q_ptr`, `k_ptr` in each thread will point to different
-key token at different iterations. As shown above, that `k_ptr`
-points to key token data based on `k_cache` at assigned block,
-assigned head and assigned token.
 
-![key](../assets/design/paged_attention/key.png)
+k
+ to `q_ptr`, `k_ptr` 
 
-The diagram above illustrates the memory layout for key data. It
-assumes that the `BLOCK_SIZE` is 16, `HEAD_SIZE` is 128, `x` is
-8, `THREAD_GROUP_SIZE` is 2, and there are a total of 4 warps. Each
-rectangle represents all the elements for one key token at one head,
-which will be processed by one thread group. The left half shows the
-total 16 blocks of key token data for warp 0, while the right half
-represents the remaining key token data for other warps or
-iterations. Inside each rectangle, there are a total 32 vecs (128
-elements for one token) that will be processed by 2 threads (one
-thread group) separately.
+ 
+ach thr
+ad 
 
-![k_vecs](../assets/design/paged_attention/k_vecs.png)
 
+ po
+
+t to d
+ff
+r
+
+t
+k
+y tok
+
+ at d
+ff
+r
+
+t 
+t
+rat
+o
+s. As sho
+
+ abov
+, that `k_ptr`
+po
+
+ts to k
+y tok
+
+ data bas
+d o
+ `k_cach
+` at ass
+g
+
+d b
+ock,
+ass
+g
+
+d h
+ad a
+d ass
+g
+
+d tok
+
+.
+![k
+y](../ass
+ts/d
+s
+g
+/pag
+d_att
+
+t
+o
+/k
+y.p
+g)
+Th
+ d
+agram abov
+ 
+
+ustrat
+s th
+ m
+mory 
+ayout for k
+y data. It
+assum
+s that th
+ `BLOCK_SIZE` 
+s 16, `HEAD_SIZE` 
+s 128, `x` 
+s
+8, `THREAD_GROUP_SIZE` 
+s 2, a
+d th
+r
+ ar
+ a tota
+ of 4 
+arps. Each
+r
+cta
+g
+
+ r
+pr
+s
+
+ts a
+ th
+ 
+
+
+m
+
+ts for o
+
+ k
+y tok
+
+ at o
+
+ h
+ad,
+
+h
+ch 
+
+
+ b
+ proc
+ss
+d by o
+
+ thr
+ad group. Th
+ 
+
+ft ha
+f sho
+s th
+
+tota
+ 16 b
+ocks of k
+y tok
+
+ data for 
+arp 0, 
+h
+
+
+ th
+ r
+ght ha
+f
+r
+pr
+s
+
+ts th
+ r
+ma
+
+
+
+g k
+y tok
+
+ data for oth
+r 
+arps or
+
+t
+rat
+o
+s. I
+s
+d
+ 
+ach r
+cta
+g
+
+, th
+r
+ ar
+ a tota
+ 32 v
+cs (128
+
+
+
+m
+
+ts for o
+
+ tok
+
+) that 
+
+
+ b
+ proc
+ss
+d by 2 thr
+ads (o
+
+
+thr
+ad group) s
+parat
+
+y.
+![k_v
+cs](../ass
+ts/d
+s
+g
+/pag
+d_att
+
+t
+o
+/k_v
+cs.p
+g)
 ```cpp
-K_vec k_vecs[NUM_VECS_PER_THREAD]
+K_v
+c k_v
+cs[NUM_VECS_PER_THREAD]
 ```
+N
+xt, 
 
-Next, we need to read the key token data from `k_ptr` and store
-them on register memory as `k_vecs`. We use register memory for
-`k_vecs` because it will only be accessed by one thread once,
-whereas `q_vecs` will be accessed by multiple threads multiple
-times. Each `k_vecs` will contain multiple vectors for later
-calculation. Each vec will be set at each inner iteration. The
-assignment of vecs allows neighboring threads in a warp to read
-neighboring memory together, which again promotes the memory
-coalescing. For instance, thread 0 will read vec 0, while thread 1
-will read vec 1. In the next inner loop, thread 0 will read vec 2,
-while thread 1 will read vec 3, and so on.
+ 
 
-You may still be a little confused about the overall flow. Don't
-worry, please keep reading the next "QK" section. It will illustrate
-the query and key calculation flow in a clearer and higher-level
-manner.
+d to r
+ad th
+ k
+y tok
 
+ data from `k_ptr` a
+d stor
+
+th
+m o
+ r
+g
+st
+r m
+mory as `k_v
+cs`. W
+ us
+ r
+g
+st
+r m
+mory for
+`k_v
+cs` b
+caus
+ 
+t 
+
+
+ o
+
+y b
+ acc
+ss
+d by o
+
+ thr
+ad o
+c
+,
+
+h
+r
+as `q_v
+cs` 
+
+
+ b
+ acc
+ss
+d by mu
+t
+p
+
+ thr
+ads mu
+t
+p
+
+
+t
+m
+s. Each `k_v
+cs` 
+
+
+ co
+ta
+
+ mu
+t
+p
+
+ v
+ctors for 
+at
+r
+ca
+cu
+at
+o
+. Each v
+c 
+
+
+ b
+ s
+t at 
+ach 
+
+
+r 
+t
+rat
+o
+. Th
+
+ass
+g
+m
+
+t of v
+cs a
+o
+s 
+
+
+ghbor
+
+g thr
+ads 
+
+ a 
+arp to r
+ad
+
+
+
+ghbor
+
+g m
+mory tog
+th
+r, 
+h
+ch aga
+
+ promot
+s th
+ m
+mory
+coa
+
+sc
+
+g. For 
+
+sta
+c
+, thr
+ad 0 
+
+
+ r
+ad v
+c 0, 
+h
+
+
+ thr
+ad 1
+
+
+
+ r
+ad v
+c 1. I
+ th
+ 
+
+xt 
+
+
+r 
+oop, thr
+ad 0 
+
+
+ r
+ad v
+c 2,
+
+h
+
+
+ thr
+ad 1 
+
+
+ r
+ad v
+c 3, a
+d so o
+.
+You may st
+
+ b
+ a 
+
+tt
+
+ co
+fus
+d about th
+ ov
+ra
+ f
+o
+. Do
+'t
+
+orry, p
+
+as
+ k
+p r
+ad
+
+g th
+ 
+
+xt "QK" s
+ct
+o
+. It 
+
+
+ 
+
+ustrat
+
+th
+ qu
+ry a
+d k
+y ca
+cu
+at
+o
+ f
+o
+ 
+
+ a c
+
+ar
+r a
+d h
+gh
+r-
+
+v
+
+
+ma
+
+r.
 ## QK
+As sho
 
-As shown the pseudocode below, before the entire for loop block, we
-fetch the query data for one token and store it in `q_vecs`. Then,
-in the outer for loop, we iterate through different `k_ptrs` that
-point to different tokens and prepare the `k_vecs` in the inner for
-loop. Finally, we perform the dot multiplication between the
-`q_vecs` and each `k_vecs`.
+ th
+ ps
+udocod
+ b
 
+o
+, b
+for
+ th
+ 
+
+t
+r
+ for 
+oop b
+ock, 
+
+
+f
+tch th
+ qu
+ry data for o
+
+ tok
+
+ a
+d stor
+ 
+t 
+
+ `q_v
+cs`. Th
+
+,
+
+
+ th
+ out
+r for 
+oop, 
+
+ 
+t
+rat
+ through d
+ff
+r
+
+t `k_ptrs` that
+po
+
+t to d
+ff
+r
+
+t tok
+
+s a
+d pr
+par
+ th
+ `k_v
+cs` 
+
+ th
+ 
+
+
+r for
+
+oop. F
+
+a
+y, 
+
+ p
+rform th
+ dot mu
+t
+p
+
+cat
+o
+ b
+t
+
+
+ th
+
+`q_v
+cs` a
+d 
+ach `k_v
+cs`.
 ```cpp
-q_vecs = ...
+q_v
+cs = ...
 for ... {
     k_ptr = ...
     for ... {
-        k_vecs[i] = ...
+        k_v
+cs[
+] = ...
     }
     ...
-    float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(q_vecs[thread_group_offset], k_vecs);
+    f
+oat qk = sca
+
+ * Qk_dot
+sca
+ar_t, THREAD_GROUP_SIZE
+::dot(q_v
+cs[thr
+ad_group_offs
+t], k_v
+cs);
 }
 ```
+As m
 
-As mentioned before, for each thread, it only fetches part of the
-query and key token data at a time. However, there will be a cross
-thread group reduction happen in the `Qk_dot<>::dot` . So `qk`
-returned here is not just between part of the query and key token dot
-multiplication, but actually a full result between entire query and
-key token data.
+t
+o
 
-For example, if the value of `HEAD_SIZE` is 128 and
-`THREAD_GROUP_SIZE` is 2, each thread's `k_vecs` will contain
-total 64 elements. However, the returned `qk` is actually the
-result of dot multiplication between 128 query elements and 128 key
-elements. If you want to learn more about the details of the dot
-multiplication and reduction, you may refer to the implementation of
-`Qk_dot<>::dot`. However, for the sake of simplicity, I will not
-cover it in this document.
+d b
+for
+, for 
+ach thr
+ad, 
+t o
 
+y f
+tch
+s part of th
+
+qu
+ry a
+d k
+y tok
+
+ data at a t
+m
+. Ho
+
+v
+r, th
+r
+ 
+
+
+ b
+ a cross
+thr
+ad group r
+duct
+o
+ happ
+
+ 
+
+ th
+ `Qk_dot
+
+::dot` . So `qk`
+r
+tur
+
+d h
+r
+ 
+s 
+ot just b
+t
+
+
+ part of th
+ qu
+ry a
+d k
+y tok
+
+ dot
+mu
+t
+p
+
+cat
+o
+, but actua
+y a fu
+ r
+su
+t b
+t
+
+
+ 
+
+t
+r
+ qu
+ry a
+d
+k
+y tok
+
+ data.
+For 
+xamp
+
+, 
+f th
+ va
+u
+ of `HEAD_SIZE` 
+s 128 a
+d
+`THREAD_GROUP_SIZE` 
+s 2, 
+ach thr
+ad's `k_v
+cs` 
+
+
+ co
+ta
+
+
+tota
+ 64 
+
+
+m
+
+ts. Ho
+
+v
+r, th
+ r
+tur
+
+d `qk` 
+s actua
+y th
+
+r
+su
+t of dot mu
+t
+p
+
+cat
+o
+ b
+t
+
+
+ 128 qu
+ry 
+
+
+m
+
+ts a
+d 128 k
+y
+
+
+
+m
+
+ts. If you 
+a
+t to 
+
+ar
+ mor
+ about th
+ d
+ta
+
+s of th
+ dot
+mu
+t
+p
+
+cat
+o
+ a
+d r
+duct
+o
+, you may r
+f
+r to th
+ 
+mp
+
+m
+
+tat
+o
+ of
+`Qk_dot
+
+::dot`. Ho
+
+v
+r, for th
+ sak
+ of s
+mp
+
+c
+ty, I 
+
+
+ 
+ot
+cov
+r 
+t 
+
+ th
+s docum
+
+t.
 ## Softmax
+N
+xt, 
 
-Next, we need to calculate the normalized softmax for all `qk`s,
-as shown above, where each $x$ represents a `qk`. To do this,
-we must obtain the reduced value of `qk_max`($m(x)$) and
-the `exp_sum`($\ell(x)$) of all `qk`s. The reduction
-should be performed across the entire thread block, encompassing
-results between the query token and all context key tokens.
+ 
 
+d to ca
+cu
+at
+ th
+ 
+orma
+
+z
+d softmax for a
+ `qk`s,
+as sho
+
+ abov
+, 
+h
+r
+ 
+ach $x$ r
+pr
+s
+
+ts a `qk`. To do th
+s,
+
+
+ must obta
+
+ th
+ r
+duc
+d va
+u
+ of `qk_max`($m(x)$) a
+d
+th
+ `
+xp_sum`($\
+
+(x)$) of a
+ `qk`s. Th
+ r
+duct
+o
+
+shou
+d b
+ p
+rform
+d across th
+ 
+
+t
+r
+ thr
+ad b
+ock, 
+
+compass
+
+g
+r
+su
+ts b
+t
+
+
+ th
+ qu
+ry tok
+
+ a
+d a
+ co
+t
+xt k
+y tok
+
+s.
 $$
-\begin{gather*}
-m(x):=\max _i \quad x_i \\ \quad f(x):=\left[\begin{array}{lll}e^{x_1-m(x)} & \ldots & e^{x_B-m(x)}\end{array}\right]\\ \quad \ell(x):=\sum_i f(x)_i \\
-\quad \operatorname{softmax}(x):=\frac{f(x)}{\ell(x)}
-\end{gather*}
+\b
+g
+
+{gath
+r*}
+m(x):=\max _
+ \quad x_
+ \\ \quad f(x):=\
+
+ft[\b
+g
+
+{array}{
+}
+^{x_1-m(x)} & \
+dots & 
+^{x_B-m(x)}\
+
+d{array}\r
+ght]\\ \quad \
+
+(x):=\sum_
+ f(x)_
+ \\
+\quad \op
+rator
+am
+{softmax}(x):=\frac{f(x)}{\
+
+(x)}
+\
+
+d{gath
+r*}
 $$
+### `qk_max` a
+d `
+og
+ts`
+Just r
+ght aft
+r 
 
-### `qk_max` and `logits`
+ g
+t th
+ `qk` r
+su
+t, 
 
-Just right after we get the `qk` result, we can set the temporary
-`logits` result with `qk` (In the end, the `logits` should
-store the normalized softmax result). Also we can compare and collect
-the `qk_max` for all `qk`s that are calculated by current
-thread group.
+ ca
+ s
+t th
+ t
+mporary
+`
+og
+ts` r
+su
+t 
 
+th `qk` (I
+ th
+ 
+
+d, th
+ `
+og
+ts` shou
+d
+stor
+ th
+ 
+orma
+
+z
+d softmax r
+su
+t). A
+so 
+
+ ca
+ compar
+ a
+d co
+
+ct
+th
+ `qk_max` for a
+ `qk`s that ar
+ ca
+cu
+at
+d by curr
+
+t
+thr
+ad group.
 ```cpp
-if (thread_group_offset == 0) {
-    const bool mask = token_idx >= context_len;
-    logits[token_idx - start_token_idx] = mask ? 0.f : qk;
+
+f (thr
+ad_group_offs
+t == 0) {
+    co
+st boo
+ mask = tok
+
+_
+dx 
+= co
+t
+xt_
+
+
+;
+    
+og
+ts[tok
+
+_
+dx - start_tok
+
+_
+dx] = mask ? 0.f : qk;
     qk_max = mask ? qk_max : fmaxf(qk_max, qk);
 }
 ```
+P
 
-Please note that the `logits` here is on shared memory, so each
-thread group will set the fields for its own assigned context tokens.
-Overall, the size of logits should be number of context tokens.
+as
+ 
+ot
+ that th
+ `
+og
+ts` h
+r
+ 
+s o
+ shar
+d m
+mory, so 
+ach
+thr
+ad group 
 
+
+ s
+t th
+ f
+
+
+ds for 
+ts o
+
+ ass
+g
+
+d co
+t
+xt tok
+
+s.
+Ov
+ra
+, th
+ s
+z
+ of 
+og
+ts shou
+d b
+ 
+umb
+r of co
+t
+xt tok
+
+s.
 ```cpp
-for (int mask = WARP_SIZE / 2; mask >= THREAD_GROUP_SIZE; mask /= 2) {
+for (
+
+t mask = WARP_SIZE / 2; mask 
+= THREAD_GROUP_SIZE; mask /= 2) {
     qk_max = fmaxf(qk_max, VLLM_SHFL_XOR_SYNC(qk_max, mask));
 }
 
-if (lane == 0) {
-    red_smem[warp_idx] = qk_max;
+f (
+a
+
+ == 0) {
+    r
+d_sm
+m[
+arp_
+dx] = qk_max;
 }
 ```
+Th
 
-Then we need to get the reduced `qk_max` across each warp. The main
-idea is to make threads in warp to communicate with each other and
-get the final max `qk` .
+ 
 
+ 
+
+d to g
+t th
+ r
+duc
+d `qk_max` across 
+ach 
+arp. Th
+ ma
+
+
+
+d
+a 
+s to mak
+ thr
+ads 
+
+ 
+arp to commu
+
+cat
+ 
+
+th 
+ach oth
+r a
+d
+g
+t th
+ f
+
+a
+ max `qk` .
 ```cpp
-for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
+for (
+
+t mask = NUM_WARPS / 2; mask 
+= 1; mask /= 2) {
     qk_max = fmaxf(qk_max, VLLM_SHFL_XOR_SYNC(qk_max, mask));
 }
 qk_max = VLLM_SHFL_SYNC(qk_max, 0);
 ```
+F
 
-Finally, we can get the reduced `qk_max` from whole thread block by
-compare the `qk_max` from all warps in this thread block. Then we
-need to broadcast the final result to each thread.
+a
+y, 
 
-### `exp_sum`
+ ca
+ g
+t th
+ r
+duc
+d `qk_max` from 
+ho
 
-Similar to `qk_max`, we need to get the reduced sum value from the
-entire thread block too.
+ thr
+ad b
+ock by
+compar
+ th
+ `qk_max` from a
+ 
+arps 
 
+ th
+s thr
+ad b
+ock. Th
+
+ 
+
+
+
+
+d to broadcast th
+ f
+
+a
+ r
+su
+t to 
+ach thr
+ad.
+### `
+xp_sum`
+S
+m
+
+ar to `qk_max`, 
+
+ 
+
+d to g
+t th
+ r
+duc
+d sum va
+u
+ from th
+
+
+
+t
+r
+ thr
+ad b
+ock too.
 ```cpp
-for (int i = thread_idx; i < num_tokens; i += NUM_THREADS) {
-    float val = __expf(logits[i] - qk_max);
-    logits[i] = val;
-    exp_sum += val;
+for (
+
+t 
+ = thr
+ad_
+dx; 
+ 
+ 
+um_tok
+
+s; 
+ += NUM_THREADS) {
+    f
+oat va
+ = __
+xpf(
+og
+ts[
+] - qk_max);
+    
+og
+ts[
+] = va
+;
+    
+xp_sum += va
+;
 }
 ...
-exp_sum = block_sum<NUM_WARPS>(&red_smem[NUM_WARPS], exp_sum);
+
+xp_sum = b
+ock_sum
+NUM_WARPS
+(&r
+d_sm
+m[NUM_WARPS], 
+xp_sum);
 ```
+F
+rst
+y, sum a
+ 
+xp va
+u
+s from 
+ach thr
+ad group, a
+d m
+a
 
-Firstly, sum all exp values from each thread group, and meanwhile,
-convert each entry of `logits` from `qk` to `exp(qk - qk_max)`.
-Please note, the `qk_max` here is already the max `qk` across the
-whole thread block. And then we can do reduction for `exp_sum`
-across whole thread block just like the `qk_max`.
+h
 
+
+,
+co
+v
+rt 
+ach 
+
+try of `
+og
+ts` from `qk` to `
+xp(qk - qk_max)`.
+P
+
+as
+ 
+ot
+, th
+ `qk_max` h
+r
+ 
+s a
+r
+ady th
+ max `qk` across th
+
+
+ho
+
+ thr
+ad b
+ock. A
+d th
+
+ 
+
+ ca
+ do r
+duct
+o
+ for `
+xp_sum`
+across 
+ho
+
+ thr
+ad b
+ock just 
+
+k
+ th
+ `qk_max`.
 ```cpp
-const float inv_sum = __fdividef(1.f, exp_sum + 1e-6f);
-for (int i = thread_idx; i < num_tokens; i += NUM_THREADS) {
-    logits[i] *= inv_sum;
+co
+st f
+oat 
+
+v_sum = __fd
+v
+d
+f(1.f, 
+xp_sum + 1
+-6f);
+for (
+
+t 
+ = thr
+ad_
+dx; 
+ 
+ 
+um_tok
+
+s; 
+ += NUM_THREADS) {
+    
+og
+ts[
+] *= 
+
+v_sum;
 }
 ```
+F
 
-Finally, with the reduced `qk_max` and `exp_sum`, we can obtain
-the final normalized softmax result as `logits`. This `logits`
-variable will be used for dot multiplication with the value data in
-later steps. Now, it should store the normalized softmax result of
-`qk` for all assigned context tokens.
+a
+y, 
 
-## Value
+th th
+ r
+duc
+d `qk_max` a
+d `
+xp_sum`, 
 
-![value](../assets/design/paged_attention/value.png)
+ ca
+ obta
 
-![logits_vec](../assets/design/paged_attention/logits_vec.png)
 
-![v_vec](../assets/design/paged_attention/v_vec.png)
+th
+ f
 
-Now we need to retrieve the value data and perform dot multiplication
-with `logits`. Unlike query and key, there is no thread group
-concept for value data. As shown in diagram, different from key token
-memory layout, elements from the same column correspond to the same
-value token. For one block of value data, there are `HEAD_SIZE` of
-rows and `BLOCK_SIZE` of columns that are split into multiple
-`v_vecs`.
+a
+ 
+orma
 
-Each thread always fetches `V_VEC_SIZE` elements from the same
-`V_VEC_SIZE` of tokens at a time. As a result, a single thread
-retrieves multiple `v_vec`s from different rows and the same
-columns through multiple inner iterations. For each `v_vec`, it
-needs to be dot multiplied with the corresponding `logits_vec`,
-which is also `V_VEC_SIZE` elements from `logits`. Overall, with
-multiple inner iterations, each warp will process one block of value
-tokens. And with multiple outer iterations, the whole context value
-tokens are processed
+z
+d softmax r
+su
+t as `
+og
+ts`. Th
+s `
+og
+ts`
+var
+ab
 
+ 
+
+
+ b
+ us
+d for dot mu
+t
+p
+
+cat
+o
+ 
+
+th th
+ va
+u
+ data 
+
+
+
+at
+r st
+ps. No
+, 
+t shou
+d stor
+ th
+ 
+orma
+
+z
+d softmax r
+su
+t of
+`qk` for a
+ ass
+g
+
+d co
+t
+xt tok
+
+s.
+## Va
+u
+
+![va
+u
+](../ass
+ts/d
+s
+g
+/pag
+d_att
+
+t
+o
+/va
+u
+.p
+g)
+![
+og
+ts_v
+c](../ass
+ts/d
+s
+g
+/pag
+d_att
+
+t
+o
+/
+og
+ts_v
+c.p
+g)
+![v_v
+c](../ass
+ts/d
+s
+g
+/pag
+d_att
+
+t
+o
+/v_v
+c.p
+g)
+No
+ 
+
+ 
+
+d to r
+tr
+
+v
+ th
+ va
+u
+ data a
+d p
+rform dot mu
+t
+p
+
+cat
+o
+
+
+
+th `
+og
+ts`. U
+
+
+k
+ qu
+ry a
+d k
+y, th
+r
+ 
+s 
+o thr
+ad group
+co
+c
+pt for va
+u
+ data. As sho
+
+ 
+
+ d
+agram, d
+ff
+r
+
+t from k
+y tok
+
+
+m
+mory 
+ayout, 
+
+
+m
+
+ts from th
+ sam
+ co
+um
+ corr
+spo
+d to th
+ sam
+
+va
+u
+ tok
+
+. For o
+
+ b
+ock of va
+u
+ data, th
+r
+ ar
+ `HEAD_SIZE` of
+ro
+s a
+d `BLOCK_SIZE` of co
+um
+s that ar
+ sp
+
+t 
+
+to mu
+t
+p
+
+
+`v_v
+cs`.
+Each thr
+ad a
+
+ays f
+tch
+s `V_VEC_SIZE` 
+
+
+m
+
+ts from th
+ sam
+
+`V_VEC_SIZE` of tok
+
+s at a t
+m
+. As a r
+su
+t, a s
+
+g
+
+ thr
+ad
+r
+tr
+
+v
+s mu
+t
+p
+
+ `v_v
+c`s from d
+ff
+r
+
+t ro
+s a
+d th
+ sam
+
+co
+um
+s through mu
+t
+p
+
+ 
+
+
+r 
+t
+rat
+o
+s. For 
+ach `v_v
+c`, 
+t
+
+
+ds to b
+ dot mu
+t
+p
+
+
+d 
+
+th th
+ corr
+spo
+d
+
+g `
+og
+ts_v
+c`,
+
+h
+ch 
+s a
+so `V_VEC_SIZE` 
+
+
+m
+
+ts from `
+og
+ts`. Ov
+ra
+, 
+
+th
+mu
+t
+p
+
+ 
+
+
+r 
+t
+rat
+o
+s, 
+ach 
+arp 
+
+
+ proc
+ss o
+
+ b
+ock of va
+u
+
+tok
+
+s. A
+d 
+
+th mu
+t
+p
+
+ out
+r 
+t
+rat
+o
+s, th
+ 
+ho
+
+ co
+t
+xt va
+u
+
+tok
+
+s ar
+ proc
+ss
+d
 ```cpp
-float accs[NUM_ROWS_PER_THREAD];
-for ... { // Iteration over different blocks.
-    logits_vec = ...
-    for ... { // Iteration over different rows.
-        v_vec = ...
+f
+oat accs[NUM_ROWS_PER_THREAD];
+for ... { // It
+rat
+o
+ ov
+r d
+ff
+r
+
+t b
+ocks.
+    
+og
+ts_v
+c = ...
+    for ... { // It
+rat
+o
+ ov
+r d
+ff
+r
+
+t ro
+s.
+        v_v
+c = ...
         ...
-        accs[i] += dot(logits_vec, v_vec);
+        accs[
+] += dot(
+og
+ts_v
+c, v_v
+c);
     }
 }
 ```
+As sho
 
-As shown in the above pseudocode, in the outer loop, similar to
-`k_ptr`, `logits_vec` iterates over different blocks and reads
-`V_VEC_SIZE` elements from `logits`. In the inner loop, each
-thread reads `V_VEC_SIZE` elements from the same tokens as a
-`v_vec` and performs dot multiplication. It is important to note
-that in each inner iteration, the thread fetches different head
-position elements for the same tokens. The dot result is then
-accumulated in `accs`. Therefore, each entry of `accs` is mapped
-to a head position assigned to the current thread.
+ 
 
-For example, if `BLOCK_SIZE` is 16 and `V_VEC_SIZE` is 8, each
-thread fetches 8 value elements for 8 tokens at a time. Each element
-is from different tokens at the same head position. If `HEAD_SIZE`
-is 128 and `WARP_SIZE` is 32, for each inner loop, a warp needs to
-fetch `WARP_SIZE * V_VEC_SIZE = 256` elements. This means there are
-a total of 128 * 16 / 256 = 8 inner iterations for a warp to handle
-a whole block of value tokens. And each `accs` in each thread
-contains 8 elements that accumulated at 8 different head positions.
-For the thread 0, the `accs` variable will have 8 elements, which
-are 0th, 32nd … 224th elements of a value head that are accumulated
-from all assigned 8 tokens.
+ th
+ abov
+ ps
+udocod
+, 
 
+ th
+ out
+r 
+oop, s
+m
+
+ar to
+`k_ptr`, `
+og
+ts_v
+c` 
+t
+rat
+s ov
+r d
+ff
+r
+
+t b
+ocks a
+d r
+ads
+`V_VEC_SIZE` 
+
+
+m
+
+ts from `
+og
+ts`. I
+ th
+ 
+
+
+r 
+oop, 
+ach
+thr
+ad r
+ads `V_VEC_SIZE` 
+
+
+m
+
+ts from th
+ sam
+ tok
+
+s as a
+`v_v
+c` a
+d p
+rforms dot mu
+t
+p
+
+cat
+o
+. It 
+s 
+mporta
+t to 
+ot
+
+that 
+
+ 
+ach 
+
+
+r 
+t
+rat
+o
+, th
+ thr
+ad f
+tch
+s d
+ff
+r
+
+t h
+ad
+pos
+t
+o
+ 
+
+
+m
+
+ts for th
+ sam
+ tok
+
+s. Th
+ dot r
+su
+t 
+s th
+
+
+accumu
+at
+d 
+
+ `accs`. Th
+r
+for
+, 
+ach 
+
+try of `accs` 
+s mapp
+d
+to a h
+ad pos
+t
+o
+ ass
+g
+
+d to th
+ curr
+
+t thr
+ad.
+For 
+xamp
+
+, 
+f `BLOCK_SIZE` 
+s 16 a
+d `V_VEC_SIZE` 
+s 8, 
+ach
+thr
+ad f
+tch
+s 8 va
+u
+ 
+
+
+m
+
+ts for 8 tok
+
+s at a t
+m
+. Each 
+
+
+m
+
+t
+
+s from d
+ff
+r
+
+t tok
+
+s at th
+ sam
+ h
+ad pos
+t
+o
+. If `HEAD_SIZE`
+
+s 128 a
+d `WARP_SIZE` 
+s 32, for 
+ach 
+
+
+r 
+oop, a 
+arp 
+
+ds to
+f
+tch `WARP_SIZE * V_VEC_SIZE = 256` 
+
+
+m
+
+ts. Th
+s m
+a
+s th
+r
+ ar
+
+a tota
+ of 128 * 16 / 256 = 8 
+
+
+r 
+t
+rat
+o
+s for a 
+arp to ha
+d
+
+
+a 
+ho
+
+ b
+ock of va
+u
+ tok
+
+s. A
+d 
+ach `accs` 
+
+ 
+ach thr
+ad
+co
+ta
+
+s 8 
+
+
+m
+
+ts that accumu
+at
+d at 8 d
+ff
+r
+
+t h
+ad pos
+t
+o
+s.
+For th
+ thr
+ad 0, th
+ `accs` var
+ab
+
+ 
+
+
+ hav
+ 8 
+
+
+m
+
+ts, 
+h
+ch
+ar
+ 0th, 32
+d … 224th 
+
+
+m
+
+ts of a va
+u
+ h
+ad that ar
+ accumu
+at
+d
+from a
+ ass
+g
+
+d 8 tok
+
+s.
 ## LV
+No
+, 
 
-Now, we need to perform reduction for `accs` within each warp. This
-process allows each thread to accumulate the `accs` for the
-assigned head positions of all tokens in one block.
+ 
 
+d to p
+rform r
+duct
+o
+ for `accs` 
+
+th
+
+ 
+ach 
+arp. Th
+s
+proc
+ss a
+o
+s 
+ach thr
+ad to accumu
+at
+ th
+ `accs` for th
+
+ass
+g
+
+d h
+ad pos
+t
+o
+s of a
+ tok
+
+s 
+
+ o
+
+ b
+ock.
 ```cpp
-for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
-    float acc = accs[i];
-    for (int mask = NUM_V_VECS_PER_ROW / 2; mask >= 1; mask /= 2) {
+for (
+
+t 
+ = 0; 
+ 
+ NUM_ROWS_PER_THREAD; 
+++) {
+    f
+oat acc = accs[
+];
+    for (
+
+t mask = NUM_V_VECS_PER_ROW / 2; mask 
+= 1; mask /= 2) {
         acc += VLLM_SHFL_XOR_SYNC(acc, mask);
     }
-    accs[i] = acc;
+    accs[
+] = acc;
 }
 ```
+N
+xt, 
 
-Next, we perform reduction for `accs` across all warps, allowing
-each thread to have the accumulation of `accs` for the assigned
-head positions of all context tokens. Please note that each `accs`
-in every thread only stores the accumulation for a portion of
-elements of the entire head for all context tokens. However, overall,
-all results for output have been calculated but are just stored in
-different thread register memory.
+ p
+rform r
+duct
+o
+ for `accs` across a
+ 
+arps, a
+o
 
-??? code
+
+g
+
+ach thr
+ad to hav
+ th
+ accumu
+at
+o
+ of `accs` for th
+ ass
+g
+
+d
+h
+ad pos
+t
+o
+s of a
+ co
+t
+xt tok
+
+s. P
+
+as
+ 
+ot
+ that 
+ach `accs`
+
+
+ 
+v
+ry thr
+ad o
+
+y stor
+s th
+ accumu
+at
+o
+ for a port
+o
+ of
+
+
+
+m
+
+ts of th
+ 
+
+t
+r
+ h
+ad for a
+ co
+t
+xt tok
+
+s. Ho
+
+v
+r, ov
+ra
+,
+a
+ r
+su
+ts for output hav
+ b
+
+ ca
+cu
+at
+d but ar
+ just stor
+d 
+
+
+d
+ff
+r
+
+t thr
+ad r
+g
+st
+r m
+mory.
+??? cod
 
     ```cpp
-    float* out_smem = reinterpret_cast<float*>(shared_mem);
-    for (int i = NUM_WARPS; i > 1; i /= 2) {
-        // Upper warps write to shared memory.
+    f
+oat* out_sm
+m = r
+
+
+t
+rpr
+t_cast
+f
+oat*
+(shar
+d_m
+m);
+    for (
+
+t 
+ = NUM_WARPS; 
+ 
+ 1; 
+ /= 2) {
+        // Upp
+r 
+arps 
+r
+t
+ to shar
+d m
+mory.
         ...
-        float* dst = &out_smem[(warp_idx - mid) * HEAD_SIZE];
-        for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
-            ...
-            dst[row_idx] = accs[i];
-        }
+        f
+oat* dst = &out_sm
+m[(
+arp_
+dx - m
+d) * HEAD_SIZE];
+        for (
 
-        // Lower warps update the output.
-        const float* src = &out_smem[warp_idx * HEAD_SIZE];
-        for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
+t 
+ = 0; 
+ 
+ NUM_ROWS_PER_THREAD; 
+++) {
             ...
-            accs[i] += src[row_idx];
+            dst[ro
+_
+dx] = accs[
+];
         }
+        // Lo
 
-        // Write out the accs.
+r 
+arps updat
+ th
+ output.
+        co
+st f
+oat* src = &out_sm
+m[
+arp_
+dx * HEAD_SIZE];
+        for (
+
+t 
+ = 0; 
+ 
+ NUM_ROWS_PER_THREAD; 
+++) {
+            ...
+            accs[
+] += src[ro
+_
+dx];
+        }
+        // Wr
+t
+ out th
+ accs.
     }
     ```
-
 ## Output
+No
+ 
 
-Now we can write all of calculated result from local register memory
-to final output global memory.
+ ca
+ 
+r
+t
+ a
+ of ca
+cu
+at
+d r
+su
+t from 
+oca
+ r
+g
+st
+r m
+mory
+to f
 
+a
+ output g
+oba
+ m
+mory.
 ```cpp
-scalar_t* out_ptr = out + seq_idx * num_heads * max_num_partitions * HEAD_SIZE
-                + head_idx * max_num_partitions * HEAD_SIZE
-                + partition_idx * HEAD_SIZE;
+sca
+ar_t* out_ptr = out + s
+q_
+dx * 
+um_h
+ads * max_
+um_part
+t
+o
+s * HEAD_SIZE
+                + h
+ad_
+dx * max_
+um_part
+t
+o
+s * HEAD_SIZE
+                + part
+t
+o
+_
+dx * HEAD_SIZE;
 ```
+F
+rst, 
 
-First, we need to define the `out_ptr` variable, which points to
-the start address of the assigned sequence and assigned head.
+ 
 
+d to d
+f
+
+
+ th
+ `out_ptr` var
+ab
+
+, 
+h
+ch po
+
+ts to
+th
+ start addr
+ss of th
+ ass
+g
+
+d s
+qu
+
+c
+ a
+d ass
+g
+
+d h
+ad.
 ```cpp
-for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
-    const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
-    if (row_idx < HEAD_SIZE && lane % NUM_V_VECS_PER_ROW == 0) {
-        from_float(*(out_ptr + row_idx), accs[i]);
+for (
+
+t 
+ = 0; 
+ 
+ NUM_ROWS_PER_THREAD; 
+++) {
+    co
+st 
+
+t ro
+_
+dx = 
+a
+
+ / NUM_V_VECS_PER_ROW + 
+ * NUM_ROWS_PER_ITER;
+    
+f (ro
+_
+dx 
+ HEAD_SIZE && 
+a
+
+ % NUM_V_VECS_PER_ROW == 0) {
+        from_f
+oat(*(out_ptr + ro
+_
+dx), accs[
+]);
     }
 }
 ```
+F
 
-Finally, we need to iterate over different assigned head positions
-and write out the corresponding accumulated result based on the
+a
+y, 
+
+ 
+
+d to 
+t
+rat
+ ov
+r d
+ff
+r
+
+t ass
+g
+
+d h
+ad pos
+t
+o
+s
+a
+d 
+r
+t
+ out th
+ corr
+spo
+d
+
+g accumu
+at
+d r
+su
+t bas
+d o
+ th
+
 `out_ptr`.
+## C
+tat
+o
 
-## Citation
+```b
+bt
+x
+@
 
-```bibtex
-@inproceedings{kwon2023efficient,
-  title={Efficient Memory Management for Large Language Model Serving with PagedAttention},
-  author={Woosuk Kwon and Zhuohan Li and Siyuan Zhuang and Ying Sheng and Lianmin Zheng and Cody Hao Yu and Joseph E. Gonzalez and Hao Zhang and Ion Stoica},
-  booktitle={Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles},
-  year={2023}
+proc
+d
+
+gs{k
+o
+2023
+ff
+c
+
+
+t,
+  t
+t
+
+={Eff
+c
+
+
+t M
+mory Ma
+ag
+m
+
+t for Larg
+ La
+guag
+ Mod
+
+ S
+rv
+
+g 
+
+th Pag
+dAtt
+
+t
+o
+},
+  author={Woosuk K
+o
+ a
+d Zhuoha
+ L
+ a
+d S
+yua
+ Zhua
+g a
+d Y
+
+g Sh
+
+g a
+d L
+a
+m
+
+ Zh
+
+g a
+d Cody Hao Yu a
+d Jos
+ph E. Go
+za
+
+z a
+d Hao Zha
+g a
+d Io
+ Sto
+ca},
+  bookt
+t
+
+={Proc
+d
+
+gs of th
+ ACM SIGOPS 29th Sympos
+um o
+ Op
+rat
+
+g Syst
+ms Pr
+
+c
+p
+
+s},
+  y
+ar={2023}
 }
 ```
