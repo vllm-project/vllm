@@ -464,8 +464,7 @@ def download_gguf(
         )
     except Exception as e:
         # mmproj files are optional — not all GGUF repos have them
-        logger.debug("Skipping optional mmproj download for %s: %s",
-                     repo_id, e)
+        logger.debug("Skipping optional mmproj download for %s: %s", repo_id, e)
 
     # Find the downloaded backbone file(s) — exclude mmproj from candidates
     local_files = []

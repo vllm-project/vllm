@@ -110,8 +110,7 @@ class TestGGUFDownload:
             # key parameters passed through correctly
             mock_snapshot.assert_called_once()
             call_kwargs = mock_snapshot.call_args.kwargs
-            assert call_kwargs["allow_patterns"] == \
-                ["mmproj*.gguf", "*/mmproj*.gguf"]
+            assert call_kwargs["allow_patterns"] == ["mmproj*.gguf", "*/mmproj*.gguf"]
             assert call_kwargs["cache_dir"] is None
             assert call_kwargs["revision"] is None
             assert call_kwargs["ignore_patterns"] is None
@@ -122,8 +121,9 @@ class TestGGUFDownload:
 
     @patch("vllm.model_executor.model_loader.weight_utils.snapshot_download")
     @patch("vllm.model_executor.model_loader.weight_utils.download_weights_from_hf")
-    def test_download_gguf_mmproj_passthrough_params(self, mock_download,
-                                                      mock_snapshot):
+    def test_download_gguf_mmproj_passthrough_params(
+        self, mock_download, mock_snapshot
+    ):
         """Test that cache_dir, revision, ignore_patterns are passed through
         to snapshot_download for mmproj."""
         mock_folder = "/tmp/mock_cache"
@@ -154,8 +154,7 @@ class TestGGUFDownload:
 
     @patch("vllm.model_executor.model_loader.weight_utils.snapshot_download")
     @patch("vllm.model_executor.model_loader.weight_utils.download_weights_from_hf")
-    def test_download_gguf_mmproj_not_in_candidates(self, mock_download,
-                                                     mock_snapshot):
+    def test_download_gguf_mmproj_not_in_candidates(self, mock_download, mock_snapshot):
         """Test that mmproj files never appear in return candidates
         even when present on disk."""
         mock_folder = "/tmp/mock_cache"
@@ -173,9 +172,7 @@ class TestGGUFDownload:
             result = download_gguf("unsloth/gemma-3-4b-it-GGUF", "Q4_K_S")
 
             # glob should only be called with backbone patterns
-            glob_patterns = [
-                call.args[0] for call in mock_glob.call_args_list
-            ]
+            glob_patterns = [call.args[0] for call in mock_glob.call_args_list]
             for p in glob_patterns:
                 assert "mmproj" not in p
 
@@ -184,8 +181,9 @@ class TestGGUFDownload:
     @patch("vllm.model_executor.model_loader.weight_utils.snapshot_download")
     @patch("vllm.model_executor.model_loader.weight_utils.download_weights_from_hf")
     @patch("glob.glob", return_value=[])
-    def test_download_gguf_no_files_found(self, mock_glob, mock_download,
-                                          mock_snapshot):
+    def test_download_gguf_no_files_found(
+        self, mock_glob, mock_download, mock_snapshot
+    ):
         """Test error when no GGUF files are found."""
         mock_folder = "/tmp/mock_cache"
         mock_download.return_value = mock_folder
