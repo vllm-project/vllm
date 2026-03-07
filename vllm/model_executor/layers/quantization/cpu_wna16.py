@@ -6,9 +6,8 @@ from typing import Any
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 
-from vllm._custom_ops import (
-    cpu_gemm_wna16,
-)
+import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -224,7 +223,13 @@ class CPUAWQLinearMethod(LinearMethodBase):
         layer.register_parameter("scales", scales)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        torch.set_printoptions(profile="full", linewidth=5000, sci_mode=False)
+        if envs.VLLM_CPU_WOQ_INT8_MODE:
+            self._process_weights_int8(layer)
+        else:
+            self._process_weights_woq(layer)
+
+    def _process_weights_woq(self, layer: torch.nn.Module) -> None:
+        """Original WOQ int4 repack path."""
         packed_weight = layer.qweight.data
         packed_zeros = layer.qzeros.data
         group_num = packed_zeros.size(0)
@@ -237,16 +242,10 @@ class CPUAWQLinearMethod(LinearMethodBase):
 
         interleave_map = (0, 4, 1, 5, 2, 6, 3, 7)
         weight = unpack_cols(
-            packed_weight,
-            bits,
-            input_size,
-            output_size,
+            packed_weight, bits, input_size, output_size,
         )
         zeros = unpack_cols(
-            packed_zeros,
-            bits,
-            group_num,
-            output_size,
+            packed_zeros, bits, group_num, output_size,
         )
         weight = (
             weight.view(input_size, -1, pack_factor)[:, :, interleave_map]
@@ -260,8 +259,6 @@ class CPUAWQLinearMethod(LinearMethodBase):
         )
 
         zeros = pack_cols(zeros, bits, group_num, output_size).contiguous()
-        # make 16 output channel as a block and transpose to
-        # the make the block contiguous
         weight = pack_cols(weight, bits, input_size, output_size)
         weight = (
             weight.view(input_size, -1, 16 // pack_factor)
@@ -272,13 +269,91 @@ class CPUAWQLinearMethod(LinearMethodBase):
         layer.qweight.data = weight
         layer.qzeros.data = zeros
 
+    def _process_weights_int8(self, layer: torch.nn.Module) -> None:
+        """Int8 oneDNN path: dequant int4 -> float -> requant int8 -> handler."""
+        packed_weight = layer.qweight.data
+        packed_zeros = layer.qzeros.data
+        group_num = packed_zeros.size(0)
+        bits = self.quant_config.weight_bits
+        pack_factor = int(self.quant_config.pack_factor)
+        input_size, packed_output_size = packed_weight.size()
+        output_size = packed_output_size * pack_factor
+        group_size = input_size // group_num
+
+        print(f'lyt_debug_A1 _process_weights_int8 ENTER: '
+            f'input_size(K)={input_size}, output_size(N)={output_size}, '
+            f'group_num={group_num}, group_size={group_size}, '
+            f'bits={bits}, pack_factor={pack_factor}')
+
+        interleave_map = (0, 4, 1, 5, 2, 6, 3, 7)
+        weight_int4 = unpack_cols(
+            packed_weight, bits, input_size, output_size,
+        )
+        zeros_int4 = unpack_cols(
+            packed_zeros, bits, group_num, output_size,
+        )
+
+        weight_int4 = (
+            weight_int4.view(input_size, -1, pack_factor)[:, :, interleave_map]
+            .reshape(input_size, output_size)
+            .contiguous()
+        )
+        zeros_int4 = (
+            zeros_int4.view(group_num, -1, pack_factor)[:, :, interleave_map]
+            .reshape(group_num, output_size)
+            .contiguous()
+        )
+
+        float_weight = _dequant_awq_to_float(
+            weight_int4, zeros_int4, layer.scales.data, group_size
+        )
+
+        weight_int8, channel_scale = _requantize_to_int8(float_weight)
+
+        channel_scale_2d = channel_scale.unsqueeze(0)
+
+        # oneDNN requires column-major weight: stride(0)==1
+        weight_int8 = weight_int8.t().contiguous().t()
+
+        print(f'lyt_debug_A4 creating oneDNN handler: '
+            f'weight_int8 shape={weight_int8.shape}, stride={weight_int8.stride()}, '
+            f'channel_scale_2d shape={channel_scale_2d.shape}')
+
+        layer.dnnl_handler = ops.create_onednn_scaled_mm(
+            weight_int8,
+            channel_scale_2d,
+            torch.get_default_dtype(),
+            True,
+            False,
+            32,
+        )
+
+        print(f'lyt_debug_A4 oneDNN handler created: '
+            f'handler.k={layer.dnnl_handler.k}, handler.n={layer.dnnl_handler.n}')
+
+        del weight_int8, float_weight
+        layer.qweight = None
+        layer.qzeros = None
+        layer.scales = None
+
     def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = cpu_gemm_wna16(
+        if envs.VLLM_CPU_WOQ_INT8_MODE:
+            return self._apply_int8(layer, x, bias)
+        return self._apply_woq(layer, x, bias)
+
+    def _apply_woq(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Original WOQ int4 GEMM path."""
+        x = ops.cpu_gemm_wna16(
             input=x,
             q_weight=layer.qweight,
             scales=layer.scales,
@@ -290,6 +365,35 @@ class CPUAWQLinearMethod(LinearMethodBase):
         )
         return x
 
+    def _apply_int8(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Int8 oneDNN GEMM path."""
+        x_shape = x.shape
+        x_2d = x.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else x
+
+        x_q, x_s, _ = ops.onednn_scaled_int8_quant(x_2d, None, None, True)
+
+        m = x_2d.size(0)
+        n = layer.dnnl_handler.n
+        out = torch.empty((m, n), dtype=x.dtype)
+
+        ops.onednn_scaled_mm(
+            layer.dnnl_handler,
+            x_q,
+            out,
+            x_s,
+            None,
+            None,
+            bias,
+        )
+
+        out = out.reshape(x_shape[:-1] + (n,)) if len(x_shape) > 2 else out
+        return out
+
 
 def _get_isa_hint(dtype: torch.dtype) -> str:
     supports_amx = torch._C._cpu._is_amx_tile_supported()
@@ -297,3 +401,89 @@ def _get_isa_hint(dtype: torch.dtype) -> str:
         return "amx"
     else:
         return "vec"
+
+
+# lyt_dbug_A2 helper: dequantize AWQ int4 weights to float32
+def _dequant_awq_to_float(
+    weight_int4: torch.Tensor,
+    zeros_int4: torch.Tensor,
+    scales: torch.Tensor,
+    group_size: int,
+) -> torch.Tensor:
+    """Dequantize AWQ int4 weights to float32.
+    Args:
+        weight_int4: [K, N] int32, each element is a single int4 value (0-15)
+        zeros_int4:  [num_groups, N] int32, each element is a single int4 zp (0-15)
+        scales:      [num_groups, N] bf16/fp16, per-group per-channel scale
+        group_size:  # of rows per group
+
+    Returns:
+        float_weight: [K, N] float32
+    """
+    K, N = weight_int4.shape
+    num_groups = zeros_int4.shape[0]
+
+    print(f'lyt_debug_A2 _dequant_awq_to_float called: '
+        f'K={K}, N={N}, numgroups={num_groups}, group_size={group_size}')
+    print(f'lyt_debug_A2 weight_int4 range: '
+        f'min={weight_int4.min().item()}, max={weight_int4.max().item()}')
+    print(f'lyt_debug_A2 zeros_int4 range: '
+        f'min={zeros_int4.min().item()}, max={zeros_int4.max().item()}')
+    print(f'lyt_debug_A2 scales range: '
+        f'min={scales.min().item():.6f}, max={scales.max().item():.6f}')
+
+    # Expand zeros &scales: [num_groups, N] -> [K, N] by repeating each group row `group_size` times along dim 0
+    zeros_expanded = zeros_int4.repeat_interleave(group_size, dim=0)  # [K, N]
+    scales_expanded = scales.repeat_interleave(group_size, dim=0)  # [K, N]
+    # AWQ dequant: float_w = (int4_val - zero_point) * scale
+    float_weight = ((weight_int4.float() - zeros_expanded.float()) * scales_expanded.float())
+
+    print(f'lyt_debug_A2 float_weight range: min={float_weight.min().item():.6f}, max={float_weight.max().item():.6f}')
+    print(f'lyt_debug_A2 float_weight shape: {float_weight.shape}, dtype: {float_weight.dtype}')
+
+    return float_weight
+
+
+# lyt_debug_A3 helper: re-quantize float32 weights to int8 per-channel symmetric
+def _requantize_to_int8(
+    float_weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Re-quantize float32 weights to int8 with per-channel symmetric quantization.
+    Args:
+        float_weight: [K, N] flot32
+
+    Returns:
+        weight_int8:    [K, N] int8 (actually stored as [N, K] for oneDNN)
+        channel_scale:  [N] float32, per-output-channel scale
+    """
+    K, N = float_weight.shape
+
+    # Per-channel (per-column) symmetric quantization
+    channel_max = float_weight.abs().amax(dim=0)  # [N]
+    channel_scale = (channel_max / 127.0).clamp(min=1e-10)  # [N]
+
+    weight_int8 = (float_weight / channel_scale.unsqueeze(0)).round().clamp(
+        -128, 127
+    ).to(torch.int8)  # [K, N]
+
+    # lyt_could_comment_cout： Verify the quantization roundtrip error
+    reconstructed = weight_int8.float() * channel_scale.unsqueeze(0)
+    abs_error = (float_weight - reconstructed).abs()
+    rel_error_mask = float_weight.abs() > 1e-6
+    rel_error = torch.zeros_like(abs_error)
+    rel_error[rel_error_mask] = (
+        abs_error[rel_error_mask] / float_weight[rel_error_mask].abs()
+    )
+
+    print(f'lyt_debug_A3 _requantize_to_int8 called: K={K}, N={N}')
+    print(f'lyt_debug_A3 channel_scale range: '
+        f'min={channel_scale.min().item():.8f}, max={channel_scale.max().item():.8f}')
+    print(f'lyt_debug_A3 weight_int8 range: '
+          f'min={weight_int8.min().item()}, max={weight_int8.max().item()}')
+    print(f'lyt_debug_A3 requant abs_error: '
+        f'mean={abs_error.mean().item():.8f}, max={abs_error.max().item():.8f}')
+    print(f'lyt_debug_A3 requant rel_error (where |w|>1e-6): '
+        f'mean={rel_error[rel_error_mask].mean().item():.6f}, '
+        f'max={rel_error[rel_error_mask].max().item():.6f}')
+
+    return weight_int8, channel_scale
