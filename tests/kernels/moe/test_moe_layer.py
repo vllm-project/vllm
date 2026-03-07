@@ -904,6 +904,10 @@ def test_moe_layer_no_parallel(
         baseline_output,
     )
 
+    # Cleanup GPU memory after spawned processes complete
+    torch.cuda.synchronize()
+    torch.accelerator.empty_cache()
+
 
 # TODO: add cudagraphs/torch.compile tests
 @pytest.mark.parametrize("m, n, k", SHAPE_COMBOS)
@@ -1071,6 +1075,10 @@ def test_moe_layer(
         baseline_output,
     )
 
+    # Cleanup GPU memory after spawned processes complete
+    torch.cuda.synchronize()
+    torch.accelerator.empty_cache()
+
 
 # Which quantization methods support EPLB.
 # ModelOptFp8MoEMethod inherits supports_eplb=False from FusedMoEMethodBase.
@@ -1210,3 +1218,7 @@ def test_moe_layer_eplb(
         reduce_results,
         _test_body_eplb,
     )
+
+    # Cleanup GPU memory after spawned processes complete
+    torch.cuda.synchronize()
+    torch.accelerator.empty_cache()
