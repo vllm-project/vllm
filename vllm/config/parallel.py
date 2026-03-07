@@ -151,7 +151,6 @@ class ParallelConfig:
     all2all_backend: All2AllBackend = "allgather_reducescatter"
     """All2All backend for MoE expert parallel communication. Available options:
 
-    - "naive": Naive all2all implementation using broadcasts\n
     - "allgather_reducescatter": All2all based on allgather and reducescatter\n
     - "deepep_high_throughput": Use deepep high-throughput kernels\n
     - "deepep_low_latency": Use deepep low-latency kernels\n
@@ -355,10 +354,11 @@ class ParallelConfig:
                 f"but found: {self._api_process_rank}"
             )
 
-        if self.all2all_backend == "pplx":
+        if self.all2all_backend == "pplx" or self.all2all_backend == "naive":
             logger.warning(
-                "The 'pplx' all2all backend has been removed. "
-                "Falling back to 'allgather_reducescatter'."
+                "The '%s' all2all backend has been removed. "
+                "Falling back to 'allgather_reducescatter'.",
+                self.all2all_backend,
             )
             self.all2all_backend = "allgather_reducescatter"
 
@@ -576,7 +576,6 @@ class ParallelConfig:
             self.all2all_backend
             in (
                 "allgather_reducescatter",
-                "naive",
                 "deepep_high_throughput",
                 "deepep_low_latency",
                 "mori",
@@ -805,7 +804,7 @@ class ParallelConfig:
             )
 
         if (
-            self.all2all_backend in ("allgather_reducescatter", "naive")
+            self.all2all_backend in ("allgather_reducescatter")
             and self.eplb_config.use_async
         ):
             logger.warning(
