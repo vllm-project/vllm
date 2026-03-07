@@ -103,6 +103,7 @@ class EagleCudaGraphManager:
             block_tables,
             attn_groups,
             kv_cache_config,
+            skip_attn=(capture_cg_mode == CUDAGraphMode.PIECEWISE),
         )
         num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
 
@@ -131,10 +132,11 @@ class EagleCudaGraphManager:
         num_reqs: int,
         num_tokens: int,
         generate_fn: Callable,
-        attn_metadata: dict[str, Any],
+        attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor],
         num_tokens_across_dp: torch.Tensor,
     ) -> None:
+        assert attn_metadata is not None
         assert num_tokens not in self.graphs
         graph = torch.cuda.CUDAGraph()
 
@@ -162,7 +164,7 @@ class EagleCudaGraphManager:
         num_reqs: int,
         num_tokens: int,
         generate_fn: Callable,
-        attn_metadata: dict[str, Any],
+        attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor],
         num_tokens_across_dp: torch.Tensor,
     ) -> None:

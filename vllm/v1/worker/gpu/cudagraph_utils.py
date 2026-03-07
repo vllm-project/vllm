@@ -125,6 +125,7 @@ class CudaGraphManager:
             block_tables,
             attn_groups,
             kv_cache_config,
+            skip_attn=(capture_cg_mode == CUDAGraphMode.PIECEWISE),
         )
         num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
 
@@ -392,7 +393,8 @@ def prepare_inputs_to_capture(
     block_tables: BlockTables,
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
-) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+    skip_attn: bool = False,
+) -> tuple[dict[str, Any] | None, dict[str, torch.Tensor]]:
     input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
@@ -412,11 +414,13 @@ def prepare_inputs_to_capture(
         )
         input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
 
-    attn_metadata = model_state.prepare_attn(
-        input_batch,
-        input_block_tables,
-        slot_mappings,
-        attn_groups,
-        kv_cache_config,
-    )
+    attn_metadata = None
+    if not skip_attn:
+        attn_metadata = model_state.prepare_attn(
+            input_batch,
+            input_block_tables,
+            slot_mappings,
+            attn_groups,
+            kv_cache_config,
+        )
     return attn_metadata, slot_mappings_by_layer

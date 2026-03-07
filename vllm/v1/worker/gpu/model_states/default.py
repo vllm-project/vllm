@@ -8,7 +8,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.attn_utils import build_attn_metadata, prepare_hybrid_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
@@ -51,6 +51,7 @@ class DefaultModelState(ModelState):
                 device=self.device,
             )
 
+        self.is_hybrid = self.model_config.is_hybrid
         self.uses_mrope = self.model_config.uses_mrope
         if self.uses_mrope:
             self.mrope_state = MRopeState(
@@ -141,9 +142,23 @@ class DefaultModelState(ModelState):
         slot_mappings: torch.Tensor,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        req_states: RequestState | None = None,
+        scheduled_spec_decode_tokens: dict[str, list[int]] | None = None,
     ) -> dict[str, Any]:
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
+
+        num_accepted_tokens = None
+        num_decode_draft_tokens_cpu = None
+        if self.is_hybrid and scheduled_spec_decode_tokens and req_states is not None:
+            num_accepted_tokens, num_decode_draft_tokens_cpu = prepare_hybrid_metadata(
+                req_states,
+                input_batch.idx_mapping,
+                input_batch.num_reqs,
+                input_batch.req_ids,
+                scheduled_spec_decode_tokens,
+            )
+
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=input_batch.num_reqs,
@@ -157,5 +172,7 @@ class DefaultModelState(ModelState):
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            num_accepted_tokens=num_accepted_tokens,
+            num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
         return attn_metadata
