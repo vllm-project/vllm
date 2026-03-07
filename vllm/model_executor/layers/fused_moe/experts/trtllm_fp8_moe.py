@@ -186,7 +186,7 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             topk_ids=packed_topk_ids,
             routing_bias=None,
             hidden_states=hidden_states,
-            hidden_states_scale=a1q_scale.t().contiguous(),
+            hidden_states_scale=a1q_scale.t().contiguous(),  # type: ignore[union-attr]
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale,
             gemm2_weights=w2,
