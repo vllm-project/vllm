@@ -61,17 +61,21 @@ class OffloadingConnectorStats(KVConnectorStats):
             self.reset()
 
     def reset(self):
-        self.data: dict[str, list[OffloadingOperationMetrics]] = {}
+        self.data: dict[str, Any] = {}
 
-    def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+    def aggregate(self, other: "KVConnectorStats") -> "KVConnectorStats":
         if not other.is_empty():
             for k, v in other.data.items():
                 if k not in self.data:
                     self.data[k] = v
                 else:
                     accumulator = self.data[k]
-                    assert isinstance(accumulator, list)
-                    accumulator.extend(v)
+                    if isinstance(accumulator, list):
+                        assert isinstance(v, list)
+                        accumulator.extend(v)
+                    else:
+                        assert isinstance(v, int | float)
+                        self.data[k] = accumulator + v
         return self
 
     def reduce(self) -> dict[str, int | float]:
@@ -83,6 +87,9 @@ class OffloadingConnectorStats(KVConnectorStats):
         """
         return_dict: dict[str, int | float] = {}
         for transfer_type, ops_list in self.data.items():
+            if isinstance(ops_list, int | float):
+                return_dict[transfer_type] = ops_list
+                continue
             assert isinstance(ops_list, list)
             total_bytes = 0
             total_time = 0.0
@@ -213,10 +220,22 @@ class OffloadingConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.take_events()
 
-    def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        if self.connector_worker is None:
-            return None  # We only emit stats from the worker-side
-        return self.connector_worker.get_kv_connector_stats()
+    def get_kv_connector_stats(self) -> "KVConnectorStats | None":
+        stats: KVConnectorStats | None = None
+        if self.connector_worker is not None:
+            stats = self.connector_worker.get_kv_connector_stats()
+
+        if self.connector_scheduler is not None:
+            mgr_stats_data = self.connector_scheduler.manager.get_stats()
+            if mgr_stats_data:
+                mgr_stats = self.build_kv_connector_stats(mgr_stats_data)
+                if mgr_stats is not None:
+                    if stats is not None:
+                        stats = stats.aggregate(mgr_stats)
+                    else:
+                        stats = mgr_stats
+
+        return stats
 
     @classmethod
     def build_kv_connector_stats(
