@@ -2801,7 +2801,7 @@ steps:
   - vllm/v1/attention/selector.py
   - vllm/platforms/cuda.py
   commands:
-    rocm-smi
+    - rocm-smi
     - python3 examples/offline_inference/basic/chat.py
     # Attention
     # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
@@ -3283,7 +3283,7 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
 
-- label: Qwen3-30B-A3B-FP8-block Accuracy (B200/MI355)
+- label: Qwen3-30B-A3B-FP8-block Accuracy (B200-MI355)
   mirror_hardwares: [amdexperimental, amdproduction, amdmi355]
   agent_pool: mi355_2
   timeout_in_minutes: 60
@@ -3305,7 +3305,7 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
 
-- label: Attention Benchmarks Smoke Test (B200/MI355)
+- label: Attention Benchmarks Smoke Test (B200-MI355)
   device: b200
   mirror_hardwares: [amdexperimental, amdmi355]
   agent_pool: mi355_2
