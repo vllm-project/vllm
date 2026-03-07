@@ -305,7 +305,22 @@ def get_lora_op_configs(
 
 
 @lru_cache
-def supports_pdl(device: torch.device | None = None) -> bool:
+def supports_pdl_linear(device: torch.device | None = None) -> bool:
+    """
+    Refer to: https://github.com/triton-lang/triton/blob/v3.5.0/python/tutorials/11-programmatic-dependent-launch.py
+    """
+    # PDL requires compute capability SM90 or above
+
+    return (
+        current_platform.is_cuda()
+        and current_platform.has_device_capability(90)
+        and not envs.VLLM_LORA_DISABLE_PDL
+        and envs.VLLM_LORA_ENABLE_DUAL_STREAM
+    )
+
+
+@lru_cache
+def supports_pdl_moe(device: torch.device | None = None) -> bool:
     """
     Refer to: https://github.com/triton-lang/triton/blob/v3.5.0/python/tutorials/11-programmatic-dependent-launch.py
     """
