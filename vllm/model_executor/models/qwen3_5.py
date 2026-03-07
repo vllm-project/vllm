@@ -190,10 +190,13 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
         z_size = self.value_dim // self.tp_size
         mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
         z = z.reshape(z.size(0), -1, self.head_v_dim)
-        b, a = ba.chunk(2, dim=-1)
-
-        b = b.contiguous()
-        a = a.contiguous()
+        # Replicated B/A projections — full output, sliced to local TP rank
+        b_full, _ = self.in_proj_b(hidden_states)
+        a_full, _ = self.in_proj_a(hidden_states)
+        _ba_chunk = self.num_v_heads // self.tp_size
+        _ba_start = self.tp_rank * _ba_chunk
+        b = b_full[:, _ba_start:_ba_start + _ba_chunk].contiguous()
+        a = a_full[:, _ba_start:_ba_start + _ba_chunk].contiguous()
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
@@ -399,8 +402,6 @@ class Qwen3_5Model(Qwen3NextModel):
             # GDN
             ("in_proj_qkvz", "in_proj_qkv", (0, 1, 2)),
             ("in_proj_qkvz", "in_proj_z", 3),
-            ("in_proj_ba", "in_proj_b", 0),
-            ("in_proj_ba", "in_proj_a", 1),
         ]
 
         params_dict = dict(self.named_parameters())
@@ -556,7 +557,6 @@ class Qwen3_5ForCausalLMBase(
         "gate_up_proj": ["gate_proj", "up_proj"],
         # GDN fused projections.
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
-        "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -666,7 +666,6 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
 
     packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
-        "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
