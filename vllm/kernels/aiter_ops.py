@@ -34,9 +34,13 @@ direct_register_aiter_op = functools.partial(
 AITER_SUPPORTED = is_aiter_found()
 """Most kernels in this file are supported if AITER is installed."""
 
-rms_no_var_16bit_only = lambda x, w, e, v=None: v is None and x.dtype in (
-    torch.float16,
-    torch.bfloat16,
+rms_no_var_16bit_only = (
+    lambda x, weight, epsilon, variance_size=None: variance_size is None
+    and x.dtype
+    in (
+        torch.float16,
+        torch.bfloat16,
+    )
 )
 """AITER rms_norm only supports float16 and bfloat16 acts and no var_size override."""
 

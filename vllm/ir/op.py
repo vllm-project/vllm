@@ -179,14 +179,17 @@ class IrOp:
         impl = self.dispatch(*args, **kwargs)
         return impl.impl_fn(*args, **kwargs)
 
-    def apply_arg_defaults(self, *args, **kwargs) -> tuple[tuple, dict]:
+    def apply_arg_defaults(self, args) -> tuple:
         """
-        Return (args, kwargs) with default values applied.
+        Return args with default values applied.
         Defaults are taken from the native implementation signature.
+
+        SHOULD NOT BE USED IN THE DISPATCH PATH (SLOW).
+        Only for Inductor lowering.
         """
-        bound_args = self._signature.bind(*args, **kwargs)
+        bound_args = self._signature.bind(*args)
         bound_args.apply_defaults()
-        return bound_args.args, bound_args.kwargs
+        return bound_args.args
 
     def dispatch(self, *args, **kwargs) -> "IrOpImpl":
         """
@@ -199,7 +202,6 @@ class IrOp:
             )
             return self.impls["native"]
 
-        args, kwargs = self.apply_arg_defaults(*args, **kwargs)
         for impl in self._priority_impls:
             assert impl.supported, (
                 "All implementations in priority list must be supported."
@@ -310,12 +312,27 @@ class IrOpImpl:
                 )
 
             # Check that supports_args has the same total number of parameters
-            if len(params) != len(op._signature.parameters):
+            op_params = op._signature.parameters
+            if len(params) != len(op_params):
                 raise ValueError(
                     f"supports_args for provider {provider} must have the same number "
                     f"of parameters ({len(params)}) as the native implementation "
-                    f"({len(op._signature.parameters)})"
+                    f"({len(op_params)})"
                 )
+
+            for p, op_p in zip(params.values(), op_params.values()):
+                if p.name != op_p.name:
+                    raise ValueError(
+                        f"supports_args for provider {provider} has parameter "
+                        f"'{p.name}' which does not match native parameter "
+                        f"'{op_p.name}'"
+                    )
+                if p.default != op_p.default:
+                    raise ValueError(
+                        f"supports_args for provider {provider} has parameter "
+                        f"'{p.name}' with default {p.default} which does not match "
+                        f"native default {op_p.default}'"
+                    )
 
         self.op = op
         self.provider = provider
@@ -332,5 +349,4 @@ class IrOpImpl:
         if self._supports_args is None:
             return True
 
-        args, kwargs = self.op.apply_arg_defaults(*args, **kwargs)
         return self._supports_args(*args, **kwargs)
