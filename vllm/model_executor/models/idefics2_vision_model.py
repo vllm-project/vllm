@@ -359,6 +359,7 @@ class Idefics2VisionTransformer(nn.Module):
         *,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool = True,
+        apply_encoder_attention_mask: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -366,6 +367,7 @@ class Idefics2VisionTransformer(nn.Module):
         embed_dim = config.hidden_size
         self.config = config
         self.use_data_parallel = is_vit_use_data_parallel()
+        self.apply_encoder_attention_mask = apply_encoder_attention_mask
         self.embeddings = Idefics2VisionEmbeddings(config)
         self.encoder = Idefics2Encoder(
             config,
@@ -425,10 +427,16 @@ class Idefics2VisionTransformer(nn.Module):
         )
 
         # Align with HuggingFace NaViT SigLIP in MiniCPMV/O:
+        # - if apply_encoder_attention_mask is False, skip (not all models
+        #   sharing this encoder apply masking in attention, e.g. Aria, Phi4)
         # - if patch_attention_mask was None, skip attention masking
         # - if any padding exists, create an additive 4D mask and pass it
         #   to attention; else skip mask for performance.
-        if flat_patch_mask is None or not torch.any(~flat_patch_mask):
+        if (
+            not self.apply_encoder_attention_mask
+            or flat_patch_mask is None
+            or not torch.any(~flat_patch_mask)
+        ):
             attention_mask = None
         else:
             # Additive mask: masked positions receive a large negative value.
