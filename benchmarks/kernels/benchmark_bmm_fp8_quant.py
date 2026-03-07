@@ -12,7 +12,6 @@ Usage:
 """
 
 import argparse
-import time
 
 import torch
 
@@ -73,9 +72,7 @@ def run_benchmark(N, B, L, V, dtype=torch.bfloat16):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Benchmark fused BMM+FP8 quant kernel"
-    )
+    parser = argparse.ArgumentParser(description="Benchmark fused BMM+FP8 quant kernel")
     parser.add_argument(
         "--batch-sizes",
         type=int,
@@ -97,8 +94,10 @@ def main():
     L = args.kv_lora_rank
     V = args.v_head_dim
 
-    print(f"{'N':>6} {'B':>6} {'L':>6} {'V':>6} | "
-          f"{'Baseline (ms)':>14} {'Fused (ms)':>12} {'Speedup':>8}")
+    print(
+        f"{'N':>6} {'B':>6} {'L':>6} {'V':>6} | "
+        f"{'Baseline (ms)':>14} {'Fused (ms)':>12} {'Speedup':>8}"
+    )
     print("-" * 75)
 
     for N in args.num_heads:

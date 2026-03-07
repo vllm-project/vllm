@@ -33,9 +33,9 @@ def test_bmm_fp8_quant_correctness(N, B, L, V, dtype):
     ref_output_bf16 = ref_bmm.transpose(0, 1).reshape(B, N * V)
     # Quantize
     fp8_dtype = current_platform.fp8_dtype()
-    ref_fp8 = (ref_output_bf16.float() * scale.item()).clamp(
-        -448.0, 448.0
-    ).to(fp8_dtype)
+    ref_fp8 = (
+        (ref_output_bf16.float() * scale.item()).clamp(-448.0, 448.0).to(fp8_dtype)
+    )
 
     # Fused kernel
     fused_output = torch.empty(B, N * V, dtype=fp8_dtype, device=device)
@@ -60,10 +60,10 @@ def test_bmm_fp8_quant_shapes():
     scale = torch.tensor([0.005], dtype=torch.float32, device=device)
 
     shapes = [
-        (16, 1, 512, 128),    # single token
+        (16, 1, 512, 128),  # single token
         (16, 128, 512, 128),  # medium batch
-        (128, 1, 512, 128),   # many heads, single token
-        (16, 1, 256, 64),     # smaller dims
+        (128, 1, 512, 128),  # many heads, single token
+        (16, 1, 256, 64),  # smaller dims
     ]
 
     for N, B, L, V in shapes:
