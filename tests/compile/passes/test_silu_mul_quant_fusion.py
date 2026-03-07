@@ -34,9 +34,10 @@ from vllm.model_executor.kernels.linear import (
     ROCmFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    create_fp8_quant_key,
+    kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -133,14 +134,19 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
 
 
 class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
+    act_quant_key = kFp8Dynamic128Sym
+
     def __init__(self, hidden_size: int, **kwargs):
         super().__init__()
         self.silu_and_mul = SiluAndMul()
-        self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
-            weight_group_shape=GroupShape(128, 128),
-            act_quant_group_shape=GroupShape(1, 128),
-            cutlass_block_fp8_supported=False,
-            use_aiter_and_is_supported=True,
+        self.weight_quant_key = create_fp8_quant_key(
+            static=True, group_shape=GroupShape(hidden_size, hidden_size)
+        )
+
+        self.w8a8_block_fp8_linear = TestFP8Layer(
+            weight_shape=(hidden_size, hidden_size),
+            weight_quant_key=self.weight_quant_key,
+            activation_quant_key=self.act_quant_key,
         )
         self.w = torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
 
@@ -153,7 +159,7 @@ class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
 
     def forward(self, x):
         y = self.silu_and_mul(x)
-        x2 = self.w8a8_block_fp8_linear.apply(y, self.w, self.wscale)
+        x2 = self.w8a8_block_fp8_linear(y, self.w, self.wscale)
         return x2
 
     def ops_in_model_before(self):
