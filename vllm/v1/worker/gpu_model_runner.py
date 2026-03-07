@@ -6249,6 +6249,25 @@ class GPUModelRunner(
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+
+        # For Mamba models, the number of blocks is the number of sequences.
+        # We must not exceed this number of sequences in CUDA graph capture.
+        mamba_num_blocks = float("inf")
+        has_mamba = False
+        num_groups = len(kv_cache_config.kv_cache_groups)
+        for group in kv_cache_config.kv_cache_groups:
+            if isinstance(group.kv_cache_spec, MambaSpec):
+                # In V1, each group has num_blocks // num_groups blocks.
+                mamba_num_blocks = min(mamba_num_blocks,
+                                       kv_cache_config.num_blocks // num_groups)
+                has_mamba = True
+
+        if has_mamba and mamba_num_blocks < self.scheduler_config.max_num_seqs:
+            logger.warning(
+                "Capping max_num_seqs to %d due to Mamba KV cache limits",
+                mamba_num_blocks)
+            self.scheduler_config.max_num_seqs = int(mamba_num_blocks)
+
         self._mamba_copy_bufs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
