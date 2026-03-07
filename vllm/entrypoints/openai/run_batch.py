@@ -31,11 +31,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.cli_args import BaseFrontendArgs
 from vllm.entrypoints.openai.engine.protocol import (
-    ErrorInfo,
     ErrorResponse,
     OpenAIBaseModel,
 )
 from vllm.entrypoints.openai.speech_to_text.protocol import (
+    AudioProcessingError,
     TranscriptionRequest,
     TranscriptionResponse,
     TranscriptionResponseVerbose,
@@ -638,13 +638,9 @@ def make_transcription_wrapper(is_translation: bool) -> WrapperFn:
                     return await handler_fn(audio_data, transcription_request)
             except Exception as e:
                 operation = "translation" if is_translation else "transcription"
-                return ErrorResponse(
-                    error=ErrorInfo(
-                        message=f"Failed to process {operation}: {str(e)}",
-                        type="BadRequestError",
-                        code=HTTPStatus.BAD_REQUEST.value,
-                    )
-                )
+                raise AudioProcessingError(
+                    f"Failed to process {operation}: {str(e)}"
+                ) from e
 
         return transcription_wrapper
 

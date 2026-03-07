@@ -8,6 +8,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.lora.exceptions import LoRAAdapterNotFoundError
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.model_manager import (
     LoRAModelManager,
@@ -147,12 +148,11 @@ class WorkerLoRAManager:
             #       offline mode)
             # - No local adapter files found at `lora_request.lora_path`
             # For NotFoundError
-            raise ValueError(
+            raise LoRAAdapterNotFoundError(
                 f"Loading lora {lora_request.lora_name} failed: No adapter "
                 f"found for {lora_request.lora_path}"
             ) from e
         except Exception as e:
-            # For BadRequestError
             raise e
 
         return lora
