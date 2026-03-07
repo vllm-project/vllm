@@ -169,12 +169,20 @@ class KVCacheEvictionEvent:
 
 @dataclass
 class EplbMetricsStats:
-    """EPLB balancedness stats computed per step for Prometheus export."""
+    """EPLB load stats computed per step for Prometheus export.
 
-    min_balancedness: float
-    p50_balancedness: float
-    p90_balancedness: float
-    avg_balancedness: float
+    Each EP rank independently reports how many tokens it routed to each
+    destination EP rank, per MoE layer.  These per-rank gauges are directly
+    summable across DP ranks in Prometheus/Grafana without inter-rank
+    synchronization:
+
+        sum by (layer_idx, dst_ep_rank) (vllm:eplb_tokens_routed_to_ep_rank)
+    """
+
+    # tokens_per_ep_rank[layer][dst_rank] = token count
+    # Shape semantics: (num_moe_layers, ep_size)
+    tokens_per_ep_rank: list[list[float]]
+
     rearrangements: int
     last_rearrangement_seconds: float
 

@@ -194,8 +194,8 @@ class RayPerfMetricsProm(PerfMetricsProm):
 class RayEplbProm(EplbProm):
     """
     RayEplbProm is used by RayMetrics to log Ray metrics.
-    Provides the same EPLB balancedness metrics as EplbProm
-    but uses Ray's util.metrics library.
+    Provides the same EPLB load metrics as EplbProm but uses
+    Ray's util.metrics library.
     """
 
     _gauge_cls = RayGaugeWrapper

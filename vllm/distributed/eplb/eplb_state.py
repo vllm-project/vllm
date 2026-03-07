@@ -664,7 +664,7 @@ class EplbState:
         # Uses only the driver rank's expert_load_pass which records routing
         # decisions for all physical experts across all EP ranks.
         if not is_dummy:
-            self._compute_local_balancedness_stats()
+            self._compute_local_load_stats()
 
         # Update the expert load sliding window
         if not is_dummy:
@@ -1198,12 +1198,16 @@ class EplbState:
             offset += shape[0]
         return all_reduce_list
 
-    def _compute_local_balancedness_stats(self) -> None:
-        """Compute per-layer balancedness from this rank's expert_load_pass.
+    def _compute_local_load_stats(self) -> None:
+        """Compute per-layer, per-EP-rank token counts from this rank's view.
 
-        No inter-rank communication. The expert_load_pass tensor records
-        routing decisions for all physical experts (partitioned across EP
-        ranks), so reshaping by rank gives per-rank token loads.
+        No inter-rank communication. Each rank's expert_load_pass records
+        how many of THIS rank's tokens were routed to each physical expert.
+        Physical experts are partitioned across EP ranks, so reshaping by
+        rank gives per-destination-rank token loads.
+
+        These per-rank counts are directly summable across DP ranks in
+        Prometheus to get the global load distribution.
         """
         ep_group = get_ep_group().device_group
         num_ranks = ep_group.size()
@@ -1217,24 +1221,13 @@ class EplbState:
         # Reshape to (num_moe_layers, num_ranks, experts_per_rank)
         # and sum per-rank token loads
         per_rank = expert_load.reshape(num_layers, num_ranks, -1).sum(dim=2).float()
-        avg_per_layer = per_rank.mean(dim=1)  # (num_layers,)
-        max_per_layer = per_rank.max(dim=1).values  # (num_layers,)
-        layer_balancedness = torch.where(
-            max_per_layer > 0,
-            avg_per_layer / max_per_layer,
-            torch.ones_like(max_per_layer),
-        )
+        # per_rank: (num_moe_layers, num_ep_ranks)
 
-        # Compute quantile stats from the per-layer balancedness values
-        bal = layer_balancedness.cpu().numpy()
         rearrangements = self.rearrangements_since_last_report
         self.rearrangements_since_last_report = 0
 
         self.last_eplb_stats = EplbMetricsStats(
-            min_balancedness=float(bal.min()),
-            p50_balancedness=float(np.median(bal)),
-            p90_balancedness=float(np.percentile(bal, 10)),
-            avg_balancedness=float(bal.mean()),
+            tokens_per_ep_rank=per_rank.cpu().tolist(),
             rearrangements=rearrangements,
             last_rearrangement_seconds=self.last_rearrangement_seconds,
         )
