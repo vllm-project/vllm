@@ -955,6 +955,7 @@ def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bo
 
 def _get_kv_cache_groups_uniform_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
+    override_group_size: int | None = None,
 ) -> list[KVCacheGroupSpec]:
     """
     Generates the KV cache groups for hybrid models with multiple
@@ -1047,6 +1048,16 @@ def _get_kv_cache_groups_uniform_page_size(
         # pad it to (13 sw, 13 full) instead of (12 sw, 24 full). 1.25 is just a
         # magic number to avoid too many padding layers.
         group_size = max_num_layers
+    if override_group_size is not None:
+        logger.info(
+            "Overriding hybrid KV cache group_size=%d (was %d, "
+            "min_num_layers=%d, max_num_layers=%d)",
+            override_group_size,
+            group_size,
+            min_num_layers,
+            max_num_layers,
+        )
+        group_size = override_group_size
     grouped_layers = []
     for layers in same_type_layers.values():
         num_padding_layers = group_size - len(layers) % group_size
@@ -1254,7 +1265,10 @@ def get_kv_cache_groups(
     # have the same physical memory per block per layer. Split the layers
     # into groups with the same number of layers, and thus same total page
     # size.
-    return _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
+    return _get_kv_cache_groups_uniform_page_size(
+        kv_cache_spec,
+        override_group_size=(vllm_config.scheduler_config.hybrid_kv_cache_group_size),
+    )
 
 
 def generate_scheduler_kv_cache_config(
