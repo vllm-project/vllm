@@ -31,6 +31,9 @@ class EmbedIOProcessor(PoolingIOProcessor):
         if not self.enable_chunked_processing:
             return None
 
+        if ctx.engine_prompts is None:
+            raise ValueError("Engine prompts not available")
+
         ctx.intermediates = ctx.engine_prompts
         request_id = ctx.request_id
         max_model_len = self.model_config.max_model_len
