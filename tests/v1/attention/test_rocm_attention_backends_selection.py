@@ -181,13 +181,13 @@ def test_standard_attention_backend_selection(
             AttentionBackendEnum.TRITON_MLA.get_path(),
             False,
         ),
-        # Test Case 2: TRITON_MLA with block_size == 1
+        # Test Case 2: TRITON_MLA with block_size == 1 (should raise)
         (
             {},
             "TRITON_MLA",
             1,
-            AttentionBackendEnum.TRITON_MLA.get_path(),
-            False,
+            None,
+            True,
         ),
         # Test Case 3: ROCM_AITER_MLA with block_size == 1
         (
