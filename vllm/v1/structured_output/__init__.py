@@ -256,16 +256,60 @@ class StructuredOutputManager:
                 grammar = structured_output_request.grammar
                 apply_bitmask = self.should_fill_bitmask(request)
 
-                state_advancements = 0
+                # Determine where the reasoning_end token falls within
+                # the speculative tokens (if applicable). This handles
+                # two scenarios:
+                # 1. Reasoning not yet ended (apply_bitmask=False): the
+                #    reasoning_end token may appear mid-speculation;
+                #    positions after it need grammar constraints.
+                # 2. Reasoning already ended (apply_bitmask=True): the
+                #    spec tokens from the previous step may contain the
+                #    reasoning_end token; the grammar must NOT accept
+                #    reasoning tokens (up to and including the end
+                #    marker).
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
-                for token in itertools.chain(req_tokens, (-1,)):
-                    self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
+                reasoning_end_idx: int | None = None
+                if (
+                    self.reasoner is not None
+                    and not self.enable_in_reasoning
+                    and req_tokens
+                ):
+                    reasoning_end_idx = self.find_reasoning_end_in_tokens(
+                        list(req_tokens)
+                    )
+
+                state_advancements = 0
+                for tok_idx, token in enumerate(itertools.chain(req_tokens, (-1,))):
+                    # Determine whether grammar applies at this position.
+                    # Tokens up to and including reasoning_end are
+                    # unconstrained; tokens after are grammar-constrained.
+                    if reasoning_end_idx is not None:
+                        is_post_reasoning = tok_idx > reasoning_end_idx
+                        pos_apply_bitmask = is_post_reasoning
+                        # Once we pass the reasoning_end position, mark
+                        # reasoning as ended so subsequent steps know.
+                        if (
+                            is_post_reasoning
+                            and not structured_output_request.reasoning_ended
+                        ):
+                            structured_output_request.reasoning_ended = True
+                    else:
+                        pos_apply_bitmask = apply_bitmask
+
+                    self._fill_bitmasks(
+                        ((grammar, cumulative_index, pos_apply_bitmask),)
+                    )
                     if token == -1:
-                        # Stop advancing the grammar once we hit a padding token.
-                        apply_bitmask = False
-                    if apply_bitmask and not grammar.is_terminated():
+                        # Stop advancing the grammar once we hit a
+                        # padding token.
+                        pos_apply_bitmask = False
+                    if pos_apply_bitmask and not grammar.is_terminated():
                         accepted = grammar.accept_tokens(req_id, [token])
-                        assert accepted, (token, req_id, scheduled_spec_decode_tokens)
+                        assert accepted, (
+                            token,
+                            req_id,
+                            scheduled_spec_decode_tokens,
+                        )
                         state_advancements += 1
                     cumulative_index += 1
                 if state_advancements > 0:
@@ -299,7 +343,11 @@ class StructuredOutputManager:
             return request.structured_output_request.reasoning_ended
         return True
 
-    def should_advance(self, request: "Request") -> bool:
+    def should_advance(
+        self,
+        request: "Request",
+        new_token_ids: list[int] | None = None,
+    ) -> bool:
         if not request.use_structured_output:
             return False
 
@@ -321,20 +369,84 @@ class StructuredOutputManager:
         if structured_req.reasoning_ended:
             return True
 
-        # Check if reasoning ends in *this* step
-        delta_from = request.num_computed_tokens - request.num_output_placeholders
-        all_token_ids = request.all_token_ids
-        start = (
-            delta_from if delta_from >= 0 else max(len(all_token_ids) + delta_from, 0)
-        )
-        if self.reasoner.is_reasoning_end_streaming(
-            all_token_ids, itertools.islice(all_token_ids, start, None)
-        ):
-            # Reasoning just ended, so we shouldn't advance til
-            # next pass
-            structured_req.reasoning_ended = True
+        # Check if reasoning ends in *this* step.
+        # When new_token_ids is provided (e.g. from speculative decoding
+        # verification), check those tokens for reasoning end. This handles
+        # the case where the reasoning_end token appears within a batch of
+        # accepted tokens — we need to return True so the caller can feed
+        # the post-reasoning tokens to the grammar.
+        if new_token_ids is not None:
+            all_token_ids = request.all_token_ids
+            if self.reasoner.is_reasoning_end_streaming(all_token_ids, new_token_ids):
+                structured_req.reasoning_ended = True
+                return True
+        else:
+            delta_from = request.num_computed_tokens - request.num_output_placeholders
+            all_token_ids = request.all_token_ids
+            if self.reasoner.is_reasoning_end_streaming(
+                all_token_ids, all_token_ids[delta_from:]
+            ):
+                # Reasoning just ended, so we shouldn't advance til
+                # next pass
+                structured_req.reasoning_ended = True
 
         return False
+
+    def find_reasoning_end_in_tokens(self, token_ids: list[int]) -> int | None:
+        """Find the index of the reasoning-end token within a token list.
+
+        Uses is_reasoning_end_streaming to check progressively longer
+        prefixes, supporting multi-token end markers.
+
+        Returns:
+            The index of the last token of the reasoning-end marker,
+            or None if not found.
+        """
+        if self.reasoner is None or self.enable_in_reasoning:
+            return None
+
+        for i, token in enumerate(token_ids):
+            # Check if reasoning ends at position i by testing the
+            # prefix up to and including this token.
+            prefix = token_ids[: i + 1]
+            if self.reasoner.is_reasoning_end_streaming(prefix, [token]):
+                return i
+        return None
+
+    def get_tokens_after_reasoning(
+        self,
+        request: "Request",
+        new_token_ids: list[int],
+    ) -> list[int]:
+        """Return the suffix of new_token_ids that comes after reasoning end.
+
+        If reasoning was already ended before these tokens, returns all of
+        them. If reasoning ends within these tokens, returns only the tokens
+        after the end marker. If reasoning doesn't end, returns empty list.
+        """
+        if self.reasoner is None or self.enable_in_reasoning:
+            return new_token_ids
+
+        assert request.structured_output_request is not None
+        structured_req = request.structured_output_request
+
+        if structured_req.reasoning_ended:
+            # Check whether reasoning_ended was set *before* this call
+            # (i.e. from a previous step) vs just now by should_advance.
+            # If it was set before, all tokens are post-reasoning.
+            # We need to check if the end marker is actually in new_token_ids.
+            idx = self.find_reasoning_end_in_tokens(new_token_ids)
+            if idx is not None:
+                # The end marker is in new_token_ids — reasoning ended
+                # within this batch. Return tokens after the end marker.
+                return new_token_ids[idx + 1 :]
+            else:
+                # End marker not in these tokens — reasoning ended before
+                # this batch. All tokens are post-reasoning.
+                return new_token_ids
+
+        # Reasoning hasn't ended — no tokens to process
+        return []
 
     def clear_backend(self) -> None:
         if self.backend is not None:

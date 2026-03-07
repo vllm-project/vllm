@@ -1405,17 +1405,30 @@ class Scheduler(SchedulerInterface):
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
-            if new_token_ids and self.structured_output_manager.should_advance(request):
+            if new_token_ids and self.structured_output_manager.should_advance(
+                request, new_token_ids=new_token_ids
+            ):
                 struct_output_request = request.structured_output_request
                 assert struct_output_request is not None
                 assert struct_output_request.grammar is not None
-                ok = struct_output_request.grammar.accept_tokens(req_id, new_token_ids)
-                if not ok:
-                    logger.warning(
-                        "Unexpected: grammar rejected tokens %s for request %s.",
-                        new_token_ids,
-                        req_id,
+                # When reasoning ends within this token batch (e.g. during
+                # speculative decoding), only the tokens after the
+                # reasoning_end marker should be fed to the grammar.
+                tokens_for_grammar = (
+                    self.structured_output_manager.get_tokens_after_reasoning(
+                        request, new_token_ids
                     )
+                )
+                if tokens_for_grammar:
+                    ok = struct_output_request.grammar.accept_tokens(
+                        req_id, tokens_for_grammar
+                    )
+                    if not ok:
+                        logger.warning(
+                            "Unexpected: grammar rejected tokens %s for request %s.",
+                            tokens_for_grammar,
+                            req_id,
+                        )
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
@@ -1613,6 +1626,30 @@ class Scheduler(SchedulerInterface):
                 # in the decoder's KV cache.
                 self.encoder_cache_manager.free_encoder_input(request, input_id)
 
+    def _validate_spec_tokens_with_reasoning(
+        self, request: Request, spec_token_ids: list[int]
+    ) -> list[int]:
+        """Validate speculative tokens against the grammar, handling
+        reasoning-end markers.
+
+        When the reasoning_end token appears within the draft tokens,
+        only tokens after the marker are validated by the grammar.
+        Tokens up to and including the marker pass through unvalidated.
+        """
+        metadata = request.structured_output_request
+        assert metadata is not None and metadata.grammar is not None
+
+        split_idx = self.structured_output_manager.find_reasoning_end_in_tokens(
+            spec_token_ids
+        )
+        if split_idx is not None:
+            pre = spec_token_ids[: split_idx + 1]
+            post = spec_token_ids[split_idx + 1 :]
+            validated_post = metadata.grammar.validate_tokens(post)
+            return pre + validated_post
+
+        return metadata.grammar.validate_tokens(spec_token_ids)
+
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         for req_id, spec_token_ids in zip(
             draft_token_ids.req_ids,
@@ -1630,9 +1667,14 @@ class Scheduler(SchedulerInterface):
                 continue
 
             # Add newly generated spec token ids to the request.
-            if self.structured_output_manager.should_advance(request):
-                metadata = request.structured_output_request
-                spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
+            # Pass spec_token_ids to should_advance so it can detect
+            # reasoning_end within the draft tokens.
+            if self.structured_output_manager.should_advance(
+                request, new_token_ids=spec_token_ids
+            ):
+                spec_token_ids = self._validate_spec_tokens_with_reasoning(
+                    request, spec_token_ids
+                )
             request.spec_token_ids = spec_token_ids
 
     def update_draft_token_ids_in_output(
@@ -1659,10 +1701,14 @@ class Scheduler(SchedulerInterface):
             # (needed for chunked prefill case for example).
             del spec_token_ids[orig_num_spec_tokens:]
             # Filter out spec tokens which do not adhere to the grammar.
-            if self.structured_output_manager.should_advance(request):
-                metadata = request.structured_output_request
-                assert metadata is not None and metadata.grammar is not None
-                spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)
+            # Pass spec_token_ids to should_advance so it can detect
+            # reasoning_end within the draft tokens.
+            if self.structured_output_manager.should_advance(
+                request, new_token_ids=spec_token_ids
+            ):
+                spec_token_ids = self._validate_spec_tokens_with_reasoning(
+                    request, spec_token_ids
+                )
             # Pad to original number of spec tokens.
             num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
             if num_invalid_tokens:
