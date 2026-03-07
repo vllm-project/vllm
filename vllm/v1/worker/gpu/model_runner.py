@@ -135,6 +135,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             self.is_first_pp_rank = True
             self.is_last_pp_rank = True
+        # Persistent buffer for intermediate tensors (non-first PP ranks).
+        # Populated during capture_model() so piecewise CUDA graphs can
+        # replay from stable memory addresses.
+        self.intermediate_tensors: IntermediateTensors | None = None
 
         # Decode context parallelism.
         self.dcp_size = self.parallel_config.decode_context_parallel_size
@@ -482,13 +486,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             return 0
 
-        # TODO (zhanqiu): support CUDA graph for PP.
-        if self.use_pp:
-            logger.warning_once(
-                "Skipping CUDA graph capture because pipeline parallel is "
-                "enabled. Pipeline parallel is currently eager-only.",
-            )
-            return 0
+        # PP does not support FULL cudagraph mode yet. When the configured
+        # mode includes FULL (e.g. FULL_AND_PIECEWISE), we downgrade to
+        # PIECEWISE so that the piecewise capture still proceeds.
+        if self.use_pp and self.cudagraph_manager.cudagraph_mode.has_full_cudagraphs():
+            if self.cudagraph_manager.cudagraph_mode.has_piecewise_cudagraphs():
+                logger.warning_once(
+                    "Pipeline parallel does not support FULL cudagraph mode. "
+                    "Downgrading from %s to PIECEWISE.",
+                    self.cudagraph_manager.cudagraph_mode,
+                )
+                self.cudagraph_manager.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                self.cudagraph_manager.uniform_decode_cudagraph_sizes = {}
+            else:
+                raise ValueError(
+                    "Pipeline parallel does not support FULL cudagraph mode. "
+                    "Use PIECEWISE or FULL_AND_PIECEWISE instead."
+                )
 
         start_time = time.perf_counter()
         gc.collect()
@@ -496,6 +510,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
+            # For non-first PP ranks, create intermediate tensors sized
+            # for the max capture size so they can be sliced per batch.
+            # Save as persistent member so runtime can copy received data
+            # into the same addresses that the CUDA graphs captured.
+            intermediate_tensors = None
+            if not self.is_first_pp_rank:
+                intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                    batch_size=self.max_num_tokens,
+                    dtype=self.model_config.dtype,
+                    device=self.device,
+                )
+                self.intermediate_tensors = intermediate_tensors
+
             self.cudagraph_manager.capture(
                 model=self.model,
                 model_state=self.model_state,
@@ -504,6 +531,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 attn_groups=self.attn_groups,
                 kv_cache_config=self.kv_cache_config,
                 has_lora=self.lora_config is not None,
+                intermediate_tensors=intermediate_tensors,
             )
             if self.speculator is not None:
                 self.speculator.capture_model()
@@ -962,6 +990,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 aux_hidden_states = None
         else:
             # For piecewise and eager mode, just call model().
+            # For non-first PP ranks with CUDA graph capture, copy received
+            # intermediate tensors into the persistent buffer so piecewise
+            # graphs replay from stable memory addresses.
+            if not self.is_first_pp_rank and self.intermediate_tensors is not None:
+                assert intermediate_tensors is not None
+                n = input_batch.num_tokens_after_padding
+                for k, v in intermediate_tensors.tensors.items():
+                    self.intermediate_tensors[k][:n].copy_(v[:n])
+                model_inputs["intermediate_tensors"] = IntermediateTensors(
+                    {k: v[:n] for k, v in self.intermediate_tensors.tensors.items()}
+                )
+
             batch_descriptor = BatchDescriptor(
                 num_tokens=input_batch.num_tokens_after_padding,
                 has_lora=self.lora_config is not None,
