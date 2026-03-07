@@ -30,6 +30,7 @@ if current_platform.is_cuda_alike():
     from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
     from .fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
     from .fusion.sequence_parallelism import SequenceParallelismPass
+    from .fusion.sequence_parallelism_moe import SequenceParallelismMoEPass
     from .utility.scatter_split_replace import ScatterSplitReplacementPass
     from .utility.split_coalescing import SplitCoalescingPass
 
@@ -115,6 +116,14 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         with set_current_vllm_config(config, check_compile=False):
             if self.pass_config.eliminate_noops:
                 self.passes += [NoOpEliminationPass(config)]
+
+            if current_platform.is_cuda_alike() and self.pass_config.enable_sp_moe:
+                self.passes += [SequenceParallelismMoEPass(config)]
+            elif self.pass_config.enable_sp_moe:
+                logger.warning_once(
+                    "Skipping SequenceParallelismMoEPass: this pass is only "
+                    "available on CUDA-alike platforms."
+                )
 
             if self.pass_config.enable_sp:
                 self.passes += [SequenceParallelismPass(config)]

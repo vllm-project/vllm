@@ -1077,6 +1077,42 @@ def test_vllm_config_explicit_overrides():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
 
 
+def test_enable_sp_moe_is_disabled_when_sp_moe_runtime_conditions_not_met():
+    from vllm.config.compilation import PassConfig
+    from vllm.config.device import DeviceConfig
+
+    with patch("vllm.config.parallel.get_open_ports_list", return_value=[29500] * 5):
+        # enable_sp_moe should be disabled if EP/runtime topology does not satisfy
+        # the sequence-parallel MoE runtime path.
+        config_off = VllmConfig(
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=2,
+                data_parallel_size=2,
+                enable_expert_parallel=False,
+            ),
+            compilation_config=CompilationConfig(
+                pass_config=PassConfig(enable_sp_moe=True),
+            ),
+            device_config=DeviceConfig(device="cpu"),
+        )
+        assert config_off.compilation_config.pass_config.enable_sp_moe is False
+
+        # Keep enable_sp_moe when SP-MoE runtime conditions are satisfied.
+        config_on = VllmConfig(
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=2,
+                data_parallel_size=2,
+                enable_expert_parallel=True,
+                all2all_backend="allgather_reducescatter",
+            ),
+            compilation_config=CompilationConfig(
+                pass_config=PassConfig(enable_sp_moe=True),
+            ),
+            device_config=DeviceConfig(device="cpu"),
+        )
+        assert config_on.compilation_config.pass_config.enable_sp_moe is True
+
+
 def test_scheduler_config_init():
     with pytest.raises(ValidationError):
         # Positional InitVars missing

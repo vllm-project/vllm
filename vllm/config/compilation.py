@@ -125,6 +125,8 @@ class PassConfig:
     """Enable sequence parallelism. Requires TP>1. Automatically disabled
     if the model's hidden_size is too small for SP to be beneficial
     (threshold is device-capability dependent)."""
+    enable_sp_moe: bool = Field(default=None)
+    """Enable sequence parallelism rewrite for MoE communication."""
     fuse_gemm_comms: bool = Field(default=None)
     """Enable async TP."""
     fuse_allreduce_rms: bool = Field(default=None)
@@ -213,6 +215,7 @@ class PassConfig:
         "fuse_act_quant",
         "fuse_attn_quant",
         "enable_sp",
+        "enable_sp_moe",
         "fuse_gemm_comms",
         "fuse_allreduce_rms",
         "fuse_act_padding",
