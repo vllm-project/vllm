@@ -968,8 +968,9 @@ class FusedMoEParallelConfig:
 
     @property
     def use_naive_all2all_kernels(self):
-        return self.use_all2all_kernels and (
-            self.all2all_backend in ["naive", "allgather_reducescatter"]
+        return (
+            self.use_all2all_kernels
+            and self.all2all_backend == "allgather_reducescatter"
         )
 
     @property
@@ -1131,7 +1132,7 @@ class FusedMoEParallelConfig:
             ep_rank=0,
             sp_size=1,
             use_ep=False,
-            all2all_backend="naive",
+            all2all_backend="allgather_reducescatter",
             enable_eplb=False,
         )
 
