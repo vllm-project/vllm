@@ -93,9 +93,9 @@ start_server() {
         "--tensor-parallel-size" "$TP"
         "--enable-prefix-caching"
         "--load-format" "dummy"
-        "--download-dir" "$DOWNLOAD_DIR"
         "--max-model-len" "$MAX_MODEL_LEN"
     )
+    if [[ -n "$DOWNLOAD_DIR" ]]; then common_args_array+=("--download-dir" "$DOWNLOAD_DIR"); fi
 
     # Use the array expansion "${common_args_array[@]}"
     # This correctly passes each element as a separate argument.
