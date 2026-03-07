@@ -28,6 +28,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsConfig,
 )
 from vllm.model_executor.models.interfaces import (
+    SupportsEagle3,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
@@ -311,7 +312,7 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
     dummy_inputs=KimiK25DummyInputsBuilder,
 )
 class KimiK25ForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant, SupportsEagle3
 ):
     """Kimi-K2.5 model for conditional generation.
 
@@ -456,6 +457,14 @@ class KimiK25ForConditionalGeneration(
         # Run multimodal inputs through encoder and projector
         vision_embeddings = self._process_media_input(media_input)
         return vision_embeddings
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        """Set which layers should output auxiliary hidden states."""
+        self.language_model.set_aux_hidden_state_layers(layers)
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        """Return default auxiliary layer indices."""
+        return self.language_model.get_eagle3_aux_hidden_state_layers()
 
     def forward(
         self,
