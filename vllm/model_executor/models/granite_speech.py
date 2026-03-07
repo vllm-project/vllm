@@ -855,6 +855,7 @@ class GraniteSpeechForConditionalGeneration(
         task_type: Literal["transcribe", "translate"],
         request_prompt: str,
         to_language: str | None,
+        response_prefix: str = "",
     ) -> PromptType:
         """Get the generation prompt to be used for transcription requests."""
         # Audio placeholders don't use an index, so value doesn't matter
