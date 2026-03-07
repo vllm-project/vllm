@@ -303,7 +303,7 @@ def create_error_response(
     if isinstance(message, Exception):
         exc = message
 
-        from vllm.exceptions import VLLMValidationError, VLLMNotFoundError
+        from vllm.exceptions import VLLMNotFoundError, VLLMValidationError
 
         if isinstance(exc, VLLMValidationError):
             err_type = "BadRequestError"

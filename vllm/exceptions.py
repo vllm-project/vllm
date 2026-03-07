@@ -38,4 +38,5 @@ class VLLMValidationError(ValueError):
 
 class VLLMNotFoundError(ValueError):
     """vLLM-specific NotFoundError"""
+
     pass
