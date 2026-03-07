@@ -46,6 +46,7 @@ buildkite-test-collector==0.1.9
 
 
 genai_perf>=0.0.8
+guidellm==0.3.1
 tritonclient>=2.51.0
 
 # The version of gRPC libraries should be consistent with each other
