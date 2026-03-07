@@ -11,6 +11,7 @@ from vllm.utils.deep_gemm import (
     calc_diff,
     fp8_mqa_logits,
     fp8_paged_mqa_logits,
+    fp8_paged_mqa_logits_torch,
     get_num_sms,
     get_paged_mqa_logits_metadata,
 )
@@ -205,6 +206,89 @@ def _ref_fp8_paged_mqa_logits(
 @pytest.mark.skipif(
     not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
 )
+def test_fp8_paged_mqa_logits_torch_matches_deepgemm():
+    torch.manual_seed(0)
+    random.seed(0)
+
+    max_model_len = 4096
+    num_blocks, blocksize = max_model_len * 2, 64
+    batch_size, next_n = 3, 2
+    heads, index_dim = 32, 128
+
+    q = torch.randn(
+        (batch_size, next_n, heads, index_dim),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    kv_cache = torch.randn(
+        (num_blocks, blocksize, 1, index_dim),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    weights = torch.randn(
+        (batch_size * next_n, heads),
+        device="cuda",
+        dtype=torch.float32,
+    )
+    context_lens = torch.tensor([1537, 2049, 3073], device="cuda", dtype=torch.int32)
+    max_block_len = cdiv(int(context_lens.max().item()), blocksize)
+    block_tables = torch.zeros(
+        (batch_size, max_block_len),
+        device="cuda",
+        dtype=torch.int32,
+    )
+
+    block_idx_pool = list(range(num_blocks))
+    random.shuffle(block_idx_pool)
+    counter = 0
+    for i, ctx_len in enumerate(context_lens.tolist()):
+        for j in range(cdiv(ctx_len, blocksize)):
+            block_tables[i, j] = block_idx_pool[counter]
+            counter += 1
+
+    q_fp8 = q.to(torch.float8_e4m3fn)
+    kv_cache_fp8 = kv_cache_cast_to_fp8(kv_cache)
+    schedule_metadata = get_paged_mqa_logits_metadata(
+        context_lens, blocksize, get_num_sms()
+    )
+
+    fallback_logits = fp8_paged_mqa_logits_torch(
+        q_fp8,
+        kv_cache_fp8,
+        weights,
+        context_lens,
+        block_tables,
+        max_model_len,
+    )
+    deepgemm_logits = fp8_paged_mqa_logits(
+        q_fp8,
+        kv_cache_fp8,
+        weights,
+        context_lens,
+        block_tables,
+        schedule_metadata,
+        max_model_len,
+        clean_logits=True,
+    )
+
+    positions = torch.arange(max_model_len, device="cuda").unsqueeze(0)
+    row_indices = torch.arange(batch_size * next_n, device="cuda") // next_n
+    next_n_offset = torch.arange(batch_size * next_n, device="cuda") % next_n
+    valid_mask = positions <= (
+        context_lens[row_indices] - next_n + next_n_offset
+    ).unsqueeze(1)
+
+    fallback_logits = fallback_logits.masked_fill(~valid_mask, 0)
+    deepgemm_logits = deepgemm_logits.masked_fill(~valid_mask, 0)
+    diff = calc_diff(fallback_logits, deepgemm_logits)
+    assert diff < 1e-3, f"{diff=}"
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not has_deep_gemm(), reason="DeepGEMM not available")
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
+)
 @pytest.mark.parametrize("clean_logits", [True, False])
 def test_deepgemm_fp8_paged_mqa_logits(clean_logits: bool):
     torch.manual_seed(0)
@@ -298,3 +382,111 @@ def test_deepgemm_fp8_paged_mqa_logits(clean_logits: bool):
                 ref_logits = ref_logits.masked_fill(~mask, 0)
                 diff = calc_diff(logits, ref_logits)
                 assert diff < 1e-3, f"{diff=}"
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_fp8_paged_mqa_logits_torch_cuda_graph_capture():
+    torch.manual_seed(0)
+    random.seed(0)
+
+    batch_size, next_n = 2, 2
+    heads, index_dim = 4, 16
+    max_model_len, blocksize = 128, 16
+    num_blocks = 32
+
+    q = torch.randn(
+        (batch_size, next_n, heads, index_dim),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    kv_cache = torch.randn(
+        (num_blocks, blocksize, 1, index_dim),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    weights = torch.randn(
+        (batch_size * next_n, heads),
+        device="cuda",
+        dtype=torch.float32,
+    )
+    context_lens = torch.tensor([33, 58], device="cuda", dtype=torch.int32)
+    block_tables = torch.zeros(
+        (batch_size, cdiv(max_model_len, blocksize)),
+        device="cuda",
+        dtype=torch.int32,
+    )
+
+    next_block = 0
+    for i, ctx_len in enumerate(context_lens.tolist()):
+        num_ctx_blocks = cdiv(ctx_len, blocksize)
+        block_tables[i, :num_ctx_blocks] = torch.tensor(
+            list(range(next_block, next_block + num_ctx_blocks)),
+            device="cuda",
+            dtype=torch.int32,
+        )
+        next_block += num_ctx_blocks
+
+    q_fp8 = q.to(torch.float8_e4m3fn)
+    kv_cache_fp8 = kv_cache_cast_to_fp8(kv_cache)
+
+    expected = fp8_paged_mqa_logits_torch(
+        q_fp8,
+        kv_cache_fp8,
+        weights,
+        context_lens,
+        block_tables,
+        max_model_len,
+    )
+    torch.accelerator.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        logits = fp8_paged_mqa_logits_torch(
+            q_fp8,
+            kv_cache_fp8,
+            weights,
+            context_lens,
+            block_tables,
+            max_model_len,
+        )
+
+    # Update inputs in-place after capture and verify replay uses the new values.
+    q_new = torch.randn_like(q)
+    kv_cache_new = torch.randn_like(kv_cache)
+    weights_new = torch.randn_like(weights)
+    context_lens_new = torch.tensor([41, 71], device="cuda", dtype=torch.int32)
+    block_tables_new = torch.zeros_like(block_tables)
+
+    next_block = 0
+    for i, ctx_len in enumerate(context_lens_new.tolist()):
+        num_ctx_blocks = cdiv(ctx_len, blocksize)
+        block_tables_new[i, :num_ctx_blocks] = torch.tensor(
+            list(range(next_block, next_block + num_ctx_blocks)),
+            device="cuda",
+            dtype=torch.int32,
+        )
+        next_block += num_ctx_blocks
+
+    q_fp8.copy_(q_new.to(torch.float8_e4m3fn))
+    kv_cache_fp8.copy_(kv_cache_cast_to_fp8(kv_cache_new))
+    weights.copy_(weights_new)
+    context_lens.copy_(context_lens_new)
+    block_tables.copy_(block_tables_new)
+
+    expected_updated = fp8_paged_mqa_logits_torch(
+        q_fp8,
+        kv_cache_fp8,
+        weights,
+        context_lens,
+        block_tables,
+        max_model_len,
+    )
+
+    logits.zero_()
+    graph.replay()
+    torch.accelerator.synchronize()
+
+    torch.testing.assert_close(logits, expected_updated, equal_nan=True)
+
+    # Sanity check: output changed after replacing inputs.
+    assert not torch.allclose(expected, expected_updated, equal_nan=True)
