@@ -322,7 +322,10 @@ class TokenizeParams:
         if not isinstance(tokens, list):
             raise ValueError("Cannot pad tokens for embedding inputs")
 
-        return tokens + [tokenizer.pad_token_id] * (pad_length - len(tokens))
+        if getattr(tokenizer, "padding_side", "right") == "left":
+            return [tokenizer.pad_token_id] * (pad_length - len(tokens)) + tokens
+        else:
+            return tokens + [tokenizer.pad_token_id] * (pad_length - len(tokens))
 
     def _token_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply truncation to prompt tokens if necessary."""
