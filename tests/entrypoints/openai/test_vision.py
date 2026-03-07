@@ -154,8 +154,8 @@ def describe_image_messages(
     image_url: str, *, extra_image_fields: dict | None = None
 ) -> list[dict]:
     """Build the system + user messages used by the completions-with-image
-    family of tests. *extra_image_fields* is merged into the image_url
-    content block (for uuid / bad-key tests)."""
+    family of tests. *extra_image_fields* is merged into the top-level
+    image content block (for uuid / bad-key tests)."""
     image_block: dict = {
         "type": "image_url",
         "image_url": {"url": image_url},
