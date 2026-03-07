@@ -53,6 +53,10 @@ class CachedRequestState:
     pooling_params: PoolingParams | None = None
     pooling_states: PoolingStates | None = None
 
+    # KLD mode: path and key for reference logits in safetensors
+    reference_logits_path: str | None = None
+    reference_logits_key: str | None = None
+
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             self.prompt_token_ids, self.prompt_embeds
@@ -225,6 +229,9 @@ class InputBatch:
 
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
+
+        # To accumulate prompt logits chunks when return_prompt_logits.
+        self.in_progress_prompt_logits: dict[str, list[torch.Tensor]] = {}
 
         # Internal representation of per-step batch state changes, used for
         # reordering persistent batch and generating logitsprocs batch state
@@ -510,6 +517,7 @@ class InputBatch:
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
+        self.in_progress_prompt_logits.pop(req_id, None)
         if self.prev_req_id_to_index is not None:
             self.prev_req_id_to_index.pop(req_id, None)
 

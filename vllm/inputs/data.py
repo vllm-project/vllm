@@ -75,6 +75,46 @@ class TokensPrompt(_PromptOptions):
     """A list of token type IDs to pass to the cross encoder model."""
 
 
+    mm_processor_kwargs: NotRequired[dict[str, Any] | None]
+    """
+    Optional multi-modal processor kwargs to be forwarded to the
+    multimodal input mapper & processor. Note that if multiple modalities
+    have registered mappers etc for the model being considered, we attempt
+    to pass the mm_processor_kwargs to each of them.
+    """
+
+    multi_modal_uuids: NotRequired[MultiModalUUIDDict]
+    """
+    Optional user-specified UUIDs for multimodal items, mapped by modality.
+    Lists must match the number of items per modality and may contain `None`.
+    For `None` entries, the hasher will compute IDs automatically; non-None
+    entries override the default hashes for caching.
+    """
+
+    cache_salt: NotRequired[str]
+    """
+    Optional cache salt to be used for prefix caching.
+    """
+
+    target_token_ids: NotRequired[list[int]]
+    """
+    Optional target token IDs for score mode perplexity calculation.
+    When provided, only logprobs for these tokens are extracted on GPU.
+    """
+
+    reference_logits_path: NotRequired[str]
+    """
+    Optional path to safetensors file containing reference logits for KLD mode.
+    When provided with reference_logits_key, enables GPU-side KLD computation.
+    """
+
+    reference_logits_key: NotRequired[str]
+    """
+    Optional key for loading reference logits from the safetensors file.
+    Used with reference_logits_path for KLD mode.
+    """
+
+
 class EmbedsPrompt(_PromptOptions):
     """Schema for a prompt provided via token embeddings."""
 
