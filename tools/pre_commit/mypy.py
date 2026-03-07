@@ -28,7 +28,6 @@ import regex as re
 SEPARATE_GROUPS = [
     "tests",
     # v0 related
-    "vllm/lora",
     "vllm/model_executor",
 ]
 
