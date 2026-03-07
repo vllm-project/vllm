@@ -22,7 +22,6 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
-from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
@@ -1304,6 +1303,10 @@ class SpecDecodeBaseProposer:
             elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":
                 self.model.config.image_token_index = (
                     target_model.config.vision_config.image_token_id
+                )
+            elif self.get_model_name(target_model) == "KimiK25ForConditionalGeneration":
+                self.model.config.image_token_index = (
+                    target_model.config.media_placeholder_token_id
                 )
             else:
                 self.model.config.image_token_index = (

@@ -775,7 +775,9 @@ class SpeculativeConfig:
             "afmoe",
             "nemotron_h",
             "deepseek_v2",
+            "deepseek_v3",
             "kimi_k2",
+            "kimi_k25",
         ]
         if (
             self.method in ("eagle3", "extract_hidden_states")
