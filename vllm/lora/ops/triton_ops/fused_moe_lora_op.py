@@ -740,7 +740,7 @@ def _fused_moe_lora(
         else num_tokens * shrink_block_size_m
     )
 
-    # TMA is not currently compatiple with fully_sharded due to the non-determinism
+    # TMA is not currently compatible with fully_sharded due to the non-determinism
     # of token id sorting across ranks.
     use_tma = supports_tma(device) and not fully_sharded
 
