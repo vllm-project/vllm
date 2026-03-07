@@ -70,14 +70,17 @@ class MinimaxM2ToolParser(ToolParser):
         self._reset_streaming_state()
 
         # Regex patterns for complete parsing
+        # Use simpler patterns to avoid excessive backtracking
         self.tool_call_complete_regex = re.compile(
             r"<minimax:tool_call>(.*?)</minimax:tool_call>", re.DOTALL
         )
         self.invoke_complete_regex = re.compile(
-            r"<invoke name=(.*?)</invoke>", re.DOTALL
+            r"<invoke name=([^>]+)>(.*?)</invoke>", re.DOTALL
         )
+        # Optimized parameter regex to avoid catastrophic backtracking
+        # Instead of .*?, we use negated character class [^>]+ to be more specific
         self.parameter_complete_regex = re.compile(
-            r"<parameter name=(.*?)</parameter>", re.DOTALL
+            r"<parameter name=([^>]+)>(.*?)</parameter>", re.DOTALL
         )
 
         if not self.model_tokenizer:
@@ -325,24 +328,21 @@ class MinimaxM2ToolParser(ToolParser):
                     break
 
         # Extract parameters
-        param_dict = {}
-        for match in self.parameter_complete_regex.findall(invoke_str):
-            param_match = re.search(r"^([^>]+)>(.*)", match, re.DOTALL)
-            if param_match:
-                param_name = self._extract_name(param_match.group(1))
-                param_value = param_match.group(2).strip()
-                if param_value.startswith("\n"):
-                    param_value = param_value[1:]
-                if param_value.endswith("\n"):
-                    param_value = param_value[:-1]
+        for match in self.parameter_complete_regex.finditer(invoke_str):
+            param_name = self._extract_name(match.group(1))
+            param_value = match.group(2).strip()
+            if param_value.startswith("\n"):
+                param_value = param_value[1:]
+            if param_value.endswith("\n"):
+                param_value = param_value[:-1]
 
-                # Get parameter types (supports anyOf/oneOf/allOf)
-                param_type = self._get_param_types_from_config(param_name, param_config)
+            # Get parameter types (supports anyOf/oneOf/allOf)
+            param_type = self._get_param_types_from_config(param_name, param_config)
 
-                # Convert value
-                param_dict[param_name] = self._convert_param_value_with_types(
-                    param_value, param_type
-                )
+            # Convert value
+            param_dict[param_name] = self._convert_param_value_with_types(
+                param_value, param_type
+            )
 
         return ToolCall(
             type="function",
@@ -370,10 +370,59 @@ class MinimaxM2ToolParser(ToolParser):
             # Find all complete tool_call blocks
             for tool_call_match in self.tool_call_complete_regex.findall(model_output):
                 # Find all invokes within this tool_call
-                for invoke_match in self.invoke_complete_regex.findall(tool_call_match):
-                    tool_call = self._parse_single_invoke(
-                        invoke_match, request.tools if request else None
+                for invoke_match in self.invoke_complete_regex.finditer(tool_call_match):
+                    # We need to construct a string that resembles the original <invoke> block
+                    # but we already have the components from the regex
+                    # However, _parse_single_invoke expects the full string or we need to refactor it
+                    # Let's just use the components directly
+                    
+                    function_name = self._extract_name(invoke_match.group(1))
+                    invoke_content = invoke_match.group(2)
+
+                    # Initialize param_dict before loop
+                    param_dict = {}
+                
+                    # Logic from _parse_single_invoke but using pre-extracted content
+                
+                    # Get parameter configuration
+                    param_config = {}
+                    if request and request.tools:
+                        for tool in request.tools:
+                            if (
+                                hasattr(tool, "function")
+                                and tool.function.name == function_name
+                                and hasattr(tool.function, "parameters")
+                            ):
+                                params = tool.function.parameters
+                                if isinstance(params, dict) and "properties" in params:
+                                    param_config = params["properties"]
+                                break
+                
+                    # Extract parameters
+                    for match in self.parameter_complete_regex.finditer(invoke_content):
+                        param_name = self._extract_name(match.group(1))
+                        param_value = match.group(2).strip()
+                        if param_value.startswith("\n"):
+                            param_value = param_value[1:]
+                        if param_value.endswith("\n"):
+                            param_value = param_value[:-1]
+
+                        # Get parameter types (supports anyOf/oneOf/allOf)
+                        param_type = self._get_param_types_from_config(param_name, param_config)
+
+                        # Convert value
+                        param_dict[param_name] = self._convert_param_value_with_types(
+                            param_value, param_type
+                        )
+                    
+                    tool_call = ToolCall(
+                        type="function",
+                        function=FunctionCall(
+                            name=function_name,
+                            arguments=json.dumps(param_dict, ensure_ascii=False),
+                        ),
                     )
+
                     if tool_call:
                         tool_calls.append(tool_call)
 
