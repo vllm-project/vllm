@@ -506,7 +506,7 @@ class Glm4MoeLiteModel(nn.Module):
                             param, "weight_loader", default_weight_loader
                         )
                         weight_loader(param, loaded_weight)
-            if not is_fusion_moe_shared_experts_layer:
+            if not is_fusion_moe_shared_experts_layer and name is not None:
                 loaded_params.add(name)
 
         return loaded_params
