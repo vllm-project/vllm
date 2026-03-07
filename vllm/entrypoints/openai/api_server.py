@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import asyncio
 import importlib
 import inspect
 import multiprocessing
@@ -11,7 +10,7 @@ import socket
 import tempfile
 import warnings
 from argparse import Namespace
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -360,6 +359,7 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
+        default_chat_template_kwargs=args.default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
     )
 
@@ -481,7 +481,7 @@ async def build_and_serve(
     sock: socket.socket,
     args: Namespace,
     **uvicorn_kwargs,
-) -> asyncio.Task:
+) -> Awaitable[None]:
     """Build FastAPI app, initialize state, and start serving.
 
     Returns the shutdown task for the caller to await.
@@ -567,6 +567,8 @@ if __name__ == "__main__":
     )
     parser = make_arg_parser(parser)
     args = parser.parse_args()
+    if args is None:
+        raise ValueError("Failed to parse CLI arguments")
     validate_parsed_serve_args(args)
 
     uvloop.run(run_server(args))
