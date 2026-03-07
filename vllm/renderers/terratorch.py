@@ -43,6 +43,7 @@ class TerratorchRenderer(BaseRenderer):
             messages,
             model_config,
             content_format="string",
+            media_io_kwargs=params.media_io_kwargs,
         )
 
         prompt = parse_dec_only_prompt([1])  # Dummy token IDs
@@ -64,6 +65,7 @@ class TerratorchRenderer(BaseRenderer):
             messages,
             model_config,
             content_format="string",
+            media_io_kwargs=params.media_io_kwargs,
         )
 
         prompt = parse_dec_only_prompt([1])  # Dummy token IDs

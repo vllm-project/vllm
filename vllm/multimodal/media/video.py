@@ -17,6 +17,28 @@ from .image import ImageMediaIO
 
 
 class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
+    """Configuration values can be user-provided either by --media-io-kwargs or
+    by the runtime API field "media_io_kwargs". Ensure proper validation and
+    error handling.
+    """
+
+    @classmethod
+    def merge_kwargs(
+        cls,
+        default_kwargs: dict[str, Any] | None,
+        runtime_kwargs: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        merged = super().merge_kwargs(default_kwargs, runtime_kwargs)
+        # fps and num_frames interact with each other, so if either is
+        # overridden at request time, wipe the other from defaults to
+        # avoid unintuitive cross-field interactions.
+        if runtime_kwargs:
+            if "num_frames" in runtime_kwargs and "fps" not in runtime_kwargs:
+                merged.pop("fps", None)
+            elif "fps" in runtime_kwargs and "num_frames" not in runtime_kwargs:
+                merged.pop("num_frames", None)
+        return merged
+
     def __init__(
         self,
         image_io: ImageMediaIO,
@@ -28,7 +50,8 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         self.image_io = image_io
         self.num_frames = num_frames
         # `kwargs` contains custom arguments from
-        # --media-io-kwargs for this modality.
+        # --media-io-kwargs for this modality, merged with
+        # per-request runtime media_io_kwargs via merge_kwargs().
         # They can be passed to the underlying
         # media loaders (e.g. custom implementations)
         # for flexible control.
