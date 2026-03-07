@@ -5,7 +5,7 @@ from typing import Any, cast
 import torch
 
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
-from vllm.entrypoints.pooling.typing import PoolingServeContext, ProcessorInputs
+from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.inputs.data import ProcessorInputs, token_inputs
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.utils.collection_utils import chunk_list
