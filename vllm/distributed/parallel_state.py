@@ -1688,9 +1688,9 @@ def initialize_model_parallel(
         global _EPLB
         assert _EPLB is None, "EPLB group is already initialized"
         if (
-            config is not None
-            and config.parallel_config is not None
-            and config.parallel_config.enable_eplb
+            config is None
+            or config.parallel_config is None
+            or config.parallel_config.enable_eplb
         ):
             if enable_elastic_ep:
                 eplb_ports = [
