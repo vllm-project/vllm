@@ -560,10 +560,13 @@ class InputBatch:
         # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
         #     self.token_ids_cpu[i2, ...], self.token_ids_cpu[i1, ...]
         # instead, we need to temporarily copy the data for one of the indices
-        # TODO(lucas): optimize this by only copying valid indices
-        tmp = self.token_ids_cpu[i1, ...].copy()
-        self.token_ids_cpu[i1, ...] = self.token_ids_cpu[i2, ...]
-        self.token_ids_cpu[i2, ...] = tmp
+        n = max(
+            self.num_tokens_no_spec[i1] + len(self.spec_token_ids[i1]),
+            self.num_tokens_no_spec[i2] + len(self.spec_token_ids[i2]),
+        )
+        tmp = self.token_ids_cpu[i1, :n].copy()
+        self.token_ids_cpu[i1, :n] = self.token_ids_cpu[i2, :n]
+        self.token_ids_cpu[i2, :n] = tmp
 
         self.is_token_ids[[i1, i2], ...] = self.is_token_ids[[i2, i1], ...]
 
