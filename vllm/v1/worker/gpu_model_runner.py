@@ -1660,8 +1660,10 @@ class GPUModelRunner(
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
         )
-        # Fill unused with 0 for full cuda graph mode.
-        self.seq_lens.np[num_reqs:].fill(0)
+        # Fill unused with safe padding for full cuda graph mode.
+        # The default is 0, but some backends (e.g. FlashMLA FP8) need
+        # a minimum of 1 to avoid illegal memory access in their kernels.
+        self.seq_lens.np[num_reqs:].fill(self.cg_pad_seq_lens)
         self.seq_lens.copy_to_gpu()
 
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
@@ -1813,9 +1815,11 @@ class GPUModelRunner(
                 blk_table = self.input_batch.block_table[kv_cache_gid]
                 blk_table_tensor = blk_table.get_device_tensor(num_reqs_padded)
 
-            # Fill unused with -1. Needed for reshape_and_cache in full cuda
-            # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
-            blk_table_tensor[num_reqs:num_reqs_padded].fill_(-1)
+            # Fill unused block table entries for padded requests.
+            # Default is -1 (matches mamba PAD_SLOT_ID for reshape_and_cache),
+            # but some backends (e.g. FlashMLA FP8) need >= 0 to avoid
+            # illegal memory access in their kernels.
+            blk_table_tensor[num_reqs:num_reqs_padded].fill_(self.cg_pad_block_table)
             return blk_table_tensor
 
         assert slot_mappings is not None
@@ -5726,6 +5730,22 @@ class GPUModelRunner(
         # Note (tdoublep): do this *after* constructing builders,
         # because some of them change the threshold at init time.
         self.calculate_reorder_batch_threshold()
+
+        # Compute CG padding values that are safe for ALL builders.
+        # Different backends may require different safe padding values for
+        # unused (padded) entries in CUDA graph mode. We take the max across
+        # all builders to find values that satisfy every backend.
+        self.cg_pad_seq_lens = 0
+        self.cg_pad_block_table = -1
+        for kv_cache_groups in self.attn_groups:
+            for attn_group in kv_cache_groups:
+                for builder in attn_group.metadata_builders:
+                    self.cg_pad_seq_lens = max(
+                        self.cg_pad_seq_lens, builder.cg_pad_seq_lens
+                    )
+                    self.cg_pad_block_table = max(
+                        self.cg_pad_block_table, builder.cg_pad_block_table
+                    )
 
         # Initialize drafter attention backend
         if self.speculative_config and (
