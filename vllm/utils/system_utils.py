@@ -266,6 +266,43 @@ def kill_process_tree(pid: int):
         os.kill(pid, signal.SIGKILL)
 
 
+def set_pdeathsig(sig: int) -> None:
+    """Set the parent-death signal for the calling process (Linux only).
+
+    Arranges for the calling process to receive *sig* when its parent process
+    exits.  This is a kernel-level guarantee that fires even if the parent is
+    killed with SIGKILL (e.g. by the Linux OOM killer), complementing Python's
+    ``daemon=True`` flag which relies on ``atexit`` handlers that are not
+    invoked on SIGKILL.
+
+    On non-Linux platforms this function is a no-op.
+
+    Note: ``PR_SET_PDEATHSIG`` is reset to 0 across ``fork()``, so this must
+    be called inside the child process after it starts, not in the parent.
+    There is an inherent TOCTOU race (parent may die before the call
+    completes); callers should check ``os.getppid()`` afterwards if they need
+    strict guarantees.
+    """
+    if sys.platform != "linux":
+        return
+    import ctypes
+    import ctypes.util
+
+    PR_SET_PDEATHSIG = 1  # from <linux/prctl.h>
+    libc_name = ctypes.util.find_library("c")
+    if not libc_name:
+        logger.warning("set_pdeathsig: could not find libc, skipping")
+        return
+    libc = ctypes.CDLL(libc_name, use_errno=True)
+    if libc.prctl(PR_SET_PDEATHSIG, ctypes.c_int(sig), 0, 0, 0) != 0:
+        errno = ctypes.get_errno()
+        logger.warning(
+            "set_pdeathsig: prctl(PR_SET_PDEATHSIG, %d) failed: %s",
+            sig,
+            os.strerror(errno),
+        )
+
+
 # Resource utilities
 
 
