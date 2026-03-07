@@ -103,6 +103,7 @@ from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle,
     SupportsEagle3,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -1370,6 +1371,7 @@ class Qwen3LLMForCausalLM(Qwen3ForCausalLM):
 class Qwen3VLForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsPP,
     SupportsMRoPE,
@@ -1518,6 +1520,258 @@ class Qwen3VLForConditionalGeneration(
         if num_tokens > 0:
             for idx in range(self.deepstack_num_level):
                 self.deepstack_input_embeds[idx][:num_tokens].zero_()
+
+    # -- SupportsEncoderCudaGraph protocol methods --
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+            EncoderCudaGraphConfig,
+        )
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            input_key="pixel_values",
+            buffer_keys=[
+                "pos_embeds",
+                "rotary_pos_emb_cos",
+                "rotary_pos_emb_sin",
+                "cu_seqlens",
+                "max_seqlen",
+                "sequence_lengths",
+            ],
+            out_hidden_size=self.visual.out_hidden_size,
+        )
+
+    def get_encoder_cudagraph_num_items(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> int:
+        return len(mm_kwargs["image_grid_thw"])
+
+    def get_encoder_cudagraph_per_item_output_tokens(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[int]:
+        m = self.visual.spatial_merge_size
+        return [t * (h // m) * (w // m) for t, h, w in mm_kwargs["image_grid_thw"]]
+
+    def get_encoder_cudagraph_per_item_input_sizes(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[int]:
+        return [t * h * w for t, h, w in mm_kwargs["image_grid_thw"]]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        grid_thw = mm_kwargs["image_grid_thw"]
+        pixel_values = mm_kwargs["pixel_values"]
+
+        if len(indices) == 0:
+            return {
+                "pixel_values": pixel_values[:0],
+                "image_grid_thw": [],
+            }
+
+        # Compute cumulative patch offsets for slicing pixel_values
+        patches_per_item = [t * h * w for t, h, w in grid_thw]
+        cum_patches = [0]
+        for p in patches_per_item:
+            cum_patches.append(cum_patches[-1] + p)
+
+        selected_pv = torch.cat(
+            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
+        )
+        selected_grid = [grid_thw[i] for i in indices]
+
+        return {
+            "pixel_values": selected_pv,
+            "image_grid_thw": selected_grid,
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ):
+        from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        spatial_merge_size = self.visual.spatial_merge_size
+        per_image_output = token_budget // max_batch_size
+
+        # Synthetic rectangular grid: [1, merge, per_image_output * merge]
+        # produces exactly per_image_output tokens per image.
+        grid_config = [
+            [1, spatial_merge_size, per_image_output * spatial_merge_size]
+            for _ in range(max_batch_size)
+        ]
+
+        # Create dummy pixel_values
+        patch_embed = self.visual.patch_embed
+        in_channels = patch_embed.proj.in_channels
+        patch_size = patch_embed.patch_size
+        temporal_patch_size = patch_embed.temporal_patch_size
+        total_patches = sum(t * h * w for t, h, w in grid_config)
+        flattened_patch_size = (
+            in_channels * temporal_patch_size * patch_size * patch_size
+        )
+        dummy_pixel_values = torch.randn(
+            total_patches, flattened_patch_size, device=device, dtype=dtype
+        )
+
+        # Compute buffers
+        buffers: dict[str, torch.Tensor] = {}
+        buffers["pos_embeds"] = self.visual.fast_pos_embed_interpolate(grid_config)
+        rotary_cos, rotary_sin = self.visual.rot_pos_emb(grid_config)
+        buffers["rotary_pos_emb_cos"] = rotary_cos
+        buffers["rotary_pos_emb_sin"] = rotary_sin
+
+        # Compute sequence metadata
+        grid_thw_np = np.array(grid_config, dtype=np.int32)
+        patches_per_frame = grid_thw_np[:, 1] * grid_thw_np[:, 2]
+        cu_seqlens_np = np.repeat(patches_per_frame, grid_thw_np[:, 0]).cumsum(
+            dtype=np.int32
+        )
+        cu_seqlens_np = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens_np])
+
+        # Pad cu_seqlens to max_batch_size
+        num_seqs = len(cu_seqlens_np) - 1
+        if num_seqs < max_batch_size:
+            cu_seqlens_np = np.concatenate(
+                [
+                    cu_seqlens_np,
+                    np.full(
+                        max_batch_size - num_seqs,
+                        cu_seqlens_np[-1],
+                        dtype=np.int32,
+                    ),
+                ]
+            )
+
+        sequence_lengths = MMEncoderAttention.maybe_compute_sequence_lengths(
+            self.visual.attn_backend, cu_seqlens_np
+        )
+        if sequence_lengths is not None:
+            buffers["sequence_lengths"] = torch.from_numpy(
+                sequence_lengths.astype(np.int32)
+            ).to(device, non_blocking=True)
+
+        # Override max_seqlen with a safe upper bound for capture.
+        # max_seqlen.item() gets baked into the CUDA graph (not replayed),
+        # so the capture value must cover any replay scenario.
+        # Worst case: 1 image consuming the full budget ->
+        # seq_len = token_budget * spatial_merge_size^2.
+        max_seqlen_safe = token_budget * (spatial_merge_size**2)
+        buffers["max_seqlen"] = torch.tensor(max_seqlen_safe, dtype=torch.int32)
+
+        cu_seqlens_np = MMEncoderAttention.maybe_recompute_cu_seqlens(
+            self.visual.attn_backend,
+            cu_seqlens_np,
+            self.visual.hidden_size,
+            self.visual.tp_size,
+        )
+        buffers["cu_seqlens"] = torch.from_numpy(cu_seqlens_np).to(
+            device, non_blocking=True
+        )
+
+        mm_kwargs = {
+            "pixel_values": dummy_pixel_values,
+            "image_grid_thw": grid_config,
+        }
+
+        return EncoderCudaGraphCaptureInputs(
+            mm_kwargs=mm_kwargs,
+            buffers=buffers,
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+    ):
+        from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+            EncoderCudaGraphReplayBuffers,
+        )
+
+        grid_thw_list = mm_kwargs["image_grid_thw"]
+
+        buffers: dict[str, torch.Tensor | None] = {}
+        buffers["pos_embeds"] = self.visual.fast_pos_embed_interpolate(grid_thw_list)
+        rotary_cos, rotary_sin = self.visual.rot_pos_emb(grid_thw_list)
+        buffers["rotary_pos_emb_cos"] = rotary_cos
+        buffers["rotary_pos_emb_sin"] = rotary_sin
+
+        # Compute sequence metadata
+        grid_thw_np = np.array(grid_thw_list, dtype=np.int32)
+        patches_per_frame = grid_thw_np[:, 1] * grid_thw_np[:, 2]
+        cu_seqlens_np = np.repeat(patches_per_frame, grid_thw_np[:, 0]).cumsum(
+            dtype=np.int32
+        )
+        cu_seqlens_np = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens_np])
+
+        # Pad cu_seqlens to max_batch_size
+        num_seqs = len(cu_seqlens_np) - 1
+        if num_seqs < max_batch_size:
+            cu_seqlens_np = np.concatenate(
+                [
+                    cu_seqlens_np,
+                    np.full(
+                        max_batch_size - num_seqs,
+                        cu_seqlens_np[-1],
+                        dtype=np.int32,
+                    ),
+                ]
+            )
+
+        sequence_lengths = MMEncoderAttention.maybe_compute_sequence_lengths(
+            self.visual.attn_backend, cu_seqlens_np
+        )
+        if sequence_lengths is not None:
+            buffers["sequence_lengths"] = torch.from_numpy(
+                sequence_lengths.astype(np.int32)
+            ).to(self.visual.device, non_blocking=True)
+        else:
+            buffers["sequence_lengths"] = None
+
+        max_seqlen_val = MMEncoderAttention.compute_max_seqlen(
+            self.visual.attn_backend, cu_seqlens_np
+        )
+        buffers["max_seqlen"] = torch.tensor(max_seqlen_val, dtype=torch.int32)
+
+        cu_seqlens_np = MMEncoderAttention.maybe_recompute_cu_seqlens(
+            self.visual.attn_backend,
+            cu_seqlens_np,
+            self.visual.hidden_size,
+            self.visual.tp_size,
+        )
+        buffers["cu_seqlens"] = torch.from_numpy(cu_seqlens_np).to(
+            self.visual.device, non_blocking=True
+        )
+
+        return EncoderCudaGraphReplayBuffers(buffers=buffers)
+
+    def encoder_cudagraph_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        buffers: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        pixel_values = mm_kwargs["pixel_values"]
+        grid_thw = mm_kwargs["image_grid_thw"]
+        return self.visual(pixel_values, grid_thw, encoder_metadata=buffers)
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        pixel_values = mm_kwargs["pixel_values"]
+        grid_thw = mm_kwargs["image_grid_thw"]
+        return self.visual(pixel_values, grid_thw)
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
