@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import gc
+import logging
 import time
 from collections.abc import Generator
 from dataclasses import dataclass, field
@@ -14,6 +15,8 @@ import torch.types
 from vllm.platforms import current_platform
 
 from .mem_constants import GiB_bytes, MiB_bytes
+
+logger = logging.getLogger(__name__)
 
 
 def format_mib(b: int) -> str:
@@ -101,7 +104,22 @@ class MemorySnapshot:
             "allocated_bytes.all.peak", 0
         )
 
-        self.free_memory, self.total_memory = current_platform.mem_get_info(device)
+        try:
+            self.free_memory, self.total_memory = current_platform.mem_get_info(device)
+        except (RuntimeError, AttributeError) as e:
+            # Fallback for platforms that don't support memory querying (e.g., simulators)
+            if current_platform.is_xpu():
+                # Hardcoded values for XPU simulator.
+                # Keep these SMALL to avoid massive KV cache allocation:
+                # available_kv_cache ≈ total * gpu_memory_utilization (0.9)
+                # 10 MB total → ~9 MB KV cache, plenty for 128 tokens × 2 layers
+                self.total_memory = 10 * 1024 * 1024       # 10 MB
+                self.free_memory = int(9.5 * 1024 * 1024)   # 9.5 MB
+                logger.warning(f"XPU memory query failed ({e}), using hardcoded values: "
+                             f"total={self.total_memory / (1024**3):.1f}GB, "
+                             f"free={self.free_memory / (1024**3):.1f}GB")
+            else:
+                raise e
         shared_sysmem_device_mem_sms = ((8, 7), (11, 0), (12, 1))  # Orin, Thor, Spark
         if (
             current_platform.is_cuda()
