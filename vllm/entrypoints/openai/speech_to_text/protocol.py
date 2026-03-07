@@ -113,6 +113,26 @@ class TranscriptionRequest(OpenAIBaseModel):
             "numeric values, used by custom extensions."
         ),
     )
+
+    decoder_prefix: str | None = Field(
+        default=None,
+        description=(
+            "Text to seed the decoder with for continuation. Unlike 'prompt' "
+            "which uses the <|prev|> conditioning mechanism for style guidance, "
+            "this forces the decoder to continue generation from the given text. "
+            "Useful for continuous transcription of overlapping audio chunks."
+        ),
+    )
+
+    custom_task_tokens: list[str] | None = Field(
+        default=None,
+        description=(
+            "Custom special tokens to inject into the decoder task token "
+            "sequence. Inserted after the task token (e.g. <|transcribe|>) "
+            "but before <|notimestamps|>. For example, ['<|nopunctuation|>'] "
+            "for fine-tuned models that support punctuation control."
+        ),
+    )
     # --8<-- [end:transcription-extra-params]
 
     to_language: str | None = None
