@@ -37,8 +37,6 @@ from vllm.lora.request import LoRARequest
 PoolingCompletionLikeRequest: TypeAlias = (
     EmbeddingCompletionRequest
     | ClassificationCompletionRequest
-    | RerankRequest
-    | ScoreRequest
     | PoolingCompletionRequest
 )
 
@@ -47,7 +45,11 @@ PoolingChatLikeRequest: TypeAlias = (
 )
 
 AnyPoolingRequest: TypeAlias = (
-    PoolingCompletionLikeRequest | PoolingChatLikeRequest | IOProcessorRequest
+    PoolingCompletionLikeRequest
+    | PoolingChatLikeRequest
+    | IOProcessorRequest
+    | RerankRequest
+    | ScoreRequest
 )
 
 AnyPoolingResponse: TypeAlias = (
