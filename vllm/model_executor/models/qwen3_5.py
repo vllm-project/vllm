@@ -195,8 +195,8 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
         a_full, _ = self.in_proj_a(hidden_states)
         _ba_chunk = self.num_v_heads // self.tp_size
         _ba_start = self.tp_rank * _ba_chunk
-        b = b_full[:, _ba_start:_ba_start + _ba_chunk].contiguous()
-        a = a_full[:, _ba_start:_ba_start + _ba_chunk].contiguous()
+        b = b_full[:, _ba_start : _ba_start + _ba_chunk].contiguous()
+        a = a_full[:, _ba_start : _ba_start + _ba_chunk].contiguous()
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)

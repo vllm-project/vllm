@@ -672,10 +672,13 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         a_full, _ = self.in_proj_a(hidden_states)
         _ba_chunk = self.num_v_heads // self.tp_size
         _ba_start = self.tp_rank * _ba_chunk
-        projected_states_ba = torch.cat([
-            b_full[:, _ba_start:_ba_start + _ba_chunk],
-            a_full[:, _ba_start:_ba_start + _ba_chunk],
-        ], dim=-1)
+        projected_states_ba = torch.cat(
+            [
+                b_full[:, _ba_start : _ba_start + _ba_chunk],
+                a_full[:, _ba_start : _ba_start + _ba_chunk],
+            ],
+            dim=-1,
+        )
         query, key, value, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba
         )
