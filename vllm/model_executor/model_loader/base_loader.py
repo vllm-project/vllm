@@ -9,6 +9,10 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.reload import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+)
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
@@ -58,8 +62,27 @@ class BaseModelLoader(ABC):
             log_model_inspection(model)
 
             logger.debug("Loading weights on %s ...", load_device)
-            # Quantization does not happen in `load_weights` but after it
-            self.load_weights(model, model_config)
+
+            use_layerwise_loading = _get_use_layerwise_loading(model, self)
+
+            if use_layerwise_loading:
+                # set up layer loading
+                initialize_layerwise_reload(
+                    model, is_reload=False, target_device=load_device
+                )
+                # load weights, quantization via each layer's
+                # `process_weights_after_loading` will happen for each layer
+                # as soon as all of that layer's weights are loaded
+                self.load_weights(model, model_config)
+                # finalize layer reloading
+                finalize_layerwise_reload(model, model_config, is_reload=False)
+
+            else:
+                # Load weights to model format
+                self.load_weights(model, model_config)
+                # For layers with quantization, convert to kernel format
+                with target_device:
+                    process_weights_after_loading(model, model_config, target_device)
 
             # Log peak GPU memory after loading weights. This is needed
             # to have test coverage on peak memory for online quantization.
@@ -71,9 +94,22 @@ class BaseModelLoader(ABC):
                     scope="local",
                 )
 
-            process_weights_after_loading(model, model_config, target_device)
-
         return model.eval()
+
+
+def _get_use_layerwise_loading(
+    model: torch.nn.Module,
+    model_loader: BaseModelLoader,
+) -> bool:
+    from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+    from vllm.model_executor.model_loader.utils import (
+        model_has_any_online_quant_with_device_meta,
+    )
+
+    has_online_quant = model_has_any_online_quant_with_device_meta(model)
+
+    is_dummy_loader = isinstance(model_loader, DummyModelLoader)
+    return has_online_quant and not is_dummy_loader
 
 
 def log_model_inspection(model: nn.Module) -> None:

@@ -284,3 +284,15 @@ def configure_quant_config(
             quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
         if packed_mapping is not None:
             quant_config.packed_modules_mapping = packed_mapping
+
+
+def model_has_any_online_quant_with_device_meta(model: nn.Module) -> bool:
+    """
+    Returns True if any module uses online quantization with meta device weights.
+    """
+
+    def uses_meta_device(module: torch.nn.Module) -> bool:
+        quant_method = getattr(module, "quant_method", None)
+        return getattr(quant_method, "uses_meta_device", False)
+
+    return any(uses_meta_device(m) for m in model.modules())
