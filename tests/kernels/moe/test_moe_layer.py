@@ -293,6 +293,48 @@ class SharedExpertsConfig:
     quant_dtype: torch.dtype | str | None = None
 
 
+class SimpleGate(torch.nn.Module):
+    """Simple gate module for testing: computes router logits from hidden states."""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_experts: int,
+        dtype: torch.dtype,
+        device: str = "cuda",
+    ):
+        super().__init__()
+        self.weight = torch.nn.Parameter(
+            torch.randn(num_experts, hidden_size, device=device, dtype=dtype) / 10
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, None]:
+        """Returns (router_logits, None) to match expected signature."""
+        router_logits = torch.nn.functional.linear(hidden_states, self.weight)
+        return router_logits, None
+
+
+class SimpleRoutedInputTransform(torch.nn.Module):
+    """Simple linear transform for testing routed input transform
+    (e.g., latent projection).
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        dtype: torch.dtype,
+        device: str = "cuda",
+    ):
+        super().__init__()
+        self.weight = torch.nn.Parameter(
+            torch.randn(out_features, in_features, device=device, dtype=dtype) / 10
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.linear(x, self.weight)
+
+
 def make_fused_moe_layer(
     quantization: str | None,
     use_ep: bool,
@@ -326,6 +368,8 @@ def make_fused_moe_layer(
     logical_replica_count: torch.Tensor | None = None,
     num_redundant_experts: int = 0,
     has_bias: bool = False,
+    gate: torch.nn.Module | None = None,
+    routed_input_transform: torch.nn.Module | None = None,
 ) -> tuple[Callable, FusedMoE]:
     quant_config, qw = make_quant_config(quantization, w1, w2, global_num_experts)
 
@@ -335,6 +379,12 @@ def make_fused_moe_layer(
     else:
         builder = SharedFusedMoE
         kwargs["shared_experts"] = shared_experts
+
+    # Add gate and routed_input_transform if provided
+    if gate is not None:
+        kwargs["gate"] = gate
+    if routed_input_transform is not None:
+        kwargs["routed_input_transform"] = routed_input_transform
 
     layer = builder(
         num_experts=global_num_experts,
@@ -432,6 +482,8 @@ def make_fake_moe_layer(
     expert_load_view: torch.Tensor | None = None,
     logical_to_physical_map: torch.Tensor | None = None,
     logical_replica_count: torch.Tensor | None = None,
+    gate: torch.nn.Module | None = None,
+    routed_input_transform: torch.nn.Module | None = None,
 ) -> Callable:
     activation = MoEActivation.from_str(activation)
 
@@ -480,16 +532,29 @@ def make_fake_moe_layer(
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
+        # Save original hidden_states for shared experts (before transform)
+        original_hidden_states = hidden_states
+
+        # If gate provided, compute router_logits from hidden_states
+        if gate is not None:
+            router_logits, _ = gate(hidden_states)
+
+        # Apply routed input transform if provided
+        if routed_input_transform is not None:
+            hidden_states = routed_input_transform(hidden_states)
+
         topk_weights, topk_ids = router.select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
         )
 
+        # Shared experts use original (untransformed) hidden_states
         if shared_experts is not None:
-            shared_output = shared_experts(hidden_states)
+            shared_output = shared_experts(original_hidden_states)
         else:
             shared_output = None
 
+        # Routed experts use transformed hidden_states
         output = fused_experts(
             hidden_states=hidden_states,
             w1=w1,
@@ -672,6 +737,8 @@ def _test_loop(
     shared_experts_config: SharedExpertsConfig | None,
     reduce_results: bool,
     test_body_fn: Callable,
+    gate: torch.nn.Module | None,
+    routed_input_transform: torch.nn.Module | None,
     **kwargs,
 ) -> None:
     """Generic test loop that sets up environment and delegates to test_body_fn.
@@ -710,6 +777,12 @@ def _test_loop(
     hidden_states = hidden_states.to(device)
     router_logits = router_logits.to(device)
 
+    # Move gate and routed_input_transform to device if provided
+    if gate is not None:
+        gate = gate.to(device)
+    if routed_input_transform is not None:
+        routed_input_transform = routed_input_transform.to(device)
+
     with set_current_vllm_config(vllm_config):
         # Setup shared experts if needed
         if shared_experts_config is not None:
@@ -744,6 +817,8 @@ def _test_loop(
             top_k=top_k,
             global_num_experts=num_experts,
             shared_experts=shared_experts,
+            gate=gate,
+            routed_input_transform=routed_input_transform,
         )
 
         if moe_layer._expert_map is not None:
@@ -806,6 +881,8 @@ def _test_loop(
 @pytest.mark.parametrize("top_k", TOP_KS)
 @pytest.mark.parametrize("quantization", QUANT_METHODS)
 @pytest.mark.parametrize("use_shared_experts", [False, True])
+@pytest.mark.parametrize("use_gate", [False, True])
+@pytest.mark.parametrize("use_routed_input_transform", [False, True])
 def test_moe_layer_no_parallel(
     m: int,
     n: int,
@@ -814,6 +891,8 @@ def test_moe_layer_no_parallel(
     top_k: int,
     quantization: str | None,
     use_shared_experts: bool,
+    use_gate: bool,
+    use_routed_input_transform: bool,
     monkeypatch,
 ):
     """Test MoE layer without parallelism (dp_size=1, tp_size=1, use_ep=False).
@@ -823,6 +902,10 @@ def test_moe_layer_no_parallel(
     # Skip modelopt_fp4 on H100 (compute capability 9.0)
     if quantization == "modelopt_fp4" and current_platform.has_device_capability(90):
         pytest.skip("modelopt_fp4 not supported on H100+ GPUs")
+
+    # routed_input_transform only makes sense with shared_experts (latent MoE)
+    if use_routed_input_transform and not use_shared_experts:
+        pytest.skip("routed_input_transform requires shared_experts")
 
     set_random_seed(7)
 
@@ -842,10 +925,14 @@ def test_moe_layer_no_parallel(
 
     in_dtype = torch.bfloat16
 
+    # Determine dimensions for routed experts (may be transformed)
+    latent_size = k // 2 if use_routed_input_transform else k
+    routed_expert_hidden_size = latent_size
+
     (w1, _, _, _), (w2, _, _, _) = make_test_weights(
         num_experts,
         n,
-        k,
+        routed_expert_hidden_size,
         in_dtype=in_dtype,
     )
 
@@ -857,6 +944,16 @@ def test_moe_layer_no_parallel(
     else:
         shared_experts_config = None
 
+    # Create gate if needed
+    gate = SimpleGate(k, num_experts, in_dtype) if use_gate else None
+
+    # Create routed input transform if needed
+    routed_input_transform = (
+        SimpleRoutedInputTransform(k, latent_size, in_dtype)
+        if use_routed_input_transform
+        else None
+    )
+
     with set_current_vllm_config(vllm_config):
         baseline_layer = make_fake_moe_layer(
             w1=w1,
@@ -867,6 +964,8 @@ def test_moe_layer_no_parallel(
             quant_dtype=None,
             renormalize=False,
             shared_experts_config=shared_experts_config,
+            gate=gate,
+            routed_input_transform=routed_input_transform,
         )
 
     hidden_states = torch.randn((m, k), device="cuda", dtype=in_dtype) / 10
@@ -893,12 +992,14 @@ def test_moe_layer_no_parallel(
         num_experts,
         m,
         n,
-        k,
+        routed_expert_hidden_size,
         top_k,
         quantization,
         shared_experts_config,
         False,  # reduce_results
         _test_body_regular,
+        gate=gate,
+        routed_input_transform=routed_input_transform,
         baseline_output=baseline_output,
     )
 
@@ -1070,6 +1171,8 @@ def test_moe_layer(
         shared_experts_config,
         reduce_results,
         _test_body_regular,
+        gate=None,
+        routed_input_transform=None,
         baseline_output=baseline_output,
     )
 
@@ -1215,6 +1318,8 @@ def test_moe_layer_eplb(
         shared_experts_config,
         reduce_results,
         _test_body_eplb,
+        gate=None,
+        routed_input_transform=None,
     )
 
     # Cleanup GPU memory after spawned processes complete
