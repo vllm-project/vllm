@@ -392,6 +392,21 @@ def select_fp8_moe_backend(
         else:
             logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
 
+    if current_platform.is_xpu():
+        backend = Fp8MoeBackend.XPU
+        k_cls = backend_to_kernel_cls(backend)
+        if not k_cls._supports_quant_scheme(
+            weight_key,
+            activation_key,
+        ):
+            backend = Fp8MoeBackend.TRITON
+            logger.info_once(
+                "Not supported quant scheme on XPU Moe Backend,"
+                " falling back to Triton backend",
+                scope="local",
+            )
+            return backend, backend_to_kernel_cls(backend)
+
     # TODO(rob): per discussion with TPU team, we need a way to register
     # MoE backends by OOT plugins, rather than having an explicit list
     # of AVAILABLE_BACKENDS. Enabling returning `Fp8MoeBackend.NONE` is
