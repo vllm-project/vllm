@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
 )
@@ -23,6 +24,9 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     make_moe_prepare_and_finalize_naive_dp_ep,
     make_moe_prepare_and_finalize_no_dp_ep,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_moe_a2a import (
+    FlashInferMoeA2APrepareAndFinalize,
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_mori
@@ -199,6 +203,19 @@ def maybe_make_prepare_finalize(
     elif moe.use_fi_all2allv_kernels:
         assert quant_config is not None
         prepare_finalize = FlashInferA2APrepareAndFinalize(
+            num_dispatchers=all2all_manager.world_size,
+        )
+
+    elif moe.use_fi_moe_a2a_kernels:
+        assert quant_config is not None
+        max_num_tokens = (
+            get_current_vllm_config().scheduler_config.max_num_batched_tokens
+        )
+        prepare_finalize = FlashInferMoeA2APrepareAndFinalize(
+            max_num_tokens=max_num_tokens,
+            top_k=moe.experts_per_token,
+            num_experts=moe.num_experts,
+            hidden_size=moe.hidden_dim,
             num_dispatchers=all2all_manager.world_size,
         )
 

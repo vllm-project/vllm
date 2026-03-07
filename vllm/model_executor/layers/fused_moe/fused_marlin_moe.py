@@ -600,7 +600,10 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return not moe_parallel_config.use_fi_all2allv_kernels
+        return not (
+            moe_parallel_config.use_fi_all2allv_kernels
+            or moe_parallel_config.use_fi_moe_a2a_kernels
+        )
 
     @property
     def quant_type_id(self) -> int:

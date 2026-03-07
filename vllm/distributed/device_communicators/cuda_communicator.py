@@ -149,6 +149,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = FlashInferAllToAllManager(
                     self.cpu_group, tcp_store_group
                 )
+            elif self.all2all_backend == "flashinfer_moe_a2a":
+                from .all2all import FlashInferMoeA2AManager
+
+                self.all2all_manager = FlashInferMoeA2AManager(self.cpu_group)
             else:
                 raise ValueError(f"Unknown all2all backend: {self.all2all_backend}")
 
