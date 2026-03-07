@@ -529,7 +529,7 @@ steps:
   commands:
     - pip install tensorizer # for tensorizer test
     # for basic
-    - python3 offline_inference/basic/chat.py
+    - python3 offline_inference/basic/chat.py --attention-backend TRITON_ATTN
     - python3 offline_inference/basic/generate.py --model facebook/opt-125m
     - python3 offline_inference/basic/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
     - python3 offline_inference/basic/classify.py
@@ -2208,7 +2208,7 @@ steps:
   commands:
     - pip install tensorizer # for tensorizer test
     # for basic
-    - python3 offline_inference/basic/chat.py
+    - python3 offline_inference/basic/chat.py --attention-backend TRITON_ATTN
     - python3 offline_inference/basic/generate.py --model facebook/opt-125m
     - python3 offline_inference/basic/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
     - python3 offline_inference/basic/classify.py
