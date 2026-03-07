@@ -433,7 +433,7 @@ def test_machete_cuda_graph():
 
     # Run the model with a cuda graph
     stream = torch.cuda.Stream()
-    with torch.cuda.stream(stream):
+    with stream:
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
             output = model(a)
