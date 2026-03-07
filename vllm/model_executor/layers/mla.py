@@ -5,9 +5,109 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import CacheConfig
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
+
+logger = init_logger(__name__)
+
+# Try to import AITER ops for fused kernels
+try:
+    from aiter import dtypes
+    from aiter.jit.utils.torch_guard import torch_compile_guard
+    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+
+    _AITER_AVAILABLE = True
+except ImportError:
+    _AITER_AVAILABLE = False
+    dtypes = None
+    torch_compile_guard = None
+    fused_rms_fp8_group_quant = None
+
+
+def _fused_rms_fp8_group_quant_fake(
+    q_c: torch.Tensor,
+    q_a_layernorm_weight: torch.Tensor,
+    q_a_layernorm_variance_epsilon: float,
+    kv_c: torch.Tensor,
+    kv_a_layernorm_weight: torch.Tensor,
+    kv_a_layernorm_variance_epsilon: float,
+    dtype_quant: torch.dtype | None = None,
+    group_size: int = 128,
+    output_unquantized_inp1: bool = False,
+    transpose_scale: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fake implementation for torch.compile/CUDA graphs.
+
+    Returns tuple: (out1_quantized, out1_bs, out2)
+    """
+    if dtype_quant is None:
+        dtype_quant = dtypes.fp8
+    m, n1 = q_c.shape
+    out1_quantized = torch.empty((m, n1), dtype=dtype_quant, device=q_c.device)
+    out1_bs = torch.empty(
+        (m, (n1 + group_size - 1) // group_size), dtype=torch.float32, device=q_c.device
+    )
+    if transpose_scale:
+        out1_bs = out1_bs.transpose(0, 1).contiguous().view(*out1_bs.shape)
+    out2 = torch.empty_like(kv_c)
+    # Return tuple for ATOM-style pattern
+    return out1_quantized, out1_bs, out2
+
+
+def _fuse_rmsnorm_quant_impl(
+    q_c: torch.Tensor,
+    q_a_layernorm_weight: torch.Tensor,
+    q_a_layernorm_variance_epsilon: float,
+    kv_c: torch.Tensor,
+    kv_a_layernorm_weight: torch.Tensor,
+    kv_a_layernorm_variance_epsilon: float,
+    dtype_quant: torch.dtype | None = None,
+    group_size: int = 128,
+    output_unquantized_inp1: bool = False,
+    transpose_scale: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fused dual RMSNorm + FP8 quantization using AITER (ATOM pattern).
+
+    Fuses:
+    1. RMSNorm on q_c
+    2. FP8 group quantization on q_c
+    3. RMSNorm on kv_c (without quantization)
+
+    Based on ATOM's implementation in deepseek_v2.py:245-280
+
+    Returns:
+        (q_c_quantized, q_c_scale, kv_c_normed)
+
+    Uses @torch_compile_guard decorator for CUDA graph compatibility.
+    """
+    # Call AITER's fused kernel
+    # Returns: ((out1_quantized, out1_bs), out1_unquantized, out2, out_res1)
+    (q_c_quantized, q_c_scale), _, kv_c_normed, _ = fused_rms_fp8_group_quant(
+        q_c,  # x1: first input to normalize + quantize
+        q_a_layernorm_weight,  # x1_weight: RMSNorm weight for q_c
+        q_a_layernorm_variance_epsilon,  # x1_epsilon: epsilon for q_c
+        kv_c,  # x2: second input to normalize (no quant)
+        kv_a_layernorm_weight,  # x2_weight: RMSNorm weight for kv_c
+        kv_a_layernorm_variance_epsilon,  # x2_epsilon: epsilon for kv_c
+        group_size,  # group_size: 128 elements per group
+        dtype_quant,  # dtype_quant: dtypes.fp8
+        None,  # res1: no residual connection
+        output_unquantized_inp1,  # output_unquantized_inp1: False
+        transpose_scale,  # transpose_scale: True
+    )
+    # Return flattened tuple (ATOM pattern)
+    return q_c_quantized, q_c_scale, kv_c_normed
+
+
+# Apply decorator conditionally only when AITER is available
+if _AITER_AVAILABLE:
+    _fuse_rmsnorm_quant = torch_compile_guard(gen_fake=_fused_rms_fp8_group_quant_fake)(
+        _fuse_rmsnorm_quant_impl
+    )
+else:
+    _fuse_rmsnorm_quant = _fuse_rmsnorm_quant_impl
 
 
 @dataclass
@@ -110,6 +210,25 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         self.prefix = prefix
 
+        # Determine if RMSNorm+Quant fusion should be enabled (ATOM pattern)
+        # Fusion is enabled when AITER is available and quantization is FP8
+        self.quant_config = quant_config
+        self.quant_dtype = None
+        self.fuse_qknorm_quant = False
+
+        if _AITER_AVAILABLE and quant_config is not None:
+            # Check if quant_config is FP8
+            from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
+            if isinstance(quant_config, Fp8Config):
+                self.quant_dtype = dtypes.fp8
+                self.fuse_qknorm_quant = True
+                logger.info(
+                    "[MLA_FUSION_INIT] Fusion enabled for %s: "
+                    "AITER available and FP8 quantization detected",
+                    prefix,
+                )
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -118,6 +237,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
     ) -> torch.Tensor:
         q_c = None
         kv_lora = None
+        q_c_scale = None  # For FP8 quantized path
 
         if self.q_lora_rank is not None:
             assert self.fused_qkv_a_proj is not None, (
@@ -130,13 +250,41 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 "q_b_proj is required when q_lora_rank is not None"
             )
 
+            # Step 1: QKV projection (use existing layer)
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_lora = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
             )
-            q_c = self.q_a_layernorm(q_c)
-            q = self.q_b_proj(q_c)[0]
+            kv_c, k_pe = kv_lora.split(
+                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
+
+            # Step 2: Apply RMSNorm and optional FP8 quantization (ATOM pattern)
+            # Fusion is enabled when fuse_qknorm_quant=True (AITER + FP8 quant)
+            if self.fuse_qknorm_quant:
+                # Fused RMSNorm + FP8 quantization on q_c and kv_c
+                q_c_quantized, q_c_scale, kv_c_normed = _fuse_rmsnorm_quant(
+                    q_c,
+                    self.q_a_layernorm.weight,
+                    self.q_a_layernorm.variance_epsilon,
+                    kv_c,
+                    self.kv_a_layernorm.weight,
+                    self.kv_a_layernorm.variance_epsilon,
+                    dtype_quant=self.quant_dtype,  # dtypes.fp8
+                    group_size=128,
+                    output_unquantized_inp1=False,
+                    transpose_scale=True,
+                )
+                # Pass quantized tensor + scale as separate parameters
+                # (ATOM pattern). The layer will skip internal quantization
+                # and use the pre-quantized input.
+                q = self.q_b_proj(q_c_quantized, x_scale=q_c_scale)[0]
+            else:
+                # Unfused path: standard RMSNorm without quantization
+                q_c = self.q_a_layernorm(q_c)
+                kv_c_normed = self.kv_a_layernorm(kv_c)
+                q = self.q_b_proj(q_c)[0]
         else:
             assert self.kv_a_proj_with_mqa is not None, (
                 "kv_a_proj_with_mqa is required when q_lora_rank is None"
@@ -146,9 +294,10 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             )
             kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
             q = self.q_proj(hidden_states)[0]
-
-        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c)
+            kv_c, k_pe = kv_lora.split(
+                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
+            kv_c_normed = self.kv_a_layernorm(kv_c)
 
         q = q.view(-1, self.num_heads, self.qk_head_dim)
         # Add head dim of 1 to k_pe

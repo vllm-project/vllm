@@ -128,5 +128,8 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
+        input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Note: PTPC FP8 implementation uses apply_weights which doesn't
+        # support pre-quantized inputs, so input_scale is ignored.
         return self.fp8_linear.apply_weights(layer, x, bias)

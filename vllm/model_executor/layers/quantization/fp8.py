@@ -448,6 +448,7 @@ class Fp8LinearMethod(LinearMethodBase):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
+        input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # if batch invariant mode is enabled, prefer DeepGEMM FP8 path
         # we will use BF16 dequant when DeepGEMM is not supported.
@@ -509,7 +510,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 input=x,
                 weight=layer.weight,
                 weight_scale=layer.weight_scale_inv,
-                input_scale=layer.input_scale,
+                input_scale=input_scale,
                 bias=bias,
             )
 
