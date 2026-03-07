@@ -109,8 +109,8 @@ batch_descriptor=BatchDescriptor(num_tokens=num_input_tokens, uniform_decode=...
 runtime_mode, batch_descriptor = cudagraphdispatcher.dispatch(batch_descriptor)
 # execution
 with set_forward_context(
-    ..., 
-    cudagraph_runtime_mode=runtime_mode, 
+    ...,
+    cudagraph_runtime_mode=runtime_mode,
     batch_descriptor=batch_descriptor,
 ):
      output = self.model(...)
@@ -161,7 +161,7 @@ class AttentionCGSupport(enum.Enum):
     """CUDA Graphs always supported; supports mixed-prefill-decode"""
     UNIFORM_BATCH = 2
     """CUDA Graphs supported for batches the only contain query lengths that are
-    the same, this can be used for spec-decode 
+    the same, this can be used for spec-decode
         i.e. "decodes" are 1 + num_speculative_tokens"""
     UNIFORM_SINGLE_TOKEN_DECODE = 1
     """CUDA Graphs supported for batches the only contain query_len==1 decodes"""

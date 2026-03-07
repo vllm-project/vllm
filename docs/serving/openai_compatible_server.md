@@ -954,7 +954,7 @@ You can pass multi-modal inputs to scoring models by passing `content` including
 
         ```python
         import requests
-        
+
         response = requests.post(
             "http://localhost:8000/v1/score",
             json={

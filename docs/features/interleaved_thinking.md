@@ -39,20 +39,20 @@ To use interleaved thinking with tool calls, specify a model that supports this 
       --enable-auto-tool-choice
     """
     import json
-    
+
     from openai import OpenAI
-    
+
     client = OpenAI(base_url="http://localhost:8000/v1",     api_key="dummy")
-    
-    
+
+
     def get_current_weather(location: str, unit: "str"):
         """Get the current weather in a given location"""
         if unit == "celsius":
             return f"The current temperature in {location} is 22°C."
         else:
             return f"The current temperature in {location} is 72°F."
-    
-    
+
+
     tools = [
         {
             "type": "function",
@@ -80,9 +80,9 @@ To use interleaved thinking with tool calls, specify a model that supports this 
         tools=tools,
         tool_choice="auto",
     )
-    
+
     tool_call = response.choices[0].message.tool_calls[0].function
-    
+
     messages.append(
         {
             "role": "assistant",
@@ -90,10 +90,10 @@ To use interleaved thinking with tool calls, specify a model that supports this 
             "reasoning": response.choices[0].message.reasoning, # append reasoning
         }
     )
-    
+
     # Simulate tool execution
     available_tools = {"get_weather": get_current_weather}
-    
+
     completion_tool_calls = response.choices[0].message.tool_calls
     for call in completion_tool_calls:
         tool_to_call = available_tools[call.function.name]

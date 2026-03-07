@@ -52,7 +52,7 @@ The raw benchmarking results (in the format of json files) are in the `Artifacts
 
 The `compare-json-results.py` helps to compare benchmark results JSON files converted using `convert-results-json-to-markdown.py`.
 When run, benchmark script generates results under `benchmark/results` folder, along with the `benchmark_results.md` and `benchmark_results.json`.
-`compare-json-results.py` compares two `benchmark_results.json` files and provides performance ratio e.g. for Output Tput, Median TTFT and Median TPOT.  
+`compare-json-results.py` compares two `benchmark_results.json` files and provides performance ratio e.g. for Output Tput, Median TTFT and Median TPOT.
 If only one benchmark_results.json is passed, `compare-json-results.py` compares different TP and PP configurations in the benchmark_results.json instead.
 
 Here is an example using the script to compare result_a and result_b with max concurrency and qps for same Model, Dataset name, input/output length.
@@ -67,9 +67,9 @@ Here is an example using the script to compare result_a and result_b with max co
 | 2  | 24 | inf| 27.74  | 293.34 |  10.57 |
 | 3  | 32 | inf| 28.61  |306.69 | 10.72 |
 
-***compare-json-results.py – Command-Line Parameters***  
+***compare-json-results.py – Command-Line Parameters***
 
-compare-json-results.py provides configurable parameters to compare one or more benchmark_results.json files and generate summary tables and plots.  
+compare-json-results.py provides configurable parameters to compare one or more benchmark_results.json files and generate summary tables and plots.
 In most cases, users only need to specify --file to parse the desired benchmark results.
 
 | Parameter              | Type               | Default Value           | Description                                                                                           |
@@ -82,11 +82,11 @@ In most cases, users only need to specify --file to parse the desired benchmark 
 | `--ttft-max-ms`        | `float`            | `3000.0`                | Reference upper bound (milliseconds) for TTFT plots, typically used to visualize SLA thresholds.      |
 | `--tpot-max-ms`        | `float`            | `100.0`                 | Reference upper bound (milliseconds) for TPOT plots, typically used to visualize SLA thresholds.      |
 
-***Valid Max Concurrency Summary***  
+***Valid Max Concurrency Summary***
 
-Based on the configured TTFT and TPOT SLA thresholds, compare-json-results.py computes the maximum valid concurrency for each benchmark result.  
-The “Max # of max concurrency. (Both)” column represents the highest concurrency level that satisfies both TTFT and TPOT constraints simultaneously.  
-This value is typically used in capacity planning and sizing guides.  
+Based on the configured TTFT and TPOT SLA thresholds, compare-json-results.py computes the maximum valid concurrency for each benchmark result.
+The “Max # of max concurrency. (Both)” column represents the highest concurrency level that satisfies both TTFT and TPOT constraints simultaneously.
+This value is typically used in capacity planning and sizing guides.
 
 | # | Configuration  | Max # of max concurrency. (TTFT ≤ 10000 ms) | Max # of max concurrency. (TPOT ≤ 100 ms) | Max # of max concurrency. (Both) | Output Tput @ Both (tok/s) | TTFT @ Both (ms) | TPOT @ Both (ms) |
 | - | -------------- | ------------------------------------------- | ----------------------------------------- | -------------------------------- | -------------------------- | ---------------- | ---------------- |
