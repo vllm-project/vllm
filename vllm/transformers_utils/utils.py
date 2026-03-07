@@ -27,6 +27,13 @@ def is_cloud_storage(model_or_path: str) -> bool:
     return is_s3(model_or_path) or is_gcs(model_or_path)
 
 
+def without_trust_remote_code(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return kwargs without trust_remote_code without modifying original dict."""
+    if "trust_remote_code" not in kwargs:
+        return kwargs
+    return {k: v for k, v in kwargs.items() if k != "trust_remote_code"}
+
+
 def modelscope_list_repo_files(
     repo_id: str,
     revision: str | None = None,
