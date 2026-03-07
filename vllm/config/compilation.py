@@ -629,6 +629,18 @@ class CompilationConfig:
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
     """local cache dir for each rank"""
 
+    compile_only: bool = False
+    """If True, run in compile-only mode: only torch.compile/Inductor
+    compilation, skip CUDA graph capture, kernel warmup, and sampler warmup.
+    Used to pre-populate the compilation cache without allocating KV caches
+    or setting up the full engine."""
+
+    overlap_compile: bool = False
+    """If True, launch a background compile-only subprocess during startup
+    to overlap compilation with weight loading. The subprocess uses
+    FakeTensor weights (no GPU memory) to run torch.compile and populate
+    the Inductor cache while the main process loads real weights."""
+
     fast_moe_cold_start: bool | None = None
     """Optimization for fast MOE cold start.
 
@@ -713,6 +725,9 @@ class CompilationConfig:
             "static_forward_context",
             "pass_config",  # handled separately below
             "dynamic_shapes_config",  # handled separately below
+            # Runtime-only flags that don’t affect the compiled graph
+            "compile_only",
+            "overlap_compile",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors

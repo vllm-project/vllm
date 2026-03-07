@@ -283,7 +283,12 @@ class Worker(WorkerBase):
 
             # take current memory snapshot
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
-            self.requested_memory = request_memory(init_snapshot, self.cache_config)
+            if self.compilation_config.compile_only:
+                # In compile-only mode with fake weights, skip memory
+                # validation since we don't allocate real GPU memory.
+                self.requested_memory = 0
+            else:
+                self.requested_memory = request_memory(init_snapshot, self.cache_config)
             logger.debug("worker init memory snapshot: %r", self.init_snapshot)
             logger.debug(
                 "worker requested memory: %sGiB", format_gib(self.requested_memory)
@@ -511,6 +516,30 @@ class Worker(WorkerBase):
             for compile_range in compile_ranges:
                 if not any(x in compile_range for x in all_sizes):
                     warmup_sizes.append(compile_range.end)
+
+        if self.compilation_config.compile_only:
+            from vllm.compilation.backends import CompilationDone
+
+            # In compile-only mode, we need at least one _dummy_run to
+            # trigger torch.compile. VllmBackend compiles ALL ranges
+            # upfront, then raises CompilationDone to prevent execution
+            # with fake tensors (which would cause CUDA IMA).
+            if not warmup_sizes:
+                warmup_sizes = [1]
+            try:
+                for size in sorted(warmup_sizes, reverse=True):
+                    logger.info("Compile and warming up model for size %d", size)
+                    self.model_runner._dummy_run(
+                        size, skip_eplb=True, remove_lora=False
+                    )
+            except CompilationDone:
+                logger.info(
+                    "Compile-only mode: compilation complete. "
+                    "Skipping kernel warmup, CUDA graphs, and "
+                    "sampler warmup."
+                )
+            set_random_seed(self.model_config.seed)
+            return self.compilation_config.compilation_time
 
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):

@@ -207,6 +207,10 @@ class LLM:
             dictionary or an AttentionConfig instance. If a dictionary, it will
             be converted to an AttentionConfig. Allows specifying the attention
             backend and other attention-related settings.
+        compile_only: If True, run in compile-only mode: wraps the model
+            loader with FakeTensorMode (zero GPU memory) and runs
+            torch.compile to populate the Inductor cache, then returns
+            early. The resulting LLM object is NOT usable for inference.
         **kwargs: Arguments for [`EngineArgs`][vllm.EngineArgs].
 
     Note:
@@ -254,6 +258,7 @@ class LLM:
         kv_cache_memory_bytes: int | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
+        compile_only: bool = False,
         **kwargs: Any,
     ) -> None:
         """LLM constructor."""
@@ -318,6 +323,9 @@ class LLM:
                 compilation_config, CompilationConfig
             )
 
+        if compile_only:
+            compilation_config_instance.compile_only = True
+
         structured_outputs_instance = _make_config(
             structured_outputs_config, StructuredOutputsConfig
         )
@@ -377,7 +385,22 @@ class LLM:
             **kwargs,
         )
 
+        if compile_only:
+            engine_args.enforce_eager = False
+
         log_non_default_args(engine_args)
+
+        if compile_only:
+            # Bypass LLMEngine (which sets up multiprocess handshake,
+            # scheduler, etc.) and create EngineCore directly.
+            from vllm.compile_only import _run_compile_with_config
+
+            vllm_config = engine_args.create_engine_config(
+                usage_context=UsageContext.LLM_CLASS
+            )
+            _run_compile_with_config(vllm_config)
+            logger.info("Compile-only mode complete. Cache populated.")
+            return
 
         self.llm_engine = LLMEngine.from_engine_args(
             engine_args=engine_args, usage_context=UsageContext.LLM_CLASS

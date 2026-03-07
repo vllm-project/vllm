@@ -4272,6 +4272,12 @@ class GPUModelRunner(
                 if load_dummy_weights:
                     self.load_config.load_format = "dummy"
                 model_loader = get_model_loader(self.load_config)
+                if self.vllm_config.compilation_config.compile_only:
+                    from vllm.model_executor.model_loader.fake_loader import (
+                        wrap_loader_with_fake,
+                    )
+
+                    model_loader = wrap_loader_with_fake(model_loader)
                 self.model = model_loader.load_model(
                     vllm_config=self.vllm_config, model_config=self.model_config
                 )
