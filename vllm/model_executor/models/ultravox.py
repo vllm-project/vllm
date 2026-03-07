@@ -6,6 +6,7 @@
 
 import copy
 import inspect
+import logging
 from collections.abc import Iterable, Mapping, Sequence
 from types import SimpleNamespace
 from typing import Annotated, Any, Literal, TypeAlias
@@ -60,6 +61,8 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
+
+logger = logging.getLogger(__name__)
 
 _AUDIO_PLACEHOLDER_OVERRIDE = "<|audio|>"
 _MAX_ENCODER_BATCH_SIZE = 16
@@ -763,8 +766,47 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # Deduplicate weights so that fine-tuned checkpoint weights are not
+        # silently overwritten by secondary base-model weights.
+        #
+        # DefaultModelLoader.get_all_weights() yields primary checkpoint
+        # weights first, then secondary weights from audio_model_id /
+        # text_model_id.  For diff checkpoints that contain only fine-tuned
+        # audio_tower (and projector) weights, the secondary Whisper weights
+        # share the same names and would otherwise replace them.
+        seen: set[str] = set()
+        skipped_count = 0
+        skipped_examples: list[str] = []
+
+        def _deduplicated(
+            weight_iter: Iterable[tuple[str, torch.Tensor]],
+        ) -> Iterable[tuple[str, torch.Tensor]]:
+            nonlocal skipped_count
+            for name, tensor in weight_iter:
+                if name not in seen:
+                    seen.add(name)
+                    yield name, tensor
+                else:
+                    skipped_count += 1
+                    if len(skipped_examples) < 10:
+                        skipped_examples.append(name)
+
         loader = AutoWeightsLoader(self, ignore_unexpected_prefixes=["audio_tower."])
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(
+            _deduplicated(weights), mapper=self.hf_to_vllm_mapper
+        )
+
+        if skipped_count > 0:
+            logger.info(
+                "Ultravox: skipped %d duplicate weight(s) that were already "
+                "loaded from the primary checkpoint. This is expected when "
+                "audio_model_id or text_model_id is set alongside a "
+                "checkpoint that already contains those weights.",
+                skipped_count,
+            )
+            logger.debug("First 10 skipped weights: %s", skipped_examples)
+
+        return loaded
 
 
 def pad_and_concat_to_dim3(
