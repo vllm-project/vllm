@@ -35,6 +35,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
     ModelOptNvFp4Config,
 )
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_all2all
 from vllm.utils.import_utils import has_deep_ep, has_mori
 from vllm.utils.math_utils import cdiv
@@ -53,7 +54,6 @@ TOP_KS = [2, 6]
 # dp_size, tp_size, use_ep
 # Note: DP+TP is not yet supported in the FusedMoE layer.
 PARALLEL_COMBOS = [
-    [1, 1, False],
     [1, 2, False],
     [1, 4, False],
     [2, 1, True],
@@ -802,6 +802,109 @@ def _test_loop(
     torch.testing.assert_close(expected, actual, atol=atol, rtol=rtol)
 
 
+# Test for non-parallel cases (world_size == 1) - backend doesn't matter
+@pytest.mark.parametrize("m, n, k", SHAPE_COMBOS)
+@pytest.mark.parametrize("num_experts", NUM_EXPERTS)
+@pytest.mark.parametrize("top_k", TOP_KS)
+@pytest.mark.parametrize("quantization", QUANT_METHODS)
+@pytest.mark.parametrize("use_shared_experts", [False, True])
+def test_moe_layer_no_parallel(
+    m: int,
+    n: int,
+    k: int,
+    num_experts: int,
+    top_k: int,
+    quantization: str | None,
+    use_shared_experts: bool,
+    monkeypatch,
+):
+    """Test MoE layer without parallelism (dp_size=1, tp_size=1, use_ep=False).
+
+    Backend doesn't matter when there's no parallelism, so we don't parametrize on it.
+    """
+    # Skip modelopt_fp4 on H100 (compute capability 9.0)
+    if quantization == "modelopt_fp4" and current_platform.has_device_capability(90):
+        pytest.skip("modelopt_fp4 not supported on H100+ GPUs")
+
+    set_random_seed(7)
+
+    dp_size = 1
+    tp_size = 1
+    world_size = 1
+
+    test_env: dict[str, str] = dict()
+
+    parallel_config = ParallelConfig()
+    compilation_config = CompilationConfig()
+    compilation_config.pass_config.fuse_allreduce_rms = False
+
+    vllm_config = VllmConfig(
+        parallel_config=parallel_config, compilation_config=compilation_config
+    )
+
+    in_dtype = torch.bfloat16
+
+    (w1, _, _, _), (w2, _, _, _) = make_test_weights(
+        num_experts,
+        n,
+        k,
+        in_dtype=in_dtype,
+    )
+
+    if use_shared_experts:
+        shared_experts_config = SharedExpertsConfig(
+            w1=torch.randn((k, n * 2), device="cuda", dtype=in_dtype) / 15,
+            w2=torch.randn((n, k), device="cuda", dtype=in_dtype) / 15,
+        )
+    else:
+        shared_experts_config = None
+
+    with set_current_vllm_config(vllm_config):
+        baseline_layer = make_fake_moe_layer(
+            w1=w1,
+            w2=w2,
+            top_k=top_k,
+            global_num_experts=num_experts,
+            in_dtype=in_dtype,
+            quant_dtype=None,
+            renormalize=False,
+            shared_experts_config=shared_experts_config,
+        )
+
+    hidden_states = torch.randn((m, k), device="cuda", dtype=in_dtype) / 10
+    router_logits = torch.randn((m, num_experts), device="cuda", dtype=in_dtype)
+
+    baseline_output = baseline_layer(hidden_states, router_logits)
+
+    del baseline_layer
+    torch.accelerator.empty_cache()
+
+    # Use parallel_launch_with_config to properly initialize parallel groups
+    parallel_launch_with_config(
+        world_size,
+        _test_loop,
+        vllm_config,
+        test_env,
+        1,  # ep_size
+        dp_size,
+        tp_size,
+        hidden_states,
+        router_logits,
+        w1,
+        w2,
+        num_experts,
+        m,
+        n,
+        k,
+        top_k,
+        quantization,
+        shared_experts_config,
+        False,  # reduce_results
+        _test_body_regular,
+        baseline_output,
+    )
+
+
 # TODO: add cudagraphs/torch.compile tests
 @pytest.mark.parametrize("m, n, k", SHAPE_COMBOS)
 @pytest.mark.parametrize("num_experts", NUM_EXPERTS)
@@ -826,10 +929,16 @@ def test_moe_layer(
     reduce_results: bool,
     monkeypatch,
 ):
+    """Test MoE layer with parallelism (multi-GPU or TP/EP enabled).
+
+    For non-parallel cases (world_size == 1), use test_moe_layer_no_parallel instead.
+    """
     set_random_seed(7)
 
     num_gpus = cuda_device_count_stateless()
     world_size = tp_size * dp_size
+
+    assert world_size > 1
 
     if world_size > num_gpus:
         pytest.skip(f"Not enough GPUs got {num_gpus}, expected {world_size}.")
@@ -842,6 +951,18 @@ def test_moe_layer(
 
     if reduce_results and quantization is not None:
         pytest.skip("reduce_results=True only tested with unquantized data types")
+
+    # Skip modelopt_fp4 on H100 (compute capability 9.0)
+    if quantization == "modelopt_fp4" and not current_platform.has_device_capability(
+        100
+    ):
+        pytest.skip("modelopt_fp4 not supported on H100+ GPUs")
+
+    # Skip flashinfer_all2allv on H100 (compute capability 9.0)
+    if backend == "flashinfer_all2allv" and not current_platform.has_device_capability(
+        100
+    ):
+        pytest.skip("flashinfer_all2allv not supported on H100+ GPUs")
 
     supported_quants = BACKEND_SUPPORTED_QUANTS.get(backend)
     if supported_quants is not None and quantization not in supported_quants:
@@ -1008,6 +1129,18 @@ def test_moe_layer_eplb(
 
     if reduce_results and quantization is not None:
         pytest.skip("reduce_results=True only tested with unquantized data types")
+
+    # Skip modelopt_fp4 on H100 (compute capability 9.0)
+    if quantization == "modelopt_fp4" and not current_platform.has_device_capability(
+        100
+    ):
+        pytest.skip("modelopt_fp4 not supported on H100+ GPUs")
+
+    # Skip flashinfer_all2allv on H100 (compute capability 9.0)
+    if backend == "flashinfer_all2allv" and not current_platform.has_device_capability(
+        100
+    ):
+        pytest.skip("flashinfer_all2allv not supported on H100+ GPUs")
 
     if num_experts % dp_size != 0:
         pytest.skip("EPLB requires num_experts divisible by ep_size")
