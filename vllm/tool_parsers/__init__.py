@@ -150,6 +150,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "functiongemma_tool_parser",
         "FunctionGemmaToolParser",
     ),
+    "step_audio_2": (
+        "step_audio_2_tool_parser",
+        "StepAudio2ToolParser",
+    ),
 }
 
 
