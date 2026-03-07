@@ -132,6 +132,11 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: list[int] | None = None
 
+    # vLLM-specific fields that are not in OpenAI spec
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="KVTransfer parameters."
+    )
+
 
 class ChatCompletionToolsParam(OpenAIBaseModel):
     type: Literal["function"] = "function"

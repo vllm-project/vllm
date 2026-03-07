@@ -5,7 +5,7 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import cast
+from typing import Any, cast
 
 from fastapi import Request
 
@@ -292,6 +292,8 @@ class OpenAIServingCompletion(OpenAIServing):
         num_prompt_tokens = [0] * num_prompts
         num_cached_tokens = None
         first_iteration = True
+        kv_transfer_params_sent = False
+        kv_transfer_params: dict[str, Any] | None = None
 
         stream_options = request.stream_options
         include_usage, include_continuous_usage = should_include_usage(
@@ -306,6 +308,10 @@ class OpenAIServingCompletion(OpenAIServing):
                 if first_iteration:
                     num_cached_tokens = res.num_cached_tokens
                     first_iteration = False
+
+                # Capture kv_transfer_params from the first result that has it
+                if res.kv_transfer_params and not kv_transfer_params:
+                    kv_transfer_params = res.kv_transfer_params
 
                 prompt_text = res.prompt
                 if prompt_text is None:
@@ -410,7 +416,17 @@ class OpenAIServingCompletion(OpenAIServing):
                                 ),
                             )
                         ],
+                        kv_transfer_params=(
+                            kv_transfer_params
+                            if kv_transfer_params and not kv_transfer_params_sent
+                            else None
+                        ),
                     )
+
+                    # Mark kv_transfer_params as sent after first chunk
+                    if kv_transfer_params and not kv_transfer_params_sent:
+                        kv_transfer_params_sent = True
+
                     if include_continuous_usage:
                         prompt_tokens = num_prompt_tokens[prompt_idx]
                         completion_tokens = previous_num_tokens[i]
