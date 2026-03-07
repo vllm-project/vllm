@@ -137,6 +137,14 @@ def resolve_tokenizer_args(
         else:
             assert_never(runner_type)
 
+    if "padding_side" not in kwargs:
+        if runner_type == "generate" or runner_type == "draft":
+            kwargs["padding_side"] = "left"
+        elif runner_type == "pooling":
+            kwargs["padding_side"] = "right"
+        else:
+            assert_never(runner_type)
+
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
             raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
