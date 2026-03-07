@@ -24,7 +24,7 @@ class CPUOffloadingSpec(OffloadingSpec):
 
         cpu_bytes_to_use = self.extra_config.get("cpu_bytes_to_use")
         if not cpu_bytes_to_use:
-            raise Exception(
+            raise ValueError(
                 "cpu_bytes_to_use must be specified in kv_connector_extra_config"
             )
 
@@ -92,7 +92,7 @@ class CPUOffloadingSpec(OffloadingSpec):
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
         if not self._handlers:
             if not current_platform.is_cuda_alike():
-                raise Exception(
+                raise RuntimeError(
                     "CPU Offloading is currently only supported on CUDA-alike GPUs"
                 )
 
