@@ -92,8 +92,9 @@ KERNEL_GROUPSHAPE_COMBINATIONS = (
 
 # For Aiter tests we toggle use_aiter_quant_op
 AITER_KERNEL_GROUPSHAPE_COMBINATIONS = [
-    # Per-token with ROCmFP8ScaledMMLinearKernel
-    (ROCmFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR, False),
+    # Per-tensor with ROCmFP8ScaledMMLinearKernel
+    # Only test with True, as False fails anyway and can't be used e2e.
+    (ROCmFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR, True),
     # Per-token with RowWiseTorchFP8ScaledMMLinearKernel
     (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
     (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
@@ -203,6 +204,9 @@ class TestModel(torch.nn.Module):
                 return [rocm_aiter_ops.get_group_quant_op()]
             if self.use_aiter_fusion:
                 return [torch.ops.vllm.triton_per_token_group_quant_fp8.default]
+        elif self.group_shape.is_per_tensor():
+            if self.use_aiter_quant_op:
+                return [rocm_aiter_ops.get_per_tensor_quant_op()]
         else:
             if self.use_aiter_quant_op:
                 return [rocm_aiter_ops.get_per_token_quant_op()]
@@ -226,6 +230,16 @@ class TestModel(torch.nn.Module):
                 return [
                     AiterFusedAddRMSFp8GroupQuantPattern.FUSED_OP,
                     AiterRMSFp8GroupQuantPattern.FUSED_OP,
+                ]
+            elif self.group_shape.is_per_tensor():
+                from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+                    AiterFusedAddRMSNormStaticQuantPattern,
+                    AiterRMSNormStaticQuantPattern,
+                )
+
+                return [
+                    AiterFusedAddRMSNormStaticQuantPattern.FUSED_OP,
+                    AiterRMSNormStaticQuantPattern.FUSED_OP,
                 ]
             else:
                 # Per-token aiter fusion
