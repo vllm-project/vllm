@@ -3,12 +3,228 @@
 import torch
 
 from vllm.config import VllmConfig, replace
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
 )
 
+logger = init_logger(__name__)
+
 PADDING_SLOT_ID = -1
+
+
+def next_power_of_2(n: int) -> int:
+    """Return the smallest power of 2 >= n. Pure Python implementation."""
+    if n <= 0:
+        return 1
+    n -= 1
+    n |= n >> 1
+    n |= n >> 2
+    n |= n >> 4
+    n |= n >> 8
+    n |= n >> 16
+    n |= n >> 32
+    return n + 1
+
+
+def eagle_prepare_inputs_padded_pytorch(
+    cu_num_draft_tokens: torch.Tensor,  # [num_reqs]
+    valid_sampled_tokens_count: torch.Tensor,  # [num_reqs]
+    query_start_loc_gpu: torch.Tensor,  # [num_reqs + 1]
+    token_indices_to_sample: torch.Tensor,  # [num_reqs] (output)
+    num_rejected_tokens_gpu: torch.Tensor,  # [num_reqs] (output)
+    num_reqs: int,
+):
+    """PyTorch implementation of eagle_prepare_inputs_padded_kernel."""
+    # Compute num_draft_tokens from cumulative sum
+    zero = torch.zeros(
+        1, dtype=cu_num_draft_tokens.dtype, device=cu_num_draft_tokens.device
+    )
+    num_draft_tokens = torch.diff(cu_num_draft_tokens, prepend=zero)[:num_reqs]
+
+    # Compute number of rejected tokens
+    num_rejected = num_draft_tokens + 1 - valid_sampled_tokens_count[:num_reqs]
+    num_rejected = torch.where(num_draft_tokens > 0, num_rejected, zero)
+
+    # Compute token indices to sample
+    q_last_tok_idx = query_start_loc_gpu[1 : num_reqs + 1] - 1
+    index_to_sample = q_last_tok_idx - num_rejected
+
+    # Write outputs
+    token_indices_to_sample[:num_reqs] = index_to_sample.to(
+        token_indices_to_sample.dtype
+    )
+    num_rejected_tokens_gpu[:num_reqs] = num_rejected.to(num_rejected_tokens_gpu.dtype)
+
+
+def eagle_prepare_next_token_padded_pytorch(
+    sampled_token_ids: torch.Tensor,  # [num_reqs, num_sampled_tokens_per_req]
+    discard_request_mask: torch.Tensor,  # [num_reqs]
+    backup_next_token_ids: torch.Tensor,  # [num_reqs]
+    next_token_ids: torch.Tensor,  # [num_reqs] (output)
+    valid_sampled_tokens_count: torch.Tensor,  # [num_reqs] (output)
+    vocab_size: int,
+    num_sampled_tokens_per_req: int,
+    num_reqs: int,
+):
+    """PyTorch implementation of eagle_prepare_next_token_padded_kernel."""
+    device = sampled_token_ids.device
+    token_ids = sampled_token_ids[:num_reqs, :num_sampled_tokens_per_req]
+
+    # Valid tokens are in [0, vocab_size) and not -1
+    is_valid = (token_ids != -1) & (token_ids < vocab_size)
+    valid_count = is_valid.sum(dim=1)
+
+    # Find last valid index per row using index multiplication trick
+    indices = torch.arange(num_sampled_tokens_per_req, device=device)
+    # Set invalid positions to -1 so they don't win the max
+    masked_indices = torch.where(is_valid, indices, -1)
+    last_valid_idx = masked_indices.max(dim=1).values
+
+    # Gather the token at the last valid index (clamp to 0 for invalid rows)
+    gather_idx = last_valid_idx.clamp(min=0).unsqueeze(1)
+    last_valid_token = token_ids.gather(1, gather_idx).squeeze(1)
+
+    # Determine which requests have valid tokens
+    has_valid = valid_count > 0
+
+    # Set next_token_ids: use last_valid_token if has_valid and not discarded
+    use_sampled = has_valid & ~discard_request_mask[:num_reqs]
+    next_token_ids[:num_reqs] = torch.where(
+        use_sampled, last_valid_token, backup_next_token_ids[:num_reqs]
+    ).to(next_token_ids.dtype)
+
+    # Set valid_sampled_tokens_count: 0 if discarded, else valid_count
+    valid_sampled_tokens_count[:num_reqs] = torch.where(
+        discard_request_mask[:num_reqs],
+        torch.zeros_like(valid_count),
+        valid_count,
+    ).to(valid_sampled_tokens_count.dtype)
+
+
+def copy_and_expand_eagle_inputs_pytorch(
+    # (Padded) Inputs from the target model
+    target_token_ids: torch.Tensor,  # [total_tokens_in_batch]
+    target_positions: torch.Tensor,  # [total_tokens_in_batch]
+    next_token_ids: torch.Tensor,  # [num_reqs]
+    # Outputs to the drafting buffers
+    out_input_ids: torch.Tensor,  # [total_draft_tokens_in_batch] (output)
+    out_positions: torch.Tensor,  # [total_draft_tokens_in_batch] (output)
+    out_is_rejected_token_mask: torch.Tensor,  # [total_draft_tokens_in_batch] (output)
+    out_is_masked_token_mask: torch.Tensor,  # [total_draft_tokens_in_batch] (output)
+    # [num_padding_slots_per_request * num_reqs] (output)
+    out_new_token_indices: torch.Tensor,
+    out_hidden_state_mapping: torch.Tensor,  # [total_tokens_in_batch]
+    # Input metadata
+    query_start_loc: torch.Tensor,  # [num_reqs + 1]
+    query_end_loc: torch.Tensor,  # [num_reqs]
+    padding_token_id: int,
+    parallel_drafting_token_id: int,
+    # Sizing info
+    total_input_tokens: int,
+    num_padding_slots_per_request: int,
+    shift_input_ids: bool,
+):
+    """PyTorch implementation of copy_and_expand_eagle_inputs_kernel."""
+    num_reqs = query_end_loc.shape[0]
+    device = target_token_ids.device
+
+    # Precompute per-request metadata using tensor operations
+    query_starts = query_start_loc[:num_reqs]
+    next_query_starts = query_start_loc[1 : num_reqs + 1]
+
+    if shift_input_ids:
+        num_valid_tokens = query_end_loc - query_starts
+        input_offset = 1
+        req_indices = torch.arange(num_reqs, device=device)
+        output_starts = query_starts + req_indices * (num_padding_slots_per_request - 1)
+    else:
+        num_valid_tokens = query_end_loc - query_starts + 1
+        input_offset = 0
+        req_indices = torch.arange(num_reqs, device=device)
+        output_starts = query_starts + req_indices * num_padding_slots_per_request
+
+    # Number of rejected tokens per request
+    num_rejected = next_query_starts - query_end_loc - 1
+
+    # Total output tokens per request
+    total_output_tokens = (
+        num_valid_tokens + num_padding_slots_per_request + num_rejected
+    )
+
+    # Get start positions for each request
+    start_positions = target_positions[query_starts.long()]
+
+    # Process each request using tensor slicing
+    for request_idx in range(num_reqs):
+        n_valid = num_valid_tokens[request_idx].long().item()
+        n_total = total_output_tokens[request_idx].long().item()
+        out_start = output_starts[request_idx].long().item()
+        q_start = query_starts[request_idx].long().item()
+        start_pos = start_positions[request_idx].item()
+        bonus_token = next_token_ids[request_idx]
+
+        # Create output index range for this request
+        j_range = torch.arange(n_total, device=device)
+        out_indices = out_start + j_range
+
+        # Region masks
+        is_valid = j_range < n_valid
+        is_bonus = j_range == n_valid
+        is_parallel = (j_range > n_valid) & (
+            j_range < n_valid + num_padding_slots_per_request
+        )
+        is_rejected = j_range >= n_valid + num_padding_slots_per_request
+
+        # Compute input indices for valid region (clamped)
+        in_indices = torch.clamp(
+            q_start + input_offset + j_range, max=total_input_tokens - 1
+        )
+
+        # Build token_ids tensor for this request
+        token_ids = torch.full(
+            (n_total,), padding_token_id, device=device, dtype=out_input_ids.dtype
+        )
+        # Valid tokens from input
+        token_ids = torch.where(
+            is_valid, target_token_ids[in_indices.long()], token_ids
+        )
+        # Bonus token
+        token_ids = torch.where(is_bonus, bonus_token.to(token_ids.dtype), token_ids)
+        # Parallel drafting tokens
+        token_ids = torch.where(is_parallel, parallel_drafting_token_id, token_ids)
+        # Rejected tokens already set to padding_token_id
+
+        # Compute positions
+        positions = torch.where(is_rejected, 0, start_pos + j_range)
+
+        # Write outputs using tensor indexing
+        out_input_ids[out_indices.long()] = token_ids.to(out_input_ids.dtype)
+        out_positions[out_indices.long()] = positions.to(out_positions.dtype)
+        out_is_rejected_token_mask[out_indices.long()] = is_rejected
+        out_is_masked_token_mask[out_indices.long()] = is_parallel
+
+        # Store new token indices (bonus + parallel drafting slots)
+        is_new_token = (j_range >= n_valid) & (
+            j_range < n_valid + num_padding_slots_per_request
+        )
+        new_token_local_idx = j_range[is_new_token] - n_valid
+        new_token_out_idx = (
+            request_idx * num_padding_slots_per_request + new_token_local_idx
+        )
+        out_new_token_indices[new_token_out_idx.long()] = out_indices[is_new_token].to(
+            out_new_token_indices.dtype
+        )
+
+        # Compute hidden state mapping if shift_input_ids
+        if shift_input_ids:
+            n_input = (next_query_starts[request_idx] - q_start).long().item()
+            src_indices = q_start + torch.arange(n_input, device=device)
+            dst_indices = out_start + torch.arange(n_input, device=device)
+            out_hidden_state_mapping[src_indices.long()] = dst_indices.to(
+                out_hidden_state_mapping.dtype
+            )
 
 
 @triton.jit
