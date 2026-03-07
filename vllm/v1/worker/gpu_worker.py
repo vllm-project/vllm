@@ -23,7 +23,9 @@ from vllm.distributed import (
     set_custom_all_reduce,
 )
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
-from vllm.distributed.eplb.eplb_utils import override_envs_for_eplb
+from vllm.distributed.eplb.eplb_utils import (
+    override_envs_for_eplb,
+)
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
     ensure_kv_transfer_shutdown,
@@ -487,14 +489,18 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> float:
-        warmup_sizes = []
+        warmup_sizes: list[int] = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             # warm up sizes that are not in cudagraph capture sizes,
             # but users still want to compile for better performance,
             # e.g. for the max-num-batched token size in chunked prefill.
             compile_sizes = self.vllm_config.compilation_config.compile_sizes
-            warmup_sizes = compile_sizes.copy() if compile_sizes is not None else []
+            warmup_sizes = (
+                [x for x in compile_sizes if isinstance(x, int)]
+                if compile_sizes is not None
+                else []
+            )
             cg_capture_sizes: list[int] = []
 
             if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
