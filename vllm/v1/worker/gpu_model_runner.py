@@ -4604,9 +4604,16 @@ class GPUModelRunner(
             tgt_token_ids = prompt_token_ids[start_tok : start_tok + num_logits]
 
             # Compute prompt logprobs.
-            logprobs = self.sampler.compute_logprobs(logits)
+            # NOTE: For prompt logprobs, there is no "processing" step
+            # (no penalties, temperature, etc.), so "processed" and "raw"
+            # variants are equivalent. We respect logprobs_mode to return
+            # either log_softmax values or raw logits as requested.
+            if self.sampler.logprobs_mode in ("raw_logits", "processed_logits"):
+                prompt_logprobs_values = logits.to(torch.float32)
+            else:
+                prompt_logprobs_values = self.sampler.compute_logprobs(logits)
             token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs(
-                logprobs, num_prompt_logprobs, tgt_token_ids
+                prompt_logprobs_values, num_prompt_logprobs, tgt_token_ids
             )
 
             # Transfer GPU->CPU async.
