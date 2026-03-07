@@ -1605,11 +1605,17 @@ def add_cli_args(parser: argparse.ArgumentParser):
     )
 
 
-def main(args: argparse.Namespace) -> dict[str, Any]:
-    return asyncio.run(main_async(args))
+def main(
+    args: argparse.Namespace,
+    prebuilt_requests: "list[SampleRequest] | None" = None,
+) -> dict[str, Any]:
+    return asyncio.run(main_async(args, prebuilt_requests))
 
 
-async def main_async(args: argparse.Namespace) -> dict[str, Any]:
+async def main_async(
+    args: argparse.Namespace,
+    prebuilt_requests: "list[SampleRequest] | None" = None,
+) -> dict[str, Any]:
     print(args)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -1717,7 +1723,10 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         args.ignore_eos = True
 
     # Load the dataset.
-    input_requests = get_samples(args, tokenizer)
+    if prebuilt_requests is not None:
+        input_requests = prebuilt_requests
+    else:
+        input_requests = get_samples(args, tokenizer)
     goodput_config_dict = check_goodput_args(args)
 
     backend = args.backend
@@ -1918,6 +1927,10 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             warnings.warn(
                 f"Failed to generate dataset statistics plot: {e}", stacklevel=2
             )
+
+    # Preserve generated_texts for offline lm_eval scoring
+    if prebuilt_requests is not None:
+        result_json["_lm_eval_generated_texts"] = result_json.get("generated_texts", [])
 
     if not args.save_detailed:
         # Remove fields with too many data points
