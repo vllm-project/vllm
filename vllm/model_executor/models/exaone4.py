@@ -65,6 +65,53 @@ from .utils import (
 )
 
 
+def _ceil_div(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+
+def _padded_intermediate_size(
+    intermediate_size: int,
+    quant_config: QuantizationConfig | None,
+    tp_size: int,
+) -> int:
+    if quant_config is None:
+        return intermediate_size
+    weight_block_size = getattr(quant_config, "weight_block_size", None)
+    if not weight_block_size or len(weight_block_size) < 2:
+        return intermediate_size
+    block_n, block_k = weight_block_size[0], weight_block_size[1]
+    if block_n <= 0 or block_k <= 0:
+        return intermediate_size
+
+    def gcd(a: int, b: int) -> int:
+        while b:
+            a, b = b, a % b
+        return a
+
+    alignment = tp_size * (block_n * block_k // gcd(block_n, block_k))
+    return _ceil_div(intermediate_size, alignment) * alignment
+
+
+def _pad_tensor_along_dim(
+    tensor: torch.Tensor,
+    target: int,
+    dim: int,
+    fill_value: float,
+) -> torch.Tensor:
+    if dim >= tensor.ndim:
+        return tensor
+    current = tensor.size(dim)
+    if target <= current:
+        return tensor
+    new_shape = list(tensor.shape)
+    new_shape[dim] = target
+    padded = tensor.new_full(new_shape, fill_value)
+    index = [slice(None)] * tensor.ndim
+    index[dim] = slice(0, current)
+    padded[tuple(index)] = tensor
+    return padded
+
+
 class Exaone4GatedMLP(nn.Module):
     def __init__(
         self,
@@ -221,6 +268,7 @@ class Exaone4DecoderLayer(nn.Module):
         config: Exaone4Config,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        intermediate_size: int | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -245,9 +293,11 @@ class Exaone4DecoderLayer(nn.Module):
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
         )
+        if intermediate_size is None:
+            intermediate_size = config.intermediate_size
         self.mlp = Exaone4GatedMLP(
             hidden_size=self.hidden_size,
-            intermediate_size=config.intermediate_size,
+            intermediate_size=intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
             bias=getattr(config, "mlp_bias", False),
@@ -302,6 +352,14 @@ class Exaone4Model(nn.Module):
         self.config = config
         self.quant_config = quant_config
 
+        tp_size = get_tensor_model_parallel_world_size()
+        self._orig_intermediate_size = config.intermediate_size
+        self._padded_intermediate_size = _padded_intermediate_size(
+            self._orig_intermediate_size, quant_config, tp_size
+        )
+        if self._padded_intermediate_size != self._orig_intermediate_size:
+            config.intermediate_size = self._padded_intermediate_size
+
         self.vocab_size = config.vocab_size
         if get_pp_group().is_first_rank or (
             config.tie_word_embeddings and get_pp_group().is_last_rank
@@ -319,6 +377,7 @@ class Exaone4Model(nn.Module):
                 config=config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                intermediate_size=self._padded_intermediate_size,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",
@@ -378,6 +437,26 @@ class Exaone4Model(nn.Module):
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        orig_intermediate_size = getattr(
+            self, "_orig_intermediate_size", self.config.intermediate_size
+        )
+        padded_intermediate_size = getattr(
+            self, "_padded_intermediate_size", self.config.intermediate_size
+        )
+        should_pad = padded_intermediate_size != orig_intermediate_size
+        weight_block_size = (
+            getattr(self.quant_config, "weight_block_size", None)
+            if self.quant_config is not None
+            else None
+        )
+        block_n = block_k = None
+        if should_pad and weight_block_size:
+            block_n, block_k = weight_block_size[0], weight_block_size[1]
+            padded_scale_out = _ceil_div(padded_intermediate_size, block_n)
+            padded_scale_in = _ceil_div(padded_intermediate_size, block_k)
+        else:
+            padded_scale_out = padded_scale_in = None
+
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -386,6 +465,38 @@ class Exaone4Model(nn.Module):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
+            if should_pad:
+                if (
+                    name.endswith(".gate_proj.weight")
+                    or name.endswith(".up_proj.weight")
+                    or name.endswith(".gate_proj.bias")
+                    or name.endswith(".up_proj.bias")
+                ):
+                    loaded_weight = _pad_tensor_along_dim(
+                        loaded_weight, padded_intermediate_size, 0, 0.0
+                    )
+                elif name.endswith(".down_proj.weight"):
+                    loaded_weight = _pad_tensor_along_dim(
+                        loaded_weight, padded_intermediate_size, 1, 0.0
+                    )
+                if weight_block_size is not None:
+                    if (
+                        name.endswith(".gate_proj.weight_scale_inv")
+                        or name.endswith(".up_proj.weight_scale_inv")
+                        or name.endswith(".gate_proj.weight_scale")
+                        or name.endswith(".up_proj.weight_scale")
+                    ):
+                        if padded_scale_out is not None:
+                            loaded_weight = _pad_tensor_along_dim(
+                                loaded_weight, padded_scale_out, 0, 1.0
+                            )
+                    elif (
+                        name.endswith(".down_proj.weight_scale_inv")
+                        or name.endswith(".down_proj.weight_scale")
+                    ) and padded_scale_in is not None:
+                        loaded_weight = _pad_tensor_along_dim(
+                            loaded_weight, padded_scale_in, 1, 1.0
+                        )
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
             ):
