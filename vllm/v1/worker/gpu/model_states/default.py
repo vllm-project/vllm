@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
 from typing import Any
 
 import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
+from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -16,6 +20,18 @@ from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
+
+
+@dataclass
+class AttnMetadataInputs:
+    num_reqs: int
+    num_tokens: int
+    query_start_loc_gpu: torch.Tensor
+    query_start_loc_cpu: torch.Tensor
+    seq_lens: torch.Tensor
+    block_tables: tuple[torch.Tensor, ...]
+    slot_mappings: torch.Tensor
+    dcp_local_seq_lens: torch.Tensor | None
 
 
 class DefaultModelState(ModelState):
@@ -50,6 +66,14 @@ class DefaultModelState(ModelState):
                 dtype=self.dtype,
                 device=self.device,
             )
+
+        self.compilation_config = vllm_config.compilation_config
+        assert self.compilation_config is not None
+        self.cudagraph_mode = self.compilation_config.cudagraph_mode
+        self.uniform_decode_query_len = 1
+        spec_config = vllm_config.speculative_config
+        if spec_config is not None:
+            self.uniform_decode_query_len += spec_config.num_speculative_tokens
 
         self.uses_mrope = self.model_config.uses_mrope
         if self.uses_mrope:
@@ -134,6 +158,87 @@ class DefaultModelState(ModelState):
             model_inputs["positions"] = mrope_positions
         return model_inputs
 
+    def _prepare_attn_metadata_inputs(
+        self,
+        input_batch: InputBatch,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+    ) -> AttnMetadataInputs:
+        num_reqs = input_batch.num_reqs
+        num_tokens = input_batch.num_tokens
+        query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
+
+        if input_batch.num_tokens_after_padding <= num_tokens:
+            return AttnMetadataInputs(
+                num_reqs=num_reqs,
+                num_tokens=num_tokens,
+                query_start_loc_gpu=input_batch.query_start_loc,
+                query_start_loc_cpu=query_start_loc_cpu,
+                seq_lens=input_batch.seq_lens,
+                block_tables=tuple(
+                    block_table[:num_reqs] for block_table in block_tables
+                ),
+                slot_mappings=slot_mappings[:, :num_tokens],
+                dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            )
+
+        query_lens_np = (
+            input_batch.query_start_loc_np[1 : num_reqs + 1]
+            - input_batch.query_start_loc_np[:num_reqs]
+        )
+        # for separate-routine FULL decode, uniform query lengths must use
+        # num_reqs = ceil(num_tokens_after_padding / uniform_decode_query_len)
+        # to match the capture-time graph shape (host-side check, no GPU sync).
+        is_uniform_full_decode = (
+            self.cudagraph_mode.separate_routine()
+            and self.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and num_reqs > 0
+            and bool((query_lens_np == self.uniform_decode_query_len).all())
+        )
+        attn_num_reqs = input_batch.num_tokens_after_padding
+        if is_uniform_full_decode:
+            attn_num_reqs = cdiv(attn_num_reqs, self.uniform_decode_query_len)
+        attn_num_reqs = min(attn_num_reqs, self.max_num_reqs)
+        attn_num_tokens = input_batch.num_tokens_after_padding
+
+        attn_query_start_loc_cpu = torch.empty(attn_num_reqs + 1, dtype=torch.int32)
+        attn_query_start_loc_cpu[: num_reqs + 1] = query_start_loc_cpu
+        attn_query_start_loc_cpu[num_reqs + 1 :] = num_tokens
+
+        attn_query_start_loc = input_batch.query_start_loc.new_empty(attn_num_reqs + 1)
+        attn_query_start_loc[: num_reqs + 1] = input_batch.query_start_loc
+        attn_query_start_loc[num_reqs + 1 :] = num_tokens
+
+        attn_seq_lens = input_batch.seq_lens.new_zeros(attn_num_reqs)
+        attn_seq_lens[:num_reqs] = input_batch.seq_lens
+
+        attn_block_tables = tuple(
+            block_table[:attn_num_reqs] for block_table in block_tables
+        )
+        for block_table in attn_block_tables:
+            block_table[num_reqs:attn_num_reqs].zero_()
+
+        attn_slot_mappings = slot_mappings.new_full(
+            (slot_mappings.shape[0], attn_num_tokens), PAD_SLOT_ID
+        )
+        attn_slot_mappings[:, :num_tokens] = slot_mappings[:, :num_tokens]
+
+        attn_dcp_local_seq_lens = None
+        if input_batch.dcp_local_seq_lens is not None:
+            attn_dcp_local_seq_lens = input_batch.dcp_local_seq_lens.new_zeros(attn_num_reqs)
+            attn_dcp_local_seq_lens[:num_reqs] = input_batch.dcp_local_seq_lens
+
+        return AttnMetadataInputs(
+            num_reqs=attn_num_reqs,
+            num_tokens=attn_num_tokens,
+            query_start_loc_gpu=attn_query_start_loc,
+            query_start_loc_cpu=attn_query_start_loc_cpu,
+            seq_lens=attn_seq_lens,
+            block_tables=attn_block_tables,
+            slot_mappings=attn_slot_mappings,
+            dcp_local_seq_lens=attn_dcp_local_seq_lens,
+        )
+
     def prepare_attn(
         self,
         input_batch: InputBatch,
@@ -142,20 +247,22 @@ class DefaultModelState(ModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
     ) -> dict[str, Any]:
-        query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
+        attn_inputs = self._prepare_attn_metadata_inputs(
+            input_batch, block_tables, slot_mappings
+        )
         max_query_len = input_batch.num_scheduled_tokens.max().item()
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
-            num_reqs=input_batch.num_reqs,
-            num_tokens=input_batch.num_tokens,
-            query_start_loc_gpu=input_batch.query_start_loc,
-            query_start_loc_cpu=query_start_loc_cpu,
+            num_reqs=attn_inputs.num_reqs,
+            num_tokens=attn_inputs.num_tokens,
+            query_start_loc_gpu=attn_inputs.query_start_loc_gpu,
+            query_start_loc_cpu=attn_inputs.query_start_loc_cpu,
             max_query_len=max_query_len,
-            seq_lens=input_batch.seq_lens,
+            seq_lens=attn_inputs.seq_lens,
             max_seq_len=self.max_model_len,
-            block_tables=block_tables,
-            slot_mappings=slot_mappings,
+            block_tables=attn_inputs.block_tables,
+            slot_mappings=attn_inputs.slot_mappings,
             kv_cache_config=kv_cache_config,
-            dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            dcp_local_seq_lens=attn_inputs.dcp_local_seq_lens,
         )
         return attn_metadata
