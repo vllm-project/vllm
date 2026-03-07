@@ -267,6 +267,7 @@ class TritonAttentionBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
+        "int8",
     ]
 
     @staticmethod
@@ -390,6 +391,7 @@ class TritonAttentionImpl(AttentionImpl):
 
         self.attn_type = attn_type
         self.fp8_dtype = current_platform.fp8_dtype()
+        self.int8_dtype = torch.int8
 
         self.sinks = sinks
         if sinks is not None:
@@ -472,6 +474,10 @@ class TritonAttentionImpl(AttentionImpl):
             assert layer._q_scale_float == 1.0, (
                 "A non 1.0 q_scale is not currently supported."
             )
+        elif self.kv_cache_dtype.startswith("int8"):
+            if key_cache.dtype != self.int8_dtype:
+                key_cache = key_cache.view(self.int8_dtype)
+                value_cache = value_cache.view(self.int8_dtype)
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
@@ -587,6 +593,9 @@ class TritonAttentionImpl(AttentionImpl):
             # triton kernel does not support uint8 kv_cache
             #  (because some explicit casts (e.g. float8_e4m3fnuz)
             #   are not supported)
+        elif self.kv_cache_dtype.startswith("int8"):
+            key_cache = key_cache.view(self.int8_dtype)
+            value_cache = value_cache.view(self.int8_dtype)
         triton_reshape_and_cache_flash(
             key,
             value,
