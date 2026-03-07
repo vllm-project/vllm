@@ -15,9 +15,18 @@ from collections.abc import Callable
 from unittest.mock import Mock
 
 import pytest
+import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1 import SupportsHMA
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    SlidingWindowSpec,
+)
 from vllm.v1.request import FinishReason, Request, RequestStatus
+from vllm.v1.structured_output import StructuredOutputManager
 
 from .utils import (
     create_model_runner_output,
@@ -478,3 +487,110 @@ def test_async_recompute_blocks_not_cached_when_invalid(
 
     # request should be in the running queue
     assert request in recompute_scheduler.running
+
+
+@pytest.fixture
+def multi_group_fail_scheduler():
+    vllm_config = create_vllm_config(kv_load_failure_policy="fail")
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1000,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer2"],
+                SlidingWindowSpec(
+                    block_size=32,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                    sliding_window=32 * 4,
+                ),
+            ),
+        ],
+    )
+    vllm_config.cache_config.num_gpu_blocks = 1000
+    return Scheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        log_stats=True,
+        structured_output_manager=StructuredOutputManager(vllm_config),
+        block_size=16,
+    )
+
+
+def test_sync_fail_multi_group_invalid_blocks_evicted(multi_group_fail_scheduler):
+    """
+    Test sync fail case with multiple KV groups
+
+    Same as test_sync_fail_invalid_blocks_evicted but for multiple KV groups.
+    """
+    scheduler = multi_group_fail_scheduler
+
+    num_prompt_tokens = 100 * scheduler.block_size
+    num_external_computed_tokens = 75 * scheduler.block_size
+
+    request = create_request(num_tokens=num_prompt_tokens)
+    scheduler.add_request(request=request)
+
+    req_num_new_matched_tokens = {
+        request.request_id: num_external_computed_tokens,
+    }
+
+    class HMAMockConnector(Mock, SupportsHMA):
+        def request_finished_all_groups(self, _, __):
+            return False, None
+
+    scheduler.connector = HMAMockConnector()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(req_num_new_matched_tokens, False)
+    )
+    scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = scheduler.schedule()
+
+    # get allocated block IDs
+    req_block_ids = scheduler_output.scheduled_new_reqs[0].block_ids[-1]
+    req_block_ids = [block_id for block_id in req_block_ids if block_id]
+    invalid_block_id = req_block_ids[1]
+    invalid_block_ids = {invalid_block_id}
+
+    # report invalid blocks - request should fail
+    model_runner_output = create_model_runner_output(
+        [request],
+        invalid_block_ids=invalid_block_ids,
+    )
+
+    _ = scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # verify the request was removed from scheduler
+    assert request.request_id not in scheduler.requests
+    assert len(scheduler.running) == 0
+
+    # verify invalid block was actually freed from cache
+    try:
+        block_id_groups = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+        # if we get here, check if blocks were actually freed
+        if block_id_groups is not None:
+            num_allocated_blocks = 0
+            for block_ids in block_id_groups:
+                num_allocated_blocks += sum(block_id != 0 for block_id in block_ids)
+            if num_allocated_blocks > 0:
+                pytest.fail(
+                    f"Invalid blocks still tracked for finished request! "
+                    f"Request {request.request_id} should have been freed but "
+                    f"still has {num_allocated_blocks} blocks allocated."
+                )
+        # blocks list exists but is empty - this is fine, they were freed
+    except KeyError:
+        # expected - request completely removed from tracking
+        pass
