@@ -12,7 +12,7 @@ from typing import Final, Literal, TypeAlias, TypeVar, cast
 import numpy as np
 from fastapi import Request
 from soundfile import LibsndfileError
-from transformers import PreTrainedTokenizerBase
+from transformers import PreTrainedTokenizerBase, ProcessorMixin
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
@@ -166,19 +166,32 @@ class OpenAISpeechToText(OpenAIServing):
             _ = librosa.get_duration(y=dummy_audio, sr=self.asr_config.sample_rate)
 
             # Warm up mel-spectrogram computation with model-specific parameters
+            # Note: Some models (e.g., Kimi-Audio) don't have a ProcessorMixin,
+            # so we catch TypeError from cached_processor_from_config
             from vllm.transformers_utils.processor import cached_processor_from_config
 
-            processor = cached_processor_from_config(self.model_config)
+            try:
+                processor = cached_processor_from_config(self.model_config)
+            except TypeError:
+                # Model doesn't have a proper processor (e.g., Kimi-Audio)
+                # uses tokenizer instead of processor
+                logger.debug(
+                    "Skipping audio warmup: model uses tokenizer instead of processor"
+                )
+                return
+
             feature_extractor = None
-            if hasattr(processor, "feature_extractor"):
-                feature_extractor = processor.feature_extractor
-            elif hasattr(processor, "audio_processor"):
-                # For models like GraniteSpeech that use audio_processor
-                audio_proc = processor.audio_processor
-                if hasattr(audio_proc, "feature_extractor"):
-                    feature_extractor = audio_proc.feature_extractor
-                # If audio_processor doesn't have feature_extractor,
-                # skip mel-spectrogram warmup for these models
+            # Check if processor is actually a ProcessorMixin (not just a tokenizer)
+            if isinstance(processor, ProcessorMixin):
+                if hasattr(processor, "feature_extractor"):
+                    feature_extractor = processor.feature_extractor
+                elif hasattr(processor, "audio_processor"):
+                    # For models like GraniteSpeech that use audio_processor
+                    audio_proc = processor.audio_processor
+                    if hasattr(audio_proc, "feature_extractor"):
+                        feature_extractor = audio_proc.feature_extractor
+                    # If audio_processor doesn't have feature_extractor,
+                    # skip mel-spectrogram warmup for these models
 
             if feature_extractor is not None:
                 _ = librosa.feature.melspectrogram(
