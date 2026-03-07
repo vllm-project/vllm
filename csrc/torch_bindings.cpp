@@ -239,10 +239,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Quantization ops
 #ifndef USE_ROCM
+  #ifdef ENABLE_DSV3_FUSED_A_GEMM
   // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
   ops.def(
       "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
-  // conditionally compiled so impl registration is in source file
+    // conditionally compiled so impl registration is in source file
+  #endif
 
   // Quantized GEMM for AWQ.
   ops.def(

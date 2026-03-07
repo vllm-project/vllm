@@ -25,7 +25,10 @@ def cutlass_fp8_supported() -> bool:
     capability_tuple = current_platform.get_device_capability()
     capability = -1 if capability_tuple is None else capability_tuple.to_int()
 
-    return ops.cutlass_scaled_mm_supports_fp8(capability)
+    try:
+        return ops.cutlass_scaled_mm_supports_fp8(capability)
+    except (AttributeError, RuntimeError):
+        return False
 
 
 def cutlass_block_fp8_supported() -> bool:
@@ -35,7 +38,10 @@ def cutlass_block_fp8_supported() -> bool:
     capability_tuple = current_platform.get_device_capability()
     capability = -1 if capability_tuple is None else capability_tuple.to_int()
 
-    return ops.cutlass_scaled_mm_supports_block_fp8(capability)
+    try:
+        return ops.cutlass_scaled_mm_supports_block_fp8(capability)
+    except (AttributeError, RuntimeError):
+        return False
 
 
 def cutlass_group_gemm_supported() -> bool:
