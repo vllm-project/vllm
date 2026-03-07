@@ -38,6 +38,10 @@ logger = logging.getLogger(__name__)
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
 envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm", "envs.py"))
+platforms = load_module_from_path(
+    "platforms", os.path.join(ROOT_DIR, "vllm", "platforms", "__init__.py")
+)
+_is_amd_zen_cpu = platforms._is_amd_zen_cpu
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
@@ -950,6 +954,8 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
         requirements = _read_requirements("cpu.txt")
+        if _is_amd_zen_cpu() and envs.VLLM_ZENTORCH_INSTALL:
+            requirements.append("zentorch")
     elif _is_xpu():
         requirements = _read_requirements("xpu.txt")
     else:
@@ -1047,6 +1053,8 @@ setup(
     ext_modules=ext_modules,
     install_requires=get_requirements(),
     extras_require={
+        # AMD Zen CPU optimizations via zentorch
+        "zen": ["zentorch"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.2.2"],
