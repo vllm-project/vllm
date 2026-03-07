@@ -1,7 +1,7 @@
 # Common dependencies
 -r common.txt
 
-numba == 0.61.2 # Required for N-gram speculative decoding
+numba == 0.63.1 # Required for N-gram speculative decoding
 
 # Dependencies for NVIDIA GPUs
 ray[cgraph]>=2.48.0
