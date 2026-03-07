@@ -63,9 +63,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
-    CompressedTensorsConfig,
-)
+from vllm.model_executor.layers.quantization.compressed_tensors import compressed_tensors
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
@@ -284,7 +282,7 @@ class Glm4vVisionAttention(nn.Module):
             quant_config=quant_config,
             # Change qkv prefix to align with GLM-4.5V-FP8 quantization cfg
             prefix=f"{prefix}.qkv_proj"
-            if isinstance(quant_config, CompressedTensorsConfig)
+            if isinstance(quant_config, compressed_tensors.CompressedTensorsConfig)
             else f"{prefix}.qkv",
             disable_tp=use_data_parallel,
         )
