@@ -29,7 +29,6 @@ def register_op(f: Callable[..., Any]) -> "IrOp": ...
 def register_op(
     *,
     name: str | None = None,
-    tags: tuple[torch.Tag, ...] = (),
 ) -> Callable[[Callable[..., Any]], "IrOp"]: ...
 
 
@@ -37,14 +36,12 @@ def register_op(
     f: Callable | None = None,
     *,
     name: str | None = None,
-    tags: tuple[torch.Tag, ...] = (),
 ) -> "IrOp | Callable[[Callable], IrOp]":
     """
     Register a new vLLM IR op.
 
     :param f: the native implementation of the op
     :param name: the name of the op, defaults to the function name
-    :param tags: any additional torch tags for the op
     :return: the IrOp object if f is provided, otherwise a decorator
 
     Example usage:
@@ -60,7 +57,10 @@ def register_op(
 
     def decorator(_f: Callable):
         op_name = _f.__name__ if name is None else name
-        return IrOp(op_name, _f, tags)
+        assert name not in IrOp.registry
+        op = IrOp(op_name, _f)
+        IrOp.registry[op_name] = op
+        return op
 
     if f is not None:
         return decorator(f)
@@ -71,9 +71,7 @@ def register_op(
 class IrOp:
     registry: ClassVar[dict[str, "IrOp"]] = {}
 
-    def __init__(
-        self, name: str, native_impl: Callable, tags: tuple[torch.Tag, ...] = ()
-    ):
+    def __init__(self, name: str, native_impl: Callable):
         signature = inspect.signature(native_impl)
         if any(
             p.kind == inspect.Parameter.KEYWORD_ONLY
@@ -88,26 +86,25 @@ class IrOp:
         self.impls: dict[str, IrOpImpl] = {}
         self._priority_impls: list[IrOpImpl] = []
         self._schema_str = infer_schema(native_impl, mutates_args=[])
-        self.native_fn = native_impl
 
-        # native implementation, constructor also registers into impls
+        # native implementation
         self._native_impl = IrOpImpl(
             self, "native", native_impl, supported=True, supports_args=None
         )
+        self.impls["native"] = self._native_impl
 
         self._fake_fn = native_impl
         self._signature = signature
 
         # torch registration
-        vllm_ir_lib.define(self.name + self._schema_str, tags=tags)
-        vllm_ir_lib.impl(self.name, self._inner_call, dispatch_key="CUDA")
-        vllm_ir_lib.impl(self.name, self._inner_call, dispatch_key="CPU")
+        vllm_ir_lib.define(self.name + self._schema_str)
+        # CompositeExplicitAutograd is not decomposed by autograd
+        vllm_ir_lib.impl(
+            self.name, self._inner_call, dispatch_key="CompositeExplicitAutograd"
+        )
         vllm_ir_lib._register_fake(self.name, self._fake_call)
         assert hasattr(torch.ops.vllm_ir, name)
-        self.torch_op = getattr(torch.ops.vllm_ir, name).default
-
-        assert name not in self.registry
-        self.registry[name] = self
+        self.torch_op: torch._ops.OpOverload = getattr(torch.ops.vllm_ir, name).default
 
     def register_fake(self, fn: Callable) -> Callable:
         """
@@ -163,7 +160,17 @@ class IrOp:
         )
 
         def _register_impl(f: Callable):
-            return IrOpImpl(self, provider, f, supported, supports_args)
+            impl = IrOpImpl(self, provider, f, supported, supports_args)
+            self.impls[provider] = impl
+
+            if self.get_priority():
+                logger.warning(
+                    "Warning: registering new impl %s for op %s while priority is set.",
+                    provider,
+                    self.name,
+                )
+
+            return impl
 
         return _register_impl
 
@@ -315,15 +322,6 @@ class IrOpImpl:
         self.impl_fn = impl_fn
         self.supported = supported
         self._supports_args = supports_args
-
-        op.impls[provider] = self
-
-        if op.get_priority():
-            logger.warning(
-                "Warning: registering new impl %s for op %s while priority is set.",
-                provider,
-                op.name,
-            )
 
     @property
     def supports_all_args(self) -> bool:
