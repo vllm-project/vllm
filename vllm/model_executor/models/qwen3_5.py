@@ -410,6 +410,11 @@ class Qwen3_5Model(Qwen3NextModel):
                 if weight_name not in name:
                     continue
 
+                # MoE router gate is a plain nn.Linear; skip the stacked parameter
+                # path and load it via the default path below.
+                if "mlp.gate." in name:
+                    continue
+
                 if "mlp.experts" in name:
                     continue
 
