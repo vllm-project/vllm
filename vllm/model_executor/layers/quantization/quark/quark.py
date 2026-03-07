@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E
     QuarkMoEMethod,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import (
+    QuarkNVFP4,
     QuarkOCP_MX,
     QuarkScheme,
     QuarkW8A8Fp8,
@@ -52,6 +53,7 @@ class QuarkConfig(QuantizationConfig):
         kv_cache_group: list[str] | None = None,
         kv_cache_config: dict[str, Any] | None = None,
         pack_method: str = "reorder",
+        emulation_dequantize_weights: bool = False,
     ):
         super().__init__()
         if kv_cache_group is None:
@@ -61,6 +63,7 @@ class QuarkConfig(QuantizationConfig):
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
         self.dynamic_mxfp4_quant = False
+        self.emulation_dequantize_weights = emulation_dequantize_weights
 
     def maybe_update_config(self, model_name: str, revision: str | None = None):
         self.hf_config = get_config(
@@ -72,10 +75,14 @@ class QuarkConfig(QuantizationConfig):
 
         quant_config = getattr(self.hf_config, "quantization_config", None)
         if quant_config is not None:
-            quant_dtype = quant_config["global_quant_config"]["weight"]["dtype"]
             model_type = self.hf_config.model_type
-            if quant_dtype == "fp4" and model_type == "deepseek_v3":
-                self.dynamic_mxfp4_quant = True
+
+            # global_quant_config's weight may be a list for NVFP4.
+            if not isinstance(quant_config["global_quant_config"]["weight"], list):
+                quant_dtype = quant_config["global_quant_config"]["weight"]["dtype"]
+                model_type = self.hf_config.model_type
+                if quant_dtype == "fp4" and model_type == "deepseek_v3":
+                    self.dynamic_mxfp4_quant = True
 
     def get_linear_method(self) -> "QuarkLinearMethod":
         return QuarkLinearMethod(self)
@@ -221,11 +228,16 @@ class QuarkConfig(QuantizationConfig):
             if q_proj_q_config is not None:
                 q_proj_q_config["output_tensors"] = None
 
+        emulation_dequantize_weights: bool = config.get(
+            "emulation_dequantize_weights", False
+        )
+
         return cls(
             quant_config=config,
             kv_cache_group=kv_cache_group,
             kv_cache_config=kv_cache_config,
             pack_method=pack_method,
+            emulation_dequantize_weights=emulation_dequantize_weights,
         )
 
     @classmethod
@@ -349,6 +361,54 @@ class QuarkConfig(QuantizationConfig):
         # Both symmetric and asymmetric input quantization supported.
         # Only symmetric weight quantization supported.
         return is_int8_dtype and is_tensor and is_weight_symmetric and is_static
+
+    def _is_nvfp4(
+        self,
+        weight_quant: dict[str, Any] | list[dict[str, Any]] | None,
+        input_quant: dict[str, Any] | list[dict[str, Any]] | None,
+    ) -> bool:
+        # Confirm weights and input quantized.
+        if weight_quant is None or input_quant is None:
+            return False
+
+        # Confirm both weight_quant and input_quant are lists with 2 elements
+        if not isinstance(weight_quant, list) or len(weight_quant) != 2:
+            return False
+        if not isinstance(input_quant, list) or len(input_quant) != 2:
+            return False
+
+        # First element should be fp4 with per_group quantization
+        is_fp4_per_group_weight = (
+            weight_quant[0].get("dtype") == "fp4"
+            and weight_quant[0].get("qscheme") == "per_group"
+            and weight_quant[0].get("group_size") == 16
+            and not weight_quant[0].get("is_dynamic")
+        )
+        is_fp4_per_group_input = (
+            input_quant[0].get("dtype") == "fp4"
+            and input_quant[0].get("qscheme") == "per_group"
+            and input_quant[0].get("group_size") == 16
+            and input_quant[0].get("is_dynamic")
+        )
+
+        # Second element should be fp8_e4m3 with per_tensor quantization
+        is_fp8_per_tensor_weight = (
+            weight_quant[1].get("dtype") == "fp8_e4m3"
+            and weight_quant[1].get("qscheme") == "per_tensor"
+            and not weight_quant[1].get("is_dynamic")
+        )
+        is_fp8_per_tensor_input = (
+            input_quant[1].get("dtype") == "fp8_e4m3"
+            and input_quant[1].get("qscheme") == "per_tensor"
+            and input_quant[1].get("is_dynamic")
+        )
+
+        return (
+            is_fp4_per_group_weight  # type: ignore[return-value]
+            and is_fp4_per_group_input
+            and is_fp8_per_tensor_weight
+            and is_fp8_per_tensor_input
+        )
 
     def _is_w_ocp_mx_a_x(
         self, weight_quant: dict[str, Any] | None, input_quant: dict[str, Any] | None
@@ -491,7 +551,11 @@ class QuarkConfig(QuantizationConfig):
         weight_config = cast(dict[str, Any], config.get("weight"))
         input_config = cast(dict[str, Any], config.get("input_tensors"))
 
-        if self._is_fp8_w8a8(weight_config, input_config):
+        if self._is_nvfp4(weight_config, input_config):
+            return QuarkNVFP4(
+                emulation_dequantize_weights=self.emulation_dequantize_weights,
+            )
+        elif self._is_fp8_w8a8(weight_config, input_config):
             is_fp8_w8a8_supported = self._check_scheme_supported(
                 QuarkW8A8Fp8.get_min_capability(), error=False
             )
@@ -506,7 +570,10 @@ class QuarkConfig(QuantizationConfig):
             )
         elif self._is_w_ocp_mx_a_x(weight_config, input_config):
             return QuarkOCP_MX(
-                weight_config, input_config, dynamic_mxfp4_quant=dynamic_mxfp4_quant
+                weight_config,
+                input_config,
+                dynamic_mxfp4_quant=dynamic_mxfp4_quant,
+                emulation_dequantize_weights=self.emulation_dequantize_weights,
             )
 
         raise NotImplementedError(

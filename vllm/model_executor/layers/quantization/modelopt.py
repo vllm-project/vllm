@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
@@ -63,6 +64,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     swizzle_mxfp8_scale,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    NvFp4LinearBackend,
     apply_nvfp4_linear,
     convert_to_nvfp4_linear_kernel_format,
     select_nvfp4_linear_backend,
@@ -977,6 +979,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         kv_cache_quant_algo: str | None,
         exclude_modules: list[str],
         group_size: int = 16,
+        emulation_dequantize_weights: bool | None = None,
     ) -> None:
         super().__init__(exclude_modules)
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
@@ -988,6 +991,8 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
             self.group_size = group_size
             self.kv_cache_quant_algo = kv_cache_quant_algo
+
+        self.emulation_dequantize_weights = emulation_dequantize_weights
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_fp4"
@@ -1038,11 +1043,16 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
                     f"hf_quant_config.json: {missing_fields}"
                 )
 
+        emulation_dequantize_weights: bool | None = original_config.get(
+            "emulation_dequantize_weights"
+        )
+
         return cls(
             is_checkpoint_nvfp4_serialized,
             kv_cache_quant_method,
             exclude_modules,
             group_size,
+            emulation_dequantize_weights=emulation_dequantize_weights,
         )
 
 
@@ -1061,6 +1071,26 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         self.quant_config = quant_config
         self.marlin_input_dtype = None
         self.backend = select_nvfp4_linear_backend()
+
+        self.swizzle = None
+        if self.backend == NvFp4LinearBackend.EMULATION:
+            self.swizzle = False
+
+        self.emulation_dequantize_weights = quant_config.emulation_dequantize_weights
+        if self.emulation_dequantize_weights:
+            if self.backend != NvFp4LinearBackend.EMULATION:
+                raise ValueError(
+                    f"emulation_dequantize_weights="
+                    f"{self.emulation_dequantize_weights} "
+                    f"has an effect only with backend "
+                    f"NvFp4LinearBackend.EMULATION, "
+                    f"but currently backend={self.backend}."
+                )
+
+            logger.info_once(
+                "ModelOptNvFp4LinearMethod simulated dense linear: "
+                "dequantizing weights ahead of time."
+            )
 
     def create_weights(
         self,
@@ -1137,10 +1167,28 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if (
+            torch.unique(layer.input_scale).numel() != 1
+            or torch.unique(layer.weight_scale_2).numel() != 1
+        ):
+            logger.warning_once(
+                "In NVFP4 linear, the global scale for input or weight are different"
+                " for parallel layers (e.g. q_proj, k_proj, v_proj). This "
+                " will likely results in reduce accuracy. Please verify the model"
+                " accuracy. Consider using a checkpoint with a shared global NVFP4"
+                " scale for parallel layers."
+            )
+
         # Rename ModelOpt checkpoint names to standardized names
+
+        # NOTE: modelopt stores the inverse scales so that
+        # `x_fp8_range = x * 1 / global_scale`, and `global_scale` is small.
+        # Taking the max here, the fp8 scales will likely overflow the fp8 range.
+        # NOTE: Taking the max is not enough: the fp8 scales should be recomputed!
         input_global_scale = layer.input_scale.max().to(torch.float32)
         layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
         del layer.input_scale
+
         weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
         layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
         del layer.weight_scale_2
@@ -1154,7 +1202,11 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         )
 
         # Convert layer to NVFP4 linear kernel format
-        convert_to_nvfp4_linear_kernel_format(self.backend, layer)
+        convert_to_nvfp4_linear_kernel_format(
+            self.backend,
+            layer,
+            emulation_dequantize_weights=self.emulation_dequantize_weights,
+        )
 
     def apply(
         self,
@@ -1167,6 +1219,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer=layer,
             x=x,
             bias=bias,
+            swizzle=self.swizzle,
         )
 
 
@@ -1194,6 +1247,22 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
+
+        # Validate emulation_dequantize_weights
+        if quant_config.emulation_dequantize_weights:
+            if self.nvfp4_backend != NvFp4MoeBackend.EMULATION:
+                raise ValueError(
+                    f"emulation_dequantize_weights="
+                    f"{quant_config.emulation_dequantize_weights} "
+                    f"has an effect only with backend "
+                    f"NvFp4MoeBackend.EMULATION, "
+                    f"but currently backend={self.nvfp4_backend}."
+                )
+
+            logger.info_once(
+                "ModelOptNvFp4FusedMoE simulated MoE: "
+                "dequantizing weights ahead of time."
+            )
 
     def maybe_make_prepare_finalize(
         self,
@@ -1362,6 +1431,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             w2_scale_2=layer.w2_weight_scale_2,
             a2_scale=layer.w2_input_scale,
             is_act_and_mul=self.moe.is_act_and_mul,
+            emulation_dequantize_weights=self.quant_config.emulation_dequantize_weights,
         )
 
         replace_parameter(layer, "w13_weight", w13)

@@ -202,7 +202,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     f"or None for NVFP4A16, found {input_quant}",
                 )
             return CompressedTensorsW4A4Nvfp4MoEMethod(
-                layer.moe_config, layer_name, use_a16=(input_quant is None)
+                layer.moe_config,
+                quant_config=quant_config,
+                layer_name=layer_name,
+                use_a16=(input_quant is None),
             )
         elif (
             quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
@@ -363,11 +366,13 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
     def __init__(
         self,
         moe: FusedMoEConfig,
+        quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
         layer_name: str | None = None,
         use_a16: bool = False,
     ):
         super().__init__(moe)
         self.group_size = 16
+        self.quant_config = quant_config
 
         # Select experts implementation.
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
@@ -379,6 +384,22 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
+
+        # Validate emulation_dequantize_weights
+        if quant_config.emulation_dequantize_weights:
+            if self.nvfp4_backend != NvFp4MoeBackend.EMULATION:
+                raise ValueError(
+                    f"emulation_dequantize_weights="
+                    f"{quant_config.emulation_dequantize_weights} "
+                    f"has an effect only with backend "
+                    f"NvFp4MoeBackend.EMULATION, "
+                    f"but currently backend={self.nvfp4_backend}."
+                )
+
+            logger.info_once(
+                "CompressedTensorsW4A4Nvfp4MoEMethod simulated MoE: "
+                "dequantizing weights ahead of time."
+            )
 
     def create_weights(
         self,
@@ -521,7 +542,13 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             )
         w13_weight_global_scale = layer.w13_weight_global_scale[:, 0].contiguous()
 
-        # Shuffle weights into the NvFp4 kernel format.
+        # compressed-tensors checkpoints store inverse global scales,
+        # compared to modelopt checkpoints.
+        w13_weight_global_scale = 1.0 / w13_weight_global_scale
+        w2_weight_global_scale = 1.0 / layer.w2_weight_global_scale
+        w13_input_global_scale = 1.0 / layer.w13_input_global_scale
+        w2_input_global_scale = 1.0 / layer.w2_input_global_scale
+
         (
             w13,
             w13_scale,
@@ -536,13 +563,14 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             layer=layer,
             w13=layer.w13_weight,
             w13_scale=layer.w13_weight_scale,
-            w13_scale_2=(1.0 / w13_weight_global_scale),
-            a13_scale=(1.0 / layer.w13_input_global_scale),
+            w13_scale_2=w13_weight_global_scale,
+            a13_scale=w13_input_global_scale,
             w2=layer.w2_weight,
             w2_scale=layer.w2_weight_scale,
-            w2_scale_2=(1.0 / layer.w2_weight_global_scale),
-            a2_scale=(1.0 / layer.w2_input_global_scale),
+            w2_scale_2=w2_weight_global_scale,
+            a2_scale=w2_input_global_scale,
             is_act_and_mul=self.moe.is_act_and_mul,
+            emulation_dequantize_weights=self.quant_config.emulation_dequantize_weights,
         )
 
         replace_parameter(layer, "w13_weight", w13)
@@ -550,6 +578,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, "w2_weight_scale", w2_scale)
         layer.w13_weight_scale_2 = w13_scale_2
+
         layer.w2_weight_scale_2 = w2_scale_2
         layer.w13_input_scale = a13_scale
         layer.w2_input_scale = a2_scale

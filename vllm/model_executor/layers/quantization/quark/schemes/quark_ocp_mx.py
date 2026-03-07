@@ -178,6 +178,7 @@ class QuarkOCP_MX(QuarkScheme):
         weight_quant_spec: dict[str, Any],
         input_quant_spec: dict[str, Any],
         dynamic_mxfp4_quant: bool = False,
+        emulation_dequantize_weights: bool = False,
     ):
         self.out_dtype = torch.get_default_dtype()
         self.qscheme = "per_group"
@@ -219,6 +220,12 @@ class QuarkOCP_MX(QuarkScheme):
         self.emulate = not current_platform.supports_mx() or (
             self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
         )
+        self.emulation_dequantize_weights = emulation_dequantize_weights
+        if self.emulation_dequantize_weights:
+            logger.info_once(
+                "QuarkOCP_MX simulated dense linear: "
+                "dequantizing weights ahead of time."
+            )
 
         self.rocm_use_aiter_fp4_asm_gemm = is_rocm_aiter_fp4_asm_gemm_enabled()
 
@@ -276,6 +283,13 @@ class QuarkOCP_MX(QuarkScheme):
             layer.weight_scale = torch.nn.Parameter(
                 layer.weight_scale.data, requires_grad=False
             )
+
+            if self.emulation_dequantize_weights:
+                dq_w = self.dequant_func(
+                    layer.weight, layer.weight_scale, torch.get_default_dtype()
+                )
+                layer.weight = torch.nn.Parameter(dq_w, requires_grad=False)
+                layer.weight_scale = None
         else:
             if self.dynamic_mxfp4_quant:
                 w_q, w_s = dynamic_mxfp4_quant(layer.weight)
@@ -369,7 +383,10 @@ class QuarkOCP_MX(QuarkScheme):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.emulate:
-            dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)
+            if not self.emulation_dequantize_weights:
+                dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)
+            else:
+                dq_w = layer.weight
             qdq_x = self.quant_dequant_func(x)
             return F.linear(qdq_x, dq_w, bias)
         else:

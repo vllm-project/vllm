@@ -39,8 +39,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
     disable_inplace,
     moe_kernel_quantize_input,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
-from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -1666,16 +1664,6 @@ def fused_experts_impl(
     # Check constraints.
     if use_int4_w4a16:
         assert hidden_states.size(1) // 2 == w1.size(2), "Hidden size mismatch"
-    elif ocp_mx_scheme is not None:
-        if ocp_mx_scheme.startswith("w_mxfp4"):
-            # 16bit activation and fp4x2 packed weight
-            assert hidden_states.size(1) == w1.size(2) * 2, "hidden size mismatch"
-        elif ocp_mx_scheme.startswith("w_mxfp6"):
-            assert hidden_states.size(1) == (w1.size(2) * 4) // 3, (
-                "hidden size mismatch"
-            )
-        else:
-            raise NotImplementedError(f"Unsupported ocp_mx_scheme={ocp_mx_scheme}")
     else:
         assert hidden_states.size(1) == w1.size(2), (
             f"Hidden size mismatch {hidden_states.size(1)} != {w1.size(2)}"
@@ -1755,37 +1743,6 @@ def fused_experts_impl(
         raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
 
     out_hidden_states = hidden_states if inplace else torch.empty_like(hidden_states)
-
-    if ocp_mx_scheme is not None:
-        # TODO: On platforms for which `current_platform.supports_mx()` is True
-        # and for which we have a native OCP mx fused MOE kernel,
-        # this dequantization step should not be done.
-        if ocp_mx_scheme.startswith("w_mxfp4"):
-            # Weight has to be dequantized for mxfp4 emulation.
-            w1 = dequant_mxfp4(w1, w1_scale, hidden_states.dtype)
-            w1_scale = None
-            w2 = dequant_mxfp4(w2, w2_scale, hidden_states.dtype)
-            w2_scale = None
-        elif ocp_mx_scheme.startswith("w_mxfp6_e3m2"):
-            w1 = dequant_mxfp6(
-                w1, w1_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype
-            )
-            w1_scale = None
-            w2 = dequant_mxfp6(
-                w2, w2_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype
-            )
-            w2_scale = None
-        elif ocp_mx_scheme.startswith("w_mxfp6_e2m3"):
-            w1 = dequant_mxfp6(
-                w1, w1_scale, quant_dtype="fp6_e2m3", float_dtype=hidden_states.dtype
-            )
-            w1_scale = None
-            w2 = dequant_mxfp6(
-                w2, w2_scale, quant_dtype="fp6_e2m3", float_dtype=hidden_states.dtype
-            )
-            w2_scale = None
-        else:
-            raise NotImplementedError(f"Unsupported ocp_mx_scheme={ocp_mx_scheme}")
 
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
         begin_chunk_idx, end_chunk_idx = (
@@ -1932,6 +1889,7 @@ class TritonExperts(mk.FusedMoEExpertsModular):
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
+        self.emulation = False
         super().__init__(moe_config, quant_config)
 
     @staticmethod
@@ -2130,6 +2088,7 @@ class TritonExperts(mk.FusedMoEExpertsModular):
             self.quant_dtype,
             self.per_act_token_quant,
             self.block_shape,
+            emulation=self.emulation,
         )
 
         invoke_fused_moe_triton_kernel(
