@@ -40,7 +40,11 @@ from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.engine.exceptions import (
+    EngineDeadError,
+    EngineGenerateError,
+    EngineRequestTimeoutError,
+)
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -573,13 +577,49 @@ class AsyncLLM(EngineClient):
                 reasoning_ended=reasoning_ended,
             )
 
+            # Read watchdog config once per request.
+            sched_cfg = self.vllm_config.scheduler_config
+            request_timeout = sched_cfg.request_timeout_s
+            stall_timeout = sched_cfg.request_stall_timeout_s
+            watchdog_enabled = request_timeout > 0 or stall_timeout > 0
+
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
             finished = False
             while not finished:
+                # Enforce request_timeout on every iteration so fast
+                # producers that always satisfy get_nowait() are still
+                # subject to the end-to-end deadline.
+                if (
+                    watchdog_enabled
+                    and request_timeout > 0
+                    and (time.monotonic() - q.created_at >= request_timeout)
+                ):
+                    raise asyncio.TimeoutError
+
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
-                out = q.get_nowait() or await q.get()
+                out = q.get_nowait()
+                if out is None:
+                    if watchdog_enabled:
+                        now = time.monotonic()
+                        remaining: float | None = None
+                        if request_timeout > 0:
+                            req_remaining = (q.created_at + request_timeout) - now
+                            remaining = req_remaining
+                        if stall_timeout > 0:
+                            stall_remaining = (q.last_put_at + stall_timeout) - now
+                            remaining = (
+                                stall_remaining
+                                if remaining is None
+                                else min(remaining, stall_remaining)
+                            )
+                        if remaining is not None and remaining <= 0:
+                            # Already past deadline before even waiting.
+                            raise asyncio.TimeoutError
+                        out = await q.get_with_timeout(remaining)  # type: ignore[arg-type]
+                    else:
+                        out = await q.get()
 
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
@@ -591,6 +631,29 @@ class AsyncLLM(EngineClient):
         # If the request is disconnected by the client, generate()
         # is cancelled or the generator is garbage collected. So,
         # we abort the request if we end up here.
+        except asyncio.TimeoutError:
+            # q is always set here: TimeoutError is only raised inside the
+            # while-loop which runs after add_request() succeeded.
+            assert q is not None
+            elapsed = time.monotonic() - q.created_at
+            stall_age = time.monotonic() - q.last_put_at
+            logger.warning(
+                "Request %s exceeded watchdog timeout: elapsed=%.1fs "
+                "(request_timeout=%.1fs), stall=%.1fs "
+                "(stall_timeout=%.1fs); aborting.",
+                request_id,
+                elapsed,
+                request_timeout,
+                stall_age,
+                stall_timeout,
+            )
+            await self.abort(q.request_id, internal=True)
+            raise EngineRequestTimeoutError(
+                f"Request {request_id} timed out after {elapsed:.1f}s "
+                f"(request_timeout_s={request_timeout}, "
+                f"request_stall_timeout_s={stall_timeout})"
+            ) from None
+
         except (asyncio.CancelledError, GeneratorExit):
             if q is not None:
                 await self.abort(q.request_id, internal=True)

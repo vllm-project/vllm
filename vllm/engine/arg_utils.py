@@ -599,6 +599,10 @@ class EngineArgs:
 
     stream_interval: int = SchedulerConfig.stream_interval
 
+    request_timeout_s: float = SchedulerConfig.request_timeout_s
+
+    request_stall_timeout_s: float = SchedulerConfig.request_stall_timeout_s
+
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
     performance_mode: PerformanceMode = VllmConfig.performance_mode
@@ -1219,6 +1223,13 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--stream-interval", **scheduler_kwargs["stream_interval"]
         )
+        scheduler_group.add_argument(
+            "--request-timeout-s", **scheduler_kwargs["request_timeout_s"]
+        )
+        scheduler_group.add_argument(
+            "--request-stall-timeout-s",
+            **scheduler_kwargs["request_stall_timeout_s"],
+        )
 
         # Compilation arguments
         compilation_kwargs = get_kwargs(CompilationConfig)
@@ -1778,6 +1789,8 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
+            request_timeout_s=self.request_timeout_s,
+            request_stall_timeout_s=self.request_stall_timeout_s,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
