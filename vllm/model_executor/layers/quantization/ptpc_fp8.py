@@ -17,7 +17,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBa
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
     Fp8KVCacheMethod,
-    Fp8LinearMethod,
+    Fp8OnlineLinearMethod,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
@@ -72,7 +72,7 @@ class PTPCFp8Config(Fp8Config):
         return None
 
 
-class PTPCFp8LinearMethod(Fp8LinearMethod):
+class PTPCFp8LinearMethod(Fp8OnlineLinearMethod):
     """Linear method for Per-Token and Per-Channel FP8 Quantization.
     Only supports loading quantized BF16 model checkpoints with dynamic
     activation scaling. To load FP16 model checkpoints, user must specify
