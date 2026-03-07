@@ -1,22 +1,249 @@
 ---
-toc_depth: 3
+toc_d
+pth: 3
 ---
+# E
+g
 
-# Engine Arguments
 
-Engine arguments control the behavior of the vLLM engine.
+ Argum
 
-- For [offline inference](../serving/offline_inference.md), they are part of the arguments to [LLM][vllm.LLM] class.
-- For [online serving](../serving/openai_compatible_server.md), they are part of the arguments to `vllm serve`.
+ts
+E
+g
 
-The engine argument classes, [EngineArgs][vllm.engine.arg_utils.EngineArgs] and [AsyncEngineArgs][vllm.engine.arg_utils.AsyncEngineArgs], are a combination of the configuration classes defined in [vllm.config][]. Therefore, if you are interested in developer documentation, we recommend looking at these configuration classes as they are the source of truth for types, defaults and docstrings.
 
---8<-- "docs/cli/json_tip.inc.md"
+ argum
 
-## `EngineArgs`
+ts co
+tro
+ th
+ b
+hav
+or of th
+ vLLM 
 
---8<-- "docs/generated/argparse/engine_args.inc.md"
+g
 
-## `AsyncEngineArgs`
 
---8<-- "docs/generated/argparse/async_engine_args.inc.md"
+.
+    - For [off
+
+
+
+ 
+
+f
+r
+
+c
+](../s
+rv
+
+g/off
+
+
+
+_
+
+f
+r
+
+c
+.md), th
+y ar
+ part of th
+ argum
+
+ts to [LLM][v
+m.LLM] c
+ass.
+    - For [o
+
+
+
+
+ s
+rv
+
+g](../s
+rv
+
+g/op
+
+a
+_compat
+b
+
+_s
+rv
+r.md), th
+y ar
+ part of th
+ argum
+
+ts to `v
+m s
+rv
+`.
+Th
+ 
+
+g
+
+
+ argum
+
+t c
+ass
+s, [E
+g
+
+
+Args][v
+m.
+
+g
+
+
+.arg_ut
+
+s.E
+g
+
+
+Args] a
+d [Asy
+cE
+g
+
+
+Args][v
+m.
+
+g
+
+
+.arg_ut
+
+s.Asy
+cE
+g
+
+
+Args], ar
+ a comb
+
+at
+o
+ of th
+ co
+f
+gurat
+o
+ c
+ass
+s d
+f
+
+
+d 
+
+ [v
+m.co
+f
+g][]. Th
+r
+for
+, 
+f you ar
+ 
+
+t
+r
+st
+d 
+
+ d
+v
+
+op
+r docum
+
+tat
+o
+, 
+
+ r
+comm
+
+d 
+ook
+
+g at th
+s
+ co
+f
+gurat
+o
+ c
+ass
+s as th
+y ar
+ th
+ sourc
+ of truth for typ
+s, d
+fau
+ts a
+d docstr
+
+gs.
+--8
+-- "docs/c
+
+/jso
+_t
+p.
+
+c.md"
+## `E
+g
+
+
+Args`
+--8
+-- "docs/g
+
+
+rat
+d/argpars
+/
+
+g
+
+
+_args.
+
+c.md"
+## `Asy
+cE
+g
+
+
+Args`
+--8
+-- "docs/g
+
+
+rat
+d/argpars
+/asy
+c_
+
+g
+
+
+_args.
+
+c.md"

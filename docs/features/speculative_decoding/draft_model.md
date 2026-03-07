@@ -1,80 +1,489 @@
-# Draft Models
+# Draft Mod
 
-The following code configures vLLM in an offline mode to use speculative decoding with a draft model, speculating 5 tokens at a time.
+s
+Th
+ fo
+o
 
-```python
-from vllm import LLM, SamplingParams
 
-prompts = ["The future of AI is"]
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+g cod
+ co
+f
+gur
+s vLLM 
 
-llm = LLM(
-    model="Qwen/Qwen3-8B",
-    tensor_parallel_size=1,
-    speculative_config={
-        "model": "Qwen/Qwen3-0.6B",
-        "num_speculative_tokens": 5,
-        "method": "draft_model",
+ a
+ off
+
+
+
+ mod
+ to us
+ sp
+cu
+at
+v
+ d
+cod
+
+g 
+
+th a draft mod
+
+, sp
+cu
+at
+
+g 5 tok
+
+s at a t
+m
+.
+```pytho
+
+from v
+m 
+mport LLM, Samp
+
+
+gParams
+prompts = ["Th
+ futur
+ of AI 
+s"]
+samp
+
+
+g_params = Samp
+
+
+gParams(t
+mp
+ratur
+=0.8, top_p=0.95)
+
+m = LLM(
+    mod
+
+="Q
+
+
+/Q
+
+
+3-8B",
+    t
+
+sor_para
+
+
+_s
+z
+=1,
+    sp
+cu
+at
+v
+_co
+f
+g={
+        "mod
+
+": "Q
+
+
+/Q
+
+
+3-0.6B",
+        "
+um_sp
+cu
+at
+v
+_tok
+
+s": 5,
+        "m
+thod": "draft_mod
+
+",
     },
 )
-outputs = llm.generate(prompts, sampling_params)
+outputs = 
+m.g
 
-for output in outputs:
+
+rat
+(prompts, samp
+
+
+g_params)
+for output 
+
+ outputs:
     prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    g
+
+
+rat
+d_t
+xt = output.outputs[0].t
+xt
+    pr
+
+t(f"Prompt: {prompt!r}, G
+
+
+rat
+d t
+xt: {g
+
+
+rat
+d_t
+xt!r}")
 ```
+To p
+rform th
+ 
+qu
+va
 
-To perform the equivalent launch in online mode, use the following server-side code:
 
+t 
+au
+ch 
+
+ o
+
+
+
+
+ mod
+, us
+ th
+ fo
+o
+
+
+g s
+rv
+r-s
+d
+ cod
+:
 ```bash
-vllm serve Qwen/Qwen3-4B-Thinking-2507 \
+v
+m s
+rv
+ Q
+
+
+/Q
+
+
+3-4B-Th
+
+k
+
+g-2507 \
     --host 0.0.0.0 \
     --port 8000 \
-    --seed 42 \
+    --s
+d 42 \
     -tp 1 \
-    --max_model_len 2048 \
-    --gpu_memory_utilization 0.8 \
-    --speculative_config '{"model": "Qwen/Qwen3-0.6B", "num_speculative_tokens": 5, "method": "draft_model"}'
+    --max_mod
+
+_
+
+
+ 2048 \
+    --gpu_m
+mory_ut
+
+
+zat
+o
+ 0.8 \
+    --sp
+cu
+at
+v
+_co
+f
+g '{"mod
+
+": "Q
+
+
+/Q
+
+
+3-0.6B", "
+um_sp
+cu
+at
+v
+_tok
+
+s": 5, "m
+thod": "draft_mod
+
+"}'
 ```
+Th
+ cod
+ us
+d to r
+qu
+st as comp
 
-The code used to request as completions as a client remains unchanged:
+t
+o
+s as a c
 
-??? code
 
-    ```python
-    from openai import OpenAI
 
-    # Modify OpenAI's API key and API base to use vLLM's API server.
-    openai_api_key = "EMPTY"
-    openai_api_base = "http://localhost:8000/v1"
+t r
+ma
 
-    client = OpenAI(
-        # defaults to os.environ.get("OPENAI_API_KEY")
-        api_key=openai_api_key,
-        base_url=openai_api_base,
+s u
+cha
+g
+d:
+??? cod
+
+    ```pytho
+
+    from op
+
+a
+ 
+mport Op
+
+AI
+    # Mod
+fy Op
+
+AI's API k
+y a
+d API bas
+ to us
+ vLLM's API s
+rv
+r.
+    op
+
+a
+_ap
+_k
+y = "EMPTY"
+    op
+
+a
+_ap
+_bas
+ = "http://
+oca
+host:8000/v1"
+    c
+
+
+
+t = Op
+
+AI(
+        # d
+fau
+ts to os.
+
+v
+ro
+.g
+t("OPENAI_API_KEY")
+        ap
+_k
+y=op
+
+a
+_ap
+_k
+y,
+        bas
+_ur
+=op
+
+a
+_ap
+_bas
+,
     )
+    mod
 
-    models = client.models.list()
-    model = models.data[0].id
+s = c
 
-    # Completion API
-    stream = False
-    completion = client.completions.create(
-        model=model,
-        prompt="The future of AI is",
-        echo=False,
-        n=1,
-        stream=stream,
+
+
+t.mod
+
+s.
+
+st()
+    mod
+
+ = mod
+
+s.data[0].
+d
+    # Comp
+
+t
+o
+ API
+    str
+am = Fa
+s
+
+    comp
+
+t
+o
+ = c
+
+
+
+t.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+=mod
+
+,
+        prompt="Th
+ futur
+ of AI 
+s",
+        
+cho=Fa
+s
+,
+        
+=1,
+        str
+am=str
+am,
     )
+    pr
 
-    print("Completion results:")
-    if stream:
-        for c in completion:
-            print(c)
-    else:
-        print(completion)
-    ```
+t("Comp
 
-!!! warning
-    Note: Please use `--speculative_config` to set all configurations related to speculative decoding. The previous method of specifying the model through `--speculative_model` and adding related parameters (e.g., `--num_speculative_tokens`) separately has been deprecated.
+t
+o
+ r
+su
+ts:")
+    
+f str
+am:
+        for c 
+
+ comp
+
+t
+o
+:
+            pr
+
+t(c)
+    
+
+s
+:
+        pr
+
+t(comp
+
+t
+o
+)
+```
+!!! 
+ar
+
+
+g
+    Not
+: P
+
+as
+ us
+ `--sp
+cu
+at
+v
+_co
+f
+g` to s
+t a
+ co
+f
+gurat
+o
+s r
+
+at
+d to sp
+cu
+at
+v
+ d
+cod
+
+g. Th
+ pr
+v
+ous m
+thod of sp
+c
+fy
+
+g th
+ mod
+
+ through `--sp
+cu
+at
+v
+_mod
+
+` a
+d add
+
+g r
+
+at
+d param
+t
+rs (
+.g., `--
+um_sp
+cu
+at
+v
+_tok
+
+s`) s
+parat
+
+y has b
+
+ d
+pr
+cat
+d.

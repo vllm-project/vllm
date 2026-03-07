@@ -1,351 +1,3358 @@
-# Reasoning Outputs
+# R
+aso
 
-vLLM offers support for reasoning models like [DeepSeek R1](https://huggingface.co/deepseek-ai/DeepSeek-R1), which are designed to generate outputs containing both reasoning steps and final conclusions.
 
-Reasoning models return an additional `reasoning` field in their outputs, which contains the reasoning steps that led to the final conclusion. This field is not present in the outputs of other models.
+g Outputs
+vLLM off
+rs support for r
+aso
 
-!!! warning
-    `reasoning` used to be called `reasoning_content`. For now, `reasoning_content` will continue to work. However, we encourage you to migrate to `reasoning` in case `reasoning_content` is removed in future.
 
-## Supported Models
+g mod
 
-vLLM currently supports the following reasoning models:
+s 
 
-| Model Series | Parser Name | Structured Output Support | Tool Calling |
+k
+ [D
+pS
+k R1](https://hugg
+
+gfac
+.co/d
+ps
+k-a
+/D
+pS
+k-R1), 
+h
+ch ar
+ d
+s
+g
+
+d to g
+
+
+rat
+ outputs co
+ta
+
+
+
+g both r
+aso
+
+
+g st
+ps a
+d f
+
+a
+ co
+c
+us
+o
+s.
+R
+aso
+
+
+g mod
+
+s r
+tur
+ a
+ add
+t
+o
+a
+ `r
+aso
+
+
+g` f
+
+
+d 
+
+ th
+
+r outputs, 
+h
+ch co
+ta
+
+s th
+ r
+aso
+
+
+g st
+ps that 
+
+d to th
+ f
+
+a
+ co
+c
+us
+o
+. Th
+s f
+
+
+d 
+s 
+ot pr
+s
+
+t 
+
+ th
+ outputs of oth
+r mod
+
+s.
+!!! 
+ar
+
+
+g
+    `r
+aso
+
+
+g` us
+d to b
+ ca
+
+d `r
+aso
+
+
+g_co
+t
+
+t`. For 
+o
+, `r
+aso
+
+
+g_co
+t
+
+t` 
+
+
+ co
+t
+
+u
+ to 
+ork. Ho
+
+v
+r, 
+
+ 
+
+courag
+ you to m
+grat
+ to `r
+aso
+
+
+g` 
+
+ cas
+ `r
+aso
+
+
+g_co
+t
+
+t` 
+s r
+mov
+d 
+
+ futur
+.
+## Support
+d Mod
+
+s
+vLLM curr
+
+t
+y supports th
+ fo
+o
+
+
+g r
+aso
+
+
+g mod
+
+s:
+| Mod
+
+ S
+r
+
+s | Pars
+r Nam
+ | Structur
+d Output Support | Too
+ Ca
+
+
+g |
 |--------------|-------------|------------------|-------------|
-| [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `json`, `regex` | ❌ |
-| [DeepSeek-V3.1](https://huggingface.co/collections/deepseek-ai/deepseek-v31-68a491bed32bd77e7fca048f) | `deepseek_v3` | `json`, `regex` | ❌ |
-| [ERNIE-4.5-VL series](https://huggingface.co/baidu/ERNIE-4.5-VL-28B-A3B-PT) | `ernie45` | `json`, `regex` | ❌ |
-| [ERNIE-4.5-21B-A3B-Thinking](https://huggingface.co/baidu/ERNIE-4.5-21B-A3B-Thinking) | `ernie45` | `json`, `regex` | ✅ |
-| [GLM-4.5 series](https://huggingface.co/collections/zai-org/glm-45-687c621d34bda8c9e4bf503b) | `glm45` | `json`, `regex` | ✅ |
-| [Holo2 series](https://huggingface.co/collections/Hcompany/holo2) | `holo2` | `json`, `regex` | ✅ |
-| [Hunyuan A13B series](https://huggingface.co/collections/tencent/hunyuan-a13b-685ec38e5b46321e3ea7c4be) | `hunyuan_a13b` | `json`, `regex` | ✅ |
-| [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a) | `granite` | ❌ | ❌ |
-| [MiniMax-M2](https://huggingface.co/MiniMaxAI/MiniMax-M2) | `minimax_m2_append_think` | `json`, `regex` | ✅ |
-| [Qwen3 series](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f) | `qwen3` | `json`, `regex` | ✅ |
-| [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `json`, `regex` | ✅ |
+| [D
+pS
+k R1 s
+r
 
-!!! note
-    IBM Granite 3.2 and DeepSeek-V3.1 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
-    The reasoning feature for the Qwen3 series is enabled by default. To disable it, you must pass `enable_thinking=False` in your `chat_template_kwargs`.
-    DeepSeek-V3.1 tool calling is supported in non-thinking mode.
-    Holo2 reasoning is enabled by default. To disable it, you must also pass `thinking=False` in your `chat_template_kwargs`.
+s](https://hugg
 
-## Quickstart
+gfac
+.co/co
 
-To use reasoning models, you need to specify the `--reasoning-parser` flags when making a request to the chat completion endpoint. The `--reasoning-parser` flag specifies the reasoning parser to use for extracting reasoning content from the model output.
+ct
+o
+s/d
+ps
+k-a
+/d
+ps
+k-r1-678
+1
+131c0169c0bc89728d) | `d
+ps
+k_r1` | `jso
+`, `r
+g
+x` | ❌ |
+| [D
+pS
+k-V3.1](https://hugg
 
+gfac
+.co/co
+
+ct
+o
+s/d
+ps
+k-a
+/d
+ps
+k-v31-68a491b
+d32bd77
+7fca048f) | `d
+ps
+k_v3` | `jso
+`, `r
+g
+x` | ❌ |
+| [ERNIE-4.5-VL s
+r
+
+s](https://hugg
+
+gfac
+.co/ba
+du/ERNIE-4.5-VL-28B-A3B-PT) | `
+r
+
+
+45` | `jso
+`, `r
+g
+x` | ❌ |
+| [ERNIE-4.5-21B-A3B-Th
+
+k
+
+g](https://hugg
+
+gfac
+.co/ba
+du/ERNIE-4.5-21B-A3B-Th
+
+k
+
+g) | `
+r
+
+
+45` | `jso
+`, `r
+g
+x` | ✅ |
+| [GLM-4.5 s
+r
+
+s](https://hugg
+
+gfac
+.co/co
+
+ct
+o
+s/za
+-org/g
+m-45-687c621d34bda8c9
+4bf503b) | `g
+m45` | `jso
+`, `r
+g
+x` | ✅ |
+| [Ho
+o2 s
+r
+
+s](https://hugg
+
+gfac
+.co/co
+
+ct
+o
+s/Hcompa
+y/ho
+o2) | `ho
+o2` | `jso
+`, `r
+g
+x` | ✅ |
+| [Hu
+yua
+ A13B s
+r
+
+s](https://hugg
+
+gfac
+.co/co
+
+ct
+o
+s/t
+
+c
+
+t/hu
+yua
+-a13b-685
+c38
+5b46321
+3
+a7c4b
+) | `hu
+yua
+_a13b` | `jso
+`, `r
+g
+x` | ✅ |
+| [IBM Gra
+
+t
+ 3.2 
+a
+guag
+ mod
+
+s](https://hugg
+
+gfac
+.co/co
+
+ct
+o
+s/
+bm-gra
+
+t
+/gra
+
+t
+-32-
+a
+guag
+-mod
+
+s-67b3bc8c13508f6d064cff9a) | `gra
+
+t
+` | ❌ | ❌ |
+| [M
+
+
+Max-M2](https://hugg
+
+gfac
+.co/M
+
+
+MaxAI/M
+
+
+Max-M2) | `m
+
+
+max_m2_app
+
+d_th
+
+k` | `jso
+`, `r
+g
+x` | ✅ |
+| [Q
+
+
+3 s
+r
+
+s](https://hugg
+
+gfac
+.co/co
+
+ct
+o
+s/Q
+
+
+/q
+
+
+3-67dd247413f0
+2
+4f653967f) | `q
+
+
+3` | `jso
+`, `r
+g
+x` | ✅ |
+| [Q
+Q-32B](https://hugg
+
+gfac
+.co/Q
+
+
+/Q
+Q-32B) | `d
+ps
+k_r1` | `jso
+`, `r
+g
+x` | ✅ |
+!!! 
+ot
+
+    IBM Gra
+
+t
+ 3.2 a
+d D
+pS
+k-V3.1 r
+aso
+
+
+g 
+s d
+sab
+
+d by d
+fau
+t; to 
+
+ab
+
+ 
+t, you must a
+so pass `th
+
+k
+
+g=Tru
+` 
+
+ your `chat_t
+mp
+at
+_k
+args`.
+    Th
+ r
+aso
+
+
+g f
+atur
+ for th
+ Q
+
+
+3 s
+r
+
+s 
+s 
+
+ab
+
+d by d
+fau
+t. To d
+sab
+
+ 
+t, you must pass `
+
+ab
+
+_th
+
+k
+
+g=Fa
+s
+` 
+
+ your `chat_t
+mp
+at
+_k
+args`.
+    D
+pS
+k-V3.1 too
+ ca
+
+
+g 
+s support
+d 
+
+ 
+o
+-th
+
+k
+
+g mod
+.
+    Ho
+o2 r
+aso
+
+
+g 
+s 
+
+ab
+
+d by d
+fau
+t. To d
+sab
+
+ 
+t, you must a
+so pass `th
+
+k
+
+g=Fa
+s
+` 
+
+ your `chat_t
+mp
+at
+_k
+args`.
+## Qu
+ckstart
+To us
+ r
+aso
+
+
+g mod
+
+s, you 
+
+d to sp
+c
+fy th
+ `--r
+aso
+
+
+g-pars
+r` f
+ags 
+h
+
+ mak
+
+g a r
+qu
+st to th
+ chat comp
+
+t
+o
+ 
+
+dpo
+
+t. Th
+ `--r
+aso
+
+
+g-pars
+r` f
+ag sp
+c
+f
+
+s th
+ r
+aso
+
+
+g pars
+r to us
+ for 
+xtract
+
+g r
+aso
+
+
+g co
+t
+
+t from th
+ mod
+
+ output.
 ```bash
-vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
-    --reasoning-parser deepseek_r1
+v
+m s
+rv
+ d
+ps
+k-a
+/D
+pS
+k-R1-D
+st
+
+-Q
+
+
+-1.5B \
+    --r
+aso
+
+
+g-pars
+r d
+ps
+k_r1
 ```
+N
+xt, mak
+ a r
+qu
+st to th
+ mod
 
-Next, make a request to the model that should return the reasoning content in the response.
+ that shou
+d r
+tur
+ th
+ r
+aso
 
-??? code
 
-    ```python
-    from openai import OpenAI
+g co
+t
 
-    # Modify OpenAI's API key and API base to use vLLM's API server.
-    openai_api_key = "EMPTY"
-    openai_api_base = "http://localhost:8000/v1"
+t 
 
-    client = OpenAI(
-        api_key=openai_api_key,
-        base_url=openai_api_base,
+ th
+ r
+spo
+s
+.
+??? cod
+
+    ```pytho
+
+    from op
+
+a
+ 
+mport Op
+
+AI
+    # Mod
+fy Op
+
+AI's API k
+y a
+d API bas
+ to us
+ vLLM's API s
+rv
+r.
+    op
+
+a
+_ap
+_k
+y = "EMPTY"
+    op
+
+a
+_ap
+_bas
+ = "http://
+oca
+host:8000/v1"
+    c
+
+
+
+t = Op
+
+AI(
+        ap
+_k
+y=op
+
+a
+_ap
+_k
+y,
+        bas
+_ur
+=op
+
+a
+_ap
+_bas
+,
     )
+    mod
 
-    models = client.models.list()
-    model = models.data[0].id
+s = c
 
-    # Round 1
-    messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
-    # For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
-    # For Qwen3 series, if you want to disable thinking in reasoning mode, add:
-    # extra_body={"chat_template_kwargs": {"enable_thinking": False}}
-    response = client.chat.completions.create(model=model, messages=messages)
 
-    reasoning = response.choices[0].message.reasoning
-    content = response.choices[0].message.content
 
-    print("reasoning:", reasoning)
-    print("content:", content)
-    ```
+t.mod
 
-The `reasoning` field contains the reasoning steps that led to the final conclusion, while the `content` field contains the final conclusion.
+s.
 
-## Streaming chat completions
+st()
+    mod
 
-Streaming chat completions are also supported for reasoning models. The `reasoning` field is available in the `delta` field in [chat completion response chunks](https://platform.openai.com/docs/api-reference/chat/streaming).
+ = mod
 
-??? console "Json"
+s.data[0].
+d
+    # Rou
+d 1
+    m
+ssag
+s = [{"ro
 
-    ```json
+": "us
+r", "co
+t
+
+t": "9.11 a
+d 9.8, 
+h
+ch 
+s gr
+at
+r?"}]
+    # For gra
+
+t
+, add: `
+xtra_body={"chat_t
+mp
+at
+_k
+args": {"th
+
+k
+
+g": Tru
+}}`
+    # For Q
+
+
+3 s
+r
+
+s, 
+f you 
+a
+t to d
+sab
+
+ th
+
+k
+
+g 
+
+ r
+aso
+
+
+g mod
+, add:
+    # 
+xtra_body={"chat_t
+mp
+at
+_k
+args": {"
+
+ab
+
+_th
+
+k
+
+g": Fa
+s
+}}
+    r
+spo
+s
+ = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(mod
+
+=mod
+
+, m
+ssag
+s=m
+ssag
+s)
+    r
+aso
+
+
+g = r
+spo
+s
+.cho
+c
+s[0].m
+ssag
+.r
+aso
+
+
+g
+    co
+t
+
+t = r
+spo
+s
+.cho
+c
+s[0].m
+ssag
+.co
+t
+
+t
+    pr
+
+t("r
+aso
+
+
+g:", r
+aso
+
+
+g)
+    pr
+
+t("co
+t
+
+t:", co
+t
+
+t)
+```
+Th
+ `r
+aso
+
+
+g` f
+
+
+d co
+ta
+
+s th
+ r
+aso
+
+
+g st
+ps that 
+
+d to th
+ f
+
+a
+ co
+c
+us
+o
+, 
+h
+
+
+ th
+ `co
+t
+
+t` f
+
+
+d co
+ta
+
+s th
+ f
+
+a
+ co
+c
+us
+o
+.
+## Str
+am
+
+g chat comp
+
+t
+o
+s
+Str
+am
+
+g chat comp
+
+t
+o
+s ar
+ a
+so support
+d for r
+aso
+
+
+g mod
+
+s. Th
+ `r
+aso
+
+
+g` f
+
+
+d 
+s ava
+
+ab
+
+ 
+
+ th
+ `d
+
+ta` f
+
+
+d 
+
+ [chat comp
+
+t
+o
+ r
+spo
+s
+ chu
+ks](https://p
+atform.op
+
+a
+.com/docs/ap
+-r
+f
+r
+
+c
+/chat/str
+am
+
+g).
+??? co
+so
+
+ "Jso
+"
+    ```jso
+
     {
-        "id": "chatcmpl-123",
-        "object": "chat.completion.chunk",
-        "created": 1694268190,
-        "model": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-        "system_fingerprint": "fp_44709d6fcb",
-        "choices": [
+        "
+d": "chatcmp
+-123",
+        "obj
+ct": "chat.comp
+
+t
+o
+.chu
+k",
+        "cr
+at
+d": 1694268190,
+        "mod
+
+": "d
+ps
+k-a
+/D
+pS
+k-R1-D
+st
+
+-Q
+
+
+-1.5B",
+        "syst
+m_f
+
+g
+rpr
+
+t": "fp_44709d6fcb",
+        "cho
+c
+s": [
             {
-                "index": 0,
-                "delta": {
-                    "role": "assistant",
-                    "reasoning": "is",
+                "
+
+d
+x": 0,
+                "d
+
+ta": {
+                    "ro
+
+": "ass
+sta
+t",
+                    "r
+aso
+
+
+g": "
+s",
                 },
-                "logprobs": null,
-                "finish_reason": null
+                "
+ogprobs": 
+u
+,
+                "f
+
+
+sh_r
+aso
+": 
+u
+
             }
         ]
     }
-    ```
+```
+Op
 
-OpenAI Python client library does not officially support `reasoning` attribute for streaming output. But the client supports extra attributes in the response. You can use `hasattr` to check if the `reasoning` attribute is present in the response. For example:
+AI Pytho
+ c
 
-??? code
 
-    ```python
-    from openai import OpenAI
 
-    # Modify OpenAI's API key and API base to use vLLM's API server.
-    openai_api_key = "EMPTY"
-    openai_api_base = "http://localhost:8000/v1"
+t 
 
-    client = OpenAI(
-        api_key=openai_api_key,
-        base_url=openai_api_base,
+brary do
+s 
+ot off
+c
+a
+y support `r
+aso
+
+
+g` attr
+but
+ for str
+am
+
+g output. But th
+ c
+
+
+
+t supports 
+xtra attr
+but
+s 
+
+ th
+ r
+spo
+s
+. You ca
+ us
+ `hasattr` to ch
+ck 
+f th
+ `r
+aso
+
+
+g` attr
+but
+ 
+s pr
+s
+
+t 
+
+ th
+ r
+spo
+s
+. For 
+xamp
+
+:
+??? cod
+
+    ```pytho
+
+    from op
+
+a
+ 
+mport Op
+
+AI
+    # Mod
+fy Op
+
+AI's API k
+y a
+d API bas
+ to us
+ vLLM's API s
+rv
+r.
+    op
+
+a
+_ap
+_k
+y = "EMPTY"
+    op
+
+a
+_ap
+_bas
+ = "http://
+oca
+host:8000/v1"
+    c
+
+
+
+t = Op
+
+AI(
+        ap
+_k
+y=op
+
+a
+_ap
+_k
+y,
+        bas
+_ur
+=op
+
+a
+_ap
+_bas
+,
     )
+    mod
 
-    models = client.models.list()
-    model = models.data[0].id
+s = c
 
-    messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
-    # For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
-    # For Qwen3 series, if you want to disable thinking in reasoning mode, add:
-    # extra_body={"chat_template_kwargs": {"enable_thinking": False}}
-    stream = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        stream=True,
+
+
+t.mod
+
+s.
+
+st()
+    mod
+
+ = mod
+
+s.data[0].
+d
+    m
+ssag
+s = [{"ro
+
+": "us
+r", "co
+t
+
+t": "9.11 a
+d 9.8, 
+h
+ch 
+s gr
+at
+r?"}]
+    # For gra
+
+t
+, add: `
+xtra_body={"chat_t
+mp
+at
+_k
+args": {"th
+
+k
+
+g": Tru
+}}`
+    # For Q
+
+
+3 s
+r
+
+s, 
+f you 
+a
+t to d
+sab
+
+ th
+
+k
+
+g 
+
+ r
+aso
+
+
+g mod
+, add:
+    # 
+xtra_body={"chat_t
+mp
+at
+_k
+args": {"
+
+ab
+
+_th
+
+k
+
+g": Fa
+s
+}}
+    str
+am = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+=mod
+
+,
+        m
+ssag
+s=m
+ssag
+s,
+        str
+am=Tru
+,
     )
+    pr
 
-    print("client: Start streaming chat completions...")
-    printed_reasoning = False
-    printed_content = False
+t("c
 
-    for chunk in stream:
-        # Safely extract reasoning and content from delta,
-        # defaulting to None if attributes don't exist or are empty strings
-        reasoning = (
-            getattr(chunk.choices[0].delta, "reasoning", None) or None
+
+
+t: Start str
+am
+
+g chat comp
+
+t
+o
+s...")
+    pr
+
+t
+d_r
+aso
+
+
+g = Fa
+s
+
+    pr
+
+t
+d_co
+t
+
+t = Fa
+s
+
+    for chu
+k 
+
+ str
+am:
+        # Saf
+
+y 
+xtract r
+aso
+
+
+g a
+d co
+t
+
+t from d
+
+ta,
+        # d
+fau
+t
+
+g to No
+
+ 
+f attr
+but
+s do
+'t 
+x
+st or ar
+ 
+mpty str
+
+gs
+        r
+aso
+
+
+g = (
+            g
+tattr(chu
+k.cho
+c
+s[0].d
+
+ta, "r
+aso
+
+
+g", No
+
+) or No
+
+
         )
-        content = getattr(chunk.choices[0].delta, "content", None) or None
+        co
+t
 
-        if reasoning is not None:
-            if not printed_reasoning:
-                printed_reasoning = True
-                print("reasoning:", end="", flush=True)
-            print(reasoning, end="", flush=True)
-        elif content is not None:
-            if not printed_content:
-                printed_content = True
-                print("\ncontent:", end="", flush=True)
-            # Extract and print the content
-            print(content, end="", flush=True)
-    ```
+t = g
+tattr(chu
+k.cho
+c
+s[0].d
 
-Remember to check whether the `reasoning` exists in the response before accessing it. You could check out the [example](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_with_reasoning_streaming.py).
+ta, "co
+t
 
-## Tool Calling
+t", No
 
-The reasoning content is also available when both tool calling and the reasoning parser are enabled. Additionally, tool calling only parses functions from the `content` field, not from the `reasoning`.
+) or No
 
-??? code
 
-    ```python
-    from openai import OpenAI
+        
+f r
+aso
 
-    client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
 
-    tools = [
+g 
+s 
+ot No
+
+:
+            
+f 
+ot pr
+
+t
+d_r
+aso
+
+
+g:
+                pr
+
+t
+d_r
+aso
+
+
+g = Tru
+
+                pr
+
+t("r
+aso
+
+
+g:", 
+
+d="", f
+ush=Tru
+)
+            pr
+
+t(r
+aso
+
+
+g, 
+
+d="", f
+ush=Tru
+)
+        
+
+
+f co
+t
+
+t 
+s 
+ot No
+
+:
+            
+f 
+ot pr
+
+t
+d_co
+t
+
+t:
+                pr
+
+t
+d_co
+t
+
+t = Tru
+
+                pr
+
+t("\
+co
+t
+
+t:", 
+
+d="", f
+ush=Tru
+)
+            # Extract a
+d pr
+
+t th
+ co
+t
+
+t
+            pr
+
+t(co
+t
+
+t, 
+
+d="", f
+ush=Tru
+)
+```
+R
+m
+mb
+r to ch
+ck 
+h
+th
+r th
+ `r
+aso
+
+
+g` 
+x
+sts 
+
+ th
+ r
+spo
+s
+ b
+for
+ acc
+ss
+
+g 
+t. You cou
+d ch
+ck out th
+ [
+xamp
+
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/op
+
+a
+_chat_comp
+
+t
+o
+_
+
+th_r
+aso
+
+
+g_str
+am
+
+g.py).
+## Too
+ Ca
+
+
+g
+Th
+ r
+aso
+
+
+g co
+t
+
+t 
+s a
+so ava
+
+ab
+
+ 
+h
+
+ both too
+ ca
+
+
+g a
+d th
+ r
+aso
+
+
+g pars
+r ar
+ 
+
+ab
+
+d. Add
+t
+o
+a
+y, too
+ ca
+
+
+g o
+
+y pars
+s fu
+ct
+o
+s from th
+ `co
+t
+
+t` f
+
+
+d, 
+ot from th
+ `r
+aso
+
+
+g`.
+??? cod
+
+    ```pytho
+
+    from op
+
+a
+ 
+mport Op
+
+AI
+    c
+
+
+
+t = Op
+
+AI(bas
+_ur
+="http://
+oca
+host:8000/v1", ap
+_k
+y="dummy")
+    too
+s = [
         {
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "description": "Get the current weather in a given location",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
-                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+            "typ
+": "fu
+ct
+o
+",
+            "fu
+ct
+o
+": {
+                "
+am
+": "g
+t_
+
+ath
+r",
+                "d
+scr
+pt
+o
+": "G
+t th
+ curr
+
+t 
+
+ath
+r 
+
+ a g
+v
+
+ 
+ocat
+o
+",
+                "param
+t
+rs": {
+                    "typ
+": "obj
+ct",
+                    "prop
+rt
+
+s": {
+                        "
+ocat
+o
+": {"typ
+": "str
+
+g", "d
+scr
+pt
+o
+": "C
+ty a
+d stat
+, 
+.g., 'Sa
+ Fra
+c
+sco, CA'"},
+                        "u
+
+t": {"typ
+": "str
+
+g", "
+
+um": ["c
+
+s
+us", "fahr
+
+h
+
+t"]},
                     },
-                    "required": ["location", "unit"],
+                    "r
+qu
+r
+d": ["
+ocat
+o
+", "u
+
+t"],
                 }
             },
         }
     ]
+    r
+spo
+s
+ = c
 
-    response = client.chat.completions.create(
-        model=client.models.list().data[0].id,
-        messages=[{"role": "user", "content": "What's the weather like in San Francisco?"}],
-        tools=tools,
-        tool_choice="auto",
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+=c
+
+
+
+t.mod
+
+s.
+
+st().data[0].
+d,
+        m
+ssag
+s=[{"ro
+
+": "us
+r", "co
+t
+
+t": "What's th
+ 
+
+ath
+r 
+
+k
+ 
+
+ Sa
+ Fra
+c
+sco?"}],
+        too
+s=too
+s,
+        too
+_cho
+c
+="auto",
     )
+    pr
 
-    print(response)
-    tool_call = response.choices[0].message.tool_calls[0].function
+t(r
+spo
+s
+)
+    too
+_ca
+ = r
+spo
+s
+.cho
+c
+s[0].m
+ssag
+.too
+_ca
+s[0].fu
+ct
+o
 
-    print(f"reasoning: {response.choices[0].message.reasoning}")
-    print(f"Function called: {tool_call.name}")
-    print(f"Arguments: {tool_call.arguments}")
-    ```
+    pr
 
-For more examples, please refer to [examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py](../../examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py).
+t(f"r
+aso
 
-## Server-Level Default Chat Template Kwargs
 
-You can set default `chat_template_kwargs` at the server level using the `--default-chat-template-kwargs` CLI argument. This is useful for configuring reasoning behavior across all requests without requiring clients to specify it in each request.
+g: {r
+spo
+s
+.cho
+c
+s[0].m
+ssag
+.r
+aso
 
-### Disabling Thinking Mode by Default
 
-For models like Qwen3 where thinking is enabled by default, you can disable it server-wide:
+g}")
+    pr
 
-```bash
-vllm serve Qwen/Qwen3-8B \
-    --reasoning-parser qwen3 \
-    --default-chat-template-kwargs '{"enable_thinking": false}'
+t(f"Fu
+ct
+o
+ ca
+
+d: {too
+_ca
+.
+am
+}")
+    pr
+
+t(f"Argum
+
+ts: {too
+_ca
+.argum
+
+ts}")
 ```
+For mor
+ 
+xamp
 
-### Enabling Thinking Mode by Default
+s, p
 
-For models like IBM Granite 3.2 or DeepSeek-V3.1 where thinking is disabled by default, you can enable it server-wide:
+as
+ r
+f
+r to [
+xamp
 
+s/o
+
+
+
+
+_s
+rv
+
+g/op
+
+a
+_chat_comp
+
+t
+o
+_too
+_ca
+s_
+
+th_r
+aso
+
+
+g.py](../../
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/op
+
+a
+_chat_comp
+
+t
+o
+_too
+_ca
+s_
+
+th_r
+aso
+
+
+g.py).
+## S
+rv
+r-L
+v
+
+ D
+fau
+t Chat T
+mp
+at
+ K
+args
+You ca
+ s
+t d
+fau
+t `chat_t
+mp
+at
+_k
+args` at th
+ s
+rv
+r 
+
+v
+
+ us
+
+g th
+ `--d
+fau
+t-chat-t
+mp
+at
+-k
+args` CLI argum
+
+t. Th
+s 
+s us
+fu
+ for co
+f
+gur
+
+g r
+aso
+
+
+g b
+hav
+or across a
+ r
+qu
+sts 
+
+thout r
+qu
+r
+
+g c
+
+
+
+ts to sp
+c
+fy 
+t 
+
+ 
+ach r
+qu
+st.
+### D
+sab
+
+
+g Th
+
+k
+
+g Mod
+ by D
+fau
+t
+For mod
+
+s 
+
+k
+ Q
+
+
+3 
+h
+r
+ th
+
+k
+
+g 
+s 
+
+ab
+
+d by d
+fau
+t, you ca
+ d
+sab
+
+ 
+t s
+rv
+r-
+
+d
+:
 ```bash
-vllm serve ibm-granite/granite-3.2-2b-instruct \
-    --reasoning-parser granite \
-    --default-chat-template-kwargs '{"thinking": true}'
+v
+m s
+rv
+ Q
+
+
+/Q
+
+
+3-8B \
+    --r
+aso
+
+
+g-pars
+r q
+
+
+3 \
+    --d
+fau
+t-chat-t
+mp
+at
+-k
+args '{"
+
+ab
+
+_th
+
+k
+
+g": fa
+s
+}'
 ```
+### E
+ab
 
-### Request-Level Override
 
-Request-level `chat_template_kwargs` always take priority over server defaults. For example, if the server is started with `enable_thinking=false`, a client can still enable it for a specific request:
+g Th
 
-```python
-response = client.chat.completions.create(
-    model=model,
-    messages=messages,
-    extra_body={"chat_template_kwargs": {"enable_thinking": True}}  # Overrides server default
+k
+
+g Mod
+ by D
+fau
+t
+For mod
+
+s 
+
+k
+ IBM Gra
+
+t
+ 3.2 or D
+pS
+k-V3.1 
+h
+r
+ th
+
+k
+
+g 
+s d
+sab
+
+d by d
+fau
+t, you ca
+ 
+
+ab
+
+ 
+t s
+rv
+r-
+
+d
+:
+```bash
+v
+m s
+rv
+ 
+bm-gra
+
+t
+/gra
+
+t
+-3.2-2b-
+
+struct \
+    --r
+aso
+
+
+g-pars
+r gra
+
+t
+ \
+    --d
+fau
+t-chat-t
+mp
+at
+-k
+args '{"th
+
+k
+
+g": tru
+}'
+```
+### R
+qu
+st-L
+v
+
+ Ov
+rr
+d
+
+R
+qu
+st-
+
+v
+
+ `chat_t
+mp
+at
+_k
+args` a
+
+ays tak
+ pr
+or
+ty ov
+r s
+rv
+r d
+fau
+ts. For 
+xamp
+
+, 
+f th
+ s
+rv
+r 
+s start
+d 
+
+th `
+
+ab
+
+_th
+
+k
+
+g=fa
+s
+`, a c
+
+
+
+t ca
+ st
+
+ 
+
+ab
+
+ 
+t for a sp
+c
+f
+c r
+qu
+st:
+```pytho
+
+r
+spo
+s
+ = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+    mod
+
+=mod
+
+,
+    m
+ssag
+s=m
+ssag
+s,
+    
+xtra_body={"chat_t
+mp
+at
+_k
+args": {"
+
+ab
+
+_th
+
+k
+
+g": Tru
+}}  # Ov
+rr
+d
+s s
+rv
+r d
+fau
+t
 )
 ```
+## L
+m
+tat
+o
+s
+    - Th
+ r
+aso
 
-## Limitations
 
-- The reasoning content is only available for online serving's chat completion endpoint (`/v1/chat/completions`).
+g co
+t
 
-## How to support a new reasoning model
+t 
+s o
 
-You can add a new `ReasoningParser` similar to [vllm/reasoning/deepseek_r1_reasoning_parser.py](../../vllm/reasoning/deepseek_r1_reasoning_parser.py).
+y ava
 
-??? code
+ab
 
-    ```python
-    # import the required packages
+ for o
 
-    from vllm.reasoning import ReasoningParser, ReasoningParserManager
-    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-    from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 
-    # define a reasoning parser and register it to vllm
-    # the name list in register_module can be used
-    # in --reasoning-parser.
-    class ExampleParser(ReasoningParser):
-        def __init__(self, tokenizer: TokenizerLike):
-            super().__init__(tokenizer)
 
-        def extract_reasoning_streaming(
-            self,
-            previous_text: str,
-            current_text: str,
-            delta_text: str,
-            previous_token_ids: Sequence[int],
-            current_token_ids: Sequence[int],
-            delta_token_ids: Sequence[int],
-        ) -> DeltaMessage | None:
+
+ s
+rv
+
+g's chat comp
+
+t
+o
+ 
+
+dpo
+
+t (`/v1/chat/comp
+
+t
+o
+s`).
+## Ho
+ to support a 
+
+
+ r
+aso
+
+
+g mod
+
+
+You ca
+ add a 
+
+
+ `R
+aso
+
+
+gPars
+r` s
+m
+
+ar to [v
+m/r
+aso
+
+
+g/d
+ps
+k_r1_r
+aso
+
+
+g_pars
+r.py](../../v
+m/r
+aso
+
+
+g/d
+ps
+k_r1_r
+aso
+
+
+g_pars
+r.py).
+??? cod
+
+    ```pytho
+
+    # 
+mport th
+ r
+qu
+r
+d packag
+s
+    from v
+m.r
+aso
+
+
+g 
+mport R
+aso
+
+
+gPars
+r, R
+aso
+
+
+gPars
+rMa
+ag
+r
+    from v
+m.
+
+trypo
+
+ts.op
+
+a
+.chat_comp
+
+t
+o
+.protoco
+ 
+mport ChatComp
+
+t
+o
+R
+qu
+st
+    from v
+m.
+
+trypo
+
+ts.op
+
+a
+.
+
+g
+
+
+.protoco
+ 
+mport D
+
+taM
+ssag
+
+    # d
+f
+
+
+ a r
+aso
+
+
+g pars
+r a
+d r
+g
+st
+r 
+t to v
+m
+    # th
+ 
+am
+ 
+
+st 
+
+ r
+g
+st
+r_modu
+
+ ca
+ b
+ us
+d
+    # 
+
+ --r
+aso
+
+
+g-pars
+r.
+    c
+ass Examp
+
+Pars
+r(R
+aso
+
+
+gPars
+r):
+        d
+f __
+
+
+t__(s
+
+f, tok
+
+
+z
+r: Tok
+
+
+z
+rL
+k
+):
+            sup
+r().__
+
+
+t__(tok
+
+
+z
+r)
+        d
+f 
+xtract_r
+aso
+
+
+g_str
+am
+
+g(
+            s
+
+f,
+            pr
+v
+ous_t
+xt: str,
+            curr
+
+t_t
+xt: str,
+            d
+
+ta_t
+xt: str,
+            pr
+v
+ous_tok
+
+_
+ds: S
+qu
+
+c
+[
+
+t],
+            curr
+
+t_tok
+
+_
+ds: S
+qu
+
+c
+[
+
+t],
+            d
+
+ta_tok
+
+_
+ds: S
+qu
+
+c
+[
+
+t],
+        ) -
+ D
+
+taM
+ssag
+ | No
+
+:
             """
-            Instance method that should be implemented for extracting reasoning
-            from an incomplete response; for use when handling reasoning calls and
-            streaming. Has to be an instance method because  it requires state -
-            the current tokens/diffs, but also the information about what has
-            previously been parsed and extracted (see constructor)
+            I
+sta
+c
+ m
+thod that shou
+d b
+ 
+mp
+
+m
+
+t
+d for 
+xtract
+
+g r
+aso
+
+
+g
+            from a
+ 
+
+comp
+
+t
+ r
+spo
+s
+; for us
+ 
+h
+
+ ha
+d
+
+
+g r
+aso
+
+
+g ca
+s a
+d
+            str
+am
+
+g. Has to b
+ a
+ 
+
+sta
+c
+ m
+thod b
+caus
+  
+t r
+qu
+r
+s stat
+ -
+            th
+ curr
+
+t tok
+
+s/d
+ffs, but a
+so th
+ 
+
+format
+o
+ about 
+hat has
+            pr
+v
+ous
+y b
+
+ pars
+d a
+d 
+xtract
+d (s
+ co
+structor)
             """
+        d
+f 
+xtract_r
+aso
 
-        def extract_reasoning(
-            self,
-            model_output: str,
-            request: ChatCompletionRequest | ResponsesRequest,
-        ) -> tuple[str | None, str | None]:
+
+g(
+            s
+
+f,
+            mod
+
+_output: str,
+            r
+qu
+st: ChatComp
+
+t
+o
+R
+qu
+st | R
+spo
+s
+sR
+qu
+st,
+        ) -
+ tup
+
+[str | No
+
+, str | No
+
+]:
             """
-            Extract reasoning content from a complete model-generated string.
+            Extract r
+aso
 
-            Used for non-streaming responses where we have the entire model response
-            available before sending to the client.
 
-            Parameters:
-            model_output: str
-                The model-generated string to extract reasoning content from.
+g co
+t
 
-            request: ChatCompletionRequest
-                The request object that was used to generate the model_output.
+t from a comp
 
-            Returns:
-            tuple[Optional[str], Optional[str]]
-                A tuple containing the reasoning content and the content.
+t
+ mod
+
+-g
+
+
+rat
+d str
+
+g.
+            Us
+d for 
+o
+-str
+am
+
+g r
+spo
+s
+s 
+h
+r
+ 
+
+ hav
+ th
+ 
+
+t
+r
+ mod
+
+ r
+spo
+s
+
+            ava
+
+ab
+
+ b
+for
+ s
+
+d
+
+g to th
+ c
+
+
+
+t.
+            Param
+t
+rs:
+            mod
+
+_output: str
+                Th
+ mod
+
+-g
+
+
+rat
+d str
+
+g to 
+xtract r
+aso
+
+
+g co
+t
+
+t from.
+            r
+qu
+st: ChatComp
+
+t
+o
+R
+qu
+st
+                Th
+ r
+qu
+st obj
+ct that 
+as us
+d to g
+
+
+rat
+ th
+ mod
+
+_output.
+            R
+tur
+s:
+            tup
+
+[Opt
+o
+a
+[str], Opt
+o
+a
+[str]]
+                A tup
+
+ co
+ta
+
+
+
+g th
+ r
+aso
+
+
+g co
+t
+
+t a
+d th
+ co
+t
+
+t.
             """
-    # Register the reasoning parser
-    ReasoningParserManager.register_lazy_module(
-        name="example",
-        module_path="vllm.reasoning.example_reasoning_parser",
-        class_name="ExampleParser",
+    # R
+g
+st
+r th
+ r
+aso
+
+
+g pars
+r
+    R
+aso
+
+
+gPars
+rMa
+ag
+r.r
+g
+st
+r_
+azy_modu
+
+(
+        
+am
+="
+xamp
+
+",
+        modu
+
+_path="v
+m.r
+aso
+
+
+g.
+xamp
+
+_r
+aso
+
+
+g_pars
+r",
+        c
+ass_
+am
+="Examp
+
+Pars
+r",
     )
-    ```
+```
+Add
+t
+o
+a
+y, to 
 
-Additionally, to enable structured output, you'll need to create a new `Reasoner` similar to the one in [vllm/reasoning/deepseek_r1_reasoning_parser.py](../../vllm/reasoning/deepseek_r1_reasoning_parser.py).
+ab
 
-??? code
+ structur
+d output, you'
+ 
 
-    ```python
-    @dataclass
-    class DeepSeekReasoner(Reasoner):
+d to cr
+at
+ a 
+
+
+ `R
+aso
+
+r` s
+m
+
+ar to th
+ o
+
+ 
+
+ [v
+m/r
+aso
+
+
+g/d
+ps
+k_r1_r
+aso
+
+
+g_pars
+r.py](../../v
+m/r
+aso
+
+
+g/d
+ps
+k_r1_r
+aso
+
+
+g_pars
+r.py).
+??? cod
+
+    ```pytho
+
+    @datac
+ass
+    c
+ass D
+pS
+kR
+aso
+
+r(R
+aso
+
+r):
         """
-        Reasoner for DeepSeek R series models.
+        R
+aso
+
+r for D
+pS
+k R s
+r
+
+s mod
+
+s.
         """
-        start_token_id: int
-        end_token_id: int
+        start_tok
 
-        start_token: str = "<think>"
-        end_token: str = "</think>"
+_
+d: 
 
-        @classmethod
-        def from_tokenizer(cls, tokenizer: PreTrainedTokenizer) -> Reasoner:
-            return cls(
-                start_token_id=tokenizer.encode("<think>", add_special_tokens=False)[0],
-                end_token_id=tokenizer.encode("</think>", add_special_tokens=False)[0],
+t
+        
+
+d_tok
+
+_
+d: 
+
+t
+        start_tok
+
+: str = "
+th
+
+k
+"
+        
+
+d_tok
+
+: str = "
+/th
+
+k
+"
+        @c
+assm
+thod
+        d
+f from_tok
+
+
+z
+r(c
+s, tok
+
+
+z
+r: Pr
+Tra
+
+
+dTok
+
+
+z
+r) -
+ R
+aso
+
+r:
+            r
+tur
+ c
+s(
+                start_tok
+
+_
+d=tok
+
+
+z
+r.
+
+cod
+("
+th
+
+k
+", add_sp
+c
+a
+_tok
+
+s=Fa
+s
+)[0],
+                
+
+d_tok
+
+_
+d=tok
+
+
+z
+r.
+
+cod
+("
+/th
+
+k
+", add_sp
+c
+a
+_tok
+
+s=Fa
+s
+)[0],
             )
+        d
+f 
+s_r
+aso
 
-        def is_reasoning_end(self, input_ids: list[int]) -> bool:
-            return self.end_token_id in input_ids
 
-        def is_reasoning_end_streaming(self, input_ids: list[int], delta_ids: list[int]) -> bool:
-            return self.end_token_id in delta_token_ids
+g_
+
+d(s
+
+f, 
+
+put_
+ds: 
+
+st[
+
+t]) -
+ boo
+:
+            r
+tur
+ s
+
+f.
+
+d_tok
+
+_
+d 
+
+ 
+
+put_
+ds
+        d
+f 
+s_r
+aso
+
+
+g_
+
+d_str
+am
+
+g(s
+
+f, 
+
+put_
+ds: 
+
+st[
+
+t], d
+
+ta_
+ds: 
+
+st[
+
+t]) -
+ boo
+:
+            r
+tur
+ s
+
+f.
+
+d_tok
+
+_
+d 
+
+ d
+
+ta_tok
+
+_
+ds
         ...
-    ```
+```
+Th
+ structur
+d output 
 
-The structured output engine like [xgrammar](https://github.com/mlc-ai/xgrammar) will use `end_token_id` to check if the reasoning content is present in the model output and skip the structured output if it is the case.
+g
 
-Finally, you can enable reasoning for the model by using the `--reasoning-parser` flags.
 
+ 
+
+k
+ [xgrammar](https://g
+thub.com/m
+c-a
+/xgrammar) 
+
+
+ us
+ `
+
+d_tok
+
+_
+d` to ch
+ck 
+f th
+ r
+aso
+
+
+g co
+t
+
+t 
+s pr
+s
+
+t 
+
+ th
+ mod
+
+ output a
+d sk
+p th
+ structur
+d output 
+f 
+t 
+s th
+ cas
+.
+F
+
+a
+y, you ca
+ 
+
+ab
+
+ r
+aso
+
+
+g for th
+ mod
+
+ by us
+
+g th
+ `--r
+aso
+
+
+g-pars
+r` f
+ags.
 ```bash
-vllm serve <model_tag> --reasoning-parser example
+v
+m s
+rv
+ 
+mod
+
+_tag
+ --r
+aso
+
+
+g-pars
+r 
+xamp
+
+
 ```

@@ -1,25 +1,552 @@
-# Automatic Prefix Caching
+# Automat
+c Pr
+f
+x Cach
 
-## Introduction
+g
+## I
+troduct
+o
 
-Automatic Prefix Caching (APC in short) caches the KV cache of existing queries, so that a new query can directly reuse the KV cache if it shares the same prefix with one of the existing queries, allowing the new query to skip the computation of the shared part.
+Automat
+c Pr
+f
+x Cach
 
-!!! note
-    Technical details on how vLLM implements APC can be found [here](../design/prefix_caching.md).
+g (APC 
 
-## Enabling APC in vLLM
+ short) cach
+s th
+ KV cach
+ of 
+x
+st
 
-Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an example:
+g qu
+r
 
-[examples/offline_inference/automatic_prefix_caching.py](../../examples/offline_inference/automatic_prefix_caching.py)
+s, so that a 
 
-## Example workloads
 
-We describe two example workloads, where APC can provide huge performance benefit:
+ qu
+ry ca
+ d
+r
+ct
+y r
+us
+ th
+ KV cach
+ 
+f 
+t shar
+s th
+ sam
+ pr
+f
+x 
 
-- Long document query, where the user repeatedly queries the same long document (e.g. software manual or annual report) with different queries. In this case, instead of processing the long document again and again, APC allows vLLM to process this long document *only once*, and all future requests can avoid recomputing this long document by reusing its KV cache. This allows vLLM to serve future requests with much higher throughput and much lower latency.
-- Multi-round conversation, where the user may chat with the application multiple times in the same chatting session. In this case, instead of processing the whole chatting history again and again, APC allows vLLM to reuse the processing results of the chat history across all future rounds of conversation, allowing vLLM to serve future requests with much higher throughput and much lower latency.
+th o
 
-## Limits
+ of th
+ 
+x
+st
 
-APC in general does not reduce the performance of vLLM. With that being said, APC only reduces the time of processing the queries (the prefilling phase) and does not reduce the time of generating new tokens (the decoding phase). So APC does not bring performance gain when vLLM spends most of the time generating answers to the queries (e.g. when the length of the answer is long), or new queries do not share the same prefix with any of existing queries (so that the computation cannot be reused).
+g qu
+r
+
+s, a
+o
+
+
+g th
+ 
+
+
+ qu
+ry to sk
+p th
+ computat
+o
+ of th
+ shar
+d part.
+!!! 
+ot
+
+    T
+ch
+
+ca
+ d
+ta
+
+s o
+ ho
+ vLLM 
+mp
+
+m
+
+ts APC ca
+ b
+ fou
+d [h
+r
+](../d
+s
+g
+/pr
+f
+x_cach
+
+g.md).
+## E
+ab
+
+
+g APC 
+
+ vLLM
+S
+t `
+
+ab
+
+_pr
+f
+x_cach
+
+g=Tru
+` 
+
+ vLLM 
+
+g
+
+
+ to 
+
+ab
+
+ APC. H
+r
+ 
+s a
+ 
+xamp
+
+:
+[
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/automat
+c_pr
+f
+x_cach
+
+g.py](../../
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/automat
+c_pr
+f
+x_cach
+
+g.py)
+## Examp
+
+ 
+ork
+oads
+W
+ d
+scr
+b
+ t
+o 
+xamp
+
+ 
+ork
+oads, 
+h
+r
+ APC ca
+ prov
+d
+ hug
+ p
+rforma
+c
+ b
+
+
+f
+t:
+    - Lo
+g docum
+
+t qu
+ry, 
+h
+r
+ th
+ us
+r r
+p
+at
+d
+y qu
+r
+
+s th
+ sam
+ 
+o
+g docum
+
+t (
+.g. soft
+ar
+ ma
+ua
+ or a
+ua
+ r
+port) 
+
+th d
+ff
+r
+
+t qu
+r
+
+s. I
+ th
+s cas
+, 
+
+st
+ad of proc
+ss
+
+g th
+ 
+o
+g docum
+
+t aga
+
+ a
+d aga
+
+, APC a
+o
+s vLLM to proc
+ss th
+s 
+o
+g docum
+
+t *o
+
+y o
+c
+*, a
+d a
+ futur
+ r
+qu
+sts ca
+ avo
+d r
+comput
+
+g th
+s 
+o
+g docum
+
+t by r
+us
+
+g 
+ts KV cach
+. Th
+s a
+o
+s vLLM to s
+rv
+ futur
+ r
+qu
+sts 
+
+th much h
+gh
+r throughput a
+d much 
+o
+
+r 
+at
+
+cy.
+    - Mu
+t
+-rou
+d co
+v
+rsat
+o
+, 
+h
+r
+ th
+ us
+r may chat 
+
+th th
+ app
+
+cat
+o
+ mu
+t
+p
+
+ t
+m
+s 
+
+ th
+ sam
+ chatt
+
+g s
+ss
+o
+. I
+ th
+s cas
+, 
+
+st
+ad of proc
+ss
+
+g th
+ 
+ho
+
+ chatt
+
+g h
+story aga
+
+ a
+d aga
+
+, APC a
+o
+s vLLM to r
+us
+ th
+ proc
+ss
+
+g r
+su
+ts of th
+ chat h
+story across a
+ futur
+ rou
+ds of co
+v
+rsat
+o
+, a
+o
+
+
+g vLLM to s
+rv
+ futur
+ r
+qu
+sts 
+
+th much h
+gh
+r throughput a
+d much 
+o
+
+r 
+at
+
+cy.
+## L
+m
+ts
+APC 
+
+ g
+
+
+ra
+ do
+s 
+ot r
+duc
+ th
+ p
+rforma
+c
+ of vLLM. W
+th that b
+
+
+g sa
+d, APC o
+
+y r
+duc
+s th
+ t
+m
+ of proc
+ss
+
+g th
+ qu
+r
+
+s (th
+ pr
+f
+
+
+
+g phas
+) a
+d do
+s 
+ot r
+duc
+ th
+ t
+m
+ of g
+
+
+rat
+
+g 
+
+
+ tok
+
+s (th
+ d
+cod
+
+g phas
+). So APC do
+s 
+ot br
+
+g p
+rforma
+c
+ ga
+
+ 
+h
+
+ vLLM sp
+
+ds most of th
+ t
+m
+ g
+
+
+rat
+
+g a
+s
+
+rs to th
+ qu
+r
+
+s (
+.g. 
+h
+
+ th
+ 
+
+
+gth of th
+ a
+s
+
+r 
+s 
+o
+g), or 
+
+
+ qu
+r
+
+s do 
+ot shar
+ th
+ sam
+ pr
+f
+x 
+
+th a
+y of 
+x
+st
+
+g qu
+r
+
+s (so that th
+ computat
+o
+ ca
+ot b
+ r
+us
+d).

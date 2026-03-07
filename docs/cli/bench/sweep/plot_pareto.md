@@ -1,9 +1,37 @@
-# vllm bench sweep plot_pareto
+# v
+m b
 
-## JSON CLI Arguments
+ch s
 
---8<-- "docs/cli/json_tip.inc.md"
+p p
+ot_par
+to
+## JSON CLI Argum
 
-## Arguments
+ts
+--8
+-- "docs/c
 
---8<-- "docs/generated/argparse/bench_sweep_plot_pareto.inc.md"
+/jso
+_t
+p.
+
+c.md"
+## Argum
+
+ts
+--8
+-- "docs/g
+
+
+rat
+d/argpars
+/b
+
+ch_s
+
+p_p
+ot_par
+to.
+
+c.md"

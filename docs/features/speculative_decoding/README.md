@@ -1,83 +1,1254 @@
-# Speculative Decoding
+# Sp
+cu
+at
+v
+ D
+cod
 
-This document shows how to use [Speculative Decoding](https://arxiv.org/pdf/2302.01318) with vLLM to reduce inter-token latency under medium-to-low QPS (query per second), memory-bound workloads.
+g
+Th
+s docum
 
-To train your own draft models for optimized speculative decoding, see [vllm-project/speculators](speculators.md) for seamless training and integration with vLLM.
+t sho
+s ho
+ to us
+ [Sp
+cu
+at
+v
+ D
+cod
 
-## vLLM Speculation Methods
+g](https://arx
+v.org/pdf/2302.01318) 
 
-vLLM supports a variety of methods of speculative decoding. Model-based methods such as EAGLE, MTP, draft models, PARD and MLP provide the best latency reduction, while simpler methods such as n-gram and suffix decoding provide modest speedups without increasing workload during peak traffic.
+th vLLM to r
+duc
+ 
 
-- [EAGLE](eagle.md)
-- [Multi-Token Prediction (MTP)](mtp.md)
-- [Draft Model](draft_model.md)
-- [Parallel Draft Model (PARD)](parallel_draft_model.md)
-- [Multi-Layer Perceptron](mlp.md)
-- [N-Gram](n_gram.md)
-- [Suffix Decoding](suffix.md)
+t
+r-tok
 
-## Method Selection at a Glance
+ 
+at
 
-Use this qualitative table as a starting point for method selection. Real gains
-depend on your model family, traffic pattern, hardware, and sampling settings.
+cy u
+d
+r m
+d
+um-to-
+o
+ QPS (qu
+ry p
+r s
+co
+d), m
+mory-bou
+d 
+ork
+oads.
+To tra
 
-| Method | Low QPS (latency focused) | High QPS (throughput focused) | Notes |
+ your o
+
+ draft mod
+
+s for opt
+m
+z
+d sp
+cu
+at
+v
+ d
+cod
+
+g, s
+ [v
+m-proj
+ct/sp
+cu
+ators](sp
+cu
+ators.md) for s
+am
+
+ss tra
+
+
+
+g a
+d 
+
+t
+grat
+o
+ 
+
+th vLLM.
+## vLLM Sp
+cu
+at
+o
+ M
+thods
+vLLM supports a var
+
+ty of m
+thods of sp
+cu
+at
+v
+ d
+cod
+
+g. Mod
+
+-bas
+d m
+thods such as EAGLE, MTP, draft mod
+
+s, PARD a
+d MLP prov
+d
+ th
+ b
+st 
+at
+
+cy r
+duct
+o
+, 
+h
+
+
+ s
+mp
+
+r m
+thods such as 
+-gram a
+d suff
+x d
+cod
+
+g prov
+d
+ mod
+st sp
+dups 
+
+thout 
+
+cr
+as
+
+g 
+ork
+oad dur
+
+g p
+ak traff
+c.
+    - [EAGLE](
+ag
+
+.md)
+    - [Mu
+t
+-Tok
+
+ Pr
+d
+ct
+o
+ (MTP)](mtp.md)
+    - [Draft Mod
+
+](draft_mod
+
+.md)
+    - [Para
+
+
+ Draft Mod
+
+ (PARD)](para
+
+
+_draft_mod
+
+.md)
+    - [Mu
+t
+-Lay
+r P
+rc
+ptro
+](m
+p.md)
+    - [N-Gram](
+_gram.md)
+    - [Suff
+x D
+cod
+
+g](suff
+x.md)
+## M
+thod S
+
+
+ct
+o
+ at a G
+a
+c
+
+Us
+ th
+s qua
+
+tat
+v
+ tab
+
+ as a start
+
+g po
+
+t for m
+thod s
+
+
+ct
+o
+. R
+a
+ ga
+
+s
+d
+p
+
+d o
+ your mod
+
+ fam
+
+y, traff
+c patt
+r
+, hard
+ar
+, a
+d samp
+
+
+g s
+tt
+
+gs.
+| M
+thod | Lo
+ QPS (
+at
+
+cy focus
+d) | H
+gh QPS (throughput focus
+d) | Not
+s |
 | --- | --- | --- | --- |
-| EAGLE | High gain | Medium to high gain | Strong general-purpose model-based method. |
-| MTP | High gain | Medium to high gain | Best when the target model has native MTP support. |
-| Draft model | High gain | Medium gain | Needs a separate draft model. |
-| Parallel Draft Model | High gain | Medium to high gain | Low draft model latency. |
-| MLP speculator | Medium to high gain | Medium gain | Good when compatible MLP speculators are available. |
-| N-gram | Low to medium gain | Medium gain | Lightweight and easy to enable. |
-| Suffix decoding | Low to medium gain | Medium gain | No extra draft model; dynamic speculation depth. |
+| EAGLE | H
+gh ga
 
-For reproducible measurements in your environment, use
-[`examples/offline_inference/spec_decode.py`](../../../examples/offline_inference/spec_decode.py)
-or the [benchmark CLI guide](../../benchmarking/cli.md).
+ | M
+d
+um to h
+gh ga
 
-## Lossless guarantees of Speculative Decoding
+ | Stro
+g g
 
-In vLLM, speculative decoding aims to enhance inference efficiency while maintaining accuracy. This section addresses the lossless guarantees of
-speculative decoding, breaking down the guarantees into three key areas:
 
-1. **Theoretical Losslessness**
-   \- Speculative decoding sampling is theoretically lossless up to the precision limits of hardware numerics. Floating-point errors might
-   cause slight variations in output distributions, as discussed
-   in [Accelerating Large Language Model Decoding with Speculative Sampling](https://arxiv.org/pdf/2302.01318)
+ra
+-purpos
+ mod
 
-2. **Algorithmic Losslessness**
-   \- vLLM’s implementation of speculative decoding is algorithmically validated to be lossless. Key validation tests include:
+-bas
+d m
+thod. |
+| MTP | H
+gh ga
 
-    > - **Rejection Sampler Convergence**: Ensures that samples from vLLM’s rejection sampler align with the target
-    >   distribution. [View Test Code](https://github.com/vllm-project/vllm/blob/47b65a550866c7ffbd076ecb74106714838ce7da/tests/samplers/test_rejection_sampler.py#L252)
-    > - **Greedy Sampling Equality**: Confirms that greedy sampling with speculative decoding matches greedy sampling
-    >   without it. This verifies that vLLM's speculative decoding framework, when integrated with the vLLM forward pass and the vLLM rejection sampler,
-    >   provides a lossless guarantee. Almost all of the tests in [tests/spec_decode/e2e](/tests/v1/spec_decode).
-    >   verify this property using [this assertion implementation](https://github.com/vllm-project/vllm/blob/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e/conftest.py#L291)
+ | M
+d
+um to h
+gh ga
 
-3. **vLLM Logprob Stability**
-   \- vLLM does not currently guarantee stable token log probabilities (logprobs). This can result in different outputs for the
-   same request across runs. For more details, see the FAQ section
-   titled *Can the output of a prompt vary across runs in vLLM?* in the [FAQs](../../usage/faq.md).
+ | B
+st 
+h
 
-While vLLM strives to ensure losslessness in speculative decoding, variations in generated outputs with and without speculative decoding
-can occur due to following factors:
+ th
+ targ
+t mod
 
-- **Floating-Point Precision**: Differences in hardware numerical precision may lead to slight discrepancies in the output distribution.
-- **Batch Size and Numerical Stability**: Changes in batch size may cause variations in logprobs and output probabilities, potentially
-  due to non-deterministic behavior in batched operations or numerical instability.
+ has 
+at
+v
+ MTP support. |
+| Draft mod
 
-For mitigation strategies, please refer to the FAQ entry *Can the output of a prompt vary across runs in vLLM?* in the [FAQs](../../usage/faq.md).
+ | H
+gh ga
 
-## Known Feature Incompatibility
+ | M
+d
+um ga
 
-1. Pipeline parallelism is not composible with speculative decoding as of `vllm<=0.15.0`
-2. Speculative decoding with a draft models is not supported in `vllm<=0.10.0`
+ | N
+ds a s
+parat
+ draft mod
 
-## Resources for vLLM contributors
+. |
+| Para
 
-- [[vLLM Office Hours #40] Intro to Speculators](https://www.youtube.com/watch?v=2ISAr_JVGLs)
-- [A Hacker's Guide to Speculative Decoding in vLLM](https://www.youtube.com/watch?v=9wNAgpX6z_4)
-- [What is Lookahead Scheduling in vLLM?](https://docs.google.com/document/d/1Z9TvqzzBPnh5WHcRwjvK2UEeFeq5zMZb5mFE8jR0HCs/edit#heading=h.1fjfb0donq5a)
-- [Information on batch expansion](https://docs.google.com/document/d/1T-JaS2T1NRfdP51qzqpyakoCXxSXTtORppiwaj5asxA/edit#heading=h.kk7dq05lc6q8)
-- [Dynamic speculative decoding](https://github.com/vllm-project/vllm/issues/4565)
+
+ Draft Mod
+
+ | H
+gh ga
+
+ | M
+d
+um to h
+gh ga
+
+ | Lo
+ draft mod
+
+ 
+at
+
+cy. |
+| MLP sp
+cu
+ator | M
+d
+um to h
+gh ga
+
+ | M
+d
+um ga
+
+ | Good 
+h
+
+ compat
+b
+
+ MLP sp
+cu
+ators ar
+ ava
+
+ab
+
+. |
+| N-gram | Lo
+ to m
+d
+um ga
+
+ | M
+d
+um ga
+
+ | L
+ght
+
+
+ght a
+d 
+asy to 
+
+ab
+
+. |
+| Suff
+x d
+cod
+
+g | Lo
+ to m
+d
+um ga
+
+ | M
+d
+um ga
+
+ | No 
+xtra draft mod
+
+; dy
+am
+c sp
+cu
+at
+o
+ d
+pth. |
+For r
+produc
+b
+
+ m
+asur
+m
+
+ts 
+
+ your 
+
+v
+ro
+m
+
+t, us
+
+[`
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/sp
+c_d
+cod
+.py`](../../../
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/sp
+c_d
+cod
+.py)
+or th
+ [b
+
+chmark CLI gu
+d
+](../../b
+
+chmark
+
+g/c
+
+.md).
+## Loss
+
+ss guara
+t
+s of Sp
+cu
+at
+v
+ D
+cod
+
+g
+I
+ vLLM, sp
+cu
+at
+v
+ d
+cod
+
+g a
+ms to 
+
+ha
+c
+ 
+
+f
+r
+
+c
+ 
+ff
+c
+
+
+cy 
+h
+
+
+ ma
+
+ta
+
+
+
+g accuracy. Th
+s s
+ct
+o
+ addr
+ss
+s th
+ 
+oss
+
+ss guara
+t
+s of
+sp
+cu
+at
+v
+ d
+cod
+
+g, br
+ak
+
+g do
+
+ th
+ guara
+t
+s 
+
+to thr
+ k
+y ar
+as:
+1. **Th
+or
+t
+ca
+ Loss
+
+ss
+
+ss**
+   \- Sp
+cu
+at
+v
+ d
+cod
+
+g samp
+
+
+g 
+s th
+or
+t
+ca
+y 
+oss
+
+ss up to th
+ pr
+c
+s
+o
+ 
+
+m
+ts of hard
+ar
+ 
+um
+r
+cs. F
+oat
+
+g-po
+
+t 
+rrors m
+ght
+   caus
+ s
+
+ght var
+at
+o
+s 
+
+ output d
+str
+but
+o
+s, as d
+scuss
+d
+   
+
+ [Acc
+
+
+rat
+
+g Larg
+ La
+guag
+ Mod
+
+ D
+cod
+
+g 
+
+th Sp
+cu
+at
+v
+ Samp
+
+
+g](https://arx
+v.org/pdf/2302.01318)
+2. **A
+gor
+thm
+c Loss
+
+ss
+
+ss**
+   \- vLLM’s 
+mp
+
+m
+
+tat
+o
+ of sp
+cu
+at
+v
+ d
+cod
+
+g 
+s a
+gor
+thm
+ca
+y va
+
+dat
+d to b
+ 
+oss
+
+ss. K
+y va
+
+dat
+o
+ t
+sts 
+
+c
+ud
+:
+    
+ - **R
+j
+ct
+o
+ Samp
+
+r Co
+v
+rg
+
+c
+**: E
+sur
+s that samp
+
+s from vLLM’s r
+j
+ct
+o
+ samp
+
+r a
+
+g
+ 
+
+th th
+ targ
+t
+    
+   d
+str
+but
+o
+. [V
+
+
+ T
+st Cod
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/47b65a550866c7ffbd076
+cb74106714838c
+7da/t
+sts/samp
+
+rs/t
+st_r
+j
+ct
+o
+_samp
+
+r.py#L252)
+    
+ - **Gr
+dy Samp
+
+
+g Equa
+
+ty**: Co
+f
+rms that gr
+dy samp
+
+
+g 
+
+th sp
+cu
+at
+v
+ d
+cod
+
+g match
+s gr
+dy samp
+
+
+g
+    
+   
+
+thout 
+t. Th
+s v
+r
+f
+
+s that vLLM's sp
+cu
+at
+v
+ d
+cod
+
+g fram
+
+ork, 
+h
+
+ 
+
+t
+grat
+d 
+
+th th
+ vLLM for
+ard pass a
+d th
+ vLLM r
+j
+ct
+o
+ samp
+
+r,
+    
+   prov
+d
+s a 
+oss
+
+ss guara
+t
+. A
+most a
+ of th
+ t
+sts 
+
+ [t
+sts/sp
+c_d
+cod
+/
+2
+](/t
+sts/v1/sp
+c_d
+cod
+).
+    
+   v
+r
+fy th
+s prop
+rty us
+
+g [th
+s ass
+rt
+o
+ 
+mp
+
+m
+
+tat
+o
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/b67a
+00cdbb
+1a58ffc8ff170f0c8d79044a684a/t
+sts/sp
+c_d
+cod
+/
+2
+/co
+ft
+st.py#L291)
+3. **vLLM Logprob Stab
+
+
+ty**
+   \- vLLM do
+s 
+ot curr
+
+t
+y guara
+t
+ stab
+
+ tok
+
+ 
+og probab
+
+
+t
+
+s (
+ogprobs). Th
+s ca
+ r
+su
+t 
+
+ d
+ff
+r
+
+t outputs for th
+
+   sam
+ r
+qu
+st across ru
+s. For mor
+ d
+ta
+
+s, s
+ th
+ FAQ s
+ct
+o
+
+   t
+t
+
+d *Ca
+ th
+ output of a prompt vary across ru
+s 
+
+ vLLM?* 
+
+ th
+ [FAQs](../../usag
+/faq.md).
+Wh
+
+
+ vLLM str
+v
+s to 
+
+sur
+ 
+oss
+
+ss
+
+ss 
+
+ sp
+cu
+at
+v
+ d
+cod
+
+g, var
+at
+o
+s 
+
+ g
+
+
+rat
+d outputs 
+
+th a
+d 
+
+thout sp
+cu
+at
+v
+ d
+cod
+
+g
+ca
+ occur du
+ to fo
+o
+
+
+g factors:
+    - **F
+oat
+
+g-Po
+
+t Pr
+c
+s
+o
+**: D
+ff
+r
+
+c
+s 
+
+ hard
+ar
+ 
+um
+r
+ca
+ pr
+c
+s
+o
+ may 
+
+ad to s
+
+ght d
+scr
+pa
+c
+
+s 
+
+ th
+ output d
+str
+but
+o
+.
+    - **Batch S
+z
+ a
+d Num
+r
+ca
+ Stab
+
+
+ty**: Cha
+g
+s 
+
+ batch s
+z
+ may caus
+ var
+at
+o
+s 
+
+ 
+ogprobs a
+d output probab
+
+
+t
+
+s, pot
+
+t
+a
+y
+  du
+ to 
+o
+-d
+t
+rm
+
+
+st
+c b
+hav
+or 
+
+ batch
+d op
+rat
+o
+s or 
+um
+r
+ca
+ 
+
+stab
+
+
+ty.
+For m
+t
+gat
+o
+ strat
+g
+
+s, p
+
+as
+ r
+f
+r to th
+ FAQ 
+
+try *Ca
+ th
+ output of a prompt vary across ru
+s 
+
+ vLLM?* 
+
+ th
+ [FAQs](../../usag
+/faq.md).
+## K
+o
+
+ F
+atur
+ I
+compat
+b
+
+
+ty
+1. P
+p
+
+
+
+
+ para
+
+
+
+sm 
+s 
+ot compos
+b
+
+ 
+
+th sp
+cu
+at
+v
+ d
+cod
+
+g as of `v
+m
+=0.15.0`
+2. Sp
+cu
+at
+v
+ d
+cod
+
+g 
+
+th a draft mod
+
+s 
+s 
+ot support
+d 
+
+ `v
+m
+=0.10.0`
+## R
+sourc
+s for vLLM co
+tr
+butors
+    - [[vLLM Off
+c
+ Hours #40] I
+tro to Sp
+cu
+ators](https://
+.youtub
+.com/
+atch?v=2ISAr_JVGLs)
+    - [A Hack
+r's Gu
+d
+ to Sp
+cu
+at
+v
+ D
+cod
+
+g 
+
+ vLLM](https://
+.youtub
+.com/
+atch?v=9
+NAgpX6z_4)
+    - [What 
+s Lookah
+ad Sch
+du
+
+
+g 
+
+ vLLM?](https://docs.goog
+
+.com/docum
+
+t/d/1Z9TvqzzBP
+h5WHcR
+jvK2UE
+F
+q5zMZb5mFE8jR0HCs/
+d
+t#h
+ad
+
+g=h.1fjfb0do
+q5a)
+    - [I
+format
+o
+ o
+ batch 
+xpa
+s
+o
+](https://docs.goog
+
+.com/docum
+
+t/d/1T-JaS2T1NRfdP51qzqpyakoCXxSXTtORpp
+
+aj5asxA/
+d
+t#h
+ad
+
+g=h.kk7dq05
+c6q8)
+    - [Dy
+am
+c sp
+cu
+at
+v
+ d
+cod
+
+g](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/4565)

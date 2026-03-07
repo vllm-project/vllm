@@ -1,5 +1,85 @@
 # KAITO
+[KAITO](https://ka
+to-proj
+ct.g
+thub.
+o/ka
+to/docs/) 
+s a Kub
+r
 
-[KAITO](https://kaito-project.github.io/kaito/docs/) is a Kubernetes operator that supports deploying and serving LLMs with vLLM. It offers managing large models via container images with built-in OpenAI-compatible inference, auto-provisioning GPU nodes and curated model presets.
+t
+s op
+rator that supports d
+p
+oy
 
-Please refer to [quick start](https://kaito-project.github.io/kaito/docs/quick-start) for more details.
+g a
+d s
+rv
+
+g LLMs 
+
+th vLLM. It off
+rs ma
+ag
+
+g 
+arg
+ mod
+
+s v
+a co
+ta
+
+
+r 
+mag
+s 
+
+th bu
+
+t-
+
+ Op
+
+AI-compat
+b
+
+ 
+
+f
+r
+
+c
+, auto-prov
+s
+o
+
+
+g GPU 
+od
+s a
+d curat
+d mod
+
+ pr
+s
+ts.
+P
+
+as
+ r
+f
+r to [qu
+ck start](https://ka
+to-proj
+ct.g
+thub.
+o/ka
+to/docs/qu
+ck-start) for mor
+ d
+ta
+
+s.

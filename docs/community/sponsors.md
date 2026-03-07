@@ -1,5 +1,47 @@
-# Sponsors
+# Spo
+sors
+vLLM 
+s a commu
 
-vLLM is a community project. Our compute resources for development and testing are supported by the following organizations. Thank you for your support!
+ty proj
+ct. Our comput
+ r
+sourc
+s for d
+v
 
-Please visit [vllm.ai/#sponsors](https://vllm.ai/#sponsors) to learn more.
+opm
+
+t a
+d t
+st
+
+g ar
+ support
+d by th
+ fo
+o
+
+
+g orga
+
+zat
+o
+s. Tha
+k you for your support!
+P
+
+as
+ v
+s
+t [v
+m.a
+/#spo
+sors](https://v
+m.a
+/#spo
+sors) to 
+
+ar
+ mor
+.

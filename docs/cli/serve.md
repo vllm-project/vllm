@@ -1,9 +1,29 @@
-# vllm serve
+# v
+m s
+rv
 
-## JSON CLI Arguments
+## JSON CLI Argum
 
---8<-- "docs/cli/json_tip.inc.md"
+ts
+--8
+-- "docs/c
 
-## Arguments
+/jso
+_t
+p.
 
---8<-- "docs/generated/argparse/serve.inc.md"
+c.md"
+## Argum
+
+ts
+--8
+-- "docs/g
+
+
+rat
+d/argpars
+/s
+rv
+.
+
+c.md"

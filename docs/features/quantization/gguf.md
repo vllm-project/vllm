@@ -1,87 +1,706 @@
 # GGUF
+!!! 
+ar
 
-!!! warning
-    Please note that GGUF support in vLLM is highly experimental and under-optimized at the moment, it might be incompatible with other features. Currently, you can use GGUF as a way to reduce memory footprint. If you encounter any issues, please report them to the vLLM team.
 
-!!! warning
-    Currently, vllm only supports loading single-file GGUF models. If you have a multi-files GGUF model, you can use [gguf-split](https://github.com/ggerganov/llama.cpp/pull/6135) tool to merge them to a single-file model.
+g
+    P
 
-To run a GGUF model with vLLM, you can use the `repo_id:quant_type` format to load directly from HuggingFace. For example, to load a Q4_K_M quantized model from [unsloth/Qwen3-0.6B-GGUF](https://huggingface.co/unsloth/Qwen3-0.6B-GGUF):
+as
+ 
+ot
+ that GGUF support 
 
+ vLLM 
+s h
+gh
+y 
+xp
+r
+m
+
+ta
+ a
+d u
+d
+r-opt
+m
+z
+d at th
+ mom
+
+t, 
+t m
+ght b
+ 
+
+compat
+b
+
+ 
+
+th oth
+r f
+atur
+s. Curr
+
+t
+y, you ca
+ us
+ GGUF as a 
+ay to r
+duc
+ m
+mory footpr
+
+t. If you 
+
+cou
+t
+r a
+y 
+ssu
+s, p
+
+as
+ r
+port th
+m to th
+ vLLM t
+am.
+!!! 
+ar
+
+
+g
+    Curr
+
+t
+y, v
+m o
+
+y supports 
+oad
+
+g s
+
+g
+
+-f
+
+
+ GGUF mod
+
+s. If you hav
+ a mu
+t
+-f
+
+
+s GGUF mod
+
+, you ca
+ us
+ [gguf-sp
+
+t](https://g
+thub.com/gg
+rga
+ov/
+ama.cpp/pu
+/6135) too
+ to m
+rg
+ th
+m to a s
+
+g
+
+-f
+
+
+ mod
+
+.
+To ru
+ a GGUF mod
+
+ 
+
+th vLLM, you ca
+ us
+ th
+ `r
+po_
+d:qua
+t_typ
+` format to 
+oad d
+r
+ct
+y from Hugg
+
+gFac
+. For 
+xamp
+
+, to 
+oad a Q4_K_M qua
+t
+z
+d mod
+
+ from [u
+s
+oth/Q
+
+
+3-0.6B-GGUF](https://hugg
+
+gfac
+.co/u
+s
+oth/Q
+
+
+3-0.6B-GGUF):
 ```bash
-# We recommend using the tokenizer from base model to avoid long-time and buggy tokenizer conversion.
-vllm serve unsloth/Qwen3-0.6B-GGUF:Q4_K_M --tokenizer Qwen/Qwen3-0.6B
+# W
+ r
+comm
+
+d us
+
+g th
+ tok
+
+
+z
+r from bas
+ mod
+
+ to avo
+d 
+o
+g-t
+m
+ a
+d buggy tok
+
+
+z
+r co
+v
+rs
+o
+.
+v
+m s
+rv
+ u
+s
+oth/Q
+
+
+3-0.6B-GGUF:Q4_K_M --tok
+
+
+z
+r Q
+
+
+/Q
+
+
+3-0.6B
 ```
+You ca
+ a
+so add `--t
 
-You can also add `--tensor-parallel-size 2` to enable tensor parallelism inference with 2 GPUs:
+sor-para
 
+
+-s
+z
+ 2` to 
+
+ab
+
+ t
+
+sor para
+
+
+
+sm 
+
+f
+r
+
+c
+ 
+
+th 2 GPUs:
 ```bash
-vllm serve unsloth/Qwen3-0.6B-GGUF:Q4_K_M \
-   --tokenizer Qwen/Qwen3-0.6B \
-   --tensor-parallel-size 2
+v
+m s
+rv
+ u
+s
+oth/Q
+
+
+3-0.6B-GGUF:Q4_K_M \
+   --tok
+
+
+z
+r Q
+
+
+/Q
+
+
+3-0.6B \
+   --t
+
+sor-para
+
+
+-s
+z
+ 2
 ```
+A
+t
+r
+at
+v
 
-Alternatively, you can download and use a local GGUF file:
+y, you ca
+ do
 
+
+oad a
+d us
+ a 
+oca
+ GGUF f
+
+
+:
 ```bash
-wget https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf
-vllm serve ./Qwen3-0.6B-Q4_K_M.gguf --tokenizer Qwen/Qwen3-0.6B
+
+g
+t https://hugg
+
+gfac
+.co/u
+s
+oth/Q
+
+
+3-0.6B-GGUF/r
+so
+v
+/ma
+
+/Q
+
+
+3-0.6B-Q4_K_M.gguf
+v
+m s
+rv
+ ./Q
+
+
+3-0.6B-Q4_K_M.gguf --tok
+
+
+z
+r Q
+
+
+/Q
+
+
+3-0.6B
 ```
+!!! 
+ar
 
-!!! warning
-    We recommend using the tokenizer from base model instead of GGUF model. Because the tokenizer conversion from GGUF is time-consuming and unstable, especially for some models with large vocab size.
 
-GGUF assumes that HuggingFace can convert the metadata to a config file. In case HuggingFace doesn't support your model you can manually create a config and pass it as hf-config-path
+g
+    W
+ r
+comm
 
+d us
+
+g th
+ tok
+
+
+z
+r from bas
+ mod
+
+ 
+
+st
+ad of GGUF mod
+
+. B
+caus
+ th
+ tok
+
+
+z
+r co
+v
+rs
+o
+ from GGUF 
+s t
+m
+-co
+sum
+
+g a
+d u
+stab
+
+, 
+sp
+c
+a
+y for som
+ mod
+
+s 
+
+th 
+arg
+ vocab s
+z
+.
+GGUF assum
+s that Hugg
+
+gFac
+ ca
+ co
+v
+rt th
+ m
+tadata to a co
+f
+g f
+
+
+. I
+ cas
+ Hugg
+
+gFac
+ do
+s
+'t support your mod
+
+ you ca
+ ma
+ua
+y cr
+at
+ a co
+f
+g a
+d pass 
+t as hf-co
+f
+g-path
 ```bash
-# If your model is not supported by HuggingFace you can manually provide a HuggingFace compatible config path
-vllm serve unsloth/Qwen3-0.6B-GGUF:Q4_K_M \
-   --tokenizer Qwen/Qwen3-0.6B \
-   --hf-config-path Qwen/Qwen3-0.6B
+# If your mod
+
+ 
+s 
+ot support
+d by Hugg
+
+gFac
+ you ca
+ ma
+ua
+y prov
+d
+ a Hugg
+
+gFac
+ compat
+b
+
+ co
+f
+g path
+v
+m s
+rv
+ u
+s
+oth/Q
+
+
+3-0.6B-GGUF:Q4_K_M \
+   --tok
+
+
+z
+r Q
+
+
+/Q
+
+
+3-0.6B \
+   --hf-co
+f
+g-path Q
+
+
+/Q
+
+
+3-0.6B
 ```
+You ca
+ a
+so us
+ th
+ GGUF mod
 
-You can also use the GGUF model directly through the LLM entrypoint:
+ d
+r
+ct
+y through th
+ LLM 
 
-??? code
+trypo
 
-      ```python
-      from vllm import LLM, SamplingParams
+t:
+??? cod
 
-      # In this script, we demonstrate how to pass input to the chat method:
-      conversation = [
+      ```pytho
+
+      from v
+m 
+mport LLM, Samp
+
+
+gParams
+      # I
+ th
+s scr
+pt, 
+
+ d
+mo
+strat
+ ho
+ to pass 
+
+put to th
+ chat m
+thod:
+      co
+v
+rsat
+o
+ = [
          {
-            "role": "system",
-            "content": "You are a helpful assistant",
+            "ro
+
+": "syst
+m",
+            "co
+t
+
+t": "You ar
+ a h
+
+pfu
+ ass
+sta
+t",
          },
          {
-            "role": "user",
-            "content": "Hello",
+            "ro
+
+": "us
+r",
+            "co
+t
+
+t": "H
+
+o",
          },
          {
-            "role": "assistant",
-            "content": "Hello! How can I assist you today?",
+            "ro
+
+": "ass
+sta
+t",
+            "co
+t
+
+t": "H
+
+o! Ho
+ ca
+ I ass
+st you today?",
          },
          {
-            "role": "user",
-            "content": "Write an essay about the importance of higher education.",
+            "ro
+
+": "us
+r",
+            "co
+t
+
+t": "Wr
+t
+ a
+ 
+ssay about th
+ 
+mporta
+c
+ of h
+gh
+r 
+ducat
+o
+.",
          },
       ]
+      # Cr
+at
+ a samp
 
-      # Create a sampling params object.
-      sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-      # Create an LLM using repo_id:quant_type format.
-      llm = LLM(
-         model="unsloth/Qwen3-0.6B-GGUF:Q4_K_M",
-         tokenizer="Qwen/Qwen3-0.6B",
+g params obj
+ct.
+      samp
+
+
+g_params = Samp
+
+
+gParams(t
+mp
+ratur
+=0.8, top_p=0.95)
+      # Cr
+at
+ a
+ LLM us
+
+g r
+po_
+d:qua
+t_typ
+ format.
+      
+m = LLM(
+         mod
+
+="u
+s
+oth/Q
+
+
+3-0.6B-GGUF:Q4_K_M",
+         tok
+
+
+z
+r="Q
+
+
+/Q
+
+
+3-0.6B",
       )
-      # Generate texts from the prompts. The output is a list of RequestOutput objects
-      # that contain the prompt, generated text, and other information.
-      outputs = llm.chat(conversation, sampling_params)
+      # G
 
-      # Print the outputs.
-      for output in outputs:
+
+rat
+ t
+xts from th
+ prompts. Th
+ output 
+s a 
+
+st of R
+qu
+stOutput obj
+cts
+      # that co
+ta
+
+ th
+ prompt, g
+
+
+rat
+d t
+xt, a
+d oth
+r 
+
+format
+o
+.
+      outputs = 
+m.chat(co
+v
+rsat
+o
+, samp
+
+
+g_params)
+      # Pr
+
+t th
+ outputs.
+      for output 
+
+ outputs:
          prompt = output.prompt
-         generated_text = output.outputs[0].text
-         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-      ```
+         g
+
+
+rat
+d_t
+xt = output.outputs[0].t
+xt
+         pr
+
+t(f"Prompt: {prompt!r}, G
+
+
+rat
+d t
+xt: {g
+
+
+rat
+d_t
+xt!r}")
+```
