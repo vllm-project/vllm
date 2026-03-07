@@ -483,13 +483,7 @@ class GroupCoordinator:
         if curr_stream != stream:
             stream.wait_stream(curr_stream)
 
-        # torch.Stream currently doesn't support reentrance on with statement.
-        # Can replace with `with stream:` after the following issue gets fixed
-        # https://github.com/pytorch/pytorch/issues/176560
-        with (
-            torch.Stream(stream.stream_id, stream.device_index, stream.device_type),
-            maybe_ca_context,
-        ):
+        with torch.cuda.stream(stream), maybe_ca_context:
             yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
