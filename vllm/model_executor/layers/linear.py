@@ -246,6 +246,7 @@ class LinearBase(PluggableLayer):
         self,
         input_size: int,
         output_size: int,
+        bias: bool = False,
         skip_bias_add: bool = False,
         params_dtype: torch.dtype | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -259,6 +260,7 @@ class LinearBase(PluggableLayer):
         # Keep input parameters
         self.input_size = input_size
         self.output_size = output_size
+        self.has_bias = bias
         self.skip_bias_add = skip_bias_add
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -324,6 +326,7 @@ class ReplicatedLinear(LinearBase):
         super().__init__(
             input_size,
             output_size,
+            bias,
             skip_bias_add,
             params_dtype,
             quant_config,
@@ -459,6 +462,7 @@ class ColumnParallelLinear(LinearBase):
         super().__init__(
             input_size,
             output_size,
+            bias,
             skip_bias_add,
             params_dtype,
             quant_config,
@@ -484,6 +488,7 @@ class ColumnParallelLinear(LinearBase):
                 else self.weight_loader
             ),
         )
+
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size_per_partition, dtype=params_dtype)
@@ -1407,6 +1412,7 @@ class RowParallelLinear(LinearBase):
         super().__init__(
             input_size,
             output_size,
+            bias,
             skip_bias_add,
             params_dtype,
             quant_config,
