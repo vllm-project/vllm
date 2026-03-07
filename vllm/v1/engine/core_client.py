@@ -567,10 +567,7 @@ class MPClient(EngineCoreClient):
                 )
 
                 with launch_core_engines(
-                    vllm_config,
-                    executor_class,
-                    log_stats,
-                    addresses,
+                    vllm_config, executor_class, log_stats, addresses
                 ) as (engine_manager, coordinator, addresses):
                     self.resources.coordinator = coordinator
                     self.resources.engine_manager = engine_manager
@@ -638,10 +635,10 @@ class MPClient(EngineCoreClient):
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown engine manager under timeout and clean up resources."""
-        self._finalizer.detach()
-        if self.resources.engine_manager is not None:
-            self.resources.engine_manager.shutdown(timeout=timeout)
-        self.resources()
+        if self._finalizer.detach() is not None:
+            if self.resources.engine_manager is not None:
+                self.resources.engine_manager.shutdown(timeout=timeout)
+            self.resources()
 
     def _format_exception(self, e: Exception) -> Exception:
         """If errored, use EngineDeadError so root cause is clear."""
@@ -685,7 +682,7 @@ class MPClient(EngineCoreClient):
             sentinels = [proc.sentinel for proc in engine_processes]
             died = multiprocessing.connection.wait(sentinels)
             _self = self_ref()
-            if not _self or _self.resources.engine_dead:
+            if not _self or not _self._finalizer.alive or _self.resources.engine_dead:
                 return
             _self.resources.engine_dead = True
             proc_name = next(
