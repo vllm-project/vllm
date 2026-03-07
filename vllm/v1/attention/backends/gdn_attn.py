@@ -197,23 +197,25 @@ class GDNAttentionMetadataBuilder(
 
     @staticmethod
     def _compute_chunk_metadata(
-        num_prefills: int,
-        query_start_loc_p_cpu: torch.Tensor,
         chunk_size: int,
+        num_prefills: int,
+        num_computed_tokens_p_cpu: torch.Tensor,
+        query_start_loc_p_cpu: torch.Tensor,
     ) -> tuple[list[int], list[int], list[int]]:
         """
         Compute chunk-specific metadata for GDN.
 
         Unlike Mamba2, the FLA GDN kernel simply divides sequences into
         chunk_size-token chunks based on total sequence length, without
-        any alignment logic based on num_computed_tokens. This function
-        matches that behavior.
+        any alignment logic based on num_computed_tokens.
 
         Args:
+            chunk_size: Size of each chunk (64 for GDN)
             num_prefills: Number of prefill sequences
+            num_computed_tokens_p_cpu: Cumulative number of computed tokens for prefill
+                sequences, shape [num_prefills]
             query_start_loc_p_cpu: Cumulative sequence lengths for prefill sequences,
                 shape [num_prefills + 1]
-            chunk_size: Size of each chunk (64 for GDN)
 
         Returns:
             cu_chunk_seqlen: Cumulative chunk sequence lengths
@@ -435,9 +437,10 @@ class GDNAttentionMetadataBuilder(
                 non_spec_query_start_loc_cpu[-num_prefills - 1 :] - num_decode_tokens
             )
             cu_chunk_seqlen, seq_idx, last_chunk_indices = self._compute_chunk_metadata(
-                num_prefills=int(num_prefills),
-                query_start_loc_p_cpu=query_start_loc_p_cpu,
                 chunk_size=self.chunk_size,
+                num_prefills=int(num_prefills),
+                num_computed_tokens_p_cpu=num_computed_tokens_p.cpu(),
+                query_start_loc_p_cpu=query_start_loc_p_cpu,
             )
             seq_idx_p = torch.as_tensor(
                 seq_idx,
