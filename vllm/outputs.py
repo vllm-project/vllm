@@ -46,6 +46,10 @@ class CompletionOutput:
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
+    # Speculative decoding: True = token from draft (accepted), False = from target.
+    sd_source_mask: GenericSequence[bool] | None = None
+    # Speculative decoding stats: num_draft_tokens, num_accepted_tokens, efficiency.
+    sd_stats: dict[str, Any] | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -59,7 +63,9 @@ class CompletionOutput:
             f"cumulative_logprob={self.cumulative_logprob}, "
             f"logprobs={self.logprobs}, "
             f"finish_reason={self.finish_reason}, "
-            f"stop_reason={self.stop_reason})"
+            f"stop_reason={self.stop_reason}, "
+            f"sd_source_mask={self.sd_source_mask}, "
+            f"sd_stats={self.sd_stats})"
         )
 
 
@@ -165,6 +171,39 @@ class RequestOutput:
                         )
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason
+                        # Merge speculative decoding data
+                        if next_completion.sd_source_mask is not None:
+                            if completion.sd_source_mask is None:
+                                completion.sd_source_mask = []
+                            if not isinstance(
+                                completion.sd_source_mask, MutableSequence
+                            ):
+                                completion.sd_source_mask = list(
+                                    completion.sd_source_mask
+                                )
+                            completion.sd_source_mask.extend(
+                                next_completion.sd_source_mask
+                            )
+                        if next_completion.sd_stats is not None:
+                            if completion.sd_stats is None:
+                                completion.sd_stats = {}
+                            for k, v in next_completion.sd_stats.items():
+                                if k == "efficiency":
+                                    continue  # Recomputed from totals below
+                                if isinstance(v, (int, float)):
+                                    completion.sd_stats[k] = (
+                                        completion.sd_stats.get(k, 0) + v
+                                    )
+                                else:
+                                    completion.sd_stats[k] = v
+                            # Recompute efficiency from accumulated totals
+                            num_draft = completion.sd_stats.get("num_draft_tokens", 0)
+                            num_accepted = completion.sd_stats.get(
+                                "num_accepted_tokens", 0
+                            )
+                            completion.sd_stats["efficiency"] = (
+                                num_accepted / num_draft if num_draft > 0 else None
+                            )
                     else:
                         # Replace the output with the new one
                         self.outputs[i] = next_completion
