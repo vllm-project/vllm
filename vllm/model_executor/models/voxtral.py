@@ -5,7 +5,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property, partial
 from math import ceil
-from typing import Literal, cast
+from typing import cast
 
 import numpy as np
 import regex as re
@@ -25,6 +25,7 @@ from transformers.tokenization_utils_base import TextInput
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -519,14 +520,13 @@ class VoxtralForConditionalGeneration(
     # for speech-to-text transcription
     def get_generation_prompt(
         cls,
-        audio: np.ndarray,
-        model_config: ModelConfig,
-        stt_config: SpeechToTextConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
+        stt_params: SpeechToTextParams,
     ) -> PromptType:
+        audio = stt_params.audio
+        model_config = stt_params.model_config
+        stt_config = stt_params.stt_config
+        language = stt_params.language
+
         tokenizer = cached_tokenizer_from_config(model_config)
         audio = Audio(audio, int(stt_config.sample_rate), format="wav")  # lossless
         req = TranscriptionRequest(
