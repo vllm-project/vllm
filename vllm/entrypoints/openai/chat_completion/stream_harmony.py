@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     DeltaToolCall,
 )
+from vllm.entrypoints.openai.parser.harmony_utils import sanitize_harmony_name
 
 
 class TokenState(NamedTuple):
@@ -109,7 +110,9 @@ def extract_harmony_streaming_delta(
             opened_new_call = False
             if prev_recipient != group.recipient:
                 # New tool call - emit the opening message
-                tool_name = group.recipient.split("functions.", 1)[1]
+                tool_name = sanitize_harmony_name(
+                    group.recipient.split("functions.", 1)[1]
+                )
                 tool_messages.append(
                     DeltaToolCall(
                         id=make_tool_call_id(),
