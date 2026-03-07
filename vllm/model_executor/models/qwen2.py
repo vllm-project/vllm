@@ -365,12 +365,16 @@ class Qwen2Model(nn.Module):
 
         # TODO (@robertgshaw2): see if this can be moved out
         if is_interleaved(vllm_config.model_config.hf_text_config):
-            assert config.max_window_layers == config.num_hidden_layers, (
+            # Some config types (e.g., Qwen3_5TextConfig) may not have max_window_layers
+            max_window_layers = getattr(
+                config, "max_window_layers", config.num_hidden_layers
+            )
+            assert max_window_layers == config.num_hidden_layers, (
                 "Sliding window for some but all layers is not supported. "
                 "This model uses sliding window but `max_window_layers` = {} "
                 "is less than `num_hidden_layers` = {}. Please open an issue "
                 "to discuss this feature.".format(
-                    config.max_window_layers,
+                    max_window_layers,
                     config.num_hidden_layers,
                 )
             )
