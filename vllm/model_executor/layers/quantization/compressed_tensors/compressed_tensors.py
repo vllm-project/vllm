@@ -1088,6 +1088,14 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         layer._v_scale = layer.v_scale
         layer._q_scale = layer.q_scale
 
+        # Also set float scales used by FlashInfer for attention/cache paths.
+        if layer.k_scale.numel() == 1:
+            layer._k_scale_float = layer.k_scale.item()
+        if layer.v_scale.numel() == 1:
+            layer._v_scale_float = layer.v_scale.item()
+        if layer.q_scale.numel() == 1:
+            layer._q_scale_float = layer.q_scale.item()
+
         # Discard all placeholders.
         del layer.k_scale
         del layer.v_scale
