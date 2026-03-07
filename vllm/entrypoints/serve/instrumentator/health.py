@@ -21,9 +21,22 @@ def engine_client(request: Request) -> EngineClient:
 
 @router.get("/health", response_class=Response)
 async def health(raw_request: Request) -> Response:
-    """Health check."""
+    """Readiness probe. Returns 503 during shutdown/drain so that
+    load balancers stop sending new traffic."""
+    if getattr(raw_request.app.state, "draining", False):
+        return Response(status_code=503)
     try:
         await engine_client(raw_request).check_health()
         return Response(status_code=200)
     except EngineDeadError:
         return Response(status_code=503)
+
+
+@router.get("/live", response_class=Response)
+async def live(raw_request: Request) -> Response:
+    """Liveness probe. Returns 200 as long as the process is alive,
+    even during graceful shutdown/drain. Only returns 503 when the
+    engine has encountered a fatal error."""
+    if engine_client(raw_request).is_engine_dead:
+        return Response(status_code=503)
+    return Response(status_code=200)
