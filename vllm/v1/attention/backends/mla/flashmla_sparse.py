@@ -273,6 +273,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         # - SM100 (Blackwell head128): num_sm_parts = num_sms / s_q / 2
         # For max buffer size, use s_q = 1 (the case that produces largest output)
         # Use padded head count since that's what will be passed to the kernel
+        # Note: SM121/GB10 does not support FlashMLA Sparse (uses TRITON_MLA instead)
         h_q = self.fp8_decode_padded_heads
         if current_platform.is_device_capability_family(100):
             # SM100 head64 or head64x2 uses full SM count
@@ -561,7 +562,8 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         self.softmax_scale = scale
         assert indexer is not None
         self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
-        # Prefill BF16 kernel requires 64 on Hopper, 128 on Blackwell
+        # Prefill BF16 kernel requires 64 on Hopper, 128 on Blackwell (SM100 only)
+        # Note: SM121/GB10 does not support FlashMLA Sparse (uses TRITON_MLA instead)
         self.prefill_padding = (
             128 if current_platform.is_device_capability_family(100) else 64
         )
