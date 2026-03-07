@@ -22,7 +22,6 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-
 @triton.jit
 def _bmm_fp8_kernel(
     # Pointers
@@ -75,11 +74,11 @@ def _bmm_fp8_kernel(
     weight_base = weight_ptr + pid_n * stride_w_n
 
     # input tile: (BLOCK_SIZE_B, BLOCK_SIZE_L)
-    a_ptrs = input_base + (offs_b[:, None] * stride_in_b +
-                           offs_l[None, :] * stride_in_l)
+    a_ptrs = input_base + (
+        offs_b[:, None] * stride_in_b + offs_l[None, :] * stride_in_l
+    )
     # weight tile: (BLOCK_SIZE_L, BLOCK_SIZE_V)
-    b_ptrs = weight_base + (offs_l[:, None] * stride_w_l +
-                            offs_v[None, :] * stride_w_v)
+    b_ptrs = weight_base + (offs_l[:, None] * stride_w_l + offs_v[None, :] * stride_w_v)
 
     # Accumulate in fp32
     acc = tl.zeros((BLOCK_SIZE_B, BLOCK_SIZE_V), dtype=tl.float32)
@@ -109,8 +108,11 @@ def _bmm_fp8_kernel(
 
     # Store output at (B, N * V) layout
     # For head pid_n, output offset is: batch * stride_out_b + pid_n * V + v
-    out_ptrs = (output_ptr + offs_b[:, None] * stride_out_b +
-                (pid_n * V + offs_v[None, :]) * stride_out_v)
+    out_ptrs = (
+        output_ptr
+        + offs_b[:, None] * stride_out_b
+        + (pid_n * V + offs_v[None, :]) * stride_out_v
+    )
     out_mask = (offs_b[:, None] < B) & (offs_v[None, :] < V)
     tl.store(out_ptrs, result, mask=out_mask)
 
@@ -133,7 +135,7 @@ def bmm_fp8_quant(
     assert weight.ndim == 3
     N, B, L = input.shape
     N_w, L_w, V = weight.shape
-    assert N == N_w and L == L_w
+    assert N_w == N and L_w == L
 
     assert output.shape == (B, N * V)
     assert scale.numel() == 1
@@ -141,8 +143,7 @@ def bmm_fp8_quant(
     # Grid: one program per (tile_within_head, head)
     def grid(META):
         return (
-            triton.cdiv(B, META["BLOCK_SIZE_B"])
-            * triton.cdiv(V, META["BLOCK_SIZE_V"]),
+            triton.cdiv(B, META["BLOCK_SIZE_B"]) * triton.cdiv(V, META["BLOCK_SIZE_V"]),
             N,
         )
 

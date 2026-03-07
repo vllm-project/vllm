@@ -690,9 +690,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             # v_up projection
             # For FP8 static quant on the decode path, fuse quant into BMM
-            if (needs_quant and output_block_scale is None
-                    and not self.is_aiter_triton_fp4_bmm_enabled
-                    and not self.is_aiter_triton_fp8_bmm_enabled):
+            if (
+                needs_quant
+                and output_block_scale is None
+                and not self.is_aiter_triton_fp4_bmm_enabled
+                and not self.is_aiter_triton_fp8_bmm_enabled
+            ):
                 self._v_up_proj(
                     attn_out,
                     out=mqa_output_slice,
