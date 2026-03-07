@@ -19,6 +19,7 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.typing import AnyPoolingRequest, PoolingServeContext
+from vllm.exceptions import VLLMNotFoundError
 from vllm.inputs.data import ProcessorInputs
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
@@ -79,7 +80,7 @@ class PoolingServing:
     async def __call__(
         self,
         request: AnyPoolingRequest,
-        raw_request: Request,
+        raw_request: Request | None = None,
     ) -> Response:
         model_name = self.models.model_name()
         request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
@@ -260,7 +261,7 @@ class PoolingServing:
             return None
 
         # if _check_model has been called earlier, this will be unreachable
-        raise ValueError(f"The model `{request.model}` does not exist.")
+        raise VLLMNotFoundError(f"The model `{request.model}` does not exist.")
 
     def _get_active_default_mm_loras(
         self, request: AnyPoolingRequest
