@@ -282,7 +282,7 @@ Taking `MMEncoderAttention` as an example:
 
         def __init__(...):
             super().__init__(...)
-        
+
         def forward_oot(...):
             # Call optimized device-specific kernels.
             ...

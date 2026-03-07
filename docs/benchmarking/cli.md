@@ -374,7 +374,7 @@ The `--burstiness` parameter mathematically controls request arrival patterns us
 - Coefficient of Variation (CV): $\frac{1}{\sqrt{burstiness}}$
 - Traffic characteristics:
     - `burstiness = 0.1`: Highly bursty traffic (CV ≈ 3.16) - stress testing
-    - `burstiness = 1.0`: Natural Poisson traffic (CV = 1.0) - realistic simulation  
+    - `burstiness = 1.0`: Natural Poisson traffic (CV = 1.0) - realistic simulation
     - `burstiness = 5.0`: Uniform traffic (CV ≈ 0.45) - controlled load testing
 
 ![Load Pattern Examples](../assets/contributing/load-pattern-examples.png)

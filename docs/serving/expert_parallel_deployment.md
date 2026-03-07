@@ -228,7 +228,7 @@ For production deployments requiring strict SLA guarantees for time-to-first-tok
 ### Architecture Overview
 
 - **Prefill Instance**: Uses `deepep_high_throughput` backend for optimal prefill performance
-- **Decode Instance**: Uses `deepep_low_latency` backend for minimal decode latency  
+- **Decode Instance**: Uses `deepep_low_latency` backend for minimal decode latency
 - **KV Cache Transfer**: Connects instances via NIXL or other KV connectors
 
 ### Setup Steps
@@ -248,7 +248,7 @@ import uuid
 try:
     # 1: Set up clients for prefill and decode instances
     openai_api_key = "EMPTY"  # vLLM doesn't require a real API key
-    
+
     # Replace these IP addresses with your actual instance addresses
     prefill_client = OpenAI(
         api_key=openai_api_key,
@@ -256,9 +256,9 @@ try:
     )
     decode_client = OpenAI(
         api_key=openai_api_key,
-        base_url="http://192.168.1.101:8001/v1",  # Decode instance URL  
+        base_url="http://192.168.1.101:8001/v1",  # Decode instance URL
     )
-    
+
     # Get model name from prefill instance
     models = prefill_client.models.list()
     model = models.data[0].id
@@ -268,7 +268,7 @@ try:
     # Generate unique request ID to link prefill and decode operations
     request_id = str(uuid.uuid4())
     print(f"Request ID: {request_id}")
-    
+
     prefill_response = prefill_client.completions.create(
         model=model,
         # Prompt must exceed vLLM's block size (16 tokens) for PD to work
@@ -286,11 +286,11 @@ try:
         },
         extra_headers={"X-Request-Id": request_id},
     )
-    
+
     print("-" * 50)
     print("✓ Prefill completed successfully")
     print(f"Prefill response: {prefill_response.choices[0].text}")
-    
+
     # 3: Decode Phase
     # Transfer KV cache parameters from prefill to decode instance
     decode_response = decode_client.completions.create(
@@ -302,7 +302,7 @@ try:
         },
         extra_headers={"X-Request-Id": request_id},  # Same request ID
     )
-    
+
     print("-" * 50)
     print("✓ Decode completed successfully")
     print(f"Final response: {decode_response.choices[0].text}")

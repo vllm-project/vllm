@@ -11,7 +11,7 @@ Example: [examples/offline_inference/reproducibility.py](../../examples/offline_
 
 !!! warning
 
-    Setting `VLLM_ENABLE_V1_MULTIPROCESSING=0` will change the random state of user code 
+    Setting `VLLM_ENABLE_V1_MULTIPROCESSING=0` will change the random state of user code
     (i.e. the code that constructs [LLM][vllm.LLM] class).
 
 !!! note
@@ -34,7 +34,7 @@ for workflows such as speculative decoding. For more information, see: <https://
 
 !!! note
 
-    The random state in user code (i.e. the code that constructs [LLM][vllm.LLM] class) is updated by vLLM 
+    The random state in user code (i.e. the code that constructs [LLM][vllm.LLM] class) is updated by vLLM
     only if the workers are run in the same process as user code, i.e.: `VLLM_ENABLE_V1_MULTIPROCESSING=0`.
 
     By default, `VLLM_ENABLE_V1_MULTIPROCESSING=1` so you can use vLLM without having to worry about
