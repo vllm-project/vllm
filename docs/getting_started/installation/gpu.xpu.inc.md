@@ -41,7 +41,7 @@ pip install -v -r requirements/xpu.txt
 
     ```bash
     pip uninstall -y triton triton-xpu
-    pip install triton-xpu==3.6.0
+    pip install triton-xpu==3.6.0 --extra-index-url https://download.pytorch.org/whl/xpu
     ```
 
     !!! note
