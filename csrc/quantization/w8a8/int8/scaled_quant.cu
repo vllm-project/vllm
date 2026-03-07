@@ -5,7 +5,7 @@
 #include <cmath>
 
 #include "dispatch_utils.h"
-#include "quantization/vectorization_utils.cuh"
+#include "stable/quantization/vectorization_utils.cuh"
 #include "cub_helpers.h"
 
 static inline __device__ int8_t float_to_int8_rn(float x) {
