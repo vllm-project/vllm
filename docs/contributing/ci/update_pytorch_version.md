@@ -1,104 +1,1141 @@
-# Update PyTorch version on vLLM OSS CI/CD
+# Updat
+ PyTorch v
+rs
+o
+ o
+ vLLM OSS CI/CD
+vLLM's curr
 
-vLLM's current policy is to always use the latest PyTorch stable
-release in CI/CD. It is standard practice to submit a PR to update the
-PyTorch version as early as possible when a new [PyTorch stable
-release](https://github.com/pytorch/pytorch/blob/main/RELEASE.md#release-cadence) becomes available.
-This process is non-trivial due to the gap between PyTorch
-releases. Using <https://github.com/vllm-project/vllm/pull/16859> as an example, this document outlines common steps to achieve this
-update along with a list of potential issues and how to address them.
+t po
 
-## Test PyTorch release candidates (RCs)
+cy 
+s to a
 
-Updating PyTorch in vLLM after the official release is not
-ideal because any issues discovered at that point can only be resolved
-by waiting for the next release or by implementing hacky workarounds in vLLM.
-The better solution is to test vLLM with PyTorch release candidates (RC) to ensure
-compatibility before each release.
+ays us
+ th
+ 
+at
+st PyTorch stab
 
-PyTorch release candidates can be downloaded from [PyTorch test index](https://download.pytorch.org/whl/test).
-For example, `torch2.7.0+cu12.8` RC can be installed using the following command:
 
+r
+
+
+as
+ 
+
+ CI/CD. It 
+s sta
+dard pract
+c
+ to subm
+t a PR to updat
+ th
+
+PyTorch v
+rs
+o
+ as 
+ar
+y as poss
+b
+
+ 
+h
+
+ a 
+
+
+ [PyTorch stab
+
+
+r
+
+
+as
+](https://g
+thub.com/pytorch/pytorch/b
+ob/ma
+
+/RELEASE.md#r
+
+
+as
+-cad
+
+c
+) b
+com
+s ava
+
+ab
+
+.
+Th
+s proc
+ss 
+s 
+o
+-tr
+v
+a
+ du
+ to th
+ gap b
+t
+
+
+ PyTorch
+r
+
+
+as
+s. Us
+
+g 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/16859
+ as a
+ 
+xamp
+
+, th
+s docum
+
+t out
+
+
+
+s commo
+ st
+ps to ach
+
+v
+ th
+s
+updat
+ a
+o
+g 
+
+th a 
+
+st of pot
+
+t
+a
+ 
+ssu
+s a
+d ho
+ to addr
+ss th
+m.
+## T
+st PyTorch r
+
+
+as
+ ca
+d
+dat
+s (RCs)
+Updat
+
+g PyTorch 
+
+ vLLM aft
+r th
+ off
+c
+a
+ r
+
+
+as
+ 
+s 
+ot
+
+d
+a
+ b
+caus
+ a
+y 
+ssu
+s d
+scov
+r
+d at that po
+
+t ca
+ o
+
+y b
+ r
+so
+v
+d
+by 
+a
+t
+
+g for th
+ 
+
+xt r
+
+
+as
+ or by 
+mp
+
+m
+
+t
+
+g hacky 
+orkarou
+ds 
+
+ vLLM.
+Th
+ b
+tt
+r so
+ut
+o
+ 
+s to t
+st vLLM 
+
+th PyTorch r
+
+
+as
+ ca
+d
+dat
+s (RC) to 
+
+sur
+
+compat
+b
+
+
+ty b
+for
+ 
+ach r
+
+
+as
+.
+PyTorch r
+
+
+as
+ ca
+d
+dat
+s ca
+ b
+ do
+
+
+oad
+d from [PyTorch t
+st 
+
+d
+x](https://do
+
+
+oad.pytorch.org/
+h
+/t
+st).
+For 
+xamp
+
+, `torch2.7.0+cu12.8` RC ca
+ b
+ 
+
+sta
+
+d us
+
+g th
+ fo
+o
+
+
+g comma
+d:
 ```bash
-uv pip install torch torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/test/cu128
+uv p
+p 
+
+sta
+ torch torchv
+s
+o
+ torchaud
+o \
+    --
+
+d
+x-ur
+ https://do
+
+
+oad.pytorch.org/
+h
+/t
+st/cu128
 ```
+Wh
 
-When the final RC is ready for testing, it will be announced to the community
-on the [PyTorch dev-discuss forum](https://dev-discuss.pytorch.org/c/release-announcements).
-After this announcement, we can begin testing vLLM integration by drafting a pull request
-following this 3-step process:
+ th
+ f
 
-1. Update [requirements files](https://github.com/vllm-project/vllm/tree/main/requirements)
-to point to the new releases for `torch`, `torchvision`, and `torchaudio`.
+a
+ RC 
+s r
+ady for t
+st
 
-2. Use the following option to get the final release candidates' wheels. Some common platforms are `cpu`, `cu128`, and `rocm6.2.4`.
+g, 
+t 
 
+
+ b
+ a
+ou
+c
+d to th
+ commu
+
+ty
+o
+ th
+ [PyTorch d
+v-d
+scuss forum](https://d
+v-d
+scuss.pytorch.org/c/r
+
+
+as
+-a
+ou
+c
+m
+
+ts).
+Aft
+r th
+s a
+ou
+c
+m
+
+t, 
+
+ ca
+ b
+g
+
+ t
+st
+
+g vLLM 
+
+t
+grat
+o
+ by draft
+
+g a pu
+ r
+qu
+st
+fo
+o
+
+
+g th
+s 3-st
+p proc
+ss:
+1. Updat
+ [r
+qu
+r
+m
+
+ts f
+
+
+s](https://g
+thub.com/v
+m-proj
+ct/v
+m/tr
+/ma
+
+/r
+qu
+r
+m
+
+ts)
+to po
+
+t to th
+ 
+
+
+ r
+
+
+as
+s for `torch`, `torchv
+s
+o
+`, a
+d `torchaud
+o`.
+2. Us
+ th
+ fo
+o
+
+
+g opt
+o
+ to g
+t th
+ f
+
+a
+ r
+
+
+as
+ ca
+d
+dat
+s' 
+h
+
+s. Som
+ commo
+ p
+atforms ar
+ `cpu`, `cu128`, a
+d `rocm6.2.4`.
     ```bash
-    --extra-index-url https://download.pytorch.org/whl/test/<PLATFORM>
+    --
+xtra-
+
+d
+x-ur
+ https://do
+
+
+oad.pytorch.org/
+h
+/t
+st/
+PLATFORM
+
     ```
+3. S
 
-3. Since vLLM uses `uv`, ensure the following index strategy is applied:
+c
+ vLLM us
+s `uv`, 
 
-    - Via environment variable:
+sur
+ th
+ fo
+o
 
+
+g 
+
+d
+x strat
+gy 
+s app
+
+
+d:
+    - V
+a 
+
+v
+ro
+m
+
+t var
+ab
+
+:
     ```bash
-    export UV_INDEX_STRATEGY=unsafe-best-match
+    
+xport UV_INDEX_STRATEGY=u
+saf
+-b
+st-match
     ```
-
-    - Or via CLI flag:
-
+    - Or v
+a CLI f
+ag:
     ```bash
-    --index-strategy unsafe-best-match
+    --
+
+d
+x-strat
+gy u
+saf
+-b
+st-match
     ```
+If fa
 
-If failures are found in the pull request, raise them as issues on vLLM and
-cc the PyTorch release team to initiate discussion on how to address them.
+ur
+s ar
+ fou
+d 
 
-## Update CUDA version
+ th
+ pu
+ r
+qu
+st, ra
+s
+ th
+m as 
+ssu
+s o
+ vLLM a
+d
+cc th
+ PyTorch r
 
-The PyTorch release matrix includes both stable and experimental [CUDA versions](https://github.com/pytorch/pytorch/blob/main/RELEASE.md#release-compatibility-matrix). Due to limitations, only the latest stable CUDA version (for example, torch `2.7.1+cu126`) is uploaded to PyPI. However, vLLM may require a different CUDA version,
-such as 12.8 for Blackwell support.
-This complicates the process as we cannot use the out-of-the-box
-`pip install torch torchvision torchaudio` command. The solution is to use
-`--extra-index-url` in vLLM's Dockerfiles.
 
-- Important indexes at the moment include:
+as
+ t
+am to 
 
-| Platform | `--extra-index-url` |
+
+t
+at
+ d
+scuss
+o
+ o
+ ho
+ to addr
+ss th
+m.
+## Updat
+ CUDA v
+rs
+o
+
+Th
+ PyTorch r
+
+
+as
+ matr
+x 
+
+c
+ud
+s both stab
+
+ a
+d 
+xp
+r
+m
+
+ta
+ [CUDA v
+rs
+o
+s](https://g
+thub.com/pytorch/pytorch/b
+ob/ma
+
+/RELEASE.md#r
+
+
+as
+-compat
+b
+
+
+ty-matr
+x). Du
+ to 
+
+m
+tat
+o
+s, o
+
+y th
+ 
+at
+st stab
+
+ CUDA v
+rs
+o
+ (for 
+xamp
+
+, torch `2.7.1+cu126`) 
+s up
+oad
+d to PyPI. Ho
+
+v
+r, vLLM may r
+qu
+r
+ a d
+ff
+r
+
+t CUDA v
+rs
+o
+,
+such as 12.8 for B
+ack
+
+
+ support.
+Th
+s comp
+
+cat
+s th
+ proc
+ss as 
+
+ ca
+ot us
+ th
+ out-of-th
+-box
+`p
+p 
+
+sta
+ torch torchv
+s
+o
+ torchaud
+o` comma
+d. Th
+ so
+ut
+o
+ 
+s to us
+
+`--
+xtra-
+
+d
+x-ur
+` 
+
+ vLLM's Dock
+rf
+
+
+s.
+- Importa
+t 
+
+d
+x
+s at th
+ mom
+
+t 
+
+c
+ud
+:
+| P
+atform | `--
+xtra-
+
+d
+x-ur
+` |
 |----------|-----------------|
-| CUDA 12.8| [https://download.pytorch.org/whl/cu128](https://download.pytorch.org/whl/cu128)|
-| CPU      | [https://download.pytorch.org/whl/cpu](https://download.pytorch.org/whl/cpu)|
-| ROCm 6.2 | [https://download.pytorch.org/whl/rocm6.2.4](https://download.pytorch.org/whl/rocm6.2.4) |
-| ROCm 6.3 | [https://download.pytorch.org/whl/rocm6.3](https://download.pytorch.org/whl/rocm6.3) |
-| XPU      | [https://download.pytorch.org/whl/xpu](https://download.pytorch.org/whl/xpu) |
+| CUDA 12.8| [https://do
 
-- Update the below files to match the CUDA version from step 1. This makes sure that the release vLLM wheel is tested on CI.
-    - `.buildkite/release-pipeline.yaml`
-    - `.buildkite/scripts/upload-wheels.sh`
 
-## Manually running vLLM builds on BuildKiteCI
+oad.pytorch.org/
+h
+/cu128](https://do
 
-When building vLLM with a new PyTorch/CUDA version, the vLLM sccache S3 bucket
-will not have any cached artifacts, which can cause CI build jobs to exceed 5 hours.
-Furthermore, vLLM's fastcheck pipeline operates in read-only mode and does not
-populate the cache, making it ineffective for cache warm-up purposes.
 
-To address this, manually trigger a build on Buildkite to accomplish two objectives:
+oad.pytorch.org/
+h
+/cu128)|
+| CPU      | [https://do
 
-1. Run the complete test suite against the PyTorch RC build by setting the environment variables: `RUN_ALL=1` and `NIGHTLY=1`
-2. Populate the vLLM sccache S3 bucket with compiled artifacts, enabling faster subsequent builds
 
-<p align="center" width="100%">
-<img width="60%" alt="Buildkite new build popup" src="https://github.com/user-attachments/assets/3b07f71b-bb18-4ca3-aeaf-da0fe79d315f" />
-</p>
+oad.pytorch.org/
+h
+/cpu](https://do
 
-## Update all the different vLLM platforms
 
-Rather than attempting to update all vLLM platforms in a single pull request, it's more manageable
-to handle some platforms separately. The separation of requirements and Dockerfiles
-for different platforms in vLLM CI/CD allows us to selectively choose
-which platforms to update. For instance, updating XPU requires the corresponding
-release from [Intel Extension for PyTorch](https://github.com/intel/intel-extension-for-pytorch) by Intel.
-While <https://github.com/vllm-project/vllm/pull/16859> updated vLLM to PyTorch 2.7.0 on CPU, CUDA, and ROCm,
-<https://github.com/vllm-project/vllm/pull/17444> completed the update for XPU.
+oad.pytorch.org/
+h
+/cpu)|
+| ROCm 6.2 | [https://do
+
+
+oad.pytorch.org/
+h
+/rocm6.2.4](https://do
+
+
+oad.pytorch.org/
+h
+/rocm6.2.4) |
+| ROCm 6.3 | [https://do
+
+
+oad.pytorch.org/
+h
+/rocm6.3](https://do
+
+
+oad.pytorch.org/
+h
+/rocm6.3) |
+| XPU      | [https://do
+
+
+oad.pytorch.org/
+h
+/xpu](https://do
+
+
+oad.pytorch.org/
+h
+/xpu) |
+- Updat
+ th
+ b
+
+o
+ f
+
+
+s to match th
+ CUDA v
+rs
+o
+ from st
+p 1. Th
+s mak
+s sur
+ that th
+ r
+
+
+as
+ vLLM 
+h
+
+ 
+s t
+st
+d o
+ CI.
+    - `.bu
+
+dk
+t
+/r
+
+
+as
+-p
+p
+
+
+
+
+.yam
+`
+    - `.bu
+
+dk
+t
+/scr
+pts/up
+oad-
+h
+
+s.sh`
+## Ma
+ua
+y ru
+
+
+g vLLM bu
+
+ds o
+ Bu
+
+dK
+t
+CI
+Wh
+
+ bu
+
+d
+
+g vLLM 
+
+th a 
+
+
+ PyTorch/CUDA v
+rs
+o
+, th
+ vLLM sccach
+ S3 buck
+t
+
+
+
+ 
+ot hav
+ a
+y cach
+d art
+facts, 
+h
+ch ca
+ caus
+ CI bu
+
+d jobs to 
+xc
+d 5 hours.
+Furth
+rmor
+, vLLM's fastch
+ck p
+p
+
+
+
+
+ op
+rat
+s 
+
+ r
+ad-o
+
+y mod
+ a
+d do
+s 
+ot
+popu
+at
+ th
+ cach
+, mak
+
+g 
+t 
+
+
+ff
+ct
+v
+ for cach
+ 
+arm-up purpos
+s.
+To addr
+ss th
+s, ma
+ua
+y tr
+gg
+r a bu
+
+d o
+ Bu
+
+dk
+t
+ to accomp
+
+sh t
+o obj
+ct
+v
+s:
+1. Ru
+ th
+ comp
+
+t
+ t
+st su
+t
+ aga
+
+st th
+ PyTorch RC bu
+
+d by s
+tt
+
+g th
+ 
+
+v
+ro
+m
+
+t var
+ab
+
+s: `RUN_ALL=1` a
+d `NIGHTLY=1`
+2. Popu
+at
+ th
+ vLLM sccach
+ S3 buck
+t 
+
+th comp
+
+
+d art
+facts, 
+
+ab
+
+
+g fast
+r subs
+qu
+
+t bu
+
+ds
+p a
+
+g
+="c
+
+t
+r" 
+
+dth="100%"
+
+
+mg 
+
+dth="60%" a
+t="Bu
+
+dk
+t
+ 
+
+
+ bu
+
+d popup" src="https://g
+thub.com/us
+r-attachm
+
+ts/ass
+ts/3b07f71b-bb18-4ca3-a
+af-da0f
+79d315f" /
+
+/p
+
+## Updat
+ a
+ th
+ d
+ff
+r
+
+t vLLM p
+atforms
+Rath
+r tha
+ att
+mpt
+
+g to updat
+ a
+ vLLM p
+atforms 
+
+ a s
+
+g
+
+ pu
+ r
+qu
+st, 
+t's mor
+ ma
+ag
+ab
+
+
+to ha
+d
+
+ som
+ p
+atforms s
+parat
+
+y. Th
+ s
+parat
+o
+ of r
+qu
+r
+m
+
+ts a
+d Dock
+rf
+
+
+s
+for d
+ff
+r
+
+t p
+atforms 
+
+ vLLM CI/CD a
+o
+s us to s
+
+
+ct
+v
+
+y choos
+
+
+h
+ch p
+atforms to updat
+. For 
+
+sta
+c
+, updat
+
+g XPU r
+qu
+r
+s th
+ corr
+spo
+d
+
+g
+r
+
+
+as
+ from [I
+t
+
+ Ext
+
+s
+o
+ for PyTorch](https://g
+thub.com/
+
+t
+
+/
+
+t
+
+-
+xt
+
+s
+o
+-for-pytorch) by I
+t
+
+.
+Wh
+
+
+ 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/16859
+ updat
+d vLLM to PyTorch 2.7.0 o
+ CPU, CUDA, a
+d ROCm,
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/17444
+ comp
+
+t
+d th
+ updat
+ for XPU.

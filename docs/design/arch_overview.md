@@ -1,314 +1,3725 @@
-# Architecture Overview
+# Arch
+t
+ctur
+ Ov
+rv
 
-This document provides an overview of the vLLM architecture.
 
+
+Th
+s docum
+
+t prov
+d
+s a
+ ov
+rv
+
+
+ of th
+ vLLM arch
+t
+ctur
+.
 [TOC]
+## E
+trypo
 
-## Entrypoints
+ts
+vLLM prov
+d
+s a 
+umb
+r of 
 
-vLLM provides a number of entrypoints for interacting with the system. The
-following diagram shows the relationship between them.
+trypo
 
-![Entrypoints Diagram](../assets/design/arch_overview/entrypoints.excalidraw.png)
+ts for 
 
-### LLM Class
+t
+ract
 
-The LLM class provides the primary Python interface for doing offline inference,
-which is interacting with a model without using a separate model inference
-server.
+g 
 
-Here is a sample of `LLM` class usage:
+th th
+ syst
+m. Th
 
-??? code
+fo
+o
 
-    ```python
-    from vllm import LLM, SamplingParams
 
-    # Define a list of input prompts
+g d
+agram sho
+s th
+ r
+
+at
+o
+sh
+p b
+t
+
+
+ th
+m.
+![E
+trypo
+
+ts D
+agram](../ass
+ts/d
+s
+g
+/arch_ov
+rv
+
+
+/
+
+trypo
+
+ts.
+xca
+
+dra
+.p
+g)
+### LLM C
+ass
+Th
+ LLM c
+ass prov
+d
+s th
+ pr
+mary Pytho
+ 
+
+t
+rfac
+ for do
+
+g off
+
+
+
+ 
+
+f
+r
+
+c
+,
+
+h
+ch 
+s 
+
+t
+ract
+
+g 
+
+th a mod
+
+ 
+
+thout us
+
+g a s
+parat
+ mod
+
+ 
+
+f
+r
+
+c
+
+s
+rv
+r.
+H
+r
+ 
+s a samp
+
+ of `LLM` c
+ass usag
+:
+??? cod
+
+    ```pytho
+
+    from v
+m 
+mport LLM, Samp
+
+
+gParams
+    # D
+f
+
+
+ a 
+
+st of 
+
+put prompts
     prompts = [
-        "Hello, my name is",
-        "The capital of France is",
-        "The largest ocean is",
+        "H
+
+o, my 
+am
+ 
+s",
+        "Th
+ cap
+ta
+ of Fra
+c
+ 
+s",
+        "Th
+ 
+arg
+st oc
+a
+ 
+s",
     ]
+    # D
+f
 
-    # Define sampling parameters
-    sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-    # Initialize the LLM engine with the OPT-125M model
-    llm = LLM(model="facebook/opt-125m")
+ samp
 
-    # Generate outputs for the input prompts
-    outputs = llm.generate(prompts, sampling_params)
 
-    # Print the generated outputs
-    for output in outputs:
+g param
+t
+rs
+    samp
+
+
+g_params = Samp
+
+
+gParams(t
+mp
+ratur
+=0.8, top_p=0.95)
+    # I
+
+t
+a
+
+z
+ th
+ LLM 
+
+g
+
+
+ 
+
+th th
+ OPT-125M mod
+
+
+    
+m = LLM(mod
+
+="fac
+book/opt-125m")
+    # G
+
+
+rat
+ outputs for th
+ 
+
+put prompts
+    outputs = 
+m.g
+
+
+rat
+(prompts, samp
+
+
+g_params)
+    # Pr
+
+t th
+ g
+
+
+rat
+d outputs
+    for output 
+
+ outputs:
         prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        g
+
+
+rat
+d_t
+xt = output.outputs[0].t
+xt
+        pr
+
+t(f"Prompt: {prompt!r}, G
+
+
+rat
+d t
+xt: {g
+
+
+rat
+d_t
+xt!r}")
     ```
+Mor
+ API d
+ta
 
-More API details can be found in the [Offline Inference](../api/README.md#offline-inference) section of the API docs.
+s ca
+ b
+ fou
+d 
 
-The code for the `LLM` class can be found in [vllm/entrypoints/llm.py](../../vllm/entrypoints/llm.py).
+ th
+ [Off
 
-### OpenAI-Compatible API Server
 
-The second primary interface to vLLM is via its OpenAI-compatible API server.
-This server can be started using the `vllm serve` command.
 
+ I
+f
+r
+
+c
+](../ap
+/README.md#off
+
+
+
+-
+
+f
+r
+
+c
+) s
+ct
+o
+ of th
+ API docs.
+Th
+ cod
+ for th
+ `LLM` c
+ass ca
+ b
+ fou
+d 
+
+ [v
+m/
+
+trypo
+
+ts/
+m.py](../../v
+m/
+
+trypo
+
+ts/
+m.py).
+### Op
+
+AI-Compat
+b
+
+ API S
+rv
+r
+Th
+ s
+co
+d pr
+mary 
+
+t
+rfac
+ to vLLM 
+s v
+a 
+ts Op
+
+AI-compat
+b
+
+ API s
+rv
+r.
+Th
+s s
+rv
+r ca
+ b
+ start
+d us
+
+g th
+ `v
+m s
+rv
+` comma
+d.
 ```bash
-vllm serve <model>
+v
+m s
+rv
+ 
+mod
+
+
+
 ```
+Th
+ cod
+ for th
+ `v
+m` CLI ca
+ b
+ fou
+d 
 
-The code for the `vllm` CLI can be found in [vllm/entrypoints/cli/main.py](../../vllm/entrypoints/cli/main.py).
+ [v
+m/
 
-Sometimes you may see the API server entrypoint used directly instead of via the
-`vllm` CLI command. For example:
+trypo
 
+ts/c
+
+/ma
+
+.py](../../v
+m/
+
+trypo
+
+ts/c
+
+/ma
+
+.py).
+Som
+t
+m
+s you may s
+ th
+ API s
+rv
+r 
+
+trypo
+
+t us
+d d
+r
+ct
+y 
+
+st
+ad of v
+a th
+
+`v
+m` CLI comma
+d. For 
+xamp
+
+:
 ```bash
-python -m vllm.entrypoints.openai.api_server --model <model>
+pytho
+ -m v
+m.
+
+trypo
+
+ts.op
+
+a
+.ap
+_s
+rv
+r --mod
+
+ 
+mod
+
+
+
 ```
+!!! 
+ar
 
-!!! warning
 
-    `python -m vllm.entrypoints.openai.api_server` is deprecated
-    and may become unsupported in a future release.
+g
+    `pytho
+ -m v
+m.
 
-That code can be found in [vllm/entrypoints/openai/api_server.py](../../vllm/entrypoints/openai/api_server.py).
+trypo
 
-More details on the API server can be found in the [OpenAI-Compatible Server](../serving/openai_compatible_server.md) document.
+ts.op
 
-## V1 Process Architecture
+a
+.ap
+_s
+rv
+r` 
+s d
+pr
+cat
+d
+    a
+d may b
+com
+ u
+support
+d 
 
-vLLM V1 uses a multi-process architecture to separate concerns and maximize throughput. Understanding this architecture is important for properly sizing CPU resources in your deployment. The key processes are:
+ a futur
+ r
 
-### API Server Process
 
-The API server process handles HTTP requests (e.g., the OpenAI-compatible API), performs input processing (tokenization, multi-modal data loading), and streams results back to clients. It communicates with the engine core process(es) via ZMQ sockets.
+as
+.
+That cod
+ ca
+ b
+ fou
+d 
 
-By default, there is **1 API server process**, but when data parallelism is used, the API server count automatically scales to match the data parallel size. This can also be manually configured with the `--api-server-count` flag. Each API server connects to **all** engine cores via ZMQ in a many-to-many topology, enabling any API server to route requests to any engine core. Each API server process uses multiple CPU threads for media loading (controlled by `VLLM_MEDIA_LOADING_THREAD_COUNT`, default 8).
+ [v
+m/
 
-The code can be found in [vllm/entrypoints/openai/api_server.py](../../vllm/entrypoints/openai/api_server.py) and [vllm/v1/utils.py](../../vllm/v1/utils.py).
+trypo
 
-### Engine Core Process
+ts/op
 
-The engine core process runs the scheduler, manages KV cache, and coordinates model execution across GPU workers. It runs a busy loop that continuously schedules requests and dispatches work to the GPU workers.
+a
+/ap
+_s
+rv
+r.py](../../v
+m/
 
-There is **1 engine core process per data parallel rank**. For example, with `--data-parallel-size 4`, there are 4 engine core processes.
+trypo
 
-The code can be found in [vllm/v1/engine/core.py](../../vllm/v1/engine/core.py) and [vllm/v1/engine/utils.py](../../vllm/v1/engine/utils.py).
+ts/op
 
-### GPU Worker Processes
+a
+/ap
+_s
+rv
+r.py).
+Mor
+ d
+ta
 
-Each GPU is managed by a dedicated worker process. The worker process loads model weights, executes forward passes, and manages GPU memory. Workers communicate with the engine core process that owns them.
+s o
+ th
+ API s
+rv
+r ca
+ b
+ fou
+d 
 
-There is **1 worker process per GPU**. The total number of GPU worker processes equals `tensor_parallel_size x pipeline_parallel_size` per engine core.
+ th
+ [Op
 
-The code can be found in [vllm/v1/executor/multiproc_executor.py](../../vllm/v1/executor/multiproc_executor.py) and [vllm/v1/worker/gpu_worker.py](../../vllm/v1/worker/gpu_worker.py).
+AI-Compat
+b
 
-### DP Coordinator Process (conditional)
+ S
+rv
+r](../s
+rv
 
-When using data parallelism (`--data-parallel-size > 1`), an additional coordinator process manages load balancing across DP ranks and coordinates synchronized forward passes for MoE models.
+g/op
 
-There is **1 DP coordinator process** (only when data parallelism is enabled).
+a
+_compat
+b
 
-The code can be found in [vllm/v1/engine/coordinator.py](../../vllm/v1/engine/coordinator.py).
+_s
+rv
+r.md) docum
 
-### Process Count Summary
+t.
+## V1 Proc
+ss Arch
+t
+ctur
 
-For a deployment with `N` GPUs, `TP` tensor parallel size, `DP` data parallel size, and `A` API server count:
+vLLM V1 us
+s a mu
+t
+-proc
+ss arch
+t
+ctur
+ to s
+parat
+ co
+c
+r
+s a
+d max
+m
+z
+ throughput. U
+d
+rsta
+d
 
-| Process Type | Count | Notes |
+g th
+s arch
+t
+ctur
+ 
+s 
+mporta
+t for prop
+r
+y s
+z
+
+g CPU r
+sourc
+s 
+
+ your d
+p
+oym
+
+t. Th
+ k
+y proc
+ss
+s ar
+:
+### API S
+rv
+r Proc
+ss
+Th
+ API s
+rv
+r proc
+ss ha
+d
+
+s HTTP r
+qu
+sts (
+.g., th
+ Op
+
+AI-compat
+b
+
+ API), p
+rforms 
+
+put proc
+ss
+
+g (tok
+
+
+zat
+o
+, mu
+t
+-moda
+ data 
+oad
+
+g), a
+d str
+ams r
+su
+ts back to c
+
+
+
+ts. It commu
+
+cat
+s 
+
+th th
+ 
+
+g
+
+
+ cor
+ proc
+ss(
+s) v
+a ZMQ sock
+ts.
+By d
+fau
+t, th
+r
+ 
+s **1 API s
+rv
+r proc
+ss**, but 
+h
+
+ data para
+
+
+
+sm 
+s us
+d, th
+ API s
+rv
+r cou
+t automat
+ca
+y sca
+
+s to match th
+ data para
+
+
+ s
+z
+. Th
+s ca
+ a
+so b
+ ma
+ua
+y co
+f
+gur
+d 
+
+th th
+ `--ap
+-s
+rv
+r-cou
+t` f
+ag. Each API s
+rv
+r co
+
+cts to **a
+** 
+
+g
+
+
+ cor
+s v
+a ZMQ 
+
+ a ma
+y-to-ma
+y topo
+ogy, 
+
+ab
+
+
+g a
+y API s
+rv
+r to rout
+ r
+qu
+sts to a
+y 
+
+g
+
+
+ cor
+. Each API s
+rv
+r proc
+ss us
+s mu
+t
+p
+
+ CPU thr
+ads for m
+d
+a 
+oad
+
+g (co
+tro
+
+d by `VLLM_MEDIA_LOADING_THREAD_COUNT`, d
+fau
+t 8).
+Th
+ cod
+ ca
+ b
+ fou
+d 
+
+ [v
+m/
+
+trypo
+
+ts/op
+
+a
+/ap
+_s
+rv
+r.py](../../v
+m/
+
+trypo
+
+ts/op
+
+a
+/ap
+_s
+rv
+r.py) a
+d [v
+m/v1/ut
+
+s.py](../../v
+m/v1/ut
+
+s.py).
+### E
+g
+
+
+ Cor
+ Proc
+ss
+Th
+ 
+
+g
+
+
+ cor
+ proc
+ss ru
+s th
+ sch
+du
+
+r, ma
+ag
+s KV cach
+, a
+d coord
+
+at
+s mod
+
+ 
+x
+cut
+o
+ across GPU 
+ork
+rs. It ru
+s a busy 
+oop that co
+t
+
+uous
+y sch
+du
+
+s r
+qu
+sts a
+d d
+spatch
+s 
+ork to th
+ GPU 
+ork
+rs.
+Th
+r
+ 
+s **1 
+
+g
+
+
+ cor
+ proc
+ss p
+r data para
+
+
+ ra
+k**. For 
+xamp
+
+, 
+
+th `--data-para
+
+
+-s
+z
+ 4`, th
+r
+ ar
+ 4 
+
+g
+
+
+ cor
+ proc
+ss
+s.
+Th
+ cod
+ ca
+ b
+ fou
+d 
+
+ [v
+m/v1/
+
+g
+
+
+/cor
+.py](../../v
+m/v1/
+
+g
+
+
+/cor
+.py) a
+d [v
+m/v1/
+
+g
+
+
+/ut
+
+s.py](../../v
+m/v1/
+
+g
+
+
+/ut
+
+s.py).
+### GPU Work
+r Proc
+ss
+s
+Each GPU 
+s ma
+ag
+d by a d
+d
+cat
+d 
+ork
+r proc
+ss. Th
+ 
+ork
+r proc
+ss 
+oads mod
+
+ 
+
+
+ghts, 
+x
+cut
+s for
+ard pass
+s, a
+d ma
+ag
+s GPU m
+mory. Work
+rs commu
+
+cat
+ 
+
+th th
+ 
+
+g
+
+
+ cor
+ proc
+ss that o
+
+s th
+m.
+Th
+r
+ 
+s **1 
+ork
+r proc
+ss p
+r GPU**. Th
+ tota
+ 
+umb
+r of GPU 
+ork
+r proc
+ss
+s 
+qua
+s `t
+
+sor_para
+
+
+_s
+z
+ x p
+p
+
+
+
+
+_para
+
+
+_s
+z
+` p
+r 
+
+g
+
+
+ cor
+.
+Th
+ cod
+ ca
+ b
+ fou
+d 
+
+ [v
+m/v1/
+x
+cutor/mu
+t
+proc_
+x
+cutor.py](../../v
+m/v1/
+x
+cutor/mu
+t
+proc_
+x
+cutor.py) a
+d [v
+m/v1/
+ork
+r/gpu_
+ork
+r.py](../../v
+m/v1/
+ork
+r/gpu_
+ork
+r.py).
+### DP Coord
+
+ator Proc
+ss (co
+d
+t
+o
+a
+)
+Wh
+
+ us
+
+g data para
+
+
+
+sm (`--data-para
+
+
+-s
+z
+ 
+ 1`), a
+ add
+t
+o
+a
+ coord
+
+ator proc
+ss ma
+ag
+s 
+oad ba
+a
+c
+
+g across DP ra
+ks a
+d coord
+
+at
+s sy
+chro
+
+z
+d for
+ard pass
+s for MoE mod
+
+s.
+Th
+r
+ 
+s **1 DP coord
+
+ator proc
+ss** (o
+
+y 
+h
+
+ data para
+
+
+
+sm 
+s 
+
+ab
+
+d).
+Th
+ cod
+ ca
+ b
+ fou
+d 
+
+ [v
+m/v1/
+
+g
+
+
+/coord
+
+ator.py](../../v
+m/v1/
+
+g
+
+
+/coord
+
+ator.py).
+### Proc
+ss Cou
+t Summary
+For a d
+p
+oym
+
+t 
+
+th `N` GPUs, `TP` t
+
+sor para
+
+
+ s
+z
+, `DP` data para
+
+
+ s
+z
+, a
+d `A` API s
+rv
+r cou
+t:
+| Proc
+ss Typ
+ | Cou
+t | Not
+s |
 |---|---|---|
-| API Server | `A` (default `DP`) | Handles HTTP requests and input processing |
-| Engine Core | `DP` (default 1) | Scheduler and KV cache management |
-| GPU Worker | `N` (= `DP x PP x TP`) | One per GPU, executes model forward passes |
-| DP Coordinator | 1 if `DP > 1`, else 0 | Load balancing across DP ranks |
-| **Total** | **`A + DP + N` (+ 1 if DP > 1)** | |
+| API S
+rv
+r | `A` (d
+fau
+t `DP`) | Ha
+d
 
-For example, a typical single-node deployment with 4 GPUs (`vllm serve -tp=4`) has:
+s HTTP r
+qu
+sts a
+d 
 
-- 1 API server + 1 engine core + 4 GPU workers = **6 processes**
+put proc
+ss
 
-<figure markdown="1">
-![V1 Process Architecture - TP=4](../assets/design/arch_overview/v1_process_architecture_tp4.png)
-</figure>
+g |
+| E
+g
 
-A data parallel deployment with 8 GPUs (`vllm serve -tp=2 -dp=4`) has:
 
-- 4 API servers + 4 engine cores + 8 GPU workers + 1 DP coordinator = **17 processes**
+ Cor
+ | `DP` (d
+fau
+t 1) | Sch
+du
 
-<figure markdown="1">
-![V1 Process Architecture - TP=2, DP=4](../assets/design/arch_overview/v1_process_architecture_tp2_dp4.png)
-</figure>
+r a
+d KV cach
+ ma
+ag
+m
 
-For CPU resource sizing recommendations, see
-[CPU Resources for GPU Deployments](../configuration/optimization.md#cpu-resources-for-gpu-deployments).
+t |
+| GPU Work
+r | `N` (= `DP x PP x TP`) | O
 
-## LLM Engine
+ p
+r GPU, 
+x
+cut
+s mod
 
-The `LLMEngine` and `AsyncLLMEngine` classes are central to the functioning of
-the vLLM system, handling model inference and asynchronous request processing.
+ for
+ard pass
+s |
+| DP Coord
 
-![LLMEngine Diagram](../assets/design/arch_overview/llm_engine.excalidraw.png)
+ator | 1 
+f `DP 
+ 1`, 
 
-### LLMEngine
+s
+ 0 | Load ba
+a
+c
 
-The `LLMEngine` class is the core component of the vLLM engine. It is
-responsible for receiving requests from clients and generating outputs from the
-model. The `LLMEngine` includes input processing, model execution (possibly
-distributed across multiple hosts and/or GPUs), scheduling, and output
-processing.
+g across DP ra
+ks |
+| **Tota
+** | **`A + DP + N` (+ 1 
+f DP 
+ 1)** | |
+For 
+xamp
 
-- **Input Processing**: Handles tokenization of input text using the specified
-  tokenizer.
-- **Scheduling**: Chooses which requests are processed in each step.
-- **Model Execution**: Manages the execution of the language model, including
-  distributed execution across multiple GPUs.
-- **Output Processing**: Processes the outputs generated by the model, decoding the
-  token IDs from a language model into human-readable text.
+, a typ
+ca
+ s
 
-The code for `LLMEngine` can be found in [vllm/engine/llm_engine.py](../../vllm/engine/llm_engine.py).
+g
 
-### AsyncLLMEngine
+-
+od
+ d
+p
+oym
 
-The `AsyncLLMEngine` class is an asynchronous wrapper for the `LLMEngine` class.
-It uses `asyncio` to create a background loop that continuously processes
-incoming requests. The `AsyncLLMEngine` is designed for online serving, where it
-can handle multiple concurrent requests and stream outputs to clients.
+t 
 
-The OpenAI-compatible API server uses the `AsyncLLMEngine`. There is also a demo
-API server that serves as a simpler example in [vllm/entrypoints/api_server.py](../../vllm/entrypoints/api_server.py).
+th 4 GPUs (`v
+m s
+rv
+ -tp=4`) has:
+- 1 API s
+rv
+r + 1 
 
-The code for `AsyncLLMEngine` can be found in [vllm/engine/async_llm_engine.py](../../vllm/engine/async_llm_engine.py).
+g
 
-## Worker
 
-A worker is a process that runs the model inference. vLLM follows the common
-practice of using one process to control one accelerator device, such as GPUs.
-For example, if we use tensor parallelism of size 2 and pipeline parallelism of
-size 2, we will have 4 workers in total. Workers are identified by their
-`rank` and `local_rank`. `rank` is used for global orchestration, while
-`local_rank` is mainly used for assigning the accelerator device and accessing
-local resources such as the file system and shared memory.
+ cor
+ + 4 GPU 
+ork
+rs = **6 proc
+ss
+s**
+f
+gur
+ markdo
 
-## Model Runner
+="1"
 
-Every worker has one model runner object, responsible for loading and running
-the model. Much of the model execution logic resides here, such as preparing
-input tensors and capturing cudagraphs.
+![V1 Proc
+ss Arch
+t
+ctur
+ - TP=4](../ass
+ts/d
+s
+g
+/arch_ov
+rv
 
-## Model
 
-Every model runner object has one model object, which is the actual
-`torch.nn.Module` instance. See [huggingface_integration](huggingface_integration.md) for how various
-configurations affect the class we ultimately get.
+/v1_proc
+ss_arch
+t
+ctur
+_tp4.p
+g)
+/f
+gur
 
-## Class Hierarchy
 
-The following figure shows the class hierarchy of vLLM:
+A data para
 
-![Class Hierarchy](../assets/design/hierarchy.png)
 
-There are several important design choices behind this class hierarchy:
+ d
+p
+oym
 
-1\. **Extensibility**: All classes in the hierarchy accept a configuration object
-containing all the necessary information. The [VllmConfig](https://github.com/vllm-project/vllm/blob/d1c6799b8870e513bf4f2305cbf6cda9fc3d773b/vllm/config.py#L2036)
-class is the main configuration object that is passed around. The class
-hierarchy is quite deep, and every class needs to read the configuration it is
-interested in. By encapsulating all configurations in one object, we can easily
-pass the configuration object around and access the configuration we need.
-Suppose we want to add a new feature (this is often the case given how fast the
-field of LLM inference is evolving) that only touches the model runner. We will
-have to add a new configuration option in the `VllmConfig` class. Since we pass
-the whole config object around, we only need to add the configuration option to
-the `VllmConfig` class, and the model runner can access it directly. We don't
-need to change the constructor of the engine, worker, or model class to pass the
-new configuration option.
+t 
 
-2\. **Uniformity**: The model runner needs a unified interface to create and
-initialize the model. vLLM supports more than 50 types of popular open-source
-models. Each model has its own initialization logic. If the constructor
-signature varies with models, the model runner does not know how to call the
-constructor accordingly, without complicated and error-prone inspection logic.
-By making the constructor of the model class uniform, the model runner can
-easily create and initialize the model without knowing the specific model type.
-This is also useful for composing models. Vision-language models often consist
-of a vision model and a language model. By making the constructor uniform, we
-can easily create a vision model and a language model and compose them into a
-vision-language model.
+th 8 GPUs (`v
+m s
+rv
+ -tp=2 -dp=4`) has:
+- 4 API s
+rv
+rs + 4 
 
-!!! note
-    To support this change, all vLLM models' signatures have been updated to:
+g
 
-    ```python
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+
+ cor
+s + 8 GPU 
+ork
+rs + 1 DP coord
+
+ator = **17 proc
+ss
+s**
+f
+gur
+ markdo
+
+="1"
+
+![V1 Proc
+ss Arch
+t
+ctur
+ - TP=2, DP=4](../ass
+ts/d
+s
+g
+/arch_ov
+rv
+
+
+/v1_proc
+ss_arch
+t
+ctur
+_tp2_dp4.p
+g)
+/f
+gur
+
+
+For CPU r
+sourc
+ s
+z
+
+g r
+comm
+
+dat
+o
+s, s
+
+[CPU R
+sourc
+s for GPU D
+p
+oym
+
+ts](../co
+f
+gurat
+o
+/opt
+m
+zat
+o
+.md#cpu-r
+sourc
+s-for-gpu-d
+p
+oym
+
+ts).
+## LLM E
+g
+
+
+
+Th
+ `LLME
+g
+
+
+` a
+d `Asy
+cLLME
+g
+
+
+` c
+ass
+s ar
+ c
+
+tra
+ to th
+ fu
+ct
+o
+
+
+g of
+th
+ vLLM syst
+m, ha
+d
+
+
+g mod
+
+ 
+
+f
+r
+
+c
+ a
+d asy
+chro
+ous r
+qu
+st proc
+ss
+
+g.
+![LLME
+g
+
+
+ D
+agram](../ass
+ts/d
+s
+g
+/arch_ov
+rv
+
+
+/
+m_
+
+g
+
+
+.
+xca
+
+dra
+.p
+g)
+### LLME
+g
+
+
+
+Th
+ `LLME
+g
+
+
+` c
+ass 
+s th
+ cor
+ compo
+
+
+t of th
+ vLLM 
+
+g
+
+
+. It 
+s
+r
+spo
+s
+b
+
+ for r
+c
+
+v
+
+g r
+qu
+sts from c
+
+
+
+ts a
+d g
+
+
+rat
+
+g outputs from th
+
+mod
+
+. Th
+ `LLME
+g
+
+
+` 
+
+c
+ud
+s 
+
+put proc
+ss
+
+g, mod
+
+ 
+x
+cut
+o
+ (poss
+b
+y
+d
+str
+but
+d across mu
+t
+p
+
+ hosts a
+d/or GPUs), sch
+du
+
+
+g, a
+d output
+proc
+ss
+
+g.
+- **I
+put Proc
+ss
+
+g**: Ha
+d
+
+s tok
+
+
+zat
+o
+ of 
+
+put t
+xt us
+
+g th
+ sp
+c
+f
+
+d
+  tok
+
+
+z
+r.
+- **Sch
+du
+
+
+g**: Choos
+s 
+h
+ch r
+qu
+sts ar
+ proc
+ss
+d 
+
+ 
+ach st
+p.
+- **Mod
+
+ Ex
+cut
+o
+**: Ma
+ag
+s th
+ 
+x
+cut
+o
+ of th
+ 
+a
+guag
+ mod
+
+, 
+
+c
+ud
+
+g
+  d
+str
+but
+d 
+x
+cut
+o
+ across mu
+t
+p
+
+ GPUs.
+- **Output Proc
+ss
+
+g**: Proc
+ss
+s th
+ outputs g
+
+
+rat
+d by th
+ mod
+
+, d
+cod
+
+g th
+
+  tok
+
+ IDs from a 
+a
+guag
+ mod
+
+ 
+
+to huma
+-r
+adab
+
+ t
+xt.
+Th
+ cod
+ for `LLME
+g
+
+
+` ca
+ b
+ fou
+d 
+
+ [v
+m/
+
+g
+
+
+/
+m_
+
+g
+
+
+.py](../../v
+m/
+
+g
+
+
+/
+m_
+
+g
+
+
+.py).
+### Asy
+cLLME
+g
+
+
+
+Th
+ `Asy
+cLLME
+g
+
+
+` c
+ass 
+s a
+ asy
+chro
+ous 
+rapp
+r for th
+ `LLME
+g
+
+
+` c
+ass.
+It us
+s `asy
+c
+o` to cr
+at
+ a backgrou
+d 
+oop that co
+t
+
+uous
+y proc
+ss
+s
+
+
+com
+
+g r
+qu
+sts. Th
+ `Asy
+cLLME
+g
+
+
+` 
+s d
+s
+g
+
+d for o
+
+
+
+
+ s
+rv
+
+g, 
+h
+r
+ 
+t
+ca
+ ha
+d
+
+ mu
+t
+p
+
+ co
+curr
+
+t r
+qu
+sts a
+d str
+am outputs to c
+
+
+
+ts.
+Th
+ Op
+
+AI-compat
+b
+
+ API s
+rv
+r us
+s th
+ `Asy
+cLLME
+g
+
+
+`. Th
+r
+ 
+s a
+so a d
+mo
+API s
+rv
+r that s
+rv
+s as a s
+mp
+
+r 
+xamp
+
+ 
+
+ [v
+m/
+
+trypo
+
+ts/ap
+_s
+rv
+r.py](../../v
+m/
+
+trypo
+
+ts/ap
+_s
+rv
+r.py).
+Th
+ cod
+ for `Asy
+cLLME
+g
+
+
+` ca
+ b
+ fou
+d 
+
+ [v
+m/
+
+g
+
+
+/asy
+c_
+m_
+
+g
+
+
+.py](../../v
+m/
+
+g
+
+
+/asy
+c_
+m_
+
+g
+
+
+.py).
+## Work
+r
+A 
+ork
+r 
+s a proc
+ss that ru
+s th
+ mod
+
+ 
+
+f
+r
+
+c
+. vLLM fo
+o
+s th
+ commo
+
+pract
+c
+ of us
+
+g o
+
+ proc
+ss to co
+tro
+ o
+
+ acc
+
+
+rator d
+v
+c
+, such as GPUs.
+For 
+xamp
+
+, 
+f 
+
+ us
+ t
+
+sor para
+
+
+
+sm of s
+z
+ 2 a
+d p
+p
+
+
+
+
+ para
+
+
+
+sm of
+s
+z
+ 2, 
+
+ 
+
+
+ hav
+ 4 
+ork
+rs 
+
+ tota
+. Work
+rs ar
+ 
+d
+
+t
+f
+
+d by th
+
+r
+`ra
+k` a
+d `
+oca
+_ra
+k`. `ra
+k` 
+s us
+d for g
+oba
+ orch
+strat
+o
+, 
+h
+
+
+
+`
+oca
+_ra
+k` 
+s ma
+
+
+y us
+d for ass
+g
+
+
+g th
+ acc
+
+
+rator d
+v
+c
+ a
+d acc
+ss
+
+g
+
+oca
+ r
+sourc
+s such as th
+ f
+
+
+ syst
+m a
+d shar
+d m
+mory.
+## Mod
+
+ Ru
+
+r
+Ev
+ry 
+ork
+r has o
+
+ mod
+
+ ru
+
+r obj
+ct, r
+spo
+s
+b
+
+ for 
+oad
+
+g a
+d ru
+
+
+g
+th
+ mod
+
+. Much of th
+ mod
+
+ 
+x
+cut
+o
+ 
+og
+c r
+s
+d
+s h
+r
+, such as pr
+par
+
+g
+
+
+put t
+
+sors a
+d captur
+
+g cudagraphs.
+## Mod
+
+
+Ev
+ry mod
+
+ ru
+
+r obj
+ct has o
+
+ mod
+
+ obj
+ct, 
+h
+ch 
+s th
+ actua
+
+`torch.
+.Modu
+
+` 
+
+sta
+c
+. S
+ [hugg
+
+gfac
+_
+
+t
+grat
+o
+](hugg
+
+gfac
+_
+
+t
+grat
+o
+.md) for ho
+ var
+ous
+co
+f
+gurat
+o
+s aff
+ct th
+ c
+ass 
+
+ u
+t
+mat
+
+y g
+t.
+## C
+ass H
+
+rarchy
+Th
+ fo
+o
+
+
+g f
+gur
+ sho
+s th
+ c
+ass h
+
+rarchy of vLLM:
+![C
+ass H
+
+rarchy](../ass
+ts/d
+s
+g
+/h
+
+rarchy.p
+g)
+Th
+r
+ ar
+ s
+v
+ra
+ 
+mporta
+t d
+s
+g
+ cho
+c
+s b
+h
+
+d th
+s c
+ass h
+
+rarchy:
+1\. **Ext
+
+s
+b
+
+
+ty**: A
+ c
+ass
+s 
+
+ th
+ h
+
+rarchy acc
+pt a co
+f
+gurat
+o
+ obj
+ct
+co
+ta
+
+
+
+g a
+ th
+ 
+
+c
+ssary 
+
+format
+o
+. Th
+ [V
+mCo
+f
+g](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/d1c6799b8870
+513bf4f2305cbf6cda9fc3d773b/v
+m/co
+f
+g.py#L2036)
+c
+ass 
+s th
+ ma
+
+ co
+f
+gurat
+o
+ obj
+ct that 
+s pass
+d arou
+d. Th
+ c
+ass
+h
+
+rarchy 
+s qu
+t
+ d
+p, a
+d 
+v
+ry c
+ass 
+
+ds to r
+ad th
+ co
+f
+gurat
+o
+ 
+t 
+s
+
+
+t
+r
+st
+d 
+
+. By 
+
+capsu
+at
+
+g a
+ co
+f
+gurat
+o
+s 
+
+ o
+
+ obj
+ct, 
+
+ ca
+ 
+as
+
+y
+pass th
+ co
+f
+gurat
+o
+ obj
+ct arou
+d a
+d acc
+ss th
+ co
+f
+gurat
+o
+ 
+
+ 
+
+d.
+Suppos
+ 
+
+ 
+a
+t to add a 
+
+
+ f
+atur
+ (th
+s 
+s oft
+
+ th
+ cas
+ g
+v
+
+ ho
+ fast th
+
+f
+
+
+d of LLM 
+
+f
+r
+
+c
+ 
+s 
+vo
+v
+
+g) that o
+
+y touch
+s th
+ mod
+
+ ru
+
+r. W
+ 
+
+
+
+hav
+ to add a 
+
+
+ co
+f
+gurat
+o
+ opt
+o
+ 
+
+ th
+ `V
+mCo
+f
+g` c
+ass. S
+
+c
+ 
+
+ pass
+th
+ 
+ho
+
+ co
+f
+g obj
+ct arou
+d, 
+
+ o
+
+y 
+
+d to add th
+ co
+f
+gurat
+o
+ opt
+o
+ to
+th
+ `V
+mCo
+f
+g` c
+ass, a
+d th
+ mod
+
+ ru
+
+r ca
+ acc
+ss 
+t d
+r
+ct
+y. W
+ do
+'t
+
+
+d to cha
+g
+ th
+ co
+structor of th
+ 
+
+g
+
+
+, 
+ork
+r, or mod
+
+ c
+ass to pass th
+
+
+
+
+ co
+f
+gurat
+o
+ opt
+o
+.
+2\. **U
+
+form
+ty**: Th
+ mod
+
+ ru
+
+r 
+
+ds a u
+
+f
+
+d 
+
+t
+rfac
+ to cr
+at
+ a
+d
+
+
+
+t
+a
+
+z
+ th
+ mod
+
+. vLLM supports mor
+ tha
+ 50 typ
+s of popu
+ar op
+
+-sourc
+
+mod
+
+s. Each mod
+
+ has 
+ts o
+
+ 
+
+
+t
+a
+
+zat
+o
+ 
+og
+c. If th
+ co
+structor
+s
+g
+atur
+ var
+
+s 
+
+th mod
+
+s, th
+ mod
+
+ ru
+
+r do
+s 
+ot k
+o
+ ho
+ to ca
+ th
+
+co
+structor accord
+
+g
+y, 
+
+thout comp
+
+cat
+d a
+d 
+rror-pro
+
+ 
+
+sp
+ct
+o
+ 
+og
+c.
+By mak
+
+g th
+ co
+structor of th
+ mod
+
+ c
+ass u
+
+form, th
+ mod
+
+ ru
+
+r ca
+
+
+as
+
+y cr
+at
+ a
+d 
+
+
+t
+a
+
+z
+ th
+ mod
+
+ 
+
+thout k
+o
+
+
+g th
+ sp
+c
+f
+c mod
+
+ typ
+.
+Th
+s 
+s a
+so us
+fu
+ for compos
+
+g mod
+
+s. V
+s
+o
+-
+a
+guag
+ mod
+
+s oft
+
+ co
+s
+st
+of a v
+s
+o
+ mod
+
+ a
+d a 
+a
+guag
+ mod
+
+. By mak
+
+g th
+ co
+structor u
+
+form, 
+
+
+ca
+ 
+as
+
+y cr
+at
+ a v
+s
+o
+ mod
+
+ a
+d a 
+a
+guag
+ mod
+
+ a
+d compos
+ th
+m 
+
+to a
+v
+s
+o
+-
+a
+guag
+ mod
+
+.
+!!! 
+ot
+
+    To support th
+s cha
+g
+, a
+ vLLM mod
+
+s' s
+g
+atur
+s hav
+ b
+
+ updat
+d to:
+    ```pytho
+
+    d
+f __
+
+
+t__(s
+
+f, *, v
+m_co
+f
+g: V
+mCo
+f
+g, pr
+f
+x: str = ""):
     ```
+    To avo
+d acc
+d
 
-    To avoid accidentally passing incorrect arguments, the constructor is now keyword-only. This ensures that the constructor will raise an error if old configurations are passed. vLLM developers have already made this change for all models within vLLM. For out-of-tree registered models, developers need to update their models, for example by adding shim code to adapt the old constructor signature to the new one:
+ta
+y pass
 
-    ??? code
+g 
 
-        ```python
-        class MyOldModel(nn.Module):
-            def __init__(
-                self,
-                config,
-                cache_config: Optional[CacheConfig] = None,
-                quant_config: Optional[QuantizationConfig] = None,
-                lora_config: Optional[LoRAConfig] = None,
-                prefix: str = "",
-            ) -> None:
+corr
+ct argum
+
+ts, th
+ co
+structor 
+s 
+o
+ k
+y
+ord-o
+
+y. Th
+s 
+
+sur
+s that th
+ co
+structor 
+
+
+ ra
+s
+ a
+ 
+rror 
+f o
+d co
+f
+gurat
+o
+s ar
+ pass
+d. vLLM d
+v
+
+op
+rs hav
+ a
+r
+ady mad
+ th
+s cha
+g
+ for a
+ mod
+
+s 
+
+th
+
+ vLLM. For out-of-tr
+ r
+g
+st
+r
+d mod
+
+s, d
+v
+
+op
+rs 
+
+d to updat
+ th
+
+r mod
+
+s, for 
+xamp
+
+ by add
+
+g sh
+m cod
+ to adapt th
+ o
+d co
+structor s
+g
+atur
+ to th
+ 
+
+
+ o
+
+:
+    ??? cod
+
+        ```pytho
+
+        c
+ass MyO
+dMod
+
+(
+.Modu
+
+):
+            d
+f __
+
+
+t__(
+                s
+
+f,
+                co
+f
+g,
+                cach
+_co
+f
+g: Opt
+o
+a
+[Cach
+Co
+f
+g] = No
+
+,
+                qua
+t_co
+f
+g: Opt
+o
+a
+[Qua
+t
+zat
+o
+Co
+f
+g] = No
+
+,
+                
+ora_co
+f
+g: Opt
+o
+a
+[LoRACo
+f
+g] = No
+
+,
+                pr
+f
+x: str = "",
+            ) -
+ No
+
+:
                 ...
+        from v
+m.co
+f
+g 
+mport V
+mCo
+f
+g
+        c
+ass MyN
 
-        from vllm.config import VllmConfig
-        class MyNewModel(MyOldModel):
-            def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-                config = vllm_config.model_config.hf_config
-                cache_config = vllm_config.cache_config
-                quant_config = vllm_config.quant_config
-                lora_config = vllm_config.lora_config
-                super().__init__(config, cache_config, quant_config, lora_config, prefix)
+Mod
 
-        from packaging import version
-        if version.parse(__version__) >= version.parse("0.6.4"):
-            MyModel = MyNewModel
-        else:
-            MyModel = MyOldModel
+(MyO
+dMod
+
+):
+            d
+f __
+
+
+t__(s
+
+f, *, v
+m_co
+f
+g: V
+mCo
+f
+g, pr
+f
+x: str = ""):
+                co
+f
+g = v
+m_co
+f
+g.mod
+
+_co
+f
+g.hf_co
+f
+g
+                cach
+_co
+f
+g = v
+m_co
+f
+g.cach
+_co
+f
+g
+                qua
+t_co
+f
+g = v
+m_co
+f
+g.qua
+t_co
+f
+g
+                
+ora_co
+f
+g = v
+m_co
+f
+g.
+ora_co
+f
+g
+                sup
+r().__
+
+
+t__(co
+f
+g, cach
+_co
+f
+g, qua
+t_co
+f
+g, 
+ora_co
+f
+g, pr
+f
+x)
+        from packag
+
+g 
+mport v
+rs
+o
+
+        
+f v
+rs
+o
+.pars
+(__v
+rs
+o
+__) 
+= v
+rs
+o
+.pars
+("0.6.4"):
+            MyMod
+
+ = MyN
+
+Mod
+
+
+        
+
+s
+:
+            MyMod
+
+ = MyO
+dMod
+
+
         ```
+    Th
+s 
+ay, th
+ mod
 
-    This way, the model can work with both old and new versions of vLLM.
+ ca
+ 
+ork 
 
-3\. **Sharding and Quantization at Initialization**: Certain features require
-changing the model weights. For example, tensor parallelism needs to shard the
-model weights, and quantization needs to quantize the model weights. There are
-two possible ways to implement this feature. One way is to change the model
-weights after the model is initialized. The other way is to change the model
-weights during the model initialization. vLLM chooses the latter. The first
-approach is not scalable to large models. Suppose we want to run a 405B model
-(with roughly 810GB weights) with 16 H100 80GB GPUs. Ideally, every GPU should
-only load 50GB weights. If we change the model weights after the model is
-initialized, we need to load the full 810GB weights to every GPU and then shard
-the weights, leading to a huge memory overhead. Instead, if we shard the weights
-during the model initialization, every layer will only create a shard of the
-weights it needs, leading to a much smaller memory overhead. The same idea
-applies to quantization. Note that we also add an additional argument `prefix`
-to the model's constructor so that the model can initialize itself differently
-based on the prefix. This is useful for non-uniform quantization, where
-different parts of the model are quantized differently. The `prefix` is
-usually an empty string for the top-level model and a string like `"vision"`
-or `"language"` for the sub-models. In general, it matches the name of the
-module's state dict in the checkpoint file.
+th both o
+d a
+d 
 
-One disadvantage of this design is that it is hard to write unit tests for
-individual components in vLLM because every component needs to be initialized by
-a complete config object. We solve this problem by providing a default
-initialization function that creates a default config object with all fields set
-to `None`. If the component we want to test only cares about a few fields in
-the config object, we can create a default config object and set the fields we
-care about. This way, we can test the component in isolation. Note that many
-tests in vLLM are end-to-end tests that test the whole system, so this is not a
-big problem.
 
-In summary, the complete config object `VllmConfig` can be treated as an
-engine-level global state that is shared among all vLLM classes.
+ v
+rs
+o
+s of vLLM.
+3\. **Shard
+
+g a
+d Qua
+t
+zat
+o
+ at I
+
+t
+a
+
+zat
+o
+**: C
+rta
+
+ f
+atur
+s r
+qu
+r
+
+cha
+g
+
+g th
+ mod
+
+ 
+
+
+ghts. For 
+xamp
+
+, t
+
+sor para
+
+
+
+sm 
+
+ds to shard th
+
+mod
+
+ 
+
+
+ghts, a
+d qua
+t
+zat
+o
+ 
+
+ds to qua
+t
+z
+ th
+ mod
+
+ 
+
+
+ghts. Th
+r
+ ar
+
+t
+o poss
+b
+
+ 
+ays to 
+mp
+
+m
+
+t th
+s f
+atur
+. O
+
+ 
+ay 
+s to cha
+g
+ th
+ mod
+
+
+
+
+
+ghts aft
+r th
+ mod
+
+ 
+s 
+
+
+t
+a
+
+z
+d. Th
+ oth
+r 
+ay 
+s to cha
+g
+ th
+ mod
+
+
+
+
+
+ghts dur
+
+g th
+ mod
+
+ 
+
+
+t
+a
+
+zat
+o
+. vLLM choos
+s th
+ 
+att
+r. Th
+ f
+rst
+approach 
+s 
+ot sca
+ab
+
+ to 
+arg
+ mod
+
+s. Suppos
+ 
+
+ 
+a
+t to ru
+ a 405B mod
+
+
+(
+
+th rough
+y 810GB 
+
+
+ghts) 
+
+th 16 H100 80GB GPUs. Id
+a
+y, 
+v
+ry GPU shou
+d
+o
+
+y 
+oad 50GB 
+
+
+ghts. If 
+
+ cha
+g
+ th
+ mod
+
+ 
+
+
+ghts aft
+r th
+ mod
+
+ 
+s
+
+
+
+t
+a
+
+z
+d, 
+
+ 
+
+d to 
+oad th
+ fu
+ 810GB 
+
+
+ghts to 
+v
+ry GPU a
+d th
+
+ shard
+th
+ 
+
+
+ghts, 
+
+ad
+
+g to a hug
+ m
+mory ov
+rh
+ad. I
+st
+ad, 
+f 
+
+ shard th
+ 
+
+
+ghts
+dur
+
+g th
+ mod
+
+ 
+
+
+t
+a
+
+zat
+o
+, 
+v
+ry 
+ay
+r 
+
+
+ o
+
+y cr
+at
+ a shard of th
+
+
+
+
+ghts 
+t 
+
+ds, 
+
+ad
+
+g to a much sma
+
+r m
+mory ov
+rh
+ad. Th
+ sam
+ 
+d
+a
+app
+
+
+s to qua
+t
+zat
+o
+. Not
+ that 
+
+ a
+so add a
+ add
+t
+o
+a
+ argum
+
+t `pr
+f
+x`
+to th
+ mod
+
+'s co
+structor so that th
+ mod
+
+ ca
+ 
+
+
+t
+a
+
+z
+ 
+ts
+
+f d
+ff
+r
+
+t
+y
+bas
+d o
+ th
+ pr
+f
+x. Th
+s 
+s us
+fu
+ for 
+o
+-u
+
+form qua
+t
+zat
+o
+, 
+h
+r
+
+d
+ff
+r
+
+t parts of th
+ mod
+
+ ar
+ qua
+t
+z
+d d
+ff
+r
+
+t
+y. Th
+ `pr
+f
+x` 
+s
+usua
+y a
+ 
+mpty str
+
+g for th
+ top-
+
+v
+
+ mod
+
+ a
+d a str
+
+g 
+
+k
+ `"v
+s
+o
+"`
+or `"
+a
+guag
+"` for th
+ sub-mod
+
+s. I
+ g
+
+
+ra
+, 
+t match
+s th
+ 
+am
+ of th
+
+modu
+
+'s stat
+ d
+ct 
+
+ th
+ ch
+ckpo
+
+t f
+
+
+.
+O
+
+ d
+sadva
+tag
+ of th
+s d
+s
+g
+ 
+s that 
+t 
+s hard to 
+r
+t
+ u
+
+t t
+sts for
+
+
+d
+v
+dua
+ compo
+
+
+ts 
+
+ vLLM b
+caus
+ 
+v
+ry compo
+
+
+t 
+
+ds to b
+ 
+
+
+t
+a
+
+z
+d by
+a comp
+
+t
+ co
+f
+g obj
+ct. W
+ so
+v
+ th
+s prob
+
+m by prov
+d
+
+g a d
+fau
+t
+
+
+
+t
+a
+
+zat
+o
+ fu
+ct
+o
+ that cr
+at
+s a d
+fau
+t co
+f
+g obj
+ct 
+
+th a
+ f
+
+
+ds s
+t
+to `No
+
+`. If th
+ compo
+
+
+t 
+
+ 
+a
+t to t
+st o
+
+y car
+s about a f
+
+ f
+
+
+ds 
+
+
+th
+ co
+f
+g obj
+ct, 
+
+ ca
+ cr
+at
+ a d
+fau
+t co
+f
+g obj
+ct a
+d s
+t th
+ f
+
+
+ds 
+
+
+car
+ about. Th
+s 
+ay, 
+
+ ca
+ t
+st th
+ compo
+
+
+t 
+
+ 
+so
+at
+o
+. Not
+ that ma
+y
+t
+sts 
+
+ vLLM ar
+ 
+
+d-to-
+
+d t
+sts that t
+st th
+ 
+ho
+
+ syst
+m, so th
+s 
+s 
+ot a
+b
+g prob
+
+m.
+I
+ summary, th
+ comp
+
+t
+ co
+f
+g obj
+ct `V
+mCo
+f
+g` ca
+ b
+ tr
+at
+d as a
+
+
+
+g
+
+
+-
+
+v
+
+ g
+oba
+ stat
+ that 
+s shar
+d amo
+g a
+ vLLM c
+ass
+s.

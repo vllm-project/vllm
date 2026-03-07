@@ -1,89 +1,655 @@
-# Intel Quantization Support
+# I
+t
 
-[AutoRound](https://github.com/intel/auto-round) is Intel’s advanced quantization algorithm designed for large language models(LLMs). It produces highly efficient **INT2, INT3, INT4, INT8, MXFP8, MXFP4, NVFP4**, and **GGUF** quantized models, balancing accuracy and inference performance. AutoRound is also part of the [Intel® Neural Compressor](https://github.com/intel/neural-compressor). For a deeper introduction, see the [AutoRound step-by-step guide](https://github.com/intel/auto-round/blob/main/docs/step_by_step.md).
+ Qua
+t
+zat
+o
+ Support
+[AutoRou
+d](https://g
+thub.com/
 
-## Key Features
+t
 
-✅ Superior Accuracy Delivers strong performance even at 2–3 bits [example models](https://huggingface.co/collections/OPEA/2-3-bits)
+/auto-rou
+d) 
+s I
+t
 
-✅ Fast Mixed `Bits`/`Dtypes` Scheme Generation Automatically configure in minutes
+’s adva
+c
+d qua
+t
+zat
+o
+ a
+gor
+thm d
+s
+g
 
-✅ Support for exporting **AutoRound, AutoAWQ, AutoGPTQ, and GGUF** formats
+d for 
+arg
+ 
+a
+guag
+ mod
 
-✅ **10+ vision-language models (VLMs)** are supported
+s(LLMs). It produc
+s h
+gh
+y 
+ff
+c
 
-✅ **Per-layer mixed-bit quantization** for fine-grained control
 
-✅ **RTN (Round-To-Nearest) mode** for quick quantization with slight accuracy loss
+t **INT2, INT3, INT4, INT8, MXFP8, MXFP4, NVFP4**, a
+d **GGUF** qua
+t
+z
+d mod
 
-✅ **Multiple quantization recipes**: best, base, and light
+s, ba
+a
+c
 
-✅ Advanced utilities such as immediate packing and support for **10+ backends**
+g accuracy a
+d 
 
-## Supported Recipes on Intel Platforms
+f
+r
 
-On Intel platforms, AutoRound recipes are being enabled progressively by format and hardware. Currently, vLLM supports:
+c
+ p
+rforma
+c
+. AutoRou
+d 
+s a
+so part of th
+ [I
+t
 
-- **`W4A16`**: weight-only, 4-bit weights with 16-bit activations
-- **`W8A16`**: weight-only, 8-bit weights with 16-bit activations
+® N
+ura
+ Compr
+ssor](https://g
+thub.com/
 
-Additional recipes and formats will be supported in future releases.
+t
 
-## Quantizing a Model
+/
 
-### Installation
+ura
+-compr
+ssor). For a d
+p
+r 
+
+troduct
+o
+, s
+ th
+ [AutoRou
+d st
+p-by-st
+p gu
+d
+](https://g
+thub.com/
+
+t
+
+/auto-rou
+d/b
+ob/ma
+
+/docs/st
+p_by_st
+p.md).
+## K
+y F
+atur
+s
+✅ Sup
+r
+or Accuracy D
+
+
+v
+rs stro
+g p
+rforma
+c
+ 
+v
+
+ at 2–3 b
+ts [
+xamp
+
+ mod
+
+s](https://hugg
+
+gfac
+.co/co
+
+ct
+o
+s/OPEA/2-3-b
+ts)
+✅ Fast M
+x
+d `B
+ts`/`Dtyp
+s` Sch
+m
+ G
+
+
+rat
+o
+ Automat
+ca
+y co
+f
+gur
+ 
+
+ m
+
+ut
+s
+✅ Support for 
+xport
+
+g **AutoRou
+d, AutoAWQ, AutoGPTQ, a
+d GGUF** formats
+✅ **10+ v
+s
+o
+-
+a
+guag
+ mod
+
+s (VLMs)** ar
+ support
+d
+✅ **P
+r-
+ay
+r m
+x
+d-b
+t qua
+t
+zat
+o
+** for f
+
+
+-gra
+
+
+d co
+tro
+
+✅ **RTN (Rou
+d-To-N
+ar
+st) mod
+** for qu
+ck qua
+t
+zat
+o
+ 
+
+th s
+
+ght accuracy 
+oss
+✅ **Mu
+t
+p
+
+ qua
+t
+zat
+o
+ r
+c
+p
+s**: b
+st, bas
+, a
+d 
+
+ght
+✅ Adva
+c
+d ut
+
+
+t
+
+s such as 
+mm
+d
+at
+ pack
+
+g a
+d support for **10+ back
+
+ds**
+## Support
+d R
+c
+p
+s o
+ I
+t
+
+ P
+atforms
+O
+ I
+t
+
+ p
+atforms, AutoRou
+d r
+c
+p
+s ar
+ b
+
+
+g 
+
+ab
+
+d progr
+ss
+v
+
+y by format a
+d hard
+ar
+. Curr
+
+t
+y, vLLM supports:
+- **`W4A16`**: 
+
+
+ght-o
+
+y, 4-b
+t 
+
+
+ghts 
+
+th 16-b
+t act
+vat
+o
+s
+- **`W8A16`**: 
+
+
+ght-o
+
+y, 8-b
+t 
+
+
+ghts 
+
+th 16-b
+t act
+vat
+o
+s
+Add
+t
+o
+a
+ r
+c
+p
+s a
+d formats 
+
+
+ b
+ support
+d 
+
+ futur
+ r
+
+
+as
+s.
+## Qua
+t
+z
+
+g a Mod
+
+
+### I
+sta
+at
+o
 
 ```bash
-uv pip install auto-round
+uv p
+p 
+
+sta
+ auto-rou
+d
 ```
+### Qua
+t
+z
+ 
 
-### Quantize with CLI
-
+th CLI
 ```bash
-auto-round \
-    --model Qwen/Qwen3-0.6B \
-    --scheme W4A16 \
-    --format auto_round \
-    --output_dir ./tmp_autoround
+auto-rou
+d \
+    --mod
+
+ Q
+
+
+/Q
+
+
+3-0.6B \
+    --sch
+m
+ W4A16 \
+    --format auto_rou
+d \
+    --output_d
+r ./tmp_autorou
+d
 ```
+### Qua
+t
+z
+ 
 
-### Quantize with Python API
+th Pytho
+ API
+```pytho
 
-```python
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from auto_round import AutoRound
+from tra
+sform
+rs 
+mport AutoMod
 
-model_name = "Qwen/Qwen3-0.6B"
-autoround = AutoRound(model_name, scheme="W4A16")
+ForCausa
+LM, AutoTok
 
-# the best accuracy, 4-5X slower, low_gpu_mem_usage could save ~20G but ~30% slower
-# autoround = AutoRound(model, tokenizer, nsamples=512, iters=1000, low_gpu_mem_usage=True, bits=bits, group_size=group_size, sym=sym)
 
-# 2-3X speedup, slight accuracy drop at W4G128
-# autoround = AutoRound(model, tokenizer, nsamples=128, iters=50, lr=5e-3, bits=bits, group_size=group_size, sym=sym )
+z
+r
+from auto_rou
+d 
+mport AutoRou
+d
+mod
 
-output_dir = "./tmp_autoround"
-# format= 'auto_round'(default), 'auto_gptq', 'auto_awq'
-autoround.quantize_and_save(output_dir, format="auto_round")
+_
+am
+ = "Q
+
+
+/Q
+
+
+3-0.6B"
+autorou
+d = AutoRou
+d(mod
+
+_
+am
+, sch
+m
+="W4A16")
+# th
+ b
+st accuracy, 4-5X s
+o
+
+r, 
+o
+_gpu_m
+m_usag
+ cou
+d sav
+ ~20G but ~30% s
+o
+
+r
+# autorou
+d = AutoRou
+d(mod
+
+, tok
+
+
+z
+r, 
+samp
+
+s=512, 
+t
+rs=1000, 
+o
+_gpu_m
+m_usag
+=Tru
+, b
+ts=b
+ts, group_s
+z
+=group_s
+z
+, sym=sym)
+# 2-3X sp
+dup, s
+
+ght accuracy drop at W4G128
+# autorou
+d = AutoRou
+d(mod
+
+, tok
+
+
+z
+r, 
+samp
+
+s=128, 
+t
+rs=50, 
+r=5
+-3, b
+ts=b
+ts, group_s
+z
+=group_s
+z
+, sym=sym )
+output_d
+r = "./tmp_autorou
+d"
+# format= 'auto_rou
+d'(d
+fau
+t), 'auto_gptq', 'auto_a
+q'
+autorou
+d.qua
+t
+z
+_a
+d_sav
+(output_d
+r, format="auto_rou
+d")
 ```
+## D
+p
+oy
 
-## Deploying AutoRound Quantized Models in vLLM
+g AutoRou
+d Qua
+t
+z
+d Mod
 
+s 
+
+ vLLM
 ```bash
-vllm serve Intel/DeepSeek-R1-0528-Qwen3-8B-int4-AutoRound \
-    --gpu-memory-utilization 0.8 \
-    --max-model-len 4096
+v
+m s
+rv
+ I
+t
+
+/D
+pS
+k-R1-0528-Q
+
+
+3-8B-
+
+t4-AutoRou
+d \
+    --gpu-m
+mory-ut
+
+
+zat
+o
+ 0.8 \
+    --max-mod
+
+-
+
+
+ 4096
 ```
+!!! 
+ot
 
-!!! note
-     To deploy `wNa16` models on Intel GPU/CPU, please add `--enforce-eager` for now.
+     To d
+p
+oy `
+Na16` mod
 
-## Evaluating the Quantized Model with vLLM
+s o
+ I
+t
 
+ GPU/CPU, p
+
+as
+ add `--
+
+forc
+-
+ag
+r` for 
+o
+.
+## Eva
+uat
+
+g th
+ Qua
+t
+z
+d Mod
+
+ 
+
+th vLLM
 ```bash
-lm_eval --model vllm \
-  --model_args pretrained="Intel/DeepSeek-R1-0528-Qwen3-8B-int4-AutoRound,max_model_len=8192,max_num_batched_tokens=32768,max_num_seqs=128,gpu_memory_utilization=0.8,dtype=bfloat16,max_gen_toks=2048,enforce_eager=True" \
+
+m_
+va
+ --mod
+
+ v
+m \
+  --mod
+
+_args pr
+tra
+
+
+d="I
+t
+
+/D
+pS
+k-R1-0528-Q
+
+
+3-8B-
+
+t4-AutoRou
+d,max_mod
+
+_
+
+
+=8192,max_
+um_batch
+d_tok
+
+s=32768,max_
+um_s
+qs=128,gpu_m
+mory_ut
+
+
+zat
+o
+=0.8,dtyp
+=bf
+oat16,max_g
+
+_toks=2048,
+
+forc
+_
+ag
+r=Tru
+" \
   --tasks gsm8k \
-  --num_fewshot 5 \
-  --batch_size 128
+  --
+um_f
+
+shot 5 \
+  --batch_s
+z
+ 128
 ```

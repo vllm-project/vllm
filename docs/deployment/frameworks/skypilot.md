@@ -1,327 +1,1753 @@
-# SkyPilot
+# SkyP
 
-<p align="center">
-  <img src="https://imgur.com/yxtzPEu.png" alt="vLLM"/>
-</p>
+ot
+p a
 
-vLLM can be **run and scaled to multiple service replicas on clouds and Kubernetes** with [SkyPilot](https://github.com/skypilot-org/skypilot), an open-source framework for running LLMs on any cloud. More examples for various open models, such as Llama-3, Mixtral, etc., can be found in [SkyPilot AI gallery](https://skypilot.readthedocs.io/en/latest/gallery/index.html).
+g
+="c
 
-## Prerequisites
+t
+r"
 
-- Go to the [HuggingFace model page](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) and request access to the model `meta-llama/Meta-Llama-3-8B-Instruct`.
-- Check that you have installed SkyPilot ([docs](https://skypilot.readthedocs.io/en/latest/getting-started/installation.html)).
-- Check that `sky check` shows clouds or Kubernetes are enabled.
+  
 
+mg src="https://
+mgur.com/yxtzPEu.p
+g" a
+t="vLLM"/
+
+/p
+
+vLLM ca
+ b
+ **ru
+ a
+d sca
+
+d to mu
+t
+p
+
+ s
+rv
+c
+ r
+p
+
+cas o
+ c
+ouds a
+d Kub
+r
+
+t
+s** 
+
+th [SkyP
+
+ot](https://g
+thub.com/skyp
+
+ot-org/skyp
+
+ot), a
+ op
+
+-sourc
+ fram
+
+ork for ru
+
+
+g LLMs o
+ a
+y c
+oud. Mor
+ 
+xamp
+
+s for var
+ous op
+
+ mod
+
+s, such as L
+ama-3, M
+xtra
+, 
+tc., ca
+ b
+ fou
+d 
+
+ [SkyP
+
+ot AI ga
+
+ry](https://skyp
+
+ot.r
+adth
+docs.
+o/
+
+/
+at
+st/ga
+
+ry/
+
+d
+x.htm
+).
+## Pr
+r
+qu
+s
+t
+s
+- Go to th
+ [Hugg
+
+gFac
+ mod
+
+ pag
+](https://hugg
+
+gfac
+.co/m
+ta-
+ama/M
+ta-L
+ama-3-8B-I
+struct) a
+d r
+qu
+st acc
+ss to th
+ mod
+
+ `m
+ta-
+ama/M
+ta-L
+ama-3-8B-I
+struct`.
+- Ch
+ck that you hav
+ 
+
+sta
+
+d SkyP
+
+ot ([docs](https://skyp
+
+ot.r
+adth
+docs.
+o/
+
+/
+at
+st/g
+tt
+
+g-start
+d/
+
+sta
+at
+o
+.htm
+)).
+- Ch
+ck that `sky ch
+ck` sho
+s c
+ouds or Kub
+r
+
+t
+s ar
+ 
+
+ab
+
+d.
 ```bash
-pip install skypilot-nightly
-sky check
+p
+p 
+
+sta
+ skyp
+
+ot-
+
+ght
+y
+sky ch
+ck
 ```
+## Ru
+ o
+ a s
 
-## Run on a single instance
+g
 
-See the vLLM SkyPilot YAML for serving, [serving.yaml](https://github.com/skypilot-org/skypilot/blob/master/llm/vllm/serve.yaml).
+ 
 
-??? code "Yaml"
+sta
+c
 
-    ```yaml
-    resources:
-      accelerators: {L4, A10g, A10, L40, A40, A100, A100-80GB} # We can use cheaper accelerators for 8B model.
-      use_spot: True
-      disk_size: 512  # Ensure model checkpoints can fit.
-      disk_tier: best
-      ports: 8081  # Expose to internet traffic.
+S
+ th
+ vLLM SkyP
 
-    envs:
+ot YAML for s
+rv
+
+g, [s
+rv
+
+g.yam
+](https://g
+thub.com/skyp
+
+ot-org/skyp
+
+ot/b
+ob/mast
+r/
+m/v
+m/s
+rv
+.yam
+).
+??? cod
+ "Yam
+"
+    ```yam
+
+    r
+sourc
+s:
+      acc
+
+
+rators: {L4, A10g, A10, L40, A40, A100, A100-80GB} # W
+ ca
+ us
+ ch
+ap
+r acc
+
+
+rators for 8B mod
+
+.
+      us
+_spot: Tru
+
+      d
+sk_s
+z
+: 512  # E
+sur
+ mod
+
+ ch
+ckpo
+
+ts ca
+ f
+t.
+      d
+sk_t
+
+r: b
+st
+      ports: 8081  # Expos
+ to 
+
+t
+r
+
+t traff
+c.
+    
+
+vs:
       PYTHONUNBUFFERED: 1
-      MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
-      HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
+      MODEL_NAME: m
+ta-
+ama/M
+ta-L
+ama-3-8B-I
+struct
+      HF_TOKEN: 
+your-hugg
 
-    setup: |
-      conda create -n vllm python=3.10 -y
-      conda activate vllm
+gfac
+-tok
 
-      pip install vllm==0.4.0.post1
-      # Install Gradio for web UI.
-      pip install gradio openai
-      pip install flash-attn==2.5.7
 
-    run: |
-      conda activate vllm
-      echo 'Starting vllm api server...'
-      vllm serve $MODEL_NAME \
+  # Cha
+g
+ to your o
+
+ hugg
+
+gfac
+ tok
+
+, or us
+ --
+
+v to pass.
+    s
+tup: |
+      co
+da cr
+at
+ -
+ v
+m pytho
+=3.10 -y
+      co
+da act
+vat
+ v
+m
+      p
+p 
+
+sta
+ v
+m==0.4.0.post1
+      # I
+sta
+ Grad
+o for 
+
+b UI.
+      p
+p 
+
+sta
+ grad
+o op
+
+a
+
+      p
+p 
+
+sta
+ f
+ash-att
+==2.5.7
+    ru
+: |
+      co
+da act
+vat
+ v
+m
+      
+cho 'Start
+
+g v
+m ap
+ s
+rv
+r...'
+      v
+m s
+rv
+ $MODEL_NAME \
         --port 8081 \
-        --trust-remote-code \
-        --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
-        2>&1 | tee api_server.log &
+        --trust-r
+mot
+-cod
+ \
+        --t
 
-      echo 'Waiting for vllm api server to start...'
-      while ! `cat api_server.log | grep -q 'Uvicorn running on'`; do sleep 1; done
+sor-para
 
-      echo 'Starting gradio server...'
-      git clone https://github.com/vllm-project/vllm.git || true
-      python vllm/examples/online_serving/gradio_openai_chatbot_webserver.py \
+
+-s
+z
+ $SKYPILOT_NUM_GPUS_PER_NODE \
+        2
+&1 | t
+ ap
+_s
+rv
+r.
+og &
+      
+cho 'Wa
+t
+
+g for v
+m ap
+ s
+rv
+r to start...'
+      
+h
+
+
+ ! `cat ap
+_s
+rv
+r.
+og | gr
+p -q 'Uv
+cor
+ ru
+
+
+g o
+'`; do s
+
+p 1; do
+
+
+      
+cho 'Start
+
+g grad
+o s
+rv
+r...'
+      g
+t c
+o
+
+ https://g
+thub.com/v
+m-proj
+ct/v
+m.g
+t || tru
+
+      pytho
+ v
+m/
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/grad
+o_op
+
+a
+_chatbot_
+
+bs
+rv
+r.py \
         -m $MODEL_NAME \
         --port 8811 \
-        --model-url http://localhost:8081/v1 \
-        --stop-token-ids 128009,128001
+        --mod
+
+-ur
+ http://
+oca
+host:8081/v1 \
+        --stop-tok
+
+-
+ds 128009,128001
     ```
+Start th
+ s
+rv
 
-Start the serving the Llama-3 8B model on any of the candidate GPUs listed (L4, A10g, ...):
+g th
+ L
+ama-3 8B mod
 
+ o
+ a
+y of th
+ ca
+d
+dat
+ GPUs 
+
+st
+d (L4, A10g, ...):
 ```bash
-HF_TOKEN="your-huggingface-token" sky launch serving.yaml --env HF_TOKEN
+HF_TOKEN="your-hugg
+
+gfac
+-tok
+
+" sky 
+au
+ch s
+rv
+
+g.yam
+ --
+
+v HF_TOKEN
 ```
+Ch
+ck th
+ output of th
+ comma
+d. Th
+r
+ 
 
-Check the output of the command. There will be a shareable gradio link (like the last line of the following). Open it in your browser to use the LLaMA model to do the text completion.
 
-```console
-(task, pid=7431) Running on public URL: https://<gradio-hash>.gradio.live
+ b
+ a shar
+ab
+
+ grad
+o 
+
+
+k (
+
+k
+ th
+ 
+ast 
+
+
+
+ of th
+ fo
+o
+
+
+g). Op
+
+ 
+t 
+
+ your bro
+s
+r to us
+ th
+ LLaMA mod
+
+ to do th
+ t
+xt comp
+
+t
+o
+.
+```co
+so
+
+
+(task, p
+d=7431) Ru
+
+
+g o
+ pub
+
+c URL: https://
+grad
+o-hash
+.grad
+o.
+
+v
+
 ```
+**Opt
+o
+a
+**: S
+rv
+ th
+ 70B mod
 
-**Optional**: Serve the 70B model instead of the default 8B and use more GPU:
+ 
 
+st
+ad of th
+ d
+fau
+t 8B a
+d us
+ mor
+ GPU:
 ```bash
-HF_TOKEN="your-huggingface-token" \
-  sky launch serving.yaml \
+HF_TOKEN="your-hugg
+
+gfac
+-tok
+
+" \
+  sky 
+au
+ch s
+rv
+
+g.yam
+ \
   --gpus A100:8 \
-  --env HF_TOKEN \
-  --env MODEL_NAME=meta-llama/Meta-Llama-3-70B-Instruct
+  --
+
+v HF_TOKEN \
+  --
+
+v MODEL_NAME=m
+ta-
+ama/M
+ta-L
+ama-3-70B-I
+struct
 ```
+## Sca
 
-## Scale up to multiple replicas
+ up to mu
+t
+p
 
-SkyPilot can scale up the service to multiple service replicas with built-in autoscaling, load-balancing and fault-tolerance. You can do it by adding a services section to the YAML file.
+ r
+p
 
-??? code "Yaml"
+cas
+SkyP
 
-    ```yaml
-    service:
-      replicas: 2
-      # An actual request for readiness probe.
-      readiness_probe:
-        path: /v1/chat/completions
+ot ca
+ sca
+
+ up th
+ s
+rv
+c
+ to mu
+t
+p
+
+ s
+rv
+c
+ r
+p
+
+cas 
+
+th bu
+
+t-
+
+ autosca
+
+
+g, 
+oad-ba
+a
+c
+
+g a
+d fau
+t-to
+
+ra
+c
+. You ca
+ do 
+t by add
+
+g a s
+rv
+c
+s s
+ct
+o
+ to th
+ YAML f
+
+
+.
+??? cod
+ "Yam
+"
+    ```yam
+
+    s
+rv
+c
+:
+      r
+p
+
+cas: 2
+      # A
+ actua
+ r
+qu
+st for r
+ad
+
+
+ss prob
+.
+      r
+ad
+
+
+ss_prob
+:
+        path: /v1/chat/comp
+
+t
+o
+s
         post_data:
-        model: $MODEL_NAME
-        messages:
-          - role: user
-            content: Hello! What is your name?
-      max_completion_tokens: 1
+        mod
+
+: $MODEL_NAME
+        m
+ssag
+s:
+          - ro
+
+: us
+r
+            co
+t
+
+t: H
+
+o! What 
+s your 
+am
+?
+      max_comp
+
+t
+o
+_tok
+
+s: 1
     ```
+??? cod
+ "Yam
+"
+    ```yam
 
-??? code "Yaml"
+    s
+rv
+c
+:
+      r
+p
 
-    ```yaml
-    service:
-      replicas: 2
-      # An actual request for readiness probe.
-      readiness_probe:
-        path: /v1/chat/completions
+cas: 2
+      # A
+ actua
+ r
+qu
+st for r
+ad
+
+
+ss prob
+.
+      r
+ad
+
+
+ss_prob
+:
+        path: /v1/chat/comp
+
+t
+o
+s
         post_data:
-          model: $MODEL_NAME
-          messages:
-            - role: user
-              content: Hello! What is your name?
-          max_completion_tokens: 1
+          mod
 
-    resources:
-      accelerators: {L4, A10g, A10, L40, A40, A100, A100-80GB} # We can use cheaper accelerators for 8B model.
-      use_spot: True
-      disk_size: 512  # Ensure model checkpoints can fit.
-      disk_tier: best
-      ports: 8081  # Expose to internet traffic.
+: $MODEL_NAME
+          m
+ssag
+s:
+            - ro
 
-    envs:
+: us
+r
+              co
+t
+
+t: H
+
+o! What 
+s your 
+am
+?
+          max_comp
+
+t
+o
+_tok
+
+s: 1
+    r
+sourc
+s:
+      acc
+
+
+rators: {L4, A10g, A10, L40, A40, A100, A100-80GB} # W
+ ca
+ us
+ ch
+ap
+r acc
+
+
+rators for 8B mod
+
+.
+      us
+_spot: Tru
+
+      d
+sk_s
+z
+: 512  # E
+sur
+ mod
+
+ ch
+ckpo
+
+ts ca
+ f
+t.
+      d
+sk_t
+
+r: b
+st
+      ports: 8081  # Expos
+ to 
+
+t
+r
+
+t traff
+c.
+    
+
+vs:
       PYTHONUNBUFFERED: 1
-      MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
-      HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
+      MODEL_NAME: m
+ta-
+ama/M
+ta-L
+ama-3-8B-I
+struct
+      HF_TOKEN: 
+your-hugg
 
-    setup: |
-      conda create -n vllm python=3.10 -y
-      conda activate vllm
+gfac
+-tok
 
-      pip install vllm==0.4.0.post1
-      # Install Gradio for web UI.
-      pip install gradio openai
-      pip install flash-attn==2.5.7
 
-    run: |
-      conda activate vllm
-      echo 'Starting vllm api server...'
-      vllm serve $MODEL_NAME \
+  # Cha
+g
+ to your o
+
+ hugg
+
+gfac
+ tok
+
+, or us
+ --
+
+v to pass.
+    s
+tup: |
+      co
+da cr
+at
+ -
+ v
+m pytho
+=3.10 -y
+      co
+da act
+vat
+ v
+m
+      p
+p 
+
+sta
+ v
+m==0.4.0.post1
+      # I
+sta
+ Grad
+o for 
+
+b UI.
+      p
+p 
+
+sta
+ grad
+o op
+
+a
+
+      p
+p 
+
+sta
+ f
+ash-att
+==2.5.7
+    ru
+: |
+      co
+da act
+vat
+ v
+m
+      
+cho 'Start
+
+g v
+m ap
+ s
+rv
+r...'
+      v
+m s
+rv
+ $MODEL_NAME \
         --port 8081 \
-        --trust-remote-code \
-        --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
-        2>&1 | tee api_server.log
+        --trust-r
+mot
+-cod
+ \
+        --t
+
+sor-para
+
+
+-s
+z
+ $SKYPILOT_NUM_GPUS_PER_NODE \
+        2
+&1 | t
+ ap
+_s
+rv
+r.
+og
     ```
+Start th
+ s
+rv
 
-Start the serving the Llama-3 8B model on multiple replicas:
+g th
+ L
+ama-3 8B mod
 
+ o
+ mu
+t
+p
+
+ r
+p
+
+cas:
 ```bash
-HF_TOKEN="your-huggingface-token" \
-  sky serve up -n vllm serving.yaml \
-  --env HF_TOKEN
+HF_TOKEN="your-hugg
+
+gfac
+-tok
+
+" \
+  sky s
+rv
+ up -
+ v
+m s
+rv
+
+g.yam
+ \
+  --
+
+v HF_TOKEN
 ```
+Wa
+t u
+t
 
-Wait until the service is ready:
-
+ th
+ s
+rv
+c
+ 
+s r
+ady:
 ```bash
-watch -n10 sky serve status vllm
+
+atch -
+10 sky s
+rv
+ status v
+m
 ```
+Examp
 
-Example outputs:
+ outputs:
+```co
+so
 
-```console
-Services
+
+S
+rv
+c
+s
 NAME  VERSION  UPTIME  STATUS  REPLICAS  ENDPOINT
-vllm  1        35s     READY   2/2       xx.yy.zz.100:30001
+v
+m  1        35s     READY   2/2       xx.yy.zz.100:30001
+S
+rv
+c
+ R
+p
 
-Service Replicas
+cas
 SERVICE_NAME  ID  VERSION  IP            LAUNCHED     RESOURCES                STATUS  REGION
-vllm          1   1        xx.yy.zz.121  18 mins ago  1x GCP([Spot]{'L4': 1})  READY   us-east4
-vllm          2   1        xx.yy.zz.245  18 mins ago  1x GCP([Spot]{'L4': 1})  READY   us-east4
+v
+m          1   1        xx.yy.zz.121  18 m
+
+s ago  1x GCP([Spot]{'L4': 1})  READY   us-
+ast4
+v
+m          2   1        xx.yy.zz.245  18 m
+
+s ago  1x GCP([Spot]{'L4': 1})  READY   us-
+ast4
 ```
+Aft
+r th
+ s
+rv
+c
+ 
+s READY, you ca
+ f
 
-After the service is READY, you can find a single endpoint for the service and access the service with the endpoint:
+d a s
 
-??? console "Commands"
+g
 
+ 
+
+dpo
+
+t for th
+ s
+rv
+c
+ a
+d acc
+ss th
+ s
+rv
+c
+ 
+
+th th
+ 
+
+dpo
+
+t:
+??? co
+so
+
+ "Comma
+ds"
     ```bash
-    ENDPOINT=$(sky serve status --endpoint 8081 vllm)
-    curl -L http://$ENDPOINT/v1/chat/completions \
-      -H "Content-Type: application/json" \
+    ENDPOINT=$(sky s
+rv
+ status --
+
+dpo
+
+t 8081 v
+m)
+    cur
+ -L http://$ENDPOINT/v1/chat/comp
+
+t
+o
+s \
+      -H "Co
+t
+
+t-Typ
+: app
+
+cat
+o
+/jso
+" \
       -d '{
-        "model": "meta-llama/Meta-Llama-3-8B-Instruct",
-        "messages": [
+        "mod
+
+": "m
+ta-
+ama/M
+ta-L
+ama-3-8B-I
+struct",
+        "m
+ssag
+s": [
         {
-          "role": "system",
-          "content": "You are a helpful assistant."
+          "ro
+
+": "syst
+m",
+          "co
+t
+
+t": "You ar
+ a h
+
+pfu
+ ass
+sta
+t."
         },
         {
-          "role": "user",
-          "content": "Who are you?"
+          "ro
+
+": "us
+r",
+          "co
+t
+
+t": "Who ar
+ you?"
         }
         ],
-        "stop_token_ids": [128009,  128001]
+        "stop_tok
+
+_
+ds": [128009,  128001]
       }'
     ```
+To 
 
-To enable autoscaling, you could replace the `replicas` with the following configs in `service`:
+ab
 
-```yaml
-service:
-  replica_policy:
-    min_replicas: 2
-    max_replicas: 4
-    target_qps_per_replica: 2
+ autosca
+
+
+g, you cou
+d r
+p
+ac
+ th
+ `r
+p
+
+cas` 
+
+th th
+ fo
+o
+
+
+g co
+f
+gs 
+
+ `s
+rv
+c
+`:
+```yam
+
+s
+rv
+c
+:
+  r
+p
+
+ca_po
+
+cy:
+    m
+
+_r
+p
+
+cas: 2
+    max_r
+p
+
+cas: 4
+    targ
+t_qps_p
+r_r
+p
+
+ca: 2
 ```
+Th
+s 
 
-This will scale the service up to when the QPS exceeds 2 for each replica.
 
-??? code "Yaml"
+ sca
 
-    ```yaml
-    service:
-      replica_policy:
-        min_replicas: 2
-        max_replicas: 4
-        target_qps_per_replica: 2
-      # An actual request for readiness probe.
-      readiness_probe:
-        path: /v1/chat/completions
+ th
+ s
+rv
+c
+ up to 
+h
+
+ th
+ QPS 
+xc
+ds 2 for 
+ach r
+p
+
+ca.
+??? cod
+ "Yam
+"
+    ```yam
+
+    s
+rv
+c
+:
+      r
+p
+
+ca_po
+
+cy:
+        m
+
+_r
+p
+
+cas: 2
+        max_r
+p
+
+cas: 4
+        targ
+t_qps_p
+r_r
+p
+
+ca: 2
+      # A
+ actua
+ r
+qu
+st for r
+ad
+
+
+ss prob
+.
+      r
+ad
+
+
+ss_prob
+:
+        path: /v1/chat/comp
+
+t
+o
+s
         post_data:
-          model: $MODEL_NAME
-          messages:
-            - role: user
-              content: Hello! What is your name?
-          max_completion_tokens: 1
+          mod
 
-    resources:
-      accelerators: {L4, A10g, A10, L40, A40, A100, A100-80GB} # We can use cheaper accelerators for 8B model.
-      use_spot: True
-      disk_size: 512  # Ensure model checkpoints can fit.
-      disk_tier: best
-      ports: 8081  # Expose to internet traffic.
+: $MODEL_NAME
+          m
+ssag
+s:
+            - ro
 
-    envs:
+: us
+r
+              co
+t
+
+t: H
+
+o! What 
+s your 
+am
+?
+          max_comp
+
+t
+o
+_tok
+
+s: 1
+    r
+sourc
+s:
+      acc
+
+
+rators: {L4, A10g, A10, L40, A40, A100, A100-80GB} # W
+ ca
+ us
+ ch
+ap
+r acc
+
+
+rators for 8B mod
+
+.
+      us
+_spot: Tru
+
+      d
+sk_s
+z
+: 512  # E
+sur
+ mod
+
+ ch
+ckpo
+
+ts ca
+ f
+t.
+      d
+sk_t
+
+r: b
+st
+      ports: 8081  # Expos
+ to 
+
+t
+r
+
+t traff
+c.
+    
+
+vs:
       PYTHONUNBUFFERED: 1
-      MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
-      HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
+      MODEL_NAME: m
+ta-
+ama/M
+ta-L
+ama-3-8B-I
+struct
+      HF_TOKEN: 
+your-hugg
 
-    setup: |
-      conda create -n vllm python=3.10 -y
-      conda activate vllm
+gfac
+-tok
 
-      pip install vllm==0.4.0.post1
-      # Install Gradio for web UI.
-      pip install gradio openai
-      pip install flash-attn==2.5.7
 
-    run: |
-      conda activate vllm
-      echo 'Starting vllm api server...'
-      vllm serve $MODEL_NAME \
+  # Cha
+g
+ to your o
+
+ hugg
+
+gfac
+ tok
+
+, or us
+ --
+
+v to pass.
+    s
+tup: |
+      co
+da cr
+at
+ -
+ v
+m pytho
+=3.10 -y
+      co
+da act
+vat
+ v
+m
+      p
+p 
+
+sta
+ v
+m==0.4.0.post1
+      # I
+sta
+ Grad
+o for 
+
+b UI.
+      p
+p 
+
+sta
+ grad
+o op
+
+a
+
+      p
+p 
+
+sta
+ f
+ash-att
+==2.5.7
+    ru
+: |
+      co
+da act
+vat
+ v
+m
+      
+cho 'Start
+
+g v
+m ap
+ s
+rv
+r...'
+      v
+m s
+rv
+ $MODEL_NAME \
         --port 8081 \
-        --trust-remote-code \
-        --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
-        2>&1 | tee api_server.log
+        --trust-r
+mot
+-cod
+ \
+        --t
+
+sor-para
+
+
+-s
+z
+ $SKYPILOT_NUM_GPUS_PER_NODE \
+        2
+&1 | t
+ ap
+_s
+rv
+r.
+og
     ```
+To updat
+ th
+ s
+rv
+c
+ 
 
-To update the service with the new config:
+th th
+ 
 
+
+ co
+f
+g:
 ```bash
-HF_TOKEN="your-huggingface-token" sky serve update vllm serving.yaml --env HF_TOKEN
+HF_TOKEN="your-hugg
+
+gfac
+-tok
+
+" sky s
+rv
+ updat
+ v
+m s
+rv
+
+g.yam
+ --
+
+v HF_TOKEN
 ```
-
-To stop the service:
-
+To stop th
+ s
+rv
+c
+:
 ```bash
-sky serve down vllm
+sky s
+rv
+ do
+
+ v
+m
 ```
+### **Opt
+o
+a
+**: Co
 
-### **Optional**: Connect a GUI to the endpoint
+ct a GUI to th
+ 
 
-It is also possible to access the Llama-3 service with a separate GUI frontend, so the user requests send to the GUI will be load-balanced across replicas.
+dpo
 
-??? code "Yaml"
+t
+It 
+s a
+so poss
+b
 
-    ```yaml
-    envs:
-      MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
-      ENDPOINT: x.x.x.x:3031 # Address of the API server running vllm.
+ to acc
+ss th
+ L
+ama-3 s
+rv
+c
+ 
 
-    resources:
+th a s
+parat
+ GUI fro
+t
+
+d, so th
+ us
+r r
+qu
+sts s
+
+d to th
+ GUI 
+
+
+ b
+ 
+oad-ba
+a
+c
+d across r
+p
+
+cas.
+??? cod
+ "Yam
+"
+    ```yam
+
+    
+
+vs:
+      MODEL_NAME: m
+ta-
+ama/M
+ta-L
+ama-3-8B-I
+struct
+      ENDPOINT: x.x.x.x:3031 # Addr
+ss of th
+ API s
+rv
+r ru
+
+
+g v
+m.
+    r
+sourc
+s:
       cpus: 2
+    s
+tup: |
+      co
+da cr
+at
+ -
+ v
+m pytho
+=3.10 -y
+      co
+da act
+vat
+ v
+m
+      # I
+sta
+ Grad
+o for 
 
-    setup: |
-      conda create -n vllm python=3.10 -y
-      conda activate vllm
+b UI.
+      p
+p 
 
-      # Install Gradio for web UI.
-      pip install gradio openai
+sta
+ grad
+o op
 
-    run: |
-      conda activate vllm
-      export PATH=$PATH:/sbin
+a
 
-      echo 'Starting gradio server...'
-      git clone https://github.com/vllm-project/vllm.git || true
-      python vllm/examples/online_serving/gradio_openai_chatbot_webserver.py \
+    ru
+: |
+      co
+da act
+vat
+ v
+m
+      
+xport PATH=$PATH:/sb
+
+
+      
+cho 'Start
+
+g grad
+o s
+rv
+r...'
+      g
+t c
+o
+
+ https://g
+thub.com/v
+m-proj
+ct/v
+m.g
+t || tru
+
+      pytho
+ v
+m/
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/grad
+o_op
+
+a
+_chatbot_
+
+bs
+rv
+r.py \
         -m $MODEL_NAME \
         --port 8811 \
-        --model-url http://$ENDPOINT/v1 \
-        --stop-token-ids 128009,128001 | tee ~/gradio.log
+        --mod
+
+-ur
+ http://$ENDPOINT/v1 \
+        --stop-tok
+
+-
+ds 128009,128001 | t
+ ~/grad
+o.
+og
     ```
+1. Start th
+ chat 
 
-1. Start the chat web UI:
-
+b UI:
     ```bash
-    sky launch \
-      -c gui ./gui.yaml \
-      --env ENDPOINT=$(sky serve status --endpoint vllm)
+    sky 
+au
+ch \
+      -c gu
+ ./gu
+.yam
+ \
+      --
+
+v ENDPOINT=$(sky s
+rv
+ status --
+
+dpo
+
+t v
+m)
     ```
+2. Th
 
-2. Then, we can access the GUI at the returned gradio link:
+, 
 
-    ```console
-    | INFO | stdout | Running on public URL: https://6141e84201ce0bb4ed.gradio.live
+ ca
+ acc
+ss th
+ GUI at th
+ r
+tur
+
+d grad
+o 
+
+
+k:
+    ```co
+so
+
+
+    | INFO | stdout | Ru
+
+
+g o
+ pub
+
+c URL: https://6141
+84201c
+0bb4
+d.grad
+o.
+
+v
+
     ```

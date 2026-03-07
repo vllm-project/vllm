@@ -1,342 +1,2812 @@
-# Structured Outputs
+# Structur
+d Outputs
+vLLM supports th
+ g
 
-vLLM supports the generation of structured outputs using
-[xgrammar](https://github.com/mlc-ai/xgrammar) or
-[guidance](https://github.com/guidance-ai/llguidance) as backends.
-This document shows you some examples of the different options that are
-available to generate structured outputs.
 
-!!! warning
-    If you are still using the following deprecated API fields which were removed in v0.12.0, please update your code to use `structured_outputs` as demonstrated in the rest of this document:
+rat
+o
+ of structur
+d outputs us
 
-    - `guided_json` -> `{"structured_outputs": {"json": ...}}` or `StructuredOutputsParams(json=...)`
-    - `guided_regex` -> `{"structured_outputs": {"regex": ...}}` or `StructuredOutputsParams(regex=...)`
-    - `guided_choice` -> `{"structured_outputs": {"choice": ...}}` or `StructuredOutputsParams(choice=...)`
-    - `guided_grammar` -> `{"structured_outputs": {"grammar": ...}}` or `StructuredOutputsParams(grammar=...)`
-    - `guided_whitespace_pattern` -> `{"structured_outputs": {"whitespace_pattern": ...}}` or `StructuredOutputsParams(whitespace_pattern=...)`
-    - `structural_tag` -> `{"structured_outputs": {"structural_tag": ...}}` or `StructuredOutputsParams(structural_tag=...)`
-    - `guided_decoding_backend` -> Remove this field from your request
+g
+[xgrammar](https://g
+thub.com/m
+c-a
+/xgrammar) or
+[gu
+da
+c
+](https://g
+thub.com/gu
+da
+c
+-a
+/
+gu
+da
+c
+) as back
 
-## Online Serving (OpenAI API)
+ds.
+Th
+s docum
 
-You can generate structured outputs using the OpenAI's [Completions](https://platform.openai.com/docs/api-reference/completions) and [Chat](https://platform.openai.com/docs/api-reference/chat) API.
+t sho
+s you som
+ 
+xamp
 
-The following parameters are supported, which must be added as extra parameters:
+s of th
+ d
+ff
+r
 
-- `choice`: the output will be exactly one of the choices.
-- `regex`: the output will follow the regex pattern.
-- `json`: the output will follow the JSON schema.
-- `grammar`: the output will follow the context free grammar.
-- `structural_tag`: Follow a JSON schema within a set of specified tags within the generated text.
+t opt
+o
+s that ar
 
-You can see the complete list of supported parameters on the [OpenAI-Compatible Server](../serving/openai_compatible_server.md) page.
+ava
 
-Structured outputs are supported by default in the OpenAI-Compatible Server. You
-may choose to specify the backend to use by setting the
-`--structured-outputs-config.backend` flag to `vllm serve`. The default backend is `auto`,
-which will try to choose an appropriate backend based on the details of the
-request. You may also choose a specific backend, along with
-some options. A full set of options is available in the `vllm serve --help`
-text.
+ab
 
-Now let's see an example for each of the cases, starting with the `choice`, as it's the easiest one:
+ to g
 
-??? code
 
-    ```python
-    from openai import OpenAI
-    client = OpenAI(
-        base_url="http://localhost:8000/v1",
-        api_key="-",
+rat
+ structur
+d outputs.
+!!! 
+ar
+
+
+g
+    If you ar
+ st
+
+ us
+
+g th
+ fo
+o
+
+
+g d
+pr
+cat
+d API f
+
+
+ds 
+h
+ch 
+
+r
+ r
+mov
+d 
+
+ v0.12.0, p
+
+as
+ updat
+ your cod
+ to us
+ `structur
+d_outputs` as d
+mo
+strat
+d 
+
+ th
+ r
+st of th
+s docum
+
+t:
+    - `gu
+d
+d_jso
+` -
+ `{"structur
+d_outputs": {"jso
+": ...}}` or `Structur
+dOutputsParams(jso
+=...)`
+    - `gu
+d
+d_r
+g
+x` -
+ `{"structur
+d_outputs": {"r
+g
+x": ...}}` or `Structur
+dOutputsParams(r
+g
+x=...)`
+    - `gu
+d
+d_cho
+c
+` -
+ `{"structur
+d_outputs": {"cho
+c
+": ...}}` or `Structur
+dOutputsParams(cho
+c
+=...)`
+    - `gu
+d
+d_grammar` -
+ `{"structur
+d_outputs": {"grammar": ...}}` or `Structur
+dOutputsParams(grammar=...)`
+    - `gu
+d
+d_
+h
+t
+spac
+_patt
+r
+` -
+ `{"structur
+d_outputs": {"
+h
+t
+spac
+_patt
+r
+": ...}}` or `Structur
+dOutputsParams(
+h
+t
+spac
+_patt
+r
+=...)`
+    - `structura
+_tag` -
+ `{"structur
+d_outputs": {"structura
+_tag": ...}}` or `Structur
+dOutputsParams(structura
+_tag=...)`
+    - `gu
+d
+d_d
+cod
+
+g_back
+
+d` -
+ R
+mov
+ th
+s f
+
+
+d from your r
+qu
+st
+## O
+
+
+
+
+ S
+rv
+
+g (Op
+
+AI API)
+You ca
+ g
+
+
+rat
+ structur
+d outputs us
+
+g th
+ Op
+
+AI's [Comp
+
+t
+o
+s](https://p
+atform.op
+
+a
+.com/docs/ap
+-r
+f
+r
+
+c
+/comp
+
+t
+o
+s) a
+d [Chat](https://p
+atform.op
+
+a
+.com/docs/ap
+-r
+f
+r
+
+c
+/chat) API.
+Th
+ fo
+o
+
+
+g param
+t
+rs ar
+ support
+d, 
+h
+ch must b
+ add
+d as 
+xtra param
+t
+rs:
+- `cho
+c
+`: th
+ output 
+
+
+ b
+ 
+xact
+y o
+
+ of th
+ cho
+c
+s.
+- `r
+g
+x`: th
+ output 
+
+
+ fo
+o
+ th
+ r
+g
+x patt
+r
+.
+- `jso
+`: th
+ output 
+
+
+ fo
+o
+ th
+ JSON sch
+ma.
+- `grammar`: th
+ output 
+
+
+ fo
+o
+ th
+ co
+t
+xt fr
+ grammar.
+- `structura
+_tag`: Fo
+o
+ a JSON sch
+ma 
+
+th
+
+ a s
+t of sp
+c
+f
+
+d tags 
+
+th
+
+ th
+ g
+
+
+rat
+d t
+xt.
+You ca
+ s
+ th
+ comp
+
+t
+ 
+
+st of support
+d param
+t
+rs o
+ th
+ [Op
+
+AI-Compat
+b
+
+ S
+rv
+r](../s
+rv
+
+g/op
+
+a
+_compat
+b
+
+_s
+rv
+r.md) pag
+.
+Structur
+d outputs ar
+ support
+d by d
+fau
+t 
+
+ th
+ Op
+
+AI-Compat
+b
+
+ S
+rv
+r. You
+may choos
+ to sp
+c
+fy th
+ back
+
+d to us
+ by s
+tt
+
+g th
+
+`--structur
+d-outputs-co
+f
+g.back
+
+d` f
+ag to `v
+m s
+rv
+`. Th
+ d
+fau
+t back
+
+d 
+s `auto`,
+
+h
+ch 
+
+
+ try to choos
+ a
+ appropr
+at
+ back
+
+d bas
+d o
+ th
+ d
+ta
+
+s of th
+
+r
+qu
+st. You may a
+so choos
+ a sp
+c
+f
+c back
+
+d, a
+o
+g 
+
+th
+som
+ opt
+o
+s. A fu
+ s
+t of opt
+o
+s 
+s ava
+
+ab
+
+ 
+
+ th
+ `v
+m s
+rv
+ --h
+
+p`
+t
+xt.
+No
+ 
+
+t's s
+ a
+ 
+xamp
+
+ for 
+ach of th
+ cas
+s, start
+
+g 
+
+th th
+ `cho
+c
+`, as 
+t's th
+ 
+as
+
+st o
+
+:
+??? cod
+
+    ```pytho
+
+    from op
+
+a
+ 
+mport Op
+
+AI
+    c
+
+
+
+t = Op
+
+AI(
+        bas
+_ur
+="http://
+oca
+host:8000/v1",
+        ap
+_k
+y="-",
     )
-    model = client.models.list().data[0].id
+    mod
 
-    completion = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
+ = c
+
+
+
+t.mod
+
+s.
+
+st().data[0].
+d
+    comp
+
+t
+o
+ = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+=mod
+
+,
+        m
+ssag
+s=[
+            {"ro
+
+": "us
+r", "co
+t
+
+t": "C
+ass
+fy th
+s s
+
+t
+m
+
+t: vLLM 
+s 
+o
+d
+rfu
+!"}
         ],
-        extra_body={"structured_outputs": {"choice": ["positive", "negative"]}},
+        
+xtra_body={"structur
+d_outputs": {"cho
+c
+": ["pos
+t
+v
+", "
+
+gat
+v
+"]}},
     )
-    print(completion.choices[0].message.content)
+    pr
+
+t(comp
+
+t
+o
+.cho
+c
+s[0].m
+ssag
+.co
+t
+
+t)
     ```
+Th
+ 
 
-The next example shows how to use the `regex`. The supported regex syntax depends on the structured output backend. For example, `xgrammar`, `guidance`, and `outlines` use Rust-style regex, while `lm-format-enforcer` uses Python's `re` module. The idea is to generate an email address, given a simple regex template:
+xt 
+xamp
 
-??? code
+ sho
+s ho
+ to us
+ th
+ `r
+g
+x`. Th
+ support
+d r
+g
+x sy
+tax d
+p
 
-    ```python
-    completion = client.chat.completions.create(
-        model=model,
-        messages=[
+ds o
+ th
+ structur
+d output back
+
+d. For 
+xamp
+
+, `xgrammar`, `gu
+da
+c
+`, a
+d `out
+
+
+
+s` us
+ Rust-sty
+
+ r
+g
+x, 
+h
+
+
+ `
+m-format-
+
+forc
+r` us
+s Pytho
+'s `r
+` modu
+
+. Th
+ 
+d
+a 
+s to g
+
+
+rat
+ a
+ 
+ma
+
+ addr
+ss, g
+v
+
+ a s
+mp
+
+ r
+g
+x t
+mp
+at
+:
+??? cod
+
+    ```pytho
+
+    comp
+
+t
+o
+ = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+=mod
+
+,
+        m
+ssag
+s=[
             {
-                "role": "user",
-                "content": "Generate an example email address for Alan Turing, who works in Enigma. End in .com and new line. Example result: alan.turing@enigma.com\n",
+                "ro
+
+": "us
+r",
+                "co
+t
+
+t": "G
+
+
+rat
+ a
+ 
+xamp
+
+ 
+ma
+
+ addr
+ss for A
+a
+ Tur
+
+g, 
+ho 
+orks 
+
+ E
+
+gma. E
+d 
+
+ .com a
+d 
+
+
+ 
+
+
+
+. Examp
+
+ r
+su
+t: a
+a
+.tur
+
+g@
+
+
+gma.com\
+",
             }
         ],
-        extra_body={"structured_outputs": {"regex": r"\w+@\w+\.com\n"}, "stop": ["\n"]},
+        
+xtra_body={"structur
+d_outputs": {"r
+g
+x": r"\
++@\
++\.com\
+"}, "stop": ["\
+"]},
     )
-    print(completion.choices[0].message.content)
+    pr
+
+t(comp
+
+t
+o
+.cho
+c
+s[0].m
+ssag
+.co
+t
+
+t)
     ```
+O
 
-One of the most relevant features in structured text generation is the option to generate a valid JSON with pre-defined fields and formats.
-For this we can use the `json` parameter in two different ways:
+ of th
+ most r
 
-- Using directly a [JSON Schema](https://json-schema.org/)
-- Defining a [Pydantic model](https://docs.pydantic.dev/latest/) and then extracting the JSON Schema from it (which is normally an easier option).
 
-The next example shows how to use the `response_format` parameter with a Pydantic model:
+va
+t f
+atur
+s 
 
-??? code
+ structur
+d t
+xt g
 
-    ```python
-    from pydantic import BaseModel
-    from enum import Enum
 
-    class CarType(str, Enum):
-        sedan = "sedan"
+rat
+o
+ 
+s th
+ opt
+o
+ to g
+
+
+rat
+ a va
+
+d JSON 
+
+th pr
+-d
+f
+
+
+d f
+
+
+ds a
+d formats.
+For th
+s 
+
+ ca
+ us
+ th
+ `jso
+` param
+t
+r 
+
+ t
+o d
+ff
+r
+
+t 
+ays:
+- Us
+
+g d
+r
+ct
+y a [JSON Sch
+ma](https://jso
+-sch
+ma.org/)
+- D
+f
+
+
+
+g a [Pyda
+t
+c mod
+
+](https://docs.pyda
+t
+c.d
+v/
+at
+st/) a
+d th
+
+ 
+xtract
+
+g th
+ JSON Sch
+ma from 
+t (
+h
+ch 
+s 
+orma
+y a
+ 
+as
+
+r opt
+o
+).
+Th
+ 
+
+xt 
+xamp
+
+ sho
+s ho
+ to us
+ th
+ `r
+spo
+s
+_format` param
+t
+r 
+
+th a Pyda
+t
+c mod
+
+:
+??? cod
+
+    ```pytho
+
+    from pyda
+t
+c 
+mport Bas
+Mod
+
+
+    from 
+
+um 
+mport E
+um
+    c
+ass CarTyp
+(str, E
+um):
+        s
+da
+ = "s
+da
+"
         suv = "SUV"
         truck = "Truck"
-        coupe = "Coupe"
+        coup
+ = "Coup
+"
+    c
+ass CarD
+scr
+pt
+o
+(Bas
+Mod
 
-    class CarDescription(BaseModel):
-        brand: str
-        model: str
-        car_type: CarType
+):
+        bra
+d: str
+        mod
 
-    json_schema = CarDescription.model_json_schema()
+: str
+        car_typ
+: CarTyp
 
-    completion = client.chat.completions.create(
-        model=model,
-        messages=[
+    jso
+_sch
+ma = CarD
+scr
+pt
+o
+.mod
+
+_jso
+_sch
+ma()
+    comp
+
+t
+o
+ = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+=mod
+
+,
+        m
+ssag
+s=[
             {
-                "role": "user",
-                "content": "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's",
+                "ro
+
+": "us
+r",
+                "co
+t
+
+t": "G
+
+
+rat
+ a JSON 
+
+th th
+ bra
+d, mod
+
+ a
+d car_typ
+ of th
+ most 
+co
+
+c car from th
+ 90's",
             }
         ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "car-description",
-                "schema": CarDescription.model_json_schema()
+        r
+spo
+s
+_format={
+            "typ
+": "jso
+_sch
+ma",
+            "jso
+_sch
+ma": {
+                "
+am
+": "car-d
+scr
+pt
+o
+",
+                "sch
+ma": CarD
+scr
+pt
+o
+.mod
+
+_jso
+_sch
+ma()
             },
         },
     )
-    print(completion.choices[0].message.content)
+    pr
+
+t(comp
+
+t
+o
+.cho
+c
+s[0].m
+ssag
+.co
+t
+
+t)
     ```
+!!! t
+p
+    Wh
 
-!!! tip
-    While not strictly necessary, normally it's better to indicate in the prompt the
-    JSON schema and how the fields should be populated. This can improve the
-    results notably in most cases.
 
-Finally we have the `grammar` option, which is probably the most
-difficult to use, but it's really powerful. It allows us to define complete
-languages like SQL queries. It works by using a context free EBNF grammar.
-As an example, we can use to define a specific format of simplified SQL queries:
+ 
+ot str
+ct
+y 
 
-??? code
+c
+ssary, 
+orma
+y 
+t's b
+tt
+r to 
 
-    ```python
-    simplified_sql_grammar = """
-        root ::= select_statement
+d
+cat
+ 
 
-        select_statement ::= "SELECT " column " from " table " where " condition
+ th
+ prompt th
 
-        column ::= "col_1 " | "col_2 "
+    JSON sch
+ma a
+d ho
+ th
+ f
 
-        table ::= "table_1 " | "table_2 "
 
-        condition ::= column "= " number
+ds shou
+d b
+ popu
+at
+d. Th
+s ca
+ 
+mprov
+ th
 
-        number ::= "1 " | "2 "
+    r
+su
+ts 
+otab
+y 
+
+ most cas
+s.
+F
+
+a
+y 
+
+ hav
+ th
+ `grammar` opt
+o
+, 
+h
+ch 
+s probab
+y th
+ most
+d
+ff
+cu
+t to us
+, but 
+t's r
+a
+y po
+
+rfu
+. It a
+o
+s us to d
+f
+
+
+ comp
+
+t
+
+
+a
+guag
+s 
+
+k
+ SQL qu
+r
+
+s. It 
+orks by us
+
+g a co
+t
+xt fr
+ EBNF grammar.
+As a
+ 
+xamp
+
+, 
+
+ ca
+ us
+ to d
+f
+
+
+ a sp
+c
+f
+c format of s
+mp
+
+f
+
+d SQL qu
+r
+
+s:
+??? cod
+
+    ```pytho
+
+    s
+mp
+
+f
+
+d_sq
+_grammar = """
+        root ::= s
+
+
+ct_stat
+m
+
+t
+        s
+
+
+ct_stat
+m
+
+t ::= "SELECT " co
+um
+ " from " tab
+
+ " 
+h
+r
+ " co
+d
+t
+o
+
+        co
+um
+ ::= "co
+_1 " | "co
+_2 "
+        tab
+
+ ::= "tab
+
+_1 " | "tab
+
+_2 "
+        co
+d
+t
+o
+ ::= co
+um
+ "= " 
+umb
+r
+        
+umb
+r ::= "1 " | "2 "
     """
+    comp
 
-    completion = client.chat.completions.create(
-        model=model,
-        messages=[
+t
+o
+ = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+=mod
+
+,
+        m
+ssag
+s=[
             {
-                "role": "user",
-                "content": "Generate an SQL query to show the 'username' and 'email' from the 'users' table.",
+                "ro
+
+": "us
+r",
+                "co
+t
+
+t": "G
+
+
+rat
+ a
+ SQL qu
+ry to sho
+ th
+ 'us
+r
+am
+' a
+d '
+ma
+
+' from th
+ 'us
+rs' tab
+
+.",
             }
         ],
-        extra_body={"structured_outputs": {"grammar": simplified_sql_grammar}},
+        
+xtra_body={"structur
+d_outputs": {"grammar": s
+mp
+
+f
+
+d_sq
+_grammar}},
     )
-    print(completion.choices[0].message.content)
+    pr
+
+t(comp
+
+t
+o
+.cho
+c
+s[0].m
+ssag
+.co
+t
+
+t)
     ```
+S
+ a
+so: [fu
+ 
+xamp
 
-See also: [full example](../examples/online_serving/structured_outputs.md)
+](../
+xamp
 
-## Reasoning Outputs
+s/o
 
-You can also use structured outputs with <project:#reasoning-outputs> for reasoning models.
 
+
+
+_s
+rv
+
+g/structur
+d_outputs.md)
+## R
+aso
+
+
+g Outputs
+You ca
+ a
+so us
+ structur
+d outputs 
+
+th 
+proj
+ct:#r
+aso
+
+
+g-outputs
+ for r
+aso
+
+
+g mod
+
+s.
 ```bash
-vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --reasoning-parser deepseek_r1
+v
+m s
+rv
+ d
+ps
+k-a
+/D
+pS
+k-R1-D
+st
+
+-Q
+
+
+-7B --r
+aso
+
+
+g-pars
+r d
+ps
+k_r1
 ```
-
-Note that you can use reasoning with any provided structured outputs feature. The following uses one with JSON schema:
-
-??? code
-
-    ```python
-    from pydantic import BaseModel
+Not
+ that you ca
+ us
+ r
+aso
 
 
-    class People(BaseModel):
-        name: str
-        age: int
+g 
+
+th a
+y prov
+d
+d structur
+d outputs f
+atur
+. Th
+ fo
+o
 
 
-    completion = client.chat.completions.create(
-        model=model,
-        messages=[
+g us
+s o
+
+ 
+
+th JSON sch
+ma:
+??? cod
+
+    ```pytho
+
+    from pyda
+t
+c 
+mport Bas
+Mod
+
+
+    c
+ass P
+op
+
+(Bas
+Mod
+
+):
+        
+am
+: str
+        ag
+: 
+
+t
+    comp
+
+t
+o
+ = c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+=mod
+
+,
+        m
+ssag
+s=[
             {
-                "role": "user",
-                "content": "Generate a JSON with the name and age of one random person.",
+                "ro
+
+": "us
+r",
+                "co
+t
+
+t": "G
+
+
+rat
+ a JSON 
+
+th th
+ 
+am
+ a
+d ag
+ of o
+
+ ra
+dom p
+rso
+.",
             }
         ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "people",
-                "schema": People.model_json_schema()
+        r
+spo
+s
+_format={
+            "typ
+": "jso
+_sch
+ma",
+            "jso
+_sch
+ma": {
+                "
+am
+": "p
+op
+
+",
+                "sch
+ma": P
+op
+
+.mod
+
+_jso
+_sch
+ma()
             }
         },
     )
-    print("reasoning: ", completion.choices[0].message.reasoning)
-    print("content: ", completion.choices[0].message.content)
+    pr
+
+t("r
+aso
+
+
+g: ", comp
+
+t
+o
+.cho
+c
+s[0].m
+ssag
+.r
+aso
+
+
+g)
+    pr
+
+t("co
+t
+
+t: ", comp
+
+t
+o
+.cho
+c
+s[0].m
+ssag
+.co
+t
+
+t)
     ```
+S
+ a
+so: [fu
+ 
+xamp
 
-See also: [full example](../examples/online_serving/structured_outputs.md)
+](../
+xamp
 
-!!! note
-    When using Qwen3 Coder models with reasoning enabled, structured outputs might become disabled if the reasoning content does not get parsed into the `reasoning` field separately (v0.11.2+).
-    To use both features together, you must explicitly enable structured outputs in reasoning mode.
-    To do so, add the following flag when starting the vLLM server: `--structured-outputs-config.enable_in_reasoning=True`.
-    See also: [Reasoning Outputs](reasoning_outputs.md) documentation.
+s/o
 
-## Experimental Automatic Parsing (OpenAI API)
 
-This section covers the OpenAI beta wrapper over the `client.chat.completions.create()` method that provides richer integrations with Python specific types.
 
-At the time of writing (`openai==1.54.4`), this is a "beta" feature in the OpenAI client library. Code reference can be found [here](https://github.com/openai/openai-python/blob/52357cff50bee57ef442e94d78a0de38b4173fc2/src/openai/resources/beta/chat/completions.py#L100-L104).
 
-For the following examples, vLLM was set up using `vllm serve meta-llama/Llama-3.1-8B-Instruct`
+_s
+rv
 
-Here is a simple example demonstrating how to get structured output using Pydantic models:
+g/structur
+d_outputs.md)
+!!! 
+ot
 
-??? code
+    Wh
 
-    ```python
-    from pydantic import BaseModel
-    from openai import OpenAI
+ us
 
-    class Info(BaseModel):
-        name: str
-        age: int
+g Q
 
-    client = OpenAI(base_url="http://0.0.0.0:8000/v1", api_key="dummy")
-    model = client.models.list().data[0].id
-    completion = client.beta.chat.completions.parse(
-        model=model,
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "My name is Cameron, I'm 28. What's my name and age?"},
+
+3 Cod
+r mod
+
+s 
+
+th r
+aso
+
+
+g 
+
+ab
+
+d, structur
+d outputs m
+ght b
+com
+ d
+sab
+
+d 
+f th
+ r
+aso
+
+
+g co
+t
+
+t do
+s 
+ot g
+t pars
+d 
+
+to th
+ `r
+aso
+
+
+g` f
+
+
+d s
+parat
+
+y (v0.11.2+).
+    To us
+ both f
+atur
+s tog
+th
+r, you must 
+xp
+
+c
+t
+y 
+
+ab
+
+ structur
+d outputs 
+
+ r
+aso
+
+
+g mod
+.
+    To do so, add th
+ fo
+o
+
+
+g f
+ag 
+h
+
+ start
+
+g th
+ vLLM s
+rv
+r: `--structur
+d-outputs-co
+f
+g.
+
+ab
+
+_
+
+_r
+aso
+
+
+g=Tru
+`.
+    S
+ a
+so: [R
+aso
+
+
+g Outputs](r
+aso
+
+
+g_outputs.md) docum
+
+tat
+o
+.
+## Exp
+r
+m
+
+ta
+ Automat
+c Pars
+
+g (Op
+
+AI API)
+Th
+s s
+ct
+o
+ cov
+rs th
+ Op
+
+AI b
+ta 
+rapp
+r ov
+r th
+ `c
+
+
+
+t.chat.comp
+
+t
+o
+s.cr
+at
+()` m
+thod that prov
+d
+s r
+ch
+r 
+
+t
+grat
+o
+s 
+
+th Pytho
+ sp
+c
+f
+c typ
+s.
+At th
+ t
+m
+ of 
+r
+t
+
+g (`op
+
+a
+==1.54.4`), th
+s 
+s a "b
+ta" f
+atur
+ 
+
+ th
+ Op
+
+AI c
+
+
+
+t 
+
+brary. Cod
+ r
+f
+r
+
+c
+ ca
+ b
+ fou
+d [h
+r
+](https://g
+thub.com/op
+
+a
+/op
+
+a
+-pytho
+/b
+ob/52357cff50b
+57
+f442
+94d78a0d
+38b4173fc2/src/op
+
+a
+/r
+sourc
+s/b
+ta/chat/comp
+
+t
+o
+s.py#L100-L104).
+For th
+ fo
+o
+
+
+g 
+xamp
+
+s, vLLM 
+as s
+t up us
+
+g `v
+m s
+rv
+ m
+ta-
+ama/L
+ama-3.1-8B-I
+struct`
+H
+r
+ 
+s a s
+mp
+
+ 
+xamp
+
+ d
+mo
+strat
+
+g ho
+ to g
+t structur
+d output us
+
+g Pyda
+t
+c mod
+
+s:
+??? cod
+
+    ```pytho
+
+    from pyda
+t
+c 
+mport Bas
+Mod
+
+
+    from op
+
+a
+ 
+mport Op
+
+AI
+    c
+ass I
+fo(Bas
+Mod
+
+):
+        
+am
+: str
+        ag
+: 
+
+t
+    c
+
+
+
+t = Op
+
+AI(bas
+_ur
+="http://0.0.0.0:8000/v1", ap
+_k
+y="dummy")
+    mod
+
+ = c
+
+
+
+t.mod
+
+s.
+
+st().data[0].
+d
+    comp
+
+t
+o
+ = c
+
+
+
+t.b
+ta.chat.comp
+
+t
+o
+s.pars
+(
+        mod
+
+=mod
+
+,
+        m
+ssag
+s=[
+            {"ro
+
+": "syst
+m", "co
+t
+
+t": "You ar
+ a h
+
+pfu
+ ass
+sta
+t."},
+            {"ro
+
+": "us
+r", "co
+t
+
+t": "My 
+am
+ 
+s Cam
+ro
+, I'm 28. What's my 
+am
+ a
+d ag
+?"},
         ],
-        response_format=Info,
+        r
+spo
+s
+_format=I
+fo,
     )
+    m
+ssag
+ = comp
 
-    message = completion.choices[0].message
-    print(message)
-    assert message.parsed
-    print("Name:", message.parsed.name)
-    print("Age:", message.parsed.age)
+t
+o
+.cho
+c
+s[0].m
+ssag
+
+    pr
+
+t(m
+ssag
+)
+    ass
+rt m
+ssag
+.pars
+d
+    pr
+
+t("Nam
+:", m
+ssag
+.pars
+d.
+am
+)
+    pr
+
+t("Ag
+:", m
+ssag
+.pars
+d.ag
+)
     ```
+```co
+so
 
-```console
-ParsedChatCompletionMessage[Testing](content='{"name": "Cameron", "age": 28}', refusal=None, role='assistant', audio=None, function_call=None, tool_calls=[], parsed=Testing(name='Cameron', age=28))
-Name: Cameron
-Age: 28
+
+Pars
+dChatComp
+
+t
+o
+M
+ssag
+[T
+st
+
+g](co
+t
+
+t='{"
+am
+": "Cam
+ro
+", "ag
+": 28}', r
+fusa
+=No
+
+, ro
+
+='ass
+sta
+t', aud
+o=No
+
+, fu
+ct
+o
+_ca
+=No
+
+, too
+_ca
+s=[], pars
+d=T
+st
+
+g(
+am
+='Cam
+ro
+', ag
+=28))
+Nam
+: Cam
+ro
+
+Ag
+: 28
 ```
+H
+r
+ 
+s a mor
+ comp
 
-Here is a more complex example using nested Pydantic models to handle a step-by-step math solution:
+x 
+xamp
 
-??? code
+ us
 
-    ```python
-    from typing import List
-    from pydantic import BaseModel
-    from openai import OpenAI
+g 
 
-    class Step(BaseModel):
-        explanation: str
+st
+d Pyda
+t
+c mod
+
+s to ha
+d
+
+ a st
+p-by-st
+p math so
+ut
+o
+:
+??? cod
+
+    ```pytho
+
+    from typ
+
+g 
+mport L
+st
+    from pyda
+t
+c 
+mport Bas
+Mod
+
+
+    from op
+
+a
+ 
+mport Op
+
+AI
+    c
+ass St
+p(Bas
+Mod
+
+):
+        
+xp
+a
+at
+o
+: str
         output: str
+    c
+ass MathR
+spo
+s
+(Bas
+Mod
 
-    class MathResponse(BaseModel):
-        steps: list[Step]
-        final_answer: str
+):
+        st
+ps: 
 
-    completion = client.beta.chat.completions.parse(
-        model=model,
-        messages=[
-            {"role": "system", "content": "You are a helpful expert math tutor."},
-            {"role": "user", "content": "Solve 8x + 31 = 2."},
+st[St
+p]
+        f
+
+a
+_a
+s
+
+r: str
+    comp
+
+t
+o
+ = c
+
+
+
+t.b
+ta.chat.comp
+
+t
+o
+s.pars
+(
+        mod
+
+=mod
+
+,
+        m
+ssag
+s=[
+            {"ro
+
+": "syst
+m", "co
+t
+
+t": "You ar
+ a h
+
+pfu
+ 
+xp
+rt math tutor."},
+            {"ro
+
+": "us
+r", "co
+t
+
+t": "So
+v
+ 8x + 31 = 2."},
         ],
-        response_format=MathResponse,
+        r
+spo
+s
+_format=MathR
+spo
+s
+,
     )
+    m
+ssag
+ = comp
 
-    message = completion.choices[0].message
-    print(message)
-    assert message.parsed
-    for i, step in enumerate(message.parsed.steps):
-        print(f"Step #{i}:", step)
-    print("Answer:", message.parsed.final_answer)
+t
+o
+.cho
+c
+s[0].m
+ssag
+
+    pr
+
+t(m
+ssag
+)
+    ass
+rt m
+ssag
+.pars
+d
+    for 
+, st
+p 
+
+ 
+
+um
+rat
+(m
+ssag
+.pars
+d.st
+ps):
+        pr
+
+t(f"St
+p #{
+}:", st
+p)
+    pr
+
+t("A
+s
+
+r:", m
+ssag
+.pars
+d.f
+
+a
+_a
+s
+
+r)
     ```
-
 Output:
+```co
+so
 
-```console
-ParsedChatCompletionMessage[MathResponse](content='{ "steps": [{ "explanation": "First, let\'s isolate the term with the variable \'x\'. To do this, we\'ll subtract 31 from both sides of the equation.", "output": "8x + 31 - 31 = 2 - 31"}, { "explanation": "By subtracting 31 from both sides, we simplify the equation to 8x = -29.", "output": "8x = -29"}, { "explanation": "Next, let\'s isolate \'x\' by dividing both sides of the equation by 8.", "output": "8x / 8 = -29 / 8"}], "final_answer": "x = -29/8" }', refusal=None, role='assistant', audio=None, function_call=None, tool_calls=[], parsed=MathResponse(steps=[Step(explanation="First, let's isolate the term with the variable 'x'. To do this, we'll subtract 31 from both sides of the equation.", output='8x + 31 - 31 = 2 - 31'), Step(explanation='By subtracting 31 from both sides, we simplify the equation to 8x = -29.', output='8x = -29'), Step(explanation="Next, let's isolate 'x' by dividing both sides of the equation by 8.", output='8x / 8 = -29 / 8')], final_answer='x = -29/8'))
-Step #0: explanation="First, let's isolate the term with the variable 'x'. To do this, we'll subtract 31 from both sides of the equation." output='8x + 31 - 31 = 2 - 31'
-Step #1: explanation='By subtracting 31 from both sides, we simplify the equation to 8x = -29.' output='8x = -29'
-Step #2: explanation="Next, let's isolate 'x' by dividing both sides of the equation by 8." output='8x / 8 = -29 / 8'
-Answer: x = -29/8
+
+Pars
+dChatComp
+
+t
+o
+M
+ssag
+[MathR
+spo
+s
+](co
+t
+
+t='{ "st
+ps": [{ "
+xp
+a
+at
+o
+": "F
+rst, 
+
+t\'s 
+so
+at
+ th
+ t
+rm 
+
+th th
+ var
+ab
+
+ \'x\'. To do th
+s, 
+
+\'
+ subtract 31 from both s
+d
+s of th
+ 
+quat
+o
+.", "output": "8x + 31 - 31 = 2 - 31"}, { "
+xp
+a
+at
+o
+": "By subtract
+
+g 31 from both s
+d
+s, 
+
+ s
+mp
+
+fy th
+ 
+quat
+o
+ to 8x = -29.", "output": "8x = -29"}, { "
+xp
+a
+at
+o
+": "N
+xt, 
+
+t\'s 
+so
+at
+ \'x\' by d
+v
+d
+
+g both s
+d
+s of th
+ 
+quat
+o
+ by 8.", "output": "8x / 8 = -29 / 8"}], "f
+
+a
+_a
+s
+
+r": "x = -29/8" }', r
+fusa
+=No
+
+, ro
+
+='ass
+sta
+t', aud
+o=No
+
+, fu
+ct
+o
+_ca
+=No
+
+, too
+_ca
+s=[], pars
+d=MathR
+spo
+s
+(st
+ps=[St
+p(
+xp
+a
+at
+o
+="F
+rst, 
+
+t's 
+so
+at
+ th
+ t
+rm 
+
+th th
+ var
+ab
+
+ 'x'. To do th
+s, 
+
+'
+ subtract 31 from both s
+d
+s of th
+ 
+quat
+o
+.", output='8x + 31 - 31 = 2 - 31'), St
+p(
+xp
+a
+at
+o
+='By subtract
+
+g 31 from both s
+d
+s, 
+
+ s
+mp
+
+fy th
+ 
+quat
+o
+ to 8x = -29.', output='8x = -29'), St
+p(
+xp
+a
+at
+o
+="N
+xt, 
+
+t's 
+so
+at
+ 'x' by d
+v
+d
+
+g both s
+d
+s of th
+ 
+quat
+o
+ by 8.", output='8x / 8 = -29 / 8')], f
+
+a
+_a
+s
+
+r='x = -29/8'))
+St
+p #0: 
+xp
+a
+at
+o
+="F
+rst, 
+
+t's 
+so
+at
+ th
+ t
+rm 
+
+th th
+ var
+ab
+
+ 'x'. To do th
+s, 
+
+'
+ subtract 31 from both s
+d
+s of th
+ 
+quat
+o
+." output='8x + 31 - 31 = 2 - 31'
+St
+p #1: 
+xp
+a
+at
+o
+='By subtract
+
+g 31 from both s
+d
+s, 
+
+ s
+mp
+
+fy th
+ 
+quat
+o
+ to 8x = -29.' output='8x = -29'
+St
+p #2: 
+xp
+a
+at
+o
+="N
+xt, 
+
+t's 
+so
+at
+ 'x' by d
+v
+d
+
+g both s
+d
+s of th
+ 
+quat
+o
+ by 8." output='8x / 8 = -29 / 8'
+A
+s
+
+r: x = -29/8
 ```
+A
+ 
+xamp
 
-An example of using `structural_tag` can be found here: [examples/online_serving/structured_outputs](../../examples/online_serving/structured_outputs)
+ of us
 
-## Offline Inference
+g `structura
+_tag` ca
+ b
+ fou
+d h
+r
+: [
+xamp
 
-Offline inference allows for the same types of structured outputs.
-To use it, we'll need to configure the structured outputs using the class `StructuredOutputsParams` inside `SamplingParams`.
-The main available options inside `StructuredOutputsParams` are:
+s/o
 
-- `json`
-- `regex`
-- `choice`
+
+
+
+_s
+rv
+
+g/structur
+d_outputs](../../
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/structur
+d_outputs)
+## Off
+
+
+
+ I
+f
+r
+
+c
+
+Off
+
+
+
+ 
+
+f
+r
+
+c
+ a
+o
+s for th
+ sam
+ typ
+s of structur
+d outputs.
+To us
+ 
+t, 
+
+'
+ 
+
+d to co
+f
+gur
+ th
+ structur
+d outputs us
+
+g th
+ c
+ass `Structur
+dOutputsParams` 
+
+s
+d
+ `Samp
+
+
+gParams`.
+Th
+ ma
+
+ ava
+
+ab
+
+ opt
+o
+s 
+
+s
+d
+ `Structur
+dOutputsParams` ar
+:
+- `jso
+`
+- `r
+g
+x`
+- `cho
+c
+`
 - `grammar`
-- `structural_tag`
+- `structura
+_tag`
+Th
+s
+ param
+t
+rs ca
+ b
+ us
+d 
 
-These parameters can be used in the same way as the parameters from the Online
-Serving examples above. One example for the usage of the `choice` parameter is
-shown below:
+ th
+ sam
+ 
+ay as th
+ param
+t
+rs from th
+ O
 
-??? code
 
-    ```python
-    from vllm import LLM, SamplingParams
-    from vllm.sampling_params import StructuredOutputsParams
 
-    llm = LLM(model="HuggingFaceTB/SmolLM2-1.7B-Instruct")
 
-    structured_outputs_params = StructuredOutputsParams(choice=["Positive", "Negative"])
-    sampling_params = SamplingParams(structured_outputs=structured_outputs_params)
-    outputs = llm.generate(
-        prompts="Classify this sentiment: vLLM is wonderful!",
-        sampling_params=sampling_params,
+
+S
+rv
+
+g 
+xamp
+
+s abov
+. O
+
+ 
+xamp
+
+ for th
+ usag
+ of th
+ `cho
+c
+` param
+t
+r 
+s
+sho
+
+ b
+
+o
+:
+??? cod
+
+    ```pytho
+
+    from v
+m 
+mport LLM, Samp
+
+
+gParams
+    from v
+m.samp
+
+
+g_params 
+mport Structur
+dOutputsParams
+    
+m = LLM(mod
+
+="Hugg
+
+gFac
+TB/Smo
+LM2-1.7B-I
+struct")
+    structur
+d_outputs_params = Structur
+dOutputsParams(cho
+c
+=["Pos
+t
+v
+", "N
+gat
+v
+"])
+    samp
+
+
+g_params = Samp
+
+
+gParams(structur
+d_outputs=structur
+d_outputs_params)
+    outputs = 
+m.g
+
+
+rat
+(
+        prompts="C
+ass
+fy th
+s s
+
+t
+m
+
+t: vLLM 
+s 
+o
+d
+rfu
+!",
+        samp
+
+
+g_params=samp
+
+
+g_params,
     )
-    print(outputs[0].outputs[0].text)
-    ```
+    pr
 
-See also: [full example](../examples/online_serving/structured_outputs.md)
+t(outputs[0].outputs[0].t
+xt)
+    ```
+S
+ a
+so: [fu
+ 
+xamp
+
+](../
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/structur
+d_outputs.md)

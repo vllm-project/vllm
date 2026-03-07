@@ -1,50 +1,300 @@
-# MTP (Multi-Token Prediction)
+# MTP (Mu
+t
+-Tok
 
-MTP is a speculative decoding method where the target model includes native
-multi-token prediction capability. Unlike draft-model-based methods, you do not
-need to provide a separate draft model.
+ Pr
+d
+ct
+o
+)
+MTP 
+s a sp
+cu
+at
+v
+ d
+cod
 
-MTP is useful when:
+g m
+thod 
+h
+r
+ th
+ targ
+t mod
 
-- Your model natively supports MTP.
-- You want model-based speculative decoding with minimal extra configuration.
+ 
 
-## Offline Example
+c
+ud
+s 
+at
+v
 
-```python
-from vllm import LLM, SamplingParams
+mu
+t
+-tok
 
-prompts = ["The future of AI is"]
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+ pr
+d
+ct
+o
+ capab
 
-llm = LLM(
-    model="XiaomiMiMo/MiMo-7B-Base",
-    tensor_parallel_size=1,
-    speculative_config={
-        "method": "mtp",
-        "num_speculative_tokens": 1,
+
+ty. U
+
+
+k
+ draft-mod
+
+-bas
+d m
+thods, you do 
+ot
+
+
+d to prov
+d
+ a s
+parat
+ draft mod
+
+.
+MTP 
+s us
+fu
+ 
+h
+
+:
+- Your mod
+
+ 
+at
+v
+
+y supports MTP.
+- You 
+a
+t mod
+
+-bas
+d sp
+cu
+at
+v
+ d
+cod
+
+g 
+
+th m
+
+
+ma
+ 
+xtra co
+f
+gurat
+o
+.
+## Off
+
+
+
+ Examp
+
+
+```pytho
+
+from v
+m 
+mport LLM, Samp
+
+
+gParams
+prompts = ["Th
+ futur
+ of AI 
+s"]
+samp
+
+
+g_params = Samp
+
+
+gParams(t
+mp
+ratur
+=0.8, top_p=0.95)
+
+m = LLM(
+    mod
+
+="X
+aom
+M
+Mo/M
+Mo-7B-Bas
+",
+    t
+
+sor_para
+
+
+_s
+z
+=1,
+    sp
+cu
+at
+v
+_co
+f
+g={
+        "m
+thod": "mtp",
+        "
+um_sp
+cu
+at
+v
+_tok
+
+s": 1,
     },
 )
-outputs = llm.generate(prompts, sampling_params)
+outputs = 
+m.g
 
-for output in outputs:
+
+rat
+(prompts, samp
+
+
+g_params)
+for output 
+
+ outputs:
     prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-```
+    g
 
-## Online Example
+
+rat
+d_t
+xt = output.outputs[0].t
+xt
+    pr
+
+t(f"Prompt: {prompt!r}, G
+
+
+rat
+d t
+xt: {g
+
+
+rat
+d_t
+xt!r}")
+```
+## O
+
+
+
+
+ Examp
+
 
 ```bash
-vllm serve XiaomiMiMo/MiMo-7B-Base \
-    --tensor-parallel-size 1 \
-    --speculative_config '{"method":"mtp","num_speculative_tokens":1}'
+v
+m s
+rv
+ X
+aom
+M
+Mo/M
+Mo-7B-Bas
+ \
+    --t
+
+sor-para
+
+
+-s
+z
+ 1 \
+    --sp
+cu
+at
+v
+_co
+f
+g '{"m
+thod":"mtp","
+um_sp
+cu
+at
+v
+_tok
+
+s":1}'
 ```
+## Not
+s
+- MTP o
 
-## Notes
+y 
+orks for mod
 
-- MTP only works for model families that support MTP in vLLM.
-- `num_speculative_tokens` controls speculative depth. A small value like `1`
-  is a good default to start with.
-- If your model does not support MTP, use another method such as EAGLE or draft
-  model speculation.
+ fam
+
+
+
+s that support MTP 
+
+ vLLM.
+- `
+um_sp
+cu
+at
+v
+_tok
+
+s` co
+tro
+s sp
+cu
+at
+v
+ d
+pth. A sma
+ va
+u
+ 
+
+k
+ `1`
+  
+s a good d
+fau
+t to start 
+
+th.
+- If your mod
+
+ do
+s 
+ot support MTP, us
+ a
+oth
+r m
+thod such as EAGLE or draft
+  mod
+
+ sp
+cu
+at
+o
+.

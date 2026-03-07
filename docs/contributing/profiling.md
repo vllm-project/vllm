@@ -1,255 +1,2565 @@
-# Profiling vLLM
+# Prof
 
-!!! warning
-    Profiling is only intended for vLLM developers and maintainers to understand the proportion of time spent in different parts of the codebase. **vLLM end-users should never turn on profiling** as it will significantly slow down the inference.
 
-## Profile with PyTorch Profiler
 
-We support tracing vLLM workers using different profilers. You can enable profiling by setting the `--profiler-config` flag when launching the server.
+g vLLM
+!!! 
+ar
 
-!!! note
-    The `--profiler-config` flag is available in vLLM v0.13.0 and later. If you are using an earlier version, please upgrade to use this feature.
 
-To use the `torch.profiler` module, set the `profiler` entry to `'torch'` and `torch_profiler_dir` to the directory where you want to save the traces. Additionally, you can control the profiling content by specifying the following additional arguments in the config:
+g
+    Prof
 
-- `torch_profiler_record_shapes` to enable recording Tensor Shapes, off by default
-- `torch_profiler_with_memory` to record memory, off by default
-- `torch_profiler_with_stack` to enable recording stack information, on by default
-- `torch_profiler_with_flops` to enable recording FLOPs, off by default
-- `torch_profiler_use_gzip` to control gzip-compressing profiling files, on by default
-- `torch_profiler_dump_cuda_time_total` to control dumping and printing the aggregated CUDA self time table, on by default
 
-When using `vllm bench serve`, you can enable profiling by passing the `--profile` flag.
 
-Traces can be visualized using <https://ui.perfetto.dev/>.
+g 
+s o
 
-!!! tip
-    You can directly call bench module without installing vLLM using `python -m vllm.entrypoints.cli.main bench`.
+y 
 
-!!! tip
-    Only send a few requests through vLLM when profiling, as the traces can get quite large. Also, no need to untar the traces, they can be viewed directly.
+t
 
-!!! tip
-    To stop the profiler - it flushes out all the profile trace files to the directory. This takes time, for example for about 100 requests worth of data for a llama 70b, it takes about 10 minutes to flush out on a H100.
-    Set the env variable VLLM_RPC_TIMEOUT to a big number before you start the server. Say something like 30 minutes.
-    `export VLLM_RPC_TIMEOUT=1800000`
+d
+d for vLLM d
+v
 
-### Example commands and usage
+op
+rs a
+d ma
 
-#### Offline Inference
+ta
 
-Refer to [examples/offline_inference/simple_profiling.py](../../examples/offline_inference/simple_profiling.py) for an example.
 
-#### OpenAI Server
+rs to u
+d
+rsta
+d th
+ proport
+o
+ of t
+m
+ sp
 
+t 
+
+ d
+ff
+r
+
+t parts of th
+ cod
+bas
+. **vLLM 
+
+d-us
+rs shou
+d 
+
+v
+r tur
+ o
+ prof
+
+
+
+g** as 
+t 
+
+
+ s
+g
+
+f
+ca
+t
+y s
+o
+ do
+
+ th
+ 
+
+f
+r
+
+c
+.
+## Prof
+
+
+ 
+
+th PyTorch Prof
+
+
+r
+W
+ support trac
+
+g vLLM 
+ork
+rs us
+
+g d
+ff
+r
+
+t prof
+
+
+rs. You ca
+ 
+
+ab
+
+ prof
+
+
+
+g by s
+tt
+
+g th
+ `--prof
+
+
+r-co
+f
+g` f
+ag 
+h
+
+ 
+au
+ch
+
+g th
+ s
+rv
+r.
+!!! 
+ot
+
+    Th
+ `--prof
+
+
+r-co
+f
+g` f
+ag 
+s ava
+
+ab
+
+ 
+
+ vLLM v0.13.0 a
+d 
+at
+r. If you ar
+ us
+
+g a
+ 
+ar
+
+
+r v
+rs
+o
+, p
+
+as
+ upgrad
+ to us
+ th
+s f
+atur
+.
+To us
+ th
+ `torch.prof
+
+
+r` modu
+
+, s
+t th
+ `prof
+
+
+r` 
+
+try to `'torch'` a
+d `torch_prof
+
+
+r_d
+r` to th
+ d
+r
+ctory 
+h
+r
+ you 
+a
+t to sav
+ th
+ trac
+s. Add
+t
+o
+a
+y, you ca
+ co
+tro
+ th
+ prof
+
+
+
+g co
+t
+
+t by sp
+c
+fy
+
+g th
+ fo
+o
+
+
+g add
+t
+o
+a
+ argum
+
+ts 
+
+ th
+ co
+f
+g:
+- `torch_prof
+
+
+r_r
+cord_shap
+s` to 
+
+ab
+
+ r
+cord
+
+g T
+
+sor Shap
+s, off by d
+fau
+t
+- `torch_prof
+
+
+r_
+
+th_m
+mory` to r
+cord m
+mory, off by d
+fau
+t
+- `torch_prof
+
+
+r_
+
+th_stack` to 
+
+ab
+
+ r
+cord
+
+g stack 
+
+format
+o
+, o
+ by d
+fau
+t
+- `torch_prof
+
+
+r_
+
+th_f
+ops` to 
+
+ab
+
+ r
+cord
+
+g FLOPs, off by d
+fau
+t
+- `torch_prof
+
+
+r_us
+_gz
+p` to co
+tro
+ gz
+p-compr
+ss
+
+g prof
+
+
+
+g f
+
+
+s, o
+ by d
+fau
+t
+- `torch_prof
+
+
+r_dump_cuda_t
+m
+_tota
+` to co
+tro
+ dump
+
+g a
+d pr
+
+t
+
+g th
+ aggr
+gat
+d CUDA s
+
+f t
+m
+ tab
+
+, o
+ by d
+fau
+t
+Wh
+
+ us
+
+g `v
+m b
+
+ch s
+rv
+`, you ca
+ 
+
+ab
+
+ prof
+
+
+
+g by pass
+
+g th
+ `--prof
+
+
+` f
+ag.
+Trac
+s ca
+ b
+ v
+sua
+
+z
+d us
+
+g 
+https://u
+.p
+rf
+tto.d
+v/
+.
+!!! t
+p
+    You ca
+ d
+r
+ct
+y ca
+ b
+
+ch modu
+
+ 
+
+thout 
+
+sta
+
+
+g vLLM us
+
+g `pytho
+ -m v
+m.
+
+trypo
+
+ts.c
+
+.ma
+
+ b
+
+ch`.
+!!! t
+p
+    O
+
+y s
+
+d a f
+
+ r
+qu
+sts through vLLM 
+h
+
+ prof
+
+
+
+g, as th
+ trac
+s ca
+ g
+t qu
+t
+ 
+arg
+. A
+so, 
+o 
+
+d to u
+tar th
+ trac
+s, th
+y ca
+ b
+ v
+
+
+
+d d
+r
+ct
+y.
+!!! t
+p
+    To stop th
+ prof
+
+
+r - 
+t f
+ush
+s out a
+ th
+ prof
+
+
+ trac
+ f
+
+
+s to th
+ d
+r
+ctory. Th
+s tak
+s t
+m
+, for 
+xamp
+
+ for about 100 r
+qu
+sts 
+orth of data for a 
+ama 70b, 
+t tak
+s about 10 m
+
+ut
+s to f
+ush out o
+ a H100.
+    S
+t th
+ 
+
+v var
+ab
+
+ VLLM_RPC_TIMEOUT to a b
+g 
+umb
+r b
+for
+ you start th
+ s
+rv
+r. Say som
+th
+
+g 
+
+k
+ 30 m
+
+ut
+s.
+    `
+xport VLLM_RPC_TIMEOUT=1800000`
+### Examp
+
+ comma
+ds a
+d usag
+
+#### Off
+
+
+
+ I
+f
+r
+
+c
+
+R
+f
+r to [
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/s
+mp
+
+_prof
+
+
+
+g.py](../../
+xamp
+
+s/off
+
+
+
+_
+
+f
+r
+
+c
+/s
+mp
+
+_prof
+
+
+
+g.py) for a
+ 
+xamp
+
+.
+#### Op
+
+AI S
+rv
+r
 ```bash
-vllm serve meta-llama/Llama-3.1-8B-Instruct --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile"}'
+v
+m s
+rv
+ m
+ta-
+ama/L
+ama-3.1-8B-I
+struct --prof
+
+
+r-co
+f
+g '{"prof
+
+
+r": "torch", "torch_prof
+
+
+r_d
+r": "./v
+m_prof
+
+
+"}'
 ```
+v
+m b
 
-vllm bench command:
-
+ch comma
+d:
 ```bash
-vllm bench serve \
-    --backend vllm \
-    --model meta-llama/Llama-3.1-8B-Instruct \
-    --dataset-name sharegpt \
-    --dataset-path sharegpt.json \
-    --profile \
-    --num-prompts 2
+v
+m b
+
+ch s
+rv
+ \
+    --back
+
+d v
+m \
+    --mod
+
+ m
+ta-
+ama/L
+ama-3.1-8B-I
+struct \
+    --datas
+t-
+am
+ shar
+gpt \
+    --datas
+t-path shar
+gpt.jso
+ \
+    --prof
+
+
+ \
+    --
+um-prompts 2
 ```
+Or us
+ http r
+qu
+st:
+```sh
 
-Or use http request:
 
-```shell
-# We need first call /start_profile api to start profile.
-$ curl -X POST http://localhost:8000/start_profile
+# W
+ 
 
-# Call model generate.
-curl -X POST http://localhost:8000/v1/chat/completions \
-    -H "Content-Type: application/json" \
+d f
+rst ca
+ /start_prof
+
+
+ ap
+ to start prof
+
+
+.
+$ cur
+ -X POST http://
+oca
+host:8000/start_prof
+
+
+
+# Ca
+ mod
+
+ g
+
+
+rat
+.
+cur
+ -X POST http://
+oca
+host:8000/v1/chat/comp
+
+t
+o
+s \
+    -H "Co
+t
+
+t-Typ
+: app
+
+cat
+o
+/jso
+" \
     -d '{
-                "model": "meta-llama/Llama-3.1-8B-Instruct",
-                "messages": [
+                "mod
+
+": "m
+ta-
+ama/L
+ama-3.1-8B-I
+struct",
+                "m
+ssag
+s": [
                         {
-                                "role": "user",
-                                "content": "San Francisco is a"
+                                "ro
+
+": "us
+r",
+                                "co
+t
+
+t": "Sa
+ Fra
+c
+sco 
+s a"
                         }
                 ]
     }'
+# Aft
+r 
 
-# After need call /stop_profile api to stop profile.
-$ curl -X POST http://localhost:8000/stop_profile
+d ca
+ /stop_prof
+
+
+ ap
+ to stop prof
+
+
+.
+$ cur
+ -X POST http://
+oca
+host:8000/stop_prof
+
+
+
 ```
+## Prof
 
-## Profile with NVIDIA Nsight Systems
 
-Nsight systems is an advanced tool that exposes more profiling details, such as register and shared memory usage, annotated code regions and low-level CUDA APIs and events.
+ 
 
-[Install nsight-systems](https://docs.nvidia.com/nsight-systems/InstallationGuide/index.html) using your package manager.
-The following block is an example for Ubuntu.
+th NVIDIA Ns
+ght Syst
+ms
+Ns
+ght syst
+ms 
+s a
+ adva
+c
+d too
+ that 
+xpos
+s mor
+ prof
 
+
+
+g d
+ta
+
+s, such as r
+g
+st
+r a
+d shar
+d m
+mory usag
+, a
+otat
+d cod
+ r
+g
+o
+s a
+d 
+o
+-
+
+v
+
+ CUDA APIs a
+d 
+v
+
+ts.
+[I
+sta
+ 
+s
+ght-syst
+ms](https://docs.
+v
+d
+a.com/
+s
+ght-syst
+ms/I
+sta
+at
+o
+Gu
+d
+/
+
+d
+x.htm
+) us
+
+g your packag
+ ma
+ag
+r.
+Th
+ fo
+o
+
+
+g b
+ock 
+s a
+ 
+xamp
+
+ for Ubu
+tu.
 ```bash
-apt update
-apt install -y --no-install-recommends gnupg
-echo "deb http://developer.download.nvidia.com/devtools/repos/ubuntu$(source /etc/lsb-release; echo "$DISTRIB_RELEASE" | tr -d .)/$(dpkg --print-architecture) /" | tee /etc/apt/sources.list.d/nvidia-devtools.list
-apt-key adv --fetch-keys http://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub
-apt update
-apt install nsight-systems-cli
+apt updat
+
+apt 
+
+sta
+ -y --
+o-
+
+sta
+-r
+comm
+
+ds g
+upg
+
+cho "d
+b http://d
+v
+
+op
+r.do
+
+
+oad.
+v
+d
+a.com/d
+vtoo
+s/r
+pos/ubu
+tu$(sourc
+ /
+tc/
+sb-r
+
+
+as
+; 
+cho "$DISTRIB_RELEASE" | tr -d .)/$(dpkg --pr
+
+t-arch
+t
+ctur
+) /" | t
+ /
+tc/apt/sourc
+s.
+
+st.d/
+v
+d
+a-d
+vtoo
+s.
+
+st
+apt-k
+y adv --f
+tch-k
+ys http://d
+v
+
+op
+r.do
+
+
+oad.
+v
+d
+a.com/comput
+/cuda/r
+pos/ubu
+tu1804/x86_64/7fa2af80.pub
+apt updat
+
+apt 
+
+sta
+ 
+s
+ght-syst
+ms-c
+
+
 ```
+!!! t
+p
+    Wh
 
-!!! tip
-    When profiling with `nsys`, it is advisable to set the environment variable `VLLM_WORKER_MULTIPROC_METHOD=spawn`. The default is to use the `fork` method instead of `spawn`. More information on the topic can be found in the [Nsight Systems release notes](https://docs.nvidia.com/nsight-systems/ReleaseNotes/index.html#general-issues).
+ prof
 
-The Nsight Systems profiler can be launched with `nsys profile ...`, with a few recommended flags for vLLM: `--trace-fork-before-exec=true --cuda-graph-trace=node`.
 
-### Example commands and usage
 
-#### Offline Inference
+g 
 
-For basic usage, you can just append the profiling command before any existing script you would run for offline inference.
+th `
+sys`, 
+t 
+s adv
+sab
 
-The following is an example using the `vllm bench latency` script:
+ to s
+t th
+ 
 
+v
+ro
+m
+
+t var
+ab
+
+ `VLLM_WORKER_MULTIPROC_METHOD=spa
+
+`. Th
+ d
+fau
+t 
+s to us
+ th
+ `fork` m
+thod 
+
+st
+ad of `spa
+
+`. Mor
+ 
+
+format
+o
+ o
+ th
+ top
+c ca
+ b
+ fou
+d 
+
+ th
+ [Ns
+ght Syst
+ms r
+
+
+as
+ 
+ot
+s](https://docs.
+v
+d
+a.com/
+s
+ght-syst
+ms/R
+
+
+as
+Not
+s/
+
+d
+x.htm
+#g
+
+
+ra
+-
+ssu
+s).
+Th
+ Ns
+ght Syst
+ms prof
+
+
+r ca
+ b
+ 
+au
+ch
+d 
+
+th `
+sys prof
+
+
+ ...`, 
+
+th a f
+
+ r
+comm
+
+d
+d f
+ags for vLLM: `--trac
+-fork-b
+for
+-
+x
+c=tru
+ --cuda-graph-trac
+=
+od
+`.
+### Examp
+
+ comma
+ds a
+d usag
+
+#### Off
+
+
+
+ I
+f
+r
+
+c
+
+For bas
+c usag
+, you ca
+ just app
+
+d th
+ prof
+
+
+
+g comma
+d b
+for
+ a
+y 
+x
+st
+
+g scr
+pt you 
+ou
+d ru
+ for off
+
+
+
+ 
+
+f
+r
+
+c
+.
+Th
+ fo
+o
+
+
+g 
+s a
+ 
+xamp
+
+ us
+
+g th
+ `v
+m b
+
+ch 
+at
+
+cy` scr
+pt:
 ```bash
-nsys profile  \
-    --trace-fork-before-exec=true \
-    --cuda-graph-trace=node \
-vllm bench latency \
-    --model meta-llama/Llama-3.1-8B-Instruct \
-    --num-iters-warmup 5 \
-    --num-iters 1 \
-    --batch-size 16 \
-    --input-len 512 \
-    --output-len 8
+
+sys prof
+
+
+  \
+    --trac
+-fork-b
+for
+-
+x
+c=tru
+ \
+    --cuda-graph-trac
+=
+od
+ \
+v
+m b
+
+ch 
+at
+
+cy \
+    --mod
+
+ m
+ta-
+ama/L
+ama-3.1-8B-I
+struct \
+    --
+um-
+t
+rs-
+armup 5 \
+    --
+um-
+t
+rs 1 \
+    --batch-s
+z
+ 16 \
+    --
+
+put-
+
+
+ 512 \
+    --output-
+
+
+ 8
 ```
+#### Op
 
-#### OpenAI Server
+AI S
+rv
+r
+To prof
 
-To profile the server, you will want to prepend your `vllm serve` command with `nsys profile` just like for offline inference, but you will need to specify a few other arguments to enable dynamic capture similarly to the Torch Profiler:
 
+ th
+ s
+rv
+r, you 
+
+
+ 
+a
+t to pr
+p
+
+d your `v
+m s
+rv
+` comma
+d 
+
+th `
+sys prof
+
+
+` just 
+
+k
+ for off
+
+
+
+ 
+
+f
+r
+
+c
+, but you 
+
+
+ 
+
+d to sp
+c
+fy a f
+
+ oth
+r argum
+
+ts to 
+
+ab
+
+ dy
+am
+c captur
+ s
+m
+
+ar
+y to th
+ Torch Prof
+
+
+r:
 ```bash
-# server
-nsys profile \
-    --trace-fork-before-exec=true \
-    --cuda-graph-trace=node \
-    --capture-range=cudaProfilerApi \
-    --capture-range-end repeat \
-    vllm serve meta-llama/Llama-3.1-8B-Instruct --profiler-config.profiler cuda
+# s
+rv
+r
 
-# client
-vllm bench serve \
-    --backend vllm \
-    --model meta-llama/Llama-3.1-8B-Instruct \
-    --dataset-name sharegpt \
-    --dataset-path sharegpt.json \
-    --profile \
-    --num-prompts 2
+sys prof
+
+
+ \
+    --trac
+-fork-b
+for
+-
+x
+c=tru
+ \
+    --cuda-graph-trac
+=
+od
+ \
+    --captur
+-ra
+g
+=cudaProf
+
+
+rAp
+ \
+    --captur
+-ra
+g
+-
+
+d r
+p
+at \
+    v
+m s
+rv
+ m
+ta-
+ama/L
+ama-3.1-8B-I
+struct --prof
+
+
+r-co
+f
+g.prof
+
+
+r cuda
+# c
+
+
+
+t
+v
+m b
+
+ch s
+rv
+ \
+    --back
+
+d v
+m \
+    --mod
+
+ m
+ta-
+ama/L
+ama-3.1-8B-I
+struct \
+    --datas
+t-
+am
+ shar
+gpt \
+    --datas
+t-path shar
+gpt.jso
+ \
+    --prof
+
+
+ \
+    --
+um-prompts 2
 ```
+W
+th `--prof
 
-With `--profile`, vLLM will capture a profile for each run of `vllm bench serve`. Once the server is killed, the profiles will all be saved.
 
-#### Analysis
+`, vLLM 
 
-You can view these profiles either as summaries in the CLI, using `nsys stats [profile-file]`, or in the GUI by installing Nsight [locally following the directions here](https://developer.nvidia.com/nsight-systems/get-started).
 
-??? console "CLI example"
+ captur
+ a prof
 
+
+ for 
+ach ru
+ of `v
+m b
+
+ch s
+rv
+`. O
+c
+ th
+ s
+rv
+r 
+s k
+
+
+d, th
+ prof
+
+
+s 
+
+
+ a
+ b
+ sav
+d.
+#### A
+a
+ys
+s
+You ca
+ v
+
+
+ th
+s
+ prof
+
+
+s 
+
+th
+r as summar
+
+s 
+
+ th
+ CLI, us
+
+g `
+sys stats [prof
+
+
+-f
+
+
+]`, or 
+
+ th
+ GUI by 
+
+sta
+
+
+g Ns
+ght [
+oca
+y fo
+o
+
+
+g th
+ d
+r
+ct
+o
+s h
+r
+](https://d
+v
+
+op
+r.
+v
+d
+a.com/
+s
+ght-syst
+ms/g
+t-start
+d).
+??? co
+so
+
+ "CLI 
+xamp
+
+"
     ```bash
-    nsys stats report1.nsys-rep
+    
+sys stats r
+port1.
+sys-r
+p
     ...
-    ** CUDA GPU Kernel Summary (cuda_gpu_kern_sum):
+    ** CUDA GPU K
+r
 
-    Time (%)  Total Time (ns)  Instances   Avg (ns)     Med (ns)    Min (ns)  Max (ns)   StdDev (ns)                                                  Name
+
+ Summary (cuda_gpu_k
+r
+_sum):
+    T
+m
+ (%)  Tota
+ T
+m
+ (
+s)  I
+sta
+c
+s   Avg (
+s)     M
+d (
+s)    M
+
+ (
+s)  Max (
+s)   StdD
+v (
+s)                                                  Nam
+
     --------  ---------------  ---------  -----------  -----------  --------  ---------  -----------  ----------------------------------------------------------------------------------------------------
-        46.3   10,327,352,338     17,505    589,965.9    144,383.0    27,040  3,126,460    944,263.8  sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n_tilesize128x128x64_warpgroupsize1x1x1_execute_segment_k_of…
-        14.8    3,305,114,764      5,152    641,520.7    293,408.0   287,296  2,822,716    867,124.9  sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n_tilesize256x128x64_warpgroupsize2x1x1_execute_segment_k_of…
-        12.1    2,692,284,876     14,280    188,535.4     83,904.0    19,328  2,862,237    497,999.9  sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n_tilesize64x128x64_warpgroupsize1x1x1_execute_segment_k_off…
-        9.5    2,116,600,578     33,920     62,399.8     21,504.0    15,326  2,532,285    290,954.1  sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n_tilesize64x64x64_warpgroupsize1x1x1_execute_segment_k_off_…
-        5.0    1,119,749,165     18,912     59,208.4      9,056.0     6,784  2,578,366    271,581.7  void vllm::act_and_mul_kernel<c10::BFloat16, &vllm::silu_kernel<c10::BFloat16>, (bool)1>(T1 *, cons…
-        4.1      916,662,515     21,312     43,011.6     19,776.0     8,928  2,586,205    199,790.1  void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<flash::CollectiveMa…
-        2.6      587,283,113     37,824     15,526.7      3,008.0     2,719  2,517,756    139,091.1  std::enable_if<T2>(int)0&&vllm::_typeConvert<T1>::exists, void>::type vllm::fused_add_rms_norm_kern…
-        1.9      418,362,605     18,912     22,121.5      3,871.0     3,328  2,523,870    175,248.2  void vllm::rotary_embedding_kernel<c10::BFloat16, (bool)1>(const long *, T1 *, T1 *, const T1 *, in…
-        0.7      167,083,069     18,880      8,849.7      2,240.0     1,471  2,499,996    101,436.1  void vllm::reshape_and_cache_flash_kernel<__nv_bfloat16, __nv_bfloat16, (vllm::Fp8KVCacheDataType)0…
+        46.3   10,327,352,338     17,505    589,965.9    144,383.0    27,040  3,126,460    944,263.8  sm90_xmma_g
+mm_bf16bf16_bf16f32_f32_t
+_
+_t
+
+
+s
+z
+128x128x64_
+arpgroups
+z
+1x1x1_
+x
+cut
+_s
+gm
+
+t_k_of…
+        14.8    3,305,114,764      5,152    641,520.7    293,408.0   287,296  2,822,716    867,124.9  sm90_xmma_g
+mm_bf16bf16_bf16f32_f32_t
+_
+_t
+
+
+s
+z
+256x128x64_
+arpgroups
+z
+2x1x1_
+x
+cut
+_s
+gm
+
+t_k_of…
+        12.1    2,692,284,876     14,280    188,535.4     83,904.0    19,328  2,862,237    497,999.9  sm90_xmma_g
+mm_bf16bf16_bf16f32_f32_t
+_
+_t
+
+
+s
+z
+64x128x64_
+arpgroups
+z
+1x1x1_
+x
+cut
+_s
+gm
+
+t_k_off…
+        9.5    2,116,600,578     33,920     62,399.8     21,504.0    15,326  2,532,285    290,954.1  sm90_xmma_g
+mm_bf16bf16_bf16f32_f32_t
+_
+_t
+
+
+s
+z
+64x64x64_
+arpgroups
+z
+1x1x1_
+x
+cut
+_s
+gm
+
+t_k_off_…
+        5.0    1,119,749,165     18,912     59,208.4      9,056.0     6,784  2,578,366    271,581.7  vo
+d v
+m::act_a
+d_mu
+_k
+r
+
+
+
+c10::BF
+oat16, &v
+m::s
+
+u_k
+r
+
+
+
+c10::BF
+oat16
+, (boo
+)1
+(T1 *, co
+s…
+        4.1      916,662,515     21,312     43,011.6     19,776.0     8,928  2,586,205    199,790.1  vo
+d cut
+ass::d
+v
+c
+_k
+r
+
+
+
+f
+ash::
+
+ab
+
+_sm90_or_
+at
+r
+f
+ash::F
+ashAtt
+F
+dSm90
+f
+ash::Co
+
+ct
+v
+Ma…
+        2.6      587,283,113     37,824     15,526.7      3,008.0     2,719  2,517,756    139,091.1  std::
+
+ab
+
+_
+f
+T2
+(
+
+t)0&&v
+m::_typ
+Co
+v
+rt
+T1
+::
+x
+sts, vo
+d
+::typ
+ v
+m::fus
+d_add_rms_
+orm_k
+r
+…
+        1.9      418,362,605     18,912     22,121.5      3,871.0     3,328  2,523,870    175,248.2  vo
+d v
+m::rotary_
+mb
+dd
+
+g_k
+r
+
+
+
+c10::BF
+oat16, (boo
+)1
+(co
+st 
+o
+g *, T1 *, T1 *, co
+st T1 *, 
+
+…
+        0.7      167,083,069     18,880      8,849.7      2,240.0     1,471  2,499,996    101,436.1  vo
+d v
+m::r
+shap
+_a
+d_cach
+_f
+ash_k
+r
+
+
+
+__
+v_bf
+oat16, __
+v_bf
+oat16, (v
+m::Fp8KVCach
+DataTyp
+)0…
     ...
     ```
+GUI 
+xamp
 
-GUI example:
+:
 
-<img width="1799" alt="Screenshot 2025-03-05 at 11 48 42 AM" src="https://github.com/user-attachments/assets/c7cff1ae-6d6f-477d-a342-bd13c4fc424c" />
+mg 
 
-## Continuous Profiling
+dth="1799" a
+t="Scr
 
-There is a [GitHub CI workflow](https://github.com/pytorch/pytorch-integration-testing/actions/workflows/vllm-profiling.yml) in the PyTorch infrastructure repository that provides continuous profiling for different models on vLLM. This automated profiling helps track performance characteristics over time and across different model configurations.
+shot 2025-03-05 at 11 48 42 AM" src="https://g
+thub.com/us
+r-attachm
 
-### How It Works
+ts/ass
+ts/c7cff1a
+-6d6f-477d-a342-bd13c4fc424c" /
 
-The workflow currently runs weekly profiling sessions for selected models, generating detailed performance traces that can be analyzed using different tools to identify performance regressions or optimization opportunities. But, it can be triggered manually as well, using the Github Action tool.
+## Co
+t
 
-### Adding New Models
+uous Prof
 
-To extend the continuous profiling to additional models, you can modify the [profiling-tests.json](https://github.com/pytorch/pytorch-integration-testing/blob/main/vllm-profiling/cuda/profiling-tests.json) configuration file in the PyTorch integration testing repository. Simply add your model specifications to this file to include them in the automated profiling runs.
 
-### Viewing Profiling Results
 
-The profiling traces generated by the continuous profiling workflow are publicly available on the [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm). Look for the **Profiling traces** table to access and download the traces for different models and runs.
+g
+Th
+r
+ 
+s a [G
+tHub CI 
+orkf
+o
+](https://g
+thub.com/pytorch/pytorch-
 
-## Profiling vLLM Python Code
+t
+grat
+o
+-t
+st
 
-The Python standard library includes
-[cProfile](https://docs.python.org/3/library/profile.html) for profiling Python
-code. vLLM includes a couple of helpers that make it easy to apply it to a section of vLLM.
-Both the `vllm.utils.profiling.cprofile` and `vllm.utils.profiling.cprofile_context` functions can be
-used to profile a section of code.
+g/act
+o
+s/
+orkf
+o
+s/v
+m-prof
 
-!!! note
-    The legacy import paths `vllm.utils.cprofile` and `vllm.utils.cprofile_context` are deprecated.
-    Please use `vllm.utils.profiling.cprofile` and `vllm.utils.profiling.cprofile_context` instead.
 
-### Example usage - decorator
 
-The first helper is a Python decorator that can be used to profile a function.
-If a filename is specified, the profile will be saved to that file. If no filename is
-specified, profile data will be printed to stdout.
+g.ym
+) 
 
-```python
-from vllm.utils.profiling import cprofile
+ th
+ PyTorch 
 
-@cprofile("expensive_function.prof")
-def expensive_function():
-    # some expensive code
+frastructur
+ r
+pos
+tory that prov
+d
+s co
+t
+
+uous prof
+
+
+
+g for d
+ff
+r
+
+t mod
+
+s o
+ vLLM. Th
+s automat
+d prof
+
+
+
+g h
+
+ps track p
+rforma
+c
+ charact
+r
+st
+cs ov
+r t
+m
+ a
+d across d
+ff
+r
+
+t mod
+
+ co
+f
+gurat
+o
+s.
+### Ho
+ It Works
+Th
+ 
+orkf
+o
+ curr
+
+t
+y ru
+s 
+
+k
+y prof
+
+
+
+g s
+ss
+o
+s for s
+
+
+ct
+d mod
+
+s, g
+
+
+rat
+
+g d
+ta
+
+
+d p
+rforma
+c
+ trac
+s that ca
+ b
+ a
+a
+yz
+d us
+
+g d
+ff
+r
+
+t too
+s to 
+d
+
+t
+fy p
+rforma
+c
+ r
+gr
+ss
+o
+s or opt
+m
+zat
+o
+ opportu
+
+t
+
+s. But, 
+t ca
+ b
+ tr
+gg
+r
+d ma
+ua
+y as 
+
+
+, us
+
+g th
+ G
+thub Act
+o
+ too
+.
+### Add
+
+g N
+
+ Mod
+
+s
+To 
+xt
+
+d th
+ co
+t
+
+uous prof
+
+
+
+g to add
+t
+o
+a
+ mod
+
+s, you ca
+ mod
+fy th
+ [prof
+
+
+
+g-t
+sts.jso
+](https://g
+thub.com/pytorch/pytorch-
+
+t
+grat
+o
+-t
+st
+
+g/b
+ob/ma
+
+/v
+m-prof
+
+
+
+g/cuda/prof
+
+
+
+g-t
+sts.jso
+) co
+f
+gurat
+o
+ f
+
+
+ 
+
+ th
+ PyTorch 
+
+t
+grat
+o
+ t
+st
+
+g r
+pos
+tory. S
+mp
+y add your mod
+
+ sp
+c
+f
+cat
+o
+s to th
+s f
+
+
+ to 
+
+c
+ud
+ th
+m 
+
+ th
+ automat
+d prof
+
+
+
+g ru
+s.
+### V
+
+
+
+
+g Prof
+
+
+
+g R
+su
+ts
+Th
+ prof
+
+
+
+g trac
+s g
+
+
+rat
+d by th
+ co
+t
+
+uous prof
+
+
+
+g 
+orkf
+o
+ ar
+ pub
+
+c
+y ava
+
+ab
+
+ o
+ th
+ [vLLM P
+rforma
+c
+ Dashboard](https://hud.pytorch.org/b
+
+chmark/
+ms?r
+poNam
+=v
+m-proj
+ct%2Fv
+m). Look for th
+ **Prof
+
+
+
+g trac
+s** tab
+
+ to acc
+ss a
+d do
+
+
+oad th
+ trac
+s for d
+ff
+r
+
+t mod
+
+s a
+d ru
+s.
+## Prof
+
+
+
+g vLLM Pytho
+ Cod
+
+Th
+ Pytho
+ sta
+dard 
+
+brary 
+
+c
+ud
+s
+[cProf
+
+
+](https://docs.pytho
+.org/3/
+
+brary/prof
+
+
+.htm
+) for prof
+
+
+
+g Pytho
+
+cod
+. vLLM 
+
+c
+ud
+s a coup
+
+ of h
+
+p
+rs that mak
+ 
+t 
+asy to app
+y 
+t to a s
+ct
+o
+ of vLLM.
+Both th
+ `v
+m.ut
+
+s.prof
+
+
+
+g.cprof
+
+
+` a
+d `v
+m.ut
+
+s.prof
+
+
+
+g.cprof
+
+
+_co
+t
+xt` fu
+ct
+o
+s ca
+ b
+
+us
+d to prof
+
+
+ a s
+ct
+o
+ of cod
+.
+!!! 
+ot
+
+    Th
+ 
+
+gacy 
+mport paths `v
+m.ut
+
+s.cprof
+
+
+` a
+d `v
+m.ut
+
+s.cprof
+
+
+_co
+t
+xt` ar
+ d
+pr
+cat
+d.
+    P
+
+as
+ us
+ `v
+m.ut
+
+s.prof
+
+
+
+g.cprof
+
+
+` a
+d `v
+m.ut
+
+s.prof
+
+
+
+g.cprof
+
+
+_co
+t
+xt` 
+
+st
+ad.
+### Examp
+
+ usag
+ - d
+corator
+Th
+ f
+rst h
+
+p
+r 
+s a Pytho
+ d
+corator that ca
+ b
+ us
+d to prof
+
+
+ a fu
+ct
+o
+.
+If a f
+
+
+
+am
+ 
+s sp
+c
+f
+
+d, th
+ prof
+
+
+ 
+
+
+ b
+ sav
+d to that f
+
+
+. If 
+o f
+
+
+
+am
+ 
+s
+sp
+c
+f
+
+d, prof
+
+
+ data 
+
+
+ b
+ pr
+
+t
+d to stdout.
+```pytho
+
+from v
+m.ut
+
+s.prof
+
+
+
+g 
+mport cprof
+
+
+
+@cprof
+
+
+("
+xp
+
+s
+v
+_fu
+ct
+o
+.prof")
+d
+f 
+xp
+
+s
+v
+_fu
+ct
+o
+():
+    # som
+ 
+xp
+
+s
+v
+ cod
+
     pass
 ```
+### Examp
 
-### Example Usage - context manager
+ Usag
+ - co
+t
+xt ma
+ag
+r
+Th
+ s
+co
+d h
 
-The second helper is a context manager that can be used to profile a block of
-code. Similar to the decorator, the filename is optional.
+p
+r 
+s a co
+t
+xt ma
+ag
+r that ca
+ b
+ us
+d to prof
 
-```python
-from vllm.utils.profiling import cprofile_context
 
-def another_function():
-    # more expensive code
+ a b
+ock of
+cod
+. S
+m
+
+ar to th
+ d
+corator, th
+ f
+
+
+
+am
+ 
+s opt
+o
+a
+.
+```pytho
+
+from v
+m.ut
+
+s.prof
+
+
+
+g 
+mport cprof
+
+
+_co
+t
+xt
+d
+f a
+oth
+r_fu
+ct
+o
+():
+    # mor
+ 
+xp
+
+s
+v
+ cod
+
     pass
 
-with cprofile_context("another_function.prof"):
-    another_function()
+
+th cprof
+
+
+_co
+t
+xt("a
+oth
+r_fu
+ct
+o
+.prof"):
+    a
+oth
+r_fu
+ct
+o
+()
 ```
+### A
+a
+yz
 
-### Analyzing Profile Results
+g Prof
 
-There are multiple tools available that can help analyze the profile results.
-One example is [snakeviz](https://jiffyclub.github.io/snakeviz/).
 
+ R
+su
+ts
+Th
+r
+ ar
+ mu
+t
+p
+
+ too
+s ava
+
+ab
+
+ that ca
+ h
+
+p a
+a
+yz
+ th
+ prof
+
+
+ r
+su
+ts.
+O
+
+ 
+xamp
+
+ 
+s [s
+ak
+v
+z](https://j
+ffyc
+ub.g
+thub.
+o/s
+ak
+v
+z/).
 ```bash
-pip install snakeviz
-snakeviz expensive_function.prof
+p
+p 
+
+sta
+ s
+ak
+v
+z
+s
+ak
+v
+z 
+xp
+
+s
+v
+_fu
+ct
+o
+.prof
 ```
+### A
+a
+yz
 
-### Analyzing Garbage Collection Costs
+g Garbag
+ Co
 
-Leverage VLLM_GC_DEBUG environment variable to debug GC costs.
+ct
+o
+ Costs
+L
+v
+rag
+ VLLM_GC_DEBUG 
 
-- VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elapsed times
-- VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger to log top 5
-  collected objects for each gc.collect
+v
+ro
+m
+
+t var
+ab
+
+ to d
+bug GC costs.
+- VLLM_GC_DEBUG=1: 
+
+ab
+
+ GC d
+bugg
+r 
+
+th gc.co
+
+ct 
+
+aps
+d t
+m
+s
+- VLLM_GC_DEBUG='{"top_obj
+cts":5}': 
+
+ab
+
+ GC d
+bugg
+r to 
+og top 5
+  co
+
+ct
+d obj
+cts for 
+ach gc.co
+
+ct

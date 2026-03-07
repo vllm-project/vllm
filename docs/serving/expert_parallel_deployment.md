@@ -1,319 +1,3722 @@
-# Expert Parallel Deployment
+# Exp
+rt Para
 
-vLLM supports Expert Parallelism (EP), which allows experts in Mixture-of-Experts (MoE) models to be deployed on separate GPUs, increasing locality, efficiency, and throughput overall.
 
-EP is typically coupled with Data Parallelism (DP). While DP can be used independently of EP, EP is more efficient when used in conjunction with DP. You can read more about data parallelism [here](data_parallel_deployment.md).
+ D
+p
+oym
 
-## Prerequisites
+t
+vLLM supports Exp
+rt Para
 
-Before using EP, you need to install the necessary dependencies. We are actively working on making this easier in the future:
 
-1. **Install DeepEP**: Set up host environment following vLLM's guide for EP kernels [here](../../tools/ep_kernels).
-2. **Install DeepGEMM library**: Follow the [official instructions](https://github.com/deepseek-ai/DeepGEMM#installation).
-3. **For disaggregated serving**: Install `gdrcopy` by running the [`install_gdrcopy.sh`](../../tools/install_gdrcopy.sh) script (e.g., `install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "12.8" "x64"`). You can find available OS versions [here](https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/).
 
-### Backend Selection Guide
+sm (EP), 
+h
+ch a
+o
+s 
+xp
+rts 
 
-vLLM provides multiple communication backends for EP. Use `--all2all-backend` to select one:
+ M
+xtur
+-of-Exp
+rts (MoE) mod
 
-| Backend | Use Case | Features | Best For |
+s to b
+ d
+p
+oy
+d o
+ s
+parat
+ GPUs, 
+
+cr
+as
+
+g 
+oca
+
+ty, 
+ff
+c
+
+
+cy, a
+d throughput ov
+ra
+.
+EP 
+s typ
+ca
+y coup
+
+d 
+
+th Data Para
+
+
+
+sm (DP). Wh
+
+
+ DP ca
+ b
+ us
+d 
+
+d
+p
+
+d
+
+t
+y of EP, EP 
+s mor
+ 
+ff
+c
+
+
+t 
+h
+
+ us
+d 
+
+ co
+ju
+ct
+o
+ 
+
+th DP. You ca
+ r
+ad mor
+ about data para
+
+
+
+sm [h
+r
+](data_para
+
+
+_d
+p
+oym
+
+t.md).
+## Pr
+r
+qu
+s
+t
+s
+B
+for
+ us
+
+g EP, you 
+
+d to 
+
+sta
+ th
+ 
+
+c
+ssary d
+p
+
+d
+
+c
+
+s. W
+ ar
+ act
+v
+
+y 
+ork
+
+g o
+ mak
+
+g th
+s 
+as
+
+r 
+
+ th
+ futur
+:
+1. **I
+sta
+ D
+pEP**: S
+t up host 
+
+v
+ro
+m
+
+t fo
+o
+
+
+g vLLM's gu
+d
+ for EP k
+r
+
+
+s [h
+r
+](../../too
+s/
+p_k
+r
+
+
+s).
+2. **I
+sta
+ D
+pGEMM 
+
+brary**: Fo
+o
+ th
+ [off
+c
+a
+ 
+
+struct
+o
+s](https://g
+thub.com/d
+ps
+k-a
+/D
+pGEMM#
+
+sta
+at
+o
+).
+3. **For d
+saggr
+gat
+d s
+rv
+
+g**: I
+sta
+ `gdrcopy` by ru
+
+
+g th
+ [`
+
+sta
+_gdrcopy.sh`](../../too
+s/
+
+sta
+_gdrcopy.sh) scr
+pt (
+.g., `
+
+sta
+_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "12.8" "x64"`). You ca
+ f
+
+d ava
+
+ab
+
+ OS v
+rs
+o
+s [h
+r
+](https://d
+v
+
+op
+r.do
+
+
+oad.
+v
+d
+a.com/comput
+/r
+d
+st/gdrcopy/CUDA%2012.8/).
+### Back
+
+d S
+
+
+ct
+o
+ Gu
+d
+
+vLLM prov
+d
+s mu
+t
+p
+
+ commu
+
+cat
+o
+ back
+
+ds for EP. Us
+ `--a
+2a
+-back
+
+d` to s
+
+
+ct o
+
+:
+| Back
+
+d | Us
+ Cas
+ | F
+atur
+s | B
+st For |
 |---------|----------|----------|----------|
-| `allgather_reducescatter` | Default backend | Standard all2all using allgather/reducescatter primitives | General purpose, works with any EP+DP configuration |
-| `deepep_high_throughput` | Multi-node prefill | Grouped GEMM with continuous layout, optimized for prefill | Prefill-dominated workloads, high-throughput scenarios |
-| `deepep_low_latency` | Multi-node decode | CUDA graph support, masked layout, optimized for decode | Decode-dominated workloads, low-latency scenarios |
-| `flashinfer_all2allv` | MNNVL systems | FlashInfer alltoallv kernels for multi-node NVLink | Systems with NVLink across nodes |
-| `naive` | Testing/debugging | Simple broadcast-based implementation | Debugging, not recommended for production |
+| `a
+gath
+r_r
+duc
+scatt
+r` | D
+fau
+t back
 
-## Single Node Deployment
+d | Sta
+dard a
+2a
+ us
 
-!!! warning
-    EP is an experimental feature. Argument names and default values may change in the future.
+g a
+gath
+r/r
+duc
+scatt
+r pr
+m
+t
+v
+s | G
 
-### Configuration
 
-Enable EP by setting the `--enable-expert-parallel` flag. The EP size is automatically calculated as:
+ra
+ purpos
+, 
+orks 
 
-```text
+th a
+y EP+DP co
+f
+gurat
+o
+ |
+| `d
+p
+p_h
+gh_throughput` | Mu
+t
+-
+od
+ pr
+f
+
+ | Group
+d GEMM 
+
+th co
+t
+
+uous 
+ayout, opt
+m
+z
+d for pr
+f
+
+ | Pr
+f
+
+-dom
+
+at
+d 
+ork
+oads, h
+gh-throughput sc
+
+ar
+os |
+| `d
+p
+p_
+o
+_
+at
+
+cy` | Mu
+t
+-
+od
+ d
+cod
+ | CUDA graph support, mask
+d 
+ayout, opt
+m
+z
+d for d
+cod
+ | D
+cod
+-dom
+
+at
+d 
+ork
+oads, 
+o
+-
+at
+
+cy sc
+
+ar
+os |
+| `f
+ash
+
+f
+r_a
+2a
+v` | MNNVL syst
+ms | F
+ashI
+f
+r a
+toa
+v k
+r
+
+
+s for mu
+t
+-
+od
+ NVL
+
+k | Syst
+ms 
+
+th NVL
+
+k across 
+od
+s |
+| `
+a
+v
+` | T
+st
+
+g/d
+bugg
+
+g | S
+mp
+
+ broadcast-bas
+d 
+mp
+
+m
+
+tat
+o
+ | D
+bugg
+
+g, 
+ot r
+comm
+
+d
+d for product
+o
+ |
+## S
+
+g
+
+ Nod
+ D
+p
+oym
+
+t
+!!! 
+ar
+
+
+g
+    EP 
+s a
+ 
+xp
+r
+m
+
+ta
+ f
+atur
+. Argum
+
+t 
+am
+s a
+d d
+fau
+t va
+u
+s may cha
+g
+ 
+
+ th
+ futur
+.
+### Co
+f
+gurat
+o
+
+E
+ab
+
+ EP by s
+tt
+
+g th
+ `--
+
+ab
+
+-
+xp
+rt-para
+
+
+` f
+ag. Th
+ EP s
+z
+ 
+s automat
+ca
+y ca
+cu
+at
+d as:
+```t
+xt
 EP_SIZE = TP_SIZE × DP_SIZE
 ```
+Wh
+r
+:
+- `TP_SIZE`: T
 
-Where:
+sor para
 
-- `TP_SIZE`: Tensor parallel size
-- `DP_SIZE`: Data parallel size
-- `EP_SIZE`: Expert parallel size (computed automatically)
 
-### Layer Behavior with EP Enabled
+ s
+z
 
-When EP is enabled, different layers in MoE models behave differently:
+- `DP_SIZE`: Data para
 
-| Layer Type | Behavior | Parallelism Used |
+
+ s
+z
+
+- `EP_SIZE`: Exp
+rt para
+
+
+ s
+z
+ (comput
+d automat
+ca
+y)
+### Lay
+r B
+hav
+or 
+
+th EP E
+ab
+
+d
+Wh
+
+ EP 
+s 
+
+ab
+
+d, d
+ff
+r
+
+t 
+ay
+rs 
+
+ MoE mod
+
+s b
+hav
+ d
+ff
+r
+
+t
+y:
+| Lay
+r Typ
+ | B
+hav
+or | Para
+
+
+
+sm Us
+d |
 |------------|----------|------------------|
-| **Expert (MoE) Layers** | Sharded across all EP ranks | Expert Parallel (EP) of size `TP × DP` |
-| **Attention Layers** | Behavior depends on TP size | See below |
+| **Exp
+rt (MoE) Lay
+rs** | Shard
+d across a
+ EP ra
+ks | Exp
+rt Para
 
-**Attention layer parallelism:**
 
-- **When `TP = 1`**: Attention weights are **replicated** across all DP ranks (data parallelism)
-- **When `TP > 1`**: Attention weights are **sharded** using tensor parallelism across TP ranks within each DP group
+ (EP) of s
+z
+ `TP × DP` |
+| **Att
 
-For example, with `TP=2, DP=4` (8 GPUs total):
+t
+o
+ Lay
+rs** | B
+hav
+or d
+p
 
-- Expert layers form an EP group of size 8, with experts distributed across all GPUs
-- Attention layers use TP=2 within each of the 4 DP groups
+ds o
+ TP s
+z
+ | S
+ b
 
-!!! note "Key Difference from Data Parallel Deployment"
-    Without `--enable-expert-parallel`, MoE layers would use tensor parallelism (forming a TP group of size `TP × DP`), similar to dense models. With EP enabled, expert layers switch to expert parallelism, which can provide better efficiency and locality for MoE models.
+o
+ |
+**Att
 
-### Example Command
+t
+o
+ 
+ay
+r para
 
-The following command serves a `DeepSeek-V3-0324` model with 1-way tensor parallel, 8-way (attention) data parallel, and 8-way expert parallel. The attention weights are replicated across all GPUs, while the expert weights are split across GPUs. It will work on a H200 (or H20) node with 8 GPUs. For H100, you can try to serve a smaller model or refer to the multi-node deployment section.
 
+
+sm:**
+- **Wh
+
+ `TP = 1`**: Att
+
+t
+o
+ 
+
+
+ghts ar
+ **r
+p
+
+cat
+d** across a
+ DP ra
+ks (data para
+
+
+
+sm)
+- **Wh
+
+ `TP 
+ 1`**: Att
+
+t
+o
+ 
+
+
+ghts ar
+ **shard
+d** us
+
+g t
+
+sor para
+
+
+
+sm across TP ra
+ks 
+
+th
+
+ 
+ach DP group
+For 
+xamp
+
+, 
+
+th `TP=2, DP=4` (8 GPUs tota
+):
+- Exp
+rt 
+ay
+rs form a
+ EP group of s
+z
+ 8, 
+
+th 
+xp
+rts d
+str
+but
+d across a
+ GPUs
+- Att
+
+t
+o
+ 
+ay
+rs us
+ TP=2 
+
+th
+
+ 
+ach of th
+ 4 DP groups
+!!! 
+ot
+ "K
+y D
+ff
+r
+
+c
+ from Data Para
+
+
+ D
+p
+oym
+
+t"
+    W
+thout `--
+
+ab
+
+-
+xp
+rt-para
+
+
+`, MoE 
+ay
+rs 
+ou
+d us
+ t
+
+sor para
+
+
+
+sm (form
+
+g a TP group of s
+z
+ `TP × DP`), s
+m
+
+ar to d
+
+s
+ mod
+
+s. W
+th EP 
+
+ab
+
+d, 
+xp
+rt 
+ay
+rs s
+
+tch to 
+xp
+rt para
+
+
+
+sm, 
+h
+ch ca
+ prov
+d
+ b
+tt
+r 
+ff
+c
+
+
+cy a
+d 
+oca
+
+ty for MoE mod
+
+s.
+### Examp
+
+ Comma
+d
+Th
+ fo
+o
+
+
+g comma
+d s
+rv
+s a `D
+pS
+k-V3-0324` mod
+
+ 
+
+th 1-
+ay t
+
+sor para
+
+
+, 8-
+ay (att
+
+t
+o
+) data para
+
+
+, a
+d 8-
+ay 
+xp
+rt para
+
+
+. Th
+ att
+
+t
+o
+ 
+
+
+ghts ar
+ r
+p
+
+cat
+d across a
+ GPUs, 
+h
+
+
+ th
+ 
+xp
+rt 
+
+
+ghts ar
+ sp
+
+t across GPUs. It 
+
+
+ 
+ork o
+ a H200 (or H20) 
+od
+ 
+
+th 8 GPUs. For H100, you ca
+ try to s
+rv
+ a sma
+
+r mod
+
+ or r
+f
+r to th
+ mu
+t
+-
+od
+ d
+p
+oym
+
+t s
+ct
+o
+.
 ```bash
-# Single node EP deployment
-vllm serve deepseek-ai/DeepSeek-V3-0324 \
-    --tensor-parallel-size 1 \       # Tensor parallelism across 1 GPU
-    --data-parallel-size 8 \         # Data parallelism across 8 processes
-    --enable-expert-parallel         # Enable expert parallelism
+# S
+
+g
+
+ 
+od
+ EP d
+p
+oym
+
+t
+v
+m s
+rv
+ d
+ps
+k-a
+/D
+pS
+k-V3-0324 \
+    --t
+
+sor-para
+
+
+-s
+z
+ 1 \       # T
+
+sor para
+
+
+
+sm across 1 GPU
+    --data-para
+
+
+-s
+z
+ 8 \         # Data para
+
+
+
+sm across 8 proc
+ss
+s
+    --
+
+ab
+
+-
+xp
+rt-para
+
+
+         # E
+ab
+
+ 
+xp
+rt para
+
+
+
+sm
 ```
+## Mu
+t
+-Nod
+ D
+p
+oym
 
-## Multi-Node Deployment
+t
+For mu
+t
+-
+od
+ d
+p
+oym
 
-For multi-node deployment, use the DeepEP communication kernel with one of two modes (see [Backend Selection Guide](#backend-selection-guide) above).
+t, us
+ th
+ D
+pEP commu
 
-### Deployment Steps
+cat
+o
+ k
+r
 
-1. **Run one command per node** - Each node requires its own launch command
-2. **Configure networking** - Ensure proper IP addresses and port configurations
-3. **Set node roles** - First node handles requests, additional nodes run in headless mode
 
-### Example: 2-Node Deployment
+ 
 
-The following example deploys `DeepSeek-V3-0324` across 2 nodes using `deepep_low_latency` mode:
+th o
 
+ of t
+o mod
+s (s
+ [Back
+
+d S
+
+
+ct
+o
+ Gu
+d
+](#back
+
+d-s
+
+
+ct
+o
+-gu
+d
+) abov
+).
+### D
+p
+oym
+
+t St
+ps
+1. **Ru
+ o
+
+ comma
+d p
+r 
+od
+** - Each 
+od
+ r
+qu
+r
+s 
+ts o
+
+ 
+au
+ch comma
+d
+2. **Co
+f
+gur
+ 
+
+t
+ork
+
+g** - E
+sur
+ prop
+r IP addr
+ss
+s a
+d port co
+f
+gurat
+o
+s
+3. **S
+t 
+od
+ ro
+
+s** - F
+rst 
+od
+ ha
+d
+
+s r
+qu
+sts, add
+t
+o
+a
+ 
+od
+s ru
+ 
+
+ h
+ad
+
+ss mod
+
+### Examp
+
+: 2-Nod
+ D
+p
+oym
+
+t
+Th
+ fo
+o
+
+
+g 
+xamp
+
+ d
+p
+oys `D
+pS
+k-V3-0324` across 2 
+od
+s us
+
+g `d
+p
+p_
+o
+_
+at
+
+cy` mod
+:
 ```bash
-# Node 1 (Primary - handles incoming requests)
-vllm serve deepseek-ai/DeepSeek-V3-0324 \
-    --all2all-backend deepep_low_latency \
-    --tensor-parallel-size 1 \               # TP size per node
-    --enable-expert-parallel \               # Enable EP
-    --data-parallel-size 16 \                # Total DP size across all nodes
-    --data-parallel-size-local 8 \           # Local DP size on this node (8 GPUs per node)
-    --data-parallel-address 192.168.1.100 \  # Replace with actual IP of Node 1
-    --data-parallel-rpc-port 13345 \         # RPC communication port, can be any port as long as reachable by all nodes
-    --api-server-count=8                     # Number of API servers for load handling (scaling this out to # local ranks is recommended)
+# Nod
+ 1 (Pr
+mary - ha
+d
 
-# Node 2 (Secondary - headless mode, no API server)
-vllm serve deepseek-ai/DeepSeek-V3-0324 \
-    --all2all-backend deepep_low_latency \
-    --tensor-parallel-size 1 \               # TP size per node
-    --enable-expert-parallel \               # Enable EP
-    --data-parallel-size 16 \                # Total DP size across all nodes
-    --data-parallel-size-local 8 \           # Local DP size on this node
-    --data-parallel-start-rank 8 \           # Starting rank offset for this node
-    --data-parallel-address 192.168.1.100 \  # IP of primary node (Node 1)
-    --data-parallel-rpc-port 13345 \         # Same RPC port as primary
-    --headless                               # No API server, worker only
+s 
+
+com
+
+g r
+qu
+sts)
+v
+m s
+rv
+ d
+ps
+k-a
+/D
+pS
+k-V3-0324 \
+    --a
+2a
+-back
+
+d d
+p
+p_
+o
+_
+at
+
+cy \
+    --t
+
+sor-para
+
+
+-s
+z
+ 1 \               # TP s
+z
+ p
+r 
+od
+
+    --
+
+ab
+
+-
+xp
+rt-para
+
+
+ \               # E
+ab
+
+ EP
+    --data-para
+
+
+-s
+z
+ 16 \                # Tota
+ DP s
+z
+ across a
+ 
+od
+s
+    --data-para
+
+
+-s
+z
+-
+oca
+ 8 \           # Loca
+ DP s
+z
+ o
+ th
+s 
+od
+ (8 GPUs p
+r 
+od
+)
+    --data-para
+
+
+-addr
+ss 192.168.1.100 \  # R
+p
+ac
+ 
+
+th actua
+ IP of Nod
+ 1
+    --data-para
+
+
+-rpc-port 13345 \         # RPC commu
+
+cat
+o
+ port, ca
+ b
+ a
+y port as 
+o
+g as r
+achab
+
+ by a
+ 
+od
+s
+    --ap
+-s
+rv
+r-cou
+t=8                     # Numb
+r of API s
+rv
+rs for 
+oad ha
+d
+
+
+g (sca
+
+
+g th
+s out to # 
+oca
+ ra
+ks 
+s r
+comm
+
+d
+d)
+# Nod
+ 2 (S
+co
+dary - h
+ad
+
+ss mod
+, 
+o API s
+rv
+r)
+v
+m s
+rv
+ d
+ps
+k-a
+/D
+pS
+k-V3-0324 \
+    --a
+2a
+-back
+
+d d
+p
+p_
+o
+_
+at
+
+cy \
+    --t
+
+sor-para
+
+
+-s
+z
+ 1 \               # TP s
+z
+ p
+r 
+od
+
+    --
+
+ab
+
+-
+xp
+rt-para
+
+
+ \               # E
+ab
+
+ EP
+    --data-para
+
+
+-s
+z
+ 16 \                # Tota
+ DP s
+z
+ across a
+ 
+od
+s
+    --data-para
+
+
+-s
+z
+-
+oca
+ 8 \           # Loca
+ DP s
+z
+ o
+ th
+s 
+od
+
+    --data-para
+
+
+-start-ra
+k 8 \           # Start
+
+g ra
+k offs
+t for th
+s 
+od
+
+    --data-para
+
+
+-addr
+ss 192.168.1.100 \  # IP of pr
+mary 
+od
+ (Nod
+ 1)
+    --data-para
+
+
+-rpc-port 13345 \         # Sam
+ RPC port as pr
+mary
+    --h
+ad
+
+ss                               # No API s
+rv
+r, 
+ork
+r o
+
+y
 ```
+### K
+y Co
+f
+gurat
+o
+ Not
+s
+- **H
+ad
 
-### Key Configuration Notes
+ss mod
+**: S
+co
+dary 
+od
+s ru
+ 
 
-- **Headless mode**: Secondary nodes run with `--headless` flag, meaning all client requests are handled by the primary node
-- **Rank calculation**: `--data-parallel-start-rank` should equal the cumulative local DP size of previous nodes
-- **Load scaling**: Adjust `--api-server-count` on the primary node to handle higher request loads
+th `--h
+ad
 
-### Network Configuration
+ss` f
+ag, m
+a
 
-!!! important "InfiniBand Clusters"
-    On InfiniBand networked clusters, set this environment variable to prevent initialization hangs:
+
+g a
+ c
+
+
+
+t r
+qu
+sts ar
+ ha
+d
+
+d by th
+ pr
+mary 
+od
+
+- **Ra
+k ca
+cu
+at
+o
+**: `--data-para
+
+
+-start-ra
+k` shou
+d 
+qua
+ th
+ cumu
+at
+v
+ 
+oca
+ DP s
+z
+ of pr
+v
+ous 
+od
+s
+- **Load sca
+
+
+g**: Adjust `--ap
+-s
+rv
+r-cou
+t` o
+ th
+ pr
+mary 
+od
+ to ha
+d
+
+ h
+gh
+r r
+qu
+st 
+oads
+### N
+t
+ork Co
+f
+gurat
+o
+
+!!! 
+mporta
+t "I
+f
+
+
+Ba
+d C
+ust
+rs"
+    O
+ I
+f
+
+
+Ba
+d 
+
+t
+ork
+d c
+ust
+rs, s
+t th
+s 
+
+v
+ro
+m
+
+t var
+ab
+
+ to pr
+v
+
+t 
+
+
+t
+a
+
+zat
+o
+ ha
+gs:
     ```bash
-    export GLOO_SOCKET_IFNAME=eth0
+    
+xport GLOO_SOCKET_IFNAME=
+th0
     ```
-    This ensures torch distributed group discovery uses Ethernet instead of InfiniBand for initial setup.
+    Th
+s 
 
-## Expert Parallel Load Balancer (EPLB)
+sur
+s torch d
+str
+but
+d group d
+scov
+ry us
+s Eth
+r
 
-While MoE models are typically trained so that each expert receives a similar number of tokens, in practice the distribution of tokens across experts can be highly skewed. vLLM provides an Expert Parallel Load Balancer (EPLB) to redistribute expert mappings across EP ranks, evening the load across experts.
+t 
 
-### Configuration
+st
+ad of I
+f
 
-Enable EPLB with the `--enable-eplb` flag.
 
-When enabled, vLLM collects load statistics with every forward pass and periodically rebalances expert distribution.
+Ba
+d for 
 
-### EPLB Parameters
 
-Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. The available keys and their descriptions are:
+t
+a
+ s
+tup.
+## Exp
+rt Para
 
-| Parameter | Description | Default |
+
+ Load Ba
+a
+c
+r (EPLB)
+Wh
+
+
+ MoE mod
+
+s ar
+ typ
+ca
+y tra
+
+
+d so that 
+ach 
+xp
+rt r
+c
+
+v
+s a s
+m
+
+ar 
+umb
+r of tok
+
+s, 
+
+ pract
+c
+ th
+ d
+str
+but
+o
+ of tok
+
+s across 
+xp
+rts ca
+ b
+ h
+gh
+y sk
+
+
+d. vLLM prov
+d
+s a
+ Exp
+rt Para
+
+
+ Load Ba
+a
+c
+r (EPLB) to r
+d
+str
+but
+ 
+xp
+rt mapp
+
+gs across EP ra
+ks, 
+v
+
+
+
+g th
+ 
+oad across 
+xp
+rts.
+### Co
+f
+gurat
+o
+
+E
+ab
+
+ EPLB 
+
+th th
+ `--
+
+ab
+
+-
+p
+b` f
+ag.
+Wh
+
+ 
+
+ab
+
+d, vLLM co
+
+cts 
+oad stat
+st
+cs 
+
+th 
+v
+ry for
+ard pass a
+d p
+r
+od
+ca
+y r
+ba
+a
+c
+s 
+xp
+rt d
+str
+but
+o
+.
+### EPLB Param
+t
+rs
+Co
+f
+gur
+ EPLB 
+
+th th
+ `--
+p
+b-co
+f
+g` argum
+
+t, 
+h
+ch acc
+pts a JSON str
+
+g. Th
+ ava
+
+ab
+
+ k
+ys a
+d th
+
+r d
+scr
+pt
+o
+s ar
+:
+| Param
+t
+r | D
+scr
+pt
+o
+ | D
+fau
+t |
 |-----------|-------------|---------|
-| `window_size`| Number of engine steps to track for rebalancing decisions | 1000 |
-| `step_interval`| Frequency of rebalancing (every N engine steps) | 3000 |
-| `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
-| `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
-| `use_async` | Use non-blocking EPLB for reduced latency overhead | `false` |
-| `policy` | The policy type for expert parallel load balancing | `"default"` |
+| `
 
-For example:
 
+do
+_s
+z
+`| Numb
+r of 
+
+g
+
+
+ st
+ps to track for r
+ba
+a
+c
+
+g d
+c
+s
+o
+s | 1000 |
+| `st
+p_
+
+t
+rva
+`| Fr
+qu
+
+cy of r
+ba
+a
+c
+
+g (
+v
+ry N 
+
+g
+
+
+ st
+ps) | 3000 |
+| `
+og_ba
+a
+c
+d
+
+ss` | Log ba
+a
+c
+d
+
+ss m
+tr
+cs (avg tok
+
+s p
+r 
+xp
+rt ÷ max tok
+
+s p
+r 
+xp
+rt) | `fa
+s
+` |
+| `
+um_r
+du
+da
+t_
+xp
+rts` | Add
+t
+o
+a
+ g
+oba
+ 
+xp
+rts p
+r EP ra
+k b
+yo
+d 
+qua
+ d
+str
+but
+o
+ | `0` |
+| `us
+_asy
+c` | Us
+ 
+o
+-b
+ock
+
+g EPLB for r
+duc
+d 
+at
+
+cy ov
+rh
+ad | `fa
+s
+` |
+| `po
+
+cy` | Th
+ po
+
+cy typ
+ for 
+xp
+rt para
+
+
+ 
+oad ba
+a
+c
+
+g | `"d
+fau
+t"` |
+For 
+xamp
+
+:
 ```bash
-vllm serve Qwen/Qwen3-30B-A3B \
-  --enable-eplb \
-  --eplb-config '{"window_size":1000,"step_interval":3000,"num_redundant_experts":2,"log_balancedness":true}'
+v
+m s
+rv
+ Q
+
+
+/Q
+
+
+3-30B-A3B \
+  --
+
+ab
+
+-
+p
+b \
+  --
+p
+b-co
+f
+g '{"
+
+
+do
+_s
+z
+":1000,"st
+p_
+
+t
+rva
+":3000,"
+um_r
+du
+da
+t_
+xp
+rts":2,"
+og_ba
+a
+c
+d
+
+ss":tru
+}'
 ```
+??? t
+p "Pr
+f
+r 
 
-??? tip "Prefer individual arguments instead of JSON?"
+d
+v
+dua
+ argum
 
+ts 
+
+st
+ad of JSON?"
     ```bash
-    vllm serve Qwen/Qwen3-30B-A3B \
-            --enable-eplb \
-            --eplb-config.window_size 1000 \
-            --eplb-config.step_interval 3000 \
-            --eplb-config.num_redundant_experts 2 \
-            --eplb-config.log_balancedness true
+    v
+m s
+rv
+ Q
+
+
+/Q
+
+
+3-30B-A3B \
+            --
+
+ab
+
+-
+p
+b \
+            --
+p
+b-co
+f
+g.
+
+
+do
+_s
+z
+ 1000 \
+            --
+p
+b-co
+f
+g.st
+p_
+
+t
+rva
+ 3000 \
+            --
+p
+b-co
+f
+g.
+um_r
+du
+da
+t_
+xp
+rts 2 \
+            --
+p
+b-co
+f
+g.
+og_ba
+a
+c
+d
+
+ss tru
+
     ```
+### Exp
+rt D
+str
+but
+o
+ Formu
+a
+- **D
+fau
+t**: Each EP ra
+k has `NUM_TOTAL_EXPERTS ÷ NUM_EP_RANKS` 
+xp
+rts
+- **W
+th r
+du
+da
+cy**: Each EP ra
+k has `(NUM_TOTAL_EXPERTS + NUM_REDUNDANT_EXPERTS) ÷ NUM_EP_RANKS` 
+xp
+rts
+### M
+mory Footpr
 
-### Expert Distribution Formula
+t Ov
+rh
+ad
+EPLB us
+s r
+du
+da
+t 
+xp
+rts that 
 
-- **Default**: Each EP rank has `NUM_TOTAL_EXPERTS ÷ NUM_EP_RANKS` experts
-- **With redundancy**: Each EP rank has `(NUM_TOTAL_EXPERTS + NUM_REDUNDANT_EXPERTS) ÷ NUM_EP_RANKS` experts
+d to f
+t 
 
-### Memory Footprint Overhead
+ GPU m
+mory. Th
+s m
+a
+s that EPLB may 
+ot b
+ a good f
+t for m
+mory co
+stra
 
-EPLB uses redundant experts that need to fit in GPU memory. This means that EPLB may not be a good fit for memory constrained environments or when KV cache space is at a premium.
 
-This overhead equals `NUM_MOE_LAYERS * BYTES_PER_EXPERT * (NUM_TOTAL_EXPERTS + NUM_REDUNDANT_EXPERTS) ÷ NUM_EP_RANKS`.
-For DeepSeekV3, this is approximately `2.4 GB` for one redundant expert per EP rank.
+d 
 
-### Example Command
+v
+ro
+m
 
-Single node deployment with EPLB enabled:
+ts or 
+h
 
+ KV cach
+ spac
+ 
+s at a pr
+m
+um.
+Th
+s ov
+rh
+ad 
+qua
+s `NUM_MOE_LAYERS * BYTES_PER_EXPERT * (NUM_TOTAL_EXPERTS + NUM_REDUNDANT_EXPERTS) ÷ NUM_EP_RANKS`.
+For D
+pS
+kV3, th
+s 
+s approx
+mat
+
+y `2.4 GB` for o
+
+ r
+du
+da
+t 
+xp
+rt p
+r EP ra
+k.
+### Examp
+
+ Comma
+d
+S
+
+g
+
+ 
+od
+ d
+p
+oym
+
+t 
+
+th EPLB 
+
+ab
+
+d:
 ```bash
-# Single node with EPLB load balancing
-vllm serve deepseek-ai/DeepSeek-V3-0324 \
-    --tensor-parallel-size 1 \       # Tensor parallelism
-    --data-parallel-size 8 \         # Data parallelism
-    --enable-expert-parallel \       # Enable EP
-    --enable-eplb \                  # Enable load balancer
-    --eplb-config '{"window_size":1000,"step_interval":3000,"num_redundant_experts":2,"log_balancedness":true}'
+# S
+
+g
+
+ 
+od
+ 
+
+th EPLB 
+oad ba
+a
+c
+
+g
+v
+m s
+rv
+ d
+ps
+k-a
+/D
+pS
+k-V3-0324 \
+    --t
+
+sor-para
+
+
+-s
+z
+ 1 \       # T
+
+sor para
+
+
+
+sm
+    --data-para
+
+
+-s
+z
+ 8 \         # Data para
+
+
+
+sm
+    --
+
+ab
+
+-
+xp
+rt-para
+
+
+ \       # E
+ab
+
+ EP
+    --
+
+ab
+
+-
+p
+b \                  # E
+ab
+
+ 
+oad ba
+a
+c
+r
+    --
+p
+b-co
+f
+g '{"
+
+
+do
+_s
+z
+":1000,"st
+p_
+
+t
+rva
+":3000,"
+um_r
+du
+da
+t_
+xp
+rts":2,"
+og_ba
+a
+c
+d
+
+ss":tru
+}'
 ```
+For mu
+t
+-
+od
+ d
+p
+oym
 
-For multi-node deployment, add these EPLB flags to each node's command. We recommend setting `--eplb-config '{"num_redundant_experts":32}'` to 32 in large scale use cases so the most popular experts are always available.
+t, add th
+s
+ EPLB f
+ags to 
+ach 
+od
+'s comma
+d. W
+ r
+comm
 
-## Advanced Configuration
+d s
+tt
 
-### Performance Optimization
+g `--
+p
+b-co
+f
+g '{"
+um_r
+du
+da
+t_
+xp
+rts":32}'` to 32 
 
-- **DeepEP kernels**: The `high_throughput` and `low_latency` kernels are optimized for disaggregated serving and may show poor performance for mixed workloads
-- **Dual Batch Overlap**: Use `--enable-dbo` to overlap all-to-all communication with compute. See [Dual Batch Overlap](../design/dbo.md) for more details.
-- **Async scheduling (experimental)**: Try `--async-scheduling` to overlap scheduling with model execution.
+ 
+arg
+ sca
 
-### Troubleshooting
+ us
+ cas
+s so th
+ most popu
+ar 
+xp
+rts ar
+ a
 
-- **`non-zero status: 7 cannot register cq buf`**: When using Infiniband/RoCE, make sure host VM and pods show `ulimit -l` "unlimited".
-- **`init failed for transport: IBGDA`**: The InfiniBand GDA kernel modules are missing. Run `tools/ep_kernels/configure_system_drivers.sh` on each GPU node and reboot. Also fixes error `NVSHMEM API called before NVSHMEM initialization has completed`.
-- **NVSHMEM peer disconnect**: Usually a networking misconfiguration. If deploying via Kubernetes, verify that every pod runs with `hostNetwork: true`, `securityContext.privileged: true` to access Infiniband.
+ays ava
 
-### Benchmarking
+ab
 
-- Use simulator flags `VLLM_MOE_ROUTING_SIMULATION_STRATEGY=uniform_random` and `VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1` so token routing is balanced across EP ranks.
+.
+## Adva
+c
+d Co
+f
+gurat
+o
 
-- Increasing `VLLM_MOE_DP_CHUNK_SIZE` may increase throughput by increasing the maximum batch size for inter-rank token transfers. This may cause DeepEP  to throw `assert self.nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2`, which can be fixed by increasing environment variable `NVSHMEM_QP_DEPTH`.
+### P
+rforma
+c
+ Opt
+m
+zat
+o
 
-## Disaggregated Serving (Prefill/Decode Split)
+- **D
+pEP k
+r
 
-For production deployments requiring strict SLA guarantees for time-to-first-token and inter-token latency, disaggregated serving allows independent scaling of prefill and decode operations.
 
-### Architecture Overview
+s**: Th
+ `h
+gh_throughput` a
+d `
+o
+_
+at
 
-- **Prefill Instance**: Uses `deepep_high_throughput` backend for optimal prefill performance
-- **Decode Instance**: Uses `deepep_low_latency` backend for minimal decode latency  
-- **KV Cache Transfer**: Connects instances via NIXL or other KV connectors
+cy` k
+r
 
-### Setup Steps
 
-1. **Install gdrcopy/ucx/nixl**: For maximum performance, run the [install_gdrcopy.sh](../../tools/install_gdrcopy.sh) script to install `gdrcopy` (e.g., `install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "12.8" "x64"`). You can find available OS versions [here](https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/). If `gdrcopy` is not installed, things will still work with a plain `pip install nixl`, just with lower performance. `nixl` and `ucx` are installed as dependencies via pip. For non-cuda platform to install nixl with non-cuda UCX build, run the [install_nixl_from_source_ubuntu.py](../../tools/install_nixl_from_source_ubuntu.py) script.
+s ar
+ opt
+m
+z
+d for d
+saggr
+gat
+d s
+rv
 
-2. **Configure Both Instances**: Add this flag to both prefill and decode instances `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}`. Noted, you may also specify one or multiple NIXL_Backend. Such as: `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both", "kv_connector_extra_config":{"backends":["UCX", "GDS"]}}'`
+g a
+d may sho
+ poor p
+rforma
+c
+ for m
+x
+d 
+ork
+oads
+- **Dua
+ Batch Ov
+r
+ap**: Us
+ `--
 
-3. **Client Orchestration**: Use the client-side script below to coordinate prefill/decode operations. We are actively working on routing solutions.
+ab
 
-### Client Orchestration Example
+-dbo` to ov
+r
+ap a
+-to-a
+ commu
 
-```python
-from openai import OpenAI
-import uuid
+cat
+o
+ 
 
+th comput
+. S
+ [Dua
+ Batch Ov
+r
+ap](../d
+s
+g
+/dbo.md) for mor
+ d
+ta
+
+s.
+- **Asy
+c sch
+du
+
+
+g (
+xp
+r
+m
+
+ta
+)**: Try `--asy
+c-sch
+du
+
+
+g` to ov
+r
+ap sch
+du
+
+
+g 
+
+th mod
+
+ 
+x
+cut
+o
+.
+### Troub
+
+shoot
+
+g
+- **`
+o
+-z
+ro status: 7 ca
+ot r
+g
+st
+r cq buf`**: Wh
+
+ us
+
+g I
+f
+
+
+ba
+d/RoCE, mak
+ sur
+ host VM a
+d pods sho
+ `u
+
+m
+t -
+` "u
+
+
+m
+t
+d".
+- **`
+
+
+t fa
+
+
+d for tra
+sport: IBGDA`**: Th
+ I
+f
+
+
+Ba
+d GDA k
+r
+
+
+ modu
+
+s ar
+ m
+ss
+
+g. Ru
+ `too
+s/
+p_k
+r
+
+
+s/co
+f
+gur
+_syst
+m_dr
+v
+rs.sh` o
+ 
+ach GPU 
+od
+ a
+d r
+boot. A
+so f
+x
+s 
+rror `NVSHMEM API ca
+
+d b
+for
+ NVSHMEM 
+
+
+t
+a
+
+zat
+o
+ has comp
+
+t
+d`.
+- **NVSHMEM p
+r d
+sco
+
+ct**: Usua
+y a 
+
+t
+ork
+
+g m
+sco
+f
+gurat
+o
+. If d
+p
+oy
+
+g v
+a Kub
+r
+
+t
+s, v
+r
+fy that 
+v
+ry pod ru
+s 
+
+th `hostN
+t
+ork: tru
+`, `s
+cur
+tyCo
+t
+xt.pr
+v
+
+
+g
+d: tru
+` to acc
+ss I
+f
+
+
+ba
+d.
+### B
+
+chmark
+
+g
+- Us
+ s
+mu
+ator f
+ags `VLLM_MOE_ROUTING_SIMULATION_STRATEGY=u
+
+form_ra
+dom` a
+d `VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1` so tok
+
+ rout
+
+g 
+s ba
+a
+c
+d across EP ra
+ks.
+- I
+cr
+as
+
+g `VLLM_MOE_DP_CHUNK_SIZE` may 
+
+cr
+as
+ throughput by 
+
+cr
+as
+
+g th
+ max
+mum batch s
+z
+ for 
+
+t
+r-ra
+k tok
+
+ tra
+sf
+rs. Th
+s may caus
+ D
+pEP  to thro
+ `ass
+rt s
+
+f.
+vshm
+m_qp_d
+pth 
+= (
+um_max_d
+spatch_tok
+
+s_p
+r_ra
+k + 1) * 2`, 
+h
+ch ca
+ b
+ f
+x
+d by 
+
+cr
+as
+
+g 
+
+v
+ro
+m
+
+t var
+ab
+
+ `NVSHMEM_QP_DEPTH`.
+## D
+saggr
+gat
+d S
+rv
+
+g (Pr
+f
+
+/D
+cod
+ Sp
+
+t)
+For product
+o
+ d
+p
+oym
+
+ts r
+qu
+r
+
+g str
+ct SLA guara
+t
+s for t
+m
+-to-f
+rst-tok
+
+ a
+d 
+
+t
+r-tok
+
+ 
+at
+
+cy, d
+saggr
+gat
+d s
+rv
+
+g a
+o
+s 
+
+d
+p
+
+d
+
+t sca
+
+
+g of pr
+f
+
+ a
+d d
+cod
+ op
+rat
+o
+s.
+### Arch
+t
+ctur
+ Ov
+rv
+
+
+
+- **Pr
+f
+
+ I
+sta
+c
+**: Us
+s `d
+p
+p_h
+gh_throughput` back
+
+d for opt
+ma
+ pr
+f
+
+ p
+rforma
+c
+
+- **D
+cod
+ I
+sta
+c
+**: Us
+s `d
+p
+p_
+o
+_
+at
+
+cy` back
+
+d for m
+
+
+ma
+ d
+cod
+ 
+at
+
+cy
+- **KV Cach
+ Tra
+sf
+r**: Co
+
+cts 
+
+sta
+c
+s v
+a NIXL or oth
+r KV co
+
+ctors
+### S
+tup St
+ps
+1. **I
+sta
+ gdrcopy/ucx/
+
+x
+**: For max
+mum p
+rforma
+c
+, ru
+ th
+ [
+
+sta
+_gdrcopy.sh](../../too
+s/
+
+sta
+_gdrcopy.sh) scr
+pt to 
+
+sta
+ `gdrcopy` (
+.g., `
+
+sta
+_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "12.8" "x64"`). You ca
+ f
+
+d ava
+
+ab
+
+ OS v
+rs
+o
+s [h
+r
+](https://d
+v
+
+op
+r.do
+
+
+oad.
+v
+d
+a.com/comput
+/r
+d
+st/gdrcopy/CUDA%2012.8/). If `gdrcopy` 
+s 
+ot 
+
+sta
+
+d, th
+
+gs 
+
+
+ st
+
+ 
+ork 
+
+th a p
+a
+
+ `p
+p 
+
+sta
+ 
+
+x
+`, just 
+
+th 
+o
+
+r p
+rforma
+c
+. `
+
+x
+` a
+d `ucx` ar
+ 
+
+sta
+
+d as d
+p
+
+d
+
+c
+
+s v
+a p
+p. For 
+o
+-cuda p
+atform to 
+
+sta
+ 
+
+x
+ 
+
+th 
+o
+-cuda UCX bu
+
+d, ru
+ th
+ [
+
+sta
+_
+
+x
+_from_sourc
+_ubu
+tu.py](../../too
+s/
+
+sta
+_
+
+x
+_from_sourc
+_ubu
+tu.py) scr
+pt.
+2. **Co
+f
+gur
+ Both I
+sta
+c
+s**: Add th
+s f
+ag to both pr
+f
+
+ a
+d d
+cod
+ 
+
+sta
+c
+s `--kv-tra
+sf
+r-co
+f
+g '{"kv_co
+
+ctor":"N
+x
+Co
+
+ctor","kv_ro
+
+":"kv_both"}`. Not
+d, you may a
+so sp
+c
+fy o
+
+ or mu
+t
+p
+
+ NIXL_Back
+
+d. Such as: `--kv-tra
+sf
+r-co
+f
+g '{"kv_co
+
+ctor":"N
+x
+Co
+
+ctor","kv_ro
+
+":"kv_both", "kv_co
+
+ctor_
+xtra_co
+f
+g":{"back
+
+ds":["UCX", "GDS"]}}'`
+3. **C
+
+
+
+t Orch
+strat
+o
+**: Us
+ th
+ c
+
+
+
+t-s
+d
+ scr
+pt b
+
+o
+ to coord
+
+at
+ pr
+f
+
+/d
+cod
+ op
+rat
+o
+s. W
+ ar
+ act
+v
+
+y 
+ork
+
+g o
+ rout
+
+g so
+ut
+o
+s.
+### C
+
+
+
+t Orch
+strat
+o
+ Examp
+
+
+```pytho
+
+from op
+
+a
+ 
+mport Op
+
+AI
+
+mport uu
+d
 try:
-    # 1: Set up clients for prefill and decode instances
-    openai_api_key = "EMPTY"  # vLLM doesn't require a real API key
-    
-    # Replace these IP addresses with your actual instance addresses
-    prefill_client = OpenAI(
-        api_key=openai_api_key,
-        base_url="http://192.168.1.100:8000/v1",  # Prefill instance URL
-    )
-    decode_client = OpenAI(
-        api_key=openai_api_key,
-        base_url="http://192.168.1.101:8001/v1",  # Decode instance URL  
-    )
-    
-    # Get model name from prefill instance
-    models = prefill_client.models.list()
-    model = models.data[0].id
-    print(f"Using model: {model}")
+    # 1: S
+t up c
 
-    # 2: Prefill Phase
-    # Generate unique request ID to link prefill and decode operations
-    request_id = str(uuid.uuid4())
-    print(f"Request ID: {request_id}")
-    
-    prefill_response = prefill_client.completions.create(
-        model=model,
-        # Prompt must exceed vLLM's block size (16 tokens) for PD to work
-        prompt="Write a detailed explanation of Paged Attention for Transformers works including the management of KV cache for multi-turn conversations",
-        max_tokens=1,  # Force prefill-only operation
-        extra_body={
-            "kv_transfer_params": {
-                "do_remote_decode": True,     # Enable remote decode
-                "do_remote_prefill": False,   # This is the prefill instance
-                "remote_engine_id": None,     # Will be populated by vLLM
-                "remote_block_ids": None,     # Will be populated by vLLM
-                "remote_host": None,          # Will be populated by vLLM
-                "remote_port": None,          # Will be populated by vLLM
+
+
+ts for pr
+f
+
+ a
+d d
+cod
+ 
+
+sta
+c
+s
+    op
+
+a
+_ap
+_k
+y = "EMPTY"  # vLLM do
+s
+'t r
+qu
+r
+ a r
+a
+ API k
+y
+    # R
+p
+ac
+ th
+s
+ IP addr
+ss
+s 
+
+th your actua
+ 
+
+sta
+c
+ addr
+ss
+s
+    pr
+f
+
+_c
+
+
+
+t = Op
+
+AI(
+        ap
+_k
+y=op
+
+a
+_ap
+_k
+y,
+        bas
+_ur
+="http://192.168.1.100:8000/v1",  # Pr
+f
+
+ 
+
+sta
+c
+ URL
+    )
+    d
+cod
+_c
+
+
+
+t = Op
+
+AI(
+        ap
+_k
+y=op
+
+a
+_ap
+_k
+y,
+        bas
+_ur
+="http://192.168.1.101:8001/v1",  # D
+cod
+ 
+
+sta
+c
+ URL
+    )
+    # G
+t mod
+
+ 
+am
+ from pr
+f
+
+ 
+
+sta
+c
+
+    mod
+
+s = pr
+f
+
+_c
+
+
+
+t.mod
+
+s.
+
+st()
+    mod
+
+ = mod
+
+s.data[0].
+d
+    pr
+
+t(f"Us
+
+g mod
+
+: {mod
+
+}")
+    # 2: Pr
+f
+
+ Phas
+
+    # G
+
+
+rat
+ u
+
+qu
+ r
+qu
+st ID to 
+
+
+k pr
+f
+
+ a
+d d
+cod
+ op
+rat
+o
+s
+    r
+qu
+st_
+d = str(uu
+d.uu
+d4())
+    pr
+
+t(f"R
+qu
+st ID: {r
+qu
+st_
+d}")
+    pr
+f
+
+_r
+spo
+s
+ = pr
+f
+
+_c
+
+
+
+t.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+=mod
+
+,
+        # Prompt must 
+xc
+d vLLM's b
+ock s
+z
+ (16 tok
+
+s) for PD to 
+ork
+        prompt="Wr
+t
+ a d
+ta
+
+
+d 
+xp
+a
+at
+o
+ of Pag
+d Att
+
+t
+o
+ for Tra
+sform
+rs 
+orks 
+
+c
+ud
+
+g th
+ ma
+ag
+m
+
+t of KV cach
+ for mu
+t
+-tur
+ co
+v
+rsat
+o
+s",
+        max_tok
+
+s=1,  # Forc
+ pr
+f
+
+-o
+
+y op
+rat
+o
+
+        
+xtra_body={
+            "kv_tra
+sf
+r_params": {
+                "do_r
+mot
+_d
+cod
+": Tru
+,     # E
+ab
+
+ r
+mot
+ d
+cod
+
+                "do_r
+mot
+_pr
+f
+
+": Fa
+s
+,   # Th
+s 
+s th
+ pr
+f
+
+ 
+
+sta
+c
+
+                "r
+mot
+_
+
+g
+
+
+_
+d": No
+
+,     # W
+
+ b
+ popu
+at
+d by vLLM
+                "r
+mot
+_b
+ock_
+ds": No
+
+,     # W
+
+ b
+ popu
+at
+d by vLLM
+                "r
+mot
+_host": No
+
+,          # W
+
+ b
+ popu
+at
+d by vLLM
+                "r
+mot
+_port": No
+
+,          # W
+
+ b
+ popu
+at
+d by vLLM
             }
         },
-        extra_headers={"X-Request-Id": request_id},
+        
+xtra_h
+ad
+rs={"X-R
+qu
+st-Id": r
+qu
+st_
+d},
     )
-    
-    print("-" * 50)
-    print("✓ Prefill completed successfully")
-    print(f"Prefill response: {prefill_response.choices[0].text}")
-    
-    # 3: Decode Phase
-    # Transfer KV cache parameters from prefill to decode instance
-    decode_response = decode_client.completions.create(
-        model=model,
-        prompt="This prompt is ignored during decode",  # Original prompt not needed
-        max_tokens=150,  # Generate up to 150 tokens
-        extra_body={
-            "kv_transfer_params": prefill_response.kv_transfer_params  # Pass KV cache info
+    pr
+
+t("-" * 50)
+    pr
+
+t("✓ Pr
+f
+
+ comp
+
+t
+d succ
+ssfu
+y")
+    pr
+
+t(f"Pr
+f
+
+ r
+spo
+s
+: {pr
+f
+
+_r
+spo
+s
+.cho
+c
+s[0].t
+xt}")
+    # 3: D
+cod
+ Phas
+
+    # Tra
+sf
+r KV cach
+ param
+t
+rs from pr
+f
+
+ to d
+cod
+ 
+
+sta
+c
+
+    d
+cod
+_r
+spo
+s
+ = d
+cod
+_c
+
+
+
+t.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+=mod
+
+,
+        prompt="Th
+s prompt 
+s 
+g
+or
+d dur
+
+g d
+cod
+",  # Or
+g
+
+a
+ prompt 
+ot 
+
+d
+d
+        max_tok
+
+s=150,  # G
+
+
+rat
+ up to 150 tok
+
+s
+        
+xtra_body={
+            "kv_tra
+sf
+r_params": pr
+f
+
+_r
+spo
+s
+.kv_tra
+sf
+r_params  # Pass KV cach
+ 
+
+fo
         },
-        extra_headers={"X-Request-Id": request_id},  # Same request ID
+        
+xtra_h
+ad
+rs={"X-R
+qu
+st-Id": r
+qu
+st_
+d},  # Sam
+ r
+qu
+st ID
     )
-    
-    print("-" * 50)
-    print("✓ Decode completed successfully")
-    print(f"Final response: {decode_response.choices[0].text}")
+    pr
 
-except Exception as e:
-    print(f"❌ Error during disaggregated serving: {e}")
-    print("Check that both prefill and decode instances are running and accessible")
+t("-" * 50)
+    pr
+
+t("✓ D
+cod
+ comp
+
+t
+d succ
+ssfu
+y")
+    pr
+
+t(f"F
+
+a
+ r
+spo
+s
+: {d
+cod
+_r
+spo
+s
+.cho
+c
+s[0].t
+xt}")
+
+xc
+pt Exc
+pt
+o
+ as 
+:
+    pr
+
+t(f"❌ Error dur
+
+g d
+saggr
+gat
+d s
+rv
+
+g: {
+}")
+    pr
+
+t("Ch
+ck that both pr
+f
+
+ a
+d d
+cod
+ 
+
+sta
+c
+s ar
+ ru
+
+
+g a
+d acc
+ss
+b
+
+")
 ```
+### B
 
-### Benchmarking
+chmark
 
-- To simulate the decode deployment of disaggregated serving, pass `--kv-transfer-config '{"kv_connector":"DecodeBenchConnector","kv_role":"kv_both"}'` to the `vllm serve` invocation. The connector populates KV cache with random values so decode can be profiled in isolation.
+g
+- To s
+mu
+at
+ th
+ d
+cod
+ d
+p
+oym
 
-- **CUDAGraph capture**: Use `--compilation_config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` to enable CUDA graph capture for decode only and save KV cache.
+t of d
+saggr
+gat
+d s
+rv
+
+g, pass `--kv-tra
+sf
+r-co
+f
+g '{"kv_co
+
+ctor":"D
+cod
+B
+
+chCo
+
+ctor","kv_ro
+
+":"kv_both"}'` to th
+ `v
+m s
+rv
+` 
+
+vocat
+o
+. Th
+ co
+
+ctor popu
+at
+s KV cach
+ 
+
+th ra
+dom va
+u
+s so d
+cod
+ ca
+ b
+ prof
+
+
+d 
+
+ 
+so
+at
+o
+.
+- **CUDAGraph captur
+**: Us
+ `--comp
+
+at
+o
+_co
+f
+g '{"cudagraph_mod
+": "FULL_DECODE_ONLY"}'` to 
+
+ab
+
+ CUDA graph captur
+ for d
+cod
+ o
+
+y a
+d sav
+ KV cach
+.

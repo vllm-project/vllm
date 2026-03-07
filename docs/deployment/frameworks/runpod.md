@@ -1,87 +1,493 @@
-# RunPod
+# Ru
+Pod
+vLLM ca
+ b
+ d
+p
+oy
+d o
+ [Ru
+Pod](https://
+.ru
+pod.
+o/), a c
+oud GPU p
+atform that prov
+d
+s o
+-d
+ma
+d a
+d s
+rv
+r
 
-vLLM can be deployed on [RunPod](https://www.runpod.io/), a cloud GPU platform that provides on-demand and serverless GPU instances for AI inference workloads.
+ss GPU 
 
-## Prerequisites
+sta
+c
+s for AI 
 
-- A RunPod account with GPU pod access
-- A GPU pod running a CUDA-compatible template (e.g., `runpod/pytorch`)
+f
+r
 
-## Starting the Server
+c
+ 
+ork
+oads.
+## Pr
+r
+qu
+s
+t
+s
+- A Ru
+Pod accou
+t 
 
-SSH into your RunPod pod and launch the vLLM OpenAI-compatible server:
+th GPU pod acc
+ss
+- A GPU pod ru
 
+
+g a CUDA-compat
+b
+
+ t
+mp
+at
+ (
+.g., `ru
+pod/pytorch`)
+## Start
+
+g th
+ S
+rv
+r
+SSH 
+
+to your Ru
+Pod pod a
+d 
+au
+ch th
+ vLLM Op
+
+AI-compat
+b
+
+ s
+rv
+r:
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-    --model <model-name> \
+pytho
+ -m v
+m.
+
+trypo
+
+ts.op
+
+a
+.ap
+_s
+rv
+r \
+    --mod
+
+ 
+mod
+
+-
+am
+
+ \
     --host 0.0.0.0 \
     --port 8000
 ```
+!!! 
+ot
 
-!!! note
+    Us
+ `--host 0.0.0.0` to b
 
-    Use `--host 0.0.0.0` to bind to all interfaces so the server is reachable from outside the container.
+d to a
+ 
 
-## Exposing Port 8000
+t
+rfac
+s so th
+ s
+rv
+r 
+s r
+achab
 
-RunPod exposes HTTP services through its proxy. To make port 8000 accessible:
+ from outs
+d
+ th
+ co
+ta
 
-1. In the RunPod dashboard, navigate to your pod settings.
-2. Add `8000` to the list of exposed HTTP ports.
-3. After the pod restarts, RunPod provides a public URL in the format:
 
-    ```text
-    https://<pod-id>-8000.proxy.runpod.net
+r.
+## Expos
+
+g Port 8000
+Ru
+Pod 
+xpos
+s HTTP s
+rv
+c
+s through 
+ts proxy. To mak
+ port 8000 acc
+ss
+b
+
+:
+1. I
+ th
+ Ru
+Pod dashboard, 
+av
+gat
+ to your pod s
+tt
+
+gs.
+2. Add `8000` to th
+ 
+
+st of 
+xpos
+d HTTP ports.
+3. Aft
+r th
+ pod r
+starts, Ru
+Pod prov
+d
+s a pub
+
+c URL 
+
+ th
+ format:
+    ```t
+xt
+    https://
+pod-
+d
+-8000.proxy.ru
+pod.
+
+t
     ```
+## Troub
 
-## Troubleshooting 502 Bad Gateway
+shoot
 
-A `502 Bad Gateway` error from the RunPod proxy typically means the server is not yet listening. Common causes:
+g 502 Bad Gat
 
-- **Model still loading** — Large models take time to download and load into GPU memory. Check the pod logs for progress.
-- **Wrong host binding** — Ensure you passed `--host 0.0.0.0`. Binding to `127.0.0.1` (the default) makes the server unreachable from the proxy.
-- **Port mismatch** — Verify the `--port` value matches the port exposed in the RunPod dashboard.
-- **Out of GPU memory** — The model may be too large for the allocated GPU. Check logs for CUDA OOM errors and consider using a larger instance or adding `--tensor-parallel-size` for multi-GPU pods.
+ay
+A `502 Bad Gat
 
-## Verifying the Deployment
+ay` 
+rror from th
+ Ru
+Pod proxy typ
+ca
+y m
+a
+s th
+ s
+rv
+r 
+s 
+ot y
+t 
 
-Once the server is running, test it with a curl request:
+st
 
-!!! console "Command"
 
+
+g. Commo
+ caus
+s:
+- **Mod
+
+ st
+
+ 
+oad
+
+g** — Larg
+ mod
+
+s tak
+ t
+m
+ to do
+
+
+oad a
+d 
+oad 
+
+to GPU m
+mory. Ch
+ck th
+ pod 
+ogs for progr
+ss.
+- **Wro
+g host b
+
+d
+
+g** — E
+sur
+ you pass
+d `--host 0.0.0.0`. B
+
+d
+
+g to `127.0.0.1` (th
+ d
+fau
+t) mak
+s th
+ s
+rv
+r u
+r
+achab
+
+ from th
+ proxy.
+- **Port m
+smatch** — V
+r
+fy th
+ `--port` va
+u
+ match
+s th
+ port 
+xpos
+d 
+
+ th
+ Ru
+Pod dashboard.
+- **Out of GPU m
+mory** — Th
+ mod
+
+ may b
+ too 
+arg
+ for th
+ a
+ocat
+d GPU. Ch
+ck 
+ogs for CUDA OOM 
+rrors a
+d co
+s
+d
+r us
+
+g a 
+arg
+r 
+
+sta
+c
+ or add
+
+g `--t
+
+sor-para
+
+
+-s
+z
+` for mu
+t
+-GPU pods.
+## V
+r
+fy
+
+g th
+ D
+p
+oym
+
+t
+O
+c
+ th
+ s
+rv
+r 
+s ru
+
+
+g, t
+st 
+t 
+
+th a cur
+ r
+qu
+st:
+!!! co
+so
+
+ "Comma
+d"
     ```bash
-    curl https://<pod-id>-8000.proxy.runpod.net/v1/chat/completions \
-        -H "Content-Type: application/json" \
+    cur
+ https://
+pod-
+d
+-8000.proxy.ru
+pod.
+
+t/v1/chat/comp
+
+t
+o
+s \
+        -H "Co
+t
+
+t-Typ
+: app
+
+cat
+o
+/jso
+" \
         -d '{
-            "model": "<model-name>",
-            "messages": [
-                {"role": "user", "content": "Hello, how are you?"}
+            "mod
+
+": "
+mod
+
+-
+am
+
+",
+            "m
+ssag
+s": [
+                {"ro
+
+": "us
+r", "co
+t
+
+t": "H
+
+o, ho
+ ar
+ you?"}
             ],
-            "max_tokens": 50
+            "max_tok
+
+s": 50
         }'
     ```
+!!! co
+so
 
-!!! console "Response"
+ "R
+spo
+s
+"
+    ```jso
 
-    ```json
     {
-        "id": "chat-abc123",
-        "object": "chat.completion",
-        "choices": [
+        "
+d": "chat-abc123",
+        "obj
+ct": "chat.comp
+
+t
+o
+",
+        "cho
+c
+s": [
             {
-                "message": {
-                    "role": "assistant",
-                    "content": "I'm doing well, thank you for asking! How can I help you today?"
+                "m
+ssag
+": {
+                    "ro
+
+": "ass
+sta
+t",
+                    "co
+t
+
+t": "I'm do
+
+g 
+
+
+, tha
+k you for ask
+
+g! Ho
+ ca
+ I h
+
+p you today?"
                 },
-                "index": 0,
-                "finish_reason": "stop"
+                "
+
+d
+x": 0,
+                "f
+
+
+sh_r
+aso
+": "stop"
             }
         ]
     }
     ```
+You ca
+ a
+so ch
+ck th
+ s
+rv
+r h
+a
+th 
 
-You can also check the server health endpoint:
+dpo
 
+t:
 ```bash
-curl https://<pod-id>-8000.proxy.runpod.net/health
+cur
+ https://
+pod-
+d
+-8000.proxy.ru
+pod.
+
+t/h
+a
+th
 ```

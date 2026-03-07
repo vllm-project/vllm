@@ -1,887 +1,7704 @@
-# Multi-Modal Support
+# Mu
+t
+-Moda
+ Support
+Th
+s docum
 
-This document walks you through the steps to extend a basic model so that it accepts [multi-modal inputs](../../features/multimodal_inputs.md).
+t 
+a
+ks you through th
+ st
+ps to 
+xt
 
-## 1. Update the base vLLM model
+d a bas
+c mod
 
-It is assumed that you have already implemented the model in vLLM according to [these steps](basic.md).
-Further update the model as follows:
+ so that 
+t acc
+pts [mu
+t
+-moda
+ 
 
-- Implement [get_placeholder_str][vllm.model_executor.models.interfaces.SupportsMultiModal.get_placeholder_str] to define the placeholder string which is used to represent the multi-modal item in the text prompt. This should be consistent with the chat template of the model.
+puts](../../f
+atur
+s/mu
+t
+moda
+_
 
-    ??? code
+puts.md).
+## 1. Updat
+ th
+ bas
+ vLLM mod
 
-        ```python
-        class YourModelForImage2Seq(nn.Module):
+
+It 
+s assum
+d that you hav
+ a
+r
+ady 
+mp
+
+m
+
+t
+d th
+ mod
+
+ 
+
+ vLLM accord
+
+g to [th
+s
+ st
+ps](bas
+c.md).
+Furth
+r updat
+ th
+ mod
+
+ as fo
+o
+s:
+- Imp
+
+m
+
+t [g
+t_p
+ac
+ho
+d
+r_str][v
+m.mod
+
+_
+x
+cutor.mod
+
+s.
+
+t
+rfac
+s.SupportsMu
+t
+Moda
+.g
+t_p
+ac
+ho
+d
+r_str] to d
+f
+
+
+ th
+ p
+ac
+ho
+d
+r str
+
+g 
+h
+ch 
+s us
+d to r
+pr
+s
+
+t th
+ mu
+t
+-moda
+ 
+t
+m 
+
+ th
+ t
+xt prompt. Th
+s shou
+d b
+ co
+s
+st
+
+t 
+
+th th
+ chat t
+mp
+at
+ of th
+ mod
+
+.
+    ??? cod
+
+        ```pytho
+
+        c
+ass YourMod
+
+ForImag
+2S
+q(
+.Modu
+
+):
             ...
+            @c
+assm
+thod
+            d
+f g
+t_p
+ac
+ho
+d
+r_str(c
+s, moda
 
-            @classmethod
-            def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-                if modality.startswith("image"):
-                    return "<image>"
+ty: str, 
+: 
 
-                raise ValueError("Only image modality is supported")
+t) -
+ str | No
+
+:
+                
+f moda
+
+ty.starts
+
+th("
+mag
+"):
+                    r
+tur
+ "
+
+mag
+
+"
+                ra
+s
+ Va
+u
+Error("O
+
+y 
+mag
+ moda
+
+ty 
+s support
+d")
         ```
+- I
+s
+d
+ `__
 
-- Inside `__init__` method, initialize the language components of the model inside [_mark_language_model][vllm.model_executor.models.interfaces.SupportsMultiModal._mark_language_model], and the multimodal components of the model inside [_mark_tower_model][vllm.model_executor.models.interfaces.SupportsMultiModal._mark_tower_model], e.g.:
 
-    ```python
-        def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-            super().__init__()
+t__` m
+thod, 
 
-            config = vllm_config.model_config.hf_config
 
-            with self._mark_tower_model(vllm_config, "image"):
-                self.vision_encoder = ...
-                self.multi_modal_projector = ...
+t
+a
 
-            with self._mark_language_model(vllm_config):
-                self.language_model = init_vllm_registered_model(
-                    vllm_config=vllm_config,
-                    hf_config=config.text_config,
-                    prefix=maybe_prefix(prefix, "language_model"),
+z
+ th
+ 
+a
+guag
+ compo
+
+
+ts of th
+ mod
+
+ 
+
+s
+d
+ [_mark_
+a
+guag
+_mod
+
+][v
+m.mod
+
+_
+x
+cutor.mod
+
+s.
+
+t
+rfac
+s.SupportsMu
+t
+Moda
+._mark_
+a
+guag
+_mod
+
+], a
+d th
+ mu
+t
+moda
+ compo
+
+
+ts of th
+ mod
+
+ 
+
+s
+d
+ [_mark_to
+
+r_mod
+
+][v
+m.mod
+
+_
+x
+cutor.mod
+
+s.
+
+t
+rfac
+s.SupportsMu
+t
+Moda
+._mark_to
+
+r_mod
+
+], 
+.g.:
+    ```pytho
+
+        d
+f __
+
+
+t__(s
+
+f, *, v
+m_co
+f
+g: V
+mCo
+f
+g, pr
+f
+x: str = "") -
+ No
+
+:
+            sup
+r().__
+
+
+t__()
+            co
+f
+g = v
+m_co
+f
+g.mod
+
+_co
+f
+g.hf_co
+f
+g
+            
+
+th s
+
+f._mark_to
+
+r_mod
+
+(v
+m_co
+f
+g, "
+mag
+"):
+                s
+
+f.v
+s
+o
+_
+
+cod
+r = ...
+                s
+
+f.mu
+t
+_moda
+_proj
+ctor = ...
+            
+
+th s
+
+f._mark_
+a
+guag
+_mod
+
+(v
+m_co
+f
+g):
+                s
+
+f.
+a
+guag
+_mod
+
+ = 
+
+
+t_v
+m_r
+g
+st
+r
+d_mod
+
+(
+                    v
+m_co
+f
+g=v
+m_co
+f
+g,
+                    hf_co
+f
+g=co
+f
+g.t
+xt_co
+f
+g,
+                    pr
+f
+x=mayb
+_pr
+f
+x(pr
+f
+x, "
+a
+guag
+_mod
+
+"),
                 )
     ```
+- R
+mov
+ th
+ 
+mb
+dd
 
-- Remove the embedding part from the [forward][torch.nn.Module.forward] method:
-    - Move the multi-modal embedding to [embed_multimodal][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_multimodal].
-    - The text embedding and embedding merge are handled automatically by a default implementation of [embed_input_ids][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_input_ids]. It does not need to be overridden in most cases.
+g part from th
+ [for
+ard][torch.
+.Modu
 
-    ```diff
-      def forward(
-          self,
-          input_ids: torch.Tensor | None,
-    -     pixel_values: torch.Tensor,
-          positions: torch.Tensor,
-          intermediate_tensors: IntermediateTensors | None = None,
-          inputs_embeds: torch.Tensor | None = None,
-      ) -> torch.Tensor:
-    -     if inputs_embeds is None:
-    -         inputs_embeds = self.get_input_embeddings()(input_ids)
+.for
+ard] m
+thod:
+    - Mov
+ th
+ mu
+t
+-moda
+ 
+mb
+dd
+
+g to [
+mb
+d_mu
+t
+moda
+][v
+m.mod
+
+_
+x
+cutor.mod
+
+s.
+
+t
+rfac
+s.SupportsMu
+t
+Moda
+.
+mb
+d_mu
+t
+moda
+].
+    - Th
+ t
+xt 
+mb
+dd
+
+g a
+d 
+mb
+dd
+
+g m
+rg
+ ar
+ ha
+d
+
+d automat
+ca
+y by a d
+fau
+t 
+mp
+
+m
+
+tat
+o
+ of [
+mb
+d_
+
+put_
+ds][v
+m.mod
+
+_
+x
+cutor.mod
+
+s.
+
+t
+rfac
+s.SupportsMu
+t
+Moda
+.
+mb
+d_
+
+put_
+ds]. It do
+s 
+ot 
+
+d to b
+ ov
+rr
+dd
+
+ 
+
+ most cas
+s.
+    ```d
+ff
+      d
+f for
+ard(
+          s
+
+f,
+          
+
+put_
+ds: torch.T
+
+sor | No
+
+,
+    -     p
+x
+
+_va
+u
+s: torch.T
+
+sor,
+          pos
+t
+o
+s: torch.T
+
+sor,
+          
+
+t
+rm
+d
+at
+_t
+
+sors: I
+t
+rm
+d
+at
+T
+
+sors | No
+
+ = No
+
+,
+          
+
+puts_
+mb
+ds: torch.T
+
+sor | No
+
+ = No
+
+,
+      ) -
+ torch.T
+
+sor:
+    -     
+f 
+
+puts_
+mb
+ds 
+s No
+
+:
+    -         
+
+puts_
+mb
+ds = s
+
+f.g
+t_
+
+put_
+mb
+dd
+
+gs()(
+
+put_
+ds)
     -
-    -     if pixel_values is not None:
-    -         image_features = self.get_image_features(
-    -             pixel_values=pixel_values,
-    -         )
-    -         special_image_mask = self.get_placeholder_mask(
-    -             input_ids,
-    -             inputs_embeds=inputs_embeds,
-    -             image_features=image_features,
-    -         )
-    -         inputs_embeds = inputs_embeds.masked_scatter(
-    -             special_image_mask,
-    -             image_features,
-    -         )
+    -     
+f p
+x
 
-           hidden_states = self.language_model(
-               input_ids,
-               positions,
-               intermediate_tensors,
-               inputs_embeds=inputs_embeds,
+_va
+u
+s 
+s 
+ot No
+
+:
+    -         
+mag
+_f
+atur
+s = s
+
+f.g
+t_
+mag
+_f
+atur
+s(
+    -             p
+x
+
+_va
+u
+s=p
+x
+
+_va
+u
+s,
+    -         )
+    -         sp
+c
+a
+_
+mag
+_mask = s
+
+f.g
+t_p
+ac
+ho
+d
+r_mask(
+    -             
+
+put_
+ds,
+    -             
+
+puts_
+mb
+ds=
+
+puts_
+mb
+ds,
+    -             
+mag
+_f
+atur
+s=
+mag
+_f
+atur
+s,
+    -         )
+    -         
+
+puts_
+mb
+ds = 
+
+puts_
+mb
+ds.mask
+d_scatt
+r(
+    -             sp
+c
+a
+_
+mag
+_mask,
+    -             
+mag
+_f
+atur
+s,
+    -         )
+           h
+dd
+
+_stat
+s = s
+
+f.
+a
+guag
+_mod
+
+(
+               
+
+put_
+ds,
+               pos
+t
+o
+s,
+               
+
+t
+rm
+d
+at
+_t
+
+sors,
+               
+
+puts_
+mb
+ds=
+
+puts_
+mb
+ds,
            )
          ...
   
-    +  def embed_multimodal(
-    +      self,
-    +      pixel_values: torch.Tensor,
-    +  ) -> MultiModalEmbeddings | None:
-    +      return self.get_image_features(
-    +          pixel_values=pixel_values,
+    +  d
+f 
+mb
+d_mu
+t
+moda
+(
+    +      s
+
+f,
+    +      p
+x
+
+_va
+u
+s: torch.T
+
+sor,
+    +  ) -
+ Mu
+t
+Moda
+Emb
+dd
+
+gs | No
+
+:
+    +      r
+tur
+ s
+
+f.g
+t_
+mag
+_f
+atur
+s(
+    +          p
+x
+
+_va
+u
+s=p
+x
+
+_va
+u
+s,
     +      )
     ```
+    B
 
-    Below we provide a boilerplate of a typical implementation pattern of [embed_multimodal][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_multimodal], but feel free to adjust it to your own needs.
+o
+ 
 
-    ```python
-    def _process_image_input(self, image_input: YourModelImageInputs) -> torch.Tensor:
-        image_features = self.vision_encoder(image_input)
-        return self.multi_modal_projector(image_features)
+ prov
+d
+ a bo
 
-    def embed_multimodal(
-        self,
-        **kwargs: object,
-    ) -> MultiModalEmbeddings | None:
-        # Validate the multimodal input keyword arguments
-        image_input = self._parse_and_validate_image_input(**kwargs)
-        if image_input is None:
-            return None
 
-        # Run multimodal inputs through encoder and projector
-        vision_embeddings = self._process_image_input(image_input)
-        return vision_embeddings
+rp
+at
+ of a typ
+ca
+ 
+mp
+
+m
+
+tat
+o
+ patt
+r
+ of [
+mb
+d_mu
+t
+moda
+][v
+m.mod
+
+_
+x
+cutor.mod
+
+s.
+
+t
+rfac
+s.SupportsMu
+t
+Moda
+.
+mb
+d_mu
+t
+moda
+], but f
+
+ fr
+ to adjust 
+t to your o
+
+ 
+
+ds.
+    ```pytho
+
+    d
+f _proc
+ss_
+mag
+_
+
+put(s
+
+f, 
+mag
+_
+
+put: YourMod
+
+Imag
+I
+puts) -
+ torch.T
+
+sor:
+        
+mag
+_f
+atur
+s = s
+
+f.v
+s
+o
+_
+
+cod
+r(
+mag
+_
+
+put)
+        r
+tur
+ s
+
+f.mu
+t
+_moda
+_proj
+ctor(
+mag
+_f
+atur
+s)
+    d
+f 
+mb
+d_mu
+t
+moda
+(
+        s
+
+f,
+        **k
+args: obj
+ct,
+    ) -
+ Mu
+t
+Moda
+Emb
+dd
+
+gs | No
+
+:
+        # Va
+
+dat
+ th
+ mu
+t
+moda
+ 
+
+put k
+y
+ord argum
+
+ts
+        
+mag
+_
+
+put = s
+
+f._pars
+_a
+d_va
+
+dat
+_
+mag
+_
+
+put(**k
+args)
+        
+f 
+mag
+_
+
+put 
+s No
+
+:
+            r
+tur
+ No
+
+
+        # Ru
+ mu
+t
+moda
+ 
+
+puts through 
+
+cod
+r a
+d proj
+ctor
+        v
+s
+o
+_
+mb
+dd
+
+gs = s
+
+f._proc
+ss_
+mag
+_
+
+put(
+mag
+_
+
+put)
+        r
+tur
+ v
+s
+o
+_
+mb
+dd
+
+gs
     ```
+!!! 
+mporta
+t
+    Th
+ r
+tur
 
-!!! important
-    The returned `multimodal_embeddings` must be either a **3D [torch.Tensor][]** of shape `(num_items, feature_size, hidden_size)`, or a **list / tuple of 2D [torch.Tensor][]'s** of shape `(feature_size, hidden_size)`, so that `multimodal_embeddings[i]` retrieves the embeddings generated from the `i`-th multimodal data item (e.g, image) of the request.
+d `mu
+t
+moda
+_
+mb
+dd
 
-!!! note
-    By default, vLLM merges the multimodal embeddings into text embeddings depending on the information of their locations defined in
-    [PlaceholderRange][vllm.multimodal.inputs.PlaceholderRange] from input processing.
-    This logic can be found at [embed_input_ids][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_input_ids].
+gs` must b
+ 
 
-    You may override this method if additional logic is required for your model when merging embeddings.
+th
+r a **3D [torch.T
 
-- Once the above steps are done, update the model class with the [SupportsMultiModal][vllm.model_executor.models.interfaces.SupportsMultiModal] interface.
+sor][]** of shap
+ `(
+um_
+t
+ms, f
+atur
+_s
+z
+, h
+dd
 
-  ```diff
-  + from vllm.model_executor.models.interfaces import SupportsMultiModal
+_s
+z
+)`, or a **
 
-  - class YourModelForImage2Seq(nn.Module):
-  + class YourModelForImage2Seq(nn.Module, SupportsMultiModal):
+st / tup
+
+ of 2D [torch.T
+
+sor][]'s** of shap
+ `(f
+atur
+_s
+z
+, h
+dd
+
+_s
+z
+)`, so that `mu
+t
+moda
+_
+mb
+dd
+
+gs[
+]` r
+tr
+
+v
+s th
+ 
+mb
+dd
+
+gs g
+
+
+rat
+d from th
+ `
+`-th mu
+t
+moda
+ data 
+t
+m (
+.g, 
+mag
+) of th
+ r
+qu
+st.
+!!! 
+ot
+
+    By d
+fau
+t, vLLM m
+rg
+s th
+ mu
+t
+moda
+ 
+mb
+dd
+
+gs 
+
+to t
+xt 
+mb
+dd
+
+gs d
+p
+
+d
+
+g o
+ th
+ 
+
+format
+o
+ of th
+
+r 
+ocat
+o
+s d
+f
+
+
+d 
+
+
+    [P
+ac
+ho
+d
+rRa
+g
+][v
+m.mu
+t
+moda
+.
+
+puts.P
+ac
+ho
+d
+rRa
+g
+] from 
+
+put proc
+ss
+
+g.
+    Th
+s 
+og
+c ca
+ b
+ fou
+d at [
+mb
+d_
+
+put_
+ds][v
+m.mod
+
+_
+x
+cutor.mod
+
+s.
+
+t
+rfac
+s.SupportsMu
+t
+Moda
+.
+mb
+d_
+
+put_
+ds].
+    You may ov
+rr
+d
+ th
+s m
+thod 
+f add
+t
+o
+a
+ 
+og
+c 
+s r
+qu
+r
+d for your mod
+
+ 
+h
+
+ m
+rg
+
+g 
+mb
+dd
+
+gs.
+- O
+c
+ th
+ abov
+ st
+ps ar
+ do
+
+, updat
+ th
+ mod
+
+ c
+ass 
+
+th th
+ [SupportsMu
+t
+Moda
+][v
+m.mod
+
+_
+x
+cutor.mod
+
+s.
+
+t
+rfac
+s.SupportsMu
+t
+Moda
+] 
+
+t
+rfac
+.
+  ```d
+ff
+  + from v
+m.mod
+
+_
+x
+cutor.mod
+
+s.
+
+t
+rfac
+s 
+mport SupportsMu
+t
+Moda
+
+  - c
+ass YourMod
+
+ForImag
+2S
+q(
+.Modu
+
+):
+  + c
+ass YourMod
+
+ForImag
+2S
+q(
+.Modu
+
+, SupportsMu
+t
+Moda
+):
   ```
+!!! 
+ot
 
-!!! note
-    The model class does not have to be named `*ForCausalLM`.
-    Check out [the HuggingFace Transformers documentation](https://huggingface.co/docs/transformers/model_doc/auto#multimodal) for some examples.
+    Th
+ mod
 
-## 2. Specify processing information
+ c
+ass do
+s 
+ot hav
+ to b
+ 
+am
+d `*ForCausa
+LM`.
+    Ch
+ck out [th
+ Hugg
 
-Next, create a subclass of [BaseProcessingInfo][vllm.multimodal.processing.BaseProcessingInfo]
-to provide basic information related to HF processing.
+gFac
+ Tra
+sform
+rs docum
 
-### Maximum number of input items
+tat
+o
+](https://hugg
 
-You need to override the abstract method [get_supported_mm_limits][vllm.multimodal.processing.BaseProcessingInfo.get_supported_mm_limits]
-to return the maximum number of input items for each modality supported by the model.
+gfac
+.co/docs/tra
+sform
+rs/mod
 
-For example, if the model supports any number of images but only one video per prompt:
+_doc/auto#mu
+t
+moda
+) for som
+ 
+xamp
 
-```python
-def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-    return {"image": None, "video": 1}
+s.
+## 2. Sp
+c
+fy proc
+ss
+
+g 
+
+format
+o
+
+N
+xt, cr
+at
+ a subc
+ass of [Bas
+Proc
+ss
+
+gI
+fo][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+Proc
+ss
+
+gI
+fo]
+to prov
+d
+ bas
+c 
+
+format
+o
+ r
+
+at
+d to HF proc
+ss
+
+g.
+### Max
+mum 
+umb
+r of 
+
+put 
+t
+ms
+You 
+
+d to ov
+rr
+d
+ th
+ abstract m
+thod [g
+t_support
+d_mm_
+
+m
+ts][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+Proc
+ss
+
+gI
+fo.g
+t_support
+d_mm_
+
+m
+ts]
+to r
+tur
+ th
+ max
+mum 
+umb
+r of 
+
+put 
+t
+ms for 
+ach moda
+
+ty support
+d by th
+ mod
+
+.
+For 
+xamp
+
+, 
+f th
+ mod
+
+ supports a
+y 
+umb
+r of 
+mag
+s but o
+
+y o
+
+ v
+d
+o p
+r prompt:
+```pytho
+
+d
+f g
+t_support
+d_mm_
+
+m
+ts(s
+
+f) -
+ Mapp
+
+g[str, 
+
+t | No
+
+]:
+    r
+tur
+ {"
+mag
+": No
+
+, "v
+d
+o": 1}
 ```
+## 3. Sp
+c
+fy dummy 
 
-## 3. Specify dummy inputs
+puts
+Th
 
-Then, inherit [BaseDummyInputsBuilder][vllm.multimodal.processing.BaseDummyInputsBuilder] to construct dummy inputs for
-HF processing. The processed outputs are also used for memory profiling.
+, 
 
-Override the abstract methods [get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text] and [get_dummy_mm_data][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_mm_data] to construct dummy inputs. These dummy inputs should result in the worst-case memory usage of the model so that vLLM can reserve the correct amount of memory for it.
+h
+r
+t [Bas
+DummyI
+putsBu
 
-Assuming that the memory usage increases with the number of tokens, the dummy inputs can be constructed to maximize the number of output embeddings, which is the same number as placeholder feature tokens.
+d
+r][v
+m.mu
+t
+moda
+.proc
+ss
 
-=== "Basic example: LLaVA"
+g.Bas
+DummyI
+putsBu
 
-    Looking at the code of HF's `LlavaForConditionalGeneration`:
+d
+r] to co
+struct dummy 
 
-    ??? code
+puts for
+HF proc
+ss
 
-        ```python
-        # https://github.com/huggingface/transformers/blob/v4.47.1/src/transformers/models/llava/modeling_llava.py#L530-L544
-        n_image_tokens = (input_ids == self.config.image_token_index).sum().item()
-        n_image_features = image_features.shape[0] * image_features.shape[1]
+g. Th
+ proc
+ss
+d outputs ar
+ a
+so us
+d for m
+mory prof
 
-        if n_image_tokens != n_image_features:
-            raise ValueError(
-                f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
+
+
+g.
+Ov
+rr
+d
+ th
+ abstract m
+thods [g
+t_dummy_t
+xt][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+DummyI
+putsBu
+
+d
+r.g
+t_dummy_t
+xt] a
+d [g
+t_dummy_mm_data][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+DummyI
+putsBu
+
+d
+r.g
+t_dummy_mm_data] to co
+struct dummy 
+
+puts. Th
+s
+ dummy 
+
+puts shou
+d r
+su
+t 
+
+ th
+ 
+orst-cas
+ m
+mory usag
+ of th
+ mod
+
+ so that vLLM ca
+ r
+s
+rv
+ th
+ corr
+ct amou
+t of m
+mory for 
+t.
+Assum
+
+g that th
+ m
+mory usag
+ 
+
+cr
+as
+s 
+
+th th
+ 
+umb
+r of tok
+
+s, th
+ dummy 
+
+puts ca
+ b
+ co
+struct
+d to max
+m
+z
+ th
+ 
+umb
+r of output 
+mb
+dd
+
+gs, 
+h
+ch 
+s th
+ sam
+ 
+umb
+r as p
+ac
+ho
+d
+r f
+atur
+ tok
+
+s.
+=== "Bas
+c 
+xamp
+
+: LLaVA"
+    Look
+
+g at th
+ cod
+ of HF's `L
+avaForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+`:
+    ??? cod
+
+        ```pytho
+
+        # https://g
+thub.com/hugg
+
+gfac
+/tra
+sform
+rs/b
+ob/v4.47.1/src/tra
+sform
+rs/mod
+
+s/
+ava/mod
+
+
+
+g_
+ava.py#L530-L544
+        
+_
+mag
+_tok
+
+s = (
+
+put_
+ds == s
+
+f.co
+f
+g.
+mag
+_tok
+
+_
+
+d
+x).sum().
+t
+m()
+        
+_
+mag
+_f
+atur
+s = 
+mag
+_f
+atur
+s.shap
+[0] * 
+mag
+_f
+atur
+s.shap
+[1]
+        
+f 
+_
+mag
+_tok
+
+s != 
+_
+mag
+_f
+atur
+s:
+            ra
+s
+ Va
+u
+Error(
+                f"Imag
+ f
+atur
+s a
+d 
+mag
+ tok
+
+s do 
+ot match: tok
+
+s: {
+_
+mag
+_tok
+
+s}, f
+atur
+s {
+_
+mag
+_f
+atur
+s}"
             )
-        special_image_mask = (
-            (input_ids == self.config.image_token_index)
-            .unsqueeze(-1)
-            .expand_as(inputs_embeds)
-            .to(inputs_embeds.device)
+        sp
+c
+a
+_
+mag
+_mask = (
+            (
+
+put_
+ds == s
+
+f.co
+f
+g.
+mag
+_tok
+
+_
+
+d
+x)
+            .u
+squ
+z
+(-1)
+            .
+xpa
+d_as(
+
+puts_
+mb
+ds)
+            .to(
+
+puts_
+mb
+ds.d
+v
+c
+)
         )
-        image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
-        inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
+        
+mag
+_f
+atur
+s = 
+mag
+_f
+atur
+s.to(
+
+puts_
+mb
+ds.d
+v
+c
+, 
+
+puts_
+mb
+ds.dtyp
+)
+        
+
+puts_
+mb
+ds = 
+
+puts_
+mb
+ds.mask
+d_scatt
+r(sp
+c
+a
+_
+mag
+_mask, 
+mag
+_f
+atur
+s)
         ```
+    Th
+ 
+umb
+r of p
+ac
+ho
+d
+r f
+atur
+ tok
 
-    The number of placeholder feature tokens per image is `image_features.shape[1]`.
-    `image_features` is calculated inside the `get_image_features` method:
+s p
+r 
+mag
+ 
+s `
+mag
+_f
+atur
+s.shap
+[1]`.
+    `
+mag
+_f
+atur
+s` 
+s ca
+cu
+at
+d 
 
-    ??? code
+s
+d
+ th
+ `g
+t_
+mag
+_f
+atur
+s` m
+thod:
+    ??? cod
 
-        ```python
-        # https://github.com/huggingface/transformers/blob/v4.47.1/src/transformers/models/llava/modeling_llava.py#L290-L300
-        image_outputs = self.vision_tower(pixel_values, output_hidden_states=True)
+        ```pytho
 
-        selected_image_feature = image_outputs.hidden_states[vision_feature_layer]
-        if vision_feature_select_strategy == "default":
-            selected_image_feature = selected_image_feature[:, 1:]
-        elif vision_feature_select_strategy == "full":
-            selected_image_feature = selected_image_feature
-        else:
-            raise ValueError(f"Unexpected select feature strategy: {self.config.vision_feature_select_strategy}")
-        image_features = self.multi_modal_projector(selected_image_feature)
-        return image_features
+        # https://g
+thub.com/hugg
+
+gfac
+/tra
+sform
+rs/b
+ob/v4.47.1/src/tra
+sform
+rs/mod
+
+s/
+ava/mod
+
+
+
+g_
+ava.py#L290-L300
+        
+mag
+_outputs = s
+
+f.v
+s
+o
+_to
+
+r(p
+x
+
+_va
+u
+s, output_h
+dd
+
+_stat
+s=Tru
+)
+        s
+
+
+ct
+d_
+mag
+_f
+atur
+ = 
+mag
+_outputs.h
+dd
+
+_stat
+s[v
+s
+o
+_f
+atur
+_
+ay
+r]
+        
+f v
+s
+o
+_f
+atur
+_s
+
+
+ct_strat
+gy == "d
+fau
+t":
+            s
+
+
+ct
+d_
+mag
+_f
+atur
+ = s
+
+
+ct
+d_
+mag
+_f
+atur
+[:, 1:]
+        
+
+
+f v
+s
+o
+_f
+atur
+_s
+
+
+ct_strat
+gy == "fu
+":
+            s
+
+
+ct
+d_
+mag
+_f
+atur
+ = s
+
+
+ct
+d_
+mag
+_f
+atur
+
+        
+
+s
+:
+            ra
+s
+ Va
+u
+Error(f"U
+
+xp
+ct
+d s
+
+
+ct f
+atur
+ strat
+gy: {s
+
+f.co
+f
+g.v
+s
+o
+_f
+atur
+_s
+
+
+ct_strat
+gy}")
+        
+mag
+_f
+atur
+s = s
+
+f.mu
+t
+_moda
+_proj
+ctor(s
+
+
+ct
+d_
+mag
+_f
+atur
+)
+        r
+tur
+ 
+mag
+_f
+atur
+s
         ```
+    W
+ ca
+ 
 
-    We can infer that `image_features.shape[1]` is based on `image_outputs.hidden_states.shape[1]` from the vision tower
-    (`CLIPVisionModel` for the [`llava-hf/llava-1.5-7b-hf`](https://huggingface.co/llava-hf/llava-1.5-7b-hf) model).
-    Moreover, we only need the sequence length (the second dimension of the tensor) to get `image_features.shape[1]`.
-    The sequence length is determined by the initial hidden states in `CLIPVisionTransformer` since the attention
-    mechanism doesn't change the sequence length of the output hidden states.
+f
+r that `
+mag
+_f
+atur
+s.shap
+[1]` 
+s bas
+d o
+ `
+mag
+_outputs.h
+dd
 
-    ```python
-    # https://github.com/huggingface/transformers/blob/v4.47.1/src/transformers/models/clip/modeling_clip.py#L1094-L1102
-    hidden_states = self.embeddings(pixel_values, interpolate_pos_encoding=interpolate_pos_encoding)
-    hidden_states = self.pre_layrnorm(hidden_states)
+_stat
+s.shap
+[1]` from th
+ v
+s
+o
+ to
 
-    encoder_outputs = self.encoder(
-        inputs_embeds=hidden_states,
-        output_attentions=output_attentions,
-        output_hidden_states=output_hidden_states,
-        return_dict=return_dict,
+r
+    (`CLIPV
+s
+o
+Mod
+
+` for th
+ [`
+ava-hf/
+ava-1.5-7b-hf`](https://hugg
+
+gfac
+.co/
+ava-hf/
+ava-1.5-7b-hf) mod
+
+).
+    Mor
+ov
+r, 
+
+ o
+
+y 
+
+d th
+ s
+qu
+
+c
+ 
+
+
+gth (th
+ s
+co
+d d
+m
+
+s
+o
+ of th
+ t
+
+sor) to g
+t `
+mag
+_f
+atur
+s.shap
+[1]`.
+    Th
+ s
+qu
+
+c
+ 
+
+
+gth 
+s d
+t
+rm
+
+
+d by th
+ 
+
+
+t
+a
+ h
+dd
+
+ stat
+s 
+
+ `CLIPV
+s
+o
+Tra
+sform
+r` s
+
+c
+ th
+ att
+
+t
+o
+
+    m
+cha
+
+sm do
+s
+'t cha
+g
+ th
+ s
+qu
+
+c
+ 
+
+
+gth of th
+ output h
+dd
+
+ stat
+s.
+    ```pytho
+
+    # https://g
+thub.com/hugg
+
+gfac
+/tra
+sform
+rs/b
+ob/v4.47.1/src/tra
+sform
+rs/mod
+
+s/c
+
+p/mod
+
+
+
+g_c
+
+p.py#L1094-L1102
+    h
+dd
+
+_stat
+s = s
+
+f.
+mb
+dd
+
+gs(p
+x
+
+_va
+u
+s, 
+
+t
+rpo
+at
+_pos_
+
+cod
+
+g=
+
+t
+rpo
+at
+_pos_
+
+cod
+
+g)
+    h
+dd
+
+_stat
+s = s
+
+f.pr
+_
+ayr
+orm(h
+dd
+
+_stat
+s)
+    
+
+cod
+r_outputs = s
+
+f.
+
+cod
+r(
+        
+
+puts_
+mb
+ds=h
+dd
+
+_stat
+s,
+        output_att
+
+t
+o
+s=output_att
+
+t
+o
+s,
+        output_h
+dd
+
+_stat
+s=output_h
+dd
+
+_stat
+s,
+        r
+tur
+_d
+ct=r
+tur
+_d
+ct,
     )
     ```
+    To f
 
-    To find the sequence length, we turn to the code of `CLIPVisionEmbeddings`:
+d th
+ s
+qu
 
-    ??? code
+c
+ 
 
-        ```python
-        # https://github.com/huggingface/transformers/blob/v4.47.1/src/transformers/models/clip/modeling_clip.py#L247-L257
-        target_dtype = self.patch_embedding.weight.dtype
-        patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))  # shape = [*, width, grid, grid]
-        patch_embeds = patch_embeds.flatten(2).transpose(1, 2)
 
-        class_embeds = self.class_embedding.expand(batch_size, 1, -1)
-        embeddings = torch.cat([class_embeds, patch_embeds], dim=1)
-        if interpolate_pos_encoding:
-            embeddings = embeddings + self.interpolate_pos_encoding(embeddings, height, width)
-        else:
-            embeddings = embeddings + self.position_embedding(self.position_ids)
-        return embeddings
+gth, 
+
+ tur
+ to th
+ cod
+ of `CLIPV
+s
+o
+Emb
+dd
+
+gs`:
+    ??? cod
+
+        ```pytho
+
+        # https://g
+thub.com/hugg
+
+gfac
+/tra
+sform
+rs/b
+ob/v4.47.1/src/tra
+sform
+rs/mod
+
+s/c
+
+p/mod
+
+
+
+g_c
+
+p.py#L247-L257
+        targ
+t_dtyp
+ = s
+
+f.patch_
+mb
+dd
+
+g.
+
+
+ght.dtyp
+
+        patch_
+mb
+ds = s
+
+f.patch_
+mb
+dd
+
+g(p
+x
+
+_va
+u
+s.to(dtyp
+=targ
+t_dtyp
+))  # shap
+ = [*, 
+
+dth, gr
+d, gr
+d]
+        patch_
+mb
+ds = patch_
+mb
+ds.f
+att
+
+(2).tra
+spos
+(1, 2)
+        c
+ass_
+mb
+ds = s
+
+f.c
+ass_
+mb
+dd
+
+g.
+xpa
+d(batch_s
+z
+, 1, -1)
+        
+mb
+dd
+
+gs = torch.cat([c
+ass_
+mb
+ds, patch_
+mb
+ds], d
+m=1)
+        
+f 
+
+t
+rpo
+at
+_pos_
+
+cod
+
+g:
+            
+mb
+dd
+
+gs = 
+mb
+dd
+
+gs + s
+
+f.
+
+t
+rpo
+at
+_pos_
+
+cod
+
+g(
+mb
+dd
+
+gs, h
+
+ght, 
+
+dth)
+        
+
+s
+:
+            
+mb
+dd
+
+gs = 
+mb
+dd
+
+gs + s
+
+f.pos
+t
+o
+_
+mb
+dd
+
+g(s
+
+f.pos
+t
+o
+_
+ds)
+        r
+tur
+ 
+mb
+dd
+
+gs
         ```
+    W
+ ca
+ 
 
-    We can infer that `embeddings.shape[1] == self.num_positions`, where
+f
+r that `
+mb
+dd
 
-    ```python
-    # https://github.com/huggingface/transformers/blob/v4.47.1/src/transformers/models/clip/modeling_clip.py#L195-L196
-    self.num_patches = (self.image_size // self.patch_size) ** 2
-    self.num_positions = self.num_patches + 1
+gs.shap
+[1] == s
+
+f.
+um_pos
+t
+o
+s`, 
+h
+r
+
+    ```pytho
+
+    # https://g
+thub.com/hugg
+
+gfac
+/tra
+sform
+rs/b
+ob/v4.47.1/src/tra
+sform
+rs/mod
+
+s/c
+
+p/mod
+
+
+
+g_c
+
+p.py#L195-L196
+    s
+
+f.
+um_patch
+s = (s
+
+f.
+mag
+_s
+z
+ // s
+
+f.patch_s
+z
+) ** 2
+    s
+
+f.
+um_pos
+t
+o
+s = s
+
+f.
+um_patch
+s + 1
     ```
+    Ov
+ra
+, th
+ 
+umb
+r of p
+ac
+ho
+d
+r f
+atur
+ tok
 
-    Overall, the number of placeholder feature tokens for an image can be calculated as:
+s for a
+ 
+mag
+ ca
+ b
+ ca
+cu
+at
+d as:
+    ??? cod
 
-    ??? code
+        ```pytho
 
-        ```python
-        def get_num_image_tokens(
-            self,
+        d
+f g
+t_
+um_
+mag
+_tok
+
+s(
+            s
+
+f,
             *,
-            image_width: int,
-            image_height: int,
-        ) -> int:
-            hf_config = self.get_hf_config()
-            hf_processor = self.get_hf_processor()
+            
+mag
+_
 
-            image_size = hf_config.vision_config.image_size
-            patch_size = hf_config.vision_config.patch_size
+dth: 
 
-            num_image_tokens = (image_size // patch_size) ** 2 + 1
-            if hf_processor.vision_feature_select_strategy == "default":
-                num_image_tokens -= 1
+t,
+            
+mag
+_h
 
-            return num_image_tokens
+ght: 
+
+t,
+        ) -
+ 
+
+t:
+            hf_co
+f
+g = s
+
+f.g
+t_hf_co
+f
+g()
+            hf_proc
+ssor = s
+
+f.g
+t_hf_proc
+ssor()
+            
+mag
+_s
+z
+ = hf_co
+f
+g.v
+s
+o
+_co
+f
+g.
+mag
+_s
+z
+
+            patch_s
+z
+ = hf_co
+f
+g.v
+s
+o
+_co
+f
+g.patch_s
+z
+
+            
+um_
+mag
+_tok
+
+s = (
+mag
+_s
+z
+ // patch_s
+z
+) ** 2 + 1
+            
+f hf_proc
+ssor.v
+s
+o
+_f
+atur
+_s
+
+
+ct_strat
+gy == "d
+fau
+t":
+                
+um_
+mag
+_tok
+
+s -= 1
+            r
+tur
+ 
+um_
+mag
+_tok
+
+s
         ```
+    Not
+c
+ that th
+ 
+umb
+r of 
+mag
+ tok
 
-    Notice that the number of image tokens doesn't depend on the image width and height.
-    We can simply use a dummy `image_size` to calculate the multimodal profiling data:
+s do
+s
+'t d
+p
 
-    ??? code
+d o
+ th
+ 
+mag
+ 
 
-        ```python
-        # NOTE: In actuality, this is usually implemented as part of the
-        # model's subclass of `BaseProcessingInfo`, but we show it as is
-        # here for simplicity.
-        def get_image_size_with_most_features(self) -> ImageSize:
-            hf_config = self.get_hf_config()
-            width = height = hf_config.image_size
-            return ImageSize(width=width, height=height)
+dth a
+d h
 
-        def get_dummy_mm_data(
-            self,
-            seq_len: int,
-            mm_counts: Mapping[str, int],
-            mm_options: Mapping[str, BaseDummyOptions],
-        ) -> MultiModalDataDict:
-            num_images = mm_counts.get("image", 0)
+ght.
+    W
+ ca
+ s
+mp
+y us
+ a dummy `
+mag
+_s
+z
+` to ca
+cu
+at
+ th
+ mu
+t
+moda
+ prof
 
-            target_width, target_height = \
-                self.info.get_image_size_with_most_features()
 
-            image_overrides = mm_options.get("image")
 
-            return {
-                "image": self._get_dummy_images(
-                    width=target_width,
-                    height=target_height,
-                    num_images=num_images,
-                    overrides=image_overrides,
+g data:
+    ??? cod
+
+        ```pytho
+
+        # NOTE: I
+ actua
+
+ty, th
+s 
+s usua
+y 
+mp
+
+m
+
+t
+d as part of th
+
+        # mod
+
+'s subc
+ass of `Bas
+Proc
+ss
+
+gI
+fo`, but 
+
+ sho
+ 
+t as 
+s
+        # h
+r
+ for s
+mp
+
+c
+ty.
+        d
+f g
+t_
+mag
+_s
+z
+_
+
+th_most_f
+atur
+s(s
+
+f) -
+ Imag
+S
+z
+:
+            hf_co
+f
+g = s
+
+f.g
+t_hf_co
+f
+g()
+            
+
+dth = h
+
+ght = hf_co
+f
+g.
+mag
+_s
+z
+
+            r
+tur
+ Imag
+S
+z
+(
+
+dth=
+
+dth, h
+
+ght=h
+
+ght)
+        d
+f g
+t_dummy_mm_data(
+            s
+
+f,
+            s
+q_
+
+
+: 
+
+t,
+            mm_cou
+ts: Mapp
+
+g[str, 
+
+t],
+            mm_opt
+o
+s: Mapp
+
+g[str, Bas
+DummyOpt
+o
+s],
+        ) -
+ Mu
+t
+Moda
+DataD
+ct:
+            
+um_
+mag
+s = mm_cou
+ts.g
+t("
+mag
+", 0)
+            targ
+t_
+
+dth, targ
+t_h
+
+ght = \
+                s
+
+f.
+
+fo.g
+t_
+mag
+_s
+z
+_
+
+th_most_f
+atur
+s()
+            
+mag
+_ov
+rr
+d
+s = mm_opt
+o
+s.g
+t("
+mag
+")
+            r
+tur
+ {
+                "
+mag
+": s
+
+f._g
+t_dummy_
+mag
+s(
+                    
+
+dth=targ
+t_
+
+dth,
+                    h
+
+ght=targ
+t_h
+
+ght,
+                    
+um_
+mag
+s=
+um_
+mag
+s,
+                    ov
+rr
+d
+s=
+mag
+_ov
+rr
+d
+s,
                 )
             }
         ```
+    For th
+ t
+xt, 
 
-    For the text, we simply expand the multimodal image token from the model config to match the desired number of images.
+ s
+mp
+y 
+xpa
+d th
+ mu
+t
+moda
+ 
+mag
+ tok
 
-    ```python
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        num_images = mm_counts.get("image", 0)
+ from th
+ mod
 
-        processor = self.info.get_hf_processor()
-        image_token = processor.image_token
+ co
+f
+g to match th
+ d
+s
+r
+d 
+umb
+r of 
+mag
+s.
+    ```pytho
 
-        return image_token * num_images
+    d
+f g
+t_dummy_t
+xt(s
+
+f, mm_cou
+ts: Mapp
+
+g[str, 
+
+t]) -
+ str:
+        
+um_
+mag
+s = mm_cou
+ts.g
+t("
+mag
+", 0)
+        proc
+ssor = s
+
+f.
+
+fo.g
+t_hf_proc
+ssor()
+        
+mag
+_tok
+
+ = proc
+ssor.
+mag
+_tok
+
+
+        r
+tur
+ 
+mag
+_tok
+
+ * 
+um_
+mag
+s
     ```
+=== "No 
 
-=== "No input placeholders: Fuyu"
+put p
+ac
+ho
+d
+rs: Fuyu"
+    Look
 
-    Looking at the code of HF's `FuyuForCausalLM`:
+g at th
+ cod
+ of HF's `FuyuForCausa
+LM`:
+    ??? cod
 
-    ??? code
+        ```pytho
 
-        ```python
-        # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/fuyu/modeling_fuyu.py#L311-L322
-        if image_patches is not None and past_key_values is None:
-            patch_embeddings = [
-                self.vision_embed_tokens(patch.to(self.vision_embed_tokens.weight.dtype))
-                .squeeze(0)
-                .to(inputs_embeds.device)
-                for patch in image_patches
+        # https://g
+thub.com/hugg
+
+gfac
+/tra
+sform
+rs/b
+ob/v4.48.3/src/tra
+sform
+rs/mod
+
+s/fuyu/mod
+
+
+
+g_fuyu.py#L311-L322
+        
+f 
+mag
+_patch
+s 
+s 
+ot No
+
+ a
+d past_k
+y_va
+u
+s 
+s No
+
+:
+            patch_
+mb
+dd
+
+gs = [
+                s
+
+f.v
+s
+o
+_
+mb
+d_tok
+
+s(patch.to(s
+
+f.v
+s
+o
+_
+mb
+d_tok
+
+s.
+
+
+ght.dtyp
+))
+                .squ
+z
+(0)
+                .to(
+
+puts_
+mb
+ds.d
+v
+c
+)
+                for patch 
+
+ 
+mag
+_patch
+s
             ]
-            inputs_embeds = self.gather_continuous_embeddings(
-                word_embeddings=inputs_embeds,
-                continuous_embeddings=patch_embeddings,
-                image_patch_input_indices=image_patches_indices,
+            
+
+puts_
+mb
+ds = s
+
+f.gath
+r_co
+t
+
+uous_
+mb
+dd
+
+gs(
+                
+ord_
+mb
+dd
+
+gs=
+
+puts_
+mb
+ds,
+                co
+t
+
+uous_
+mb
+dd
+
+gs=patch_
+mb
+dd
+
+gs,
+                
+mag
+_patch_
+
+put_
+
+d
+c
+s=
+mag
+_patch
+s_
+
+d
+c
+s,
             )
         ```
+    Th
+ 
+umb
+r of p
+ac
+ho
+d
+r f
+atur
+ tok
 
-    The number of placeholder feature tokens for the `i`th item in the batch is `patch_embeddings[i].shape[0]`,
-    which is the same as `image_patches[i].shape[0]`, i.e. `num_total_patches`.
+s for th
+ `
+`th 
+t
+m 
 
-    Unlike LLaVA, Fuyu does not define the number of patches inside the modeling file. Where can we get more information?
-    Considering that the model input comes from the output of `FuyuProcessor`, let's **look at the preprocessing files**.
+ th
+ batch 
+s `patch_
+mb
+dd
 
-    The image outputs are obtained by calling `FuyuImageProcessor.preprocess` and then
-    `FuyuImageProcessor.preprocess_with_tokenizer_info` inside `FuyuProcessor`.
+gs[
+].shap
+[0]`,
+    
+h
+ch 
+s th
+ sam
+ as `
+mag
+_patch
+s[
+].shap
+[0]`, 
+.
+. `
+um_tota
+_patch
+s`.
+    U
 
-    In `FuyuImageProcessor.preprocess`, the images are resized and padded to the target `FuyuImageProcessor.size`,
-    returning the dimensions after resizing (but before padding) as metadata.
 
-    ??? code
+k
+ LLaVA, Fuyu do
+s 
+ot d
+f
 
-        ```python
-        # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/fuyu/processing_fuyu.py#L541-L544
-        image_encoding = self.image_processor.preprocess(images, **output_kwargs["images_kwargs"])
-        batch_images = image_encoding["images"]
-        image_unpadded_heights = image_encoding["image_unpadded_heights"]
-        image_unpadded_widths = image_encoding["image_unpadded_widths"]
 
-        # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/fuyu/image_processing_fuyu.py#L480-L
-        if do_resize:
-            batch_images = [
-                [self.resize(image, size=size, input_data_format=input_data_format) for image in images]
-                for images in batch_images
+ th
+ 
+umb
+r of patch
+s 
+
+s
+d
+ th
+ mod
+
+
+
+g f
+
+
+. Wh
+r
+ ca
+ 
+
+ g
+t mor
+ 
+
+format
+o
+?
+    Co
+s
+d
+r
+
+g that th
+ mod
+
+ 
+
+put com
+s from th
+ output of `FuyuProc
+ssor`, 
+
+t's **
+ook at th
+ pr
+proc
+ss
+
+g f
+
+
+s**.
+    Th
+ 
+mag
+ outputs ar
+ obta
+
+
+d by ca
+
+
+g `FuyuImag
+Proc
+ssor.pr
+proc
+ss` a
+d th
+
+
+    `FuyuImag
+Proc
+ssor.pr
+proc
+ss_
+
+th_tok
+
+
+z
+r_
+
+fo` 
+
+s
+d
+ `FuyuProc
+ssor`.
+    I
+ `FuyuImag
+Proc
+ssor.pr
+proc
+ss`, th
+ 
+mag
+s ar
+ r
+s
+z
+d a
+d padd
+d to th
+ targ
+t `FuyuImag
+Proc
+ssor.s
+z
+`,
+    r
+tur
+
+
+g th
+ d
+m
+
+s
+o
+s aft
+r r
+s
+z
+
+g (but b
+for
+ padd
+
+g) as m
+tadata.
+    ??? cod
+
+        ```pytho
+
+        # https://g
+thub.com/hugg
+
+gfac
+/tra
+sform
+rs/b
+ob/v4.48.3/src/tra
+sform
+rs/mod
+
+s/fuyu/proc
+ss
+
+g_fuyu.py#L541-L544
+        
+mag
+_
+
+cod
+
+g = s
+
+f.
+mag
+_proc
+ssor.pr
+proc
+ss(
+mag
+s, **output_k
+args["
+mag
+s_k
+args"])
+        batch_
+mag
+s = 
+mag
+_
+
+cod
+
+g["
+mag
+s"]
+        
+mag
+_u
+padd
+d_h
+
+ghts = 
+mag
+_
+
+cod
+
+g["
+mag
+_u
+padd
+d_h
+
+ghts"]
+        
+mag
+_u
+padd
+d_
+
+dths = 
+mag
+_
+
+cod
+
+g["
+mag
+_u
+padd
+d_
+
+dths"]
+        # https://g
+thub.com/hugg
+
+gfac
+/tra
+sform
+rs/b
+ob/v4.48.3/src/tra
+sform
+rs/mod
+
+s/fuyu/
+mag
+_proc
+ss
+
+g_fuyu.py#L480-L
+        
+f do_r
+s
+z
+:
+            batch_
+mag
+s = [
+                [s
+
+f.r
+s
+z
+(
+mag
+, s
+z
+=s
+z
+, 
+
+put_data_format=
+
+put_data_format) for 
+mag
+ 
+
+ 
+mag
+s]
+                for 
+mag
+s 
+
+ batch_
+mag
+s
             ]
+        
+mag
+_s
+z
+s = [g
+t_
+mag
+_s
+z
+(
+mag
+s[0], cha
 
-        image_sizes = [get_image_size(images[0], channel_dim=input_data_format) for images in batch_images]
-        image_unpadded_heights = [[image_size[0]] for image_size in image_sizes]
-        image_unpadded_widths = [[image_size[1]] for image_size in image_sizes]
 
-        if do_pad:
-            batch_images = [
+_d
+m=
+
+put_data_format) for 
+mag
+s 
+
+ batch_
+mag
+s]
+        
+mag
+_u
+padd
+d_h
+
+ghts = [[
+mag
+_s
+z
+[0]] for 
+mag
+_s
+z
+ 
+
+ 
+mag
+_s
+z
+s]
+        
+mag
+_u
+padd
+d_
+
+dths = [[
+mag
+_s
+z
+[1]] for 
+mag
+_s
+z
+ 
+
+ 
+mag
+_s
+z
+s]
+        
+f do_pad:
+            batch_
+mag
+s = [
                 [
-                    self.pad_image(
-                        image,
-                        size=size,
-                        mode=padding_mode,
-                        constant_values=padding_value,
-                        input_data_format=input_data_format,
+                    s
+
+f.pad_
+mag
+(
+                        
+mag
+,
+                        s
+z
+=s
+z
+,
+                        mod
+=padd
+
+g_mod
+,
+                        co
+sta
+t_va
+u
+s=padd
+
+g_va
+u
+,
+                        
+
+put_data_format=
+
+put_data_format,
                     )
-                    for image in images
+                    for 
+mag
+ 
+
+ 
+mag
+s
                 ]
-                for images in batch_images
+                for 
+mag
+s 
+
+ batch_
+mag
+s
             ]
         ```
+    I
+ `FuyuImag
+Proc
+ssor.pr
+proc
+ss_
 
-    In `FuyuImageProcessor.preprocess_with_tokenizer_info`, the images are split into patches based on this metadata:
+th_tok
 
-    ??? code
 
-        ```python
-        # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/fuyu/processing_fuyu.py#L417-L425
-        model_image_input = self.image_processor.preprocess_with_tokenizer_info(
-            image_input=tensor_batch_images,
-            image_present=image_present,
-            image_unpadded_h=image_unpadded_heights,
-            image_unpadded_w=image_unpadded_widths,
-            image_placeholder_id=image_placeholder_id,
-            image_newline_id=image_newline_id,
-            variable_sized=True,
+z
+r_
+
+fo`, th
+ 
+mag
+s ar
+ sp
+
+t 
+
+to patch
+s bas
+d o
+ th
+s m
+tadata:
+    ??? cod
+
+        ```pytho
+
+        # https://g
+thub.com/hugg
+
+gfac
+/tra
+sform
+rs/b
+ob/v4.48.3/src/tra
+sform
+rs/mod
+
+s/fuyu/proc
+ss
+
+g_fuyu.py#L417-L425
+        mod
+
+_
+mag
+_
+
+put = s
+
+f.
+mag
+_proc
+ssor.pr
+proc
+ss_
+
+th_tok
+
+
+z
+r_
+
+fo(
+            
+mag
+_
+
+put=t
+
+sor_batch_
+mag
+s,
+            
+mag
+_pr
+s
+
+t=
+mag
+_pr
+s
+
+t,
+            
+mag
+_u
+padd
+d_h=
+mag
+_u
+padd
+d_h
+
+ghts,
+            
+mag
+_u
+padd
+d_
+=
+mag
+_u
+padd
+d_
+
+dths,
+            
+mag
+_p
+ac
+ho
+d
+r_
+d=
+mag
+_p
+ac
+ho
+d
+r_
+d,
+            
+mag
+_
+
+
+
+
+
+
+_
+d=
+mag
+_
+
+
+
+
+
+
+_
+d,
+            var
+ab
+
+_s
+z
+d=Tru
+,
         )
+        # https://g
+thub.com/hugg
 
-        # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/fuyu/image_processing_fuyu.py#L638-L658
-        image_height, image_width = image.shape[1], image.shape[2]
-        if variable_sized:  # variable_sized=True
-            new_h = min(
-                image_height,
-                math.ceil(image_unpadded_h[batch_index, subseq_index] / patch_height) * patch_height,
-            )
-            new_w = min(
-                image_width,
-                math.ceil(image_unpadded_w[batch_index, subseq_index] / patch_width) * patch_width,
-            )
-            image = image[:, :new_h, :new_w]
-            image_height, image_width = new_h, new_w
+gfac
+/tra
+sform
+rs/b
+ob/v4.48.3/src/tra
+sform
+rs/mod
 
-        num_patches = self.get_num_patches(image_height=image_height, image_width=image_width)
-        tensor_of_image_ids = torch.full(
-            [num_patches], image_placeholder_id, dtype=torch.int32, device=image_input.device
+s/fuyu/
+mag
+_proc
+ss
+
+g_fuyu.py#L638-L658
+        
+mag
+_h
+
+ght, 
+mag
+_
+
+dth = 
+mag
+.shap
+[1], 
+mag
+.shap
+[2]
+        
+f var
+ab
+
+_s
+z
+d:  # var
+ab
+
+_s
+z
+d=Tru
+
+            
+
+
+_h = m
+
+(
+                
+mag
+_h
+
+ght,
+                math.c
+
+
+(
+mag
+_u
+padd
+d_h[batch_
+
+d
+x, subs
+q_
+
+d
+x] / patch_h
+
+ght) * patch_h
+
+ght,
+            )
+            
+
+
+_
+ = m
+
+(
+                
+mag
+_
+
+dth,
+                math.c
+
+
+(
+mag
+_u
+padd
+d_
+[batch_
+
+d
+x, subs
+q_
+
+d
+x] / patch_
+
+dth) * patch_
+
+dth,
+            )
+            
+mag
+ = 
+mag
+[:, :
+
+
+_h, :
+
+
+_
+]
+            
+mag
+_h
+
+ght, 
+mag
+_
+
+dth = 
+
+
+_h, 
+
+
+_
+
+        
+um_patch
+s = s
+
+f.g
+t_
+um_patch
+s(
+mag
+_h
+
+ght=
+mag
+_h
+
+ght, 
+mag
+_
+
+dth=
+mag
+_
+
+dth)
+        t
+
+sor_of_
+mag
+_
+ds = torch.fu
+(
+            [
+um_patch
+s], 
+mag
+_p
+ac
+ho
+d
+r_
+d, dtyp
+=torch.
+
+t32, d
+v
+c
+=
+mag
+_
+
+put.d
+v
+c
+
         )
-        patches = self.patchify_image(image=image.unsqueeze(0)).squeeze(0)
-        assert num_patches == patches.shape[0]
+        patch
+s = s
+
+f.patch
+fy_
+mag
+(
+mag
+=
+mag
+.u
+squ
+z
+(0)).squ
+z
+(0)
+        ass
+rt 
+um_patch
+s == patch
+s.shap
+[0]
         ```
+    Th
+ 
+umb
+r of patch
+s 
+s 
 
-    The number of patches is in turn defined by `FuyuImageProcessor.get_num_patches`:
+ tur
+ d
+f
 
-    ??? code
 
-        ```python
-        # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/fuyu/image_processing_fuyu.py#L552-L562
-        patch_size = patch_size if patch_size is not None else self.patch_size
-        patch_height, patch_width = self.patch_size["height"], self.patch_size["width"]
+d by `FuyuImag
+Proc
+ssor.g
+t_
+um_patch
+s`:
+    ??? cod
 
-        if image_height % patch_height != 0:
-            raise ValueError(f"{image_height=} must be divisible by {patch_height}")
-        if image_width % patch_width != 0:
-            raise ValueError(f"{image_width=} must be divisible by {patch_width}")
+        ```pytho
 
-        num_patches_per_dim_h = image_height // patch_height
-        num_patches_per_dim_w = image_width // patch_width
-        num_patches = num_patches_per_dim_h * num_patches_per_dim_w
+        # https://g
+thub.com/hugg
+
+gfac
+/tra
+sform
+rs/b
+ob/v4.48.3/src/tra
+sform
+rs/mod
+
+s/fuyu/
+mag
+_proc
+ss
+
+g_fuyu.py#L552-L562
+        patch_s
+z
+ = patch_s
+z
+ 
+f patch_s
+z
+ 
+s 
+ot No
+
+ 
+
+s
+ s
+
+f.patch_s
+z
+
+        patch_h
+
+ght, patch_
+
+dth = s
+
+f.patch_s
+z
+["h
+
+ght"], s
+
+f.patch_s
+z
+["
+
+dth"]
+        
+f 
+mag
+_h
+
+ght % patch_h
+
+ght != 0:
+            ra
+s
+ Va
+u
+Error(f"{
+mag
+_h
+
+ght=} must b
+ d
+v
+s
+b
+
+ by {patch_h
+
+ght}")
+        
+f 
+mag
+_
+
+dth % patch_
+
+dth != 0:
+            ra
+s
+ Va
+u
+Error(f"{
+mag
+_
+
+dth=} must b
+ d
+v
+s
+b
+
+ by {patch_
+
+dth}")
+        
+um_patch
+s_p
+r_d
+m_h = 
+mag
+_h
+
+ght // patch_h
+
+ght
+        
+um_patch
+s_p
+r_d
+m_
+ = 
+mag
+_
+
+dth // patch_
+
+dth
+        
+um_patch
+s = 
+um_patch
+s_p
+r_d
+m_h * 
+um_patch
+s_p
+r_d
+m_
+
         ```
+    Th
+s
+ 
+mag
+ patch
+s corr
+spo
+d to p
+ac
+ho
+d
+r tok
 
-    These image patches correspond to placeholder tokens (`|SPEAKER|`). So, we just need to maximize the number of image patches. Since input images are first resized
-    to fit within `image_processor.size`, we can maximize the number of image patches by inputting an image with size equal to `image_processor.size`.
+s (`|SPEAKER|`). So, 
 
-    ```python
-    def get_image_size_with_most_features(self) -> ImageSize:
-        image_processor = self.get_image_processor()
-        return ImageSize(
-            width=image_processor.size["width"],
-            height=image_processor.size["height"],
+ just 
+
+d to max
+m
+z
+ th
+ 
+umb
+r of 
+mag
+ patch
+s. S
+
+c
+ 
+
+put 
+mag
+s ar
+ f
+rst r
+s
+z
+d
+    to f
+t 
+
+th
+
+ `
+mag
+_proc
+ssor.s
+z
+`, 
+
+ ca
+ max
+m
+z
+ th
+ 
+umb
+r of 
+mag
+ patch
+s by 
+
+putt
+
+g a
+ 
+mag
+ 
+
+th s
+z
+ 
+qua
+ to `
+mag
+_proc
+ssor.s
+z
+`.
+    ```pytho
+
+    d
+f g
+t_
+mag
+_s
+z
+_
+
+th_most_f
+atur
+s(s
+
+f) -
+ Imag
+S
+z
+:
+        
+mag
+_proc
+ssor = s
+
+f.g
+t_
+mag
+_proc
+ssor()
+        r
+tur
+ Imag
+S
+z
+(
+            
+
+dth=
+mag
+_proc
+ssor.s
+z
+["
+
+dth"],
+            h
+
+ght=
+mag
+_proc
+ssor.s
+z
+["h
+
+ght"],
         )
     ```
+    Fuyu do
+s 
+ot 
+xp
+ct 
+mag
+ p
+ac
+ho
+d
+rs 
 
-    Fuyu does not expect image placeholders in the inputs to HF processor, so
-    the dummy prompt text is empty regardless of the number of images.
+ th
+ 
 
-    ```python
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        return ""
+puts to HF proc
+ssor, so
+    th
+ dummy prompt t
+xt 
+s 
+mpty r
+gard
+
+ss of th
+ 
+umb
+r of 
+mag
+s.
+    ```pytho
+
+    d
+f g
+t_dummy_t
+xt(s
+
+f, mm_cou
+ts: Mapp
+
+g[str, 
+
+t]) -
+ str:
+        r
+tur
+ ""
     ```
+    For th
+ mu
+t
+moda
+ 
+mag
+ prof
 
-    For the multimodal image profiling data, the logic is very similar to LLaVA:
 
-    ??? code
 
-        ```python
-        def get_dummy_mm_data(
-            self,
-            seq_len: int,
-            mm_counts: Mapping[str, int],
-            mm_options: Mapping[str, BaseDummyOptions],
-        ) -> MultiModalDataDict:
-            target_width, target_height = \
-                self.info.get_image_size_with_most_features()
-            num_images = mm_counts.get("image", 0)
+g data, th
+ 
+og
+c 
+s v
+ry s
+m
 
-            image_overrides = mm_options.get("image")
+ar to LLaVA:
+    ??? cod
 
-            return {
-                "image": self._get_dummy_images(
-                    width=target_width,
-                    height=target_height,
-                    num_images=num_images,
-                    overrides=image_overrides,
+        ```pytho
+
+        d
+f g
+t_dummy_mm_data(
+            s
+
+f,
+            s
+q_
+
+
+: 
+
+t,
+            mm_cou
+ts: Mapp
+
+g[str, 
+
+t],
+            mm_opt
+o
+s: Mapp
+
+g[str, Bas
+DummyOpt
+o
+s],
+        ) -
+ Mu
+t
+Moda
+DataD
+ct:
+            targ
+t_
+
+dth, targ
+t_h
+
+ght = \
+                s
+
+f.
+
+fo.g
+t_
+mag
+_s
+z
+_
+
+th_most_f
+atur
+s()
+            
+um_
+mag
+s = mm_cou
+ts.g
+t("
+mag
+", 0)
+            
+mag
+_ov
+rr
+d
+s = mm_opt
+o
+s.g
+t("
+mag
+")
+            r
+tur
+ {
+                "
+mag
+": s
+
+f._g
+t_dummy_
+mag
+s(
+                    
+
+dth=targ
+t_
+
+dth,
+                    h
+
+ght=targ
+t_h
+
+ght,
+                    
+um_
+mag
+s=
+um_
+mag
+s,
+                    ov
+rr
+d
+s=
+mag
+_ov
+rr
+d
+s,
                 )
             }
         ```
+## 4. Sp
+c
+fy proc
+ss
 
-## 4. Specify processing details
+g d
+ta
 
-Afterwards, create a subclass of [BaseMultiModalProcessor][vllm.multimodal.processing.BaseMultiModalProcessor]
-to fill in the missing details about HF processing.
+s
+Aft
+r
+ards, cr
+at
+ a subc
+ass of [Bas
+Mu
+t
+Moda
+Proc
+ssor][v
+m.mu
+t
+moda
+.proc
+ss
 
-!!! info
-    [Multi-Modal Data Processing](../../design/mm_processing.md)
+g.Bas
+Mu
+t
+Moda
+Proc
+ssor]
+to f
 
-### Multi-modal fields
+ 
 
-Override [_get_mm_fields_config][vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config] to
-return a schema of the tensors outputted by the HF processor that are related to the input multi-modal items.
+ th
+ m
+ss
 
-=== "Basic example: LLaVA"
+g d
+ta
 
-    The output of `CLIPImageProcessor` is a simple tensor with shape
-    `(num_images, num_channels, image_height, image_width)`:
+s about HF proc
+ss
+
+g.
+!!! 
+
+fo
+    [Mu
+t
+-Moda
+ Data Proc
+ss
+
+g](../../d
+s
+g
+/mm_proc
+ss
+
+g.md)
+### Mu
+t
+-moda
+ f
 
 
-    ```python
-    # https://github.com/huggingface/transformers/blob/v4.47.1/src/transformers/models/clip/image_processing_clip.py#L339-L345
-    images = [
-        to_channel_dimension_format(image, data_format, input_channel_dim=input_data_format)
-        for image in all_images
+ds
+Ov
+rr
+d
+ [_g
+t_mm_f
+
+
+ds_co
+f
+g][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+Mu
+t
+Moda
+Proc
+ssor._g
+t_mm_f
+
+
+ds_co
+f
+g] to
+r
+tur
+ a sch
+ma of th
+ t
+
+sors outputt
+d by th
+ HF proc
+ssor that ar
+ r
+
+at
+d to th
+ 
+
+put mu
+t
+-moda
+ 
+t
+ms.
+=== "Bas
+c 
+xamp
+
+: LLaVA"
+    Th
+ output of `CLIPImag
+Proc
+ssor` 
+s a s
+mp
+
+ t
+
+sor 
+
+th shap
+
+    `(
+um_
+mag
+s, 
+um_cha
+
+
+s, 
+mag
+_h
+
+ght, 
+mag
+_
+
+dth)`:
+    ```pytho
+
+    # https://g
+thub.com/hugg
+
+gfac
+/tra
+sform
+rs/b
+ob/v4.47.1/src/tra
+sform
+rs/mod
+
+s/c
+
+p/
+mag
+_proc
+ss
+
+g_c
+
+p.py#L339-L345
+    
+mag
+s = [
+        to_cha
+
+
+_d
+m
+
+s
+o
+_format(
+mag
+, data_format, 
+
+put_cha
+
+
+_d
+m=
+
+put_data_format)
+        for 
+mag
+ 
+
+ a
+_
+mag
+s
     ]
+    data = {"p
+x
 
-    data = {"pixel_values": images}
-    return BatchFeature(data=data, tensor_type=return_tensors)
+_va
+u
+s": 
+mag
+s}
+    r
+tur
+ BatchF
+atur
+(data=data, t
+
+sor_typ
+=r
+tur
+_t
+
+sors)
     ```
+    So, 
 
-    So, we override [_get_mm_fields_config][vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config] as follows:
+ ov
+rr
+d
+ [_g
+t_mm_f
 
-    ```python
-    def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
+
+ds_co
+f
+g][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+Mu
+t
+Moda
+Proc
+ssor._g
+t_mm_f
+
+
+ds_co
+f
+g] as fo
+o
+s:
+    ```pytho
+
+    d
+f _g
+t_mm_f
+
+
+ds_co
+f
+g(
+        s
+
+f,
+        hf_
+
+puts: BatchF
+atur
+,
+        hf_proc
+ssor_mm_k
+args: Mapp
+
+g[str, obj
+ct],
+    ) -
+ Mapp
+
+g[str, Mu
+t
+Moda
+F
+
+
+dCo
+f
+g]:
+        r
+tur
+ d
+ct(
+            p
+x
+
+_va
+u
+s=Mu
+t
+Moda
+F
+
+
+dCo
+f
+g.batch
+d("
+mag
+"),
         )
     ```
+    !!! 
+ot
 
-    !!! note
-        Our [actual code](../../../vllm/model_executor/models/llava.py) additionally supports
-        pre-computed image embeddings, which can be passed to be model via the `image_embeds` argument.
+        Our [actua
+ cod
+](../../../v
+m/mod
 
-=== "With postprocessing: Fuyu"
+_
+x
+cutor/mod
 
-    The `image_patches` output of `FuyuImageProcessor.preprocess_with_tokenizer_info` concatenates
-    the patches from each image belonging to an item in the batch:
+s/
+ava.py) add
+t
+o
+a
+y supports
+        pr
+-comput
+d 
+mag
+ 
+mb
+dd
 
-    ```python
-    # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/fuyu/image_processing_fuyu.py#L673-L679
-            image_input_ids.append(tensor_of_image_ids)
-            image_patches.append(patches)
-        else:
-            image_input_ids.append(torch.tensor([], dtype=torch.int32, device=image_input.device))
+gs, 
+h
+ch ca
+ b
+ pass
+d to b
+ mod
 
-    batch_image_input_ids.append(image_input_ids)
-    batch_image_patches.append(image_patches)
+ v
+a th
+ `
+mag
+_
+mb
+ds` argum
+
+t.
+=== "W
+th postproc
+ss
+
+g: Fuyu"
+    Th
+ `
+mag
+_patch
+s` output of `FuyuImag
+Proc
+ssor.pr
+proc
+ss_
+
+th_tok
+
+
+z
+r_
+
+fo` co
+cat
+
+at
+s
+    th
+ patch
+s from 
+ach 
+mag
+ b
+
+o
+g
+
+g to a
+ 
+t
+m 
+
+ th
+ batch:
+    ```pytho
+
+    # https://g
+thub.com/hugg
+
+gfac
+/tra
+sform
+rs/b
+ob/v4.48.3/src/tra
+sform
+rs/mod
+
+s/fuyu/
+mag
+_proc
+ss
+
+g_fuyu.py#L673-L679
+            
+mag
+_
+
+put_
+ds.app
+
+d(t
+
+sor_of_
+mag
+_
+ds)
+            
+mag
+_patch
+s.app
+
+d(patch
+s)
+        
+
+s
+:
+            
+mag
+_
+
+put_
+ds.app
+
+d(torch.t
+
+sor([], dtyp
+=torch.
+
+t32, d
+v
+c
+=
+mag
+_
+
+put.d
+v
+c
+))
+    batch_
+mag
+_
+
+put_
+ds.app
+
+d(
+mag
+_
+
+put_
+ds)
+    batch_
+mag
+_patch
+s.app
+
+d(
+mag
+_patch
+s)
     ```
+    Th
+ shap
+ of `
+mag
+_patch
+s` outputt
+d by `FuyuImag
+Proc
+ssor` 
+s th
+r
+for
 
-    The shape of `image_patches` outputted by `FuyuImageProcessor` is therefore
-    `(1, num_images, num_patches, patch_width * patch_height * num_channels)`.
+    `(1, 
+um_
+mag
+s, 
+um_patch
+s, patch_
 
-    In order to support the use of
-    [MultiModalFieldConfig.batched][vllm.multimodal.inputs.MultiModalFieldConfig.batched]
-    like in LLaVA, we remove the extra batch dimension by overriding
-    [BaseMultiModalProcessor._call_hf_processor][vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor]:
+dth * patch_h
 
-    ??? code
+ght * 
+um_cha
 
-        ```python
-        def _call_hf_processor(
-            self,
+
+s)`.
+    I
+ ord
+r to support th
+ us
+ of
+    [Mu
+t
+Moda
+F
+
+
+dCo
+f
+g.batch
+d][v
+m.mu
+t
+moda
+.
+
+puts.Mu
+t
+Moda
+F
+
+
+dCo
+f
+g.batch
+d]
+    
+
+k
+ 
+
+ LLaVA, 
+
+ r
+mov
+ th
+ 
+xtra batch d
+m
+
+s
+o
+ by ov
+rr
+d
+
+g
+    [Bas
+Mu
+t
+Moda
+Proc
+ssor._ca
+_hf_proc
+ssor][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+Mu
+t
+Moda
+Proc
+ssor._ca
+_hf_proc
+ssor]:
+    ??? cod
+
+        ```pytho
+
+        d
+f _ca
+_hf_proc
+ssor(
+            s
+
+f,
             prompt: str,
-            mm_data: Mapping[str, object],
-            mm_kwargs: Mapping[str, object],
-            tok_kwargs: Mapping[str, object],
-        ) -> BatchFeature:
-            processed_outputs = super()._call_hf_processor(
+            mm_data: Mapp
+
+g[str, obj
+ct],
+            mm_k
+args: Mapp
+
+g[str, obj
+ct],
+            tok_k
+args: Mapp
+
+g[str, obj
+ct],
+        ) -
+ BatchF
+atur
+:
+            proc
+ss
+d_outputs = sup
+r()._ca
+_hf_proc
+ssor(
                 prompt=prompt,
                 mm_data=mm_data,
-                mm_kwargs=mm_kwargs,
-                tok_kwargs=tok_kwargs,
+                mm_k
+args=mm_k
+args,
+                tok_k
+args=tok_k
+args,
             )
+            
+mag
+_patch
+s = proc
+ss
+d_outputs.g
+t("
+mag
+_patch
+s")
+            
+f 
+mag
+_patch
+s 
+s 
+ot No
 
-            image_patches = processed_outputs.get("image_patches")
-            if image_patches is not None:
-                images = mm_data["images"]
-                assert isinstance(images, list)
+:
+                
+mag
+s = mm_data["
+mag
+s"]
+                ass
+rt 
+s
 
-                # Original output: (1, num_images, Pn, Px * Py * C)
-                # New output: (num_images, Pn, Px * Py * C)
-                assert (isinstance(image_patches, list)
-                        and len(image_patches) == 1)
-                assert (isinstance(image_patches[0], torch.Tensor)
-                        and len(image_patches[0]) == len(images))
+sta
+c
+(
+mag
+s, 
 
-                processed_outputs["image_patches"] = image_patches[0]
+st)
+                # Or
+g
 
-            return processed_outputs
+a
+ output: (1, 
+um_
+mag
+s, P
+, Px * Py * C)
+                # N
+
+ output: (
+um_
+mag
+s, P
+, Px * Py * C)
+                ass
+rt (
+s
+
+sta
+c
+(
+mag
+_patch
+s, 
+
+st)
+                        a
+d 
+
+
+(
+mag
+_patch
+s) == 1)
+                ass
+rt (
+s
+
+sta
+c
+(
+mag
+_patch
+s[0], torch.T
+
+sor)
+                        a
+d 
+
+
+(
+mag
+_patch
+s[0]) == 
+
+
+(
+mag
+s))
+                proc
+ss
+d_outputs["
+mag
+_patch
+s"] = 
+mag
+_patch
+s[0]
+            r
+tur
+ proc
+ss
+d_outputs
         ```
+    !!! 
+ot
 
-    !!! note
-        Our [actual code](../../../vllm/model_executor/models/fuyu.py) has special handling
-        for text-only inputs to prevent unnecessary warnings from HF processor.
+        Our [actua
+ cod
+](../../../v
+m/mod
 
-    !!! note
-        The `_call_hf_processor` method specifies both `mm_kwargs` and `tok_kwargs` for
-        processing. `mm_kwargs` is used to both initialize and call the huggingface
-        processor, whereas `tok_kwargs` is only used to call the huggingface processor.
+_
+x
+cutor/mod
 
-    This lets us override [_get_mm_fields_config][vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config] as follows:
+s/fuyu.py) has sp
+c
+a
+ ha
+d
 
-    ```python
-    def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(image_patches=MultiModalFieldConfig.batched("image"))
+
+g
+        for t
+xt-o
+
+y 
+
+puts to pr
+v
+
+t u
+
+c
+ssary 
+ar
+
+
+gs from HF proc
+ssor.
+    !!! 
+ot
+
+        Th
+ `_ca
+_hf_proc
+ssor` m
+thod sp
+c
+f
+
+s both `mm_k
+args` a
+d `tok_k
+args` for
+        proc
+ss
+
+g. `mm_k
+args` 
+s us
+d to both 
+
+
+t
+a
+
+z
+ a
+d ca
+ th
+ hugg
+
+gfac
+
+        proc
+ssor, 
+h
+r
+as `tok_k
+args` 
+s o
+
+y us
+d to ca
+ th
+ hugg
+
+gfac
+ proc
+ssor.
+    Th
+s 
+
+ts us ov
+rr
+d
+ [_g
+t_mm_f
+
+
+ds_co
+f
+g][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+Mu
+t
+Moda
+Proc
+ssor._g
+t_mm_f
+
+
+ds_co
+f
+g] as fo
+o
+s:
+    ```pytho
+
+    d
+f _g
+t_mm_f
+
+
+ds_co
+f
+g(
+        s
+
+f,
+        hf_
+
+puts: BatchF
+atur
+,
+        hf_proc
+ssor_mm_k
+args: Mapp
+
+g[str, obj
+ct],
+    ) -
+ Mapp
+
+g[str, Mu
+t
+Moda
+F
+
+
+dCo
+f
+g]:
+        r
+tur
+ d
+ct(
+mag
+_patch
+s=Mu
+t
+Moda
+F
+
+
+dCo
+f
+g.batch
+d("
+mag
+"))
     ```
+### Prompt updat
+s
+Ov
+rr
+d
+ [_g
+t_prompt_updat
+s][v
+m.mu
+t
+moda
+.proc
+ss
 
-### Prompt updates
+g.Bas
+Mu
+t
+Moda
+Proc
+ssor._g
+t_prompt_updat
+s] to
+r
+tur
+ a 
 
-Override [_get_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates] to
-return a list of [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instances.
+st of [PromptUpdat
+][v
+m.mu
+t
+moda
+.proc
+ss
 
-Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies an update operation
-(e.g.: insertion, replacement) performed by the HF processor.
+g.PromptUpdat
+] 
 
-=== "Basic example: LLaVA"
+sta
+c
+s.
+Each [PromptUpdat
+][v
+m.mu
+t
+moda
+.proc
+ss
 
-    Looking at HF's `LlavaProcessor`:
+g.PromptUpdat
+] 
 
-    ```python
-    # https://github.com/huggingface/transformers/blob/v4.47.1/src/transformers/models/llava/processing_llava.py#L167-L170
-    prompt_strings = []
-    for sample in text:
-        sample = sample.replace(self.image_token, self.image_token * num_image_tokens)
-        prompt_strings.append(sample)
+sta
+c
+ sp
+c
+f
+
+s a
+ updat
+ op
+rat
+o
+
+(
+.g.: 
+
+s
+rt
+o
+, r
+p
+ac
+m
+
+t) p
+rform
+d by th
+ HF proc
+ssor.
+=== "Bas
+c 
+xamp
+
+: LLaVA"
+    Look
+
+g at HF's `L
+avaProc
+ssor`:
+    ```pytho
+
+    # https://g
+thub.com/hugg
+
+gfac
+/tra
+sform
+rs/b
+ob/v4.47.1/src/tra
+sform
+rs/mod
+
+s/
+ava/proc
+ss
+
+g_
+ava.py#L167-L170
+    prompt_str
+
+gs = []
+    for samp
+
+ 
+
+ t
+xt:
+        samp
+
+ = samp
+
+.r
+p
+ac
+(s
+
+f.
+mag
+_tok
+
+, s
+
+f.
+mag
+_tok
+
+ * 
+um_
+mag
+_tok
+
+s)
+        prompt_str
+
+gs.app
+
+d(samp
+
+)
     ```
+    It s
+mp
+y r
+p
+ats 
+ach 
 
-    It simply repeats each input `image_token` a number of times equal to the number of placeholder feature tokens (`num_image_tokens`).
-    Based on this, we override [_get_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates] as follows:
+put `
+mag
+_tok
 
-    ??? code
+` a 
+umb
+r of t
+m
+s 
+qua
+ to th
+ 
+umb
+r of p
+ac
+ho
+d
+r f
+atur
+ tok
 
-        ```python
-        def _get_prompt_updates(
-            self,
-            mm_items: MultiModalDataItems,
-            hf_processor_mm_kwargs: Mapping[str, object],
-            out_mm_kwargs: MultiModalKwargsItems,
-        ) -> Sequence[PromptUpdate]:
-            hf_config = self.info.get_hf_config()
-            image_token_id = hf_config.image_token_index
+s (`
+um_
+mag
+_tok
 
-            def get_replacement(item_idx: int):
-                images = mm_items.get_items("image", ImageProcessorItems)
+s`).
+    Bas
+d o
+ th
+s, 
 
-                image_size = images.get_image_size(item_idx)
-                num_image_tokens = self.info.get_num_image_tokens(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
+ ov
+rr
+d
+ [_g
+t_prompt_updat
+s][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+Mu
+t
+Moda
+Proc
+ssor._g
+t_prompt_updat
+s] as fo
+o
+s:
+    ??? cod
+
+        ```pytho
+
+        d
+f _g
+t_prompt_updat
+s(
+            s
+
+f,
+            mm_
+t
+ms: Mu
+t
+Moda
+DataIt
+ms,
+            hf_proc
+ssor_mm_k
+args: Mapp
+
+g[str, obj
+ct],
+            out_mm_k
+args: Mu
+t
+Moda
+K
+argsIt
+ms,
+        ) -
+ S
+qu
+
+c
+[PromptUpdat
+]:
+            hf_co
+f
+g = s
+
+f.
+
+fo.g
+t_hf_co
+f
+g()
+            
+mag
+_tok
+
+_
+d = hf_co
+f
+g.
+mag
+_tok
+
+_
+
+d
+x
+            d
+f g
+t_r
+p
+ac
+m
+
+t(
+t
+m_
+dx: 
+
+t):
+                
+mag
+s = mm_
+t
+ms.g
+t_
+t
+ms("
+mag
+", Imag
+Proc
+ssorIt
+ms)
+                
+mag
+_s
+z
+ = 
+mag
+s.g
+t_
+mag
+_s
+z
+(
+t
+m_
+dx)
+                
+um_
+mag
+_tok
+
+s = s
+
+f.
+
+fo.g
+t_
+um_
+mag
+_tok
+
+s(
+                    
+mag
+_
+
+dth=
+mag
+_s
+z
+.
+
+dth,
+                    
+mag
+_h
+
+ght=
+mag
+_s
+z
+.h
+
+ght,
                 )
+                r
+tur
+ [
+mag
+_tok
 
-                return [image_token_id] * num_image_tokens
+_
+d] * 
+um_
+mag
+_tok
 
-            return [
-                PromptReplacement(
-                    modality="image",
-                    target=[image_token_id],
-                    replacement=get_replacement,
+s
+            r
+tur
+ [
+                PromptR
+p
+ac
+m
+
+t(
+                    moda
+
+ty="
+mag
+",
+                    targ
+t=[
+mag
+_tok
+
+_
+d],
+                    r
+p
+ac
+m
+
+t=g
+t_r
+p
+ac
+m
+
+t,
                 ),
             ]
         ```
+=== "Ha
+d
 
-=== "Handling additional tokens: Fuyu"
 
-    Recall the layout of feature tokens from Step 2:
+g add
+t
+o
+a
+ tok
 
+s: Fuyu"
+    R
+ca
+ th
+ 
+ayout of f
+atur
+ tok
+
+s from St
+p 2:
     ```
     |SPEAKER||SPEAKER|...|SPEAKER||NEWLINE|
     |SPEAKER||SPEAKER|...|SPEAKER||NEWLINE|
     ...
     |SPEAKER||SPEAKER|...|SPEAKER||NEWLINE|
     ```
+    W
+ d
+f
 
-    We define a helper function to return `ncols` and `nrows` directly:
 
-    ??? code
+ a h
 
-        ```python
-        def get_image_feature_grid_size(
-            self,
+p
+r fu
+ct
+o
+ to r
+tur
+ `
+co
+s` a
+d `
+ro
+s` d
+r
+ct
+y:
+    ??? cod
+
+        ```pytho
+
+        d
+f g
+t_
+mag
+_f
+atur
+_gr
+d_s
+z
+(
+            s
+
+f,
             *,
-            image_width: int,
-            image_height: int,
-        ) -> tuple[int, int]:
-            image_processor = self.get_image_processor()
-            target_width = image_processor.size["width"]
-            target_height = image_processor.size["height"]
-            patch_width = image_processor.patch_size["width"]
-            patch_height = image_processor.patch_size["height"]
+            
+mag
+_
 
-            if not (image_width <= target_width and image_height <= target_height):
-                height_scale_factor = target_height / image_height
-                width_scale_factor = target_width / image_width
-                optimal_scale_factor = min(height_scale_factor, width_scale_factor)
+dth: 
 
-                image_height = int(image_height * optimal_scale_factor)
-                image_width = int(image_width * optimal_scale_factor)
+t,
+            
+mag
+_h
 
-            ncols = math.ceil(image_width / patch_width)
-            nrows = math.ceil(image_height / patch_height)
-            return ncols, nrows
+ght: 
+
+t,
+        ) -
+ tup
+
+[
+
+t, 
+
+t]:
+            
+mag
+_proc
+ssor = s
+
+f.g
+t_
+mag
+_proc
+ssor()
+            targ
+t_
+
+dth = 
+mag
+_proc
+ssor.s
+z
+["
+
+dth"]
+            targ
+t_h
+
+ght = 
+mag
+_proc
+ssor.s
+z
+["h
+
+ght"]
+            patch_
+
+dth = 
+mag
+_proc
+ssor.patch_s
+z
+["
+
+dth"]
+            patch_h
+
+ght = 
+mag
+_proc
+ssor.patch_s
+z
+["h
+
+ght"]
+            
+f 
+ot (
+mag
+_
+
+dth 
+= targ
+t_
+
+dth a
+d 
+mag
+_h
+
+ght 
+= targ
+t_h
+
+ght):
+                h
+
+ght_sca
+
+_factor = targ
+t_h
+
+ght / 
+mag
+_h
+
+ght
+                
+
+dth_sca
+
+_factor = targ
+t_
+
+dth / 
+mag
+_
+
+dth
+                opt
+ma
+_sca
+
+_factor = m
+
+(h
+
+ght_sca
+
+_factor, 
+
+dth_sca
+
+_factor)
+                
+mag
+_h
+
+ght = 
+
+t(
+mag
+_h
+
+ght * opt
+ma
+_sca
+
+_factor)
+                
+mag
+_
+
+dth = 
+
+t(
+mag
+_
+
+dth * opt
+ma
+_sca
+
+_factor)
+            
+co
+s = math.c
+
+
+(
+mag
+_
+
+dth / patch_
+
+dth)
+            
+ro
+s = math.c
+
+
+(
+mag
+_h
+
+ght / patch_h
+
+ght)
+            r
+tur
+ 
+co
+s, 
+ro
+s
         ```
+    Bas
+d o
+ th
+s, 
 
-    Based on this, we can initially define our replacement tokens as:
+ ca
+ 
 
-    ??? code
 
-        ```python
-        def get_replacement(item_idx: int):
-            images = mm_items.get_items("image", ImageProcessorItems)
-            image_size = images.get_image_size(item_idx)
+t
+a
+y d
+f
 
-            ncols, nrows = self.info.get_image_feature_grid_size(
-                image_width=image_size.width,
-                image_height=image_size.height,
+
+ our r
+p
+ac
+m
+
+t tok
+
+s as:
+    ??? cod
+
+        ```pytho
+
+        d
+f g
+t_r
+p
+ac
+m
+
+t(
+t
+m_
+dx: 
+
+t):
+            
+mag
+s = mm_
+t
+ms.g
+t_
+t
+ms("
+mag
+", Imag
+Proc
+ssorIt
+ms)
+            
+mag
+_s
+z
+ = 
+mag
+s.g
+t_
+mag
+_s
+z
+(
+t
+m_
+dx)
+            
+co
+s, 
+ro
+s = s
+
+f.
+
+fo.g
+t_
+mag
+_f
+atur
+_gr
+d_s
+z
+(
+                
+mag
+_
+
+dth=
+mag
+_s
+z
+.
+
+dth,
+                
+mag
+_h
+
+ght=
+mag
+_s
+z
+.h
+
+ght,
             )
-
-            # `_IMAGE_TOKEN_ID` corresponds to `|SPEAKER|`
-            # `_NEWLINE_TOKEN_ID` corresponds to `|NEWLINE|`
-            return ([_IMAGE_TOKEN_ID] * ncols + [_NEWLINE_TOKEN_ID]) * nrows
+            # `_IMAGE_TOKEN_ID` corr
+spo
+ds to `|SPEAKER|`
+            # `_NEWLINE_TOKEN_ID` corr
+spo
+ds to `|NEWLINE|`
+            r
+tur
+ ([_IMAGE_TOKEN_ID] * 
+co
+s + [_NEWLINE_TOKEN_ID]) * 
+ro
+s
         ```
+    Ho
 
-    However, this is not entirely correct. After `FuyuImageProcessor.preprocess_with_tokenizer_info` is called,
-    a BOS token (`<s>`) is also added to the prompt:
+v
+r, th
+s 
+s 
+ot 
 
-    ??? code
+t
+r
 
-        ```python
-        # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/fuyu/processing_fuyu.py#L417-L435
-        model_image_input = self.image_processor.preprocess_with_tokenizer_info(
-            image_input=tensor_batch_images,
-            image_present=image_present,
-            image_unpadded_h=image_unpadded_heights,
-            image_unpadded_w=image_unpadded_widths,
-            image_placeholder_id=image_placeholder_id,
-            image_newline_id=image_newline_id,
-            variable_sized=True,
+y corr
+ct. Aft
+r `FuyuImag
+Proc
+ssor.pr
+proc
+ss_
+
+th_tok
+
+
+z
+r_
+
+fo` 
+s ca
+
+d,
+    a BOS tok
+
+ (`
+s
+`) 
+s a
+so add
+d to th
+ prompt:
+    ??? cod
+
+        ```pytho
+
+        # https://g
+thub.com/hugg
+
+gfac
+/tra
+sform
+rs/b
+ob/v4.48.3/src/tra
+sform
+rs/mod
+
+s/fuyu/proc
+ss
+
+g_fuyu.py#L417-L435
+        mod
+
+_
+mag
+_
+
+put = s
+
+f.
+mag
+_proc
+ssor.pr
+proc
+ss_
+
+th_tok
+
+
+z
+r_
+
+fo(
+            
+mag
+_
+
+put=t
+
+sor_batch_
+mag
+s,
+            
+mag
+_pr
+s
+
+t=
+mag
+_pr
+s
+
+t,
+            
+mag
+_u
+padd
+d_h=
+mag
+_u
+padd
+d_h
+
+ghts,
+            
+mag
+_u
+padd
+d_
+=
+mag
+_u
+padd
+d_
+
+dths,
+            
+mag
+_p
+ac
+ho
+d
+r_
+d=
+mag
+_p
+ac
+ho
+d
+r_
+d,
+            
+mag
+_
+
+
+
+
+
+
+_
+d=
+mag
+_
+
+
+
+
+
+
+_
+d,
+            var
+ab
+
+_s
+z
+d=Tru
+,
         )
-        prompt_tokens, prompts_length = _tokenize_prompts_with_image_and_batch(
-            tokenizer=self.tokenizer,
+        prompt_tok
+
+s, prompts_
+
+
+gth = _tok
+
+
+z
+_prompts_
+
+th_
+mag
+_a
+d_batch(
+            tok
+
+
+z
+r=s
+
+f.tok
+
+
+z
+r,
             prompts=prompts,
-            scale_factors=scale_factors,
-            max_tokens_to_generate=self.max_tokens_to_generate,
-            max_position_embeddings=self.max_position_embeddings,
-            add_BOS=True,
-            add_beginning_of_answer_token=True,
+            sca
+
+_factors=sca
+
+_factors,
+            max_tok
+
+s_to_g
+
+
+rat
+=s
+
+f.max_tok
+
+s_to_g
+
+
+rat
+,
+            max_pos
+t
+o
+_
+mb
+dd
+
+gs=s
+
+f.max_pos
+t
+o
+_
+mb
+dd
+
+gs,
+            add_BOS=Tru
+,
+            add_b
+g
+
+
+
+g_of_a
+s
+
+r_tok
+
+=Tru
+,
         )
         ```
+    To ass
+g
+ th
+ v
+s
+o
+ 
+mb
+dd
 
-    To assign the vision embeddings to only the image tokens, instead of a string
-    you can return an instance of [PromptUpdateDetails][vllm.multimodal.processing.PromptUpdateDetails]:
+gs to o
 
-    ??? code
+y th
+ 
+mag
+ tok
 
-        ```python
-        hf_config = self.info.get_hf_config()
-        bos_token_id = hf_config.bos_token_id  # `<s>`
-        assert isinstance(bos_token_id, int)
+s, 
 
-        def get_replacement_fuyu(item_idx: int):
-            images = mm_items.get_items("image", ImageProcessorItems)
-            image_size = images.get_image_size(item_idx)
+st
+ad of a str
 
-            ncols, nrows = self.info.get_image_feature_grid_size(
-                image_width=image_size.width,
-                image_height=image_size.height,
+g
+    you ca
+ r
+tur
+ a
+ 
+
+sta
+c
+ of [PromptUpdat
+D
+ta
+
+s][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.PromptUpdat
+D
+ta
+
+s]:
+    ??? cod
+
+        ```pytho
+
+        hf_co
+f
+g = s
+
+f.
+
+fo.g
+t_hf_co
+f
+g()
+        bos_tok
+
+_
+d = hf_co
+f
+g.bos_tok
+
+_
+d  # `
+s
+`
+        ass
+rt 
+s
+
+sta
+c
+(bos_tok
+
+_
+d, 
+
+t)
+        d
+f g
+t_r
+p
+ac
+m
+
+t_fuyu(
+t
+m_
+dx: 
+
+t):
+            
+mag
+s = mm_
+t
+ms.g
+t_
+t
+ms("
+mag
+", Imag
+Proc
+ssorIt
+ms)
+            
+mag
+_s
+z
+ = 
+mag
+s.g
+t_
+mag
+_s
+z
+(
+t
+m_
+dx)
+            
+co
+s, 
+ro
+s = s
+
+f.
+
+fo.g
+t_
+mag
+_f
+atur
+_gr
+d_s
+z
+(
+                
+mag
+_
+
+dth=
+mag
+_s
+z
+.
+
+dth,
+                
+mag
+_h
+
+ght=
+mag
+_s
+z
+.h
+
+ght,
             )
-            image_tokens = ([_IMAGE_TOKEN_ID] * ncols + [_NEWLINE_TOKEN_ID]) * nrows
+            
+mag
+_tok
 
-            return PromptUpdateDetails.select_token_id(
-                image_tokens + [bos_token_id],
-                embed_token_id=_IMAGE_TOKEN_ID,
+s = ([_IMAGE_TOKEN_ID] * 
+co
+s + [_NEWLINE_TOKEN_ID]) * 
+ro
+s
+            r
+tur
+ PromptUpdat
+D
+ta
+
+s.s
+
+
+ct_tok
+
+_
+d(
+                
+mag
+_tok
+
+s + [bos_tok
+
+_
+d],
+                
+mb
+d_tok
+
+_
+d=_IMAGE_TOKEN_ID,
             )
         ```
+    F
 
-    Finally, noticing that the HF processor removes the `|ENDOFTEXT|` token from the tokenized prompt,
-    we can search for it to conduct the replacement at the start of the string:
+a
+y, 
+ot
+c
 
-    ??? code
+g that th
+ HF proc
+ssor r
+mov
+s th
+ `|ENDOFTEXT|` tok
 
-        ```python
-        def _get_prompt_updates(
-            self,
-            mm_items: MultiModalDataItems,
-            hf_processor_mm_kwargs: Mapping[str, object],
-            out_mm_kwargs: MultiModalKwargsItems,
-        ) -> Sequence[PromptUpdate]:
-            hf_config = self.info.get_hf_config()
-            bos_token_id = hf_config.bos_token_id
-            assert isinstance(bos_token_id, int)
+ from th
+ tok
 
-            tokenizer = self.info.get_tokenizer()
-            eot_token_id = tokenizer.bos_token_id
-            assert isinstance(eot_token_id, int)
 
-            def get_replacement_fuyu(item_idx: int):
-                images = mm_items.get_items("image", ImageProcessorItems)
-                image_size = images.get_image_size(item_idx)
+z
+d prompt,
+    
 
-                ncols, nrows = self.info.get_image_feature_grid_size(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
+ ca
+ s
+arch for 
+t to co
+duct th
+ r
+p
+ac
+m
+
+t at th
+ start of th
+ str
+
+g:
+    ??? cod
+
+        ```pytho
+
+        d
+f _g
+t_prompt_updat
+s(
+            s
+
+f,
+            mm_
+t
+ms: Mu
+t
+Moda
+DataIt
+ms,
+            hf_proc
+ssor_mm_k
+args: Mapp
+
+g[str, obj
+ct],
+            out_mm_k
+args: Mu
+t
+Moda
+K
+argsIt
+ms,
+        ) -
+ S
+qu
+
+c
+[PromptUpdat
+]:
+            hf_co
+f
+g = s
+
+f.
+
+fo.g
+t_hf_co
+f
+g()
+            bos_tok
+
+_
+d = hf_co
+f
+g.bos_tok
+
+_
+d
+            ass
+rt 
+s
+
+sta
+c
+(bos_tok
+
+_
+d, 
+
+t)
+            tok
+
+
+z
+r = s
+
+f.
+
+fo.g
+t_tok
+
+
+z
+r()
+            
+ot_tok
+
+_
+d = tok
+
+
+z
+r.bos_tok
+
+_
+d
+            ass
+rt 
+s
+
+sta
+c
+(
+ot_tok
+
+_
+d, 
+
+t)
+            d
+f g
+t_r
+p
+ac
+m
+
+t_fuyu(
+t
+m_
+dx: 
+
+t):
+                
+mag
+s = mm_
+t
+ms.g
+t_
+t
+ms("
+mag
+", Imag
+Proc
+ssorIt
+ms)
+                
+mag
+_s
+z
+ = 
+mag
+s.g
+t_
+mag
+_s
+z
+(
+t
+m_
+dx)
+                
+co
+s, 
+ro
+s = s
+
+f.
+
+fo.g
+t_
+mag
+_f
+atur
+_gr
+d_s
+z
+(
+                    
+mag
+_
+
+dth=
+mag
+_s
+z
+.
+
+dth,
+                    
+mag
+_h
+
+ght=
+mag
+_s
+z
+.h
+
+ght,
                 )
-                image_tokens = ([_IMAGE_TOKEN_ID] * ncols + [_NEWLINE_TOKEN_ID]) * nrows
+                
+mag
+_tok
 
-                return PromptUpdateDetails.select_token_id(
-                    image_tokens + [bos_token_id],
-                    embed_token_id=_IMAGE_TOKEN_ID,
+s = ([_IMAGE_TOKEN_ID] * 
+co
+s + [_NEWLINE_TOKEN_ID]) * 
+ro
+s
+                r
+tur
+ PromptUpdat
+D
+ta
+
+s.s
+
+
+ct_tok
+
+_
+d(
+                    
+mag
+_tok
+
+s + [bos_tok
+
+_
+d],
+                    
+mb
+d_tok
+
+_
+d=_IMAGE_TOKEN_ID,
                 )
+            r
+tur
+ [
+                PromptR
+p
+ac
+m
 
-            return [
-                PromptReplacement(
-                    modality="image",
-                    target=[eot_token_id],
-                    replacement=get_replacement_fuyu,
+t(
+                    moda
+
+ty="
+mag
+",
+                    targ
+t=[
+ot_tok
+
+_
+d],
+                    r
+p
+ac
+m
+
+t=g
+t_r
+p
+ac
+m
+
+t_fuyu,
                 )
             ]
         ```
+## 5. R
+g
+st
+r proc
+ssor-r
 
-## 5. Register processor-related classes
+at
+d c
+ass
+s
+Aft
+r you hav
+ d
+f
 
-After you have defined [BaseProcessingInfo][vllm.multimodal.processing.BaseProcessingInfo] (Step 2),
-[BaseDummyInputsBuilder][vllm.multimodal.processing.BaseDummyInputsBuilder] (Step 3),
-and [BaseMultiModalProcessor][vllm.multimodal.processing.BaseMultiModalProcessor] (Step 4),
-decorate the model class with [MULTIMODAL_REGISTRY.register_processor][vllm.multimodal.registry.MultiModalRegistry.register_processor]
-to register them to the multi-modal registry:
 
-```diff
-  from vllm.model_executor.models.interfaces import SupportsMultiModal
-+ from vllm.multimodal import MULTIMODAL_REGISTRY
+d [Bas
+Proc
+ss
 
-+ @MULTIMODAL_REGISTRY.register_processor(
-+     YourMultiModalProcessor,
-+     info=YourProcessingInfo,
-+     dummy_inputs=YourDummyInputsBuilder,
+gI
+fo][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+Proc
+ss
+
+gI
+fo] (St
+p 2),
+[Bas
+DummyI
+putsBu
+
+d
+r][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+DummyI
+putsBu
+
+d
+r] (St
+p 3),
+a
+d [Bas
+Mu
+t
+Moda
+Proc
+ssor][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+Mu
+t
+Moda
+Proc
+ssor] (St
+p 4),
+d
+corat
+ th
+ mod
+
+ c
+ass 
+
+th [MULTIMODAL_REGISTRY.r
+g
+st
+r_proc
+ssor][v
+m.mu
+t
+moda
+.r
+g
+stry.Mu
+t
+Moda
+R
+g
+stry.r
+g
+st
+r_proc
+ssor]
+to r
+g
+st
+r th
+m to th
+ mu
+t
+-moda
+ r
+g
+stry:
+```d
+ff
+  from v
+m.mod
+
+_
+x
+cutor.mod
+
+s.
+
+t
+rfac
+s 
+mport SupportsMu
+t
+Moda
+
++ from v
+m.mu
+t
+moda
+ 
+mport MULTIMODAL_REGISTRY
++ @MULTIMODAL_REGISTRY.r
+g
+st
+r_proc
+ssor(
++     YourMu
+t
+Moda
+Proc
+ssor,
++     
+
+fo=YourProc
+ss
+
+gI
+fo,
++     dummy_
+
+puts=YourDummyI
+putsBu
+
+d
+r,
 + )
-  class YourModelForImage2Seq(nn.Module, SupportsMultiModal):
+  c
+ass YourMod
+
+ForImag
+2S
+q(
+.Modu
+
+, SupportsMu
+t
+Moda
+):
 ```
+## Not
+s
+### I
+s
+rt
 
-## Notes
+g f
+atur
+ tok
 
-### Inserting feature tokens without replacement
+s 
 
-Some HF processors directly insert feature tokens without replacing anything in the original prompt. In that case, you can use [PromptInsertion][vllm.multimodal.processing.PromptInsertion] instead of [PromptReplacement][vllm.multimodal.processing.PromptReplacement] inside [_get_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates].
+thout r
+p
+ac
+m
 
-Examples:
+t
+Som
+ HF proc
+ssors d
+r
+ct
+y 
 
-- BLIP-2 (insert at start of prompt): [vllm/model_executor/models/blip2.py](../../../vllm/model_executor/models/blip2.py)
-- Molmo (insert after `<|endoftext|>` token): [vllm/model_executor/models/molmo.py](../../../vllm/model_executor/models/molmo.py)
+s
+rt f
+atur
+ tok
 
-### Handling prompt updates unrelated to multi-modal data
+s 
 
-[_get_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates] assumes that each application of prompt update corresponds to one multi-modal item. If the HF processor performs additional processing regardless of how many multi-modal items there are, you should override [_apply_hf_processor_tokens_only][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_tokens_only] so that the processed token inputs are consistent with the result of applying the HF processor on text inputs. This is because token inputs bypass the HF processor according to [our design](../../design/mm_processing.md).
+thout r
+p
+ac
 
-Examples:
+g a
+yth
 
-- Chameleon (appends `sep_token`): [vllm/model_executor/models/chameleon.py](../../../vllm/model_executor/models/chameleon.py)
-- Fuyu (appends `boa_token`): [vllm/model_executor/models/fuyu.py](../../../vllm/model_executor/models/fuyu.py)
-- Molmo (applies chat template which is not defined elsewhere): [vllm/model_executor/models/molmo.py](../../../vllm/model_executor/models/molmo.py)
+g 
 
-### Custom HF processor
+ th
+ or
+g
 
-Some models don't define an HF processor class on HF Hub. In that case, you can define a custom HF processor that has the same call signature as HF processors and pass it to [_call_hf_processor][vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor].
+a
+ prompt. I
+ that cas
+, you ca
+ us
+ [PromptI
+s
+rt
+o
+][v
+m.mu
+t
+moda
+.proc
+ss
 
-Examples:
+g.PromptI
+s
+rt
+o
+] 
 
-- DeepSeek-VL2: [vllm/model_executor/models/deepseek_vl2.py](../../../vllm/model_executor/models/deepseek_vl2.py)
-- InternVL: [vllm/model_executor/models/internvl.py](../../../vllm/model_executor/models/internvl.py)
-- Qwen-VL: [vllm/model_executor/models/qwen_vl.py](../../../vllm/model_executor/models/qwen_vl.py)
+st
+ad of [PromptR
+p
+ac
+m
+
+t][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.PromptR
+p
+ac
+m
+
+t] 
+
+s
+d
+ [_g
+t_prompt_updat
+s][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+Mu
+t
+Moda
+Proc
+ssor._g
+t_prompt_updat
+s].
+Examp
+
+s:
+- BLIP-2 (
+
+s
+rt at start of prompt): [v
+m/mod
+
+_
+x
+cutor/mod
+
+s/b
+
+p2.py](../../../v
+m/mod
+
+_
+x
+cutor/mod
+
+s/b
+
+p2.py)
+- Mo
+mo (
+
+s
+rt aft
+r `
+|
+
+doft
+xt|
+` tok
+
+): [v
+m/mod
+
+_
+x
+cutor/mod
+
+s/mo
+mo.py](../../../v
+m/mod
+
+_
+x
+cutor/mod
+
+s/mo
+mo.py)
+### Ha
+d
+
+
+g prompt updat
+s u
+r
+
+at
+d to mu
+t
+-moda
+ data
+[_g
+t_prompt_updat
+s][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+Mu
+t
+Moda
+Proc
+ssor._g
+t_prompt_updat
+s] assum
+s that 
+ach app
+
+cat
+o
+ of prompt updat
+ corr
+spo
+ds to o
+
+ mu
+t
+-moda
+ 
+t
+m. If th
+ HF proc
+ssor p
+rforms add
+t
+o
+a
+ proc
+ss
+
+g r
+gard
+
+ss of ho
+ ma
+y mu
+t
+-moda
+ 
+t
+ms th
+r
+ ar
+, you shou
+d ov
+rr
+d
+ [_app
+y_hf_proc
+ssor_tok
+
+s_o
+
+y][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+Mu
+t
+Moda
+Proc
+ssor._app
+y_hf_proc
+ssor_tok
+
+s_o
+
+y] so that th
+ proc
+ss
+d tok
+
+ 
+
+puts ar
+ co
+s
+st
+
+t 
+
+th th
+ r
+su
+t of app
+y
+
+g th
+ HF proc
+ssor o
+ t
+xt 
+
+puts. Th
+s 
+s b
+caus
+ tok
+
+ 
+
+puts bypass th
+ HF proc
+ssor accord
+
+g to [our d
+s
+g
+](../../d
+s
+g
+/mm_proc
+ss
+
+g.md).
+Examp
+
+s:
+- Cham
+
+
+o
+ (app
+
+ds `s
+p_tok
+
+`): [v
+m/mod
+
+_
+x
+cutor/mod
+
+s/cham
+
+
+o
+.py](../../../v
+m/mod
+
+_
+x
+cutor/mod
+
+s/cham
+
+
+o
+.py)
+- Fuyu (app
+
+ds `boa_tok
+
+`): [v
+m/mod
+
+_
+x
+cutor/mod
+
+s/fuyu.py](../../../v
+m/mod
+
+_
+x
+cutor/mod
+
+s/fuyu.py)
+- Mo
+mo (app
+
+
+s chat t
+mp
+at
+ 
+h
+ch 
+s 
+ot d
+f
+
+
+d 
+
+s
+
+h
+r
+): [v
+m/mod
+
+_
+x
+cutor/mod
+
+s/mo
+mo.py](../../../v
+m/mod
+
+_
+x
+cutor/mod
+
+s/mo
+mo.py)
+### Custom HF proc
+ssor
+Som
+ mod
+
+s do
+'t d
+f
+
+
+ a
+ HF proc
+ssor c
+ass o
+ HF Hub. I
+ that cas
+, you ca
+ d
+f
+
+
+ a custom HF proc
+ssor that has th
+ sam
+ ca
+ s
+g
+atur
+ as HF proc
+ssors a
+d pass 
+t to [_ca
+_hf_proc
+ssor][v
+m.mu
+t
+moda
+.proc
+ss
+
+g.Bas
+Mu
+t
+Moda
+Proc
+ssor._ca
+_hf_proc
+ssor].
+Examp
+
+s:
+- D
+pS
+k-VL2: [v
+m/mod
+
+_
+x
+cutor/mod
+
+s/d
+ps
+k_v
+2.py](../../../v
+m/mod
+
+_
+x
+cutor/mod
+
+s/d
+ps
+k_v
+2.py)
+- I
+t
+r
+VL: [v
+m/mod
+
+_
+x
+cutor/mod
+
+s/
+
+t
+r
+v
+.py](../../../v
+m/mod
+
+_
+x
+cutor/mod
+
+s/
+
+t
+r
+v
+.py)
+- Q
+
+
+-VL: [v
+m/mod
+
+_
+x
+cutor/mod
+
+s/q
+
+
+_v
+.py](../../../v
+m/mod
+
+_
+x
+cutor/mod
+
+s/q
+
+
+_v
+.py)

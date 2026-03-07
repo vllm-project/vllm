@@ -1,53 +1,357 @@
-# AnythingLLM
+# A
+yth
 
-[AnythingLLM](https://github.com/Mintplex-Labs/anything-llm) is a full-stack application that enables you to turn any document, resource, or piece of content into context that any LLM can use as references during chatting.
+gLLM
+[A
+yth
 
-It allows you to deploy a large language model (LLM) server with vLLM as the backend, which exposes OpenAI-compatible endpoints.
+gLLM](https://g
+thub.com/M
 
-## Prerequisites
+tp
 
-Set up the vLLM environment:
+x-Labs/a
+yth
 
+g-
+m) 
+s a fu
+-stack app
+
+cat
+o
+ that 
+
+ab
+
+s you to tur
+ a
+y docum
+
+t, r
+sourc
+, or p
+
+c
+ of co
+t
+
+t 
+
+to co
+t
+xt that a
+y LLM ca
+ us
+ as r
+f
+r
+
+c
+s dur
+
+g chatt
+
+g.
+It a
+o
+s you to d
+p
+oy a 
+arg
+ 
+a
+guag
+ mod
+
+ (LLM) s
+rv
+r 
+
+th vLLM as th
+ back
+
+d, 
+h
+ch 
+xpos
+s Op
+
+AI-compat
+b
+
+ 
+
+dpo
+
+ts.
+## Pr
+r
+qu
+s
+t
+s
+S
+t up th
+ vLLM 
+
+v
+ro
+m
+
+t:
 ```bash
-pip install vllm
+p
+p 
+
+sta
+ v
+m
 ```
+## D
+p
+oy
+1. Start th
+ vLLM s
+rv
+r 
 
-## Deploy
+th a support
+d chat-comp
 
-1. Start the vLLM server with a supported chat-completion model, for example:
+t
+o
+ mod
 
+, for 
+xamp
+
+:
     ```bash
-    vllm serve Qwen/Qwen1.5-32B-Chat-AWQ --max-model-len 4096
+    v
+m s
+rv
+ Q
+
+
+/Q
+
+
+1.5-32B-Chat-AWQ --max-mod
+
+-
+
+
+ 4096
     ```
+1. Do
 
-1. Download and install [AnythingLLM Desktop](https://anythingllm.com/desktop).
 
-1. Configure the AI provider:
+oad a
+d 
 
-    - At the bottom, click the 🔧 wrench icon -> **Open settings** -> **AI Providers** -> **LLM**.
-    - Enter the following values:
-        - LLM Provider: Generic OpenAI
-        - Base URL: `http://{vllm server host}:{vllm server port}/v1`
-        - Chat Model Name: `Qwen/Qwen1.5-32B-Chat-AWQ`
+sta
+ [A
+yth
 
-    ![set AI providers](../../assets/deployment/anything-llm-provider.png)
+gLLM D
+sktop](https://a
+yth
 
-1. Create a workspace:
+g
+m.com/d
+sktop).
+1. Co
+f
+gur
+ th
+ AI prov
+d
+r:
+    - At th
+ bottom, c
 
-    1. At the bottom, click the ↺ back icon and back to workspaces.
-    1. Create a workspace (e.g., `vllm`) and start chatting.
+ck th
+ 🔧 
+r
 
-    ![create a workspace](../../assets/deployment/anything-llm-chat-without-doc.png)
+ch 
+co
+ -
+ **Op
 
-1. Add a document.
+ s
+tt
 
-    1. Click the 📎 attachment icon.
-    1. Upload a document.
-    1. Select and move the document into your workspace.
-    1. Save and embed it.
+gs** -
+ **AI Prov
+d
+rs** -
+ **LLM**.
+    - E
+t
+r th
+ fo
+o
 
-    ![add a document](../../assets/deployment/anything-llm-upload-doc.png)
 
-1. Chat using your document as context.
+g va
+u
+s:
+        - LLM Prov
+d
+r: G
 
-    ![chat with your context](../../assets/deployment/anything-llm-chat-with-doc.png)
+
+r
+c Op
+
+AI
+        - Bas
+ URL: `http://{v
+m s
+rv
+r host}:{v
+m s
+rv
+r port}/v1`
+        - Chat Mod
+
+ Nam
+: `Q
+
+
+/Q
+
+
+1.5-32B-Chat-AWQ`
+    ![s
+t AI prov
+d
+rs](../../ass
+ts/d
+p
+oym
+
+t/a
+yth
+
+g-
+m-prov
+d
+r.p
+g)
+1. Cr
+at
+ a 
+orkspac
+:
+    1. At th
+ bottom, c
+
+ck th
+ ↺ back 
+co
+ a
+d back to 
+orkspac
+s.
+    1. Cr
+at
+ a 
+orkspac
+ (
+.g., `v
+m`) a
+d start chatt
+
+g.
+    ![cr
+at
+ a 
+orkspac
+](../../ass
+ts/d
+p
+oym
+
+t/a
+yth
+
+g-
+m-chat-
+
+thout-doc.p
+g)
+1. Add a docum
+
+t.
+    1. C
+
+ck th
+ 📎 attachm
+
+t 
+co
+.
+    1. Up
+oad a docum
+
+t.
+    1. S
+
+
+ct a
+d mov
+ th
+ docum
+
+t 
+
+to your 
+orkspac
+.
+    1. Sav
+ a
+d 
+mb
+d 
+t.
+    ![add a docum
+
+t](../../ass
+ts/d
+p
+oym
+
+t/a
+yth
+
+g-
+m-up
+oad-doc.p
+g)
+1. Chat us
+
+g your docum
+
+t as co
+t
+xt.
+    ![chat 
+
+th your co
+t
+xt](../../ass
+ts/d
+p
+oym
+
+t/a
+yth
+
+g-
+m-chat-
+
+th-doc.p
+g)

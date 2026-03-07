@@ -1,376 +1,4400 @@
-# Troubleshooting
+# Troub
 
-This document outlines some troubleshooting strategies you can consider. If you think you've discovered a bug, please [search existing issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue) first to see if it has already been reported. If not, please [file a new issue](https://github.com/vllm-project/vllm/issues/new/choose), providing as much relevant information as possible.
+shoot
 
-!!! note
-    Once you've debugged a problem, remember to turn off any debugging environment variables defined, or simply start a new shell to avoid being affected by lingering debugging settings. Otherwise, the system might be slow with debugging functionalities left activated.
+g
+Th
+s docum
 
-## Hangs downloading a model
+t out
 
-If the model isn't already downloaded to disk, vLLM will download it from the internet which can take time and depend on your internet connection.
-It's recommended to download the model first using the [huggingface-cli](https://huggingface.co/docs/huggingface_hub/en/guides/cli) and passing the local path to the model to vLLM. This way, you can isolate the issue.
 
-## Hangs loading a model from disk
 
-If the model is large, it can take a long time to load it from disk. Pay attention to where you store the model. Some clusters have shared filesystems across nodes, e.g. a distributed filesystem or a network filesystem, which can be slow.
-It'd be better to store the model in a local disk. Additionally, have a look at the CPU memory usage, when the model is too large it might take a lot of CPU memory, slowing down the operating system because it needs to frequently swap between disk and memory.
+s som
+ troub
 
-!!! note
-    To isolate the model downloading and loading issue, you can use the `--load-format dummy` argument to skip loading the model weights. This way, you can check if the model downloading and loading is the bottleneck.
+shoot
 
-## Out of memory
+g strat
+g
 
-If the model is too large to fit in a single GPU, you will get an out-of-memory (OOM) error. Consider adopting [these options](../configuration/conserving_memory.md) to reduce the memory consumption.
+s you ca
+ co
+s
+d
+r. If you th
 
-## Generation quality changed
+k you'v
+ d
+scov
+r
+d a bug, p
 
-In v0.8.0, the source of default sampling parameters was changed in <https://github.com/vllm-project/vllm/pull/12622>. Prior to v0.8.0, the default sampling parameters came from vLLM's set of neutral defaults. From v0.8.0 onwards, the default sampling parameters come from the `generation_config.json` provided by the model creator.
+as
+ [s
+arch 
+x
+st
 
-In most cases, this should lead to higher quality responses, because the model creator is likely to know which sampling parameters are best for their model. However, in some cases the defaults provided by the model creator can lead to degraded performance.
+g 
+ssu
+s](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s?q=
+s%3A
+ssu
+) f
+rst to s
+ 
+f 
+t has a
+r
+ady b
 
-You can check if this is happening by trying the old defaults with `--generation-config vllm` for online and `generation_config="vllm"` for offline. If, after trying this, your generation quality improves we would recommend continuing to use the vLLM defaults and petition the model creator on <https://huggingface.co> to update their default `generation_config.json` so that it produces better quality generations.
+ r
+port
+d. If 
+ot, p
 
-## Enable more logging
+as
+ [f
 
-If other strategies don't solve the problem, it's likely that the vLLM instance is stuck somewhere. You can use the following environment variables to help debug the issue:
 
-- `export VLLM_LOGGING_LEVEL=DEBUG` to turn on more logging.
-- `export VLLM_LOG_STATS_INTERVAL=1.` to get log statistics more frequently for tracking running queue, waiting queue and cache hit states.
-- `export CUDA_LAUNCH_BLOCKING=1` to identify which CUDA kernel is causing the problem.
-- `export NCCL_DEBUG=TRACE` to turn on more logging for NCCL.
-- `export VLLM_TRACE_FUNCTION=1` to record all function calls for inspection in the log files to tell which function crashes or hangs. (WARNING: This flag will slow down the token generation by **over 100x**. Do not use unless absolutely needed.)
+ a 
 
-## Breakpoints
 
-Setting normal `pdb` breakpoints may not work in vLLM's codebase if they are executed in a subprocess. You will experience something like:
+ 
+ssu
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/
 
-``` text
-  File "/usr/local/uv/cpython-3.12.11-linux-x86_64-gnu/lib/python3.12/bdb.py", line 100, in trace_dispatch
-    return self.dispatch_line(frame)
+
+/choos
+), prov
+d
+
+g as much r
+
+
+va
+t 
+
+format
+o
+ as poss
+b
+
+.
+!!! 
+ot
+
+    O
+c
+ you'v
+ d
+bugg
+d a prob
+
+m, r
+m
+mb
+r to tur
+ off a
+y d
+bugg
+
+g 
+
+v
+ro
+m
+
+t var
+ab
+
+s d
+f
+
+
+d, or s
+mp
+y start a 
+
+
+ sh
+
+ to avo
+d b
+
+
+g aff
+ct
+d by 
+
+
+g
+r
+
+g d
+bugg
+
+g s
+tt
+
+gs. Oth
+r
+
+s
+, th
+ syst
+m m
+ght b
+ s
+o
+ 
+
+th d
+bugg
+
+g fu
+ct
+o
+a
+
+t
+
+s 
+
+ft act
+vat
+d.
+## Ha
+gs do
+
+
+oad
+
+g a mod
+
+
+If th
+ mod
+
+ 
+s
+'t a
+r
+ady do
+
+
+oad
+d to d
+sk, vLLM 
+
+
+ do
+
+
+oad 
+t from th
+ 
+
+t
+r
+
+t 
+h
+ch ca
+ tak
+ t
+m
+ a
+d d
+p
+
+d o
+ your 
+
+t
+r
+
+t co
+
+ct
+o
+.
+It's r
+comm
+
+d
+d to do
+
+
+oad th
+ mod
+
+ f
+rst us
+
+g th
+ [hugg
+
+gfac
+-c
+
+](https://hugg
+
+gfac
+.co/docs/hugg
+
+gfac
+_hub/
+
+/gu
+d
+s/c
+
+) a
+d pass
+
+g th
+ 
+oca
+ path to th
+ mod
+
+ to vLLM. Th
+s 
+ay, you ca
+ 
+so
+at
+ th
+ 
+ssu
+.
+## Ha
+gs 
+oad
+
+g a mod
+
+ from d
+sk
+If th
+ mod
+
+ 
+s 
+arg
+, 
+t ca
+ tak
+ a 
+o
+g t
+m
+ to 
+oad 
+t from d
+sk. Pay att
+
+t
+o
+ to 
+h
+r
+ you stor
+ th
+ mod
+
+. Som
+ c
+ust
+rs hav
+ shar
+d f
+
+
+syst
+ms across 
+od
+s, 
+.g. a d
+str
+but
+d f
+
+
+syst
+m or a 
+
+t
+ork f
+
+
+syst
+m, 
+h
+ch ca
+ b
+ s
+o
+.
+It'd b
+ b
+tt
+r to stor
+ th
+ mod
+
+ 
+
+ a 
+oca
+ d
+sk. Add
+t
+o
+a
+y, hav
+ a 
+ook at th
+ CPU m
+mory usag
+, 
+h
+
+ th
+ mod
+
+ 
+s too 
+arg
+ 
+t m
+ght tak
+ a 
+ot of CPU m
+mory, s
+o
+
+
+g do
+
+ th
+ op
+rat
+
+g syst
+m b
+caus
+ 
+t 
+
+ds to fr
+qu
+
+t
+y s
+ap b
+t
+
+
+ d
+sk a
+d m
+mory.
+!!! 
+ot
+
+    To 
+so
+at
+ th
+ mod
+
+ do
+
+
+oad
+
+g a
+d 
+oad
+
+g 
+ssu
+, you ca
+ us
+ th
+ `--
+oad-format dummy` argum
+
+t to sk
+p 
+oad
+
+g th
+ mod
+
+ 
+
+
+ghts. Th
+s 
+ay, you ca
+ ch
+ck 
+f th
+ mod
+
+ do
+
+
+oad
+
+g a
+d 
+oad
+
+g 
+s th
+ bott
+
+
+
+ck.
+## Out of m
+mory
+If th
+ mod
+
+ 
+s too 
+arg
+ to f
+t 
+
+ a s
+
+g
+
+ GPU, you 
+
+
+ g
+t a
+ out-of-m
+mory (OOM) 
+rror. Co
+s
+d
+r adopt
+
+g [th
+s
+ opt
+o
+s](../co
+f
+gurat
+o
+/co
+s
+rv
+
+g_m
+mory.md) to r
+duc
+ th
+ m
+mory co
+sumpt
+o
+.
+## G
+
+
+rat
+o
+ qua
+
+ty cha
+g
+d
+I
+ v0.8.0, th
+ sourc
+ of d
+fau
+t samp
+
+
+g param
+t
+rs 
+as cha
+g
+d 
+
+ 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/12622
+. Pr
+or to v0.8.0, th
+ d
+fau
+t samp
+
+
+g param
+t
+rs cam
+ from vLLM's s
+t of 
+
+utra
+ d
+fau
+ts. From v0.8.0 o
+
+ards, th
+ d
+fau
+t samp
+
+
+g param
+t
+rs com
+ from th
+ `g
+
+
+rat
+o
+_co
+f
+g.jso
+` prov
+d
+d by th
+ mod
+
+ cr
+ator.
+I
+ most cas
+s, th
+s shou
+d 
+
+ad to h
+gh
+r qua
+
+ty r
+spo
+s
+s, b
+caus
+ th
+ mod
+
+ cr
+ator 
+s 
+
+k
+
+y to k
+o
+ 
+h
+ch samp
+
+
+g param
+t
+rs ar
+ b
+st for th
+
+r mod
+
+. Ho
+
+v
+r, 
+
+ som
+ cas
+s th
+ d
+fau
+ts prov
+d
+d by th
+ mod
+
+ cr
+ator ca
+ 
+
+ad to d
+grad
+d p
+rforma
+c
+.
+You ca
+ ch
+ck 
+f th
+s 
+s happ
+
+
+
+g by try
+
+g th
+ o
+d d
+fau
+ts 
+
+th `--g
+
+
+rat
+o
+-co
+f
+g v
+m` for o
+
+
+
+
+ a
+d `g
+
+
+rat
+o
+_co
+f
+g="v
+m"` for off
+
+
+
+. If, aft
+r try
+
+g th
+s, your g
+
+
+rat
+o
+ qua
+
+ty 
+mprov
+s 
+
+ 
+ou
+d r
+comm
+
+d co
+t
+
+u
+
+g to us
+ th
+ vLLM d
+fau
+ts a
+d p
+t
+t
+o
+ th
+ mod
+
+ cr
+ator o
+ 
+https://hugg
+
+gfac
+.co
+ to updat
+ th
+
+r d
+fau
+t `g
+
+
+rat
+o
+_co
+f
+g.jso
+` so that 
+t produc
+s b
+tt
+r qua
+
+ty g
+
+
+rat
+o
+s.
+## E
+ab
+
+ mor
+ 
+ogg
+
+g
+If oth
+r strat
+g
+
+s do
+'t so
+v
+ th
+ prob
+
+m, 
+t's 
+
+k
+
+y that th
+ vLLM 
+
+sta
+c
+ 
+s stuck som
+
+h
+r
+. You ca
+ us
+ th
+ fo
+o
+
+
+g 
+
+v
+ro
+m
+
+t var
+ab
+
+s to h
+
+p d
+bug th
+ 
+ssu
+:
+- `
+xport VLLM_LOGGING_LEVEL=DEBUG` to tur
+ o
+ mor
+ 
+ogg
+
+g.
+- `
+xport VLLM_LOG_STATS_INTERVAL=1.` to g
+t 
+og stat
+st
+cs mor
+ fr
+qu
+
+t
+y for track
+
+g ru
+
+
+g qu
+u
+, 
+a
+t
+
+g qu
+u
+ a
+d cach
+ h
+t stat
+s.
+- `
+xport CUDA_LAUNCH_BLOCKING=1` to 
+d
+
+t
+fy 
+h
+ch CUDA k
+r
+
+
+ 
+s caus
+
+g th
+ prob
+
+m.
+- `
+xport NCCL_DEBUG=TRACE` to tur
+ o
+ mor
+ 
+ogg
+
+g for NCCL.
+- `
+xport VLLM_TRACE_FUNCTION=1` to r
+cord a
+ fu
+ct
+o
+ ca
+s for 
+
+sp
+ct
+o
+ 
+
+ th
+ 
+og f
+
+
+s to t
+
+ 
+h
+ch fu
+ct
+o
+ crash
+s or ha
+gs. (WARNING: Th
+s f
+ag 
+
+
+ s
+o
+ do
+
+ th
+ tok
+
+ g
+
+
+rat
+o
+ by **ov
+r 100x**. Do 
+ot us
+ u
+
+
+ss abso
+ut
+
+y 
+
+d
+d.)
+## Br
+akpo
+
+ts
+S
+tt
+
+g 
+orma
+ `pdb` br
+akpo
+
+ts may 
+ot 
+ork 
+
+ vLLM's cod
+bas
+ 
+f th
+y ar
+ 
+x
+cut
+d 
+
+ a subproc
+ss. You 
+
+
+ 
+xp
+r
+
+
+c
+ som
+th
+
+g 
+
+k
+:
+``` t
+xt
+  F
+
+
+ "/usr/
+oca
+/uv/cpytho
+-3.12.11-
+
+
+ux-x86_64-g
+u/
+
+b/pytho
+3.12/bdb.py", 
+
+
+
+ 100, 
+
+ trac
+_d
+spatch
+    r
+tur
+ s
+
+f.d
+spatch_
+
+
+
+(fram
+)
            ^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/usr/local/uv/cpython-3.12.11-linux-x86_64-gnu/lib/python3.12/bdb.py", line 125, in dispatch_line
-    if self.quitting: raise BdbQuit
+  F
+
+
+ "/usr/
+oca
+/uv/cpytho
+-3.12.11-
+
+
+ux-x86_64-g
+u/
+
+b/pytho
+3.12/bdb.py", 
+
+
+
+ 125, 
+
+ d
+spatch_
+
+
+
+
+    
+f s
+
+f.qu
+tt
+
+g: ra
+s
+ BdbQu
+t
                       ^^^^^^^^^^^^^
-bdb.BdbQuit
+bdb.BdbQu
+t
 ```
+O
 
-One solution is using [forked-pdb](https://github.com/Lightning-AI/forked-pdb). Install with `pip install fpdb` and set a breakpoint with something like:
+ so
+ut
+o
+ 
+s us
 
-``` python
-__import__('fpdb').ForkedPdb().set_trace()
+g [fork
+d-pdb](https://g
+thub.com/L
+ght
+
+
+g-AI/fork
+d-pdb). I
+sta
+ 
+
+th `p
+p 
+
+sta
+ fpdb` a
+d s
+t a br
+akpo
+
+t 
+
+th som
+th
+
+g 
+
+k
+:
+``` pytho
+
+__
+mport__('fpdb').Fork
+dPdb().s
+t_trac
+()
 ```
+A
+oth
+r opt
+o
+ 
+s to d
+sab
 
-Another option is to disable multiprocessing entirely, with the `VLLM_ENABLE_V1_MULTIPROCESSING` environment variable.
-This keeps the scheduler in the same process, so you can use stock `pdb` breakpoints:
+ mu
+t
+proc
+ss
 
-``` python
-import os
-os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+g 
+
+t
+r
+
+y, 
+
+th th
+ `VLLM_ENABLE_V1_MULTIPROCESSING` 
+
+v
+ro
+m
+
+t var
+ab
+
+.
+Th
+s k
+ps th
+ sch
+du
+
+r 
+
+ th
+ sam
+ proc
+ss, so you ca
+ us
+ stock `pdb` br
+akpo
+
+ts:
+``` pytho
+
+
+mport os
+os.
+
+v
+ro
+["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 ```
+## I
+corr
+ct 
 
-## Incorrect network setup
+t
+ork s
+tup
+Th
+ vLLM 
 
-The vLLM instance cannot get the correct IP address if you have a complicated network config. You can find a log such as `DEBUG 06-10 21:32:17 parallel_state.py:88] world_size=8 rank=0 local_rank=0 distributed_init_method=tcp://xxx.xxx.xxx.xxx:54641 backend=nccl` and the IP address should be the correct one.
-If it's not, override the IP address using the environment variable `export VLLM_HOST_IP=<your_ip_address>`.
+sta
+c
+ ca
+ot g
+t th
+ corr
+ct IP addr
+ss 
+f you hav
+ a comp
 
-You might also need to set `export NCCL_SOCKET_IFNAME=<your_network_interface>` and `export GLOO_SOCKET_IFNAME=<your_network_interface>` to specify the network interface for the IP address.
+cat
+d 
 
-## Error near `self.graph.replay()`
+t
+ork co
+f
+g. You ca
+ f
 
-If vLLM crashes and the error trace captures it somewhere around `self.graph.replay()` in `vllm/worker/model_runner.py`, it is a CUDA error inside CUDAGraph.
-To identify the particular CUDA operation that causes the error, you can add `--enforce-eager` to the command line, or `enforce_eager=True` to the [LLM][vllm.LLM] class to disable the CUDAGraph optimization and isolate the exact CUDA operation that causes the error.
+d a 
+og such as `DEBUG 06-10 21:32:17 para
 
-## Incorrect hardware/driver
 
-If GPU/CPU communication cannot be established, you can use the following Python script and follow the instructions below to confirm whether the GPU/CPU communication is working correctly.
+_stat
+.py:88] 
+or
+d_s
+z
+=8 ra
+k=0 
+oca
+_ra
+k=0 d
+str
+but
+d_
 
-??? code
 
-    ```python
-    # Test PyTorch NCCL
-    import torch
-    import torch.distributed as dist
-    dist.init_process_group(backend="nccl")
-    local_rank = dist.get_rank() % torch.cuda.device_count()
-    torch.cuda.set_device(local_rank)
-    data = torch.FloatTensor([1,] * 128).to("cuda")
-    dist.all_reduce(data, op=dist.ReduceOp.SUM)
-    torch.accelerator.synchronize()
-    value = data.mean().item()
-    world_size = dist.get_world_size()
-    assert value == world_size, f"Expected {world_size}, got {value}"
+t_m
+thod=tcp://xxx.xxx.xxx.xxx:54641 back
 
-    print("PyTorch NCCL is successful!")
+d=
+cc
+` a
+d th
+ IP addr
+ss shou
+d b
+ th
+ corr
+ct o
 
-    # Test PyTorch GLOO
-    gloo_group = dist.new_group(ranks=list(range(world_size)), backend="gloo")
-    cpu_data = torch.FloatTensor([1,] * 128)
-    dist.all_reduce(cpu_data, op=dist.ReduceOp.SUM, group=gloo_group)
-    value = cpu_data.mean().item()
-    assert value == world_size, f"Expected {world_size}, got {value}"
+.
+If 
+t's 
+ot, ov
+rr
+d
+ th
+ IP addr
+ss us
 
-    print("PyTorch GLOO is successful!")
+g th
+ 
 
-    if world_size <= 1:
-        exit()
+v
+ro
+m
 
-    # Test vLLM NCCL, with cuda graph
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+t var
+ab
 
-    pynccl = PyNcclCommunicator(group=gloo_group, device=local_rank)
-    # pynccl is enabled by default for 0.6.5+,
-    # but for 0.6.4 and below, we need to enable it manually.
-    # keep the code for backward compatibility when because people
-    # prefer to read the latest documentation.
-    pynccl.disabled = False
+ `
+xport VLLM_HOST_IP=
+your_
+p_addr
+ss
+`.
+You m
+ght a
+so 
 
-    s = torch.cuda.Stream()
-    with torch.cuda.stream(s):
-        data.fill_(1)
-        out = pynccl.all_reduce(data, stream=s)
-        value = out.mean().item()
-        assert value == world_size, f"Expected {world_size}, got {value}"
+d to s
+t `
+xport NCCL_SOCKET_IFNAME=
+your_
 
-    print("vLLM NCCL is successful!")
+t
+ork_
 
+t
+rfac
+
+` a
+d `
+xport GLOO_SOCKET_IFNAME=
+your_
+
+t
+ork_
+
+t
+rfac
+
+` to sp
+c
+fy th
+ 
+
+t
+ork 
+
+t
+rfac
+ for th
+ IP addr
+ss.
+## Error 
+
+ar `s
+
+f.graph.r
+p
+ay()`
+If vLLM crash
+s a
+d th
+ 
+rror trac
+ captur
+s 
+t som
+
+h
+r
+ arou
+d `s
+
+f.graph.r
+p
+ay()` 
+
+ `v
+m/
+ork
+r/mod
+
+_ru
+
+r.py`, 
+t 
+s a CUDA 
+rror 
+
+s
+d
+ CUDAGraph.
+To 
+d
+
+t
+fy th
+ part
+cu
+ar CUDA op
+rat
+o
+ that caus
+s th
+ 
+rror, you ca
+ add `--
+
+forc
+-
+ag
+r` to th
+ comma
+d 
+
+
+
+, or `
+
+forc
+_
+ag
+r=Tru
+` to th
+ [LLM][v
+m.LLM] c
+ass to d
+sab
+
+ th
+ CUDAGraph opt
+m
+zat
+o
+ a
+d 
+so
+at
+ th
+ 
+xact CUDA op
+rat
+o
+ that caus
+s th
+ 
+rror.
+## I
+corr
+ct hard
+ar
+/dr
+v
+r
+If GPU/CPU commu
+
+cat
+o
+ ca
+ot b
+ 
+stab
+
+sh
+d, you ca
+ us
+ th
+ fo
+o
+
+
+g Pytho
+ scr
+pt a
+d fo
+o
+ th
+ 
+
+struct
+o
+s b
+
+o
+ to co
+f
+rm 
+h
+th
+r th
+ GPU/CPU commu
+
+cat
+o
+ 
+s 
+ork
+
+g corr
+ct
+y.
+??? cod
+
+    ```pytho
+
+    # T
+st PyTorch NCCL
+    
+mport torch
+    
+mport torch.d
+str
+but
+d as d
+st
+    d
+st.
+
+
+t_proc
+ss_group(back
+
+d="
+cc
+")
+    
+oca
+_ra
+k = d
+st.g
+t_ra
+k() % torch.cuda.d
+v
+c
+_cou
+t()
+    torch.cuda.s
+t_d
+v
+c
+(
+oca
+_ra
+k)
+    data = torch.F
+oatT
+
+sor([1,] * 128).to("cuda")
+    d
+st.a
+_r
+duc
+(data, op=d
+st.R
+duc
+Op.SUM)
+    torch.acc
+
+
+rator.sy
+chro
+
+z
+()
+    va
+u
+ = data.m
+a
+().
+t
+m()
+    
+or
+d_s
+z
+ = d
+st.g
+t_
+or
+d_s
+z
+()
+    ass
+rt va
+u
+ == 
+or
+d_s
+z
+, f"Exp
+ct
+d {
+or
+d_s
+z
+}, got {va
+u
+}"
+    pr
+
+t("PyTorch NCCL 
+s succ
+ssfu
+!")
+    # T
+st PyTorch GLOO
+    g
+oo_group = d
+st.
+
+
+_group(ra
+ks=
+
+st(ra
+g
+(
+or
+d_s
+z
+)), back
+
+d="g
+oo")
+    cpu_data = torch.F
+oatT
+
+sor([1,] * 128)
+    d
+st.a
+_r
+duc
+(cpu_data, op=d
+st.R
+duc
+Op.SUM, group=g
+oo_group)
+    va
+u
+ = cpu_data.m
+a
+().
+t
+m()
+    ass
+rt va
+u
+ == 
+or
+d_s
+z
+, f"Exp
+ct
+d {
+or
+d_s
+z
+}, got {va
+u
+}"
+    pr
+
+t("PyTorch GLOO 
+s succ
+ssfu
+!")
+    
+f 
+or
+d_s
+z
+ 
+= 1:
+        
+x
+t()
+    # T
+st vLLM NCCL, 
+
+th cuda graph
+    from v
+m.d
+str
+but
+d.d
+v
+c
+_commu
+
+cators.py
+cc
+ 
+mport PyNcc
+Commu
+
+cator
+    py
+cc
+ = PyNcc
+Commu
+
+cator(group=g
+oo_group, d
+v
+c
+=
+oca
+_ra
+k)
+    # py
+cc
+ 
+s 
+
+ab
+
+d by d
+fau
+t for 0.6.5+,
+    # but for 0.6.4 a
+d b
+
+o
+, 
+
+ 
+
+d to 
+
+ab
+
+ 
+t ma
+ua
+y.
+    # k
+p th
+ cod
+ for back
+ard compat
+b
+
+
+ty 
+h
+
+ b
+caus
+ p
+op
+
+
+    # pr
+f
+r to r
+ad th
+ 
+at
+st docum
+
+tat
+o
+.
+    py
+cc
+.d
+sab
+
+d = Fa
+s
+
+    s = torch.cuda.Str
+am()
+    
+
+th torch.cuda.str
+am(s):
+        data.f
+
+_(1)
+        out = py
+cc
+.a
+_r
+duc
+(data, str
+am=s)
+        va
+u
+ = out.m
+a
+().
+t
+m()
+        ass
+rt va
+u
+ == 
+or
+d_s
+z
+, f"Exp
+ct
+d {
+or
+d_s
+z
+}, got {va
+u
+}"
+    pr
+
+t("vLLM NCCL 
+s succ
+ssfu
+!")
     g = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(cuda_graph=g, stream=s):
-        out = pynccl.all_reduce(data, stream=torch.cuda.current_stream())
+    
 
-    data.fill_(1)
-    g.replay()
-    torch.cuda.current_stream().synchronize()
-    value = out.mean().item()
-    assert value == world_size, f"Expected {world_size}, got {value}"
+th torch.cuda.graph(cuda_graph=g, str
+am=s):
+        out = py
+cc
+.a
+_r
+duc
+(data, str
+am=torch.cuda.curr
 
-    print("vLLM NCCL with cuda graph is successful!")
+t_str
+am())
+    data.f
 
-    dist.destroy_process_group(gloo_group)
-    dist.destroy_process_group()
+_(1)
+    g.r
+p
+ay()
+    torch.cuda.curr
+
+t_str
+am().sy
+chro
+
+z
+()
+    va
+u
+ = out.m
+a
+().
+t
+m()
+    ass
+rt va
+u
+ == 
+or
+d_s
+z
+, f"Exp
+ct
+d {
+or
+d_s
+z
+}, got {va
+u
+}"
+    pr
+
+t("vLLM NCCL 
+
+th cuda graph 
+s succ
+ssfu
+!")
+    d
+st.d
+stroy_proc
+ss_group(g
+oo_group)
+    d
+st.d
+stroy_proc
+ss_group()
     ```
+If you ar
+ t
+st
 
-If you are testing with a single node, adjust `--nproc-per-node` to the number of GPUs you want to use:
+g 
 
+th a s
+
+g
+
+ 
+od
+, adjust `--
+proc-p
+r-
+od
+` to th
+ 
+umb
+r of GPUs you 
+a
+t to us
+:
 ```bash
-NCCL_DEBUG=TRACE torchrun --nproc-per-node=<number-of-GPUs> test.py
+NCCL_DEBUG=TRACE torchru
+ --
+proc-p
+r-
+od
+=
+
+umb
+r-of-GPUs
+ t
+st.py
 ```
+If you ar
+ t
+st
 
-If you are testing with multi-nodes, adjust `--nproc-per-node` and `--nnodes` according to your setup and set `MASTER_ADDR` to the correct IP address and port of the master node (e.g., `10.0.0.1:29400`), reachable from all nodes. Then, run:
+g 
 
+th mu
+t
+-
+od
+s, adjust `--
+proc-p
+r-
+od
+` a
+d `--
+od
+s` accord
+
+g to your s
+tup a
+d s
+t `MASTER_ADDR` to th
+ corr
+ct IP addr
+ss a
+d port of th
+ mast
+r 
+od
+ (
+.g., `10.0.0.1:29400`), r
+achab
+
+ from a
+ 
+od
+s. Th
+
+, ru
+:
 ```bash
-NCCL_DEBUG=TRACE torchrun --nnodes 2 \
-    --nproc-per-node=2 \
-    --rdzv_backend=static \
-    --rdzv_endpoint=$MASTER_ADDR \
-    --node-rank $NODE_RANK test.py
+NCCL_DEBUG=TRACE torchru
+ --
+od
+s 2 \
+    --
+proc-p
+r-
+od
+=2 \
+    --rdzv_back
+
+d=stat
+c \
+    --rdzv_
+
+dpo
+
+t=$MASTER_ADDR \
+    --
+od
+-ra
+k $NODE_RANK t
+st.py
 ```
+S
+t `MASTER_ADDR` to th
+ IP addr
+ss a
+d port of th
+ mast
+r 
+od
+ (
+.g., `10.0.0.1:29400`), r
+achab
 
-Set `MASTER_ADDR` to the IP address and port of the master node (e.g., `10.0.0.1:29400`), reachable from all nodes. Set `NODE_RANK` to `0` on the master node and `1`, `2`, ... on the workers. Adjust `--nproc-per-node` and `--nnodes` according to your setup.
+ from a
+ 
+od
+s. S
+t `NODE_RANK` to `0` o
+ th
+ mast
+r 
+od
+ a
+d `1`, `2`, ... o
+ th
+ 
+ork
+rs. Adjust `--
+proc-p
+r-
+od
+` a
+d `--
+od
+s` accord
 
-!!! note
-    We use `--rdzv_backend=static` instead of `c10d` because the `c10d` rendezvous backend can fail with DNS resolution errors in multi-node setups (see [pytorch/pytorch#85300](https://github.com/pytorch/pytorch/issues/85300)). The `static` backend avoids this by requiring explicit node ranks.
+g to your s
+tup.
+!!! 
+ot
 
-If the script runs successfully, you should see the message `sanity check is successful!`.
+    W
+ us
+ `--rdzv_back
 
-If the test script hangs or crashes, usually it means the hardware/drivers are broken in some sense. You should try to contact your system administrator or hardware vendor for further assistance. As a common workaround, you can try to tune some NCCL environment variables, such as `export NCCL_P2P_DISABLE=1` to see if it helps. Please check [their documentation](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html) for more information. Please only use these environment variables as a temporary workaround, as they might affect the performance of the system. The best solution is still to fix the hardware/drivers so that the test script can run successfully.
+d=stat
+c` 
 
-## Python multiprocessing
+st
+ad of `c10d` b
+caus
+ th
+ `c10d` r
 
-### `RuntimeError` Exception
+d
+zvous back
 
-If you have seen a warning in your logs like this:
+d ca
+ fa
 
-```console
-WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
-    initialized. We must use the `spawn` multiprocessing start method. Setting
-    VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. See
-    https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-multiprocessing
-    for more information.
+ 
+
+th DNS r
+so
+ut
+o
+ 
+rrors 
+
+ mu
+t
+-
+od
+ s
+tups (s
+ [pytorch/pytorch#85300](https://g
+thub.com/pytorch/pytorch/
+ssu
+s/85300)). Th
+ `stat
+c` back
+
+d avo
+ds th
+s by r
+qu
+r
+
+g 
+xp
+
+c
+t 
+od
+ ra
+ks.
+If th
+ scr
+pt ru
+s succ
+ssfu
+y, you shou
+d s
+ th
+ m
+ssag
+ `sa
+
+ty ch
+ck 
+s succ
+ssfu
+!`.
+If th
+ t
+st scr
+pt ha
+gs or crash
+s, usua
+y 
+t m
+a
+s th
+ hard
+ar
+/dr
+v
+rs ar
+ brok
+
+ 
+
+ som
+ s
+
+s
+. You shou
+d try to co
+tact your syst
+m adm
+
+
+strator or hard
+ar
+ v
+
+dor for furth
+r ass
+sta
+c
+. As a commo
+ 
+orkarou
+d, you ca
+ try to tu
+
+ som
+ NCCL 
+
+v
+ro
+m
+
+t var
+ab
+
+s, such as `
+xport NCCL_P2P_DISABLE=1` to s
+ 
+f 
+t h
+
+ps. P
+
+as
+ ch
+ck [th
+
+r docum
+
+tat
+o
+](https://docs.
+v
+d
+a.com/d
+p
+
+ar
+
+
+g/
+cc
+/us
+r-gu
+d
+/docs/
+
+v.htm
+) for mor
+ 
+
+format
+o
+. P
+
+as
+ o
+
+y us
+ th
+s
+ 
+
+v
+ro
+m
+
+t var
+ab
+
+s as a t
+mporary 
+orkarou
+d, as th
+y m
+ght aff
+ct th
+ p
+rforma
+c
+ of th
+ syst
+m. Th
+ b
+st so
+ut
+o
+ 
+s st
+
+ to f
+x th
+ hard
+ar
+/dr
+v
+rs so that th
+ t
+st scr
+pt ca
+ ru
+ succ
+ssfu
+y.
+## Pytho
+ mu
+t
+proc
+ss
+
+g
+### `Ru
+t
+m
+Error` Exc
+pt
+o
+
+If you hav
+ s
+
+ a 
+ar
+
+
+g 
+
+ your 
+ogs 
+
+k
+ th
+s:
+```co
+so
+
+
+WARNING 12-11 14:50:37 mu
+t
+proc_
+ork
+r_ut
+
+s.py:281] CUDA 
+as pr
+v
+ous
+y
+    
+
+
+t
+a
+
+z
+d. W
+ must us
+ th
+ `spa
+
+` mu
+t
+proc
+ss
+
+g start m
+thod. S
+tt
+
+g
+    VLLM_WORKER_MULTIPROC_METHOD to 'spa
+
+'. S
+
+    https://docs.v
+m.a
+/
+
+/
+at
+st/usag
+/troub
+
+shoot
+
+g.htm
+#pytho
+-mu
+t
+proc
+ss
+
+g
+    for mor
+ 
+
+format
+o
+.
 ```
+or a
+ 
+rror from Pytho
+ that 
+ooks 
 
-or an error from Python that looks like this:
+k
+ th
+s:
+??? co
+so
 
-??? console "Logs"
+ "Logs"
+    ```co
+so
 
-    ```console
-    RuntimeError:
-            An attempt has been made to start a new process before the
-            current process has finished its bootstrapping phase.
 
-            This probably means that you are not using fork to start your
-            child processes and you have forgotten to use the proper idiom
-            in the main module:
+    Ru
+t
+m
+Error:
+            A
+ att
+mpt has b
 
-                if __name__ == '__main__':
-                    freeze_support()
+ mad
+ to start a 
+
+
+ proc
+ss b
+for
+ th
+
+            curr
+
+t proc
+ss has f
+
+
+sh
+d 
+ts bootstrapp
+
+g phas
+.
+            Th
+s probab
+y m
+a
+s that you ar
+ 
+ot us
+
+g fork to start your
+            ch
+
+d proc
+ss
+s a
+d you hav
+ forgott
+
+ to us
+ th
+ prop
+r 
+d
+om
+            
+
+ th
+ ma
+
+ modu
+
+:
+                
+f __
+am
+__ == '__ma
+
+__':
+                    fr
+z
+_support()
                     ...
+            Th
+ "fr
+z
+_support()" 
 
-            The "freeze_support()" line can be omitted if the program
-            is not going to be frozen to produce an executable.
 
-            To fix this issue, refer to the "Safe importing of main module"
-            section in https://docs.python.org/3/library/multiprocessing.html
+
+ ca
+ b
+ om
+tt
+d 
+f th
+ program
+            
+s 
+ot go
+
+g to b
+ froz
+
+ to produc
+ a
+ 
+x
+cutab
+
+.
+            To f
+x th
+s 
+ssu
+, r
+f
+r to th
+ "Saf
+ 
+mport
+
+g of ma
+
+ modu
+
+"
+            s
+ct
+o
+ 
+
+ https://docs.pytho
+.org/3/
+
+brary/mu
+t
+proc
+ss
+
+g.htm
+
     ```
+th
 
-then you must update your Python code to guard usage of `vllm` behind a `if
-__name__ == '__main__':` block. For example, instead of this:
+ you must updat
+ your Pytho
+ cod
+ to guard usag
+ of `v
+m` b
+h
 
-```python
-import vllm
+d a `
+f
+__
+am
+__ == '__ma
 
-llm = vllm.LLM(...)
+__':` b
+ock. For 
+xamp
+
+, 
+
+st
+ad of th
+s:
+```pytho
+
+
+mport v
+m
+
+m = v
+m.LLM(...)
 ```
+try th
+s 
 
-try this instead:
+st
+ad:
+```pytho
 
-```python
-if __name__ == '__main__':
-    import vllm
 
-    llm = vllm.LLM(...)
+f __
+am
+__ == '__ma
+
+__':
+    
+mport v
+m
+    
+m = v
+m.LLM(...)
 ```
+## `torch.comp
 
-## `torch.compile` Error
 
-vLLM heavily depends on `torch.compile` to optimize the model for better performance, which introduces the dependency on the `torch.compile` functionality and the `triton` library. By default, we use `torch.compile` to [optimize some functions](https://github.com/vllm-project/vllm/pull/10406) in the model. Before running vLLM, you can check if `torch.compile` is working as expected by running the following script:
+` Error
+vLLM h
+av
 
-??? code
+y d
+p
 
-    ```python
-    import torch
+ds o
+ `torch.comp
 
-    @torch.compile
-    def f(x):
-        # a simple function to test torch.compile
+
+` to opt
+m
+z
+ th
+ mod
+
+ for b
+tt
+r p
+rforma
+c
+, 
+h
+ch 
+
+troduc
+s th
+ d
+p
+
+d
+
+cy o
+ th
+ `torch.comp
+
+
+` fu
+ct
+o
+a
+
+ty a
+d th
+ `tr
+to
+` 
+
+brary. By d
+fau
+t, 
+
+ us
+ `torch.comp
+
+
+` to [opt
+m
+z
+ som
+ fu
+ct
+o
+s](https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/10406) 
+
+ th
+ mod
+
+. B
+for
+ ru
+
+
+g vLLM, you ca
+ ch
+ck 
+f `torch.comp
+
+
+` 
+s 
+ork
+
+g as 
+xp
+ct
+d by ru
+
+
+g th
+ fo
+o
+
+
+g scr
+pt:
+??? cod
+
+    ```pytho
+
+    
+mport torch
+    @torch.comp
+
+
+
+    d
+f f(x):
+        # a s
+mp
+
+ fu
+ct
+o
+ to t
+st torch.comp
+
+
+
         x = x + 1
         x = x * 2
-        x = x.sin()
-        return x
+        x = x.s
 
-    x = torch.randn(4, 4).cuda()
-    print(f(x))
+()
+        r
+tur
+ x
+    x = torch.ra
+d
+(4, 4).cuda()
+    pr
+
+t(f(x))
     ```
+If 
+t ra
+s
+s 
+rrors from `torch/_
 
-If it raises errors from `torch/_inductor` directory, usually it means you have a custom `triton` library that is not compatible with the version of PyTorch you are using. See <https://github.com/vllm-project/vllm/issues/12219> for example.
+ductor` d
+r
+ctory, usua
+y 
+t m
+a
+s you hav
+ a custom `tr
+to
+` 
 
-## Model failed to be inspected
+brary that 
+s 
+ot compat
+b
 
-If you see an error like:
+ 
 
-```text
-  File "vllm/model_executor/models/registry.py", line xxx, in _raise_for_unsupported
-    raise ValueError(
-ValueError: Model architectures ['<arch>'] failed to be inspected. Please check the logs for more details.
+th th
+ v
+rs
+o
+ of PyTorch you ar
+ us
+
+g. S
+ 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/12219
+ for 
+xamp
+
+.
+## Mod
+
+ fa
+
+
+d to b
+ 
+
+sp
+ct
+d
+If you s
+ a
+ 
+rror 
+
+k
+:
+```t
+xt
+  F
+
+
+ "v
+m/mod
+
+_
+x
+cutor/mod
+
+s/r
+g
+stry.py", 
+
+
+
+ xxx, 
+
+ _ra
+s
+_for_u
+support
+d
+    ra
+s
+ Va
+u
+Error(
+Va
+u
+Error: Mod
+
+ arch
+t
+ctur
+s ['
+arch
+'] fa
+
+
+d to b
+ 
+
+sp
+ct
+d. P
+
+as
+ ch
+ck th
+ 
+ogs for mor
+ d
+ta
+
+s.
 ```
+It m
+a
+s that vLLM fa
 
-It means that vLLM failed to import the model file.
-Usually, it is related to missing dependencies or outdated binaries in the vLLM build.
-Please read the logs carefully to determine the root cause of the error.
 
-## Model not supported
+d to 
+mport th
+ mod
 
-If you see an error like:
+ f
 
-```text
-Traceback (most recent call last):
+
+.
+Usua
+y, 
+t 
+s r
+
+at
+d to m
+ss
+
+g d
+p
+
+d
+
+c
+
+s or outdat
+d b
+
+ar
+
+s 
+
+ th
+ vLLM bu
+
+d.
+P
+
+as
+ r
+ad th
+ 
+ogs car
+fu
+y to d
+t
+rm
+
+
+ th
+ root caus
+ of th
+ 
+rror.
+## Mod
+
+ 
+ot support
+d
+If you s
+ a
+ 
+rror 
+
+k
+:
+```t
+xt
+Trac
+back (most r
+c
+
+t ca
+ 
+ast):
 ...
-  File "vllm/model_executor/models/registry.py", line xxx, in inspect_model_cls
-    for arch in architectures:
-TypeError: 'NoneType' object is not iterable
-```
+  F
 
+
+ "v
+m/mod
+
+_
+x
+cutor/mod
+
+s/r
+g
+stry.py", 
+
+
+
+ xxx, 
+
+ 
+
+sp
+ct_mod
+
+_c
+s
+    for arch 
+
+ arch
+t
+ctur
+s:
+Typ
+Error: 'No
+
+Typ
+' obj
+ct 
+s 
+ot 
+t
+rab
+
+
+```
 or:
+```t
+xt
+  F
 
-```text
-  File "vllm/model_executor/models/registry.py", line xxx, in _raise_for_unsupported
-    raise ValueError(
-ValueError: Model architectures ['<arch>'] are not supported for now. Supported architectures: [...]
+
+ "v
+m/mod
+
+_
+x
+cutor/mod
+
+s/r
+g
+stry.py", 
+
+
+
+ xxx, 
+
+ _ra
+s
+_for_u
+support
+d
+    ra
+s
+ Va
+u
+Error(
+Va
+u
+Error: Mod
+
+ arch
+t
+ctur
+s ['
+arch
+'] ar
+ 
+ot support
+d for 
+o
+. Support
+d arch
+t
+ctur
+s: [...]
 ```
+But you ar
+ sur
+ that th
+ mod
 
-But you are sure that the model is in the [list of supported models](../models/supported_models.md), there may be some issue with vLLM's model resolution. In that case, please follow [these steps](../configuration/model_resolution.md) to explicitly specify the vLLM implementation for the model.
+ 
+s 
 
-## Failed to infer device type
+ th
+ [
 
-If you see an error like `RuntimeError: Failed to infer device type`, it means that vLLM failed to infer the device type of the runtime environment. You can check [the code](../../vllm/platforms/__init__.py) to see how vLLM infers the device type and why it is not working as expected. After [this PR](https://github.com/vllm-project/vllm/pull/14195), you can also set the environment variable `VLLM_LOGGING_LEVEL=DEBUG` to see more detailed logs to help debug the issue.
+st of support
+d mod
 
-## NCCL error: unhandled system error during `ncclCommInitRank`
+s](../mod
 
-If your serving workload uses GPUDirect RDMA for distributed serving across multiple nodes and encounters an error during `ncclCommInitRank`, with no clear error message even with `NCCL_DEBUG=INFO` set, it might look like this:
+s/support
+d_mod
 
-```text
-Error executing method 'init_device'. This might cause deadlock in distributed execution.
-Traceback (most recent call last):
+s.md), th
+r
+ may b
+ som
+ 
+ssu
+ 
+
+th vLLM's mod
+
+ r
+so
+ut
+o
+. I
+ that cas
+, p
+
+as
+ fo
+o
+ [th
+s
+ st
+ps](../co
+f
+gurat
+o
+/mod
+
+_r
+so
+ut
+o
+.md) to 
+xp
+
+c
+t
+y sp
+c
+fy th
+ vLLM 
+mp
+
+m
+
+tat
+o
+ for th
+ mod
+
+.
+## Fa
+
+
+d to 
+
+f
+r d
+v
+c
+ typ
+
+If you s
+ a
+ 
+rror 
+
+k
+ `Ru
+t
+m
+Error: Fa
+
+
+d to 
+
+f
+r d
+v
+c
+ typ
+`, 
+t m
+a
+s that vLLM fa
+
+
+d to 
+
+f
+r th
+ d
+v
+c
+ typ
+ of th
+ ru
+t
+m
+ 
+
+v
+ro
+m
+
+t. You ca
+ ch
+ck [th
+ cod
+](../../v
+m/p
+atforms/__
+
+
+t__.py) to s
+ ho
+ vLLM 
+
+f
+rs th
+ d
+v
+c
+ typ
+ a
+d 
+hy 
+t 
+s 
+ot 
+ork
+
+g as 
+xp
+ct
+d. Aft
+r [th
+s PR](https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/14195), you ca
+ a
+so s
+t th
+ 
+
+v
+ro
+m
+
+t var
+ab
+
+ `VLLM_LOGGING_LEVEL=DEBUG` to s
+ mor
+ d
+ta
+
+
+d 
+ogs to h
+
+p d
+bug th
+ 
+ssu
+.
+## NCCL 
+rror: u
+ha
+d
+
+d syst
+m 
+rror dur
+
+g `
+cc
+CommI
+
+tRa
+k`
+If your s
+rv
+
+g 
+ork
+oad us
+s GPUD
+r
+ct RDMA for d
+str
+but
+d s
+rv
+
+g across mu
+t
+p
+
+ 
+od
+s a
+d 
+
+cou
+t
+rs a
+ 
+rror dur
+
+g `
+cc
+CommI
+
+tRa
+k`, 
+
+th 
+o c
+
+ar 
+rror m
+ssag
+ 
+v
+
+ 
+
+th `NCCL_DEBUG=INFO` s
+t, 
+t m
+ght 
+ook 
+
+k
+ th
+s:
+```t
+xt
+Error 
+x
+cut
+
+g m
+thod '
+
+
+t_d
+v
+c
+'. Th
+s m
+ght caus
+ d
+ad
+ock 
+
+ d
+str
+but
+d 
+x
+cut
+o
+.
+Trac
+back (most r
+c
+
+t ca
+ 
+ast):
 ...
-   File "/usr/local/lib/python3.12/dist-packages/vllm/distributed/device_communicators/pynccl.py", line 99, in __init__
-     self.comm: ncclComm_t = self.nccl.ncclCommInitRank(
+   F
+
+
+ "/usr/
+oca
+/
+
+b/pytho
+3.12/d
+st-packag
+s/v
+m/d
+str
+but
+d/d
+v
+c
+_commu
+
+cators/py
+cc
+.py", 
+
+
+
+ 99, 
+
+ __
+
+
+t__
+     s
+
+f.comm: 
+cc
+Comm_t = s
+
+f.
+cc
+.
+cc
+CommI
+
+tRa
+k(
                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   File "/usr/local/lib/python3.12/dist-packages/vllm/distributed/device_communicators/pynccl_wrapper.py", line 277, in ncclCommInitRank
-     self.NCCL_CHECK(self._funcs["ncclCommInitRank"](ctypes.byref(comm),
-   File "/usr/local/lib/python3.12/dist-packages/vllm/distributed/device_communicators/pynccl_wrapper.py", line 256, in NCCL_CHECK
-     raise RuntimeError(f"NCCL error: {error_str}")
- RuntimeError: NCCL error: unhandled system error (run with NCCL_DEBUG=INFO for details)
+   F
+
+
+ "/usr/
+oca
+/
+
+b/pytho
+3.12/d
+st-packag
+s/v
+m/d
+str
+but
+d/d
+v
+c
+_commu
+
+cators/py
+cc
+_
+rapp
+r.py", 
+
+
+
+ 277, 
+
+ 
+cc
+CommI
+
+tRa
+k
+     s
+
+f.NCCL_CHECK(s
+
+f._fu
+cs["
+cc
+CommI
+
+tRa
+k"](ctyp
+s.byr
+f(comm),
+   F
+
+
+ "/usr/
+oca
+/
+
+b/pytho
+3.12/d
+st-packag
+s/v
+m/d
+str
+but
+d/d
+v
+c
+_commu
+
+cators/py
+cc
+_
+rapp
+r.py", 
+
+
+
+ 256, 
+
+ NCCL_CHECK
+     ra
+s
+ Ru
+t
+m
+Error(f"NCCL 
+rror: {
+rror_str}")
+ Ru
+t
+m
+Error: NCCL 
+rror: u
+ha
+d
+
+d syst
+m 
+rror (ru
+ 
+
+th NCCL_DEBUG=INFO for d
+ta
+
+s)
 ...
 ```
+Th
+s 
 
-This indicates vLLM failed to initialize the NCCL communicator, possibly due to a missing `IPC_LOCK` linux capability  or an unmounted `/dev/shm`. Refer to [Enabling GPUDirect RDMA](../serving/parallelism_scaling.md#enabling-gpudirect-rdma) for guidance on properly configuring the environment for GPUDirect RDMA.
+d
+cat
+s vLLM fa
 
-## CUDA error: the provided PTX was compiled with an unsupported toolchain
 
-If you see an error like `RuntimeError: CUDA error: the provided PTX was compiled with an unsupported toolchain`, it means that the CUDA PTX in vLLM's wheels was compiled with a toolchain unsupported by your system. This section also applies if you get the error `RuntimeError: The NVIDIA driver on your system is too old`.
+d to 
 
-The released vLLM wheels are compiled with a specific version of CUDA toolkit, and the compiled code might fail to run on lower versions of CUDA drivers. Read [CUDA compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/) for more details. **This is only supported on select professional and datacenter NVIDIA GPUs.**
 
-If you are using the vLLM official Docker image, you can solve this by adding `-e VLLM_ENABLE_CUDA_COMPATIBILITY=1` to your `docker run` command. This will enable the pre-installed CUDA forward compatibility libraries.
+t
+a
 
-If you are running vLLM outside of Docker, the solution is to install the `cuda-compat` package from your package manager with the [CUDA repository](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/) enabled. For example, on Ubuntu, you can run `sudo apt-get install cuda-compat-12-9`, and then set `export VLLM_ENABLE_CUDA_COMPATIBILITY=1` and `export VLLM_CUDA_COMPATIBILITY_PATH="/usr/local/cuda-12.9/compat"`.
+z
+ th
+ NCCL commu
 
-On Conda, you can install the `conda-forge::cuda-compat` package (e.g., `conda install -c conda-forge cuda-compat=12.9`), then after activating the environment, set `export VLLM_ENABLE_CUDA_COMPATIBILITY=1` and `export VLLM_CUDA_COMPATIBILITY_PATH="${CONDA_PREFIX}/cuda-compat"`.
+cator, poss
+b
+y du
+ to a m
+ss
 
-You can verify the configuration works by running a minimal Python script that initializes CUDA via vLLM:
+g `IPC_LOCK` 
 
+
+ux capab
+
+
+ty  or a
+ u
+mou
+t
+d `/d
+v/shm`. R
+f
+r to [E
+ab
+
+
+g GPUD
+r
+ct RDMA](../s
+rv
+
+g/para
+
+
+
+sm_sca
+
+
+g.md#
+
+ab
+
+
+g-gpud
+r
+ct-rdma) for gu
+da
+c
+ o
+ prop
+r
+y co
+f
+gur
+
+g th
+ 
+
+v
+ro
+m
+
+t for GPUD
+r
+ct RDMA.
+## CUDA 
+rror: th
+ prov
+d
+d PTX 
+as comp
+
+
+d 
+
+th a
+ u
+support
+d too
+cha
+
+
+If you s
+ a
+ 
+rror 
+
+k
+ `Ru
+t
+m
+Error: CUDA 
+rror: th
+ prov
+d
+d PTX 
+as comp
+
+
+d 
+
+th a
+ u
+support
+d too
+cha
+
+`, 
+t m
+a
+s that th
+ CUDA PTX 
+
+ vLLM's 
+h
+
+s 
+as comp
+
+
+d 
+
+th a too
+cha
+
+ u
+support
+d by your syst
+m. Th
+s s
+ct
+o
+ a
+so app
+
+
+s 
+f you g
+t th
+ 
+rror `Ru
+t
+m
+Error: Th
+ NVIDIA dr
+v
+r o
+ your syst
+m 
+s too o
+d`.
+Th
+ r
+
+
+as
+d vLLM 
+h
+
+s ar
+ comp
+
+
+d 
+
+th a sp
+c
+f
+c v
+rs
+o
+ of CUDA too
+k
+t, a
+d th
+ comp
+
+
+d cod
+ m
+ght fa
+
+ to ru
+ o
+ 
+o
+
+r v
+rs
+o
+s of CUDA dr
+v
+rs. R
+ad [CUDA compat
+b
+
+
+ty](https://docs.
+v
+d
+a.com/d
+p
+oy/cuda-compat
+b
+
+
+ty/) for mor
+ d
+ta
+
+s. **Th
+s 
+s o
+
+y support
+d o
+ s
+
+
+ct prof
+ss
+o
+a
+ a
+d datac
+
+t
+r NVIDIA GPUs.**
+If you ar
+ us
+
+g th
+ vLLM off
+c
+a
+ Dock
+r 
+mag
+, you ca
+ so
+v
+ th
+s by add
+
+g `-
+ VLLM_ENABLE_CUDA_COMPATIBILITY=1` to your `dock
+r ru
+` comma
+d. Th
+s 
+
+
+ 
+
+ab
+
+ th
+ pr
+-
+
+sta
+
+d CUDA for
+ard compat
+b
+
+
+ty 
+
+brar
+
+s.
+If you ar
+ ru
+
+
+g vLLM outs
+d
+ of Dock
+r, th
+ so
+ut
+o
+ 
+s to 
+
+sta
+ th
+ `cuda-compat` packag
+ from your packag
+ ma
+ag
+r 
+
+th th
+ [CUDA r
+pos
+tory](https://docs.
+v
+d
+a.com/cuda/cuda-
+
+sta
+at
+o
+-gu
+d
+-
+
+
+ux/) 
+
+ab
+
+d. For 
+xamp
+
+, o
+ Ubu
+tu, you ca
+ ru
+ `sudo apt-g
+t 
+
+sta
+ cuda-compat-12-9`, a
+d th
+
+ s
+t `
+xport VLLM_ENABLE_CUDA_COMPATIBILITY=1` a
+d `
+xport VLLM_CUDA_COMPATIBILITY_PATH="/usr/
+oca
+/cuda-12.9/compat"`.
+O
+ Co
+da, you ca
+ 
+
+sta
+ th
+ `co
+da-forg
+::cuda-compat` packag
+ (
+.g., `co
+da 
+
+sta
+ -c co
+da-forg
+ cuda-compat=12.9`), th
+
+ aft
+r act
+vat
+
+g th
+ 
+
+v
+ro
+m
+
+t, s
+t `
+xport VLLM_ENABLE_CUDA_COMPATIBILITY=1` a
+d `
+xport VLLM_CUDA_COMPATIBILITY_PATH="${CONDA_PREFIX}/cuda-compat"`.
+You ca
+ v
+r
+fy th
+ co
+f
+gurat
+o
+ 
+orks by ru
+
+
+g a m
+
+
+ma
+ Pytho
+ scr
+pt that 
+
+
+t
+a
+
+z
+s CUDA v
+a vLLM:
 ```bash
-export VLLM_ENABLE_CUDA_COMPATIBILITY=1
-export VLLM_CUDA_COMPATIBILITY_PATH="/usr/local/cuda-12.9/compat"
 
-python3 - << 'EOF'
-import vllm
-import torch
+xport VLLM_ENABLE_CUDA_COMPATIBILITY=1
 
-print(f"CUDA available: {torch.cuda.is_available()}")
-print(f"CUDA device count: {torch.cuda.device_count()}")
+xport VLLM_CUDA_COMPATIBILITY_PATH="/usr/
+oca
+/cuda-12.9/compat"
+pytho
+3 - 
+ 'EOF'
+
+mport v
+m
+
+mport torch
+pr
+
+t(f"CUDA ava
+
+ab
+
+: {torch.cuda.
+s_ava
+
+ab
+
+()}")
+pr
+
+t(f"CUDA d
+v
+c
+ cou
+t: {torch.cuda.d
+v
+c
+_cou
+t()}")
 EOF
 ```
+Not
+ that 
 
-Note that we use CUDA 12.9 as an example here, and you may want to install a higher version of cuda-compat package in case vLLM's default CUDA version goes higher.
+ us
+ CUDA 12.9 as a
+ 
+xamp
 
-## ptxas fatal: Value 'sm_110a' is not defined for option 'gpu-name'
+ h
+r
+, a
+d you may 
+a
+t to 
 
-If you use triton kernels with cuda 13, you might see an error like `ptxas fatal: Value 'sm_110a' is not defined for option 'gpu-name'`:
+sta
+ a h
+gh
+r v
+rs
+o
+ of cuda-compat packag
+ 
 
-```text
-(EngineCore_0 pid=9492) triton.runtime.errors.PTXASError: PTXAS error: Internal Triton PTX codegen error
-(EngineCore_0 pid=9492) `ptxas` stderr:
-(EngineCore_0 pid=9492) ptxas fatal   : Value 'sm_110a' is not defined for option 'gpu-name'
-(EngineCore_0 pid=9492) 
-(EngineCore_0 pid=9492) Repro command: /home/jetson/.venv/lib/python3.12/site-packages/triton/backends/nvidia/bin/ptxas -lineinfo -v --gpu-name=sm_110a /tmp/tmp95oy_b9d.ptx -o /tmp/tmp95oy_b9d.ptx.o
-(EngineCore_0 pid=9492) 
-    outputs = self.engine_core.get_output()
+ cas
+ vLLM's d
+fau
+t CUDA v
+rs
+o
+ go
+s h
+gh
+r.
+## ptxas fata
+: Va
+u
+ 'sm_110a' 
+s 
+ot d
+f
+
+
+d for opt
+o
+ 'gpu-
+am
+'
+If you us
+ tr
+to
+ k
+r
+
+
+s 
+
+th cuda 13, you m
+ght s
+ a
+ 
+rror 
+
+k
+ `ptxas fata
+: Va
+u
+ 'sm_110a' 
+s 
+ot d
+f
+
+
+d for opt
+o
+ 'gpu-
+am
+'`:
+```t
+xt
+(E
+g
+
+
+Cor
+_0 p
+d=9492) tr
+to
+.ru
+t
+m
+.
+rrors.PTXASError: PTXAS 
+rror: I
+t
+r
+a
+ Tr
+to
+ PTX cod
+g
+
+ 
+rror
+(E
+g
+
+
+Cor
+_0 p
+d=9492) `ptxas` std
+rr:
+(E
+g
+
+
+Cor
+_0 p
+d=9492) ptxas fata
+   : Va
+u
+ 'sm_110a' 
+s 
+ot d
+f
+
+
+d for opt
+o
+ 'gpu-
+am
+'
+(E
+g
+
+
+Cor
+_0 p
+d=9492)
+(E
+g
+
+
+Cor
+_0 p
+d=9492) R
+pro comma
+d: /hom
+/j
+tso
+/.v
+
+v/
+
+b/pytho
+3.12/s
+t
+-packag
+s/tr
+to
+/back
+
+ds/
+v
+d
+a/b
+
+/ptxas -
+
+
+
+
+
+fo -v --gpu-
+am
+=sm_110a /tmp/tmp95oy_b9d.ptx -o /tmp/tmp95oy_b9d.ptx.o
+(E
+g
+
+
+Cor
+_0 p
+d=9492)
+    outputs = s
+
+f.
+
+g
+
+
+_cor
+.g
+t_output()
               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/jetson/.venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 668, in get_output
-    raise self._format_exception(outputs) from None
-vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.
+  F
+
+
+ "/hom
+/j
+tso
+/.v
+
+v/
+
+b/pytho
+3.12/s
+t
+-packag
+s/v
+m/v1/
+
+g
+
+
+/cor
+_c
+
+
+
+t.py", 
+
+
+
+ 668, 
+
+ g
+t_output
+    ra
+s
+ s
+
+f._format_
+xc
+pt
+o
+(outputs) from No
+
+
+v
+m.v1.
+
+g
+
+
+.
+xc
+pt
+o
+s.E
+g
+
+
+D
+adError: E
+g
+
+
+Cor
+ 
+
+cou
+t
+r
+d a
+ 
+ssu
+. S
+ stack trac
+ (abov
+) for th
+ root caus
+.
 ```
+It m
+a
+s that th
+ ptxas 
 
-It means that the ptxas in the triton bundle is not compatible with your device. You need to set `TRITON_PTXAS_PATH` environment variable to use cuda toolkit's ptxas manually instead:
+ th
+ tr
+to
+ bu
+d
 
-```shell
-export CUDA_HOME=/usr/local/cuda
-export TRITON_PTXAS_PATH="${CUDA_HOME}/bin/ptxas"
-export PATH="${CUDA_HOME}/bin:$PATH"
+ 
+s 
+ot compat
+b
+
+ 
+
+th your d
+v
+c
+. You 
+
+d to s
+t `TRITON_PTXAS_PATH` 
+
+v
+ro
+m
+
+t var
+ab
+
+ to us
+ cuda too
+k
+t's ptxas ma
+ua
+y 
+
+st
+ad:
+```sh
+
+
+
+xport CUDA_HOME=/usr/
+oca
+/cuda
+
+xport TRITON_PTXAS_PATH="${CUDA_HOME}/b
+
+/ptxas"
+
+xport PATH="${CUDA_HOME}/b
+
+:$PATH"
 ```
+## K
+o
 
-## Known Issues
+ Issu
+s
+- I
+ `v0.5.2`, `v0.5.3`, a
+d `v0.5.3.post1`, th
+r
+ 
+s a bug caus
+d by [zmq](https://g
+thub.com/z
+romq/pyzmq/
+ssu
+s/2000) , 
+h
+ch ca
+ occas
+o
+a
+y caus
+ vLLM to ha
+g d
+p
 
-- In `v0.5.2`, `v0.5.3`, and `v0.5.3.post1`, there is a bug caused by [zmq](https://github.com/zeromq/pyzmq/issues/2000) , which can occasionally cause vLLM to hang depending on the machine configuration. The solution is to upgrade to the latest version of `vllm` to include the [fix](https://github.com/vllm-project/vllm/pull/6759).
-- To address a memory overhead issue in older NCCL versions (see [bug](https://github.com/NVIDIA/nccl/issues/1234)), vLLM versions `>= 0.4.3, <= 0.10.1.1` would set the environment variable `NCCL_CUMEM_ENABLE=0`. External processes connecting to vLLM also needed to set this variable to prevent hangs or crashes. Since the underlying NCCL bug was fixed in NCCL 2.22.3, this override was removed in newer vLLM versions to allow for NCCL performance optimizations.
-- In some PCIe machines (e.g. machines without NVLink), if you see an error like `transport/shm.cc:590 NCCL WARN Cuda failure 217 'peer access is not supported between these two devices'`, it's likely caused by a driver bug. See [this issue](https://github.com/NVIDIA/nccl/issues/1838) for more details. In that case, you can try to set `NCCL_CUMEM_HOST_ENABLE=0` to disable the feature, or upgrade your driver to the latest version.
+d
+
+g o
+ th
+ mach
+
+
+ co
+f
+gurat
+o
+. Th
+ so
+ut
+o
+ 
+s to upgrad
+ to th
+ 
+at
+st v
+rs
+o
+ of `v
+m` to 
+
+c
+ud
+ th
+ [f
+x](https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/6759).
+- To addr
+ss a m
+mory ov
+rh
+ad 
+ssu
+ 
+
+ o
+d
+r NCCL v
+rs
+o
+s (s
+ [bug](https://g
+thub.com/NVIDIA/
+cc
+/
+ssu
+s/1234)), vLLM v
+rs
+o
+s `
+= 0.4.3, 
+= 0.10.1.1` 
+ou
+d s
+t th
+ 
+
+v
+ro
+m
+
+t var
+ab
+
+ `NCCL_CUMEM_ENABLE=0`. Ext
+r
+a
+ proc
+ss
+s co
+
+ct
+
+g to vLLM a
+so 
+
+d
+d to s
+t th
+s var
+ab
+
+ to pr
+v
+
+t ha
+gs or crash
+s. S
+
+c
+ th
+ u
+d
+r
+y
+
+g NCCL bug 
+as f
+x
+d 
+
+ NCCL 2.22.3, th
+s ov
+rr
+d
+ 
+as r
+mov
+d 
+
+ 
+
+
+
+r vLLM v
+rs
+o
+s to a
+o
+ for NCCL p
+rforma
+c
+ opt
+m
+zat
+o
+s.
+- I
+ som
+ PCI
+ mach
+
+
+s (
+.g. mach
+
+
+s 
+
+thout NVL
+
+k), 
+f you s
+ a
+ 
+rror 
+
+k
+ `tra
+sport/shm.cc:590 NCCL WARN Cuda fa
+
+ur
+ 217 'p
+r acc
+ss 
+s 
+ot support
+d b
+t
+
+
+ th
+s
+ t
+o d
+v
+c
+s'`, 
+t's 
+
+k
+
+y caus
+d by a dr
+v
+r bug. S
+ [th
+s 
+ssu
+](https://g
+thub.com/NVIDIA/
+cc
+/
+ssu
+s/1838) for mor
+ d
+ta
+
+s. I
+ that cas
+, you ca
+ try to s
+t `NCCL_CUMEM_HOST_ENABLE=0` to d
+sab
+
+ th
+ f
+atur
+, or upgrad
+ your dr
+v
+r to th
+ 
+at
+st v
+rs
+o
+.

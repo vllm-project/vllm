@@ -1,323 +1,2823 @@
-# How to debug the vLLM-torch.compile integration
+# Ho
+ to d
+bug th
+ vLLM-torch.comp
+
+
+ 
+
+t
+grat
+o
 
 TL;DR:
+- us
+ t
+pars
+ to acqu
+r
+ torch.comp
 
-- use tlparse to acquire torch.compile logs. Include these logs in bug reports and/or support asks.
-- The vLLM-torch.compile integration is multiple pieces. vLLM exposes flags to turn off each piece:
 
-| Online Flag | Offline Flag   |      Result |
+ 
+ogs. I
+c
+ud
+ th
+s
+ 
+ogs 
+
+ bug r
+ports a
+d/or support asks.
+- Th
+ vLLM-torch.comp
+
+
+ 
+
+t
+grat
+o
+ 
+s mu
+t
+p
+
+ p
+
+c
+s. vLLM 
+xpos
+s f
+ags to tur
+ off 
+ach p
+
+c
+:
+| O
+
+
+
+
+ F
+ag | Off
+
+
+
+ F
+ag   |      R
+su
+t |
 |----------|----------|-------------|
-| --enforce-eager | enforce_eager=True |  Turn off torch.compile and CUDAGraphs |
-| -cc.mode=0 | mode=CompilationMode.NONE |  Turn off torch.compile only |
-| -cc.cudagraph_mode=NONE | compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE) |  Turn off CUDAGraphs only |
-| -cc.backend=eager | compilation_config=CompilationConfig(backend='eager') |  Turn off TorchInductor |
+| --
 
-## vLLM-torch.compile overview
+forc
+-
+ag
+r | 
 
-To improve performance, vLLM leverages torch.compile and CUDAGraphs to speed things up.
-torch.compile generates optimized kernels for PyTorch code while CUDAGraphs eliminates overhead.
-Most notably, vLLM-compile is NOT torch.compile, it is a custom compiler built using internal PyTorch Compile APIs.
+forc
+_
+ag
+r=Tru
+ |  Tur
+ off torch.comp
 
-![vLLM-compile diagram](../assets/design/debug_vllm_compile/design_diagram.png)
 
-- Given a model, we do a full graph capture via TorchDynamo that is dynamic on the batch size (number of tokens)
-- vLLM then optionally splits and/or specializes this graph and then uses TorchInductor to compile each graph into a compiled artifact.
-This step may use vLLM custom Inductor passes to further optimize the graph.
-- The compiled artifact is saved to vLLM's compile cache so that it can be loaded in the future.
-- vLLM applies CUDAGraphs to reduce CPU overheads.
+ a
+d CUDAGraphs |
+| -cc.mod
+=0 | mod
+=Comp
 
-Things can go wrong in each of the four steps. When something does go wrong, please try to isolate the subsystem
-that went wrong -- this will allow you to turn off the minimal number of things to keep reliability
-goals while minimizing impact to performance and also helps us (vLLM) when you open a bug report.
+at
+o
+Mod
+.NONE |  Tur
+ off torch.comp
 
-For more details on the design, please see the following resources:
 
-- [Introduction to vLLM-torch.compile blogpost](https://blog.vllm.ai/2025/08/20/torch-compile.html)
-- [vLLM-torch.compile integration design](./torch_compile.md)
-- [vLLM Office Hours #26](https://www.youtube.com/live/xLyxc7hxCJc?si=Xulo9pe53C6ywf0V&t=561)
-- [Talk at PyTorch Conference 2025](https://youtu.be/1wV1ESbGrVQ?si=s1GqymUfwiwOrDTg&t=725)
+ o
 
-## Use tlparse
+y |
+| -cc.cudagraph_mod
+=NONE | comp
 
-Use [tlparse](https://github.com/meta-pytorch/tlparse) to view torch.compile
-logs. These logs show all stages of the compilation process, including the fused
-kernels that torch.compile produces.
+at
+o
+_co
+f
+g=Comp
 
-Install tlparse:
+at
+o
+Co
+f
+g(cudagraph_mod
+=CUDAGraphMod
+.NONE) |  Tur
+ off CUDAGraphs o
 
+y |
+| -cc.back
+
+d=
+ag
+r | comp
+
+at
+o
+_co
+f
+g=Comp
+
+at
+o
+Co
+f
+g(back
+
+d='
+ag
+r') |  Tur
+ off TorchI
+ductor |
+## vLLM-torch.comp
+
+
+ ov
+rv
+
+
+
+To 
+mprov
+ p
+rforma
+c
+, vLLM 
+
+v
+rag
+s torch.comp
+
+
+ a
+d CUDAGraphs to sp
+d th
+
+gs up.
+torch.comp
+
+
+ g
+
+
+rat
+s opt
+m
+z
+d k
+r
+
+
+s for PyTorch cod
+ 
+h
+
+
+ CUDAGraphs 
+
+
+m
+
+at
+s ov
+rh
+ad.
+Most 
+otab
+y, vLLM-comp
+
+
+ 
+s NOT torch.comp
+
+
+, 
+t 
+s a custom comp
+
+
+r bu
+
+t us
+
+g 
+
+t
+r
+a
+ PyTorch Comp
+
+
+ APIs.
+![vLLM-comp
+
+
+ d
+agram](../ass
+ts/d
+s
+g
+/d
+bug_v
+m_comp
+
+
+/d
+s
+g
+_d
+agram.p
+g)
+- G
+v
+
+ a mod
+
+, 
+
+ do a fu
+ graph captur
+ v
+a TorchDy
+amo that 
+s dy
+am
+c o
+ th
+ batch s
+z
+ (
+umb
+r of tok
+
+s)
+- vLLM th
+
+ opt
+o
+a
+y sp
+
+ts a
+d/or sp
+c
+a
+
+z
+s th
+s graph a
+d th
+
+ us
+s TorchI
+ductor to comp
+
+
+ 
+ach graph 
+
+to a comp
+
+
+d art
+fact.
+Th
+s st
+p may us
+ vLLM custom I
+ductor pass
+s to furth
+r opt
+m
+z
+ th
+ graph.
+- Th
+ comp
+
+
+d art
+fact 
+s sav
+d to vLLM's comp
+
+
+ cach
+ so that 
+t ca
+ b
+ 
+oad
+d 
+
+ th
+ futur
+.
+- vLLM app
+
+
+s CUDAGraphs to r
+duc
+ CPU ov
+rh
+ads.
+Th
+
+gs ca
+ go 
+ro
+g 
+
+ 
+ach of th
+ four st
+ps. Wh
+
+ som
+th
+
+g do
+s go 
+ro
+g, p
+
+as
+ try to 
+so
+at
+ th
+ subsyst
+m
+that 
+
+
+t 
+ro
+g -- th
+s 
+
+
+ a
+o
+ you to tur
+ off th
+ m
+
+
+ma
+ 
+umb
+r of th
+
+gs to k
+p r
+
+
+ab
+
+
+ty
+goa
+s 
+h
+
+
+ m
+
+
+m
+z
+
+g 
+mpact to p
+rforma
+c
+ a
+d a
+so h
+
+ps us (vLLM) 
+h
+
+ you op
+
+ a bug r
+port.
+For mor
+ d
+ta
+
+s o
+ th
+ d
+s
+g
+, p
+
+as
+ s
+ th
+ fo
+o
+
+
+g r
+sourc
+s:
+- [I
+troduct
+o
+ to vLLM-torch.comp
+
+
+ b
+ogpost](https://b
+og.v
+m.a
+/2025/08/20/torch-comp
+
+
+.htm
+)
+- [vLLM-torch.comp
+
+
+ 
+
+t
+grat
+o
+ d
+s
+g
+](./torch_comp
+
+
+.md)
+- [vLLM Off
+c
+ Hours #26](https://
+.youtub
+.com/
+
+v
+/xLyxc7hxCJc?s
+=Xu
+o9p
+53C6y
+f0V&t=561)
+- [Ta
+k at PyTorch Co
+f
+r
+
+c
+ 2025](https://youtu.b
+/1
+V1ESbGrVQ?s
+=s1GqymUf
+
+
+OrDTg&t=725)
+## Us
+ t
+pars
+
+Us
+ [t
+pars
+](https://g
+thub.com/m
+ta-pytorch/t
+pars
+) to v
+
+
+ torch.comp
+
+
+
+
+ogs. Th
+s
+ 
+ogs sho
+ a
+ stag
+s of th
+ comp
+
+at
+o
+ proc
+ss, 
+
+c
+ud
+
+g th
+ fus
+d
+k
+r
+
+
+s that torch.comp
+
+
+ produc
+s.
+I
+sta
+ t
+pars
+:
 ```sh
-pip install tlparse
+p
+p 
+
+sta
+ t
+pars
+
 ```
+To 
 
-To enable the torch.compile logs, you can set the envvar `TORCH_TRACE=<dir>`.
-During tracing, a file per rank will be created inside of that directory, with
-each file containing the artifacts during compilation. If you can, we recommend
-sending these log files along with bug reports -- they are very helpful.
+ab
 
-Usage (offline inference)
+ th
+ torch.comp
 
+
+ 
+ogs, you ca
+ s
+t th
+ 
+
+vvar `TORCH_TRACE=
+d
+r
+`.
+Dur
+
+g trac
+
+g, a f
+
+
+ p
+r ra
+k 
+
+
+ b
+ cr
+at
+d 
+
+s
+d
+ of that d
+r
+ctory, 
+
+th
+
+ach f
+
+
+ co
+ta
+
+
+
+g th
+ art
+facts dur
+
+g comp
+
+at
+o
+. If you ca
+, 
+
+ r
+comm
+
+d
+s
+
+d
+
+g th
+s
+ 
+og f
+
+
+s a
+o
+g 
+
+th bug r
+ports -- th
+y ar
+ v
+ry h
+
+pfu
+.
+Usag
+ (off
+
+
+
+ 
+
+f
+r
+
+c
+)
 ```sh
-TORCH_TRACE=~/trace_dir python my_script.py
-tlparse ~/trace_dir/<rank_0_log_file>
+TORCH_TRACE=~/trac
+_d
+r pytho
+ my_scr
+pt.py
+t
+pars
+ ~/trac
+_d
+r/
+ra
+k_0_
+og_f
+
+
+
+
 ```
+Usag
+ (s
+rv
 
-Usage (serving)
-
+g)
 ```sh
-TORCH_TRACE=~/trace_dir vllm serve
-# ctrl-c out of the server
-tlparse ~/trace_dir/<rank_0_log_file>
+TORCH_TRACE=~/trac
+_d
+r v
+m s
+rv
+
+# ctr
+-c out of th
+ s
+rv
+r
+t
+pars
+ ~/trac
+_d
+r/
+ra
+k_0_
+og_f
+
+
+
+
 ```
+G
+v
 
-Given one of the log files, the `tlparse` command outputs some HTML files
-(perhaps into e.g. `./tl_out/index.html`).
-Open it to see the logs. It'll look something like the following:
+ o
 
-![tlparse example](../assets/design/debug_vllm_compile/tlparse_inductor.png)
+ of th
+ 
+og f
 
-## Turn off vLLM-torch.compile integration
 
-Pass `--enforce-eager` to turn off the vLLM-torch.compile integration and run entirely
-in eager mode. This includes turning off CUDAGraphs.
+s, th
+ `t
+pars
+` comma
+d outputs som
+ HTML f
 
+
+s
+(p
+rhaps 
+
+to 
+.g. `./t
+_out/
+
+d
+x.htm
+`).
+Op
+
+ 
+t to s
+ th
+ 
+ogs. It'
+ 
+ook som
+th
+
+g 
+
+k
+ th
+ fo
+o
+
+
+g:
+![t
+pars
+ 
+xamp
+
+](../ass
+ts/d
+s
+g
+/d
+bug_v
+m_comp
+
+
+/t
+pars
+_
+
+ductor.p
+g)
+## Tur
+ off vLLM-torch.comp
+
+
+ 
+
+t
+grat
+o
+
+Pass `--
+
+forc
+-
+ag
+r` to tur
+ off th
+ vLLM-torch.comp
+
+
+ 
+
+t
+grat
+o
+ a
+d ru
+ 
+
+t
+r
+
+y
+
+
+ 
+ag
+r mod
+. Th
+s 
+
+c
+ud
+s tur
+
+
+g off CUDAGraphs.
 ```sh
-# Online
-vllm serve --enforce-eager
-```
+# O
 
+
+
+
+
+v
+m s
+rv
+ --
+
+forc
+-
+ag
+r
+```
 ```py
-# Offline
-LLM(model, enforce_eager=True)
+# Off
+
+
+
+
+LLM(mod
+
+, 
+
+forc
+_
+ag
+r=Tru
+)
 ```
+To tur
+ off just torch.comp
 
-To turn off just torch.compile, pass `mode = NONE` to the compilation config.
-(`-cc` is short for `--compilation_config`):
 
+, pass `mod
+ = NONE` to th
+ comp
+
+at
+o
+ co
+f
+g.
+(`-cc` 
+s short for `--comp
+
+at
+o
+_co
+f
+g`):
 ```sh
-# Online
-vllm serve -cc.mode=0
-```
+# O
 
+
+
+
+
+v
+m s
+rv
+ -cc.mod
+=0
+```
 ```py
-# Offline
-from vllm.config.compilation import CompilationConfig, CompilationMode
-LLM(model, compilation_config=CompilationConfig(mode=CompilationMode.NONE))
+# Off
+
+
+
+
+from v
+m.co
+f
+g.comp
+
+at
+o
+ 
+mport Comp
+
+at
+o
+Co
+f
+g, Comp
+
+at
+o
+Mod
+
+LLM(mod
+
+, comp
+
+at
+o
+_co
+f
+g=Comp
+
+at
+o
+Co
+f
+g(mod
+=Comp
+
+at
+o
+Mod
+.NONE))
 ```
-
-To turn off just CUDAGraphs, pass `cudagraph_mode = NONE`:
-
+To tur
+ off just CUDAGraphs, pass `cudagraph_mod
+ = NONE`:
 ```sh
-# Online
-vllm serve -cc.cudagraph_mode=NONE
+# O
+
+
+
+
+
+v
+m s
+rv
+ -cc.cudagraph_mod
+=NONE
 ```
-
 ```py
-# Offline
-from vllm.config.compilation import CompilationConfig, CUDAGraphMode
-LLM(model, compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE))
+# Off
+
+
+
+
+from v
+m.co
+f
+g.comp
+
+at
+o
+ 
+mport Comp
+
+at
+o
+Co
+f
+g, CUDAGraphMod
+
+LLM(mod
+
+, comp
+
+at
+o
+_co
+f
+g=Comp
+
+at
+o
+Co
+f
+g(cudagraph_mod
+=CUDAGraphMod
+.NONE))
 ```
+## D
+bugg
 
-## Debugging TorchDynamo
+g TorchDy
+amo
+vLLM r
+qu
+r
+s mod
 
-vLLM requires model code be capturable into a full graph via TorchDynamo (torch.compile's frontend).
-TorchDynamo does not support all of Python. It will error (in fullgraph mode) if it cannot support
-a feature (this is sometimes known as a graph break).
+ cod
+ b
+ capturab
 
-If you encounter a graph break, please [open an issue to pytorch/pytorch](https://github.com/pytorch/pytorch) so the PyTorch devs can prioritize.
-Then, try your best to rewrite the code to avoid the graph break.
-For more information, see this [Dynamo guide](https://docs.pytorch.org/docs/stable/compile/programming_model.dynamo_core_concepts.html).
+ 
 
-## Debugging Dynamic Shape full graph capture
+to a fu
+ graph v
+a TorchDy
+amo (torch.comp
 
-vLLM requires that the model's forward pass be capturable into a full graph that is dynamic
-on the batch size (i.e. the number of tokens). It (by default) compiles this one graph into
-one artifact and uses this artifact for all batch sizes.
 
-If your code cannot be captured with Dynamic Shapes, you may see silent incorrectness,
-loud errors, or CUDA illegal memory accesses. For example, the following is not
-capturable into a single graph:
+'s fro
+t
 
+d).
+TorchDy
+amo do
+s 
+ot support a
+ of Pytho
+. It 
+
+
+ 
+rror (
+
+ fu
+graph mod
+) 
+f 
+t ca
+ot support
+a f
+atur
+ (th
+s 
+s som
+t
+m
+s k
+o
+
+ as a graph br
+ak).
+If you 
+
+cou
+t
+r a graph br
+ak, p
+
+as
+ [op
+
+ a
+ 
+ssu
+ to pytorch/pytorch](https://g
+thub.com/pytorch/pytorch) so th
+ PyTorch d
+vs ca
+ pr
+or
+t
+z
+.
+Th
+
+, try your b
+st to r
+
+r
+t
+ th
+ cod
+ to avo
+d th
+ graph br
+ak.
+For mor
+ 
+
+format
+o
+, s
+ th
+s [Dy
+amo gu
+d
+](https://docs.pytorch.org/docs/stab
+
+/comp
+
+
+/programm
+
+g_mod
+
+.dy
+amo_cor
+_co
+c
+pts.htm
+).
+## D
+bugg
+
+g Dy
+am
+c Shap
+ fu
+ graph captur
+
+vLLM r
+qu
+r
+s that th
+ mod
+
+'s for
+ard pass b
+ capturab
+
+ 
+
+to a fu
+ graph that 
+s dy
+am
+c
+o
+ th
+ batch s
+z
+ (
+.
+. th
+ 
+umb
+r of tok
+
+s). It (by d
+fau
+t) comp
+
+
+s th
+s o
+
+ graph 
+
+to
+o
+
+ art
+fact a
+d us
+s th
+s art
+fact for a
+ batch s
+z
+s.
+If your cod
+ ca
+ot b
+ captur
+d 
+
+th Dy
+am
+c Shap
+s, you may s
+ s
+
+
+
+t 
+
+corr
+ct
+
+ss,
+
+oud 
+rrors, or CUDA 
+
+
+ga
+ m
+mory acc
+ss
+s. For 
+xamp
+
+, th
+ fo
+o
+
+
+g 
+s 
+ot
+capturab
+
+ 
+
+to a s
+
+g
+
+ graph:
 ```py
-if data.size[0] % 128 == 0:
+
+f data.s
+z
+[0] % 128 == 0:
     foo(...)
-else:
+
+
+s
+:
     bar(...)
 ```
+Th
+s prob
 
-This problem is easy to diagnose. Use tlparse and click on `compilation_metrics`:
-it will tell you symbolic constraints on the batch size. If there is any constraint
-that restricts the batch sizes, then we've got a problem.
+m 
+s 
+asy to d
+ag
+os
+. Us
+ t
+pars
+ a
+d c
 
-![Bad tlparse example](../assets/design/debug_vllm_compile/dynamic_shapes.png)
+ck o
+ `comp
 
-To avoid this, please either:
+at
+o
+_m
+tr
+cs`:
 
-1. avoid branching on the number of tokens
-2. wrap the branching logic into a custom operator. TorchDynamo does not
-trace into custom operators.
+t 
 
-## Debugging constraint violations and dynamic shapes guards issues
 
-Dynamic-shape guards are a specific category of Dynamo guards. They are constraints that `torch.compile`
-attaches to dynamic dimensions (e.g., `seq_len`) to ensure the compiled artifact remains valid.
-These guards typically appear when framework code, custom passes, or user code branches based on
-dynamic shape values.
+ t
 
-**Example:**
+ you symbo
 
-```python
-if x > 10:
+c co
+stra
+
+ts o
+ th
+ batch s
+z
+. If th
+r
+ 
+s a
+y co
+stra
+
+t
+that r
+str
+cts th
+ batch s
+z
+s, th
+
+ 
+
+'v
+ got a prob
+
+m.
+![Bad t
+pars
+ 
+xamp
+
+](../ass
+ts/d
+s
+g
+/d
+bug_v
+m_comp
+
+
+/dy
+am
+c_shap
+s.p
+g)
+To avo
+d th
+s, p
+
+as
+ 
+
+th
+r:
+1. avo
+d bra
+ch
+
+g o
+ th
+ 
+umb
+r of tok
+
+s
+2. 
+rap th
+ bra
+ch
+
+g 
+og
+c 
+
+to a custom op
+rator. TorchDy
+amo do
+s 
+ot
+trac
+ 
+
+to custom op
+rators.
+## D
+bugg
+
+g co
+stra
+
+t v
+o
+at
+o
+s a
+d dy
+am
+c shap
+s guards 
+ssu
+s
+Dy
+am
+c-shap
+ guards ar
+ a sp
+c
+f
+c cat
+gory of Dy
+amo guards. Th
+y ar
+ co
+stra
+
+ts that `torch.comp
+
+
+`
+attach
+s to dy
+am
+c d
+m
+
+s
+o
+s (
+.g., `s
+q_
+
+
+`) to 
+
+sur
+ th
+ comp
+
+
+d art
+fact r
+ma
+
+s va
+
+d.
+Th
+s
+ guards typ
+ca
+y app
+ar 
+h
+
+ fram
+
+ork cod
+, custom pass
+s, or us
+r cod
+ bra
+ch
+s bas
+d o
+
+dy
+am
+c shap
+ va
+u
+s.
+**Examp
+
+:**
+```pytho
+
+
+f x 
+ 10:
     # path A
-else:
+
+
+s
+:
     # path B
 ```
+Th
+s cr
+at
+s a guard `x 
+ 10` or `x 
+= 10` d
+p
 
-This creates a guard `x > 10` or `x <= 10` depending on which path was traced.
+d
 
-**vLLM's Assumption:**
-vLLM assumes that all guards added by torch.compile are safe to drop and will not
-constrain the compiled graph to specific input shapes. When this assumption is violated,
-it can cause issues that users need to debug.
-Some side effects that indicates this assumption is violated are runtime errors
-or `ConstraintViolationErrors`.
+g o
+ 
+h
+ch path 
+as trac
+d.
+**vLLM's Assumpt
+o
+:**
+vLLM assum
+s that a
+ guards add
+d by torch.comp
 
-A `ConstraintViolationErrors` will be thrown if a dynamic shape gets constrained to
-a single value. If you encounter a constraint violation error or suspect that a dynamic
-shapes guard is being added incorrectly, you can use stricter dynamic shape modes to
-help debug the issue:
 
+ ar
+ saf
+ to drop a
+d 
+
+
+ 
+ot
+co
+stra
+
+ th
+ comp
+
+
+d graph to sp
+c
+f
+c 
+
+put shap
+s. Wh
+
+ th
+s assumpt
+o
+ 
+s v
+o
+at
+d,
+
+t ca
+ caus
+ 
+ssu
+s that us
+rs 
+
+d to d
+bug.
+Som
+ s
+d
+ 
+ff
+cts that 
+
+d
+cat
+s th
+s assumpt
+o
+ 
+s v
+o
+at
+d ar
+ ru
+t
+m
+ 
+rrors
+or `Co
+stra
+
+tV
+o
+at
+o
+Errors`.
+A `Co
+stra
+
+tV
+o
+at
+o
+Errors` 
+
+
+ b
+ thro
+
+ 
+f a dy
+am
+c shap
+ g
+ts co
+stra
+
+
+d to
+a s
+
+g
+
+ va
+u
+. If you 
+
+cou
+t
+r a co
+stra
+
+t v
+o
+at
+o
+ 
+rror or susp
+ct that a dy
+am
+c
+shap
+s guard 
+s b
+
+
+g add
+d 
+
+corr
+ct
+y, you ca
+ us
+ str
+ct
+r dy
+am
+c shap
+ mod
+s to
+h
+
+p d
+bug th
+ 
+ssu
+:
 ```sh
-# Online - using unbacked mode
-vllm serve meta-llama/Llama-3.2-1B -cc.dynamic_shapes_config.type=unbacked
+# O
 
-# Online - using backed_size_oblivious mode
-vllm serve meta-llama/Llama-3.2-1B -cc.dynamic_shapes_config.type=backed_size_oblivious
+
+
+
+ - us
+
+g u
+back
+d mod
+
+v
+m s
+rv
+ m
+ta-
+ama/L
+ama-3.2-1B -cc.dy
+am
+c_shap
+s_co
+f
+g.typ
+=u
+back
+d
+# O
+
+
+
+
+ - us
+
+g back
+d_s
+z
+_ob
+
+v
+ous mod
+
+v
+m s
+rv
+ m
+ta-
+ama/L
+ama-3.2-1B -cc.dy
+am
+c_shap
+s_co
+f
+g.typ
+=back
+d_s
+z
+_ob
+
+v
+ous
 ```
-
 ```py
-# Offline - using unbacked mode
-from vllm.config.compilation import CompilationConfig, DynamicShapesConfig, DynamicShapesType
-LLM(model, compilation_config=CompilationConfig(
-    dynamic_shapes_config=DynamicShapesConfig(type=DynamicShapesType.UNBACKED)
+# Off
+
+
+
+ - us
+
+g u
+back
+d mod
+
+from v
+m.co
+f
+g.comp
+
+at
+o
+ 
+mport Comp
+
+at
+o
+Co
+f
+g, Dy
+am
+cShap
+sCo
+f
+g, Dy
+am
+cShap
+sTyp
+
+LLM(mod
+
+, comp
+
+at
+o
+_co
+f
+g=Comp
+
+at
+o
+Co
+f
+g(
+    dy
+am
+c_shap
+s_co
+f
+g=Dy
+am
+cShap
+sCo
+f
+g(typ
+=Dy
+am
+cShap
+sTyp
+.UNBACKED)
 ))
+# Off
 
-# Offline - using backed_size_oblivious mode
-from vllm.config.compilation import CompilationConfig, DynamicShapesConfig, DynamicShapesType
-LLM(model, compilation_config=CompilationConfig(
-    dynamic_shapes_config=DynamicShapesConfig(type=DynamicShapesType.BACKED_SIZE_OBLIVIOUS)
+
+
+ - us
+
+g back
+d_s
+z
+_ob
+
+v
+ous mod
+
+from v
+m.co
+f
+g.comp
+
+at
+o
+ 
+mport Comp
+
+at
+o
+Co
+f
+g, Dy
+am
+cShap
+sCo
+f
+g, Dy
+am
+cShap
+sTyp
+
+LLM(mod
+
+, comp
+
+at
+o
+_co
+f
+g=Comp
+
+at
+o
+Co
+f
+g(
+    dy
+am
+c_shap
+s_co
+f
+g=Dy
+am
+cShap
+sCo
+f
+g(typ
+=Dy
+am
+cShap
+sTyp
+.BACKED_SIZE_OBLIVIOUS)
 ))
 ```
+Th
+s
+ mod
+s ar
+ str
+ct
+r a
+d r
+duc
+ or 
 
-These modes are stricter and reduce or eliminate the need of dynamic shapes guarding, which can help isolate issues:
 
-- `unbacked`: Uses unbacked symints which don't allow guards, making it easier to identify where guards are being incorrectly added
-- `backed_size_oblivious`: Uses a mode that is stricter about guarding.
+m
 
-For more details on dynamic shapes modes, see [Dynamic shapes and vLLM guard dropping](torch_compile.md#dynamic-shapes-and-vllm-guard-dropping).
+at
+ th
+ 
 
-### Printing guards
+d of dy
+am
+c shap
+s guard
 
-To see all guards that are being added during compilation, you can use `TORCH_LOGS=+dynamic`:
+g, 
+h
+ch ca
+ h
 
+p 
+so
+at
+ 
+ssu
+s:
+- `u
+back
+d`: Us
+s u
+back
+d sym
+
+ts 
+h
+ch do
+'t a
+o
+ guards, mak
+
+g 
+t 
+as
+
+r to 
+d
+
+t
+fy 
+h
+r
+ guards ar
+ b
+
+
+g 
+
+corr
+ct
+y add
+d
+- `back
+d_s
+z
+_ob
+
+v
+ous`: Us
+s a mod
+ that 
+s str
+ct
+r about guard
+
+g.
+For mor
+ d
+ta
+
+s o
+ dy
+am
+c shap
+s mod
+s, s
+ [Dy
+am
+c shap
+s a
+d vLLM guard dropp
+
+g](torch_comp
+
+
+.md#dy
+am
+c-shap
+s-a
+d-v
+m-guard-dropp
+
+g).
+### Pr
+
+t
+
+g guards
+To s
+ a
+ guards that ar
+ b
+
+
+g add
+d dur
+
+g comp
+
+at
+o
+, you ca
+ us
+ `TORCH_LOGS=+dy
+am
+c`:
 ```sh
-TORCH_LOGS=+dynamic vllm serve meta-llama/Llama-3.2-1B
+TORCH_LOGS=+dy
+am
+c v
+m s
+rv
+ m
+ta-
+ama/L
+ama-3.2-1B
 ```
+Look for `[guard add
+d]` 
 
-Look for `[guard added]` in the logs to see where guards are being added. This can help you identify which operations are
-causing guards to be added incorrectly.
+ th
+ 
+ogs to s
+ 
+h
+r
+ guards ar
+ b
 
-## Debugging TorchInductor
 
-TorchInductor takes a captured graph and then compiles it down to some Python code
-that may call 1+ triton kernels. On rare (but unfortunate) occasions, it may
-produce an incorrect triton kernel. This may manifest as silent incorrectness,
-CUDA illegal memory accesses, or loud errors.
+g add
+d. Th
+s ca
+ h
 
-To debug if TorchInductor is at fault, you can disable it by passing `backend='eager'`
-to the compilation config:
+p you 
+d
 
+t
+fy 
+h
+ch op
+rat
+o
+s ar
+
+caus
+
+g guards to b
+ add
+d 
+
+corr
+ct
+y.
+## D
+bugg
+
+g TorchI
+ductor
+TorchI
+ductor tak
+s a captur
+d graph a
+d th
+
+ comp
+
+
+s 
+t do
+
+ to som
+ Pytho
+ cod
+
+that may ca
+ 1+ tr
+to
+ k
+r
+
+
+s. O
+ rar
+ (but u
+fortu
+at
+) occas
+o
+s, 
+t may
+produc
+ a
+ 
+
+corr
+ct tr
+to
+ k
+r
+
+
+. Th
+s may ma
+
+f
+st as s
+
+
+
+t 
+
+corr
+ct
+
+ss,
+CUDA 
+
+
+ga
+ m
+mory acc
+ss
+s, or 
+oud 
+rrors.
+To d
+bug 
+f TorchI
+ductor 
+s at fau
+t, you ca
+ d
+sab
+
+ 
+t by pass
+
+g `back
+
+d='
+ag
+r'`
+to th
+ comp
+
+at
+o
+ co
+f
+g:
 ```sh
-# online
-vllm serve -cc.backend=eager
-```
+# o
 
+
+
+
+
+v
+m s
+rv
+ -cc.back
+
+d=
+ag
+r
+```
 ```py
-# offline
-LLM(compilation_config=CompilationConfig(backend='eager'))
+# off
+
+
+
+
+LLM(comp
+
+at
+o
+_co
+f
+g=Comp
+
+at
+o
+Co
+f
+g(back
+
+d='
+ag
+r'))
 ```
+If I
+ductor 
+s at fau
+t, [f
 
-If Inductor is at fault, [file a bug to PyTorch](https://github.com/pytorch/pytorch).
-If you're feeling adventurous, you can debug the triton kernels in the Inductor output code
-(that you can locate via using tlparse).
 
-![tlparse example](../assets/design/debug_vllm_compile/tlparse_inductor.png)
+ a bug to PyTorch](https://g
+thub.com/pytorch/pytorch).
+If you'r
+ f
 
-You can also use `TORCH_LOGS=output_code <command>` to print the Inductor output code.
 
-### Editable TorchInductor code
 
-You can edit the TorchInductor code that gets run by setting `VLLM_COMPILE_CACHE_SAVE_FORMAT=unpacked`
-or passing `-cc.compile_cache_save_format=unpacked`. The default is `binary`, which means it is not editable.
+g adv
 
-This is a useful technique: you can put breakpoints (e.g. `torch.distributed.breakpoint()`)
-and print statements in the output code.
+turous, you ca
+ d
+bug th
+ tr
+to
+ k
+r
 
-## Debugging vLLM-compile cache
 
-vLLM built its own cache for torch.compile artifacts. The idea is that the artifacts
-can be compiled once and then reused after they have been compiled. This
-is a layer on top of [torch.compile's compiler cache](https://docs.pytorch.org/tutorials/recipes/torch_compile_caching_tutorial.html).
+s 
 
-While torch.compile's compiler cache is rock-stable, vLLM's compiler cache is unfortunately
-not always correct. You can disable it via setting `VLLM_DISABLE_COMPILE_CACHE=1`.
+ th
+ I
+ductor output cod
 
-You can also manually remove this cache.
+(that you ca
+ 
+ocat
+ v
+a us
 
-- Remove vLLM's compile cache with `rm -rf ~/.cache/vllm` (look at logs to see if the location changed)
-- Remove torch.compile's built-in caches with `rm -rf /tmp/torchinductor_$(whoami)`
+g t
+pars
+).
+![t
+pars
+ 
+xamp
 
-vLLM's cache is a mapping from cache key to a compiled artifact. vLLM computes
-the cache key via combining multiple factors (e.g. config flags and model name).
-If vLLM's compile cache is wrong, this usually means that a factor is missing.
-Please see [this example](https://github.com/vllm-project/vllm/blob/18b39828d90413d05d770dfd2e2f48304f4ca0eb/vllm/config/model.py#L310)
-of how vLLM computes part of the cache key.
+](../ass
+ts/d
+s
+g
+/d
+bug_v
+m_comp
 
-vLLM's compilation cache requires that the code being compiled ends up being serializable.
-If this is not the case, then it will error out on save. Usually the fixes are to either:
 
-- rewrite the non-serializable pieces (perhaps difficult because it's difficult to
-  tell right now what is serializable and what isn't)
-- file a bug report
-- ignore the error by setting `VLLM_DISABLE_COMPILE_CACHE=1` (note that this will
-  make warm server starts a lot slower).
+/t
+pars
+_
 
-## Debugging CUDAGraphs
+ductor.p
+g)
+You ca
+ a
+so us
+ `TORCH_LOGS=output_cod
+ 
+comma
+d
+` to pr
 
-CUDAGraphs is a feature that allows one to:
+t th
+ I
+ductor output cod
+.
+### Ed
+tab
 
-- Capture a callable that launches 1+ CUDA kernels into a CUDAGraph
-- Replay the CUDAGraph
+ TorchI
+ductor cod
 
-The captured CUDAGraph contains all of the memory used during the capture process.
-The replay of the CUDAGraph reads and writes to exactly the same regions of memory.
+You ca
+ 
+d
+t th
+ TorchI
+ductor cod
+ that g
+ts ru
+ by s
+tt
 
-This leads to some restrictions:
+g `VLLM_COMPILE_CACHE_SAVE_FORMAT=u
+pack
+d`
+or pass
 
-1. In order to use CUDAGraphs on new data, you'll need to copy the data into a buffer
-that the CUDAGraph is reading from
-2. CUDAGraphs only capture CUDA kernels, they don't capture work done on CPU.
+g `-cc.comp
 
-vLLM uses the raw CUDAGraphs API, which is unsafe when used incorrectly.
 
-To turn off just CUDAGraphs, pass `cudagraph_mode = NONE`:
+_cach
+_sav
+_format=u
+pack
+d`. Th
+ d
+fau
+t 
+s `b
 
+ary`, 
+h
+ch m
+a
+s 
+t 
+s 
+ot 
+d
+tab
+
+.
+Th
+s 
+s a us
+fu
+ t
+ch
+
+qu
+: you ca
+ put br
+akpo
+
+ts (
+.g. `torch.d
+str
+but
+d.br
+akpo
+
+t()`)
+a
+d pr
+
+t stat
+m
+
+ts 
+
+ th
+ output cod
+.
+## D
+bugg
+
+g vLLM-comp
+
+
+ cach
+
+vLLM bu
+
+t 
+ts o
+
+ cach
+ for torch.comp
+
+
+ art
+facts. Th
+ 
+d
+a 
+s that th
+ art
+facts
+ca
+ b
+ comp
+
+
+d o
+c
+ a
+d th
+
+ r
+us
+d aft
+r th
+y hav
+ b
+
+ comp
+
+
+d. Th
+s
+
+s a 
+ay
+r o
+ top of [torch.comp
+
+
+'s comp
+
+
+r cach
+](https://docs.pytorch.org/tutor
+a
+s/r
+c
+p
+s/torch_comp
+
+
+_cach
+
+g_tutor
+a
+.htm
+).
+Wh
+
+
+ torch.comp
+
+
+'s comp
+
+
+r cach
+ 
+s rock-stab
+
+, vLLM's comp
+
+
+r cach
+ 
+s u
+fortu
+at
+
+y
+
+ot a
+
+ays corr
+ct. You ca
+ d
+sab
+
+ 
+t v
+a s
+tt
+
+g `VLLM_DISABLE_COMPILE_CACHE=1`.
+You ca
+ a
+so ma
+ua
+y r
+mov
+ th
+s cach
+.
+- R
+mov
+ vLLM's comp
+
+
+ cach
+ 
+
+th `rm -rf ~/.cach
+/v
+m` (
+ook at 
+ogs to s
+ 
+f th
+ 
+ocat
+o
+ cha
+g
+d)
+- R
+mov
+ torch.comp
+
+
+'s bu
+
+t-
+
+ cach
+s 
+
+th `rm -rf /tmp/torch
+
+ductor_$(
+hoam
+)`
+vLLM's cach
+ 
+s a mapp
+
+g from cach
+ k
+y to a comp
+
+
+d art
+fact. vLLM comput
+s
+th
+ cach
+ k
+y v
+a comb
+
+
+
+g mu
+t
+p
+
+ factors (
+.g. co
+f
+g f
+ags a
+d mod
+
+ 
+am
+).
+If vLLM's comp
+
+
+ cach
+ 
+s 
+ro
+g, th
+s usua
+y m
+a
+s that a factor 
+s m
+ss
+
+g.
+P
+
+as
+ s
+ [th
+s 
+xamp
+
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/18b39828d90413d05d770dfd2
+2f48304f4ca0
+b/v
+m/co
+f
+g/mod
+
+.py#L310)
+of ho
+ vLLM comput
+s part of th
+ cach
+ k
+y.
+vLLM's comp
+
+at
+o
+ cach
+ r
+qu
+r
+s that th
+ cod
+ b
+
+
+g comp
+
+
+d 
+
+ds up b
+
+
+g s
+r
+a
+
+zab
+
+.
+If th
+s 
+s 
+ot th
+ cas
+, th
+
+ 
+t 
+
+
+ 
+rror out o
+ sav
+. Usua
+y th
+ f
+x
+s ar
+ to 
+
+th
+r:
+- r
+
+r
+t
+ th
+ 
+o
+-s
+r
+a
+
+zab
+
+ p
+
+c
+s (p
+rhaps d
+ff
+cu
+t b
+caus
+ 
+t's d
+ff
+cu
+t to
+  t
+
+ r
+ght 
+o
+ 
+hat 
+s s
+r
+a
+
+zab
+
+ a
+d 
+hat 
+s
+'t)
+- f
+
+
+ a bug r
+port
+- 
+g
+or
+ th
+ 
+rror by s
+tt
+
+g `VLLM_DISABLE_COMPILE_CACHE=1` (
+ot
+ that th
+s 
+
+
+
+  mak
+ 
+arm s
+rv
+r starts a 
+ot s
+o
+
+r).
+## D
+bugg
+
+g CUDAGraphs
+CUDAGraphs 
+s a f
+atur
+ that a
+o
+s o
+
+ to:
+- Captur
+ a ca
+ab
+
+ that 
+au
+ch
+s 1+ CUDA k
+r
+
+
+s 
+
+to a CUDAGraph
+- R
+p
+ay th
+ CUDAGraph
+Th
+ captur
+d CUDAGraph co
+ta
+
+s a
+ of th
+ m
+mory us
+d dur
+
+g th
+ captur
+ proc
+ss.
+Th
+ r
+p
+ay of th
+ CUDAGraph r
+ads a
+d 
+r
+t
+s to 
+xact
+y th
+ sam
+ r
+g
+o
+s of m
+mory.
+Th
+s 
+
+ads to som
+ r
+str
+ct
+o
+s:
+1. I
+ ord
+r to us
+ CUDAGraphs o
+ 
+
+
+ data, you'
+ 
+
+d to copy th
+ data 
+
+to a buff
+r
+that th
+ CUDAGraph 
+s r
+ad
+
+g from
+2. CUDAGraphs o
+
+y captur
+ CUDA k
+r
+
+
+s, th
+y do
+'t captur
+ 
+ork do
+
+ o
+ CPU.
+vLLM us
+s th
+ ra
+ CUDAGraphs API, 
+h
+ch 
+s u
+saf
+ 
+h
+
+ us
+d 
+
+corr
+ct
+y.
+To tur
+ off just CUDAGraphs, pass `cudagraph_mod
+ = NONE`:
 ```sh
-# Online
-vllm serve -cc.cudagraph_mode=NONE
-```
+# O
 
+
+
+
+
+v
+m s
+rv
+ -cc.cudagraph_mod
+=NONE
+```
 ```py
-# Offline
-from vllm.config.compilation import CompilationConfig, CUDAGraphMode
-LLM(model, compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE))
+# Off
+
+
+
+
+from v
+m.co
+f
+g.comp
+
+at
+o
+ 
+mport Comp
+
+at
+o
+Co
+f
+g, CUDAGraphMod
+
+LLM(mod
+
+, comp
+
+at
+o
+_co
+f
+g=Comp
+
+at
+o
+Co
+f
+g(cudagraph_mod
+=CUDAGraphMod
+.NONE))
 ```

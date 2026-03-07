@@ -1,9 +1,121 @@
-# Using vLLM
+# Us
 
-First, vLLM must be [installed](../getting_started/installation/README.md) for your chosen device in either a Python or Docker environment.
+g vLLM
+F
+rst, vLLM must b
+ [
 
-Then, vLLM supports the following usage patterns:
+sta
 
-- [Inference and Serving](../serving/offline_inference.md): Run a single instance of a model.
-- [Deployment](../deployment/docker.md): Scale up model instances for production.
-- [Training](../training/rlhf.md): Train or fine-tune a model.
+d](../g
+tt
+
+g_start
+d/
+
+sta
+at
+o
+/README.md) for your chos
+
+ d
+v
+c
+ 
+
+ 
+
+th
+r a Pytho
+ or Dock
+r 
+
+v
+ro
+m
+
+t.
+Th
+
+, vLLM supports th
+ fo
+o
+
+
+g usag
+ patt
+r
+s:
+- [I
+f
+r
+
+c
+ a
+d S
+rv
+
+g](../s
+rv
+
+g/off
+
+
+
+_
+
+f
+r
+
+c
+.md): Ru
+ a s
+
+g
+
+ 
+
+sta
+c
+ of a mod
+
+.
+- [D
+p
+oym
+
+t](../d
+p
+oym
+
+t/dock
+r.md): Sca
+
+ up mod
+
+ 
+
+sta
+c
+s for product
+o
+.
+- [Tra
+
+
+
+g](../tra
+
+
+
+g/r
+hf.md): Tra
+
+ or f
+
+
+-tu
+
+ a mod
+
+.

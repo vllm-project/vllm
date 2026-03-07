@@ -1,77 +1,868 @@
-# Claude Code
+# C
+aud
+ Cod
 
-[Claude Code](https://code.claude.com/docs/en/quickstart) is Anthropic's official agentic coding tool that lives in your terminal. It can understand your codebase, edit files, run commands, and help you write code more efficiently.
+[C
+aud
+ Cod
+](https://cod
+.c
+aud
+.com/docs/
 
-By pointing Claude Code at a vLLM server, you can use your own models as the backend instead of the Anthropic API. This is useful for:
+/qu
+ckstart) 
+s A
+throp
+c's off
+c
+a
+ ag
 
-- Running fully local/private coding assistance
-- Using open-weight models with tool calling capabilities
-- Testing and developing with custom models
+t
+c cod
 
-## How It Works
+g too
+ that 
 
-vLLM implements the Anthropic Messages API, which is the same API that Claude Code uses to communicate with Anthropic's servers. By setting `ANTHROPIC_BASE_URL` to point at your vLLM server, Claude Code sends its requests to vLLM instead of Anthropic. vLLM then translates these requests to work with your local model and returns responses in the format Claude Code expects.
+v
+s 
 
-This means any model served by vLLM with proper tool calling support can act as a drop-in replacement for Claude models in Claude Code.
+ your t
+rm
 
-## Requirements
+a
+. It ca
+ u
+d
+rsta
+d your cod
+bas
+, 
+d
+t f
 
-Claude Code requires a model with strong tool calling capabilities. The model must support the OpenAI-compatible tool calling API. See [Tool Calling](../../features/tool_calling.md) for details on enabling tool calling for your model.
 
-## Installation
+s, ru
+ comma
+ds, a
+d h
 
-First, install Claude Code by following the [official installation guide](https://docs.anthropic.com/en/docs/claude-code/getting-started).
+p you 
+r
+t
+ cod
+ mor
+ 
+ff
+c
 
-## Starting the vLLM Server
 
-Start vLLM with a tool-calling capable model - here's an example using `openai/gpt-oss-120b`:
+t
+y.
+By po
 
+t
+
+g C
+aud
+ Cod
+ at a vLLM s
+rv
+r, you ca
+ us
+ your o
+
+ mod
+
+s as th
+ back
+
+d 
+
+st
+ad of th
+ A
+throp
+c API. Th
+s 
+s us
+fu
+ for:
+- Ru
+
+
+g fu
+y 
+oca
+/pr
+vat
+ cod
+
+g ass
+sta
+c
+
+- Us
+
+g op
+
+-
+
+
+ght mod
+
+s 
+
+th too
+ ca
+
+
+g capab
+
+
+t
+
+s
+- T
+st
+
+g a
+d d
+v
+
+op
+
+g 
+
+th custom mod
+
+s
+## Ho
+ It Works
+vLLM 
+mp
+
+m
+
+ts th
+ A
+throp
+c M
+ssag
+s API, 
+h
+ch 
+s th
+ sam
+ API that C
+aud
+ Cod
+ us
+s to commu
+
+cat
+ 
+
+th A
+throp
+c's s
+rv
+rs. By s
+tt
+
+g `ANTHROPIC_BASE_URL` to po
+
+t at your vLLM s
+rv
+r, C
+aud
+ Cod
+ s
+
+ds 
+ts r
+qu
+sts to vLLM 
+
+st
+ad of A
+throp
+c. vLLM th
+
+ tra
+s
+at
+s th
+s
+ r
+qu
+sts to 
+ork 
+
+th your 
+oca
+ mod
+
+ a
+d r
+tur
+s r
+spo
+s
+s 
+
+ th
+ format C
+aud
+ Cod
+ 
+xp
+cts.
+Th
+s m
+a
+s a
+y mod
+
+ s
+rv
+d by vLLM 
+
+th prop
+r too
+ ca
+
+
+g support ca
+ act as a drop-
+
+ r
+p
+ac
+m
+
+t for C
+aud
+ mod
+
+s 
+
+ C
+aud
+ Cod
+.
+## R
+qu
+r
+m
+
+ts
+C
+aud
+ Cod
+ r
+qu
+r
+s a mod
+
+ 
+
+th stro
+g too
+ ca
+
+
+g capab
+
+
+t
+
+s. Th
+ mod
+
+ must support th
+ Op
+
+AI-compat
+b
+
+ too
+ ca
+
+
+g API. S
+ [Too
+ Ca
+
+
+g](../../f
+atur
+s/too
+_ca
+
+
+g.md) for d
+ta
+
+s o
+ 
+
+ab
+
+
+g too
+ ca
+
+
+g for your mod
+
+.
+## I
+sta
+at
+o
+
+F
+rst, 
+
+sta
+ C
+aud
+ Cod
+ by fo
+o
+
+
+g th
+ [off
+c
+a
+ 
+
+sta
+at
+o
+ gu
+d
+](https://docs.a
+throp
+c.com/
+
+/docs/c
+aud
+-cod
+/g
+tt
+
+g-start
+d).
+## Start
+
+g th
+ vLLM S
+rv
+r
+Start vLLM 
+
+th a too
+-ca
+
+
+g capab
+
+ mod
+
+ - h
+r
+'s a
+ 
+xamp
+
+ us
+
+g `op
+
+a
+/gpt-oss-120b`:
 ```bash
-vllm serve openai/gpt-oss-120b --served-model-name my-model --enable-auto-tool-choice --tool-call-parser openai
+v
+m s
+rv
+ op
+
+a
+/gpt-oss-120b --s
+rv
+d-mod
+
+-
+am
+ my-mod
+
+ --
+
+ab
+
+-auto-too
+-cho
+c
+ --too
+-ca
+-pars
+r op
+
+a
+
 ```
+For oth
+r mod
 
-For other models, you'll need to enable tool calling explicitly with `--enable-auto-tool-choice` and the right `--tool-call-parser`. Refer to the [Tool Calling documentation](../../features/tool_calling.md) for the correct flags for your model.
+s, you'
+ 
 
-## Configuring Claude Code
+d to 
 
-Launch Claude Code with environment variables pointing to your vLLM server:
+ab
 
+ too
+ ca
+
+
+g 
+xp
+
+c
+t
+y 
+
+th `--
+
+ab
+
+-auto-too
+-cho
+c
+` a
+d th
+ r
+ght `--too
+-ca
+-pars
+r`. R
+f
+r to th
+ [Too
+ Ca
+
+
+g docum
+
+tat
+o
+](../../f
+atur
+s/too
+_ca
+
+
+g.md) for th
+ corr
+ct f
+ags for your mod
+
+.
+## Co
+f
+gur
+
+g C
+aud
+ Cod
+
+Lau
+ch C
+aud
+ Cod
+ 
+
+th 
+
+v
+ro
+m
+
+t var
+ab
+
+s po
+
+t
+
+g to your vLLM s
+rv
+r:
 ```bash
-ANTHROPIC_BASE_URL=http://localhost:8000 \
+ANTHROPIC_BASE_URL=http://
+oca
+host:8000 \
 ANTHROPIC_API_KEY=dummy \
 ANTHROPIC_AUTH_TOKEN=dummy \
-ANTHROPIC_DEFAULT_OPUS_MODEL=my-model \
-ANTHROPIC_DEFAULT_SONNET_MODEL=my-model \
-ANTHROPIC_DEFAULT_HAIKU_MODEL=my-model \
-claude
+ANTHROPIC_DEFAULT_OPUS_MODEL=my-mod
+
+ \
+ANTHROPIC_DEFAULT_SONNET_MODEL=my-mod
+
+ \
+ANTHROPIC_DEFAULT_HAIKU_MODEL=my-mod
+
+ \
+c
+aud
+
 ```
+Th
+ 
 
-The environment variables:
+v
+ro
+m
 
-| Variable                         | Description                                                           |
+t var
+ab
+
+s:
+| Var
+ab
+
+                         | D
+scr
+pt
+o
+                                                           |
 | -------------------------------- | --------------------------------------------------------------------- |
-| `ANTHROPIC_BASE_URL`             | Points to your vLLM server (default port is 8000)                     |
-| `ANTHROPIC_API_KEY`              | Can be any value since vLLM doesn't require authentication by default |
-| `ANTHROPIC_AUTH_TOKEN`           | Is required. Can be any value.                                        |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL`   | Model name for Opus-tier requests                                     |
-| `ANTHROPIC_DEFAULT_SONNET_MODEL` | Model name for Sonnet-tier requests                                   |
-| `ANTHROPIC_DEFAULT_HAIKU_MODEL`  | Model name for Haiku-tier requests                                    |
+| `ANTHROPIC_BASE_URL`             | Po
 
-!!! tip
-    You can add these environment variables to your shell profile (e.g., `.bashrc`, `.zshrc`), Claude Code configuration file (`~/.claude/settings.json`), or create a wrapper script for convenience.
+ts to your vLLM s
+rv
+r (d
+fau
+t port 
+s 8000)                     |
+| `ANTHROPIC_API_KEY`              | Ca
+ b
+ a
+y va
+u
+ s
 
-## Testing the Setup
+c
+ vLLM do
+s
+'t r
+qu
+r
+ auth
 
-Once Claude Code launches, try a simple prompt to verify the connection:
+t
+cat
+o
+ by d
+fau
+t |
+| `ANTHROPIC_AUTH_TOKEN`           | Is r
+qu
+r
+d. Ca
+ b
+ a
+y va
+u
+.                                        |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL`   | Mod
 
-![Claude Code example chat](../../assets/deployment/claude-code-example.png)
+ 
+am
+ for Opus-t
 
-If the model responds correctly, your setup is working. You can now use Claude Code with your vLLM-served model for coding tasks.
+r r
+qu
+sts                                     |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | Mod
 
-## Troubleshooting
+ 
+am
+ for So
 
-**Connection refused**: Ensure vLLM is running and accessible at the specified URL. Check that the port matches.
+t-t
 
-**Tool calls not working**: Verify that your model supports tool calling and that you've enabled it with the correct `--tool-call-parser` flag. See [Tool Calling](../../features/tool_calling.md).
+r r
+qu
+sts                                   |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL`  | Mod
 
-**Model not found**: Ensure the `--served-model-name` matches the model names in your environment variables. You cannot use model names with `/` in them, such as `openai/gpt-oss-120b` directly from Huggingface, so beware of that limitation with Claude Code.
+ 
+am
+ for Ha
+ku-t
+
+r r
+qu
+sts                                    |
+!!! t
+p
+    You ca
+ add th
+s
+ 
+
+v
+ro
+m
+
+t var
+ab
+
+s to your sh
+
+ prof
+
+
+ (
+.g., `.bashrc`, `.zshrc`), C
+aud
+ Cod
+ co
+f
+gurat
+o
+ f
+
+
+ (`~/.c
+aud
+/s
+tt
+
+gs.jso
+`), or cr
+at
+ a 
+rapp
+r scr
+pt for co
+v
+
+
+
+
+c
+.
+## T
+st
+
+g th
+ S
+tup
+O
+c
+ C
+aud
+ Cod
+ 
+au
+ch
+s, try a s
+mp
+
+ prompt to v
+r
+fy th
+ co
+
+ct
+o
+:
+![C
+aud
+ Cod
+ 
+xamp
+
+ chat](../../ass
+ts/d
+p
+oym
+
+t/c
+aud
+-cod
+-
+xamp
+
+.p
+g)
+If th
+ mod
+
+ r
+spo
+ds corr
+ct
+y, your s
+tup 
+s 
+ork
+
+g. You ca
+ 
+o
+ us
+ C
+aud
+ Cod
+ 
+
+th your vLLM-s
+rv
+d mod
+
+ for cod
+
+g tasks.
+## Troub
+
+shoot
+
+g
+**Co
+
+ct
+o
+ r
+fus
+d**: E
+sur
+ vLLM 
+s ru
+
+
+g a
+d acc
+ss
+b
+
+ at th
+ sp
+c
+f
+
+d URL. Ch
+ck that th
+ port match
+s.
+**Too
+ ca
+s 
+ot 
+ork
+
+g**: V
+r
+fy that your mod
+
+ supports too
+ ca
+
+
+g a
+d that you'v
+ 
+
+ab
+
+d 
+t 
+
+th th
+ corr
+ct `--too
+-ca
+-pars
+r` f
+ag. S
+ [Too
+ Ca
+
+
+g](../../f
+atur
+s/too
+_ca
+
+
+g.md).
+**Mod
+
+ 
+ot fou
+d**: E
+sur
+ th
+ `--s
+rv
+d-mod
+
+-
+am
+` match
+s th
+ mod
+
+ 
+am
+s 
+
+ your 
+
+v
+ro
+m
+
+t var
+ab
+
+s. You ca
+ot us
+ mod
+
+ 
+am
+s 
+
+th `/` 
+
+ th
+m, such as `op
+
+a
+/gpt-oss-120b` d
+r
+ct
+y from Hugg
+
+gfac
+, so b
+
+ar
+ of that 
+
+m
+tat
+o
+ 
+
+th C
+aud
+ Cod
+.

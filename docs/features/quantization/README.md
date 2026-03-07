@@ -1,227 +1,1697 @@
-# Quantization
+# Qua
+t
+zat
+o
 
-Quantization trades off model precision for smaller memory footprint, allowing large models to be run on a wider range of devices.
+Qua
+t
+zat
+o
+ trad
+s off mod
 
-!!! tip
-    To get started with quantization, see [LLM Compressor](llm_compressor.md), a library for optimizing models for deployment with vLLM that supports FP8, INT8, INT4, and other quantization formats.
+ pr
+c
+s
+o
+ for sma
 
-The following are the supported quantization formats for vLLM:
+r m
+mory footpr
 
-- [AutoAWQ](auto_awq.md)
-- [BitsAndBytes](bnb.md)
+t, a
+o
+
+
+g 
+arg
+ mod
+
+s to b
+ ru
+ o
+ a 
+
+d
+r ra
+g
+ of d
+v
+c
+s.
+!!! t
+p
+    To g
+t start
+d 
+
+th qua
+t
+zat
+o
+, s
+ [LLM Compr
+ssor](
+m_compr
+ssor.md), a 
+
+brary for opt
+m
+z
+
+g mod
+
+s for d
+p
+oym
+
+t 
+
+th vLLM that supports FP8, INT8, INT4, a
+d oth
+r qua
+t
+zat
+o
+ formats.
+Th
+ fo
+o
+
+
+g ar
+ th
+ support
+d qua
+t
+zat
+o
+ formats for vLLM:
+- [AutoAWQ](auto_a
+q.md)
+- [B
+tsA
+dByt
+s](b
+b.md)
 - [GGUF](gguf.md)
-- [GPTQModel](gptqmodel.md)
-- [Intel Neural Compressor](inc.md)
-- [INT4 W4A16](int4.md)
-- [INT8 W8A8](int8.md)
+- [GPTQMod
+
+](gptqmod
+
+.md)
+- [I
+t
+
+ N
+ura
+ Compr
+ssor](
+
+c.md)
+- [INT4 W4A16](
+
+t4.md)
+- [INT8 W8A8](
+
+t8.md)
 - [FP8 W8A8](fp8.md)
-- [NVIDIA Model Optimizer](modelopt.md)
+- [NVIDIA Mod
+
+ Opt
+m
+z
+r](mod
+
+opt.md)
 - [AMD Quark](quark.md)
-- [Quantized KV Cache](quantized_kvcache.md)
+- [Qua
+t
+z
+d KV Cach
+](qua
+t
+z
+d_kvcach
+.md)
 - [TorchAO](torchao.md)
+## Support
+d Hard
+ar
 
-## Supported Hardware
+Th
+ tab
 
-The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:
+ b
 
-<style>
-td:not(:first-child) {
-  text-align: center !important;
+o
+ sho
+s th
+ compat
+b
+
+
+ty of var
+ous qua
+t
+zat
+o
+ 
+mp
+
+m
+
+tat
+o
+s 
+
+th d
+ff
+r
+
+t hard
+ar
+ p
+atforms 
+
+ vLLM:
+sty
+
+
+
+td:
+ot(:f
+rst-ch
+
+d) {
+  t
+xt-a
+
+g
+: c
+
+t
+r !
+mporta
+t;
 }
 td {
-  padding: 0.5rem !important;
-  white-space: nowrap;
-}
+  padd
 
+g: 0.5r
+m !
+mporta
+t;
+  
+h
+t
+-spac
+: 
+o
+rap;
+}
 th {
-  padding: 0.5rem !important;
-  min-width: 0 !important;
-}
+  padd
 
-th:not(:first-child) {
-  writing-mode: vertical-lr;
-  transform: rotate(180deg)
-}
-</style>
+g: 0.5r
+m !
+mporta
+t;
+  m
 
-| Implementation        | Volta   | Turing   | Ampere   | Ada   | Hopper   | AMD GPU   | Intel GPU   | x86 CPU   |
+-
+
+dth: 0 !
+mporta
+t;
+}
+th:
+ot(:f
+rst-ch
+
+d) {
+  
+r
+t
+
+g-mod
+: v
+rt
+ca
+-
+r;
+  tra
+sform: rotat
+(180d
+g)
+}
+/sty
+
+
+
+| Imp
+
+m
+
+tat
+o
+        | Vo
+ta   | Tur
+
+g   | Amp
+r
+   | Ada   | Hopp
+r   | AMD GPU   | I
+t
+
+ GPU   | x86 CPU   |
 |-----------------------|---------|----------|----------|-------|----------|-----------|-------------|-----------|
 | AWQ                   | ❌      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ✅︎          | ✅︎        |
 | GPTQ                  | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ✅︎          | ✅︎        |
-| Marlin (GPTQ/AWQ/FP8/FP4) | ❌      | ✅︎*       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌        |
+| Mar
+
+
+ (GPTQ/AWQ/FP8/FP4) | ❌      | ✅︎*       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌        |
 | INT8 (W8A8)           | ❌      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ✅︎        |
 | FP8 (W8A8)            | ❌      | ❌       | ❌       | ✅︎    | ✅︎       | ✅︎         | ❌          | ❌        |
-| bitsandbytes          | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌        |
-| DeepSpeedFP           | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌        |
+| b
+tsa
+dbyt
+s          | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌        |
+| D
+pSp
+dFP           | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌        |
 | GGUF                  | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ✅︎         | ❌          | ❌        |
+- Vo
+ta r
+f
+rs to SM 7.0, Tur
 
-- Volta refers to SM 7.0, Turing to SM 7.5, Ampere to SM 8.0/8.6, Ada to SM 8.9, and Hopper to SM 9.0.
-- ✅︎ indicates that the quantization method is supported on the specified hardware.
-- ❌ indicates that the quantization method is not supported on the specified hardware.
-- All Intel Gaudi quantization support has been migrated to [vLLM-Gaudi](https://github.com/vllm-project/vllm-gaudi).
-- *Turing does not support Marlin MXFP4.
+g to SM 7.5, Amp
+r
+ to SM 8.0/8.6, Ada to SM 8.9, a
+d Hopp
+r to SM 9.0.
+- ✅︎ 
 
-!!! note
-    For information on quantization support on Google TPU, please refer to the [TPU-Inference Recommended Models and Features](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models_features/) documentation.
+d
+cat
+s that th
+ qua
+t
+zat
+o
+ m
+thod 
+s support
+d o
+ th
+ sp
+c
+f
 
-!!! note
-    This compatibility chart is subject to change as vLLM continues to evolve and expand its support for different hardware platforms and quantization methods.
+d hard
+ar
+.
+- ❌ 
 
-    For the most up-to-date information on hardware support and quantization methods, please refer to [vllm/model_executor/layers/quantization](../../../vllm/model_executor/layers/quantization) or consult with the vLLM development team.
+d
+cat
+s that th
+ qua
+t
+zat
+o
+ m
+thod 
+s 
+ot support
+d o
+ th
+ sp
+c
+f
 
-## Out-of-Tree Quantization Plugins
+d hard
+ar
+.
+- A
+ I
+t
 
-vLLM supports registering custom, out-of-tree quantization methods using the `@register_quantization_config` decorator. This allows you to implement and use your own quantization schemes without modifying the vLLM codebase.
+ Gaud
+ qua
+t
+zat
+o
+ support has b
 
-### Registering a Custom Quantization Method
+ m
+grat
+d to [vLLM-Gaud
+](https://g
+thub.com/v
+m-proj
+ct/v
+m-gaud
+).
+- *Tur
 
-To register a custom quantization method, create a class that inherits from `QuantizationConfig` and decorate it with `@register_quantization_config`. The `get_quant_method` dispatches to the appropriate quantize method based on the layer type:
+g do
+s 
+ot support Mar
 
-```python
-import torch
-from vllm.model_executor.layers.quantization import (
-    register_quantization_config,
+
+ MXFP4.
+!!! 
+ot
+
+    For 
+
+format
+o
+ o
+ qua
+t
+zat
+o
+ support o
+ Goog
+
+ TPU, p
+
+as
+ r
+f
+r to th
+ [TPU-I
+f
+r
+
+c
+ R
+comm
+
+d
+d Mod
+
+s a
+d F
+atur
+s](https://docs.v
+m.a
+/proj
+cts/tpu/
+
+/
+at
+st/r
+comm
+
+d
+d_mod
+
+s_f
+atur
+s/) docum
+
+tat
+o
+.
+!!! 
+ot
+
+    Th
+s compat
+b
+
+
+ty chart 
+s subj
+ct to cha
+g
+ as vLLM co
+t
+
+u
+s to 
+vo
+v
+ a
+d 
+xpa
+d 
+ts support for d
+ff
+r
+
+t hard
+ar
+ p
+atforms a
+d qua
+t
+zat
+o
+ m
+thods.
+    For th
+ most up-to-dat
+ 
+
+format
+o
+ o
+ hard
+ar
+ support a
+d qua
+t
+zat
+o
+ m
+thods, p
+
+as
+ r
+f
+r to [v
+m/mod
+
+_
+x
+cutor/
+ay
+rs/qua
+t
+zat
+o
+](../../../v
+m/mod
+
+_
+x
+cutor/
+ay
+rs/qua
+t
+zat
+o
+) or co
+su
+t 
+
+th th
+ vLLM d
+v
+
+opm
+
+t t
+am.
+## Out-of-Tr
+ Qua
+t
+zat
+o
+ P
+ug
+
+s
+vLLM supports r
+g
+st
+r
+
+g custom, out-of-tr
+ qua
+t
+zat
+o
+ m
+thods us
+
+g th
+ `@r
+g
+st
+r_qua
+t
+zat
+o
+_co
+f
+g` d
+corator. Th
+s a
+o
+s you to 
+mp
+
+m
+
+t a
+d us
+ your o
+
+ qua
+t
+zat
+o
+ sch
+m
+s 
+
+thout mod
+fy
+
+g th
+ vLLM cod
+bas
+.
+### R
+g
+st
+r
+
+g a Custom Qua
+t
+zat
+o
+ M
+thod
+To r
+g
+st
+r a custom qua
+t
+zat
+o
+ m
+thod, cr
+at
+ a c
+ass that 
+
+h
+r
+ts from `Qua
+t
+zat
+o
+Co
+f
+g` a
+d d
+corat
+ 
+t 
+
+th `@r
+g
+st
+r_qua
+t
+zat
+o
+_co
+f
+g`. Th
+ `g
+t_qua
+t_m
+thod` d
+spatch
+s to th
+ appropr
+at
+ qua
+t
+z
+ m
+thod bas
+d o
+ th
+ 
+ay
+r typ
+:
+```pytho
+
+
+mport torch
+from v
+m.mod
+
+_
+x
+cutor.
+ay
+rs.qua
+t
+zat
+o
+ 
+mport (
+    r
+g
+st
+r_qua
+t
+zat
+o
+_co
+f
+g,
 )
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig,
-    QuantizeMethodBase,
+from v
+m.mod
+
+_
+x
+cutor.
+ay
+rs.qua
+t
+zat
+o
+.bas
+_co
+f
+g 
+mport (
+    Qua
+t
+zat
+o
+Co
+f
+g,
+    Qua
+t
+z
+M
+thodBas
+,
 )
-from vllm.model_executor.layers.linear import LinearBase
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from v
+m.mod
 
-@register_quantization_config("my_quant")
-class MyQuantConfig(QuantizationConfig):
-    """Custom quantization config."""
+_
+x
+cutor.
+ay
+rs.
 
-    def get_name(self) -> str:
-        return "my_quant"
 
-    def get_supported_act_dtypes(self) -> list:
-        return [torch.float16, torch.bfloat16]
 
-    @classmethod
-    def get_min_capability(cls) -> int:
-        # Minimum GPU compute capability, -1 for no restriction
-        return -1
+ar 
+mport L
 
-    @staticmethod
-    def get_config_filenames() -> list[str]:
-        # Config files to search for in model directory
-        return []
 
-    @classmethod
-    def from_config(cls, config: dict) -> "MyQuantConfig":
-        # Create config from model's quantization config
-        return cls()
+arBas
 
-    def get_quant_method(
-        self, layer: torch.nn.Module, prefix: str
-    ) -> QuantizeMethodBase | None:
-        # Dispatch based on layer type
-        # NOTE: you only need to implement methods you care about
-        if isinstance(layer, LinearBase):
-            return MyQuantLinearMethod()
-        elif isinstance(layer, FusedMoE):
-            return MyQuantMoEMethod(layer.moe_config)
-        return None
+from v
+m.mod
+
+_
+x
+cutor.
+ay
+rs.fus
+d_mo
+ 
+mport Fus
+dMoE
+@r
+g
+st
+r_qua
+t
+zat
+o
+_co
+f
+g("my_qua
+t")
+c
+ass MyQua
+tCo
+f
+g(Qua
+t
+zat
+o
+Co
+f
+g):
+    """Custom qua
+t
+zat
+o
+ co
+f
+g."""
+    d
+f g
+t_
+am
+(s
+
+f) -
+ str:
+        r
+tur
+ "my_qua
+t"
+    d
+f g
+t_support
+d_act_dtyp
+s(s
+
+f) -
+ 
+
+st:
+        r
+tur
+ [torch.f
+oat16, torch.bf
+oat16]
+    @c
+assm
+thod
+    d
+f g
+t_m
+
+_capab
+
+
+ty(c
+s) -
+ 
+
+t:
+        # M
+
+
+mum GPU comput
+ capab
+
+
+ty, -1 for 
+o r
+str
+ct
+o
+
+        r
+tur
+ -1
+    @stat
+cm
+thod
+    d
+f g
+t_co
+f
+g_f
+
+
+
+am
+s() -
+ 
+
+st[str]:
+        # Co
+f
+g f
+
+
+s to s
+arch for 
+
+ mod
+
+ d
+r
+ctory
+        r
+tur
+ []
+    @c
+assm
+thod
+    d
+f from_co
+f
+g(c
+s, co
+f
+g: d
+ct) -
+ "MyQua
+tCo
+f
+g":
+        # Cr
+at
+ co
+f
+g from mod
+
+'s qua
+t
+zat
+o
+ co
+f
+g
+        r
+tur
+ c
+s()
+    d
+f g
+t_qua
+t_m
+thod(
+        s
+
+f, 
+ay
+r: torch.
+.Modu
+
+, pr
+f
+x: str
+    ) -
+ Qua
+t
+z
+M
+thodBas
+ | No
+
+:
+        # D
+spatch bas
+d o
+ 
+ay
+r typ
+
+        # NOTE: you o
+
+y 
+
+d to 
+mp
+
+m
+
+t m
+thods you car
+ about
+        
+f 
+s
+
+sta
+c
+(
+ay
+r, L
+
+
+arBas
+):
+            r
+tur
+ MyQua
+tL
+
+
+arM
+thod()
+        
+
+
+f 
+s
+
+sta
+c
+(
+ay
+r, Fus
+dMoE):
+            r
+tur
+ MyQua
+tMoEM
+thod(
+ay
+r.mo
+_co
+f
+g)
+        r
+tur
+ No
+
+
 ```
+### R
+qu
+r
+d Qua
+t
+zat
+o
+Co
+f
+g M
+thods
+Your custom `Qua
+t
+zat
+o
+Co
+f
+g` subc
+ass must 
+mp
 
-### Required QuantizationConfig Methods
+m
 
-Your custom `QuantizationConfig` subclass must implement these abstract methods:
-
-| Method | Description |
+t th
+s
+ abstract m
+thods:
+| M
+thod | D
+scr
+pt
+o
+ |
 |--------|-------------|
-| `get_name()` | Returns the name of the quantization method |
-| `get_supported_act_dtypes()` | Returns list of supported activation dtypes (e.g., `torch.float16`) |
-| `get_min_capability()` | Returns minimum GPU compute capability (e.g., 80 for Ampere, -1 for no restriction) |
-| `get_config_filenames()` | Returns list of config filenames to search for in model directory |
-| `from_config(config)` | Class method to create config from model's quantization config dict |
-| `get_quant_method(layer, prefix)` | Returns the quantization method for a given layer, or `None` to skip |
+| `g
+t_
+am
+()` | R
+tur
+s th
+ 
+am
+ of th
+ qua
+t
+zat
+o
+ m
+thod |
+| `g
+t_support
+d_act_dtyp
+s()` | R
+tur
+s 
 
-### Implementing a Quantized Linear Method
+st of support
+d act
+vat
+o
+ dtyp
+s (
+.g., `torch.f
+oat16`) |
+| `g
+t_m
 
-For linear layers, return a `QuantizeMethodBase` subclass from `get_quant_method`. You can extend `UnquantizedLinearMethod` as a starting point:
+_capab
 
-```python
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
-class MyQuantLinearMethod(UnquantizedLinearMethod):
-    """Custom quantization method for linear layers."""
+ty()` | R
+tur
+s m
 
-    def create_weights(
-        self, layer: torch.nn.Module, *weight_args, **extra_weight_attrs
+
+mum GPU comput
+ capab
+
+
+ty (
+.g., 80 for Amp
+r
+, -1 for 
+o r
+str
+ct
+o
+) |
+| `g
+t_co
+f
+g_f
+
+
+
+am
+s()` | R
+tur
+s 
+
+st of co
+f
+g f
+
+
+
+am
+s to s
+arch for 
+
+ mod
+
+ d
+r
+ctory |
+| `from_co
+f
+g(co
+f
+g)` | C
+ass m
+thod to cr
+at
+ co
+f
+g from mod
+
+'s qua
+t
+zat
+o
+ co
+f
+g d
+ct |
+| `g
+t_qua
+t_m
+thod(
+ay
+r, pr
+f
+x)` | R
+tur
+s th
+ qua
+t
+zat
+o
+ m
+thod for a g
+v
+
+ 
+ay
+r, or `No
+
+` to sk
+p |
+### Imp
+
+m
+
+t
+
+g a Qua
+t
+z
+d L
+
+
+ar M
+thod
+For 
+
+
+
+ar 
+ay
+rs, r
+tur
+ a `Qua
+t
+z
+M
+thodBas
+` subc
+ass from `g
+t_qua
+t_m
+thod`. You ca
+ 
+xt
+
+d `U
+qua
+t
+z
+dL
+
+
+arM
+thod` as a start
+
+g po
+
+t:
+```pytho
+
+from v
+m.mod
+
+_
+x
+cutor.
+ay
+rs.
+
+
+
+ar 
+mport U
+qua
+t
+z
+dL
+
+
+arM
+thod
+c
+ass MyQua
+tL
+
+
+arM
+thod(U
+qua
+t
+z
+dL
+
+
+arM
+thod):
+    """Custom qua
+t
+zat
+o
+ m
+thod for 
+
+
+
+ar 
+ay
+rs."""
+    d
+f cr
+at
+_
+
+
+ghts(
+        s
+
+f, 
+ay
+r: torch.
+.Modu
+
+, *
+
+
+ght_args, **
+xtra_
+
+
+ght_attrs
     ):
-        # Create quantized weights for the layer
-        ...
+        # Cr
+at
+ qua
+t
+z
+d 
 
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        # Apply custom quantization logic here
+
+ghts for th
+ 
+ay
+r
+        ...
+    d
+f app
+y(
+        s
+
+f,
+        
+ay
+r: torch.
+.Modu
+
+,
+        x: torch.T
+
+sor,
+        b
+as: torch.T
+
+sor | No
+
+ = No
+
+,
+    ) -
+ torch.T
+
+sor:
+        # App
+y custom qua
+t
+zat
+o
+ 
+og
+c h
+r
+
         ...
 ```
+### Imp
 
-### Implementing a Quantized MoE Method
+m
 
-For Mixture of Experts (MoE) models, return a `FusedMoEMethodBase` subclass from `get_quant_method`. You can use `UnquantizedFusedMoEMethod` to skip MoE quantization:
+t
 
-```python
-from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
-from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
-    FusedMoEMethodBase,
+g a Qua
+t
+z
+d MoE M
+thod
+For M
+xtur
+ of Exp
+rts (MoE) mod
+
+s, r
+tur
+ a `Fus
+dMoEM
+thodBas
+` subc
+ass from `g
+t_qua
+t_m
+thod`. You ca
+ us
+ `U
+qua
+t
+z
+dFus
+dMoEM
+thod` to sk
+p MoE qua
+t
+zat
+o
+:
+```pytho
+
+from v
+m.mod
+
+_
+x
+cutor.
+ay
+rs.fus
+d_mo
+.
+ay
+r 
+mport U
+qua
+t
+z
+dFus
+dMoEM
+thod
+from v
+m.mod
+
+_
+x
+cutor.
+ay
+rs.fus
+d_mo
+.fus
+d_mo
+_m
+thod_bas
+ 
+mport (
+    Fus
+dMoEM
+thodBas
+,
 )
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from v
+m.mod
 
-class MyQuantMoEMethod(FusedMoEMethodBase):
-    """Custom quantization method for MoE layers."""
+_
+x
+cutor.
+ay
+rs.fus
+d_mo
+.co
+f
+g 
+mport Fus
+dMoEQua
+tCo
+f
+g
+c
+ass MyQua
+tMoEM
+thod(Fus
+dMoEM
+thodBas
+):
+    """Custom qua
+t
+zat
+o
+ m
+thod for MoE 
+ay
+rs."""
+    d
+f cr
+at
+_
 
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        num_experts: int,
-        hidden_size: int,
-        intermediate_size_per_partition: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
+
+ghts(
+        s
+
+f,
+        
+ay
+r: torch.
+.Modu
+
+,
+        
+um_
+xp
+rts: 
+
+t,
+        h
+dd
+
+_s
+z
+: 
+
+t,
+        
+
+t
+rm
+d
+at
+_s
+z
+_p
+r_part
+t
+o
+: 
+
+t,
+        params_dtyp
+: torch.dtyp
+,
+        **
+xtra_
+
+
+ght_attrs,
     ):
-        # Create quantized weights for the MoE layer
-        ...
+        # Cr
+at
+ qua
+t
+z
+d 
 
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        router: "FusedMoERouter",
-        x: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor:
-        # Apply MoE computation with quantized weights
-        ...
 
-    def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
-    ) -> FusedMoEQuantConfig | None:
-        # Return the MoE quantization configuration
+ghts for th
+ MoE 
+ay
+r
+        ...
+    d
+f app
+y(
+        s
+
+f,
+        
+ay
+r: torch.
+.Modu
+
+,
+        rout
+r: "Fus
+dMoERout
+r",
+        x: torch.T
+
+sor,
+        rout
+r_
+og
+ts: torch.T
+
+sor,
+    ) -
+ torch.T
+
+sor:
+        # App
+y MoE computat
+o
+ 
+
+th qua
+t
+z
+d 
+
+
+ghts
+        ...
+    d
+f g
+t_fus
+d_mo
+_qua
+t_co
+f
+g(
+        s
+
+f, 
+ay
+r: torch.
+.Modu
+
+
+    ) -
+ Fus
+dMoEQua
+tCo
+f
+g | No
+
+:
+        # R
+tur
+ th
+ MoE qua
+t
+zat
+o
+ co
+f
+gurat
+o
+
         ...
 ```
+S
+ 
+x
+st
 
-See existing implementations like `Fp8MoEMethod` in `vllm/model_executor/layers/quantization/fp8.py` for reference.
+g 
+mp
 
-### Using the Plugin
+m
 
-Once registered, you can use your custom quantization method with vLLM:
+tat
+o
+s 
 
-```python
-# Register your quantization method (import the module containing your config)
-import my_quant_plugin
+k
+ `Fp8MoEM
+thod` 
 
-from vllm import LLM
+ `v
+m/mod
 
-# Use the custom quantization method
-llm = LLM(model="your-model", quantization="my_quant")
+_
+x
+cutor/
+ay
+rs/qua
+t
+zat
+o
+/fp8.py` for r
+f
+r
+
+c
+.
+### Us
+
+g th
+ P
+ug
+
+
+O
+c
+ r
+g
+st
+r
+d, you ca
+ us
+ your custom qua
+t
+zat
+o
+ m
+thod 
+
+th vLLM:
+```pytho
+
+# R
+g
+st
+r your qua
+t
+zat
+o
+ m
+thod (
+mport th
+ modu
+
+ co
+ta
+
+
+
+g your co
+f
+g)
+
+mport my_qua
+t_p
+ug
+
+
+from v
+m 
+mport LLM
+# Us
+ th
+ custom qua
+t
+zat
+o
+ m
+thod
+
+m = LLM(mod
+
+="your-mod
+
+", qua
+t
+zat
+o
+="my_qua
+t")
 ```
+For mor
+ 
 
-For more information on the plugin system, see the [Plugin System documentation](../../design/plugin_system.md).
+format
+o
+ o
+ th
+ p
+ug
+
+ syst
+m, s
+ th
+ [P
+ug
+
+ Syst
+m docum
+
+tat
+o
+](../../d
+s
+g
+/p
+ug
+
+_syst
+m.md).

@@ -1,316 +1,2487 @@
 # AMD Quark
+Qua
+t
+zat
+o
+ ca
+ 
+ff
+ct
+v
 
-Quantization can effectively reduce memory and bandwidth usage, accelerate computation and improve
-throughput while with minimal accuracy loss. vLLM can leverage [Quark](https://quark.docs.amd.com/latest/),
-the flexible and powerful quantization toolkit, to produce performant quantized models to run on AMD GPUs. Quark has specialized support for quantizing large language models with weight,
-activation and kv-cache quantization and cutting-edge quantization algorithms like
-AWQ, GPTQ, Rotation and SmoothQuant.
+y r
+duc
+ m
+mory a
+d ba
+d
 
-## Quark Installation
+dth usag
+, acc
 
-Before quantizing models, you need to install Quark. The latest release of Quark can be installed with pip:
 
+rat
+ computat
+o
+ a
+d 
+mprov
+
+throughput 
+h
+
+
+ 
+
+th m
+
+
+ma
+ accuracy 
+oss. vLLM ca
+ 
+
+v
+rag
+ [Quark](https://quark.docs.amd.com/
+at
+st/),
+th
+ f
+
+x
+b
+
+ a
+d po
+
+rfu
+ qua
+t
+zat
+o
+ too
+k
+t, to produc
+ p
+rforma
+t qua
+t
+z
+d mod
+
+s to ru
+ o
+ AMD GPUs. Quark has sp
+c
+a
+
+z
+d support for qua
+t
+z
+
+g 
+arg
+ 
+a
+guag
+ mod
+
+s 
+
+th 
+
+
+ght,
+act
+vat
+o
+ a
+d kv-cach
+ qua
+t
+zat
+o
+ a
+d cutt
+
+g-
+dg
+ qua
+t
+zat
+o
+ a
+gor
+thms 
+
+k
+
+AWQ, GPTQ, Rotat
+o
+ a
+d SmoothQua
+t.
+## Quark I
+sta
+at
+o
+
+B
+for
+ qua
+t
+z
+
+g mod
+
+s, you 
+
+d to 
+
+sta
+ Quark. Th
+ 
+at
+st r
+
+
+as
+ of Quark ca
+ b
+ 
+
+sta
+
+d 
+
+th p
+p:
 ```bash
-pip install amd-quark
+p
+p 
+
+sta
+ amd-quark
 ```
+You ca
+ r
+f
+r to [Quark 
 
-You can refer to [Quark installation guide](https://quark.docs.amd.com/latest/install.html)
-for more installation details.
+sta
+at
+o
+ gu
+d
+](https://quark.docs.amd.com/
+at
+st/
 
-Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
+sta
+.htm
+)
+for mor
+ 
 
+sta
+at
+o
+ d
+ta
+
+s.
+Add
+t
+o
+a
+y, 
+
+sta
+ `v
+m` a
+d `
+m-
+va
+uat
+o
+-har
+
+ss` for 
+va
+uat
+o
+:
 ```bash
-pip install vllm "lm-eval[api]>=0.4.11"
+p
+p 
+
+sta
+ v
+m "
+m-
+va
+[ap
+]
+=0.4.11"
 ```
+## Qua
+t
+zat
+o
+ Proc
+ss
+Aft
+r 
 
-## Quantization Process
+sta
 
-After installing Quark, we will use an example to illustrate how to use Quark.
-The Quark quantization process can be listed for 5 steps as below:
 
-1. Load the model
-2. Prepare the calibration dataloader
-3. Set the quantization configuration
-4. Quantize the model and export
-5. Evaluation in vLLM
+g Quark, 
 
-### 1. Load the Model
+ 
 
-Quark uses [Transformers](https://huggingface.co/docs/transformers/en/index)
-to fetch model and tokenizer.
 
-??? code
+ us
+ a
+ 
+xamp
 
-    ```python
-    from transformers import AutoTokenizer, AutoModelForCausalLM
+ to 
 
-    MODEL_ID = "meta-llama/Llama-2-70b-chat-hf"
+ustrat
+ ho
+ to us
+ Quark.
+Th
+ Quark qua
+t
+zat
+o
+ proc
+ss ca
+ b
+ 
+
+st
+d for 5 st
+ps as b
+
+o
+:
+1. Load th
+ mod
+
+
+2. Pr
+par
+ th
+ ca
+
+brat
+o
+ data
+oad
+r
+3. S
+t th
+ qua
+t
+zat
+o
+ co
+f
+gurat
+o
+
+4. Qua
+t
+z
+ th
+ mod
+
+ a
+d 
+xport
+5. Eva
+uat
+o
+ 
+
+ vLLM
+### 1. Load th
+ Mod
+
+
+Quark us
+s [Tra
+sform
+rs](https://hugg
+
+gfac
+.co/docs/tra
+sform
+rs/
+
+/
+
+d
+x)
+to f
+tch mod
+
+ a
+d tok
+
+
+z
+r.
+??? cod
+
+    ```pytho
+
+    from tra
+sform
+rs 
+mport AutoTok
+
+
+z
+r, AutoMod
+
+ForCausa
+LM
+    MODEL_ID = "m
+ta-
+ama/L
+ama-2-70b-chat-hf"
     MAX_SEQ_LEN = 512
+    mod
 
-    model = AutoModelForCausalLM.from_pretrained(
+ = AutoMod
+
+ForCausa
+LM.from_pr
+tra
+
+
+d(
         MODEL_ID,
-        device_map="auto",
-        dtype="auto",
+        d
+v
+c
+_map="auto",
+        dtyp
+="auto",
     )
-    model.eval()
+    mod
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, model_max_length=MAX_SEQ_LEN)
-    tokenizer.pad_token = tokenizer.eos_token
+.
+va
+()
+    tok
+
+
+z
+r = AutoTok
+
+
+z
+r.from_pr
+tra
+
+
+d(MODEL_ID, mod
+
+_max_
+
+
+gth=MAX_SEQ_LEN)
+    tok
+
+
+z
+r.pad_tok
+
+ = tok
+
+
+z
+r.
+os_tok
+
+
     ```
+### 2. Pr
+par
+ th
+ Ca
 
-### 2. Prepare the Calibration Dataloader
+brat
+o
+ Data
+oad
+r
+Quark us
+s th
+ [PyTorch Data
+oad
+r](https://pytorch.org/tutor
+a
+s/b
+g
 
-Quark uses the [PyTorch Dataloader](https://pytorch.org/tutorials/beginner/basics/data_tutorial.html)
-to load calibration data. For more details about how to use calibration datasets efficiently, please refer
-to [Adding Calibration Datasets](https://quark.docs.amd.com/latest/pytorch/calibration_datasets.html).
 
-??? code
+r/bas
+cs/data_tutor
+a
+.htm
+)
+to 
+oad ca
 
-    ```python
-    from datasets import load_dataset
-    from torch.utils.data import DataLoader
+brat
+o
+ data. For mor
+ d
+ta
 
+s about ho
+ to us
+ ca
+
+brat
+o
+ datas
+ts 
+ff
+c
+
+
+t
+y, p
+
+as
+ r
+f
+r
+to [Add
+
+g Ca
+
+brat
+o
+ Datas
+ts](https://quark.docs.amd.com/
+at
+st/pytorch/ca
+
+brat
+o
+_datas
+ts.htm
+).
+??? cod
+
+    ```pytho
+
+    from datas
+ts 
+mport 
+oad_datas
+t
+    from torch.ut
+
+s.data 
+mport DataLoad
+r
     BATCH_SIZE = 1
     NUM_CALIBRATION_DATA = 512
+    # Load th
+ datas
+t a
+d g
+t ca
 
-    # Load the dataset and get calibration data.
-    dataset = load_dataset("mit-han-lab/pile-val-backup", split="validation")
-    text_data = dataset["text"][:NUM_CALIBRATION_DATA]
+brat
+o
+ data.
+    datas
+t = 
+oad_datas
+t("m
+t-ha
+-
+ab/p
 
-    tokenized_outputs = tokenizer(
-        text_data,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=MAX_SEQ_LEN,
+
+-va
+-backup", sp
+
+t="va
+
+dat
+o
+")
+    t
+xt_data = datas
+t["t
+xt"][:NUM_CALIBRATION_DATA]
+    tok
+
+
+z
+d_outputs = tok
+
+
+z
+r(
+        t
+xt_data,
+        r
+tur
+_t
+
+sors="pt",
+        padd
+
+g=Tru
+,
+        tru
+cat
+o
+=Tru
+,
+        max_
+
+
+gth=MAX_SEQ_LEN,
     )
-    calib_dataloader = DataLoader(
-        tokenized_outputs['input_ids'],
-        batch_size=BATCH_SIZE,
-        drop_last=True,
+    ca
+
+b_data
+oad
+r = DataLoad
+r(
+        tok
+
+
+z
+d_outputs['
+
+put_
+ds'],
+        batch_s
+z
+=BATCH_SIZE,
+        drop_
+ast=Tru
+,
     )
     ```
+### 3. S
+t th
+ Qua
+t
+zat
+o
+ Co
+f
+gurat
+o
 
-### 3. Set the Quantization Configuration
+W
+ 
 
-We need to set the quantization configuration, you can check
-[quark config guide](https://quark.docs.amd.com/latest/pytorch/user_guide_config_description.html)
-for further details. Here we use FP8 per-tensor quantization on weight, activation,
-kv-cache and the quantization algorithm is AutoSmoothQuant.
+d to s
+t th
+ qua
+t
+zat
+o
+ co
+f
+gurat
+o
+, you ca
+ ch
+ck
+[quark co
+f
+g gu
+d
+](https://quark.docs.amd.com/
+at
+st/pytorch/us
+r_gu
+d
+_co
+f
+g_d
+scr
+pt
+o
+.htm
+)
+for furth
+r d
+ta
 
-!!! note
-    Note the quantization algorithm needs a JSON config file and the config file is located in
-    [Quark Pytorch examples](https://quark.docs.amd.com/latest/pytorch/pytorch_examples.html),
-    under the directory `examples/torch/language_modeling/llm_ptq/models`. For example,
-    AutoSmoothQuant config file for Llama is
-    `examples/torch/language_modeling/llm_ptq/models/llama/autosmoothquant_config.json`.
+s. H
+r
+ 
 
-??? code
+ us
+ FP8 p
+r-t
 
-    ```python
-    from quark.torch.quantization import (Config, QuantizationConfig,
-                                        FP8E4M3PerTensorSpec,
-                                        load_quant_algo_config_from_file)
+sor qua
+t
+zat
+o
+ o
+ 
 
-    # Define fp8/per-tensor/static spec.
-    FP8_PER_TENSOR_SPEC = FP8E4M3PerTensorSpec(
-        observer_method="min_max",
-        is_dynamic=False,
-    ).to_quantization_spec()
 
-    # Define global quantization config, input tensors and weight apply FP8_PER_TENSOR_SPEC.
-    global_quant_config = QuantizationConfig(
-        input_tensors=FP8_PER_TENSOR_SPEC,
-        weight=FP8_PER_TENSOR_SPEC,
+ght, act
+vat
+o
+,
+kv-cach
+ a
+d th
+ qua
+t
+zat
+o
+ a
+gor
+thm 
+s AutoSmoothQua
+t.
+!!! 
+ot
+
+    Not
+ th
+ qua
+t
+zat
+o
+ a
+gor
+thm 
+
+ds a JSON co
+f
+g f
+
+
+ a
+d th
+ co
+f
+g f
+
+
+ 
+s 
+ocat
+d 
+
+
+    [Quark Pytorch 
+xamp
+
+s](https://quark.docs.amd.com/
+at
+st/pytorch/pytorch_
+xamp
+
+s.htm
+),
+    u
+d
+r th
+ d
+r
+ctory `
+xamp
+
+s/torch/
+a
+guag
+_mod
+
+
+
+g/
+m_ptq/mod
+
+s`. For 
+xamp
+
+,
+    AutoSmoothQua
+t co
+f
+g f
+
+
+ for L
+ama 
+s
+    `
+xamp
+
+s/torch/
+a
+guag
+_mod
+
+
+
+g/
+m_ptq/mod
+
+s/
+ama/autosmoothqua
+t_co
+f
+g.jso
+`.
+??? cod
+
+    ```pytho
+
+    from quark.torch.qua
+t
+zat
+o
+ 
+mport (Co
+f
+g, Qua
+t
+zat
+o
+Co
+f
+g,
+                                        FP8E4M3P
+rT
+
+sorSp
+c,
+                                        
+oad_qua
+t_a
+go_co
+f
+g_from_f
+
+
+)
+    # D
+f
+
+
+ fp8/p
+r-t
+
+sor/stat
+c sp
+c.
+    FP8_PER_TENSOR_SPEC = FP8E4M3P
+rT
+
+sorSp
+c(
+        obs
+rv
+r_m
+thod="m
+
+_max",
+        
+s_dy
+am
+c=Fa
+s
+,
+    ).to_qua
+t
+zat
+o
+_sp
+c()
+    # D
+f
+
+
+ g
+oba
+ qua
+t
+zat
+o
+ co
+f
+g, 
+
+put t
+
+sors a
+d 
+
+
+ght app
+y FP8_PER_TENSOR_SPEC.
+    g
+oba
+_qua
+t_co
+f
+g = Qua
+t
+zat
+o
+Co
+f
+g(
+        
+
+put_t
+
+sors=FP8_PER_TENSOR_SPEC,
+        
+
+
+ght=FP8_PER_TENSOR_SPEC,
     )
+    # D
+f
 
-    # Define quantization config for kv-cache layers, output tensors apply FP8_PER_TENSOR_SPEC.
+
+ qua
+t
+zat
+o
+ co
+f
+g for kv-cach
+ 
+ay
+rs, output t
+
+sors app
+y FP8_PER_TENSOR_SPEC.
     KV_CACHE_SPEC = FP8_PER_TENSOR_SPEC
-    kv_cache_layer_names_for_llama = ["*k_proj", "*v_proj"]
-    kv_cache_quant_config = {
-        name: QuantizationConfig(
-            input_tensors=global_quant_config.input_tensors,
-            weight=global_quant_config.weight,
-            output_tensors=KV_CACHE_SPEC,
+    kv_cach
+_
+ay
+r_
+am
+s_for_
+ama = ["*k_proj", "*v_proj"]
+    kv_cach
+_qua
+t_co
+f
+g = {
+        
+am
+: Qua
+t
+zat
+o
+Co
+f
+g(
+            
+
+put_t
+
+sors=g
+oba
+_qua
+t_co
+f
+g.
+
+put_t
+
+sors,
+            
+
+
+ght=g
+oba
+_qua
+t_co
+f
+g.
+
+
+ght,
+            output_t
+
+sors=KV_CACHE_SPEC,
         )
-        for name in kv_cache_layer_names_for_llama
+        for 
+am
+ 
+
+ kv_cach
+_
+ay
+r_
+am
+s_for_
+ama
     }
-    layer_quant_config = kv_cache_quant_config.copy()
+    
+ay
+r_qua
+t_co
+f
+g = kv_cach
+_qua
+t_co
+f
+g.copy()
+    # D
+f
 
-    # Define algorithm config by config file.
-    LLAMA_AUTOSMOOTHQUANT_CONFIG_FILE = "examples/torch/language_modeling/llm_ptq/models/llama/autosmoothquant_config.json"
-    algo_config = load_quant_algo_config_from_file(LLAMA_AUTOSMOOTHQUANT_CONFIG_FILE)
 
-    EXCLUDE_LAYERS = ["lm_head"]
-    quant_config = Config(
-        global_quant_config=global_quant_config,
-        layer_quant_config=layer_quant_config,
-        kv_cache_quant_config=kv_cache_quant_config,
-        exclude=EXCLUDE_LAYERS,
-        algo_config=algo_config,
+ a
+gor
+thm co
+f
+g by co
+f
+g f
+
+
+.
+    LLAMA_AUTOSMOOTHQUANT_CONFIG_FILE = "
+xamp
+
+s/torch/
+a
+guag
+_mod
+
+
+
+g/
+m_ptq/mod
+
+s/
+ama/autosmoothqua
+t_co
+f
+g.jso
+"
+    a
+go_co
+f
+g = 
+oad_qua
+t_a
+go_co
+f
+g_from_f
+
+
+(LLAMA_AUTOSMOOTHQUANT_CONFIG_FILE)
+    EXCLUDE_LAYERS = ["
+m_h
+ad"]
+    qua
+t_co
+f
+g = Co
+f
+g(
+        g
+oba
+_qua
+t_co
+f
+g=g
+oba
+_qua
+t_co
+f
+g,
+        
+ay
+r_qua
+t_co
+f
+g=
+ay
+r_qua
+t_co
+f
+g,
+        kv_cach
+_qua
+t_co
+f
+g=kv_cach
+_qua
+t_co
+f
+g,
+        
+xc
+ud
+=EXCLUDE_LAYERS,
+        a
+go_co
+f
+g=a
+go_co
+f
+g,
     )
     ```
+### 4. Qua
+t
+z
+ th
+ Mod
 
-### 4. Quantize the Model and Export
+ a
+d Export
+Th
 
-Then we can apply the quantization. After quantizing, we need to freeze the
-quantized model first before exporting. Note that we need to export model with format of
-HuggingFace `safetensors`, you can refer to
-[HuggingFace format exporting](https://quark.docs.amd.com/latest/pytorch/export/quark_export_hf.html)
-for more exporting format details.
+ 
 
-??? code
+ ca
+ app
+y th
+ qua
+t
+zat
+o
+. Aft
+r qua
+t
+z
 
-    ```python
-    import torch
-    from quark.torch import ModelQuantizer, ModelExporter
-    from quark.torch.export import ExporterConfig, JsonExporterConfig
+g, 
 
-    # Apply quantization.
-    quantizer = ModelQuantizer(quant_config)
-    quant_model = quantizer.quantize_model(model, calib_dataloader)
+ 
 
-    # Freeze quantized model to export.
-    freezed_model = quantizer.freeze(model)
+d to fr
+z
+ th
 
-    # Define export config.
+qua
+t
+z
+d mod
+
+ f
+rst b
+for
+ 
+xport
+
+g. Not
+ that 
+
+ 
+
+d to 
+xport mod
+
+ 
+
+th format of
+Hugg
+
+gFac
+ `saf
+t
+
+sors`, you ca
+ r
+f
+r to
+[Hugg
+
+gFac
+ format 
+xport
+
+g](https://quark.docs.amd.com/
+at
+st/pytorch/
+xport/quark_
+xport_hf.htm
+)
+for mor
+ 
+xport
+
+g format d
+ta
+
+s.
+??? cod
+
+    ```pytho
+
+    
+mport torch
+    from quark.torch 
+mport Mod
+
+Qua
+t
+z
+r, Mod
+
+Export
+r
+    from quark.torch.
+xport 
+mport Export
+rCo
+f
+g, Jso
+Export
+rCo
+f
+g
+    # App
+y qua
+t
+zat
+o
+.
+    qua
+t
+z
+r = Mod
+
+Qua
+t
+z
+r(qua
+t_co
+f
+g)
+    qua
+t_mod
+
+ = qua
+t
+z
+r.qua
+t
+z
+_mod
+
+(mod
+
+, ca
+
+b_data
+oad
+r)
+    # Fr
+z
+ qua
+t
+z
+d mod
+
+ to 
+xport.
+    fr
+z
+d_mod
+
+ = qua
+t
+z
+r.fr
+z
+(mod
+
+)
+    # D
+f
+
+
+ 
+xport co
+f
+g.
     LLAMA_KV_CACHE_GROUP = ["*k_proj", "*v_proj"]
-    export_config = ExporterConfig(json_export_config=JsonExporterConfig())
-    export_config.json_export_config.kv_cache_group = LLAMA_KV_CACHE_GROUP
+    
+xport_co
+f
+g = Export
+rCo
+f
+g(jso
+_
+xport_co
+f
+g=Jso
+Export
+rCo
+f
+g())
+    
+xport_co
+f
+g.jso
+_
+xport_co
+f
+g.kv_cach
+_group = LLAMA_KV_CACHE_GROUP
+    # Mod
 
-    # Model: Llama-2-70b-chat-hf-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant
-    EXPORT_DIR = MODEL_ID.split("/")[1] + "-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant"
-    exporter = ModelExporter(config=export_config, export_dir=EXPORT_DIR)
-    with torch.no_grad():
-        exporter.export_safetensors_model(
-            freezed_model,
-            quant_config=quant_config,
-            tokenizer=tokenizer,
+: L
+ama-2-70b-chat-hf-
+-fp8-a-fp8-kvcach
+-fp8-p
+rt
+
+sor-autosmoothqua
+t
+    EXPORT_DIR = MODEL_ID.sp
+
+t("/")[1] + "-
+-fp8-a-fp8-kvcach
+-fp8-p
+rt
+
+sor-autosmoothqua
+t"
+    
+xport
+r = Mod
+
+Export
+r(co
+f
+g=
+xport_co
+f
+g, 
+xport_d
+r=EXPORT_DIR)
+    
+
+th torch.
+o_grad():
+        
+xport
+r.
+xport_saf
+t
+
+sors_mod
+
+(
+            fr
+z
+d_mod
+
+,
+            qua
+t_co
+f
+g=qua
+t_co
+f
+g,
+            tok
+
+
+z
+r=tok
+
+
+z
+r,
         )
     ```
+### 5. Eva
+uat
+o
+ 
 
-### 5. Evaluation in vLLM
+ vLLM
+No
+, you ca
+ 
+oad a
+d ru
+ th
+ Quark qua
+t
+z
+d mod
 
-Now, you can load and run the Quark quantized model directly through the LLM entrypoint:
+ d
+r
+ct
+y through th
+ LLM 
 
-??? code
+trypo
 
-    ```python
-    from vllm import LLM, SamplingParams
+t:
+??? cod
 
-    # Sample prompts.
+    ```pytho
+
+    from v
+m 
+mport LLM, Samp
+
+
+gParams
+    # Samp
+
+ prompts.
     prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
+        "H
+
+o, my 
+am
+ 
+s",
+        "Th
+ pr
+s
+d
+
+t of th
+ U
+
+t
+d Stat
+s 
+s",
+        "Th
+ cap
+ta
+ of Fra
+c
+ 
+s",
+        "Th
+ futur
+ of AI 
+s",
     ]
-    # Create a sampling params object.
-    sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+    # Cr
+at
+ a samp
 
-    # Create an LLM.
-    llm = LLM(
-        model="Llama-2-70b-chat-hf-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant",
-        kv_cache_dtype="fp8",
-        quantization="quark",
+
+g params obj
+ct.
+    samp
+
+
+g_params = Samp
+
+
+gParams(t
+mp
+ratur
+=0.8, top_p=0.95)
+    # Cr
+at
+ a
+ LLM.
+    
+m = LLM(
+        mod
+
+="L
+ama-2-70b-chat-hf-
+-fp8-a-fp8-kvcach
+-fp8-p
+rt
+
+sor-autosmoothqua
+t",
+        kv_cach
+_dtyp
+="fp8",
+        qua
+t
+zat
+o
+="quark",
     )
-    # Generate texts from the prompts. The output is a list of RequestOutput objects
-    # that contain the prompt, generated text, and other information.
-    outputs = llm.generate(prompts, sampling_params)
-    # Print the outputs.
-    print("\nGenerated Outputs:\n" + "-" * 60)
-    for output in outputs:
+    # G
+
+
+rat
+ t
+xts from th
+ prompts. Th
+ output 
+s a 
+
+st of R
+qu
+stOutput obj
+cts
+    # that co
+ta
+
+ th
+ prompt, g
+
+
+rat
+d t
+xt, a
+d oth
+r 
+
+format
+o
+.
+    outputs = 
+m.g
+
+
+rat
+(prompts, samp
+
+
+g_params)
+    # Pr
+
+t th
+ outputs.
+    pr
+
+t("\
+G
+
+
+rat
+d Outputs:\
+" + "-" * 60)
+    for output 
+
+ outputs:
         prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(f"Prompt:    {prompt!r}")
-        print(f"Output:    {generated_text!r}")
-        print("-" * 60)
+        g
+
+
+rat
+d_t
+xt = output.outputs[0].t
+xt
+        pr
+
+t(f"Prompt:    {prompt!r}")
+        pr
+
+t(f"Output:    {g
+
+
+rat
+d_t
+xt!r}")
+        pr
+
+t("-" * 60)
     ```
-
-Or, you can use `lm_eval` to evaluate accuracy:
-
+Or, you ca
+ us
+ `
+m_
+va
+` to 
+va
+uat
+ accuracy:
 ```bash
-lm_eval --model vllm \
-  --model_args pretrained=Llama-2-70b-chat-hf-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant,kv_cache_dtype='fp8',quantization='quark' \
+
+m_
+va
+ --mod
+
+ v
+m \
+  --mod
+
+_args pr
+tra
+
+
+d=L
+ama-2-70b-chat-hf-
+-fp8-a-fp8-kvcach
+-fp8-p
+rt
+
+sor-autosmoothqua
+t,kv_cach
+_dtyp
+='fp8',qua
+t
+zat
+o
+='quark' \
   --tasks gsm8k
 ```
+## Quark Qua
+t
+zat
+o
+ Scr
+pt
+I
+ add
+t
+o
+ to th
+ 
+xamp
 
-## Quark Quantization Script
+ of Pytho
+ API abov
+, Quark a
+so off
+rs a
+[qua
+t
+zat
+o
+ scr
+pt](https://quark.docs.amd.com/
+at
+st/pytorch/
+xamp
 
-In addition to the example of Python API above, Quark also offers a
-[quantization script](https://quark.docs.amd.com/latest/pytorch/example_quark_torch_llm_ptq.html)
-to quantize large language models more conveniently. It supports quantizing models with variety
-of different quantization schemes and optimization algorithms. It can export the quantized model
-and run evaluation tasks on the fly. With the script, the example above can be:
+_quark_torch_
+m_ptq.htm
+)
+to qua
+t
+z
+ 
+arg
+ 
+a
+guag
+ mod
 
+s mor
+ co
+v
+
+
+
+
+t
+y. It supports qua
+t
+z
+
+g mod
+
+s 
+
+th var
+
+ty
+of d
+ff
+r
+
+t qua
+t
+zat
+o
+ sch
+m
+s a
+d opt
+m
+zat
+o
+ a
+gor
+thms. It ca
+ 
+xport th
+ qua
+t
+z
+d mod
+
+
+a
+d ru
+ 
+va
+uat
+o
+ tasks o
+ th
+ f
+y. W
+th th
+ scr
+pt, th
+ 
+xamp
+
+ abov
+ ca
+ b
+:
 ```bash
-python3 quantize_quark.py --model_dir meta-llama/Llama-2-70b-chat-hf \
-                          --output_dir /path/to/output \
-                          --quant_scheme w_fp8_a_fp8 \
-                          --kv_cache_dtype fp8 \
-                          --quant_algo autosmoothquant \
-                          --num_calib_data 512 \
-                          --model_export hf_format \
+pytho
+3 qua
+t
+z
+_quark.py --mod
+
+_d
+r m
+ta-
+ama/L
+ama-2-70b-chat-hf \
+                          --output_d
+r /path/to/output \
+                          --qua
+t_sch
+m
+ 
+_fp8_a_fp8 \
+                          --kv_cach
+_dtyp
+ fp8 \
+                          --qua
+t_a
+go autosmoothqua
+t \
+                          --
+um_ca
+
+b_data 512 \
+                          --mod
+
+_
+xport hf_format \
                           --tasks gsm8k
 ```
+## Us
 
-## Using OCP MX (MXFP4, MXFP6) models
+g OCP MX (MXFP4, MXFP6) mod
 
-vLLM supports loading MXFP4 and MXFP6 models quantized offline through AMD Quark, compliant with [Open Compute Project (OCP) specification](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf).
+s
+vLLM supports 
+oad
 
-The scheme currently only supports dynamic quantization for activations.
+g MXFP4 a
+d MXFP6 mod
 
-Example usage, after installing the latest AMD Quark release:
+s qua
+t
+z
+d off
 
+
+
+ through AMD Quark, comp
+
+a
+t 
+
+th [Op
+
+ Comput
+ Proj
+ct (OCP) sp
+c
+f
+cat
+o
+](https://
+.op
+
+comput
+.org/docum
+
+ts/ocp-m
+crosca
+
+
+g-formats-mx-v1-0-sp
+c-f
+
+a
+-pdf).
+Th
+ sch
+m
+ curr
+
+t
+y o
+
+y supports dy
+am
+c qua
+t
+zat
+o
+ for act
+vat
+o
+s.
+Examp
+
+ usag
+, aft
+r 
+
+sta
+
+
+g th
+ 
+at
+st AMD Quark r
+
+
+as
+:
 ```bash
-vllm serve fxmarty/qwen_1.5-moe-a2.7b-mxfp4 --tensor-parallel-size 1
-# or, for a model using fp6 activations and fp4 weights:
-vllm serve fxmarty/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3 --tensor-parallel-size 1
+v
+m s
+rv
+ fxmarty/q
+
+
+_1.5-mo
+-a2.7b-mxfp4 --t
+
+sor-para
+
+
+-s
+z
+ 1
+# or, for a mod
+
+ us
+
+g fp6 act
+vat
+o
+s a
+d fp4 
+
+
+ghts:
+v
+m s
+rv
+ fxmarty/q
+
+
+1.5_mo
+_a2.7b_chat_
+_fp4_a_fp6_
+2m3 --t
+
+sor-para
+
+
+-s
+z
+ 1
 ```
+A s
+mu
+at
+o
+ of th
+ matr
+x mu
+t
+p
 
-A simulation of the matrix multiplication execution in MXFP4/MXFP6 can be run on devices that do not support OCP MX operations natively (e.g. AMD Instinct MI325, MI300 and MI250), dequantizing weights from FP4/FP6 to half precision on the fly, using a fused kernel. This is useful e.g. to evaluate FP4/FP6 models using vLLM, or alternatively to benefit from the ~2.5-4x memory savings (compared to float16 and bfloat16).
+cat
+o
+ 
+x
+cut
+o
+ 
 
-To generate offline models quantized using MXFP4 data type, the easiest approach is to use AMD Quark's [quantization script](https://quark.docs.amd.com/latest/pytorch/example_quark_torch_llm_ptq.html), as an example:
+ MXFP4/MXFP6 ca
+ b
+ ru
+ o
+ d
+v
+c
+s that do 
+ot support OCP MX op
+rat
+o
+s 
+at
+v
 
+y (
+.g. AMD I
+st
+
+ct MI325, MI300 a
+d MI250), d
+qua
+t
+z
+
+g 
+
+
+ghts from FP4/FP6 to ha
+f pr
+c
+s
+o
+ o
+ th
+ f
+y, us
+
+g a fus
+d k
+r
+
+
+. Th
+s 
+s us
+fu
+ 
+.g. to 
+va
+uat
+ FP4/FP6 mod
+
+s us
+
+g vLLM, or a
+t
+r
+at
+v
+
+y to b
+
+
+f
+t from th
+ ~2.5-4x m
+mory sav
+
+gs (compar
+d to f
+oat16 a
+d bf
+oat16).
+To g
+
+
+rat
+ off
+
+
+
+ mod
+
+s qua
+t
+z
+d us
+
+g MXFP4 data typ
+, th
+ 
+as
+
+st approach 
+s to us
+ AMD Quark's [qua
+t
+zat
+o
+ scr
+pt](https://quark.docs.amd.com/
+at
+st/pytorch/
+xamp
+
+_quark_torch_
+m_ptq.htm
+), as a
+ 
+xamp
+
+:
 ```bash
-python quantize_quark.py --model_dir Qwen/Qwen1.5-MoE-A2.7B-Chat \
-    --quant_scheme w_mxfp4_a_mxfp4 \
-    --output_dir qwen_1.5-moe-a2.7b-mxfp4 \
-    --skip_evaluation \
-    --model_export hf_format \
-    --group_size 32
+pytho
+ qua
+t
+z
+_quark.py --mod
+
+_d
+r Q
+
+
+/Q
+
+
+1.5-MoE-A2.7B-Chat \
+    --qua
+t_sch
+m
+ 
+_mxfp4_a_mxfp4 \
+    --output_d
+r q
+
+
+_1.5-mo
+-a2.7b-mxfp4 \
+    --sk
+p_
+va
+uat
+o
+ \
+    --mod
+
+_
+xport hf_format \
+    --group_s
+z
+ 32
 ```
+Th
+ curr
 
-The current integration supports [all combination of FP4, FP6_E3M2, FP6_E2M3](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/utils/ocp_mx_utils.py) used for either weights or activations.
+t 
 
-## Using Quark Quantized layerwise Auto Mixed Precision (AMP) Models
+t
+grat
+o
+ supports [a
+ comb
 
-vLLM also supports loading layerwise mixed precision model quantized using AMD Quark. Currently, mixed scheme of {MXFP4, FP8} is supported, where FP8 here denotes for FP8 per-tensor scheme. More mixed precision schemes are planned to be supported in a near future, including
+at
+o
+ of FP4, FP6_E3M2, FP6_E2M3](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
 
-- Unquantized Linear and/or MoE layer(s) as an option for each layer, i.e., mixed of {MXFP4, FP8, BF16/FP16}
-- MXFP6 quantization extension, i.e., {MXFP4, MXFP6, FP8, BF16/FP16}
+/v
+m/mod
 
-Although one can maximize serving throughput using the lowest precision supported on a given device (e.g. MXFP4 for AMD Instinct MI355, FP8 for AMD Instinct MI300), these aggressive schemes can be detrimental to accuracy recovering from quantization on target tasks. Mixed precision allows to strike a balance between maximizing accuracy and throughput.
+_
+x
+cutor/
+ay
+rs/qua
+t
+zat
+o
+/ut
 
-There are two steps to generate and deploy a mixed precision model quantized with AMD Quark, as shown below.
+s/ocp_mx_ut
 
-### 1. Quantize a model using mixed precision in AMD Quark
+s.py) us
+d for 
 
-Firstly, the layerwise mixed-precision configuration for a given LLM model is searched and then quantized using AMD Quark. We will provide a detailed tutorial with Quark APIs later.
+th
+r 
 
-As examples, we provide some ready-to-use quantized mixed precision model to show the usage in vLLM and the accuracy benefits. They are:
 
-- amd/Llama-2-70b-chat-hf-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8
-- amd/Mixtral-8x7B-Instruct-v0.1-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8
-- amd/Qwen3-8B-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8
+ghts or act
+vat
+o
+s.
+## Us
 
-### 2. inference the quantized mixed precision model in vLLM
+g Quark Qua
+t
+z
+d 
+ay
+r
 
-Models quantized with AMD Quark using mixed precision can natively be reload in vLLM, and e.g. evaluated using lm-evaluation-harness as follows:
+s
+ Auto M
+x
+d Pr
+c
+s
+o
+ (AMP) Mod
 
+s
+vLLM a
+so supports 
+oad
+
+g 
+ay
+r
+
+s
+ m
+x
+d pr
+c
+s
+o
+ mod
+
+ qua
+t
+z
+d us
+
+g AMD Quark. Curr
+
+t
+y, m
+x
+d sch
+m
+ of {MXFP4, FP8} 
+s support
+d, 
+h
+r
+ FP8 h
+r
+ d
+
+ot
+s for FP8 p
+r-t
+
+sor sch
+m
+. Mor
+ m
+x
+d pr
+c
+s
+o
+ sch
+m
+s ar
+ p
+a
+
+d to b
+ support
+d 
+
+ a 
+
+ar futur
+, 
+
+c
+ud
+
+g
+- U
+qua
+t
+z
+d L
+
+
+ar a
+d/or MoE 
+ay
+r(s) as a
+ opt
+o
+ for 
+ach 
+ay
+r, 
+.
+., m
+x
+d of {MXFP4, FP8, BF16/FP16}
+- MXFP6 qua
+t
+zat
+o
+ 
+xt
+
+s
+o
+, 
+.
+., {MXFP4, MXFP6, FP8, BF16/FP16}
+A
+though o
+
+ ca
+ max
+m
+z
+ s
+rv
+
+g throughput us
+
+g th
+ 
+o
+
+st pr
+c
+s
+o
+ support
+d o
+ a g
+v
+
+ d
+v
+c
+ (
+.g. MXFP4 for AMD I
+st
+
+ct MI355, FP8 for AMD I
+st
+
+ct MI300), th
+s
+ aggr
+ss
+v
+ sch
+m
+s ca
+ b
+ d
+tr
+m
+
+ta
+ to accuracy r
+cov
+r
+
+g from qua
+t
+zat
+o
+ o
+ targ
+t tasks. M
+x
+d pr
+c
+s
+o
+ a
+o
+s to str
+k
+ a ba
+a
+c
+ b
+t
+
+
+ max
+m
+z
+
+g accuracy a
+d throughput.
+Th
+r
+ ar
+ t
+o st
+ps to g
+
+
+rat
+ a
+d d
+p
+oy a m
+x
+d pr
+c
+s
+o
+ mod
+
+ qua
+t
+z
+d 
+
+th AMD Quark, as sho
+
+ b
+
+o
+.
+### 1. Qua
+t
+z
+ a mod
+
+ us
+
+g m
+x
+d pr
+c
+s
+o
+ 
+
+ AMD Quark
+F
+rst
+y, th
+ 
+ay
+r
+
+s
+ m
+x
+d-pr
+c
+s
+o
+ co
+f
+gurat
+o
+ for a g
+v
+
+ LLM mod
+
+ 
+s s
+arch
+d a
+d th
+
+ qua
+t
+z
+d us
+
+g AMD Quark. W
+ 
+
+
+ prov
+d
+ a d
+ta
+
+
+d tutor
+a
+ 
+
+th Quark APIs 
+at
+r.
+As 
+xamp
+
+s, 
+
+ prov
+d
+ som
+ r
+ady-to-us
+ qua
+t
+z
+d m
+x
+d pr
+c
+s
+o
+ mod
+
+ to sho
+ th
+ usag
+ 
+
+ vLLM a
+d th
+ accuracy b
+
+
+f
+ts. Th
+y ar
+:
+- amd/L
+ama-2-70b-chat-hf-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8
+- amd/M
+xtra
+-8x7B-I
+struct-v0.1-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8
+- amd/Q
+
+
+3-8B-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8
+### 2. 
+
+f
+r
+
+c
+ th
+ qua
+t
+z
+d m
+x
+d pr
+c
+s
+o
+ mod
+
+ 
+
+ vLLM
+Mod
+
+s qua
+t
+z
+d 
+
+th AMD Quark us
+
+g m
+x
+d pr
+c
+s
+o
+ ca
+ 
+at
+v
+
+y b
+ r
+
+oad 
+
+ vLLM, a
+d 
+.g. 
+va
+uat
+d us
+
+g 
+m-
+va
+uat
+o
+-har
+
+ss as fo
+o
+s:
 ```bash
-lm_eval --model vllm \
-    --model_args pretrained=amd/Llama-2-70b-chat-hf-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8,tensor_parallel_size=4,dtype=auto,gpu_memory_utilization=0.8,trust_remote_code=False \
-    --tasks mmlu \
-    --batch_size auto
+
+m_
+va
+ --mod
+
+ v
+m \
+    --mod
+
+_args pr
+tra
+
+
+d=amd/L
+ama-2-70b-chat-hf-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8,t
+
+sor_para
+
+
+_s
+z
+=4,dtyp
+=auto,gpu_m
+mory_ut
+
+
+zat
+o
+=0.8,trust_r
+mot
+_cod
+=Fa
+s
+ \
+    --tasks mm
+u \
+    --batch_s
+z
+ auto
 ```

@@ -1,198 +1,948 @@
 # LWS
+L
+ad
+rWork
+rS
+t (LWS) 
+s a Kub
+r
 
-LeaderWorkerSet (LWS) is a Kubernetes API that aims to address common deployment patterns of AI/ML inference workloads.
-A major use case is for multi-host/multi-node distributed inference.
+t
+s API that a
+ms to addr
+ss commo
+ d
+p
+oym
 
-vLLM can be deployed with [LWS](https://github.com/kubernetes-sigs/lws) on Kubernetes for distributed model serving.
+t patt
+r
+s of AI/ML 
 
-## Prerequisites
+f
+r
 
-* At least two Kubernetes nodes, each with 8 GPUs, are required.
-* Install LWS by following the instructions found [here](https://lws.sigs.k8s.io/docs/installation/).
+c
+ 
+ork
+oads.
+A major us
+ cas
+ 
+s for mu
+t
+-host/mu
+t
+-
+od
+ d
+str
+but
+d 
 
-## Deploy and Serve
+f
+r
 
-Deploy the following yaml file `lws.yaml`
+c
+.
+vLLM ca
+ b
+ d
+p
+oy
+d 
 
-??? code "Yaml"
+th [LWS](https://g
+thub.com/kub
+r
 
-    ```yaml
-    apiVersion: leaderworkerset.x-k8s.io/v1
-    kind: LeaderWorkerSet
-    metadata:
-      name: vllm
-    spec:
-      replicas: 1
-      leaderWorkerTemplate:
-        size: 2
-        restartPolicy: RecreateGroupOnPodRestart
-        leaderTemplate:
-          metadata:
-            labels:
-              role: leader
-          spec:
-            containers:
-              - name: vllm-leader
-                image: docker.io/vllm/vllm-openai:latest
-                env:
-                  - name: HF_TOKEN
-                    value: <your-hf-token>
-                command:
+t
+s-s
+gs/
+
+s) o
+ Kub
+r
+
+t
+s for d
+str
+but
+d mod
+
+ s
+rv
+
+g.
+## Pr
+r
+qu
+s
+t
+s
+* At 
+
+ast t
+o Kub
+r
+
+t
+s 
+od
+s, 
+ach 
+
+th 8 GPUs, ar
+ r
+qu
+r
+d.
+* I
+sta
+ LWS by fo
+o
+
+
+g th
+ 
+
+struct
+o
+s fou
+d [h
+r
+](https://
+
+s.s
+gs.k8s.
+o/docs/
+
+sta
+at
+o
+/).
+## D
+p
+oy a
+d S
+rv
+
+D
+p
+oy th
+ fo
+o
+
+
+g yam
+ f
+
+
+ `
+
+s.yam
+`
+??? cod
+ "Yam
+"
+    ```yam
+
+    ap
+V
+rs
+o
+: 
+
+ad
+r
+ork
+rs
+t.x-k8s.
+o/v1
+    k
+
+d: L
+ad
+rWork
+rS
+t
+    m
+tadata:
+      
+am
+: v
+m
+    sp
+c:
+      r
+p
+
+cas: 1
+      
+
+ad
+rWork
+rT
+mp
+at
+:
+        s
+z
+: 2
+        r
+startPo
+
+cy: R
+cr
+at
+GroupO
+PodR
+start
+        
+
+ad
+rT
+mp
+at
+:
+          m
+tadata:
+            
+ab
+
+s:
+              ro
+
+: 
+
+ad
+r
+          sp
+c:
+            co
+ta
+
+
+rs:
+              - 
+am
+: v
+m-
+
+ad
+r
+                
+mag
+: dock
+r.
+o/v
+m/v
+m-op
+
+a
+:
+at
+st
+                
+
+v:
+                  - 
+am
+: HF_TOKEN
+                    va
+u
+: 
+your-hf-tok
+
+
+
+                comma
+d:
                   - sh
                   - -c
-                  - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE); 
-                    vllm serve meta-llama/Meta-Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline_parallel_size 2"
-                resources:
-                  limits:
-                    nvidia.com/gpu: "8"
-                    memory: 1124Gi
-                    ephemeral-storage: 800Gi
-                  requests:
-                    ephemeral-storage: 800Gi
+                  - "bash /v
+m-
+orkspac
+/
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/mu
+t
+-
+od
+-s
+rv
+
+g.sh 
+
+ad
+r --ray_c
+ust
+r_s
+z
+=$(LWS_GROUP_SIZE); 
+                    v
+m s
+rv
+ m
+ta-
+ama/M
+ta-L
+ama-3.1-405B-I
+struct --port 8080 --t
+
+sor-para
+
+
+-s
+z
+ 8 --p
+p
+
+
+
+
+_para
+
+
+_s
+z
+ 2"
+                r
+sourc
+s:
+                  
+
+m
+ts:
+                    
+v
+d
+a.com/gpu: "8"
+                    m
+mory: 1124G
+
+                    
+ph
+m
+ra
+-storag
+: 800G
+
+                  r
+qu
+sts:
+                    
+ph
+m
+ra
+-storag
+: 800G
+
                     cpu: 125
                 ports:
-                  - containerPort: 8080
-                readinessProbe:
-                  tcpSocket:
+                  - co
+ta
+
+
+rPort: 8080
+                r
+ad
+
+
+ssProb
+:
+                  tcpSock
+t:
                     port: 8080
-                  initialDelaySeconds: 15
-                  periodSeconds: 10
-                volumeMounts:
-                  - mountPath: /dev/shm
-                    name: dshm
-            volumes:
-            - name: dshm
-              emptyDir:
-                medium: Memory
-                sizeLimit: 15Gi
-        workerTemplate:
-          spec:
-            containers:
-              - name: vllm-worker
-                image: docker.io/vllm/vllm-openai:latest
-                command:
+                  
+
+
+t
+a
+D
+
+ayS
+co
+ds: 15
+                  p
+r
+odS
+co
+ds: 10
+                vo
+um
+Mou
+ts:
+                  - mou
+tPath: /d
+v/shm
+                    
+am
+: dshm
+            vo
+um
+s:
+            - 
+am
+: dshm
+              
+mptyD
+r:
+                m
+d
+um: M
+mory
+                s
+z
+L
+m
+t: 15G
+
+        
+ork
+rT
+mp
+at
+:
+          sp
+c:
+            co
+ta
+
+
+rs:
+              - 
+am
+: v
+m-
+ork
+r
+                
+mag
+: dock
+r.
+o/v
+m/v
+m-op
+
+a
+:
+at
+st
+                comma
+d:
                   - sh
                   - -c
-                  - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh worker --ray_address=$(LWS_LEADER_ADDRESS)"
-                resources:
-                  limits:
-                    nvidia.com/gpu: "8"
-                    memory: 1124Gi
-                    ephemeral-storage: 800Gi
-                  requests:
-                    ephemeral-storage: 800Gi
+                  - "bash /v
+m-
+orkspac
+/
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/mu
+t
+-
+od
+-s
+rv
+
+g.sh 
+ork
+r --ray_addr
+ss=$(LWS_LEADER_ADDRESS)"
+                r
+sourc
+s:
+                  
+
+m
+ts:
+                    
+v
+d
+a.com/gpu: "8"
+                    m
+mory: 1124G
+
+                    
+ph
+m
+ra
+-storag
+: 800G
+
+                  r
+qu
+sts:
+                    
+ph
+m
+ra
+-storag
+: 800G
+
                     cpu: 125
-                env:
-                  - name: HF_TOKEN
-                    value: <your-hf-token>
-                volumeMounts:
-                  - mountPath: /dev/shm
-                    name: dshm   
-            volumes:
-            - name: dshm
-              emptyDir:
-                medium: Memory
-                sizeLimit: 15Gi
+                
+
+v:
+                  - 
+am
+: HF_TOKEN
+                    va
+u
+: 
+your-hf-tok
+
+
+
+                vo
+um
+Mou
+ts:
+                  - mou
+tPath: /d
+v/shm
+                    
+am
+: dshm   
+            vo
+um
+s:
+            - 
+am
+: dshm
+              
+mptyD
+r:
+                m
+d
+um: M
+mory
+                s
+z
+L
+m
+t: 15G
+
     ---
-    apiVersion: v1
-    kind: Service
-    metadata:
-      name: vllm-leader
-    spec:
+    ap
+V
+rs
+o
+: v1
+    k
+
+d: S
+rv
+c
+
+    m
+tadata:
+      
+am
+: v
+m-
+
+ad
+r
+    sp
+c:
       ports:
-        - name: http
+        - 
+am
+: http
           port: 8080
-          protocol: TCP
-          targetPort: 8080
-      selector:
-        leaderworkerset.sigs.k8s.io/name: vllm
-        role: leader
-      type: ClusterIP
+          protoco
+: TCP
+          targ
+tPort: 8080
+      s
+
+
+ctor:
+        
+
+ad
+r
+ork
+rs
+t.s
+gs.k8s.
+o/
+am
+: v
+m
+        ro
+
+: 
+
+ad
+r
+      typ
+: C
+ust
+rIP
     ```
-
 ```bash
-kubectl apply -f lws.yaml
+kub
+ct
+ app
+y -f 
+
+s.yam
+
 ```
-
-Verify the status of the pods:
-
+V
+r
+fy th
+ status of th
+ pods:
 ```bash
-kubectl get pods
+kub
+ct
+ g
+t pods
 ```
+Shou
+d g
+t a
+ output s
+m
 
-Should get an output similar to this:
-
+ar to th
+s:
 ```bash
 NAME       READY   STATUS    RESTARTS   AGE
-vllm-0     1/1     Running   0          2s
-vllm-0-1   1/1     Running   0          2s
-```
+v
+m-0     1/1     Ru
 
-Verify that the distributed tensor-parallel inference works:
+
+g   0          2s
+v
+m-0-1   1/1     Ru
+
+
+g   0          2s
+```
+V
+r
+fy that th
+ d
+str
+but
+d t
+
+sor-para
+
+
+ 
+
+f
+r
+
+c
+ 
+orks:
+```bash
+kub
+ct
+ 
+ogs v
+m-0 |gr
+p -
+ "Load
+
+g mod
+
+ 
+
+
+ghts took" 
+```
+Shou
+d g
+t som
+th
+
+g s
+m
+
+ar to th
+s:
+```t
+xt
+INFO 05-08 03:20:24 mod
+
+_ru
+
+r.py:173] Load
+
+g mod
+
+ 
+
+
+ghts took 0.1189 GB
+(RayWork
+rWrapp
+r p
+d=169, 
+p=10.20.0.197) INFO 05-08 03:20:28 mod
+
+_ru
+
+r.py:173] Load
+
+g mod
+
+ 
+
+
+ghts took 0.1189 GB
+```
+## Acc
+ss C
+ust
+rIP s
+rv
+c
 
 ```bash
-kubectl logs vllm-0 |grep -i "Loading model weights took" 
+# L
+st
+
+ o
+ port 8080 
+oca
+y, for
+ard
+
+g to th
+ targ
+tPort of th
+ s
+rv
+c
+'s port 8080 
+
+ a pod s
+
+
+ct
+d by th
+ s
+rv
+c
+
+kub
+ct
+ port-for
+ard svc/v
+m-
+
+ad
+r 8080:8080
 ```
+Th
+ output shou
+d b
+ s
+m
 
-Should get something similar to this:
+ar to th
+ fo
+o
 
-```text
-INFO 05-08 03:20:24 model_runner.py:173] Loading model weights took 0.1189 GB
-(RayWorkerWrapper pid=169, ip=10.20.0.197) INFO 05-08 03:20:28 model_runner.py:173] Loading model weights took 0.1189 GB
+
+g:
+```t
+xt
+For
+ard
+
+g from 127.0.0.1:8080 -
+ 8080
+For
+ard
+
+g from [::1]:8080 -
+ 8080
 ```
+## S
+rv
+ th
+ mod
 
-## Access ClusterIP service
 
-```bash
-# Listen on port 8080 locally, forwarding to the targetPort of the service's port 8080 in a pod selected by the service
-kubectl port-forward svc/vllm-leader 8080:8080
-```
+Op
 
-The output should be similar to the following:
+ a
+oth
+r t
+rm
 
-```text
-Forwarding from 127.0.0.1:8080 -> 8080
-Forwarding from [::1]:8080 -> 8080
-```
+a
+ a
+d s
 
-## Serve the model
+d a r
+qu
+st
+```t
+xt
+cur
+ http://
+oca
+host:8080/v1/comp
 
-Open another terminal and send a request
+t
+o
+s \
+-H "Co
+t
 
-```text
-curl http://localhost:8080/v1/completions \
--H "Content-Type: application/json" \
+t-Typ
+: app
+
+cat
+o
+/jso
+" \
 -d '{
-    "model": "meta-llama/Meta-Llama-3.1-405B-Instruct",
-    "prompt": "San Francisco is a",
-    "max_tokens": 7,
-    "temperature": 0
+    "mod
+
+": "m
+ta-
+ama/M
+ta-L
+ama-3.1-405B-I
+struct",
+    "prompt": "Sa
+ Fra
+c
+sco 
+s a",
+    "max_tok
+
+s": 7,
+    "t
+mp
+ratur
+": 0
 }'
 ```
+Th
+ output shou
+d b
+ s
+m
 
-The output should be similar to the following
+ar to th
+ fo
+o
 
-??? console "Output"
 
-    ```text
+g
+??? co
+so
+
+ "Output"
+    ```t
+xt
     {
-      "id": "cmpl-1bb34faba88b43f9862cfbfb2200949d",
-      "object": "text_completion",
-      "created": 1715138766,
-      "model": "meta-llama/Meta-Llama-3.1-405B-Instruct",
-      "choices": [
+      "
+d": "cmp
+-1bb34faba88b43f9862cfbfb2200949d",
+      "obj
+ct": "t
+xt_comp
+
+t
+o
+",
+      "cr
+at
+d": 1715138766,
+      "mod
+
+": "m
+ta-
+ama/M
+ta-L
+ama-3.1-405B-I
+struct",
+      "cho
+c
+s": [
         {
-          "index": 0,
-          "text": " top destination for foodies, with",
-          "logprobs": null,
-          "finish_reason": "length",
-          "stop_reason": null
+          "
+
+d
+x": 0,
+          "t
+xt": " top d
+st
+
+at
+o
+ for food
+
+s, 
+
+th",
+          "
+ogprobs": 
+u
+,
+          "f
+
+
+sh_r
+aso
+": "
+
+
+gth",
+          "stop_r
+aso
+": 
+u
+
         }
       ],
-      "usage": {
-        "prompt_tokens": 5,
-        "total_tokens": 12,
-        "completion_tokens": 7
+      "usag
+": {
+        "prompt_tok
+
+s": 5,
+        "tota
+_tok
+
+s": 12,
+        "comp
+
+t
+o
+_tok
+
+s": 7
       }
     }
     ```
