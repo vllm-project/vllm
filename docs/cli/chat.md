@@ -1,5 +1,14 @@
-# vllm chat
+# v
+m chat
+## Argum
 
-## Arguments
+ts
+--8
+-- "docs/g
 
---8<-- "docs/generated/argparse/chat.inc.md"
+
+rat
+d/argpars
+/chat.
+
+c.md"

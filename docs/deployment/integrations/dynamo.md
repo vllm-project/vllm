@@ -1,7 +1,149 @@
-# NVIDIA Dynamo
+# NVIDIA Dy
+amo
+[NVIDIA Dy
+amo](https://g
+thub.com/a
+-dy
+amo/dy
+amo) 
+s a
+ op
 
-[NVIDIA Dynamo](https://github.com/ai-dynamo/dynamo) is an open-source framework for distributed LLM inference that can run vLLM on Kubernetes with flexible serving architectures (e.g. aggregated/disaggregated, optional router/planner).
+-sourc
+ fram
 
-For Kubernetes deployment instructions and examples (including vLLM), see the [Deploying Dynamo on Kubernetes](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/README.md) guide.
+ork for d
+str
+but
+d LLM 
 
-Background reading: InfoQ news coverage — [NVIDIA Dynamo simplifies Kubernetes deployment for LLM inference](https://www.infoq.com/news/2025/12/nvidia-dynamo-kubernetes/).
+f
+r
+
+c
+ that ca
+ ru
+ vLLM o
+ Kub
+r
+
+t
+s 
+
+th f
+
+x
+b
+
+ s
+rv
+
+g arch
+t
+ctur
+s (
+.g. aggr
+gat
+d/d
+saggr
+gat
+d, opt
+o
+a
+ rout
+r/p
+a
+
+r).
+For Kub
+r
+
+t
+s d
+p
+oym
+
+t 
+
+struct
+o
+s a
+d 
+xamp
+
+s (
+
+c
+ud
+
+g vLLM), s
+ th
+ [D
+p
+oy
+
+g Dy
+amo o
+ Kub
+r
+
+t
+s](https://g
+thub.com/a
+-dy
+amo/dy
+amo/b
+ob/ma
+
+/docs/kub
+r
+
+t
+s/README.md) gu
+d
+.
+Backgrou
+d r
+ad
+
+g: I
+foQ 
+
+
+s cov
+rag
+ — [NVIDIA Dy
+amo s
+mp
+
+f
+
+s Kub
+r
+
+t
+s d
+p
+oym
+
+t for LLM 
+
+f
+r
+
+c
+](https://
+.
+
+foq.com/
+
+
+s/2025/12/
+v
+d
+a-dy
+amo-kub
+r
+
+t
+s/).

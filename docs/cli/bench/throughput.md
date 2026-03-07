@@ -1,9 +1,29 @@
-# vllm bench throughput
+# v
+m b
 
-## JSON CLI Arguments
+ch throughput
+## JSON CLI Argum
 
---8<-- "docs/cli/json_tip.inc.md"
+ts
+--8
+-- "docs/c
 
-## Arguments
+/jso
+_t
+p.
 
---8<-- "docs/generated/argparse/bench_throughput.inc.md"
+c.md"
+## Argum
+
+ts
+--8
+-- "docs/g
+
+
+rat
+d/argpars
+/b
+
+ch_throughput.
+
+c.md"

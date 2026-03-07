@@ -1,237 +1,4226 @@
 # CUDA Graphs
+Th
+s 
+r
+t
+-up 
 
-This write-up introduces the new CUDA Graphs modes in vLLM v1 beyond previous [torch.compile integration](torch_compile.md). To summarize, we:
+troduc
+s th
+ 
 
-1. Added flexible `cudagraph_mode` configuration
-2. Made full CUDA Graphs support orthogonal to compilation
-3. Introduced a CUDA Graphs dispatcher as a central controller that picks the desired runtime mode and CUDA Graphs per batch automatically
 
-In this document we will discuss the:
+ CUDA Graphs mod
+s 
 
-* [Motivation](#motivation)
-* [CUDA Graphs modes](#cudagraphmodes)
-* [Detailed design](#detailed-design)
-* [Example usage of the different CUDA Graphs modes](#usage-guide)
+ vLLM v1 b
+yo
+d pr
+v
+ous [torch.comp
 
-!!! note
-    In this document, we refer to pure decode (`max_query_len=1`) or speculative decode (`max_query_len =1+num_spec_tokens`) as **uniform decode** batches, and the opposite would be **non-uniform** batches (i.e., prefill or mixed prefill-decode batches).
 
-!!! note
-    The following contents are mostly based on the last commit of <https://github.com/vllm-project/vllm/pull/20059>.
+ 
 
-## Motivation
+t
+grat
+o
+](torch_comp
 
-Initial piecewise compilation was built to allow piecewise cudagraph capture, excluding cudagraph-unsupported operations (mainly attention). This allowed some speedup from cudagraphs while maintaining compatibility with all attention backends. We later added support for "full cudagraphs" by not compiling piecewise, so that we could further reduce the latency in cases where attention supported cudagraphs. However, this tight coupling between compilation and cudagraph capture led to an all-or-nothing experience with little flexibility. Many attention backends also weren’t ready for unified "full" CUDA Graphs capture (e.g., only FlashAttention 3 supports it currently) or only support CUDA Graphs for pure decode batches (e.g., Flashinfer, FlashMLA, and Mamba, etc.). That led to confusing performance/compatibility tradeoffs, inconsistent CUDA Graphs support, and increasingly complex code structure.
 
-This led us to seek a more fine-grained CUDA Graphs solution with the following features:
+.md). To summar
+z
+, 
 
-* Explicitly aware of CUDA Graphs for prefill/mixed or (uniform-)decode batch and capture them separately.
-* Separate CUDAGraph capture logic from compilation (as much as feasible) for feature orthogonality, which suggest:
-    * Capturing piecewise and full cudagraphs using the same compiled graph, and
-    * Full cudagraph capture without compilation.
-* Dispatch between full and piecewise cudagraph at runtime depending on batch composition.
-* Centralized control of CUDAGraph behavior for reduced code complexity and allowed more extendibility.
+:
+1. Add
+d f
 
-These features allow the most flexibility for cudagraph capture and compilation for all kinds of startup/performance tradeoffs and feature support.
+x
+b
 
-## `CudagraphModes`
+ `cudagraph_mod
+` co
+f
+gurat
+o
 
-[CUDAGraphMode][vllm.config.compilation.CUDAGraphMode] is the single knob you tune in `CompilationConfig.cudagraph_mode`:
+2. Mad
+ fu
+ CUDA Graphs support orthogo
+a
+ to comp
 
-* `NONE` — turn CUDA Graphs off. Good for debugging.
-* `PIECEWISE` —  a single-mode strategy (and past default). It is the most flexible: attention or other CUDA Graphs-incompatible operations stay eager, everything else goes into CUDA Graphs. Requires piecewise compilation.
-* `FULL` — a single-mode strategy, which only captures full CUDA Graphs for non-uniform batches, then uniform-decode batches reuse the CUDA Graph of non-uniform batch of the same batch_size, since they are compatible; can be good for small models or workloads with small prompts.
-* `FULL_DECODE_ONLY` — full CUDA Graph for uniform decode, no cudagraph for prefill/mixed etc.; suitable for decode instances in a P/D setup where prefill is not as important, this way we can save the memory needed for `PIECEWISE` CUDA Graphs.
-* `FULL_AND_PIECEWISE` — (default mode) full CUDA Graph for uniform decode, piecewise CUDA Graphs for others; generally the most performant setting, especially for low latency with small models or MoEs, but also requires the most memory and takes the longest to capture.
+at
+o
 
-Defaults: If you’re on v1 with piecewise compilation, we default to `FULL_AND_PIECEWISE` for better performance, (for pooling models, it's still `PIECEWISE`). Otherwise, e.g. if piecewise compilation unavailable, we default to `NONE`.
+3. I
+troduc
+d a CUDA Graphs d
+spatch
+r as a c
 
-While `NONE` , `PIECEWISE`, and `FULL` are single-mode configurations and simply equivalent to past implementations of eager execution, piecewise CUDA Graphs, and full CUDA Graphs respectively, `FULL_DECODE_ONLY` and `FULL_AND_PIECEWISE` are newly appended dual-mode configurations, which require dispatching to switch between concrete runtime modes according to runtime batches dynamically.
+tra
+ co
+tro
 
-!!! note
-    Here, the single-modes `NONE`, `PIECEWISE`, and `FULL` are treated as the runtime modes for CUDA Graphs dispatching. If using a dual-mode, the dispatcher will always dispatch to one of its member modes (plus a potential `NONE` if no suitable CUDA Graph available), depending on the batch composition.
+r that p
+cks th
+ d
+s
+r
+d ru
+t
+m
+ mod
+ a
+d CUDA Graphs p
+r batch automat
+ca
+y
+I
+ th
+s docum
 
-While cascade attention is not cudagraph compatible, it is now compatible with all possible cudagraph mode configurations. If a batch uses cascade attention, it always gets dispatched to `PIECEWISE` mode if available (otherwise `NONE`).
+t 
 
-!!! note
-    Not all CUDA Graph modes are compatible with every attention backend. We automatically "downgrade" modes to the closest supported mode. For example, if a backend only supports CUDA Graphs for pure decode/uniform batches, we convert `FULL` to `FULL_AND_PIECEWISE` if piecewise compilation is enabled, and `FULL_DECODE_ONLY` otherwise.
+ 
 
-## Detailed Design
 
-### Overview
+ d
+scuss th
+:
+* [Mot
+vat
+o
+](#mot
+vat
+o
+)
+* [CUDA Graphs mod
+s](#cudagraphmod
+s)
+* [D
+ta
 
-The new CUDA Graphs logic is built on top of piecewise compilation and supports dual CUDA Graphs runtime mode switching. The system contains the following core components:
 
-* [CUDAGraphWrapper][vllm.compilation.cuda_graph.CUDAGraphWrapper]: wrapper that handles CUDAGraph capture & replay on the wrapped callable
-* [CudagraphDispatcher][vllm.v1.cudagraph_dispatcher.CudagraphDispatcher]: the central controller that contains the single source of truth about CUDA Graphs and handles dispatching between them.
-* [CUDAGraphMode][vllm.config.compilation.CUDAGraphMode]: enum describing the supported and runtime modes (introduced above).
-* [BatchDescriptor][vllm.forward_context.BatchDescriptor], serving as a unique representation of the runtime batch used for dispatching.
+d d
+s
+g
+](#d
+ta
 
-See the following figures for a quick comparison between the previous and current design patterns of CUDA Graphs with inductor compilation. We can see that previously the CUDA Graphs logic and compilation logic were tightly coupled into the vllm `PiecewiseBackend`, and CUDA Graphs was implicitly dispatched by `batch_size` idly. Now the CUDA Graphs logic is separated into the `CUDAGraphWrapper` class, responsible for both full and piecewise CUDA Graphs abilities, and dispatching is **explicitly** done via **runtime mode** plus the `BatchDescriptor` as the **dispatch key** via `CudagraphDispatcher`.
 
-**Before:**
+d-d
+s
+g
+)
+* [Examp
 
-![previous_design](../assets/design/cuda_graphs/previous_design.png)
+ usag
+ of th
+ d
+ff
+r
 
-**After:**
+t CUDA Graphs mod
+s](#usag
+-gu
+d
+)
+!!! 
+ot
 
-![new_design](../assets/design/cuda_graphs/current_design.png)
+    I
+ th
+s docum
 
-### `BatchDescriptor`
+t, 
 
-[BatchDescriptor][vllm.forward_context.BatchDescriptor] is a component within `ForwardContext`, alongside the CUDA Graphs runtime modes, serving as the core structure for dispatching keys at runtime. The prototype is:
+ r
+f
+r to pur
+ d
+cod
+ (`max_qu
+ry_
 
-```python
-class BatchDescriptor(NamedTuple):
-    num_tokens: int
-    num_reqs: int
-    uniform: bool = False
-    has_lora: bool = False
-```
 
-where `num_tokens` can be the padded token length, and `uniform` indicates if all the requests have the same query lengths. Many attention backends only support full cudagraphs when the batches are uniform; pure decode batches are uniform but may not be query length 1 (i.e. `num_tokens == num_reqs`), this occurs in the validation pass of spec-decode where "decode" batches will have a query length of  `1+num_spec_tokens`.
+=1`) or sp
+cu
+at
+v
+ d
+cod
+ (`max_qu
+ry_
 
-The goal of this structure is to uniquely identify a (padded) batch with minimal possible items corresponding to a CUDA Graphs item.
 
-!!! note
-    The prototype of `BatchDescriptor` may be extended for more general situations in the future, e.g., include more items, like `uniform_query_len` to support multiple different uniform decode lengths settings (<https://github.com/vllm-project/vllm/pull/23679>), or other modifications needed to support CUDA Graphs for models whose inputs are not necessarily token length aware (for example, some multi-modal inputs).
+ =1+
+um_sp
+c_tok
 
-### `CudagraphDispatcher`
+s`) as **u
 
-The [CudagraphDispatcher][vllm.v1.cudagraph_dispatcher.CudagraphDispatcher] takes responsibility for maintaining two sets of valid dispatching keys, one set for `FULL` runtime mode and one set for `PIECEWISE` runtime mode, and dispatches the correct runtime mode and the dispatching keys before executing the model's forwards. It will take in the initial key (a rough batch_descriptor for the padded input) and return the selected runtime mode and the final batch_descriptor, then tell the CUDAGraphWrapper instances that decision through forward contexts. Notice that `CudagraphDispatcher` is the only source of truth for available CUDA Graph keys and `CUDAGraphWrapper` instances can blindly trust the forward context on what CUDA Graphs to dispatch to. This lets us simplify the wrapper code and centralize the logic in the dispatcher.
+form d
+cod
+** batch
+s, a
+d th
+ oppos
+t
+ 
+ou
+d b
+ **
+o
+-u
 
-The dispatching keys are initialized through the dispatcher's `initialize_cudagraph_keys` method, which is called by the gpu_model_runner after all possible attention backends are initialized. This is where we can get much fancier in the future and “prepare” all kinds of CUDA Graphs combinations. For now, we just append available keys based on the valid combos of `decode_mode`/`mixed_mode` of `cudagraph_mode` and `cudagraph_capture_sizes` in the compilation config.
+form** batch
+s (
+.
+., pr
+f
 
-The dispatch code looks like:
+ or m
+x
+d pr
+f
 
-```python
-batch_descriptor=BatchDescriptor(num_tokens=num_input_tokens, uniform_decode=...)
-runtime_mode, batch_descriptor = cudagraphdispatcher.dispatch(batch_descriptor)
-# execution
-with set_forward_context(
-    ..., 
-    cudagraph_runtime_mode=runtime_mode, 
-    batch_descriptor=batch_descriptor,
+-d
+cod
+ batch
+s).
+!!! 
+ot
+
+    Th
+ fo
+o
+
+
+g co
+t
+
+ts ar
+ most
+y bas
+d o
+ th
+ 
+ast comm
+t of 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/20059
+.
+## Mot
+vat
+o
+
+I
+
+t
+a
+ p
+
+c
+
+
+s
+ comp
+
+at
+o
+ 
+as bu
+
+t to a
+o
+ p
+
+c
+
+
+s
+ cudagraph captur
+, 
+xc
+ud
+
+g cudagraph-u
+support
+d op
+rat
+o
+s (ma
+
+
+y att
+
+t
+o
+). Th
+s a
+o
+
+d som
+ sp
+dup from cudagraphs 
+h
+
+
+ ma
+
+ta
+
+
+
+g compat
+b
+
+
+ty 
+
+th a
+ att
+
+t
+o
+ back
+
+ds. W
+ 
+at
+r add
+d support for "fu
+ cudagraphs" by 
+ot comp
+
+
+
+g p
+
+c
+
+
+s
+, so that 
+
+ cou
+d furth
+r r
+duc
+ th
+ 
+at
+
+cy 
+
+ cas
+s 
+h
+r
+ att
+
+t
+o
+ support
+d cudagraphs. Ho
+
+v
+r, th
+s t
+ght coup
+
+
+g b
+t
+
+
+ comp
+
+at
+o
+ a
+d cudagraph captur
+ 
+
+d to a
+ a
+-or-
+oth
+
+g 
+xp
+r
+
+
+c
+ 
+
+th 
+
+tt
+
+ f
+
+x
+b
+
+
+ty. Ma
+y att
+
+t
+o
+ back
+
+ds a
+so 
+
+r
+
+’t r
+ady for u
+
+f
+
+d "fu
+" CUDA Graphs captur
+ (
+.g., o
+
+y F
+ashAtt
+
+t
+o
+ 3 supports 
+t curr
+
+t
+y) or o
+
+y support CUDA Graphs for pur
+ d
+cod
+ batch
+s (
+.g., F
+ash
+
+f
+r, F
+ashMLA, a
+d Mamba, 
+tc.). That 
+
+d to co
+fus
+
+g p
+rforma
+c
+/compat
+b
+
+
+ty trad
+offs, 
+
+co
+s
+st
+
+t CUDA Graphs support, a
+d 
+
+cr
+as
+
+g
+y comp
+
+x cod
+ structur
+.
+Th
+s 
+
+d us to s
+k a mor
+ f
+
+
+-gra
+
+
+d CUDA Graphs so
+ut
+o
+ 
+
+th th
+ fo
+o
+
+
+g f
+atur
+s:
+* Exp
+
+c
+t
+y a
+ar
+ of CUDA Graphs for pr
+f
+
+/m
+x
+d or (u
+
+form-)d
+cod
+ batch a
+d captur
+ th
+m s
+parat
+
+y.
+* S
+parat
+ CUDAGraph captur
+ 
+og
+c from comp
+
+at
+o
+ (as much as f
+as
+b
+
+) for f
+atur
+ orthogo
+a
+
+ty, 
+h
+ch sugg
+st:
+    * Captur
+
+g p
+
+c
+
+
+s
+ a
+d fu
+ cudagraphs us
+
+g th
+ sam
+ comp
+
+
+d graph, a
+d
+    * Fu
+ cudagraph captur
+ 
+
+thout comp
+
+at
+o
+.
+* D
+spatch b
+t
+
+
+ fu
+ a
+d p
+
+c
+
+
+s
+ cudagraph at ru
+t
+m
+ d
+p
+
+d
+
+g o
+ batch compos
+t
+o
+.
+* C
+
+tra
+
+z
+d co
+tro
+ of CUDAGraph b
+hav
+or for r
+duc
+d cod
+ comp
+
+x
+ty a
+d a
+o
+
+d mor
+ 
+xt
+
+d
+b
+
+
+ty.
+Th
+s
+ f
+atur
+s a
+o
+ th
+ most f
+
+x
+b
+
+
+ty for cudagraph captur
+ a
+d comp
+
+at
+o
+ for a
+ k
+
+ds of startup/p
+rforma
+c
+ trad
+offs a
+d f
+atur
+ support.
+## `CudagraphMod
+s`
+[CUDAGraphMod
+][v
+m.co
+f
+g.comp
+
+at
+o
+.CUDAGraphMod
+] 
+s th
+ s
+
+g
+
+ k
+ob you tu
+
+ 
+
+ `Comp
+
+at
+o
+Co
+f
+g.cudagraph_mod
+`:
+* `NONE` — tur
+ CUDA Graphs off. Good for d
+bugg
+
+g.
+* `PIECEWISE` —  a s
+
+g
+
+-mod
+ strat
+gy (a
+d past d
+fau
+t). It 
+s th
+ most f
+
+x
+b
+
+: att
+
+t
+o
+ or oth
+r CUDA Graphs-
+
+compat
+b
+
+ op
+rat
+o
+s stay 
+ag
+r, 
+v
+ryth
+
+g 
+
+s
+ go
+s 
+
+to CUDA Graphs. R
+qu
+r
+s p
+
+c
+
+
+s
+ comp
+
+at
+o
+.
+* `FULL` — a s
+
+g
+
+-mod
+ strat
+gy, 
+h
+ch o
+
+y captur
+s fu
+ CUDA Graphs for 
+o
+-u
+
+form batch
+s, th
+
+ u
+
+form-d
+cod
+ batch
+s r
+us
+ th
+ CUDA Graph of 
+o
+-u
+
+form batch of th
+ sam
+ batch_s
+z
+, s
+
+c
+ th
+y ar
+ compat
+b
+
+; ca
+ b
+ good for sma
+ mod
+
+s or 
+ork
+oads 
+
+th sma
+ prompts.
+* `FULL_DECODE_ONLY` — fu
+ CUDA Graph for u
+
+form d
+cod
+, 
+o cudagraph for pr
+f
+
+/m
+x
+d 
+tc.; su
+tab
+
+ for d
+cod
+ 
+
+sta
+c
+s 
+
+ a P/D s
+tup 
+h
+r
+ pr
+f
+
+ 
+s 
+ot as 
+mporta
+t, th
+s 
+ay 
+
+ ca
+ sav
+ th
+ m
+mory 
+
+d
+d for `PIECEWISE` CUDA Graphs.
+* `FULL_AND_PIECEWISE` — (d
+fau
+t mod
+) fu
+ CUDA Graph for u
+
+form d
+cod
+, p
+
+c
+
+
+s
+ CUDA Graphs for oth
+rs; g
+
+
+ra
+y th
+ most p
+rforma
+t s
+tt
+
+g, 
+sp
+c
+a
+y for 
+o
+ 
+at
+
+cy 
+
+th sma
+ mod
+
+s or MoEs, but a
+so r
+qu
+r
+s th
+ most m
+mory a
+d tak
+s th
+ 
+o
+g
+st to captur
+.
+D
+fau
+ts: If you’r
+ o
+ v1 
+
+th p
+
+c
+
+
+s
+ comp
+
+at
+o
+, 
+
+ d
+fau
+t to `FULL_AND_PIECEWISE` for b
+tt
+r p
+rforma
+c
+, (for poo
+
+
+g mod
+
+s, 
+t's st
+
+ `PIECEWISE`). Oth
+r
+
+s
+, 
+.g. 
+f p
+
+c
+
+
+s
+ comp
+
+at
+o
+ u
+ava
+
+ab
+
+, 
+
+ d
+fau
+t to `NONE`.
+Wh
+
+
+ `NONE` , `PIECEWISE`, a
+d `FULL` ar
+ s
+
+g
+
+-mod
+ co
+f
+gurat
+o
+s a
+d s
+mp
+y 
+qu
+va
+
+
+t to past 
+mp
+
+m
+
+tat
+o
+s of 
+ag
+r 
+x
+cut
+o
+, p
+
+c
+
+
+s
+ CUDA Graphs, a
+d fu
+ CUDA Graphs r
+sp
+ct
+v
+
+y, `FULL_DECODE_ONLY` a
+d `FULL_AND_PIECEWISE` ar
+ 
+
+
+
+y app
+
+d
+d dua
+-mod
+ co
+f
+gurat
+o
+s, 
+h
+ch r
+qu
+r
+ d
+spatch
+
+g to s
+
+tch b
+t
+
+
+ co
+cr
+t
+ ru
+t
+m
+ mod
+s accord
+
+g to ru
+t
+m
+ batch
+s dy
+am
+ca
+y.
+!!! 
+ot
+
+    H
+r
+, th
+ s
+
+g
+
+-mod
+s `NONE`, `PIECEWISE`, a
+d `FULL` ar
+ tr
+at
+d as th
+ ru
+t
+m
+ mod
+s for CUDA Graphs d
+spatch
+
+g. If us
+
+g a dua
+-mod
+, th
+ d
+spatch
+r 
+
+
+ a
+
+ays d
+spatch to o
+
+ of 
+ts m
+mb
+r mod
+s (p
+us a pot
+
+t
+a
+ `NONE` 
+f 
+o su
+tab
+
+ CUDA Graph ava
+
+ab
+
+), d
+p
+
+d
+
+g o
+ th
+ batch compos
+t
+o
+.
+Wh
+
+
+ cascad
+ att
+
+t
+o
+ 
+s 
+ot cudagraph compat
+b
+
+, 
+t 
+s 
+o
+ compat
+b
+
+ 
+
+th a
+ poss
+b
+
+ cudagraph mod
+ co
+f
+gurat
+o
+s. If a batch us
+s cascad
+ att
+
+t
+o
+, 
+t a
+
+ays g
+ts d
+spatch
+d to `PIECEWISE` mod
+ 
+f ava
+
+ab
+
+ (oth
+r
+
+s
+ `NONE`).
+!!! 
+ot
+
+    Not a
+ CUDA Graph mod
+s ar
+ compat
+b
+
+ 
+
+th 
+v
+ry att
+
+t
+o
+ back
+
+d. W
+ automat
+ca
+y "do
+
+grad
+" mod
+s to th
+ c
+os
+st support
+d mod
+. For 
+xamp
+
+, 
+f a back
+
+d o
+
+y supports CUDA Graphs for pur
+ d
+cod
+/u
+
+form batch
+s, 
+
+ co
+v
+rt `FULL` to `FULL_AND_PIECEWISE` 
+f p
+
+c
+
+
+s
+ comp
+
+at
+o
+ 
+s 
+
+ab
+
+d, a
+d `FULL_DECODE_ONLY` oth
+r
+
+s
+.
+## D
+ta
+
+
+d D
+s
+g
+
+### Ov
+rv
+
+
+
+Th
+ 
+
+
+ CUDA Graphs 
+og
+c 
+s bu
+
+t o
+ top of p
+
+c
+
+
+s
+ comp
+
+at
+o
+ a
+d supports dua
+ CUDA Graphs ru
+t
+m
+ mod
+ s
+
+tch
+
+g. Th
+ syst
+m co
+ta
+
+s th
+ fo
+o
+
+
+g cor
+ compo
+
+
+ts:
+* [CUDAGraphWrapp
+r][v
+m.comp
+
+at
+o
+.cuda_graph.CUDAGraphWrapp
+r]: 
+rapp
+r that ha
+d
+
+s CUDAGraph captur
+ & r
+p
+ay o
+ th
+ 
+rapp
+d ca
+ab
+
+
+* [CudagraphD
+spatch
+r][v
+m.v1.cudagraph_d
+spatch
+r.CudagraphD
+spatch
+r]: th
+ c
+
+tra
+ co
+tro
+
+r that co
+ta
+
+s th
+ s
+
+g
+
+ sourc
+ of truth about CUDA Graphs a
+d ha
+d
+
+s d
+spatch
+
+g b
+t
+
+
+ th
+m.
+* [CUDAGraphMod
+][v
+m.co
+f
+g.comp
+
+at
+o
+.CUDAGraphMod
+]: 
+
+um d
+scr
+b
+
+g th
+ support
+d a
+d ru
+t
+m
+ mod
+s (
+
+troduc
+d abov
+).
+* [BatchD
+scr
+ptor][v
+m.for
+ard_co
+t
+xt.BatchD
+scr
+ptor], s
+rv
+
+g as a u
+
+qu
+ r
+pr
+s
+
+tat
+o
+ of th
+ ru
+t
+m
+ batch us
+d for d
+spatch
+
+g.
+S
+ th
+ fo
+o
+
+
+g f
+gur
+s for a qu
+ck compar
+so
+ b
+t
+
+
+ th
+ pr
+v
+ous a
+d curr
+
+t d
+s
+g
+ patt
+r
+s of CUDA Graphs 
+
+th 
+
+ductor comp
+
+at
+o
+. W
+ ca
+ s
+ that pr
+v
+ous
+y th
+ CUDA Graphs 
+og
+c a
+d comp
+
+at
+o
+ 
+og
+c 
+
+r
+ t
+ght
+y coup
+
+d 
+
+to th
+ v
+m `P
+
+c
+
+
+s
+Back
+
+d`, a
+d CUDA Graphs 
+as 
+mp
+
+c
+t
+y d
+spatch
+d by `batch_s
+z
+` 
+d
+y. No
+ th
+ CUDA Graphs 
+og
+c 
+s s
+parat
+d 
+
+to th
+ `CUDAGraphWrapp
+r` c
+ass, r
+spo
+s
+b
+
+ for both fu
+ a
+d p
+
+c
+
+
+s
+ CUDA Graphs ab
+
+
+t
+
+s, a
+d d
+spatch
+
+g 
+s **
+xp
+
+c
+t
+y** do
+
+ v
+a **ru
+t
+m
+ mod
+** p
+us th
+ `BatchD
+scr
+ptor` as th
+ **d
+spatch k
+y** v
+a `CudagraphD
+spatch
+r`.
+**B
+for
+:**
+![pr
+v
+ous_d
+s
+g
+](../ass
+ts/d
+s
+g
+/cuda_graphs/pr
+v
+ous_d
+s
+g
+.p
+g)
+**Aft
+r:**
+![
+
+
+_d
+s
+g
+](../ass
+ts/d
+s
+g
+/cuda_graphs/curr
+
+t_d
+s
+g
+.p
+g)
+### `BatchD
+scr
+ptor`
+[BatchD
+scr
+ptor][v
+m.for
+ard_co
+t
+xt.BatchD
+scr
+ptor] 
+s a compo
+
+
+t 
+
+th
+
+ `For
+ardCo
+t
+xt`, a
+o
+gs
+d
+ th
+ CUDA Graphs ru
+t
+m
+ mod
+s, s
+rv
+
+g as th
+ cor
+ structur
+ for d
+spatch
+
+g k
+ys at ru
+t
+m
+. Th
+ prototyp
+ 
+s:
+```pytho
+
+c
+ass BatchD
+scr
+ptor(Nam
+dTup
+
 ):
-     output = self.model(...)
+    
+um_tok
+
+s: 
+
+t
+    
+um_r
+qs: 
+
+t
+    u
+
+form: boo
+ = Fa
+s
+
+    has_
+ora: boo
+ = Fa
+s
+
 ```
 
-Inside the `dispatch()` method, the dispatcher will search the proper CUDA Graphs runtime mode and existing dispatching keys for a return. We basically search the existing keys following the priority: `FULL`>`PIECEWISE`>`None`. If the dispatching key does not exist, default to return `NONE` mode for eager execution. The implementations can be found [here](https://github.com/vllm-project/vllm/blob/main/vllm/v1/cudagraph_dispatcher.py#L91).
+h
+r
+ `
+um_tok
 
-Here is a simplified illustration of the workflow at runtime in the model executor:
-![executor_runtime](../assets/design/cuda_graphs/executor_runtime.png)
+s` ca
+ b
+ th
+ padd
+d tok
 
-### `CUDAGraphWrapper`
+ 
 
-A [CUDAGraphWrapper][vllm.compilation.cuda_graph.CUDAGraphWrapper] instance wraps a runnable and simply mimics the runnable with appended CUDA Graphs abilities. Each wrapper instance is bound to a specific `runtime_mode`, which is restricted to `PIECEWISE` and `FULL` mode, and takes responsibility for capturing/replaying and passing through (directly calling) the runnable.  At runtime, each wrapper would:
 
-1. inspect the runtime_mode and batch_descriptor(dispatching key) from the global forward context.
-2. If runtime_mode is `NONE` or runtime_mode does not match the mode of the wrapper, just call the runnable directly.
-3. Otherwise, i.e., the runtime_mode matches the mode of the wrapper, the wrapper will perform CUDA Graphs capture (if key does not exist, create
-a new entry and cache it) or replay (if key exists in the cache).
+gth, a
+d `u
 
-The above steps are based on the assumption that the CUDA Graphs wrapper would directly trust what’s in the forward context (controlled by the dispatcher). This lets us simplify and centralize the logic, reducing the complexity as well as the risk of mismatched state between the wrappers and the dispatcher. It also allows reusing the wrapper class for both `FULL` and `PIECEWISE` runtime modes. See the implementation [here](https://github.com/vllm-project/vllm/blob/f751e50b7a2aae3110d83ed0d88202fc91b3e78a/vllm/compilation/cuda_graph.py#L106).
+form` 
 
-#### Nested Wrapper design
+d
+cat
+s 
+f a
+ th
+ r
+qu
+sts hav
+ th
+ sam
+ qu
+ry 
 
-The core mechanism of making a full CUDA Graphs and piecewise CUDA Graphs coexist and compatible is the nested CUDA Graphs wrapper design, building on top of piecewise compilation with only a single piecewise FX graph.  We wrap a FULL mode wrapper outside the entire model for the full CUDA Graphs functionality; meanwhile, each piecewise backend is wrapped via a `PIECEWISE` mode wrapper inside the compilation.
 
-The flow chart below should clearly describe how it works.
-![wrapper_flow](../assets/design/cuda_graphs/wrapper_flow.png)
+gths. Ma
+y att
 
-Therefore, for a `FULL` runtime mode, it is safe to capture/replay a full CUDA Graph since the piecewise wrapper is not activated. The situation is similar for `PIECEWISE` mode, as there are no conflicts between the `FULL` mode wrapper and `PIECEWISE` mode wrappers.  For the `NONE` runtime mode, both `FULL` and `PIECEWISE` wrappers would not be activated, so we simply fall through to eager execution.
+t
+o
+ back
 
-### Full CUDA Graph capturing & warm-up
+ds o
 
-The CUDA Graphs capturing happens when the runner first calls the model forward (using `_dummy_run`) with a non-`NONE` runtime mode. For full CUDA Graph capture, we explicitly capture different cases (i.e., prefill/mixed batch or uniform_decode batch) by properly setting attention metadata to make sure the underlying attention backends launch the desired kernel routines. To distinguish prefill/mixed batch or uniform_decode batch, the most important property is the `max_query_len` in attn_metadata (true for most attention backends). We set it to the desired `uniform_query_len` for uniform_decode otherwise we make it just the `num_tokens` for a non-uniform_decode batch.
+y support fu
+ cudagraphs 
+h
 
-The CUDA Graphs wrapper no longer manages the warm-up logic. The warm-up process is now controlled directly by the GPU model runner, where the `NONE` runtime mode is assigned to play an eager execution for warm-up. When warming up for a full CUDA Graph, it is also important to explicitly run attention during the warmup `dummy_run` call.
+ th
+ batch
+s ar
+ u
 
-## CUDA Graphs Compatibility of Attention Backends
+form; pur
+ d
+cod
+ batch
+s ar
+ u
 
-To signal the CUDA Graphs compatibility of the attention backends, we introduce a new enum type [AttentionCGSupport][vllm.v1.attention.backend.AttentionCGSupport], which is an enum type that tracks the capability of the attention backend to support CUDA Graphs. The value is sorted in the order of the capability, i.e., `ALWAYS`> `UNIFORM_BATCH`> `UNIFORM_SINGLE_TOKEN_DECODE`> `NEVER`.
+form but may 
+ot b
+ qu
+ry 
 
-```python
-class AttentionCGSupport(enum.Enum):
-    """ Constants for the CUDA Graphs support of the attention backend
-    Here we do not consider the cascade attention, as currently
-    it is never CUDA Graphs supported."""
 
+gth 1 (
+.
+. `
+um_tok
+
+s == 
+um_r
+qs`), th
+s occurs 
+
+ th
+ va
+
+dat
+o
+ pass of sp
+c-d
+cod
+ 
+h
+r
+ "d
+cod
+" batch
+s 
+
+
+ hav
+ a qu
+ry 
+
+
+gth of  `1+
+um_sp
+c_tok
+
+s`.
+Th
+ goa
+ of th
+s structur
+ 
+s to u
+
+qu
+
+y 
+d
+
+t
+fy a (padd
+d) batch 
+
+th m
+
+
+ma
+ poss
+b
+
+ 
+t
+ms corr
+spo
+d
+
+g to a CUDA Graphs 
+t
+m.
+!!! 
+ot
+
+    Th
+ prototyp
+ of `BatchD
+scr
+ptor` may b
+ 
+xt
+
+d
+d for mor
+ g
+
+
+ra
+ s
+tuat
+o
+s 
+
+ th
+ futur
+, 
+.g., 
+
+c
+ud
+ mor
+ 
+t
+ms, 
+
+k
+ `u
+
+form_qu
+ry_
+
+
+` to support mu
+t
+p
+
+ d
+ff
+r
+
+t u
+
+form d
+cod
+ 
+
+
+gths s
+tt
+
+gs (
+https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/23679
+), or oth
+r mod
+f
+cat
+o
+s 
+
+d
+d to support CUDA Graphs for mod
+
+s 
+hos
+ 
+
+puts ar
+ 
+ot 
+
+c
+ssar
+
+y tok
+
+ 
+
+
+gth a
+ar
+ (for 
+xamp
+
+, som
+ mu
+t
+-moda
+ 
+
+puts).
+### `CudagraphD
+spatch
+r`
+Th
+ [CudagraphD
+spatch
+r][v
+m.v1.cudagraph_d
+spatch
+r.CudagraphD
+spatch
+r] tak
+s r
+spo
+s
+b
+
+
+ty for ma
+
+ta
+
+
+
+g t
+o s
+ts of va
+
+d d
+spatch
+
+g k
+ys, o
+
+ s
+t for `FULL` ru
+t
+m
+ mod
+ a
+d o
+
+ s
+t for `PIECEWISE` ru
+t
+m
+ mod
+, a
+d d
+spatch
+s th
+ corr
+ct ru
+t
+m
+ mod
+ a
+d th
+ d
+spatch
+
+g k
+ys b
+for
+ 
+x
+cut
+
+g th
+ mod
+
+'s for
+ards. It 
+
+
+ tak
+ 
+
+ th
+ 
+
+
+t
+a
+ k
+y (a rough batch_d
+scr
+ptor for th
+ padd
+d 
+
+put) a
+d r
+tur
+ th
+ s
+
+
+ct
+d ru
+t
+m
+ mod
+ a
+d th
+ f
+
+a
+ batch_d
+scr
+ptor, th
+
+ t
+
+ th
+ CUDAGraphWrapp
+r 
+
+sta
+c
+s that d
+c
+s
+o
+ through for
+ard co
+t
+xts. Not
+c
+ that `CudagraphD
+spatch
+r` 
+s th
+ o
+
+y sourc
+ of truth for ava
+
+ab
+
+ CUDA Graph k
+ys a
+d `CUDAGraphWrapp
+r` 
+
+sta
+c
+s ca
+ b
+
+
+d
+y trust th
+ for
+ard co
+t
+xt o
+ 
+hat CUDA Graphs to d
+spatch to. Th
+s 
+
+ts us s
+mp
+
+fy th
+ 
+rapp
+r cod
+ a
+d c
+
+tra
+
+z
+ th
+ 
+og
+c 
+
+ th
+ d
+spatch
+r.
+Th
+ d
+spatch
+
+g k
+ys ar
+ 
+
+
+t
+a
+
+z
+d through th
+ d
+spatch
+r's `
+
+
+t
+a
+
+z
+_cudagraph_k
+ys` m
+thod, 
+h
+ch 
+s ca
+
+d by th
+ gpu_mod
+
+_ru
+
+r aft
+r a
+ poss
+b
+
+ att
+
+t
+o
+ back
+
+ds ar
+ 
+
+
+t
+a
+
+z
+d. Th
+s 
+s 
+h
+r
+ 
+
+ ca
+ g
+t much fa
+c
+
+r 
+
+ th
+ futur
+ a
+d “pr
+par
+” a
+ k
+
+ds of CUDA Graphs comb
+
+at
+o
+s. For 
+o
+, 
+
+ just app
+
+d ava
+
+ab
+
+ k
+ys bas
+d o
+ th
+ va
+
+d combos of `d
+cod
+_mod
+`/`m
+x
+d_mod
+` of `cudagraph_mod
+` a
+d `cudagraph_captur
+_s
+z
+s` 
+
+ th
+ comp
+
+at
+o
+ co
+f
+g.
+Th
+ d
+spatch cod
+ 
+ooks 
+
+k
+:
+```pytho
+
+batch_d
+scr
+ptor=BatchD
+scr
+ptor(
+um_tok
+
+s=
+um_
+
+put_tok
+
+s, u
+
+form_d
+cod
+=...)
+ru
+t
+m
+_mod
+, batch_d
+scr
+ptor = cudagraphd
+spatch
+r.d
+spatch(batch_d
+scr
+ptor)
+# 
+x
+cut
+o
+
+
+
+th s
+t_for
+ard_co
+t
+xt(
+    ...,
+    cudagraph_ru
+t
+m
+_mod
+=ru
+t
+m
+_mod
+,
+    batch_d
+scr
+ptor=batch_d
+scr
+ptor,
+):
+     output = s
+
+f.mod
+
+(...)
+```
+I
+s
+d
+ th
+ `d
+spatch()` m
+thod, th
+ d
+spatch
+r 
+
+
+ s
+arch th
+ prop
+r CUDA Graphs ru
+t
+m
+ mod
+ a
+d 
+x
+st
+
+g d
+spatch
+
+g k
+ys for a r
+tur
+. W
+ bas
+ca
+y s
+arch th
+ 
+x
+st
+
+g k
+ys fo
+o
+
+
+g th
+ pr
+or
+ty: `FULL`
+`PIECEWISE`
+`No
+
+`. If th
+ d
+spatch
+
+g k
+y do
+s 
+ot 
+x
+st, d
+fau
+t to r
+tur
+ `NONE` mod
+ for 
+ag
+r 
+x
+cut
+o
+. Th
+ 
+mp
+
+m
+
+tat
+o
+s ca
+ b
+ fou
+d [h
+r
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/v
+m/v1/cudagraph_d
+spatch
+r.py#L91).
+H
+r
+ 
+s a s
+mp
+
+f
+
+d 
+
+ustrat
+o
+ of th
+ 
+orkf
+o
+ at ru
+t
+m
+ 
+
+ th
+ mod
+
+ 
+x
+cutor:
+![
+x
+cutor_ru
+t
+m
+](../ass
+ts/d
+s
+g
+/cuda_graphs/
+x
+cutor_ru
+t
+m
+.p
+g)
+### `CUDAGraphWrapp
+r`
+A [CUDAGraphWrapp
+r][v
+m.comp
+
+at
+o
+.cuda_graph.CUDAGraphWrapp
+r] 
+
+sta
+c
+ 
+raps a ru
+ab
+
+ a
+d s
+mp
+y m
+m
+cs th
+ ru
+ab
+
+ 
+
+th app
+
+d
+d CUDA Graphs ab
+
+
+t
+
+s. Each 
+rapp
+r 
+
+sta
+c
+ 
+s bou
+d to a sp
+c
+f
+c `ru
+t
+m
+_mod
+`, 
+h
+ch 
+s r
+str
+ct
+d to `PIECEWISE` a
+d `FULL` mod
+, a
+d tak
+s r
+spo
+s
+b
+
+
+ty for captur
+
+g/r
+p
+ay
+
+g a
+d pass
+
+g through (d
+r
+ct
+y ca
+
+
+g) th
+ ru
+ab
+
+.  At ru
+t
+m
+, 
+ach 
+rapp
+r 
+ou
+d:
+1. 
+
+sp
+ct th
+ ru
+t
+m
+_mod
+ a
+d batch_d
+scr
+ptor(d
+spatch
+
+g k
+y) from th
+ g
+oba
+ for
+ard co
+t
+xt.
+2. If ru
+t
+m
+_mod
+ 
+s `NONE` or ru
+t
+m
+_mod
+ do
+s 
+ot match th
+ mod
+ of th
+ 
+rapp
+r, just ca
+ th
+ ru
+ab
+
+ d
+r
+ct
+y.
+3. Oth
+r
+
+s
+, 
+.
+., th
+ ru
+t
+m
+_mod
+ match
+s th
+ mod
+ of th
+ 
+rapp
+r, th
+ 
+rapp
+r 
+
+
+ p
+rform CUDA Graphs captur
+ (
+f k
+y do
+s 
+ot 
+x
+st, cr
+at
+
+a 
+
+
+ 
+
+try a
+d cach
+ 
+t) or r
+p
+ay (
+f k
+y 
+x
+sts 
+
+ th
+ cach
+).
+Th
+ abov
+ st
+ps ar
+ bas
+d o
+ th
+ assumpt
+o
+ that th
+ CUDA Graphs 
+rapp
+r 
+ou
+d d
+r
+ct
+y trust 
+hat’s 
+
+ th
+ for
+ard co
+t
+xt (co
+tro
+
+d by th
+ d
+spatch
+r). Th
+s 
+
+ts us s
+mp
+
+fy a
+d c
+
+tra
+
+z
+ th
+ 
+og
+c, r
+duc
+
+g th
+ comp
+
+x
+ty as 
+
+
+ as th
+ r
+sk of m
+smatch
+d stat
+ b
+t
+
+
+ th
+ 
+rapp
+rs a
+d th
+ d
+spatch
+r. It a
+so a
+o
+s r
+us
+
+g th
+ 
+rapp
+r c
+ass for both `FULL` a
+d `PIECEWISE` ru
+t
+m
+ mod
+s. S
+ th
+ 
+mp
+
+m
+
+tat
+o
+ [h
+r
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/f751
+50b7a2aa
+3110d83
+d0d88202fc91b3
+78a/v
+m/comp
+
+at
+o
+/cuda_graph.py#L106).
+#### N
+st
+d Wrapp
+r d
+s
+g
+
+Th
+ cor
+ m
+cha
+
+sm of mak
+
+g a fu
+ CUDA Graphs a
+d p
+
+c
+
+
+s
+ CUDA Graphs co
+x
+st a
+d compat
+b
+
+ 
+s th
+ 
+
+st
+d CUDA Graphs 
+rapp
+r d
+s
+g
+, bu
+
+d
+
+g o
+ top of p
+
+c
+
+
+s
+ comp
+
+at
+o
+ 
+
+th o
+
+y a s
+
+g
+
+ p
+
+c
+
+
+s
+ FX graph.  W
+ 
+rap a FULL mod
+ 
+rapp
+r outs
+d
+ th
+ 
+
+t
+r
+ mod
+
+ for th
+ fu
+ CUDA Graphs fu
+ct
+o
+a
+
+ty; m
+a
+
+h
+
+
+, 
+ach p
+
+c
+
+
+s
+ back
+
+d 
+s 
+rapp
+d v
+a a `PIECEWISE` mod
+ 
+rapp
+r 
+
+s
+d
+ th
+ comp
+
+at
+o
+.
+Th
+ f
+o
+ chart b
+
+o
+ shou
+d c
+
+ar
+y d
+scr
+b
+ ho
+ 
+t 
+orks.
+![
+rapp
+r_f
+o
+](../ass
+ts/d
+s
+g
+/cuda_graphs/
+rapp
+r_f
+o
+.p
+g)
+Th
+r
+for
+, for a `FULL` ru
+t
+m
+ mod
+, 
+t 
+s saf
+ to captur
+/r
+p
+ay a fu
+ CUDA Graph s
+
+c
+ th
+ p
+
+c
+
+
+s
+ 
+rapp
+r 
+s 
+ot act
+vat
+d. Th
+ s
+tuat
+o
+ 
+s s
+m
+
+ar for `PIECEWISE` mod
+, as th
+r
+ ar
+ 
+o co
+f
+
+cts b
+t
+
+
+ th
+ `FULL` mod
+ 
+rapp
+r a
+d `PIECEWISE` mod
+ 
+rapp
+rs.  For th
+ `NONE` ru
+t
+m
+ mod
+, both `FULL` a
+d `PIECEWISE` 
+rapp
+rs 
+ou
+d 
+ot b
+ act
+vat
+d, so 
+
+ s
+mp
+y fa
+ through to 
+ag
+r 
+x
+cut
+o
+.
+### Fu
+ CUDA Graph captur
+
+g & 
+arm-up
+Th
+ CUDA Graphs captur
+
+g happ
+
+s 
+h
+
+ th
+ ru
+
+r f
+rst ca
+s th
+ mod
+
+ for
+ard (us
+
+g `_dummy_ru
+`) 
+
+th a 
+o
+-`NONE` ru
+t
+m
+ mod
+. For fu
+ CUDA Graph captur
+, 
+
+ 
+xp
+
+c
+t
+y captur
+ d
+ff
+r
+
+t cas
+s (
+.
+., pr
+f
+
+/m
+x
+d batch or u
+
+form_d
+cod
+ batch) by prop
+r
+y s
+tt
+
+g att
+
+t
+o
+ m
+tadata to mak
+ sur
+ th
+ u
+d
+r
+y
+
+g att
+
+t
+o
+ back
+
+ds 
+au
+ch th
+ d
+s
+r
+d k
+r
+
+
+ rout
+
+
+s. To d
+st
+
+gu
+sh pr
+f
+
+/m
+x
+d batch or u
+
+form_d
+cod
+ batch, th
+ most 
+mporta
+t prop
+rty 
+s th
+ `max_qu
+ry_
+
+
+` 
+
+ att
+_m
+tadata (tru
+ for most att
+
+t
+o
+ back
+
+ds). W
+ s
+t 
+t to th
+ d
+s
+r
+d `u
+
+form_qu
+ry_
+
+
+` for u
+
+form_d
+cod
+ oth
+r
+
+s
+ 
+
+ mak
+ 
+t just th
+ `
+um_tok
+
+s` for a 
+o
+-u
+
+form_d
+cod
+ batch.
+Th
+ CUDA Graphs 
+rapp
+r 
+o 
+o
+g
+r ma
+ag
+s th
+ 
+arm-up 
+og
+c. Th
+ 
+arm-up proc
+ss 
+s 
+o
+ co
+tro
+
+d d
+r
+ct
+y by th
+ GPU mod
+
+ ru
+
+r, 
+h
+r
+ th
+ `NONE` ru
+t
+m
+ mod
+ 
+s ass
+g
+
+d to p
+ay a
+ 
+ag
+r 
+x
+cut
+o
+ for 
+arm-up. Wh
+
+ 
+arm
+
+g up for a fu
+ CUDA Graph, 
+t 
+s a
+so 
+mporta
+t to 
+xp
+
+c
+t
+y ru
+ att
+
+t
+o
+ dur
+
+g th
+ 
+armup `dummy_ru
+` ca
+.
+## CUDA Graphs Compat
+b
+
+
+ty of Att
+
+t
+o
+ Back
+
+ds
+To s
+g
+a
+ th
+ CUDA Graphs compat
+b
+
+
+ty of th
+ att
+
+t
+o
+ back
+
+ds, 
+
+ 
+
+troduc
+ a 
+
+
+ 
+
+um typ
+ [Att
+
+t
+o
+CGSupport][v
+m.v1.att
+
+t
+o
+.back
+
+d.Att
+
+t
+o
+CGSupport], 
+h
+ch 
+s a
+ 
+
+um typ
+ that tracks th
+ capab
+
+
+ty of th
+ att
+
+t
+o
+ back
+
+d to support CUDA Graphs. Th
+ va
+u
+ 
+s sort
+d 
+
+ th
+ ord
+r of th
+ capab
+
+
+ty, 
+.
+., `ALWAYS`
+ `UNIFORM_BATCH`
+ `UNIFORM_SINGLE_TOKEN_DECODE`
+ `NEVER`.
+```pytho
+
+c
+ass Att
+
+t
+o
+CGSupport(
+
+um.E
+um):
+    """ Co
+sta
+ts for th
+ CUDA Graphs support of th
+ att
+
+t
+o
+ back
+
+d
+    H
+r
+ 
+
+ do 
+ot co
+s
+d
+r th
+ cascad
+ att
+
+t
+o
+, as curr
+
+t
+y
+    
+t 
+s 
+
+v
+r CUDA Graphs support
+d."""
     ALWAYS = 3
-    """CUDA Graphs always supported; supports mixed-prefill-decode"""
+    """CUDA Graphs a
+
+ays support
+d; supports m
+x
+d-pr
+f
+
+-d
+cod
+"""
     UNIFORM_BATCH = 2
-    """CUDA Graphs supported for batches the only contain query lengths that are
-    the same, this can be used for spec-decode 
-        i.e. "decodes" are 1 + num_speculative_tokens"""
+    """CUDA Graphs support
+d for batch
+s th
+ o
+
+y co
+ta
+
+ qu
+ry 
+
+
+gths that ar
+
+    th
+ sam
+, th
+s ca
+ b
+ us
+d for sp
+c-d
+cod
+
+        
+.
+. "d
+cod
+s" ar
+ 1 + 
+um_sp
+cu
+at
+v
+_tok
+
+s"""
     UNIFORM_SINGLE_TOKEN_DECODE = 1
-    """CUDA Graphs supported for batches the only contain query_len==1 decodes"""
+    """CUDA Graphs support
+d for batch
+s th
+ o
+
+y co
+ta
+
+ qu
+ry_
+
+
+==1 d
+cod
+s"""
     NEVER = 0
     """NO CUDA Graphs support"""
 ```
+Suppos
+ 
 
-Suppose we have hybrid attention backends (e.g., in mamba mixer models). In that case, we seek the minimum capability of all backends to determine the final capability of the model, and we might resolve the incompatible CUDA Graphs mode by downgrading the mode to the best fit one. For example, downgrading `FULL` mode to `FULL_AND_PIECEWISE` mode if the minimum capability is `UNIFORM_BATCH`, or `PIECEWISE` mode if the minimum capability is `NEVER` for -O3 compilation mode. For the complete fallback policy, please see the code for [this][vllm.v1.worker.gpu_model_runner.GPUModelRunner._check_and_update_cudagraph_mode].
+ hav
+ hybr
+d att
 
-The following table lists backends that support full CUDA Graphs at the time of writing.
+t
+o
+ back
 
-| Attention Backend | cudagraph_support | Comments |
+ds (
+.g., 
+
+ mamba m
+x
+r mod
+
+s). I
+ that cas
+, 
+
+ s
+k th
+ m
+
+
+mum capab
+
+
+ty of a
+ back
+
+ds to d
+t
+rm
+
+
+ th
+ f
+
+a
+ capab
+
+
+ty of th
+ mod
+
+, a
+d 
+
+ m
+ght r
+so
+v
+ th
+ 
+
+compat
+b
+
+ CUDA Graphs mod
+ by do
+
+grad
+
+g th
+ mod
+ to th
+ b
+st f
+t o
+
+. For 
+xamp
+
+, do
+
+grad
+
+g `FULL` mod
+ to `FULL_AND_PIECEWISE` mod
+ 
+f th
+ m
+
+
+mum capab
+
+
+ty 
+s `UNIFORM_BATCH`, or `PIECEWISE` mod
+ 
+f th
+ m
+
+
+mum capab
+
+
+ty 
+s `NEVER` for -O3 comp
+
+at
+o
+ mod
+. For th
+ comp
+
+t
+ fa
+back po
+
+cy, p
+
+as
+ s
+ th
+ cod
+ for [th
+s][v
+m.v1.
+ork
+r.gpu_mod
+
+_ru
+
+r.GPUMod
+
+Ru
+
+r._ch
+ck_a
+d_updat
+_cudagraph_mod
+].
+Th
+ fo
+o
+
+
+g tab
+
+ 
+
+sts back
+
+ds that support fu
+ CUDA Graphs at th
+ t
+m
+ of 
+r
+t
+
+g.
+| Att
+
+t
+o
+ Back
+
+d | cudagraph_support | Comm
+
+ts |
 |:---|:---|:---|
-| FlashAttention v2 | `UNIFORM_BATCH` | Actually `ALWAYS` but workaround to fallback to `FULL_AND_PIECEWISE` for performance reason |
-| FlashAttention v3 | `ALWAYS` | has unified routine for both batches, so `FULL` mode is good |
-| Triton Attention | `ALWAYS` | prefer `FULL_AND_PIECEWISE` since it has different kernels for prefill/mixed and pure decode batches |
-| AITER FlashAttention | `UNIFORM_BATCH`| |
-| FlashInfer | `UNIFORM_SINGLE_TOKEN_DECODE` | Will be set to `UNIFORM_BATCH` when using TRTLLM attention on Blackwell |
-| FlashMLA | `UNIFORM_BATCH` | |
-| FlashInferMLA | `UNIFORM_BATCH` | |
-| FlashInferMLASparse | `UNIFORM_BATCH` | |
+| F
+ashAtt
+
+t
+o
+ v2 | `UNIFORM_BATCH` | Actua
+y `ALWAYS` but 
+orkarou
+d to fa
+back to `FULL_AND_PIECEWISE` for p
+rforma
+c
+ r
+aso
+ |
+| F
+ashAtt
+
+t
+o
+ v3 | `ALWAYS` | has u
+
+f
+
+d rout
+
+
+ for both batch
+s, so `FULL` mod
+ 
+s good |
+| Tr
+to
+ Att
+
+t
+o
+ | `ALWAYS` | pr
+f
+r `FULL_AND_PIECEWISE` s
+
+c
+ 
+t has d
+ff
+r
+
+t k
+r
+
+
+s for pr
+f
+
+/m
+x
+d a
+d pur
+ d
+cod
+ batch
+s |
+| AITER F
+ashAtt
+
+t
+o
+ | `UNIFORM_BATCH`| |
+| F
+ashI
+f
+r | `UNIFORM_SINGLE_TOKEN_DECODE` | W
+
+ b
+ s
+t to `UNIFORM_BATCH` 
+h
+
+ us
+
+g TRTLLM att
+
+t
+o
+ o
+ B
+ack
+
+
+ |
+| F
+ashMLA | `UNIFORM_BATCH` | |
+| F
+ashI
+f
+rMLA | `UNIFORM_BATCH` | |
+| F
+ashI
+f
+rMLASpars
+ | `UNIFORM_BATCH` | |
 | AITER MLA | `UNIFORM_SINGLE_TOKEN_DECODE` | |
 | CUTLASS MLA | `UNIFORM_SINGLE_TOKEN_DECODE` | |
-| Mamba attention| `UNIFORM_SINGLE_TOKEN_DECODE` | |
+| Mamba att
 
-Unlisted backends are all declared as `NEVER`.
+t
+o
+| `UNIFORM_SINGLE_TOKEN_DECODE` | |
+U
 
-## Usage guide
 
-Now the CLI is directly using the uppercase string of cudagraph_mode for compilation_config: `--compilation-config '{"cudagraph_mode": "..."}'`, where `...` should be one of `NONE`, `PIECEWISE`, `FULL`, `FULL_DECODE_ONLY`, and `FULL_AND_PIECEWISE`. Note that all `PIECEWISE` related modes require piecewise compilation, and all `FULL` related modes need CUDA Graphs support of attention backends. For example:
+st
+d back
 
+ds ar
+ a
+ d
+c
+ar
+d as `NEVER`.
+## Usag
+ gu
+d
+
+No
+ th
+ CLI 
+s d
+r
+ct
+y us
+
+g th
+ upp
+rcas
+ str
+
+g of cudagraph_mod
+ for comp
+
+at
+o
+_co
+f
+g: `--comp
+
+at
+o
+-co
+f
+g '{"cudagraph_mod
+": "..."}'`, 
+h
+r
+ `...` shou
+d b
+ o
+
+ of `NONE`, `PIECEWISE`, `FULL`, `FULL_DECODE_ONLY`, a
+d `FULL_AND_PIECEWISE`. Not
+ that a
+ `PIECEWISE` r
+
+at
+d mod
+s r
+qu
+r
+ p
+
+c
+
+
+s
+ comp
+
+at
+o
+, a
+d a
+ `FULL` r
+
+at
+d mod
+s 
+
+d CUDA Graphs support of att
+
+t
+o
+ back
+
+ds. For 
+xamp
+
+:
 ```bash
-vllm serve --model meta-llama/Llama-3.1-8B-Instruct --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
+v
+m s
+rv
+ --mod
+
+ m
+ta-
+ama/L
+ama-3.1-8B-I
+struct --comp
+
+at
+o
+-co
+f
+g '{"cudagraph_mod
+": "FULL_AND_PIECEWISE"}'
 ```
+### Pytho
+ 
+xamp
 
-### Python examples
+s
+```pytho
 
-```python
-import os
-os.environ.setdefault("VLLM_LOGGING_LEVEL", "DEBUG")
 
-import vllm
-from vllm.config import CUDAGraphMode
+mport os
+os.
 
-compilation_config = {"mode": 3, "cudagraph_mode": "FULL_AND_PIECEWISE"}
-model = vllm.LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    dtype="auto",
-    compilation_config=compilation_config,
+v
+ro
+.s
+td
+fau
+t("VLLM_LOGGING_LEVEL", "DEBUG")
+
+mport v
+m
+from v
+m.co
+f
+g 
+mport CUDAGraphMod
+
+comp
+
+at
+o
+_co
+f
+g = {"mod
+": 3, "cudagraph_mod
+": "FULL_AND_PIECEWISE"}
+mod
+
+ = v
+m.LLM(
+    mod
+
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct",
+    dtyp
+="auto",
+    comp
+
+at
+o
+_co
+f
+g=comp
+
+at
+o
+_co
+f
+g,
 )
-sampling_params = vllm.SamplingParams(
-    temperature=0,  # greedy decoding
-    max_tokens=1024,
+samp
+
+
+g_params = v
+m.Samp
+
+
+gParams(
+    t
+mp
+ratur
+=0,  # gr
+dy d
+cod
+
+g
+    max_tok
+
+s=1024,
 )
-outputs = model.generate(
-    ["My name is John and"],
-    sampling_params=sampling_params,
+outputs = mod
+
+.g
+
+
+rat
+(
+    ["My 
+am
+ 
+s Joh
+ a
+d"],
+    samp
+
+
+g_params=samp
+
+
+g_params,
 )
 ```
+### P
 
-### Piecewise compilation and full graph custom passes (attention fusion, sequence parallelism)
+c
 
-Unfortunately, some custom compile passes have to see the whole graph to be effective and hence aren't compatible with piecewise compilation. This includes `AttnFusionPass` and `SequenceParallelismPass`. As a short-term solution, we automatically disable piecewise compilation (by setting `splitting_ops=[]`) when attention fusion is enabled. We use CUDA Graph modes `FULL` or `FULL_DECODE_ONLY` (depending on backend support). However, this leads to another optimization incompatibility and confusing performance tradeoffs.
 
-Long term, we've added the ability to partition the graph in Inductor instead of right after Dynamo. It can be enabled with `CompilationConfig.use_inductor_graph_partition=True` but is currently experimental and only available with `torch>=2.9`. This also increases compilation time as it has to compile the whole graph and cannot reuse piecewise compilation artifacts. Once vLLM supports 2.9, we plan to make this the default approach as it will also speed up piecewise cudagraph capture.
+s
+ comp
 
-## About the Performance
+at
+o
+ a
+d fu
+ graph custom pass
+s (att
 
-See the following links for examples:
+t
+o
+ fus
+o
+, s
+qu
 
-* [20059#issuecomment-3160858458](https://github.com/vllm-project/vllm/pull/20059#issuecomment-3160858458)
-* [20059#issuecomment-3188735226](https://github.com/vllm-project/vllm/pull/20059#issuecomment-3188735226)
-* [20059#issuecomment-3219888738](https://github.com/vllm-project/vllm/pull/20059#issuecomment-3219888738)
+c
+ para
+
+
+
+sm)
+U
+fortu
+at
+
+y, som
+ custom comp
+
+
+ pass
+s hav
+ to s
+ th
+ 
+ho
+
+ graph to b
+ 
+ff
+ct
+v
+ a
+d h
+
+c
+ ar
+
+'t compat
+b
+
+ 
+
+th p
+
+c
+
+
+s
+ comp
+
+at
+o
+. Th
+s 
+
+c
+ud
+s `Att
+Fus
+o
+Pass` a
+d `S
+qu
+
+c
+Para
+
+
+
+smPass`. As a short-t
+rm so
+ut
+o
+, 
+
+ automat
+ca
+y d
+sab
+
+ p
+
+c
+
+
+s
+ comp
+
+at
+o
+ (by s
+tt
+
+g `sp
+
+tt
+
+g_ops=[]`) 
+h
+
+ att
+
+t
+o
+ fus
+o
+ 
+s 
+
+ab
+
+d. W
+ us
+ CUDA Graph mod
+s `FULL` or `FULL_DECODE_ONLY` (d
+p
+
+d
+
+g o
+ back
+
+d support). Ho
+
+v
+r, th
+s 
+
+ads to a
+oth
+r opt
+m
+zat
+o
+ 
+
+compat
+b
+
+
+ty a
+d co
+fus
+
+g p
+rforma
+c
+ trad
+offs.
+Lo
+g t
+rm, 
+
+'v
+ add
+d th
+ ab
+
+
+ty to part
+t
+o
+ th
+ graph 
+
+ I
+ductor 
+
+st
+ad of r
+ght aft
+r Dy
+amo. It ca
+ b
+ 
+
+ab
+
+d 
+
+th `Comp
+
+at
+o
+Co
+f
+g.us
+_
+
+ductor_graph_part
+t
+o
+=Tru
+` but 
+s curr
+
+t
+y 
+xp
+r
+m
+
+ta
+ a
+d o
+
+y ava
+
+ab
+
+ 
+
+th `torch
+=2.9`. Th
+s a
+so 
+
+cr
+as
+s comp
+
+at
+o
+ t
+m
+ as 
+t has to comp
+
+
+ th
+ 
+ho
+
+ graph a
+d ca
+ot r
+us
+ p
+
+c
+
+
+s
+ comp
+
+at
+o
+ art
+facts. O
+c
+ vLLM supports 2.9, 
+
+ p
+a
+ to mak
+ th
+s th
+ d
+fau
+t approach as 
+t 
+
+
+ a
+so sp
+d up p
+
+c
+
+
+s
+ cudagraph captur
+.
+## About th
+ P
+rforma
+c
+
+S
+ th
+ fo
+o
+
+
+g 
+
+
+ks for 
+xamp
+
+s:
+* [20059#
+ssu
+comm
+
+t-3160858458](https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/20059#
+ssu
+comm
+
+t-3160858458)
+* [20059#
+ssu
+comm
+
+t-3188735226](https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/20059#
+ssu
+comm
+
+t-3188735226)
+* [20059#
+ssu
+comm
+
+t-3219888738](https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/20059#
+ssu
+comm
+
+t-3219888738)

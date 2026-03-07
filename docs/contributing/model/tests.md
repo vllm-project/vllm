@@ -1,57 +1,615 @@
-# Unit Testing
+# U
 
-This page explains how to write unit tests to verify the implementation of your model.
+t T
+st
 
-## Required Tests
+g
+Th
+s pag
+ 
+xp
+a
 
-These tests are necessary to get your PR merged into vLLM library.
-Without them, the CI for your PR will fail.
+s ho
+ to 
+r
+t
+ u
 
-### Model loading
+t t
+sts to v
+r
+fy th
+ 
+mp
 
-Include an example HuggingFace repository for your model in [tests/models/registry.py](../../../tests/models/registry.py).
-This enables a unit test that loads dummy weights to ensure that the model can be initialized in vLLM.
+m
 
-!!! important
-    The list of models in each section should be maintained in alphabetical order.
+tat
+o
+ of your mod
 
-!!! tip
-    If your model requires a development version of HF Transformers, you can set
-    `min_transformers_version` to skip the test in CI until the model is released.
+.
+## R
+qu
+r
+d T
+sts
+Th
+s
+ t
+sts ar
+ 
 
-## Optional Tests
+c
+ssary to g
+t your PR m
+rg
+d 
 
-These tests are optional to get your PR merged into vLLM library.
-Passing these tests provides more confidence that your implementation is correct, and helps avoid future regressions.
+to vLLM 
 
-### Model correctness
+brary.
+W
+thout th
+m, th
+ CI for your PR 
 
-These tests compare the model outputs of vLLM against [HF Transformers](https://github.com/huggingface/transformers). You can add new tests under the subdirectories of [tests/models](../../../tests/models).
 
-#### Generative models
+ fa
 
-For [generative models](../../models/generative_models.md), there are two levels of correctness tests, as defined in [tests/models/utils.py](../../../tests/models/utils.py):
+.
+### Mod
 
-- Exact correctness (`check_outputs_equal`): The text outputted by vLLM should exactly match the text outputted by HF.
-- Logprobs similarity (`check_logprobs_close`): The logprobs outputted by vLLM should be in the top-k logprobs outputted by HF, and vice versa.
+ 
+oad
 
-#### Pooling models
+g
+I
+c
+ud
+ a
+ 
+xamp
 
-For [pooling models](../../models/pooling_models.md), we simply check the cosine similarity, as defined in [tests/models/utils.py](../../../tests/models/utils.py).
+ Hugg
 
-### Multi-modal processing
+gFac
+ r
+pos
+tory for your mod
 
-#### Common tests
+ 
 
-Adding your model to [tests/models/multimodal/processing/test_common.py](../../../tests/models/multimodal/processing/test_common.py) verifies that the following input combinations result in the same outputs:
+ [t
+sts/mod
 
-- Text + multi-modal data
-- Tokens + multi-modal data
-- Text + cached multi-modal data
-- Tokens + cached multi-modal data
+s/r
+g
+stry.py](../../../t
+sts/mod
 
-#### Model-specific tests
+s/r
+g
+stry.py).
+Th
+s 
 
-You can add a new file under [tests/models/multimodal/processing](../../../tests/models/multimodal/processing) to run tests that only apply to your model.
+ab
 
-For example, if the HF processor for your model accepts user-specified keyword arguments, you can verify that the keyword arguments are being applied correctly, such as in [tests/models/multimodal/processing/test_phi3v.py](../../../tests/models/multimodal/processing/test_phi3v.py).
+s a u
+
+t t
+st that 
+oads dummy 
+
+
+ghts to 
+
+sur
+ that th
+ mod
+
+ ca
+ b
+ 
+
+
+t
+a
+
+z
+d 
+
+ vLLM.
+!!! 
+mporta
+t
+    Th
+ 
+
+st of mod
+
+s 
+
+ 
+ach s
+ct
+o
+ shou
+d b
+ ma
+
+ta
+
+
+d 
+
+ a
+phab
+t
+ca
+ ord
+r.
+!!! t
+p
+    If your mod
+
+ r
+qu
+r
+s a d
+v
+
+opm
+
+t v
+rs
+o
+ of HF Tra
+sform
+rs, you ca
+ s
+t
+    `m
+
+_tra
+sform
+rs_v
+rs
+o
+` to sk
+p th
+ t
+st 
+
+ CI u
+t
+
+ th
+ mod
+
+ 
+s r
+
+
+as
+d.
+## Opt
+o
+a
+ T
+sts
+Th
+s
+ t
+sts ar
+ opt
+o
+a
+ to g
+t your PR m
+rg
+d 
+
+to vLLM 
+
+brary.
+Pass
+
+g th
+s
+ t
+sts prov
+d
+s mor
+ co
+f
+d
+
+c
+ that your 
+mp
+
+m
+
+tat
+o
+ 
+s corr
+ct, a
+d h
+
+ps avo
+d futur
+ r
+gr
+ss
+o
+s.
+### Mod
+
+ corr
+ct
+
+ss
+Th
+s
+ t
+sts compar
+ th
+ mod
+
+ outputs of vLLM aga
+
+st [HF Tra
+sform
+rs](https://g
+thub.com/hugg
+
+gfac
+/tra
+sform
+rs). You ca
+ add 
+
+
+ t
+sts u
+d
+r th
+ subd
+r
+ctor
+
+s of [t
+sts/mod
+
+s](../../../t
+sts/mod
+
+s).
+#### G
+
+
+rat
+v
+ mod
+
+s
+For [g
+
+
+rat
+v
+ mod
+
+s](../../mod
+
+s/g
+
+
+rat
+v
+_mod
+
+s.md), th
+r
+ ar
+ t
+o 
+
+v
+
+s of corr
+ct
+
+ss t
+sts, as d
+f
+
+
+d 
+
+ [t
+sts/mod
+
+s/ut
+
+s.py](../../../t
+sts/mod
+
+s/ut
+
+s.py):
+    - Exact corr
+ct
+
+ss (`ch
+ck_outputs_
+qua
+`): Th
+ t
+xt outputt
+d by vLLM shou
+d 
+xact
+y match th
+ t
+xt outputt
+d by HF.
+    - Logprobs s
+m
+
+ar
+ty (`ch
+ck_
+ogprobs_c
+os
+`): Th
+ 
+ogprobs outputt
+d by vLLM shou
+d b
+ 
+
+ th
+ top-k 
+ogprobs outputt
+d by HF, a
+d v
+c
+ v
+rsa.
+#### Poo
+
+
+g mod
+
+s
+For [poo
+
+
+g mod
+
+s](../../mod
+
+s/poo
+
+
+g_mod
+
+s.md), 
+
+ s
+mp
+y ch
+ck th
+ cos
+
+
+ s
+m
+
+ar
+ty, as d
+f
+
+
+d 
+
+ [t
+sts/mod
+
+s/ut
+
+s.py](../../../t
+sts/mod
+
+s/ut
+
+s.py).
+### Mu
+t
+-moda
+ proc
+ss
+
+g
+#### Commo
+ t
+sts
+Add
+
+g your mod
+
+ to [t
+sts/mod
+
+s/mu
+t
+moda
+/proc
+ss
+
+g/t
+st_commo
+.py](../../../t
+sts/mod
+
+s/mu
+t
+moda
+/proc
+ss
+
+g/t
+st_commo
+.py) v
+r
+f
+
+s that th
+ fo
+o
+
+
+g 
+
+put comb
+
+at
+o
+s r
+su
+t 
+
+ th
+ sam
+ outputs:
+    - T
+xt + mu
+t
+-moda
+ data
+    - Tok
+
+s + mu
+t
+-moda
+ data
+    - T
+xt + cach
+d mu
+t
+-moda
+ data
+    - Tok
+
+s + cach
+d mu
+t
+-moda
+ data
+#### Mod
+
+-sp
+c
+f
+c t
+sts
+You ca
+ add a 
+
+
+ f
+
+
+ u
+d
+r [t
+sts/mod
+
+s/mu
+t
+moda
+/proc
+ss
+
+g](../../../t
+sts/mod
+
+s/mu
+t
+moda
+/proc
+ss
+
+g) to ru
+ t
+sts that o
+
+y app
+y to your mod
+
+.
+For 
+xamp
+
+, 
+f th
+ HF proc
+ssor for your mod
+
+ acc
+pts us
+r-sp
+c
+f
+
+d k
+y
+ord argum
+
+ts, you ca
+ v
+r
+fy that th
+ k
+y
+ord argum
+
+ts ar
+ b
+
+
+g app
+
+
+d corr
+ct
+y, such as 
+
+ [t
+sts/mod
+
+s/mu
+t
+moda
+/proc
+ss
+
+g/t
+st_ph
+3v.py](../../../t
+sts/mod
+
+s/mu
+t
+moda
+/proc
+ss
+
+g/t
+st_ph
+3v.py).

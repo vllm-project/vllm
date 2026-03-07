@@ -1,236 +1,3138 @@
-# Automatic Prefix Caching
+# Automat
+c Pr
+f
+x Cach
 
-Prefix caching kv-cache blocks is a popular optimization in LLM inference to avoid redundant prompt computations. The core idea is simple – we cache the kv-cache blocks of processed requests, and reuse these blocks when a new request comes in with the same prefix as previous requests. Since prefix caching is almost a free lunch and won’t change model outputs, it has been widely used by many public endpoints (e.g., OpenAI, Anthropic, etc.) and most open source LLM inference frameworks (e.g., SGLang).
+g
+Pr
+f
+x cach
 
-While there are many ways to implement prefix caching, vLLM chooses a hash-based approach. Specifically, we hash each kv-cache block by the tokens in the block and the tokens in the prefix before the block:
+g kv-cach
+ b
+ocks 
+s a popu
+ar opt
+m
+zat
+o
+ 
 
-```text
-                    Block 1                  Block 2                  Block 3
-         [A gentle breeze stirred] [the leaves as children] [laughed in the distance]
-Block 1: |<--- block tokens ---->|
-Block 2: |<------- prefix ------>| |<--- block tokens --->|
-Block 3: |<------------------ prefix -------------------->| |<--- block tokens ---->|
+ LLM 
+
+f
+r
+
+c
+ to avo
+d r
+du
+da
+t prompt computat
+o
+s. Th
+ cor
+ 
+d
+a 
+s s
+mp
+
+ – 
+
+ cach
+ th
+ kv-cach
+ b
+ocks of proc
+ss
+d r
+qu
+sts, a
+d r
+us
+ th
+s
+ b
+ocks 
+h
+
+ a 
+
+
+ r
+qu
+st com
+s 
+
+ 
+
+th th
+ sam
+ pr
+f
+x as pr
+v
+ous r
+qu
+sts. S
+
+c
+ pr
+f
+x cach
+
+g 
+s a
+most a fr
+ 
+u
+ch a
+d 
+o
+’t cha
+g
+ mod
+
+ outputs, 
+t has b
+
+ 
+
+d
+
+y us
+d by ma
+y pub
+
+c 
+
+dpo
+
+ts (
+.g., Op
+
+AI, A
+throp
+c, 
+tc.) a
+d most op
+
+ sourc
+ LLM 
+
+f
+r
+
+c
+ fram
+
+orks (
+.g., SGLa
+g).
+Wh
+
+
+ th
+r
+ ar
+ ma
+y 
+ays to 
+mp
+
+m
+
+t pr
+f
+x cach
+
+g, vLLM choos
+s a hash-bas
+d approach. Sp
+c
+f
+ca
+y, 
+
+ hash 
+ach kv-cach
+ b
+ock by th
+ tok
+
+s 
+
+ th
+ b
+ock a
+d th
+ tok
+
+s 
+
+ th
+ pr
+f
+x b
+for
+ th
+ b
+ock:
+```t
+xt
+                    B
+ock 1                  B
+ock 2                  B
+ock 3
+         [A g
+
+t
+
+ br
+z
+ st
+rr
+d] [th
+ 
+
+av
+s as ch
+
+dr
+
+] [
+augh
+d 
+
+ th
+ d
+sta
+c
+]
+B
+ock 1: |
+--- b
+ock tok
+
+s ----
+|
+B
+ock 2: |
+------- pr
+f
+x ------
+| |
+--- b
+ock tok
+
+s ---
+|
+B
+ock 3: |
+------------------ pr
+f
+x --------------------
+| |
+--- b
+ock tok
+
+s ----
+|
 ```
+I
+ th
+ 
+xamp
 
-In the example above, the KV cache in the first block can be uniquely identified with the token “A gentle breeze stirred”. The third block can be uniquely identified with the tokens in the block “laughed in the distance”, along with the prefix tokens “A gentle breeze stirred the leaves as children”. Therefore, we can build the block hash of `hash(tuple[components])`, where components are:
+ abov
+, th
+ KV cach
+ 
 
-* Parent hash value: The hash value of the parent hash block.
-* Block tokens: A tuple of tokens in this block. The reason to include the exact tokens is to reduce potential hash value collision.
-* Extra hashes: Other values required to make this block unique, such as LoRA IDs, multi-modality input hashes (see the example below), and cache salts to isolate caches in multi-tenant environments.
+ th
+ f
+rst b
+ock ca
+ b
+ u
 
-!!! note "Note 1"
-    We only cache full blocks.
+qu
 
-!!! note "Note 2"
-    In previous versions, the hash key was not guaranteed to be collision-free. As of v0.11, the default hashing algorithm is `sha256`, which addresses collision risks.
+y 
+d
 
-    For `vllm serve`, you can control the hashing algorithm via `--prefix-caching-hash-algo`:
-    - `sha256` (default): Uses Python's `pickle` for serialization. Hashes may not be reproducible across different Python or vLLM versions.
-    - `sha256_cbor`: Uses `cbor2` for serialization, providing a reproducible, cross-language compatible hash. This is recommended for deterministic caching across environments.
-    - `xxhash`: `Uses Pickle serialization with xxHash (128-bit) for faster, non-cryptographic hashing. Requires the optional `xxhash` package. IMPORTANT: Use of a hashing algorithm that is not considered cryptographically secure theoretically increases the risk of hash collisions, which can cause undefined behavior or even leak private information in multi-tenant environments. Even if collisions are still very unlikely, it is important to consider your security risk tolerance against the performance benefits before turning this on.
-    - `xxhash_cbor` combines canonical CBOR serialization with xxHash for reproducible hashing. Requires the optional `xxhash` package.    
+t
+f
 
-**A hashing example with multi-modality inputs**  
-In this example, we illustrate how prefix caching works with multi-modality inputs (e.g., images). Assuming we have a request with the following messages:
+d 
 
-```text
-messages = [
-    {"role": "user",
-     "content": [
-         {"type": "text",
-          "text": "What's in this image?"
+th th
+ tok
+
+ “A g
+
+t
+
+ br
+z
+ st
+rr
+d”. Th
+ th
+rd b
+ock ca
+ b
+ u
+
+qu
+
+y 
+d
+
+t
+f
+
+d 
+
+th th
+ tok
+
+s 
+
+ th
+ b
+ock “
+augh
+d 
+
+ th
+ d
+sta
+c
+”, a
+o
+g 
+
+th th
+ pr
+f
+x tok
+
+s “A g
+
+t
+
+ br
+z
+ st
+rr
+d th
+ 
+
+av
+s as ch
+
+dr
+
+”. Th
+r
+for
+, 
+
+ ca
+ bu
+
+d th
+ b
+ock hash of `hash(tup
+
+[compo
+
+
+ts])`, 
+h
+r
+ compo
+
+
+ts ar
+:
+* Par
+
+t hash va
+u
+: Th
+ hash va
+u
+ of th
+ par
+
+t hash b
+ock.
+* B
+ock tok
+
+s: A tup
+
+ of tok
+
+s 
+
+ th
+s b
+ock. Th
+ r
+aso
+ to 
+
+c
+ud
+ th
+ 
+xact tok
+
+s 
+s to r
+duc
+ pot
+
+t
+a
+ hash va
+u
+ co
+
+s
+o
+.
+* Extra hash
+s: Oth
+r va
+u
+s r
+qu
+r
+d to mak
+ th
+s b
+ock u
+
+qu
+, such as LoRA IDs, mu
+t
+-moda
+
+ty 
+
+put hash
+s (s
+ th
+ 
+xamp
+
+ b
+
+o
+), a
+d cach
+ sa
+ts to 
+so
+at
+ cach
+s 
+
+ mu
+t
+-t
+
+a
+t 
+
+v
+ro
+m
+
+ts.
+!!! 
+ot
+ "Not
+ 1"
+    W
+ o
+
+y cach
+ fu
+ b
+ocks.
+!!! 
+ot
+ "Not
+ 2"
+    I
+ pr
+v
+ous v
+rs
+o
+s, th
+ hash k
+y 
+as 
+ot guara
+t
+d to b
+ co
+
+s
+o
+-fr
+. As of v0.11, th
+ d
+fau
+t hash
+
+g a
+gor
+thm 
+s `sha256`, 
+h
+ch addr
+ss
+s co
+
+s
+o
+ r
+sks.
+    For `v
+m s
+rv
+`, you ca
+ co
+tro
+ th
+ hash
+
+g a
+gor
+thm v
+a `--pr
+f
+x-cach
+
+g-hash-a
+go`:
+    - `sha256` (d
+fau
+t): Us
+s Pytho
+'s `p
+ck
+
+` for s
+r
+a
+
+zat
+o
+. Hash
+s may 
+ot b
+ r
+produc
+b
+
+ across d
+ff
+r
+
+t Pytho
+ or vLLM v
+rs
+o
+s.
+    - `sha256_cbor`: Us
+s `cbor2` for s
+r
+a
+
+zat
+o
+, prov
+d
+
+g a r
+produc
+b
+
+, cross-
+a
+guag
+ compat
+b
+
+ hash. Th
+s 
+s r
+comm
+
+d
+d for d
+t
+rm
+
+
+st
+c cach
+
+g across 
+
+v
+ro
+m
+
+ts.
+    - `xxhash`: `Us
+s P
+ck
+
+ s
+r
+a
+
+zat
+o
+ 
+
+th xxHash (128-b
+t) for fast
+r, 
+o
+-cryptograph
+c hash
+
+g. R
+qu
+r
+s th
+ opt
+o
+a
+ `xxhash` packag
+. IMPORTANT: Us
+ of a hash
+
+g a
+gor
+thm that 
+s 
+ot co
+s
+d
+r
+d cryptograph
+ca
+y s
+cur
+ th
+or
+t
+ca
+y 
+
+cr
+as
+s th
+ r
+sk of hash co
+
+s
+o
+s, 
+h
+ch ca
+ caus
+ u
+d
+f
+
+
+d b
+hav
+or or 
+v
+
+ 
+
+ak pr
+vat
+ 
+
+format
+o
+ 
+
+ mu
+t
+-t
+
+a
+t 
+
+v
+ro
+m
+
+ts. Ev
+
+ 
+f co
+
+s
+o
+s ar
+ st
+
+ v
+ry u
+
+
+k
+
+y, 
+t 
+s 
+mporta
+t to co
+s
+d
+r your s
+cur
+ty r
+sk to
+
+ra
+c
+ aga
+
+st th
+ p
+rforma
+c
+ b
+
+
+f
+ts b
+for
+ tur
+
+
+g th
+s o
+.
+    - `xxhash_cbor` comb
+
+
+s ca
+o
+
+ca
+ CBOR s
+r
+a
+
+zat
+o
+ 
+
+th xxHash for r
+produc
+b
+
+ hash
+
+g. R
+qu
+r
+s th
+ opt
+o
+a
+ `xxhash` packag
+.
+**A hash
+
+g 
+xamp
+
+ 
+
+th mu
+t
+-moda
+
+ty 
+
+puts**
+I
+ th
+s 
+xamp
+
+, 
+
+ 
+
+ustrat
+ ho
+ pr
+f
+x cach
+
+g 
+orks 
+
+th mu
+t
+-moda
+
+ty 
+
+puts (
+.g., 
+mag
+s). Assum
+
+g 
+
+ hav
+ a r
+qu
+st 
+
+th th
+ fo
+o
+
+
+g m
+ssag
+s:
+```t
+xt
+m
+ssag
+s = [
+    {"ro
+
+": "us
+r",
+     "co
+t
+
+t": [
+         {"typ
+": "t
+xt",
+          "t
+xt": "What's 
+
+ th
+s 
+mag
+?"
          },
-         {"type": "image_url",
-          "image_url": {"url": image_url},
+         {"typ
+": "
+mag
+_ur
+",
+          "
+mag
+_ur
+": {"ur
+": 
+mag
+_ur
+},
          },
     ]},
 ]
 ```
+It 
 
-It will become the following prompt:
 
-```text
+ b
+com
+ th
+ fo
+o
+
+
+g prompt:
+```t
+xt
 Prompt:
-    <s>[INST]What's in this image?\n[IMG][/INST]
+    
+s
+[INST]What's 
 
-Tokenized prompt:
+ th
+s 
+mag
+?\
+[IMG][/INST]
+Tok
+
+
+z
+d prompt:
     [1, 3, 7493, 1681, 1294, 1593, 3937, 9551, 10, 4]
+Prompt 
 
-Prompt with placeholders (<P>):
-    [1, 3, 7493, 1681, 1294, 1593, 3937, 9551, <P>, <P>, ..., <P>, 4]
+th p
+ac
+ho
+d
+rs (
+P
+):
+    [1, 3, 7493, 1681, 1294, 1593, 3937, 9551, 
+P
+, 
+P
+, ..., 
+P
+, 4]
 ```
+As 
 
-As we can see, after the tokenization, the `[IMG]` will be replaced by a sequence of placeholder tokens, and these placeholders will be replaced by image embeddings during prefill. The challenge for prefix caching to support this case is we need to differentiate images from the placeholders. To address this problem, we encode the image hash generated by the frontend image processor. For example, the hash of the blocks in the above prompt would be (assuming block size 16, and we have 41 placeholder tokens):
+ ca
+ s
+, aft
+r th
+ tok
 
-```text
-Block 0
-    Parent hash: None
-    Token IDs: 1, 3, 7493, 1681, 1294, 1593, 3937, 9551, <p>, ..., <p>
-    Extra hash: <image hash>
-Block 1
-    Parent hash: Block 0 hash
-    Token IDs: <p>, ..., <p>
-    Extra hash: <image hash>
-Block 2
-    Parent hash: Block 1 hash
-    Token IDs: <p>, ..., <p>
-    Extra hash: <image hash>
-Block 3
-    Parent hash: Block 2 hash
-    Token IDs: <p>, ..., <p>, 4
-    Extra hash: <image hash>
+
+zat
+o
+, th
+ `[IMG]` 
+
+
+ b
+ r
+p
+ac
+d by a s
+qu
+
+c
+ of p
+ac
+ho
+d
+r tok
+
+s, a
+d th
+s
+ p
+ac
+ho
+d
+rs 
+
+
+ b
+ r
+p
+ac
+d by 
+mag
+ 
+mb
+dd
+
+gs dur
+
+g pr
+f
+
+. Th
+ cha
+
+
+g
+ for pr
+f
+x cach
+
+g to support th
+s cas
+ 
+s 
+
+ 
+
+d to d
+ff
+r
+
+t
+at
+ 
+mag
+s from th
+ p
+ac
+ho
+d
+rs. To addr
+ss th
+s prob
+
+m, 
+
+ 
+
+cod
+ th
+ 
+mag
+ hash g
+
+
+rat
+d by th
+ fro
+t
+
+d 
+mag
+ proc
+ssor. For 
+xamp
+
+, th
+ hash of th
+ b
+ocks 
+
+ th
+ abov
+ prompt 
+ou
+d b
+ (assum
+
+g b
+ock s
+z
+ 16, a
+d 
+
+ hav
+ 41 p
+ac
+ho
+d
+r tok
+
+s):
+```t
+xt
+B
+ock 0
+    Par
+
+t hash: No
+
+
+    Tok
+
+ IDs: 1, 3, 7493, 1681, 1294, 1593, 3937, 9551, 
+p
+, ..., 
+p
+
+    Extra hash: 
+
+mag
+ hash
+
+B
+ock 1
+    Par
+
+t hash: B
+ock 0 hash
+    Tok
+
+ IDs: 
+p
+, ..., 
+p
+
+    Extra hash: 
+
+mag
+ hash
+
+B
+ock 2
+    Par
+
+t hash: B
+ock 1 hash
+    Tok
+
+ IDs: 
+p
+, ..., 
+p
+
+    Extra hash: 
+
+mag
+ hash
+
+B
+ock 3
+    Par
+
+t hash: B
+ock 2 hash
+    Tok
+
+ IDs: 
+p
+, ..., 
+p
+, 4
+    Extra hash: 
+
+mag
+ hash
+
 ```
+I
+ th
+ r
+st of th
+s docum
 
-In the rest of this document, we first introduce the data structure used for prefix caching in vLLM v1, followed by the prefix caching workflow of major KV cache operators (e.g., allocate, append, free, eviction). Finally, we use an example to illustrate the end to end prefix caching workflow.
+t, 
 
-**Cache Isolation for Security**
-To improve privacy in shared environments, vLLM supports isolating prefix cache reuse through optional per-request salting. By including a `cache_salt` in the request, this value is injected into the hash of the first block, ensuring that only requests with the same salt can reuse cached KV blocks. This prevents timing-based attacks where an adversary could infer cached content by observing latency differences. This offers protection without compromising performance.
+ f
+rst 
 
-```json
+troduc
+ th
+ data structur
+ us
+d for pr
+f
+x cach
+
+g 
+
+ vLLM v1, fo
+o
+
+d by th
+ pr
+f
+x cach
+
+g 
+orkf
+o
+ of major KV cach
+ op
+rators (
+.g., a
+ocat
+, app
+
+d, fr
+, 
+v
+ct
+o
+). F
+
+a
+y, 
+
+ us
+ a
+ 
+xamp
+
+ to 
+
+ustrat
+ th
+ 
+
+d to 
+
+d pr
+f
+x cach
+
+g 
+orkf
+o
+.
+**Cach
+ Iso
+at
+o
+ for S
+cur
+ty**
+To 
+mprov
+ pr
+vacy 
+
+ shar
+d 
+
+v
+ro
+m
+
+ts, vLLM supports 
+so
+at
+
+g pr
+f
+x cach
+ r
+us
+ through opt
+o
+a
+ p
+r-r
+qu
+st sa
+t
+
+g. By 
+
+c
+ud
+
+g a `cach
+_sa
+t` 
+
+ th
+ r
+qu
+st, th
+s va
+u
+ 
+s 
+
+j
+ct
+d 
+
+to th
+ hash of th
+ f
+rst b
+ock, 
+
+sur
+
+g that o
+
+y r
+qu
+sts 
+
+th th
+ sam
+ sa
+t ca
+ r
+us
+ cach
+d KV b
+ocks. Th
+s pr
+v
+
+ts t
+m
+
+g-bas
+d attacks 
+h
+r
+ a
+ adv
+rsary cou
+d 
+
+f
+r cach
+d co
+t
+
+t by obs
+rv
+
+g 
+at
+
+cy d
+ff
+r
+
+c
+s. Th
+s off
+rs prot
+ct
+o
+ 
+
+thout comprom
+s
+
+g p
+rforma
+c
+.
+```jso
+
 {
-  "messages": [
-    {"role": "system", "content": "You are a helpful assistant."},
-    {"role": "user", "content": "Here is a document with details about the world series: ..."},
-    {"role": "user", "content": "Who won the world series in 2020?"}
+  "m
+ssag
+s": [
+    {"ro
+
+": "syst
+m", "co
+t
+
+t": "You ar
+ a h
+
+pfu
+ ass
+sta
+t."},
+    {"ro
+
+": "us
+r", "co
+t
+
+t": "H
+r
+ 
+s a docum
+
+t 
+
+th d
+ta
+
+s about th
+ 
+or
+d s
+r
+
+s: ..."},
+    {"ro
+
+": "us
+r", "co
+t
+
+t": "Who 
+o
+ th
+ 
+or
+d s
+r
+
+s 
+
+ 2020?"}
   ],
-  "cache_salt": "your-cache-salt"
+  "cach
+_sa
+t": "your-cach
+-sa
+t"
 }
 ```
+W
+th th
+s s
+tup, cach
+ shar
 
-With this setup, cache sharing is limited to users or requests that explicitly agree on a common salt, enabling cache reuse within a trust group while isolating others.
+g 
+s 
 
-## Data Structure
+m
+t
+d to us
+rs or r
+qu
+sts that 
+xp
 
-The prefix caching in vLLM v1 is implemented in the KV cache manager. The basic building block is the “Block” data class (simplified):
+c
+t
+y agr
+ o
+ a commo
+ sa
+t, 
 
-```python
-class KVCacheBlock:
-    # The block ID (immutable)
-    block_id: int
-    # The block hash (will be assigned when the block is full,
-    # and will be reset when the block is evicted).
-    block_hash: BlockHash
-    # The number of requests using this block now.
-    ref_cnt: int
+ab
 
-    # The pointers to form a doubly linked list for the free queue.
-    prev_free_block: "KVCacheBlock | None" = None
-    next_free_block: "KVCacheBlock | None" = None
+
+g cach
+ r
+us
+ 
+
+th
+
+ a trust group 
+h
+
+
+ 
+so
+at
+
+g oth
+rs.
+## Data Structur
+
+Th
+ pr
+f
+x cach
+
+g 
+
+ vLLM v1 
+s 
+mp
+
+m
+
+t
+d 
+
+ th
+ KV cach
+ ma
+ag
+r. Th
+ bas
+c bu
+
+d
+
+g b
+ock 
+s th
+ “B
+ock” data c
+ass (s
+mp
+
+f
+
+d):
+```pytho
+
+c
+ass KVCach
+B
+ock:
+    # Th
+ b
+ock ID (
+mmutab
+
+)
+    b
+ock_
+d: 
+
+t
+    # Th
+ b
+ock hash (
+
+
+ b
+ ass
+g
+
+d 
+h
+
+ th
+ b
+ock 
+s fu
+,
+    # a
+d 
+
+
+ b
+ r
+s
+t 
+h
+
+ th
+ b
+ock 
+s 
+v
+ct
+d).
+    b
+ock_hash: B
+ockHash
+    # Th
+ 
+umb
+r of r
+qu
+sts us
+
+g th
+s b
+ock 
+o
+.
+    r
+f_c
+t: 
+
+t
+    # Th
+ po
+
+t
+rs to form a doub
+y 
+
+
+k
+d 
+
+st for th
+ fr
+ qu
+u
+.
+    pr
+v_fr
+_b
+ock: "KVCach
+B
+ock | No
+
+" = No
+
+
+    
+
+xt_fr
+_b
+ock: "KVCach
+B
+ock | No
+
+" = No
+
+
 ```
+Th
+r
+ ar
+ t
+o d
+s
+g
+ po
 
-There are two design points to highlight:
+ts to h
+gh
 
-1. We allocate all KVCacheBlock when initializing the KV cache manager to be a block pool. This avoids Python object creation overheads and can easily track all blocks all the time.  
-2. We introduce doubly linked list pointers directly in the KVCacheBlock, so that we could construct a free queue directly. This gives us two benefits:  
-    1. We could have O(1) complexity moving elements in the middle to the tail.  
-    2. We could avoid introducing another Python queue (e.g., `deque`) which has a wrapper to the elements.
+ght:
+1. W
+ a
+ocat
+ a
+ KVCach
+B
+ock 
+h
 
-As a result, we will have the following components when the KV cache manager is initialized:
+ 
 
-![Component Overview](../assets/design/prefix_caching/overview.png)
 
-* Block Pool: A list of KVCacheBlock.  
-* Free Block Queue: Only store the pointers of head and tail blocks for manipulations.  
-* Cache blocks: Mapping from hash key to block IDs.  
-* Request blocks: Mapping from request ID to allocated block IDs.
+t
+a
 
-## Operations
+z
 
-### Block Allocation
+g th
+ KV cach
+ ma
+ag
+r to b
+ a b
+ock poo
+. Th
+s avo
+ds Pytho
+ obj
+ct cr
+at
+o
+ ov
+rh
+ads a
+d ca
+ 
+as
 
-**New request:** Workflow for the scheduler to schedule a new request with KV cache block allocation:
+y track a
+ b
+ocks a
+ th
+ t
+m
+.
+2. W
+ 
 
-1. The scheduler calls `kv_cache_manager.get_computed_blocks()` to get a sequence of blocks that have already been computed. This is done by hashing the prompt tokens in the request and looking up cache blocks.  
-2. The scheduler calls `kv_cache_manager.allocate_slots()`. It does the following steps:  
-    1. Compute the number of new required blocks, and return if there are no sufficient blocks to allocate.  
-    2. “Touch” the computed blocks. It increases the reference count of the computed block by one, and removes the block from the free queue if the block wasn’t used by other requests. This is to avoid these computed blocks being evicted. See the example in the next section for illustration.  
-    3. Allocate new blocks by popping the heads of the free queue. If the head block is a cached block, this also “evicts” the block so that no other requests can reuse it anymore from now on.  
-    4. If an allocated block is already full of tokens, we immediately add it to the cache block, so that the block can be reused by other requests in the same batch.
+troduc
+ doub
+y 
 
-**Running request:** Workflow for the scheduler to schedule a running request with KV cache block allocation:
 
-1. The scheduler calls `kv_cache_manager.allocate_slots()`. It does the following steps:  
-    1. Compute the number of new required blocks, and return if there are no sufficient blocks to allocate.  
-    2. Allocate new blocks by popping the heads of the free queue. If the head block is a cached block, this also “evicts” the block so that no other requests can reuse it anymore from now on.  
-    3. Append token IDs to the slots in existing blocks as well as the new blocks. If a block is full, we add it to the cache block to cache it.
+k
+d 
 
-**Duplicated blocks**  
-Assuming block size is 4 and you send a request (Request 1\) with prompt ABCDEF and decoding length 3:
+st po
 
-```text
+t
+rs d
+r
+ct
+y 
+
+ th
+ KVCach
+B
+ock, so that 
+
+ cou
+d co
+struct a fr
+ qu
+u
+ d
+r
+ct
+y. Th
+s g
+v
+s us t
+o b
+
+
+f
+ts:
+    1. W
+ cou
+d hav
+ O(1) comp
+
+x
+ty mov
+
+g 
+
+
+m
+
+ts 
+
+ th
+ m
+dd
+
+ to th
+ ta
+
+.
+    2. W
+ cou
+d avo
+d 
+
+troduc
+
+g a
+oth
+r Pytho
+ qu
+u
+ (
+.g., `d
+qu
+`) 
+h
+ch has a 
+rapp
+r to th
+ 
+
+
+m
+
+ts.
+As a r
+su
+t, 
+
+ 
+
+
+ hav
+ th
+ fo
+o
+
+
+g compo
+
+
+ts 
+h
+
+ th
+ KV cach
+ ma
+ag
+r 
+s 
+
+
+t
+a
+
+z
+d:
+![Compo
+
+
+t Ov
+rv
+
+
+](../ass
+ts/d
+s
+g
+/pr
+f
+x_cach
+
+g/ov
+rv
+
+
+.p
+g)
+* B
+ock Poo
+: A 
+
+st of KVCach
+B
+ock.
+* Fr
+ B
+ock Qu
+u
+: O
+
+y stor
+ th
+ po
+
+t
+rs of h
+ad a
+d ta
+
+ b
+ocks for ma
+
+pu
+at
+o
+s.
+* Cach
+ b
+ocks: Mapp
+
+g from hash k
+y to b
+ock IDs.
+* R
+qu
+st b
+ocks: Mapp
+
+g from r
+qu
+st ID to a
+ocat
+d b
+ock IDs.
+## Op
+rat
+o
+s
+### B
+ock A
+ocat
+o
+
+**N
+
+ r
+qu
+st:** Workf
+o
+ for th
+ sch
+du
+
+r to sch
+du
+
+ a 
+
+
+ r
+qu
+st 
+
+th KV cach
+ b
+ock a
+ocat
+o
+:
+1. Th
+ sch
+du
+
+r ca
+s `kv_cach
+_ma
+ag
+r.g
+t_comput
+d_b
+ocks()` to g
+t a s
+qu
+
+c
+ of b
+ocks that hav
+ a
+r
+ady b
+
+ comput
+d. Th
+s 
+s do
+
+ by hash
+
+g th
+ prompt tok
+
+s 
+
+ th
+ r
+qu
+st a
+d 
+ook
+
+g up cach
+ b
+ocks.
+2. Th
+ sch
+du
+
+r ca
+s `kv_cach
+_ma
+ag
+r.a
+ocat
+_s
+ots()`. It do
+s th
+ fo
+o
+
+
+g st
+ps:
+    1. Comput
+ th
+ 
+umb
+r of 
+
+
+ r
+qu
+r
+d b
+ocks, a
+d r
+tur
+ 
+f th
+r
+ ar
+ 
+o suff
+c
+
+
+t b
+ocks to a
+ocat
+.
+    2. “Touch” th
+ comput
+d b
+ocks. It 
+
+cr
+as
+s th
+ r
+f
+r
+
+c
+ cou
+t of th
+ comput
+d b
+ock by o
+
+, a
+d r
+mov
+s th
+ b
+ock from th
+ fr
+ qu
+u
+ 
+f th
+ b
+ock 
+as
+’t us
+d by oth
+r r
+qu
+sts. Th
+s 
+s to avo
+d th
+s
+ comput
+d b
+ocks b
+
+
+g 
+v
+ct
+d. S
+ th
+ 
+xamp
+
+ 
+
+ th
+ 
+
+xt s
+ct
+o
+ for 
+
+ustrat
+o
+.
+    3. A
+ocat
+ 
+
+
+ b
+ocks by popp
+
+g th
+ h
+ads of th
+ fr
+ qu
+u
+. If th
+ h
+ad b
+ock 
+s a cach
+d b
+ock, th
+s a
+so “
+v
+cts” th
+ b
+ock so that 
+o oth
+r r
+qu
+sts ca
+ r
+us
+ 
+t a
+ymor
+ from 
+o
+ o
+.
+    4. If a
+ a
+ocat
+d b
+ock 
+s a
+r
+ady fu
+ of tok
+
+s, 
+
+ 
+mm
+d
+at
+
+y add 
+t to th
+ cach
+ b
+ock, so that th
+ b
+ock ca
+ b
+ r
+us
+d by oth
+r r
+qu
+sts 
+
+ th
+ sam
+ batch.
+**Ru
+
+
+g r
+qu
+st:** Workf
+o
+ for th
+ sch
+du
+
+r to sch
+du
+
+ a ru
+
+
+g r
+qu
+st 
+
+th KV cach
+ b
+ock a
+ocat
+o
+:
+1. Th
+ sch
+du
+
+r ca
+s `kv_cach
+_ma
+ag
+r.a
+ocat
+_s
+ots()`. It do
+s th
+ fo
+o
+
+
+g st
+ps:
+    1. Comput
+ th
+ 
+umb
+r of 
+
+
+ r
+qu
+r
+d b
+ocks, a
+d r
+tur
+ 
+f th
+r
+ ar
+ 
+o suff
+c
+
+
+t b
+ocks to a
+ocat
+.
+    2. A
+ocat
+ 
+
+
+ b
+ocks by popp
+
+g th
+ h
+ads of th
+ fr
+ qu
+u
+. If th
+ h
+ad b
+ock 
+s a cach
+d b
+ock, th
+s a
+so “
+v
+cts” th
+ b
+ock so that 
+o oth
+r r
+qu
+sts ca
+ r
+us
+ 
+t a
+ymor
+ from 
+o
+ o
+.
+    3. App
+
+d tok
+
+ IDs to th
+ s
+ots 
+
+ 
+x
+st
+
+g b
+ocks as 
+
+
+ as th
+ 
+
+
+ b
+ocks. If a b
+ock 
+s fu
+, 
+
+ add 
+t to th
+ cach
+ b
+ock to cach
+ 
+t.
+**Dup
+
+cat
+d b
+ocks**
+Assum
+
+g b
+ock s
+z
+ 
+s 4 a
+d you s
+
+d a r
+qu
+st (R
+qu
+st 1\) 
+
+th prompt ABCDEF a
+d d
+cod
+
+g 
+
+
+gth 3:
+```t
+xt
 Prompt: [A, B, C, D, E, F]
 Output: [G, H, I]
+T
+m
+ 0:
+  Tok
 
-Time 0:
-  Tokens: [A, B, C, D, E, F, G]
-  Block Table: [0 (ABCD), 1 (EFG)]
-  Cache Blocks: 0
-Time 1:
-  Tokens: [A, B, C, D, E, F, G, H]
-  Block Table: [0 (ABCD), 1 (EFGH)]
-  Cache Blocks: 0, 1
-Time 2:
-  Tokens: [A, B, C, D, E, F, G, H, I]
-  Block Table: [0 (ABCD), 1 (EFGH), 2 (I)]
-  Cache Blocks: 0, 1
+s: [A, B, C, D, E, F, G]
+  B
+ock Tab
+
+: [0 (ABCD), 1 (EFG)]
+  Cach
+ B
+ocks: 0
+T
+m
+ 1:
+  Tok
+
+s: [A, B, C, D, E, F, G, H]
+  B
+ock Tab
+
+: [0 (ABCD), 1 (EFGH)]
+  Cach
+ B
+ocks: 0, 1
+T
+m
+ 2:
+  Tok
+
+s: [A, B, C, D, E, F, G, H, I]
+  B
+ock Tab
+
+: [0 (ABCD), 1 (EFGH), 2 (I)]
+  Cach
+ B
+ocks: 0, 1
 ```
+No
+ b
+ock 0 a
+d b
+ock 1 ar
+ cach
+d, a
+d 
 
-Now block 0 and block 1 are cached, and we send the same request again (Request 2\) with greedy sampling, so that it will produce exactly the same outputs as the Request 1:
+ s
 
-```text
+d th
+ sam
+ r
+qu
+st aga
+
+ (R
+qu
+st 2\) 
+
+th gr
+dy samp
+
+
+g, so that 
+t 
+
+
+ produc
+ 
+xact
+y th
+ sam
+ outputs as th
+ R
+qu
+st 1:
+```t
+xt
 Prompt: [A, B, C, D, E, F]
 Output: [G, H, I]
+T
+m
+ 0:
+  Tok
 
-Time 0:
-  Tokens: [A, B, C, D, E, F, G]
-  Block Table: [0 (ABCD), 3 (EFG)]
-  Cache Blocks: 0, 1
-Time 1:
-  Tokens: [A, B, C, D, E, F, G, H]
-  Block Table: [0 (ABCD), 3 (EFGH)]
-  Cache Blocks: 0, 1, 3
+s: [A, B, C, D, E, F, G]
+  B
+ock Tab
+
+: [0 (ABCD), 3 (EFG)]
+  Cach
+ B
+ocks: 0, 1
+T
+m
+ 1:
+  Tok
+
+s: [A, B, C, D, E, F, G, H]
+  B
+ock Tab
+
+: [0 (ABCD), 3 (EFGH)]
+  Cach
+ B
+ocks: 0, 1, 3
 ```
+As ca
+ b
+ s
 
-As can be seen, block 3 is a new full block and is cached. However, it is redundant as block 1, meaning that we cached the same block twice. In v0, when detecting block 3 is duplicated, we free block 3 and let Request 2 use block 1 instead, so its block table becomes `[0, 1]` in Time 1. However, the block table in vLLM v1 is append-only, meaning that changing the block table from `[0, 3]` to `[0, 1]` is not allowed. As a result, we will have duplicated blocks for the hash key E-H. This duplication will be eliminated when the request is freed.
+, b
+ock 3 
+s a 
 
-### Free
 
-When a request is finished, we free all its blocks if no other requests are using them (reference count = 0). In this example, we free request 1 and block 2, 3, 4, 8 associated with it. We can see that the freed blocks are added to the tail of the free queue in the *reverse* order. This is because the last block of a request must hash more tokens and is less likely to be reused by other requests. As a result, it should be evicted first.
+ fu
+ b
+ock a
+d 
+s cach
+d. Ho
 
-![Free queue after a request us freed](../assets/design/prefix_caching/free.png)
+v
+r, 
+t 
+s r
+du
+da
+t as b
+ock 1, m
+a
 
-### Eviction (LRU)
 
-When the head block (least recently used block) of the free queue is cached, we have to evict the block to prevent it from being used by other requests. Specifically, eviction involves the following steps:
+g that 
 
-1. Pop the block from the head of the free queue. This is the LRU block to be evicted.  
-2. Remove the block ID from the cache block.  
-3. Remove the block hash.
+ cach
+d th
+ sam
+ b
+ock t
 
-## Example
+c
+. I
+ v0, 
+h
 
-In this example, we assume the block size is 4 (each block can cache 4 tokens), and we have 10 blocks in the KV-cache manager in total.
+ d
+t
+ct
 
-**Time 1: The cache is empty and a new request comes in.** We allocate 4 blocks. 3 of them are already full and cached. The fourth block is partially full with 3 of 4 tokens.
+g b
+ock 3 
+s dup
 
-![Example Time 1](../assets/design/prefix_caching/example-time-1.png)
+cat
+d, 
 
-**Time 2: Request 0 makes the block 3 full and asks for a new block to keep decoding.** We cache block 3 and allocate block 4.
+ fr
+ b
+ock 3 a
+d 
 
-![Example Time 2](../assets/design/prefix_caching/example-time-3.png)
+t R
+qu
+st 2 us
+ b
+ock 1 
 
-**Time 3: Request 1 comes in with the 14 prompt tokens, where the first 10 tokens are the same as request 0.** We can see that only the first 2 blocks (8 tokens) hit the cache, because the 3rd block only matches 2 of 4 tokens.
+st
+ad, so 
+ts b
+ock tab
 
-![Example Time 3](../assets/design/prefix_caching/example-time-4.png)
+ b
+com
+s `[0, 1]` 
 
-**Time 4: Request 0 is finished and free.** Blocks 2, 3 and 4 are added to the free queue in the reverse order (but block 2 and 3 are still cached). Block 0 and 1 are not added to the free queue because they are being used by Request 1.
+ T
+m
+ 1. Ho
 
-![Example Time 4](../assets/design/prefix_caching/example-time-5.png)
+v
+r, th
+ b
+ock tab
 
-**Time 5: Request 1 is finished and free.**
+ 
 
-![Example Time 5](../assets/design/prefix_caching/example-time-6.png)
+ vLLM v1 
+s app
 
-**Time 6: Request 2 comes in with the 29 prompt tokens, where the first 12 tokens are the same as request 0\.** Note that even the block order in the free queue was `7 - 8 - 9 - 4 - 3 - 2 - 6 - 5 - 1 - 0`, the cache hit blocks (i.e., 0, 1, 2) are touched and removed from the queue before allocation, so the free queue becomes `7 - 8 - 9 - 4 - 3 - 6 - 5`. As a result, the allocated blocks are 0 (cached), 1 (cached), 2 (cached), 7, 8, 9, 4, 3 (evicted).
+d-o
 
-![Example Time 6](../assets/design/prefix_caching/example-time-7.png)
+y, m
+a
+
+
+g that cha
+g
+
+g th
+ b
+ock tab
+
+ from `[0, 3]` to `[0, 1]` 
+s 
+ot a
+o
+
+d. As a r
+su
+t, 
+
+ 
+
+
+ hav
+ dup
+
+cat
+d b
+ocks for th
+ hash k
+y E-H. Th
+s dup
+
+cat
+o
+ 
+
+
+ b
+ 
+
+
+m
+
+at
+d 
+h
+
+ th
+ r
+qu
+st 
+s fr
+d.
+### Fr
+
+Wh
+
+ a r
+qu
+st 
+s f
+
+
+sh
+d, 
+
+ fr
+ a
+ 
+ts b
+ocks 
+f 
+o oth
+r r
+qu
+sts ar
+ us
+
+g th
+m (r
+f
+r
+
+c
+ cou
+t = 0). I
+ th
+s 
+xamp
+
+, 
+
+ fr
+ r
+qu
+st 1 a
+d b
+ock 2, 3, 4, 8 assoc
+at
+d 
+
+th 
+t. W
+ ca
+ s
+ that th
+ fr
+d b
+ocks ar
+ add
+d to th
+ ta
+
+ of th
+ fr
+ qu
+u
+ 
+
+ th
+ *r
+v
+rs
+* ord
+r. Th
+s 
+s b
+caus
+ th
+ 
+ast b
+ock of a r
+qu
+st must hash mor
+ tok
+
+s a
+d 
+s 
+
+ss 
+
+k
+
+y to b
+ r
+us
+d by oth
+r r
+qu
+sts. As a r
+su
+t, 
+t shou
+d b
+ 
+v
+ct
+d f
+rst.
+![Fr
+ qu
+u
+ aft
+r a r
+qu
+st us fr
+d](../ass
+ts/d
+s
+g
+/pr
+f
+x_cach
+
+g/fr
+.p
+g)
+### Ev
+ct
+o
+ (LRU)
+Wh
+
+ th
+ h
+ad b
+ock (
+
+ast r
+c
+
+t
+y us
+d b
+ock) of th
+ fr
+ qu
+u
+ 
+s cach
+d, 
+
+ hav
+ to 
+v
+ct th
+ b
+ock to pr
+v
+
+t 
+t from b
+
+
+g us
+d by oth
+r r
+qu
+sts. Sp
+c
+f
+ca
+y, 
+v
+ct
+o
+ 
+
+vo
+v
+s th
+ fo
+o
+
+
+g st
+ps:
+1. Pop th
+ b
+ock from th
+ h
+ad of th
+ fr
+ qu
+u
+. Th
+s 
+s th
+ LRU b
+ock to b
+ 
+v
+ct
+d.
+2. R
+mov
+ th
+ b
+ock ID from th
+ cach
+ b
+ock.
+3. R
+mov
+ th
+ b
+ock hash.
+## Examp
+
+
+I
+ th
+s 
+xamp
+
+, 
+
+ assum
+ th
+ b
+ock s
+z
+ 
+s 4 (
+ach b
+ock ca
+ cach
+ 4 tok
+
+s), a
+d 
+
+ hav
+ 10 b
+ocks 
+
+ th
+ KV-cach
+ ma
+ag
+r 
+
+ tota
+.
+**T
+m
+ 1: Th
+ cach
+ 
+s 
+mpty a
+d a 
+
+
+ r
+qu
+st com
+s 
+
+.** W
+ a
+ocat
+ 4 b
+ocks. 3 of th
+m ar
+ a
+r
+ady fu
+ a
+d cach
+d. Th
+ fourth b
+ock 
+s part
+a
+y fu
+ 
+
+th 3 of 4 tok
+
+s.
+![Examp
+
+ T
+m
+ 1](../ass
+ts/d
+s
+g
+/pr
+f
+x_cach
+
+g/
+xamp
+
+-t
+m
+-1.p
+g)
+**T
+m
+ 2: R
+qu
+st 0 mak
+s th
+ b
+ock 3 fu
+ a
+d asks for a 
+
+
+ b
+ock to k
+p d
+cod
+
+g.** W
+ cach
+ b
+ock 3 a
+d a
+ocat
+ b
+ock 4.
+![Examp
+
+ T
+m
+ 2](../ass
+ts/d
+s
+g
+/pr
+f
+x_cach
+
+g/
+xamp
+
+-t
+m
+-3.p
+g)
+**T
+m
+ 3: R
+qu
+st 1 com
+s 
+
+ 
+
+th th
+ 14 prompt tok
+
+s, 
+h
+r
+ th
+ f
+rst 10 tok
+
+s ar
+ th
+ sam
+ as r
+qu
+st 0.** W
+ ca
+ s
+ that o
+
+y th
+ f
+rst 2 b
+ocks (8 tok
+
+s) h
+t th
+ cach
+, b
+caus
+ th
+ 3rd b
+ock o
+
+y match
+s 2 of 4 tok
+
+s.
+![Examp
+
+ T
+m
+ 3](../ass
+ts/d
+s
+g
+/pr
+f
+x_cach
+
+g/
+xamp
+
+-t
+m
+-4.p
+g)
+**T
+m
+ 4: R
+qu
+st 0 
+s f
+
+
+sh
+d a
+d fr
+.** B
+ocks 2, 3 a
+d 4 ar
+ add
+d to th
+ fr
+ qu
+u
+ 
+
+ th
+ r
+v
+rs
+ ord
+r (but b
+ock 2 a
+d 3 ar
+ st
+
+ cach
+d). B
+ock 0 a
+d 1 ar
+ 
+ot add
+d to th
+ fr
+ qu
+u
+ b
+caus
+ th
+y ar
+ b
+
+
+g us
+d by R
+qu
+st 1.
+![Examp
+
+ T
+m
+ 4](../ass
+ts/d
+s
+g
+/pr
+f
+x_cach
+
+g/
+xamp
+
+-t
+m
+-5.p
+g)
+**T
+m
+ 5: R
+qu
+st 1 
+s f
+
+
+sh
+d a
+d fr
+.**
+![Examp
+
+ T
+m
+ 5](../ass
+ts/d
+s
+g
+/pr
+f
+x_cach
+
+g/
+xamp
+
+-t
+m
+-6.p
+g)
+**T
+m
+ 6: R
+qu
+st 2 com
+s 
+
+ 
+
+th th
+ 29 prompt tok
+
+s, 
+h
+r
+ th
+ f
+rst 12 tok
+
+s ar
+ th
+ sam
+ as r
+qu
+st 0\.** Not
+ that 
+v
+
+ th
+ b
+ock ord
+r 
+
+ th
+ fr
+ qu
+u
+ 
+as `7 - 8 - 9 - 4 - 3 - 2 - 6 - 5 - 1 - 0`, th
+ cach
+ h
+t b
+ocks (
+.
+., 0, 1, 2) ar
+ touch
+d a
+d r
+mov
+d from th
+ qu
+u
+ b
+for
+ a
+ocat
+o
+, so th
+ fr
+ qu
+u
+ b
+com
+s `7 - 8 - 9 - 4 - 3 - 6 - 5`. As a r
+su
+t, th
+ a
+ocat
+d b
+ocks ar
+ 0 (cach
+d), 1 (cach
+d), 2 (cach
+d), 7, 8, 9, 4, 3 (
+v
+ct
+d).
+![Examp
+
+ T
+m
+ 6](../ass
+ts/d
+s
+g
+/pr
+f
+x_cach
+
+g/
+xamp
+
+-t
+m
+-7.p
+g)

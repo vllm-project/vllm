@@ -1,94 +1,1107 @@
-# IO Processor Plugins
+# IO Proc
+ssor P
+ug
 
-IO Processor plugins are a feature that allows pre- and post-processing of the model input and output for pooling models. The idea is that users are allowed to pass a custom input to vLLM that is converted into one or more model prompts and fed to the model `encode` method. One potential use-case of such plugins is that of using vLLM for generating multi-modal data. Say users feed an image to vLLM and get an image in output.
+s
+IO Proc
+ssor p
+ug
 
-When performing an inference with IO Processor plugins, the prompt type is defined by the plugin and the same is valid for the final request output. vLLM does not perform any validation of input/output data, and it is up to the plugin to ensure the correct data is being fed to the model and returned to the user. As of now these plugins support only pooling models and can be triggered via the `encode` method in `LLM` and `AsyncLLM`, or in online serving mode via the `/pooling` endpoint.
+s ar
+ a f
+atur
+ that a
+o
+s pr
+- a
+d post-proc
+ss
 
-## Writing an IO Processor Plugin
+g of th
+ mod
 
-IO Processor plugins implement the [`IOProcessor`][vllm.plugins.io_processors.interface.IOProcessor] interface:
+ 
 
-```python
-IOProcessorInput = TypeVar("IOProcessorInput")
-IOProcessorOutput = TypeVar("IOProcessorOutput")
+put a
+d output for poo
 
-class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
-    """Abstract interface for pre/post-processing of engine I/O."""
 
-    def __init__(self, vllm_config: VllmConfig, renderer: BaseRenderer):
-        super().__init__()
+g mod
 
-        self.vllm_config = vllm_config
+s. Th
+ 
+d
+a 
+s that us
+rs ar
+ a
+o
 
-    def parse_data(self, data: object) -> IOProcessorInput:
-        raise NotImplementedError
+d to pass a custom 
 
-    def merge_sampling_params(
-        self,
-        params: SamplingParams | None = None,
-    ) -> SamplingParams:
-        return params or SamplingParams()
+put to vLLM that 
+s co
+v
+rt
+d 
 
-    def merge_pooling_params(
-        self,
-        params: PoolingParams | None = None,
-    ) -> PoolingParams:
-        return params or PoolingParams(task="plugin")
+to o
 
-    @abstractmethod
-    def pre_process(
-        self,
-        prompt: IOProcessorInput,
-        request_id: str | None = None,
-        **kwargs,
-    ) -> PromptType | Sequence[PromptType]:
-        raise NotImplementedError
+ or mor
+ mod
 
-    async def pre_process_async(
-        self,
-        prompt: IOProcessorInput,
-        request_id: str | None = None,
-        **kwargs,
-    ) -> PromptType | Sequence[PromptType]:
-        return self.pre_process(prompt, request_id, **kwargs)
+ prompts a
+d f
+d to th
+ mod
 
-    @abstractmethod
-    def post_process(
-        self,
-        model_output: Sequence[PoolingRequestOutput],
-        request_id: str | None = None,
-        **kwargs,
-    ) -> IOProcessorOutput:
-        raise NotImplementedError
+ `
 
-    async def post_process_async(
-        self,
-        model_output: AsyncGenerator[tuple[int, PoolingRequestOutput]],
-        request_id: str | None = None,
-        **kwargs,
-    ) -> IOProcessorOutput:
-        # We cannot guarantee outputs are returned in the same order they were
-        # fed to vLLM.
-        # Let's sort them by id before post_processing
-        sorted_output = sorted(
-            [(i, item) async for i, item in model_output], key=lambda output: output[0]
+cod
+` m
+thod. O
+
+ pot
+
+t
+a
+ us
+-cas
+ of such p
+ug
+
+s 
+s that of us
+
+g vLLM for g
+
+
+rat
+
+g mu
+t
+-moda
+ data. Say us
+rs f
+d a
+ 
+mag
+ to vLLM a
+d g
+t a
+ 
+mag
+ 
+
+ output.
+Wh
+
+ p
+rform
+
+g a
+ 
+
+f
+r
+
+c
+ 
+
+th IO Proc
+ssor p
+ug
+
+s, th
+ prompt typ
+ 
+s d
+f
+
+
+d by th
+ p
+ug
+
+ a
+d th
+ sam
+ 
+s va
+
+d for th
+ f
+
+a
+ r
+qu
+st output. vLLM do
+s 
+ot p
+rform a
+y va
+
+dat
+o
+ of 
+
+put/output data, a
+d 
+t 
+s up to th
+ p
+ug
+
+ to 
+
+sur
+ th
+ corr
+ct data 
+s b
+
+
+g f
+d to th
+ mod
+
+ a
+d r
+tur
+
+d to th
+ us
+r. As of 
+o
+ th
+s
+ p
+ug
+
+s support o
+
+y poo
+
+
+g mod
+
+s a
+d ca
+ b
+ tr
+gg
+r
+d v
+a th
+ `
+
+cod
+` m
+thod 
+
+ `LLM` a
+d `Asy
+cLLM`, or 
+
+ o
+
+
+
+
+ s
+rv
+
+g mod
+ v
+a th
+ `/poo
+
+
+g` 
+
+dpo
+
+t.
+## Wr
+t
+
+g a
+ IO Proc
+ssor P
+ug
+
+
+IO Proc
+ssor p
+ug
+
+s 
+mp
+
+m
+
+t th
+ [`IOProc
+ssor`][v
+m.p
+ug
+
+s.
+o_proc
+ssors.
+
+t
+rfac
+.IOProc
+ssor] 
+
+t
+rfac
+:
+```pytho
+
+IOProc
+ssorI
+put = Typ
+Var("IOProc
+ssorI
+put")
+IOProc
+ssorOutput = Typ
+Var("IOProc
+ssorOutput")
+c
+ass IOProc
+ssor(ABC, G
+
+
+r
+c[IOProc
+ssorI
+put, IOProc
+ssorOutput]):
+    """Abstract 
+
+t
+rfac
+ for pr
+/post-proc
+ss
+
+g of 
+
+g
+
+
+ I/O."""
+    d
+f __
+
+
+t__(s
+
+f, v
+m_co
+f
+g: V
+mCo
+f
+g, r
+
+d
+r
+r: Bas
+R
+
+d
+r
+r):
+        sup
+r().__
+
+
+t__()
+        s
+
+f.v
+m_co
+f
+g = v
+m_co
+f
+g
+    d
+f pars
+_data(s
+
+f, data: obj
+ct) -
+ IOProc
+ssorI
+put:
+        ra
+s
+ NotImp
+
+m
+
+t
+dError
+    d
+f m
+rg
+_samp
+
+
+g_params(
+        s
+
+f,
+        params: Samp
+
+
+gParams | No
+
+ = No
+
+,
+    ) -
+ Samp
+
+
+gParams:
+        r
+tur
+ params or Samp
+
+
+gParams()
+    d
+f m
+rg
+_poo
+
+
+g_params(
+        s
+
+f,
+        params: Poo
+
+
+gParams | No
+
+ = No
+
+,
+    ) -
+ Poo
+
+
+gParams:
+        r
+tur
+ params or Poo
+
+
+gParams(task="p
+ug
+
+")
+    @abstractm
+thod
+    d
+f pr
+_proc
+ss(
+        s
+
+f,
+        prompt: IOProc
+ssorI
+put,
+        r
+qu
+st_
+d: str | No
+
+ = No
+
+,
+        **k
+args,
+    ) -
+ PromptTyp
+ | S
+qu
+
+c
+[PromptTyp
+]:
+        ra
+s
+ NotImp
+
+m
+
+t
+dError
+    asy
+c d
+f pr
+_proc
+ss_asy
+c(
+        s
+
+f,
+        prompt: IOProc
+ssorI
+put,
+        r
+qu
+st_
+d: str | No
+
+ = No
+
+,
+        **k
+args,
+    ) -
+ PromptTyp
+ | S
+qu
+
+c
+[PromptTyp
+]:
+        r
+tur
+ s
+
+f.pr
+_proc
+ss(prompt, r
+qu
+st_
+d, **k
+args)
+    @abstractm
+thod
+    d
+f post_proc
+ss(
+        s
+
+f,
+        mod
+
+_output: S
+qu
+
+c
+[Poo
+
+
+gR
+qu
+stOutput],
+        r
+qu
+st_
+d: str | No
+
+ = No
+
+,
+        **k
+args,
+    ) -
+ IOProc
+ssorOutput:
+        ra
+s
+ NotImp
+
+m
+
+t
+dError
+    asy
+c d
+f post_proc
+ss_asy
+c(
+        s
+
+f,
+        mod
+
+_output: Asy
+cG
+
+
+rator[tup
+
+[
+
+t, Poo
+
+
+gR
+qu
+stOutput]],
+        r
+qu
+st_
+d: str | No
+
+ = No
+
+,
+        **k
+args,
+    ) -
+ IOProc
+ssorOutput:
+        # W
+ ca
+ot guara
+t
+ outputs ar
+ r
+tur
+
+d 
+
+ th
+ sam
+ ord
+r th
+y 
+
+r
+
+        # f
+d to vLLM.
+        # L
+t's sort th
+m by 
+d b
+for
+ post_proc
+ss
+
+g
+        sort
+d_output = sort
+d(
+            [(
+, 
+t
+m) asy
+c for 
+, 
+t
+m 
+
+ mod
+
+_output], k
+y=
+ambda output: output[0]
         )
-        collected_output = [output[1] for output in sorted_output]
-        return self.post_process(collected_output, request_id=request_id, **kwargs)
+        co
+
+ct
+d_output = [output[1] for output 
+
+ sort
+d_output]
+        r
+tur
+ s
+
+f.post_proc
+ss(co
+
+ct
+d_output, r
+qu
+st_
+d=r
+qu
+st_
+d, **k
+args)
 ```
+Th
+ `pars
+_data` m
+thod 
+s us
+d for va
 
-The `parse_data` method is used for validating the user data and converting it into the input expected by the `pre_process*` methods.
-The `merge_sampling_params` and `merge_pooling_params` methods merge input `SamplingParams` or `PoolingParams` (if any) with the default one.
-The `pre_process*` methods take the validated plugin input to generate vLLM's model prompts for regular inference.
-The `post_process*` methods take `PoolingRequestOutput` objects as input and generate a custom plugin output.
+dat
 
-An example implementation of a plugin that enables generating geotiff images with the PrithviGeospatialMAE model is available [here](https://github.com/IBM/terratorch/tree/main/terratorch/vllm/plugins/segmentation). Please, also refer to our online ([examples/pooling/plugin/prithvi_geospatial_mae_online.py](../../examples/pooling/plugin/prithvi_geospatial_mae_online.py)) and offline ([examples/pooling/plugin/prithvi_geospatial_mae_io_processor.py](../../examples/pooling/plugin/prithvi_geospatial_mae_io_processor.py)) inference examples.
+g th
+ us
+r data a
+d co
+v
+rt
 
-## Using an IO Processor plugin
+g 
+t 
 
-IO Processor plugins are loaded at engine startup and there are two methods for specifying the name of the plugin to be loaded:
+to th
+ 
 
-1. Via vLLM's `EngineArgs`: setting the `io_processor_plugin` argument in the `EngineArgs` used to initialize the `AsyncLLM`. The same can be achieved by passing the `io_processor_plugin` argument to `LLM` in offline mode, or by passing the `--io-processor-plugin` argument in serving mode.
-2. Via the model HF configuration: adding an `io_processor_plugin` field to the model config (config.json).
+put 
+xp
+ct
+d by th
+ `pr
+_proc
+ss*` m
+thods.
+Th
+ `m
+rg
+_samp
 
-The order also determines method priority. i.e., setting the plugin name via `EngineArgs` will override any plugin name specified in the model HF config (config.json).
+
+g_params` a
+d `m
+rg
+_poo
+
+
+g_params` m
+thods m
+rg
+ 
+
+put `Samp
+
+
+gParams` or `Poo
+
+
+gParams` (
+f a
+y) 
+
+th th
+ d
+fau
+t o
+
+.
+Th
+ `pr
+_proc
+ss*` m
+thods tak
+ th
+ va
+
+dat
+d p
+ug
+
+ 
+
+put to g
+
+
+rat
+ vLLM's mod
+
+ prompts for r
+gu
+ar 
+
+f
+r
+
+c
+.
+Th
+ `post_proc
+ss*` m
+thods tak
+ `Poo
+
+
+gR
+qu
+stOutput` obj
+cts as 
+
+put a
+d g
+
+
+rat
+ a custom p
+ug
+
+ output.
+A
+ 
+xamp
+
+ 
+mp
+
+m
+
+tat
+o
+ of a p
+ug
+
+ that 
+
+ab
+
+s g
+
+
+rat
+
+g g
+ot
+ff 
+mag
+s 
+
+th th
+ Pr
+thv
+G
+ospat
+a
+MAE mod
+
+ 
+s ava
+
+ab
+
+ [h
+r
+](https://g
+thub.com/IBM/t
+rratorch/tr
+/ma
+
+/t
+rratorch/v
+m/p
+ug
+
+s/s
+gm
+
+tat
+o
+). P
+
+as
+, a
+so r
+f
+r to our o
+
+
+
+
+ ([
+xamp
+
+s/poo
+
+
+g/p
+ug
+
+/pr
+thv
+_g
+ospat
+a
+_ma
+_o
+
+
+
+
+.py](../../
+xamp
+
+s/poo
+
+
+g/p
+ug
+
+/pr
+thv
+_g
+ospat
+a
+_ma
+_o
+
+
+
+
+.py)) a
+d off
+
+
+
+ ([
+xamp
+
+s/poo
+
+
+g/p
+ug
+
+/pr
+thv
+_g
+ospat
+a
+_ma
+_
+o_proc
+ssor.py](../../
+xamp
+
+s/poo
+
+
+g/p
+ug
+
+/pr
+thv
+_g
+ospat
+a
+_ma
+_
+o_proc
+ssor.py)) 
+
+f
+r
+
+c
+ 
+xamp
+
+s.
+## Us
+
+g a
+ IO Proc
+ssor p
+ug
+
+
+IO Proc
+ssor p
+ug
+
+s ar
+ 
+oad
+d at 
+
+g
+
+
+ startup a
+d th
+r
+ ar
+ t
+o m
+thods for sp
+c
+fy
+
+g th
+ 
+am
+ of th
+ p
+ug
+
+ to b
+ 
+oad
+d:
+1. V
+a vLLM's `E
+g
+
+
+Args`: s
+tt
+
+g th
+ `
+o_proc
+ssor_p
+ug
+
+` argum
+
+t 
+
+ th
+ `E
+g
+
+
+Args` us
+d to 
+
+
+t
+a
+
+z
+ th
+ `Asy
+cLLM`. Th
+ sam
+ ca
+ b
+ ach
+
+v
+d by pass
+
+g th
+ `
+o_proc
+ssor_p
+ug
+
+` argum
+
+t to `LLM` 
+
+ off
+
+
+
+ mod
+, or by pass
+
+g th
+ `--
+o-proc
+ssor-p
+ug
+
+` argum
+
+t 
+
+ s
+rv
+
+g mod
+.
+2. V
+a th
+ mod
+
+ HF co
+f
+gurat
+o
+: add
+
+g a
+ `
+o_proc
+ssor_p
+ug
+
+` f
+
+
+d to th
+ mod
+
+ co
+f
+g (co
+f
+g.jso
+).
+Th
+ ord
+r a
+so d
+t
+rm
+
+
+s m
+thod pr
+or
+ty. 
+.
+., s
+tt
+
+g th
+ p
+ug
+
+ 
+am
+ v
+a `E
+g
+
+
+Args` 
+
+
+ ov
+rr
+d
+ a
+y p
+ug
+
+ 
+am
+ sp
+c
+f
+
+d 
+
+ th
+ mod
+
+ HF co
+f
+g (co
+f
+g.jso
+).

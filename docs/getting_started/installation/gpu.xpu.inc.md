@@ -1,85 +1,790 @@
-# --8<-- [start:installation]
+# --8
+-- [start:
 
-vLLM initially supports basic model inference and serving on Intel GPU platform.
+sta
+at
+o
+]
+vLLM 
 
-# --8<-- [end:installation]
-# --8<-- [start:requirements]
 
-- Supported Hardware: Intel Data Center GPU, Intel ARC GPU
-- OneAPI requirements: oneAPI 2025.3
-- Dependency: [vllm-xpu-kernels](https://github.com/vllm-project/vllm-xpu-kernels): a package provide all necessary vllm custom kernel when running vLLM on Intel GPU platform, 
-- Python: 3.12
-!!! warning
-    The provided vllm-xpu-kernels whl is Python3.12 specific so this version is a MUST.
+t
+a
+y supports bas
+c mod
 
-# --8<-- [end:requirements]
-# --8<-- [start:set-up-using-python]
+ 
 
-There is no extra information on creating a new Python environment for this device.
+f
+r
 
-# --8<-- [end:set-up-using-python]
-# --8<-- [start:pre-built-wheels]
+c
+ a
+d s
+rv
 
-Currently, there are no pre-built XPU wheels.
+g o
+ I
+t
 
-# --8<-- [end:pre-built-wheels]
-# --8<-- [start:build-wheel-from-source]
+ GPU p
+atform.
+# --8
+-- [
 
-- First, install required [driver](https://dgpu-docs.intel.com/driver/installation.html#installing-gpu-drivers) and [Intel OneAPI](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html) 2025.3 or later.
-- Second, install Python packages for vLLM XPU backend building:
+d:
 
+sta
+at
+o
+]
+# --8
+-- [start:r
+qu
+r
+m
+
+ts]
+    - Support
+d Hard
+ar
+: I
+t
+
+ Data C
+
+t
+r GPU, I
+t
+
+ ARC GPU
+    - O
+
+API r
+qu
+r
+m
+
+ts: o
+
+API 2025.3
+    - D
+p
+
+d
+
+cy: [v
+m-xpu-k
+r
+
+
+s](https://g
+thub.com/v
+m-proj
+ct/v
+m-xpu-k
+r
+
+
+s): a packag
+ prov
+d
+ a
+ 
+
+c
+ssary v
+m custom k
+r
+
+
+ 
+h
+
+ ru
+
+
+g vLLM o
+ I
+t
+
+ GPU p
+atform, 
+    - Pytho
+: 3.12
+!!! 
+ar
+
+
+g
+    Th
+ prov
+d
+d v
+m-xpu-k
+r
+
+
+s 
+h
+ 
+s Pytho
+3.12 sp
+c
+f
+c so th
+s v
+rs
+o
+ 
+s a MUST.
+# --8
+-- [
+
+d:r
+qu
+r
+m
+
+ts]
+# --8
+-- [start:s
+t-up-us
+
+g-pytho
+]
+Th
+r
+ 
+s 
+o 
+xtra 
+
+format
+o
+ o
+ cr
+at
+
+g a 
+
+
+ Pytho
+ 
+
+v
+ro
+m
+
+t for th
+s d
+v
+c
+.
+# --8
+-- [
+
+d:s
+t-up-us
+
+g-pytho
+]
+# --8
+-- [start:pr
+-bu
+
+t-
+h
+
+s]
+Curr
+
+t
+y, th
+r
+ ar
+ 
+o pr
+-bu
+
+t XPU 
+h
+
+s.
+# --8
+-- [
+
+d:pr
+-bu
+
+t-
+h
+
+s]
+# --8
+-- [start:bu
+
+d-
+h
+
+-from-sourc
+]
+    - F
+rst, 
+
+sta
+ r
+qu
+r
+d [dr
+v
+r](https://dgpu-docs.
+
+t
+
+.com/dr
+v
+r/
+
+sta
+at
+o
+.htm
+#
+
+sta
+
+
+g-gpu-dr
+v
+rs) a
+d [I
+t
+
+ O
+
+API](https://
+.
+
+t
+
+.com/co
+t
+
+t/
+/us/
+
+/d
+v
+
+op
+r/too
+s/o
+
+ap
+/bas
+-too
+k
+t.htm
+) 2025.3 or 
+at
+r.
+    - S
+co
+d, 
+
+sta
+ Pytho
+ packag
+s for vLLM XPU back
+
+d bu
+
+d
+
+g:
 ```bash
-git clone https://github.com/vllm-project/vllm.git
-cd vllm
-pip install --upgrade pip
-pip install -v -r requirements/xpu.txt
+g
+t c
+o
+
+ https://g
+thub.com/v
+m-proj
+ct/v
+m.g
+t
+cd v
+m
+p
+p 
+
+sta
+ --upgrad
+ p
+p
+p
+p 
+
+sta
+ -v -r r
+qu
+r
+m
+
+ts/xpu.txt
 ```
+    - Th
 
-- Then, build and install vLLM XPU backend:
+, bu
 
+d a
+d 
+
+sta
+ vLLM XPU back
+
+d:
 ```bash
-VLLM_TARGET_DEVICE=xpu pip install --no-build-isolation -e . -v
+VLLM_TARGET_DEVICE=xpu p
+p 
+
+sta
+ --
+o-bu
+
+d-
+so
+at
+o
+ -
+ . -v
 ```
+# --8
+-- [
 
-# --8<-- [end:build-wheel-from-source]
-# --8<-- [start:pre-built-images]
+d:bu
 
-Currently, we release prebuilt XPU images at docker [hub](https://hub.docker.com/r/intel/vllm/tags) based on vLLM released version. For more information, please refer release [note](https://github.com/intel/ai-containers/blob/main/vllm).
+d-
+h
 
-# --8<-- [end:pre-built-images]
-# --8<-- [start:build-image-from-source]
+-from-sourc
+]
+# --8
+-- [start:pr
+-bu
 
+t-
+mag
+s]
+Curr
+
+t
+y, 
+
+ r
+
+
+as
+ pr
+bu
+
+t XPU 
+mag
+s at dock
+r [hub](https://hub.dock
+r.com/r/
+
+t
+
+/v
+m/tags) bas
+d o
+ vLLM r
+
+
+as
+d v
+rs
+o
+. For mor
+ 
+
+format
+o
+, p
+
+as
+ r
+f
+r r
+
+
+as
+ [
+ot
+](https://g
+thub.com/
+
+t
+
+/a
+-co
+ta
+
+
+rs/b
+ob/ma
+
+/v
+m).
+# --8
+-- [
+
+d:pr
+-bu
+
+t-
+mag
+s]
+# --8
+-- [start:bu
+
+d-
+mag
+-from-sourc
+]
 ```bash
-docker build -f docker/Dockerfile.xpu -t vllm-xpu-env --shm-size=4g .
-docker run -it \
+dock
+r bu
+
+d -f dock
+r/Dock
+rf
+
+
+.xpu -t v
+m-xpu-
+
+v --shm-s
+z
+=4g .
+dock
+r ru
+ -
+t \
              --rm \
-             --network=host \
-             --device /dev/dri:/dev/dri \
-             -v /dev/dri/by-path:/dev/dri/by-path \
-             --ipc=host \
-             --privileged \
-             vllm-xpu-env
+             --
+
+t
+ork=host \
+             --d
+v
+c
+ /d
+v/dr
+:/d
+v/dr
+ \
+             -v /d
+v/dr
+/by-path:/d
+v/dr
+/by-path \
+             --
+pc=host \
+             --pr
+v
+
+
+g
+d \
+             v
+m-xpu-
+
+v
 ```
+# --8
+-- [
 
-# --8<-- [end:build-image-from-source]
-# --8<-- [start:supported-features]
+d:bu
 
-XPU platform supports **tensor parallel** inference/serving and also supports **pipeline parallel** as a beta feature for online serving. For **pipeline parallel**, we support it on single node with mp as the backend. For example, a reference execution like following:
+d-
+mag
+-from-sourc
+]
+# --8
+-- [start:support
+d-f
+atur
+s]
+XPU p
+atform supports **t
 
+sor para
+
+
+** 
+
+f
+r
+
+c
+/s
+rv
+
+g a
+d a
+so supports **p
+p
+
+
+
+
+ para
+
+
+** as a b
+ta f
+atur
+ for o
+
+
+
+
+ s
+rv
+
+g. For **p
+p
+
+
+
+
+ para
+
+
+**, 
+
+ support 
+t o
+ s
+
+g
+
+ 
+od
+ 
+
+th mp as th
+ back
+
+d. For 
+xamp
+
+, a r
+f
+r
+
+c
+ 
+x
+cut
+o
+ 
+
+k
+ fo
+o
+
+
+g:
 ```bash
-vllm serve facebook/opt-13b \
-     --dtype=bfloat16 \
-     --max_model_len=1024 \
-     --distributed-executor-backend=mp \
-     --pipeline-parallel-size=2 \
+v
+m s
+rv
+ fac
+book/opt-13b \
+     --dtyp
+=bf
+oat16 \
+     --max_mod
+
+_
+
+
+=1024 \
+     --d
+str
+but
+d-
+x
+cutor-back
+
+d=mp \
+     --p
+p
+
+
+
+
+-para
+
+
+-s
+z
+=2 \
      -tp=8
 ```
+By d
+fau
+t, a ray 
 
-By default, a ray instance will be launched automatically if no existing one is detected in the system, with `num-gpus` equals to `parallel_config.world_size`. We recommend properly starting a ray cluster before execution, referring to the [examples/online_serving/run_cluster.sh](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/run_cluster.sh) helper script.
+sta
+c
+ 
 
-# --8<-- [end:supported-features]
-# --8<-- [start:distributed-backend]
 
-XPU platform uses **torch-ccl** for torch<2.8 and **xccl** for torch>=2.8 as distributed backend, since torch 2.8 supports **xccl** as built-in backend for XPU.
+ b
+ 
+au
+ch
+d automat
+ca
+y 
+f 
+o 
+x
+st
 
-# --8<-- [end:distributed-backend]
+g o
+
+ 
+s d
+t
+ct
+d 
+
+ th
+ syst
+m, 
+
+th `
+um-gpus` 
+qua
+s to `para
+
+
+_co
+f
+g.
+or
+d_s
+z
+`. W
+ r
+comm
+
+d prop
+r
+y start
+
+g a ray c
+ust
+r b
+for
+ 
+x
+cut
+o
+, r
+f
+rr
+
+g to th
+ [
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/ru
+_c
+ust
+r.sh](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/ru
+_c
+ust
+r.sh) h
+
+p
+r scr
+pt.
+# --8
+-- [
+
+d:support
+d-f
+atur
+s]
+# --8
+-- [start:d
+str
+but
+d-back
+
+d]
+XPU p
+atform us
+s **torch-cc
+** for torch
+2.8 a
+d **xcc
+** for torch
+=2.8 as d
+str
+but
+d back
+
+d, s
+
+c
+ torch 2.8 supports **xcc
+** as bu
+
+t-
+
+ back
+
+d for XPU.
+# --8
+-- [
+
+d:d
+str
+but
+d-back
+
+d]

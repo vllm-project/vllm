@@ -1,468 +1,5939 @@
-# Custom Logits Processors
+# Custom Log
+ts Proc
+ssors
+!!! 
+mporta
+t
+    Som
+ 
+og
+ts proc
+ssors d
+s
+g
+ cha
+g
+s ar
+ st
 
-!!! important
-    Some logits processors design changes are still in progress and the API may
-    change in the near future. We hope to stabilize this part of the API soon
+ 
 
-A "custom" logits processor is written by a user of vLLM and is loaded into vLLM at initialization without needing to modify or recompile the vLLM source code. It is the opposite of a built-in logits processor.
+ progr
+ss a
+d th
+ API may
+    cha
+g
+ 
 
-This document shows how to write, load and use a custom logits processor.
+ th
+ 
 
-## Logits Processors Background
+ar futur
+. W
+ hop
+ to stab
 
-A logits processor adjusts the next-token probability distribution, usually with the intention of steering the model towards a desired type of behavior.
 
-In vLLM, logits processors operate at batch granularity. During a given engine step, the logits processor consumes a `(num_requests) x (vocab_size)` tensor of raw logits output by the model. For all requests which enable the logits processor, the logits processor applies a transformation to the corresponding row of the logits tensor, while leaving other rows unmodified. The transformed logits tensor is then passed to softmax.  
+z
+ th
+s part of th
+ API soo
 
-## Creating a Custom Logits Processor
+A "custom" 
+og
+ts proc
+ssor 
+s 
+r
+tt
 
-Custom logits processors must subclass `vllm.v1.sample.logits_processor.LogitsProcessor` and define (at minimum) the following methods:
+ by a us
+r of vLLM a
+d 
+s 
+oad
+d 
 
-* `validate_params(cls, sampling_params: SamplingParams)`:
-    * Raise `ValueError` if `SamplingParams` has invalid arguments (especially custom arguments) used by logits processor.
-    * When request is sent to entrypoint, `validate_params()` will validate `SamplingParams` and refuse request with invalid arguments.
-    * **Note:** it's important to implement `validate_params()` to prevent invalid parameters for custom logits processor. Otherwise requests with invalid parameters can cause unexpected behaviour in custom logits processor.
+to vLLM at 
 
-* `__init__(self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool)`
-    * `vllm_config`: engine configuration data structure
-    * `device`: hardware accelerator device info
-    * `is_pin_memory`: flag indicating whether pin memory is available to support logits processor implementation
 
-* `apply(self, logits: torch.Tensor) -> torch.Tensor`:
-    * Consume a `(num_requests) x (vocab_size)` logits tensor (`logits`)
-    * Apply logits processor transformation at batch granularity
-    * Return a transformed `(num_requests) x (vocab_size)` logits tensor
-    * You can modify the input logits processors in-place or out-of-place; in-place is more memory-efficient
+t
+a
 
-* `is_argmax_invariant(self) -> bool`:
-    * Return `True` if the logits processor is argmax invariant (never changes what is the highest-logit-value token ID for a given request), `False` if the logits processor may modify argmax
-    * `is_argmax_invariant()` is evaluated once at startup; if `True`, vLLM will skip applying this logits processor in a given step when all requests use greedy sampling
+zat
+o
+ 
 
-* `update_state(self, batch_update: Optional["BatchUpdate"]) -> None`:
-    * Consume a `BatchUpdate` data structure representing persistent batch state changes at the beginning of the current engine step
-    * Use the `BatchUpdate` members to update logits processor internal state
-    * **Note:** batch update data structure may be `None`, signaling no change to the batch constituents. In this case, the LogitsProcessor might still want to update its state based on the updated `output_token_ids` lists that it could have retained when they were added.
+thout 
 
-### How the vLLM engine builds the `BatchUpdate` data structure
+d
 
-!!! important
-    Some logits processors design changes are still in progress. We expect
-    that in the future you will not need to account for batch state changes
-    when implementing a logits processor, and the information in this section
-    will become irrelevant.
+g to mod
+fy or r
+comp
 
-Logits processor `update_state()` implementations should assume the following model for how the model runner updates persistent batch state (expressed here in terms of the `BatchUpdate` abstraction):
 
-1. Identify indices of requests which finished in the current engine step
+ th
+ vLLM sourc
+ cod
+. It 
+s th
+ oppos
+t
+ of a bu
 
-2. Identify new requests introduced in the current step
+t-
 
-3. Use Add operations to replace as many finished requests with new requests, in order of increasing index of the replaced request starting with the lowest index
+ 
+og
+ts proc
+ssor.
+Th
+s docum
 
-4. Based on the relative number of new and finished requests:
+t sho
+s ho
+ to 
+r
+t
+, 
+oad a
+d us
+ a custom 
+og
+ts proc
+ssor.
+## Log
+ts Proc
+ssors Backgrou
+d
+A 
+og
+ts proc
+ssor adjusts th
+ 
 
-    1. If the numbers of new and finished requests are the same, proceed to next step
+xt-tok
 
-    2. *If there are more new requests than finished requests:* apply Add operations to extend the batch with the remaining new requests which did not replace finished requests. Assign consecutive indices to these new requests, starting with `current_max_batch_index + 1`
+ probab
 
-    3. *If there are fewer new requests than finished requests:*
 
-        * Apply Remove operations to finished requests which were not replaced with new requests. These removed request indices will necessarily be greater than the greatest index of the finished requests which were replaced in the previous step. The Removes may leave the batch in a non-contiguous state
+ty d
+str
+but
+o
+, usua
+y 
 
-        * **"Condense" the batch to be contiguous:** starting with the lowest-index empty slot (which was caused by a Remove), apply a Unidirectional Move from the current highest non-empty slot in the batch to fill the empty slot. Proceed with additional Unidirectional Move operations in order of increasing empty slot destination index and decreasing non-empty slot source index until the batch is contiguous
+th th
+ 
 
-        * **Shrink the batch:** a side effect of condensing the batch is that empty slots resulting from Remove operations are grouped in a contiguous block at the end of the batch array. Thus, after condensing, update `BatchUpdate.batch_size` to reflect the number of non-empty slots
+t
 
-5. Reorder the batch for improved efficiency. Depending on the attention backend implementation and the current characteristics of the batch, zero or more Swap Move operations may be applied to reorder the batch
+t
+o
+ of st
+r
 
-Notes:
+g th
+ mod
 
-* A logits processor `update_state()` method must process batch update operations in the following order: removes, adds, moves
+ to
+ards a d
+s
+r
+d typ
+ of b
+hav
+or.
+I
+ vLLM, 
+og
+ts proc
+ssors op
+rat
+ at batch gra
+u
+ar
+ty. Dur
 
-* The index argument for Add operations refers to the index *at the time the Add occurred*, i.e. before any Move operations
-    * Example: if a request is Added at index 5 and then swapped with index 3, the Add operation in `BatchUpdate.added` will be associated with index 5 not 3
-    * In other words Move operations can be assumed to be applied after Adds and Removes
+g a g
+v
 
-* Move operations can be assumed to be applied in the order in which they appear in `BatchUpdate.moved`
+ 
 
-* If there are no new/finished requests and there is no batch reordering, then the batch update for the logits processors will be `None`
+g
 
-### Passing Custom Argument to a Custom Logits Processor
 
-Unlike built-in logits processors, custom logits processors may require configuration arguments that are not hard-coded into `SamplingParams` or the vLLM server REST API. To solve this problem, custom logits processors may leverage vLLM [custom arguments](./custom_arguments.md) support to receive configuration settings from the user (although you are also free to design a custom logits processor which utilizes the pre-existing fields in `SamplingParams`.)
+ st
+p, th
+ 
+og
+ts proc
+ssor co
+sum
+s a `(
+um_r
+qu
+sts) x (vocab_s
+z
+)` t
 
-### Example Custom Logits Processor Implementation
+sor of ra
+ 
+og
+ts output by th
+ mod
 
-The contrived example below implements a custom logits processor which consumes a `(num\_requests) \times (vocab\_size)` logits tensor and masks out all tokens except for one (`target_token`) with `float(-inf)`. The logits processor is disabled for any request that does not specify `target_token`. To determine whether the logits processor is enabled and which token to leave unmasked, the logits processor checks `SamplingParams.extra_args` for a `target_token` custom argument associated with each request:
+. For a
+ r
+qu
+sts 
+h
+ch 
 
-??? code "Example custom logits processor definition"
+ab
 
-    ``` python
-    import torch
-    from vllm.config import VllmConfig
-    from vllm.sampling_params import SamplingParams
-    from vllm.v1.sample.logits_processor import (BatchUpdate,
-                                                LogitsProcessor,
-                                                MoveDirectionality)
+ th
+ 
+og
+ts proc
+ssor, th
+ 
+og
+ts proc
+ssor app
 
-    class DummyLogitsProcessor(LogitsProcessor):
-        """Fake logit processor to support unit testing and examples"""
 
-        @classmethod
-        def validate_params(cls, params: SamplingParams):
-            target_token: int | None = params.extra_args and params.extra_args.get(
-                "target_token"
+s a tra
+sformat
+o
+ to th
+ corr
+spo
+d
+
+g ro
+ of th
+ 
+og
+ts t
+
+sor, 
+h
+
+
+ 
+
+av
+
+g oth
+r ro
+s u
+mod
+f
+
+d. Th
+ tra
+sform
+d 
+og
+ts t
+
+sor 
+s th
+
+ pass
+d to softmax.
+## Cr
+at
+
+g a Custom Log
+ts Proc
+ssor
+Custom 
+og
+ts proc
+ssors must subc
+ass `v
+m.v1.samp
+
+.
+og
+ts_proc
+ssor.Log
+tsProc
+ssor` a
+d d
+f
+
+
+ (at m
+
+
+mum) th
+ fo
+o
+
+
+g m
+thods:
+* `va
+
+dat
+_params(c
+s, samp
+
+
+g_params: Samp
+
+
+gParams)`:
+    * Ra
+s
+ `Va
+u
+Error` 
+f `Samp
+
+
+gParams` has 
+
+va
+
+d argum
+
+ts (
+sp
+c
+a
+y custom argum
+
+ts) us
+d by 
+og
+ts proc
+ssor.
+    * Wh
+
+ r
+qu
+st 
+s s
+
+t to 
+
+trypo
+
+t, `va
+
+dat
+_params()` 
+
+
+ va
+
+dat
+ `Samp
+
+
+gParams` a
+d r
+fus
+ r
+qu
+st 
+
+th 
+
+va
+
+d argum
+
+ts.
+    * **Not
+:** 
+t's 
+mporta
+t to 
+mp
+
+m
+
+t `va
+
+dat
+_params()` to pr
+v
+
+t 
+
+va
+
+d param
+t
+rs for custom 
+og
+ts proc
+ssor. Oth
+r
+
+s
+ r
+qu
+sts 
+
+th 
+
+va
+
+d param
+t
+rs ca
+ caus
+ u
+
+xp
+ct
+d b
+hav
+our 
+
+ custom 
+og
+ts proc
+ssor.
+* `__
+
+
+t__(s
+
+f, v
+m_co
+f
+g: V
+mCo
+f
+g, d
+v
+c
+: torch.d
+v
+c
+, 
+s_p
+
+_m
+mory: boo
+)`
+    * `v
+m_co
+f
+g`: 
+
+g
+
+
+ co
+f
+gurat
+o
+ data structur
+
+    * `d
+v
+c
+`: hard
+ar
+ acc
+
+
+rator d
+v
+c
+ 
+
+fo
+    * `
+s_p
+
+_m
+mory`: f
+ag 
+
+d
+cat
+
+g 
+h
+th
+r p
+
+ m
+mory 
+s ava
+
+ab
+
+ to support 
+og
+ts proc
+ssor 
+mp
+
+m
+
+tat
+o
+
+* `app
+y(s
+
+f, 
+og
+ts: torch.T
+
+sor) -
+ torch.T
+
+sor`:
+    * Co
+sum
+ a `(
+um_r
+qu
+sts) x (vocab_s
+z
+)` 
+og
+ts t
+
+sor (`
+og
+ts`)
+    * App
+y 
+og
+ts proc
+ssor tra
+sformat
+o
+ at batch gra
+u
+ar
+ty
+    * R
+tur
+ a tra
+sform
+d `(
+um_r
+qu
+sts) x (vocab_s
+z
+)` 
+og
+ts t
+
+sor
+    * You ca
+ mod
+fy th
+ 
+
+put 
+og
+ts proc
+ssors 
+
+-p
+ac
+ or out-of-p
+ac
+; 
+
+-p
+ac
+ 
+s mor
+ m
+mory-
+ff
+c
+
+
+t
+* `
+s_argmax_
+
+var
+a
+t(s
+
+f) -
+ boo
+`:
+    * R
+tur
+ `Tru
+` 
+f th
+ 
+og
+ts proc
+ssor 
+s argmax 
+
+var
+a
+t (
+
+v
+r cha
+g
+s 
+hat 
+s th
+ h
+gh
+st-
+og
+t-va
+u
+ tok
+
+ ID for a g
+v
+
+ r
+qu
+st), `Fa
+s
+` 
+f th
+ 
+og
+ts proc
+ssor may mod
+fy argmax
+    * `
+s_argmax_
+
+var
+a
+t()` 
+s 
+va
+uat
+d o
+c
+ at startup; 
+f `Tru
+`, vLLM 
+
+
+ sk
+p app
+y
+
+g th
+s 
+og
+ts proc
+ssor 
+
+ a g
+v
+
+ st
+p 
+h
+
+ a
+ r
+qu
+sts us
+ gr
+dy samp
+
+
+g
+* `updat
+_stat
+(s
+
+f, batch_updat
+: Opt
+o
+a
+["BatchUpdat
+"]) -
+ No
+
+`:
+    * Co
+sum
+ a `BatchUpdat
+` data structur
+ r
+pr
+s
+
+t
+
+g p
+rs
+st
+
+t batch stat
+ cha
+g
+s at th
+ b
+g
+
+
+
+g of th
+ curr
+
+t 
+
+g
+
+
+ st
+p
+    * Us
+ th
+ `BatchUpdat
+` m
+mb
+rs to updat
+ 
+og
+ts proc
+ssor 
+
+t
+r
+a
+ stat
+
+    * **Not
+:** batch updat
+ data structur
+ may b
+ `No
+
+`, s
+g
+a
+
+
+g 
+o cha
+g
+ to th
+ batch co
+st
+tu
+
+ts. I
+ th
+s cas
+, th
+ Log
+tsProc
+ssor m
+ght st
+
+ 
+a
+t to updat
+ 
+ts stat
+ bas
+d o
+ th
+ updat
+d `output_tok
+
+_
+ds` 
+
+sts that 
+t cou
+d hav
+ r
+ta
+
+
+d 
+h
+
+ th
+y 
+
+r
+ add
+d.
+### Ho
+ th
+ vLLM 
+
+g
+
+
+ bu
+
+ds th
+ `BatchUpdat
+` data structur
+
+!!! 
+mporta
+t
+    Som
+ 
+og
+ts proc
+ssors d
+s
+g
+ cha
+g
+s ar
+ st
+
+ 
+
+ progr
+ss. W
+ 
+xp
+ct
+    that 
+
+ th
+ futur
+ you 
+
+
+ 
+ot 
+
+d to accou
+t for batch stat
+ cha
+g
+s
+    
+h
+
+ 
+mp
+
+m
+
+t
+
+g a 
+og
+ts proc
+ssor, a
+d th
+ 
+
+format
+o
+ 
+
+ th
+s s
+ct
+o
+
+    
+
+
+ b
+com
+ 
+rr
+
+
+va
+t.
+Log
+ts proc
+ssor `updat
+_stat
+()` 
+mp
+
+m
+
+tat
+o
+s shou
+d assum
+ th
+ fo
+o
+
+
+g mod
+
+ for ho
+ th
+ mod
+
+ ru
+
+r updat
+s p
+rs
+st
+
+t batch stat
+ (
+xpr
+ss
+d h
+r
+ 
+
+ t
+rms of th
+ `BatchUpdat
+` abstract
+o
+):
+1. Id
+
+t
+fy 
+
+d
+c
+s of r
+qu
+sts 
+h
+ch f
+
+
+sh
+d 
+
+ th
+ curr
+
+t 
+
+g
+
+
+ st
+p
+2. Id
+
+t
+fy 
+
+
+ r
+qu
+sts 
+
+troduc
+d 
+
+ th
+ curr
+
+t st
+p
+3. Us
+ Add op
+rat
+o
+s to r
+p
+ac
+ as ma
+y f
+
+
+sh
+d r
+qu
+sts 
+
+th 
+
+
+ r
+qu
+sts, 
+
+ ord
+r of 
+
+cr
+as
+
+g 
+
+d
+x of th
+ r
+p
+ac
+d r
+qu
+st start
+
+g 
+
+th th
+ 
+o
+
+st 
+
+d
+x
+4. Bas
+d o
+ th
+ r
+
+at
+v
+ 
+umb
+r of 
+
+
+ a
+d f
+
+
+sh
+d r
+qu
+sts:
+    1. If th
+ 
+umb
+rs of 
+
+
+ a
+d f
+
+
+sh
+d r
+qu
+sts ar
+ th
+ sam
+, proc
+d to 
+
+xt st
+p
+    2. *If th
+r
+ ar
+ mor
+ 
+
+
+ r
+qu
+sts tha
+ f
+
+
+sh
+d r
+qu
+sts:* app
+y Add op
+rat
+o
+s to 
+xt
+
+d th
+ batch 
+
+th th
+ r
+ma
+
+
+
+g 
+
+
+ r
+qu
+sts 
+h
+ch d
+d 
+ot r
+p
+ac
+ f
+
+
+sh
+d r
+qu
+sts. Ass
+g
+ co
+s
+cut
+v
+ 
+
+d
+c
+s to th
+s
+ 
+
+
+ r
+qu
+sts, start
+
+g 
+
+th `curr
+
+t_max_batch_
+
+d
+x + 1`
+    3. *If th
+r
+ ar
+ f
+
+
+r 
+
+
+ r
+qu
+sts tha
+ f
+
+
+sh
+d r
+qu
+sts:*
+        * App
+y R
+mov
+ op
+rat
+o
+s to f
+
+
+sh
+d r
+qu
+sts 
+h
+ch 
+
+r
+ 
+ot r
+p
+ac
+d 
+
+th 
+
+
+ r
+qu
+sts. Th
+s
+ r
+mov
+d r
+qu
+st 
+
+d
+c
+s 
+
+
+ 
+
+c
+ssar
+
+y b
+ gr
+at
+r tha
+ th
+ gr
+at
+st 
+
+d
+x of th
+ f
+
+
+sh
+d r
+qu
+sts 
+h
+ch 
+
+r
+ r
+p
+ac
+d 
+
+ th
+ pr
+v
+ous st
+p. Th
+ R
+mov
+s may 
+
+av
+ th
+ batch 
+
+ a 
+o
+-co
+t
+guous stat
+
+        * **"Co
+d
+
+s
+" th
+ batch to b
+ co
+t
+guous:** start
+
+g 
+
+th th
+ 
+o
+
+st-
+
+d
+x 
+mpty s
+ot (
+h
+ch 
+as caus
+d by a R
+mov
+), app
+y a U
+
+d
+r
+ct
+o
+a
+ Mov
+ from th
+ curr
+
+t h
+gh
+st 
+o
+-
+mpty s
+ot 
+
+ th
+ batch to f
+
+ th
+ 
+mpty s
+ot. Proc
+d 
+
+th add
+t
+o
+a
+ U
+
+d
+r
+ct
+o
+a
+ Mov
+ op
+rat
+o
+s 
+
+ ord
+r of 
+
+cr
+as
+
+g 
+mpty s
+ot d
+st
+
+at
+o
+ 
+
+d
+x a
+d d
+cr
+as
+
+g 
+o
+-
+mpty s
+ot sourc
+ 
+
+d
+x u
+t
+
+ th
+ batch 
+s co
+t
+guous
+        * **Shr
+
+k th
+ batch:** a s
+d
+ 
+ff
+ct of co
+d
+
+s
+
+g th
+ batch 
+s that 
+mpty s
+ots r
+su
+t
+
+g from R
+mov
+ op
+rat
+o
+s ar
+ group
+d 
+
+ a co
+t
+guous b
+ock at th
+ 
+
+d of th
+ batch array. Thus, aft
+r co
+d
+
+s
+
+g, updat
+ `BatchUpdat
+.batch_s
+z
+` to r
+f
+
+ct th
+ 
+umb
+r of 
+o
+-
+mpty s
+ots
+5. R
+ord
+r th
+ batch for 
+mprov
+d 
+ff
+c
+
+
+cy. D
+p
+
+d
+
+g o
+ th
+ att
+
+t
+o
+ back
+
+d 
+mp
+
+m
+
+tat
+o
+ a
+d th
+ curr
+
+t charact
+r
+st
+cs of th
+ batch, z
+ro or mor
+ S
+ap Mov
+ op
+rat
+o
+s may b
+ app
+
+
+d to r
+ord
+r th
+ batch
+Not
+s:
+* A 
+og
+ts proc
+ssor `updat
+_stat
+()` m
+thod must proc
+ss batch updat
+ op
+rat
+o
+s 
+
+ th
+ fo
+o
+
+
+g ord
+r: r
+mov
+s, adds, mov
+s
+* Th
+ 
+
+d
+x argum
+
+t for Add op
+rat
+o
+s r
+f
+rs to th
+ 
+
+d
+x *at th
+ t
+m
+ th
+ Add occurr
+d*, 
+.
+. b
+for
+ a
+y Mov
+ op
+rat
+o
+s
+    * Examp
+
+: 
+f a r
+qu
+st 
+s Add
+d at 
+
+d
+x 5 a
+d th
+
+ s
+app
+d 
+
+th 
+
+d
+x 3, th
+ Add op
+rat
+o
+ 
+
+ `BatchUpdat
+.add
+d` 
+
+
+ b
+ assoc
+at
+d 
+
+th 
+
+d
+x 5 
+ot 3
+    * I
+ oth
+r 
+ords Mov
+ op
+rat
+o
+s ca
+ b
+ assum
+d to b
+ app
+
+
+d aft
+r Adds a
+d R
+mov
+s
+* Mov
+ op
+rat
+o
+s ca
+ b
+ assum
+d to b
+ app
+
+
+d 
+
+ th
+ ord
+r 
+
+ 
+h
+ch th
+y app
+ar 
+
+ `BatchUpdat
+.mov
+d`
+* If th
+r
+ ar
+ 
+o 
+
+
+/f
+
+
+sh
+d r
+qu
+sts a
+d th
+r
+ 
+s 
+o batch r
+ord
+r
+
+g, th
+
+ th
+ batch updat
+ for th
+ 
+og
+ts proc
+ssors 
+
+
+ b
+ `No
+
+`
+### Pass
+
+g Custom Argum
+
+t to a Custom Log
+ts Proc
+ssor
+U
+
+
+k
+ bu
+
+t-
+
+ 
+og
+ts proc
+ssors, custom 
+og
+ts proc
+ssors may r
+qu
+r
+ co
+f
+gurat
+o
+ argum
+
+ts that ar
+ 
+ot hard-cod
+d 
+
+to `Samp
+
+
+gParams` or th
+ vLLM s
+rv
+r REST API. To so
+v
+ th
+s prob
+
+m, custom 
+og
+ts proc
+ssors may 
+
+v
+rag
+ vLLM [custom argum
+
+ts](./custom_argum
+
+ts.md) support to r
+c
+
+v
+ co
+f
+gurat
+o
+ s
+tt
+
+gs from th
+ us
+r (a
+though you ar
+ a
+so fr
+ to d
+s
+g
+ a custom 
+og
+ts proc
+ssor 
+h
+ch ut
+
+
+z
+s th
+ pr
+-
+x
+st
+
+g f
+
+
+ds 
+
+ `Samp
+
+
+gParams`.)
+### Examp
+
+ Custom Log
+ts Proc
+ssor Imp
+
+m
+
+tat
+o
+
+Th
+ co
+tr
+v
+d 
+xamp
+
+ b
+
+o
+ 
+mp
+
+m
+
+ts a custom 
+og
+ts proc
+ssor 
+h
+ch co
+sum
+s a `(
+um\_r
+qu
+sts) \t
+m
+s (vocab\_s
+z
+)` 
+og
+ts t
+
+sor a
+d masks out a
+ tok
+
+s 
+xc
+pt for o
+
+ (`targ
+t_tok
+
+`) 
+
+th `f
+oat(-
+
+f)`. Th
+ 
+og
+ts proc
+ssor 
+s d
+sab
+
+d for a
+y r
+qu
+st that do
+s 
+ot sp
+c
+fy `targ
+t_tok
+
+`. To d
+t
+rm
+
+
+ 
+h
+th
+r th
+ 
+og
+ts proc
+ssor 
+s 
+
+ab
+
+d a
+d 
+h
+ch tok
+
+ to 
+
+av
+ u
+mask
+d, th
+ 
+og
+ts proc
+ssor ch
+cks `Samp
+
+
+gParams.
+xtra_args` for a `targ
+t_tok
+
+` custom argum
+
+t assoc
+at
+d 
+
+th 
+ach r
+qu
+st:
+??? cod
+ "Examp
+
+ custom 
+og
+ts proc
+ssor d
+f
+
+
+t
+o
+"
+    ``` pytho
+
+    
+mport torch
+    from v
+m.co
+f
+g 
+mport V
+mCo
+f
+g
+    from v
+m.samp
+
+
+g_params 
+mport Samp
+
+
+gParams
+    from v
+m.v1.samp
+
+.
+og
+ts_proc
+ssor 
+mport (BatchUpdat
+,
+                                                Log
+tsProc
+ssor,
+                                                Mov
+D
+r
+ct
+o
+a
+
+ty)
+    c
+ass DummyLog
+tsProc
+ssor(Log
+tsProc
+ssor):
+        """Fak
+ 
+og
+t proc
+ssor to support u
+
+t t
+st
+
+g a
+d 
+xamp
+
+s"""
+        @c
+assm
+thod
+        d
+f va
+
+dat
+_params(c
+s, params: Samp
+
+
+gParams):
+            targ
+t_tok
+
+: 
+
+t | No
+
+ = params.
+xtra_args a
+d params.
+xtra_args.g
+t(
+                "targ
+t_tok
+
+"
             )
-            if target_token is not None and not isinstance(target_token, int):
-                raise ValueError(f"target_token value {target_token} is not int")
+            
+f targ
+t_tok
 
-        def __init__(self, vllm_config: "VllmConfig", device: torch.device,
-                    is_pin_memory: bool):
-            self.req_info: dict[int, int] = {}
+ 
+s 
+ot No
 
-        def is_argmax_invariant(self) -> bool:
-            """Never impacts greedy sampling"""
-            return False
+ a
+d 
+ot 
+s
 
-        def update_state(self, batch_update: BatchUpdate | None):
-            if not batch_update:
-                return
+sta
+c
+(targ
+t_tok
 
-            # Process added requests.
-            for index, params, _, _ in batch_update.added:
-                assert params is not None
-                self.validate_params(params)
-                if params.extra_args and (target_token :=
-                                        params.extra_args.get("target_token")):
-                    self.req_info[index] = target_token
-                else: 
-                    self.req_info.pop(index, None)
+, 
 
-            if self.req_info:
-                # Process removed requests.
-                for index in batch_update.removed:
-                    self.req_info.pop(index, None)
+t):
+                ra
+s
+ Va
+u
+Error(f"targ
+t_tok
 
-                # Process moved requests, unidirectional move (a->b) and swap
-                # (a<->b)
-                for adx, bdx, direct in batch_update.moved:
-                    a_val = self.req_info.pop(adx, None)
-                    b_val = self.req_info.pop(bdx, None)
-                    if a_val is not None:
-                        self.req_info[bdx] = a_val
-                    if direct == MoveDirectionality.SWAP and b_val is not None:
-                        self.req_info[adx] = b_val
+ va
+u
+ {targ
+t_tok
 
-        def apply(self, logits: torch.Tensor) -> torch.Tensor:
-            if not self.req_info:
-                return logits
+} 
+s 
+ot 
 
-            # Save target values before modification
-            cols = torch.tensor(
-                list(self.req_info.values()), dtype=torch.long, device=logits.device
+t")
+        d
+f __
+
+
+t__(s
+
+f, v
+m_co
+f
+g: "V
+mCo
+f
+g", d
+v
+c
+: torch.d
+v
+c
+,
+                    
+s_p
+
+_m
+mory: boo
+):
+            s
+
+f.r
+q_
+
+fo: d
+ct[
+
+t, 
+
+t] = {}
+        d
+f 
+s_argmax_
+
+var
+a
+t(s
+
+f) -
+ boo
+:
+            """N
+v
+r 
+mpacts gr
+dy samp
+
+
+g"""
+            r
+tur
+ Fa
+s
+
+        d
+f updat
+_stat
+(s
+
+f, batch_updat
+: BatchUpdat
+ | No
+
+):
+            
+f 
+ot batch_updat
+:
+                r
+tur
+
+            # Proc
+ss add
+d r
+qu
+sts.
+            for 
+
+d
+x, params, _, _ 
+
+ batch_updat
+.add
+d:
+                ass
+rt params 
+s 
+ot No
+
+
+                s
+
+f.va
+
+dat
+_params(params)
+                
+f params.
+xtra_args a
+d (targ
+t_tok
+
+ :=
+                                        params.
+xtra_args.g
+t("targ
+t_tok
+
+")):
+                    s
+
+f.r
+q_
+
+fo[
+
+d
+x] = targ
+t_tok
+
+
+                
+
+s
+:
+                    s
+
+f.r
+q_
+
+fo.pop(
+
+d
+x, No
+
+)
+            
+f s
+
+f.r
+q_
+
+fo:
+                # Proc
+ss r
+mov
+d r
+qu
+sts.
+                for 
+
+d
+x 
+
+ batch_updat
+.r
+mov
+d:
+                    s
+
+f.r
+q_
+
+fo.pop(
+
+d
+x, No
+
+)
+                # Proc
+ss mov
+d r
+qu
+sts, u
+
+d
+r
+ct
+o
+a
+ mov
+ (a-
+b) a
+d s
+ap
+                # (a
+-
+b)
+                for adx, bdx, d
+r
+ct 
+
+ batch_updat
+.mov
+d:
+                    a_va
+ = s
+
+f.r
+q_
+
+fo.pop(adx, No
+
+)
+                    b_va
+ = s
+
+f.r
+q_
+
+fo.pop(bdx, No
+
+)
+                    
+f a_va
+ 
+s 
+ot No
+
+:
+                        s
+
+f.r
+q_
+
+fo[bdx] = a_va
+
+                    
+f d
+r
+ct == Mov
+D
+r
+ct
+o
+a
+
+ty.SWAP a
+d b_va
+ 
+s 
+ot No
+
+:
+                        s
+
+f.r
+q_
+
+fo[adx] = b_va
+
+        d
+f app
+y(s
+
+f, 
+og
+ts: torch.T
+
+sor) -
+ torch.T
+
+sor:
+            
+f 
+ot s
+
+f.r
+q_
+
+fo:
+                r
+tur
+ 
+og
+ts
+            # Sav
+ targ
+t va
+u
+s b
+for
+ mod
+f
+cat
+o
+
+            co
+s = torch.t
+
+sor(
+                
+
+st(s
+
+f.r
+q_
+
+fo.va
+u
+s()), dtyp
+=torch.
+o
+g, d
+v
+c
+=
+og
+ts.d
+v
+c
+
             )
-            rows = torch.tensor(
-                list(self.req_info.keys()), dtype=torch.long, device=logits.device
+            ro
+s = torch.t
+
+sor(
+                
+
+st(s
+
+f.r
+q_
+
+fo.k
+ys()), dtyp
+=torch.
+o
+g, d
+v
+c
+=
+og
+ts.d
+v
+c
+
             )
-            values_to_keep = logits[rows, cols].clone()
+            va
+u
+s_to_k
+p = 
+og
+ts[ro
+s, co
+s].c
+o
 
-            # Mask all but target tokens
-            logits[rows] = float('-inf')
-            logits[rows, cols] = values_to_keep
+()
+            # Mask a
+ but targ
+t tok
 
-            return logits
+s
+            
+og
+ts[ro
+s] = f
+oat('-
 
-    ```
+f')
+            
+og
+ts[ro
+s, co
+s] = va
+u
+s_to_k
+p
+            r
+tur
+ 
+og
+ts
+```
+I
+ th
+ r
+st of th
+s docum
 
-In the rest of this document, we will use `DummyLogitsProcessor` as an example of a custom logits processor.
+t, 
 
-The `DummyLogitsProcessor.update_state()` implementation maintains a "sparse" representation of the batched requests in the `self.req_info` dictionary: only those requests which specify a `target_token` value have a key in the dictionary. `update_state()` adjusts the stored request indices and `target_token` values (keys and values respectively in `self.req_info`) in response to Add, Remove and Move operations against the persistent batch.
+ 
 
-### Wrapping an Existing Request-Level Logits Processor
 
-Although the vLLM engine applies logits processors at batch granularity, some users may want to use vLLM with a "request-level" logits processor implementation - an implementation which operates on individual requests. This will be especially true if your logits processor was developed for vLLM version 0, which required it to be a `Callable` (as described [here][vllm.logits_process]) conforming to the following type annotation:
+ us
+ `DummyLog
+tsProc
+ssor` as a
+ 
+xamp
 
-``` python
-RequestLogitsProcessor = Union[
+ of a custom 
+og
+ts proc
+ssor.
+Th
+ `DummyLog
+tsProc
+ssor.updat
+_stat
+()` 
+mp
 
-    # (output token ids, logits tensor) -> logits tensor
-    Callable[[list[int], Tensor], Tensor],
+m
 
-    # (prompt token ids, output token ids, logits tensor) -> logits tensor
-    Callable[[list[int], list[int], Tensor], Tensor],
+tat
+o
+ ma
+
+ta
+
+s a "spars
+" r
+pr
+s
+
+tat
+o
+ of th
+ batch
+d r
+qu
+sts 
+
+ th
+ `s
+
+f.r
+q_
+
+fo` d
+ct
+o
+ary: o
+
+y thos
+ r
+qu
+sts 
+h
+ch sp
+c
+fy a `targ
+t_tok
+
+` va
+u
+ hav
+ a k
+y 
+
+ th
+ d
+ct
+o
+ary. `updat
+_stat
+()` adjusts th
+ stor
+d r
+qu
+st 
+
+d
+c
+s a
+d `targ
+t_tok
+
+` va
+u
+s (k
+ys a
+d va
+u
+s r
+sp
+ct
+v
+
+y 
+
+ `s
+
+f.r
+q_
+
+fo`) 
+
+ r
+spo
+s
+ to Add, R
+mov
+ a
+d Mov
+ op
+rat
+o
+s aga
+
+st th
+ p
+rs
+st
+
+t batch.
+### Wrapp
+
+g a
+ Ex
+st
+
+g R
+qu
+st-L
+v
+
+ Log
+ts Proc
+ssor
+A
+though th
+ vLLM 
+
+g
+
+
+ app
+
+
+s 
+og
+ts proc
+ssors at batch gra
+u
+ar
+ty, som
+ us
+rs may 
+a
+t to us
+ vLLM 
+
+th a "r
+qu
+st-
+
+v
+
+" 
+og
+ts proc
+ssor 
+mp
+
+m
+
+tat
+o
+ - a
+ 
+mp
+
+m
+
+tat
+o
+ 
+h
+ch op
+rat
+s o
+ 
+
+d
+v
+dua
+ r
+qu
+sts. Th
+s 
+
+
+ b
+ 
+sp
+c
+a
+y tru
+ 
+f your 
+og
+ts proc
+ssor 
+as d
+v
+
+op
+d for vLLM v
+rs
+o
+ 0, 
+h
+ch r
+qu
+r
+d 
+t to b
+ a `Ca
+ab
+
+` (as d
+scr
+b
+d [h
+r
+][v
+m.
+og
+ts_proc
+ss]) co
+form
+
+g to th
+ fo
+o
+
+
+g typ
+ a
+otat
+o
+:
+``` pytho
+
+R
+qu
+stLog
+tsProc
+ssor = U
+
+o
+[
+    # (output tok
+
+ 
+ds, 
+og
+ts t
+
+sor) -
+ 
+og
+ts t
+
+sor
+    Ca
+ab
+
+[[
+
+st[
+
+t], T
+
+sor], T
+
+sor],
+    # (prompt tok
+
+ 
+ds, output tok
+
+ 
+ds, 
+og
+ts t
+
+sor) -
+ 
+og
+ts t
+
+sor
+    Ca
+ab
+
+[[
+
+st[
+
+t], 
+
+st[
+
+t], T
+
+sor], T
+
+sor],
 ]
 ```
+Wh
 
-While request-level logits processors are explicitly *not* supported in the vLLM engine, vLLM *does* provide a convenient process to wrap an existing `Callable` request-level logits processor and create a batch-level logits processor that is compatible with vLLM. The `Callable` must conform to the type annotation above; if your request-level logits processor has a different interface, then in order to wrap it, you may need to modify it or implement an additional wrapper layer to comply with the interface specification above.
 
-You can wrap the request-level logits processor by subclassing `AdapterLogitsProcessor` as shown in the example below (in this example, `DummyPerReqLogitsProcessor` is a stand-in for your request-level logits processor which needs to be wrapped.):
+ r
+qu
+st-
 
-* Override `AdapterLogitsProcessor.validate_params(cls,params)` to validate request's sampling parameters.
+v
 
-* Override `AdapterLogitsProcessor.is_argmax_invariant(self)` to accurately reflect whether your request-level logits processor may impact which token has the highest-value logit.
+ 
+og
+ts proc
+ssors ar
+ 
+xp
 
-* Override `AdapterLogitsProcessor.new_req_logits_processor(self,params)` to create a new request-level logits processor instance from a `SamplingParams` instance:
+c
+t
+y *
+ot* support
+d 
 
-??? code "Example of Wrapping a Request-Level Logits Processor"
+ th
+ vLLM 
 
-    ``` python
+g
+
+
+, vLLM *do
+s* prov
+d
+ a co
+v
+
+
+
+
+t proc
+ss to 
+rap a
+ 
+x
+st
+
+g `Ca
+ab
+
+` r
+qu
+st-
+
+v
+
+ 
+og
+ts proc
+ssor a
+d cr
+at
+ a batch-
+
+v
+
+ 
+og
+ts proc
+ssor that 
+s compat
+b
+
+ 
+
+th vLLM. Th
+ `Ca
+ab
+
+` must co
+form to th
+ typ
+ a
+otat
+o
+ abov
+; 
+f your r
+qu
+st-
+
+v
+
+ 
+og
+ts proc
+ssor has a d
+ff
+r
+
+t 
+
+t
+rfac
+, th
+
+ 
+
+ ord
+r to 
+rap 
+t, you may 
+
+d to mod
+fy 
+t or 
+mp
+
+m
+
+t a
+ add
+t
+o
+a
+ 
+rapp
+r 
+ay
+r to comp
+y 
+
+th th
+ 
+
+t
+rfac
+ sp
+c
+f
+cat
+o
+ abov
+.
+You ca
+ 
+rap th
+ r
+qu
+st-
+
+v
+
+ 
+og
+ts proc
+ssor by subc
+ass
+
+g `Adapt
+rLog
+tsProc
+ssor` as sho
+
+ 
+
+ th
+ 
+xamp
+
+ b
+
+o
+ (
+
+ th
+s 
+xamp
+
+, `DummyP
+rR
+qLog
+tsProc
+ssor` 
+s a sta
+d-
+
+ for your r
+qu
+st-
+
+v
+
+ 
+og
+ts proc
+ssor 
+h
+ch 
+
+ds to b
+ 
+rapp
+d.):
+* Ov
+rr
+d
+ `Adapt
+rLog
+tsProc
+ssor.va
+
+dat
+_params(c
+s,params)` to va
+
+dat
+ r
+qu
+st's samp
+
+
+g param
+t
+rs.
+* Ov
+rr
+d
+ `Adapt
+rLog
+tsProc
+ssor.
+s_argmax_
+
+var
+a
+t(s
+
+f)` to accurat
+
+y r
+f
+
+ct 
+h
+th
+r your r
+qu
+st-
+
+v
+
+ 
+og
+ts proc
+ssor may 
+mpact 
+h
+ch tok
+
+ has th
+ h
+gh
+st-va
+u
+ 
+og
+t.
+* Ov
+rr
+d
+ `Adapt
+rLog
+tsProc
+ssor.
+
+
+_r
+q_
+og
+ts_proc
+ssor(s
+
+f,params)` to cr
+at
+ a 
+
+
+ r
+qu
+st-
+
+v
+
+ 
+og
+ts proc
+ssor 
+
+sta
+c
+ from a `Samp
+
+
+gParams` 
+
+sta
+c
+:
+??? cod
+ "Examp
+
+ of Wrapp
+
+g a R
+qu
+st-L
+v
+
+ Log
+ts Proc
+ssor"
+    ``` pytho
+
     ...
+    from v
+m.v1.samp
 
-    from vllm.v1.sample.logits_processor import (
-        AdapterLogitsProcessor, # Wrapper base-class
-        RequestLogitsProcessor, # Request-level logitsproc type annotation
+.
+og
+ts_proc
+ssor 
+mport (
+        Adapt
+rLog
+tsProc
+ssor, # Wrapp
+r bas
+-c
+ass
+        R
+qu
+stLog
+tsProc
+ssor, # R
+qu
+st-
+
+v
+
+ 
+og
+tsproc typ
+ a
+otat
+o
+
     )
-
     ...
+    # Sta
+d-
 
-    # Stand-in for your request-level logits processor:
-    class DummyPerReqLogitsProcessor:
-        """The request-level logits processor masks out all logits except the
-        token id identified by `target_token`"""
+ for your r
+qu
+st-
 
-        def __init__(self, target_token: int) -> None:
-            """Specify `target_token`"""
-            self.target_token = target_token
+v
 
-        def __call__(
-            self,
-            output_ids: list[int],
-            logits: torch.Tensor,
-        ) -> torch.Tensor:
-            val_to_keep = logits[self.target_token].item()
-            logits[:] = float("-inf")
-            logits[self.target_token] = val_to_keep
-            return logits
+ 
+og
+ts proc
+ssor:
+    c
+ass DummyP
+rR
+qLog
+tsProc
+ssor:
+        """Th
+ r
+qu
+st-
 
+v
+
+ 
+og
+ts proc
+ssor masks out a
+ 
+og
+ts 
+xc
+pt th
+
+        tok
+
+ 
+d 
+d
+
+t
+f
+
+d by `targ
+t_tok
+
+`"""
+        d
+f __
+
+
+t__(s
+
+f, targ
+t_tok
+
+: 
+
+t) -
+ No
+
+:
+            """Sp
+c
+fy `targ
+t_tok
+
+`"""
+            s
+
+f.targ
+t_tok
+
+ = targ
+t_tok
+
+
+        d
+f __ca
+__(
+            s
+
+f,
+            output_
+ds: 
+
+st[
+
+t],
+            
+og
+ts: torch.T
+
+sor,
+        ) -
+ torch.T
+
+sor:
+            va
+_to_k
+p = 
+og
+ts[s
+
+f.targ
+t_tok
+
+].
+t
+m()
+            
+og
+ts[:] = f
+oat("-
+
+f")
+            
+og
+ts[s
+
+f.targ
+t_tok
+
+] = va
+_to_k
+p
+            r
+tur
+ 
+og
+ts
     ...
+    # Examp
 
-    # Example of wrapping the request-level logits processor:
-    class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
-        """Example of wrapping a fake request-level logit processor to create a
-        batch-level logits processor"""
+ of 
+rapp
 
-        @classmethod
-        def validate_params(cls, params: SamplingParams):
-            target_token: Any | None = params.extra_args and params.extra_args.get(
-                "target_token"
+g th
+ r
+qu
+st-
+
+v
+
+ 
+og
+ts proc
+ssor:
+    c
+ass Wrapp
+dP
+rR
+qLog
+tsProc
+ssor(Adapt
+rLog
+tsProc
+ssor):
+        """Examp
+
+ of 
+rapp
+
+g a fak
+ r
+qu
+st-
+
+v
+
+ 
+og
+t proc
+ssor to cr
+at
+ a
+        batch-
+
+v
+
+ 
+og
+ts proc
+ssor"""
+        @c
+assm
+thod
+        d
+f va
+
+dat
+_params(c
+s, params: Samp
+
+
+gParams):
+            targ
+t_tok
+
+: A
+y | No
+
+ = params.
+xtra_args a
+d params.
+xtra_args.g
+t(
+                "targ
+t_tok
+
+"
             )
-            if target_token is not None and not isinstance(target_token, int):
-                raise ValueError(
-                    f"target_token value {target_token} is not int"
+            
+f targ
+t_tok
+
+ 
+s 
+ot No
+
+ a
+d 
+ot 
+s
+
+sta
+c
+(targ
+t_tok
+
+, 
+
+t):
+                ra
+s
+ Va
+u
+Error(
+                    f"targ
+t_tok
+
+ va
+u
+ {targ
+t_tok
+
+} 
+s 
+ot 
+
+t"
                 )
+        d
+f 
+s_argmax_
 
-        def is_argmax_invariant(self) -> bool:
-            return False
+var
+a
+t(s
 
-        def new_req_logits_processor(
-            self,
-            params: SamplingParams,
-        ) -> Optional[RequestLogitsProcessor]:
-            """This method returns a new request-level logits processor, customized
-            to the `target_token` value associated with a particular request.
+f) -
+ boo
+:
+            r
+tur
+ Fa
+s
 
-            Returns None if the logits processor should not be applied to the
-            particular request. To use the logits processor the request must have
-            a "target_token" custom argument with an integer value.
+        d
+f 
 
+
+_r
+q_
+og
+ts_proc
+ssor(
+            s
+
+f,
+            params: Samp
+
+
+gParams,
+        ) -
+ Opt
+o
+a
+[R
+qu
+stLog
+tsProc
+ssor]:
+            """Th
+s m
+thod r
+tur
+s a 
+
+
+ r
+qu
+st-
+
+v
+
+ 
+og
+ts proc
+ssor, custom
+z
+d
+            to th
+ `targ
+t_tok
+
+` va
+u
+ assoc
+at
+d 
+
+th a part
+cu
+ar r
+qu
+st.
+            R
+tur
+s No
+
+ 
+f th
+ 
+og
+ts proc
+ssor shou
+d 
+ot b
+ app
+
+
+d to th
+
+            part
+cu
+ar r
+qu
+st. To us
+ th
+ 
+og
+ts proc
+ssor th
+ r
+qu
+st must hav
+
+            a "targ
+t_tok
+
+" custom argum
+
+t 
+
+th a
+ 
+
+t
+g
+r va
+u
+.
             Args:
-            params: per-request sampling params
+            params: p
+r-r
+qu
+st samp
 
-            Returns:
-            `Callable` request logits processor, or None
+
+g params
+            R
+tur
+s:
+            `Ca
+ab
+
+` r
+qu
+st 
+og
+ts proc
+ssor, or No
+
+
             """
-            target_token: Any | None = params.extra_args and params.extra_args.get(
-                "target_token"
+            targ
+t_tok
+
+: A
+y | No
+
+ = params.
+xtra_args a
+d params.
+xtra_args.g
+t(
+                "targ
+t_tok
+
+"
             )
-            if target_token is None:
-                return None
-            return DummyPerReqLogitsProcessor(target_token)
-    ```
+            
+f targ
+t_tok
 
-!!! note
-    Your `new_req_logits_processor()` override can return `None` to signal that the wrapped logits processor should not be applied to the request in question.
+ 
+s No
 
-Once you have created a custom subclass (like `WrappedPerReqLogitsProcessor`) which wraps your request level logits processor, you can pass the custom subclass to vLLM via any of the methods described in the following section.
+:
+                r
+tur
+ No
 
-## Ways to Load Your Custom Logits Processor in vLLM
 
-Logits processors are loaded at initialization. Critically, the set of loaded logits processors cannot be modified after the vLLM engine finishes loading, and new logits processors cannot be loaded on-demand for individual requests.
+            r
+tur
+ DummyP
+rR
+qLog
+tsProc
+ssor(targ
+t_tok
 
-This section details different ways of making your logits processor visible to vLLM and triggering vLLM to load your logits processor.
-
-### Method 1: Pass the Custom Logits Processor Fully-Qualified Class Name (FQCN) to vLLM at Initialization Time
-
-This method is supported in both offline and online vLLM usage scenarios. The custom logits processor's FQCN (in the form of `dotted.path.to.module:ClassName`) can be passed as an argument to the `LLM` and `AsyncLLM` Python constructors, or as a CLI argument to `vllm serve` with the following syntax
-
-``` bash
-vllm serve ... --logits_processors <logits processor 1> <logits processor 2> ...
+)
 ```
+!!! 
+ot
 
-The only requirements on the FQCN are
+    Your `
 
-1. Python's `importlib.import_module()` must be able to resolve the dotted path portion of the FQCN and load it as a module
 
-2. The class-name portion of the FQCN must be possible to import from the loaded module
+_r
+q_
+og
+ts_proc
+ssor()` ov
+rr
+d
+ ca
+ r
+tur
+ `No
 
-3. The object pointed to by the FQCN must be a subclass of `LogitsProcessor`
+` to s
+g
+a
+ that th
+ 
+rapp
+d 
+og
+ts proc
+ssor shou
+d 
+ot b
+ app
 
-See examples below:
 
-??? code "Passing custom logits processor FQCN to `LLM` in Python"
+d to th
+ r
+qu
+st 
 
-    ``` python
-    # Pass in FQCN
-    llm = LLM(
-        model="facebook/opt-125m",
-        logits_processors=["your.module.path:DummyLogitsProcessor"],
+ qu
+st
+o
+.
+O
+c
+ you hav
+ cr
+at
+d a custom subc
+ass (
+
+k
+ `Wrapp
+dP
+rR
+qLog
+tsProc
+ssor`) 
+h
+ch 
+raps your r
+qu
+st 
+
+v
+
+ 
+og
+ts proc
+ssor, you ca
+ pass th
+ custom subc
+ass to vLLM v
+a a
+y of th
+ m
+thods d
+scr
+b
+d 
+
+ th
+ fo
+o
+
+
+g s
+ct
+o
+.
+## Ways to Load Your Custom Log
+ts Proc
+ssor 
+
+ vLLM
+Log
+ts proc
+ssors ar
+ 
+oad
+d at 
+
+
+t
+a
+
+zat
+o
+. Cr
+t
+ca
+y, th
+ s
+t of 
+oad
+d 
+og
+ts proc
+ssors ca
+ot b
+ mod
+f
+
+d aft
+r th
+ vLLM 
+
+g
+
+
+ f
+
+
+sh
+s 
+oad
+
+g, a
+d 
+
+
+ 
+og
+ts proc
+ssors ca
+ot b
+ 
+oad
+d o
+-d
+ma
+d for 
+
+d
+v
+dua
+ r
+qu
+sts.
+Th
+s s
+ct
+o
+ d
+ta
+
+s d
+ff
+r
+
+t 
+ays of mak
+
+g your 
+og
+ts proc
+ssor v
+s
+b
+
+ to vLLM a
+d tr
+gg
+r
+
+g vLLM to 
+oad your 
+og
+ts proc
+ssor.
+### M
+thod 1: Pass th
+ Custom Log
+ts Proc
+ssor Fu
+y-Qua
+
+f
+
+d C
+ass Nam
+ (FQCN) to vLLM at I
+
+t
+a
+
+zat
+o
+ T
+m
+
+Th
+s m
+thod 
+s support
+d 
+
+ both off
+
+
+
+ a
+d o
+
+
+
+
+ vLLM usag
+ sc
+
+ar
+os. Th
+ custom 
+og
+ts proc
+ssor's FQCN (
+
+ th
+ form of `dott
+d.path.to.modu
+
+:C
+assNam
+`) ca
+ b
+ pass
+d as a
+ argum
+
+t to th
+ `LLM` a
+d `Asy
+cLLM` Pytho
+ co
+structors, or as a CLI argum
+
+t to `v
+m s
+rv
+` 
+
+th th
+ fo
+o
+
+
+g sy
+tax
+``` bash
+v
+m s
+rv
+ ... --
+og
+ts_proc
+ssors 
+
+og
+ts proc
+ssor 1
+ 
+
+og
+ts proc
+ssor 2
+ ...
+```
+Th
+ o
+
+y r
+qu
+r
+m
+
+ts o
+ th
+ FQCN ar
+
+1. Pytho
+'s `
+mport
+
+b.
+mport_modu
+
+()` must b
+ ab
+
+ to r
+so
+v
+ th
+ dott
+d path port
+o
+ of th
+ FQCN a
+d 
+oad 
+t as a modu
+
+
+2. Th
+ c
+ass-
+am
+ port
+o
+ of th
+ FQCN must b
+ poss
+b
+
+ to 
+mport from th
+ 
+oad
+d modu
+
+
+3. Th
+ obj
+ct po
+
+t
+d to by th
+ FQCN must b
+ a subc
+ass of `Log
+tsProc
+ssor`
+S
+ 
+xamp
+
+s b
+
+o
+:
+??? cod
+ "Pass
+
+g custom 
+og
+ts proc
+ssor FQCN to `LLM` 
+
+ Pytho
+"
+    ``` pytho
+
+    # Pass 
+
+ FQCN
+    
+m = LLM(
+        mod
+
+="fac
+book/opt-125m",
+        
+og
+ts_proc
+ssors=["your.modu
+
+.path:DummyLog
+tsProc
+ssor"],
     )
-    ```
+```
+??? cod
+ "Pass
 
-??? code "Passing custom logits processor FQCN to `AsyncLLM` in Python"
+g custom 
+og
+ts proc
+ssor FQCN to `Asy
+cLLM` 
 
-    ``` python
-    # Pass in FQCN
-    engine_args = AsyncEngineArgs(model="facebook/opt-125m",
-                                  logits_processors=["your.module.path:DummyLogitsProcessor"])
-    async_llm = AsyncLLM.from_engine_args(engine_args)
-    ```
+ Pytho
+"
+    ``` pytho
 
-??? code "Passing custom logits processor FQCN to vLLM server via CLI"
+    # Pass 
 
+ FQCN
+    
+
+g
+
+
+_args = Asy
+cE
+g
+
+
+Args(mod
+
+="fac
+book/opt-125m",
+                                  
+og
+ts_proc
+ssors=["your.modu
+
+.path:DummyLog
+tsProc
+ssor"])
+    asy
+c_
+m = Asy
+cLLM.from_
+
+g
+
+
+_args(
+
+g
+
+
+_args)
+```
+??? cod
+ "Pass
+
+g custom 
+og
+ts proc
+ssor FQCN to vLLM s
+rv
+r v
+a CLI"
     ```bash
-    vllm serve facebook/opt-125m --logits_processors your.module.path:DummyLogitsProcessor
-    ```
+    v
+m s
+rv
+ fac
+book/opt-125m --
+og
+ts_proc
+ssors your.modu
 
-### Method 2: Automatically Detect Custom Logits Processors Installed in Your Python Environment As Entry Points
+.path:DummyLog
+tsProc
+ssor
+```
+### M
+thod 2: Automat
+ca
+y D
+t
+ct Custom Log
+ts Proc
+ssors I
+sta
 
-[`setuptools`](https://setuptools.pypa.io/en/latest/userguide/entry_point.html) can enable installed packages to make themselves available as plugins to other Python programs, via pieces of metadata known as "entry points".
+d 
 
-During initialization, vLLM automatically scans the `vllm.logits_processors` entry point group and loads any installed logits processors which it finds.
+ Your Pytho
+ E
+v
+ro
+m
 
-Suppose that you have developed a Python package that holds your custom logits processors. You can expose each logits processor to vLLM by adding a unique entrypoint for each logits processor to your logits processor Python package. The example below shows how to add an entrypoint to your project's `pyproject.toml` file:
+t As E
+try Po
 
-??? code "Exposing a custom logits processor as a Python entrypoint"
+ts
+[`s
+tuptoo
+s`](https://s
+tuptoo
+s.pypa.
+o/
 
-    ``` toml
-    [project.entry-points."vllm.logits_processors"]
-    dummy_logits_processor = "your.module.path:DummyLogitsProcessor"
-    ```
+/
+at
+st/us
+rgu
+d
+/
 
-Once your package is installed, your custom logits processor will be loaded automatically whenever vLLM is initialized. You do *not* need to pass the custom logits processor to the `LLM` or `AsyncLLM` constructors or to the vLLM server explicitly at initialization time if your logits processor is exposed as an entry point.
+try_po
 
-!!! note
-    vLLM will *always* load *all* logits processors which are exposed via entrypoints under the `vllm.logits_processors` grouping.
+t.htm
+) ca
+ 
 
-### Method 3 (Offline-only): Pass a Python Class Object to the vLLM Constructor
+ab
 
-You can pass one or more custom logits processor class objects to the `LLM` and `AsyncLLM` constructors. This option is very flexible, as the logits processor classes may either be (1) defined locally within the same Python source file where `LLM` or `AsyncLLM` is instantiated, or (2) imported from a Python package.
+ 
 
-??? code "Passing custom logits processor class object to `LLM` or `AsyncLLM` in Python"
+sta
 
-    ``` python
-    # Import custom logits processor
-    from some.module import DummyLogitsProcessor
+d packag
+s to mak
+ th
+ms
 
+v
+s ava
+
+ab
+
+ as p
+ug
+
+s to oth
+r Pytho
+ programs, v
+a p
+
+c
+s of m
+tadata k
+o
+
+ as "
+
+try po
+
+ts".
+Dur
+
+g 
+
+
+t
+a
+
+zat
+o
+, vLLM automat
+ca
+y sca
+s th
+ `v
+m.
+og
+ts_proc
+ssors` 
+
+try po
+
+t group a
+d 
+oads a
+y 
+
+sta
+
+d 
+og
+ts proc
+ssors 
+h
+ch 
+t f
+
+ds.
+Suppos
+ that you hav
+ d
+v
+
+op
+d a Pytho
+ packag
+ that ho
+ds your custom 
+og
+ts proc
+ssors. You ca
+ 
+xpos
+ 
+ach 
+og
+ts proc
+ssor to vLLM by add
+
+g a u
+
+qu
+ 
+
+trypo
+
+t for 
+ach 
+og
+ts proc
+ssor to your 
+og
+ts proc
+ssor Pytho
+ packag
+. Th
+ 
+xamp
+
+ b
+
+o
+ sho
+s ho
+ to add a
+ 
+
+trypo
+
+t to your proj
+ct's `pyproj
+ct.tom
+` f
+
+
+:
+??? cod
+ "Expos
+
+g a custom 
+og
+ts proc
+ssor as a Pytho
+ 
+
+trypo
+
+t"
+    ``` tom
+
+    [proj
+ct.
+
+try-po
+
+ts."v
+m.
+og
+ts_proc
+ssors"]
+    dummy_
+og
+ts_proc
+ssor = "your.modu
+
+.path:DummyLog
+tsProc
+ssor"
+```
+O
+c
+ your packag
+ 
+s 
+
+sta
+
+d, your custom 
+og
+ts proc
+ssor 
+
+
+ b
+ 
+oad
+d automat
+ca
+y 
+h
+
+
+v
+r vLLM 
+s 
+
+
+t
+a
+
+z
+d. You do *
+ot* 
+
+d to pass th
+ custom 
+og
+ts proc
+ssor to th
+ `LLM` or `Asy
+cLLM` co
+structors or to th
+ vLLM s
+rv
+r 
+xp
+
+c
+t
+y at 
+
+
+t
+a
+
+zat
+o
+ t
+m
+ 
+f your 
+og
+ts proc
+ssor 
+s 
+xpos
+d as a
+ 
+
+try po
+
+t.
+!!! 
+ot
+
+    vLLM 
+
+
+ *a
+
+ays* 
+oad *a
+* 
+og
+ts proc
+ssors 
+h
+ch ar
+ 
+xpos
+d v
+a 
+
+trypo
+
+ts u
+d
+r th
+ `v
+m.
+og
+ts_proc
+ssors` group
+
+g.
+### M
+thod 3 (Off
+
+
+
+-o
+
+y): Pass a Pytho
+ C
+ass Obj
+ct to th
+ vLLM Co
+structor
+You ca
+ pass o
+
+ or mor
+ custom 
+og
+ts proc
+ssor c
+ass obj
+cts to th
+ `LLM` a
+d `Asy
+cLLM` co
+structors. Th
+s opt
+o
+ 
+s v
+ry f
+
+x
+b
+
+, as th
+ 
+og
+ts proc
+ssor c
+ass
+s may 
+
+th
+r b
+ (1) d
+f
+
+
+d 
+oca
+y 
+
+th
+
+ th
+ sam
+ Pytho
+ sourc
+ f
+
+
+ 
+h
+r
+ `LLM` or `Asy
+cLLM` 
+s 
+
+sta
+t
+at
+d, or (2) 
+mport
+d from a Pytho
+ packag
+.
+??? cod
+ "Pass
+
+g custom 
+og
+ts proc
+ssor c
+ass obj
+ct to `LLM` or `Asy
+cLLM` 
+
+ Pytho
+"
+    ``` pytho
+
+    # Import custom 
+og
+ts proc
+ssor
+    from som
+.modu
+
+ 
+mport DummyLog
+tsProc
+ssor
     # ...or...
+    # D
+f
 
-    # Define custom logits processor locally
-    from vllm.v1.sample.logits_processor import LogitsProcessor
 
-    class DummyLogitsProcessor(LogitsProcessor):
-        # See DummyLogitsProcessor implementation above
+ custom 
+og
+ts proc
+ssor 
+oca
+y
+    from v
+m.v1.samp
+
+.
+og
+ts_proc
+ssor 
+mport Log
+tsProc
+ssor
+    c
+ass DummyLog
+tsProc
+ssor(Log
+tsProc
+ssor):
+        # S
+ DummyLog
+tsProc
+ssor 
+mp
+
+m
+
+tat
+o
+ abov
+
         ...
+    # Pass c
+ass obj
+ct to LLM co
+structor
+    
+m = LLM(
+        mod
 
-    # Pass class object to LLM constructor
-    llm = LLM(
-        model="facebook/opt-125m",
-        logits_processors=[DummyLogitsProcessor],
+="fac
+book/opt-125m",
+        
+og
+ts_proc
+ssors=[DummyLog
+tsProc
+ssor],
     )
+    # Pass c
+ass obj
+ct to Asy
+cLLM co
+structor
+    
 
-    # Pass class object to AsyncLLM constructor
-    engine_args = AsyncEngineArgs(model="facebook/opt-125m",
-                                  logits_processors=[DummyLogitsProcessor])
-    async_llm = AsyncLLM.from_engine_args(engine_args)
-    ```
+g
 
-## Invoking a Custom Logits Processor Against a Request
 
-The design of the custom logits processor determines whether the logits processor must be enabled/disabled for a given request, and what arguments must be provided to configure the logits processor.
+_args = Asy
+cE
+g
 
-The examples below show how a user would pass a custom argument (`target_token`) to `DummyLogitsProcessor` in order to (1) enable the logits processor for that particular request and (2) control the logits processor's behavior.
 
-??? code "vLLM REST API: configure custom logits processor for a request"
+Args(mod
 
+="fac
+book/opt-125m",
+                                  
+og
+ts_proc
+ssors=[DummyLog
+tsProc
+ssor])
+    asy
+c_
+m = Asy
+cLLM.from_
+
+g
+
+
+_args(
+
+g
+
+
+_args)
+```
+## I
+vok
+
+g a Custom Log
+ts Proc
+ssor Aga
+
+st a R
+qu
+st
+Th
+ d
+s
+g
+ of th
+ custom 
+og
+ts proc
+ssor d
+t
+rm
+
+
+s 
+h
+th
+r th
+ 
+og
+ts proc
+ssor must b
+ 
+
+ab
+
+d/d
+sab
+
+d for a g
+v
+
+ r
+qu
+st, a
+d 
+hat argum
+
+ts must b
+ prov
+d
+d to co
+f
+gur
+ th
+ 
+og
+ts proc
+ssor.
+Th
+ 
+xamp
+
+s b
+
+o
+ sho
+ ho
+ a us
+r 
+ou
+d pass a custom argum
+
+t (`targ
+t_tok
+
+`) to `DummyLog
+tsProc
+ssor` 
+
+ ord
+r to (1) 
+
+ab
+
+ th
+ 
+og
+ts proc
+ssor for that part
+cu
+ar r
+qu
+st a
+d (2) co
+tro
+ th
+ 
+og
+ts proc
+ssor's b
+hav
+or.
+??? cod
+ "vLLM REST API: co
+f
+gur
+ custom 
+og
+ts proc
+ssor for a r
+qu
+st"
     ``` bash
-    curl http://localhost:8000/v1/completions \
-        -H "Content-Type: application/json" \
+    cur
+ http://
+oca
+host:8000/v1/comp
+
+t
+o
+s \
+        -H "Co
+t
+
+t-Typ
+: app
+
+cat
+o
+/jso
+" \
         -d '{
-            "model": "Qwen/Qwen2.5-1.5B-Instruct",
+            "mod
+
+": "Q
+
+
+/Q
+
+
+2.5-1.5B-I
+struct",
             ...
-            "vllm_xargs": {"target_token": 67}
+            "v
+m_xargs": {"targ
+t_tok
+
+": 67}
         }'
-    ```
+```
+??? cod
+ "Op
 
-??? code "OpenAI SDK: configure custom logits processor for a request"
+AI SDK: co
+f
+gur
+ custom 
+og
+ts proc
+ssor for a r
+qu
+st"
+    ``` pytho
 
-    ``` python
-    batch = await client.completions.create(
-        model="Qwen/Qwen2.5-1.5B-Instruct",
+    batch = a
+a
+t c
+
+
+
+t.comp
+
+t
+o
+s.cr
+at
+(
+        mod
+
+="Q
+
+
+/Q
+
+
+2.5-1.5B-I
+struct",
         ...,
-        extra_body={
-            "vllm_xargs": {
-                "target_token": 67
+        
+xtra_body={
+            "v
+m_xargs": {
+                "targ
+t_tok
+
+": 67
             }
         }
     )
-    ```
+```
+??? cod
+ "Off
 
-??? code "Offline: configure custom logits processor for an `LLM` request"
 
-    ``` python
-    outputs_logitproc = llm.generate("your prompt", 
-                                     SamplingParams(...,
-                                        extra_args={"target_token": 67}))
-    ```
 
-??? code "Offline: configure custom logits processor for an `AsyncLLM` request"
+: co
+f
+gur
+ custom 
+og
+ts proc
+ssor for a
+ `LLM` r
+qu
+st"
+    ``` pytho
 
-    ``` python
-    async for out in engine.generate(request_id="your request id",
+    outputs_
+og
+tproc = 
+m.g
+
+
+rat
+("your prompt",
+                                     Samp
+
+
+gParams(...,
+                                        
+xtra_args={"targ
+t_tok
+
+": 67}))
+```
+??? cod
+ "Off
+
+
+
+: co
+f
+gur
+ custom 
+og
+ts proc
+ssor for a
+ `Asy
+cLLM` r
+qu
+st"
+    ``` pytho
+
+    asy
+c for out 
+
+ 
+
+g
+
+
+.g
+
+
+rat
+(r
+qu
+st_
+d="your r
+qu
+st 
+d",
                                      prompt="your prompt",
-                                     sampling_params=SamplingParams(...,
-                                        extra_args={"target_token": 67})):
+                                     samp
 
-        # Process async request outputs
+
+g_params=Samp
+
+
+gParams(...,
+                                        
+xtra_args={"targ
+t_tok
+
+": 67})):
+        # Proc
+ss asy
+c r
+qu
+st outputs
         ...
-    ```
+```
+## B
+st Pract
+c
+s for Wr
+t
 
-## Best Practices for Writing Custom Logits Processors
+g Custom Log
+ts Proc
+ssors
+O
+c
+ vLLM 
+oads a 
+og
+ts proc
+ssor dur
 
-Once vLLM loads a logits processor during initialization, then vLLM will invoke `update_state()` and `apply()` against that logits processor in every engine step. Both methods operate on all requests which currently reside in the vLLM persistent batch. Thus, it is important to implement these methods efficiently.
+g 
 
-* Write efficient `apply()` and `update_state()` implementations in light of the fact that logits processors operate at batch granularity
-    * For example, you may be able to use efficient vectorized operations to implement `apply()` or update internal state vectors in `update_state()`
-    * However, if you think that a logits processor may be used infrequently, it may be appropriate to use a "sparse" representation of request state i.e. the class can represent request configuration using a dictionary which only stores metadata about requests that enable the logits processor
-    * **Note:** wrapped request-level logits processors do not need to implement `apply()` and `update_state()`; the default `AdapterLogitsProcessor.update_state()` implementation maintains a sparse representation of request state, wherein requests for which `new_req_logits_processor()` returns `None` are not represented in the base-class state dictionary. The default implementation of `AdapterLogitsProcessor.apply()` applies the request-level logits processor to each row of input logits sequentially and assembles the output logits tensor. If the performance of this `AdapterLogitsProcessor` default implementation is insufficient, then avoid wrapping your request-level logits processor and instead re-implement it as a `LogitsProcessor` subclass with optimized `apply()` and `update_state()` implementations that operate at batch granularity
 
-* It is up to the logits processor author to determine:
+t
+a
 
-    1. **The per-request attributes which configure the logits processor's behavior against that request.** Your custom logits processor's `update_state()` override determines how `SamplingParams` fields are mapped into logits processor state
+zat
+o
+, th
 
-        * **Note:** for wrapped request-level logits processors, `new_req_logits_processor()` determines how `SamplingParams` fields are used to initialize a request-level logits processor instance.
+ vLLM 
 
-    2. **The conditions under which the logits processor is or is not enabled on a per-request basis.** Unless your intention is for the custom logits processor to act on all requests all the time, you should write your logits processor in such a way that it is possible to disable the logits processor for a given request, i.e. by defaulting an argument to `None` or by passing in a specific do-nothing argument value i.e. `0.0`. Try to save compute and memory for requests which disable the logits processor
 
-        * **Note:** for wrapped per-request logits processors, the default `AdapterLogitsProcessor.update_state()` implementation ensures that the request-level logits processor is disabled when `new_req_logits_processor()` returns `None` for that request
+ 
 
-    3. **The conditions under which the logits processor is short-circuited at the batch level.** Even if you have defined a way to disable the custom logits processor at the request level, it may be difficult to translate this into compute savings i.e. if your `update_state()` and `apply()` implementations use efficient vectorized implementations that operate on the whole persistent batch in a single command. For example, you cannot skip an entire vectorized operation in `apply()` just because one request disabled the logits processor. To save compute in the edge-case where no running requests utilize the custom logits processor, we recommend designing `apply()` to return the unmodified input tensor if all requests have the logits processor disabled. Similarly, consider whether steps can be skipped in `update_state()` if no requests enable the logits processor
+vok
+ `updat
+_stat
+()` a
+d `app
+y()` aga
 
-        * Additionally, an easy way to save compute in `update_state()` is to exit early when the `batch_update` is `None`
+st that 
+og
+ts proc
+ssor 
 
-        * **Note:** for wrapped per-request logits processors, the `AdapterLogitsProcessor` base-class implements the above optimizations by default
+ 
+v
+ry 
 
-* Ensure that the logits processor `update_state` method discards information about finished requests (i.e. requests which are replaced by an Add or which are subject to a Remove)
+g
 
-    * **Note:** for wrapped per-request logits processors, the `AdapterLogitsProcessor` base-class handles this by default
 
-* `is_argmax_invariant()` can be hard-coded to `True` or `False` if the logits processor has consistent behavior. However, the argmax invariance may also be determined programmatically (i.e. if your logits processor is user-customizable in some way that impacts whether the logits processor is argmax invariant). For this reason, `is_argmax_invariant()` is not a class method
+ st
+p. Both m
+thods op
+rat
+ o
+ a
+ r
+qu
+sts 
+h
+ch curr
+
+t
+y r
+s
+d
+ 
+
+ th
+ vLLM p
+rs
+st
+
+t batch. Thus, 
+t 
+s 
+mporta
+t to 
+mp
+
+m
+
+t th
+s
+ m
+thods 
+ff
+c
+
+
+t
+y.
+* Wr
+t
+ 
+ff
+c
+
+
+t `app
+y()` a
+d `updat
+_stat
+()` 
+mp
+
+m
+
+tat
+o
+s 
+
+ 
+
+ght of th
+ fact that 
+og
+ts proc
+ssors op
+rat
+ at batch gra
+u
+ar
+ty
+    * For 
+xamp
+
+, you may b
+ ab
+
+ to us
+ 
+ff
+c
+
+
+t v
+ctor
+z
+d op
+rat
+o
+s to 
+mp
+
+m
+
+t `app
+y()` or updat
+ 
+
+t
+r
+a
+ stat
+ v
+ctors 
+
+ `updat
+_stat
+()`
+    * Ho
+
+v
+r, 
+f you th
+
+k that a 
+og
+ts proc
+ssor may b
+ us
+d 
+
+fr
+qu
+
+t
+y, 
+t may b
+ appropr
+at
+ to us
+ a "spars
+" r
+pr
+s
+
+tat
+o
+ of r
+qu
+st stat
+ 
+.
+. th
+ c
+ass ca
+ r
+pr
+s
+
+t r
+qu
+st co
+f
+gurat
+o
+ us
+
+g a d
+ct
+o
+ary 
+h
+ch o
+
+y stor
+s m
+tadata about r
+qu
+sts that 
+
+ab
+
+ th
+ 
+og
+ts proc
+ssor
+    * **Not
+:** 
+rapp
+d r
+qu
+st-
+
+v
+
+ 
+og
+ts proc
+ssors do 
+ot 
+
+d to 
+mp
+
+m
+
+t `app
+y()` a
+d `updat
+_stat
+()`; th
+ d
+fau
+t `Adapt
+rLog
+tsProc
+ssor.updat
+_stat
+()` 
+mp
+
+m
+
+tat
+o
+ ma
+
+ta
+
+s a spars
+ r
+pr
+s
+
+tat
+o
+ of r
+qu
+st stat
+, 
+h
+r
+
+
+ r
+qu
+sts for 
+h
+ch `
+
+
+_r
+q_
+og
+ts_proc
+ssor()` r
+tur
+s `No
+
+` ar
+ 
+ot r
+pr
+s
+
+t
+d 
+
+ th
+ bas
+-c
+ass stat
+ d
+ct
+o
+ary. Th
+ d
+fau
+t 
+mp
+
+m
+
+tat
+o
+ of `Adapt
+rLog
+tsProc
+ssor.app
+y()` app
+
+
+s th
+ r
+qu
+st-
+
+v
+
+ 
+og
+ts proc
+ssor to 
+ach ro
+ of 
+
+put 
+og
+ts s
+qu
+
+t
+a
+y a
+d ass
+mb
+
+s th
+ output 
+og
+ts t
+
+sor. If th
+ p
+rforma
+c
+ of th
+s `Adapt
+rLog
+tsProc
+ssor` d
+fau
+t 
+mp
+
+m
+
+tat
+o
+ 
+s 
+
+suff
+c
+
+
+t, th
+
+ avo
+d 
+rapp
+
+g your r
+qu
+st-
+
+v
+
+ 
+og
+ts proc
+ssor a
+d 
+
+st
+ad r
+-
+mp
+
+m
+
+t 
+t as a `Log
+tsProc
+ssor` subc
+ass 
+
+th opt
+m
+z
+d `app
+y()` a
+d `updat
+_stat
+()` 
+mp
+
+m
+
+tat
+o
+s that op
+rat
+ at batch gra
+u
+ar
+ty
+* It 
+s up to th
+ 
+og
+ts proc
+ssor author to d
+t
+rm
+
+
+:
+    1. **Th
+ p
+r-r
+qu
+st attr
+but
+s 
+h
+ch co
+f
+gur
+ th
+ 
+og
+ts proc
+ssor's b
+hav
+or aga
+
+st that r
+qu
+st.** Your custom 
+og
+ts proc
+ssor's `updat
+_stat
+()` ov
+rr
+d
+ d
+t
+rm
+
+
+s ho
+ `Samp
+
+
+gParams` f
+
+
+ds ar
+ mapp
+d 
+
+to 
+og
+ts proc
+ssor stat
+
+        * **Not
+:** for 
+rapp
+d r
+qu
+st-
+
+v
+
+ 
+og
+ts proc
+ssors, `
+
+
+_r
+q_
+og
+ts_proc
+ssor()` d
+t
+rm
+
+
+s ho
+ `Samp
+
+
+gParams` f
+
+
+ds ar
+ us
+d to 
+
+
+t
+a
+
+z
+ a r
+qu
+st-
+
+v
+
+ 
+og
+ts proc
+ssor 
+
+sta
+c
+.
+    2. **Th
+ co
+d
+t
+o
+s u
+d
+r 
+h
+ch th
+ 
+og
+ts proc
+ssor 
+s or 
+s 
+ot 
+
+ab
+
+d o
+ a p
+r-r
+qu
+st bas
+s.** U
+
+
+ss your 
+
+t
+
+t
+o
+ 
+s for th
+ custom 
+og
+ts proc
+ssor to act o
+ a
+ r
+qu
+sts a
+ th
+ t
+m
+, you shou
+d 
+r
+t
+ your 
+og
+ts proc
+ssor 
+
+ such a 
+ay that 
+t 
+s poss
+b
+
+ to d
+sab
+
+ th
+ 
+og
+ts proc
+ssor for a g
+v
+
+ r
+qu
+st, 
+.
+. by d
+fau
+t
+
+g a
+ argum
+
+t to `No
+
+` or by pass
+
+g 
+
+ a sp
+c
+f
+c do-
+oth
+
+g argum
+
+t va
+u
+ 
+.
+. `0.0`. Try to sav
+ comput
+ a
+d m
+mory for r
+qu
+sts 
+h
+ch d
+sab
+
+ th
+ 
+og
+ts proc
+ssor
+        * **Not
+:** for 
+rapp
+d p
+r-r
+qu
+st 
+og
+ts proc
+ssors, th
+ d
+fau
+t `Adapt
+rLog
+tsProc
+ssor.updat
+_stat
+()` 
+mp
+
+m
+
+tat
+o
+ 
+
+sur
+s that th
+ r
+qu
+st-
+
+v
+
+ 
+og
+ts proc
+ssor 
+s d
+sab
+
+d 
+h
+
+ `
+
+
+_r
+q_
+og
+ts_proc
+ssor()` r
+tur
+s `No
+
+` for that r
+qu
+st
+    3. **Th
+ co
+d
+t
+o
+s u
+d
+r 
+h
+ch th
+ 
+og
+ts proc
+ssor 
+s short-c
+rcu
+t
+d at th
+ batch 
+
+v
+
+.** Ev
+
+ 
+f you hav
+ d
+f
+
+
+d a 
+ay to d
+sab
+
+ th
+ custom 
+og
+ts proc
+ssor at th
+ r
+qu
+st 
+
+v
+
+, 
+t may b
+ d
+ff
+cu
+t to tra
+s
+at
+ th
+s 
+
+to comput
+ sav
+
+gs 
+.
+. 
+f your `updat
+_stat
+()` a
+d `app
+y()` 
+mp
+
+m
+
+tat
+o
+s us
+ 
+ff
+c
+
+
+t v
+ctor
+z
+d 
+mp
+
+m
+
+tat
+o
+s that op
+rat
+ o
+ th
+ 
+ho
+
+ p
+rs
+st
+
+t batch 
+
+ a s
+
+g
+
+ comma
+d. For 
+xamp
+
+, you ca
+ot sk
+p a
+ 
+
+t
+r
+ v
+ctor
+z
+d op
+rat
+o
+ 
+
+ `app
+y()` just b
+caus
+ o
+
+ r
+qu
+st d
+sab
+
+d th
+ 
+og
+ts proc
+ssor. To sav
+ comput
+ 
+
+ th
+ 
+dg
+-cas
+ 
+h
+r
+ 
+o ru
+
+
+g r
+qu
+sts ut
+
+
+z
+ th
+ custom 
+og
+ts proc
+ssor, 
+
+ r
+comm
+
+d d
+s
+g
+
+
+g `app
+y()` to r
+tur
+ th
+ u
+mod
+f
+
+d 
+
+put t
+
+sor 
+f a
+ r
+qu
+sts hav
+ th
+ 
+og
+ts proc
+ssor d
+sab
+
+d. S
+m
+
+ar
+y, co
+s
+d
+r 
+h
+th
+r st
+ps ca
+ b
+ sk
+pp
+d 
+
+ `updat
+_stat
+()` 
+f 
+o r
+qu
+sts 
+
+ab
+
+ th
+ 
+og
+ts proc
+ssor
+        * Add
+t
+o
+a
+y, a
+ 
+asy 
+ay to sav
+ comput
+ 
+
+ `updat
+_stat
+()` 
+s to 
+x
+t 
+ar
+y 
+h
+
+ th
+ `batch_updat
+` 
+s `No
+
+`
+        * **Not
+:** for 
+rapp
+d p
+r-r
+qu
+st 
+og
+ts proc
+ssors, th
+ `Adapt
+rLog
+tsProc
+ssor` bas
+-c
+ass 
+mp
+
+m
+
+ts th
+ abov
+ opt
+m
+zat
+o
+s by d
+fau
+t
+* E
+sur
+ that th
+ 
+og
+ts proc
+ssor `updat
+_stat
+` m
+thod d
+scards 
+
+format
+o
+ about f
+
+
+sh
+d r
+qu
+sts (
+.
+. r
+qu
+sts 
+h
+ch ar
+ r
+p
+ac
+d by a
+ Add or 
+h
+ch ar
+ subj
+ct to a R
+mov
+)
+    * **Not
+:** for 
+rapp
+d p
+r-r
+qu
+st 
+og
+ts proc
+ssors, th
+ `Adapt
+rLog
+tsProc
+ssor` bas
+-c
+ass ha
+d
+
+s th
+s by d
+fau
+t
+* `
+s_argmax_
+
+var
+a
+t()` ca
+ b
+ hard-cod
+d to `Tru
+` or `Fa
+s
+` 
+f th
+ 
+og
+ts proc
+ssor has co
+s
+st
+
+t b
+hav
+or. Ho
+
+v
+r, th
+ argmax 
+
+var
+a
+c
+ may a
+so b
+ d
+t
+rm
+
+
+d programmat
+ca
+y (
+.
+. 
+f your 
+og
+ts proc
+ssor 
+s us
+r-custom
+zab
+
+ 
+
+ som
+ 
+ay that 
+mpacts 
+h
+th
+r th
+ 
+og
+ts proc
+ssor 
+s argmax 
+
+var
+a
+t). For th
+s r
+aso
+, `
+s_argmax_
+
+var
+a
+t()` 
+s 
+ot a c
+ass m
+thod

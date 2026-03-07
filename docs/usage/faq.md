@@ -1,35 +1,581 @@
-# Frequently Asked Questions
+# Fr
+qu
 
-> Q: How can I serve multiple models on a single port using the OpenAI API?
+t
+y Ask
+d Qu
+st
+o
+s
 
-A: Assuming that you're referring to using OpenAI compatible server to serve multiple models at once, that is not currently supported, you can run multiple instances of the server (each serving a different model) at the same time, and have another layer to route the incoming request to the correct server accordingly.
+ Q: Ho
+ ca
+ I s
+rv
+ mu
+t
+p
 
+ mod
+
+s o
+ a s
+
+g
+
+ port us
+
+g th
+ Op
+
+AI API?
+A: Assum
+
+g that you'r
+ r
+f
+rr
+
+g to us
+
+g Op
+
+AI compat
+b
+
+ s
+rv
+r to s
+rv
+ mu
+t
+p
+
+ mod
+
+s at o
+c
+, that 
+s 
+ot curr
+
+t
+y support
+d, you ca
+ ru
+ mu
+t
+p
+
+ 
+
+sta
+c
+s of th
+ s
+rv
+r (
+ach s
+rv
+
+g a d
+ff
+r
+
+t mod
+
+) at th
+ sam
+ t
+m
+, a
+d hav
+ a
+oth
+r 
+ay
+r to rout
+ th
+ 
+
+com
+
+g r
+qu
+st to th
+ corr
+ct s
+rv
+r accord
+
+g
+y.
 ---
 
-> Q: Which model to use for offline inference embedding?
+ Q: Wh
+ch mod
 
-A: You can try [e5-mistral-7b-instruct](https://huggingface.co/intfloat/e5-mistral-7b-instruct) and [BAAI/bge-base-en-v1.5](https://huggingface.co/BAAI/bge-base-en-v1.5);
-more are listed [here](../models/supported_models.md).
+ to us
+ for off
 
-By extracting hidden states, vLLM can automatically convert text generation models like [Llama-3-8B](https://huggingface.co/meta-llama/Meta-Llama-3-8B),
-[Mistral-7B-Instruct-v0.3](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3) into embedding models,
-but they are expected to be inferior to models that are specifically trained on embedding tasks.
 
+
+ 
+
+f
+r
+
+c
+ 
+mb
+dd
+
+g?
+A: You ca
+ try [
+5-m
+stra
+-7b-
+
+struct](https://hugg
+
+gfac
+.co/
+
+tf
+oat/
+5-m
+stra
+-7b-
+
+struct) a
+d [BAAI/bg
+-bas
+-
+
+-v1.5](https://hugg
+
+gfac
+.co/BAAI/bg
+-bas
+-
+
+-v1.5);
+mor
+ ar
+ 
+
+st
+d [h
+r
+](../mod
+
+s/support
+d_mod
+
+s.md).
+By 
+xtract
+
+g h
+dd
+
+ stat
+s, vLLM ca
+ automat
+ca
+y co
+v
+rt t
+xt g
+
+
+rat
+o
+ mod
+
+s 
+
+k
+ [L
+ama-3-8B](https://hugg
+
+gfac
+.co/m
+ta-
+ama/M
+ta-L
+ama-3-8B),
+[M
+stra
+-7B-I
+struct-v0.3](https://hugg
+
+gfac
+.co/m
+stra
+a
+/M
+stra
+-7B-I
+struct-v0.3) 
+
+to 
+mb
+dd
+
+g mod
+
+s,
+but th
+y ar
+ 
+xp
+ct
+d to b
+ 
+
+f
+r
+or to mod
+
+s that ar
+ sp
+c
+f
+ca
+y tra
+
+
+d o
+ 
+mb
+dd
+
+g tasks.
 ---
 
-> Q: Can the output of a prompt vary across runs in vLLM?
+ Q: Ca
+ th
+ output of a prompt vary across ru
+s 
 
-A: Yes, it can. vLLM does not guarantee stable log probabilities (logprobs) for the output tokens. Variations in logprobs may occur due to
-numerical instability in Torch operations or non-deterministic behavior in batched Torch operations when batching changes. For more details,
-see the [Numerical Accuracy section](https://pytorch.org/docs/stable/notes/numerical_accuracy.html#batched-computations-or-slice-computations).
+ vLLM?
+A: Y
+s, 
+t ca
+. vLLM do
+s 
+ot guara
+t
+ stab
 
-In vLLM, the same requests might be batched differently due to factors such as other concurrent requests,
-changes in batch size, or batch expansion in speculative decoding. These batching variations, combined with numerical instability of Torch operations,
-can lead to slightly different logit/logprob values at each step. Such differences can accumulate, potentially resulting in
-different tokens being sampled. Once a different token is sampled, further divergence is likely.
+ 
+og probab
 
-## Mitigation Strategies
 
-- For improved stability and reduced variance, use `float32`. Note that this will require more memory.
-- If using `bfloat16`, switching to `float16` can also help.
-- Using request seeds can aid in achieving more stable generation for temperature > 0, but discrepancies due to precision differences may still occur.
+t
+
+s (
+ogprobs) for th
+ output tok
+
+s. Var
+at
+o
+s 
+
+ 
+ogprobs may occur du
+ to
+
+um
+r
+ca
+ 
+
+stab
+
+
+ty 
+
+ Torch op
+rat
+o
+s or 
+o
+-d
+t
+rm
+
+
+st
+c b
+hav
+or 
+
+ batch
+d Torch op
+rat
+o
+s 
+h
+
+ batch
+
+g cha
+g
+s. For mor
+ d
+ta
+
+s,
+s
+ th
+ [Num
+r
+ca
+ Accuracy s
+ct
+o
+](https://pytorch.org/docs/stab
+
+/
+ot
+s/
+um
+r
+ca
+_accuracy.htm
+#batch
+d-computat
+o
+s-or-s
+
+c
+-computat
+o
+s).
+I
+ vLLM, th
+ sam
+ r
+qu
+sts m
+ght b
+ batch
+d d
+ff
+r
+
+t
+y du
+ to factors such as oth
+r co
+curr
+
+t r
+qu
+sts,
+cha
+g
+s 
+
+ batch s
+z
+, or batch 
+xpa
+s
+o
+ 
+
+ sp
+cu
+at
+v
+ d
+cod
+
+g. Th
+s
+ batch
+
+g var
+at
+o
+s, comb
+
+
+d 
+
+th 
+um
+r
+ca
+ 
+
+stab
+
+
+ty of Torch op
+rat
+o
+s,
+ca
+ 
+
+ad to s
+
+ght
+y d
+ff
+r
+
+t 
+og
+t/
+ogprob va
+u
+s at 
+ach st
+p. Such d
+ff
+r
+
+c
+s ca
+ accumu
+at
+, pot
+
+t
+a
+y r
+su
+t
+
+g 
+
+
+d
+ff
+r
+
+t tok
+
+s b
+
+
+g samp
+
+d. O
+c
+ a d
+ff
+r
+
+t tok
+
+ 
+s samp
+
+d, furth
+r d
+v
+rg
+
+c
+ 
+s 
+
+k
+
+y.
+## M
+t
+gat
+o
+ Strat
+g
+
+s
+    - For 
+mprov
+d stab
+
+
+ty a
+d r
+duc
+d var
+a
+c
+, us
+ `f
+oat32`. Not
+ that th
+s 
+
+
+ r
+qu
+r
+ mor
+ m
+mory.
+    - If us
+
+g `bf
+oat16`, s
+
+tch
+
+g to `f
+oat16` ca
+ a
+so h
+
+p.
+    - Us
+
+g r
+qu
+st s
+ds ca
+ a
+d 
+
+ ach
+
+v
+
+g mor
+ stab
+
+ g
+
+
+rat
+o
+ for t
+mp
+ratur
+ 
+ 0, but d
+scr
+pa
+c
+
+s du
+ to pr
+c
+s
+o
+ d
+ff
+r
+
+c
+s may st
+
+ occur.

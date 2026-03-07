@@ -1,88 +1,1406 @@
-# Dual Batch Overlap
+# Dua
+ Batch Ov
+r
+ap
+## Mot
+vat
+o
 
-## Motivation
+Th
+ cor
+ mot
+vat
+o
+ of th
+ DBO syst
+m 
 
-The core motivation of the DBO system in vLLM is to overlap the sparse all-to-all communication in the MoE layer with the surrounding computation. This system currently only targets DP+EP deployments.
+ vLLM 
+s to ov
+r
+ap th
+ spars
+ a
+-to-a
+ commu
 
-## Introduction
+cat
+o
+ 
 
-The Dual Batch Overlap system works by splitting the batch in the model runner, creating two worker threads, and then running the model on each of these worker threads. When DBO is enabled, yield points within the `FusedMoEModularKernel` allow the two CPU worker threads (also called UBatch threads) to ping-pong between each other so that when one is running compute, the other is waiting on communication. Throughout the code, ubatch may be used as a short form of microbatch; this is an ASCII-friendly version of the short form µ-batch.
+ th
+ MoE 
+ay
+r 
 
-The DBO system includes modifications to `GpuModelRunner` and `ModularKernel`, and defines two utility classes: `UBatchWrapper` and `UBatchContext`. `UBatchWrapper` manages thread lifecycle and CUDA graph execution of the model. `UBatchContext` wraps `ForwardContext` to coordinate synchronization between the two UBatch threads.
+th th
+ surrou
+d
 
-Below is the overlap schedule that is currently implemented in vLLM.
+g computat
+o
+. Th
+s syst
+m curr
 
-```python
-# Schedule notation legend:
-#    S = Shared expert
+t
+y o
+
+y targ
+ts DP+EP d
+p
+oym
+
+ts.
+## I
+troduct
+o
+
+Th
+ Dua
+ Batch Ov
+r
+ap syst
+m 
+orks by sp
+
+tt
+
+g th
+ batch 
+
+ th
+ mod
+
+ ru
+
+r, cr
+at
+
+g t
+o 
+ork
+r thr
+ads, a
+d th
+
+ ru
+
+
+g th
+ mod
+
+ o
+ 
+ach of th
+s
+ 
+ork
+r thr
+ads. Wh
+
+ DBO 
+s 
+
+ab
+
+d, y
+
+
+d po
+
+ts 
+
+th
+
+ th
+ `Fus
+dMoEModu
+arK
+r
+
+
+` a
+o
+ th
+ t
+o CPU 
+ork
+r thr
+ads (a
+so ca
+
+d UBatch thr
+ads) to p
+
+g-po
+g b
+t
+
+
+ 
+ach oth
+r so that 
+h
+
+ o
+
+ 
+s ru
+
+
+g comput
+, th
+ oth
+r 
+s 
+a
+t
+
+g o
+ commu
+
+cat
+o
+. Throughout th
+ cod
+, ubatch may b
+ us
+d as a short form of m
+crobatch; th
+s 
+s a
+ ASCII-fr
+
+
+d
+y v
+rs
+o
+ of th
+ short form µ-batch.
+Th
+ DBO syst
+m 
+
+c
+ud
+s mod
+f
+cat
+o
+s to `GpuMod
+
+Ru
+
+r` a
+d `Modu
+arK
+r
+
+
+`, a
+d d
+f
+
+
+s t
+o ut
+
+
+ty c
+ass
+s: `UBatchWrapp
+r` a
+d `UBatchCo
+t
+xt`. `UBatchWrapp
+r` ma
+ag
+s thr
+ad 
+
+f
+cyc
+
+ a
+d CUDA graph 
+x
+cut
+o
+ of th
+ mod
+
+. `UBatchCo
+t
+xt` 
+raps `For
+ardCo
+t
+xt` to coord
+
+at
+ sy
+chro
+
+zat
+o
+ b
+t
+
+
+ th
+ t
+o UBatch thr
+ads.
+B
+
+o
+ 
+s th
+ ov
+r
+ap sch
+du
+
+ that 
+s curr
+
+t
+y 
+mp
+
+m
+
+t
+d 
+
+ vLLM.
+```pytho
+
+# Sch
+du
+
+ 
+otat
+o
+ 
+
+g
+
+d:
+#    S = Shar
+d 
+xp
+rt
 #    A0 = MLA qkv proj,
-#    A1 = Core attn + out proj + MoE gate
-#    D = Dispatch
-#    C = Combine
+#    A1 = Cor
+ att
+ + out proj + MoE gat
+
+#    D = D
+spatch
+#    C = Comb
+
+
 
 # Comp: |-A0₀-A1₀-||-MLP₁-||-S₁-MLP₀-||-S₀-A0₁-A1₁-|
 # Comm: |----D₁---||--D₀--||----C₁---||-----C₀-----|
-# Order: D₁ send, A0₀, A1₀, D₁ recv, D₀ send, MLP₁, D₀ recv,
-#        C₁ send, S₁, MLP₀, C₁ recv, C₀ send, S₀, A0₁, A1₁, C₀ recv.
-# MLP_SHARED_OVERLAP = "mlp_shared_overlap"
+# Ord
+r: D₁ s
+
+d, A0₀, A1₀, D₁ r
+cv, D₀ s
+
+d, MLP₁, D₀ r
+cv,
+#        C₁ s
+
+d, S₁, MLP₀, C₁ r
+cv, C₀ s
+
+d, S₀, A0₁, A1₁, C₀ r
+cv.
+# MLP_SHARED_OVERLAP = "m
+p_shar
+d_ov
+r
+ap"
 ```
+## Ru
 
-## Running with DBO
 
-To enable the DBO system pass in the `--enable-dbo` argument to your vllm serve command. This must be run in conjunction with `--data-parallel-size N` where N is greater than 1 and `--enable-expert-parallel`. Additionally, there are two configuration knobs.
+g 
 
-* `--dbo-decode-token-threshold` the minimum number of tokens in a decode-only batch required to enable DBO for that batch
-* `--dbo-prefill-token-threshold` the minimum number of tokens in a batch containing at least one prefill required to enable DBO for that batch
+th DBO
+To 
 
-Currently, DBO is only supported with DeepEP, so DeepEP must be installed and the `--all2all-backend` argument must be set to `deepep_low_latency` if your workload is primarily decode requests, or `deepep_high_throughput` if your workload is primarily prefill requests.
+ab
 
-Below is a command that will spin up a two DP rank server with expert parallelism and DBO enabled.
-EX: `vllm serve deepseek-ai/DeepSeek-V2-Lite --trust-remote-code --data-parallel-size 2 --enable-expert-parallel --enable-dbo --all2all-backend deepep_low_latency`
+ th
+ DBO syst
+m pass 
 
-Note that there must be at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
+ th
+ `--
 
-## DBO Components
+ab
 
-* GPUModelRunner
-* UBatchWrapper
-* UBatchContext
+-dbo` argum
 
-### GPU Model Runner
+t to your v
+m s
+rv
+ comma
+d. Th
+s must b
+ ru
+ 
 
-The batch is split into microbatches by the `GPUModelRunner` class. This is accomplished in two steps. First, coordination across all DP ranks is performed to determine whether microbatching will be applied. Microbatching must be uniform across all DP ranks. If microbatching is not feasible for any DP rank, it is disabled for all ranks. If all DP ranks are going to microbatch, the total number of tokens is padded up to the max number of tokens amongst all ranks. If any rank would end up with an empty second microbatch after the padding is applied, microbatching will be aborted and no ranks will microbatch. Once microbatching has been initiated by all ranks, the second step is performed. The `CommonAttentionMetadata` is sliced in half by the `GPUModelRunner` so that there is one attention metadata per-microbatch.
+ co
+ju
+ct
+o
+ 
 
-### UBatchWrapper
+th `--data-para
 
-gpu_ubatch_wrapper
 
-The `UBatchWrapper` class is a model wrapper that's responsible for all of the thread, UBatchContext, and CUDA graph management for DBO. It's designed to be relatively transparent to the GPU Model Runner.
+-s
+z
+ N` 
+h
+r
+ N 
+s gr
+at
+r tha
+ 1 a
+d `--
 
-The implementation runs the model twice, once for each microbatch. Each model invocation occurs within a UBatch thread. These threads are launched in parallel and are synchronized using the `UBatchContext`. Each thread is provided with a sliced version of the attention metadata that is used to run its half of the batch.
+ab
 
-CUDA graphs for DBO are entirely managed by the `UBatchWrapper`. Because of this, DBO only supports running with Full CUDA graphs. However, once a DBO CUDA graph has been captured, it can be replayed without any multithreading or CPU synchronization.
+-
+xp
+rt-para
 
-#### Interfaces
 
-The `__init__` method takes in the model, VllmConfig, CUDAGraphMode, and device.
+`. Add
+t
+o
+a
+y, th
+r
+ ar
+ t
+o co
+f
+gurat
+o
+ k
+obs.
+* `--dbo-d
+cod
+-tok
 
-The `forward` method exclusively takes in model arguments. It determines whether or not to run with DBO based on whether a `ubatch_slices` object is present in the `forward_context`. Otherwise, the model is run without DBO.
+-thr
+sho
+d` th
+ m
 
-### UBatchContext
 
-ubatch_context
+mum 
+umb
+r of tok
 
-The `UBatchContext` class is a `ForwardContext` wrapper class that is used by the `UBatchWrapper` class to synchronize the two UBatch threads. It should only be instantiated by using `make_ubatch_contexts`.
+s 
 
-When one of the UBatch threads reaches a `dbo_yield` call, it pauses, and starts the other thread which will run until it reaches the same `dbo_yield` call. This "ping-pong" dynamic continues, with threads swapping at each `dbo_yield call`, until the model's execution is complete.
+ a d
+cod
+-o
 
-The current implementation has all `dbo_yield` and `dbo_maybe_run_recv_hook` calls in the `FusedMoEModularKernel.forward` method.
+y batch r
+qu
+r
+d to 
 
-#### Interfaces
+ab
 
-The `make_ubatch_context` function initializes two `UBatchContexts`, one for each UBatch thread. It takes two CUDA streams, the preexisting `ForwardContexts` and a CPU thread barrier. This function should be used exclusively to instantiate `UBatchContexts`. It will handle all of the event initialization.
+ DBO for that batch
+* `--dbo-pr
+f
 
-The `dbo_register_recv_hook` method registers a callback that can be returned by the `FusedMoEPrepareAndFinalizeModular` class in the other UBatch thread’s `UBatchContext`. The callback will be run when the other thread calls `dbo_maybe_run_recv_hook`. This is typically used to wait on an all-to-all kernel.
+-tok
 
-The `dbo_maybe_run_recv_hook` method runs a callback that’s set by the `dbo_register_recv_hook` function if that callback exists.
+-thr
+sho
+d` th
+ m
 
-The `dbo_yield` method puts the current thread to sleep and wakes up the other UBatch thread.
+
+mum 
+umb
+r of tok
+
+s 
+
+ a batch co
+ta
+
+
+
+g at 
+
+ast o
+
+ pr
+f
+
+ r
+qu
+r
+d to 
+
+ab
+
+ DBO for that batch
+Curr
+
+t
+y, DBO 
+s o
+
+y support
+d 
+
+th D
+pEP, so D
+pEP must b
+ 
+
+sta
+
+d a
+d th
+ `--a
+2a
+-back
+
+d` argum
+
+t must b
+ s
+t to `d
+p
+p_
+o
+_
+at
+
+cy` 
+f your 
+ork
+oad 
+s pr
+mar
+
+y d
+cod
+ r
+qu
+sts, or `d
+p
+p_h
+gh_throughput` 
+f your 
+ork
+oad 
+s pr
+mar
+
+y pr
+f
+
+ r
+qu
+sts.
+B
+
+o
+ 
+s a comma
+d that 
+
+
+ sp
+
+ up a t
+o DP ra
+k s
+rv
+r 
+
+th 
+xp
+rt para
+
+
+
+sm a
+d DBO 
+
+ab
+
+d.
+EX: `v
+m s
+rv
+ d
+ps
+k-a
+/D
+pS
+k-V2-L
+t
+ --trust-r
+mot
+-cod
+ --data-para
+
+
+-s
+z
+ 2 --
+
+ab
+
+-
+xp
+rt-para
+
+
+ --
+
+ab
+
+-dbo --a
+2a
+-back
+
+d d
+p
+p_
+o
+_
+at
+
+cy`
+Not
+ that th
+r
+ must b
+ at 
+
+ast t
+o GPUs v
+s
+b
+
+ 
+
+ `CUDA_VISIBLE_DEVICES`
+## DBO Compo
+
+
+ts
+* GPUMod
+
+Ru
+
+r
+* UBatchWrapp
+r
+* UBatchCo
+t
+xt
+### GPU Mod
+
+ Ru
+
+r
+Th
+ batch 
+s sp
+
+t 
+
+to m
+crobatch
+s by th
+ `GPUMod
+
+Ru
+
+r` c
+ass. Th
+s 
+s accomp
+
+sh
+d 
+
+ t
+o st
+ps. F
+rst, coord
+
+at
+o
+ across a
+ DP ra
+ks 
+s p
+rform
+d to d
+t
+rm
+
+
+ 
+h
+th
+r m
+crobatch
+
+g 
+
+
+ b
+ app
+
+
+d. M
+crobatch
+
+g must b
+ u
+
+form across a
+ DP ra
+ks. If m
+crobatch
+
+g 
+s 
+ot f
+as
+b
+
+ for a
+y DP ra
+k, 
+t 
+s d
+sab
+
+d for a
+ ra
+ks. If a
+ DP ra
+ks ar
+ go
+
+g to m
+crobatch, th
+ tota
+ 
+umb
+r of tok
+
+s 
+s padd
+d up to th
+ max 
+umb
+r of tok
+
+s amo
+gst a
+ ra
+ks. If a
+y ra
+k 
+ou
+d 
+
+d up 
+
+th a
+ 
+mpty s
+co
+d m
+crobatch aft
+r th
+ padd
+
+g 
+s app
+
+
+d, m
+crobatch
+
+g 
+
+
+ b
+ abort
+d a
+d 
+o ra
+ks 
+
+
+ m
+crobatch. O
+c
+ m
+crobatch
+
+g has b
+
+ 
+
+
+t
+at
+d by a
+ ra
+ks, th
+ s
+co
+d st
+p 
+s p
+rform
+d. Th
+ `Commo
+Att
+
+t
+o
+M
+tadata` 
+s s
+
+c
+d 
+
+ ha
+f by th
+ `GPUMod
+
+Ru
+
+r` so that th
+r
+ 
+s o
+
+ att
+
+t
+o
+ m
+tadata p
+r-m
+crobatch.
+### UBatchWrapp
+r
+gpu_ubatch_
+rapp
+r
+Th
+ `UBatchWrapp
+r` c
+ass 
+s a mod
+
+ 
+rapp
+r that's r
+spo
+s
+b
+
+ for a
+ of th
+ thr
+ad, UBatchCo
+t
+xt, a
+d CUDA graph ma
+ag
+m
+
+t for DBO. It's d
+s
+g
+
+d to b
+ r
+
+at
+v
+
+y tra
+spar
+
+t to th
+ GPU Mod
+
+ Ru
+
+r.
+Th
+ 
+mp
+
+m
+
+tat
+o
+ ru
+s th
+ mod
+
+ t
+
+c
+, o
+c
+ for 
+ach m
+crobatch. Each mod
+
+ 
+
+vocat
+o
+ occurs 
+
+th
+
+ a UBatch thr
+ad. Th
+s
+ thr
+ads ar
+ 
+au
+ch
+d 
+
+ para
+
+
+ a
+d ar
+ sy
+chro
+
+z
+d us
+
+g th
+ `UBatchCo
+t
+xt`. Each thr
+ad 
+s prov
+d
+d 
+
+th a s
+
+c
+d v
+rs
+o
+ of th
+ att
+
+t
+o
+ m
+tadata that 
+s us
+d to ru
+ 
+ts ha
+f of th
+ batch.
+CUDA graphs for DBO ar
+ 
+
+t
+r
+
+y ma
+ag
+d by th
+ `UBatchWrapp
+r`. B
+caus
+ of th
+s, DBO o
+
+y supports ru
+
+
+g 
+
+th Fu
+ CUDA graphs. Ho
+
+v
+r, o
+c
+ a DBO CUDA graph has b
+
+ captur
+d, 
+t ca
+ b
+ r
+p
+ay
+d 
+
+thout a
+y mu
+t
+thr
+ad
+
+g or CPU sy
+chro
+
+zat
+o
+.
+#### I
+t
+rfac
+s
+Th
+ `__
+
+
+t__` m
+thod tak
+s 
+
+ th
+ mod
+
+, V
+mCo
+f
+g, CUDAGraphMod
+, a
+d d
+v
+c
+.
+Th
+ `for
+ard` m
+thod 
+xc
+us
+v
+
+y tak
+s 
+
+ mod
+
+ argum
+
+ts. It d
+t
+rm
+
+
+s 
+h
+th
+r or 
+ot to ru
+ 
+
+th DBO bas
+d o
+ 
+h
+th
+r a `ubatch_s
+
+c
+s` obj
+ct 
+s pr
+s
+
+t 
+
+ th
+ `for
+ard_co
+t
+xt`. Oth
+r
+
+s
+, th
+ mod
+
+ 
+s ru
+ 
+
+thout DBO.
+### UBatchCo
+t
+xt
+ubatch_co
+t
+xt
+Th
+ `UBatchCo
+t
+xt` c
+ass 
+s a `For
+ardCo
+t
+xt` 
+rapp
+r c
+ass that 
+s us
+d by th
+ `UBatchWrapp
+r` c
+ass to sy
+chro
+
+z
+ th
+ t
+o UBatch thr
+ads. It shou
+d o
+
+y b
+ 
+
+sta
+t
+at
+d by us
+
+g `mak
+_ubatch_co
+t
+xts`.
+Wh
+
+ o
+
+ of th
+ UBatch thr
+ads r
+ach
+s a `dbo_y
+
+
+d` ca
+, 
+t paus
+s, a
+d starts th
+ oth
+r thr
+ad 
+h
+ch 
+
+
+ ru
+ u
+t
+
+ 
+t r
+ach
+s th
+ sam
+ `dbo_y
+
+
+d` ca
+. Th
+s "p
+
+g-po
+g" dy
+am
+c co
+t
+
+u
+s, 
+
+th thr
+ads s
+app
+
+g at 
+ach `dbo_y
+
+
+d ca
+`, u
+t
+
+ th
+ mod
+
+'s 
+x
+cut
+o
+ 
+s comp
+
+t
+.
+Th
+ curr
+
+t 
+mp
+
+m
+
+tat
+o
+ has a
+ `dbo_y
+
+
+d` a
+d `dbo_mayb
+_ru
+_r
+cv_hook` ca
+s 
+
+ th
+ `Fus
+dMoEModu
+arK
+r
+
+
+.for
+ard` m
+thod.
+#### I
+t
+rfac
+s
+Th
+ `mak
+_ubatch_co
+t
+xt` fu
+ct
+o
+ 
+
+
+t
+a
+
+z
+s t
+o `UBatchCo
+t
+xts`, o
+
+ for 
+ach UBatch thr
+ad. It tak
+s t
+o CUDA str
+ams, th
+ pr
+x
+st
+
+g `For
+ardCo
+t
+xts` a
+d a CPU thr
+ad barr
+
+r. Th
+s fu
+ct
+o
+ shou
+d b
+ us
+d 
+xc
+us
+v
+
+y to 
+
+sta
+t
+at
+ `UBatchCo
+t
+xts`. It 
+
+
+ ha
+d
+
+ a
+ of th
+ 
+v
+
+t 
+
+
+t
+a
+
+zat
+o
+.
+Th
+ `dbo_r
+g
+st
+r_r
+cv_hook` m
+thod r
+g
+st
+rs a ca
+back that ca
+ b
+ r
+tur
+
+d by th
+ `Fus
+dMoEPr
+par
+A
+dF
+
+a
+
+z
+Modu
+ar` c
+ass 
+
+ th
+ oth
+r UBatch thr
+ad’s `UBatchCo
+t
+xt`. Th
+ ca
+back 
+
+
+ b
+ ru
+ 
+h
+
+ th
+ oth
+r thr
+ad ca
+s `dbo_mayb
+_ru
+_r
+cv_hook`. Th
+s 
+s typ
+ca
+y us
+d to 
+a
+t o
+ a
+ a
+-to-a
+ k
+r
+
+
+.
+Th
+ `dbo_mayb
+_ru
+_r
+cv_hook` m
+thod ru
+s a ca
+back that’s s
+t by th
+ `dbo_r
+g
+st
+r_r
+cv_hook` fu
+ct
+o
+ 
+f that ca
+back 
+x
+sts.
+Th
+ `dbo_y
+
+
+d` m
+thod puts th
+ curr
+
+t thr
+ad to s
+
+p a
+d 
+ak
+s up th
+ oth
+r UBatch thr
+ad.

@@ -1,11 +1,108 @@
-# Lobe Chat
+# Lob
+ Chat
+[Lob
+ Chat](https://g
+thub.com/
+ob
+hub/
+ob
+-chat) 
+s a
+ op
 
-[Lobe Chat](https://github.com/lobehub/lobe-chat) is an open-source, modern-design ChatGPT/LLMs UI/Framework.
+-sourc
+, mod
+r
+-d
+s
+g
+ ChatGPT/LLMs UI/Fram
 
-Supports speech-synthesis, multi-modal, and extensible (function call) plugin system.
+ork.
+Supports sp
+ch-sy
+th
+s
+s, mu
+t
+-moda
+, a
+d 
+xt
 
-One-click FREE deployment of your private OpenAI ChatGPT/Claude/Gemini/Groq/Ollama chat application.
+s
+b
 
-It supports vLLM as an AI model provider to efficiently serve large language models.
+ (fu
+ct
+o
+ ca
+) p
+ug
 
-For details, see the tutorial [Using vLLM in LobeChat](https://lobehub.com/docs/usage/providers/vllm).
+ syst
+m.
+O
+
+-c
+
+ck FREE d
+p
+oym
+
+t of your pr
+vat
+ Op
+
+AI ChatGPT/C
+aud
+/G
+m
+
+
+/Groq/O
+ama chat app
+
+cat
+o
+.
+It supports vLLM as a
+ AI mod
+
+ prov
+d
+r to 
+ff
+c
+
+
+t
+y s
+rv
+ 
+arg
+ 
+a
+guag
+ mod
+
+s.
+For d
+ta
+
+s, s
+ th
+ tutor
+a
+ [Us
+
+g vLLM 
+
+ Lob
+Chat](https://
+ob
+hub.com/docs/usag
+/prov
+d
+rs/v
+m).

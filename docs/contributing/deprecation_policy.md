@@ -1,87 +1,874 @@
-# Deprecation Policy
+# D
+pr
+cat
+o
+ Po
 
-This document outlines the official policy and process for deprecating features
-in the vLLM project.
+cy
+Th
+s docum
 
-## Overview
+t out
 
-vLLM uses a structured "deprecation pipeline" to guide the lifecycle of
-deprecated features. This policy ensures that users are given clear and
-sufficient notice when a feature is deprecated and that deprecations proceed in
-a consistent and predictable manner.
 
-We aim to strike a balance between continued innovation and respecting users’
-reliance on existing functionality. Deprecations are tied to our **minor (Y)
-releases** following semantic versioning (X.Y.Z), where:
 
-- **X** is a major version (rare)
-- **Y** is a minor version (used for significant changes, including deprecations/removals)
-- **Z** is a patch version (used for fixes and safer enhancements)
+s th
+ off
+c
+a
+ po
 
-Features that fall under this policy include (at a minimum) the following:
+cy a
+d proc
+ss for d
+pr
+cat
 
-- CLI flags
-- Environment variables
-- Configuration files
-- APIs in the OpenAI-compatible API server
-- Public Python APIs for the `vllm` library
+g f
+atur
+s
 
-## Deprecation Pipeline
 
-The deprecation process consists of several clearly defined stages that span
-multiple Y releases:
+ th
+ vLLM proj
+ct.
+## Ov
+rv
 
-### 1. Deprecated (Still On By Default)
 
-- **Action**: Feature is marked as deprecated.
-- **Timeline**: A removal version is explicitly stated in the deprecation
-warning (e.g., "This will be removed in v0.10.0").
-- **Communication**: Deprecation is noted in the following, as applicable:
-    - Help strings
+
+vLLM us
+s a structur
+d "d
+pr
+cat
+o
+ p
+p
+
+
+
+
+" to gu
+d
+ th
+ 
+
+f
+cyc
+
+ of
+d
+pr
+cat
+d f
+atur
+s. Th
+s po
+
+cy 
+
+sur
+s that us
+rs ar
+ g
+v
+
+ c
+
+ar a
+d
+suff
+c
+
+
+t 
+ot
+c
+ 
+h
+
+ a f
+atur
+ 
+s d
+pr
+cat
+d a
+d that d
+pr
+cat
+o
+s proc
+d 
+
+
+a co
+s
+st
+
+t a
+d pr
+d
+ctab
+
+ ma
+
+r.
+W
+ a
+m to str
+k
+ a ba
+a
+c
+ b
+t
+
+
+ co
+t
+
+u
+d 
+
+ovat
+o
+ a
+d r
+sp
+ct
+
+g us
+rs’
+r
+
+
+a
+c
+ o
+ 
+x
+st
+
+g fu
+ct
+o
+a
+
+ty. D
+pr
+cat
+o
+s ar
+ t
+
+d to our **m
+
+or (Y)
+r
+
+
+as
+s** fo
+o
+
+
+g s
+ma
+t
+c v
+rs
+o
+
+
+g (X.Y.Z), 
+h
+r
+:
+    - **X** 
+s a major v
+rs
+o
+ (rar
+)
+    - **Y** 
+s a m
+
+or v
+rs
+o
+ (us
+d for s
+g
+
+f
+ca
+t cha
+g
+s, 
+
+c
+ud
+
+g d
+pr
+cat
+o
+s/r
+mova
+s)
+    - **Z** 
+s a patch v
+rs
+o
+ (us
+d for f
+x
+s a
+d saf
+r 
+
+ha
+c
+m
+
+ts)
+F
+atur
+s that fa
+ u
+d
+r th
+s po
+
+cy 
+
+c
+ud
+ (at a m
+
+
+mum) th
+ fo
+o
+
+
+g:
+    - CLI f
+ags
+    - E
+v
+ro
+m
+
+t var
+ab
+
+s
+    - Co
+f
+gurat
+o
+ f
+
+
+s
+    - APIs 
+
+ th
+ Op
+
+AI-compat
+b
+
+ API s
+rv
+r
+    - Pub
+
+c Pytho
+ APIs for th
+ `v
+m` 
+
+brary
+## D
+pr
+cat
+o
+ P
+p
+
+
+
+
+
+Th
+ d
+pr
+cat
+o
+ proc
+ss co
+s
+sts of s
+v
+ra
+ c
+
+ar
+y d
+f
+
+
+d stag
+s that spa
+
+mu
+t
+p
+
+ Y r
+
+
+as
+s:
+### 1. D
+pr
+cat
+d (St
+
+ O
+ By D
+fau
+t)
+    - **Act
+o
+**: F
+atur
+ 
+s mark
+d as d
+pr
+cat
+d.
+    - **T
+m
+
+
+
+
+**: A r
+mova
+ v
+rs
+o
+ 
+s 
+xp
+
+c
+t
+y stat
+d 
+
+ th
+ d
+pr
+cat
+o
+
+
+ar
+
+
+g (
+.g., "Th
+s 
+
+
+ b
+ r
+mov
+d 
+
+ v0.10.0").
+    - **Commu
+
+cat
+o
+**: D
+pr
+cat
+o
+ 
+s 
+ot
+d 
+
+ th
+ fo
+o
+
+
+g, as app
+
+cab
+
+:
+    - H
+
+p str
+
+gs
     - Log output
-    - API responses
-    - `/metrics` output (for metrics features)
-    - User-facing documentation
-    - Release notes
-    - GitHub Issue (RFC) for feedback
-    - Documentation and use of the `@typing_extensions.deprecated` decorator for Python APIs
+    - API r
+spo
+s
+s
+    - `/m
+tr
+cs` output (for m
+tr
+cs f
+atur
+s)
+    - Us
+r-fac
 
-### 2. Deprecated (Off By Default)
+g docum
 
-- **Action**: Feature is disabled by default, but can still be re-enabled via a
-CLI flag or environment variable. Feature throws an error when used without
-re-enabling.
-- **Purpose**: Allows users who missed earlier warnings a temporary escape hatch
-while signaling imminent removal. Ensures any remaining usage is clearly
-surfaced and blocks silent breakage before full removal.
+tat
+o
 
-### 3. Removed
+    - R
 
-- **Action**: Feature is completely removed from the codebase.
-- **Note**: Only features that have passed through the previous deprecation
-stages will be removed.
 
-## Example Timeline
+as
+ 
+ot
+s
+    - G
+tHub Issu
+ (RFC) for f
+dback
+    - Docum
 
-Assume a feature is deprecated in `v0.9.0`.
+tat
+o
+ a
+d us
+ of th
+ `@typ
 
-| Release       | Status                                                                                          |
+g_
+xt
+
+s
+o
+s.d
+pr
+cat
+d` d
+corator for Pytho
+ APIs
+### 2. D
+pr
+cat
+d (Off By D
+fau
+t)
+    - **Act
+o
+**: F
+atur
+ 
+s d
+sab
+
+d by d
+fau
+t, but ca
+ st
+
+ b
+ r
+-
+
+ab
+
+d v
+a a
+CLI f
+ag or 
+
+v
+ro
+m
+
+t var
+ab
+
+. F
+atur
+ thro
+s a
+ 
+rror 
+h
+
+ us
+d 
+
+thout
+r
+-
+
+ab
+
+
+g.
+    - **Purpos
+**: A
+o
+s us
+rs 
+ho m
+ss
+d 
+ar
+
+
+r 
+ar
+
+
+gs a t
+mporary 
+scap
+ hatch
+
+h
+
+
+ s
+g
+a
+
+
+g 
+mm
+
+
+
+t r
+mova
+. E
+sur
+s a
+y r
+ma
+
+
+
+g usag
+ 
+s c
+
+ar
+y
+surfac
+d a
+d b
+ocks s
+
+
+
+t br
+akag
+ b
+for
+ fu
+ r
+mova
+.
+### 3. R
+mov
+d
+    - **Act
+o
+**: F
+atur
+ 
+s comp
+
+t
+
+y r
+mov
+d from th
+ cod
+bas
+.
+    - **Not
+**: O
+
+y f
+atur
+s that hav
+ pass
+d through th
+ pr
+v
+ous d
+pr
+cat
+o
+
+stag
+s 
+
+
+ b
+ r
+mov
+d.
+## Examp
+
+ T
+m
+
+
+
+
+
+Assum
+ a f
+atur
+ 
+s d
+pr
+cat
+d 
+
+ `v0.9.0`.
+| R
+
+
+as
+       | Status                                                                                          |
 |---------------|-------------------------------------------------------------------------------------------------|
-| `v0.9.0`      | Feature is deprecated with clear removal version listed.                                        |
-| `v0.10.0`     | Feature is now off by default, throws an error when used, and can be re-enabled for legacy use. |
-| `v0.11.0`     | Feature is removed.                                                                             |
+| `v0.9.0`      | F
+atur
+ 
+s d
+pr
+cat
+d 
 
-## Important Guidelines
+th c
 
-- **No Removals in Patch Releases**: Removing deprecated features in patch
-(`.Z`) releases is disallowed to avoid surprising users.
-- **Grace Period for Existing Deprecations**: Any feature deprecated **before
-this policy** will have its grace period start **now**, not retroactively.
-- **Documentation is Critical**: Ensure every stage of the pipeline is
-documented clearly for users.
+ar r
+mova
+ v
+rs
+o
+ 
 
-## Final Notes
+st
+d.                                        |
+| `v0.10.0`     | F
+atur
+ 
+s 
+o
+ off by d
+fau
+t, thro
+s a
+ 
+rror 
+h
 
-This policy is a living document and may evolve as the needs of the project and
-its users change. Community feedback is welcome and encouraged as we refine the
-process.
+ us
+d, a
+d ca
+ b
+ r
+-
+
+ab
+
+d for 
+
+gacy us
+. |
+| `v0.11.0`     | F
+atur
+ 
+s r
+mov
+d.                                                                             |
+## Importa
+t Gu
+d
+
+
+
+
+s
+    - **No R
+mova
+s 
+
+ Patch R
+
+
+as
+s**: R
+mov
+
+g d
+pr
+cat
+d f
+atur
+s 
+
+ patch
+(`.Z`) r
+
+
+as
+s 
+s d
+sa
+o
+
+d to avo
+d surpr
+s
+
+g us
+rs.
+    - **Grac
+ P
+r
+od for Ex
+st
+
+g D
+pr
+cat
+o
+s**: A
+y f
+atur
+ d
+pr
+cat
+d **b
+for
+
+th
+s po
+
+cy** 
+
+
+ hav
+ 
+ts grac
+ p
+r
+od start **
+o
+**, 
+ot r
+troact
+v
+
+y.
+    - **Docum
+
+tat
+o
+ 
+s Cr
+t
+ca
+**: E
+sur
+ 
+v
+ry stag
+ of th
+ p
+p
+
+
+
+
+ 
+s
+docum
+
+t
+d c
+
+ar
+y for us
+rs.
+## F
+
+a
+ Not
+s
+Th
+s po
+
+cy 
+s a 
+
+v
+
+g docum
+
+t a
+d may 
+vo
+v
+ as th
+ 
+
+ds of th
+ proj
+ct a
+d
+
+ts us
+rs cha
+g
+. Commu
+
+ty f
+dback 
+s 
+
+
+com
+ a
+d 
+
+courag
+d as 
+
+ r
+f
+
+
+ th
+
+proc
+ss.

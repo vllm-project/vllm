@@ -1,24 +1,137 @@
-# LlamaIndex
+# L
+amaI
+d
+x
+vLLM 
+s a
+so ava
 
-vLLM is also available via [LlamaIndex](https://github.com/run-llama/llama_index) .
+ab
 
-To install LlamaIndex, run
+ v
+a [L
+amaI
+d
+x](https://g
+thub.com/ru
+-
+ama/
+ama_
+
+d
+x) .
+To 
+
+sta
+ L
+amaI
+d
+x, ru
 
 ```bash
-pip install llama-index-llms-vllm -q
+p
+p 
+
+sta
+ 
+ama-
+
+d
+x-
+ms-v
+m -q
 ```
+To ru
+ 
 
-To run inference on a single or multiple GPUs, use `Vllm` class from `llamaindex`.
+f
+r
 
-```python
-from llama_index.llms.vllm import Vllm
+c
+ o
+ a s
 
-llm = Vllm(
-    model="microsoft/Orca-2-7b",
-    tensor_parallel_size=4,
-    max_new_tokens=100,
-    vllm_kwargs={"gpu_memory_utilization": 0.5},
+g
+
+ or mu
+t
+p
+
+ GPUs, us
+ `V
+m` c
+ass from `
+ama
+
+d
+x`.
+```pytho
+
+from 
+ama_
+
+d
+x.
+ms.v
+m 
+mport V
+m
+
+m = V
+m(
+    mod
+
+="m
+crosoft/Orca-2-7b",
+    t
+
+sor_para
+
+
+_s
+z
+=4,
+    max_
+
+
+_tok
+
+s=100,
+    v
+m_k
+args={"gpu_m
+mory_ut
+
+
+zat
+o
+": 0.5},
 )
 ```
+P
 
-Please refer to this [Tutorial](https://docs.llamaindex.ai/en/latest/examples/llm/vllm/) for more details.
+as
+ r
+f
+r to th
+s [Tutor
+a
+](https://docs.
+ama
+
+d
+x.a
+/
+
+/
+at
+st/
+xamp
+
+s/
+m/v
+m/) for mor
+ d
+ta
+
+s.

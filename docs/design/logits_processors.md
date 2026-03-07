@@ -1,571 +1,5694 @@
-# Logits Processors
+# Log
+ts Proc
+ssors
+!!! 
+mporta
+t
+    Som
+ 
+og
+ts proc
+ssors d
+s
+g
+ cha
+g
+s ar
+ st
 
-!!! important
-    Some logits processors design changes are still in progress and the API may
-    change in the near future. We hope to stabilize this part of the API soon
+ 
 
-This document describes how the vLLM engine interacts with logits processors, and the programming model which vLLM supports for implementing logits processors.
+ progr
+ss a
+d th
+ API may
+    cha
+g
+ 
 
-## Logits Processors Background
+ th
+ 
 
-A logits processor adjusts the next-token probability distribution, usually with the intention of steering the model towards a desired type of behavior.
+ar futur
+. W
+ hop
+ to stab
 
-In vLLM, logits processors operate at batch granularity. During a given engine step, the logits processor consumes a `(num_requests) x (vocab_size)` tensor of raw logits output by the model. For all requests which enable the logits processor, the logits processor applies a transformation to the corresponding row of the logits tensor, while leaving other rows unmodified. The transformed logits tensor is then passed to softmax.  
 
-## Logits Processors in the vLLM engine
+z
+ th
+s part of th
+ API soo
 
-The vLLM engine's persistent batch data structure maintains a list of loaded logits processors.
+Th
+s docum
 
-In order to operate on the entire batch at once, each logits processor may maintain metadata about the requests in the batch (i.e. each request's logits-processor-specific configuration settings). Therefore, logits processors are stateful.
+t d
+scr
+b
+s ho
+ th
+ vLLM 
 
-In each engine step, the vLLM engine will (1) update each logits processor's internal state and (2) apply logits processors to the model output logits.
+g
 
-### Updating Logits Processor Internal State
 
-At the beginning of each engine step, the persistent batch may add, discard and/or reorder requests in response to the scheduler output. After the persistent batch has reorganized, the vLLM engine invokes each logits processor's `update_state()` method. This is necessary to ensure that logits processors' internal states are reorganized to match the new persistent batch state at the beginning of the engine step.
+ 
 
-The pseudocode below shows the process by which the vLLM persistent batch notifies each logits processor of changes in batch state:
+t
+racts 
 
-??? code "Model Runner Updates Logits Processor States"
+th 
+og
+ts proc
+ssors, a
+d th
+ programm
 
-    ``` python
-    # gpu_model_runner.py
+g mod
 
-    class GPUModelRunner(...):
+ 
+h
+ch vLLM supports for 
+mp
 
+m
+
+t
+
+g 
+og
+ts proc
+ssors.
+## Log
+ts Proc
+ssors Backgrou
+d
+A 
+og
+ts proc
+ssor adjusts th
+ 
+
+xt-tok
+
+ probab
+
+
+ty d
+str
+but
+o
+, usua
+y 
+
+th th
+ 
+
+t
+
+t
+o
+ of st
+r
+
+g th
+ mod
+
+ to
+ards a d
+s
+r
+d typ
+ of b
+hav
+or.
+I
+ vLLM, 
+og
+ts proc
+ssors op
+rat
+ at batch gra
+u
+ar
+ty. Dur
+
+g a g
+v
+
+ 
+
+g
+
+
+ st
+p, th
+ 
+og
+ts proc
+ssor co
+sum
+s a `(
+um_r
+qu
+sts) x (vocab_s
+z
+)` t
+
+sor of ra
+ 
+og
+ts output by th
+ mod
+
+. For a
+ r
+qu
+sts 
+h
+ch 
+
+ab
+
+ th
+ 
+og
+ts proc
+ssor, th
+ 
+og
+ts proc
+ssor app
+
+
+s a tra
+sformat
+o
+ to th
+ corr
+spo
+d
+
+g ro
+ of th
+ 
+og
+ts t
+
+sor, 
+h
+
+
+ 
+
+av
+
+g oth
+r ro
+s u
+mod
+f
+
+d. Th
+ tra
+sform
+d 
+og
+ts t
+
+sor 
+s th
+
+ pass
+d to softmax.
+## Log
+ts Proc
+ssors 
+
+ th
+ vLLM 
+
+g
+
+
+
+Th
+ vLLM 
+
+g
+
+
+'s p
+rs
+st
+
+t batch data structur
+ ma
+
+ta
+
+s a 
+
+st of 
+oad
+d 
+og
+ts proc
+ssors.
+I
+ ord
+r to op
+rat
+ o
+ th
+ 
+
+t
+r
+ batch at o
+c
+, 
+ach 
+og
+ts proc
+ssor may ma
+
+ta
+
+ m
+tadata about th
+ r
+qu
+sts 
+
+ th
+ batch (
+.
+. 
+ach r
+qu
+st's 
+og
+ts-proc
+ssor-sp
+c
+f
+c co
+f
+gurat
+o
+ s
+tt
+
+gs). Th
+r
+for
+, 
+og
+ts proc
+ssors ar
+ stat
+fu
+.
+I
+ 
+ach 
+
+g
+
+
+ st
+p, th
+ vLLM 
+
+g
+
+
+ 
+
+
+ (1) updat
+ 
+ach 
+og
+ts proc
+ssor's 
+
+t
+r
+a
+ stat
+ a
+d (2) app
+y 
+og
+ts proc
+ssors to th
+ mod
+
+ output 
+og
+ts.
+### Updat
+
+g Log
+ts Proc
+ssor I
+t
+r
+a
+ Stat
+
+At th
+ b
+g
+
+
+
+g of 
+ach 
+
+g
+
+
+ st
+p, th
+ p
+rs
+st
+
+t batch may add, d
+scard a
+d/or r
+ord
+r r
+qu
+sts 
+
+ r
+spo
+s
+ to th
+ sch
+du
+
+r output. Aft
+r th
+ p
+rs
+st
+
+t batch has r
+orga
+
+z
+d, th
+ vLLM 
+
+g
+
+
+ 
+
+vok
+s 
+ach 
+og
+ts proc
+ssor's `updat
+_stat
+()` m
+thod. Th
+s 
+s 
+
+c
+ssary to 
+
+sur
+ that 
+og
+ts proc
+ssors' 
+
+t
+r
+a
+ stat
+s ar
+ r
+orga
+
+z
+d to match th
+ 
+
+
+ p
+rs
+st
+
+t batch stat
+ at th
+ b
+g
+
+
+
+g of th
+ 
+
+g
+
+
+ st
+p.
+Th
+ ps
+udocod
+ b
+
+o
+ sho
+s th
+ proc
+ss by 
+h
+ch th
+ vLLM p
+rs
+st
+
+t batch 
+ot
+f
+
+s 
+ach 
+og
+ts proc
+ssor of cha
+g
+s 
+
+ batch stat
+:
+??? cod
+ "Mod
+
+ Ru
+
+r Updat
+s Log
+ts Proc
+ssor Stat
+s"
+    ``` pytho
+
+    # gpu_mod
+
+_ru
+
+r.py
+    c
+ass GPUMod
+
+Ru
+
+r(...):
         ...
+        d
+f 
+x
+cut
+_mod
 
-        def execute_model(self, scheduler_output, ...):
-            self._update_states(scheduler_output)
+(s
 
+f, sch
+du
+
+r_output, ...):
+            s
+
+f._updat
+_stat
+s(sch
+du
+
+r_output)
             ...
-
-        def _update_states(...):
-
+        d
+f _updat
+_stat
+s(...):
             ...
+            # ...updat
+ p
+rs
+st
 
-            # ...update persistent batch to reflect new/finished requests & reordering
-            # of requests within batch...
+t batch to r
+f
 
+ct 
+
+
+/f
+
+
+sh
+d r
+qu
+sts & r
+ord
+r
+
+g
+            # of r
+qu
+sts 
+
+th
+
+ batch...
             ...
+            s
 
-            self.input_batch.refresh_metadata()
+f.
 
+put_batch.r
+fr
+sh_m
+tadata()
+    # gpu_
 
-    # gpu_input_batch.py
-
-    class InputBatch:
-
+put_batch.py
+    c
+ass I
+putBatch:
         ...
+        d
+f r
+fr
+sh_m
+tadata(s
 
-        def refresh_metadata(self):
-
+f):
             ...
+            # Updat
+ 
+ach 
+og
+ts proc
+ssor's stat
+ to r
+f
 
-            # Update each logits processor's state to reflect persistent batch state
-            batch_update = self.batch_update_builder.get_and_reset(self.num_reqs)
-            for logit_proc in self.logitsprocs.all:
-                logit_proc.update_state(batch_update)
+ct p
+rs
+st
 
+t batch stat
+
+            batch_updat
+ = s
+
+f.batch_updat
+_bu
+
+d
+r.g
+t_a
+d_r
+s
+t(s
+
+f.
+um_r
+qs)
+            for 
+og
+t_proc 
+
+ s
+
+f.
+og
+tsprocs.a
+:
+                
+og
+t_proc.updat
+_stat
+(batch_updat
+)
             ...
+    # v
+m/v1/samp
+
+/
+og
+ts_proc
+ssor/
+
+t
+rfac
+.py
+    @datac
+ass(froz
+
+=Tru
+)
+    c
+ass BatchUpdat
+:
+        # Batch stat
+-cha
+g
+ data structur
+ 
+h
+ch 
+s pass
+d to 
+og
+ts proc
+ssors'
+        # updat
+_stat
+() m
+thods
+        batch_s
+z
+: 
+
+t
+        r
+mov
+d: S
+qu
+
+c
+[R
+mov
+dR
+qu
+st]
+        add
+d: S
+qu
+
+c
+[Add
+dR
+qu
+st]
+        mov
+d: S
+qu
+
+c
+[Mov
+dR
+qu
+st]
+```
+### App
+y
+
+g Log
+ts Proc
+ssors to th
+ Mod
+
+ Output Log
+ts
+Aft
+r updat
+
+g p
+rs
+st
+
+t batch stat
+, th
+ vLLM mod
+
+ ru
+
+r p
+rforms mod
+
+ 
+
+f
+r
+
+c
+ to obta
+
+ 
+og
+ts. Th
+
+, th
+ mod
+
+ ru
+
+r 
+
+vok
+s th
+ samp
+
+r aga
+
+st th
+ 
+og
+ts. I
+ tur
+, part of th
+ samp
+
+r's op
+rat
+o
+ 
+s to 
+
+vok
+ th
+ 
+og
+ts proc
+ssors' `app
+y()` m
+thods aga
+
+st th
+ mod
+
+ output 
+og
+t proc
+ssors, y
 
 
-    # vllm/v1/sample/logits_processor/interface.py
+d
 
-    @dataclass(frozen=True)
-    class BatchUpdate:
-        # Batch state-change data structure which is passed to logits processors'
-        # update_state() methods
+g tra
+sform
+d 
+og
+ts (th
+ `app
+y()` m
+thods may mod
+fy th
+ 
+og
+ts 
 
-        batch_size: int
+-p
+ac
+ or out-of-p
+ac
+, a
+though 
 
-        removed: Sequence[RemovedRequest]
-        added: Sequence[AddedRequest]
-        moved: Sequence[MovedRequest]
+-p
+ac
+ 
+s mor
+ m
+mory-
+ff
+c
+
+
+t). Th
+s proc
+ss 
+s sho
+
+ 
+
+ th
+ ps
+udocod
+ b
+
+o
+.
+Not
+ that th
+ samp
+
+r 
+
+
+ acc
+ss th
+ 
+og
+ts proc
+ssors v
+a `Samp
+
+
+gM
+tadata.
+og
+tsprocs`. Wh
+
+ th
+ vLLM 
+
+g
+
+
+ co
+structs `Samp
+
+
+gM
+tadata` (
+ot sho
+
+ 
+
+ th
+ cod
+ b
+
+o
+), th
+ r
+f
+r
+
+c
+ to th
+ 
+
+st of 
+og
+ts proc
+ssors 
+s pass
+d from th
+ p
+rs
+st
+
+t batch data structur
+ to `Samp
+
+
+gM
+tadata`.
+??? cod
+ "App
+y 
+og
+ts proc
+ssors to mod
+
+ output 
+og
+ts"
+    ``` pytho
+
+    # gpu_mod
+
+_ru
+
+r.py
+    c
+ass GPUMod
+
+Ru
+
+r(...):
+        ...
+        d
+f 
+x
+cut
+_mod
+
+(s
+
+f, sch
+du
+
+r_output, ...):
+            # (d
+scuss
+d 
+
+ pr
+v
+ous s
+ct
+o
+)
+            s
+
+f._updat
+_stat
+s(sch
+du
+
+r_output)
+            ...
+            # ...ru
+ mod
+
+ 
+
+f
+r
+
+c
+ to obta
+
+ 
+og
+ts...
+            ...
+            # I
+vok
+ samp
+
+r, 
+h
+ch app
+
+
+s 
+og
+ts proc
+ssors
+            samp
+
+r_output = s
+
+f.samp
+
+r(
+og
+ts=
+og
+ts,
+                                          samp
+
+
+g_m
+tadata=samp
+
+
+g_m
+tadata)
+            ...
+    # samp
+
+r.py
+    c
+ass Samp
+
+r(
+.Modu
+
+):
+        ...
+        d
+f for
+ard(s
+
+f, 
+og
+ts, samp
+
+
+g_m
+tadata):
+            ...
+            # App
+y 
+o
+-argmax-
+
+var
+a
+t 
+og
+ts proc
+ssors to mod
+
+ output 
+og
+ts
+            for proc
+ssor 
+
+ (samp
+
+
+g_m
+tadata.
+og
+tsprocs.
+o
+_argmax_
+
+var
+a
+t):
+                
+og
+ts = proc
+ssor.app
+y(
+og
+ts)
+            samp
+
+d = s
+
+f.samp
+
+(
+og
+ts, samp
+
+
+g_m
+tadata)
+            ...
+            # ...r
+tur
+ samp
+
+r output data structur
+...
+        d
+f samp
+
+(s
+
+f, 
+og
+ts, samp
+
+
+g_m
+tadata)
+            ...
+            # ...
+x
+t 
+ar
+y 
+f a
+ r
+qu
+sts ar
+ gr
+dy-samp
+
+
+g...
+            ...
+            # App
+y argmax-
+
+var
+a
+t 
+og
+ts proc
+ssors
+            for proc
+ssor 
+
+ samp
+
+
+g_m
+tadata.
+og
+tsprocs.argmax_
+
+var
+a
+t:
+                
+og
+ts = proc
+ssor.app
+y(
+og
+ts)
+            ...
+            # ...p
+rform samp
+
+
+g a
+d r
+tur
+ samp
+
+
+g r
+su
+t...
+```
+At samp
+
+
+g t
+m
+, th
+ samp
+
+r ch
+cks 
+h
+th
+r a
+ r
+qu
+sts 
+
+ th
+ p
+rs
+st
+
+t batch 
+mp
+oy gr
+dy samp
+
+
+g. If that 
+s th
+ cas
+, th
+ samp
+
+r sav
+s comput
+ by sk
+pp
+
+g "argmax-
+
+var
+a
+t" 
+og
+ts proc
+ssors. H
+r
+, "argmax" 
+s shortha
+d for th
+ tok
+
+ ID 
+
+th th
+ h
+gh
+st 
+og
+t va
+u
+ 
+
+ a g
+v
+
+ ro
+ of th
+ 
+og
+ts t
+
+sor (
+.
+. th
+ tok
+
+ 
+h
+ch th
+ mod
+
+ 
+
+
+ght
+d th
+ h
+gh
+st for a g
+v
+
+ r
+qu
+st).
+* A
+ **argmax-
+
+var
+a
+t 
+og
+ts proc
+ssor** 
+s a 
+og
+ts proc
+ssor (such as M
+
+-P) 
+h
+ch do
+s 
+ot mod
+fy th
+ argmax. For 
+xamp
+
+, a 
+og
+ts proc
+ssor 
+h
+ch masks out th
+ 
+o
+
+st-probab
+
+
+ty tok
+
+s 
+
+
+ 
+ot cha
+g
+ 
+h
+ch tok
+
+ ID has th
+ max 
+og
+t. Gr
+dy samp
+
+
+g a
+
+ays p
+cks th
+ h
+gh
+st-
+og
+t-va
+u
+ tok
+
+ ID, a
+d so co
+c
+ptua
+y a
+ argmax-
+
+var
+a
+t 
+og
+ts proc
+ssor ca
+ b
+ sk
+pp
+d for gr
+dy samp
+
+
+g r
+qu
+sts.
+* A **
+o
+-argmax-
+
+var
+a
+t 
+og
+ts proc
+ssor** 
+s a 
+og
+ts proc
+ssor 
+h
+ch may mod
+fy th
+ argmax. For 
+xamp
+
+, a 
+og
+ts proc
+ssor 
+h
+ch masks a
+ tok
+
+s 
+xc
+pt for EOS aft
+r a c
+rta
+
+ 
+umb
+r of st
+ps 
+
+ ord
+r to forc
+ d
+cod
+
+g to t
+rm
+
+at
+ m
+ght 
+
+d up mask
+
+g th
+ max-
+og
+t-va
+u
+ tok
+
+ a
+d th
+r
+for
+ cha
+g
+ th
+ argmax. Co
+c
+ptua
+y, th
+s
+ 
+og
+ts proc
+ssors ca
+ot b
+ sk
+pp
+d for gr
+dy samp
+
+
+g r
+qu
+sts.
+Th
+ vLLM 
+og
+ts proc
+ssor abstract
+o
+ r
+qu
+r
+s th
+ 
+
+g
+
+
+ to app
+y 
+og
+ts proc
+ssors at batch gra
+u
+ar
+ty; th
+r
+for
+ 
+
+ pract
+c
+ th
+ argmax-
+
+var
+a
+t 
+og
+ts proc
+ssors ca
+ o
+
+y b
+ sk
+pp
+d 
+h
+
+ th
+ 
+
+t
+r
+ batch us
+s gr
+dy samp
+
+
+g.
+## Log
+ts Proc
+ssor Programm
+
+g Mod
+
+
+Th
+ pr
+v
+ous s
+ct
+o
+s a
+ud
+d to th
+ 
+
+t
+rfac
+s 
+h
+ch vLLM 
+og
+ts proc
+ssors must support. Th
+s s
+ct
+o
+ 
+
+troduc
+s 
+
+ fu
+ th
+ programm
+
+g mod
+
+ for 
+mp
+
+m
+
+t
+
+g 
+og
+ts proc
+ssors that ar
+ compat
+b
+
+ 
+
+th th
+ vLLM 
+
+g
+
+
+, 
+
+c
+ud
+
+g th
+ `Log
+tsProc
+ssor` bas
+ c
+ass a
+d 
+ts 
+
+t
+rfac
+ m
+thods as 
+
+
+ as th
+ `BatchUpdat
+` data structur
+ for r
+pr
+s
+
+t
+
+g p
+rs
+st
+
+t batch stat
+ cha
+g
+s, both of 
+h
+ch ar
+ sho
+
+ 
+
+ th
+ cod
+ b
+
+o
+:
+??? cod
+ "`Log
+tsProc
+ssor` bas
+ c
+ass a
+d `BatchUpdat
+` data structur
+"
+    ``` pytho
+
+    from abc 
+mport ABC, abstractm
+thod
+    from co
+
+ct
+o
+s.abc 
+mport S
+qu
+
+c
+
+    from datac
+ass
+s 
+mport datac
+ass
+    from 
+
+um 
+mport E
+um, auto
+    from typ
+
+g 
+mport TYPE_CHECKING
     
-    ```
-
-### Applying Logits Processors to the Model Output Logits
-
-After updating persistent batch state, the vLLM model runner performs model inference to obtain logits. Then, the model runner invokes the sampler against the logits. In turn, part of the sampler's operation is to invoke the logits processors' `apply()` methods against the model output logit processors, yielding transformed logits (the `apply()` methods may modify the logits in-place or out-of-place, although in-place is more memory-efficient). This process is shown in the pseudocode below.
-
-Note that the sampler will access the logits processors via `SamplingMetadata.logitsprocs`. When the vLLM engine constructs `SamplingMetadata` (not shown in the code below), the reference to the list of logits processors is passed from the persistent batch data structure to `SamplingMetadata`.
-
-??? code "Apply logits processors to model output logits"
-
-    ``` python
-    # gpu_model_runner.py
-
-    class GPUModelRunner(...):
-
-        ...
-
-        def execute_model(self, scheduler_output, ...):
-            # (discussed in previous section)
-            self._update_states(scheduler_output)
-
-            ...
-
-            # ...run model inference to obtain logits...
-
-            ...
-
-            # Invoke sampler, which applies logits processors
-            sampler_output = self.sampler(logits=logits,
-                                          sampling_metadata=sampling_metadata)
-
-            ...
+mport torch
+    from v
+m 
+mport Samp
 
 
-    # sampler.py
+gParams
+    
+f TYPE_CHECKING:
+        from v
+m.co
+f
+g 
+mport V
+mCo
+f
+g
+    c
+ass Mov
+D
+r
+ct
+o
+a
 
-    class Sampler(nn.Module):
+ty(E
+um):
+        # O
 
-        ...
+-
+ay 
+1-
 
-        def forward(self, logits, sampling_metadata):
+2 r
+q mov
+ 
 
-            ...
+th
 
-            # Apply non-argmax-invariant logits processors to model output logits
-            for processor in (sampling_metadata.logitsprocs.non_argmax_invariant):
-                logits = processor.apply(logits)
-
-            sampled = self.sample(logits, sampling_metadata)
-
-            ...
-
-            # ...return sampler output data structure...
-
-
-        def sample(self, logits, sampling_metadata)
-
-            ...
-
-            # ...exit early if all requests are greedy-sampling...
-
-            ...
-
-            # Apply argmax-invariant logits processors
-            for processor in sampling_metadata.logitsprocs.argmax_invariant:
-                logits = processor.apply(logits)
-
-            ...
-
-            # ...perform sampling and return sampling result...
-    ``` 
-
-At sampling time, the sampler checks whether all requests in the persistent batch employ greedy sampling. If that is the case, the sampler saves compute by skipping "argmax-invariant" logits processors. Here, "argmax" is shorthand for the token ID with the highest logit value in a given row of the logits tensor (i.e. the token which the model weighted the highest for a given request).
-
-* An **argmax-invariant logits processor** is a logits processor (such as Min-P) which does not modify the argmax. For example, a logits processor which masks out the lowest-probability tokens will not change which token ID has the max logit. Greedy sampling always picks the highest-logit-value token ID, and so conceptually an argmax-invariant logits processor can be skipped for greedy sampling requests.
-
-* A **non-argmax-invariant logits processor** is a logits processor which may modify the argmax. For example, a logits processor which masks all tokens except for EOS after a certain number of steps in order to force decoding to terminate might end up masking the max-logit-value token and therefore change the argmax. Conceptually, these logits processors cannot be skipped for greedy sampling requests.
-
-The vLLM logits processor abstraction requires the engine to apply logits processors at batch granularity; therefore in practice the argmax-invariant logits processors can only be skipped when the entire batch uses greedy sampling.
-
-## Logits Processor Programming Model
-
-The previous sections alluded to the interfaces which vLLM logits processors must support. This section introduces in full the programming model for implementing logits processors that are compatible with the vLLM engine, including the `LogitsProcessor` base class and its interface methods as well as the `BatchUpdate` data structure for representing persistent batch state changes, both of which are shown in the code below:
-
-??? code "`LogitsProcessor` base class and `BatchUpdate` data structure"
-
-    ``` python
-    from abc import ABC, abstractmethod
-    from collections.abc import Sequence
-    from dataclasses import dataclass
-    from enum import Enum, auto
-    from typing import TYPE_CHECKING
-
-    import torch
-
-    from vllm import SamplingParams
-
-    if TYPE_CHECKING:
-        from vllm.config import VllmConfig
-
-
-    class MoveDirectionality(Enum):
-        # One-way i1->i2 req move within batch
+ batch
         UNIDIRECTIONAL = auto()
-        # Two-way i1<->i2 req swap within batch
+        # T
+o-
+ay 
+1
+-
+
+2 r
+q s
+ap 
+
+th
+
+ batch
         SWAP = auto()
+    # (
+
+d
+x, params, prompt_tok_
+ds, output_tok_
+ds) tup
+
+s for 
 
 
-    # (index, params, prompt_tok_ids, output_tok_ids) tuples for new
-    # requests added to the batch.
-    AddedRequest = tuple[int, SamplingParams, list[int], list[int]]
 
-    # (index 1, index 2, directionality) tuples representing
-    # one-way moves or two-way swaps of requests in batch
-    MovedRequest = tuple[int, int, MoveDirectionality]
+    # r
+qu
+sts add
+d to th
+ batch.
+    Add
+dR
+qu
+st = tup
 
-    # Batch indices of any removed requests.
-    RemovedRequest = int
+[
+
+t, Samp
 
 
-    @dataclass(frozen=True)
-    class BatchUpdate:
-        """Persistent batch state change info for logitsprocs"""
-        batch_size: int  # Current num reqs in batch
+gParams, 
 
-        # Metadata for requests added to, removed from, and moved
-        # within the persistent batch.
+st[
+
+t], 
+
+st[
+
+t]]
+    # (
+
+d
+x 1, 
+
+d
+x 2, d
+r
+ct
+o
+a
+
+ty) tup
+
+s r
+pr
+s
+
+t
+
+g
+    # o
+
+-
+ay mov
+s or t
+o-
+ay s
+aps of r
+qu
+sts 
+
+ batch
+    Mov
+dR
+qu
+st = tup
+
+[
+
+t, 
+
+t, Mov
+D
+r
+ct
+o
+a
+
+ty]
+    # Batch 
+
+d
+c
+s of a
+y r
+mov
+d r
+qu
+sts.
+    R
+mov
+dR
+qu
+st = 
+
+t
+    @datac
+ass(froz
+
+=Tru
+)
+    c
+ass BatchUpdat
+:
+        """P
+rs
+st
+
+t batch stat
+ cha
+g
+ 
+
+fo for 
+og
+tsprocs"""
+        batch_s
+z
+: 
+
+t  # Curr
+
+t 
+um r
+qs 
+
+ batch
+        # M
+tadata for r
+qu
+sts add
+d to, r
+mov
+d from, a
+d mov
+d
+        # 
+
+th
+
+ th
+ p
+rs
+st
+
+t batch.
         #
-        # Key assumption: the `output_tok_ids` list (which is an element of each
-        # tuple in `added`) is a reference to the request's running output tokens
-        # list; via this reference, the logits processors always see the latest
-        # list of generated output tokens
-        removed: Sequence[RemovedRequest]
-        moved: Sequence[MovedRequest]
-        added: Sequence[AddedRequest]
+        # K
+y assumpt
+o
+: th
+ `output_tok_
+ds` 
+
+st (
+h
+ch 
+s a
+ 
 
 
-    class LogitsProcessor(ABC):
+m
 
-        @abstractmethod
-        def __init__(self, vllm_config: "VllmConfig", device: torch.device,
-                    is_pin_memory: bool) -> None:
-            raise NotImplementedError
+t of 
+ach
+        # tup
 
-        @abstractmethod
-        def apply(self, logits: torch.Tensor) -> torch.Tensor:
-            raise NotImplementedError
+ 
 
-        @abstractmethod
-        def is_argmax_invariant(self) -> bool:
-            """True if logits processor has no impact on the
-            argmax computation in greedy sampling.
-            NOTE: may or may not have the same value for all
-            instances of a given LogitsProcessor subclass,
-            depending on subclass implementation.
+ `add
+d`) 
+s a r
+f
+r
+
+c
+ to th
+ r
+qu
+st's ru
+
+
+g output tok
+
+s
+        # 
+
+st; v
+a th
+s r
+f
+r
+
+c
+, th
+ 
+og
+ts proc
+ssors a
+
+ays s
+ th
+ 
+at
+st
+        # 
+
+st of g
+
+
+rat
+d output tok
+
+s
+        r
+mov
+d: S
+qu
+
+c
+[R
+mov
+dR
+qu
+st]
+        mov
+d: S
+qu
+
+c
+[Mov
+dR
+qu
+st]
+        add
+d: S
+qu
+
+c
+[Add
+dR
+qu
+st]
+    c
+ass Log
+tsProc
+ssor(ABC):
+        @abstractm
+thod
+        d
+f __
+
+
+t__(s
+
+f, v
+m_co
+f
+g: "V
+mCo
+f
+g", d
+v
+c
+: torch.d
+v
+c
+,
+                    
+s_p
+
+_m
+mory: boo
+) -
+ No
+
+:
+            ra
+s
+ NotImp
+
+m
+
+t
+dError
+        @abstractm
+thod
+        d
+f app
+y(s
+
+f, 
+og
+ts: torch.T
+
+sor) -
+ torch.T
+
+sor:
+            ra
+s
+ NotImp
+
+m
+
+t
+dError
+        @abstractm
+thod
+        d
+f 
+s_argmax_
+
+var
+a
+t(s
+
+f) -
+ boo
+:
+            """Tru
+ 
+f 
+og
+ts proc
+ssor has 
+o 
+mpact o
+ th
+
+            argmax computat
+o
+ 
+
+ gr
+dy samp
+
+
+g.
+            NOTE: may or may 
+ot hav
+ th
+ sam
+ va
+u
+ for a
+
+            
+
+sta
+c
+s of a g
+v
+
+ Log
+tsProc
+ssor subc
+ass,
+            d
+p
+
+d
+
+g o
+ subc
+ass 
+mp
+
+m
+
+tat
+o
+.
             """
-            raise NotImplementedError
+            ra
+s
+ NotImp
 
-        @abstractmethod
-        def update_state(
-            self,
-            batch_update: "BatchUpdate" | None,
-        ) -> None:
-            """Called when there are new output tokens, prior
-            to each forward pass.
+m
 
+t
+dError
+        @abstractm
+thod
+        d
+f updat
+_stat
+(
+            s
+
+f,
+            batch_updat
+: "BatchUpdat
+" | No
+
+,
+        ) -
+ No
+
+:
+            """Ca
+
+d 
+h
+
+ th
+r
+ ar
+ 
+
+
+ output tok
+
+s, pr
+or
+            to 
+ach for
+ard pass.
             Args:
-                batch_update is non-None iff there have been
-                changes to the batch makeup.
+                batch_updat
+ 
+s 
+o
+-No
+
+ 
+ff th
+r
+ hav
+ b
+
+
+                cha
+g
+s to th
+ batch mak
+up.
             """
-            raise NotImplementedError
+            ra
+s
+ NotImp
 
-        @classmethod
-        def validate_params(cls, sampling_params: SamplingParams):
-            """Validate sampling params for this logits processor.
+m
 
-            Raise ValueError for invalid ones.
+t
+dError
+        @c
+assm
+thod
+        d
+f va
+
+dat
+_params(c
+s, samp
+
+
+g_params: Samp
+
+
+gParams):
+            """Va
+
+dat
+ samp
+
+
+g params for th
+s 
+og
+ts proc
+ssor.
+            Ra
+s
+ Va
+u
+Error for 
+
+va
+
+d o
+
+s.
             """
-            return None
+            r
+tur
+ No
 
-    ```
 
-A vLLM logits processor must subclass `LogitsProcessor` and define (at minimum) the following methods:
+```
+A vLLM 
+og
+ts proc
+ssor must subc
+ass `Log
+tsProc
+ssor` a
+d d
+f
 
-* `__init__(self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool)`
-    * `vllm_config`: engine configuration data structure
-    * `device`: hardware accelerator device info
-    * `is_pin_memory`: flag indicating whether pin memory is available to support logits processor implementation
 
-* `apply(self, logits: torch.Tensor) -> torch.Tensor`:
-    * Consume a `(num_requests) x (vocab_size)` logits tensor (`logits`)
-    * Apply logits processor transformation at batch granularity
-    * Return a transformed `(num_requests) x (vocab_size)` logits tensor
-    * You can modify the input logits processors in-place or out-of-place; in-place is more memory-efficient
+ (at m
 
-* `is_argmax_invariant(self) -> bool`:
-    * Return `True` if the logits processor is argmax invariant (never changes what is the highest-logit-value token ID for a given request), `False` if the logits processor may modify argmax
-    * `is_argmax_invariant()` is evaluated once at startup; if `True`, vLLM will skip applying this logits processor in a given step when all requests use greedy sampling
 
-* `update_state(self, batch_update: "BatchUpdate" | None) -> None`:
-    * Consume a `BatchUpdate` data structure representing persistent batch state changes at the beginning of the current engine step
-    * Use the `BatchUpdate` members to update logits processor internal state
-    * **Note:** batch update data structure may be `None`, signaling no change to the batch constituents. In this case, the LogitsProcessor might still want to update its state based on the updated `output_token_ids` lists that it could have retained when they were added.
+mum) th
+ fo
+o
 
-* `validate_params(cls, sampling_params: SamplingParams)`:
-    * Raise `ValueError` if `SamplingParams` has invalid arguments (especially custom arguments) used by logits processor.
-    * When request is sent to entrypoint, `validate_params()` will validate `SamplingParams` and refuse request with invalid arguments.
 
-### `BatchUpdate` data structure
+g m
+thods:
+* `__
 
-The `BatchUpdate` abstraction models the persistent batch as a list of requests, supporting the following operations to change batch state (note that the order in which the operations are mentioned below reflects the order in which they should be processed in `update_state()`):
 
-* **Remove:** remove (without replacement) request at index `i`
+t__(s
 
-    * A Remove is represented in `Batchupdate.removed` by an `int` (representing `i`)
+f, v
+m_co
+f
+g: V
+mCo
+f
+g, d
+v
+c
+: torch.d
+v
+c
+, 
+s_p
 
-    * Effect of remove-at-index on batch:
+_m
+mory: boo
+)`
+    * `v
+m_co
+f
+g`: 
 
-        ``` text
+g
+
+
+ co
+f
+gurat
+o
+ data structur
+
+    * `d
+v
+c
+`: hard
+ar
+ acc
+
+
+rator d
+v
+c
+ 
+
+fo
+    * `
+s_p
+
+_m
+mory`: f
+ag 
+
+d
+cat
+
+g 
+h
+th
+r p
+
+ m
+mory 
+s ava
+
+ab
+
+ to support 
+og
+ts proc
+ssor 
+mp
+
+m
+
+tat
+o
+
+* `app
+y(s
+
+f, 
+og
+ts: torch.T
+
+sor) -
+ torch.T
+
+sor`:
+    * Co
+sum
+ a `(
+um_r
+qu
+sts) x (vocab_s
+z
+)` 
+og
+ts t
+
+sor (`
+og
+ts`)
+    * App
+y 
+og
+ts proc
+ssor tra
+sformat
+o
+ at batch gra
+u
+ar
+ty
+    * R
+tur
+ a tra
+sform
+d `(
+um_r
+qu
+sts) x (vocab_s
+z
+)` 
+og
+ts t
+
+sor
+    * You ca
+ mod
+fy th
+ 
+
+put 
+og
+ts proc
+ssors 
+
+-p
+ac
+ or out-of-p
+ac
+; 
+
+-p
+ac
+ 
+s mor
+ m
+mory-
+ff
+c
+
+
+t
+* `
+s_argmax_
+
+var
+a
+t(s
+
+f) -
+ boo
+`:
+    * R
+tur
+ `Tru
+` 
+f th
+ 
+og
+ts proc
+ssor 
+s argmax 
+
+var
+a
+t (
+
+v
+r cha
+g
+s 
+hat 
+s th
+ h
+gh
+st-
+og
+t-va
+u
+ tok
+
+ ID for a g
+v
+
+ r
+qu
+st), `Fa
+s
+` 
+f th
+ 
+og
+ts proc
+ssor may mod
+fy argmax
+    * `
+s_argmax_
+
+var
+a
+t()` 
+s 
+va
+uat
+d o
+c
+ at startup; 
+f `Tru
+`, vLLM 
+
+
+ sk
+p app
+y
+
+g th
+s 
+og
+ts proc
+ssor 
+
+ a g
+v
+
+ st
+p 
+h
+
+ a
+ r
+qu
+sts us
+ gr
+dy samp
+
+
+g
+* `updat
+_stat
+(s
+
+f, batch_updat
+: "BatchUpdat
+" | No
+
+) -
+ No
+
+`:
+    * Co
+sum
+ a `BatchUpdat
+` data structur
+ r
+pr
+s
+
+t
+
+g p
+rs
+st
+
+t batch stat
+ cha
+g
+s at th
+ b
+g
+
+
+
+g of th
+ curr
+
+t 
+
+g
+
+
+ st
+p
+    * Us
+ th
+ `BatchUpdat
+` m
+mb
+rs to updat
+ 
+og
+ts proc
+ssor 
+
+t
+r
+a
+ stat
+
+    * **Not
+:** batch updat
+ data structur
+ may b
+ `No
+
+`, s
+g
+a
+
+
+g 
+o cha
+g
+ to th
+ batch co
+st
+tu
+
+ts. I
+ th
+s cas
+, th
+ Log
+tsProc
+ssor m
+ght st
+
+ 
+a
+t to updat
+ 
+ts stat
+ bas
+d o
+ th
+ updat
+d `output_tok
+
+_
+ds` 
+
+sts that 
+t cou
+d hav
+ r
+ta
+
+
+d 
+h
+
+ th
+y 
+
+r
+ add
+d.
+* `va
+
+dat
+_params(c
+s, samp
+
+
+g_params: Samp
+
+
+gParams)`:
+    * Ra
+s
+ `Va
+u
+Error` 
+f `Samp
+
+
+gParams` has 
+
+va
+
+d argum
+
+ts (
+sp
+c
+a
+y custom argum
+
+ts) us
+d by 
+og
+ts proc
+ssor.
+    * Wh
+
+ r
+qu
+st 
+s s
+
+t to 
+
+trypo
+
+t, `va
+
+dat
+_params()` 
+
+
+ va
+
+dat
+ `Samp
+
+
+gParams` a
+d r
+fus
+ r
+qu
+st 
+
+th 
+
+va
+
+d argum
+
+ts.
+### `BatchUpdat
+` data structur
+
+Th
+ `BatchUpdat
+` abstract
+o
+ mod
+
+s th
+ p
+rs
+st
+
+t batch as a 
+
+st of r
+qu
+sts, support
+
+g th
+ fo
+o
+
+
+g op
+rat
+o
+s to cha
+g
+ batch stat
+ (
+ot
+ that th
+ ord
+r 
+
+ 
+h
+ch th
+ op
+rat
+o
+s ar
+ m
+
+t
+o
+
+d b
+
+o
+ r
+f
+
+cts th
+ ord
+r 
+
+ 
+h
+ch th
+y shou
+d b
+ proc
+ss
+d 
+
+ `updat
+_stat
+()`):
+* **R
+mov
+:** r
+mov
+ (
+
+thout r
+p
+ac
+m
+
+t) r
+qu
+st at 
+
+d
+x `
+`
+    * A R
+mov
+ 
+s r
+pr
+s
+
+t
+d 
+
+ `Batchupdat
+.r
+mov
+d` by a
+ `
+
+t` (r
+pr
+s
+
+t
+
+g `
+`)
+    * Eff
+ct of r
+mov
+-at-
+
+d
+x o
+ batch:
+        ``` t
+xt
         Batch: [A,B,C]
-        Remove @ i:  1
+        R
+mov
+ @ 
+:  1
+        =
 
-        =>
+        N
 
-        New Batch: [A,x,C] # Discard B and leave an empty slot
-        ```
+ Batch: [A,x,C] # D
+scard B a
+d 
 
-* **Add:** add (or replace existing request with) a new request at index `i`. If a request is replaced, its associated state should be discarded.
+av
+ a
+ 
+mpty s
+ot
+```
+* **Add:** add (or r
+p
+ac
+ 
+x
+st
 
-    * An Add is represented in `Batchupdate.added` as a tuple of
+g r
+qu
+st 
 
-        ``` text
-        (index, new request SamplingParams, prompt token ids, output token ids)
-        ```
+th) a 
 
-    * `prompt token ids` and `output token ids` are references to the request's prompt token ids and output token ids lists, respectively. Note that the output token ids list grows with each engine step, and this growth is visible to the logits processor because output token ids are passed by reference. **This is important for LogitsProcessors that take into account the tokens generated so far**.
 
-    * The implementation of the particular logits processor subclass determines whether or how the fields in the added request tuple are digested into an internal representation. For example, a logits processor that does not utilize prompt or output token ids may only need to utilize `index` and `SamplingParams` and discard the other tuple fields
+ r
+qu
+st at 
 
-    * If index `i` currently holds a request, a replacement occurs:
+d
+x `
+`. If a r
+qu
+st 
+s r
+p
+ac
+d, 
+ts assoc
+at
+d stat
+ shou
+d b
+ d
+scard
+d.
+    * A
+ Add 
+s r
+pr
+s
 
-        ``` text
+t
+d 
+
+ `Batchupdat
+.add
+d` as a tup
+
+ of
+        ``` t
+xt
+        (
+
+d
+x, 
+
+
+ r
+qu
+st Samp
+
+
+gParams, prompt tok
+
+ 
+ds, output tok
+
+ 
+ds)
+```
+    * `prompt tok
+
+ 
+ds` a
+d `output tok
+
+ 
+ds` ar
+ r
+f
+r
+
+c
+s to th
+ r
+qu
+st's prompt tok
+
+ 
+ds a
+d output tok
+
+ 
+ds 
+
+sts, r
+sp
+ct
+v
+
+y. Not
+ that th
+ output tok
+
+ 
+ds 
+
+st gro
+s 
+
+th 
+ach 
+
+g
+
+
+ st
+p, a
+d th
+s gro
+th 
+s v
+s
+b
+
+ to th
+ 
+og
+ts proc
+ssor b
+caus
+ output tok
+
+ 
+ds ar
+ pass
+d by r
+f
+r
+
+c
+. **Th
+s 
+s 
+mporta
+t for Log
+tsProc
+ssors that tak
+ 
+
+to accou
+t th
+ tok
+
+s g
+
+
+rat
+d so far**.
+    * Th
+ 
+mp
+
+m
+
+tat
+o
+ of th
+ part
+cu
+ar 
+og
+ts proc
+ssor subc
+ass d
+t
+rm
+
+
+s 
+h
+th
+r or ho
+ th
+ f
+
+
+ds 
+
+ th
+ add
+d r
+qu
+st tup
+
+ ar
+ d
+g
+st
+d 
+
+to a
+ 
+
+t
+r
+a
+ r
+pr
+s
+
+tat
+o
+. For 
+xamp
+
+, a 
+og
+ts proc
+ssor that do
+s 
+ot ut
+
+
+z
+ prompt or output tok
+
+ 
+ds may o
+
+y 
+
+d to ut
+
+
+z
+ `
+
+d
+x` a
+d `Samp
+
+
+gParams` a
+d d
+scard th
+ oth
+r tup
+
+ f
+
+
+ds
+    * If 
+
+d
+x `
+` curr
+
+t
+y ho
+ds a r
+qu
+st, a r
+p
+ac
+m
+
+t occurs:
+        ``` t
+xt
         Batch: [A,B,C]
-        New request to be added @ i: D @ 1
+        N
 
-        =>
+ r
+qu
+st to b
+ add
+d @ 
+: D @ 1
+        =
 
-        New Batch: [A,D,C] # Add D, discard B
-        ```
+        N
 
-    * If index `i` does not currently hold a request (because `i` is out of bounds of the current batch size):
+ Batch: [A,D,C] # Add D, d
+scard B
+```
+    * If 
 
-        ``` text
+d
+x `
+` do
+s 
+ot curr
+
+t
+y ho
+d a r
+qu
+st (b
+caus
+ `
+` 
+s out of bou
+ds of th
+ curr
+
+t batch s
+z
+):
+        ``` t
+xt
         Batch: [A,B,C]
-        New request to be added @ i: D @ 3
+        N
 
-        =>
+ r
+qu
+st to b
+ add
+d @ 
+: D @ 3
+        =
 
-        New Batch: [A,B,C,D] # Add D, extending batch
-        ```
+        N
 
-* **Move:** move request at index `s` to index `d` OR swap requests at indices `s` and `d`
+ Batch: [A,B,C,D] # Add D, 
+xt
 
-    * A Move is represented in `Batchupdate.moved` as a tuple of
+d
 
-        ``` text
+g batch
+```
+* **Mov
+:** mov
+ r
+qu
+st at 
+
+d
+x `s` to 
+
+d
+x `d` OR s
+ap r
+qu
+sts at 
+
+d
+c
+s `s` a
+d `d`
+    * A Mov
+ 
+s r
+pr
+s
+
+t
+d 
+
+ `Batchupdat
+.mov
+d` as a tup
+
+ of
+        ``` t
+xt
         (s, d, UNIDIRECTIONAL or SWAP)
-        ```
+```
+    * If th
+ Mov
+ sp
+c
+f
 
-    * If the Move specifies `UNIDIRECTIONAL`:
+s `UNIDIRECTIONAL`:
+        * Th
+ r
+qu
+st at 
 
-        * The request at index `s` is moved to index `d`; index `s` becomes an empty slot
+d
+x `s` 
+s mov
+d to 
 
-            ``` text
+d
+x `d`; 
+
+d
+x `s` b
+com
+s a
+ 
+mpty s
+ot
+            ``` t
+xt
             Batch: [A,x,C,D]
-            Unidirectionally Move s -> d:  3 -> 1
+            U
 
-            =>
+d
+r
+ct
+o
+a
+y Mov
+ s -
+ d:  3 -
+ 1
+            =
 
-            New Batch: [A,D,C,x] # Move D to 1, leaving empty slot at 3
-            ```
+            N
 
-        * If another request already resided at index `d`, it is replaced and discarded
+ Batch: [A,D,C,x] # Mov
+ D to 1, 
 
-            ``` text
+av
+
+g 
+mpty s
+ot at 3
+```
+        * If a
+oth
+r r
+qu
+st a
+r
+ady r
+s
+d
+d at 
+
+d
+x `d`, 
+t 
+s r
+p
+ac
+d a
+d d
+scard
+d
+            ``` t
+xt
             Batch: [A,B,C,D]
-            Unidirectionally Move s -> d:  3 -> 1
+            U
 
-            =>
+d
+r
+ct
+o
+a
+y Mov
+ s -
+ d:  3 -
+ 1
+            =
 
-            New Batch: [A,D,C,x] # Move D to 1, discarding B and leaving empty slot at 3
-            ```
+            N
 
-    * If the Move specifies `SWAP`, the requests at `s` and `d` exchange indices
+ Batch: [A,D,C,x] # Mov
+ D to 1, d
+scard
 
-        ``` text
+g B a
+d 
+
+av
+
+g 
+mpty s
+ot at 3
+```
+    * If th
+ Mov
+ sp
+c
+f
+
+s `SWAP`, th
+ r
+qu
+sts at `s` a
+d `d` 
+xcha
+g
+ 
+
+d
+c
+s
+        ``` t
+xt
         Batch: [A,B,C,D]
-        Swap Move s <-> d:  3 <-> 1
+        S
+ap Mov
+ s 
+-
+ d:  3 
+-
+ 1
+        =
 
-        =>
+        N
 
-        New Batch: [A,D,C,B] # Swap B and D
-        ```
+ Batch: [A,D,C,B] # S
+ap B a
+d D
+```
+Add
+t
+o
+a
+y, th
+ `BatchUpdat
+` data structur
+ 
 
-Additionally, the `BatchUpdate` data structure includes a representation (`batch_size`) of the size of the persistent batch at the beginning of the engine step.
+c
+ud
+s a r
+pr
+s
 
-### How the vLLM engine builds the `BatchUpdate` data structure
+tat
+o
+ (`batch_s
+z
+`) of th
+ s
+z
+ of th
+ p
+rs
+st
 
-Logits processor `update_state()` implementations should assume the following model for how the model runner updates persistent batch state (expressed here in terms of the `BatchUpdate` abstraction):
+t batch at th
+ b
+g
 
-1. Identify indices of requests which finished in the current engine step
 
-2. Identify new requests introduced in the current step
 
-3. Use Add operations to replace as many finished requests with new requests, in order of increasing index of the replaced request starting with the lowest index
+g of th
+ 
 
-4. Based on the relative number of new and finished requests:
+g
 
-    1. If the numbers of new and finished requests are the same, proceed to next step
 
-    2. *If there are more new requests than finished requests:* apply Add operations to extend the batch with the remaining new requests which did not replace finished requests. Assign consecutive indices to these new requests, starting with `current_max_batch_index + 1`
+ st
+p.
+### Ho
+ th
+ vLLM 
 
-    3. *If there are fewer new requests than finished requests:*
+g
 
-        * Apply Remove operations to finished requests which were not replaced with new requests. These removed request indices will necessarily be greater than the greatest index of the finished requests which were replaced in the previous step. The Removes may leave the batch in a non-contiguous state
 
-        * **"Condense" the batch to be contiguous:** starting with the lowest-index empty slot (which was caused by a Remove), apply a Unidirectional Move from the current highest non-empty slot in the batch to fill the empty slot. Proceed with additional Unidirectional Move operations in order of increasing empty slot destination index and decreasing non-empty slot source index until the batch is contiguous
+ bu
 
-        * **Shrink the batch:** a side effect of condensing the batch is that empty slots resulting from Remove operations are grouped in a contiguous block at the end of the batch array. Thus, after condensing, update `BatchUpdate.batch_size` to reflect the number of non-empty slots
+ds th
+ `BatchUpdat
+` data structur
 
-5. Reorder the batch for improved efficiency. Depending on the attention backend implementation and the current characteristics of the batch, zero or more Swap Move operations may be applied to reorder the batch
+Log
+ts proc
+ssor `updat
+_stat
+()` 
+mp
 
-Notes:
+m
 
-* A logits processor `update_state()` method must process batch update operations in the following order: removes, adds, moves
+tat
+o
+s shou
+d assum
+ th
+ fo
+o
 
-* The index argument for Add operations refers to the index *at the time the Add occurred*, i.e. before any Move operations
-    * Example: if a request is Added at index 5 and then swapped with index 3, the Add operation in `BatchUpdate.added` will be associated with index 5 not 3
-    * In other words Move operations can be assumed to be applied after Adds and Removes
 
-* Move operations can be assumed to be applied in the order in which they appear in `BatchUpdate.moved`
+g mod
 
-* If there are no new/finished requests and there is no batch reordering, then the batch update for the logits processors will be `None`
+ for ho
+ th
+ mod
 
-#### Example: Batch Update with Fewer New Requests Than Finished Requests
+ ru
 
-The following example models an engine step where 1 new request is introduced and 2 finished requests are eliminated, additionally the attention backend performs a swap to optimize the batch ordering.
+r updat
+s p
+rs
+st
 
-``` text
-Batch state (beginning of engine step): [A,B,C,D]
-Batch size: 4
+t batch stat
+ (
+xpr
+ss
+d h
+r
+ 
 
-New requests: E
+ t
+rms of th
+ `BatchUpdat
+` abstract
+o
+):
+1. Id
 
-Finished requests: A, C
+t
+fy 
 
-Processing steps (using BatchUpdate abstraction):
+d
+c
+s of r
+qu
+sts 
+h
+ch f
 
-1. Add E at index 0
 
-[E,B,C,D] # Discard A
-Batch size: 4
+sh
+d 
 
-2. Remove at index 2
+ th
+ curr
 
-[E,B,x,D] # Discard C, empty slot at index 2
-Batch size: 4
+t 
 
-3. Condense batch with a Unidirectional Move 3 -> 2 operation and shrink batch
+g
 
-[E,B,D] x # Empty slot is now outside batch
-Batch size: 3
 
-4. Attention backend optimization: reorder batch with Swap 0 <-> 1
+ st
+p
+2. Id
 
+t
+fy 
+
+
+ r
+qu
+sts 
+
+troduc
+d 
+
+ th
+ curr
+
+t st
+p
+3. Us
+ Add op
+rat
+o
+s to r
+p
+ac
+ as ma
+y f
+
+
+sh
+d r
+qu
+sts 
+
+th 
+
+
+ r
+qu
+sts, 
+
+ ord
+r of 
+
+cr
+as
+
+g 
+
+d
+x of th
+ r
+p
+ac
+d r
+qu
+st start
+
+g 
+
+th th
+ 
+o
+
+st 
+
+d
+x
+4. Bas
+d o
+ th
+ r
+
+at
+v
+ 
+umb
+r of 
+
+
+ a
+d f
+
+
+sh
+d r
+qu
+sts:
+    1. If th
+ 
+umb
+rs of 
+
+
+ a
+d f
+
+
+sh
+d r
+qu
+sts ar
+ th
+ sam
+, proc
+d to 
+
+xt st
+p
+    2. *If th
+r
+ ar
+ mor
+ 
+
+
+ r
+qu
+sts tha
+ f
+
+
+sh
+d r
+qu
+sts:* app
+y Add op
+rat
+o
+s to 
+xt
+
+d th
+ batch 
+
+th th
+ r
+ma
+
+
+
+g 
+
+
+ r
+qu
+sts 
+h
+ch d
+d 
+ot r
+p
+ac
+ f
+
+
+sh
+d r
+qu
+sts. Ass
+g
+ co
+s
+cut
+v
+ 
+
+d
+c
+s to th
+s
+ 
+
+
+ r
+qu
+sts, start
+
+g 
+
+th `curr
+
+t_max_batch_
+
+d
+x + 1`
+    3. *If th
+r
+ ar
+ f
+
+
+r 
+
+
+ r
+qu
+sts tha
+ f
+
+
+sh
+d r
+qu
+sts:*
+        * App
+y R
+mov
+ op
+rat
+o
+s to f
+
+
+sh
+d r
+qu
+sts 
+h
+ch 
+
+r
+ 
+ot r
+p
+ac
+d 
+
+th 
+
+
+ r
+qu
+sts. Th
+s
+ r
+mov
+d r
+qu
+st 
+
+d
+c
+s 
+
+
+ 
+
+c
+ssar
+
+y b
+ gr
+at
+r tha
+ th
+ gr
+at
+st 
+
+d
+x of th
+ f
+
+
+sh
+d r
+qu
+sts 
+h
+ch 
+
+r
+ r
+p
+ac
+d 
+
+ th
+ pr
+v
+ous st
+p. Th
+ R
+mov
+s may 
+
+av
+ th
+ batch 
+
+ a 
+o
+-co
+t
+guous stat
+
+        * **"Co
+d
+
+s
+" th
+ batch to b
+ co
+t
+guous:** start
+
+g 
+
+th th
+ 
+o
+
+st-
+
+d
+x 
+mpty s
+ot (
+h
+ch 
+as caus
+d by a R
+mov
+), app
+y a U
+
+d
+r
+ct
+o
+a
+ Mov
+ from th
+ curr
+
+t h
+gh
+st 
+o
+-
+mpty s
+ot 
+
+ th
+ batch to f
+
+ th
+ 
+mpty s
+ot. Proc
+d 
+
+th add
+t
+o
+a
+ U
+
+d
+r
+ct
+o
+a
+ Mov
+ op
+rat
+o
+s 
+
+ ord
+r of 
+
+cr
+as
+
+g 
+mpty s
+ot d
+st
+
+at
+o
+ 
+
+d
+x a
+d d
+cr
+as
+
+g 
+o
+-
+mpty s
+ot sourc
+ 
+
+d
+x u
+t
+
+ th
+ batch 
+s co
+t
+guous
+        * **Shr
+
+k th
+ batch:** a s
+d
+ 
+ff
+ct of co
+d
+
+s
+
+g th
+ batch 
+s that 
+mpty s
+ots r
+su
+t
+
+g from R
+mov
+ op
+rat
+o
+s ar
+ group
+d 
+
+ a co
+t
+guous b
+ock at th
+ 
+
+d of th
+ batch array. Thus, aft
+r co
+d
+
+s
+
+g, updat
+ `BatchUpdat
+.batch_s
+z
+` to r
+f
+
+ct th
+ 
+umb
+r of 
+o
+-
+mpty s
+ots
+5. R
+ord
+r th
+ batch for 
+mprov
+d 
+ff
+c
+
+
+cy. D
+p
+
+d
+
+g o
+ th
+ att
+
+t
+o
+ back
+
+d 
+mp
+
+m
+
+tat
+o
+ a
+d th
+ curr
+
+t charact
+r
+st
+cs of th
+ batch, z
+ro or mor
+ S
+ap Mov
+ op
+rat
+o
+s may b
+ app
+
+
+d to r
+ord
+r th
+ batch
+Not
+s:
+* A 
+og
+ts proc
+ssor `updat
+_stat
+()` m
+thod must proc
+ss batch updat
+ op
+rat
+o
+s 
+
+ th
+ fo
+o
+
+
+g ord
+r: r
+mov
+s, adds, mov
+s
+* Th
+ 
+
+d
+x argum
+
+t for Add op
+rat
+o
+s r
+f
+rs to th
+ 
+
+d
+x *at th
+ t
+m
+ th
+ Add occurr
+d*, 
+.
+. b
+for
+ a
+y Mov
+ op
+rat
+o
+s
+    * Examp
+
+: 
+f a r
+qu
+st 
+s Add
+d at 
+
+d
+x 5 a
+d th
+
+ s
+app
+d 
+
+th 
+
+d
+x 3, th
+ Add op
+rat
+o
+ 
+
+ `BatchUpdat
+.add
+d` 
+
+
+ b
+ assoc
+at
+d 
+
+th 
+
+d
+x 5 
+ot 3
+    * I
+ oth
+r 
+ords Mov
+ op
+rat
+o
+s ca
+ b
+ assum
+d to b
+ app
+
+
+d aft
+r Adds a
+d R
+mov
+s
+* Mov
+ op
+rat
+o
+s ca
+ b
+ assum
+d to b
+ app
+
+
+d 
+
+ th
+ ord
+r 
+
+ 
+h
+ch th
+y app
+ar 
+
+ `BatchUpdat
+.mov
+d`
+* If th
+r
+ ar
+ 
+o 
+
+
+/f
+
+
+sh
+d r
+qu
+sts a
+d th
+r
+ 
+s 
+o batch r
+ord
+r
+
+g, th
+
+ th
+ batch updat
+ for th
+ 
+og
+ts proc
+ssors 
+
+
+ b
+ `No
+
+`
+#### Examp
+
+: Batch Updat
+ 
+
+th F
+
+
+r N
+
+ R
+qu
+sts Tha
+ F
+
+
+sh
+d R
+qu
+sts
+Th
+ fo
+o
+
+
+g 
+xamp
+
+ mod
+
+s a
+ 
+
+g
+
+
+ st
+p 
+h
+r
+ 1 
+
+
+ r
+qu
+st 
+s 
+
+troduc
+d a
+d 2 f
+
+
+sh
+d r
+qu
+sts ar
+ 
+
+
+m
+
+at
+d, add
+t
+o
+a
+y th
+ att
+
+t
+o
+ back
+
+d p
+rforms a s
+ap to opt
+m
+z
+ th
+ batch ord
+r
+
+g.
+``` t
+xt
+Batch stat
+ (b
+g
+
+
+
+g of 
+
+g
+
+
+ st
+p): [A,B,C,D]
+Batch s
+z
+: 4
+N
+
+ r
+qu
+sts: E
+F
+
+
+sh
+d r
+qu
+sts: A, C
+Proc
+ss
+
+g st
+ps (us
+
+g BatchUpdat
+ abstract
+o
+):
+1. Add E at 
+
+d
+x 0
+[E,B,C,D] # D
+scard A
+Batch s
+z
+: 4
+2. R
+mov
+ at 
+
+d
+x 2
+[E,B,x,D] # D
+scard C, 
+mpty s
+ot at 
+
+d
+x 2
+Batch s
+z
+: 4
+3. Co
+d
+
+s
+ batch 
+
+th a U
+
+d
+r
+ct
+o
+a
+ Mov
+ 3 -
+ 2 op
+rat
+o
+ a
+d shr
+
+k batch
+[E,B,D] x # Empty s
+ot 
+s 
+o
+ outs
+d
+ batch
+Batch s
+z
+: 3
+4. Att
+
+t
+o
+ back
+
+d opt
+m
+zat
+o
+: r
+ord
+r batch 
+
+th S
+ap 0 
+-
+ 1
 [B,E,D]
-Batch size: 3
-
+Batch s
+z
+: 3
 ```
+Th
+ r
+su
+t
 
-The resulting `BatchUpdate` data structure will look like
+g `BatchUpdat
+` data structur
+ 
 
-``` text
-BatchUpdate instance
-* added: [(0,E's SamplingParams,E's prompt tokens ref,E's output tokens ref)]
-* removed: [2] # request C was removed without replacement
-* moved: [(3,2,UNIDIRECTIONAL),(0,1,SWAP)]
+
+ 
+ook 
+
+k
+
+``` t
+xt
+BatchUpdat
+ 
+
+sta
+c
+
+* add
+d: [(0,E's Samp
+
+
+gParams,E's prompt tok
+
+s r
+f,E's output tok
+
+s r
+f)]
+* r
+mov
+d: [2] # r
+qu
+st C 
+as r
+mov
+d 
+
+thout r
+p
+ac
+m
+
+t
+* mov
+d: [(3,2,UNIDIRECTIONAL),(0,1,SWAP)]
 ```
+#### Examp
 
-#### Example: Batch Update with More New Requests Than Finished Requests
+: Batch Updat
+ 
 
-The following example models an engine step where 2 new requests are introduced and 1 finished request is eliminated, additionally the attention backend performs a swap to optimize the batch ordering.
+th Mor
+ N
 
-``` text
-Batch state (beginning of engine step): [A,B,C,D]
-Batch size: 4
+ R
+qu
+sts Tha
+ F
 
-New requests: E,F
 
-Finished requests: C
+sh
+d R
+qu
+sts
+Th
+ fo
+o
 
-Processing steps (using BatchUpdate abstraction):
 
-1. Add E at index 2
+g 
+xamp
 
-[A,B,E,D] # Discard C
-Batch size: 4
+ mod
 
-2. Add F at index 4 (current max batch index + 1)
+s a
+ 
 
-[A,B,E,D,F] # Extend batch by 1
-Batch size: 5
+g
 
-4. Attention backend optimization: reorder batch with Swap 0 <-> 1
 
+ st
+p 
+h
+r
+ 2 
+
+
+ r
+qu
+sts ar
+ 
+
+troduc
+d a
+d 1 f
+
+
+sh
+d r
+qu
+st 
+s 
+
+
+m
+
+at
+d, add
+t
+o
+a
+y th
+ att
+
+t
+o
+ back
+
+d p
+rforms a s
+ap to opt
+m
+z
+ th
+ batch ord
+r
+
+g.
+``` t
+xt
+Batch stat
+ (b
+g
+
+
+
+g of 
+
+g
+
+
+ st
+p): [A,B,C,D]
+Batch s
+z
+: 4
+N
+
+ r
+qu
+sts: E,F
+F
+
+
+sh
+d r
+qu
+sts: C
+Proc
+ss
+
+g st
+ps (us
+
+g BatchUpdat
+ abstract
+o
+):
+1. Add E at 
+
+d
+x 2
+[A,B,E,D] # D
+scard C
+Batch s
+z
+: 4
+2. Add F at 
+
+d
+x 4 (curr
+
+t max batch 
+
+d
+x + 1)
+[A,B,E,D,F] # Ext
+
+d batch by 1
+Batch s
+z
+: 5
+4. Att
+
+t
+o
+ back
+
+d opt
+m
+zat
+o
+: r
+ord
+r batch 
+
+th S
+ap 0 
+-
+ 1
 [B,A,E,D,F]
-Batch size: 5
-
+Batch s
+z
+: 5
 ```
+Not
+ that batch co
+d
 
-Note that batch condensation is skipped because there are no empty slots left behind by Remove operations.
+sat
+o
+ 
+s sk
+pp
+d b
+caus
+ th
+r
+ ar
+ 
+o 
+mpty s
+ots 
 
-The resulting `BatchUpdate` data structure will look like
+ft b
+h
 
-``` text
-BatchUpdate instance
-* added: [(2,E's SamplingParams,E's prompt tokens ref,E's output tokens ref),(4,F's SamplingParams,F's prompt tokens ref,F's output tokens ref)]
-* removed: [] # no requests were removed without replacement
-* moved: [(0,1,SWAP)]
+d by R
+mov
+ op
+rat
+o
+s.
+Th
+ r
+su
+t
+
+g `BatchUpdat
+` data structur
+ 
+
+
+ 
+ook 
+
+k
+
+``` t
+xt
+BatchUpdat
+ 
+
+sta
+c
+
+* add
+d: [(2,E's Samp
+
+
+gParams,E's prompt tok
+
+s r
+f,E's output tok
+
+s r
+f),(4,F's Samp
+
+
+gParams,F's prompt tok
+
+s r
+f,F's output tok
+
+s r
+f)]
+* r
+mov
+d: [] # 
+o r
+qu
+sts 
+
+r
+ r
+mov
+d 
+
+thout r
+p
+ac
+m
+
+t
+* mov
+d: [(0,1,SWAP)]
 ```
+## Ho
+ to I
+troduc
+ a N
 
-## How to Introduce a New Logits Processor to vLLM
+ Log
+ts Proc
+ssor to vLLM
+### B
+st Pract
+c
+s for Wr
+t
 
-### Best Practices for Writing Built-In Logits Processors
+g Bu
 
-* Write efficient `apply()` and `update_state()` implementations in light of the fact that logits processors operate at batch granularity
-    * For example, you may be able to use efficient vectorized operations to implement `apply()` or update internal state vectors in `update_state()`
-    * However, if you think that a logits processor may be used infrequently, it may be appropriate to use a "sparse" representation of request state i.e. the class can represent request configuration using a dictionary which only stores metadata about requests that enable the logits processor
+t-I
+ Log
+ts Proc
+ssors
+* Wr
+t
+ 
+ff
+c
 
-* It is up to the logits processor author to determine:
 
-    1. **The per-request attributes which configure the logits processor's behavior against that request.** For example, if you are writing a new built-in logits processor for vLLM, you may or may not need to add additional fields to `SamplingParams` and the vLLM REST API
+t `app
+y()` a
+d `updat
+_stat
+()` 
+mp
 
-    2. **The conditions under which the logits processor is or is not enabled on a per-request basis.** Unless your intention is for the built-in logits processor to act on all requests all the time, you should write your logits processor in such a way that it is possible to disable the logits processor for a given request, i.e. by defaulting an argument to `None` or by passing in a specific do-nothing argument value i.e. `0.0`. Try to save compute and memory for requests which disable the logits processor
+m
 
-    3. **The conditions under which the logits processor is short-circuited at the batch level.** Even if you have defined a way to disable the built-in logits processor at the request level, it may be difficult to translate this into compute savings i.e. if your `update_state()` and `apply()` implementations use efficient vectorized implementations that operate on the whole persistent batch in a single command. For example, you cannot skip an entire vectorized operation in `apply()` just because one request disabled the logits processor. To save compute in the edge-case where no running requests utilize the built-in logits processor, we recommend designing `apply()` to return the unmodified input tensor if all requests have the logits processor disabled. Similarly, consider whether steps can be skipped in `update_state()` if no requests enable the logits processor
+tat
+o
+s 
 
-        * Additionally, an easy way to save compute in `update_state()` is to exit early when the batch_update is `None`
+ 
 
-* Ensure that the logits processor `update_state` method discards information about finished requests (i.e. requests which are replaced by an Add or which are subject to a Remove)
+ght of th
+ fact that 
+og
+ts proc
+ssors op
+rat
+ at batch gra
+u
+ar
+ty
+    * For 
+xamp
 
-* `is_argmax_invariant()` can be hard-coded to `True` or `False` if the logits processor has consistent behavior. However the argmax invariance may also be determined programmatically (i.e. if your logits processor is user-customizable in some way that impacts whether the logits processor is argmax invariant). For this reason, `is_argmax_invariant()` is not a class method
+, you may b
+ ab
 
-### Built-In Logits Processors
+ to us
+ 
+ff
+c
 
-Built-in logits processors are always loaded when the vLLM engine starts. See the existing vLLM built-in logits processors in `vllm/v1/sample/logits_processor/builtin.py` for examples of how to write a new built-in vLLM logits processor. It makes sense to write a PR to introduce a new logits processor as a built-in if it is likely to be useful to a wide audience. vLLM currently employs the following built-in logits processors based on the programming model described above:
 
-* Min-P
+t v
+ctor
+z
+d op
+rat
+o
+s to 
+mp
 
-* Logit bias
+m
 
-* Min-tokens
+t `app
+y()` or updat
+ 
 
-Review these logits processor implementations for guidance on writing built-in logits processors.
+t
+r
+a
+ stat
+ v
+ctors 
 
-Additionally, the following logits-processor-like functionalities are hard-coded into the sampler and do not yet utilize the programming model described above. Most of them will be refactored to use the aforementioned logits processor programming model.
+ `updat
+_stat
+()`
+    * Ho
 
-* Allowed token IDs
+v
+r, 
+f you th
 
-* Bad words
+k that a 
+og
+ts proc
+ssor may b
+ us
+d 
 
-* Repetition penalty
+fr
+qu
 
-* Frequency penalty
+t
+y, 
+t may b
+ appropr
+at
+ to us
+ a "spars
+" r
+pr
+s
 
-* Presence penalty
+tat
+o
+ of r
+qu
+st stat
+ 
+.
+. th
+ c
+ass ca
+ r
+pr
+s
 
-* Temperature
+t r
+qu
+st co
+f
+gurat
+o
+ us
+
+g a d
+ct
+o
+ary 
+h
+ch o
+
+y stor
+s m
+tadata about r
+qu
+sts that 
+
+ab
+
+ th
+ 
+og
+ts proc
+ssor
+* It 
+s up to th
+ 
+og
+ts proc
+ssor author to d
+t
+rm
+
+
+:
+    1. **Th
+ p
+r-r
+qu
+st attr
+but
+s 
+h
+ch co
+f
+gur
+ th
+ 
+og
+ts proc
+ssor's b
+hav
+or aga
+
+st that r
+qu
+st.** For 
+xamp
+
+, 
+f you ar
+ 
+r
+t
+
+g a 
+
+
+ bu
+
+t-
+
+ 
+og
+ts proc
+ssor for vLLM, you may or may 
+ot 
+
+d to add add
+t
+o
+a
+ f
+
+
+ds to `Samp
+
+
+gParams` a
+d th
+ vLLM REST API
+    2. **Th
+ co
+d
+t
+o
+s u
+d
+r 
+h
+ch th
+ 
+og
+ts proc
+ssor 
+s or 
+s 
+ot 
+
+ab
+
+d o
+ a p
+r-r
+qu
+st bas
+s.** U
+
+
+ss your 
+
+t
+
+t
+o
+ 
+s for th
+ bu
+
+t-
+
+ 
+og
+ts proc
+ssor to act o
+ a
+ r
+qu
+sts a
+ th
+ t
+m
+, you shou
+d 
+r
+t
+ your 
+og
+ts proc
+ssor 
+
+ such a 
+ay that 
+t 
+s poss
+b
+
+ to d
+sab
+
+ th
+ 
+og
+ts proc
+ssor for a g
+v
+
+ r
+qu
+st, 
+.
+. by d
+fau
+t
+
+g a
+ argum
+
+t to `No
+
+` or by pass
+
+g 
+
+ a sp
+c
+f
+c do-
+oth
+
+g argum
+
+t va
+u
+ 
+.
+. `0.0`. Try to sav
+ comput
+ a
+d m
+mory for r
+qu
+sts 
+h
+ch d
+sab
+
+ th
+ 
+og
+ts proc
+ssor
+    3. **Th
+ co
+d
+t
+o
+s u
+d
+r 
+h
+ch th
+ 
+og
+ts proc
+ssor 
+s short-c
+rcu
+t
+d at th
+ batch 
+
+v
+
+.** Ev
+
+ 
+f you hav
+ d
+f
+
+
+d a 
+ay to d
+sab
+
+ th
+ bu
+
+t-
+
+ 
+og
+ts proc
+ssor at th
+ r
+qu
+st 
+
+v
+
+, 
+t may b
+ d
+ff
+cu
+t to tra
+s
+at
+ th
+s 
+
+to comput
+ sav
+
+gs 
+.
+. 
+f your `updat
+_stat
+()` a
+d `app
+y()` 
+mp
+
+m
+
+tat
+o
+s us
+ 
+ff
+c
+
+
+t v
+ctor
+z
+d 
+mp
+
+m
+
+tat
+o
+s that op
+rat
+ o
+ th
+ 
+ho
+
+ p
+rs
+st
+
+t batch 
+
+ a s
+
+g
+
+ comma
+d. For 
+xamp
+
+, you ca
+ot sk
+p a
+ 
+
+t
+r
+ v
+ctor
+z
+d op
+rat
+o
+ 
+
+ `app
+y()` just b
+caus
+ o
+
+ r
+qu
+st d
+sab
+
+d th
+ 
+og
+ts proc
+ssor. To sav
+ comput
+ 
+
+ th
+ 
+dg
+-cas
+ 
+h
+r
+ 
+o ru
+
+
+g r
+qu
+sts ut
+
+
+z
+ th
+ bu
+
+t-
+
+ 
+og
+ts proc
+ssor, 
+
+ r
+comm
+
+d d
+s
+g
+
+
+g `app
+y()` to r
+tur
+ th
+ u
+mod
+f
+
+d 
+
+put t
+
+sor 
+f a
+ r
+qu
+sts hav
+ th
+ 
+og
+ts proc
+ssor d
+sab
+
+d. S
+m
+
+ar
+y, co
+s
+d
+r 
+h
+th
+r st
+ps ca
+ b
+ sk
+pp
+d 
+
+ `updat
+_stat
+()` 
+f 
+o r
+qu
+sts 
+
+ab
+
+ th
+ 
+og
+ts proc
+ssor
+        * Add
+t
+o
+a
+y, a
+ 
+asy 
+ay to sav
+ comput
+ 
+
+ `updat
+_stat
+()` 
+s to 
+x
+t 
+ar
+y 
+h
+
+ th
+ batch_updat
+ 
+s `No
+
+`
+* E
+sur
+ that th
+ 
+og
+ts proc
+ssor `updat
+_stat
+` m
+thod d
+scards 
+
+format
+o
+ about f
+
+
+sh
+d r
+qu
+sts (
+.
+. r
+qu
+sts 
+h
+ch ar
+ r
+p
+ac
+d by a
+ Add or 
+h
+ch ar
+ subj
+ct to a R
+mov
+)
+* `
+s_argmax_
+
+var
+a
+t()` ca
+ b
+ hard-cod
+d to `Tru
+` or `Fa
+s
+` 
+f th
+ 
+og
+ts proc
+ssor has co
+s
+st
+
+t b
+hav
+or. Ho
+
+v
+r th
+ argmax 
+
+var
+a
+c
+ may a
+so b
+ d
+t
+rm
+
+
+d programmat
+ca
+y (
+.
+. 
+f your 
+og
+ts proc
+ssor 
+s us
+r-custom
+zab
+
+ 
+
+ som
+ 
+ay that 
+mpacts 
+h
+th
+r th
+ 
+og
+ts proc
+ssor 
+s argmax 
+
+var
+a
+t). For th
+s r
+aso
+, `
+s_argmax_
+
+var
+a
+t()` 
+s 
+ot a c
+ass m
+thod
+### Bu
+
+t-I
+ Log
+ts Proc
+ssors
+Bu
+
+t-
+
+ 
+og
+ts proc
+ssors ar
+ a
+
+ays 
+oad
+d 
+h
+
+ th
+ vLLM 
+
+g
+
+
+ starts. S
+ th
+ 
+x
+st
+
+g vLLM bu
+
+t-
+
+ 
+og
+ts proc
+ssors 
+
+ `v
+m/v1/samp
+
+/
+og
+ts_proc
+ssor/bu
+
+t
+
+.py` for 
+xamp
+
+s of ho
+ to 
+r
+t
+ a 
+
+
+ bu
+
+t-
+
+ vLLM 
+og
+ts proc
+ssor. It mak
+s s
+
+s
+ to 
+r
+t
+ a PR to 
+
+troduc
+ a 
+
+
+ 
+og
+ts proc
+ssor as a bu
+
+t-
+
+ 
+f 
+t 
+s 
+
+k
+
+y to b
+ us
+fu
+ to a 
+
+d
+ aud
+
+
+c
+. vLLM curr
+
+t
+y 
+mp
+oys th
+ fo
+o
+
+
+g bu
+
+t-
+
+ 
+og
+ts proc
+ssors bas
+d o
+ th
+ programm
+
+g mod
+
+ d
+scr
+b
+d abov
+:
+* M
+
+-P
+* Log
+t b
+as
+* M
+
+-tok
+
+s
+R
+v
+
+
+ th
+s
+ 
+og
+ts proc
+ssor 
+mp
+
+m
+
+tat
+o
+s for gu
+da
+c
+ o
+ 
+r
+t
+
+g bu
+
+t-
+
+ 
+og
+ts proc
+ssors.
+Add
+t
+o
+a
+y, th
+ fo
+o
+
+
+g 
+og
+ts-proc
+ssor-
+
+k
+ fu
+ct
+o
+a
+
+t
+
+s ar
+ hard-cod
+d 
+
+to th
+ samp
+
+r a
+d do 
+ot y
+t ut
+
+
+z
+ th
+ programm
+
+g mod
+
+ d
+scr
+b
+d abov
+. Most of th
+m 
+
+
+ b
+ r
+factor
+d to us
+ th
+ afor
+m
+
+t
+o
+
+d 
+og
+ts proc
+ssor programm
+
+g mod
+
+.
+* A
+o
+
+d tok
+
+ IDs
+* Bad 
+ords
+* R
+p
+t
+t
+o
+ p
+
+a
+ty
+* Fr
+qu
+
+cy p
+
+a
+ty
+* Pr
+s
+
+c
+ p
+
+a
+ty
+* T
+mp
+ratur
 
 * Top-K
-
 * Top-P
+### Custom Log
+ts Proc
+ssors
+vLLM ca
+ b
+ augm
 
-### Custom Logits Processors
+t
+d 
 
-vLLM can be augmented with [user-provided custom logits processors](../features/custom_logitsprocs.md).
+th [us
+r-prov
+d
+d custom 
+og
+ts proc
+ssors](../f
+atur
+s/custom_
+og
+tsprocs.md).

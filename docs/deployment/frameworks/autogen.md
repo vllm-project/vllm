@@ -1,79 +1,539 @@
-# AutoGen
+# AutoG
 
-[AutoGen](https://github.com/microsoft/autogen) is a framework for creating multi-agent AI applications that can act autonomously or work alongside humans.
 
-## Prerequisites
+[AutoG
 
-Set up the vLLM and [AutoGen](https://microsoft.github.io/autogen/0.2/docs/installation/) environment:
+](https://g
+thub.com/m
+crosoft/autog
 
+) 
+s a fram
+
+ork for cr
+at
+
+g mu
+t
+-ag
+
+t AI app
+
+cat
+o
+s that ca
+ act auto
+omous
+y or 
+ork a
+o
+gs
+d
+ huma
+s.
+## Pr
+r
+qu
+s
+t
+s
+S
+t up th
+ vLLM a
+d [AutoG
+
+](https://m
+crosoft.g
+thub.
+o/autog
+
+/0.2/docs/
+
+sta
+at
+o
+/) 
+
+v
+ro
+m
+
+t:
 ```bash
-pip install vllm
+p
+p 
 
-# Install AgentChat and OpenAI client from Extensions
-# AutoGen requires Python 3.10 or later.
-pip install -U "autogen-agentchat" "autogen-ext[openai]"
+sta
+ v
+m
+# I
+sta
+ Ag
+
+tChat a
+d Op
+
+AI c
+
+
+
+t from Ext
+
+s
+o
+s
+# AutoG
+
+ r
+qu
+r
+s Pytho
+ 3.10 or 
+at
+r.
+p
+p 
+
+sta
+ -U "autog
+
+-ag
+
+tchat" "autog
+
+-
+xt[op
+
+a
+]"
 ```
+## D
+p
+oy
+1. Start th
+ vLLM s
+rv
+r 
 
-## Deploy
+th th
+ support
+d chat comp
 
-1. Start the vLLM server with the supported chat completion model, e.g.
+t
+o
+ mod
 
+, 
+.g.
     ```bash
-    vllm serve mistralai/Mistral-7B-Instruct-v0.2
-    ```
+    v
+m s
+rv
+ m
+stra
+a
+/M
+stra
+-7B-I
+struct-v0.2
+```
+1. Ca
+ 
+t 
 
-1. Call it with AutoGen:
+th AutoG
 
-??? code
+:
+??? cod
 
-    ```python
-    import asyncio
-    from autogen_core.models import UserMessage
-    from autogen_ext.models.openai import OpenAIChatCompletionClient
-    from autogen_core.models import ModelFamily
+    ```pytho
+
+    
+mport asy
+c
+o
+    from autog
+
+_cor
+.mod
+
+s 
+mport Us
+rM
+ssag
+
+    from autog
+
+_
+xt.mod
+
+s.op
+
+a
+ 
+mport Op
+
+AIChatComp
+
+t
+o
+C
 
 
-    async def main() -> None:
-        # Create a model client
-        model_client = OpenAIChatCompletionClient(
-            model="mistralai/Mistral-7B-Instruct-v0.2",
-            base_url="http://{your-vllm-host-ip}:{your-vllm-host-port}/v1",
-            api_key="EMPTY",
-            model_info={
-                "vision": False,
-                "function_calling": False,
-                "json_output": False,
-                "family": ModelFamily.MISTRAL,
-                "structured_output": True,
+
+t
+    from autog
+
+_cor
+.mod
+
+s 
+mport Mod
+
+Fam
+
+y
+    asy
+c d
+f ma
+
+() -
+ No
+
+:
+        # Cr
+at
+ a mod
+
+ c
+
+
+
+t
+        mod
+
+_c
+
+
+
+t = Op
+
+AIChatComp
+
+t
+o
+C
+
+
+
+t(
+            mod
+
+="m
+stra
+a
+/M
+stra
+-7B-I
+struct-v0.2",
+            bas
+_ur
+="http://{your-v
+m-host-
+p}:{your-v
+m-host-port}/v1",
+            ap
+_k
+y="EMPTY",
+            mod
+
+_
+
+fo={
+                "v
+s
+o
+": Fa
+s
+,
+                "fu
+ct
+o
+_ca
+
+
+g": Fa
+s
+,
+                "jso
+_output": Fa
+s
+,
+                "fam
+
+y": Mod
+
+Fam
+
+y.MISTRAL,
+                "structur
+d_output": Tru
+,
             },
         )
+        m
+ssag
+s = [Us
+rM
+ssag
+(co
+t
 
-        messages = [UserMessage(content="Write a very short story about a dragon.", source="user")]
+t="Wr
+t
+ a v
+ry short story about a drago
+.", sourc
+="us
+r")]
+        # Cr
+at
+ a str
+am.
+        str
+am = mod
 
-        # Create a stream.
-        stream = model_client.create_stream(messages=messages)
-
-        # Iterate over the stream and print the responses.
-        print("Streamed responses:")
-        async for response in stream:
-            if isinstance(response, str):
-                # A partial response is a string.
-                print(response, flush=True, end="")
-            else:
-                # The last response is a CreateResult object with the complete message.
-                print("\n\n------------\n")
-                print("The complete response:", flush=True)
-                print(response.content, flush=True)
-
-        # Close the client when done.
-        await model_client.close()
+_c
 
 
-    asyncio.run(main())
-    ```
 
-For details, see the tutorial:
+t.cr
+at
+_str
+am(m
+ssag
+s=m
+ssag
+s)
+        # It
+rat
+ ov
+r th
+ str
+am a
+d pr
 
-- [Using vLLM in AutoGen](https://microsoft.github.io/autogen/0.2/docs/topics/non-openai-models/local-vllm/)
+t th
+ r
+spo
+s
+s.
+        pr
 
-- [OpenAI-compatible API examples](https://microsoft.github.io/autogen/stable/reference/python/autogen_ext.models.openai.html#autogen_ext.models.openai.OpenAIChatCompletionClient)
+t("Str
+am
+d r
+spo
+s
+s:")
+        asy
+c for r
+spo
+s
+ 
+
+ str
+am:
+            
+f 
+s
+
+sta
+c
+(r
+spo
+s
+, str):
+                # A part
+a
+ r
+spo
+s
+ 
+s a str
+
+g.
+                pr
+
+t(r
+spo
+s
+, f
+ush=Tru
+, 
+
+d="")
+            
+
+s
+:
+                # Th
+ 
+ast r
+spo
+s
+ 
+s a Cr
+at
+R
+su
+t obj
+ct 
+
+th th
+ comp
+
+t
+ m
+ssag
+.
+                pr
+
+t("\
+\
+------------\
+")
+                pr
+
+t("Th
+ comp
+
+t
+ r
+spo
+s
+:", f
+ush=Tru
+)
+                pr
+
+t(r
+spo
+s
+.co
+t
+
+t, f
+ush=Tru
+)
+        # C
+os
+ th
+ c
+
+
+
+t 
+h
+
+ do
+
+.
+        a
+a
+t mod
+
+_c
+
+
+
+t.c
+os
+()
+    asy
+c
+o.ru
+(ma
+
+())
+```
+For d
+ta
+
+s, s
+ th
+ tutor
+a
+:
+    - [Us
+
+g vLLM 
+
+ AutoG
+
+](https://m
+crosoft.g
+thub.
+o/autog
+
+/0.2/docs/top
+cs/
+o
+-op
+
+a
+-mod
+
+s/
+oca
+-v
+m/)
+    - [Op
+
+AI-compat
+b
+
+ API 
+xamp
+
+s](https://m
+crosoft.g
+thub.
+o/autog
+
+/stab
+
+/r
+f
+r
+
+c
+/pytho
+/autog
+
+_
+xt.mod
+
+s.op
+
+a
+.htm
+#autog
+
+_
+xt.mod
+
+s.op
+
+a
+.Op
+
+AIChatComp
+
+t
+o
+C
+
+
+
+t)

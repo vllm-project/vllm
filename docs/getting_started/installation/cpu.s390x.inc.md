@@ -1,98 +1,684 @@
-# --8<-- [start:installation]
+# --8
+-- [start:
 
-vLLM has experimental support for s390x architecture on IBM Z platform. For now, users must build from source to natively run on IBM Z platform.
+sta
+at
+o
+]
+vLLM has 
+xp
+r
+m
 
-Currently, the CPU implementation for s390x architecture supports FP32 datatype only.
+ta
+ support for s390x arch
+t
+ctur
+ o
+ IBM Z p
+atform. For 
+o
+, us
+rs must bu
 
-# --8<-- [end:installation]
-# --8<-- [start:requirements]
+d from sourc
+ to 
+at
+v
 
-- OS: `Linux`
-- SDK: `gcc/g++ >= 12.3.0` or later with Command Line Tools
-- Instruction Set Architecture (ISA): VXE support is required. Works with Z14 and above.
-- Build install python packages: `pyarrow`, `torch` and `torchvision`
+y ru
+ o
+ IBM Z p
+atform.
+Curr
 
-# --8<-- [end:requirements]
-# --8<-- [start:set-up-using-python]
+t
+y, th
+ CPU 
+mp
 
-# --8<-- [end:set-up-using-python]
-# --8<-- [start:pre-built-wheels]
+m
 
-Currently, there are no pre-built IBM Z CPU wheels.
+tat
+o
+ for s390x arch
+t
+ctur
+ supports FP32 datatyp
+ o
 
-# --8<-- [end:pre-built-wheels]
-# --8<-- [start:build-wheel-from-source]
+y.
+# --8
+-- [
 
-Install the following packages from the package manager before building the vLLM. For example on RHEL 9.4:
+d:
 
+sta
+at
+o
+]
+# --8
+-- [start:r
+qu
+r
+m
+
+ts]
+    - OS: `L
+
+ux`
+    - SDK: `gcc/g++ 
+= 12.3.0` or 
+at
+r 
+
+th Comma
+d L
+
+
+ Too
+s
+    - I
+struct
+o
+ S
+t Arch
+t
+ctur
+ (ISA): VXE support 
+s r
+qu
+r
+d. Works 
+
+th Z14 a
+d abov
+.
+    - Bu
+
+d 
+
+sta
+ pytho
+ packag
+s: `pyarro
+`, `torch` a
+d `torchv
+s
+o
+`
+# --8
+-- [
+
+d:r
+qu
+r
+m
+
+ts]
+# --8
+-- [start:s
+t-up-us
+
+g-pytho
+]
+# --8
+-- [
+
+d:s
+t-up-us
+
+g-pytho
+]
+# --8
+-- [start:pr
+-bu
+
+t-
+h
+
+s]
+Curr
+
+t
+y, th
+r
+ ar
+ 
+o pr
+-bu
+
+t IBM Z CPU 
+h
+
+s.
+# --8
+-- [
+
+d:pr
+-bu
+
+t-
+h
+
+s]
+# --8
+-- [start:bu
+
+d-
+h
+
+-from-sourc
+]
+I
+sta
+ th
+ fo
+o
+
+
+g packag
+s from th
+ packag
+ ma
+ag
+r b
+for
+ bu
+
+d
+
+g th
+ vLLM. For 
+xamp
+
+ o
+ RHEL 9.4:
 ```bash
-dnf install -y \
-    which procps findutils tar vim git gcc g++ make patch make cython zlib-devel \
-    libjpeg-turbo-devel libtiff-devel libpng-devel libwebp-devel freetype-devel harfbuzz-devel \
-    openssl-devel openblas openblas-devel wget autoconf automake libtool cmake numactl-devel
+d
+f 
+
+sta
+ -y \
+    
+h
+ch procps f
+
+dut
+
+s tar v
+m g
+t gcc g++ mak
+ patch mak
+ cytho
+ z
+
+b-d
+v
+
+ \
+    
+
+bjp
+g-turbo-d
+v
+
+ 
+
+bt
+ff-d
+v
+
+ 
+
+bp
+g-d
+v
+
+ 
+
+b
+
+bp-d
+v
+
+ fr
+typ
+-d
+v
+
+ harfbuzz-d
+v
+
+ \
+    op
+
+ss
+-d
+v
+
+ op
+
+b
+as op
+
+b
+as-d
+v
+
+ 
+g
+t autoco
+f automak
+ 
+
+btoo
+ cmak
+ 
+umact
+-d
+v
+
+
 ```
+I
+sta
+ rust
+=1.80 
+h
+ch 
+s 
 
-Install rust>=1.80 which is needed for `outlines-core` and `uvloop` python packages installation.
+d
+d for `out
 
+
+
+s-cor
+` a
+d `uv
+oop` pytho
+ packag
+s 
+
+sta
+at
+o
+.
 ```bash
-curl https://sh.rustup.rs -sSf | sh -s -- -y && \
-    . "$HOME/.cargo/env"
+cur
+ https://sh.rustup.rs -sSf | sh -s -- -y && \
+    . "$HOME/.cargo/
+
+v"
 ```
+Ex
+cut
+ th
+ fo
+o
 
-Execute the following commands to build and install vLLM from source.
 
-!!! tip
-    Please build the following dependencies, `torchvision`, `pyarrow` from source before building vLLM.
+g comma
+ds to bu
 
+d a
+d 
+
+sta
+ vLLM from sourc
+.
+!!! t
+p
+    P
+
+as
+ bu
+
+d th
+ fo
+o
+
+
+g d
+p
+
+d
+
+c
+
+s, `torchv
+s
+o
+`, `pyarro
+` from sourc
+ b
+for
+ bu
+
+d
+
+g vLLM.
 ```bash
-    sed -i '/^torch/d' requirements/build.txt    # remove torch from requirements/build.txt since we use nightly builds
-    uv pip install -v \
-        --torch-backend auto \
-        -r requirements/build.txt \
-        -r requirements/cpu.txt \
-    VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel && \
-        uv pip install dist/*.whl
-```
+    s
+d -
+ '/^torch/d' r
+qu
+r
+m
 
-??? console "pip"
+ts/bu
+
+d.txt    # r
+mov
+ torch from r
+qu
+r
+m
+
+ts/bu
+
+d.txt s
+
+c
+ 
+
+ us
+ 
+
+ght
+y bu
+
+ds
+    uv p
+p 
+
+sta
+ -v \
+        --torch-back
+
+d auto \
+        -r r
+qu
+r
+m
+
+ts/bu
+
+d.txt \
+        -r r
+qu
+r
+m
+
+ts/cpu.txt \
+    VLLM_TARGET_DEVICE=cpu pytho
+ s
+tup.py bd
+st_
+h
+
+ && \
+        uv p
+p 
+
+sta
+ d
+st/*.
+h
+
+```
+??? co
+so
+
+ "p
+p"
     ```bash
-        sed -i '/^torch/d' requirements/build.txt    # remove torch from requirements/build.txt since we use nightly builds
-        pip install -v \
-            --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
-            -r requirements/build.txt \
-            -r requirements/cpu.txt \
-        VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel && \
-            pip install dist/*.whl
-    ```
+        s
+d -
+ '/^torch/d' r
+qu
+r
+m
 
-# --8<-- [end:build-wheel-from-source]
-# --8<-- [start:pre-built-images]
+ts/bu
 
-Currently, there are no pre-built IBM Z CPU images.
+d.txt    # r
+mov
+ torch from r
+qu
+r
+m
 
-# --8<-- [end:pre-built-images]
-# --8<-- [start:build-image-from-source]
+ts/bu
 
-```bash
-docker build -f docker/Dockerfile.s390x \
-    --tag vllm-cpu-env .
+d.txt s
 
-# Launch OpenAI server
-docker run --rm \
-    --privileged true \
-    --shm-size 4g \
-    -p 8000:8000 \
-    -e VLLM_CPU_KVCACHE_SPACE=<KV cache space> \
-    -e VLLM_CPU_OMP_THREADS_BIND=<CPU cores for inference> \
-    vllm-cpu-env \
-    --model meta-llama/Llama-3.2-1B-Instruct \
-    --dtype float \
-    other vLLM OpenAI server arguments
+c
+ 
+
+ us
+ 
+
+ght
+y bu
+
+ds
+        p
+p 
+
+sta
+ -v \
+            --
+xtra-
+
+d
+x-ur
+ https://do
+
+
+oad.pytorch.org/
+h
+/
+
+ght
+y/cpu \
+            -r r
+qu
+r
+m
+
+ts/bu
+
+d.txt \
+            -r r
+qu
+r
+m
+
+ts/cpu.txt \
+        VLLM_TARGET_DEVICE=cpu pytho
+ s
+tup.py bd
+st_
+h
+
+ && \
+            p
+p 
+
+sta
+ d
+st/*.
+h
+
 ```
+# --8
+-- [
 
-!!! tip
-    An alternative of `--privileged true` is `--cap-add SYS_NICE --security-opt seccomp=unconfined`.
+d:bu
 
-# --8<-- [end:build-image-from-source]
-# --8<-- [start:extra-information]
-# --8<-- [end:extra-information]
+d-
+h
+
+-from-sourc
+]
+# --8
+-- [start:pr
+-bu
+
+t-
+mag
+s]
+Curr
+
+t
+y, th
+r
+ ar
+ 
+o pr
+-bu
+
+t IBM Z CPU 
+mag
+s.
+# --8
+-- [
+
+d:pr
+-bu
+
+t-
+mag
+s]
+# --8
+-- [start:bu
+
+d-
+mag
+-from-sourc
+]
+```bash
+dock
+r bu
+
+d -f dock
+r/Dock
+rf
+
+
+.s390x \
+    --tag v
+m-cpu-
+
+v .
+# Lau
+ch Op
+
+AI s
+rv
+r
+dock
+r ru
+ --rm \
+    --pr
+v
+
+
+g
+d tru
+ \
+    --shm-s
+z
+ 4g \
+    -p 8000:8000 \
+    -
+ VLLM_CPU_KVCACHE_SPACE=
+KV cach
+ spac
+
+ \
+    -
+ VLLM_CPU_OMP_THREADS_BIND=
+CPU cor
+s for 
+
+f
+r
+
+c
+
+ \
+    v
+m-cpu-
+
+v \
+    --mod
+
+ m
+ta-
+ama/L
+ama-3.2-1B-I
+struct \
+    --dtyp
+ f
+oat \
+    oth
+r vLLM Op
+
+AI s
+rv
+r argum
+
+ts
+```
+!!! t
+p
+    A
+ a
+t
+r
+at
+v
+ of `--pr
+v
+
+
+g
+d tru
+` 
+s `--cap-add SYS_NICE --s
+cur
+ty-opt s
+ccomp=u
+co
+f
+
+
+d`.
+# --8
+-- [
+
+d:bu
+
+d-
+mag
+-from-sourc
+]
+# --8
+-- [start:
+xtra-
+
+format
+o
+]
+# --8
+-- [
+
+d:
+xtra-
+
+format
+o
+]

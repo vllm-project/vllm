@@ -1,136 +1,1135 @@
-# Batch Invariance
+# Batch I
+var
+a
+c
 
-!!! note
-    Batch invariance is currently in beta. Some features are still under active development.
-    Track progress and planned improvements at <https://github.com/vllm-project/vllm/issues/27433>
+!!! 
+ot
 
-This document shows how to enable batch invariance in vLLM. Batch invariance ensures that the output of a model is deterministic and independent of the batch size or the order of requests in a batch.
+    Batch 
 
-## Motivation
+var
+a
+c
+ 
+s curr
 
-Batch invariance is crucial for several use cases:
+t
+y 
 
-- **Framework debugging**: Deterministic outputs make it easier to debug issues in the inference framework, as the same input will always produce the same output regardless of batching.
-- **Model debugging**: Helps identify issues in model implementations by ensuring consistent behavior across different batch configurations.
-- **Reinforcement Learning (RL)**: RL training often requires deterministic rollouts for reproducibility and stable training.
-- **Large-scale inference systems**: Systems that use vLLM as a component benefit from deterministic behavior for testing, validation, and consistency guarantees.
+ b
+ta. Som
+ f
+atur
+s ar
+ st
 
-## Hardware Requirements
+ u
+d
+r act
+v
+ d
+v
 
-Batch invariance currently requires NVIDIA GPUs with compute capability 9.0 or higher:
+opm
 
-- **H-series**: H100, H200
-- **B-series**: B100, B200
+t.
+    Track progr
+ss a
+d p
+a
 
-## Enabling Batch Invariance
+d 
+mprov
+m
 
-Batch invariance can be enabled by setting the `VLLM_BATCH_INVARIANT` environment variable to `1`:
+ts at 
+https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/27433
 
+Th
+s docum
+
+t sho
+s ho
+ to 
+
+ab
+
+ batch 
+
+var
+a
+c
+ 
+
+ vLLM. Batch 
+
+var
+a
+c
+ 
+
+sur
+s that th
+ output of a mod
+
+ 
+s d
+t
+rm
+
+
+st
+c a
+d 
+
+d
+p
+
+d
+
+t of th
+ batch s
+z
+ or th
+ ord
+r of r
+qu
+sts 
+
+ a batch.
+## Mot
+vat
+o
+
+Batch 
+
+var
+a
+c
+ 
+s cruc
+a
+ for s
+v
+ra
+ us
+ cas
+s:
+    - **Fram
+
+ork d
+bugg
+
+g**: D
+t
+rm
+
+
+st
+c outputs mak
+ 
+t 
+as
+
+r to d
+bug 
+ssu
+s 
+
+ th
+ 
+
+f
+r
+
+c
+ fram
+
+ork, as th
+ sam
+ 
+
+put 
+
+
+ a
+
+ays produc
+ th
+ sam
+ output r
+gard
+
+ss of batch
+
+g.
+    - **Mod
+
+ d
+bugg
+
+g**: H
+
+ps 
+d
+
+t
+fy 
+ssu
+s 
+
+ mod
+
+ 
+mp
+
+m
+
+tat
+o
+s by 
+
+sur
+
+g co
+s
+st
+
+t b
+hav
+or across d
+ff
+r
+
+t batch co
+f
+gurat
+o
+s.
+    - **R
+
+
+forc
+m
+
+t L
+ar
+
+
+g (RL)**: RL tra
+
+
+
+g oft
+
+ r
+qu
+r
+s d
+t
+rm
+
+
+st
+c ro
+outs for r
+produc
+b
+
+
+ty a
+d stab
+
+ tra
+
+
+
+g.
+    - **Larg
+-sca
+
+ 
+
+f
+r
+
+c
+ syst
+ms**: Syst
+ms that us
+ vLLM as a compo
+
+
+t b
+
+
+f
+t from d
+t
+rm
+
+
+st
+c b
+hav
+or for t
+st
+
+g, va
+
+dat
+o
+, a
+d co
+s
+st
+
+cy guara
+t
+s.
+## Hard
+ar
+ R
+qu
+r
+m
+
+ts
+Batch 
+
+var
+a
+c
+ curr
+
+t
+y r
+qu
+r
+s NVIDIA GPUs 
+
+th comput
+ capab
+
+
+ty 9.0 or h
+gh
+r:
+    - **H-s
+r
+
+s**: H100, H200
+    - **B-s
+r
+
+s**: B100, B200
+## E
+ab
+
+
+g Batch I
+var
+a
+c
+
+Batch 
+
+var
+a
+c
+ ca
+ b
+ 
+
+ab
+
+d by s
+tt
+
+g th
+ `VLLM_BATCH_INVARIANT` 
+
+v
+ro
+m
+
+t var
+ab
+
+ to `1`:
 ```bash
-export VLLM_BATCH_INVARIANT=1
+
+xport VLLM_BATCH_INVARIANT=1
 ```
+### O
 
-### Online Inference (Server Mode)
 
-To start a vLLM server with batch invariance enabled:
 
+
+ I
+f
+r
+
+c
+ (S
+rv
+r Mod
+)
+To start a vLLM s
+rv
+r 
+
+th batch 
+
+var
+a
+c
+ 
+
+ab
+
+d:
 ```bash
-VLLM_BATCH_INVARIANT=1 vllm serve meta-llama/Llama-3.1-8B-Instruct
+VLLM_BATCH_INVARIANT=1 v
+m s
+rv
+ m
+ta-
+ama/L
+ama-3.1-8B-I
+struct
 ```
+Th
 
-Then use the OpenAI-compatible client:
+ us
+ th
+ Op
 
-```python
-from openai import OpenAI
+AI-compat
+b
 
-client = OpenAI(
-    api_key="EMPTY",
-    base_url="http://localhost:8000/v1",
+ c
+
+
+
+t:
+```pytho
+
+from op
+
+a
+ 
+mport Op
+
+AI
+c
+
+
+
+t = Op
+
+AI(
+    ap
+_k
+y="EMPTY",
+    bas
+_ur
+="http://
+oca
+host:8000/v1",
 )
+# Th
+s
+ r
+qu
+sts 
 
-# These requests will produce deterministic outputs
-# regardless of batch size or order
-response = client.completions.create(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    prompt="The future of AI is",
-    max_tokens=100,
-    temperature=0.7,
-    seed=42,
+
+ produc
+ d
+t
+rm
+
+
+st
+c outputs
+# r
+gard
+
+ss of batch s
+z
+ or ord
+r
+r
+spo
+s
+ = c
+
+
+
+t.comp
+
+t
+o
+s.cr
+at
+(
+    mod
+
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct",
+    prompt="Th
+ futur
+ of AI 
+s",
+    max_tok
+
+s=100,
+    t
+mp
+ratur
+=0.7,
+    s
+d=42,
 )
+pr
 
-print(response.choices[0].text)
+t(r
+spo
+s
+.cho
+c
+s[0].t
+xt)
 ```
+### Off
 
-### Offline Inference
 
-For offline batch inference with batch invariance:
 
-```python
-import os
-os.environ["VLLM_BATCH_INVARIANT"] = "1"
+ I
+f
+r
 
-from vllm import LLM, SamplingParams
+c
 
+For off
+
+
+
+ batch 
+
+f
+r
+
+c
+ 
+
+th batch 
+
+var
+a
+c
+:
+```pytho
+
+
+mport os
+os.
+
+v
+ro
+["VLLM_BATCH_INVARIANT"] = "1"
+from v
+m 
+mport LLM, Samp
+
+
+gParams
 prompts = [
-    "The future of AI is",
-    "Machine learning enables",
-    "Deep learning models can",
+    "Th
+ futur
+ of AI 
+s",
+    "Mach
+
+
+ 
+
+ar
+
+
+g 
+
+ab
+
+s",
+    "D
+p 
+
+ar
+
+
+g mod
+
+s ca
+",
 ]
+samp
 
-sampling_params = SamplingParams(
-    temperature=0.7,
+
+g_params = Samp
+
+
+gParams(
+    t
+mp
+ratur
+=0.7,
     top_p=0.95,
-    max_tokens=100,
-    seed=42,
+    max_tok
+
+s=100,
+    s
+d=42,
 )
 
-llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    tensor_parallel_size=1,
+m = LLM(
+    mod
+
+="m
+ta-
+ama/L
+ama-3.1-8B-I
+struct",
+    t
+
+sor_para
+
+
+_s
+z
+=1,
 )
+# Outputs 
 
-# Outputs will be deterministic regardless of batch size
-outputs = llm.generate(prompts, sampling_params)
 
-for output in outputs:
+ b
+ d
+t
+rm
+
+
+st
+c r
+gard
+
+ss of batch s
+z
+
+outputs = 
+m.g
+
+
+rat
+(prompts, samp
+
+
+g_params)
+for output 
+
+ outputs:
     prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}")
-    print(f"Generated: {generated_text!r}\n")
+    g
+
+
+rat
+d_t
+xt = output.outputs[0].t
+xt
+    pr
+
+t(f"Prompt: {prompt!r}")
+    pr
+
+t(f"G
+
+
+rat
+d: {g
+
+
+rat
+d_t
+xt!r}\
+")
 ```
+## T
+st
+d Mod
 
-## Tested Models
+s
+Batch 
 
-Batch invariance has been tested and verified on the following models:
+var
+a
+c
+ has b
 
-- **DeepSeek series**: `deepseek-ai/DeepSeek-V3`, `deepseek-ai/DeepSeek-V3-0324`, `deepseek-ai/DeepSeek-R1`, `deepseek-ai/DeepSeek-V3.1`
-- **Qwen3 (Dense)**: `Qwen/Qwen3-1.7B`, `Qwen/Qwen3-8B`
-- **Qwen3 (MoE)**: `Qwen/Qwen3-30B-A3B`, `Qwen/Qwen3-Next-80B-A3B-Instruct`
-- **Qwen2.5**: `Qwen/Qwen2.5-0.5B-Instruct`, `Qwen/Qwen2.5-1.5B-Instruct`, `Qwen/Qwen2.5-3B-Instruct`, `Qwen/Qwen2.5-7B-Instruct`, `Qwen/Qwen2.5-14B-Instruct`, `Qwen/Qwen2.5-32B-Instruct`
-- **Llama 3**: `meta-llama/Llama-3.1-8B-Instruct`, `meta-llama/Llama-3.2-1B-Instruct`
-- **GPT-OSS**: `openai/gpt-oss-20b`, `openai/gpt-oss-120b`
-- **Mistral**: `mistralai/Mistral-7B-v0.3`
+ t
+st
+d a
+d v
+r
+f
 
-Other models may also work, but these have been explicitly validated. If you encounter issues with a specific model, please report them on the [GitHub issue tracker](https://github.com/vllm-project/vllm/issues/new/choose).
+d o
+ th
+ fo
+o
 
-## Implementation Details
 
-When batch invariance is enabled, vLLM:
+g mod
 
-1. Uses deterministic kernel implementations for attention and other operations
-2. Ensures consistent numerical behavior across different batch sizes
-3. Disables certain optimizations that may introduce non-determinism (such as custom all-reduce operations in tensor parallel mode)
+s:
+    - **D
+pS
+k s
+r
 
-!!! note
-    Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.
+s**: `d
+ps
+k-a
+/D
+pS
+k-V3`, `d
+ps
+k-a
+/D
+pS
+k-V3-0324`, `d
+ps
+k-a
+/D
+pS
+k-R1`, `d
+ps
+k-a
+/D
+pS
+k-V3.1`
+    - **Q
 
-## Future Improvements
 
-The batch invariance feature is under active development. Planned improvements include:
+3 (D
 
-- Support for additional GPU architectures
-- Expanded model coverage
-- Performance optimizations
-- Additional testing and validation
+s
+)**: `Q
 
-For the latest status and to contribute ideas, see the [tracking issue](https://github.com/vllm-project/vllm/issues/27433).
+
+/Q
+
+
+3-1.7B`, `Q
+
+
+/Q
+
+
+3-8B`
+    - **Q
+
+
+3 (MoE)**: `Q
+
+
+/Q
+
+
+3-30B-A3B`, `Q
+
+
+/Q
+
+
+3-N
+xt-80B-A3B-I
+struct`
+    - **Q
+
+
+2.5**: `Q
+
+
+/Q
+
+
+2.5-0.5B-I
+struct`, `Q
+
+
+/Q
+
+
+2.5-1.5B-I
+struct`, `Q
+
+
+/Q
+
+
+2.5-3B-I
+struct`, `Q
+
+
+/Q
+
+
+2.5-7B-I
+struct`, `Q
+
+
+/Q
+
+
+2.5-14B-I
+struct`, `Q
+
+
+/Q
+
+
+2.5-32B-I
+struct`
+    - **L
+ama 3**: `m
+ta-
+ama/L
+ama-3.1-8B-I
+struct`, `m
+ta-
+ama/L
+ama-3.2-1B-I
+struct`
+    - **GPT-OSS**: `op
+
+a
+/gpt-oss-20b`, `op
+
+a
+/gpt-oss-120b`
+    - **M
+stra
+**: `m
+stra
+a
+/M
+stra
+-7B-v0.3`
+Oth
+r mod
+
+s may a
+so 
+ork, but th
+s
+ hav
+ b
+
+ 
+xp
+
+c
+t
+y va
+
+dat
+d. If you 
+
+cou
+t
+r 
+ssu
+s 
+
+th a sp
+c
+f
+c mod
+
+, p
+
+as
+ r
+port th
+m o
+ th
+ [G
+tHub 
+ssu
+ track
+r](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/
+
+
+/choos
+).
+## Imp
+
+m
+
+tat
+o
+ D
+ta
+
+s
+Wh
+
+ batch 
+
+var
+a
+c
+ 
+s 
+
+ab
+
+d, vLLM:
+1. Us
+s d
+t
+rm
+
+
+st
+c k
+r
+
+
+ 
+mp
+
+m
+
+tat
+o
+s for att
+
+t
+o
+ a
+d oth
+r op
+rat
+o
+s
+2. E
+sur
+s co
+s
+st
+
+t 
+um
+r
+ca
+ b
+hav
+or across d
+ff
+r
+
+t batch s
+z
+s
+3. D
+sab
+
+s c
+rta
+
+ opt
+m
+zat
+o
+s that may 
+
+troduc
+ 
+o
+-d
+t
+rm
+
+
+sm (such as custom a
+-r
+duc
+ op
+rat
+o
+s 
+
+ t
+
+sor para
+
+
+ mod
+)
+!!! 
+ot
+
+    E
+ab
+
+
+g batch 
+
+var
+a
+c
+ may 
+mpact p
+rforma
+c
+ compar
+d to th
+ d
+fau
+t 
+o
+-d
+t
+rm
+
+
+st
+c mod
+. Th
+s trad
+-off 
+s 
+
+t
+
+t
+o
+a
+ to guara
+t
+ r
+produc
+b
+
+
+ty.
+## Futur
+ Improv
+m
+
+ts
+Th
+ batch 
+
+var
+a
+c
+ f
+atur
+ 
+s u
+d
+r act
+v
+ d
+v
+
+opm
+
+t. P
+a
+
+d 
+mprov
+m
+
+ts 
+
+c
+ud
+:
+    - Support for add
+t
+o
+a
+ GPU arch
+t
+ctur
+s
+    - Expa
+d
+d mod
+
+ cov
+rag
+
+    - P
+rforma
+c
+ opt
+m
+zat
+o
+s
+    - Add
+t
+o
+a
+ t
+st
+
+g a
+d va
+
+dat
+o
+
+For th
+ 
+at
+st status a
+d to co
+tr
+but
+ 
+d
+as, s
+ th
+ [track
+
+g 
+ssu
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/27433).

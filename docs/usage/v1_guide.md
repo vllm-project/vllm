@@ -1,190 +1,2100 @@
 # vLLM V1
+!!! a
+ou
+c
+m
 
-!!! announcement
+t
+    W
+ hav
+ fu
+y d
+pr
+cat
+d V0. P
 
-    We have fully deprecated V0. Please read [RFC #18571](https://github.com/vllm-project/vllm/issues/18571) for more details.
+as
+ r
+ad [RFC #18571](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/18571) for mor
+ d
+ta
 
-    If you have a use case that works on V0 Engine but not V1, please share it on [GitHub](https://github.com/vllm-project/vllm) or in the [vLLM Slack](https://inviter.co/vllm-slack).
+s.
+    If you hav
+ a us
+ cas
+ that 
+orks o
+ V0 E
+g
 
-vLLM V0 successfully supported a wide range of models and hardware, but as new features were developed independently, the system grew increasingly complex. This complexity made it harder to integrate new capabilities and introduced technical debt, revealing the need for a more streamlined and unified design.
 
-Building on V0’s success, vLLM V1 retains the stable and proven components from V0
-(such as the models, GPU kernels, and utilities). At the same time, it significantly
-re-architects the core systems, covering the scheduler, KV cache manager, worker,
-sampler, and API server, to provide a cohesive, maintainable framework that better
-accommodates continued growth and innovation.
+ but 
+ot V1, p
 
-Specifically, V1 aims to:
+as
+ shar
+ 
+t o
+ [G
+tHub](https://g
+thub.com/v
+m-proj
+ct/v
+m) or 
 
-- Provide a **simple, modular, and easy-to-hack codebase**.
-- Ensure **high performance** with near-zero CPU overhead.
-- **Combine key optimizations** into a unified architecture.
-- Require **zero configs** by enabling features/optimizations by default.
+ th
+ [vLLM S
+ack](https://
 
-We see significant performance improvements from upgrading to V1 core engine, in
-particular for long context scenarios. Please see performance benchmark (To be
-added).
+v
+t
+r.co/v
+m-s
+ack).
+vLLM V0 succ
+ssfu
+y support
+d a 
 
-For more details, check out the vLLM V1 blog post [vLLM V1: A Major
-Upgrade to vLLM’s Core Architecture](https://blog.vllm.ai/2025/01/27/v1-alpha-release.html) (published Jan 27, 2025).
+d
+ ra
+g
+ of mod
 
-This living user guide outlines a few known **important changes and limitations** introduced by vLLM V1. The team has been working actively to bring V1 as the default engine, therefore this guide will be updated constantly as more features get supported on vLLM V1.
+s a
+d hard
+ar
+, but as 
 
-## Differences from V0
 
-This section lists some differences in behavior between V0 and V1.
+ f
+atur
+s 
 
-### Chunked Prefill
+r
+ d
+v
 
-Chunked prefill is enabled by default whenever possible, unlike in V0 where it was conditionally enabled based on model characteristics.
+op
+d 
 
+d
+p
+
+d
+
+t
+y, th
+ syst
+m gr
+
+ 
+
+cr
+as
+
+g
+y comp
+
+x. Th
+s comp
+
+x
+ty mad
+ 
+t hard
+r to 
+
+t
+grat
+ 
+
+
+ capab
+
+
+t
+
+s a
+d 
+
+troduc
+d t
+ch
+
+ca
+ d
+bt, r
+v
+a
+
+
+g th
+ 
+
+d for a mor
+ str
+am
+
+
+
+d a
+d u
+
+f
+
+d d
+s
+g
+.
+Bu
+
+d
+
+g o
+ V0’s succ
+ss, vLLM V1 r
+ta
+
+s th
+ stab
+
+ a
+d prov
+
+ compo
+
+
+ts from V0
+(such as th
+ mod
+
+s, GPU k
+r
+
+
+s, a
+d ut
+
+
+t
+
+s). At th
+ sam
+ t
+m
+, 
+t s
+g
+
+f
+ca
+t
+y
+r
+-arch
+t
+cts th
+ cor
+ syst
+ms, cov
+r
+
+g th
+ sch
+du
+
+r, KV cach
+ ma
+ag
+r, 
+ork
+r,
+samp
+
+r, a
+d API s
+rv
+r, to prov
+d
+ a coh
+s
+v
+, ma
+
+ta
+
+ab
+
+ fram
+
+ork that b
+tt
+r
+accommodat
+s co
+t
+
+u
+d gro
+th a
+d 
+
+ovat
+o
+.
+Sp
+c
+f
+ca
+y, V1 a
+ms to:
+    - Prov
+d
+ a **s
+mp
+
+, modu
+ar, a
+d 
+asy-to-hack cod
+bas
+**.
+    - E
+sur
+ **h
+gh p
+rforma
+c
+** 
+
+th 
+
+ar-z
+ro CPU ov
+rh
+ad.
+    - **Comb
+
+
+ k
+y opt
+m
+zat
+o
+s** 
+
+to a u
+
+f
+
+d arch
+t
+ctur
+.
+    - R
+qu
+r
+ **z
+ro co
+f
+gs** by 
+
+ab
+
+
+g f
+atur
+s/opt
+m
+zat
+o
+s by d
+fau
+t.
+W
+ s
+ s
+g
+
+f
+ca
+t p
+rforma
+c
+ 
+mprov
+m
+
+ts from upgrad
+
+g to V1 cor
+ 
+
+g
+
+
+, 
+
+
+part
+cu
+ar for 
+o
+g co
+t
+xt sc
+
+ar
+os. P
+
+as
+ s
+ p
+rforma
+c
+ b
+
+chmark (To b
+
+add
+d).
+For mor
+ d
+ta
+
+s, ch
+ck out th
+ vLLM V1 b
+og post [vLLM V1: A Major
+Upgrad
+ to vLLM’s Cor
+ Arch
+t
+ctur
+](https://b
+og.v
+m.a
+/2025/01/27/v1-a
+pha-r
+
+
+as
+.htm
+) (pub
+
+sh
+d Ja
+ 27, 2025).
+Th
+s 
+
+v
+
+g us
+r gu
+d
+ out
+
+
+
+s a f
+
+ k
+o
+
+ **
+mporta
+t cha
+g
+s a
+d 
+
+m
+tat
+o
+s** 
+
+troduc
+d by vLLM V1. Th
+ t
+am has b
+
+ 
+ork
+
+g act
+v
+
+y to br
+
+g V1 as th
+ d
+fau
+t 
+
+g
+
+
+, th
+r
+for
+ th
+s gu
+d
+ 
+
+
+ b
+ updat
+d co
+sta
+t
+y as mor
+ f
+atur
+s g
+t support
+d o
+ vLLM V1.
+## D
+ff
+r
+
+c
+s from V0
+Th
+s s
+ct
+o
+ 
+
+sts som
+ d
+ff
+r
+
+c
+s 
+
+ b
+hav
+or b
+t
+
+
+ V0 a
+d V1.
+### Chu
+k
+d Pr
+f
+
+
+Chu
+k
+d pr
+f
+
+ 
+s 
+
+ab
+
+d by d
+fau
+t 
+h
+
+
+v
+r poss
+b
+
+, u
+
+
+k
+ 
+
+ V0 
+h
+r
+ 
+t 
+as co
+d
+t
+o
+a
+y 
+
+ab
+
+d bas
+d o
+ mod
+
+ charact
+r
+st
+cs.
 ### CUDA Graphs
+CUDA graph captur
+ tak
+s up mor
+ m
+mory 
 
-CUDA graph capture takes up more memory in V1 than in V0.
+ V1 tha
+ 
 
-### Semantic Changes to Logprobs
+ V0.
+### S
+ma
+t
+c Cha
+g
+s to Logprobs
+#### Logprobs Ca
+cu
+at
+o
 
-#### Logprobs Calculation
+By d
+fau
+t, 
+ogprobs 
 
-By default, logprobs in V1 are now returned immediately once computed from the model’s raw output (i.e.
-before applying any logits post-processing such as temperature scaling or penalty
-adjustments). As a result, the returned logprobs do not reflect the final adjusted
-probabilities used during sampling.
+ V1 ar
+ 
+o
+ r
+tur
 
-You can adjust this behavior by setting the `--logprobs-mode` flag.
-Four modes are supported: `raw_logprobs` (default), `processed_logprobs`, `raw_logits`, `processed_logits`.
-Raw means the values before applying any logit processors, like bad words.
-Processed means the values after applying all processors, including temperature and top_k/top_p.
+d 
+mm
+d
+at
 
-#### Prompt Logprobs with Prefix Caching
+y o
+c
+ comput
+d from th
+ mod
 
-While V1 supports passing prompt logprobs with prefix caching enabled, it no longer caches the logprobs.
-For a request requiring prompt logprobs, the engine will ignore the prefix cache and recompute the prefill of full prompt to generate the logprobs.
+’s ra
+ output (
+.
+.
+b
+for
+ app
+y
 
-## Feature Support
+g a
+y 
+og
+ts post-proc
+ss
 
-For each item, its support in vLLM V1 falls into one of the following states:
+g such as t
+mp
+ratur
+ sca
 
-- **🟢 Functional**: Fully operational with optimizations comparable to or better than V0.
-- **🟡 In Progress**: Planned to be in vLLM V1, with open PRs/RFCs.
-- **🔴 Removed**: Dropped from vLLM V1. Will only consider re-introducing if there is strong demand.
 
-!!! note
-    vLLM V1’s unified scheduler treats both prompt and output tokens the same
-    way by using a simple dictionary (e.g., `{request_id: num_tokens}`) to dynamically
-    allocate a fixed token budget per request, enabling features like chunked prefills,
-    prefix caching, and speculative decoding without a strict separation between prefill
-    and decode phases.
+g or p
 
-The V1 scheduler supports multiple scheduling policies, including First-Come,
-First-Served (FCFS) and priority-based scheduling (where requests are processed
-based on assigned priority, with FCFS as a tie-breaker), configurable via the
-`--scheduling-policy` argument.
+a
+ty
+adjustm
 
-### Hardware
+ts). As a r
+su
+t, th
+ r
+tur
 
-| Hardware         | Status                                        |
+d 
+ogprobs do 
+ot r
+f
+
+ct th
+ f
+
+a
+ adjust
+d
+probab
+
+
+t
+
+s us
+d dur
+
+g samp
+
+
+g.
+You ca
+ adjust th
+s b
+hav
+or by s
+tt
+
+g th
+ `--
+ogprobs-mod
+` f
+ag.
+Four mod
+s ar
+ support
+d: `ra
+_
+ogprobs` (d
+fau
+t), `proc
+ss
+d_
+ogprobs`, `ra
+_
+og
+ts`, `proc
+ss
+d_
+og
+ts`.
+Ra
+ m
+a
+s th
+ va
+u
+s b
+for
+ app
+y
+
+g a
+y 
+og
+t proc
+ssors, 
+
+k
+ bad 
+ords.
+Proc
+ss
+d m
+a
+s th
+ va
+u
+s aft
+r app
+y
+
+g a
+ proc
+ssors, 
+
+c
+ud
+
+g t
+mp
+ratur
+ a
+d top_k/top_p.
+#### Prompt Logprobs 
+
+th Pr
+f
+x Cach
+
+g
+Wh
+
+
+ V1 supports pass
+
+g prompt 
+ogprobs 
+
+th pr
+f
+x cach
+
+g 
+
+ab
+
+d, 
+t 
+o 
+o
+g
+r cach
+s th
+ 
+ogprobs.
+For a r
+qu
+st r
+qu
+r
+
+g prompt 
+ogprobs, th
+ 
+
+g
+
+
+ 
+
+
+ 
+g
+or
+ th
+ pr
+f
+x cach
+ a
+d r
+comput
+ th
+ pr
+f
+
+ of fu
+ prompt to g
+
+
+rat
+ th
+ 
+ogprobs.
+## F
+atur
+ Support
+For 
+ach 
+t
+m, 
+ts support 
+
+ vLLM V1 fa
+s 
+
+to o
+
+ of th
+ fo
+o
+
+
+g stat
+s:
+    - **🟢 Fu
+ct
+o
+a
+**: Fu
+y op
+rat
+o
+a
+ 
+
+th opt
+m
+zat
+o
+s comparab
+
+ to or b
+tt
+r tha
+ V0.
+    - **🟡 I
+ Progr
+ss**: P
+a
+
+d to b
+ 
+
+ vLLM V1, 
+
+th op
+
+ PRs/RFCs.
+    - **🔴 R
+mov
+d**: Dropp
+d from vLLM V1. W
+
+ o
+
+y co
+s
+d
+r r
+-
+
+troduc
+
+g 
+f th
+r
+ 
+s stro
+g d
+ma
+d.
+!!! 
+ot
+
+    vLLM V1’s u
+
+f
+
+d sch
+du
+
+r tr
+ats both prompt a
+d output tok
+
+s th
+ sam
+
+    
+ay by us
+
+g a s
+mp
+
+ d
+ct
+o
+ary (
+.g., `{r
+qu
+st_
+d: 
+um_tok
+
+s}`) to dy
+am
+ca
+y
+    a
+ocat
+ a f
+x
+d tok
+
+ budg
+t p
+r r
+qu
+st, 
+
+ab
+
+
+g f
+atur
+s 
+
+k
+ chu
+k
+d pr
+f
+
+s,
+    pr
+f
+x cach
+
+g, a
+d sp
+cu
+at
+v
+ d
+cod
+
+g 
+
+thout a str
+ct s
+parat
+o
+ b
+t
+
+
+ pr
+f
+
+
+    a
+d d
+cod
+ phas
+s.
+Th
+ V1 sch
+du
+
+r supports mu
+t
+p
+
+ sch
+du
+
+
+g po
+
+c
+
+s, 
+
+c
+ud
+
+g F
+rst-Com
+,
+F
+rst-S
+rv
+d (FCFS) a
+d pr
+or
+ty-bas
+d sch
+du
+
+
+g (
+h
+r
+ r
+qu
+sts ar
+ proc
+ss
+d
+bas
+d o
+ ass
+g
+
+d pr
+or
+ty, 
+
+th FCFS as a t
+
+-br
+ak
+r), co
+f
+gurab
+
+ v
+a th
+
+`--sch
+du
+
+
+g-po
+
+cy` argum
+
+t.
+### Hard
+ar
+
+| Hard
+ar
+         | Status                                        |
 |------------------|-----------------------------------------------|
-| **NVIDIA**       | <nobr>🟢</nobr>                               |
-| **AMD**          | <nobr>🟢</nobr>                               |
-| **INTEL GPU**    | <nobr>🟢</nobr>                               |
-| **TPU**          | <nobr>🟢</nobr>                               |
-| **CPU**          | <nobr>🟢</nobr>                               |
+| **NVIDIA**       | 
 
-!!! note
+obr
+🟢
+/
+obr
+                               |
+| **AMD**          | 
 
-    More hardware platforms may be supported via plugins, e.g.:
+obr
+🟢
+/
+obr
+                               |
+| **INTEL GPU**    | 
 
-    - [vllm-ascend](https://github.com/vllm-project/vllm-ascend)
-    - [vllm-spyre](https://github.com/vllm-project/vllm-spyre)
-    - [vllm-gaudi](https://github.com/vllm-project/vllm-gaudi)
-    - [vllm-openvino](https://github.com/vllm-project/vllm-openvino)
+obr
+🟢
+/
+obr
+                               |
+| **TPU**          | 
 
-    Please check their corresponding repositories for more details.
+obr
+🟢
+/
+obr
+                               |
+| **CPU**          | 
 
-### Models
+obr
+🟢
+/
+obr
+                               |
+!!! 
+ot
 
-| Model Type                  | Status                                                                  |
+    Mor
+ hard
+ar
+ p
+atforms may b
+ support
+d v
+a p
+ug
+
+s, 
+.g.:
+    - [v
+m-asc
+
+d](https://g
+thub.com/v
+m-proj
+ct/v
+m-asc
+
+d)
+    - [v
+m-spyr
+](https://g
+thub.com/v
+m-proj
+ct/v
+m-spyr
+)
+    - [v
+m-gaud
+](https://g
+thub.com/v
+m-proj
+ct/v
+m-gaud
+)
+    - [v
+m-op
+
+v
+
+o](https://g
+thub.com/v
+m-proj
+ct/v
+m-op
+
+v
+
+o)
+    P
+
+as
+ ch
+ck th
+
+r corr
+spo
+d
+
+g r
+pos
+tor
+
+s for mor
+ d
+ta
+
+s.
+### Mod
+
+s
+| Mod
+
+ Typ
+                  | Status                                                                  |
 |-----------------------------|-------------------------------------------------------------------------|
-| **Decoder-only Models**     | <nobr>🟢</nobr>                                                         |
-| **Encoder-Decoder Models**  | <nobr>🟢 (Whisper), 🔴 (Others) </nobr>                                |
-| **Pooling Models**          | <nobr>🟢</nobr>                                                         |
-| **Mamba Models**            | <nobr>🟢</nobr>                                                         |
-| **Multimodal Models**       | <nobr>🟢</nobr>                                                         |
+| **D
+cod
+r-o
 
-See below for the status of models that are not yet supported or have more features planned in V1.
+y Mod
 
-#### Pooling Models
+s**     | 
 
-Now fully supported, with prefix caching and chunked prefill newly available for last-pooling models.
+obr
+🟢
+/
+obr
+                                                         |
+| **E
+cod
+r-D
+cod
+r Mod
 
-We are working on enabling prefix caching and chunked prefill for more categories of pooling models.
+s**  | 
 
-#### Mamba Models
+obr
+🟢 (Wh
+sp
+r), 🔴 (Oth
+rs) 
+/
+obr
+                                |
+| **Poo
 
-Models using selective state-space mechanisms instead of standard transformer attention are supported.
-Models that use Mamba-2 and Mamba-1 layers (e.g., `Mamba2ForCausalLM`, `MambaForCausalLM`, `FalconMambaForCausalLM`) are supported.
 
-Hybrid models that combine Mamba-2 and Mamba-1 layers with standard attention layers are also supported (e.g., `BambaForCausalLM`,
-`Zamba2ForCausalLM`, `NemotronHForCausalLM`, `FalconH1ForCausalLM` and `GraniteMoeHybridForCausalLM`, `JambaForCausalLM`, `Plamo2ForCausalLM`).
+g Mod
 
-Hybrid models with mechanisms different to Mamba are also supported (e.g, `MiniMaxText01ForCausalLM`, `MiniMaxM1ForCausalLM`, `Lfm2ForCausalLM`).
+s**          | 
 
-Please note that prefix caching is not yet supported for any of the above models.
+obr
+🟢
+/
+obr
+                                                         |
+| **Mamba Mod
 
-#### Encoder-Decoder Models
+s**            | 
 
-Whisper is supported natively. Other encoder-decoder models are supported via the plugin system:
+obr
+🟢
+/
+obr
+                                                         |
+| **Mu
+t
+moda
+ Mod
 
-- **BART**: `BartForConditionalGeneration` is supported via the official [bart-plugin](https://github.com/vllm-project/bart-plugin).
-- **Florence-2**: `Florence2ForConditionalGeneration` is supported via the official [bart-plugin](https://github.com/vllm-project/bart-plugin).
+s**       | 
 
-For other encoder-decoder models (e.g., `MllamaForConditionalGeneration`), we recommend
-following a similar pattern by implementing support through the [plugin system](../design/plugin_system.md).
+obr
+🟢
+/
+obr
+                                                         |
+S
+ b
 
-### Features
+o
+ for th
+ status of mod
 
-| Feature                                     | Status                                                                            |
+s that ar
+ 
+ot y
+t support
+d or hav
+ mor
+ f
+atur
+s p
+a
+
+d 
+
+ V1.
+#### Poo
+
+
+g Mod
+
+s
+No
+ fu
+y support
+d, 
+
+th pr
+f
+x cach
+
+g a
+d chu
+k
+d pr
+f
+
+ 
+
+
+
+y ava
+
+ab
+
+ for 
+ast-poo
+
+
+g mod
+
+s.
+W
+ ar
+ 
+ork
+
+g o
+ 
+
+ab
+
+
+g pr
+f
+x cach
+
+g a
+d chu
+k
+d pr
+f
+
+ for mor
+ cat
+gor
+
+s of poo
+
+
+g mod
+
+s.
+#### Mamba Mod
+
+s
+Mod
+
+s us
+
+g s
+
+
+ct
+v
+ stat
+-spac
+ m
+cha
+
+sms 
+
+st
+ad of sta
+dard tra
+sform
+r att
+
+t
+o
+ ar
+ support
+d.
+Mod
+
+s that us
+ Mamba-2 a
+d Mamba-1 
+ay
+rs (
+.g., `Mamba2ForCausa
+LM`, `MambaForCausa
+LM`, `Fa
+co
+MambaForCausa
+LM`) ar
+ support
+d.
+Hybr
+d mod
+
+s that comb
+
+
+ Mamba-2 a
+d Mamba-1 
+ay
+rs 
+
+th sta
+dard att
+
+t
+o
+ 
+ay
+rs ar
+ a
+so support
+d (
+.g., `BambaForCausa
+LM`,
+`Zamba2ForCausa
+LM`, `N
+motro
+HForCausa
+LM`, `Fa
+co
+H1ForCausa
+LM` a
+d `Gra
+
+t
+Mo
+Hybr
+dForCausa
+LM`, `JambaForCausa
+LM`, `P
+amo2ForCausa
+LM`).
+Hybr
+d mod
+
+s 
+
+th m
+cha
+
+sms d
+ff
+r
+
+t to Mamba ar
+ a
+so support
+d (
+.g, `M
+
+
+MaxT
+xt01ForCausa
+LM`, `M
+
+
+MaxM1ForCausa
+LM`, `Lfm2ForCausa
+LM`).
+P
+
+as
+ 
+ot
+ that pr
+f
+x cach
+
+g 
+s 
+ot y
+t support
+d for a
+y of th
+ abov
+ mod
+
+s.
+#### E
+cod
+r-D
+cod
+r Mod
+
+s
+Wh
+sp
+r 
+s support
+d 
+at
+v
+
+y. Oth
+r 
+
+cod
+r-d
+cod
+r mod
+
+s ar
+ support
+d v
+a th
+ p
+ug
+
+ syst
+m:
+    - **BART**: `BartForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` 
+s support
+d v
+a th
+ off
+c
+a
+ [bart-p
+ug
+
+](https://g
+thub.com/v
+m-proj
+ct/bart-p
+ug
+
+).
+    - **F
+or
+
+c
+-2**: `F
+or
+
+c
+2ForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+` 
+s support
+d v
+a th
+ off
+c
+a
+ [bart-p
+ug
+
+](https://g
+thub.com/v
+m-proj
+ct/bart-p
+ug
+
+).
+For oth
+r 
+
+cod
+r-d
+cod
+r mod
+
+s (
+.g., `M
+amaForCo
+d
+t
+o
+a
+G
+
+
+rat
+o
+`), 
+
+ r
+comm
+
+d
+fo
+o
+
+
+g a s
+m
+
+ar patt
+r
+ by 
+mp
+
+m
+
+t
+
+g support through th
+ [p
+ug
+
+ syst
+m](../d
+s
+g
+/p
+ug
+
+_syst
+m.md).
+### F
+atur
+s
+| F
+atur
+                                     | Status                                                                            |
 |---------------------------------------------|-----------------------------------------------------------------------------------|
-| **Prefix Caching**                          | <nobr>🟢 Functional</nobr>                                                        |
-| **Chunked Prefill**                         | <nobr>🟢 Functional</nobr>                                                        |
-| **LoRA**                                    | <nobr>🟢 Functional</nobr>                                                        |
-| **Logprobs Calculation**                    | <nobr>🟢 Functional</nobr>                                                        |
-| **FP8 KV Cache**                            | <nobr>🟢 Functional</nobr>                                                        |
-| **Spec Decode**                             | <nobr>🟢 Functional</nobr>                                                        |
-| **Prompt Logprobs with Prefix Caching**     | <nobr>🟢 Functional</nobr>                                                        |
-| **Structured Output Alternative Backends**  | <nobr>🟢 Functional</nobr>                                                        |
-| **Concurrent Partial Prefills**             | <nobr>🟡 [In Progress](https://github.com/vllm-project/vllm/issues/14003)</nobr>  |
-| **best_of**                                 | <nobr>🔴 [Removed](https://github.com/vllm-project/vllm/issues/13361)</nobr>      |
-| **Per-Request Logits Processors**           | <nobr>🔴 [Removed](https://github.com/vllm-project/vllm/pull/13360)</nobr>        |
-| **GPU <> CPU KV Cache Swapping**            | <nobr>🔴 Removed</nobr>                                                           |
-| **Request-level Structured Output Backend** | <nobr>🔴 Removed</nobr>                                                           |
+| **Pr
+f
+x Cach
 
-!!! note
+g**                          | 
 
-    vLLM V1’s unified scheduler treats both prompt and output tokens the same
-    way by using a simple dictionary (e.g., `{request_id: num_tokens}`) to dynamically
-    allocate a fixed token budget per request, enabling features like chunked prefills,
-    prefix caching, and speculative decoding without a strict separation between prefill
-    and decode phases.
+obr
+🟢 Fu
+ct
+o
+a
 
-#### Removed Features
+/
+obr
+                                                        |
+| **Chu
+k
+d Pr
+f
 
-As part of the major architectural rework in vLLM V1, several legacy features have been removed.
+**                         | 
 
-##### Sampling features
+obr
+🟢 Fu
+ct
+o
+a
 
-- **best_of**: This feature has been removed due to limited usage. See details at [RFC #13361](https://github.com/vllm-project/vllm/issues/13361).
-- **Per-Request Logits Processors**: In V0, users could pass custom
-  processing functions to adjust logits on a per-request basis. In vLLM V1, this
-  feature has been removed. Instead, we now support **global logits processors**
-  which are set at startup time, see [RFC #17799](https://github.com/vllm-project/vllm/issues/17799).
+/
+obr
+                                                        |
+| **LoRA**                                    | 
 
-##### KV Cache features
+obr
+🟢 Fu
+ct
+o
+a
 
-- **GPU <> CPU KV Cache Swapping**: with the new simplified core architecture, vLLM V1 no longer requires KV cache swapping
-to handle request preemptions.
+/
+obr
+                                                        |
+| **Logprobs Ca
+cu
+at
+o
+**                    | 
 
-##### Structured Output features
+obr
+🟢 Fu
+ct
+o
+a
 
-- **Request-level Structured Output Backend**: Removed; alternative backends (outlines, guidance) with fallbacks are supported now.
+/
+obr
+                                                        |
+| **FP8 KV Cach
+**                            | 
+
+obr
+🟢 Fu
+ct
+o
+a
+
+/
+obr
+                                                        |
+| **Sp
+c D
+cod
+**                             | 
+
+obr
+🟢 Fu
+ct
+o
+a
+
+/
+obr
+                                                        |
+| **Prompt Logprobs 
+
+th Pr
+f
+x Cach
+
+g**     | 
+
+obr
+🟢 Fu
+ct
+o
+a
+
+/
+obr
+                                                        |
+| **Structur
+d Output A
+t
+r
+at
+v
+ Back
+
+ds**  | 
+
+obr
+🟢 Fu
+ct
+o
+a
+
+/
+obr
+                                                        |
+| **Co
+curr
+
+t Part
+a
+ Pr
+f
+
+s**             | 
+
+obr
+🟡 [I
+ Progr
+ss](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/14003)
+/
+obr
+  |
+| **b
+st_of**                                 | 
+
+obr
+🔴 [R
+mov
+d](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/13361)
+/
+obr
+      |
+| **P
+r-R
+qu
+st Log
+ts Proc
+ssors**           | 
+
+obr
+🔴 [R
+mov
+d](https://g
+thub.com/v
+m-proj
+ct/v
+m/pu
+/13360)
+/
+obr
+        |
+| **GPU 
+
+ CPU KV Cach
+ S
+app
+
+g**            | 
+
+obr
+🔴 R
+mov
+d
+/
+obr
+                                                           |
+| **R
+qu
+st-
+
+v
+
+ Structur
+d Output Back
+
+d** | 
+
+obr
+🔴 R
+mov
+d
+/
+obr
+                                                           |
+!!! 
+ot
+
+    vLLM V1’s u
+
+f
+
+d sch
+du
+
+r tr
+ats both prompt a
+d output tok
+
+s th
+ sam
+
+    
+ay by us
+
+g a s
+mp
+
+ d
+ct
+o
+ary (
+.g., `{r
+qu
+st_
+d: 
+um_tok
+
+s}`) to dy
+am
+ca
+y
+    a
+ocat
+ a f
+x
+d tok
+
+ budg
+t p
+r r
+qu
+st, 
+
+ab
+
+
+g f
+atur
+s 
+
+k
+ chu
+k
+d pr
+f
+
+s,
+    pr
+f
+x cach
+
+g, a
+d sp
+cu
+at
+v
+ d
+cod
+
+g 
+
+thout a str
+ct s
+parat
+o
+ b
+t
+
+
+ pr
+f
+
+
+    a
+d d
+cod
+ phas
+s.
+#### R
+mov
+d F
+atur
+s
+As part of th
+ major arch
+t
+ctura
+ r
+
+ork 
+
+ vLLM V1, s
+v
+ra
+ 
+
+gacy f
+atur
+s hav
+ b
+
+ r
+mov
+d.
+##### Samp
+
+
+g f
+atur
+s
+    - **b
+st_of**: Th
+s f
+atur
+ has b
+
+ r
+mov
+d du
+ to 
+
+m
+t
+d usag
+. S
+ d
+ta
+
+s at [RFC #13361](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/13361).
+    - **P
+r-R
+qu
+st Log
+ts Proc
+ssors**: I
+ V0, us
+rs cou
+d pass custom
+  proc
+ss
+
+g fu
+ct
+o
+s to adjust 
+og
+ts o
+ a p
+r-r
+qu
+st bas
+s. I
+ vLLM V1, th
+s
+  f
+atur
+ has b
+
+ r
+mov
+d. I
+st
+ad, 
+
+ 
+o
+ support **g
+oba
+ 
+og
+ts proc
+ssors**
+  
+h
+ch ar
+ s
+t at startup t
+m
+, s
+ [RFC #17799](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s/17799).
+##### KV Cach
+ f
+atur
+s
+    - **GPU 
+
+ CPU KV Cach
+ S
+app
+
+g**: 
+
+th th
+ 
+
+
+ s
+mp
+
+f
+
+d cor
+ arch
+t
+ctur
+, vLLM V1 
+o 
+o
+g
+r r
+qu
+r
+s KV cach
+ s
+app
+
+g
+to ha
+d
+
+ r
+qu
+st pr
+mpt
+o
+s.
+##### Structur
+d Output f
+atur
+s
+    - **R
+qu
+st-
+
+v
+
+ Structur
+d Output Back
+
+d**: R
+mov
+d; a
+t
+r
+at
+v
+ back
+
+ds (out
+
+
+
+s, gu
+da
+c
+) 
+
+th fa
+backs ar
+ support
+d 
+o
+.

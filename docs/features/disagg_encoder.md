@@ -1,75 +1,868 @@
-# Disaggregated Encoder
+# D
+saggr
+gat
+d E
+cod
+r
+A **d
+saggr
+gat
+d 
 
-A **disaggregated encoder** runs the vision-encoder stage of a multimodal LLM in a process that is separate from the pre-fill / decoder stage. Deploying these two stages in independent vLLM instances brings three practical benefits:
+cod
+r** ru
+s th
+ v
+s
+o
+-
 
-1. **Independent, fine-grained scaling**  
-2. **Lower time-to-first-token (TTFT)**  
-3. **Cross-process reuse and caching of encoder outputs**
+cod
+r stag
+ of a mu
+t
+moda
+ LLM 
 
-Design doc: <https://docs.google.com/document/d/1aed8KtC6XkXtdoV87pWT0a8OJlZ-CpnuLLzmR8l9BAE>
+ a proc
+ss that 
+s s
+parat
+ from th
+ pr
+-f
+
+ / d
+cod
+r stag
+. D
+p
+oy
+
+g th
+s
+ t
+o stag
+s 
+
+ 
+
+d
+p
+
+d
+
+t vLLM 
+
+sta
+c
+s br
+
+gs thr
+ pract
+ca
+ b
+
+
+f
+ts:
+1. **I
+d
+p
+
+d
+
+t, f
+
+
+-gra
+
+
+d sca
+
+
+g**
+2. **Lo
+
+r t
+m
+-to-f
+rst-tok
+
+ (TTFT)**
+3. **Cross-proc
+ss r
+us
+ a
+d cach
+
+g of 
+
+cod
+r outputs**
+D
+s
+g
+ doc: 
+https://docs.goog
+
+.com/docum
+
+t/d/1a
+d8KtC6XkXtdoV87pWT0a8OJ
+Z-Cp
+uLLzmR8
+9BAE
 
 ---
+## 1  Mot
+vat
+o
 
-## 1  Motivation
+### 1. I
+d
+p
 
-### 1. Independent, fine-grained scaling
+d
 
-* Vision encoders are lightweight, while language models are orders of magnitude larger.  
-* The language model can be parallelised without affecting the encoder fleet.  
-* Encoder nodes can be added or removed independently.
+t, f
 
-### 2. Lower time-to-first-token (TTFT)
 
-* Language-only requests bypass the vision encoder entirely.  
-* Encoder output is injected only at required attention layers, shortening the pre-fill critical path.
+-gra
 
-### 3. Cross-process reuse and caching
 
-* In-process encoders confine reuse to a single worker.  
-* A remote, shared cache lets any worker retrieve existing embeddings, eliminating redundant computation.
+d sca
 
+
+g
+* V
+s
+o
+ 
+
+cod
+rs ar
+ 
+
+ght
+
+
+ght, 
+h
+
+
+ 
+a
+guag
+ mod
+
+s ar
+ ord
+rs of mag
+
+tud
+ 
+arg
+r.
+* Th
+ 
+a
+guag
+ mod
+
+ ca
+ b
+ para
+
+
+
+s
+d 
+
+thout aff
+ct
+
+g th
+ 
+
+cod
+r f
+
+t.
+* E
+cod
+r 
+od
+s ca
+ b
+ add
+d or r
+mov
+d 
+
+d
+p
+
+d
+
+t
+y.
+### 2. Lo
+
+r t
+m
+-to-f
+rst-tok
+
+ (TTFT)
+* La
+guag
+-o
+
+y r
+qu
+sts bypass th
+ v
+s
+o
+ 
+
+cod
+r 
+
+t
+r
+
+y.
+* E
+cod
+r output 
+s 
+
+j
+ct
+d o
+
+y at r
+qu
+r
+d att
+
+t
+o
+ 
+ay
+rs, short
+
+
+
+g th
+ pr
+-f
+
+ cr
+t
+ca
+ path.
+### 3. Cross-proc
+ss r
+us
+ a
+d cach
+
+g
+* I
+-proc
+ss 
+
+cod
+rs co
+f
+
+
+ r
+us
+ to a s
+
+g
+
+ 
+ork
+r.
+* A r
+mot
+, shar
+d cach
+ 
+
+ts a
+y 
+ork
+r r
+tr
+
+v
+ 
+x
+st
+
+g 
+mb
+dd
+
+gs, 
+
+
+m
+
+at
+
+g r
+du
+da
+t computat
+o
+.
 ---
+## 2  Usag
+ Examp
 
-## 2  Usage Example
 
-The current reference pathway is **ExampleConnector**.  
-Below ready-to-run scripts shows the workflow:
+Th
+ curr
 
-1 Encoder instance + 1 PD instance:
-`examples/online_serving/disaggregated_encoder/disagg_1e1pd_example.sh`
+t r
+f
+r
 
-1 Encoder instance + 1 Prefill instance + 1 Decode instance:
-`examples/online_serving/disaggregated_encoder/disagg_1e1p1d_example.sh`
+c
+ path
+ay 
+s **Examp
 
+Co
+
+ctor**.
+B
+
+o
+ r
+ady-to-ru
+ scr
+pts sho
+s th
+ 
+orkf
+o
+:
+1 E
+cod
+r 
+
+sta
+c
+ + 1 PD 
+
+sta
+c
+:
+`
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/d
+saggr
+gat
+d_
+
+cod
+r/d
+sagg_1
+1pd_
+xamp
+
+.sh`
+1 E
+cod
+r 
+
+sta
+c
+ + 1 Pr
+f
+
+ 
+
+sta
+c
+ + 1 D
+cod
+ 
+
+sta
+c
+:
+`
+xamp
+
+s/o
+
+
+
+
+_s
+rv
+
+g/d
+saggr
+gat
+d_
+
+cod
+r/d
+sagg_1
+1p1d_
+xamp
+
+.sh`
 ---
+## 3  T
+st Scr
+pt
+P
 
-## 3  Test Script
+as
+ r
+f
+r to th
+ d
+r
+ctor
 
-Please refer to the directories `tests/v1/ec_connector`
+s `t
+sts/v1/
+c_co
 
-## 4  Development
+ctor`
+## 4  D
+v
 
-Disaggregated encoding is implemented by running two parts:
+opm
 
-* **Encoder instance** – a vLLM instance to performs vision encoding.  
-* **Prefill/Decode (PD) instance(s)** – runs language pre-fill and decode.
-    * PD can be in either a single normal instance with `disagg_encoder_example.sh` (E->PD) or in disaggregated instances with `disagg_epd_example.sh` (E->P->D)
+t
+D
+saggr
+gat
+d 
 
-A connector transfers encoder-cache (EC) embeddings from the encoder instance to the PD instance.  
-All related code is under `vllm/distributed/ec_transfer`.
+cod
 
-### Key abstractions
+g 
+s 
+mp
 
-* **ECConnector** – interface for retrieving EC caches produced by the encoder.  
-    * *Scheduler role* – checks cache existence and schedules loads.  
-    * *Worker role* – loads the embeddings into memory.
+m
 
-Here is a figure illustrating disaggregate encoder flow:
+t
+d by ru
 
-![Disaggregated Encoder Flow](../assets/features/disagg_encoder/disagg_encoder_flow.png)
 
-For the PD disaggregation part, the Prefill instance receives cache exactly the same as the disaggregated encoder flow above. Prefill instance executes 1 step (prefill -> 1 token output) and then transfers KV cache to the Decode instance for the remaining execution. The KV transfer part purely happens after the execution of the PD instance.
+g t
+o parts:
+* **E
+cod
+r 
 
-`docs/features/disagg_prefill.md` shows the brief idea about the disaggregated prefill (v0)
+sta
+c
+** – a vLLM 
 
-We create the example setup with the **NixlConnector** from `vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py` and referred to the `tests/v1/kv_connector/nixl_integration/toy_proxy_server.py` to facilitate the kv transfer between P and D;
+sta
+c
+ to p
+rforms v
+s
+o
+ 
+
+cod
+
+g.
+* **Pr
+f
+
+/D
+cod
+ (PD) 
+
+sta
+c
+(s)** – ru
+s 
+a
+guag
+ pr
+-f
+
+ a
+d d
+cod
+.
+    * PD ca
+ b
+ 
+
+ 
+
+th
+r a s
+
+g
+
+ 
+orma
+ 
+
+sta
+c
+ 
+
+th `d
+sagg_
+
+cod
+r_
+xamp
+
+.sh` (E-
+PD) or 
+
+ d
+saggr
+gat
+d 
+
+sta
+c
+s 
+
+th `d
+sagg_
+pd_
+xamp
+
+.sh` (E-
+P-
+D)
+A co
+
+ctor tra
+sf
+rs 
+
+cod
+r-cach
+ (EC) 
+mb
+dd
+
+gs from th
+ 
+
+cod
+r 
+
+sta
+c
+ to th
+ PD 
+
+sta
+c
+.
+A
+ r
+
+at
+d cod
+ 
+s u
+d
+r `v
+m/d
+str
+but
+d/
+c_tra
+sf
+r`.
+### K
+y abstract
+o
+s
+* **ECCo
+
+ctor** – 
+
+t
+rfac
+ for r
+tr
+
+v
+
+g EC cach
+s produc
+d by th
+ 
+
+cod
+r.
+    * *Sch
+du
+
+r ro
+
+* – ch
+cks cach
+ 
+x
+st
+
+c
+ a
+d sch
+du
+
+s 
+oads.
+    * *Work
+r ro
+
+* – 
+oads th
+ 
+mb
+dd
+
+gs 
+
+to m
+mory.
+H
+r
+ 
+s a f
+gur
+ 
+
+ustrat
+
+g d
+saggr
+gat
+ 
+
+cod
+r f
+o
+:
+![D
+saggr
+gat
+d E
+cod
+r F
+o
+](../ass
+ts/f
+atur
+s/d
+sagg_
+
+cod
+r/d
+sagg_
+
+cod
+r_f
+o
+.p
+g)
+For th
+ PD d
+saggr
+gat
+o
+ part, th
+ Pr
+f
+
+ 
+
+sta
+c
+ r
+c
+
+v
+s cach
+ 
+xact
+y th
+ sam
+ as th
+ d
+saggr
+gat
+d 
+
+cod
+r f
+o
+ abov
+. Pr
+f
+
+ 
+
+sta
+c
+ 
+x
+cut
+s 1 st
+p (pr
+f
+
+ -
+ 1 tok
+
+ output) a
+d th
+
+ tra
+sf
+rs KV cach
+ to th
+ D
+cod
+ 
+
+sta
+c
+ for th
+ r
+ma
+
+
+
+g 
+x
+cut
+o
+. Th
+ KV tra
+sf
+r part pur
+
+y happ
+
+s aft
+r th
+ 
+x
+cut
+o
+ of th
+ PD 
+
+sta
+c
+.
+`docs/f
+atur
+s/d
+sagg_pr
+f
+
+.md` sho
+s th
+ br
+
+f 
+d
+a about th
+ d
+saggr
+gat
+d pr
+f
+
+ (v0)
+W
+ cr
+at
+ th
+ 
+xamp
+
+ s
+tup 
+
+th th
+ **N
+x
+Co
+
+ctor** from `v
+m/d
+str
+but
+d/kv_tra
+sf
+r/kv_co
+
+ctor/v1/
+
+x
+_co
+
+ctor.py` a
+d r
+f
+rr
+d to th
+ `t
+sts/v1/kv_co
+
+ctor/
+
+x
+_
+
+t
+grat
+o
+/toy_proxy_s
+rv
+r.py` to fac
+
+
+tat
+ th
+ kv tra
+sf
+r b
+t
+
+
+ P a
+d D;
