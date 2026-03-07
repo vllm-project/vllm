@@ -70,7 +70,6 @@ N_FACTORS_WVSPLITKRC = [
     117,
     128,
 ]
-
 K_FACTORS_WVSPLITKRC = [2880, 2880 + 8, 3072, 3072 + 8]
 M_FACTORS_WVSPLITKRC = [128, 128 + 16, 256, 256 + 16, 640, 640 + 16]
 
@@ -123,10 +122,11 @@ def pad_fp8(weight):
 @pytest.mark.parametrize("m", M_FACTORS_WVSPLITKRC)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("padded_a", [False, True])
 @pytest.mark.parametrize("bias_mode", BIAS_MODES)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 @pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
-def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, bias_mode):
+def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode):
     torch.manual_seed(seed)
     cu_count = num_compute_units()
 
@@ -151,6 +151,8 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, bias_mode):
     )  # normalize to avoid large output-bias deltas
     A = (torch.rand(n, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
     B = (torch.rand(m, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+    if padded_a:
+        A = pad_fp8(A)
 
     BIAS = None
     if bias_mode == 1:
@@ -159,7 +161,7 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, bias_mode):
         BIAS = torch.rand(n, m, dtype=dtype, device="cuda") * 2 - 1
 
     ref_out = torch.nn.functional.linear(A, B, BIAS)
-    out = ops.wvSplitKrc(B, A.view(-1, A.size(-1)), cu_count, BIAS)
+    out = ops.wvSplitKrc(A, B, cu_count, BIAS)
 
     if xnorm:
         torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-8)
