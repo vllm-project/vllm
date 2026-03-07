@@ -1,17 +1,14 @@
 # Reward Models
 
-## Sequence Classification
+## Supported Models
 
-### Supported Models
+- Sequence Classification
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 |--------------|--------|-------------------|----------------------|---------------------------|
 | `Qwen3ForSequenceClassification` | InternLM2-based | `Skywork/Skywork-Reward-V2-Qwen3-0.6B`, etc. | ✅︎ | ✅︎ |
 
-
-## Token Classification
-
-### Supported Models
+- Token Classification
 
 These models primarily support the [`LLM.reward`](./pooling_models.md#llmreward) API.
 
@@ -25,7 +22,6 @@ These models primarily support the [`LLM.reward`](./pooling_models.md#llmreward)
 !!! important
     For process-supervised reward models such as `peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
     e.g.: `--pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
-
 
 ## Offline Inference
 
