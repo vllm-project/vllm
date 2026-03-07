@@ -1260,6 +1260,9 @@ class ShareGPTDataset(BenchmarkDataset):
         lora_path: str | None = None,
         max_loras: int | None = None,
         output_len: int | None = None,
+        min_len: int = 4,
+        max_prompt_len: int = 1024,
+        max_total_len: int = 2048,
         enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -1285,6 +1288,9 @@ class ShareGPTDataset(BenchmarkDataset):
             if not is_valid_sequence(
                 prompt_len,
                 new_output_len,
+                min_len=min_len,
+                max_prompt_len=max_prompt_len,
+                max_total_len=max_total_len,
                 skip_min_output_len_check=output_len is not None,
             ):
                 continue
@@ -1452,6 +1458,26 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         default=None,
         help="Output length for each request. Overrides the output length "
         "from the ShareGPT dataset.",
+    )
+    sharegpt_group.add_argument(
+        "--sharegpt-min-len",
+        type=int,
+        default=4,
+        help="Minimum length of the prompt and (unless --sharegpt-output-len is set) "
+        "the output. Requests shorter than this are discarded.",
+    )
+    sharegpt_group.add_argument(
+        "--sharegpt-max-prompt-len",
+        type=int,
+        default=1024,
+        help="Maximum length of the prompt. Requests longer than this are discarded.",
+    )
+    sharegpt_group.add_argument(
+        "--sharegpt-max-total-len",
+        type=int,
+        default=2048,
+        help="Maximum combined length of the prompt and output. Requests longer than "
+        "this are discarded.",
     )
 
     blazedit_group = parser.add_argument_group("blazedit dataset options")
@@ -1925,6 +1951,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
                 output_len=args.sharegpt_output_len,
+                min_len=args.sharegpt_min_len,
+                max_prompt_len=args.sharegpt_max_prompt_len,
+                max_total_len=args.sharegpt_max_total_len,
                 enable_multimodal_chat=args.enable_multimodal_chat,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
