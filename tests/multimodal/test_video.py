@@ -49,8 +49,9 @@ def test_video_loader_registry():
     np.testing.assert_array_equal(output_2, FAKE_OUTPUT_2)
 
 
-def test_video_loader_type_doesnt_exist():
-    with pytest.raises(AssertionError):
+def test_video_loader_type_does_not_exist():
+    with pytest.raises(AssertionError,
+                       match="Extension class non_existing_video_loader not found"):
         VIDEO_LOADER_REGISTRY.load("non_existing_video_loader")
 
 
