@@ -645,6 +645,8 @@ class OpenAIServingChat(OpenAIServing):
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
+        kv_transfer_params_sent = False
+        kv_transfer_params: dict[str, Any] | None = None
         if self.use_harmony:
             harmony_parsers = [
                 get_streamable_parser_for_assistant() for _ in range(num_choices)
@@ -716,6 +718,10 @@ class OpenAIServingChat(OpenAIServing):
                     num_prompt_tokens = len(res.prompt_token_ids)
                     if res.encoder_prompt_token_ids is not None:
                         num_prompt_tokens += len(res.encoder_prompt_token_ids)
+
+                # Capture kv_transfer_params from the first result that has it
+                if res.kv_transfer_params and not kv_transfer_params:
+                    kv_transfer_params = res.kv_transfer_params
 
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
@@ -1317,7 +1323,16 @@ class OpenAIServingChat(OpenAIServing):
                         created=created_time,
                         choices=[choice_data],
                         model=model_name,
+                        kv_transfer_params=(
+                            kv_transfer_params
+                            if kv_transfer_params and not kv_transfer_params_sent
+                            else None
+                        ),
                     )
+
+                    # Mark kv_transfer_params as sent after first chunk
+                    if kv_transfer_params and not kv_transfer_params_sent:
+                        kv_transfer_params_sent = True
 
                     # handle usage stats if requested & if continuous
                     if include_continuous_usage:

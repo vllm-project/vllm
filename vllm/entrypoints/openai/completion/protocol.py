@@ -512,3 +512,8 @@ class CompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: list[CompletionResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
+
+    # vLLM-specific fields that are not in OpenAI spec
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="KVTransfer parameters."
+    )
