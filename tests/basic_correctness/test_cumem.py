@@ -245,6 +245,36 @@ def test_deep_sleep_async():
     asyncio.run(test())
 
 
+@create_new_process_for_each_test()
+def test_flashinfer_sleep_wake():
+    """Regression test for issue #31016: FlashInfer + sleep mode.
+
+    Ensures that metadata tensors allocated during attention backend
+    initialization are not tagged as 'kv_cache', which would cause
+    them to be freed on sleep and lead to errors on wake/generate.
+    """
+    from vllm.utils.flashinfer import has_flashinfer
+
+    if not has_flashinfer():
+        pytest.skip("FlashInfer is not installed")
+
+    model = "hmellor/tiny-random-LlamaForCausalLM"
+    llm = LLM(
+        model,
+        enable_sleep_mode=True,
+        attention_config={"backend": "FLASHINFER"},
+    )
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    output = llm.generate(prompt, sampling_params)
+
+    llm.sleep(level=1)
+    llm.wake_up()
+
+    output2 = llm.generate(prompt, sampling_params)
+    assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+
 @requires_fp8
 def test_deep_sleep_fp8_kvcache():
     model = "Qwen/Qwen2-0.5B"
