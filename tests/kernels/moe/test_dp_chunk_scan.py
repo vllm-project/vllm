@@ -348,19 +348,17 @@ def _deep_ep_moe_scan(
     def chunk_fn(
         carry: torch.Tensor,
         xs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-        fixed: tuple,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         chunk_h, chunk_topk, chunk_w = xs
-        w1_local, w2_local, expert_map_local = fixed
         out = mk.apply(
             hidden_states=chunk_h,
-            w1=w1_local,
-            w2=w2_local,
+            w1=w1,
+            w2=w2,
             topk_weights=chunk_w,
             topk_ids=chunk_topk,
             activation=MoEActivation.SILU,
             global_num_experts=num_experts,
-            expert_map=expert_map_local,
+            expert_map=expert_map,
             apply_router_weight_on_input=False,
         )
         return carry, out
@@ -370,7 +368,6 @@ def _deep_ep_moe_scan(
         init=dummy_carry,
         xs=(chunked_h, chunked_topk, chunked_w),
         dim=0,
-        additional_inputs=(w1, w2, expert_map),
     )
 
     return stacked.reshape(-1, H)[:total_num_tokens]
