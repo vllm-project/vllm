@@ -384,14 +384,22 @@ class BackgroundResources:
     # processing threads can access it without holding a ref to the client.
     engine_dead: bool = False
 
+    # Guard against double-cleanup
+    _cleaned_up: bool = False
+
     def __call__(self):
         """Clean up background resources."""
+        if self._cleaned_up:
+            return
+        self._cleaned_up = True
 
         self.engine_dead = True
         if self.engine_manager is not None:
             self.engine_manager.shutdown()
+            self.engine_manager = None
         if self.coordinator is not None:
             self.coordinator.shutdown()
+            self.coordinator = None
 
         if isinstance(self.output_socket, zmq.asyncio.Socket):
             # Async case.
@@ -424,8 +432,10 @@ class BackgroundResources:
                 del tasks
                 del close_sockets_and_tasks
                 close_sockets(sockets)
-                del self.output_queue_task
-                del self.stats_update_task
+
+            # Clear references instead of deleting attributes
+            self.output_queue_task = None
+            self.stats_update_task = None
         else:
             # Sync case.
 
