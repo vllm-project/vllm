@@ -184,3 +184,76 @@ def test_consecutive_ops_in_split():
     assert [node.op for node in splitting_gm.graph.nodes] == ["placeholder"] + 2 * [
         "call_function"
     ] + ["output"]
+
+
+def test_empty_only_partition_is_merged():
+    """
+    Test that an empty-allocation-only partition is merged into its previous
+    partition during Dynamo FX splitting.
+    """
+
+    def model_fn(x: torch.Tensor) -> torch.Tensor:
+        y = torch.sin(x)
+        out = torch.empty_like(y)
+        torch.ops.aten.cos.out(y, out=out)
+        return out
+
+    x = torch.randn(4, 3)
+    gm = make_fx(model_fn)(x)
+
+    split_ops = ["aten::sin", "aten::cos.out"]
+    split_gm, split_items = split_graph(gm, split_ops)
+
+    # Without the merge, this graph is split into 3 partitions where the
+    # middle partition contains only aten::empty_like.
+    assert len(split_items) == 2, "Empty-only partition should be merged"
+
+    output_original = gm(x)
+    output_split = split_gm(x)
+    assert torch.allclose(output_original, output_split), "Output mismatch after split"
+
+
+def test_builtin_empty_only_partition_is_merged():
+    """
+    In Dynamo graphs, torch.empty/empty_like may appear as builtin call targets
+    (not aten OpOverload). Ensure empty-only partitions are still merged.
+    """
+
+    def model_fn(x: torch.Tensor) -> torch.Tensor:
+        out1 = torch.empty_like(x)
+        torch.ops.silly.attention(x, x, x, out1)
+        out2 = torch.empty_like(x)
+        torch.ops.silly.attention(out1, out1, out1, out2)
+        return out2
+
+    gm = torch.fx.symbolic_trace(model_fn)
+    split_gm, split_items = split_graph(gm, ["silly::attention"])
+
+    # Without the empty-only merge, this graph creates 4 partitions:
+    # [empty_like], [attention], [empty_like], [attention].
+    assert len(split_items) == 3, "Builtin empty-only partition should be merged"
+
+    empty_only_indices: list[int] = []
+    for idx, split_item in enumerate(split_items):
+        call_nodes = [
+            n for n in split_item.graph.graph.nodes if n.op == "call_function"
+        ]
+        if len(call_nodes) != 1:
+            continue
+        target = call_nodes[0].target
+        if getattr(target, "__module__", None) == "torch" and getattr(
+            target, "__name__", None
+        ) in ("empty", "empty_like", "empty_strided", "new_empty"):
+            empty_only_indices.append(idx)
+
+    # The initial output allocation before the first split op is expected.
+    # Only the middle empty-only partition should be merged away.
+    assert empty_only_indices == [0], (
+        "Only the leading allocation partition should remain empty-only, "
+        f"got indices={empty_only_indices}"
+    )
+
+    x = torch.randn(2, 3, device="cuda")
+    output_original = gm(x)
+    output_split = split_gm(x)
+    assert torch.allclose(output_original, output_split), "Output mismatch after split"
