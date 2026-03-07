@@ -413,16 +413,38 @@ class OpenAIServingChat(OpenAIServing):
                     else None
                 )
 
-                generator = self.engine_client.generate(
-                    engine_prompt,
-                    sampling_params,
-                    sub_request_id,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                    priority=request.priority,
-                    data_parallel_rank=data_parallel_rank,
-                    reasoning_ended=reasoning_ended,
-                )
+                if isinstance(sampling_params, BeamSearchParams):
+                    generator = self.beam_search(
+                        prompt=engine_prompt,
+                        request_id=sub_request_id,
+                        params=sampling_params,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                    )
+                else:
+                    reasoning_ended = (
+                        # Only check the tail of the prompt: tool definitions
+                        # contain <tool_call> and multi-turn history contains
+                        # </think> from prior turns — both would falsely signal
+                        # reasoning ended for the current turn. The
+                        # enable_thinking=False case injects </think> in the
+                        # last ~4 tokens, so checking [-10:] is sufficient.
+                        (reasoning_parser.end_token_id
+                         in (prompt_token_ids or [])[-10:])
+                        if reasoning_parser
+                        else None
+                    )
+
+                    generator = self.engine_client.generate(
+                        engine_prompt,
+                        sampling_params,
+                        sub_request_id,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                        priority=request.priority,
+                        data_parallel_rank=data_parallel_rank,
+                        reasoning_ended=reasoning_ended,
+                    )
 
             generators.append(generator)
 
@@ -783,9 +805,17 @@ class OpenAIServingChat(OpenAIServing):
                         and prompt_is_reasoning_end_arr[i] is None
                     ):
                         # only check once per choice, because prompt_token_ids
-                        # are the same for all deltas in that choice
+                        # are the same for all deltas in that choice.
+                        # Only inspect the last few tokens of the prompt:
+                        # - tool definitions contain <tool_call> tokens
+                        # - multi-turn history contains </think> from prior turns
+                        # Both would falsely signal reasoning-ended for the
+                        # current turn. The enable_thinking=False case injects
+                        # <think>\n\n</think>\n\n as the last ~4 tokens, so
+                        # checking the tail is sufficient and correct.
                         prompt_is_reasoning_end_arr[i] = (
-                            reasoning_parser.is_reasoning_end(res.prompt_token_ids)
+                            reasoning_parser.end_token_id
+                            in res.prompt_token_ids[-10:]
                         )
                     if finish_reason_sent[i]:
                         continue
@@ -1010,6 +1040,7 @@ class OpenAIServingChat(OpenAIServing):
                         assert added_content_delta_arr is not None
                         assert reasoning_end_arr is not None
                         output_token_ids = as_list(output.token_ids)
+                        delta_message = None
                         if not reasoning_end_arr[i]:
                             # When encountering think end id in prompt_token_ids
                             # i.e {"enable_thinking": False},
@@ -1060,6 +1091,16 @@ class OpenAIServingChat(OpenAIServing):
                                 delta_text = current_text
                                 delta_token_ids = current_token_ids
 
+                            # Preserve reasoning from the transition batch
+                            # (when </think> and content appear in the same
+                            # stream-interval chunk) before the tool parser
+                            # overwrites delta_message.
+                            _saved_reasoning = (
+                                delta_message.reasoning
+                                if delta_message is not None
+                                else None
+                            )
+
                             delta_message = tool_parser.extract_tool_calls_streaming(
                                 previous_text=previous_text,
                                 current_text=current_text,
@@ -1071,6 +1112,16 @@ class OpenAIServingChat(OpenAIServing):
                             )
                             if delta_message and delta_message.tool_calls:
                                 tools_streamed[i] = True
+
+                            # Merge saved reasoning back so it reaches the
+                            # client as delta.reasoning (not discarded).
+                            if _saved_reasoning:
+                                if delta_message is None:
+                                    delta_message = DeltaMessage(
+                                        reasoning=_saved_reasoning
+                                    )
+                                else:
+                                    delta_message.reasoning = _saved_reasoning
                     # when only tool calls
                     elif tool_choice_auto:
                         assert tool_parser is not None
