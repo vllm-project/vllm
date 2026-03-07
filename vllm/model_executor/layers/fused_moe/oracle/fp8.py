@@ -562,7 +562,7 @@ def make_fp8_moe_kernel(
         experts,
         shared_experts=(
             shared_experts
-            if moe_config.moe_parallel_config.use_all2all_kernels
+            if moe_config.moe_parallel_config.use_deepep_ll_kernels
             else None
         ),
         moe_parallel_config=moe_config.moe_parallel_config,
