@@ -70,6 +70,6 @@ class AttentionConfig(VerifyAndUpdateConfig):
             raise ValueError(
                 f"Unexpected block_size {cache_config.block_size} for current"
                 f" attention backend {attention_config.backend},"
-                f" the supportted block_sizes of {attention_config.backend}:"
+                f" the supported block_sizes of {attention_config.backend}:"
                 f" {supported_kernel_block_sizes}"
             )
