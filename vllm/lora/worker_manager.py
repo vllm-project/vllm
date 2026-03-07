@@ -16,7 +16,11 @@ from vllm.lora.model_manager import (
 )
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
-from vllm.lora.utils import get_adapter_absolute_path
+from vllm.lora.utils import (
+    get_adapter_absolute_path,
+    is_in_target_modules,
+    is_supported_lora_module,
+)
 
 logger = init_logger(__name__)
 
@@ -140,6 +144,29 @@ class WorkerLoRAManager:
                 weights_mapper=hf_to_vllm_mapper,
                 skip_prefixes=lora_skip_prefixes,
             )
+
+            # Warn about adapter modules that will be ignored.
+            target_modules = self.lora_config.target_modules
+            for module_name in lora.loras:
+                if not is_supported_lora_module(module_name, supported_lora_modules):
+                    logger.warning_once(
+                        "LoRA module '%s' in adapter '%s' is not in the "
+                        "model's supported LoRA target modules [%s]. "
+                        "These parameters will be ignored, which may "
+                        "cause abnormal model behavior.",
+                        module_name,
+                        lora_request.lora_path,
+                        ", ".join(sorted(supported_lora_modules)),
+                    )
+                elif not is_in_target_modules(module_name, target_modules):
+                    logger.warning_once(
+                        "LoRA module '%s' in adapter '%s' is not in the "
+                        "deployment-time target_modules restriction [%s]."
+                        " These parameters will be ignored.",
+                        module_name,
+                        lora_request.lora_path,
+                        ", ".join(sorted(target_modules)),
+                    )
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both
