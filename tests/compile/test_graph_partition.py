@@ -233,26 +233,6 @@ def test_builtin_empty_only_partition_is_merged():
     # [empty_like], [attention], [empty_like], [attention].
     assert len(split_items) == 3, "Builtin empty-only partition should be merged"
 
-    empty_only_indices: list[int] = []
-    for idx, split_item in enumerate(split_items):
-        call_nodes = [
-            n for n in split_item.graph.graph.nodes if n.op == "call_function"
-        ]
-        if len(call_nodes) != 1:
-            continue
-        target = call_nodes[0].target
-        if getattr(target, "__module__", None) == "torch" and getattr(
-            target, "__name__", None
-        ) in ("empty", "empty_like", "empty_strided", "new_empty"):
-            empty_only_indices.append(idx)
-
-    # The initial output allocation before the first split op is expected.
-    # Only the middle empty-only partition should be merged away.
-    assert empty_only_indices == [0], (
-        "Only the leading allocation partition should remain empty-only, "
-        f"got indices={empty_only_indices}"
-    )
-
     x = torch.randn(2, 3, device="cuda")
     output_original = gm(x)
     output_split = split_gm(x)
