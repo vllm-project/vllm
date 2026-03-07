@@ -367,6 +367,7 @@ class Hermes2ProToolParser(ToolParser):
 
             # now, the nitty-gritty of tool calls
             # now we have the portion to parse as tool call.
+            assert current_tool_call is not None
 
             if current_tool_call is None:
                 return None

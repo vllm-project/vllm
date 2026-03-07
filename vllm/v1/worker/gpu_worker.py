@@ -556,6 +556,12 @@ class Worker(WorkerBase):
         else:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
+        # Build KV-zero metadata outside the CuMem pool so the bookkeeping
+        # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
+        # allocator and are not discarded during sleep/wake cycles.
+        if hasattr(self.model_runner, "_init_kv_zero_meta"):
+            self.model_runner._init_kv_zero_meta()
+
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> float:
         warmup_sizes: list[int] = []
