@@ -1115,12 +1115,16 @@ def _step_until_done(
         all_finished = all_done
 
 
+def _num_waiting_requests(scheduler: Scheduler) -> int:
+    return len(scheduler.waiting) + len(scheduler.blocked_waiting)
+
+
 def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
     """Cycle requests through a KV transfer cycle."""
 
     # Requests should first transition to WAITING_FOR_REMOTE_KVS
     output = scheduler.schedule()
-    assert len(scheduler.waiting) == len(req_ids)
+    assert _num_waiting_requests(scheduler) == len(req_ids)
     assert len(scheduler.running) == 0
     assert len(output.scheduled_new_reqs) == 0
     for req in scheduler.requests.values():
@@ -1139,7 +1143,7 @@ def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
 
     # Simulate KV transfer completion using KVConnectorOutput.finished_recving
     output = scheduler.schedule()
-    assert len(scheduler.waiting) == len(req_ids)
+    assert _num_waiting_requests(scheduler) == len(req_ids)
     assert len(scheduler.running) == 0
 
     MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
@@ -1546,7 +1550,7 @@ def test_kv_connector_handles_preemption(is_async, use_ec_connector, ec_role):
     # All can be scheduled - 1st token.
     output = scheduler.schedule()
     if is_async:
-        assert len(scheduler.waiting) == 2
+        assert _num_waiting_requests(scheduler) == 2
         assert scheduler.running == []
         _step_until_kv_transfer_finished(scheduler, req_ids)
         output = scheduler.schedule()
@@ -1604,7 +1608,11 @@ def test_kv_connector_handles_preemption(is_async, use_ec_connector, ec_role):
     # This will have a local and remote cache hit.
     output = scheduler.schedule()
     if is_async:
-        waiting_req_ids = [req.request_id for req in scheduler.waiting]
+        waiting_req_ids = [
+            req.request_id
+            for req in scheduler.blocked_waiting
+            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        ]
         assert len(waiting_req_ids) == 1
         _step_until_kv_transfer_finished(scheduler, waiting_req_ids)
         output = scheduler.schedule()
@@ -2439,7 +2447,8 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
     output = scheduler.schedule()
     assert len(output.scheduled_new_reqs) == 0
     assert len(scheduler.running) == 0
-    assert len(scheduler.waiting) == 1
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.blocked_waiting) == 1
 
 
 @pytest.mark.parametrize(
@@ -3626,6 +3635,9 @@ def test_prepend_skipped_requests_order():
     # simulate first 2 waiting requests are waiting for remote KVs
     for req in expected_waiting_reqs[:2]:
         req.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.waiting.remove_requests(expected_waiting_reqs[:2])
+    for req in expected_waiting_reqs[:2]:
+        scheduler.blocked_waiting.add_request(req)
 
     # schedule step
     # expect the first 2 waiting to be skipped, the third running,
@@ -3636,7 +3648,47 @@ def test_prepend_skipped_requests_order():
     expected_waiting_reqs.pop(2)
 
     # verify waiting order is preserved
-    assert list(scheduler.waiting) == expected_waiting_reqs
+    waiting_reqs = list(scheduler.blocked_waiting) + list(scheduler.waiting)
+    assert waiting_reqs == expected_waiting_reqs
+
+
+def test_remote_kv_promotion_keeps_fcfs_with_fsm_prefix():
+    scheduler = create_scheduler(max_num_seqs=1)
+    scheduler.connector = Mock()
+    scheduler.connector.get_num_new_matched_tokens.return_value = (0, False)
+
+    requests = create_requests(num_requests=4)
+    for request in requests:
+        scheduler.add_request(request)
+
+    req_fsm_1, req_fsm_2, req_remote, req_tail = list(scheduler.waiting)
+
+    # simulate two FSM requests at the waiting head that become ready now.
+    req_fsm_1.status = RequestStatus.WAITING_FOR_FSM
+    req_fsm_1.structured_output_request = Mock(grammar=object())
+    req_fsm_2.status = RequestStatus.WAITING_FOR_FSM
+    req_fsm_2.structured_output_request = Mock(grammar=object())
+
+    # simulate a remote-KV request that is ready to be promoted now.
+    req_remote.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.waiting.remove_requests([req_fsm_1, req_fsm_2, req_remote])
+    scheduler.blocked_waiting.add_request(req_fsm_1)
+    scheduler.blocked_waiting.add_request(req_fsm_2)
+    scheduler.blocked_waiting.add_request(req_remote)
+    scheduler.finished_recving_kv_req_ids.add(req_remote.request_id)
+    scheduler._update_waiting_for_remote_kv = Mock()
+
+    output = scheduler.schedule()
+
+    assert output.scheduled_new_reqs
+    assert output.scheduled_new_reqs[0].req_id == req_fsm_1.request_id
+    waiting_req_ids = [req.request_id for req in scheduler.waiting]
+    assert waiting_req_ids == [
+        req_fsm_2.request_id,
+        req_remote.request_id,
+        req_tail.request_id,
+    ]
+    scheduler._update_waiting_for_remote_kv.assert_called_once_with(req_remote)
 
 
 def test_abort_request_waiting_for_remote_kvs():

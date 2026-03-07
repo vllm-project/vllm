@@ -160,6 +160,8 @@ class Scheduler(SchedulerInterface):
             ) from e
         # Priority queues for requests.
         self.waiting = create_request_queue(self.policy)
+        # requests waiting on async dependencies
+        self.blocked_waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
 
         # The request IDs that are finished in between the previous and the
@@ -353,6 +355,7 @@ class Scheduler(SchedulerInterface):
         scheduled_timestamp = time.monotonic()
 
         self.kv_cache_manager.new_step_starts()
+        self._promote_ready_skipped_requests()
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -547,41 +550,12 @@ class Scheduler(SchedulerInterface):
                 request = self.waiting.peek_request()
                 request_id = request.request_id
 
-                # KVTransfer: skip request if still waiting for remote kvs.
-                if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                    is_ready = self._update_waiting_for_remote_kv(request)
-                    if is_ready:
-                        if request.num_preemptions:
-                            # We must be loading for a resumed preemption
-                            # rather than a new request.
-                            request.status = RequestStatus.PREEMPTED
-                        else:
-                            request.status = RequestStatus.WAITING
-                    else:
-                        logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request_id,
-                        )
-                        self.waiting.pop_request()
-                        skipped_waiting_requests.prepend_request(request)
-                        continue
-
-                # Skip request if the structured output request is still waiting
-                # for FSM compilation.
-                if request.status == RequestStatus.WAITING_FOR_FSM:
-                    structured_output_req = request.structured_output_request
-                    if structured_output_req and structured_output_req.grammar:
-                        request.status = RequestStatus.WAITING
-                    else:
-                        self.waiting.pop_request()
-                        skipped_waiting_requests.prepend_request(request)
-                        continue
-
-                # Streaming: skip request if still waiting for next streaming req.
-                if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
-                    assert not request.streaming_queue
+                # route blocked waiting statuses into the shared blocked queue.
+                if self._is_blocked_waiting_status(
+                    request.status
+                ) and not self._try_promote_skipped_request(request):
                     self.waiting.pop_request()
-                    skipped_waiting_requests.prepend_request(request)
+                    self.blocked_waiting.add_request(request)
                     continue
 
                 # Check that adding the request still respects the max_loras
@@ -772,8 +746,8 @@ class Scheduler(SchedulerInterface):
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
-                    skipped_waiting_requests.prepend_request(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                    self.blocked_waiting.add_request(request)
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
                     # the request finished the KV transfer.
@@ -1529,6 +1503,20 @@ class Scheduler(SchedulerInterface):
 
         return engine_core_outputs
 
+    @staticmethod
+    def _is_blocked_waiting_status(status: RequestStatus) -> bool:
+        return status in (
+            RequestStatus.WAITING_FOR_FSM,
+            RequestStatus.WAITING_FOR_REMOTE_KVS,
+            RequestStatus.WAITING_FOR_STREAMING_REQ,
+        )
+
+    def _enqueue_waiting_request(self, request: Request) -> None:
+        if self._is_blocked_waiting_status(request.status):
+            self.blocked_waiting.add_request(request)
+        else:
+            self.waiting.add_request(request)
+
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
         if not request.resumable:
@@ -1544,7 +1532,7 @@ class Scheduler(SchedulerInterface):
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
             self.num_waiting_for_streaming_input += 1
 
-        self.waiting.add_request(request)
+        self._enqueue_waiting_request(request)
         return False
 
     def _get_routed_experts(self, request: Request) -> np.ndarray | None:
@@ -1675,7 +1663,7 @@ class Scheduler(SchedulerInterface):
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
-        return len(self.running), len(self.waiting)
+        return len(self.running), len(self.waiting) + len(self.blocked_waiting)
 
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
@@ -1694,7 +1682,7 @@ class Scheduler(SchedulerInterface):
         else:
             if request.resumable:
                 request.streaming_queue = deque()
-            self.waiting.add_request(request)
+            self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
@@ -1745,6 +1733,7 @@ class Scheduler(SchedulerInterface):
             self.running = remove_all(self.running, running_requests_to_remove)
         if waiting_requests_to_remove:
             self.waiting.remove_requests(waiting_requests_to_remove)
+            self.blocked_waiting.remove_requests(waiting_requests_to_remove)
 
         # Second pass: set status and free requests
         for request in valid_requests:
@@ -1796,7 +1785,11 @@ class Scheduler(SchedulerInterface):
             return 0
         if self._pause_state == PauseState.PAUSED_NEW:
             return len(self.running)
-        num_waiting = len(self.waiting) - self.num_waiting_for_streaming_input
+        num_waiting = (
+            len(self.waiting)
+            - self.num_waiting_for_streaming_input
+            + len(self.blocked_waiting)
+        )
         return num_waiting + len(self.running)
 
     def has_finished_requests(self) -> bool:
@@ -1896,7 +1889,7 @@ class Scheduler(SchedulerInterface):
         )
         return SchedulerStats(
             num_running_reqs=len(self.running),
-            num_waiting_reqs=len(self.waiting),
+            num_waiting_reqs=len(self.waiting) + len(self.blocked_waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
             encoder_cache_usage=self._get_encoder_cache_usage(),
             prefix_cache_stats=prefix_cache_stats,
@@ -1979,21 +1972,15 @@ class Scheduler(SchedulerInterface):
 
         return self.connector.request_finished_all_groups(request, block_ids)
 
-    def _update_waiting_for_remote_kv(self, request: Request) -> bool:
+    def _update_waiting_for_remote_kv(self, request: Request) -> None:
         """
-        KV Connector: check if the request_id is finished_recving.
-
-        The finished_recving_kv_req_ids list is populated
-        on the previous steps()'s update_from_output based
-        on the worker side connector.
+        KV Connector: update request state after async recv is finished.
 
         When the kv transfer is ready, we cache the blocks
         and the request state will be moved back to WAITING from
         WAITING_FOR_REMOTE_KV.
         """
         assert self.connector is not None
-        if request.request_id not in self.finished_recving_kv_req_ids:
-            return False
 
         if request.request_id in self.failed_recving_kv_req_ids:
             # Request had KV load failures; num_computed_tokens was already
@@ -2021,9 +2008,53 @@ class Scheduler(SchedulerInterface):
             if request.num_cached_tokens < 0:
                 request.num_cached_tokens = request.num_computed_tokens
 
-        # Return that we are ready.
         self.finished_recving_kv_req_ids.remove(request.request_id)
-        return True
+
+    def _try_promote_skipped_request(self, request: Request) -> bool:
+        """
+        Try to promote a blocked waiting request back to schedulable states.
+        """
+        if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+            if request.request_id not in self.finished_recving_kv_req_ids:
+                return False
+            self._update_waiting_for_remote_kv(request)
+            if request.num_preemptions:
+                request.status = RequestStatus.PREEMPTED
+            else:
+                request.status = RequestStatus.WAITING
+            return True
+
+        if request.status == RequestStatus.WAITING_FOR_FSM:
+            structured_output_req = request.structured_output_request
+            if not (structured_output_req and structured_output_req.grammar):
+                return False
+            request.status = RequestStatus.WAITING
+            return True
+
+        if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
+            assert not request.streaming_queue
+            return False
+
+        return request.status in (RequestStatus.WAITING, RequestStatus.PREEMPTED)
+
+    def _promote_ready_skipped_requests(self) -> None:
+        """Promote ready blocked requests into the regular waiting queue."""
+        if not self.blocked_waiting:
+            return
+
+        ready_requests = create_request_queue(self.policy)
+        pending_skipped_requests = create_request_queue(self.policy)
+
+        while self.blocked_waiting:
+            request = self.blocked_waiting.pop_request()
+            if self._try_promote_skipped_request(request):
+                ready_requests.prepend_request(request)
+            else:
+                pending_skipped_requests.add_request(request)
+
+        self.blocked_waiting = pending_skipped_requests
+        if ready_requests:
+            self.waiting.prepend_requests(ready_requests)
 
     def _update_from_kv_xfer_finished(self, kv_connector_output: KVConnectorOutput):
         """
@@ -2170,7 +2201,7 @@ class Scheduler(SchedulerInterface):
         # handle async KV loads (not cached yet, evict_blocks=False)
         async_load_reqs = (
             req
-            for req in self.waiting
+            for req in self.blocked_waiting
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         )
         async_failed_req_ids, num_failed_tokens, _ = (
