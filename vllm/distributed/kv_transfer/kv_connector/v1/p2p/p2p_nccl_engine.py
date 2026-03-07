@@ -15,14 +15,8 @@ import msgpack
 import torch
 import zmq
 
+import vllm.envs as envs
 from vllm.config.kv_transfer import KVTransferConfig
-from vllm.distributed.device_communicators.pynccl_wrapper import (
-    NCCLLibrary,
-    buffer_type,
-    cudaStream_t,
-    ncclComm_t,
-    ncclDataTypeEnum,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import (  # noqa: E501
     TensorMemoryPool,
 )
@@ -71,6 +65,13 @@ class SendQueueItem:
     tensor: torch.Tensor
 
 
+def _get_stream_ptr(stream):
+    """Get stream pointer for nccl4py."""
+    if stream is None:
+        return None
+    return stream.cuda_stream
+
+
 class P2pNcclEngine:
     def __init__(
         self,
@@ -84,7 +85,37 @@ class P2pNcclEngine:
         self.rank = port_offset
         self.local_rank = local_rank
         self.device = torch.device(f"cuda:{self.local_rank}")
-        self.nccl = NCCLLibrary(library_path)
+
+        # Use nccl4py by default, fall back to legacy if requested or unavailable
+        self._use_legacy = envs.VLLM_DISABLE_NCCL4PY
+        if not self._use_legacy:
+            try:
+                import nccl.bindings as nccl_bindings
+                import nccl.core as nccl
+
+                self._nccl = nccl
+                self._nccl_bindings = nccl_bindings
+                self.nccl = None  # type: ignore[assignment]  # Not used in nccl4py mode
+            except ImportError:
+                logger.warning(
+                    "nccl4py is not installed. Falling back to legacy NCCL "
+                    "bindings. Install with: pip install nccl4py[cu12]"
+                )
+                self._use_legacy = True
+
+        if self._use_legacy:
+            from vllm.distributed.device_communicators.pynccl_wrapper import (
+                NCCLLibrary,
+                buffer_type,
+                cudaStream_t,
+                ncclDataTypeEnum,
+            )
+
+            self._NCCLLibrary = NCCLLibrary
+            self._buffer_type = buffer_type
+            self._cudaStream_t = cudaStream_t
+            self._ncclDataTypeEnum = ncclDataTypeEnum
+            self.nccl = NCCLLibrary(library_path)
 
         if not hostname:
             hostname = get_ip()
@@ -166,7 +197,7 @@ class P2pNcclEngine:
         self.recv_request_id_to_tensor_ids: dict[str, set[str]] = {}
         self.send_request_id_to_tensor_ids: dict[str, set[str]] = {}
         self.socks: dict[str, Any] = {}  # remote_address: client socket
-        self.comms: dict[str, Any] = {}  # remote_address: (ncclComm_t, rank)
+        self.comms: dict[str, Any] = {}  # remote_address: (comm, rank)
 
         self.buffer_size = 0
         self.buffer_size_threshold = float(self.config.kv_buffer_size)
@@ -188,7 +219,7 @@ class P2pNcclEngine:
         logger.info(
             "💯P2pNcclEngine init, rank:%d, local_rank:%d, http_address:%s, "
             "zmq_address:%s, proxy_address:%s, send_type:%s, buffer_size_"
-            "threshold:%.2f, nccl_num_channels:%s",
+            "threshold:%.2f, nccl_num_channels:%s, backend:%s",
             self.rank,
             self.local_rank,
             self.http_address,
@@ -197,7 +228,40 @@ class P2pNcclEngine:
             self.send_type,
             self.buffer_size_threshold,
             self.nccl_num_channels,
+            "legacy" if self._use_legacy else "nccl4py",
         )
+
+    def _get_unique_id(self):
+        """Get a new NCCL unique ID."""
+        if self._use_legacy:
+            return self.nccl.ncclGetUniqueId()  # type: ignore[union-attr]
+        else:
+            return self._nccl.get_unique_id()
+
+    def _unique_id_from_bytes(self, data: bytes):
+        """Create unique ID from bytes."""
+        if self._use_legacy:
+            return self.nccl.unique_id_from_bytes(data)  # type: ignore[union-attr]
+        else:
+            return self._nccl.UniqueId.from_bytes(data)
+
+    def _unique_id_to_bytes(self, unique_id):
+        """Convert unique ID to bytes."""
+        if self._use_legacy:
+            return bytes(unique_id.internal)
+        else:
+            return unique_id.as_bytes
+
+    def _comm_init_rank(self, nranks: int, unique_id, rank: int):
+        """Initialize NCCL communicator."""
+        if self._use_legacy:
+            return self.nccl.ncclCommInitRank(nranks, unique_id, rank)  # type: ignore[union-attr]
+        else:
+            return self._nccl.Communicator.init(
+                nranks=nranks,
+                rank=rank,
+                unique_id=unique_id,
+            )
 
     def create_connect(self, remote_address: str | None = None):
         assert remote_address is not None
@@ -214,14 +278,14 @@ class P2pNcclEngine:
                 )
                 return sock, self.comms[remote_address]
 
-            unique_id = self.nccl.ncclGetUniqueId()
-            data = {"cmd": "NEW", "unique_id": bytes(unique_id.internal)}
+            unique_id = self._get_unique_id()
+            data = {"cmd": "NEW", "unique_id": self._unique_id_to_bytes(unique_id)}
             sock.send(msgpack.dumps(data))
 
             with torch.cuda.device(self.device):
                 rank = 0
                 with set_p2p_nccl_context(self.nccl_num_channels):
-                    comm: ncclComm_t = self.nccl.ncclCommInitRank(2, unique_id, rank)
+                    comm = self._comm_init_rank(2, unique_id, rank)
                 self.comms[remote_address] = (comm, rank)
                 logger.info(
                     "🤝ncclCommInitRank Success, %s👉%s, MyRank:%s",
@@ -376,13 +440,11 @@ class P2pNcclEngine:
             remote_address, message = self.router_socket.recv_multipart()
             data = msgpack.loads(message)
             if data["cmd"] == "NEW":
-                unique_id = self.nccl.unique_id_from_bytes(bytes(data["unique_id"]))
+                unique_id = self._unique_id_from_bytes(bytes(data["unique_id"]))
                 with torch.cuda.device(self.device):
                     rank = 1
                     with set_p2p_nccl_context(self.nccl_num_channels):
-                        comm: ncclComm_t = self.nccl.ncclCommInitRank(
-                            2, unique_id, rank
-                        )
+                        comm = self._comm_init_rank(2, unique_id, rank)
                     self.comms[remote_address.decode()] = (comm, rank)
                     logger.info(
                         "🤝ncclCommInitRank Success, %s👈%s, MyRank:%s",
@@ -595,14 +657,18 @@ class P2pNcclEngine:
             stream = current_stream()
 
         with torch.cuda.stream(stream):
-            self.nccl.ncclSend(
-                buffer_type(tensor.data_ptr()),
-                tensor.numel(),
-                ncclDataTypeEnum.from_torch(tensor.dtype),
-                dst,
-                comm,
-                cudaStream_t(stream.cuda_stream),
-            )
+            if self._use_legacy:
+                self.nccl.ncclSend(  # type: ignore[union-attr]
+                    self._buffer_type(tensor.data_ptr()),
+                    tensor.numel(),
+                    self._ncclDataTypeEnum.from_torch(tensor.dtype),
+                    dst,
+                    comm,
+                    self._cudaStream_t(stream.cuda_stream),
+                )
+            else:
+                # nccl4py Communicator API
+                comm.send(tensor, dst, stream=_get_stream_ptr(stream))
         stream.synchronize()
 
     def recv(self, comm, tensor: torch.Tensor, src: int, stream=None):
@@ -614,14 +680,18 @@ class P2pNcclEngine:
             stream = current_stream()
 
         with torch.cuda.stream(stream):
-            self.nccl.ncclRecv(
-                buffer_type(tensor.data_ptr()),
-                tensor.numel(),
-                ncclDataTypeEnum.from_torch(tensor.dtype),
-                src,
-                comm,
-                cudaStream_t(stream.cuda_stream),
-            )
+            if self._use_legacy:
+                self.nccl.ncclRecv(  # type: ignore[union-attr]
+                    self._buffer_type(tensor.data_ptr()),
+                    tensor.numel(),
+                    self._ncclDataTypeEnum.from_torch(tensor.dtype),
+                    src,
+                    comm,
+                    self._cudaStream_t(stream.cuda_stream),
+                )
+            else:
+                # nccl4py Communicator API
+                comm.recv(tensor, src, stream=_get_stream_ptr(stream))
         stream.synchronize()
 
     def close(self) -> None:
