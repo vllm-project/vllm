@@ -300,14 +300,26 @@ class Base(
             for child_name, child_module in module.named_children():
                 new_module = child_module
                 qual_name = maybe_prefix(prefix, child_name)
-                # Populate Eagle3 attrs
                 if (
                     isinstance(module, nn.ModuleList)
                     and len(module) == self.text_config.num_hidden_layers
                 ):
+                    # Populate Eagle3 attrs
                     self._target_class = type(child_module)
                     layer_name = qual_name.removeprefix("model.")
                     self._layer_names[int(child_name)] = layer_name
+                    # MTP weights should not be loaded into the base model
+                    num_hidden_layers = self.text_config.num_hidden_layers
+                    names = (
+                        "n_predict",  # Override from SpeculativeConfig
+                        "num_nextn_predict_layers",  # Most models
+                        "mtp_num_hidden_layers",  # Qwen 3.5
+                    )
+                    n_predict = getattr_iter(self.text_config, names, 0)
+                    for i in range(num_hidden_layers, num_hidden_layers + n_predict):
+                        mtp_prefix = f"{prefix}.{i}."
+                        if mtp_prefix not in self.ignore_unexpected_prefixes:
+                            self.ignore_unexpected_prefixes.append(mtp_prefix)
                 # Replace modules as needed
                 if isinstance(child_module, nn.Linear):
                     generator = (p for p in tp_plan if re.match(p, qual_name))
@@ -504,8 +516,11 @@ class Base(
             )
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.check_version("5.0.0", "Eagle3 support")
-        from transformers.utils.generic import OutputRecorder
+        self.check_version("5.2.0", "Eagle3 support")
+        from transformers.utils.output_capturing import (
+            OutputRecorder,
+            maybe_install_capturing_hooks,
+        )
 
         # The default value in PreTrainedModel is None
         if self.model._can_record_outputs is None:
@@ -519,6 +534,9 @@ class Base(
             aux_hidden_state_i = OutputRecorder(target_class, layer_name=layer_name)
             self.model._can_record_outputs[layer_key] = aux_hidden_state_i
             self._output_aux_hidden_states_kwargs[f"output_{layer_key}"] = True
+
+        # Ensure that the capture hooks are installed before dynamo traces the model
+        maybe_install_capturing_hooks(self.model)
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = self.text_config.num_hidden_layers

@@ -82,7 +82,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         weight = weight.permute(0, 2, 1).reshape(input_size, output_size).contiguous()
         weight = pack_quantized_values_into_int32(weight, self.config.weight_type, 1)
         # make 16 output channel as a block and transpose to the make
-        # the block contigous
+        # the block contiguous
         weight = (
             weight.view(input_size, -1, 16 // pack_factor)
             .permute(1, 0, 2)
