@@ -161,6 +161,13 @@ def reset_torch_dynamo():
             "num_speculative_tokens": 3,
         },
         {
+            "method": "ngram",
+            "prompt_lookup_max": 5,
+            "prompt_lookup_min": 3,
+            "num_speculative_tokens": 3,
+            "verification_method": "block",
+        },
+        {
             "method": "suffix",
             "suffix_decoding_max_spec_factor": 2.0,
         },

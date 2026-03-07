@@ -35,6 +35,34 @@ For reproducible measurements in your environment, use
 [`examples/offline_inference/spec_decode.py`](../../../examples/offline_inference/spec_decode.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
 
+## Verification Method
+
+You can choose how draft tokens are verified via
+`speculative_config.verification_method`:
+
+- `"token"`: existing per-token rejection sampling (default).
+- `"block"`: single-path block verification.
+- `"greedy_multipath_block"`: reserved for future GBV support and currently
+  not implemented.
+
+Example:
+
+```python
+speculative_config={
+    "method": "draft_model",
+    "model": "Qwen/Qwen3-0.6B",
+    "num_speculative_tokens": 5,
+    "verification_method": "block",
+}
+```
+
+Notes:
+
+- In the default V1 runner, `"block"` enables block verification.
+- In the experimental V2 runner (`VLLM_USE_V2_MODEL_RUNNER=1`), `"block"`
+  currently falls back to `"token"` with a warning.
+- `"greedy_multipath_block"` raises `NotImplementedError` at runtime.
+
 ## Lossless guarantees of Speculative Decoding
 
 In vLLM, speculative decoding aims to enhance inference efficiency while maintaining accuracy. This section addresses the lossless guarantees of

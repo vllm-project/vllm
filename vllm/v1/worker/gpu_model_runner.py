@@ -529,7 +529,10 @@ class GPUModelRunner(
                     "Unknown speculative decoding method: "
                     f"{self.speculative_config.method}"
                 )
-            self.rejection_sampler = RejectionSampler(self.sampler)
+            self.rejection_sampler = RejectionSampler(
+                self.sampler,
+                verification_method=self.speculative_config.verification_method,
+            )
 
         self.num_spec_tokens = 0
         if self.speculative_config:

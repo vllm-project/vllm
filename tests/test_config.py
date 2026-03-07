@@ -4,7 +4,7 @@
 import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -1149,3 +1149,42 @@ def test_eagle_draft_model_config():
     assert draft_model_config.hf_text_config.model_type == "eagle"
     assert draft_model_config.architectures == ["EagleLlamaForCausalLM"]
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
+
+
+def _make_mock_target_model_config():
+    target_model_config = Mock()
+    target_model_config.verify_with_parallel_config = Mock()
+    target_model_config.hf_text_config.model_type = "llama"
+    return target_model_config
+
+
+def test_speculative_verification_method_default_is_token():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+        target_model_config=_make_mock_target_model_config(),
+        target_parallel_config=ParallelConfig(),
+    )
+    assert speculative_config.verification_method == "token"
+
+
+def test_speculative_verification_method_block_is_valid():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+        verification_method="block",
+        target_model_config=_make_mock_target_model_config(),
+        target_parallel_config=ParallelConfig(),
+    )
+    assert speculative_config.verification_method == "block"
+
+
+def test_speculative_verification_method_invalid_value():
+    with pytest.raises(ValidationError):
+        SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=1,
+            verification_method="invalid",
+            target_model_config=_make_mock_target_model_config(),
+            target_parallel_config=ParallelConfig(),
+        )

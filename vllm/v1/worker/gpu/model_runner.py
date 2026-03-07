@@ -154,7 +154,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculator = None
         self.num_speculative_steps = 0
         self.use_aux_hidden_state_outputs = False
+        self.spec_decode_verification_method = "token"
+        self._verification_dispatch = {
+            "token": rejection_sample,
+        }
         if self.speculative_config is not None:
+            self.spec_decode_verification_method = (
+                self._resolve_verification_method_for_v2(
+                    self.speculative_config.verification_method
+                )
+            )
             self.num_speculative_steps = self.speculative_config.num_speculative_tokens
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
@@ -214,6 +223,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: tuple | None = None
+
+    @staticmethod
+    def _resolve_verification_method_for_v2(verification_method: str) -> str:
+        if verification_method == "greedy_multipath_block":
+            raise NotImplementedError(
+                "verification_method='greedy_multipath_block' is not implemented "
+                "in the experimental V2 model runner yet."
+            )
+        if verification_method == "block":
+            logger.warning_once(
+                "verification_method='block' is not implemented in the "
+                "experimental V2 model runner yet; falling back to "
+                "verification_method='token'."
+            )
+            return "token"
+        return verification_method
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -782,7 +807,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_sampled = input_batch.seq_lens.new_ones(input_batch.num_reqs)
         else:
             # Rejection sampling for spec decoding.
-            sampled_tokens, num_sampled = rejection_sample(
+            verify_fn = self._verification_dispatch[self.spec_decode_verification_method]
+            sampled_tokens, num_sampled = verify_fn(
                 sampler_output.sampled_token_ids,
                 input_ids,
                 input_batch.cu_num_logits,

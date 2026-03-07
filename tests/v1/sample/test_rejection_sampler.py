@@ -22,11 +22,15 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 DEVICE = current_platform.device_type
 
 
-@pytest.fixture
-def rejection_sampler():
+def make_rejection_sampler(verification_method: str = "token") -> RejectionSampler:
     mock_sampler = Mock(spec=Sampler)
     mock_sampler.logprobs_mode = "raw_logprobs"
-    return RejectionSampler(mock_sampler)
+    return RejectionSampler(mock_sampler, verification_method=verification_method)
+
+
+@pytest.fixture
+def rejection_sampler():
+    return make_rejection_sampler()
 
 
 def mock_sampler_output(
@@ -303,6 +307,191 @@ def test_parametrized_cases(rejection_sampler, spec_tokens, output_tokens, expec
     )
     expected_tensor = torch.tensor(expected, dtype=torch.int, device=logits.device)
     assert torch.equal(output.sampled_token_ids, expected_tensor)
+
+
+def test_block_verification_matches_token_verification_for_greedy():
+    spec_tokens = [[1, 2, 3], [4, 5]]
+    output_tokens = [[1, 2, 3, 7], [4, 6, 8]]
+    metadata = create_sampling_metadata(all_greedy=True)
+    logits = create_logits_tensor(output_tokens)
+    bonus_token_tensor = torch.tensor(
+        [output_tokens[0][-1], output_tokens[1][-1]], device=logits.device
+    )
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
+
+    token_sampler = make_rejection_sampler("token")
+    block_sampler = make_rejection_sampler("block")
+    mock_sampler_output(token_sampler, bonus_token_tensor)
+    mock_sampler_output(block_sampler, bonus_token_tensor)
+
+    token_output = token_sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=metadata,
+    )
+    block_output = block_sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=metadata,
+    )
+    assert torch.equal(token_output.sampled_token_ids, block_output.sampled_token_ids)
+
+
+def test_block_verification_deterministic_when_seeded():
+    block_sampler = make_rejection_sampler("block")
+    batch_size = 8
+    max_spec_len = 3
+    vocab_size = 256
+    num_tokens = batch_size * max_spec_len
+    n_rep = 10
+
+    draft_probs = torch.rand(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
+    draft_probs = F.softmax(draft_probs, dim=-1)
+    target_logits = torch.rand_like(draft_probs)
+    draft_token_ids = torch.multinomial(
+        draft_probs, num_samples=1, replacement=True
+    ).reshape(batch_size, max_spec_len)
+    bonus_token_ids = torch.randint(
+        low=0, high=vocab_size, size=(batch_size, 1), dtype=torch.int64, device=DEVICE
+    )
+    seeded_mask = torch.rand(batch_size, dtype=torch.float32, device=DEVICE) <= 0.5
+
+    results = []
+    for _ in range(n_rep):
+        seeded_generators = {
+            i: torch.Generator(device=DEVICE).manual_seed(i)
+            for i in range(batch_size)
+            if bool(seeded_mask[i].item())
+        }
+        sampling_metadata = create_sampling_metadata(
+            all_greedy=False,
+            temperature=torch.ones(batch_size, dtype=torch.float32, device=DEVICE),
+            generators=seeded_generators,
+        )
+        spec_decode_metadata = create_spec_decode_metadata(
+            draft_token_ids.tolist(), target_logits
+        )
+        mock_sampler_output(block_sampler, bonus_token_ids)
+        rep_output = block_sampler(
+            spec_decode_metadata,
+            draft_probs=draft_probs,
+            logits=target_logits,
+            sampling_metadata=sampling_metadata,
+        )
+        results.append(rep_output.sampled_token_ids)
+
+    for req_idx in range(batch_size):
+        if bool(seeded_mask[req_idx].item()):
+            for rep_idx in range(1, n_rep):
+                assert torch.equal(results[rep_idx][req_idx], results[0][req_idx])
+
+
+def test_block_verification_handles_zero_denominator_threshold():
+    block_sampler = make_rejection_sampler("block")
+    batch_size = 1
+    max_spec_len = 2
+    vocab_size = 32
+    num_tokens = batch_size * max_spec_len
+
+    target_logits = torch.rand(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
+    target_probs = F.softmax(target_logits, dim=-1)
+    draft_probs = target_probs.clone()
+    draft_token_ids = target_probs.argmax(dim=-1).reshape(batch_size, max_spec_len)
+    bonus_token_ids = torch.tensor([[9]], device=DEVICE)
+
+    sampling_metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=torch.ones(batch_size, dtype=torch.float32, device=DEVICE),
+        generators={0: torch.Generator(device=DEVICE).manual_seed(0)},
+    )
+    spec_decode_metadata = create_spec_decode_metadata(draft_token_ids.tolist(), target_logits)
+    mock_sampler_output(block_sampler, bonus_token_ids)
+
+    output = block_sampler(
+        spec_decode_metadata,
+        draft_probs=draft_probs,
+        logits=target_logits,
+        sampling_metadata=sampling_metadata,
+    )
+    expected = torch.tensor(
+        [[int(draft_token_ids[0, 0].item()), int(draft_token_ids[0, 1].item()), 9]],
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+    assert torch.equal(output.sampled_token_ids, expected)
+
+
+def test_block_verification_handles_zero_draft_probability_for_sampled_token():
+    block_sampler = make_rejection_sampler("block")
+    spec_tokens = [[3]]
+    vocab_size = 16
+    target_logits = torch.rand((1, vocab_size), dtype=torch.float32, device=DEVICE)
+    draft_probs = torch.rand((1, vocab_size), dtype=torch.float32, device=DEVICE)
+    draft_probs[0, 3] = 0.0
+    draft_probs /= draft_probs.sum(dim=-1, keepdim=True)
+    bonus_token_ids = torch.tensor([[7]], device=DEVICE)
+    metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=torch.ones(1, dtype=torch.float32, device=DEVICE),
+        generators={0: torch.Generator(device=DEVICE).manual_seed(0)},
+    )
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, target_logits)
+    mock_sampler_output(block_sampler, bonus_token_ids)
+    output = block_sampler(
+        spec_decode_metadata,
+        draft_probs=draft_probs,
+        logits=target_logits,
+        sampling_metadata=metadata,
+    )
+    assert int(output.sampled_token_ids[0, 0].item()) != PLACEHOLDER_TOKEN_ID
+
+
+def test_block_verification_handles_empty_and_non_empty_draft_batches():
+    block_sampler = make_rejection_sampler("block")
+    spec_tokens = [[], [2, 3], []]
+    output_tokens = [[5], [2, 3, 4], [6]]
+    metadata = create_sampling_metadata(all_greedy=True)
+    logits = create_logits_tensor(output_tokens)
+    bonus_token_tensor = torch.tensor([5, 4, 6], device=logits.device)
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
+    mock_sampler_output(block_sampler, bonus_token_tensor)
+
+    output = block_sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=metadata,
+    )
+    expected = torch.tensor(
+        [
+            [5, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID],
+            [2, 3, 4],
+            [6, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID],
+        ],
+        dtype=torch.int32,
+        device=logits.device,
+    )
+    assert torch.equal(output.sampled_token_ids, expected)
+
+
+def test_greedy_multipath_block_verification_not_implemented():
+    gbv_sampler = make_rejection_sampler("greedy_multipath_block")
+    spec_tokens = [[1, 2]]
+    output_tokens = [[1, 2, 3]]
+    metadata = create_sampling_metadata(all_greedy=True)
+    logits = create_logits_tensor(output_tokens)
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
+    mock_sampler_output(gbv_sampler, torch.tensor([[3]], device=logits.device))
+
+    with pytest.raises(NotImplementedError):
+        gbv_sampler(
+            spec_decode_metadata,
+            draft_probs=None,
+            logits=logits,
+            sampling_metadata=metadata,
+        )
 
 
 ########################### Tests for Random Sampling ###################

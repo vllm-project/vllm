@@ -50,12 +50,77 @@ class RejectionSampler(nn.Module):
         output tokens = accepted tokens + recovered tokens + bonus tokens
     """
 
-    def __init__(self, sampler: Sampler):
+    def __init__(
+        self,
+        sampler: Sampler,
+        verification_method: str = "token",
+    ):
         super().__init__()
         self.sampler = sampler
+        self.verification_method = verification_method
+        self._verification_dispatch = {
+            "token": self._token_rejection_sample,
+            "block": self._block_verification_sample,
+            "greedy_multipath_block": self._greedy_multipath_block_verification,
+        }
+        if self.verification_method not in self._verification_dispatch:
+            raise ValueError(
+                f"Unknown speculative verification_method: "
+                f"{self.verification_method}"
+            )
         logprobs_mode = self.sampler.logprobs_mode
         self.is_processed_logprobs_mode = logprobs_mode.startswith("processed")
         self.is_logits_logprobs_mode = logprobs_mode.endswith("logits")
+
+    def _token_rejection_sample(
+        self,
+        metadata: SpecDecodeMetadata,
+        draft_probs: torch.Tensor | None,
+        target_logits: torch.Tensor,
+        bonus_token_ids: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        return rejection_sample(
+            metadata.draft_token_ids,
+            metadata.num_draft_tokens,
+            metadata.max_spec_len,
+            metadata.cu_num_draft_tokens,
+            draft_probs,
+            target_logits,
+            bonus_token_ids,
+            sampling_metadata,
+        )
+
+    def _block_verification_sample(
+        self,
+        metadata: SpecDecodeMetadata,
+        draft_probs: torch.Tensor | None,
+        target_logits: torch.Tensor,
+        bonus_token_ids: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        return block_verification_sample(
+            metadata.draft_token_ids,
+            metadata.num_draft_tokens,
+            metadata.max_spec_len,
+            metadata.cu_num_draft_tokens,
+            draft_probs,
+            target_logits,
+            bonus_token_ids,
+            sampling_metadata,
+        )
+
+    @staticmethod
+    def _greedy_multipath_block_verification(
+        metadata: SpecDecodeMetadata,
+        draft_probs: torch.Tensor | None,
+        target_logits: torch.Tensor,
+        bonus_token_ids: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        raise NotImplementedError(
+            "verification_method='greedy_multipath_block' is not implemented yet."
+        )
 
     def forward(
         self,
@@ -138,11 +203,9 @@ class RejectionSampler(nn.Module):
             sampling_metadata,
         )
 
-        output_token_ids = rejection_sample(
-            metadata.draft_token_ids,
-            metadata.num_draft_tokens,
-            metadata.max_spec_len,
-            metadata.cu_num_draft_tokens,
+        verify_fn = self._verification_dispatch[self.verification_method]
+        output_token_ids = verify_fn(
+            metadata,
             draft_probs,
             target_logits,
             bonus_token_ids,
@@ -445,6 +508,187 @@ def rejection_sample(
         vocab_size,
         NO_DRAFT_PROBS=draft_probs is None,
     )
+    return output_token_ids
+
+
+def block_verification_sample(
+    # [num_tokens]
+    draft_token_ids: torch.Tensor,
+    # [batch_size]
+    num_draft_tokens: list[int],
+    max_spec_len: int,
+    # [batch_size]
+    cu_num_draft_tokens: torch.Tensor,
+    # [num_tokens, vocab_size]
+    draft_probs: torch.Tensor | None,
+    # [num_tokens, vocab_size]
+    target_logits: torch.Tensor,
+    # [batch_size, 1]
+    bonus_token_ids: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+) -> torch.Tensor:
+    assert draft_token_ids.ndim == 1
+    assert draft_probs is None or draft_probs.ndim == 2
+    assert cu_num_draft_tokens.ndim == 1
+    assert target_logits.ndim == 2
+
+    batch_size = len(num_draft_tokens)
+    num_tokens = draft_token_ids.shape[0]
+    vocab_size = target_logits.shape[-1]
+    device = target_logits.device
+    assert draft_token_ids.is_contiguous()
+    assert draft_probs is None or draft_probs.is_contiguous()
+    assert bonus_token_ids.is_contiguous()
+    assert target_logits.shape == (num_tokens, vocab_size)
+
+    output_token_ids = torch.full(
+        (batch_size, max_spec_len + 1),
+        PLACEHOLDER_TOKEN_ID,
+        dtype=torch.int32,
+        device=device,
+    )
+
+    if sampling_metadata.all_greedy:
+        is_greedy = None
+    else:
+        is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
+
+    # Keep the greedy path identical to token-level verification.
+    if not sampling_metadata.all_random:
+        target_argmax = target_logits.argmax(dim=-1)
+        rejection_greedy_sample_kernel[(batch_size,)](
+            output_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            target_argmax,
+            bonus_token_ids,
+            is_greedy,
+            max_spec_len,
+        )
+        if sampling_metadata.all_greedy:
+            return output_token_ids
+
+    target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
+    assert target_probs.is_contiguous()
+    uniform_probs = generate_uniform_probs(
+        num_tokens, num_draft_tokens, sampling_metadata.generators, device
+    )
+
+    # One exponential vector per request for correction sampling.
+    q = torch.empty((batch_size, vocab_size), dtype=torch.float32, device=device)
+    q.exponential_()
+    for i, generator in sampling_metadata.generators.items():
+        if num_draft_tokens[i] > 0:
+            q[i].exponential_(generator=generator)
+    inv_q = q.reciprocal()
+
+    bonus_token_ids = bonus_token_ids.flatten()
+
+    start_idx = 0
+    for req_idx, req_num_draft_tokens in enumerate(num_draft_tokens):
+        end_idx = start_idx + req_num_draft_tokens
+        req_is_greedy = False if is_greedy is None else bool(is_greedy[req_idx].item())
+
+        # Greedy requests are already handled by rejection_greedy_sample_kernel.
+        if req_is_greedy:
+            start_idx = end_idx
+            continue
+
+        if req_num_draft_tokens == 0:
+            output_token_ids[req_idx, 0] = bonus_token_ids[req_idx]
+            start_idx = end_idx
+            continue
+
+        req_draft_token_ids = draft_token_ids[start_idx:end_idx]
+        req_target_probs = target_probs[start_idx:end_idx]
+        req_draft_probs = None if draft_probs is None else draft_probs[start_idx:end_idx]
+        req_uniform_probs = uniform_probs[start_idx:end_idx]
+
+        prefix_acceptance = torch.empty(
+            req_num_draft_tokens, dtype=torch.float64, device=device
+        )
+        prefix_acceptance_prod = 1.0
+        for pos in range(req_num_draft_tokens):
+            token_id = int(req_draft_token_ids[pos].item())
+            target_prob = float(req_target_probs[pos, token_id].item())
+            if req_draft_probs is None:
+                draft_prob = 1.0
+            else:
+                draft_prob = float(req_draft_probs[pos, token_id].item())
+            acceptance_prob = (
+                min(1.0, target_prob / draft_prob) if draft_prob > 0.0 else 0.0
+            )
+            prefix_acceptance_prod *= acceptance_prob
+            prefix_acceptance[pos] = prefix_acceptance_prod
+
+        thresholds = torch.empty(req_num_draft_tokens, dtype=torch.float64, device=device)
+        for pos in range(req_num_draft_tokens):
+            p_i = float(prefix_acceptance[pos].item())
+            if pos == req_num_draft_tokens - 1:
+                thresholds[pos] = p_i
+                continue
+
+            # Block-verification threshold:
+            # h_i = S_i / (S_i + 1 - p_i),
+            # S_i = sum_x max(p_i * p_target(x | prefix_i) - q_draft(x | prefix_i), 0)
+            next_target_probs = req_target_probs[pos + 1]
+            if req_draft_probs is None:
+                next_token_id = int(req_draft_token_ids[pos + 1].item())
+                residual_mass = (
+                    float((p_i * next_target_probs).sum().item())
+                    - p_i * float(next_target_probs[next_token_id].item())
+                )
+            else:
+                next_draft_probs = req_draft_probs[pos + 1]
+                residual_mass = float(
+                    torch.clamp(
+                        p_i * next_target_probs - next_draft_probs,
+                        min=0.0,
+                    )
+                    .sum()
+                    .item()
+                )
+            residual_mass = max(residual_mass, 0.0)
+            denominator = residual_mass + 1.0 - p_i
+            if abs(denominator) > 1e-12:
+                thresholds[pos] = residual_mass / denominator
+            elif abs(p_i - 1.0) <= 1e-12 and residual_mass <= 1e-12:
+                thresholds[pos] = 1.0
+            else:
+                thresholds[pos] = 0.0
+
+        tau = 0
+        for pos in range(req_num_draft_tokens):
+            if bool((req_uniform_probs[pos] <= thresholds[pos]).item()):
+                tau = pos + 1
+            else:
+                break
+
+        if tau > 0:
+            output_token_ids[req_idx, :tau] = req_draft_token_ids[:tau]
+
+        if tau == req_num_draft_tokens:
+            output_token_ids[req_idx, tau] = bonus_token_ids[req_idx]
+        else:
+            p_tau = 1.0 if tau == 0 else float(prefix_acceptance[tau - 1].item())
+            correction_row = start_idx + tau
+            correction_target_probs = target_probs[correction_row]
+            if draft_probs is None:
+                correction_residual = p_tau * correction_target_probs
+                correction_residual = correction_residual.clone()
+                draft_token_id = int(draft_token_ids[correction_row].item())
+                correction_residual[draft_token_id] = 0.0
+            else:
+                correction_residual = torch.clamp(
+                    p_tau * correction_target_probs - draft_probs[correction_row],
+                    min=0.0,
+                )
+            correction_scores = correction_residual * inv_q[req_idx]
+            correction_token_id = torch.argmax(correction_scores)
+            output_token_ids[req_idx, tau] = correction_token_id.to(torch.int32)
+
+        start_idx = end_idx
+
     return output_token_ids
 
 

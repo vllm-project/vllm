@@ -18,6 +18,7 @@ llm = LLM(
         "draft_tensor_parallel_size": 1,
         "num_speculative_tokens": 2,
         "method": "eagle",
+        "verification_method": "block",
     },
 )
 
@@ -45,6 +46,7 @@ llm = LLM(
         "draft_tensor_parallel_size": 2,
         "num_speculative_tokens": 2,
         "method": "eagle3",
+        "verification_method": "block",
     },
 )
 

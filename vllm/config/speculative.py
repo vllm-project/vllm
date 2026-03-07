@@ -55,6 +55,11 @@ SpeculativeMethod = Literal[
     "suffix",
     EagleModelTypes,
 ]
+SpecDecodeVerificationMethod = Literal[
+    "token",
+    "block",
+    "greedy_multipath_block",
+]
 
 
 @config
@@ -78,6 +83,13 @@ class SpeculativeConfig:
 
     If using `ngram` method, the related configuration `prompt_lookup_max` and
     `prompt_lookup_min` should be considered."""
+    verification_method: SpecDecodeVerificationMethod = "token"
+    """Verification strategy for speculative decoding.
+
+    ``token`` keeps per-token rejection sampling, ``block`` enables
+    single-path block verification, and ``greedy_multipath_block`` is
+    reserved for future GBV support.
+    """
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
@@ -840,4 +852,8 @@ class SpeculativeConfig:
             else self.draft_model_config.model
         )
         num_spec_tokens = self.num_speculative_tokens
-        return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
+        verification_method = self.verification_method
+        return (
+            "SpeculativeConfig("
+            f"{method=}, {model=}, {num_spec_tokens=}, {verification_method=})"
+        )
