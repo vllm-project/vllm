@@ -54,6 +54,65 @@ The initialization code should look like this:
             self.model = MyModel(vllm_config, prefix=f"{prefix}.model")
     ```
 
+!!! note "Auto-Registering Attention Layers"
+    Some vLLM attention layers support automatic registration for KV cache allocation and don't require the `prefix` argument. These layers automatically register themselves during initialization:
+
+    - **`TrainableFlashAttention`**: A training-compatible flash attention layer that supports both PyTorch backward passes (for fine-tuning/RL) and vLLM's KV cache (for inference). This layer automatically registers itself when used in a vLLM context and works seamlessly in third-party models.
+
+    Example usage:
+
+    ```python
+    from vllm.model_executor.custom_models import TrainableFlashAttention
+
+    class MyDecoderLayer(nn.Module):
+        def __init__(self, hidden_size: int, num_heads: int):
+            super().__init__()
+            # No prefix needed - auto-registers for KV cache
+            self.attn = TrainableFlashAttention(
+                hidden_size=hidden_size,
+                num_heads=num_heads,
+                dropout=0.0,
+                causal=True,
+            )
+    ```
+
+    This layer is particularly useful when:
+    - You want to use external parallelism libraries (e.g., Megatron-LM) for other components
+    - You need both training (backward pass) and inference (KV cache) support in the same model
+    - You're integrating vLLM attention into third-party models without extensive modifications
+
+    For a complete example, see [custom_model_with_megatron.py](../../../examples/offline_inference/custom_model_with_megatron.py).
+
+!!! note "Using External Parallelism Libraries"
+    When using external parallelism libraries like Megatron-LM, you can access vLLM's process groups directly from `ParallelContext`:
+
+    ```python
+    def build_model(vllm_config, parallel_context):
+        # Get vLLM's tensor parallel process group
+        tp_group = parallel_context.get_tp_process_group()
+        tp_rank = parallel_context.get_tensor_parallel_rank()
+        tp_size = parallel_context.get_tensor_parallel_world_size()
+
+        # Pass to external library (e.g., Megatron-LM)
+        from megatron.core.tensor_parallel import ColumnParallelLinear
+        layer = ColumnParallelLinear(
+            hidden_size,
+            output_size,
+            tp_group=tp_group,  # Use vLLM's process group!
+        )
+    ```
+
+    This is much cleaner than importing vLLM's internal `parallel_state` module and extracting the process group manually. The `ParallelContext` API provides:
+
+    - `get_tp_process_group()`: Get tensor parallel process group
+    - `get_pp_process_group()`: Get pipeline parallel process group
+    - `get_tensor_parallel_rank()`: Get TP rank
+    - `get_tensor_parallel_world_size()`: Get TP world size
+    - `get_pipeline_parallel_rank()`: Get PP rank
+    - `get_pipeline_parallel_world_size()`: Get PP world size
+
+    See [custom_model_with_megatron.py](../../../examples/offline_inference/custom_model_with_megatron.py) for a complete example.
+
 ### Computation Code
 
 - Add a `embed_input_ids` method inside `MyModel` module that returns the text embeddings given `input_ids`. This is equivalent to directly calling the text embedding layer, but provides a unified interface in case `MyModel` is used within a composite multimodal model.
