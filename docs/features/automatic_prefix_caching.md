@@ -23,3 +23,6 @@ We describe two example workloads, where APC can provide huge performance benefi
 ## Limits
 
 APC in general does not reduce the performance of vLLM. With that being said, APC only reduces the time of processing the queries (the prefilling phase) and does not reduce the time of generating new tokens (the decoding phase). So APC does not bring performance gain when vLLM spends most of the time generating answers to the queries (e.g. when the length of the answer is long), or new queries do not share the same prefix with any of existing queries (so that the computation cannot be reused).
+
+!!! tip
+    To verify APC is working correctly, you can check the server logs for cache hit rates. A high cache hit rate (e.g., >50%) indicates that APC is effectively reusing KV caches.
