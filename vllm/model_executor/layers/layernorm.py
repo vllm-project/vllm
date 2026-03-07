@@ -6,7 +6,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vllm import _oink_ops, envs
+# Import kernels
+import vllm.kernels  # noqa: F401
+from vllm import _oink_ops, envs, ir
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -172,7 +174,6 @@ class RMSNorm(CustomOp):
         # compatible CUDA devices (e.g., SM100) when the external Oink
         # package is available. This is detected once at construction time
         # to avoid per-call device queries in the hot path.
-        self._use_oink_rmsnorm = False
         self._use_oink_fused_add_rmsnorm = False
         if (
             not current_platform.is_rocm()
@@ -204,7 +205,6 @@ class RMSNorm(CustomOp):
                 try:
                     device_index = torch.cuda.current_device()
                     if _oink_ops.is_oink_available_for_device(device_index):
-                        self._use_oink_rmsnorm = True
                         self._use_oink_fused_add_rmsnorm = (
                             _oink_ops.has_fused_add_rms_norm()
                         )
@@ -216,7 +216,6 @@ class RMSNorm(CustomOp):
                         "RMSNorm; falling back to vLLM RMSNorm. Error: %s",
                         e,
                     )
-                    self._use_oink_rmsnorm = False
                     self._use_oink_fused_add_rmsnorm = False
 
     @staticmethod
@@ -271,6 +270,12 @@ class RMSNorm(CustomOp):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
+        add_residual = residual is not None
+        weight = self.weight.data if self.has_weight else None
+        if not add_residual:
+            return ir.ops.rms_norm(
+                x, weight, self.variance_epsilon, self.variance_size_override
+            )
 
         return self.forward_static(
             x,
@@ -287,34 +292,15 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        add_residual = residual is not None
+        weight = self.weight.data if self.has_weight else None
+        if not add_residual and not vllm_is_batch_invariant():
+            return ir.ops.rms_norm(
+                x, weight, self.variance_epsilon, self.variance_size_override
+            )
+
         if self.variance_size_override is not None:
             return self.forward_native(x, residual)
-
-        # Optional Oink SM100 fast path (no residual). This path is
-        # torch.compile-friendly via torch.ops.oink.rmsnorm and preserves
-        # 2D layouts (including padded rows) when using the Oink
-        # pointer-based kernel.
-        if (
-            residual is None
-            and getattr(self, "_use_oink_rmsnorm", False)
-            and x.is_cuda
-            and x.dim() >= 2
-            and self.has_weight
-            and not vllm_is_batch_invariant()
-            and self.weight.data.dtype == x.dtype
-            and self.weight.data.is_contiguous()
-        ):
-            orig_shape = x.shape
-            hidden_size = orig_shape[-1]
-            if _can_view_as_2d(x):
-                x_2d = x.view(-1, hidden_size)
-                if _is_oink_stride_compatible_2d(x_2d):
-                    y_2d = _oink_ops.rmsnorm(
-                        x_2d,
-                        self.weight.data,
-                        self.variance_epsilon,
-                    )
-                    return y_2d.view(orig_shape)
 
         # Optional Oink SM100 fast path (fused residual-add + RMSNorm, in-place).
         # This mirrors vLLM's fused_add_rms_norm semantics by mutating both
@@ -370,6 +356,13 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        add_residual = residual is not None
+        weight = self.weight.data if self.has_weight else None
+        if not add_residual:
+            return ir.ops.rms_norm(
+                x, weight, self.variance_epsilon, self.variance_size_override
+            )
+
         if self.variance_size_override is not None:
             return self.forward_native(x, residual)
 
