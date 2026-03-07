@@ -1723,7 +1723,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     backend = args.backend
     task_type = (
         TaskType.POOLING
-        if "embeddings" in backend or "rerank" in backend
+        if "embeddings" in backend or "rerank" in backend or backend == "vllm-pooling"
         else TaskType.GENERATION
     )
 
