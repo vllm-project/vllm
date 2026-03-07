@@ -875,3 +875,48 @@ def get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
     if feature_layer_index < 0:
         return num_hidden_layers + feature_layer_index + 1
     return feature_layer_index
+
+
+def get_rotation_path(target_config):
+    """
+    Gets the path of the rotation matrix, returns None if the target model is not a quarot model.
+    """
+    target_model_path = target_config.model_config.model
+    try:
+        rotation_relative_path = target_config.quant_config.quant_description["optional"]["quarot"]["rotation_map"][
+            "global_rotation"
+        ]
+    except KeyError:
+        return None
+
+    return Path(target_model_path) / rotation_relative_path
+
+
+def get_rotataion_matrix(rotation_path):
+    """
+    Anti-rotate maxtrix.
+    """
+    try:
+        safetensor_data = load_file(rotation_path)
+        Q = safetensor_data["global_rotation"]
+
+        return Q
+    except Exception as e:
+        logger.error(
+            f"Failed to load rotation weight from '{rotation_path}'. "
+            "If you want to use quarot model with eagle3, take a check."
+        )
+        raise e
+
+
+_target_config = None
+
+
+def set_target_config(target_config):
+    global _target_config
+    _target_config = target_config
+
+
+def get_target_config():
+    global _target_config
+    return _target_config
