@@ -45,21 +45,41 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def get_captured_lora_counts(max_loras: int, specialize: bool) -> list[int]:
+def get_captured_lora_counts(
+    max_loras: int,
+    specialize: bool,
+    max_concurrent_loras: int | None = None,
+) -> list[int]:
     """
     Returns num_active_loras values for cudagraph capture.
 
     When specialize=True: powers of 2 up to max_loras, plus max_loras + 1.
     When specialize=False: just [max_loras + 1].
 
+    max_concurrent_loras: optional upper bound on the number of simultaneously
+        active LoRA adapters (e.g. max_num_seqs). Powers-of-2 counts above
+        this limit are omitted since they can never be reached at runtime,
+        reducing the number of captured CUDA graphs. The sentinel
+        (max_loras + 1) is also omitted when max_concurrent_loras < sentinel,
+        because num_active_loras can never reach it in that case.
+
     This is the single source of truth for LoRA capture cases, used by both
     CudagraphDispatcher and PunicaWrapperGPU.
     """
+    sentinel = max_loras + 1
     if not specialize:
-        return [max_loras + 1]
+        return [sentinel]
 
+    # The sentinel (max_loras + 1) is a catch-all for active-LoRA counts that
+    # exceed all captured power-of-2 values.  When max_concurrent_loras caps
+    # what is reachable at runtime, num_active_loras can never reach sentinel,
+    # so capturing a graph for it wastes memory and capture time.
+    include_sentinel = max_concurrent_loras is None or max_concurrent_loras >= sentinel
     return [
-        n for n in range(1, max_loras + 2) if (n & (n - 1)) == 0 or n == max_loras + 1
+        n
+        for n in range(1, sentinel + 1)
+        if (n & (n - 1)) == 0 or (n == sentinel and include_sentinel)
+        if max_concurrent_loras is None or n <= max_concurrent_loras or n == sentinel
     ]
 
 
