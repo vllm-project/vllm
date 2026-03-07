@@ -554,7 +554,23 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         layer.w13_input_scale = a13_scale
         layer.w2_input_scale = a2_scale
 
-        # Setup modular kernel.
+        # Pre-compute g1/g2 alphas as registered parameters so EPLB
+        # rearranges them alongside expert weights (see modelopt.py).
+        if self.nvfp4_backend not in (
+            NvFp4MoeBackend.FLASHINFER_TRTLLM,
+            NvFp4MoeBackend.MARLIN,
+        ):
+            layer.g1_alphas = torch.nn.Parameter(
+                a13_scale * w13_scale_2, requires_grad=False
+            )
+            layer.g2_alphas = torch.nn.Parameter(
+                a2_scale * w2_scale_2, requires_grad=False
+            )
+
+        # Setup modular kernel for TP case and naive DP/EP case.
+        # In non-naive DP/EP case, we will create a ModularKernelMethod.
+        # TODO(rob): unify these so FP8MoEMethod owns the ModularKernel
+        # in both cases.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.experts_cls is not None
         self.moe_kernel = make_nvfp4_moe_kernel(
@@ -575,7 +591,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
-        return make_nvfp4_moe_quant_config(
+        result = make_nvfp4_moe_quant_config(
             backend=self.nvfp4_backend,
             w13_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
@@ -583,7 +599,11 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             w2_scale_2=layer.w2_weight_scale_2,
             a13_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
+            g1_alphas=getattr(layer, "g1_alphas", None),
+            g2_alphas=getattr(layer, "g2_alphas", None),
         )
+        assert result is not None
+        return result
 
     def apply_monolithic(
         self,
