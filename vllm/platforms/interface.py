@@ -29,8 +29,10 @@ logger = init_logger(__name__)
 
 
 def in_wsl() -> bool:
-    # Reference: https://github.com/microsoft/WSL/issues/4071
-    return "microsoft" in " ".join(platform.uname()).lower()
+    # (Old) Reference: https://github.com/microsoft/WSL/issues/4071
+    # (New) We now check for "microsoft" and exclude "wsl2" to detect WSL1 only.
+    uname = " ".join(platform.uname()).lower()
+    return "microsoft" in uname and "wsl2" not in uname
 
 
 class PlatformEnum(enum.Enum):
@@ -467,10 +469,11 @@ class Platform:
     def is_pin_memory_available(cls) -> bool:
         """Checks whether pin memory is available on the current platform."""
         if in_wsl():
-            # Pinning memory in WSL is not supported.
+            # Pinning memory in WSL1 is not supported.
+            # However it is supported on WSL2.
             # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
             logger.warning(
-                "Using 'pin_memory=False' as WSL is detected. "
+                "Using 'pin_memory=False' as WSL1 is detected. "
                 "This may slow down the performance."
             )
             return False
