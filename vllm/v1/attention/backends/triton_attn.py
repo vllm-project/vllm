@@ -28,6 +28,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
@@ -301,12 +302,20 @@ class TritonAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         # `stride_order` indicates the permutation that gets
         # us from `get_kv_cache_shape` to the actual memory layout we want.
-        if include_num_layers_dimension:
+        cache_layout = get_kv_cache_layout()
+        if cache_layout == "NHD" and include_num_layers_dimension:
             # (num_blocks, num_layers, 2, block_size, num_kv_heads, head_size)
             return (1, 0, 2, 3, 4, 5)
-
-        # (num_blocks, 2, block_size, num_kv_heads, head_size)
-        return (0, 1, 2, 3, 4)
+        elif cache_layout == "NHD":
+            stride_order = (0, 1, 2, 3, 4)
+        elif cache_layout == "HND" and include_num_layers_dimension:
+            # (num_blocks, 2, num_kv_heads, num_layers, block_size, head_size)
+            return (1, 2, 4, 0, 3, 5)
+        elif cache_layout == "HND":
+            stride_order = (0, 1, 3, 2, 4)
+        else:
+            raise ValueError(f"Unknown cache layout format {cache_layout}.")
+        return stride_order
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:

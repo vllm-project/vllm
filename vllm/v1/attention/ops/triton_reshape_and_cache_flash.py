@@ -69,9 +69,23 @@ def reshape_and_cache_kernel_flash(
             + (cur_dim % x)
         )
     else:
-        tgt_base = block_idx * block_stride + block_offset * page_stride
-        tgt_idx_k = tgt_base + tile_pos
-        tgt_idx_v = tgt_base + tile_pos
+        # Decompose tile position into head and dim coordinates to support
+        # non-contiguous head layouts (e.g. HND where heads are not adjacent
+        # in memory within a block position).
+        cur_head = tile_pos // head_size
+        cur_dim = tile_pos % head_size
+        tgt_idx_k = (
+            block_idx * block_stride
+            + block_offset * page_stride
+            + cur_head * head_stride
+            + cur_dim
+        )
+        tgt_idx_v = (
+            block_idx * block_stride
+            + block_offset * page_stride
+            + cur_head * head_stride
+            + cur_dim
+        )
 
     # [TILE_SIZE]
     key_load = tl.load(
