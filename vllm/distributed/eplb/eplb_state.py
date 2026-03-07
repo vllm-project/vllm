@@ -56,6 +56,105 @@ from .rebalance_execute import (
 logger = init_logger(__name__)
 
 
+def _verify_expert_weights_after_rearrange(
+    model_state: "EplbModelState",
+    ep_rank: int,
+) -> None:
+    """
+    Post-rearrangement diagnostic: verify expert weight consistency.
+
+    Checks:
+    1. g1_alphas[i] == a13_scale_val * w13_weight_scale_2[i] for all experts
+    2. g2_alphas[i] == a2_scale_val * w2_weight_scale_2[i] for all experts
+    3. Per-weight checksums for tracking corruption across rearrangements
+    """
+    torch.cuda.synchronize()
+    model = model_state.model
+    g1_broken = 0
+    g2_broken = 0
+    g1_max_diff_all = 0.0
+    g2_max_diff_all = 0.0
+    for layer_idx, layer in enumerate(model.moe_layers):
+        g1 = getattr(layer, "g1_alphas", None)
+        g2 = getattr(layer, "g2_alphas", None)
+        s2_13 = getattr(layer, "w13_weight_scale_2", None)
+        s2_2 = getattr(layer, "w2_weight_scale_2", None)
+        a13 = getattr(layer, "w13_input_scale", None)
+        a2 = getattr(layer, "w2_input_scale", None)
+
+        # Invariant checks
+        if g1 is not None and s2_13 is not None and a13 is not None:
+            a13_val = a13.float().max().item()
+            expected_g1 = a13_val * s2_13.float()
+            diff = (g1.float() - expected_g1).abs()
+            max_diff = diff.max().item()
+            g1_max_diff_all = max(g1_max_diff_all, max_diff)
+            if max_diff > 1e-6:
+                g1_broken += 1
+                bad = (diff > 1e-6).nonzero(as_tuple=True)[0]
+                logger.error(
+                    "EPLB INVARIANT BROKEN rank %d layer %d: "
+                    "g1_alphas != a13_scale * w13_scale_2, "
+                    "max_diff=%.6e, broken_slots=%s "
+                    "(g1=%s, expected=%s)",
+                    ep_rank, layer_idx, max_diff,
+                    bad[:8].tolist(),
+                    g1.float()[bad[:4]].tolist(),
+                    expected_g1[bad[:4]].tolist(),
+                )
+
+        if g2 is not None and s2_2 is not None and a2 is not None:
+            a2_val = a2.float().max().item()
+            expected_g2 = a2_val * s2_2.float()
+            diff = (g2.float() - expected_g2).abs()
+            max_diff = diff.max().item()
+            g2_max_diff_all = max(g2_max_diff_all, max_diff)
+            if max_diff > 1e-6:
+                g2_broken += 1
+                bad = (diff > 1e-6).nonzero(as_tuple=True)[0]
+                logger.error(
+                    "EPLB INVARIANT BROKEN rank %d layer %d: "
+                    "g2_alphas != a2_scale * w2_scale_2, "
+                    "max_diff=%.6e, broken_slots=%s",
+                    ep_rank, layer_idx, max_diff,
+                    bad[:8].tolist(),
+                )
+
+        # Per-weight checksums (rank 0 only, sample layers)
+        if ep_rank == 0 and layer_idx % 20 == 0:
+            checksums = []
+            for name, param in layer.named_parameters():
+                if name in {"w13_input_scale", "w2_input_scale",
+                            "e_score_correction_bias"}:
+                    continue
+                if (name.startswith("_shared_experts.")
+                        or name.startswith("_gate.")):
+                    continue
+                cs = param.float().abs().sum().item()
+                checksums.append(f"{name}={cs:.4f}")
+            logger.info(
+                "EPLB checksums rank %d layer %d: %s",
+                ep_rank, layer_idx, ", ".join(checksums),
+            )
+
+    num_layers = model.num_moe_layers
+    if g1_broken > 0 or g2_broken > 0:
+        logger.error(
+            "EPLB VERIFY rank %d: %d/%d layers g1 broken, "
+            "%d/%d layers g2 broken (g1_max=%.2e, g2_max=%.2e)",
+            ep_rank, g1_broken, num_layers,
+            g2_broken, num_layers,
+            g1_max_diff_all, g2_max_diff_all,
+        )
+    else:
+        logger.info(
+            "EPLB VERIFY rank %d: all %d layers OK "
+            "(g1_max=%.2e, g2_max=%.2e)",
+            ep_rank, num_layers,
+            g1_max_diff_all, g2_max_diff_all,
+        )
+
+
 @dataclass
 class EplbStats:
     """
@@ -766,6 +865,9 @@ class EplbState:
                 )
 
                 if not is_profile:
+                    _verify_expert_weights_after_rearrange(
+                        eplb_model_state, ep_rank
+                    )
                     if (
                         eplb_model_state.physical_to_logical_map.shape[1]
                         != new_physical_to_logical_map.shape[1]
