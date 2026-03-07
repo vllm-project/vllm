@@ -35,7 +35,6 @@ from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -135,8 +134,11 @@ class MiniMaxM2MoE(nn.Module):
         )
         final_hidden_states = final_hidden_states
         if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
-
+            final_hidden_states = (
+                self.experts.runner.maybe_all_reduce_tensor_model_parallel(
+                    final_hidden_states
+                )
+            )
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 
