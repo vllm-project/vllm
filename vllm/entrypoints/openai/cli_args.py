@@ -281,6 +281,11 @@ class FrontendArgs(BaseFrontendArgs):
     Enable offline FastAPI documentation for air-gapped environments.
     Uses vendored static assets bundled with vLLM.
     """
+    enable_dashboard: bool = False
+    """
+    Enable the vLLM web dashboard at /dashboard for monitoring and testing.
+    Provides server info, metrics display, and a chat interface for testing.
+    """
     use_gpu_for_pooling_score: bool = False
     """If set, run pooling score MaxSim on GPU in the API server process.
     Can significantly improve late-interaction scoring performance.
