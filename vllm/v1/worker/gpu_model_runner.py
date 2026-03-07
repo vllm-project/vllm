@@ -1902,11 +1902,7 @@ class GPUModelRunner(
                     ],
                 )
 
-            if for_cudagraph_capture:
-                attn_metadata_i = builder.build_for_cudagraph_capture(
-                    common_attn_metadata
-                )
-            elif (
+            if (
                 cache_key in cached_attn_metadata
                 and builder.supports_update_block_table
             ):
@@ -1915,6 +1911,12 @@ class GPUModelRunner(
                     common_attn_metadata.block_table_tensor,
                     common_attn_metadata.slot_mapping,
                 )
+            elif for_cudagraph_capture:
+                attn_metadata_i = builder.build_for_cudagraph_capture(
+                    common_attn_metadata
+                )
+                if builder.supports_update_block_table:
+                    cached_attn_metadata[cache_key] = attn_metadata_i
             else:
                 attn_metadata_i = builder.build(
                     common_prefix_len=cascade_attn_prefix_len,
