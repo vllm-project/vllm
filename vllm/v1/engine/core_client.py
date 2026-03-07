@@ -559,12 +559,27 @@ class MPClient(EngineCoreClient):
             else:
                 # Engines are managed by this client.
                 addresses = get_engine_zmq_addresses(vllm_config)
-                self.input_socket = self.resources.input_socket = make_zmq_socket(
-                    self.ctx, addresses.inputs[0], zmq.ROUTER, bind=True
+                # Use late binding (return_address=True) to avoid port
+                # conflicts. Wildcard addresses (port 0) get an OS-assigned
+                # port at bind time, and we capture the actual address to
+                # pass to engines in the handshake (issue #28498).
+                self.input_socket, actual_input = make_zmq_socket(
+                    self.ctx,
+                    addresses.inputs[0],
+                    zmq.ROUTER,
+                    bind=True,
+                    return_address=True,
                 )
-                self.resources.output_socket = make_zmq_socket(
-                    self.ctx, addresses.outputs[0], zmq.PULL
+                self.resources.input_socket = self.input_socket
+                addresses.inputs[0] = actual_input
+
+                self.resources.output_socket, actual_output = make_zmq_socket(
+                    self.ctx,
+                    addresses.outputs[0],
+                    zmq.PULL,
+                    return_address=True,
                 )
+                addresses.outputs[0] = actual_output
 
                 with launch_core_engines(
                     vllm_config, executor_class, log_stats, addresses
