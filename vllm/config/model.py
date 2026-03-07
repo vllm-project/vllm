@@ -1989,7 +1989,11 @@ def _get_and_verify_max_len(
             if rope_type not in ("su", "longrope", "llama3"):
                 # NOTE: rope_type == "default" does not define factor https://github.com/huggingface/transformers/blob/v4.45.2/src/transformers/modeling_rope_utils.py
                 # NOTE: This assumes all layer types have the same scaling factor.
-                scaling_factor = rp.get("factor", scaling_factor)
+                # Some configs set `factor: null` explicitly; keep the previous
+                # scaling value in that case instead of overriding with None.
+                rope_factor = rp.get("factor")
+                if rope_factor is not None:
+                    scaling_factor = rope_factor
 
                 if rope_type == "yarn":
                     derived_max_model_len = rp["original_max_position_embeddings"]
