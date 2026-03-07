@@ -93,8 +93,18 @@ async def serve_http(
     )
 
     shutdown_event = asyncio.Event()
+    force_exit = False
 
     def signal_handler() -> None:
+        nonlocal force_exit
+        if shutdown_event.is_set():
+            # Second signal (e.g. second Ctrl-C) → force immediate exit.
+            logger.warning("Received second shutdown signal, forcing exit.")
+            force_exit = True
+            server.should_exit = True
+            server_task.cancel()
+            return
+        # First signal → graceful drain.
         shutdown_event.set()
 
     async def dummy_shutdown() -> None:
@@ -107,7 +117,8 @@ async def serve_http(
         await shutdown_event.wait()
 
         engine_client = app.state.engine_client
-        timeout = engine_client.vllm_config.shutdown_timeout
+        # If force_exit was set by a second signal, skip the drain wait.
+        timeout = 0 if force_exit else engine_client.vllm_config.shutdown_timeout
 
         await loop.run_in_executor(
             None, partial(engine_client.shutdown, timeout=timeout)
