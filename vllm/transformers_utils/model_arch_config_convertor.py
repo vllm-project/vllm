@@ -79,10 +79,10 @@ class ModelArchConfigConvertorBase:
         if getattr(self.hf_text_config, "hidden_size_per_head", None) is not None:
             return self.hf_text_config.hidden_size_per_head
 
+        if (total_num_attention_heads := self.get_total_num_attention_heads()) == 0:
+            return 0
         # FIXME(woosuk): This may not be true for all models.
-        return (
-            self.hf_text_config.hidden_size // self.hf_text_config.num_attention_heads
-        )
+        return self.get_hidden_size() // total_num_attention_heads
 
     def get_total_num_kv_heads(self) -> int:
         attributes = [
@@ -96,7 +96,7 @@ class ModelArchConfigConvertorBase:
         ]
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
-        default_factory = lambda: self.hf_text_config.num_attention_heads
+        default_factory = self.get_total_num_attention_heads
         return getattr_iter(
             self.hf_text_config, attributes, default_factory=default_factory
         )
