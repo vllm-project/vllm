@@ -9,6 +9,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
@@ -732,6 +733,21 @@ class AiterFlashAttentionMetadataBuilder(
 class AiterFlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+        "fp8",
+        "fp8_e4m3",
+        "fp8_e5m2",
+    ]
+
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        """ROCM AITER FA supports decoder and encoder-decoder (cross) attention."""
+        return attn_type in (
+            AttentionType.DECODER,
+            AttentionType.ENCODER_DECODER,
+        )
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -1136,11 +1152,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 decode_max_query_len = attn_metadata.decode_metadata.max_query_len
 
                 # Use unified_attention for speculative decoding (multi-token)
-                # or when sliding window is enabled
-                if self.sliding_window[0] != -1 or decode_max_query_len > 1:
+                if decode_max_query_len > 1:
                     assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
-                        "Shuffle KV cache layout is not supported with sliding "
-                        "window or speculative decoding (multi-token decode)."
+                        "Shuffle KV cache layout is not supported with "
+                        "speculative decoding (multi-token decode)."
                     )
                     from aiter.ops.triton.unified_attention import (
                         unified_attention,
