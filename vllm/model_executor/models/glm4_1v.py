@@ -283,7 +283,9 @@ class Glm4vVisionAttention(nn.Module):
             bias=False,
             quant_config=quant_config,
             # Change qkv prefix to align with GLM-4.5V-FP8 quantization cfg
-            prefix=f"{prefix}.qkv_proj" if isinstance(quant_config, CompressedTensorsConfig) else f"{prefix}.qkv",
+            prefix=f"{prefix}.qkv_proj"
+            if isinstance(quant_config, CompressedTensorsConfig)
+            else f"{prefix}.qkv",
             disable_tp=use_data_parallel,
         )
         self.proj = RowParallelLinear(
