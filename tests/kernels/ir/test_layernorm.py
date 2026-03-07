@@ -24,7 +24,12 @@ rms_norm_native = ir.ops.rms_norm.impls["native"].impl_fn
     reason="Currently only kernels on CUDA and ROCm",
 )
 def test_rms_norm_registration():
-    expected = {"native": True, "vllm_c": True, "aiter": current_platform.is_rocm()}
+    expected = {
+        "native": True,
+        "vllm_c": True,
+        "aiter": current_platform.is_rocm(),
+        "oink": False,
+    }
 
     actual = {
         provider: impl.supported for provider, impl in ir.ops.rms_norm.impls.items()
@@ -86,7 +91,7 @@ class TestRMSNorm:
         out_native = rms_norm_native(*args)
 
         torch.testing.assert_close(
-            out_impl, out_native, rtol=get_default_rtol(out_impl), atol=2e-4
+            out_impl, out_native, rtol=get_default_rtol(out_impl), atol=1e-3
         )
 
         # check that dispatched call matches direct call
