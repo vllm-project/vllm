@@ -5,23 +5,24 @@
 Test organization:
   No GPU required:
     - TestFindBudgetGraph      — greedy budget selection logic
-    - TestCountInputPatches    — T*H*W patch counting
-    - TestCountOutputTokens    — T*(H//m)*(W//m) output token counting
-    - TestGenerateGridConfig   — dummy grid generation for graph capture
     - TestGetCumulativeStats   — hit/miss rate statistics
   GPU required:
     - TestEncoderCudaGraphCaptureReplay — capture, replay, fallback, counters, chunking
 """
 
+from typing import Any
+
 import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu.mm.encoder_cudagraph import (
     EncoderCudaGraphManager,
-    _count_input_patches,
-    _count_output_tokens,
+)
+from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+    EncoderCudaGraphCaptureInputs,
+    EncoderCudaGraphConfig,
+    EncoderCudaGraphReplayBuffers,
 )
 
 # ---------------------------------------------------------------------------
@@ -32,7 +33,7 @@ from vllm.v1.worker.gpu.mm.encoder_cudagraph import (
 def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     """Create a minimal EncoderCudaGraphManager with only token_budgets set.
 
-    Skips the parts of __init__ that require a real VllmConfig / vision model
+    Skips the parts of __init__ that require a real VllmConfig / model
     by patching the attributes directly after construction.
     """
     mgr = object.__new__(EncoderCudaGraphManager)
@@ -85,125 +86,6 @@ class TestFindBudgetGraph:
         assert mgr.token_budgets == [2048, 4096, 8192]
         # Budget selection still works correctly after sorting
         assert mgr._find_smallest_fitting_budget_given_tokens(3000) == 4096
-
-
-# ---------------------------------------------------------------------------
-# Token counting helpers
-# ---------------------------------------------------------------------------
-
-
-class TestCountInputPatches:
-    """_count_input_patches: T*H*W per image, no spatial merge."""
-
-    @pytest.mark.parametrize(
-        "grid_thw_list,expected",
-        [
-            # Single image
-            ([[1, 14, 14]], 196),
-            # Two images
-            ([[1, 14, 14], [1, 28, 28]], 196 + 784),
-            # Video: T>1
-            ([[2, 14, 14]], 2 * 14 * 14),
-            # Mixed video and image
-            ([[2, 8, 8], [1, 4, 4]], 2 * 64 + 16),
-            # Empty batch
-            ([], 0),
-        ],
-    )
-    def test_count_input_patches(self, grid_thw_list, expected):
-        assert _count_input_patches(grid_thw_list) == expected
-
-
-class TestCountOutputTokens:
-    """_count_output_tokens: T*(H//m)*(W//m) per image, after spatial merge."""
-
-    @pytest.mark.parametrize(
-        "grid_thw_list,spatial_merge_size,expected",
-        [
-            # Single image, merge=2: 1 * (14//2) * (14//2) = 49
-            ([[1, 14, 14]], 2, 49),
-            # Two images: 49 + 196
-            ([[1, 14, 14], [1, 28, 28]], 2, 49 + 196),
-            # No merge (merge=1): same as input patches
-            ([[1, 14, 14]], 1, 196),
-            # Video T=2: 2 * 7 * 7 = 98
-            ([[2, 14, 14]], 2, 98),
-            # Larger merge=4: 1 * 3 * 3 = 9
-            ([[1, 12, 12]], 4, 9),
-            # Empty batch
-            ([], 2, 0),
-        ],
-    )
-    def test_count_output_tokens(self, grid_thw_list, spatial_merge_size, expected):
-        assert _count_output_tokens(grid_thw_list, spatial_merge_size) == expected
-
-    @pytest.mark.parametrize("spatial_merge_size", [1, 2, 4])
-    def test_spatial_merge_reduces_by_exact_factor(self, spatial_merge_size):
-        """When H and W are divisible by m, output_tokens * m^2 == input_patches."""
-        m = spatial_merge_size
-        # Use dimensions exactly divisible by m for each test
-        grid_thw_list = [[1, 4 * m, 4 * m], [2, 6 * m, 6 * m]]
-        output = _count_output_tokens(grid_thw_list, m)
-        patches = _count_input_patches(grid_thw_list)
-        assert output * (m * m) == patches
-
-    def test_merge_1_equals_input_patches(self):
-        """With merge=1, output tokens == input patches exactly."""
-        grid_thw_list = [[1, 14, 14], [1, 28, 28]]
-        assert _count_output_tokens(grid_thw_list, 1) == _count_input_patches(
-            grid_thw_list
-        )
-
-
-# ---------------------------------------------------------------------------
-# _generate_grid_config_for_budget
-# ---------------------------------------------------------------------------
-
-
-class TestGenerateGridConfig:
-    """Grid config generation for CUDA graph capture."""
-
-    @pytest.mark.parametrize(
-        "token_budget,max_batch_size,spatial_merge_size",
-        [
-            (2048, 16, 2),
-            (4096, 8, 2),
-            (8192, 16, 2),
-            (13824, 16, 2),
-            (1024, 4, 4),
-        ],
-    )
-    def test_grid_produces_exact_budget(
-        self, token_budget, max_batch_size, spatial_merge_size, monkeypatch
-    ):
-        """The generated grid config produces exactly token_budget output tokens."""
-        mgr = _make_manager_with_budgets([token_budget])
-        mgr.max_batch_size = max_batch_size
-        # Inject spatial_merge_size via a mock vision_model attribute
-        mgr.vision_model = type("M", (), {"spatial_merge_size": spatial_merge_size})()
-
-        grid_config = mgr._generate_grid_config_for_budget(token_budget, max_batch_size)
-
-        assert len(grid_config) == max_batch_size
-        # Each entry is [T, H, W]; output tokens = T * (H//m) * (W//m)
-        m = spatial_merge_size
-        total_output_tokens = sum(t * (h // m) * (w // m) for t, h, w in grid_config)
-        assert total_output_tokens == token_budget
-
-    def test_grid_entries_are_rectangular(self):
-        """Grid uses the pattern [1, merge, per_image * merge] for each image."""
-        mgr = _make_manager_with_budgets([2048])
-        mgr.max_batch_size = 16
-        mgr.vision_model = type("M", (), {"spatial_merge_size": 2})()
-
-        grid_config = mgr._generate_grid_config_for_budget(2048, 16)
-
-        # All images have T=1
-        assert all(t == 1 for t, h, w in grid_config)
-        # H equals spatial_merge_size
-        assert all(h == 2 for t, h, w in grid_config)
-        # All images are identical
-        assert len(set(map(tuple, grid_config))) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -268,80 +150,147 @@ _BUDGETS = [16, 64]
 _MAX_BATCH = 4
 
 
-class SimpleMockViTEncoder(torch.nn.Module):
-    """Minimal ViT encoder for CUDA graph tests.
+def _count_input_patches(grid_thw_list: list[list[int]]) -> int:
+    return sum(t * h * w for t, h, w in grid_thw_list)
 
-    Implements the interface expected by EncoderCudaGraphManager:
-      - spatial_merge_size, out_hidden_size        (attributes)
-      - attn_backend, hidden_size, tp_size         (for _compute_encoder_metadata)
-      - patch_embed.proj.in_channels, .patch_size, .temporal_patch_size
-      - fast_pos_embed_interpolate(grid_thw_list)  → [n_out, hidden]
-      - rot_pos_emb(grid_thw_list)                 → ([n_out, d], [n_out, d])
-      - forward(pixel_values, grid_thw, encoder_metadata=None) → [n_out, hidden]
 
-    Forward: project all input patches, then simulate spatial merge by
-    averaging groups of m² patches → exactly token_budget output tokens.
+def _count_output_tokens(
+    grid_thw_list: list[list[int]], spatial_merge_size: int
+) -> int:
+    m = spatial_merge_size
+    return sum(t * (h // m) * (w // m) for t, h, w in grid_thw_list)
+
+
+class SimpleMockViTModel(torch.nn.Module):
+    """Minimal ViT model for CUDA graph tests.
+
+    Implements the SupportsEncoderCudaGraph protocol by providing
+    all required methods. The forward pass projects patches and
+    simulates spatial merge by averaging groups of m^2 patches.
     """
 
-    spatial_merge_size = _SPATIAL_MERGE
-    out_hidden_size = _HIDDEN
-    hidden_size = _HIDDEN
-    tp_size = 1
+    supports_encoder_cudagraph = True
 
     def __init__(self):
         super().__init__()
-        # Fake patch_embed namespace used by _prepare_dummy_inputs
-        PE = type(
-            "PE",
-            (),
-            {
-                "proj": type("P", (), {"in_channels": _IN_CHANNELS})(),
-                "patch_size": _PATCH_SIZE,
-                "temporal_patch_size": _TEMPORAL_PATCH,
-            },
-        )()
-        self.patch_embed = PE
         self.proj = torch.nn.Linear(_FLAT, _HIDDEN)
-        # Use FLASH_ATTN as default backend (non-FlashInfer, no transforms)
-        self.attn_backend = AttentionBackendEnum.FLASH_ATTN
+        self.spatial_merge_size = _SPATIAL_MERGE
+        self.out_hidden_size = _HIDDEN
 
-    def _n_out(self, grid_thw_list: list[list[int]]) -> int:
-        m = self.spatial_merge_size
-        return sum(t * (h // m) * (w // m) for t, h, w in grid_thw_list)
-
-    def fast_pos_embed_interpolate(
-        self, grid_thw_list: list[list[int]]
-    ) -> torch.Tensor:
-        p = next(self.parameters())
-        return torch.zeros(
-            self._n_out(grid_thw_list), _HIDDEN, device=p.device, dtype=p.dtype
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            input_key="pixel_values",
+            buffer_keys=["dummy_buf"],
+            out_hidden_size=_HIDDEN,
         )
 
-    def rot_pos_emb(
-        self, grid_thw_list: list[list[int]]
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        p = next(self.parameters())
-        n = self._n_out(grid_thw_list)
-        cos = torch.zeros(n, 16, device=p.device, dtype=p.dtype)
-        sin = torch.zeros(n, 16, device=p.device, dtype=p.dtype)
-        return cos, sin
-
-    def forward(
+    def get_encoder_cudagraph_num_items(
         self,
-        pixel_values: torch.Tensor,
-        grid_thw: torch.Tensor | list[list[int]],
-        encoder_metadata: dict | None = None,
+        mm_kwargs: dict[str, Any],
+    ) -> int:
+        return len(mm_kwargs["image_grid_thw"])
+
+    def get_encoder_cudagraph_per_item_output_tokens(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[int]:
+        m = _SPATIAL_MERGE
+        return [t * (h // m) * (w // m) for t, h, w in mm_kwargs["image_grid_thw"]]
+
+    def get_encoder_cudagraph_per_item_input_sizes(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[int]:
+        return [t * h * w for t, h, w in mm_kwargs["image_grid_thw"]]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        grid_thw = mm_kwargs["image_grid_thw"]
+        pixel_values = mm_kwargs["pixel_values"]
+
+        if len(indices) == 0:
+            return {
+                "pixel_values": pixel_values[:0],
+                "image_grid_thw": [],
+            }
+
+        patches_per_item = [t * h * w for t, h, w in grid_thw]
+        cum_patches = [0]
+        for p in patches_per_item:
+            cum_patches.append(cum_patches[-1] + p)
+
+        selected_pv = torch.cat(
+            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
+        )
+        selected_grid = [grid_thw[i] for i in indices]
+        return {
+            "pixel_values": selected_pv,
+            "image_grid_thw": selected_grid,
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> EncoderCudaGraphCaptureInputs:
+        per_image_output = token_budget // max_batch_size
+        grid_config = [
+            [1, _SPATIAL_MERGE, per_image_output * _SPATIAL_MERGE]
+            for _ in range(max_batch_size)
+        ]
+        total_patches = _count_input_patches(grid_config)
+        dummy_pixel_values = torch.randn(
+            total_patches, _FLAT, device=device, dtype=dtype
+        )
+        n_out = _count_output_tokens(grid_config, _SPATIAL_MERGE)
+        dummy_buf = torch.zeros(n_out, _HIDDEN, device=device, dtype=dtype)
+        return EncoderCudaGraphCaptureInputs(
+            mm_kwargs={
+                "pixel_values": dummy_pixel_values,
+                "image_grid_thw": grid_config,
+            },
+            buffers={"dummy_buf": dummy_buf},
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+    ) -> EncoderCudaGraphReplayBuffers:
+        grid_thw = mm_kwargs["image_grid_thw"]
+        n_out = _count_output_tokens(grid_thw, _SPATIAL_MERGE)
+        p = next(self.parameters())
+        dummy_buf = torch.zeros(n_out, _HIDDEN, device=p.device, dtype=p.dtype)
+        return EncoderCudaGraphReplayBuffers(buffers={"dummy_buf": dummy_buf})
+
+    def encoder_cudagraph_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        buffers: dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        # pixel_values: [n_patches, _FLAT]
-        # Simulate spatial merge: every m² input patches → 1 output token
-        m2 = self.spatial_merge_size**2
-        out = self.proj(pixel_values)  # [n_patches, hidden]
+        return self._forward(mm_kwargs["pixel_values"])
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        return self._forward(mm_kwargs["pixel_values"])
+
+    def _forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        m2 = _SPATIAL_MERGE**2
+        out = self.proj(pixel_values)
         n_out = out.shape[0] // m2
         return out[: n_out * m2].view(n_out, m2, _HIDDEN).mean(dim=1)
 
 
 def _make_manager_for_gpu(
-    encoder: torch.nn.Module,
+    model: SimpleMockViTModel,
     token_budgets: list[int],
     max_batch_size: int,
     device: torch.device,
@@ -356,7 +305,8 @@ def _make_manager_for_gpu(
     mgr.graph_hits = 0
     mgr.graph_misses = 0
     mgr.log_stats_interval = 100
-    mgr.vision_model = encoder
+    mgr.model = model
+    mgr.config = model.get_encoder_cudagraph_config()
     mgr.device = device
     mgr.dtype = dtype
     return mgr
@@ -372,6 +322,18 @@ def _make_pixel_values(
     return torch.randn(n, _FLAT, device=device, dtype=dtype)
 
 
+def _make_mm_kwargs(
+    grid_thw_list: list[list[int]],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> dict[str, Any]:
+    """Create mm_kwargs for testing."""
+    return {
+        "pixel_values": _make_pixel_values(grid_thw_list, device, dtype),
+        "image_grid_thw": grid_thw_list,
+    }
+
+
 # ---------------------------------------------------------------------------
 # GPU tests — capture, replay, fallback, counters, chunking
 # ---------------------------------------------------------------------------
@@ -382,9 +344,9 @@ class TestEncoderCudaGraphCaptureReplay:
     def setup_method(self):
         self.device = torch.device("cuda:0")
         self.dtype = torch.float16
-        self.encoder = SimpleMockViTEncoder().to(self.device).half()
+        self.model = SimpleMockViTModel().to(self.device).half()
         self.mgr = _make_manager_for_gpu(
-            self.encoder, _BUDGETS, _MAX_BATCH, self.device, self.dtype
+            self.model, _BUDGETS, _MAX_BATCH, self.device, self.dtype
         )
         self.mgr.capture()
 
@@ -398,16 +360,16 @@ class TestEncoderCudaGraphCaptureReplay:
 
     def test_execute_returns_one_tensor_per_image(self):
         grid_thw = [[1, 4, 4], [1, 4, 4]]
-        pv = _make_pixel_values(grid_thw, self.device, self.dtype)
-        result = self.mgr.execute(pv, grid_thw)
+        mm_kwargs = _make_mm_kwargs(grid_thw, self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
         assert result is not None
         assert len(result) == 2
 
     def test_execute_output_tokens_per_image(self):
         # [1,4,4] → 1*(4//2)*(4//2) = 4 tokens; [1,8,8] → 16 tokens
         grid_thw = [[1, 4, 4], [1, 8, 8]]
-        pv = _make_pixel_values(grid_thw, self.device, self.dtype)
-        result = self.mgr.execute(pv, grid_thw)
+        mm_kwargs = _make_mm_kwargs(grid_thw, self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
         assert result is not None
         assert result[0].shape == (4, _HIDDEN)
         assert result[1].shape == (16, _HIDDEN)
@@ -420,11 +382,11 @@ class TestEncoderCudaGraphCaptureReplay:
         # gets an eager forward pass and is returned as part of the output list
         # (execute() no longer returns None for individual image misses).
         grid_thw = [[1, 18, 18]]
-        pv = _make_pixel_values(grid_thw, self.device, self.dtype)
-        result = self.mgr.execute(pv, grid_thw)
+        mm_kwargs = _make_mm_kwargs(grid_thw, self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
         assert result is not None
         assert len(result) == 1
-        # Eager output: SimpleMockViTEncoder produces n_out = 81 tokens
+        # Eager output: SimpleMockViTModel produces n_out = 81 tokens
         assert result[0].shape == (81, _HIDDEN)
         assert self.mgr.graph_misses == 1
 
@@ -432,14 +394,14 @@ class TestEncoderCudaGraphCaptureReplay:
 
     def test_hit_counter_increments_by_num_images(self):
         grid_thw = [[1, 4, 4], [1, 4, 4]]
-        pv = _make_pixel_values(grid_thw, self.device, self.dtype)
-        self.mgr.execute(pv, grid_thw)
+        mm_kwargs = _make_mm_kwargs(grid_thw, self.device, self.dtype)
+        self.mgr.execute(mm_kwargs)
         assert self.mgr.graph_hits == 2
 
     def test_miss_counter_increments_by_num_images(self):
         grid_thw = [[1, 18, 18]]  # 81 tokens > 64
-        pv = _make_pixel_values(grid_thw, self.device, self.dtype)
-        self.mgr.execute(pv, grid_thw)
+        mm_kwargs = _make_mm_kwargs(grid_thw, self.device, self.dtype)
+        self.mgr.execute(mm_kwargs)
         assert self.mgr.graph_misses == 1
 
     # --- chunking ---
@@ -449,8 +411,8 @@ class TestEncoderCudaGraphCaptureReplay:
         # each chunk: 4 * 4 = 16 tokens → fits budget 16
         n_images = _MAX_BATCH * 2
         grid_thw = [[1, 4, 4]] * n_images
-        pv = _make_pixel_values(grid_thw, self.device, self.dtype)
-        result = self.mgr.execute(pv, grid_thw)
+        mm_kwargs = _make_mm_kwargs(grid_thw, self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
         assert result is not None
         assert len(result) == n_images
         for out in result:
