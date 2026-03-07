@@ -160,7 +160,7 @@ class Qwen3ASRDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3ASRProcessingInfo])
             * feature_extractor.sampling_rate
         )
 
-        audio_overrides = mm_options.get("audio")
+        audio_overrides = (mm_options or {}).get("audio")
 
         return {
             "audio": self._get_dummy_audios(
@@ -539,7 +539,13 @@ class Qwen3ASRForConditionalGeneration(
         request_prompt: str,
         to_language: str | None,
     ) -> PromptType:
-        """Get the generation prompt to be used for transcription requests."""
+        """Get the generation prompt to be used for transcription requests.
+
+        Matches the official Qwen3-ASR SDK prompt format:
+          system: {context}
+          user:   {audio}
+          assistant: [language {Lang}<asr_text>]  (when language is forced)
+        """
         tokenizer = cached_tokenizer_from_config(model_config)
         audio_placeholder = cls.get_placeholder_str("audio", 0)
 
@@ -548,17 +554,17 @@ class Qwen3ASRForConditionalGeneration(
                 f"Unsupported task_type '{task_type}'. "
                 "Supported task types are 'transcribe' and 'translate'."
             )
+
+        context = request_prompt or ""
         full_lang_name_to = cls.supported_languages.get(to_language, to_language)
-        if to_language is None:
-            prompt = (
-                f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
-                f"<|im_start|>assistant\n"
-            )
-        else:
-            prompt = (
-                f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
-                f"<|im_start|>assistant\nlanguage {full_lang_name_to}{_ASR_TEXT_TAG}"
-            )
+
+        prompt = (
+            f"<|im_start|>system\n{context}<|im_end|>\n"
+            f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+        if to_language is not None:
+            prompt += f"language {full_lang_name_to}{_ASR_TEXT_TAG}"
 
         prompt_token_ids = tokenizer.encode(prompt)
 

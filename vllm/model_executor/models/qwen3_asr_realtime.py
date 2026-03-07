@@ -203,7 +203,9 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
 
         audio_placeholder = cls.get_placeholder_str("audio", 0)
         prompt_template = (
-            f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n<|im_start|>assistant\n"
+            f"<|im_start|>system\n<|im_end|>\n"
+            f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
         )
 
         prompt_token_ids = tokenizer.encode(prompt_template)
