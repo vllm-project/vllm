@@ -883,6 +883,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             block_tables, slot_mappings = self.prepare_attn(input_batch)
 
+            if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+                # Pad the attention batch size to match the capture-time value.
+                input_batch.pad_for_cudagraph(
+                    num_tokens_after_padding, self.input_buffers
+                )
+
             if self.lora_config:
                 # Activate LoRA adapters.
                 lora_inputs = self.lora_state.make_lora_inputs(

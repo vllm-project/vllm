@@ -76,6 +76,20 @@ class InputBatch:
     # Whether any requests in batch use structured output.
     has_structured_output_reqs: bool
 
+    def pad_for_cudagraph(
+        self, num_tokens_padded: int, input_buffers: "InputBuffers"
+    ) -> None:
+        """Pad batch to match FULL cudagraph capture-time batch size.
+
+        FA3's scheduler_metadata depends on the exact batch_size, so the
+        attention metadata must be built with the same num_reqs as capture.
+        Must match the logic in CudaGraphManager.capture_graph.
+        """
+        num_reqs_padded = min(num_tokens_padded, input_buffers.seq_lens.shape[0])
+        if num_reqs_padded > self.seq_lens.shape[0]:
+            self.seq_lens = input_buffers.seq_lens[:num_reqs_padded]
+            self.query_start_loc = input_buffers.query_start_loc[: num_reqs_padded + 1]
+
     @classmethod
     def make_dummy(
         cls,
