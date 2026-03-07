@@ -1379,12 +1379,19 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         # quant config caches g1_alphas = a_scale * w_scale_2 once at
         # init, and EPLB's in-place rearrangement of w_scale_2 leaves
         # the cached product stale, corrupting dequantization.
+        #
+        # Use direct Parameter assignment (not replace_parameter) because
+        # g1_alphas/g2_alphas are not pre-registered in create_weights.
         if self.nvfp4_backend not in (
             NvFp4MoeBackend.FLASHINFER_TRTLLM,
             NvFp4MoeBackend.MARLIN,
         ):
-            replace_parameter(layer, "g1_alphas", a13_scale * w13_scale_2)
-            replace_parameter(layer, "g2_alphas", a2_scale * w2_scale_2)
+            layer.g1_alphas = torch.nn.Parameter(
+                (a13_scale * w13_scale_2).contiguous(), requires_grad=False
+            )
+            layer.g2_alphas = torch.nn.Parameter(
+                (a2_scale * w2_scale_2).contiguous(), requires_grad=False
+            )
 
         # Setup modular kernel for TP case and naive DP/EP case.
         # In non-naive DP/EP case, we will create a ModularKernelMethod.
