@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 import torch
 from typing_extensions import NotRequired, TypedDict, assert_never
 
+from vllm.config import ModelConfig
+
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import (
         MultiModalDataDict,
@@ -365,6 +367,7 @@ def build_enc_dec_inputs(
     encoder_inputs: SingletonInputs,
     decoder_inputs: SingletonInputs | None,
     decoder_start_token_id: int,
+    model_config: ModelConfig,
 ) -> EncoderDecoderInputs:
     enc_inputs = _validate_enc_inputs(encoder_inputs)
 
@@ -396,10 +399,12 @@ def build_enc_dec_inputs(
     else:
         assert_never(enc_inputs)
 
-    dec_inputs_new["prompt_token_ids"] = _prepare_decoder_input_ids_for_generation(
-        dec_inputs_new["prompt_token_ids"],
-        decoder_start_token_id,
-    )
+    # Do not modify the original decoder_inputs for cohere_asr
+    if model_config.hf_config.model_type != "cohere_asr":
+        dec_inputs_new["prompt_token_ids"] = _prepare_decoder_input_ids_for_generation(
+            dec_inputs_new["prompt_token_ids"],
+            decoder_start_token_id,
+        )
 
     if cache_salt := enc_inputs.get("cache_salt"):
         dec_inputs_new["cache_salt"] = cache_salt

@@ -275,6 +275,7 @@ class InputPreprocessor:
                 )
             ),
             decoder_start_token_id=self.renderer.get_dec_start_token_id(),
+            model_config=self.model_config,
         )
 
     def _process_decoder_only_prompt(

@@ -645,6 +645,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 None if dec_prompt is None else self._process_singleton(dec_prompt)
             ),
             decoder_start_token_id=self.get_dec_start_token_id(),
+            model_config=self.model_config,
         )
 
     def process_for_engine(
