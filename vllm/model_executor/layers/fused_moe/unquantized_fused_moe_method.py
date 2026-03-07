@@ -231,6 +231,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+        if not isinstance(layer, FusedMoE):
+            return
         super().process_weights_after_loading(layer)
 
         # Padding the weight for better performance on ROCm
