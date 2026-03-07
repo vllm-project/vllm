@@ -1345,9 +1345,6 @@ class MoRIIOConnectorWorker:
             remote_ip=meta.remote_host,
         )
 
-    def _is_last_layer(self, layer_name):
-        return layer_name == list(self.kv_caches.keys())[-1]
-
     def merge_contiguous_blocks(
         self,
         offsets_local: list[int],

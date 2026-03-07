@@ -1226,19 +1226,6 @@ class OpenAIServingResponses(OpenAIServing):
             param="response_id",
         )
 
-    def _make_store_not_supported_error(self) -> ErrorResponse:
-        return self.create_error_response(
-            err_type="invalid_request_error",
-            message=(
-                "`store=True` (default) is not supported. Please set "
-                "`store=False` in Responses API or set "
-                "`VLLM_ENABLE_RESPONSES_API_STORE=1` in the env var when "
-                "starting the vLLM server."
-            ),
-            status_code=HTTPStatus.BAD_REQUEST,
-            param="store",
-        )
-
     async def _process_simple_streaming_events(
         self,
         request: ResponsesRequest,
