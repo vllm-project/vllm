@@ -74,7 +74,12 @@ from vllm.v1.worker.gpu.kv_connector import (
     KVConnector,
     get_kv_connector,
 )
-from vllm.v1.worker.gpu.lora_utils import LoraState
+from vllm.v1.worker.gpu.lora_utils import (
+    LoraState,
+    activate_loras_for_batch,
+    create_lora_capture_hook,
+    get_num_active_loras_for_dispatch,
+)
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
@@ -504,21 +509,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         torch.accelerator.empty_cache()
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
-        def _lora_context_before_capture(
-            num_active_loras: int, num_reqs: int, num_tokens: int
-        ) -> None:
-            """Set up LoRA state before each capture. Used when has_lora."""
-            if self.lora_config is None:
-                return
-            num_scheduled = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
-            num_scheduled[-1] += num_tokens % num_reqs
-            with self.maybe_select_dummy_loras(
-                self.lora_config,
-                num_scheduled,
-                num_active_loras=num_active_loras,
-            ):
-                pass
-
         with self.maybe_setup_dummy_loras(self.lora_config):
             self.cudagraph_manager.capture(
                 model=self.model,
@@ -528,11 +518,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 attn_groups=self.attn_groups,
                 kv_cache_config=self.kv_cache_config,
                 has_lora=self.lora_config is not None,
-                lora_capture_hook=(
-                    _lora_context_before_capture
-                    if self.lora_config is not None
-                    else None
-                ),
+                lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
             )
             if self.speculator is not None:
                 self.speculator.capture_model()
@@ -880,15 +866,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 return empty_output
 
         # Get local cudagraph mode and size.
-        if self.lora_config and not dummy_run:
-            req_ids = list(scheduler_output.num_scheduled_tokens.keys())
-            active_loras = self.lora_state.get_activate_loras(req_ids)
-            num_active_loras = len(active_loras)
-        elif dummy_run and self.lora_config:
-            # Use max_loras + 1 to match cudagraph capture for has_lora case
-            num_active_loras = self.lora_config.max_loras + 1
-        else:
-            num_active_loras = 0
+        req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+        num_active_loras = get_num_active_loras_for_dispatch(
+            self.lora_config, self.lora_state, req_ids, dummy_run
+        )
         (
             local_cudagraph_mode,
             local_cudagraph_size,
@@ -924,14 +905,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             block_tables, slot_mappings = self.prepare_attn(input_batch)
 
-            if self.lora_config:
-                # Activate LoRA adapters.
-                lora_inputs = self.lora_state.make_lora_inputs(
-                    input_batch.req_ids,
-                    input_batch.idx_mapping_np,
-                    input_batch.num_scheduled_tokens,
-                )
-                self._set_active_loras(*lora_inputs)
+            activate_loras_for_batch(
+                self.lora_config,
+                self.lora_state,
+                input_batch.req_ids,
+                input_batch.idx_mapping_np,
+                input_batch.num_scheduled_tokens,
+                self._set_active_loras,
+            )
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
             num_reqs = min(num_tokens_after_padding, self.max_num_reqs)

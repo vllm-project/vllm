@@ -11,7 +11,6 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.lora.utils import get_captured_lora_counts
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -20,13 +19,13 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.lora_utils import (
+    get_lora_capture_cases,
+    make_graph_key,
+    resolve_effective_num_active_loras,
+)
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
-
-
-def _make_graph_key(num_tokens: int, num_active_loras: int = 0) -> tuple[int, int]:
-    """Create a unique key for CUDA graph storage (num_tokens, num_active_loras)."""
-    return (num_tokens, num_active_loras)
 
 
 class CudaGraphManager:
@@ -68,27 +67,9 @@ class CudaGraphManager:
             use_uniform_decode_cudagraph,
         )
 
-        # Compute LoRA capture cases for cudagraph_specialize_lora.
-        lora_config = vllm_config.lora_config
-        if (
-            lora_config is not None
-            and self.compilation_config.cudagraph_specialize_lora
-        ):
-            specialize_lora_count = getattr(
-                lora_config, "specialize_active_lora", False
-            )
-            captured = get_captured_lora_counts(
-                lora_config.max_loras, specialize_lora_count
-            )
-            # Include 0 for no-LoRA case; filter out 0 from captured (it's added)
-            self.lora_capture_cases = [0] + [c for c in captured if c > 0]
-        else:
-            # When cudagraph_specialize_lora=False, use single LoRA case
-            # (max_loras+1) for has_lora batches; 0 for no-LoRA.
-            if lora_config is not None:
-                self.lora_capture_cases = [0, lora_config.max_loras + 1]
-            else:
-                self.lora_capture_cases = [0]
+        self.lora_capture_cases = get_lora_capture_cases(
+            vllm_config.lora_config, self.compilation_config
+        )
 
         self.graphs: dict[tuple[int, int], torch.cuda.CUDAGraph] = {}
         self.pool = None
@@ -204,7 +185,7 @@ class CudaGraphManager:
         num_active_loras: int = 0,
     ) -> None:
         assert attn_metadata is not None
-        graph_key = _make_graph_key(num_tokens, num_active_loras)
+        graph_key = make_graph_key(num_tokens, num_active_loras)
         assert graph_key not in self.graphs
         graph = torch.cuda.CUDAGraph()
 
@@ -348,26 +329,14 @@ class CudaGraphManager:
         else:
             cudagraph_mode = self.cudagraph_mode.mixed_mode()
 
-        # Resolve effective_num_active_loras for graph lookup.
-        effective_num_active_loras = num_active_loras
-        if num_active_loras > 0 and self.lora_capture_cases:
-            import bisect
-
-            idx = bisect.bisect_left(
-                [c for c in self.lora_capture_cases if c > 0], num_active_loras
-            )
-            captured_with_lora = [c for c in self.lora_capture_cases if c > 0]
-            if idx < len(captured_with_lora):
-                effective_num_active_loras = captured_with_lora[idx]
-            else:
-                effective_num_active_loras = (
-                    captured_with_lora[-1] if captured_with_lora else 0
-                )
+        effective_num_active_loras = resolve_effective_num_active_loras(
+            num_active_loras, self.lora_capture_cases
+        )
 
         if (
             cudagraph_mode == CUDAGraphMode.FULL
             and cudagraph_size is not None
-            and _make_graph_key(cudagraph_size, effective_num_active_loras)
+            and make_graph_key(cudagraph_size, effective_num_active_loras)
             not in self.graphs
         ):
             # If graph wasn't captured yet, fall back to eager.
@@ -379,7 +348,7 @@ class CudaGraphManager:
     def run_fullgraph(
         self, num_tokens: int, num_active_loras: int = 0
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-        graph_key = _make_graph_key(num_tokens, num_active_loras)
+        graph_key = make_graph_key(num_tokens, num_active_loras)
         assert graph_key in self.graphs, (
             f"No cudagraph for {num_tokens} tokens, num_active_loras={num_active_loras}"
         )
