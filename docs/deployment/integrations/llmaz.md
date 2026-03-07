@@ -1,5 +1,70 @@
-# llmaz
+# 
+maz
+[
+maz](https://g
+thub.com/I
+ftyAI/
+maz) 
+s a
+ 
+asy-to-us
+ a
+d adva
+c
+d 
 
-[llmaz](https://github.com/InftyAI/llmaz) is an easy-to-use and advanced inference platform for large language models on Kubernetes, aimed for production use. It uses vLLM as the default model serving backend.
+f
+r
 
-Please refer to the [Quick Start](https://github.com/InftyAI/llmaz?tab=readme-ov-file#quick-start) for more details.
+c
+ p
+atform for 
+arg
+ 
+a
+guag
+ mod
+
+s o
+ Kub
+r
+
+t
+s, a
+m
+d for product
+o
+ us
+. It us
+s vLLM as th
+ d
+fau
+t mod
+
+ s
+rv
+
+g back
+
+d.
+P
+
+as
+ r
+f
+r to th
+ [Qu
+ck Start](https://g
+thub.com/I
+ftyAI/
+maz?tab=r
+adm
+-ov-f
+
+
+#qu
+ck-start) for mor
+ d
+ta
+
+s.

@@ -1,187 +1,1241 @@
-# Quantized KV Cache
+# Qua
+t
+z
+d KV Cach
 
-## FP8 KV Cache Overview
+## FP8 KV Cach
+ Ov
+rv
 
-Efficient memory usage is crucial for working with large language models. Quantizing the KV (Key-Value) cache to FP8 format can significantly reduce its memory footprint. This optimization enables you to store more tokens in memory, leading to improved throughput and support for longer context windows.
 
-> **Note:** When using the Flash Attention 3 backend with FP8 KV cache, attention operations are also performed in the quantized (FP8) domain. In this configuration, queries are quantized to FP8 in addition to keys and values.
 
-### Supported FP8 KV-Cache Quantization Schemes
+Eff
+c
 
-vLLM supports two main quantization strategies for the FP8 KV-cache:
 
-- **Per-tensor quantization:**  
-  A single scale is applied for each Q, K, and V tensor individually. (`q/k/v_scale = [1]`)
-- **Per-attention-head quantization:**  
-  Each scale corresponds to an attention head: `q_scale = [num_heads]`, `k/v_scale = [num_kv_heads]`.
+t m
+mory usag
+ 
+s cruc
+a
+ for 
+ork
 
-> **Note:**  
-> Per-attention-head quantization is currently available **only with the Flash Attention backend** and requires the calibration pathway provided by **llm-compressor**.
+g 
 
-### Scale Calibration Approaches
+th 
+arg
+ 
+a
+guag
+ mod
 
-You can configure how the quantization scales are computed in vLLM using three different approaches:
+s. Qua
+t
+z
 
-1. **No calibration (default scales):**  
-   All quantization scales are set to `1.0`.  
-   _Configure with:_  
-   ```python
-   kv_cache_dtype="fp8"
-   calculate_kv_scales=False
-   ```
+g th
+ KV (K
+y-Va
+u
+) cach
+ to FP8 format ca
+ s
+g
 
-2. **Random token calibration (on-the-fly):**  
-   Scales are automatically estimated from a single batch of random tokens during warmup and then fixed.  
-   _Configure with:_  
-   ```python
-   kv_cache_dtype="fp8"
-   calculate_kv_scales=True
-   ```
+f
+ca
+t
+y r
+duc
+ 
+ts m
+mory footpr
 
-3. **[Recommended] Calibration with a dataset (via llm-compressor):**  
-   Scales are estimated using a curated calibration dataset for maximum accuracy.  
-   This requires the [llm-compressor](https://github.com/vllm-project/llm-compressor) library.  
-   _See example below!_
+t. Th
+s opt
+m
+zat
+o
+ 
 
-#### Additional `kv_cache_dtype` Options
+ab
 
-- `kv_cache_dtype="auto"`: Use the model's default data type
-- `kv_cache_dtype="fp8_e4m3"`: Supported on CUDA 11.8+ and ROCm (AMD GPUs)
-- `kv_cache_dtype="fp8_e5m2"`: Supported on CUDA 11.8+
+s you to stor
+ mor
+ tok
 
----
+s 
 
-## Examples
+ m
+mory, 
 
-### 1. No Calibration (`kv_cache_dtype="fp8"`, `calculate_kv_scales=False`)
+ad
 
-All quantization scales are set to 1.0.
+g to 
+mprov
+d throughput a
+d support for 
+o
+g
+r co
+t
+xt 
 
-```python
-from vllm import LLM, SamplingParams
 
-sampling_params = SamplingParams(temperature=0.7, top_p=0.8)
-llm = LLM(
-    model="meta-llama/Llama-2-7b-chat-hf",
-    kv_cache_dtype="fp8",
-    calculate_kv_scales=False,
-)
-prompt = "London is the capital of"
-out = llm.generate(prompt, sampling_params)[0].outputs[0].text
-print(out)
+do
+s.
+
+ **Not
+:** Wh
+
+ us
+
+g th
+ F
+ash Att
+
+t
+o
+ 3 back
+
+d 
+
+th FP8 KV cach
+, att
+
+t
+o
+ op
+rat
+o
+s ar
+ a
+so p
+rform
+d 
+
+ th
+ qua
+t
+z
+d (FP8) doma
+
+. I
+ th
+s co
+f
+gurat
+o
+, qu
+r
+
+s ar
+ qua
+t
+z
+d to FP8 
+
+ add
+t
+o
+ to k
+ys a
+d va
+u
+s.
+### Support
+d FP8 KV-Cach
+ Qua
+t
+zat
+o
+ Sch
+m
+s
+vLLM supports t
+o ma
+
+ qua
+t
+zat
+o
+ strat
+g
+
+s for th
+ FP8 KV-cach
+:
+    - **P
+r-t
+
+sor qua
+t
+zat
+o
+:**  
+  A s
+
+g
+
+ sca
+
+ 
+s app
+
+
+d for 
+ach Q, K, a
+d V t
+
+sor 
+
+d
+v
+dua
+y. (`q/k/v_sca
+
+ = [1]`)
+    - **P
+r-att
+
+t
+o
+-h
+ad qua
+t
+zat
+o
+:**  
+  Each sca
+
+ corr
+spo
+ds to a
+ att
+
+t
+o
+ h
+ad: `q_sca
+
+ = [
+um_h
+ads]`, `k/v_sca
+
+ = [
+um_kv_h
+ads]`.
+
+ **Not
+:**  
+
+ P
+r-att
+
+t
+o
+-h
+ad qua
+t
+zat
+o
+ 
+s curr
+
+t
+y ava
+
+ab
+
+ **o
+
+y 
+
+th th
+ F
+ash Att
+
+t
+o
+ back
+
+d** a
+d r
+qu
+r
+s th
+ ca
+
+brat
+o
+ path
+ay prov
+d
+d by **
+m-compr
+ssor**.
+### Sca
+
+ Ca
+
+brat
+o
+ Approach
+s
+You ca
+ co
+f
+gur
+ ho
+ th
+ qua
+t
+zat
+o
+ sca
+
+s ar
+ comput
+d 
+
+ vLLM us
+
+g thr
+ d
+ff
+r
+
+t approach
+s:
+1. **No ca
+
+brat
+o
+ (d
+fau
+t sca
+
+s):**  
+   A
+ qua
+t
+zat
+o
+ sca
+
+s ar
+ s
+t to `1.0`.  
+   _Co
+f
+gur
+ 
+
+th:_  
+   ```pytho
+
+   kv_cach
+_dtyp
+="fp8"
+   ca
+cu
+at
+_kv_sca
+
+s=Fa
+s
+
 ```
+2. **Ra
+dom tok
 
----
+ ca
 
-### 2. Random Token Calibration (`kv_cache_dtype="fp8"`, `calculate_kv_scales=True`)
+brat
+o
+ (o
+-th
+-f
+y):**  
+   Sca
 
-Scales are automatically estimated from a single batch of tokens during warmup.
+s ar
+ automat
+ca
+y 
+st
+mat
+d from a s
 
-```python
-from vllm import LLM, SamplingParams
+g
 
-sampling_params = SamplingParams(temperature=0.7, top_p=0.8)
-llm = LLM(
-    model="meta-llama/Llama-2-7b-chat-hf",
-    kv_cache_dtype="fp8",
-    calculate_kv_scales=True,
-)
-prompt = "London is the capital of"
-out = llm.generate(prompt, sampling_params)[0].outputs[0].text
-print(out)
+ batch of ra
+dom tok
+
+s dur
+
+g 
+armup a
+d th
+
+ f
+x
+d.  
+   _Co
+f
+gur
+ 
+
+th:_  
+   ```pytho
+
+   kv_cach
+_dtyp
+="fp8"
+   ca
+cu
+at
+_kv_sca
+
+s=Tru
+
 ```
+3. **[R
+comm
 
+d
+d] Ca
+
+brat
+o
+ 
+
+th a datas
+t (v
+a 
+m-compr
+ssor):**  
+   Sca
+
+s ar
+ 
+st
+mat
+d us
+
+g a curat
+d ca
+
+brat
+o
+ datas
+t for max
+mum accuracy.  
+   Th
+s r
+qu
+r
+s th
+ [
+m-compr
+ssor](https://g
+thub.com/v
+m-proj
+ct/
+m-compr
+ssor) 
+
+brary.  
+   _S
+ 
+xamp
+
+ b
+
+o
+!_
+#### Add
+t
+o
+a
+ `kv_cach
+_dtyp
+` Opt
+o
+s
+    - `kv_cach
+_dtyp
+="auto"`: Us
+ th
+ mod
+
+'s d
+fau
+t data typ
+
+    - `kv_cach
+_dtyp
+="fp8_
+4m3"`: Support
+d o
+ CUDA 11.8+ a
+d ROCm (AMD GPUs)
+    - `kv_cach
+_dtyp
+="fp8_
+5m2"`: Support
+d o
+ CUDA 11.8+
 ---
+## Examp
 
-### 3. **[Recommended] Calibration Using a Dataset (with `llm-compressor`)**
+s
+### 1. No Ca
 
-For the highest-quality quantization, we recommend calibrating against a dataset using `llm-compressor`. This enables advanced strategies such as per-attention-head quantization.
+brat
+o
+ (`kv_cach
+_dtyp
+="fp8"`, `ca
+cu
+at
+_kv_sca
 
-#### Install the required package
+s=Fa
+s
+`)
+A
+ qua
+t
+zat
+o
+ sca
+
+s ar
+ s
+t to 1.0.
+```pytho
+
+from v
+m 
+mport LLM, Samp
+
+
+gParams
+samp
+
+
+g_params = Samp
+
+
+gParams(t
+mp
+ratur
+=0.7, top_p=0.8)
+
+m = LLM(
+    mod
+
+="m
+ta-
+ama/L
+ama-2-7b-chat-hf",
+    kv_cach
+_dtyp
+="fp8",
+    ca
+cu
+at
+_kv_sca
+
+s=Fa
+s
+,
+)
+prompt = "Lo
+do
+ 
+s th
+ cap
+ta
+ of"
+out = 
+m.g
+
+
+rat
+(prompt, samp
+
+
+g_params)[0].outputs[0].t
+xt
+pr
+
+t(out)
+```
+---
+### 2. Ra
+dom Tok
+
+ Ca
+
+brat
+o
+ (`kv_cach
+_dtyp
+="fp8"`, `ca
+cu
+at
+_kv_sca
+
+s=Tru
+`)
+Sca
+
+s ar
+ automat
+ca
+y 
+st
+mat
+d from a s
+
+g
+
+ batch of tok
+
+s dur
+
+g 
+armup.
+```pytho
+
+from v
+m 
+mport LLM, Samp
+
+
+gParams
+samp
+
+
+g_params = Samp
+
+
+gParams(t
+mp
+ratur
+=0.7, top_p=0.8)
+
+m = LLM(
+    mod
+
+="m
+ta-
+ama/L
+ama-2-7b-chat-hf",
+    kv_cach
+_dtyp
+="fp8",
+    ca
+cu
+at
+_kv_sca
+
+s=Tru
+,
+)
+prompt = "Lo
+do
+ 
+s th
+ cap
+ta
+ of"
+out = 
+m.g
+
+
+rat
+(prompt, samp
+
+
+g_params)[0].outputs[0].t
+xt
+pr
+
+t(out)
+```
+---
+### 3. **[R
+comm
+
+d
+d] Ca
+
+brat
+o
+ Us
+
+g a Datas
+t (
+
+th `
+m-compr
+ssor`)**
+For th
+ h
+gh
+st-qua
+
+ty qua
+t
+zat
+o
+, 
+
+ r
+comm
+
+d ca
+
+brat
+
+g aga
+
+st a datas
+t us
+
+g `
+m-compr
+ssor`. Th
+s 
+
+ab
+
+s adva
+c
+d strat
+g
+
+s such as p
+r-att
+
+t
+o
+-h
+ad qua
+t
+zat
+o
+.
+#### I
+sta
+ th
+ r
+qu
+r
+d packag
 
 ```bash
-pip install llmcompressor
+p
+p 
+
+sta
+ 
+mcompr
+ssor
 ```
+#### Examp
 
-#### Example: Quantize Llama Attention & KV Cache to FP8
+: Qua
+t
+z
+ L
+ama Att
 
-```python
+t
+o
+ & KV Cach
+ to FP8
+```pytho
+
 """
-Quantize Llama attention + KV cache to FP8 (choose either 'tensor' or 'attn_head' strategy)
-using llm-compressor one-shot calibration.
+Qua
+t
+z
+ L
+ama att
+
+t
+o
+ + KV cach
+ to FP8 (choos
+ 
+
+th
+r 't
+
+sor' or 'att
+_h
+ad' strat
+gy)
+us
+
+g 
+m-compr
+ssor o
+
+-shot ca
+
+brat
+o
+.
 """
+from datas
+ts 
+mport 
+oad_datas
+t
+from tra
+sform
+rs 
+mport AutoMod
 
-from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+ForCausa
+LM, AutoTok
 
-from llmcompressor import oneshot
-from llmcompressor.modifiers.quantization import QuantizationModifier
-from compressed_tensors.quantization import QuantizationScheme, QuantizationArgs
 
+z
+r
+from 
+mcompr
+ssor 
+mport o
+
+shot
+from 
+mcompr
+ssor.mod
+f
+
+rs.qua
+t
+zat
+o
+ 
+mport Qua
+t
+zat
+o
+Mod
+f
+
+r
+from compr
+ss
+d_t
+
+sors.qua
+t
+zat
+o
+ 
+mport Qua
+t
+zat
+o
+Sch
+m
+, Qua
+t
+zat
+o
+Args
 # -----------------------------
-# Config
+# Co
+f
+g
 # -----------------------------
-MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"
-DATASET_ID = "HuggingFaceH4/ultrachat_200k"
-DATASET_SPLIT = "train_sft"
-STRATEGY = "tensor"       # or "attn_head"
-NUM_CALIB_SAMPLES = 512   # Good starting value
+MODEL_ID = "m
+ta-
+ama/L
+ama-3.1-8B-I
+struct"
+DATASET_ID = "Hugg
+
+gFac
+H4/u
+trachat_200k"
+DATASET_SPLIT = "tra
+
+_sft"
+STRATEGY = "t
+
+sor"       # or "att
+_h
+ad"
+NUM_CALIB_SAMPLES = 512   # Good start
+
+g va
+u
+
 MAX_SEQ_LEN = 2048
+# -----------------------------
+# H
 
+p
+rs
 # -----------------------------
-# Helpers
-# -----------------------------
-def process_and_tokenize(example, tokenizer: AutoTokenizer):
-    """Convert chat messages to tokens."""
-    text = tokenizer.apply_chat_template(example["messages"], tokenize=False)
-    return tokenizer(
-        text,
-        padding=False,
-        max_length=MAX_SEQ_LEN,
-        truncation=True,
-        add_special_tokens=False,
+d
+f proc
+ss_a
+d_tok
+
+
+z
+(
+xamp
+
+, tok
+
+
+z
+r: AutoTok
+
+
+z
+r):
+    """Co
+v
+rt chat m
+ssag
+s to tok
+
+s."""
+    t
+xt = tok
+
+
+z
+r.app
+y_chat_t
+mp
+at
+(
+xamp
+
+["m
+ssag
+s"], tok
+
+
+z
+=Fa
+s
+)
+    r
+tur
+ tok
+
+
+z
+r(
+        t
+xt,
+        padd
+
+g=Fa
+s
+,
+        max_
+
+
+gth=MAX_SEQ_LEN,
+        tru
+cat
+o
+=Tru
+,
+        add_sp
+c
+a
+_tok
+
+s=Fa
+s
+,
     )
+d
+f bu
 
-def build_recipe(strategy: str) -> QuantizationModifier:
-    fp8_args = QuantizationArgs(num_bits=8, type="float", strategy=strategy)
-    return QuantizationModifier(
-        config_groups={
-            "attention": QuantizationScheme(
-                targets=["LlamaAttention"],  # Quantize queries: q_scale
-                input_activations=fp8_args,
+d_r
+c
+p
+(strat
+gy: str) -
+ Qua
+t
+zat
+o
+Mod
+f
+
+r:
+    fp8_args = Qua
+t
+zat
+o
+Args(
+um_b
+ts=8, typ
+="f
+oat", strat
+gy=strat
+gy)
+    r
+tur
+ Qua
+t
+zat
+o
+Mod
+f
+
+r(
+        co
+f
+g_groups={
+            "att
+
+t
+o
+": Qua
+t
+zat
+o
+Sch
+m
+(
+                targ
+ts=["L
+amaAtt
+
+t
+o
+"],  # Qua
+t
+z
+ qu
+r
+
+s: q_sca
+
+
+                
+
+put_act
+vat
+o
+s=fp8_args,
             )
         },
-        kv_cache_scheme=fp8_args,           # Quantize KV cache: k/v_scale
+        kv_cach
+_sch
+m
+=fp8_args,           # Qua
+t
+z
+ KV cach
+: k/v_sca
+
+
     )
+# -----------------------------
+# Ma
+
 
 # -----------------------------
-# Main
-# -----------------------------
-def main():
-    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    ds = load_dataset(DATASET_ID, split=f"{DATASET_SPLIT}[:{NUM_CALIB_SAMPLES}]")
-    ds = ds.shuffle(seed=42)
+d
+f ma
+
+():
+    mod
+
+ = AutoMod
+
+ForCausa
+LM.from_pr
+tra
+
+
+d(MODEL_ID, torch_dtyp
+="auto")
+    tok
+
+
+z
+r = AutoTok
+
+
+z
+r.from_pr
+tra
+
+
+d(MODEL_ID)
+    ds = 
+oad_datas
+t(DATASET_ID, sp
+
+t=f"{DATASET_SPLIT}[:{NUM_CALIB_SAMPLES}]")
+    ds = ds.shuff
+
+(s
+d=42)
     ds = ds.map(
-        lambda ex: process_and_tokenize(ex, tokenizer),
-        remove_columns=ds.column_names,
+        
+ambda 
+x: proc
+ss_a
+d_tok
+
+
+z
+(
+x, tok
+
+
+z
+r),
+        r
+mov
+_co
+um
+s=ds.co
+um
+_
+am
+s,
     )
+    r
+c
+p
+ = bu
 
-    recipe = build_recipe(STRATEGY)
-    oneshot(
-        model=model,
-        dataset=ds,
-        recipe=recipe,
-        max_seq_length=MAX_SEQ_LEN,
-        num_calibration_samples=NUM_CALIB_SAMPLES,
+d_r
+c
+p
+(STRATEGY)
+    o
+
+shot(
+        mod
+
+=mod
+
+,
+        datas
+t=ds,
+        r
+c
+p
+=r
+c
+p
+,
+        max_s
+q_
+
+
+gth=MAX_SEQ_LEN,
+        
+um_ca
+
+brat
+o
+_samp
+
+s=NUM_CALIB_SAMPLES,
     )
+    sav
+_d
+r = f"{MODEL_ID.rstr
+p('/').sp
 
-    save_dir = f"{MODEL_ID.rstrip('/').split('/')[-1]}-kvattn-fp8-{STRATEGY}"
-    model.save_pretrained(save_dir, save_compressed=True)
-    tokenizer.save_pretrained(save_dir)
+t('/')[-1]}-kvatt
+-fp8-{STRATEGY}"
+    mod
 
-if __name__ == "__main__":
-    main()
+.sav
+_pr
+tra
+
+
+d(sav
+_d
+r, sav
+_compr
+ss
+d=Tru
+)
+    tok
+
+
+z
+r.sav
+_pr
+tra
+
+
+d(sav
+_d
+r)
+
+f __
+am
+__ == "__ma
+
+__":
+    ma
+
+()
 ```
+For mor
+ d
+ta
 
-For more detailed and up-to-date examples, see the [`llm-compressor` official examples](https://github.com/vllm-project/llm-compressor/tree/main/examples/quantization_kv_cache).
+
+d a
+d up-to-dat
+ 
+xamp
+
+s, s
+ th
+ [`
+m-compr
+ssor` off
+c
+a
+ 
+xamp
+
+s](https://g
+thub.com/v
+m-proj
+ct/
+m-compr
+ssor/tr
+/ma
+
+/
+xamp
+
+s/qua
+t
+zat
+o
+_kv_cach
+).

@@ -1,58 +1,498 @@
-# Production Metrics
+# Product
+o
+ M
+tr
+cs
+vLLM 
+xpos
+s a 
+umb
+r of m
+tr
+cs that ca
+ b
+ us
+d to mo
 
-vLLM exposes a number of metrics that can be used to monitor the health of the
-system. These metrics are exposed via the `/metrics` endpoint on the vLLM
-OpenAI compatible API server.
+tor th
+ h
+a
+th of th
 
-You can start the server using Python, or using [Docker](../deployment/docker.md):
+syst
+m. Th
+s
+ m
+tr
+cs ar
+ 
+xpos
+d v
+a th
+ `/m
+tr
+cs` 
 
+dpo
+
+t o
+ th
+ vLLM
+Op
+
+AI compat
+b
+
+ API s
+rv
+r.
+You ca
+ start th
+ s
+rv
+r us
+
+g Pytho
+, or us
+
+g [Dock
+r](../d
+p
+oym
+
+t/dock
+r.md):
 ```bash
-vllm serve unsloth/Llama-3.2-1B-Instruct
+v
+m s
+rv
+ u
+s
+oth/L
+ama-3.2-1B-I
+struct
 ```
+Th
 
-Then query the endpoint to get the latest metrics from the server:
+ qu
+ry th
+ 
 
-??? console "Output"
+dpo
 
-    ```console
-    $ curl http://0.0.0.0:8000/metrics
+t to g
+t th
+ 
+at
+st m
+tr
+cs from th
+ s
+rv
+r:
+??? co
+so
 
-    # HELP vllm:iteration_tokens_total Histogram of number of tokens per engine_step.
-    # TYPE vllm:iteration_tokens_total histogram
-    vllm:iteration_tokens_total_sum{model_name="unsloth/Llama-3.2-1B-Instruct"} 0.0
-    vllm:iteration_tokens_total_bucket{le="1.0",model_name="unsloth/Llama-3.2-1B-Instruct"} 3.0
-    vllm:iteration_tokens_total_bucket{le="8.0",model_name="unsloth/Llama-3.2-1B-Instruct"} 3.0
-    vllm:iteration_tokens_total_bucket{le="16.0",model_name="unsloth/Llama-3.2-1B-Instruct"} 3.0
-    vllm:iteration_tokens_total_bucket{le="32.0",model_name="unsloth/Llama-3.2-1B-Instruct"} 3.0
-    vllm:iteration_tokens_total_bucket{le="64.0",model_name="unsloth/Llama-3.2-1B-Instruct"} 3.0
-    vllm:iteration_tokens_total_bucket{le="128.0",model_name="unsloth/Llama-3.2-1B-Instruct"} 3.0
-    vllm:iteration_tokens_total_bucket{le="256.0",model_name="unsloth/Llama-3.2-1B-Instruct"} 3.0
-    vllm:iteration_tokens_total_bucket{le="512.0",model_name="unsloth/Llama-3.2-1B-Instruct"} 3.0
+ "Output"
+    ```co
+so
+
+
+    $ cur
+ http://0.0.0.0:8000/m
+tr
+cs
+    # HELP v
+m:
+t
+rat
+o
+_tok
+
+s_tota
+ H
+stogram of 
+umb
+r of tok
+
+s p
+r 
+
+g
+
+
+_st
+p.
+    # TYPE v
+m:
+t
+rat
+o
+_tok
+
+s_tota
+ h
+stogram
+    v
+m:
+t
+rat
+o
+_tok
+
+s_tota
+_sum{mod
+
+_
+am
+="u
+s
+oth/L
+ama-3.2-1B-I
+struct"} 0.0
+    v
+m:
+t
+rat
+o
+_tok
+
+s_tota
+_buck
+t{
+
+="1.0",mod
+
+_
+am
+="u
+s
+oth/L
+ama-3.2-1B-I
+struct"} 3.0
+    v
+m:
+t
+rat
+o
+_tok
+
+s_tota
+_buck
+t{
+
+="8.0",mod
+
+_
+am
+="u
+s
+oth/L
+ama-3.2-1B-I
+struct"} 3.0
+    v
+m:
+t
+rat
+o
+_tok
+
+s_tota
+_buck
+t{
+
+="16.0",mod
+
+_
+am
+="u
+s
+oth/L
+ama-3.2-1B-I
+struct"} 3.0
+    v
+m:
+t
+rat
+o
+_tok
+
+s_tota
+_buck
+t{
+
+="32.0",mod
+
+_
+am
+="u
+s
+oth/L
+ama-3.2-1B-I
+struct"} 3.0
+    v
+m:
+t
+rat
+o
+_tok
+
+s_tota
+_buck
+t{
+
+="64.0",mod
+
+_
+am
+="u
+s
+oth/L
+ama-3.2-1B-I
+struct"} 3.0
+    v
+m:
+t
+rat
+o
+_tok
+
+s_tota
+_buck
+t{
+
+="128.0",mod
+
+_
+am
+="u
+s
+oth/L
+ama-3.2-1B-I
+struct"} 3.0
+    v
+m:
+t
+rat
+o
+_tok
+
+s_tota
+_buck
+t{
+
+="256.0",mod
+
+_
+am
+="u
+s
+oth/L
+ama-3.2-1B-I
+struct"} 3.0
+    v
+m:
+t
+rat
+o
+_tok
+
+s_tota
+_buck
+t{
+
+="512.0",mod
+
+_
+am
+="u
+s
+oth/L
+ama-3.2-1B-I
+struct"} 3.0
     ...
-    ```
+```
+Th
+ fo
+o
 
-The following metrics are exposed:
 
-## General Metrics
+g m
+tr
+cs ar
+ 
+xpos
+d:
+## G
 
---8<-- "docs/generated/metrics/general.inc.md"
 
-## Speculative Decoding Metrics
+ra
+ M
+tr
+cs
+--8
+-- "docs/g
 
---8<-- "docs/generated/metrics/spec_decode.inc.md"
 
-## NIXL KV Connector Metrics
+rat
+d/m
+tr
+cs/g
 
---8<-- "docs/generated/metrics/nixl_connector.inc.md"
 
-## Model Flops Utilization (MFU) Performance Metrics
+ra
+.
 
-These metrics are available via `--enable-mfu-metrics`:
+c.md"
+## Sp
+cu
+at
+v
+ D
+cod
 
---8<-- "docs/generated/metrics/perf.inc.md"
+g M
+tr
+cs
+--8
+-- "docs/g
 
-## Deprecation Policy
 
-Note: when metrics are deprecated in version `X.Y`, they are hidden in version `X.Y+1`
-but can be re-enabled using the `--show-hidden-metrics-for-version=X.Y` escape hatch,
-and are then removed in version `X.Y+2`.
+rat
+d/m
+tr
+cs/sp
+c_d
+cod
+.
+
+c.md"
+## NIXL KV Co
+
+ctor M
+tr
+cs
+--8
+-- "docs/g
+
+
+rat
+d/m
+tr
+cs/
+
+x
+_co
+
+ctor.
+
+c.md"
+## Mod
+
+ F
+ops Ut
+
+
+zat
+o
+ (MFU) P
+rforma
+c
+ M
+tr
+cs
+Th
+s
+ m
+tr
+cs ar
+ ava
+
+ab
+
+ v
+a `--
+
+ab
+
+-mfu-m
+tr
+cs`:
+--8
+-- "docs/g
+
+
+rat
+d/m
+tr
+cs/p
+rf.
+
+c.md"
+## D
+pr
+cat
+o
+ Po
+
+cy
+Not
+: 
+h
+
+ m
+tr
+cs ar
+ d
+pr
+cat
+d 
+
+ v
+rs
+o
+ `X.Y`, th
+y ar
+ h
+dd
+
+ 
+
+ v
+rs
+o
+ `X.Y+1`
+but ca
+ b
+ r
+-
+
+ab
+
+d us
+
+g th
+ `--sho
+-h
+dd
+
+-m
+tr
+cs-for-v
+rs
+o
+=X.Y` 
+scap
+ hatch,
+a
+d ar
+ th
+
+ r
+mov
+d 
+
+ v
+rs
+o
+ `X.Y+2`.

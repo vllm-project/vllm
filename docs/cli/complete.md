@@ -1,5 +1,20 @@
-# vllm complete
+# v
+m comp
 
-## Arguments
+t
 
---8<-- "docs/generated/argparse/complete.inc.md"
+## Argum
+
+ts
+--8
+-- "docs/g
+
+
+rat
+d/argpars
+/comp
+
+t
+.
+
+c.md"

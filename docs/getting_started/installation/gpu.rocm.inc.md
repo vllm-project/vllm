@@ -1,316 +1,2740 @@
-# --8<-- [start:installation]
+# --8
+-- [start:
 
-vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available for ROCm 7.0.
+sta
+at
+o
+]
+vLLM supports AMD GPUs 
 
-# --8<-- [end:installation]
-# --8<-- [start:requirements]
+th ROCm 6.3 or abov
+. Pr
+-bu
 
-- GPU: MI200s (gfx90a), MI300 (gfx942), MI350 (gfx950), Radeon RX 7900 series (gfx1100/1101), Radeon RX 9000 series (gfx1200/1201), Ryzen AI MAX / AI 300 Series (gfx1151/1150)
-- ROCm 6.3 or above
-    - MI350 requires ROCm 7.0 or above
-    - Ryzen AI MAX / AI 300 Series requires ROCm 7.0.2 or above
+t 
+h
 
-# --8<-- [end:requirements]
-# --8<-- [start:set-up-using-python]
+s ar
+ ava
 
-The vLLM wheel bundles PyTorch and all required dependencies, and you should use the included PyTorch for compatibility. Because vLLM compiles many ROCm kernels to ensure a validated, high‑performance stack, the resulting binaries may not be compatible with other ROCm or PyTorch builds.
-If you need a different ROCm version or want to use an existing PyTorch installation, you’ll need to build vLLM from source.  See [below](#build-wheel-from-source) for more details.
+ab
 
-# --8<-- [end:set-up-using-python]
-# --8<-- [start:pre-built-wheels]
+ for ROCm 7.0.
+# --8
+-- [
 
-To install the latest version of vLLM for Python 3.12, ROCm 7.0 and `glibc >= 2.35`.
+d:
 
+sta
+at
+o
+]
+# --8
+-- [start:r
+qu
+r
+m
+
+ts]
+    - GPU: MI200s (gfx90a), MI300 (gfx942), MI350 (gfx950), Rad
+o
+ RX 7900 s
+r
+
+s (gfx1100/1101), Rad
+o
+ RX 9000 s
+r
+
+s (gfx1200/1201), Ryz
+
+ AI MAX / AI 300 S
+r
+
+s (gfx1151/1150)
+    - ROCm 6.3 or abov
+
+    - MI350 r
+qu
+r
+s ROCm 7.0 or abov
+
+    - Ryz
+
+ AI MAX / AI 300 S
+r
+
+s r
+qu
+r
+s ROCm 7.0.2 or abov
+
+# --8
+-- [
+
+d:r
+qu
+r
+m
+
+ts]
+# --8
+-- [start:s
+t-up-us
+
+g-pytho
+]
+Th
+ vLLM 
+h
+
+ bu
+d
+
+s PyTorch a
+d a
+ r
+qu
+r
+d d
+p
+
+d
+
+c
+
+s, a
+d you shou
+d us
+ th
+ 
+
+c
+ud
+d PyTorch for compat
+b
+
+
+ty. B
+caus
+ vLLM comp
+
+
+s ma
+y ROCm k
+r
+
+
+s to 
+
+sur
+ a va
+
+dat
+d, h
+gh‑p
+rforma
+c
+ stack, th
+ r
+su
+t
+
+g b
+
+ar
+
+s may 
+ot b
+ compat
+b
+
+ 
+
+th oth
+r ROCm or PyTorch bu
+
+ds.
+If you 
+
+d a d
+ff
+r
+
+t ROCm v
+rs
+o
+ or 
+a
+t to us
+ a
+ 
+x
+st
+
+g PyTorch 
+
+sta
+at
+o
+, you’
+ 
+
+d to bu
+
+d vLLM from sourc
+.  S
+ [b
+
+o
+](#bu
+
+d-
+h
+
+-from-sourc
+) for mor
+ d
+ta
+
+s.
+# --8
+-- [
+
+d:s
+t-up-us
+
+g-pytho
+]
+# --8
+-- [start:pr
+-bu
+
+t-
+h
+
+s]
+To 
+
+sta
+ th
+ 
+at
+st v
+rs
+o
+ of vLLM for Pytho
+ 3.12, ROCm 7.0 a
+d `g
+
+bc 
+= 2.35`.
 ```bash
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+uv p
+p 
+
+sta
+ v
+m --
+xtra-
+
+d
+x-ur
+ https://
+h
+
+s.v
+m.a
+/rocm/
 ```
+!!! t
+p
+    You ca
+ f
 
-!!! tip
-    You can find out about which ROCm version the latest vLLM supports by checking the index in extra-index-url [https://wheels.vllm.ai/rocm/](https://wheels.vllm.ai/rocm/) .
+d out about 
+h
+ch ROCm v
+rs
+o
+ th
+ 
+at
+st vLLM supports by ch
+ck
 
-To install a specific version and ROCm variant of vLLM wheel.
+g th
+ 
 
+d
+x 
+
+ 
+xtra-
+
+d
+x-ur
+ [https://
+h
+
+s.v
+m.a
+/rocm/](https://
+h
+
+s.v
+m.a
+/rocm/) .
+To 
+
+sta
+ a sp
+c
+f
+c v
+rs
+o
+ a
+d ROCm var
+a
+t of vLLM 
+h
+
+.
 ```bash
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.15.0/rocm700
+uv p
+p 
+
+sta
+ v
+m --
+xtra-
+
+d
+x-ur
+ https://
+h
+
+s.v
+m.a
+/rocm/0.15.0/rocm700
 ```
+!!! 
+ar
 
-!!! warning "Caveats for using `pip`" 
 
-    We recommend leveraging `uv` to install vLLM wheel. Using `pip` to install from custom indices is cumbersome, because `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install wheel from custom index if exact versions of all packages are specified exactly. In contrast, `uv` gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes).
+g "Cav
+ats for us
 
-    If you insist on using `pip`, you have to specify the exact vLLM version and full URL of the wheel path `https://wheels.vllm.ai/rocm/<version>/<rocm-variant>` (which can be obtained from the web page).
+g `p
+p`" 
+    W
+ r
+comm
 
+d 
+
+v
+rag
+
+g `uv` to 
+
+sta
+ vLLM 
+h
+
+. Us
+
+g `p
+p` to 
+
+sta
+ from custom 
+
+d
+c
+s 
+s cumb
+rsom
+, b
+caus
+ `p
+p` comb
+
+
+s packag
+s from `--
+xtra-
+
+d
+x-ur
+` a
+d th
+ d
+fau
+t 
+
+d
+x, choos
+
+g o
+
+y th
+ 
+at
+st v
+rs
+o
+, 
+h
+ch mak
+s 
+t d
+ff
+cu
+t to 
+
+sta
+ 
+h
+
+ from custom 
+
+d
+x 
+f 
+xact v
+rs
+o
+s of a
+ packag
+s ar
+ sp
+c
+f
+
+d 
+xact
+y. I
+ co
+trast, `uv` g
+v
+s th
+ 
+xtra 
+
+d
+x [h
+gh
+r pr
+or
+ty tha
+ th
+ d
+fau
+t 
+
+d
+x](https://docs.astra
+.sh/uv/p
+p/compat
+b
+
+
+ty/#packag
+s-that-
+x
+st-o
+-mu
+t
+p
+
+-
+
+d
+x
+s).
+    If you 
+
+s
+st o
+ us
+
+g `p
+p`, you hav
+ to sp
+c
+fy th
+ 
+xact vLLM v
+rs
+o
+ a
+d fu
+ URL of th
+ 
+h
+
+ path `https://
+h
+
+s.v
+m.a
+/rocm/
+v
+rs
+o
+
+/
+rocm-var
+a
+t
+` (
+h
+ch ca
+ b
+ obta
+
+
+d from th
+ 
+
+b pag
+).
     ```bash
-    pip install vllm==0.15.0+rocm700 --extra-index-url https://wheels.vllm.ai/rocm/0.15.0/rocm700
-    ```
+    p
+p 
 
-# --8<-- [end:pre-built-wheels]
-# --8<-- [start:build-wheel-from-source]
+sta
+ v
+m==0.15.0+rocm700 --
+xtra-
 
-!!! tip
-    - If you found that the following installation step does not work for you, please refer to [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base). Dockerfile is a form of installation steps.
+d
+x-ur
+ https://
+h
 
-0. Install prerequisites (skip if you are already in an environment/docker with the following installed):
+s.v
+m.a
+/rocm/0.15.0/rocm700
+```
+# --8
+-- [
 
-    - [ROCm](https://rocm.docs.amd.com/en/latest/deploy/linux/index.html)
+d:pr
+-bu
+
+t-
+h
+
+s]
+# --8
+-- [start:bu
+
+d-
+h
+
+-from-sourc
+]
+!!! t
+p
+    - If you fou
+d that th
+ fo
+o
+
+
+g 
+
+sta
+at
+o
+ st
+p do
+s 
+ot 
+ork for you, p
+
+as
+ r
+f
+r to [dock
+r/Dock
+rf
+
+
+.rocm_bas
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/dock
+r/Dock
+rf
+
+
+.rocm_bas
+). Dock
+rf
+
+
+ 
+s a form of 
+
+sta
+at
+o
+ st
+ps.
+0. I
+sta
+ pr
+r
+qu
+s
+t
+s (sk
+p 
+f you ar
+ a
+r
+ady 
+
+ a
+ 
+
+v
+ro
+m
+
+t/dock
+r 
+
+th th
+ fo
+o
+
+
+g 
+
+sta
+
+d):
+    - [ROCm](https://rocm.docs.amd.com/
+
+/
+at
+st/d
+p
+oy/
+
+
+ux/
+
+d
+x.htm
+)
     - [PyTorch](https://pytorch.org/)
+    For 
 
-    For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm7.0_ubuntu22.04_py3.10_pytorch_release_2.8.0`, `rocm/pytorch-nightly`. If you are using docker image, you can skip to Step 3.
+sta
 
-    Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guide in PyTorch [Getting Started](https://pytorch.org/get-started/locally/). Example:
 
+g PyTorch, you ca
+ start from a fr
+sh dock
+r 
+mag
+, 
+.g, `rocm/pytorch:rocm7.0_ubu
+tu22.04_py3.10_pytorch_r
+
+
+as
+_2.8.0`, `rocm/pytorch-
+
+ght
+y`. If you ar
+ us
+
+g dock
+r 
+mag
+, you ca
+ sk
+p to St
+p 3.
+    A
+t
+r
+at
+v
+
+y, you ca
+ 
+
+sta
+ PyTorch us
+
+g PyTorch 
+h
+
+s. You ca
+ ch
+ck PyTorch 
+
+sta
+at
+o
+ gu
+d
+ 
+
+ PyTorch [G
+tt
+
+g Start
+d](https://pytorch.org/g
+t-start
+d/
+oca
+y/). Examp
+
+:
     ```bash
-    # Install PyTorch
-    pip uninstall torch -y
-    pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/nightly/rocm7.0
-    ```
+    # I
+sta
+ PyTorch
+    p
+p u
 
-1. Install [Triton for ROCm](https://github.com/ROCm/triton.git)
 
-    Install ROCm's Triton following the instructions from [ROCm/triton](https://github.com/ROCm/triton.git)
+sta
+ torch -y
+    p
+p 
 
+sta
+ --
+o-cach
+-d
+r torch torchv
+s
+o
+ --
+
+d
+x-ur
+ https://do
+
+
+oad.pytorch.org/
+h
+/
+
+ght
+y/rocm7.0
+```
+1. I
+sta
+ [Tr
+to
+ for ROCm](https://g
+thub.com/ROCm/tr
+to
+.g
+t)
+    I
+sta
+ ROCm's Tr
+to
+ fo
+o
+
+
+g th
+ 
+
+struct
+o
+s from [ROCm/tr
+to
+](https://g
+thub.com/ROCm/tr
+to
+.g
+t)
     ```bash
-    python3 -m pip install ninja cmake wheel pybind11
-    pip uninstall -y triton
-    git clone https://github.com/ROCm/triton.git
-    cd triton
-    # git checkout $TRITON_BRANCH
-    git checkout f9e5bf54
-    if [ ! -f setup.py ]; then cd python; fi
-    python3 setup.py install
+    pytho
+3 -m p
+p 
+
+sta
+ 
+
+
+ja cmak
+ 
+h
+
+ pyb
+
+d11
+    p
+p u
+
+
+sta
+ -y tr
+to
+
+    g
+t c
+o
+
+ https://g
+thub.com/ROCm/tr
+to
+.g
+t
+    cd tr
+to
+
+    # g
+t ch
+ckout $TRITON_BRANCH
+    g
+t ch
+ckout f9
+5bf54
+    
+f [ ! -f s
+tup.py ]; th
+
+ cd pytho
+; f
+
+    pytho
+3 s
+tup.py 
+
+sta
+
     cd ../..
-    ```
+```
+    !!! 
+ot
 
-    !!! note
-        - The validated `$TRITON_BRANCH` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
-        - If you see HTTP issue related to downloading packages during building triton, please try again as the HTTP error is intermittent.
+        - Th
+ va
 
-2. Optionally, if you choose to use CK flash attention, you can install [flash attention for ROCm](https://github.com/Dao-AILab/flash-attention.git)
+dat
+d `$TRITON_BRANCH` ca
+ b
+ fou
+d 
 
-    Install ROCm's flash attention (v2.8.0) following the instructions from [ROCm/flash-attention](https://github.com/Dao-AILab/flash-attention#amd-rocm-support)
+ th
+ [dock
+r/Dock
+rf
 
-    For example, for ROCm 7.0, suppose your gfx arch is `gfx942`. To get your gfx architecture, run `rocminfo |grep gfx`.
 
+.rocm_bas
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/dock
+r/Dock
+rf
+
+
+.rocm_bas
+).
+        - If you s
+ HTTP 
+ssu
+ r
+
+at
+d to do
+
+
+oad
+
+g packag
+s dur
+
+g bu
+
+d
+
+g tr
+to
+, p
+
+as
+ try aga
+
+ as th
+ HTTP 
+rror 
+s 
+
+t
+rm
+tt
+
+t.
+2. Opt
+o
+a
+y, 
+f you choos
+ to us
+ CK f
+ash att
+
+t
+o
+, you ca
+ 
+
+sta
+ [f
+ash att
+
+t
+o
+ for ROCm](https://g
+thub.com/Dao-AILab/f
+ash-att
+
+t
+o
+.g
+t)
+    I
+sta
+ ROCm's f
+ash att
+
+t
+o
+ (v2.8.0) fo
+o
+
+
+g th
+ 
+
+struct
+o
+s from [ROCm/f
+ash-att
+
+t
+o
+](https://g
+thub.com/Dao-AILab/f
+ash-att
+
+t
+o
+#amd-rocm-support)
+    For 
+xamp
+
+, for ROCm 7.0, suppos
+ your gfx arch 
+s `gfx942`. To g
+t your gfx arch
+t
+ctur
+, ru
+ `rocm
+
+fo |gr
+p gfx`.
     ```bash
-    git clone https://github.com/Dao-AILab/flash-attention.git
-    cd flash-attention
-    # git checkout $FA_BRANCH
-    git checkout 0e60e394
-    git submodule update --init
-    GPU_ARCHS="gfx942" python3 setup.py install
+    g
+t c
+o
+
+ https://g
+thub.com/Dao-AILab/f
+ash-att
+
+t
+o
+.g
+t
+    cd f
+ash-att
+
+t
+o
+
+    # g
+t ch
+ckout $FA_BRANCH
+    g
+t ch
+ckout 0
+60
+394
+    g
+t submodu
+
+ updat
+ --
+
+
+t
+    GPU_ARCHS="gfx942" pytho
+3 s
+tup.py 
+
+sta
+
     cd ..
-    ```
+```
+    !!! 
+ot
 
-    !!! note
-        - The validated `$FA_BRANCH` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
+        - Th
+ va
+
+dat
+d `$FA_BRANCH` ca
+ b
+ fou
+d 
+
+ th
+ [dock
+r/Dock
+rf
 
 
-3. Optionally, if you choose to build AITER yourself to use a certain branch or commit, you can build AITER using the following steps:
+.rocm_bas
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
 
+/dock
+r/Dock
+rf
+
+
+.rocm_bas
+).
+3. Opt
+o
+a
+y, 
+f you choos
+ to bu
+
+d AITER yours
+
+f to us
+ a c
+rta
+
+ bra
+ch or comm
+t, you ca
+ bu
+
+d AITER us
+
+g th
+ fo
+o
+
+
+g st
+ps:
     ```bash
-    python3 -m pip uninstall -y aiter
-    git clone --recursive https://github.com/ROCm/aiter.git
-    cd aiter
-    git checkout $AITER_BRANCH_OR_COMMIT
-    git submodule sync; git submodule update --init --recursive
-    python3 setup.py develop
-    ```
-
-    !!! note
-        - You will need to config the `$AITER_BRANCH_OR_COMMIT` for your purpose.
-        - The validated `$AITER_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
+    pytho
+3 -m p
+p u
 
 
-4. Optionally, if you want to use MORI for EP or PD disaggregation, you can install [MORI](https://github.com/ROCm/mori) using the following steps:
+sta
+ -y a
+t
+r
+    g
+t c
+o
 
+ --r
+curs
+v
+ https://g
+thub.com/ROCm/a
+t
+r.g
+t
+    cd a
+t
+r
+    g
+t ch
+ckout $AITER_BRANCH_OR_COMMIT
+    g
+t submodu
+
+ sy
+c; g
+t submodu
+
+ updat
+ --
+
+
+t --r
+curs
+v
+
+    pytho
+3 s
+tup.py d
+v
+
+op
+```
+    !!! 
+ot
+
+        - You 
+
+
+ 
+
+d to co
+f
+g th
+ `$AITER_BRANCH_OR_COMMIT` for your purpos
+.
+        - Th
+ va
+
+dat
+d `$AITER_BRANCH_OR_COMMIT` ca
+ b
+ fou
+d 
+
+ th
+ [dock
+r/Dock
+rf
+
+
+.rocm_bas
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/dock
+r/Dock
+rf
+
+
+.rocm_bas
+).
+4. Opt
+o
+a
+y, 
+f you 
+a
+t to us
+ MORI for EP or PD d
+saggr
+gat
+o
+, you ca
+ 
+
+sta
+ [MORI](https://g
+thub.com/ROCm/mor
+) us
+
+g th
+ fo
+o
+
+
+g st
+ps:
     ```bash
-    git clone https://github.com/ROCm/mori.git
-    cd mori
-    git checkout $MORI_BRANCH_OR_COMMIT
-    git submodule sync; git submodule update --init --recursive
-    MORI_GPU_ARCHS="gfx942;gfx950" python3 setup.py install
-    ```
+    g
+t c
+o
 
-    !!! note
-        - You will need to config the `$MORI_BRANCH_OR_COMMIT` for your purpose.
-        - The validated `$MORI_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
+ https://g
+thub.com/ROCm/mor
+.g
+t
+    cd mor
+
+    g
+t ch
+ckout $MORI_BRANCH_OR_COMMIT
+    g
+t submodu
+
+ sy
+c; g
+t submodu
+
+ updat
+ --
 
 
-5. Build vLLM. For example, vLLM on ROCM 7.0 can be built with the following steps:
+t --r
+curs
+v
 
-    ???+ console "Commands"
+    MORI_GPU_ARCHS="gfx942;gfx950" pytho
+3 s
+tup.py 
 
+sta
+
+```
+    !!! 
+ot
+
+        - You 
+
+
+ 
+
+d to co
+f
+g th
+ `$MORI_BRANCH_OR_COMMIT` for your purpos
+.
+        - Th
+ va
+
+dat
+d `$MORI_BRANCH_OR_COMMIT` ca
+ b
+ fou
+d 
+
+ th
+ [dock
+r/Dock
+rf
+
+
+.rocm_bas
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/dock
+r/Dock
+rf
+
+
+.rocm_bas
+).
+5. Bu
+
+d vLLM. For 
+xamp
+
+, vLLM o
+ ROCM 7.0 ca
+ b
+ bu
+
+t 
+
+th th
+ fo
+o
+
+
+g st
+ps:
+    ???+ co
+so
+
+ "Comma
+ds"
         ```bash
-        pip install --upgrade pip
+        p
+p 
 
-        # Build & install AMD SMI
-        pip install /opt/rocm/share/amd_smi
+sta
+ --upgrad
+ p
+p
+        # Bu
 
-        # Install dependencies
-        pip install --upgrade numba \
-            scipy \
-            huggingface-hub[cli,hf_transfer] \
-            setuptools_scm
-        pip install -r requirements/rocm.txt
+d & 
 
-        # To build for a single architecture (e.g., MI300) for faster installation (recommended):
-        export PYTORCH_ROCM_ARCH="gfx942"
+sta
+ AMD SMI
+        p
+p 
 
-        # To build vLLM for multiple arch MI210/MI250/MI300, use this instead
-        # export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
+sta
+ /opt/rocm/shar
+/amd_sm
 
-        python3 setup.py develop
-        ```
+        # I
+sta
+ d
+p
 
-    This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm when installing vLLM from source.
+d
 
-    !!! tip
-        - The ROCm version of PyTorch, ideally, should match the ROCm driver version.
+c
 
-!!! tip
-    - For MI300x (gfx942) users, to achieve optimal performance, please refer to [MI300x tuning guide](https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/index.html) for performance optimization and tuning tips on system and workflow level.
-      For vLLM, please refer to [vLLM performance optimization](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html).
+s
+        p
+p 
 
-# --8<-- [end:build-wheel-from-source]
-# --8<-- [start:pre-built-images]
+sta
+ --upgrad
+ 
+umba \
+            sc
+py \
+            hugg
 
-vLLM offers an official Docker image for deployment.
-The image can be used to run OpenAI compatible server and is available on Docker Hub as [vllm/vllm-openai-rocm](https://hub.docker.com/r/vllm/vllm-openai-rocm/tags).
+gfac
+-hub[c
 
+,hf_tra
+sf
+r] \
+            s
+tuptoo
+s_scm
+        p
+p 
+
+sta
+ -r r
+qu
+r
+m
+
+ts/rocm.txt
+        # To bu
+
+d for a s
+
+g
+
+ arch
+t
+ctur
+ (
+.g., MI300) for fast
+r 
+
+sta
+at
+o
+ (r
+comm
+
+d
+d):
+        
+xport PYTORCH_ROCM_ARCH="gfx942"
+        # To bu
+
+d vLLM for mu
+t
+p
+
+ arch MI210/MI250/MI300, us
+ th
+s 
+
+st
+ad
+        # 
+xport PYTORCH_ROCM_ARCH="gfx90a;gfx942"
+        pytho
+3 s
+tup.py d
+v
+
+op
+```
+    Th
+s may tak
+ 5-10 m
+
+ut
+s. Curr
+
+t
+y, `p
+p 
+
+sta
+ .` do
+s 
+ot 
+ork for ROCm 
+h
+
+ 
+
+sta
+
+
+g vLLM from sourc
+.
+    !!! t
+p
+        - Th
+ ROCm v
+rs
+o
+ of PyTorch, 
+d
+a
+y, shou
+d match th
+ ROCm dr
+v
+r v
+rs
+o
+.
+!!! t
+p
+    - For MI300x (gfx942) us
+rs, to ach
+
+v
+ opt
+ma
+ p
+rforma
+c
+, p
+
+as
+ r
+f
+r to [MI300x tu
+
+
+g gu
+d
+](https://rocm.docs.amd.com/
+
+/
+at
+st/ho
+-to/tu
+
+
+g-gu
+d
+s/m
+300x/
+
+d
+x.htm
+) for p
+rforma
+c
+ opt
+m
+zat
+o
+ a
+d tu
+
+
+g t
+ps o
+ syst
+m a
+d 
+orkf
+o
+ 
+
+v
+
+.
+      For vLLM, p
+
+as
+ r
+f
+r to [vLLM p
+rforma
+c
+ opt
+m
+zat
+o
+](https://rocm.docs.amd.com/
+
+/
+at
+st/ho
+-to/rocm-for-a
+/
+
+f
+r
+
+c
+-opt
+m
+zat
+o
+/v
+m-opt
+m
+zat
+o
+.htm
+).
+# --8
+-- [
+
+d:bu
+
+d-
+h
+
+-from-sourc
+]
+# --8
+-- [start:pr
+-bu
+
+t-
+mag
+s]
+vLLM off
+rs a
+ off
+c
+a
+ Dock
+r 
+mag
+ for d
+p
+oym
+
+t.
+Th
+ 
+mag
+ ca
+ b
+ us
+d to ru
+ Op
+
+AI compat
+b
+
+ s
+rv
+r a
+d 
+s ava
+
+ab
+
+ o
+ Dock
+r Hub as [v
+m/v
+m-op
+
+a
+-rocm](https://hub.dock
+r.com/r/v
+m/v
+m-op
+
+a
+-rocm/tags).
 ```bash
-docker run --rm \
-    --group-add=video \
+dock
+r ru
+ --rm \
+    --group-add=v
+d
+o \
     --cap-add=SYS_PTRACE \
-    --security-opt seccomp=unconfined \
-    --device /dev/kfd \
-    --device /dev/dri \
-    -v ~/.cache/huggingface:/root/.cache/huggingface \
-    --env "HF_TOKEN=$HF_TOKEN" \
+    --s
+cur
+ty-opt s
+ccomp=u
+co
+f
+
+
+d \
+    --d
+v
+c
+ /d
+v/kfd \
+    --d
+v
+c
+ /d
+v/dr
+ \
+    -v ~/.cach
+/hugg
+
+gfac
+:/root/.cach
+/hugg
+
+gfac
+ \
+    --
+
+v "HF_TOKEN=$HF_TOKEN" \
     -p 8000:8000 \
-    --ipc=host \
-    vllm/vllm-openai-rocm:latest \
-    --model Qwen/Qwen3-0.6B
+    --
+pc=host \
+    v
+m/v
+m-op
+
+a
+-rocm:
+at
+st \
+    --mod
+
+ Q
+
+
+/Q
+
+
+3-0.6B
 ```
+#### Us
+ AMD's Dock
+r Imag
+s
+Pr
+or to Ja
+uary 20th, 2026 
+h
 
-#### Use AMD's Docker Images
+ th
+ off
+c
+a
+ dock
+r 
+mag
+s ar
+ ava
 
-Prior to January 20th, 2026 when the official docker images are available on [upstream vLLM docker hub](https://hub.docker.com/v2/repositories/vllm/vllm-openai-rocm/tags/), the [AMD Infinity hub for vLLM](https://hub.docker.com/r/rocm/vllm/tags) offers a prebuilt, optimized
-docker image designed for validating inference performance on the AMD Instinct MI300X™ accelerator.
-AMD also offers nightly prebuilt docker image from [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev), which has vLLM and all its dependencies installed. The entrypoint of this docker image is `/bin/bash` (different from the vLLM's Official Docker Image).
+ab
 
+ o
+ [upstr
+am vLLM dock
+r hub](https://hub.dock
+r.com/v2/r
+pos
+tor
+
+s/v
+m/v
+m-op
+
+a
+-rocm/tags/), th
+ [AMD I
+f
+
+
+ty hub for vLLM](https://hub.dock
+r.com/r/rocm/v
+m/tags) off
+rs a pr
+bu
+
+t, opt
+m
+z
+d
+dock
+r 
+mag
+ d
+s
+g
+
+d for va
+
+dat
+
+g 
+
+f
+r
+
+c
+ p
+rforma
+c
+ o
+ th
+ AMD I
+st
+
+ct MI300X™ acc
+
+
+rator.
+AMD a
+so off
+rs 
+
+ght
+y pr
+bu
+
+t dock
+r 
+mag
+ from [Dock
+r Hub](https://hub.dock
+r.com/r/rocm/v
+m-d
+v), 
+h
+ch has vLLM a
+d a
+ 
+ts d
+p
+
+d
+
+c
+
+s 
+
+sta
+
+d. Th
+ 
+
+trypo
+
+t of th
+s dock
+r 
+mag
+ 
+s `/b
+
+/bash` (d
+ff
+r
+
+t from th
+ vLLM's Off
+c
+a
+ Dock
+r Imag
+).
 ```bash
-docker pull rocm/vllm-dev:nightly # to get the latest image
-docker run -it --rm \
---network=host \
---group-add=video \
---ipc=host \
+dock
+r pu
+ rocm/v
+m-d
+v:
+
+ght
+y # to g
+t th
+ 
+at
+st 
+mag
+
+dock
+r ru
+ -
+t --rm \
+--
+
+t
+ork=host \
+--group-add=v
+d
+o \
+--
+pc=host \
 --cap-add=SYS_PTRACE \
---security-opt seccomp=unconfined \
---device /dev/kfd \
---device /dev/dri \
--v <path/to/your/models>:/app/models \
--e HF_HOME="/app/models" \
-rocm/vllm-dev:nightly
+--s
+cur
+ty-opt s
+ccomp=u
+co
+f
+
+
+d \
+--d
+v
+c
+ /d
+v/kfd \
+--d
+v
+c
+ /d
+v/dr
+ \
+-v 
+path/to/your/mod
+
+s
+:/app/mod
+
+s \
+-
+ HF_HOME="/app/mod
+
+s" \
+rocm/v
+m-d
+v:
+
+ght
+y
 ```
+!!! t
+p
+    P
 
-!!! tip
-    Please check [LLM inference performance validation on AMD Instinct MI300X](https://rocm.docs.amd.com/en/latest/how-to/performance-validation/mi300x/vllm-benchmark.html)
-    for instructions on how to use this prebuilt docker image.
+as
+ ch
+ck [LLM 
 
-# --8<-- [end:pre-built-images]
-# --8<-- [start:build-image-from-source]
+f
+r
 
-You can build and run vLLM from source via the provided [docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm).
+c
+ p
+rforma
+c
+ va
 
-??? info "(Optional) Build an image with ROCm software stack"
+dat
+o
+ o
+ AMD I
+st
 
-    Build a docker image from [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base) which setup ROCm software stack needed by the vLLM.
-    **This step is optional as this rocm_base image is usually prebuilt and store at [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev) under tag `rocm/vllm-dev:base` to speed up user experience.**
-    If you choose to build this rocm_base image yourself, the steps are as follows.
+ct MI300X](https://rocm.docs.amd.com/
 
-    It is important that the user kicks off the docker build using buildkit. Either the user put `DOCKER_BUILDKIT=1` as environment variable when calling docker build command, or the user needs to set up buildkit in the docker daemon configuration `/etc/docker/daemon.json` as follows and restart the daemon:
+/
+at
+st/ho
+-to/p
+rforma
+c
+-va
 
-    ```json
+dat
+o
+/m
+300x/v
+m-b
+
+chmark.htm
+)
+    for 
+
+struct
+o
+s o
+ ho
+ to us
+ th
+s pr
+bu
+
+t dock
+r 
+mag
+.
+# --8
+-- [
+
+d:pr
+-bu
+
+t-
+mag
+s]
+# --8
+-- [start:bu
+
+d-
+mag
+-from-sourc
+]
+You ca
+ bu
+
+d a
+d ru
+ vLLM from sourc
+ v
+a th
+ prov
+d
+d [dock
+r/Dock
+rf
+
+
+.rocm](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/dock
+r/Dock
+rf
+
+
+.rocm).
+??? 
+
+fo "(Opt
+o
+a
+) Bu
+
+d a
+ 
+mag
+ 
+
+th ROCm soft
+ar
+ stack"
+    Bu
+
+d a dock
+r 
+mag
+ from [dock
+r/Dock
+rf
+
+
+.rocm_bas
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/dock
+r/Dock
+rf
+
+
+.rocm_bas
+) 
+h
+ch s
+tup ROCm soft
+ar
+ stack 
+
+d
+d by th
+ vLLM.
+    **Th
+s st
+p 
+s opt
+o
+a
+ as th
+s rocm_bas
+ 
+mag
+ 
+s usua
+y pr
+bu
+
+t a
+d stor
+ at [Dock
+r Hub](https://hub.dock
+r.com/r/rocm/v
+m-d
+v) u
+d
+r tag `rocm/v
+m-d
+v:bas
+` to sp
+d up us
+r 
+xp
+r
+
+
+c
+.**
+    If you choos
+ to bu
+
+d th
+s rocm_bas
+ 
+mag
+ yours
+
+f, th
+ st
+ps ar
+ as fo
+o
+s.
+    It 
+s 
+mporta
+t that th
+ us
+r k
+cks off th
+ dock
+r bu
+
+d us
+
+g bu
+
+dk
+t. E
+th
+r th
+ us
+r put `DOCKER_BUILDKIT=1` as 
+
+v
+ro
+m
+
+t var
+ab
+
+ 
+h
+
+ ca
+
+
+g dock
+r bu
+
+d comma
+d, or th
+ us
+r 
+
+ds to s
+t up bu
+
+dk
+t 
+
+ th
+ dock
+r da
+mo
+ co
+f
+gurat
+o
+ `/
+tc/dock
+r/da
+mo
+.jso
+` as fo
+o
+s a
+d r
+start th
+ da
+mo
+:
+    ```jso
+
     {
-        "features": {
-            "buildkit": true
+        "f
+atur
+s": {
+            "bu
+
+dk
+t": tru
+
         }
     }
-    ```
+```
+    To bu
 
-    To build vllm on ROCm 7.0 for MI200 and MI300 series, you can use the default:
+d v
+m o
+ ROCm 7.0 for MI200 a
+d MI300 s
+r
 
+s, you ca
+ us
+ th
+ d
+fau
+t:
     ```bash
-    DOCKER_BUILDKIT=1 docker build \
-        -f docker/Dockerfile.rocm_base \
-        -t rocm/vllm-dev:base .
-    ```
+    DOCKER_BUILDKIT=1 dock
+r bu
 
-First, build a docker image from [docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm) and launch a docker container from the image.
-It is important that the user kicks off the docker build using buildkit. Either the user put `DOCKER_BUILDKIT=1` as environment variable when calling docker build command, or the user needs to set up buildkit in the docker daemon configuration /etc/docker/daemon.json as follows and restart the daemon:
+d \
+        -f dock
+r/Dock
+rf
 
-```json
+
+.rocm_bas
+ \
+        -t rocm/v
+m-d
+v:bas
+ .
+```
+F
+rst, bu
+
+d a dock
+r 
+mag
+ from [dock
+r/Dock
+rf
+
+
+.rocm](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/dock
+r/Dock
+rf
+
+
+.rocm) a
+d 
+au
+ch a dock
+r co
+ta
+
+
+r from th
+ 
+mag
+.
+It 
+s 
+mporta
+t that th
+ us
+r k
+cks off th
+ dock
+r bu
+
+d us
+
+g bu
+
+dk
+t. E
+th
+r th
+ us
+r put `DOCKER_BUILDKIT=1` as 
+
+v
+ro
+m
+
+t var
+ab
+
+ 
+h
+
+ ca
+
+
+g dock
+r bu
+
+d comma
+d, or th
+ us
+r 
+
+ds to s
+t up bu
+
+dk
+t 
+
+ th
+ dock
+r da
+mo
+ co
+f
+gurat
+o
+ /
+tc/dock
+r/da
+mo
+.jso
+ as fo
+o
+s a
+d r
+start th
+ da
+mo
+:
+```jso
+
 {
-    "features": {
-        "buildkit": true
+    "f
+atur
+s": {
+        "bu
+
+dk
+t": tru
+
     }
 }
 ```
+[dock
+r/Dock
+rf
 
-[docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm) uses ROCm 7.0 by default, but also supports ROCm 5.7, 6.0, 6.1, 6.2, 6.3, and 6.4, in older vLLM branches.
-It provides flexibility to customize the build of docker image using the following arguments:
 
-- `BASE_IMAGE`: specifies the base image used when running `docker build`. The default value `rocm/vllm-dev:base` is an image published and maintained by AMD. It is being built using [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base)
-- `ARG_PYTORCH_ROCM_ARCH`: Allows to override the gfx architecture values from the base docker image
+.rocm](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
 
-Their values can be passed in when running `docker build` with `--build-arg` options.
+/dock
+r/Dock
+rf
 
-To build vllm on ROCm 7.0 for MI200 and MI300 series, you can use the default (which build a docker image with `vllm serve` as entrypoint):
 
+.rocm) us
+s ROCm 7.0 by d
+fau
+t, but a
+so supports ROCm 5.7, 6.0, 6.1, 6.2, 6.3, a
+d 6.4, 
+
+ o
+d
+r vLLM bra
+ch
+s.
+It prov
+d
+s f
+
+x
+b
+
+
+ty to custom
+z
+ th
+ bu
+
+d of dock
+r 
+mag
+ us
+
+g th
+ fo
+o
+
+
+g argum
+
+ts:
+    - `BASE_IMAGE`: sp
+c
+f
+
+s th
+ bas
+ 
+mag
+ us
+d 
+h
+
+ ru
+
+
+g `dock
+r bu
+
+d`. Th
+ d
+fau
+t va
+u
+ `rocm/v
+m-d
+v:bas
+` 
+s a
+ 
+mag
+ pub
+
+sh
+d a
+d ma
+
+ta
+
+
+d by AMD. It 
+s b
+
+
+g bu
+
+t us
+
+g [dock
+r/Dock
+rf
+
+
+.rocm_bas
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/b
+ob/ma
+
+/dock
+r/Dock
+rf
+
+
+.rocm_bas
+)
+    - `ARG_PYTORCH_ROCM_ARCH`: A
+o
+s to ov
+rr
+d
+ th
+ gfx arch
+t
+ctur
+ va
+u
+s from th
+ bas
+ dock
+r 
+mag
+
+Th
+
+r va
+u
+s ca
+ b
+ pass
+d 
+
+ 
+h
+
+ ru
+
+
+g `dock
+r bu
+
+d` 
+
+th `--bu
+
+d-arg` opt
+o
+s.
+To bu
+
+d v
+m o
+ ROCm 7.0 for MI200 a
+d MI300 s
+r
+
+s, you ca
+ us
+ th
+ d
+fau
+t (
+h
+ch bu
+
+d a dock
+r 
+mag
+ 
+
+th `v
+m s
+rv
+` as 
+
+trypo
+
+t):
 ```bash
-DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm/vllm-openai-rocm .
+DOCKER_BUILDKIT=1 dock
+r bu
+
+d -f dock
+r/Dock
+rf
+
+
+.rocm -t v
+m/v
+m-op
+
+a
+-rocm .
 ```
+To ru
+ vLLM 
 
+th th
+ custom-bu
 
-To run vLLM with the custom-built Docker image:
-
+t Dock
+r 
+mag
+:
 ```bash
-docker run --rm \
-    --group-add=video \
+dock
+r ru
+ --rm \
+    --group-add=v
+d
+o \
     --cap-add=SYS_PTRACE \
-    --security-opt seccomp=unconfined \
-    --device /dev/kfd \
-    --device /dev/dri \
-    -v ~/.cache/huggingface:/root/.cache/huggingface \
-    --env "HF_TOKEN=$HF_TOKEN" \
+    --s
+cur
+ty-opt s
+ccomp=u
+co
+f
+
+
+d \
+    --d
+v
+c
+ /d
+v/kfd \
+    --d
+v
+c
+ /d
+v/dr
+ \
+    -v ~/.cach
+/hugg
+
+gfac
+:/root/.cach
+/hugg
+
+gfac
+ \
+    --
+
+v "HF_TOKEN=$HF_TOKEN" \
     -p 8000:8000 \
-    --ipc=host \
-    vllm/vllm-openai-rocm <args...>
+    --
+pc=host \
+    v
+m/v
+m-op
+
+a
+-rocm 
+args...
+
 ```
+Th
+ argum
 
-The argument `vllm/vllm-openai-rocm` specifies the image to run, and should be replaced with the name of the custom-built image (the `-t` tag from the build command).
+t `v
+m/v
+m-op
 
-To use the docker image as base for development, you can launch it in interactive session through overriding the entrypoint.
+a
+-rocm` sp
+c
+f
 
-???+ console "Commands"
+s th
+ 
+mag
+ to ru
+, a
+d shou
+d b
+ r
+p
+ac
+d 
+
+th th
+ 
+am
+ of th
+ custom-bu
+
+t 
+mag
+ (th
+ `-t` tag from th
+ bu
+
+d comma
+d).
+To us
+ th
+ dock
+r 
+mag
+ as bas
+ for d
+v
+
+opm
+
+t, you ca
+ 
+au
+ch 
+t 
+
+ 
+
+t
+ract
+v
+ s
+ss
+o
+ through ov
+rr
+d
+
+g th
+ 
+
+trypo
+
+t.
+???+ co
+so
+
+ "Comma
+ds"
     ```bash
-    docker run --rm -it \
-        --group-add=video \
+    dock
+r ru
+ --rm -
+t \
+        --group-add=v
+d
+o \
         --cap-add=SYS_PTRACE \
-        --security-opt seccomp=unconfined \
-        --device /dev/kfd \
-        --device /dev/dri \
-        -v ~/.cache/huggingface:/root/.cache/huggingface \
-        --env "HF_TOKEN=$HF_TOKEN" \
-        --network=host \
-        --ipc=host \
-        --entrypoint bash \
-        vllm/vllm-openai-rocm
-    ```
+        --s
+cur
+ty-opt s
+ccomp=u
+co
+f
 
-# --8<-- [end:build-image-from-source]
-# --8<-- [start:supported-features]
 
-See [Feature x Hardware](../../features/README.md#feature-x-hardware) compatibility matrix for feature support information.
+d \
+        --d
+v
+c
+ /d
+v/kfd \
+        --d
+v
+c
+ /d
+v/dr
+ \
+        -v ~/.cach
+/hugg
 
-# --8<-- [end:supported-features]
+gfac
+:/root/.cach
+/hugg
+
+gfac
+ \
+        --
+
+v "HF_TOKEN=$HF_TOKEN" \
+        --
+
+t
+ork=host \
+        --
+pc=host \
+        --
+
+trypo
+
+t bash \
+        v
+m/v
+m-op
+
+a
+-rocm
+```
+# --8
+-- [
+
+d:bu
+
+d-
+mag
+-from-sourc
+]
+# --8
+-- [start:support
+d-f
+atur
+s]
+S
+ [F
+atur
+ x Hard
+ar
+](../../f
+atur
+s/README.md#f
+atur
+-x-hard
+ar
+) compat
+b
+
+
+ty matr
+x for f
+atur
+ support 
+
+format
+o
+.
+# --8
+-- [
+
+d:support
+d-f
+atur
+s]

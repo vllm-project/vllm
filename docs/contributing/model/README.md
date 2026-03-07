@@ -1,23 +1,288 @@
 # Summary
+!!! 
+mporta
+t
+    Ma
+y d
+cod
+r 
+a
+guag
+ mod
 
-!!! important
-    Many decoder language models can now be automatically loaded using the [Transformers modeling backend](../../models/supported_models.md#transformers) without having to implement them in vLLM. See if `vllm serve <model>` works first!
+s ca
+ 
+o
+ b
+ automat
+ca
+y 
+oad
+d us
 
-vLLM models are specialized [PyTorch](https://pytorch.org/) models that take advantage of various [features](../../features/README.md#compatibility-matrix) to optimize their performance.
+g th
+ [Tra
+sform
+rs mod
 
-The complexity of integrating a model into vLLM depends heavily on the model's architecture.
-The process is considerably straightforward if the model shares a similar architecture with an existing model in vLLM.
-However, this can be more complex for models that include new operators (e.g., a new attention mechanism).
 
-Read through these pages for a step-by-step guide:
 
-- [Basic Model](basic.md)
-- [Registering a Model](registration.md)
-- [Unit Testing](tests.md)
-- [Multi-Modal Support](multimodal.md)
-- [Speech-to-Text Support](transcription.md)
+g back
 
-!!! tip
-    If you are encountering issues while integrating your model into vLLM, feel free to open a [GitHub issue](https://github.com/vllm-project/vllm/issues)
-    or ask on our [developer slack](https://slack.vllm.ai).
-    We will be happy to help you out!
+d](../../mod
+
+s/support
+d_mod
+
+s.md#tra
+sform
+rs) 
+
+thout hav
+
+g to 
+mp
+
+m
+
+t th
+m 
+
+ vLLM. S
+ 
+f `v
+m s
+rv
+ 
+mod
+
+
+` 
+orks f
+rst!
+vLLM mod
+
+s ar
+ sp
+c
+a
+
+z
+d [PyTorch](https://pytorch.org/) mod
+
+s that tak
+ adva
+tag
+ of var
+ous [f
+atur
+s](../../f
+atur
+s/README.md#compat
+b
+
+
+ty-matr
+x) to opt
+m
+z
+ th
+
+r p
+rforma
+c
+.
+Th
+ comp
+
+x
+ty of 
+
+t
+grat
+
+g a mod
+
+ 
+
+to vLLM d
+p
+
+ds h
+av
+
+y o
+ th
+ mod
+
+'s arch
+t
+ctur
+.
+Th
+ proc
+ss 
+s co
+s
+d
+rab
+y stra
+ghtfor
+ard 
+f th
+ mod
+
+ shar
+s a s
+m
+
+ar arch
+t
+ctur
+ 
+
+th a
+ 
+x
+st
+
+g mod
+
+ 
+
+ vLLM.
+Ho
+
+v
+r, th
+s ca
+ b
+ mor
+ comp
+
+x for mod
+
+s that 
+
+c
+ud
+ 
+
+
+ op
+rators (
+.g., a 
+
+
+ att
+
+t
+o
+ m
+cha
+
+sm).
+R
+ad through th
+s
+ pag
+s for a st
+p-by-st
+p gu
+d
+:
+    - [Bas
+c Mod
+
+](bas
+c.md)
+    - [R
+g
+st
+r
+
+g a Mod
+
+](r
+g
+strat
+o
+.md)
+    - [U
+
+t T
+st
+
+g](t
+sts.md)
+    - [Mu
+t
+-Moda
+ Support](mu
+t
+moda
+.md)
+    - [Sp
+ch-to-T
+xt Support](tra
+scr
+pt
+o
+.md)
+!!! t
+p
+    If you ar
+ 
+
+cou
+t
+r
+
+g 
+ssu
+s 
+h
+
+
+ 
+
+t
+grat
+
+g your mod
+
+ 
+
+to vLLM, f
+
+ fr
+ to op
+
+ a [G
+tHub 
+ssu
+](https://g
+thub.com/v
+m-proj
+ct/v
+m/
+ssu
+s)
+    or ask o
+ our [d
+v
+
+op
+r s
+ack](https://s
+ack.v
+m.a
+).
+    W
+ 
+
+
+ b
+ happy to h
+
+p you out!

@@ -1,122 +1,1333 @@
-# Sleep Mode
+# S
 
-vLLM's Sleep Mode allows you to temporarily release most GPU memory used by a model, including model weights and KV cache, without stopping the server or unloading the Docker container. This is especially useful for RLHF, training, or cost-saving scenarios where GPU resources need to be freed between inference workloads.
+p Mod
 
-Key benefits:
+vLLM's S
 
-- **Frees GPU memory**: Offloads model weights to CPU RAM and discards KV cache, releasing up to 90%+ of GPU memory for other tasks.
-- **Fast resume**: Quickly wake up the engine and resume inference without full model reload.
-- **API endpoints**: Control sleep/wake_up state via HTTP endpoints or Python API.
-- **Supports distributed workloads**: Works with tensor parallelism, pipeline parallelism, etc.
-- **Fine-grained control**: Optionally wake up only model weights or KV cache to avoid OOM during weight updates.
+p Mod
+ a
+o
+s you to t
+mporar
 
-!!! note
-    This feature is now supported on CUDA and ROCm platform.
+y r
 
-!!! note
-    For more information, see this [Blog Post](https://blog.vllm.ai/2025/10/26/sleep-mode.html).
 
-## Sleep levels
+as
+ most GPU m
+mory us
+d by a mod
 
-Level 1 sleep will offload the model weights and discard the KV cache. The content of KV cache is forgotten. Level 1 sleep is good for sleeping and waking up the engine to run the same model again. The model weights are backed up in CPU memory. Please make sure there's enough CPU memory to store the model weights. Level 2 sleep will discard both the model weights and the KV cache (while the model's buffers are kept in CPU, like rope scaling tensors). The content of both the model weights and KV cache is forgotten. Level 2 sleep is good for sleeping and waking up the engine to run a different model or update the model, where previous model weights are not needed, e.g. RLHF weight update.
+, 
 
-## Usage
+c
+ud
 
-### Offline inference
+g mod
 
-Enable sleep mode by passing `enable_sleep_mode=True` to the `LLM` class.
+ 
 
-```python
-from vllm import LLM
-llm = LLM("Qwen/Qwen3-0.6B", enable_sleep_mode=True)
+
+ghts a
+d KV cach
+, 
+
+thout stopp
+
+g th
+ s
+rv
+r or u
+
+oad
+
+g th
+ Dock
+r co
+ta
+
+
+r. Th
+s 
+s 
+sp
+c
+a
+y us
+fu
+ for RLHF, tra
+
+
+
+g, or cost-sav
+
+g sc
+
+ar
+os 
+h
+r
+ GPU r
+sourc
+s 
+
+d to b
+ fr
+d b
+t
+
+
+ 
+
+f
+r
+
+c
+ 
+ork
+oads.
+K
+y b
+
+
+f
+ts:
+    - **Fr
+s GPU m
+mory**: Off
+oads mod
+
+ 
+
+
+ghts to CPU RAM a
+d d
+scards KV cach
+, r
+
+
+as
+
+g up to 90%+ of GPU m
+mory for oth
+r tasks.
+    - **Fast r
+sum
+**: Qu
+ck
+y 
+ak
+ up th
+ 
+
+g
+
+
+ a
+d r
+sum
+ 
+
+f
+r
+
+c
+ 
+
+thout fu
+ mod
+
+ r
+
+oad.
+    - **API 
+
+dpo
+
+ts**: Co
+tro
+ s
+
+p/
+ak
+_up stat
+ v
+a HTTP 
+
+dpo
+
+ts or Pytho
+ API.
+    - **Supports d
+str
+but
+d 
+ork
+oads**: Works 
+
+th t
+
+sor para
+
+
+
+sm, p
+p
+
+
+
+
+ para
+
+
+
+sm, 
+tc.
+    - **F
+
+
+-gra
+
+
+d co
+tro
+**: Opt
+o
+a
+y 
+ak
+ up o
+
+y mod
+
+ 
+
+
+ghts or KV cach
+ to avo
+d OOM dur
+
+g 
+
+
+ght updat
+s.
+!!! 
+ot
+
+    Th
+s f
+atur
+ 
+s 
+o
+ support
+d o
+ CUDA a
+d ROCm p
+atform.
+!!! 
+ot
+
+    For mor
+ 
+
+format
+o
+, s
+ th
+s [B
+og Post](https://b
+og.v
+m.a
+/2025/10/26/s
+
+p-mod
+.htm
+).
+## S
+
+p 
+
+v
+
+s
+L
+v
+
+ 1 s
+
+p 
+
+
+ off
+oad th
+ mod
+
+ 
+
+
+ghts a
+d d
+scard th
+ KV cach
+. Th
+ co
+t
+
+t of KV cach
+ 
+s forgott
+
+. L
+v
+
+ 1 s
+
+p 
+s good for s
+
+p
+
+g a
+d 
+ak
+
+g up th
+ 
+
+g
+
+
+ to ru
+ th
+ sam
+ mod
+
+ aga
+
+. Th
+ mod
+
+ 
+
+
+ghts ar
+ back
+d up 
+
+ CPU m
+mory. P
+
+as
+ mak
+ sur
+ th
+r
+'s 
+
+ough CPU m
+mory to stor
+ th
+ mod
+
+ 
+
+
+ghts. L
+v
+
+ 2 s
+
+p 
+
+
+ d
+scard both th
+ mod
+
+ 
+
+
+ghts a
+d th
+ KV cach
+ (
+h
+
+
+ th
+ mod
+
+'s buff
+rs ar
+ k
+pt 
+
+ CPU, 
+
+k
+ rop
+ sca
+
+
+g t
+
+sors). Th
+ co
+t
+
+t of both th
+ mod
+
+ 
+
+
+ghts a
+d KV cach
+ 
+s forgott
+
+. L
+v
+
+ 2 s
+
+p 
+s good for s
+
+p
+
+g a
+d 
+ak
+
+g up th
+ 
+
+g
+
+
+ to ru
+ a d
+ff
+r
+
+t mod
+
+ or updat
+ th
+ mod
+
+, 
+h
+r
+ pr
+v
+ous mod
+
+ 
+
+
+ghts ar
+ 
+ot 
+
+d
+d, 
+.g. RLHF 
+
+
+ght updat
+.
+## Usag
+
+### Off
+
+
+
+ 
+
+f
+r
+
+c
+
+E
+ab
+
+ s
+
+p mod
+ by pass
+
+g `
+
+ab
+
+_s
+
+p_mod
+=Tru
+` to th
+ `LLM` c
+ass.
+```pytho
+
+from v
+m 
+mport LLM
+
+m = LLM("Q
+
+
+/Q
+
+
+3-0.6B", 
+
+ab
+
+_s
+
+p_mod
+=Tru
+)
 ```
+#### Pytho
+ API
+```pytho
 
-#### Python API
+# S
 
-```python
-# Sleep level 1
-# Put the engine to sleep (level=1: offload weights to CPU RAM, discard KV cache)
-llm.sleep(level=1)
+p 
 
-# Wake up the engine (restore weights)
-llm.wake_up()
+v
+
+ 1
+# Put th
+ 
+
+g
+
+
+ to s
+
+p (
+
+v
+
+=1: off
+oad 
+
+
+ghts to CPU RAM, d
+scard KV cach
+)
+
+m.s
+
+p(
+
+v
+
+=1)
+# Wak
+ up th
+ 
+
+g
+
+
+ (r
+stor
+ 
+
+
+ghts)
+
+m.
+ak
+_up()
 ```
+```pytho
 
-```python
-# Sleep level 2
-# Put the engine to sleep (level=2: discard both weights and KV cache)
-llm.sleep(level=2)
+# S
 
-# Reallocate weights memory only
-llm.wake_up(tags=["weights"])
+p 
 
-# Load weights in-place
-llm.collective_rpc("reload_weights")
+v
 
-# Reallocate KV cache
-llm.wake_up(tags=["kv_cache"])
+ 2
+# Put th
+ 
+
+g
+
+
+ to s
+
+p (
+
+v
+
+=2: d
+scard both 
+
+
+ghts a
+d KV cach
+)
+
+m.s
+
+p(
+
+v
+
+=2)
+# R
+a
+ocat
+ 
+
+
+ghts m
+mory o
+
+y
+
+m.
+ak
+_up(tags=["
+
+
+ghts"])
+# Load 
+
+
+ghts 
+
+-p
+ac
+
+
+m.co
+
+ct
+v
+_rpc("r
+
+oad_
+
+
+ghts")
+# R
+a
+ocat
+ KV cach
+
+
+m.
+ak
+_up(tags=["kv_cach
+"])
 ```
+#### RLHF 
 
-#### RLHF weight updates
 
-During RLHF training, vLLM allows you to selectively wake up only the model weights or the KV cache using the tags argument in wake_up(). This fine-grained control is especially useful when updating model weights: by waking up just the weights (e.g., llm.wake_up(tags=["weights"])), you avoid allocating memory for the KV cache until after the weight update is complete. This approach helps prevent GPU out-of-memory (OOM) errors, particularly with large models, by minimizing peak memory usage during weight synchronization and update operations.
+ght updat
+s
+Dur
 
-Use `tags=["weights"]` or `tags=["kv_cache"]` to control which resources are restored, useful for RLHF and weight updates. **Note** that `is_sleeping` will report `true` until all components are awake.
+g RLHF tra
 
-```python
-# Put engine to deep sleep (level=2)
-llm.sleep(level=2)
-# ... Get the new weights
-# Wake up only weights to avoid OOM
-llm.wake_up(tags=["weights"])
-# ... Update the weights
-# wake up KV cache after weights are updated
-llm.wake_up(tags=["kv_cache"])
+
+
+g, vLLM a
+o
+s you to s
+
+
+ct
+v
+
+y 
+ak
+ up o
+
+y th
+ mod
+
+ 
+
+
+ghts or th
+ KV cach
+ us
+
+g th
+ tags argum
+
+t 
+
+ 
+ak
+_up(). Th
+s f
+
+
+-gra
+
+
+d co
+tro
+ 
+s 
+sp
+c
+a
+y us
+fu
+ 
+h
+
+ updat
+
+g mod
+
+ 
+
+
+ghts: by 
+ak
+
+g up just th
+ 
+
+
+ghts (
+.g., 
+m.
+ak
+_up(tags=["
+
+
+ghts"])), you avo
+d a
+ocat
+
+g m
+mory for th
+ KV cach
+ u
+t
+
+ aft
+r th
+ 
+
+
+ght updat
+ 
+s comp
+
+t
+. Th
+s approach h
+
+ps pr
+v
+
+t GPU out-of-m
+mory (OOM) 
+rrors, part
+cu
+ar
+y 
+
+th 
+arg
+ mod
+
+s, by m
+
+
+m
+z
+
+g p
+ak m
+mory usag
+ dur
+
+g 
+
+
+ght sy
+chro
+
+zat
+o
+ a
+d updat
+ op
+rat
+o
+s.
+Us
+ `tags=["
+
+
+ghts"]` or `tags=["kv_cach
+"]` to co
+tro
+ 
+h
+ch r
+sourc
+s ar
+ r
+stor
+d, us
+fu
+ for RLHF a
+d 
+
+
+ght updat
+s. **Not
+** that `
+s_s
+
+p
+
+g` 
+
+
+ r
+port `tru
+` u
+t
+
+ a
+ compo
+
+
+ts ar
+ a
+ak
+.
+```pytho
+
+# Put 
+
+g
+
+
+ to d
+p s
+
+p (
+
+v
+
+=2)
+
+m.s
+
+p(
+
+v
+
+=2)
+# ... G
+t th
+ 
+
+
+ 
+
+
+ghts
+# Wak
+ up o
+
+y 
+
+
+ghts to avo
+d OOM
+
+m.
+ak
+_up(tags=["
+
+
+ghts"])
+# ... Updat
+ th
+ 
+
+
+ghts
+# 
+ak
+ up KV cach
+ aft
+r 
+
+
+ghts ar
+ updat
+d
+
+m.
+ak
+_up(tags=["kv_cach
+"])
 ```
+### O
 
-### Online Serving
 
-To enable sleep mode in a vLLM server you need to initialize it with the flag `VLLM_SERVER_DEV_MODE=1` and pass `--enable-sleep-mode` to the vLLM server.
 
-#### Server in development mode
 
-When using the flag `VLLM_SERVER_DEV_MODE=1` you enable development endpoints, and these endpoints should not be exposed to users.
+ S
+rv
 
+g
+To 
+
+ab
+
+ s
+
+p mod
+ 
+
+ a vLLM s
+rv
+r you 
+
+d to 
+
+
+t
+a
+
+z
+ 
+t 
+
+th th
+ f
+ag `VLLM_SERVER_DEV_MODE=1` a
+d pass `--
+
+ab
+
+-s
+
+p-mod
+` to th
+ vLLM s
+rv
+r.
+#### S
+rv
+r 
+
+ d
+v
+
+opm
+
+t mod
+
+Wh
+
+ us
+
+g th
+ f
+ag `VLLM_SERVER_DEV_MODE=1` you 
+
+ab
+
+ d
+v
+
+opm
+
+t 
+
+dpo
+
+ts, a
+d th
+s
+ 
+
+dpo
+
+ts shou
+d 
+ot b
+ 
+xpos
+d to us
+rs.
 ```bash
-VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3-0.6B \
-  --enable-sleep-mode \
+VLLM_SERVER_DEV_MODE=1 v
+m s
+rv
+ Q
+
+
+/Q
+
+
+3-0.6B \
+  --
+
+ab
+
+-s
+
+p-mod
+ \
   --port 8000
 ```
+B
 
-Below is an example of how to sleep and wake up a model in level 1.
+o
+ 
+s a
+ 
+xamp
 
+ of ho
+ to s
+
+p a
+d 
+ak
+ up a mod
+
+ 
+
+ 
+
+v
+
+ 1.
 ```bash
-curl -X POST 'http://localhost:8000/sleep?level=1'
-curl -X POST 'http://localhost:8000/wake_up'
+cur
+ -X POST 'http://
+oca
+host:8000/s
+
+p?
+
+v
+
+=1'
+cur
+ -X POST 'http://
+oca
+host:8000/
+ak
+_up'
 ```
+A
+d th
+s 
+s a
+ 
+xamp
 
-And this is an example of how to sleep and wake up a model in level 2.
+ of ho
+ to s
 
+p a
+d 
+ak
+ up a mod
+
+ 
+
+ 
+
+v
+
+ 2.
 ```bash
-curl -X POST 'http://localhost:8000/sleep?level=2'
-# Reallocate weights memory only
-curl -X POST 'http://localhost:8000/wake_up?tags=weights'
-# Load weights in-place
-curl -X POST 'http://localhost:8000/collective_rpc' -H 'Content-Type: application/json' -d '{"method":"reload_weights"}'
-# Reallocate KV cache
-curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
+cur
+ -X POST 'http://
+oca
+host:8000/s
+
+p?
+
+v
+
+=2'
+# R
+a
+ocat
+ 
+
+
+ghts m
+mory o
+
+y
+cur
+ -X POST 'http://
+oca
+host:8000/
+ak
+_up?tags=
+
+
+ghts'
+# Load 
+
+
+ghts 
+
+-p
+ac
+
+cur
+ -X POST 'http://
+oca
+host:8000/co
+
+ct
+v
+_rpc' -H 'Co
+t
+
+t-Typ
+: app
+
+cat
+o
+/jso
+' -d '{"m
+thod":"r
+
+oad_
+
+
+ghts"}'
+# R
+a
+ocat
+ KV cach
+
+cur
+ -X POST 'http://
+oca
+host:8000/
+ak
+_up?tags=kv_cach
+'
 ```
+#### HTTP 
 
-#### HTTP endpoints
+dpo
 
-- `POST /sleep?level=1` — Put the model to sleep (`level=1`).
-- `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
-- `POST /collective_rpc` — Perform a collective remote procedure call (RPC).
-- `GET /is_sleeping` — Check if the model is sleeping.
+ts
+    - `POST /s
 
-!!! note
-    These endpoints are only available when passing `VLLM_SERVER_DEV_MODE=1`.
+p?
 
-## Limitation
+v
 
-On ROCm, the virtual memory allocation on ROCm is done through chunked memory allocation. You can control the chunk size through `VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE` (in MB). The default value is set at 256MB. The larger the chunk size the faster the performance. However, setting it too large will cause OOM. So if you encounter OOM when using sleep mode. Try reducing the chunk size. It is recommended to define the chunk size as a power of 2.
+=1` — Put th
+ mod
+
+ to s
+
+p (`
+
+v
+
+=1`).
+    - `POST /
+ak
+_up` — Wak
+ up th
+ mod
+
+. Supports opt
+o
+a
+ `tags` qu
+ry param
+t
+rs for part
+a
+ 
+ak
+-up (
+.g., `?tags=
+
+
+ghts`).
+    - `POST /co
+
+ct
+v
+_rpc` — P
+rform a co
+
+ct
+v
+ r
+mot
+ proc
+dur
+ ca
+ (RPC).
+    - `GET /
+s_s
+
+p
+
+g` — Ch
+ck 
+f th
+ mod
+
+ 
+s s
+
+p
+
+g.
+!!! 
+ot
+
+    Th
+s
+ 
+
+dpo
+
+ts ar
+ o
+
+y ava
+
+ab
+
+ 
+h
+
+ pass
+
+g `VLLM_SERVER_DEV_MODE=1`.
+## L
+m
+tat
+o
+
+O
+ ROCm, th
+ v
+rtua
+ m
+mory a
+ocat
+o
+ o
+ ROCm 
+s do
+
+ through chu
+k
+d m
+mory a
+ocat
+o
+. You ca
+ co
+tro
+ th
+ chu
+k s
+z
+ through `VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE` (
+
+ MB). Th
+ d
+fau
+t va
+u
+ 
+s s
+t at 256MB. Th
+ 
+arg
+r th
+ chu
+k s
+z
+ th
+ fast
+r th
+ p
+rforma
+c
+. Ho
+
+v
+r, s
+tt
+
+g 
+t too 
+arg
+ 
+
+
+ caus
+ OOM. So 
+f you 
+
+cou
+t
+r OOM 
+h
+
+ us
+
+g s
+
+p mod
+. Try r
+duc
+
+g th
+ chu
+k s
+z
+. It 
+s r
+comm
+
+d
+d to d
+f
+
+
+ th
+ chu
+k s
+z
+ as a po
+
+r of 2.
