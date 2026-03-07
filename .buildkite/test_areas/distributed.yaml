@@ -49,6 +49,27 @@ steps:
   - VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
+  mirror:
+  amd:
+    device: mi325_2
+    depends_on:
+    - image-build-amd
+    commands:
+      # Work around HIP bug tracked here: https://github.com/ROCm/hip/issues/3876
+      # TODO: Remove when the bug is fixed in a future ROCm release
+      - export TORCH_NCCL_BLOCKING_WAIT=1
+      # NOTE: The rest is in complete parity with CUDA tests
+      - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+      - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
+      - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
+      - DP_SIZE=2 pytest -v -s v1/entrypoints/openai/test_multi_api_servers.py
+      - pytest -v -s entrypoints/llm/test_collective_rpc.py
+      - pytest -v -s ./compile/fullgraph/test_basic_correctness.py
+      - pytest -v -s ./compile/test_wrapper.py
+      - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
+      - VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
+      - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
+      - pytest -v -s v1/worker/test_worker_memory_snapshot.py
 
 - label: Distributed Tests (4 GPUs)
   timeout_in_minutes: 50
@@ -108,6 +129,40 @@ steps:
   - cd new_weight_syncing
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_nccl.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_ipc.py
+  mirror:
+  amd:
+    device: mi325_4
+    depends_on:
+    - image-build-amd
+    commands:
+    # Work around HIP bug tracked here: https://github.com/ROCm/hip/issues/3876
+    # TODO: Remove when the bug is fixed in a future ROCm release
+    - export TORCH_NCCL_BLOCKING_WAIT=1
+    # NOTE: The rest is in complete parity with CUDA tests
+    - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
+    - PP_SIZE=2 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
+    - TP_SIZE=4 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
+    - PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
+    - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
+    - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
+    - python3 ../examples/offline_inference/data_parallel.py --enforce-eager
+    - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+    - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
+    - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
+    - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py
+    - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py
+    - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
+    - pytest -v -s distributed/test_utils.py
+    - pytest -v -s compile/fullgraph/test_basic_correctness.py
+    - pytest -v -s distributed/test_pynccl.py
+    - pytest -v -s distributed/test_events.py
+    - pytest -v -s distributed/test_symm_mem_allreduce.py
+    - cd ../examples/offline_inference
+    - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
+    - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
+    - cd new_weight_syncing
+    - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_nccl.py
+    - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_ipc.py
 
 - label: Distributed Tests (8 GPUs)(H100)
   timeout_in_minutes: 10
@@ -141,7 +196,7 @@ steps:
   - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
 
-- label: Distributed Tests (2 GPUs)(H100)
+- label: Distributed Tests (2 GPUs)(H100-MI325)
   timeout_in_minutes: 15
   device: h100
   optional: true
@@ -152,6 +207,16 @@ steps:
     # - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/offline_inference/new_weight_syncing/rlhf_async_new_apis.py --- failing, need to re-enable
     - VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
     - pytest -v -s tests/v1/distributed/test_dbo.py
+  mirror:
+    amd:
+      device: mi325_2
+      depends_on:
+      - image-build-amd
+      commands:
+      - pytest -v -s tests/distributed/test_context_parallel.py
+      - python3 examples/offline_inference/new_weight_syncing/rlhf_async_new_apis.py
+      - VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
+      - pytest -v -s tests/v1/distributed/test_dbo.py
 
 - label: Distributed Tests (2 GPUs)(B200)
   device: b200

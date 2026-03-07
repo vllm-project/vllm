@@ -12,6 +12,11 @@ steps:
     # Test standard language models, excluding a subset of slow tests
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m 'core_model and (not slow_test)'
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: Language Models Tests (Extra Standard) %N
   timeout_in_minutes: 45
@@ -27,6 +32,16 @@ steps:
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
+      commands:
+      - export TORCH_NCCL_BLOCKING_WAIT=1
+      # NOTE: The rest is in complete parity with CUDA tests
+      - pip freeze | grep -E 'torch'
+      - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: Language Models Tests (Hybrid) %N
   timeout_in_minutes: 75
@@ -42,6 +57,16 @@ steps:
     # Shard hybrid language model tests
     - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
+      commands:
+      - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      # NOTE: The rest is in complete parity with CUDA tests
+      - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
+      - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: Language Models Test (Extended Generation) # 80min
   timeout_in_minutes: 110
