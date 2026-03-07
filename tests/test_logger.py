@@ -511,6 +511,40 @@ def test_streaming_complete_logs_full_text_content():
         assert call_args[5] == "streaming_complete"
 
 
+def test_request_logger_includes_structured_request_id():
+    """Test that log_inputs and log_outputs include request_id as structured field."""
+    mock_logger = MagicMock()
+
+    with patch("vllm.entrypoints.logger.logger", mock_logger):
+        request_logger = RequestLogger(max_log_len=None)
+
+        request_logger.log_inputs(
+            request_id="test-structured-123",
+            prompt="The capital of France is",
+            prompt_token_ids=[1, 2, 3],
+            prompt_embeds=None,
+            params=None,
+            lora_request=None,
+        )
+
+        call_kwargs = mock_logger.info.call_args.kwargs
+        assert "extra" in call_kwargs, "extra parameter should be passed to logger"
+        assert call_kwargs["extra"]["request_id"] == "test-structured-123"
+
+        mock_logger.reset_mock()
+
+        request_logger.log_outputs(
+            request_id="test-structured-456",
+            outputs="Test output",
+            output_token_ids=[4, 5, 6],
+            finish_reason="stop",
+        )
+
+        call_kwargs = mock_logger.info.call_args.kwargs
+        assert "extra" in call_kwargs, "extra parameter should be passed to logger"
+        assert call_kwargs["extra"]["request_id"] == "test-structured-456"
+
+
 # Add vllm prefix to make sure logs go through the vllm logger
 test_logger = init_logger("vllm.test_logger")
 
