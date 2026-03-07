@@ -244,8 +244,7 @@ def _get_grouped_gemm_params(
     device = w1.device
 
     # Assumes all ranks have the same max_num_batched_tokens
-    max_tokens_across_dp = get_dp_group().world_size * max_tokens
-    max_tokens = min(max_tokens_across_dp, envs.VLLM_FUSED_MOE_CHUNK_SIZE)
+    max_tokens = get_dp_group().world_size * max_tokens
 
     # This is the maximum GroupedGemm M size that we expect to run
     # the grouped_gemm with.
