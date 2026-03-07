@@ -233,10 +233,12 @@ class ModelArchConfigConvertorBase:
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in (
+            "AXK1",
             "deepseek_v2",
             "deepseek_v3",
             "deepseek_v32",
             "deepseek_mtp",
+            "glm_moe_dsa",
             "glm4_moe_lite",
             "glm4_moe_lite_mtp",
             "kimi_k2",
@@ -244,6 +246,7 @@ class ModelArchConfigConvertorBase:
             "longcat_flash",
             "pangu_ultra_moe",
             "pangu_ultra_moe_mtp",
+            "bailing_hybrid",
         ):
             return self.hf_text_config.kv_lora_rank is not None
         elif self.hf_text_config.model_type == "eagle":
@@ -251,7 +254,13 @@ class ModelArchConfigConvertorBase:
             # underlying architecture
             return (
                 self.hf_text_config.model.model_type
-                in ("deepseek_v2", "deepseek_v3", "deepseek_v32", "deepseek_mtp")
+                in (
+                    "AXK1",
+                    "deepseek_v2",
+                    "deepseek_v3",
+                    "deepseek_v32",
+                    "deepseek_mtp",
+                )
                 and self.hf_text_config.kv_lora_rank is not None
             )
         return False
@@ -419,6 +428,11 @@ class Qwen3NextMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
 
 
+class Qwen3_5MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_num_hidden_layers(self) -> int:
+        return getattr(self.hf_text_config, "mtp_num_hidden_layers", 0)
+
+
 class PanguUltraMoeMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
@@ -444,6 +458,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "nemotron-nas": NemotronNasModelArchConfigConvertor,
     "deepseek_mtp": DeepSeekMTPModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
+    "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
     "mimo_mtp": MimoMTPModelArchConfigConvertor,
     "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,

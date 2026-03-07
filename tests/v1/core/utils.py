@@ -174,6 +174,7 @@ def create_requests(
     num_tokens: int = 10,
     mm_hashes_list: list[list[str]] | None = None,
     mm_positions: list[list[PlaceholderRange]] | None = None,
+    ignore_eos: bool = False,
     max_tokens: int = 16,
     stop_token_ids: list[int] | None = None,
     prompt_logprobs: int | None = None,
@@ -188,11 +189,12 @@ def create_requests(
 
     block_hasher = get_request_block_hasher(block_size, sha256)
     sampling_params = SamplingParams(
-        ignore_eos=False,
+        ignore_eos=ignore_eos,
         max_tokens=max_tokens,
         stop_token_ids=stop_token_ids,
         prompt_logprobs=prompt_logprobs,
     )
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
     requests = []
 
     if mm_hashes_list is not None:
@@ -250,7 +252,6 @@ def create_requests(
             sampling_params=sampling_params,
             pooling_params=None,
             mm_features=mm_features if mm_features else None,
-            eos_token_id=EOS_TOKEN_ID,
             block_hasher=block_hasher,
         )
         requests.append(request)

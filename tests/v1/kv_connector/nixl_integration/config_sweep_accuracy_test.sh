@@ -12,6 +12,7 @@ tp_configs=(
   "GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny" # MLA case
   "GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny"
   "GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=1 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny"
+  "GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=google/gemma-3-4b-it VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192" # SW model
 )
 dp_ep_configs=(
 "DP_EP=1 GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny" # MLA+P-TP1, D-DPEP=2 (TP=1)
@@ -26,15 +27,28 @@ else
   configs=("${tp_configs[@]}")
 fi
 
+if [[ -n "${ENABLE_HMA_FLAG:-}" ]]; then
+  # Append ENABLE_HMA_FLAG=1 to each config in the selected array
+  echo "ENABLE_HMA_FLAG is set, appending ENABLE_HMA_FLAG=1 to each config"
+  for i in "${!configs[@]}"; do
+    configs[$i]="ENABLE_HMA_FLAG=1 ${configs[$i]}"
+  done
+fi
+
 run_tests() {
   local label=$1
   local extra_args=$2
 
   echo "=== Running tests (${label}) ==="
   for cfg in "${configs[@]}"; do
+    local -a cfg_parts extra_args_parts
+    read -r -a cfg_parts <<< "$cfg"
+    read -r -a extra_args_parts <<< "$extra_args"
+
     echo "-> Running with ${cfg} ${extra_args:+and ${extra_args}}"
     # Use 'env' to safely set variables without eval
-    if ! env ${cfg} bash "${SCRIPT}" ${extra_args}; then
+    # keep argv splitting safe and SC2086-clean via arrays.
+    if ! env "${cfg_parts[@]}" bash "${SCRIPT}" "${extra_args_parts[@]}"; then
       echo "❌ Test failed for config: ${cfg} ${extra_args:+(${extra_args})}"
       exit 1
     fi

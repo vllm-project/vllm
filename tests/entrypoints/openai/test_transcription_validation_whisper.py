@@ -109,6 +109,23 @@ async def test_long_audio_request(mary_had_lamb, whisper_client):
 
 
 @pytest.mark.asyncio
+async def test_invalid_audio_file(whisper_client):
+    """Corrupted audio should surface as HTTP 400."""
+    invalid_audio = io.BytesIO(b"not a valid audio file")
+    invalid_audio.name = "invalid.wav"
+
+    with pytest.raises(openai.BadRequestError) as exc_info:
+        await whisper_client.audio.transcriptions.create(
+            model=MODEL_NAME,
+            file=invalid_audio,
+            language="en",
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "Invalid or unsupported audio file" in exc_info.value.message
+
+
+@pytest.mark.asyncio
 async def test_completion_endpoints(whisper_client):
     # text to text model
     with pytest.raises(openai.NotFoundError):
@@ -273,3 +290,30 @@ async def test_audio_with_max_tokens(whisper_client, mary_had_lamb):
     out_text = out["text"]
     out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
     assert len(out_tokens) < 450  # ~Whisper max output len
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fixture_name", "expected_lang", "expected_text"),
+    [
+        ("mary_had_lamb", "en", ["Mary had a little lamb"]),
+        ("foscolo", "it", ["zacinto", "sacre"]),
+    ],
+    ids=["english", "italian"],
+)
+async def test_language_auto_detect(
+    whisper_client, fixture_name, expected_lang, expected_text, request
+):
+    """Auto-detect language when no language param is provided."""
+    audio_file = request.getfixturevalue(fixture_name)
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=audio_file,
+        response_format="verbose_json",
+        temperature=0.0,
+    )
+    assert transcription.language == expected_lang
+    text_lower = transcription.text.lower()
+    assert any(word.lower() in text_lower for word in expected_text), (
+        f"Expected {expected_lang} text but got: {transcription.text}"
+    )

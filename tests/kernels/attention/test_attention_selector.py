@@ -103,21 +103,20 @@ def test_backend_selection(
 
                     if name == "TRITON_MLA" and block_size == 1:
                         # TRITON_MLA doesn't support block_size == 1
-                        with pytest.raises(ValueError) as exc_info:
+                        with pytest.raises(ValueError):
                             get_attn_backend(
-                                16, torch.float16, None, block_size, use_mla=use_mla
+                                576, torch.float16, None, block_size, use_mla=use_mla
                             )
-                        assert f"The selected backend, {name}" in str(exc_info.value)
                     else:
                         # Valid backend-block_size combination
                         backend = get_attn_backend(
-                            16, torch.float16, None, block_size, use_mla=use_mla
+                            576, torch.float16, None, block_size, use_mla=use_mla
                         )
                         expected = name
                         assert backend.get_name() == expected
                 else:
                     backend = get_attn_backend(
-                        16, torch.float16, None, block_size, use_mla=use_mla
+                        32, torch.float16, None, block_size, use_mla=use_mla
                     )
                     expected = "ROCM_ATTN"
                     assert backend.get_name() == expected
@@ -291,3 +290,103 @@ def test_invalid_backend():
     ):
         # Invalid backend name should raise ValueError when creating enum
         AttentionConfig(backend=AttentionBackendEnum["INVALID"])
+
+
+@pytest.mark.parametrize("auto_value", ["auto", "AUTO", "Auto"])
+def test_auto_backend_string(auto_value: str):
+    """Test that 'auto' string value triggers automatic backend selection."""
+    # Using "auto" should result in backend=None (automatic selection)
+    attention_config = AttentionConfig(backend=auto_value)
+    assert attention_config.backend is None
+
+
+def test_auto_backend_selection_behavior():
+    """Test that 'auto' backend behaves same as None (automatic selection)."""
+    # Create config with explicit "auto"
+    auto_config = AttentionConfig(backend="auto")
+
+    # Create config with None (default)
+    none_config = AttentionConfig(backend=None)
+
+    # Both should have backend=None
+    assert auto_config.backend is None
+    assert none_config.backend is None
+
+    # Both configs should result in the same automatic backend selection
+    vllm_config_auto = VllmConfig(attention_config=auto_config)
+    vllm_config_none = VllmConfig(attention_config=none_config)
+
+    with (
+        set_current_vllm_config(vllm_config_auto),
+        patch("vllm.platforms.current_platform", CpuPlatform()),
+    ):
+        backend_auto = get_attn_backend(16, torch.float16, None, 16)
+
+    _cached_get_attn_backend.cache_clear()
+
+    with (
+        set_current_vllm_config(vllm_config_none),
+        patch("vllm.platforms.current_platform", CpuPlatform()),
+    ):
+        backend_none = get_attn_backend(16, torch.float16, None, 16)
+
+    # Both should select the same backend
+    assert backend_auto.get_name() == backend_none.get_name()
+
+
+@pytest.mark.parametrize(
+    "backend_name,flash_attn_version,should_succeed",
+    [
+        ("FLASH_ATTN", 3, True),  # FA3 supports per-head quant scales
+        ("FLASH_ATTN", 2, False),  # FA2 does not support per-head quant scales
+        ("FLASHINFER", None, False),  # FlashInfer does not support
+        ("FLEX_ATTENTION", None, False),  # Flex does not support
+    ],
+)
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="Attention backend FA3 is not supported on ROCm. This test can't succeed.",
+)
+def test_per_head_quant_scales_backend_selection(
+    backend_name: str, flash_attn_version: int | None, should_succeed: bool
+):
+    """Test backend selection when use_per_head_quant_scales=True."""
+    # Clear cache to ensure fresh backend selection
+    _cached_get_attn_backend.cache_clear()
+
+    attention_config = AttentionConfig(
+        backend=AttentionBackendEnum[backend_name],
+        flash_attn_version=flash_attn_version,
+    )
+    vllm_config = VllmConfig(attention_config=attention_config)
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch("vllm.platforms.current_platform", CudaPlatform()),
+    ):
+        if backend_name == "FLASH_ATTN" and flash_attn_version == 3:
+            if not torch.cuda.is_available():
+                pytest.skip("FA3 requires CUDA")
+            capability = torch.cuda.get_device_capability()
+            if capability[0] != 9:
+                pytest.skip("FA3 is only supported on Hopper (SM 9.x) GPUs")
+
+        if should_succeed:
+            backend = get_attn_backend(
+                head_size=128,
+                dtype=torch.float16,
+                kv_cache_dtype="fp8",
+                block_size=64,
+                use_per_head_quant_scales=True,
+            )
+            assert backend.get_name() == backend_name
+        else:
+            with pytest.raises(ValueError) as exc_info:
+                get_attn_backend(
+                    head_size=128,
+                    dtype=torch.float16,
+                    kv_cache_dtype="fp8",
+                    block_size=64,
+                    use_per_head_quant_scales=True,
+                )
+            assert backend_name in str(exc_info.value)
