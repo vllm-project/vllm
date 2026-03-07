@@ -833,6 +833,11 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 "Encoder self-attention is not implemented for FlashAttentionImpl"
             )
 
+    @property
+    def _kv_cache_layout_str(self) -> str:
+        """Get the KV cache layout string based on shuffle setting."""
+        return "SHUFFLE" if rocm_aiter_ops.is_shuffle_kv_cache_enabled() else "NHD"
+
     def extend_for_sliding_window(
         self,
         attn_metadata: AiterFlashAttentionMetadata,
@@ -872,7 +877,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             token_to_batch=swa_token_to_batch,
             seq_starts=swa_seq_starts,
             dequant=self.kv_cache_dtype.startswith("fp8"),
-            kv_cache_layout="NHD",
+            kv_cache_layout=self._kv_cache_layout_str,
             total_tokens=swa_total_tokens,
         )
 
@@ -967,9 +972,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 token_to_batch=token_to_batch[chunk_idx],
                 seq_starts=chunk_starts[chunk_idx],
                 dequant=self.kv_cache_dtype.startswith("fp8"),
-                kv_cache_layout="SHUFFLE"
-                if rocm_aiter_ops.is_shuffle_kv_cache_enabled()
-                else "NHD",
+                kv_cache_layout=self._kv_cache_layout_str,
                 total_tokens=total_token_per_batch[chunk_idx],
             )
 
