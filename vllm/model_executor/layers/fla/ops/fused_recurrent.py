@@ -106,16 +106,23 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
                 i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
             else:
                 i_t = 0
-            # Load state index and check for PAD_SLOT_ID (-1)
-            state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(
-                tl.int64
-            )
-            # Skip if state index is invalid (PAD_SLOT_ID = -1)
+            # Load state index and check for PAD_SLOT_ID (-1).
+            state_idx = tl.load(
+                ssm_state_indices + i_n * stride_indices_seq + i_t * stride_indices_tok
+            ).to(tl.int64)
+            # If state index is invalid (PAD_SLOT_ID = -1), write zeros to the
+            # output and return early. This is important for padded requests in
+            # CUDAGraph mode where `o` may be reused across replays.
             if state_idx < 0:
+                p_o_pad = p_o
+                zero = tl.zeros([BV], dtype=tl.float32).to(p_o.dtype.element_ty)
+                for _ in range(0, T):
+                    tl.store(p_o_pad, zero, mask=mask_v)
+                    p_o_pad += HV * V
                 return
             p_h0 = h0 + state_idx * stride_init_state_token
         else:
-            p_h0 = h0 + bos * HV * V * K
+            p_h0 = h0 + i_n * stride_init_state_token
         p_h0 = p_h0 + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
@@ -150,13 +157,20 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 
         # keep the states for multi-query tokens
         if INPLACE_FINAL_STATE:
-            # Load state index and check for PAD_SLOT_ID (-1)
-            final_state_idx = tl.load(
-                ssm_state_indices + i_n * stride_indices_seq + i_t
-            ).to(tl.int64)
-            # Only store if state index is valid (not PAD_SLOT_ID)
-            if final_state_idx >= 0:
-                p_ht = ht + final_state_idx * stride_final_state_token
+            if IS_CONTINUOUS_BATCHING:
+                # Load state index and check for PAD_SLOT_ID (-1).
+                final_state_idx = tl.load(
+                    ssm_state_indices
+                    + i_n * stride_indices_seq
+                    + i_t * stride_indices_tok
+                ).to(tl.int64)
+                # Only store if state index is valid (not PAD_SLOT_ID).
+                if final_state_idx >= 0:
+                    p_ht = ht + final_state_idx * stride_final_state_token
+                    p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
+                    tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+            else:
+                p_ht = ht + i_n * stride_final_state_token
                 p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
                 tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
         else:
@@ -175,6 +189,266 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         p_beta += HV * (V if IS_BETA_HEADWISE else 1)
 
 
+@triton.jit
+def fused_recurrent_gated_delta_rule_packed_decode_fwd_kernel(
+    mixed_qkv,
+    a,
+    b,
+    A_log,
+    dt_bias,
+    o,
+    h0,
+    ht,
+    ssm_state_indices,
+    scale,
+    stride_mixed_qkv_tok: tl.constexpr,
+    stride_a_tok: tl.constexpr,
+    stride_b_tok: tl.constexpr,
+    stride_init_state_token: tl.constexpr,
+    stride_final_state_token: tl.constexpr,
+    stride_indices_seq: tl.constexpr,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    SOFTPLUS_THRESHOLD: tl.constexpr,
+    USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
+):
+    """Fused recurrent kernel for decode-uniform (B=num_tokens, T=1).
+
+    - Reads Q/K/V directly from a packed `mixed_qkv` row: [Q | K | V].
+    - Fuses gated-delta gating (a/b -> g/beta) inside the recurrent kernel.
+    - Supports continuous batching via `ssm_state_indices` (PAD_SLOT_ID = -1).
+    """
+    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    i_n, i_hv = i_nh // HV, i_nh % HV
+    i_h = i_hv // (HV // H)
+
+    o_k = tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+    mask_k = o_k < K
+    mask_v = o_v < V
+    mask_h = mask_v[:, None] & mask_k[None, :]
+
+    state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq).to(tl.int64)
+
+    # Output tensor layout is [B, 1, HV, V] (contiguous). The size-1 time dim
+    # is elided in the address computation.
+    p_o = o + (i_n * HV + i_hv) * V + o_v
+
+    # If state index is invalid (PAD_SLOT_ID = -1), write zeros to the output
+    # and return early. This is important for padded requests in CUDAGraph mode
+    # where `o` may be reused across replays.
+    if state_idx < 0:
+        zero = tl.zeros([BV], dtype=tl.float32).to(p_o.dtype.element_ty)
+        tl.store(p_o, zero, mask=mask_v)
+        return
+
+    # Load initial state for this sequence/head.
+    p_h0 = h0 + state_idx * stride_init_state_token
+    p_h0 = p_h0 + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
+    b_h = tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
+
+    # Load q/k/v from packed `mixed_qkv` for this token.
+    p_mixed = mixed_qkv + i_n * stride_mixed_qkv_tok
+    q_off = i_h * K + o_k
+    k_off = (H * K) + i_h * K + o_k
+    v_off = (2 * H * K) + i_hv * V + o_v
+    b_q = tl.load(p_mixed + q_off, mask=mask_k, other=0).to(tl.float32)
+    b_k = tl.load(p_mixed + k_off, mask=mask_k, other=0).to(tl.float32)
+    b_v = tl.load(p_mixed + v_off, mask=mask_v, other=0).to(tl.float32)
+
+    if USE_QK_L2NORM_IN_KERNEL:
+        b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
+        b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
+    b_q = b_q * scale
+
+    # Fused gating:
+    # g = -exp(A_log) * softplus(a + dt_bias), beta = sigmoid(b)
+    a_val = tl.load(a + i_n * stride_a_tok + i_hv).to(tl.float32)
+    b_val = tl.load(b + i_n * stride_b_tok + i_hv).to(tl.float32)
+    A_log_val = tl.load(A_log + i_hv).to(tl.float32)
+    dt_bias_val = tl.load(dt_bias + i_hv).to(tl.float32)
+    x = a_val + dt_bias_val
+    softplus_x = tl.where(x <= SOFTPLUS_THRESHOLD, tl.log(1.0 + tl.exp(x)), x)
+    g_val = -tl.exp(A_log_val) * softplus_x
+    beta_val = tl.sigmoid(b_val)
+    # Match the existing behavior where `beta` is written out in `b.dtype` and
+    # reloaded as float32 inside the recurrent kernel.
+    beta_val = beta_val.to(b.dtype.element_ty).to(tl.float32)
+
+    # Recurrent update for a single token (T=1).
+    b_h *= exp(g_val)
+    b_v -= tl.sum(b_h * b_k[None, :], 1)
+    b_v *= beta_val
+    b_h += b_v[:, None] * b_k[None, :]
+    b_o = tl.sum(b_h * b_q[None, :], 1)
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
+
+    # Store final state (in-place).
+    p_ht = ht + state_idx * stride_final_state_token
+    p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
+    tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+
+
+def fused_recurrent_gated_delta_rule_packed_decode_fwd(
+    mixed_qkv: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    scale: float,
+    initial_state: torch.Tensor,
+    out: torch.Tensor,
+    ssm_state_indices: torch.Tensor,
+    use_qk_l2norm_in_kernel: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Decode-only fast path (uniform batching): fused packed-QKV recurrent.
+
+    Expects:
+    - mixed_qkv: [B, 2*H*K + HV*V] (packed [Q|K|V] per token)
+    - a/b: [B, HV]
+    - out: [B, 1, HV, V] (contiguous)
+    - initial_state: [S, HV, V, K], updated in-place using `ssm_state_indices`.
+    """
+    if mixed_qkv.ndim != 2:
+        raise ValueError(
+            f"`mixed_qkv` must be a 2D tensor (got ndim={mixed_qkv.ndim})."
+        )
+    if mixed_qkv.stride(-1) != 1:
+        raise ValueError("`mixed_qkv` must be contiguous in the last dim.")
+    if a.ndim != 2 or b.ndim != 2:
+        raise ValueError(
+            f"`a` and `b` must be 2D tensors (got a.ndim={a.ndim}, b.ndim={b.ndim})."
+        )
+    if a.stride(-1) != 1 or b.stride(-1) != 1:
+        raise ValueError("`a`/`b` must be contiguous in the last dim.")
+    if ssm_state_indices.ndim != 1:
+        raise ValueError(
+            f"`ssm_state_indices` must be 1D for packed decode (got ndim={ssm_state_indices.ndim})."
+        )
+    if not out.is_contiguous():
+        raise ValueError("`out` must be contiguous.")
+
+    if not torch.is_floating_point(mixed_qkv):
+        raise ValueError("`mixed_qkv` must be a floating tensor.")
+    if not torch.is_floating_point(a) or not torch.is_floating_point(b):
+        raise ValueError("`a`/`b` must be floating tensors.")
+    if not torch.is_floating_point(A_log) or not torch.is_floating_point(dt_bias):
+        raise ValueError("`A_log`/`dt_bias` must be floating tensors.")
+    if not torch.is_floating_point(initial_state) or not torch.is_floating_point(out):
+        raise ValueError("`initial_state`/`out` must be floating tensors.")
+
+    dev = mixed_qkv.device
+    if (
+        a.device != dev
+        or b.device != dev
+        or A_log.device != dev
+        or dt_bias.device != dev
+        or initial_state.device != dev
+        or out.device != dev
+        or ssm_state_indices.device != dev
+    ):
+        raise ValueError("All inputs must be on the same device.")
+
+    B = mixed_qkv.shape[0]
+    if a.shape[0] != B or b.shape[0] != B:
+        raise ValueError(
+            f"Mismatched batch sizes: mixed_qkv.shape[0]={B}, a.shape[0]={a.shape[0]}, b.shape[0]={b.shape[0]}."
+        )
+    if ssm_state_indices.shape[0] != B:
+        raise ValueError(
+            f"`ssm_state_indices` must have shape [B] (got {tuple(ssm_state_indices.shape)}; expected ({B},))."
+        )
+
+    if initial_state.ndim != 4:
+        raise ValueError(
+            f"`initial_state` must be a 4D tensor (got ndim={initial_state.ndim})."
+        )
+    if initial_state.stride(-1) != 1:
+        raise ValueError("`initial_state` must be contiguous in the last dim.")
+    HV, V, K = initial_state.shape[-3:]
+    if a.shape[1] != HV or b.shape[1] != HV:
+        raise ValueError(
+            f"`a`/`b` must have shape [B, HV] with HV={HV} (got a.shape={tuple(a.shape)}, b.shape={tuple(b.shape)})."
+        )
+    if A_log.numel() != HV or dt_bias.numel() != HV:
+        raise ValueError(
+            f"`A_log` and `dt_bias` must have {HV} elements (got A_log.numel()={A_log.numel()}, dt_bias.numel()={dt_bias.numel()})."
+        )
+
+    if out.shape != (B, 1, HV, V):
+        raise ValueError(
+            f"`out` must have shape {(B, 1, HV, V)} (got out.shape={tuple(out.shape)})."
+        )
+
+    qkv_dim = mixed_qkv.shape[1]
+    qk_dim = qkv_dim - HV * V
+    if qk_dim <= 0 or qk_dim % 2 != 0:
+        raise ValueError(
+            f"Invalid packed `mixed_qkv` last dim={qkv_dim} for HV={HV}, V={V}."
+        )
+    q_dim = qk_dim // 2
+    if q_dim % K != 0:
+        raise ValueError(f"Invalid packed Q size {q_dim}: must be divisible by K={K}.")
+    H = q_dim // K
+    if H <= 0 or HV % H != 0:
+        raise ValueError(
+            f"Invalid head config inferred from mixed_qkv: H={H}, HV={HV}."
+        )
+
+    BK = triton.next_power_of_2(K)
+    if triton.cdiv(K, BK) != 1:
+        raise ValueError(
+            f"Packed decode kernel only supports NK=1 (got K={K}, BK={BK})."
+        )
+
+    BV = min(triton.next_power_of_2(V), 32)
+    num_stages = 3
+    num_warps = 1
+
+    stride_mixed_qkv_tok = mixed_qkv.stride(0)
+    stride_a_tok = a.stride(0)
+    stride_b_tok = b.stride(0)
+    stride_init_state_token = initial_state.stride(0)
+    stride_final_state_token = initial_state.stride(0)
+    stride_indices_seq = ssm_state_indices.stride(0)
+
+    NV = triton.cdiv(V, BV)
+    grid = (NV, B * HV)
+    fused_recurrent_gated_delta_rule_packed_decode_fwd_kernel[grid](
+        mixed_qkv=mixed_qkv,
+        a=a,
+        b=b,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        o=out,
+        h0=initial_state,
+        ht=initial_state,
+        ssm_state_indices=ssm_state_indices,
+        scale=scale,
+        stride_mixed_qkv_tok=stride_mixed_qkv_tok,
+        stride_a_tok=stride_a_tok,
+        stride_b_tok=stride_b_tok,
+        stride_init_state_token=stride_init_state_token,
+        stride_final_state_token=stride_final_state_token,
+        stride_indices_seq=stride_indices_seq,
+        H=H,
+        HV=HV,
+        K=K,
+        V=V,
+        BK=BK,
+        BV=BV,
+        SOFTPLUS_THRESHOLD=20.0,
+        USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
+    return out, initial_state
+
+
 def fused_recurrent_gated_delta_rule_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -183,6 +457,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     beta: torch.Tensor,
     scale: float,
     initial_state: torch.Tensor,
+    out: torch.Tensor | None = None,
     inplace_final_state: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
@@ -198,7 +473,22 @@ def fused_recurrent_gated_delta_rule_fwd(
     num_stages = 3
     num_warps = 1
 
-    o = q.new_empty(NK, *v.shape)
+    if out is None:
+        o = q.new_empty(NK, *v.shape)
+    else:
+        if out.shape != v.shape:
+            raise ValueError(
+                f"`out` must have the same shape as `v` (got out.shape={tuple(out.shape)}, v.shape={tuple(v.shape)})"
+            )
+        if not torch.is_floating_point(out):
+            raise ValueError("`out` must be a floating tensor.")
+        if out.device != q.device:
+            raise ValueError(
+                f"`out` must be on the same device as `q` (got out.device={out.device}, q.device={q.device})"
+            )
+        if not out.is_contiguous():
+            raise ValueError("`out` must be contiguous.")
+        o = out.unsqueeze(0)
     if inplace_final_state:
         final_state = initial_state
     else:
@@ -263,6 +553,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         beta: torch.Tensor,
         scale: float,
         initial_state: torch.Tensor,
+        out: torch.Tensor | None = None,
         inplace_final_state: bool = True,
         cu_seqlens: torch.LongTensor | None = None,
         ssm_state_indices: torch.Tensor | None = None,
@@ -277,6 +568,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
             beta=beta.contiguous(),
             scale=scale,
             initial_state=initial_state,
+            out=out,
             inplace_final_state=inplace_final_state,
             cu_seqlens=cu_seqlens,
             ssm_state_indices=ssm_state_indices,
@@ -295,6 +587,7 @@ def fused_recurrent_gated_delta_rule(
     beta: torch.Tensor = None,
     scale: float = None,
     initial_state: torch.Tensor = None,
+    out: torch.Tensor | None = None,
     inplace_final_state: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
@@ -384,6 +677,7 @@ def fused_recurrent_gated_delta_rule(
         beta,
         scale,
         initial_state,
+        out,
         inplace_final_state,
         cu_seqlens,
         ssm_state_indices,
