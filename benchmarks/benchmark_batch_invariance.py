@@ -37,12 +37,13 @@ Example usage:
 """
 
 import contextlib
+import json
 import os
 import random
+import subprocess
+import sys
+import tempfile
 import time
-
-from vllm import LLM, SamplingParams
-from vllm.platforms import current_platform
 
 
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
@@ -81,7 +82,7 @@ def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
     return base_prompt
 
 
-def run_benchmark_with_batch_invariant(
+def run_benchmark(
     model: str,
     tp_size: int,
     max_batch_size: int,
@@ -93,24 +94,24 @@ def run_benchmark_with_batch_invariant(
     gpu_mem_util: float,
     max_model_len: int,
     backend: str,
-    batch_invariant: bool,
     seed: int = 12345,
 ) -> dict:
     """
     Run the benchmark with the specified configuration.
 
+    Must be called in a subprocess where VLLM_BATCH_INVARIANT is already set
+    in the environment before vllm is imported.
+
     Returns a dict with timing and throughput metrics.
     """
+    from vllm import LLM, SamplingParams
+
     random.seed(seed)
 
-    # Set environment variables
-    if batch_invariant:
-        os.environ["VLLM_BATCH_INVARIANT"] = "1"
-    else:
-        os.environ["VLLM_BATCH_INVARIANT"] = "0"
+    batch_invariant_val = os.getenv("VLLM_BATCH_INVARIANT", "0")
 
     print(f"\n{'=' * 80}")
-    print(f"BENCHMARK: VLLM_BATCH_INVARIANT={int(batch_invariant)}")
+    print(f"BENCHMARK: VLLM_BATCH_INVARIANT={batch_invariant_val}")
     print(f"  Model: {model}")
     print(f"  TP Size: {tp_size}")
     print(f"  Backend: {backend}")
@@ -228,81 +229,113 @@ def run_benchmark_with_batch_invariant(
                 llm.shutdown()
 
 
-def main():
-    # Check platform support
-    if not (current_platform.is_cuda() and current_platform.has_device_capability(90)):
-        print("ERROR: Requires CUDA and >= Hopper (SM90)")
-        print(f"Current platform: {current_platform.device_type}")
-        if current_platform.is_cuda():
-            print(f"Device capability: {current_platform.get_device_capability()}")
-        return 1
+_RESULT_FILE_ENV = "_VLLM_BENCH_RESULT_FILE"
 
-    # Read configuration from environment
-    model = os.getenv("VLLM_BENCH_MODEL", "Qwen/Qwen3-1.7B")
-    tp_size = int(os.getenv("VLLM_BENCH_TP_SIZE", "1"))
-    max_batch_size = int(os.getenv("VLLM_BENCH_BATCH_SIZE", "128"))
-    num_trials = int(os.getenv("VLLM_BENCH_NUM_TRIALS", "5"))
-    min_prompt = int(os.getenv("VLLM_BENCH_MIN_PROMPT", "1024"))
-    max_prompt = int(os.getenv("VLLM_BENCH_MAX_PROMPT", "2048"))
-    max_tokens = int(os.getenv("VLLM_BENCH_MAX_TOKENS", "128"))
-    temperature = float(os.getenv("VLLM_BENCH_TEMPERATURE", "0.0"))
-    gpu_mem_util = float(os.getenv("VLLM_BENCH_GPU_MEMORY_UTILIZATION", "0.4"))
-    max_model_len = int(os.getenv("VLLM_BENCH_MAX_MODEL_LEN", "5120"))
-    backend = os.getenv("VLLM_BENCH_BACKEND", "FLASH_ATTN")
+
+def _read_bench_config() -> dict:
+    """Read benchmark configuration from VLLM_BENCH_* environment variables."""
+    return {
+        "model": os.getenv("VLLM_BENCH_MODEL", "Qwen/Qwen3-1.7B"),
+        "tp_size": int(os.getenv("VLLM_BENCH_TP_SIZE", "1")),
+        "max_batch_size": int(os.getenv("VLLM_BENCH_BATCH_SIZE", "128")),
+        "num_trials": int(os.getenv("VLLM_BENCH_NUM_TRIALS", "5")),
+        "min_prompt": int(os.getenv("VLLM_BENCH_MIN_PROMPT", "1024")),
+        "max_prompt": int(os.getenv("VLLM_BENCH_MAX_PROMPT", "2048")),
+        "max_tokens": int(os.getenv("VLLM_BENCH_MAX_TOKENS", "128")),
+        "temperature": float(os.getenv("VLLM_BENCH_TEMPERATURE", "0.0")),
+        "gpu_mem_util": float(os.getenv("VLLM_BENCH_GPU_MEMORY_UTILIZATION", "0.4")),
+        "max_model_len": int(os.getenv("VLLM_BENCH_MAX_MODEL_LEN", "5120")),
+        "backend": os.getenv("VLLM_BENCH_BACKEND", "FLASH_ATTN"),
+    }
+
+
+def worker_main():
+    """Entry point for subprocess workers.
+
+    Runs the benchmark and writes JSON results to the file path
+    specified by the _VLLM_BENCH_RESULT_FILE environment variable.
+    stdout/stderr go directly to the terminal.
+    """
+    from vllm.platforms import current_platform
+
+    if not (current_platform.is_cuda() and current_platform.has_device_capability(90)):
+        print("ERROR: Requires CUDA and >= Hopper (SM90)", file=sys.stderr)
+        sys.exit(1)
+
+    result_path = os.environ.get(_RESULT_FILE_ENV)
+    if not result_path:
+        print(
+            f"ERROR: {_RESULT_FILE_ENV} not set (this script should be "
+            "launched by the driver, not invoked with --worker directly)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    cfg = _read_bench_config()
+    result = run_benchmark(**cfg)
+    with open(result_path, "w") as f:
+        json.dump(result, f)
+
+
+def _run_phase(batch_invariant: bool) -> dict:
+    """Spawn a subprocess with the given VLLM_BATCH_INVARIANT value.
+
+    stdout/stderr are inherited so the worker's output streams directly
+    to the terminal.  Results are passed back via a temp file.
+    """
+    fd, result_path = tempfile.mkstemp(suffix=".json", prefix="vllm_bench_")
+    os.close(fd)
+    try:
+        env = os.environ.copy()
+        env["VLLM_BATCH_INVARIANT"] = "1" if batch_invariant else "0"
+        env[_RESULT_FILE_ENV] = result_path
+        proc = subprocess.run(
+            [sys.executable, __file__, "--worker"],
+            env=env,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"Worker (VLLM_BATCH_INVARIANT="
+                f"{'1' if batch_invariant else '0'}) "
+                f"failed with exit code {proc.returncode}"
+            )
+        with open(result_path) as f:
+            return json.load(f)
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(result_path)
+
+
+def main():
+    cfg = _read_bench_config()
 
     print("\n" + "=" * 80)
     print("VLLM BATCH INVARIANCE BENCHMARK")
     print("=" * 80)
     print("\nConfiguration:")
-    print(f"  Model: {model}")
-    print(f"  Tensor Parallel Size: {tp_size}")
-    print(f"  Attention Backend: {backend}")
-    print(f"  Max Batch Size: {max_batch_size}")
-    print(f"  Number of Trials: {num_trials}")
-    print(f"  Prompt Length Range: {min_prompt}-{max_prompt} words")
-    print(f"  Max Tokens to Generate: {max_tokens}")
-    print(f"  Temperature: {temperature}")
-    print(f"  GPU Memory Utilization: {gpu_mem_util}")
-    print(f"  Max Model Length: {max_model_len}")
+    print(f"  Model: {cfg['model']}")
+    print(f"  Tensor Parallel Size: {cfg['tp_size']}")
+    print(f"  Attention Backend: {cfg['backend']}")
+    print(f"  Max Batch Size: {cfg['max_batch_size']}")
+    print(f"  Number of Trials: {cfg['num_trials']}")
+    print(f"  Prompt Length Range: {cfg['min_prompt']}-{cfg['max_prompt']} words")
+    print(f"  Max Tokens to Generate: {cfg['max_tokens']}")
+    print(f"  Temperature: {cfg['temperature']}")
+    print(f"  GPU Memory Utilization: {cfg['gpu_mem_util']}")
+    print(f"  Max Model Length: {cfg['max_model_len']}")
     print("=" * 80)
 
-    # Run benchmark WITHOUT batch invariance (baseline)
+    # Each phase runs in its own subprocess so VLLM_BATCH_INVARIANT is
+    # picked up at import time by the vllm module.
     print("\n" + "=" * 80)
     print("PHASE 1: Running WITHOUT batch invariance (baseline)")
     print("=" * 80)
-    baseline_results = run_benchmark_with_batch_invariant(
-        model=model,
-        tp_size=tp_size,
-        max_batch_size=max_batch_size,
-        num_trials=num_trials,
-        min_prompt=min_prompt,
-        max_prompt=max_prompt,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        gpu_mem_util=gpu_mem_util,
-        max_model_len=max_model_len,
-        backend=backend,
-        batch_invariant=False,
-    )
+    baseline_results = _run_phase(batch_invariant=False)
 
-    # Run benchmark WITH batch invariance
     print("\n" + "=" * 80)
     print("PHASE 2: Running WITH batch invariance")
     print("=" * 80)
-    batch_inv_results = run_benchmark_with_batch_invariant(
-        model=model,
-        tp_size=tp_size,
-        max_batch_size=max_batch_size,
-        num_trials=num_trials,
-        min_prompt=min_prompt,
-        max_prompt=max_prompt,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        gpu_mem_util=gpu_mem_util,
-        max_model_len=max_model_len,
-        backend=backend,
-        batch_invariant=True,
-    )
+    batch_inv_results = _run_phase(batch_invariant=True)
 
     # Compare results
     print("\n" + "=" * 80)
@@ -377,4 +410,7 @@ def main():
 
 
 if __name__ == "__main__":
-    exit(main())
+    if "--worker" in sys.argv:
+        worker_main()
+    else:
+        exit(main())
