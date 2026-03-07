@@ -22,6 +22,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
+    SharedExpertsOrder,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     count_expert_num_tokens,
@@ -1017,15 +1021,15 @@ class FusedMoEKernelModularImpl:
         self,
         prepare_finalize: FusedMoEPrepareAndFinalizeModular,
         fused_experts: FusedMoEExpertsModular,
-        shared_experts: torch.nn.Module | None = None,
-        moe_parallel_config: FusedMoEParallelConfig | None = None,
+        shared_experts: SharedExperts | None,
         inplace: bool = False,
     ):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
         self.shared_experts = shared_experts
-        self.moe_parallel_config = moe_parallel_config
         self.inplace = inplace
+        moe_parallel_config = fused_experts.moe_config.moe_parallel_config
+        self.moe_parallel_config = moe_parallel_config
         self.is_dp_ep = (
             moe_parallel_config is not None
             and moe_parallel_config.dp_size > 1
@@ -1209,6 +1213,17 @@ class FusedMoEKernelModularImpl:
             expert_num_tokens=c_expert_num_tokens,
             expert_num_tokens_cpu=c_expert_num_tokens_cpu,
         )
+
+    def _maybe_apply_shared_experts(
+        self,
+        shared_experts_input: torch.Tensor | None,
+    ):
+        if self.shared_experts is not None:
+            assert shared_experts_input is not None
+            self.shared_experts.apply(
+                shared_experts_input,
+                SharedExpertsOrder.INTERNAL,
+            )
 
     def _prepare(
         self,
@@ -1413,15 +1428,6 @@ class FusedMoEKernelModularImpl:
                 shared_experts_input is the original hidden_states (full
                 dimension) needed by the shared expert MLP.
         """
-        shared_output: torch.Tensor | None = None
-
-        # For latent MoE: shared experts need the original hidden_states
-        # (full hidden_size), not the latent-projected version used by
-        # routed experts.
-        se_hidden_states = (
-            shared_experts_input if shared_experts_input is not None else hidden_states
-        )
-
         if not self.prepare_finalize.supports_async():
             assert not dbo_enabled()
 
@@ -1433,8 +1439,7 @@ class FusedMoEKernelModularImpl:
                 apply_router_weight_on_input,
                 self.fused_experts.finalize_weight_and_reduce_impl(),
             )
-            if self.shared_experts is not None:
-                shared_output = self.shared_experts(se_hidden_states)
+            self._maybe_apply_shared_experts(shared_experts_input)
         else:
             finalize_ret = self.prepare_finalize.finalize_async(
                 output,
@@ -1444,8 +1449,7 @@ class FusedMoEKernelModularImpl:
                 apply_router_weight_on_input,
                 self.fused_experts.finalize_weight_and_reduce_impl(),
             )
-            if self.shared_experts is not None:
-                shared_output = self.shared_experts(se_hidden_states)
+            self._maybe_apply_shared_experts(shared_experts_input)
 
             # TODO(lucas): refactor this in the alternative schedules followup
             # currently unpack if we have hook + receiver pair or just
@@ -1468,11 +1472,7 @@ class FusedMoEKernelModularImpl:
 
             receiver()
 
-        if self.shared_experts is None:
-            return output
-        else:
-            assert shared_output is not None
-            return shared_output, output
+        return output
 
     def apply(
         self,
@@ -1486,7 +1486,7 @@ class FusedMoEKernelModularImpl:
         expert_map: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         shared_experts_input: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """
         This function computes a Mixture of Experts (MoE) layer using two sets
         of weights, w1 and w2, and top-k gating mechanism.
@@ -1629,8 +1629,7 @@ class FusedMoEKernel:
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         fused_experts: FusedMoEExperts,
-        shared_experts: torch.nn.Module | None = None,
-        moe_parallel_config: FusedMoEParallelConfig | None = None,
+        shared_experts: SharedExperts | None = None,
         inplace: bool = False,
     ):
         super().__init__()
@@ -1645,7 +1644,6 @@ class FusedMoEKernel:
                 prepare_finalize,
                 fused_experts,
                 shared_experts,
-                moe_parallel_config,
                 inplace,
             )
 

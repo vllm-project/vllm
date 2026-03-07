@@ -125,7 +125,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         raise NotImplementedError
 
     def apply_monolithic(
@@ -133,5 +133,5 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         raise NotImplementedError
