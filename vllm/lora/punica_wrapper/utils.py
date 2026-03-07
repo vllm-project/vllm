@@ -148,3 +148,20 @@ def convert_mapping(
         embeddings_indices,
         indices_len,
     )
+
+
+_lora_stream: torch.cuda.Stream | None = None
+
+
+def lora_stream() -> torch.cuda.Stream | None:
+    """
+    Ensures lora_stream is initialized only once
+    """
+    global _lora_stream
+
+    from vllm.platforms import current_platform
+
+    if _lora_stream is None and current_platform.is_cuda_alike():
+        _lora_stream = torch.cuda.Stream(priority=1)
+
+    return _lora_stream

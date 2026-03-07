@@ -13,10 +13,71 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import current_stream, direct_register_custom_op
 
 from .base import BaseLayerWithLoRA
 from .utils import _get_lora_device
+
+# Global registry with stable string keys
+_lora_layer_registry: dict[str, "BaseLinearLayerWithLoRA"] = {}
+_layer_counter = 0
+
+
+def _lora_apply_impl(
+    x: torch.Tensor,
+    bias: torch.Tensor | None,
+    layer_key: str,
+    output_size: int,
+) -> torch.Tensor:
+    """Custom op implementation."""
+    layer = _lora_layer_registry[layer_key]
+
+    lora_delta = torch.zeros(
+        (x.shape[0], output_size),
+        dtype=x.dtype,
+        device=x.device,
+    )
+
+    lora_stream = layer.punica_wrapper.lora_stream
+    lora_stream.wait_stream(current_stream())
+    lora_delta.record_stream(lora_stream)
+    with torch.cuda.stream(lora_stream):
+        output = layer.base_layer.quant_method.apply(layer.base_layer, x, bias)
+        output_flat = output.flatten(0, 1) if output.ndim == 3 else output
+    layer.punica_wrapper.add_lora_linear(
+        lora_delta,
+        x,
+        layer.lora_a_stacked,
+        layer.lora_b_stacked,
+        1.0,
+        layer.output_slices,
+    )
+
+    current_stream().wait_stream(lora_stream)
+    output_flat.add_(lora_delta)
+
+    return output_flat
+
+
+def _lora_apply_fake(
+    x: torch.Tensor,
+    bias: torch.Tensor | None,
+    layer_key: str,
+    output_size: int,
+) -> torch.Tensor:
+    """Fake implementation for torch.compile."""
+    return torch.empty((x.shape[0], output_size), dtype=x.dtype, device=x.device)
+
+
+# Register the custom op
+direct_register_custom_op(
+    op_name="lora_apply",
+    op_func=_lora_apply_impl,
+    mutates_args=[],
+    fake_impl=_lora_apply_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
+lora_apply = torch.ops.vllm.lora_apply
 
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
@@ -31,6 +92,12 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.output_slices: tuple[int, ...]
         self.output_size: int
         self.n_slices: int
+
+        # Use stable string key
+        global _layer_counter
+        self._layer_key = f"lora_{_layer_counter}"
+        _layer_counter += 1
+        _lora_layer_registry[self._layer_key] = self
 
     def create_lora_weights(
         self,
@@ -120,6 +187,18 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         )
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        original_shape = x.shape if x.ndim == 3 else None
+        x_flat = x.flatten(0, 1) if x.ndim == 3 else x
+
+        # Use custom op wrapper to hide record_stream from torch.compile
+        output_flat = lora_apply(x_flat, bias, self._layer_key, self.output_size)
+        if original_shape is not None:
+            return output_flat.view(*original_shape[:-1], -1)
+        return output_flat
+
+    """
+
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
 
         original_shape = output.shape if output.ndim == 3 else None
@@ -143,6 +222,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.reshape(original_shape)
 
         return output
+
+    """
 
     @property
     def weight(self) -> torch.Tensor:
