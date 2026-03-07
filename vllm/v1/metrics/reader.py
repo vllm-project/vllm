@@ -138,7 +138,7 @@ def get_metrics_snapshot() -> list[Metric]:
                     )
                 )
         else:
-            raise AssertionError(f"Unknown metric type {metric.type}")
+            raise ValueError(f"Unknown metric type {metric.type}")
 
     return collected
 

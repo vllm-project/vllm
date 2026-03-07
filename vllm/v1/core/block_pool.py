@@ -123,7 +123,7 @@ class BlockHashToBlockMap:
         return len(self._cache)
 
     def _unexpected_blocks_type(self, blocks: Any) -> None:
-        raise AssertionError(f"Invalid KV cache block type {type(blocks)}")
+        raise TypeError(f"Invalid KV cache block type {type(blocks)}")
 
 
 class BlockPool:
