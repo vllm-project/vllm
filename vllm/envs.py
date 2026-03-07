@@ -244,6 +244,7 @@ if TYPE_CHECKING:
     VLLM_CUDA_COMPATIBILITY_PATH: str | None = None
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
+    VLLM_CONTIGUOUS_BLOCK_ALLOC: bool = False
 
 
 def get_default_cache_root():
@@ -1627,6 +1628,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # scaling command in elastic EP.
     "VLLM_ELASTIC_EP_DRAIN_REQUESTS": lambda: bool(
         int(os.getenv("VLLM_ELASTIC_EP_DRAIN_REQUESTS", "0"))
+    ),
+    # When enabled, freed KV cache blocks are buffered and sorted by block_id
+    # before re-entering the free list, improving physical memory contiguity
+    # on allocation. Compatible with prefix caching (eviction order degrades
+    # from LRU to block_id order, but cache hits still work correctly).
+    "VLLM_CONTIGUOUS_BLOCK_ALLOC": lambda: bool(
+        int(os.getenv("VLLM_CONTIGUOUS_BLOCK_ALLOC", "0"))
     ),
 }
 

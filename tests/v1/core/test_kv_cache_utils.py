@@ -391,6 +391,29 @@ def test_free_kv_cache_block_queue_popleft_n():
         assert block.next_free_block is None
 
 
+def test_free_kv_cache_block_queue_contiguous_alloc_pending_free(monkeypatch):
+    monkeypatch.setenv("VLLM_CONTIGUOUS_BLOCK_ALLOC", "1")
+    if hasattr(kv_cache_utils.envs.__getattr__, "cache_clear"):
+        kv_cache_utils.envs.__getattr__.cache_clear()
+
+    blocks = [KVCacheBlock(block_id=i) for i in range(4)]
+    queue = FreeKVCacheBlockQueue([])
+
+    queue.append_n([blocks[2], blocks[0]])
+    queue.append(blocks[3])
+    queue.remove(blocks[0])
+
+    assert queue.num_free_blocks == 2
+    # Pending blocks are merged and sorted by block_id when consumed.
+    assert [queue.popleft().block_id, queue.popleft().block_id] == [2, 3]
+
+    with pytest.raises(ValueError, match="No free blocks available"):
+        queue.popleft()
+
+    if hasattr(kv_cache_utils.envs.__getattr__, "cache_clear"):
+        kv_cache_utils.envs.__getattr__.cache_clear()
+
+
 def test_free_kv_cache_block_queue_get_all_free_blocks():
     # Create a list of KVCacheBlock objects
     blocks = [KVCacheBlock(block_id=i) for i in range(5)]
