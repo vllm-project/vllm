@@ -215,8 +215,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 )
 
                 # get the block size of m from customized config or default config
+                # token_lora_mapping and lora_ids are available from meta_args()
+                # in add_lora_fused_moe(), so they're not returned here
                 (
-                    token_lora_mapping,
                     sorted_token_ids_lora,
                     expert_ids_lora,
                     num_tokens_post_padded_lora,
@@ -236,14 +237,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 moe_state_dict["num_tokens_post_padded_lora"] = (
                     num_tokens_post_padded_lora
                 )
-                moe_state_dict["token_lora_mapping"] = token_lora_mapping
-
-                if sorted_token_ids_lora is not None:
-                    expert_ids_lora = expert_ids_lora.view(self.max_loras, -1)
-                    sorted_token_ids_lora = sorted_token_ids_lora.view(
-                        self.max_loras, -1
-                    )
-                #
 
                 self.punica_wrapper.add_lora_fused_moe(
                     input.view(-1, top_k, input.shape[-1]),
@@ -260,7 +253,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     expand_config,  ## pass the expand config
                     self.adapter_enabled,
                     fully_sharded=self.fully_sharded,
-                    token_lora_mapping=token_lora_mapping,
                 )
 
                 result = func(*args, **kwargs)
@@ -301,13 +293,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 num_tokens_post_padded_lora = moe_state_dict[
                     "num_tokens_post_padded_lora"
                 ]
-                token_lora_mapping = moe_state_dict.get("token_lora_mapping")
 
-                if sorted_token_ids_lora is not None:
-                    expert_ids_lora = expert_ids_lora.view(self.max_loras, -1)
-                    sorted_token_ids_lora = sorted_token_ids_lora.view(
-                        self.max_loras, -1
-                    )
                 intermediate_cache2 = moe_state_dict["intermediate_cache2"]
                 intermediate_cache3 = args[0]
 
@@ -330,7 +316,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     True,
                     fully_sharded=self.fully_sharded,
                     offset=shard_size_w2 * self.tp_rank if self.fully_sharded else 0,
-                    token_lora_mapping=token_lora_mapping,
                 )
 
                 result = func(*args, **kwargs)

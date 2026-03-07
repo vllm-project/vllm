@@ -32,10 +32,6 @@ def round_up(x, base):
     return ((x + base - 1) // base) * base
 
 
-def CEILDIV(x, y):
-    return (x + y - 1) // y
-
-
 def assign_loras_to_tokens(num_tokens: int, num_sequences: int, max_loras: int):
     """
     Split `num_tokens` into `num_sequences` sequences.
@@ -142,33 +138,55 @@ def use_fused_moe_lora_kernel(
     fully_sharded=False,
     offset=0,
 ):
-    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+    num_virtual_experts = num_experts * max_loras
+    max_num_tokens_padded = topk_ids.numel() + num_virtual_experts * (block_size - 1)
     max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
-    max_num_m_blocks = CEILDIV(max_num_tokens_padded, block_size)
+    max_num_m_blocks = (max_num_tokens_padded + block_size - 1) // block_size
 
-    # init output tensors
     sorted_token_ids = torch.empty(
-        (max_loras * max_num_tokens_padded,),
+        (max_num_tokens_padded,),
         dtype=torch.int32,
+        device=topk_ids.device,
     )
-    expert_ids = torch.empty((max_loras * max_num_m_blocks,), dtype=torch.int32)
-    num_tokens_post_padded = torch.empty((max_loras,), dtype=torch.int32)
-    adapter_enabled = torch.ones(max_loras + 1, dtype=torch.int32)
+    expert_ids = torch.empty(
+        (max_num_m_blocks,),
+        dtype=torch.int32,
+        device=topk_ids.device,
+    )
+    num_tokens_post_padded = torch.empty(
+        (1,), dtype=torch.int32, device=topk_ids.device
+    )
+    adapter_enabled = torch.ones(
+        (max_loras + 1,), dtype=torch.int32, device=topk_ids.device
+    )
 
-    # call kernel
+    # Generate random permutation for lora_ids (slot -> lora_id mapping)
+    # IMPORTANT: Only permute valid lora_ids [0, max_loras), not [0, max_loras]
+    # Valid lora_ids in token_lora_mapping are [0, max_loras-1]
+    # If we permute max_loras+1 values, a valid lora_id could map to slot=max_loras,
+    # causing virtual_expert >= num_virtual_experts (num_experts * max_loras)
+    lora_ids = torch.randperm(max_loras, dtype=torch.int32, device=topk_ids.device)
+
+    # Build inverse mapping: lora_id_to_slot[lora_id] = slot
+    lora_id_to_slot = torch.full(
+        (max_loras,), -1, dtype=torch.int32, device=topk_ids.device
+    )
+    for slot, lora_id in enumerate(lora_ids):
+        lora_id_to_slot[lora_id] = slot
+
     ops.moe_lora_align_block_size(
         topk_ids,
+        adapter_enabled,
         token_lora_mapping,
-        num_experts,
-        block_size,
+        lora_id_to_slot,
+        num_virtual_experts,
+        max_loras,  # num_loras (all adapters enabled, so same as max_loras)
         max_loras,
-        max_num_tokens_padded,
-        max_num_m_blocks,
+        block_size,
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
-        adapter_enabled,
-        lora_ids,
+        None,  # expert_map
     )
 
     config = {
@@ -182,13 +200,6 @@ def use_fused_moe_lora_kernel(
     }
 
     mul_routed_weight = False
-    expert_ids = expert_ids.view(max_loras, -1)
-    sorted_token_ids = sorted_token_ids.view(max_loras, -1)
-
-    # num_active_loras is the number of active LoRAs
-    # (max_loras + 1 to include no-lora case)
-    # Stored as CPU tensor to match the kernel API (torch.compile compatibility)
-    num_active_loras = torch.tensor([max_loras + 1], dtype=torch.int32, device="cpu")
 
     fused_moe_lora(
         output,
@@ -200,10 +211,9 @@ def use_fused_moe_lora_kernel(
         expert_ids,
         num_tokens_post_padded,
         token_lora_mapping,
+        lora_ids,
         max_lora_rank,
         top_k_num,
-        lora_ids,
-        num_active_loras,
         adapter_enabled,
         config["BLOCK_SIZE_M"],
         config["BLOCK_SIZE_N"],
@@ -398,10 +408,9 @@ def use_fused_moe_lora_kernel_naive(
 
     adapter_enabled = torch.ones(max_loras + 1, dtype=torch.int32)
 
-    # num_active_loras is the number of active LoRAs
-    # (max_loras + 1 to include no-lora case)
-    # Stored as CPU tensor to match the kernel API (torch.compile compatibility)
-    num_active_loras = torch.tensor([max_loras + 1], dtype=torch.int32, device="cpu")
+    # Generate random permutation for lora_ids (slot -> lora_id mapping)
+    # IMPORTANT: Only permute valid lora_ids [0, max_loras)
+    lora_ids = torch.randperm(max_loras, dtype=torch.int32, device=topk_ids.device)
 
     fused_moe_lora(
         output,
@@ -413,10 +422,9 @@ def use_fused_moe_lora_kernel_naive(
         expert_ids,
         num_tokens_post_padded,
         token_lora_mapping,
+        lora_ids,
         max_lora_rank,
         top_k_num,
-        lora_ids,
-        num_active_loras,
         adapter_enabled,
         config["BLOCK_SIZE_M"],
         config["BLOCK_SIZE_N"],
