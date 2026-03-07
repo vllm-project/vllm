@@ -15,11 +15,11 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 
@@ -31,6 +31,8 @@ class TritonMLABackend(MLACommonBackend):
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "bfloat16",
+        "fp8",
+        "fp8_e4m3",
     ]
 
     @staticmethod
@@ -93,11 +95,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "TritonMLAImpl"
             )
 
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError(
-                "TritonMLA V1 with FP8 KV cache not yet supported"
-            )
-
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
     ):
@@ -120,8 +117,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        if self.kv_cache_dtype.startswith("fp8"):
-            raise NotImplementedError("FP8 Triton MLA not yet supported")
+        # Determine if we're using FP8 KV cache
+        use_fp8 = self.kv_cache_dtype.startswith("fp8")
 
         if type(q) is tuple:
             q = torch.cat(q, dim=-1)
@@ -129,10 +126,15 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert isinstance(q, torch.Tensor)
         B = q.shape[0]
         q_num_heads = q.shape[1]
+        # Cast FP8 q to bfloat16 for Blackwell compatibility (FP8 tl.dot
+        # may produce invalid instructions) and for V up-proj torch.bmm.
+        if use_fp8 and q.dtype not in (torch.float16, torch.bfloat16):
+            q = q.to(torch.bfloat16)
+        out_dtype = q.dtype
         o = torch.zeros(
-            B, q_num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
+            B, q_num_heads, self.kv_lora_rank, dtype=out_dtype, device=q.device
         )
-        lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
+        lse = torch.zeros(B, q_num_heads, dtype=out_dtype, device=q.device)
 
         # For batch invariance, use only 1 split to ensure deterministic reduction
         num_kv_splits = 1 if vllm_is_batch_invariant() else 4
@@ -151,12 +153,18 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             device=q.device,
         )
 
+        # View as FP8 and pass scale for in-kernel dequantization.
+        if use_fp8:
+            kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(current_platform.fp8_dtype())
+            k_scale = layer._k_scale
+        else:
+            k_scale = None
+
         # Add a head dim of 1
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.unsqueeze(2)
         kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
         PAGE_SIZE = kv_c_and_k_pe_cache.size(1)
 
-        # Run MQA
         decode_attention_fwd(
             q,
             kv_c_and_k_pe_cache,
@@ -169,6 +177,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             num_kv_splits,
             self.scale,
             PAGE_SIZE,
+            k_scale=k_scale,
         )
 
         return o, lse
