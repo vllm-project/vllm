@@ -161,7 +161,6 @@ DTYPEs = [torch.bfloat16]
 def is_nyi_config(config: Config) -> bool:
     # We know these configs to be legitimate. but still fail.
     info = expert_info(config.fused_experts_type)
-
     if info.needs_matching_quant:
         # The triton kernels expect both per-act-token-quant and
         # per-out-ch-quant or neither.
@@ -249,14 +248,14 @@ def test_modular_kernel_combinations_multigpu(
     dtype: torch.dtype,
     quant_config: TestMoEQuantConfig | None,
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
-    fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
+    fused_experts_type: mk.FusedMoEExperts,
     world_size: int,
     pytestconfig,
 ):
     if cuda_device_count_stateless() < world_size:
         pytest.skip(
             f"Not enough GPUs available to run, got "
-            f"{cuda_device_count_stateless()} exepected "
+            f"{cuda_device_count_stateless()} expected "
             f"{world_size}."
         )
 
@@ -289,7 +288,7 @@ def test_modular_kernel_combinations_singlegpu(
     dtype: torch.dtype,
     quant_config: TestMoEQuantConfig | None,
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
-    fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
+    fused_experts_type: mk.FusedMoEExperts,
     world_size: int,
     pytestconfig,
     workspace_init,

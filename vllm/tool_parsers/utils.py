@@ -93,21 +93,6 @@ def extract_intermediate_diff(curr: str, old: str) -> str:
     return diff
 
 
-def find_all_indices(string: str, substring: str) -> list[int]:
-    """
-    Find all (starting) indices of a substring in a given string. Useful for
-    tool call extraction
-    """
-    indices = []
-    index = -1
-    while True:
-        index = string.find(substring, index + 1)
-        if index == -1:
-            break
-        indices.append(index)
-    return indices
-
-
 # partial_json_parser doesn't support extra data and
 # JSONDecoder.raw_decode doesn't support partial JSON
 def partial_json_loads(input_str: str, flags: Allow) -> tuple[Any, int]:
