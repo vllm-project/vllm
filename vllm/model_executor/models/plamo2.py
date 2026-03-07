@@ -36,10 +36,10 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
-from vllm.model_executor.layers.mamba.ops.mamba_ssm import selective_state_update
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import selective_state_update
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -438,8 +438,8 @@ class Plamo2MambaMixer(MambaBase, PluggableLayer):
                 B,
                 C,
                 D,
+                dt_bias,
                 z=gate_d.reshape(num_decodes, -1, self.head_dim),
-                dt_bias=dt_bias,
                 dt_softplus=True,
                 state_batch_indices=state_indices_tensor_d,
                 out=preallocated_ssm_out_d.view(num_decodes, -1, self.head_dim),
