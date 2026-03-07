@@ -263,7 +263,6 @@ def is_valid_sequence(
     min_len: int = 4,
     max_prompt_len: int = 1024,
     max_total_len: int = 2048,
-    skip_min_output_len_check: bool = False,
 ) -> bool:
     """
     Validate a sequence based on prompt and output lengths.
@@ -274,7 +273,7 @@ def is_valid_sequence(
     """
     # Check for invalid conditions
     prompt_too_short = prompt_len < min_len
-    output_too_short = (not skip_min_output_len_check) and (output_len < min_len)
+    output_too_short = output_len < min_len
     prompt_too_long = prompt_len > max_prompt_len
     combined_too_long = (prompt_len + output_len) > max_total_len
 
@@ -1278,14 +1277,16 @@ class ShareGPTDataset(BenchmarkDataset):
             lora_request = self.get_random_lora_request(
                 max_loras=max_loras, lora_path=lora_path
             )
-            prompt_ids = tokenizer(prompt).input_ids
-            completion_ids = tokenizer(completion).input_ids
+            # Count tokens on the raw text, without any automatic chat
+            # templates or special tokens (e.g., BOS/EOS) so that token
+            # accounting matches the legacy serving benchmark behavior.
+            prompt_ids = tokenizer(prompt, add_special_tokens=False).input_ids
+            completion_ids = tokenizer(completion, add_special_tokens=False).input_ids
             prompt_len = len(prompt_ids)
             new_output_len = len(completion_ids) if output_len is None else output_len
             if not is_valid_sequence(
                 prompt_len,
                 new_output_len,
-                skip_min_output_len_check=output_len is not None,
             ):
                 continue
             if image_path := entry.get("image"):
