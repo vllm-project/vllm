@@ -905,7 +905,14 @@ class WorkerProc:
         """Entrypoint for the thread which handles outputs asynchronously."""
         while True:
             output = self.async_output_queue.get()
-            self.enqueue_output(output)
+            try:
+                self.enqueue_output(output)
+            except Exception as e:
+                # If an error happens during the output handling, such as
+                # a cuda error in AsyncGPUModelRunnerOutput, we handle it
+                # as a failure.
+                logger.exception("Async output thread hit an exception.")
+                self.enqueue_output(e)
 
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
