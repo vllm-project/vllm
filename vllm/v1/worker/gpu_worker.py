@@ -6,6 +6,7 @@ import gc
 import os
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
+from datetime import timedelta
 from types import NoneType
 from typing import TYPE_CHECKING, Any
 
@@ -278,7 +279,7 @@ class Worker(WorkerBase):
 
             # Now take memory snapshot after NCCL is initialized
             gc.collect()
-            torch.cuda.empty_cache()
+            torch.accelerator.empty_cache()
 
             # take current memory snapshot
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
@@ -464,6 +465,10 @@ class Worker(WorkerBase):
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
 
+        # Update local config with adjusted num blocks after profiling,
+        # so that it's available to the warmup stage.
+        self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
+
         # Init kv cache connector here, because it requires
         # `kv_cache_config`.
         # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
@@ -579,13 +584,13 @@ class Worker(WorkerBase):
 
         if self.use_v2_model_runner:
             # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.
-            warmup_kernels(self.model_runner)
+            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
         elif get_pp_group().is_last_rank:
             # V1: Warm up sampler and preallocate memory buffer for logits and other
             # sampling related tensors of max possible shape to avoid memory
             # fragmentation issue.
             # NOTE: This is called after `capture_model` on purpose to prevent
-            # memory buffers from being cleared by `torch.cuda.empty_cache`.
+            # memory buffers from being cleared by `torch.accelerator.empty_cache`.
             max_num_reqs = min(
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens,
@@ -938,8 +943,18 @@ def init_worker_distributed_environment(
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_method = distributed_init_method or "env://"
+
+    timeout = None
+    if parallel_config.distributed_timeout_seconds is not None:
+        timeout = timedelta(seconds=parallel_config.distributed_timeout_seconds)
+
     init_distributed_environment(
-        parallel_config.world_size, rank, init_method, local_rank, backend
+        parallel_config.world_size,
+        rank,
+        init_method,
+        local_rank,
+        backend,
+        timeout,
     )
 
     ensure_model_parallel_initialized(
