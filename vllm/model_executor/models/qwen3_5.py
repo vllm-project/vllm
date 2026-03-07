@@ -139,7 +139,7 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
     ) -> MergedColumnParallelLinear:
         return MergedColumnParallelLinear(
             input_size=hidden_size,
-            output_sizes=[key_dim, key_dim, value_dim, value_dim],
+            output_sizes=[key_dim * 2 + value_dim, value_dim],
             bias=False,
             quant_config=quant_config,
             prefix=prefix,
@@ -372,8 +372,8 @@ class Qwen3_5Model(Qwen3NextModel):
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
             # GDN
-            ("in_proj_qkvz", "in_proj_qkv", (0, 1, 2)),
-            ("in_proj_qkvz", "in_proj_z", 3),
+            ("in_proj_qkvz", "in_proj_qkv", 0),
+            ("in_proj_qkvz", "in_proj_z", 1),
             ("in_proj_ba", "in_proj_b", 0),
             ("in_proj_ba", "in_proj_a", 1),
         ]
