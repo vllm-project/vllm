@@ -78,19 +78,21 @@ class VllmIRLoweringPass(VllmInductorPass):
         node = match.nodes[0]
         ir_op = get_ir_op(node)
         assert ir_op is not None, "Expected vLLM IR op"
-
-        bound_args, bound_kwargs = ir_op.apply_arg_defaults(*node.args, **node.kwargs)
-        assert not bound_kwargs  # I think there should never be kwargs here
+        assert not node.kwargs  # I think there should never be kwargs here
 
         # Select and record the implementation, using fake args
-        fake_args = fx.map_arg(bound_args, lambda arg: arg.meta["val"])
+        fake_args = fx.map_arg(node.args, lambda arg: arg.meta["val"])
         ir_op_impl = ir_op.dispatch(*fake_args)
         self.selected_impls[ir_op.name][node.name] = ir_op_impl.provider
 
         # replace_by_example wants node args, not the fake tensors
         # TODO(luka): Use aot_export_module to get functionalized graph
         # TODO(luka): Cache the fx_replacement to avoid re-tracing the same impl
-        match.replace_by_example(ir_op_impl.impl_fn, bound_args)
+
+        # Defaults not present on node.args but required for replacement tracing
+        bound_args = ir_op._signature.bind(*node.args)
+        bound_args.apply_defaults()
+        match.replace_by_example(ir_op_impl.impl_fn, bound_args.args)
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
