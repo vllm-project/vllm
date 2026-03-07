@@ -365,6 +365,8 @@ def make_nvfp4_moe_quant_config(
     w2_scale_2: torch.Tensor,
     a13_scale: torch.Tensor,
     a2_scale: torch.Tensor,
+    g1_alphas: torch.Tensor | None = None,
+    g2_alphas: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     if backend == NvFp4MoeBackend.MARLIN:
         return nvfp4_w4a16_moe_quant_config(
@@ -374,8 +376,10 @@ def make_nvfp4_moe_quant_config(
             w2_scale=w2_scale,
         )
 
-    g1_alphas = a13_scale * w13_scale_2
-    g2_alphas = a2_scale * w2_scale_2
+    if g1_alphas is None:
+        g1_alphas = a13_scale * w13_scale_2
+    if g2_alphas is None:
+        g2_alphas = a2_scale * w2_scale_2
     return nvfp4_moe_quant_config(
         g1_alphas=g1_alphas,
         g2_alphas=g2_alphas,
