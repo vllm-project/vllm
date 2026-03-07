@@ -458,3 +458,149 @@ def test_hermes_parser_non_streaming_tool_call_invalid_json(
 
     assert tool_call is not None
     assert not tool_call.tools_called
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Regression tests for issue #32152:
+# Hermes tool parser drops final JSON brace during streaming when MTP
+# (Multi-Token Prediction) batches closing tokens together.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _simulate_streaming_with_chunks(
+    chunks: list[str],
+    hermes_parser: Hermes2ProToolParser,
+    any_chat_request: ChatCompletionRequest,
+) -> list:
+    """Helper: feed pre-defined text chunks to the streaming parser."""
+    previous_text = ""
+    delta_messages = []
+    for chunk in chunks:
+        current_text = previous_text + chunk
+        delta = hermes_parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=chunk,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=any_chat_request,
+        )
+        previous_text = current_text
+        if delta is not None:
+            delta_messages.append(delta)
+    return delta_messages
+
+
+def test_hermes_parser_streaming_mtp_non_string_value(
+    hermes_parser: Hermes2ProToolParser,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """Issue #32152: arguments ending with a non-string value (integer)
+    had their closing brace swallowed when MTP batched the closing
+    tokens together, because the '"}' check failed."""
+    chunks = [
+        "<tool_call>",
+        "\n",
+        '{"name":',
+        ' "get_id",',
+        ' "arguments":',
+        ' {"id":',
+        " 42",
+        "}\n}\n</tool_call>",
+    ]
+    delta_messages = _simulate_streaming_with_chunks(
+        chunks, hermes_parser, any_chat_request
+    )
+
+    assert delta_messages[0].tool_calls[0].function.name == "get_id"
+    tool_call_args = "".join(
+        delta.tool_calls[0].function.arguments or "" for delta in delta_messages
+    )
+    parsed = json.loads(tool_call_args)
+    assert parsed == {"id": 42}
+
+
+def test_hermes_parser_streaming_mtp_boolean_value(
+    hermes_parser: Hermes2ProToolParser,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """Same class of bug as #32152 but with a boolean value."""
+    chunks = [
+        "<tool_call>",
+        "\n",
+        '{"name":',
+        ' "set_flag",',
+        ' "arguments":',
+        ' {"enabled":',
+        " true",
+        "}\n}\n</tool_call>",
+    ]
+    delta_messages = _simulate_streaming_with_chunks(
+        chunks, hermes_parser, any_chat_request
+    )
+
+    assert delta_messages[0].tool_calls[0].function.name == "set_flag"
+    tool_call_args = "".join(
+        delta.tool_calls[0].function.arguments or "" for delta in delta_messages
+    )
+    parsed = json.loads(tool_call_args)
+    assert parsed == {"enabled": True}
+
+
+def test_hermes_parser_streaming_mtp_fused_closing_chunk(
+    hermes_parser: Hermes2ProToolParser,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """MTP batches the closing quote, inner brace, outer brace, and
+    end tag into a single chunk. The parser must still emit the
+    remaining argument characters (the closing '"}')."""
+    chunks = [
+        "<tool_call>",
+        "\n",
+        '{"name":',
+        ' "get_weather",',
+        ' "arguments":',
+        ' {"city":',
+        ' "Paris',
+        '"}\n}\n</tool_call>',
+    ]
+    delta_messages = _simulate_streaming_with_chunks(
+        chunks, hermes_parser, any_chat_request
+    )
+
+    assert delta_messages[0].tool_calls[0].function.name == "get_weather"
+    tool_call_args = "".join(
+        delta.tool_calls[0].function.arguments or "" for delta in delta_messages
+    )
+    parsed = json.loads(tool_call_args)
+    assert parsed == {"city": "Paris"}
+
+
+def test_hermes_parser_streaming_mtp_nested_json(
+    hermes_parser: Hermes2ProToolParser,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """Nested JSON arguments with MTP closing chunk."""
+    chunks = [
+        "<tool_call>",
+        "\n",
+        '{"name":',
+        ' "search",',
+        ' "arguments":',
+        ' {"query":',
+        ' {"text":',
+        ' "hello"',
+        "}",
+        "}\n}\n</tool_call>",
+    ]
+    delta_messages = _simulate_streaming_with_chunks(
+        chunks, hermes_parser, any_chat_request
+    )
+
+    assert delta_messages[0].tool_calls[0].function.name == "search"
+    tool_call_args = "".join(
+        delta.tool_calls[0].function.arguments or "" for delta in delta_messages
+    )
+    parsed = json.loads(tool_call_args)
+    assert parsed == {"query": {"text": "hello"}}
