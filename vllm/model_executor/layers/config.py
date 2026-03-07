@@ -51,7 +51,9 @@ class AttentionConfig(VerifyAndUpdateConfig):
             backend=attention_config.backend,
             attn_selector_config=attn_selector_config,
         )
-        supported_kernel_block_sizes = backend_cls.get_supported_kernel_block_sizes()
+        ori_supported_kernel_block_sizes = (
+            backend_cls.get_supported_kernel_block_sizes()
+        )
         # clear the cache of attention backend to avoid influcing the
         # attention backend selection during inference runtime
         _cached_get_attn_backend.cache_clear()
@@ -59,17 +61,24 @@ class AttentionConfig(VerifyAndUpdateConfig):
             kernel_block_size.base
             if isinstance(kernel_block_size, MultipleOf)
             else kernel_block_size
-            for kernel_block_size in supported_kernel_block_sizes
+            for kernel_block_size in ori_supported_kernel_block_sizes
         ]
 
         kernel_block_alignment_size = min(supported_kernel_block_sizes)
         cache_config.mamba_alignment_kernel_block_size = kernel_block_alignment_size
         if cache_config.block_size is None:
             cache_config.block_size = kernel_block_alignment_size
-        elif cache_config.block_size not in supported_kernel_block_sizes:
-            raise ValueError(
-                f"Unexpected block_size {cache_config.block_size} for current"
-                f" attention backend {attention_config.backend},"
-                f" the supported block_sizes of {attention_config.backend}:"
-                f" {supported_kernel_block_sizes}"
+        else:
+            is_valid_block_size = any(
+                (cache_config.block_size % kernel_block_size.base == 0)
+                if isinstance(kernel_block_size, MultipleOf)
+                else (cache_config.block_size == kernel_block_size)
+                for kernel_block_size in ori_supported_kernel_block_sizes
             )
+            if not is_valid_block_size:
+                raise ValueError(
+                    f"Unexpected block_size {cache_config.block_size} for current"
+                    f" attention backend {attention_config.backend},"
+                    f" the supported block_sizes of {attention_config.backend}:"
+                    f" {supported_kernel_block_sizes}"
+                )
