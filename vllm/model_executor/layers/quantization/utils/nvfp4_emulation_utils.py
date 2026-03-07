@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 import torch
 
 from vllm.scalar_type import scalar_types
@@ -11,9 +13,10 @@ __all__ = [
 ]
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
+FLOAT4_E2M1_MAX_RECIPROCAL = 1 / FLOAT4_E2M1_MAX
 
-kE2M1ToFloat = torch.tensor(
-    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32
+kE2M1ToFloat_handle = SimpleNamespace(
+    val=torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32)
 )
 
 
@@ -29,8 +32,9 @@ def break_fp4_bytes(a, dtype):
     # Vectorized sign and magnitude extraction
     signs = (combined & 0x08).to(torch.bool)  # Sign bits
     abs_vals = (combined & 0x07).to(torch.long)
+
+    kE2M1 = kE2M1ToFloat_handle.val
     # Device-aware lookup and sign application
-    kE2M1 = kE2M1ToFloat.to(device=a.device)
     values = kE2M1[abs_vals] * torch.where(signs, -1.0, 1.0)
     # Reshape to final form
     return values.reshape(m, n * 2).to(dtype=dtype)
@@ -47,27 +51,62 @@ def convert_swizzled_to_linear(a_sf_swizzled: torch.Tensor, m, k, block_size):
 
 
 def dequantize_to_dtype(
-    tensor_fp4, tensor_sf, global_scale, dtype, device, block_size=16
+    tensor_fp4,
+    tensor_sf,
+    global_scale,
+    dtype,
+    device,
+    block_size=16,
+    swizzle: bool | None = True,
 ):
-    """Dequantize the fp4 tensor back to high precision."""
+    """Dequantize the fp4 tensor back to high precision.
+
+    Supports both 2D and 3D inputs:
+    - 2D: [m, packed_k] -> [m, k]
+    - 3D: [dim0, m, packed_k] -> [dim0, m, k]
+    """
     # Two fp4 values are packed into one uint8.
     assert tensor_fp4.dtype == torch.uint8
-    m, packed_k = tensor_fp4.shape
+
+    # We handle 3D tensors reshaping them to 2D.
+    is_3d = tensor_fp4.ndim == 3
+
+    if is_3d:
+        dim0, m, packed_k = tensor_fp4.shape
+        tensor_fp4 = tensor_fp4.reshape(-1, packed_k)
+        tensor_sf = tensor_sf.reshape(-1, tensor_sf.shape[-1])
+        global_scale = global_scale[:, None, None]
+    else:
+        m, packed_k = tensor_fp4.shape
+
     k = packed_k * 2
     tensor_f32 = break_fp4_bytes(tensor_fp4, torch.float32)
-    tensor_f32 = tensor_f32.reshape(m, k // block_size, block_size)
+    tensor_f32 = tensor_f32.reshape(-1, k // block_size, block_size)
     tensor_sf = tensor_sf.view(torch.float8_e4m3fn)
-    tensor_sf = convert_swizzled_to_linear(tensor_sf, m, k, block_size)
-    tensor_sf_dtype = tensor_sf.to(torch.float32) / global_scale
+
+    if swizzle:
+        tensor_sf = convert_swizzled_to_linear(  # noqa: E501
+            tensor_sf, tensor_f32.size(0), k, block_size
+        )
+
+    if is_3d:
+        tensor_sf = tensor_sf.reshape(dim0, m, k // block_size)
+    tensor_sf_dtype = tensor_sf.to(torch.float32) * global_scale
+
+    if is_3d:
+        tensor_f32 = tensor_f32.reshape(dim0, m, -1, block_size)
 
     # scale the tensor
-    out = (tensor_f32 * tensor_sf_dtype.unsqueeze(-1)).reshape(m, k)
+    out = tensor_f32 * tensor_sf_dtype.unsqueeze(-1)
+    out = out.reshape(*out.shape[:-2], -1)
+
     return out.to(dtype)
 
 
 def get_reciprocal(x):
     if isinstance(x, torch.Tensor):
-        return torch.where(x == 0, torch.tensor(0.0, dtype=x.dtype), 1.0 / x)
+        # torch.where yields operation not permitted when stream is capturing.
+        return 1.0 / (x + (x == 0) * 1e8)
     elif isinstance(x, (float, int)):
         return 0.0 if x == 0 else 1.0 / x
     else:
@@ -94,7 +133,7 @@ def ref_nvfp4_quant(x, global_scale, block_size):
     m, n = x.shape
     x = torch.reshape(x, (m, n // block_size, block_size))
     vec_max = torch.max(torch.abs(x), dim=-1, keepdim=True)[0].to(torch.float32)
-    scale = global_scale * (vec_max * get_reciprocal(FLOAT4_E2M1_MAX))
+    scale = global_scale * (vec_max * FLOAT4_E2M1_MAX_RECIPROCAL)
     scale = torch.clamp(scale, max=448, min=-448)
     scale = scale.to(torch.float8_e4m3fn).to(torch.float32)
     output_scale = get_reciprocal(scale * get_reciprocal(global_scale))
@@ -105,25 +144,41 @@ def ref_nvfp4_quant(x, global_scale, block_size):
     return cast_to_fp4(clipped_x), scale.squeeze(-1)
 
 
+def ref_nvfp4_quant_dequant(
+    x: torch.Tensor, global_scale: torch.Tensor, block_size: int
+) -> tuple[torch.Tensor, None]:
+    """
+    NVFP4 quantize-dequantize operation.
+
+    `global_scale` is expected to have a single element.
+    """
+    x_m, x_k = x.shape
+    output_dtype = x.dtype
+
+    # quantize input to (FP4 and interleaved block scale)
+    x_fp4, x_blockscale = ref_nvfp4_quant(x, global_scale, block_size)
+
+    # dequantize input
+    x_fp4 = x_fp4.reshape(x_m, x_k // block_size, block_size)
+    x_blockscale = x_blockscale.unsqueeze(-1) / global_scale
+    x_dq = (x_fp4 * x_blockscale).reshape(x_m, x_k).to(output_dtype)
+    del x_fp4, x_blockscale
+
+    return x_dq, None
+
+
 def run_nvfp4_emulations(
     x: torch.Tensor,
     input_global_scale: torch.Tensor,
     weight: torch.Tensor,
     weight_scale_swizzled: torch.Tensor,
     weight_global_scale: torch.Tensor,
+    swizzle: bool | None = True,
 ):
-    group_size = 16
-    x_m, x_k = x.shape
     output_dtype = x.dtype
+    group_size = 16
 
-    # quantize input to (FP4 and interleaved block scale)
-    x_fp4, x_blockscale = ref_nvfp4_quant(x, input_global_scale, group_size)
-
-    # dequantize input
-    x_fp4 = x_fp4.reshape(x_m, x_k // group_size, group_size)
-    x_blockscale = x_blockscale.unsqueeze(-1) / input_global_scale
-    x_dq = (x_fp4 * x_blockscale).reshape(x_m, x_k).to(output_dtype)
-    del x_fp4, x_blockscale
+    x_dq, _ = ref_nvfp4_quant_dequant(x, input_global_scale, block_size=group_size)
 
     # dequantize weight
     w_fp4 = weight.data.view(torch.uint8)
@@ -134,6 +189,7 @@ def run_nvfp4_emulations(
         output_dtype,
         x.device,
         group_size,
+        swizzle=swizzle,
     )
 
     # matmul
