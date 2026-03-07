@@ -88,7 +88,136 @@ class ShortConv(MambaBase, CustomOp):
         hidden_states: torch.Tensor,
         output: torch.Tensor,
     ):
-        return
+        forward_context = get_forward_context()
+
+        attn_metadata: AttentionMetadata = forward_context.attn_metadata
+        # Extract the layer-specific metadata from the top-level dictionary
+        if attn_metadata is not None:
+            attn_metadata = attn_metadata[self.prefix]
+
+        BCx, _ = self.in_proj(hidden_states)
+        B, C, x = BCx.chunk(3, dim=-1)
+
+        # Profile run (no metadata)
+        if attn_metadata is None:
+            Bx = (B * x).unsqueeze(0).transpose(1, 2)
+            padded_Bx = torch.nn.functional.pad(Bx, (self.L_cache - 1, 0))
+            conv_output = (
+                torch.nn.functional.conv1d(
+                    padded_Bx, self.conv.weight, self.conv.bias, groups=self.conv_dim
+                )
+                .squeeze(0)
+                .transpose(0, 1)
+            )
+            output_tensor, _ = self.out_proj(C * conv_output)
+            output[: hidden_states.shape[0]] = output_tensor
+            return
+
+        # Continuous Batching / Real Forward Pass
+        self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+        # conv_state shape usually (num_blocks, dim, L_cache - 1)
+        conv_state = self_kv_cache[0]
+
+        num_prefills = attn_metadata.num_prefills
+        num_decodes = attn_metadata.num_decode_tokens
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+        has_prefill = num_prefills > 0
+        has_decode = num_decodes > 0
+        num_actual_tokens = num_decodes + num_prefill_tokens
+
+        # Split tokens
+        B_d, B_p = torch.split(
+            B[:num_actual_tokens],
+            [num_decodes, num_prefill_tokens],
+            dim=0,
+        )
+        C_d, C_p = torch.split(
+            C[:num_actual_tokens],
+            [num_decodes, num_prefill_tokens],
+            dim=0,
+        )
+        x_d, x_p = torch.split(
+            x[:num_actual_tokens],
+            [num_decodes, num_prefill_tokens],
+            dim=0,
+        )
+        state_indices_d, state_indices_p = torch.split(
+            attn_metadata.state_indices_tensor,
+            [num_decodes, num_prefills],
+            dim=0,
+        )
+
+        conv_output_list = []
+
+        # Handle Prefill (Variable sequence lengths)
+        if has_prefill:
+            query_start_loc_p = attn_metadata.query_start_loc_p
+            for i in range(num_prefills):
+                # Use query_start_loc_p to get exact start/end bounds for each sequence
+                start_idx = query_start_loc_p[i]
+                end_idx = query_start_loc_p[i + 1]
+
+                Bx_seq = (
+                    (B_p[start_idx:end_idx] * x_p[start_idx:end_idx])
+                    .unsqueeze(0)
+                    .transpose(1, 2)
+                )
+                # Left pad with zeros
+                padded_Bx = torch.nn.functional.pad(Bx_seq, (self.L_cache - 1, 0))
+
+                out_seq = (
+                    torch.nn.functional.conv1d(
+                        padded_Bx,
+                        self.conv.weight,
+                        self.conv.bias,
+                        groups=self.conv_dim,
+                    )
+                    .squeeze(0)
+                    .transpose(0, 1)
+                )
+
+                conv_output_list.append(C_p[start_idx:end_idx] * out_seq)
+
+                # Update KV cache with the last (L_cache - 1) tokens
+                state_idx = state_indices_p[i]
+                cache_update = padded_Bx[0, :, -(self.L_cache - 1) :]
+                conv_state[state_idx] = cache_update.transpose(0, 1)
+
+        # Handle Decode (Single tokens using history)
+        if has_decode:
+            Bx_d = B_d * x_d  # Shape: (num_decodes, dim)
+
+            # Fetch past state for each decoding sequence
+            past_states = []
+            for i in range(num_decodes):
+                state_idx = state_indices_d[i]
+                # Extract state and transpose back to (dim, L_cache - 1)
+                past_state = conv_state[state_idx].transpose(0, 1)
+                past_states.append(past_state)
+
+            past_states_tensor = torch.stack(past_states)
+
+            # Append current token to past state: (num_decodes, dim, L_cache)
+            current_tokens = Bx_d.unsqueeze(-1)
+            combined_Bx = torch.cat([past_states_tensor, current_tokens], dim=-1)
+
+            # Compute 1D conv
+            out_d = torch.nn.functional.conv1d(
+                combined_Bx, self.conv.weight, self.conv.bias, groups=self.conv_dim
+            ).squeeze(-1)  # (num_decodes, dim)
+
+            conv_output_list.insert(0, C_d * out_d)
+
+            # Update KV cache by shifting left and adding new token
+            for i in range(num_decodes):
+                state_idx = state_indices_d[i]
+                new_state = combined_Bx[i, :, 1:].transpose(0, 1)
+                conv_state[state_idx] = new_state
+
+        # Merge and Project
+        hidden_states_out = torch.vstack(conv_output_list)
+        output_tensor, _ = self.out_proj(hidden_states_out)
+        output[:num_actual_tokens] = output_tensor
 
     def forward(
         self,
@@ -229,7 +358,10 @@ def short_conv(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self.forward_cuda(hidden_states=hidden_states, output=output)
+    if self.conv.weight.device.type == "cuda":
+        self.forward_cuda(hidden_states=hidden_states, output=output)
+    else:
+        self.forward_native(hidden_states=hidden_states, output=output)
 
 
 def short_conv_fake(
