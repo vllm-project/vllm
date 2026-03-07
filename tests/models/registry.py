@@ -479,6 +479,14 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         extras={"tiny-random": "tiny-random/qwen3-next-moe"},
         min_transformers_version="4.56.3",
     ),
+    "Qwen3_5ForCausalLM": _HfExamplesInfo(
+        "Qwen/Qwen3.5-0.8B",
+        max_model_len=4096,
+    ),
+    "Qwen3_5MoeForCausalLM": _HfExamplesInfo(
+        "Qwen/Qwen3.5-35B-A3B",
+        max_model_len=4096,
+    ),
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b"),
     "SeedOssForCausalLM": _HfExamplesInfo(
         "ByteDance-Seed/Seed-OSS-36B-Instruct",
