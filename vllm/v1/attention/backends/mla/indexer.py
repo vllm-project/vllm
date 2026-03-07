@@ -5,6 +5,7 @@ from typing import ClassVar
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -23,11 +24,47 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
-    split_prefill_chunks,
 )
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 logger = init_logger(__name__)
+
+
+def split_indexer_prefill_chunks(
+    seq_lens_cpu: torch.Tensor,
+    query_lens_cpu: torch.Tensor,
+    workspace_size: int,
+    max_logits_bytes: int,
+    request_offset: int = 0,
+) -> list[tuple[int, int]]:
+    """
+    Split prefill requests into chunks for the sparse indexer, respecting:
+    - N constraint: total_seq_lens <= workspace_size (existing O(N) workspace)
+    - Logits constraint: M * N * 4 <= max_logits_bytes
+    """
+    chunk_bounds: list[tuple[int, int]] = []
+    n = len(seq_lens_cpu)
+    max_logits_elems = max_logits_bytes // 4
+    i = 0
+
+    while i < n:
+        start, chunk_m, chunk_n = i, 0, 0
+
+        while i < n:
+            q, s = query_lens_cpu[i].item(), seq_lens_cpu[i].item()
+            new_m, new_n = chunk_m + q, chunk_n + s
+            if new_n <= workspace_size and new_m * new_n <= max_logits_elems:
+                chunk_m, chunk_n = new_m, new_n
+                i += 1
+            else:
+                break
+
+        if i == start:
+            i += 1
+
+        chunk_bounds.append((start + request_offset, i + request_offset))
+
+    return chunk_bounds
 
 
 class DeepseekV32IndexerBackend(AttentionBackend):
@@ -317,9 +354,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         prefill_metadata = None
         if num_prefills > 0:
-            chunk_seq_ids = split_prefill_chunks(
+            prefill_query_lens_cpu = torch.diff(
+                query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
+            )
+            max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+            chunk_seq_ids = split_indexer_prefill_chunks(
                 common_attn_metadata.seq_lens_cpu[num_decodes:],
+                prefill_query_lens_cpu,
                 self.max_prefill_buffer_size,
+                max_logits_bytes,
                 request_offset=num_decodes,
             )
             chunks = [

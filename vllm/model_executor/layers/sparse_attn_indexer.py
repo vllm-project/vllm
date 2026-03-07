@@ -113,6 +113,17 @@ def sparse_attn_indexer(
                 chunk.block_table,
                 chunk.cu_seq_lens,
             )
+            chunk_m = chunk.token_end - chunk.token_start
+            chunk_n = chunk.total_seq_lens
+            logits_bytes = chunk_m * chunk_n * 4
+            logger.debug(
+                "Sparse indexer prefill chunk: M=%d, N=%d, logits_size=%.2f MB, "
+                "num_reqs=%d",
+                chunk_m,
+                chunk_n,
+                logits_bytes / (1024 * 1024),
+                chunk.num_reqs,
+            )
             if is_deep_gemm_supported():
                 logits = fp8_mqa_logits(
                     q_fp8[chunk.token_start : chunk.token_end],
