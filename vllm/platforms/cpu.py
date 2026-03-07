@@ -487,7 +487,8 @@ class CpuPlatform(Platform):
     @classmethod
     def import_kernels(cls) -> None:
         if Platform.get_cpu_architecture() in (CpuArchEnum.X86,):
-            if torch._C._cpu._is_avx512_supported():
+            if hasattr(torch._C._cpu, '_is_avx512_supported') \
+                    and torch._C._cpu._is_avx512_supported():
                 try:
                     import vllm._C  # noqa: F401
                 except ImportError as e:

@@ -292,7 +292,10 @@ class CPUAWQLinearMethod(LinearMethodBase):
 
 
 def _get_isa_hint(dtype: torch.dtype) -> str:
-    supports_amx = torch._C._cpu._is_amx_tile_supported()
+    if hasattr(torch._C._cpu, "_is_amx_tile_supported"):
+        supports_amx = torch._C._cpu._is_amx_tile_supported()
+    else:
+        supports_amx = False
     if supports_amx and dtype in (torch.bfloat16,):
         return "amx"
     else:
