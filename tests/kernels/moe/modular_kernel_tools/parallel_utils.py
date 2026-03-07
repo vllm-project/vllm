@@ -66,11 +66,11 @@ def _worker_parallel_launch(
     world_local_size: int,
     node_rank: int,
     init_method: str,
-    worker: Callable[Concatenate[ProcessGroupInfo, VllmConfig | None, Any, P], None],
+    worker: Callable[..., None],
     vllm_config: VllmConfig | None,
     env_dict: dict | None,
-    *args: P.args,
-    **kwargs: P.kwargs,
+    worker_kwargs: dict[str, Any],
+    *args: Any,
 ) -> None:
     rank = node_rank * world_local_size + local_rank
     torch.accelerator.set_device_index(local_rank)
@@ -105,7 +105,7 @@ def _worker_parallel_launch(
             vllm_config,
             cpu_group,
             *args,
-            **kwargs,
+            **worker_kwargs,
         )
     except Exception as ex:
         print(ex)
@@ -123,7 +123,6 @@ def parallel_launch_with_config(
     *args: P.args,
     **kwargs: P.kwargs,
 ) -> None:
-    assert not kwargs
     spawn(
         _worker_parallel_launch,
         args=(
@@ -134,6 +133,7 @@ def parallel_launch_with_config(
             worker,
             vllm_config,
             env_dict,
+            kwargs,
         )
         + args,
         nprocs=world_size,

@@ -513,9 +513,6 @@ def make_fake_moe_layer(
     return _moe
 
 
-# TODO: maybe add separate testpoint for this?
-
-
 def _test_body_regular(
     moe_fn: Callable,
     hidden_states: torch.Tensor,
@@ -675,7 +672,7 @@ def _test_loop(
     shared_experts_config: SharedExpertsConfig | None,
     reduce_results: bool,
     test_body_fn: Callable,
-    baseline_output: torch.Tensor | None = None,
+    **kwargs,
 ) -> None:
     """Generic test loop that sets up environment and delegates to test_body_fn.
 
@@ -786,10 +783,11 @@ def _test_loop(
             top_k=top_k,
             shared_experts=shared_experts,
             reduce_results=reduce_results,
-            baseline_output=baseline_output,
+            **kwargs,
         )
 
     # Common tolerance logic
+    # TODO: consider associating tolerances with quant methods.
     if quantization is None:
         atol, rtol = 3.5e-2, 3.5e-2
     elif quantization in ("fp8", "modelopt_fp8"):
@@ -901,7 +899,7 @@ def test_moe_layer_no_parallel(
         shared_experts_config,
         False,  # reduce_results
         _test_body_regular,
-        baseline_output,
+        baseline_output=baseline_output,
     )
 
     # Cleanup GPU memory after spawned processes complete
@@ -1072,7 +1070,7 @@ def test_moe_layer(
         shared_experts_config,
         reduce_results,
         _test_body_regular,
-        baseline_output,
+        baseline_output=baseline_output,
     )
 
     # Cleanup GPU memory after spawned processes complete
