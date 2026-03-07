@@ -595,6 +595,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 output=output[num_mqa_tokens:],
             )
 
+        mqa_fused = False
         if num_mqa_tokens > 0:
             mqa_q = q[:num_mqa_tokens]
             mqa_output_slice = output[:num_mqa_tokens]
@@ -688,28 +689,57 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     )
 
             # v_up projection
-            self._v_up_proj(attn_out, out=mqa_output_slice)
+            # For FP8 static quant on the decode path, fuse quant into BMM
+            if (needs_quant and output_block_scale is None
+                    and not self.is_aiter_triton_fp4_bmm_enabled
+                    and not self.is_aiter_triton_fp8_bmm_enabled):
+                self._v_up_proj(
+                    attn_out,
+                    out=mqa_output_slice,
+                    output_scale=output_scale,
+                    quant_output=quant_output[:num_mqa_tokens],
+                )
+                mqa_fused = True
+            else:
+                self._v_up_proj(attn_out, out=mqa_output_slice)
+                mqa_fused = False
 
         if needs_quant:
-            # Quantize the BF16 computation result into the quantized output
-            actual = output[:num_actual_toks].reshape(
-                -1, self.num_heads * self.v_head_dim
-            )
-            if output_block_scale is not None:
-                # NVFP4: two FP4 values packed into one uint8
-                from vllm._custom_ops import scaled_fp4_quant
-
-                fp4_data, fp4_scales = scaled_fp4_quant(actual, output_scale)
-                quant_output[:num_actual_toks].copy_(
-                    fp4_data.view(quant_output[:num_actual_toks].shape)
-                )
-                output_block_scale.copy_(fp4_scales)
+            if num_mqa_tokens > 0 and mqa_fused:
+                # MQA decode path was already fused — only need to handle
+                # the MHA prefill portion if it exists.
+                if num_mha_tokens > 0:
+                    mha_actual = output[num_mqa_tokens:num_actual_toks].reshape(
+                        -1, self.num_heads * self.v_head_dim
+                    )
+                    mha_quant = quant_output[num_mqa_tokens:num_actual_toks].reshape(
+                        -1, self.num_heads * self.v_head_dim
+                    )
+                    torch.ops._C.static_scaled_fp8_quant(
+                        mha_quant, mha_actual, output_scale
+                    )
             else:
-                # Static FP8 quantization
-                quant_actual = quant_output[:num_actual_toks].reshape(
+                # Fallback: quantize the full output (both MQA and MHA)
+                actual = output[:num_actual_toks].reshape(
                     -1, self.num_heads * self.v_head_dim
                 )
-                torch.ops._C.static_scaled_fp8_quant(quant_actual, actual, output_scale)
+                if output_block_scale is not None:
+                    # NVFP4: two FP4 values packed into one uint8
+                    from vllm._custom_ops import scaled_fp4_quant
+
+                    fp4_data, fp4_scales = scaled_fp4_quant(actual, output_scale)
+                    quant_output[:num_actual_toks].copy_(
+                        fp4_data.view(quant_output[:num_actual_toks].shape)
+                    )
+                    output_block_scale.copy_(fp4_scales)
+                else:
+                    # Static FP8 quantization
+                    quant_actual = quant_output[:num_actual_toks].reshape(
+                        -1, self.num_heads * self.v_head_dim
+                    )
+                    torch.ops._C.static_scaled_fp8_quant(
+                        quant_actual, actual, output_scale
+                    )
             return quant_output_padded
 
         return output_padded
@@ -851,9 +881,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             cache_dtype_str=vllm_config.cache_config.cache_dtype,
         )
 
-    def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
+    def _v_up_proj(
+        self,
+        x: torch.Tensor,
+        out: torch.Tensor,
+        output_scale: torch.Tensor | None = None,
+        quant_output: torch.Tensor | None = None,
+    ):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+
+        # Fused BMM + FP8 quant path: skip the bf16 intermediate entirely
+        if output_scale is not None and quant_output is not None:
+            from vllm.v1.attention.ops.triton_bmm_fp8 import bmm_fp8_quant
+
+            bmm_fp8_quant(x, self.W_UV, output_scale, quant_output)
+            return
+
         out = out.view(-1, self.num_heads, self.v_head_dim)
         if self.is_aiter_triton_fp4_bmm_enabled:
             out = rocm_aiter_ops.batched_gemm_a16wfp4(
