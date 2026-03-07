@@ -90,19 +90,22 @@ def test_models(example_prompts, model_name) -> None:
 EAGER = [True, False]
 
 
-@pytest.mark.skipif(
-    not current_platform.has_device_capability(100),
-    reason="modelopt_fp4 is not supported on this GPU type.",
-)
+if not current_platform.has_device_capability(100):
+    TEST_NVFP4_BACKENDS = ["emulation"]
+else:
+    TEST_NVFP4_BACKENDS = [
+        "emulation",
+        "flashinfer-cudnn",
+        "flashinfer-trtllm",  # the small seq_len ensures trtllm_8x4_layout backend is used
+        "flashinfer-cutlass",
+    ]
+
+
 @pytest.mark.parametrize("model", ["nvidia/Llama-3.1-8B-Instruct-NVFP4"])
 @pytest.mark.parametrize("eager", EAGER)
 @pytest.mark.parametrize(
     "backend",
-    [
-        "flashinfer-cudnn",
-        "flashinfer-trtllm",  # the small seq_len ensures trtllm_8x4_layout backend is used
-        "flashinfer-cutlass",
-    ],
+    TEST_NVFP4_BACKENDS,
 )
 def test_nvfp4(vllm_runner, model, eager, backend, monkeypatch):
     monkeypatch.setenv("VLLM_NVFP4_GEMM_BACKEND", backend)
