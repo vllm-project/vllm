@@ -5,6 +5,9 @@
 import pytest
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_helion
 
@@ -22,7 +25,8 @@ def _reference_bmm_fp8(input_tensor, weight, scale):
 
     ref_bmm = torch.bmm(input_tensor, weight)  # (N, B, V)
     ref_bf16 = ref_bmm.transpose(0, 1).reshape(B, N * V)
-    ref_fp8 = (ref_bf16.float() * scale.item()).clamp(-448.0, 448.0).to(fp8_dtype)
+    _, fp8_max = get_fp8_min_max()
+    ref_fp8 = (ref_bf16.float() * scale.item()).clamp(-fp8_max, fp8_max).to(fp8_dtype)
     return ref_fp8
 
 

@@ -36,11 +36,14 @@ if not has_helion():
 import helion.language as hl
 
 from vllm.kernels.helion.register import register_kernel
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+)
 
 logger = init_logger(__name__)
 
-# FP8 E4M3 max representable value
-_FP8_E4M3_MAX = 448.0
+# Platform-aware FP8 max (448.0 for e4m3fn on NVIDIA, 224.0 for e4m3fnuz on ROCm)
+_, _FP8_MAX = get_fp8_min_max()
 
 
 @register_kernel  # type: ignore[misc]
@@ -75,7 +78,7 @@ def bmm_fp8_quant_helion(
         # Quantize to FP8: scale, clamp, cast
         result_f32 = result.to(torch.float32)
         scale_val = hl.load(scale, [0])
-        result_scaled = (result_f32 * scale_val).clamp(-_FP8_E4M3_MAX, _FP8_E4M3_MAX)
+        result_scaled = (result_f32 * scale_val).clamp(-_FP8_MAX, _FP8_MAX)
 
         out[tile_b, tile_n, :] = result_scaled.to(out.dtype)
 

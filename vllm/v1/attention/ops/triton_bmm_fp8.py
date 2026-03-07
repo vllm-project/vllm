@@ -19,6 +19,9 @@ Operation:
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+)
 from vllm.triton_utils import tl, triton
 
 
@@ -49,6 +52,7 @@ def _bmm_fp8_kernel(
     BLOCK_SIZE_B: tl.constexpr,
     BLOCK_SIZE_V: tl.constexpr,
     BLOCK_SIZE_L: tl.constexpr,
+    FP8_MAX: tl.constexpr,
 ):
     """Fused BMM + FP8 static quantization kernel.
 
@@ -100,10 +104,9 @@ def _bmm_fp8_kernel(
     # Load scale and quantize to FP8
     scale = tl.load(scale_ptr)
     # FP8 quant: clamp(value * scale, -max, max)
-    # 448.0 is the max representable value in FP8 E4M3
     acc = acc * scale
-    acc = tl.where(acc > 448.0, 448.0, acc)
-    acc = tl.where(acc < -448.0, -448.0, acc)
+    acc = tl.where(acc > FP8_MAX, FP8_MAX, acc)
+    acc = tl.where(acc < -FP8_MAX, -FP8_MAX, acc)
     result = acc.to(output_ptr.type.element_ty)
 
     # Store output at (B, N * V) layout
@@ -140,6 +143,8 @@ def bmm_fp8_quant(
     assert output.shape == (B, N * V)
     assert scale.numel() == 1
 
+    _, fp8_max = get_fp8_min_max()
+
     # Grid: one program per (tile_within_head, head)
     def grid(META):
         return (
@@ -167,4 +172,5 @@ def bmm_fp8_quant(
         BLOCK_SIZE_B=32,
         BLOCK_SIZE_V=64,
         BLOCK_SIZE_L=64,
+        FP8_MAX=fp8_max,
     )
