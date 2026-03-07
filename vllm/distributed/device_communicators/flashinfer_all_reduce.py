@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import atexit
 
 import torch
 import torch.distributed as dist
@@ -144,6 +145,10 @@ def destroy_fi_ar_workspace():
     if _fi_ar_workspace is not None:
         _fi_ar_workspace.destroy()
         _fi_ar_workspace = None
+
+
+# Register cleanup handler to prevent ImportError during Python shutdown
+atexit.register(destroy_fi_ar_workspace)
 
 
 class FlashInferAllReduce:
