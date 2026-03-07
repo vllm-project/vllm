@@ -42,7 +42,7 @@ class AiterTritonMLAImpl(AiterMLAImpl):
             kv_sharing_target_layer_name,
             **mla_args,
         )
-        from aiter.ops.triton.mha import flash_attn_varlen_func
+        from aiter.ops.triton.attention.mha import flash_attn_varlen_func
 
         self.flash_attn_varlen_func = flash_attn_varlen_func
 
