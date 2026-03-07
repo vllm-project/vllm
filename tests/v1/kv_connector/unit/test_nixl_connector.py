@@ -673,7 +673,6 @@ class TestNixlHandshake:
         """
 
         vllm_config = create_vllm_config()
-        local_tp_size = 1
         vllm_config.parallel_config.tensor_parallel_size = local_tp_size
 
         connector = NixlConnector(
