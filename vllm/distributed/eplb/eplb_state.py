@@ -287,6 +287,12 @@ class EplbState:
         Interval for expert rearrangement steps.
         This is a constant and is taken from the config.
         """
+        self._layer_states: list[EplbLayerState] = []
+        """
+        All per-layer :class:`EplbLayerState` objects registered with this
+        state.  Used to propagate ``should_record`` updates after each step
+        without requiring additional plumbing through the model hierarchy.
+        """
         self.is_async: bool = False
         """
         The flag indicates whether the EPLB is running in async mode.
@@ -477,7 +483,7 @@ class EplbState:
             logical_to_physical_map,
             logical_replica_count,
         )
-
+        self._register_layer_states(model)
         expert_buffer = [torch.empty_like(w) for w in model.expert_weights[0]]
 
         model_state = EplbModelState(
@@ -600,15 +606,18 @@ class EplbState:
 
         # Update the expert load sliding window
         if not is_dummy:
+            should_record = self._should_record_current_step(log_stats=log_stats)
             for eplb_model_state in self.model_states.values():
-                eplb_model_state.expert_load_window[self.expert_load_window_step] = (
-                    eplb_model_state.expert_load_pass.clone()
-                )
+                if should_record:
+                    eplb_model_state.expert_load_window[
+                        self.expert_load_window_step
+                    ].copy_(eplb_model_state.expert_load_pass)
                 eplb_model_state.expert_load_pass.zero_()
 
-            self.expert_load_window_step += 1
-            if self.expert_load_window_step >= self.expert_load_window_size:
-                self.expert_load_window_step = 0
+            if should_record:
+                self.expert_load_window_step += 1
+                if self.expert_load_window_step >= self.expert_load_window_size:
+                    self.expert_load_window_step = 0
 
         # Step the expert rearrangement step
         # Note that even if this is a dummy step, we still increment the
@@ -635,10 +644,67 @@ class EplbState:
                 eplb_model_state.rebalanced
                 for eplb_model_state in self.model_states.values()
             ):
-                # Still performing asynchronous rearrangement
+                # Still performing asynchronous rearrangement; update
+                # should_record (step > step_interval, so always True) and
+                # bail out before the step counter is reset.
+                self._update_layer_should_record(log_stats=log_stats)
                 return
             self.expert_rearrangement_step = 0
             self.rearrange()
+
+        self._update_layer_should_record(log_stats=log_stats)
+
+    def _should_record_current_step(self, log_stats: bool = False) -> bool:
+        """Return whether expert-load recording should be enabled this step.
+
+        Recording is enabled when we are close to either:
+        1) The next rearrangement step, so the sliding window is ready.
+        2) The next balancedness logging step, when log_stats is enabled.
+        """
+        steps_remaining = (
+            self.expert_rearrangement_step_interval - self.expert_rearrangement_step
+        )
+        should_record_for_rearrange = steps_remaining <= self.expert_load_window_size
+
+        if not log_stats:
+            return should_record_for_rearrange
+
+        log_interval = self.parallel_config.eplb_config.log_balancedness_interval
+        steps_until_next_log = (
+            log_interval - (self.expert_rearrangement_step % log_interval)
+        ) % log_interval
+        should_record_for_log = steps_until_next_log <= self.expert_load_window_size
+        return should_record_for_rearrange or should_record_for_log
+
+    def _update_layer_should_record(self, log_stats: bool = False) -> None:
+        """Update ``should_record`` on every registered layer state."""
+        if not self._layer_states:
+            return
+        should_record = self._should_record_current_step(log_stats=log_stats)
+        for layer_state in self._layer_states:
+            layer_state.should_record = should_record
+            if layer_state.should_record_tensor is not None:
+                layer_state.should_record_tensor.fill_(should_record)
+
+    def _register_layer_states(self, model: "MixtureOfExperts") -> None:  # type: ignore[name-defined]
+        """Collect all per-layer states and stamp scheduling config on them.
+
+        Must be called after :meth:`model.set_eplb_state` so that each
+        layer's ``eplb_state`` is already populated with the tensor views.
+        """
+        self._layer_states = []
+        for layer in model.moe_layers:
+            if hasattr(layer, "eplb_state") and isinstance(
+                layer.eplb_state, EplbLayerState
+            ):
+                if layer.eplb_state.expert_load_view is not None:
+                    layer.eplb_state.should_record_tensor = torch.ones(
+                        (),
+                        dtype=torch.bool,
+                        device=layer.eplb_state.expert_load_view.device,
+                    )
+                self._layer_states.append(layer.eplb_state)
+        self._update_layer_should_record()
 
     def rearrange(
         self,
@@ -1095,6 +1161,18 @@ class EplbLayerState:
     expert_load_view: torch.Tensor | None = None
     logical_to_physical_map: torch.Tensor | None = None
     logical_replica_count: torch.Tensor | None = None
+    should_record_tensor: torch.Tensor | None = None
+
+    should_record: bool = True
+    """
+    Whether to accumulate expert load metrics during this forward pass.
+
+    Set to ``False`` for the first ``step_interval - window_size`` steps of
+    each rearrangement period: those steps would be overwritten in the
+    sliding window before the next rearrangement, so recording them wastes
+    GPU work.  Defaults to ``True`` (always record) until EPLB scheduling
+    config is propagated via :meth:`EplbState._register_layer_states`.
+    """
 
 
 def _node_count_with_rank_mapping(
