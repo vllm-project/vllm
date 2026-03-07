@@ -197,6 +197,8 @@ WIKITEXT_ACCURACY_CONFIGS = [
         model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2",
         excepted_value=10.6,
     ),
+    # This one raises `RuntimeError: wrong! device_gemm with the specified compilation
+    # parameters does not support this GEMM problem` on MI355X.
     AccuracyTestConfig(
         model_name="fxmarty/qwen_1.5-moe-a2.7b-mxfp4", excepted_value=12.4
     ),
@@ -207,9 +209,23 @@ WIKITEXT_ACCURACY_CONFIGS = [
     not QUARK_MXFP4_AVAILABLE,
     reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
 )
-@pytest.mark.parametrize("config", WIKITEXT_ACCURACY_CONFIGS)
-@pytest.mark.parametrize("tp_size", [1, 2])
-def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
+@pytest.mark.parametrize(
+    "config",
+    [pytest.param(val, id=f"config:{val}") for val in WIKITEXT_ACCURACY_CONFIGS],
+)
+@pytest.mark.parametrize(
+    "tp_size", [pytest.param(val, id=f"tp_size:{val}") for val in [1, 2]]
+)
+@pytest.mark.parametrize(
+    "emulation_dequantize_weights",
+    [
+        pytest.param(val, id=f"emulation_dequantize_weights:{val}")
+        for val in [True, False]
+    ],
+)
+def test_ocp_mx_wikitext_correctness(
+    config: AccuracyTestConfig, tp_size: int, emulation_dequantize_weights: bool
+):
     if torch.cuda.device_count() < tp_size:
         pytest.skip(
             f"This test requires >={tp_size} gpus, got only {torch.cuda.device_count()}"
@@ -222,7 +238,15 @@ def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
     results = lm_eval.simple_evaluate(
         model="vllm",
         model_args=config.get_model_args(
-            tp_size=tp_size, kwargs={"cudagraph_capture_sizes": [16]}
+            tp_size=tp_size,
+            kwargs={
+                "cudagraph_capture_sizes": [16],
+                "hf_overrides": {
+                    "quantization_config": {
+                        "emulation_dequantize_weights": emulation_dequantize_weights
+                    }
+                },
+            },
         ),
         tasks=task,
         batch_size=64,

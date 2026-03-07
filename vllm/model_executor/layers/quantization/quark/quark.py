@@ -52,6 +52,7 @@ class QuarkConfig(QuantizationConfig):
         kv_cache_group: list[str] | None = None,
         kv_cache_config: dict[str, Any] | None = None,
         pack_method: str = "reorder",
+        emulation_dequantize_weights: bool = False,
     ):
         super().__init__()
         if kv_cache_group is None:
@@ -61,6 +62,7 @@ class QuarkConfig(QuantizationConfig):
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
         self.dynamic_mxfp4_quant = False
+        self.emulation_dequantize_weights = emulation_dequantize_weights
 
     def maybe_update_config(self, model_name: str, revision: str | None = None):
         self.hf_config = get_config(
@@ -221,11 +223,16 @@ class QuarkConfig(QuantizationConfig):
             if q_proj_q_config is not None:
                 q_proj_q_config["output_tensors"] = None
 
+        emulation_dequantize_weights: bool = config.get(
+            "emulation_dequantize_weights", False
+        )
+
         return cls(
             quant_config=config,
             kv_cache_group=kv_cache_group,
             kv_cache_config=kv_cache_config,
             pack_method=pack_method,
+            emulation_dequantize_weights=emulation_dequantize_weights,
         )
 
     @classmethod
@@ -506,7 +513,10 @@ class QuarkConfig(QuantizationConfig):
             )
         elif self._is_w_ocp_mx_a_x(weight_config, input_config):
             return QuarkOCP_MX(
-                weight_config, input_config, dynamic_mxfp4_quant=dynamic_mxfp4_quant
+                weight_config,
+                input_config,
+                dynamic_mxfp4_quant=dynamic_mxfp4_quant,
+                emulation_dequantize_weights=self.emulation_dequantize_weights,
             )
 
         raise NotImplementedError(
