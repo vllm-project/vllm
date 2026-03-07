@@ -116,7 +116,10 @@ class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
 
 class Qwen3_5MoeProcessingInfo(Qwen3VLProcessingInfo):
     def get_hf_config(self):
-        return self.ctx.get_hf_config(Qwen3_5MoeConfig)
+        return self.ctx.get_hf_config(
+            Qwen3_5MoeConfig,
+            Qwen3_5MoeTextConfig,
+        )
 
 
 class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
