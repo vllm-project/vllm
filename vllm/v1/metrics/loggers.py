@@ -1303,6 +1303,14 @@ class StatLoggerManager:
                 PrometheusStatLogger(vllm_config, self.engine_indexes)
             )
 
+        # Add OTel metrics logger if endpoint is configured
+        if vllm_config.observability_config.otlp_metrics_endpoint:
+            from vllm.v1.metrics.otel import OTelMetricsStatLogger
+
+            self.stat_loggers.append(
+                OTelMetricsStatLogger(vllm_config, self.engine_indexes)
+            )
+
     def record(
         self,
         scheduler_stats: SchedulerStats | None,
