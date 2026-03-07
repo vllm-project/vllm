@@ -1036,6 +1036,38 @@ class EngineCoreProc(EngineCore):
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
 
+        # Extract death pipe if provided (for parent death detection).
+        from multiprocessing.connection import Connection
+
+        death_pipe: Connection | None = kwargs.pop("death_pipe", None)
+
+        # Start death monitoring thread if death_pipe is provided.
+        # When the parent process exits, the pipe writer end closes,
+        # causing recv() to raise EOFError. We then send SIGTERM to
+        # ourselves to trigger graceful shutdown via the signal handler.
+        if death_pipe is not None:
+
+            def monitor_parent_death():
+                try:
+                    # This will block until parent process exits
+                    # (pipe writer end closes)
+                    death_pipe.recv()
+                except EOFError:
+                    # Parent process has exited
+                    logger.info("Parent process exited, terminating EngineCore")
+                    os.kill(os.getpid(), signal.SIGTERM)
+                except Exception:
+                    logger.warning("EngineCore death monitoring error", exc_info=True)
+                finally:
+                    death_pipe.close()
+
+            death_monitor = threading.Thread(
+                target=monitor_parent_death,
+                daemon=True,
+                name="EngineCoreDeathMonitor",
+            )
+            death_monitor.start()
+
         engine_core: EngineCoreProc | None = None
         signal_callback: SignalCallback | None = None
         try:
@@ -1258,8 +1290,9 @@ class EngineCoreProc(EngineCore):
                 return
             output = UtilityOutput(call_id)
             # Lazily look-up utility method so that failure will be handled/returned.
-            get_result = lambda: (method := getattr(self, method_name)) and method(
-                *self._convert_msgspec_args(method, args)
+            get_result = lambda: (
+                (method := getattr(self, method_name))
+                and method(*self._convert_msgspec_args(method, args))
             )
             enqueue_output = lambda out: self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=out))

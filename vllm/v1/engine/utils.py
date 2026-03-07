@@ -110,10 +110,17 @@ class CoreEngineProcManager:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
         self.processes: list[BaseProcess] = []
+        # Keep death pipe writers alive in parent - when parent exits,
+        # the pipes close and child processes detect the parent death.
+        self.death_writers: list[connection.Connection] = []
         local_dp_ranks = []
         for index in range(local_engine_count):
             local_index = local_start_index + index
             global_index = start_index + index
+
+            # Create death pipe to detect parent process exit.
+            # The reader end goes to the child, writer stays in the parent.
+            death_reader, death_writer = context.Pipe(duplex=False)
 
             # Start EngineCore in background process.
             local_dp_ranks.append(local_index)
@@ -125,11 +132,15 @@ class CoreEngineProcManager:
                     | {
                         "dp_rank": global_index,
                         "local_dp_rank": local_index,
+                        "death_pipe": death_reader,
                     },
                 )
             )
+            self.death_writers.append(death_writer)
 
-        self._finalizer = weakref.finalize(self, shutdown, self.processes)
+        self._finalizer = weakref.finalize(
+            self, shutdown, self.processes, self.death_writers
+        )
 
         data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
@@ -157,7 +168,7 @@ class CoreEngineProcManager:
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown engine core processes with configurable timeout."""
         if self._finalizer.detach() is not None:
-            shutdown(self.processes, timeout=timeout)
+            shutdown(self.processes, self.death_writers, timeout=timeout)
 
     def join_first(self):
         """Wait for any process to exit."""
