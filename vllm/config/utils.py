@@ -11,13 +11,13 @@ import os
 import pathlib
 import textwrap
 from collections.abc import Callable, Mapping, Sequence, Set
-from dataclasses import MISSING, field, fields, is_dataclass
+from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from itertools import pairwise
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, overload
 
 import torch
 from pydantic import ConfigDict
-from pydantic.dataclasses import dataclass
+from pydantic.dataclasses import dataclass as pydantic_dataclass
 from pydantic.fields import Field as PydanticField
 from pydantic.fields import FieldInfo
 from typing_extensions import dataclass_transform, runtime_checkable
@@ -34,6 +34,25 @@ else:
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=DataclassInstance)
+_ReplaceT = TypeVar("_ReplaceT")
+
+
+@overload
+def config(
+    cls: type[ConfigT],
+    *,
+    config: ConfigDict | None = ...,
+    **kwargs: Any,
+) -> type[ConfigT]: ...
+
+
+@overload
+def config(
+    cls: None = ...,
+    *,
+    config: ConfigDict | None = ...,
+    **kwargs: Any,
+) -> Callable[[type[ConfigT]], type[ConfigT]]: ...
 
 
 @dataclass_transform(field_specifiers=(PydanticField,))
@@ -59,7 +78,7 @@ def config(
         merged_config.update(config)
 
     def decorator(cls):
-        return dataclass(cls, config=merged_config, **kwargs)
+        return pydantic_dataclass(cls, config=merged_config, **kwargs)
 
     # Called with arguments: @config(config=...)
     if cls is None:
@@ -68,7 +87,7 @@ def config(
     return decorator(cls)
 
 
-def get_field(cls: ConfigType, name: str) -> Any:
+def get_field(cls: type[Any], name: str) -> Any:
     """Get the default factory field of a dataclass by name. Used for getting
     default factory fields in `EngineArgs`."""
     if not is_dataclass(cls):
@@ -93,18 +112,22 @@ def get_field(cls: ConfigType, name: str) -> Any:
         else:
             default = default.default
 
-    if default is MISSING and default_factory is MISSING:
+    if default_factory is not MISSING:
+        return field(default_factory=default_factory, init=init)
+    elif default is not MISSING:
+        return field(default=default, init=init)
+    else:
         logger.warning_once(
             "%s.%s has no default or default factory.", cls.__name__, name
         )
-    return field(default=default, default_factory=default_factory, init=init)
+        return field(init=init)
 
 
-def is_init_field(cls: ConfigType, name: str) -> bool:
+def is_init_field(cls: type[Any], name: str) -> bool:
     return get_field(cls, name).init
 
 
-def replace(dataclass_instance: ConfigT, /, **kwargs) -> ConfigT:
+def replace(dataclass_instance: _ReplaceT, /, **kwargs) -> _ReplaceT:
     """Like [`dataclasses.replace`](https://docs.python.org/3/library/dataclasses.html#dataclasses.replace),
     but compatible with Pydantic dataclasses which use `pydantic.fields.Field` instead
     of `dataclasses.field`"""
