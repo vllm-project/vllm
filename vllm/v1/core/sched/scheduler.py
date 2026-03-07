@@ -96,6 +96,11 @@ class Scheduler(SchedulerInterface):
             defaultdict(set) if include_finished_set else None
         )
         self.prev_step_scheduled_req_ids: set[str] = set()
+        # Jump-forward decoding: grammar-forced tokens pending write to buffer.
+        self._jump_decoding_enabled = (
+            vllm_config.structured_outputs_config.enable_jump_decoding
+        )
+        self._pending_ff_tokens: dict[str, list[int]] = {}
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -890,6 +895,10 @@ class Scheduler(SchedulerInterface):
         self.prev_step_scheduled_req_ids.clear()
         self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
+        # Jump-forward: pass pending ff tokens and clear for next step.
+        jump_forward_tokens = self._pending_ff_tokens
+        self._pending_ff_tokens = {}
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -905,6 +914,7 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            jump_forward_tokens=jump_forward_tokens,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1416,6 +1426,17 @@ class Scheduler(SchedulerInterface):
                         new_token_ids,
                         req_id,
                     )
+                # Jump-forward: compute deterministic tokens forced by grammar.
+                elif (
+                    self._jump_decoding_enabled
+                    and not stopped
+                    and not struct_output_request.grammar.is_terminated()
+                ):
+                    ff_tokens = struct_output_request.grammar.advance_ff_tokens()
+                    if ff_tokens:
+                        request.append_output_token_ids(ff_tokens)
+                        new_token_ids.extend(ff_tokens)
+                        self._pending_ff_tokens[req_id] = ff_tokens
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]

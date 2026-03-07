@@ -1177,6 +1177,15 @@ class GPUModelRunner(
             # Add spec_token_ids to token_ids_cpu.
             self.input_batch.update_req_spec_token_ids(req_state, scheduled_spec_tokens)
 
+            # Jump-forward: write grammar-forced tokens to the buffer.
+            ff_tokens = scheduler_output.jump_forward_tokens.get(req_id)
+            if ff_tokens:
+                start_idx = self.input_batch.num_tokens_no_spec[req_index]
+                end_idx = start_idx + len(ff_tokens)
+                self.input_batch.token_ids_cpu[req_index, start_idx:end_idx] = ff_tokens
+                self.input_batch.num_tokens_no_spec[req_index] = end_idx
+                req_state.output_token_ids.extend(ff_tokens)
+
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         for request in reqs_to_add:

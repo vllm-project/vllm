@@ -42,6 +42,11 @@ class StructuredOutputsConfig:
     loaded and registered."""
     enable_in_reasoning: bool = False
     """Whether to use structured input for reasoning."""
+    enable_jump_decoding: bool = False
+    """If True, enable jump-forward decoding for structured outputs.
+    When the grammar forces a deterministic sequence of tokens, they are
+    injected without model inference. Only supported with the guidance
+    backend."""
 
     def compute_hash(self) -> str:
         """
@@ -72,5 +77,9 @@ class StructuredOutputsConfig:
             raise ValueError(
                 "disable_additional_properties is only supported "
                 "for the guidance backend."
+            )
+        if self.enable_jump_decoding and self.backend != "guidance":
+            raise ValueError(
+                "enable_jump_decoding is only supported for the guidance backend."
             )
         return self
