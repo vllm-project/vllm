@@ -89,10 +89,15 @@ async def _run_request_bursts(
             )
             await asyncio.sleep(0.01)
 
-        results = await asyncio.gather(*all_tasks)
+        results = await asyncio.gather(*all_tasks, return_exceptions=True)
         assert len(results) == num_requests, (
             f"Burst {burst}: expected {num_requests} results, got {len(results)}"
         )
+
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+
         assert all(completion is not None for completion in results), (
             f"Burst {burst}: some completions were None"
         )
