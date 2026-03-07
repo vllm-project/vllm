@@ -43,6 +43,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
@@ -109,6 +110,7 @@ def new_kv_cache_spec(
     page_size_padded=None,
     sliding_window=None,
     attention_chunk_size=None,
+    group_size=1,
 ):
     return FullAttentionSpec(
         block_size=block_size,
@@ -118,6 +120,7 @@ def new_kv_cache_spec(
         page_size_padded=page_size_padded,
         sliding_window=sliding_window,
         attention_chunk_size=attention_chunk_size,
+        group_size=group_size,
     )
 
 
@@ -154,6 +157,22 @@ def new_chunked_local_attention_spec(
         dtype=dtype,
         page_size_padded=page_size_padded,
         attention_chunk_size=attention_chunk_size,
+    )
+
+
+def new_mamba_spec(
+    block_size=16,
+    shapes=((2, 512), (3, 32, 32)),
+    dtypes=(torch.float32, torch.float32),
+    num_speculative_blocks=2,
+    page_size_padded=None,
+):
+    return MambaSpec(
+        block_size=block_size,
+        shapes=shapes,
+        dtypes=dtypes,
+        page_size_padded=page_size_padded,
+        num_speculative_blocks=num_speculative_blocks,
     )
 
 
@@ -2094,3 +2113,120 @@ def test_unify_hybrid_kv_cache_specs():
 
     with pytest.raises(ValueError):
         kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+
+
+def test_get_kv_cache_configs_with_mamba():
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    expected_page_size = new_mamba_spec().page_size_bytes
+
+    # Test 1: Pure mamba model (2 layers with same spec)
+    kv_cache_specs = {
+        "layer_1": new_mamba_spec(),
+        "layer_2": new_mamba_spec(),
+    }
+    available_memory = expected_page_size * 2 * 10
+    kv_cache_config = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [available_memory]
+    )[0]
+
+    assert kv_cache_config == KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[
+            KVCacheTensor(size=expected_page_size * 10, shared_by=["layer_1"]),
+            KVCacheTensor(size=expected_page_size * 10, shared_by=["layer_2"]),
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer_1", "layer_2"], new_mamba_spec())],
+    )
+
+    # Test 2: 1 mamba + 1 full
+    hybrid_kv_cache_specs = {
+        "layer_1": new_mamba_spec(),
+        "layer_2": new_kv_cache_spec(),
+    }
+    available_memory_hybrid = expected_page_size * 2 * 10
+    kv_cache_config_hybrid = get_kv_cache_configs(
+        vllm_config, [hybrid_kv_cache_specs], [available_memory_hybrid]
+    )[0]
+
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=20,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=expected_page_size * 20, shared_by=["layer_1", "layer_2"]
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1"], new_mamba_spec()),
+            KVCacheGroupSpec(["layer_2"], new_kv_cache_spec()),
+        ],
+    )
+
+    # Test 3: 1 mamba + 2 full attention with group size 2
+    hybrid_kv_cache_specs = {
+        "layer_1": new_mamba_spec(),
+        "layer_2": new_kv_cache_spec(head_size=32, group_size=2),
+        "layer_3": new_kv_cache_spec(head_size=32, group_size=2),
+    }
+    available_memory_hybrid = expected_page_size * 2 * 10
+    kv_cache_config_hybrid = get_kv_cache_configs(
+        vllm_config, [hybrid_kv_cache_specs], [available_memory_hybrid]
+    )[0]
+
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=20,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=expected_page_size * 20,
+                shared_by=["layer_1", "layer_2", "layer_3"],
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1"], new_mamba_spec()),
+            KVCacheGroupSpec(
+                ["layer_2", "layer_3"],
+                new_kv_cache_spec(head_size=32, group_size=2),
+            ),
+        ],
+    )
+
+    # Test 4: 2 mamba + 5 full (with 3 padding full)
+    hybrid_kv_cache_specs = {
+        "layer_1": new_mamba_spec(),
+        "layer_2": new_mamba_spec(),
+        "layer_3": new_kv_cache_spec(head_size=32, group_size=2),
+        "layer_4": new_kv_cache_spec(head_size=32, group_size=2),
+        "layer_5": new_kv_cache_spec(head_size=32, group_size=2),
+        "layer_6": new_kv_cache_spec(head_size=32, group_size=2),
+        "layer_7": new_kv_cache_spec(head_size=32, group_size=2),
+    }
+    available_memory_hybrid = expected_page_size * 2 * 10
+    kv_cache_config_hybrid = get_kv_cache_configs(
+        vllm_config, [hybrid_kv_cache_specs], [available_memory_hybrid]
+    )[0]
+
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=expected_page_size * 10,
+                shared_by=["layer_1", "layer_3", "layer_4", "layer_5", "layer_6"],
+            ),
+            KVCacheTensor(
+                size=expected_page_size * 10,
+                shared_by=["layer_2", "layer_7"],
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1", "layer_2"], new_mamba_spec()),
+            KVCacheGroupSpec(
+                ["layer_3", "layer_4", "layer_7"],
+                new_kv_cache_spec(head_size=32, group_size=2),
+            ),
+            KVCacheGroupSpec(
+                ["layer_5", "layer_6"],
+                new_kv_cache_spec(head_size=32, group_size=2),
+            ),
+        ],
+    )

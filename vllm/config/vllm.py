@@ -1236,6 +1236,12 @@ class VllmConfig:
                 "schedule a multiple of block_size tokens even if they are in the "
                 "middle of a mm input"
             )
+        if self.cache_config.mamba_num_attn_pages > 1:
+            assert self.model_config.is_hybrid, (
+                "Mapping multiple FullAttention layers to a single page is only "
+                "supported for hybrid models"
+            )
+
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = (
                 self.compilation_config.debug_dump_path.absolute().expanduser()

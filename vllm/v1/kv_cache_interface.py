@@ -16,7 +16,7 @@ from vllm.utils.torch_utils import get_dtype_size
 logger = init_logger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class KVCacheSpec:
     """
     A base class for specifying the KV cache format of one layer.
@@ -24,6 +24,12 @@ class KVCacheSpec:
 
     # number of tokens in a block
     block_size: int
+    group_size: int = 1
+    """
+    The size of a group of attention layers.
+    Currently, it's used for Mamba models to group more than one 
+    FullAttn layers to one page.
+    """
 
     @property
     def page_size_bytes(self) -> int:
@@ -110,6 +116,10 @@ class FullAttentionSpec(AttentionSpec):
         if self.head_size_v is None:
             object.__setattr__(self, "head_size_v", self.head_size)
 
+    @property
+    def page_size_bytes(self) -> int:
+        return super().page_size_bytes * self.group_size
+
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
@@ -155,6 +165,7 @@ class FullAttentionSpec(AttentionSpec):
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
+            group_size=specs[0].group_size,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             head_size_v=specs[0].head_size_v,
@@ -217,6 +228,7 @@ class MLAAttentionSpec(FullAttentionSpec):
         )
         return cls(
             block_size=specs[0].block_size,
+            group_size=specs[0].group_size,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
@@ -270,7 +282,7 @@ class SlidingWindowSpec(AttentionSpec):
         return (cdiv(num_tokens, self.block_size) + 1) * self.page_size_bytes
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtypes: tuple[torch.dtype]
@@ -347,6 +359,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
+            group_size=specs[0].group_size,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             head_size_v=specs[0].head_size_v,
@@ -469,6 +482,20 @@ class KVCacheGroupSpec:
     layer_names: list[str]
     # The KV cache spec of this manager layer
     kv_cache_spec: KVCacheSpec
+
+    @property
+    def group_size(self) -> int:
+        """
+        The size of this group.
+        Normally, it is the length of the layer names.
+        For Mamba models, some FullAttn layers are grouped together and map
+        to the same KV cache block, so the group size will be smaller than
+        the number of layers.
+        """
+        if isinstance(self.kv_cache_spec, FullAttentionSpec):
+            return cdiv(len(self.layer_names), self.kv_cache_spec.group_size)
+        else:
+            return len(self.layer_names)
 
 
 @dataclass
