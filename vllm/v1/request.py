@@ -128,7 +128,14 @@ class Request:
 
         # The number of tokens that have been computed remotely.
         self.num_external_computed_tokens = 0
+        # Parallel sampling support.
+        self.parallel_sampling_n: int = 1
 
+        self.parent_request_id: str | None = None
+        self.child_index: int = 0
+
+        self.kv_load_request_id: str | None = None
+        
         self.block_hashes: list[BlockHash] = []
         self.get_hash_new_full_blocks: Callable[[], list[BlockHash]] | None = None
         if block_hasher is not None:
@@ -158,6 +165,7 @@ class Request:
             priority=request.priority,
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
+            parallel_sampling_n=request.parallel_sampling_n,
         )
 
     def append_output_token_ids(

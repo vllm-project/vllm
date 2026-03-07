@@ -5,6 +5,7 @@ import time
 from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
+from copy import copy
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -1114,7 +1115,14 @@ class Scheduler(SchedulerInterface):
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids
                 )
-
+                is_first_output = request.num_output_tokens == 0
+                # Split parallel sampling request after prefill completes.
+                if (
+                    is_first_output
+                    and not stopped
+                    and request.parallel_sampling_n > 1
+                ):
+                    self._split_parallel_sampling_request(request)
             # Stop checking for pooler models.
             pooler_output = None
             if pooler_outputs:
@@ -1250,6 +1258,78 @@ class Scheduler(SchedulerInterface):
                 break
         return new_token_ids, stopped
 
+    def _split_parallel_sampling_request(self, request: Request) -> list[Request]:
+        n = request.parallel_sampling_n
+        if n <= 1:
+            return []
+
+        child_requests: list[Request] = []
+        original_request_id = request.request_id
+
+        # Parent request becomes child 0.
+        request.parallel_sampling_n = 1
+        request.parent_request_id = original_request_id
+        request.child_index = 0
+
+        # Get parent sampling params.
+        parent_sampling_params = request.sampling_params
+        assert parent_sampling_params is not None
+
+        # Create child requests 1 to n-1.
+        for child_idx in range(1, n):
+            child_sampling_params = copy(parent_sampling_params)
+            child_sampling_params.n = 1
+            if parent_sampling_params.seed is not None:
+                child_sampling_params.seed = parent_sampling_params.seed + child_idx
+
+            child_id = f"{child_idx}_{original_request_id}"
+
+            # Create child request with same prefill state as parent.
+            child_request = Request(
+                request_id=child_id,
+                prompt_token_ids=request.prompt_token_ids,
+                sampling_params=child_sampling_params,
+                pooling_params=request.pooling_params,
+                eos_token_id=request.eos_token_id,
+                client_index=request.client_index,
+                arrival_time=request.arrival_time,
+                prompt_embeds=request.prompt_embeds,
+                mm_features=request.mm_features,
+                lora_request=request.lora_request,
+                cache_salt=request.cache_salt,
+                priority=request.priority,
+                trace_headers=request.trace_headers,
+                block_hasher=self.block_hasher,
+                resumable=request.resumable,
+            )
+
+            # Set child request fields.
+            child_request.parent_request_id = original_request_id
+            child_request.child_index = child_idx
+            child_request.parallel_sampling_n = 1
+            child_request.kv_load_request_id = request.kv_load_request_id
+
+            # Share parent's prefill state (KV cache sharing via block_hashes).
+            child_request.num_computed_tokens = request.num_computed_tokens
+            child_request.num_cached_tokens = request.num_cached_tokens
+            child_request.block_hashes = request.block_hashes.copy()
+
+            # Copy the first output token from parent.
+            if request._output_token_ids:
+                child_request._output_token_ids = request._output_token_ids.copy()
+                child_request._all_token_ids = request._all_token_ids.copy()
+
+            # Set running status (child should continue from decode).
+            child_request.status = RequestStatus.RUNNING
+
+            # Add to scheduler.
+            self.requests[child_id] = child_request
+            self.waiting.add_request(child_request)
+
+            child_requests.append(child_request)
+
+        return child_requests
+    
     def _free_encoder_inputs(self, request: Request) -> None:
         cached_encoder_input_ids = self.encoder_cache_manager.get_cached_input_ids(
             request

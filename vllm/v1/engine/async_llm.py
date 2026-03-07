@@ -331,16 +331,13 @@ class AsyncLLM(EngineClient):
         parent_params = params
         assert isinstance(parent_params, SamplingParams)
 
-        # Fan out child requests (for n>1).
+        request.parallel_sampling_n = parent_params.n
         parent_request = ParentRequest(request_id, parent_params)
-        for idx in range(parent_params.n):
-            request_id, child_params = parent_request.get_child_info(idx)
-            child_request = request if idx == parent_params.n - 1 else copy(request)
-            child_request.request_id = request_id
-            child_request.sampling_params = child_params
-            await self._add_request(
-                child_request, prompt_text, parent_request, idx, queue
-            )
+        # Set n=1 for prefill (execute prefill only once).
+        parent_request.sampling_params.n = 1
+        request.sampling_params.n = 1
+
+        await self._add_request(request, prompt_text, parent_request, 0, queue)
         return queue
 
     async def _add_request(

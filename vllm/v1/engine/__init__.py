@@ -69,6 +69,8 @@ class EngineCoreRequest(
     # a wave finished notification is received.
     current_wave: int = 0
     priority: int = 0
+    
+    parallel_sampling_n: int = 1
 
     trace_headers: Mapping[str, str] | None = None
 

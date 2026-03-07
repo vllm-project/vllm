@@ -267,20 +267,16 @@ class LLMEngine:
             self.engine_core.add_request(request)
             return
 
-        # Fan out child requests (for n>1).
         parent_req = ParentRequest(request_id, params)
-        for idx in range(n):
-            request_id, child_params = parent_req.get_child_info(idx)
-            child_request = request if idx == n - 1 else copy(request)
-            child_request.request_id = request_id
-            child_request.sampling_params = child_params
+        # Set n=1 for prefill (execute prefill only once).
+        parent_req.sampling_params.n = 1
+        request.sampling_params.n = 1
+        request.parallel_sampling_n = parent_req.n
 
-            # Make a new RequestState and queue.
-            self.output_processor.add_request(
-                child_request, prompt_text, parent_req, idx
-            )
-            # Add the request to EngineCore.
-            self.engine_core.add_request(child_request)
+        # Make a new RequestState and queue.
+        self.output_processor.add_request(request, prompt_text, parent_req, 0)
+        # Add the request to EngineCore.
+        self.engine_core.add_request(request)
 
     def step(self) -> list[RequestOutput | PoolingRequestOutput]:
         if self.should_execute_dummy_batch:
