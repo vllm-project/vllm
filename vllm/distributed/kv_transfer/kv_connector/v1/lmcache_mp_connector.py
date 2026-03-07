@@ -721,6 +721,34 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             # Clean up lookup future in scheduler adapter
             self.scheduler_adapter.cleanup_lookup_result(request.request_id)
 
+            # Free locks on chunks that vLLM already computed and won't
+            # retrieve from LMCache.
+            if tracker.num_lmcache_hit_blocks > 0:
+                if not condition:
+                    # No retrieve needed — free ALL locked chunks
+                    free_end = tracker.num_lmcache_hit_blocks * self.vllm_block_size
+                else:
+                    # Note(Roy): Boundary misalignment between vLLM blocks and LMCache
+                    # blocks is handled in free_lookup_locks. It makes sure that if
+                    # the last vLLM computed block ends in the middle of a LMCache
+                    # block, the end LMCache block is not freed (i.e., floor division)
+                    # since it will still be needed by vLLM and such block's lock will
+                    # be freed by vLLM's retrieve.
+                    free_end = tracker.num_vllm_hit_blocks * self.vllm_block_size
+
+                if free_end > 0:
+                    self.scheduler_adapter.free_lookup_locks(
+                        token_ids=list(tracker.all_token_ids),
+                        start=0,
+                        end=free_end,
+                        request_id=request.request_id,
+                    )
+                    logger.debug(
+                        "Free locks of tokens %d-%d since it is cached by vLLM.",
+                        0,
+                        free_end,
+                    )
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
