@@ -93,6 +93,7 @@ from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.logger import init_logger, suppress_logging
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
@@ -1848,6 +1849,11 @@ class EngineArgs:
             kernel_config.moe_backend = self.moe_backend
 
         load_config = self.create_load_config()
+
+        # Validate model loader config in main process so that errors (e.g.
+        # "Unexpected extra config keys" for tensorizer config with load_format
+        # auto/safetensors) are raised here and visible to callers (e.g. tests).
+        get_model_loader(load_config)
 
         # Pass reasoning_parser into StructuredOutputsConfig
         if self.reasoning_parser:

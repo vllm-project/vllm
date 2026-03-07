@@ -168,7 +168,9 @@ def test_load_without_tensorizer_load_format(vllm_runner, capfd, model_ref):
         model = vllm_runner(
             model_ref, model_loader_extra_config=TensorizerConfig(tensorizer_uri="test")
         )
-        pytest.fail("Expected RuntimeError for extra config keys")
+        pytest.fail("Expected ValueError or RuntimeError for extra config keys")
+    except ValueError as e:
+        assert "Unexpected extra config keys for load format auto" in str(e)
     except RuntimeError:
         out, err = capfd.readouterr()
         combined_output = out + err
@@ -189,7 +191,9 @@ def test_raise_value_error_on_invalid_load_format(vllm_runner, capfd, model_ref)
             load_format="safetensors",
             model_loader_extra_config=TensorizerConfig(tensorizer_uri="test"),
         )
-        pytest.fail("Expected RuntimeError for extra config keys")
+        pytest.fail("Expected ValueError or RuntimeError for extra config keys")
+    except ValueError as e:
+        assert "Unexpected extra config keys for load format safetensors" in str(e)
     except RuntimeError:
         out, err = capfd.readouterr()
 
@@ -552,6 +556,8 @@ def test_blacklisted_parameter_for_loading(tmp_path, vllm_runner, capfd, illegal
             load_format="tensorizer",
             model_loader_extra_config=loader_tc,
         )
+    except ValueError as e:
+        assert f"{illegal_value} is not an allowed Tensorizer argument." in str(e)
     except RuntimeError:
         out, err = capfd.readouterr()
         combined_output = out + err
