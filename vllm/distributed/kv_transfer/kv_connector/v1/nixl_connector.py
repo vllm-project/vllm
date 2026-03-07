@@ -266,6 +266,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_send: dict[ReqId, float] = {}
         self.reqs_in_batch: set[ReqId] = set()
         self.reqs_not_processed: set[ReqId] = set()
+        self.reqs_abort_done: set[ReqId] = set()
 
     def _add_new_req(
         self,
@@ -576,6 +577,8 @@ class NixlConnectorScheduler:
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
         self._reqs_not_processed: set[ReqId] = set()
+        # Reqs that were aborted after finished and need cleanup.
+        self._reqs_abort_done: set[ReqId] = set()
 
         # Gather Sliding Window sizes for each kv cache group (if any) in number of
         # blocks per KV cache group. This is used to clip the local attention window.
@@ -846,12 +849,14 @@ class NixlConnectorScheduler:
         meta.reqs_to_send = self._reqs_need_send
         meta.reqs_in_batch = self._reqs_in_batch
         meta.reqs_not_processed = self._reqs_not_processed
+        meta.reqs_abort_done = self._reqs_abort_done
 
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
         self._reqs_in_batch = set()
         self._reqs_not_processed = set()
         self._reqs_need_send = {}
+        self._reqs_abort_done = set()
 
         return meta
 
@@ -865,6 +870,24 @@ class NixlConnectorScheduler:
         should be freed now or will be sent asynchronously and freed later.
         """
         from vllm.v1.request import RequestStatus
+
+        # Check if this is an abort after finished case.
+        if request.status == RequestStatus.FINISHED_ABORTED:
+            # Request was already finished and is now being aborted.
+            # Clean up state and mark for immediate reporting via
+            # finished_sending to unblock block freeing.
+            req_id = request.request_id
+            logger.debug(
+                "NIXLConnector request_finished(%s): abort after finished, "
+                "marking for cleanup via finished_sending",
+                req_id,
+            )
+            self._reqs_not_processed.add(req_id)
+            self._reqs_need_send.pop(req_id, None)
+            self._reqs_abort_done.add(req_id)
+            # Don't delay free blocks - will be freed when finished_sending
+            # is reported from worker.
+            return False, None
 
         params = request.kv_transfer_params
         logger.debug(
@@ -1086,6 +1109,8 @@ class NixlConnectorWorker:
         self._invalid_block_ids: set[int] = set()
         # requests that skipped transfer (handshake or transfer failures)
         self._failed_recv_reqs: set[ReqId] = set()
+        # requests that were aborted after finished
+        self._aborted_reqs: set[ReqId] = set()
 
         # Handshake metadata of this worker for NIXL transfers.
         self.xfer_handshake_metadata: NixlHandshakePayload | None = None
@@ -2087,6 +2112,10 @@ class NixlConnectorWorker:
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
 
+        # Add aborted requests (abort after finished) to done_sending.
+        done_sending.update(self._aborted_reqs)
+        self._aborted_reqs.clear()
+
         return done_sending, done_recving
 
     def _get_new_notifs(self) -> set[str]:
@@ -2254,6 +2283,10 @@ class NixlConnectorWorker:
         for req_id, expiration_time in metadata.reqs_to_send.items():
             if req_id in self._reqs_to_process:
                 self._reqs_to_send[req_id] = expiration_time
+
+        # Handle aborted requests (abort after finished).
+        # These will be reported as done_sending immediately.
+        self._aborted_reqs.update(metadata.reqs_abort_done)
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.kv_topo is not None
