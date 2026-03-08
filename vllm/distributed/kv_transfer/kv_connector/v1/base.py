@@ -284,21 +284,16 @@ class KVConnectorBase_V1(ABC):
         self,
         cross_layer_groups: "list[CrossLayerGroup]",
     ) -> None:
-        """
-        Register cross-layer KV cache tensors for models with multiple
+        """Register cross-layer KV cache tensors for models with multiple
         KV cache groups (e.g. hybrid attention architectures).
 
         Called instead of register_kv_caches / register_cross_layers_kv_cache
         when the model runner allocates cross-layer tensors. Connectors
-        that override this method opt in to the multi-group cross-layer
-        allocation path.
+        that override this method opt in to the multi-group path.
 
-        Each CrossLayerGroup contains:
-            tensor: the cross-layer tensor packing all layers in the group.
-            layer_names: names of the layers in this group.
-            page_size_bytes: page size used by these layers.
-            topologies: per-layer KVCacheTopology describing where
-                logical dimensions appear in the tensor.
+        Args:
+            cross_layer_groups (list[CrossLayerGroup]): one entry per
+                group of layers sharing a contiguous buffer.
         """
         raise NotImplementedError
 
