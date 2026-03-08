@@ -44,8 +44,30 @@ class TranscriptionStreamResponse(OpenAIBaseModel):
     usage: UsageInfo | None = Field(default=None)
 
 
+class TranscriptionTextDeltaEvent(OpenAIBaseModel):
+    type: Literal["transcript.text.delta"] = "transcript.text.delta"
+    delta: str
+    segment_id: int
+
+
+class TranscriptionTextSegmentEvent(OpenAIBaseModel):
+    type: Literal["transcript.text.segment"] = "transcript.text.segment"
+    id: int
+    text: str
+    start: float
+    end: float
+    speaker: str
+
+
+class TranscriptionTextDoneEvent(OpenAIBaseModel):
+    type: Literal["transcript.text.done"] = "transcript.text.done"
+    text: str
+
+
 ## Protocols for Audio
-AudioResponseFormat: TypeAlias = Literal["json", "text", "srt", "verbose_json", "vtt"]
+AudioResponseFormat: TypeAlias = Literal[
+    "json", "text", "srt", "verbose_json", "diarized_json", "vtt"
+]
 
 
 class TranscriptionRequest(OpenAIBaseModel):
@@ -309,6 +331,37 @@ class TranscriptionSegment(OpenAIBaseModel):
     """Array of token IDs for the text content."""
 
 
+class TranscriptionDiarizedWord(OpenAIBaseModel):
+    end: float
+    """End time of the word in seconds."""
+
+    start: float
+    """Start time of the word in seconds."""
+
+    word: str
+    """The text content of the word."""
+
+    speaker: str
+    """Predicted speaker label for this word."""
+
+
+class TranscriptionDiarizedSegment(OpenAIBaseModel):
+    id: int
+    """Unique identifier of the segment."""
+
+    end: float
+    """End time of the segment in seconds."""
+
+    start: float
+    """Start time of the segment in seconds."""
+
+    text: str
+    """Text content of the segment."""
+
+    speaker: str
+    """Predicted speaker label for this segment."""
+
+
 class TranscriptionResponseVerbose(OpenAIBaseModel):
     duration: str
     """The duration of the input audio."""
@@ -326,8 +379,28 @@ class TranscriptionResponseVerbose(OpenAIBaseModel):
     """Extracted words and their corresponding timestamps."""
 
 
+class TranscriptionResponseDiarized(OpenAIBaseModel):
+    duration: str
+    """The duration of the input audio."""
+
+    language: str | None = None
+    """The language of the input audio."""
+
+    text: str
+    """The transcribed text."""
+
+    segments: list[TranscriptionDiarizedSegment]
+    """Diarized segments and their corresponding speaker labels."""
+
+    words: list[TranscriptionDiarizedWord] | None = None
+    """Diarized words and their corresponding speaker labels."""
+
+    usage: TranscriptionUsageAudio
+    """Input-audio duration usage metadata."""
+
+
 TranscriptionResponseVariant: TypeAlias = (
-    TranscriptionResponse | TranscriptionResponseVerbose
+    TranscriptionResponse | TranscriptionResponseVerbose | TranscriptionResponseDiarized
 )
 
 
@@ -371,7 +444,7 @@ class TranslationRequest(OpenAIBaseModel):
     response_format: AudioResponseFormat = Field(default="json")
     """
     The format of the output, in one of these options: `json`, `text`, `srt`,
-    `verbose_json`, or `vtt`.
+    `verbose_json`, `diarized_json`, or `vtt`.
     """
 
     # TODO support additional sampling parameters
