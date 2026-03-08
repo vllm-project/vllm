@@ -25,8 +25,6 @@ def server():
         "2048",
         "--enforce-eager",
         "--no-async-scheduling",
-        "--gpu-memory-utilization",
-        "0.1",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
