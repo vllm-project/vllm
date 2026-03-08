@@ -11,7 +11,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 from safetensors import safe_open
-from transformers import AutoFeatureExtractor, BatchFeature, WhisperConfig
+from transformers import AutoFeatureExtractor, BatchFeature
+from transformers import WhisperConfig as HFWhisperConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.inputs.data import PromptType, TokensPrompt
@@ -65,27 +66,6 @@ logger = init_logger(__name__)
 KIMIA_WHISPER_SUBFOLDER = "whisper-large-v3"
 
 
-def _create_whisper_config_from_hf(hf_config) -> WhisperConfig:
-    """Create WhisperConfig from Kimi-Audio HF config."""
-    return WhisperConfig(
-        d_model=getattr(hf_config, "d_model", 1280),
-        encoder_layers=getattr(hf_config, "encoder_layers", 32),
-        encoder_attention_heads=getattr(hf_config, "encoder_attention_heads", 20),
-        encoder_ffn_dim=getattr(hf_config, "encoder_ffn_dim", 5120),
-        decoder_layers=getattr(hf_config, "decoder_layers", 32),
-        decoder_attention_heads=getattr(hf_config, "decoder_attention_heads", 20),
-        decoder_ffn_dim=getattr(hf_config, "decoder_ffn_dim", 5120),
-        num_mel_bins=getattr(hf_config, "num_mel_bins", 128),
-        max_source_positions=getattr(hf_config, "max_source_positions", 1500),
-        max_target_positions=getattr(hf_config, "max_target_positions", 448),
-        scale_embedding=getattr(hf_config, "scale_embedding", False),
-        activation_function=getattr(hf_config, "activation_function", "gelu"),
-        dropout=getattr(hf_config, "dropout", 0.0),
-        attention_dropout=getattr(hf_config, "attention_dropout", 0.0),
-        activation_dropout=getattr(hf_config, "activation_dropout", 0.0),
-    )
-
-
 class KimiAudioWhisperEncoder(WhisperEncoder):
     """WhisperEncoder for Kimi-Audio with packed_modules_mapping."""
 
@@ -98,15 +78,17 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
     def __init__(
         self, *, vllm_config: VllmConfig, prefix: str = "", init_in_fp32: bool = False
     ):
-        # Read Whisper encoder params from HF config (authoritative source)
-        hf_config = vllm_config.model_config.hf_config
+        # Load Whisper config from subfolder (authoritative source)
+        # Kimi-Audio stores Whisper config in whisper-large-v3/config.json
+        model_path = vllm_config.model_config.model
+        whisper_config_path = os.path.join(model_path, KIMIA_WHISPER_SUBFOLDER)
 
-        # Create WhisperConfig with values from HF config
-        config = _create_whisper_config_from_hf(hf_config)
+        # Load WhisperConfig from the subfolder
+        whisper_config = HFWhisperConfig.from_pretrained(whisper_config_path)
 
         # Temporarily replace hf_config for WhisperEncoder.__init__()
         original_config = vllm_config.model_config.hf_config
-        vllm_config.model_config.hf_config = config
+        vllm_config.model_config.hf_config = whisper_config
 
         super().__init__(
             vllm_config=vllm_config, prefix=prefix, init_in_fp32=init_in_fp32
