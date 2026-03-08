@@ -492,7 +492,9 @@ class KVConnectorModelRunnerMixin:
             )
             assert len(kv_cache_stride_order) == len(kv_cache_shape)
         except (AttributeError, NotImplementedError):
-            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+            # Fallback: prepend layers dim to the base stride order.
+            base_order = attn_backend.get_kv_cache_stride_order()
+            kv_cache_stride_order = (0,) + tuple(x + 1 for x in base_order)
 
         kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
 
