@@ -691,12 +691,58 @@ class DefaultMoERunner(MoERunner):
         _layer = layer
         _runner = self
         _has_sep_shared = has_separate_shared_experts
+        _mk_owns_shared = self.quant_method.mk_owns_shared_expert
+        _has_chunked_shared = chunked_shared is not None
+
+        # Wrap quant_method.apply() so dynamo treats it as an opaque leaf.
+        #
+        # torch.scan compiles chunk_fn with fullgraph=True.  For the DeepEP-LL
+        # path, quant_method.apply() calls buffer.low_latency_dispatch() on a
+        # deep_ep.Buffer C++ extension object.  Dynamo cannot trace into that
+        # method, and the opaque handle object it returns cannot be represented
+        # as an FX proxy.  Capturing _layer and _runner in the closure (instead
+        # of passing them as arguments) avoids exposing any non-tensor objects
+        # as FX graph inputs.
+        #
+        # allow_in_graph stops tracing INTO the function (Phase 1), but dynamo
+        # still calls it with FakeTensors to infer output shapes (Phase 2).
+        # The is_fake guard handles Phase 2 without executing any CUDA kernels.
+        def _apply_chunk(
+            x: torch.Tensor,
+            topk_weights: torch.Tensor,
+            topk_ids: torch.Tensor,
+            shared_input: torch.Tensor,
+        ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+            from torch._subclasses.fake_tensor import is_fake
+
+            if is_fake(x):
+                # Shape-propagation call: return correctly-shaped outputs
+                # without executing CUDA kernels (FakeTensors have no memory).
+                if _has_sep_shared or _mk_owns_shared:
+                    return torch.empty_like(shared_input), torch.empty_like(x)
+                return torch.empty_like(x)
+
+            out = _runner.quant_method.apply(
+                layer=_layer,
+                x=x,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                shared_experts_input=shared_input,
+            )
+            if _has_sep_shared:
+                assert _runner.shared_experts is not None
+                assert not isinstance(out, tuple)
+                shared_out = _runner.shared_experts(shared_input)
+                return shared_out, out
+            return out
+
+        _apply_chunk = torch._dynamo.allow_in_graph(_apply_chunk)
 
         def chunk_fn(
             carry: torch.Tensor,
             xs: tuple[torch.Tensor, ...],
         ) -> tuple[torch.Tensor, torch.Tensor | tuple[torch.Tensor, torch.Tensor]]:
-            if chunked_shared is not None:
+            if _has_chunked_shared:
                 chunk_h, chunk_r, chunk_s = xs
             else:
                 chunk_h, chunk_r = xs
@@ -707,23 +753,15 @@ class DefaultMoERunner(MoERunner):
                 router_logits=chunk_r,
             )
 
-            chunk_out = _runner.quant_method.apply(
-                layer=_layer,
-                x=chunk_h,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                shared_experts_input=chunk_s if chunked_shared is not None else None,
+            chunk_out = _apply_chunk(
+                chunk_h,
+                topk_weights,
+                topk_ids,
+                chunk_s,
             )
 
-            if _has_sep_shared:
-                assert _runner.shared_experts is not None
-                assert not isinstance(chunk_out, tuple)
-                shared_out = _runner.shared_experts(chunk_s)
-                chunk_out = (shared_out, chunk_out)
-
-            # torch.scan requires output leaves to be tensors; tuples are
-            # supported as pytrees.
-            return carry, chunk_out
+            # Must clone carry to avoid input-output aliasing, which HOPs forbid.
+            return carry.clone(), chunk_out
 
         xs_tuple: tuple[torch.Tensor, ...]
         if chunked_shared is not None:
@@ -736,7 +774,8 @@ class DefaultMoERunner(MoERunner):
         # ------------------------------------------------------------------
         # Unpack stacked outputs: (num_chunks, max_tokens, H) -> (N, H)
         # ------------------------------------------------------------------
-        if has_separate_shared_experts:
+        mk_owns_shared = self.quant_method.mk_owns_shared_expert
+        if has_separate_shared_experts or mk_owns_shared:
             assert isinstance(stacked, tuple)
             stacked_shared, stacked_fused = stacked
             return (
