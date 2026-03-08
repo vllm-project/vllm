@@ -7,6 +7,7 @@ import argparse
 from vllm import LLM
 from vllm.sampling_params import SamplingParams
 from vllm.assets.image import ImageAsset
+from vllm.multimodal.utils import encode_image_url
 
 # This script is an offline demo for running Mistral-Small-3.1
 #
@@ -18,11 +19,11 @@ from vllm.assets.image import ImageAsset
 # # Mistral format
 # vllm serve mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
 #   --tokenizer-mode mistral --config-format mistral --load-format mistral \
-#   --limit-mm-per-prompt '{"image":4}' --max-model-len 16384
+#   --limit-mm-per-prompt.image 4 --max-model-len 16384
 #
 # # HF format
 # vllm serve mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
-#   --limit-mm-per-prompt '{"image":4}' --max-model-len 16384
+#   --limit-mm-per-prompt.image 4 --max-model-len 16384
 # ```
 #
 # - Client:
@@ -79,8 +80,10 @@ def run_simple_demo(args: argparse.Namespace):
             "content": [
                 {"type": "text", "text": prompt},
                 {
-                    "type": "image_pil",
-                    "image_pil": ImageAsset("cherry_blossom").pil_image,
+                    "type": "image_url",
+                    "image_url": {
+                        "url": encode_image_url(ImageAsset("cherry_blossom").pil_image)
+                    },
                 },
             ],
         },

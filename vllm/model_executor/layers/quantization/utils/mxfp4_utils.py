@@ -6,12 +6,20 @@ from typing import Any
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
 logger = init_logger(__name__)
+
+# CK's pre-compiled MXFP4 MoE GEMM kernel instances require the
+# intermediate_size (after TP split) to be a multiple of this value.
+# This arises from FP4 packing (2 values per byte) combined with CK
+# tile size constraints. When violated, AITER raises:
+# "device_gemm ... does not support this GEMM problem".
+CK_MXFP4_MOE_DIM_ALIGNMENT = 256
 
 
 def _swizzle_mxfp4(quant_tensor, scale, num_warps):
@@ -88,7 +96,7 @@ def _can_support_mxfp4(
     e_score_correction_bias: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
     scoring_func: str = "softmax",
-    activation: str = "swigluoai",
+    activation: MoEActivation = MoEActivation.SWIGLUOAI,
     expert_load_view: torch.Tensor | None = None,
     logical_to_physical_map: torch.Tensor | None = None,
     logical_replica_count: torch.Tensor | None = None,
@@ -101,7 +109,7 @@ def _can_support_mxfp4(
         or e_score_correction_bias
         or apply_router_weight_on_input
         or scoring_func != "softmax"
-        or activation != "swigluoai"
+        or activation != MoEActivation.SWIGLUOAI
         or expert_load_view
         or logical_to_physical_map
         or logical_replica_count

@@ -85,7 +85,7 @@ class OffloadingConnectorStats(KVConnectorStats):
         for transfer_type, ops_list in self.data.items():
             assert isinstance(ops_list, list)
             total_bytes = 0
-            total_time = 0
+            total_time = 0.0
             for op in ops_list:
                 assert isinstance(op, dict)
                 total_bytes += op["op_size"]
@@ -720,7 +720,7 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         per_engine_labelvalues: dict[int, list[object]],
     ):
         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
-        # (engine_idx, transfer_tupe) -> (metric with bounded labels)
+        # (engine_idx, transfer_type) -> (metric with bounded labels)
         self.histogram_transfer_size: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_bytes: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_transfer_time: dict[tuple[int, str], PromMetricT] = {}

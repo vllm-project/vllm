@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
+from itertools import islice
 from typing import TYPE_CHECKING, Any
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
@@ -77,7 +78,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         return False
 
     def is_reasoning_end_streaming(
-        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
         end_token_id = self.end_token_id
         return end_token_id in delta_ids
@@ -86,7 +87,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         """
         Extract the content after the end tokens
         """
-        if self.end_token_id not in input_ids[:-1]:
+        if self.end_token_id not in islice(input_ids, 0, max(0, len(input_ids) - 1)):
             return []
         else:
             return input_ids[input_ids.index(self.end_token_id) + 1 :]
@@ -175,3 +176,23 @@ class BaseThinkingReasoningParser(ReasoningParser):
             # If generation stops right after end-of-think, return null content
             final_content = content or None
             return reasoning, final_content
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count tokens that fall within start/end thinking markers.
+
+        Uses a depth counter so nested spans are handled safely and stray end
+        tokens do not drive the counter negative.
+        """
+        count = 0
+        depth = 0
+        for token_id in token_ids:
+            if token_id == self.start_token_id:
+                depth += 1
+                continue
+            if token_id == self.end_token_id:
+                if depth > 0:
+                    depth -= 1
+                continue
+            if depth > 0:
+                count += 1
+        return count

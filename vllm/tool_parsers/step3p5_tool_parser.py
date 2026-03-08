@@ -23,10 +23,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import (
-    ToolParser,
-    ToolParserManager,
-)
+from vllm.tool_parsers.abstract_tool_parser import ToolParser
 
 logger = init_logger(__name__)
 
@@ -97,10 +94,25 @@ class StreamingXMLToolCallParser:
         """
         # Record delta count before processing
         initial_delta_count = len(self.deltas)
+        entry_call_id = self.current_call_id
+        entry_tool_call_index = self.tool_call_index
 
         self.streaming_buffer += xml_chunk
 
         found_elements = self._process_complete_xml_elements()
+
+        fallback_call_id = None
+        if entry_call_id is not None:
+            if (
+                self.current_call_id == entry_call_id
+                and self.tool_call_index == entry_tool_call_index
+            ):
+                fallback_call_id = entry_call_id
+        elif (
+            self.current_call_id is not None
+            and self.tool_call_index == entry_tool_call_index + 1
+        ):
+            fallback_call_id = self.current_call_id
 
         if found_elements:
             # If complete elements found, check if end events were missed
@@ -110,7 +122,7 @@ class StreamingXMLToolCallParser:
                 # If this chunk contains </function>
                 # but didn't generate '}', then complete it
                 if (
-                    self.current_call_id is not None
+                    fallback_call_id is not None
                     and self.function_end_token in xml_chunk
                 ):
                     # - Added '}' (non-empty parameter ending)
@@ -121,7 +133,7 @@ class StreamingXMLToolCallParser:
                             and any(
                                 (
                                     tc.function
-                                    and tc.id == self.current_call_id
+                                    and tc.id == fallback_call_id
                                     and isinstance(tc.function.arguments, str)
                                     and (tc.function.arguments in ("}", "{}"))
                                 )
@@ -139,7 +151,7 @@ class StreamingXMLToolCallParser:
                 # If this chunk contains </tool_call>
                 # but didn't generate final empty delta, then complete it
                 if (
-                    self.current_call_id is not None
+                    fallback_call_id is not None
                     and self.tool_call_end_token in xml_chunk
                 ):
                     has_toolcall_close = any(
@@ -150,7 +162,7 @@ class StreamingXMLToolCallParser:
                                     tc.type == "function"
                                     and tc.function
                                     and tc.function.arguments == ""
-                                    and tc.id == self.current_call_id
+                                    and tc.id == fallback_call_id
                                 )
                                 for tc in td.tool_calls
                             )
@@ -186,7 +198,7 @@ class StreamingXMLToolCallParser:
             # Only execute when still on the same call as when entered,
             # to prevent accidentally closing new calls
             # in multi <tool_call> scenarios
-            if self.current_call_id is not None and (
+            if fallback_call_id is not None and (
                 self.function_end_token in xml_chunk
                 or self.tool_call_end_token in xml_chunk
             ):
@@ -1352,7 +1364,6 @@ class StreamingXMLToolCallParser:
         self.deferred_param_raw_value = ""
 
 
-@ToolParserManager.register_module("step3p5")
 class Step3p5ToolParser(ToolParser):
     def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)

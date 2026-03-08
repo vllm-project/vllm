@@ -7,7 +7,8 @@
 set -e
 
 TORCHCODEC_REPO="${TORCHCODEC_REPO:-https://github.com/pytorch/torchcodec.git}"
-TORCHCODEC_BRANCH="${TORCHCODEC_BRANCH:-main}"
+# Pin to a specific release for reproducibility; update as needed.
+TORCHCODEC_BRANCH="${TORCHCODEC_BRANCH:-v0.10.0}"
 
 echo "=== TorchCodec Installation Script ==="
 

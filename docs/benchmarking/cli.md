@@ -4,6 +4,11 @@ This section guides you through running benchmark tests with the extensive datas
 
 It's a living document, updated as new features and datasets become available.
 
+!!! tip
+    The benchmarks described on this page are mainly for evaluating specific vLLM features as well as regression testing.
+
+    For benchmarking production vLLM servers, we recommend [GuideLLM](https://github.com/vllm-project/guidellm), an established performance benchmarking framework with live progress updates and automatic report generation. It is also more flexible than `vllm bench serve` in terms of dataset loading, request formatting, and workload patterns.
+
 ## Dataset Overview
 
 <style>
@@ -20,7 +25,7 @@ th {
 | BurstGPT | ✅ | ✅ | `wget https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv` |
 | Sonnet (deprecated) | ✅ | ✅ | Local file: `benchmarks/sonnet.txt` |
 | Random | ✅ | ✅ | `synthetic` |
-| RandomMultiModal (Image/Video) | 🟡 | 🚧 | `synthetic` |
+| RandomMultiModal (Image/Video) | ✅ | ✅ | `synthetic` |
 | RandomForReranking | ✅ | ✅ | `synthetic` |
 | Prefix Repetition | ✅ | ✅ | `synthetic` |
 | HuggingFace-VisionArena | ✅ | ✅ | `lmarena-ai/VisionArena-Chat` |
@@ -30,6 +35,7 @@ th {
 | HuggingFace-Other | ✅ | ✅ | `lmms-lab/LLaVA-OneVision-Data`, `Aeala/ShareGPT_Vicuna_unfiltered` |
 | HuggingFace-MTBench | ✅ | ✅ | `philschmid/mt-bench` |
 | HuggingFace-Blazedit | ✅ | ✅ | `vdaita/edit_5k_char`, `vdaita/edit_10k_char` |
+| HuggingFace-ASR | ✅ | ✅ | `openslr/librispeech_asr`, `facebook/voxpopuli`,  `LIUM/tedlium`, `edinburghcstr/ami`,        `speechcolab/gigaspeech`,        `kensho/spgispeech` |
 | Spec Bench | ✅ | ✅ | `wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl` |
 | Custom | ✅ | ✅ | Local file: `data.jsonl` |
 | Custom MM | ✅ | ✅ | Local file: `mm_data.jsonl` |
@@ -299,6 +305,22 @@ vllm bench serve \
     --blazedit-max-distance 0.99
 ```
 
+`openslr/librispeech_asr`, `facebook/voxpopuli`, `LIUM/tedlium`, `edinburghcstr/ami`, `speechcolab/gigaspeech`, `kensho/spgispeech`
+
+```bash
+vllm bench serve \
+    --model openai/whisper-large-v3-turbo \
+    --backend openai-audio \
+    --dataset-name hf \
+    --dataset-path facebook/voxpopuli --hf-subset en --hf-split test --no-stream --trust-remote-code \
+    --num-prompts 99999999 \
+    --no-oversample \
+    --endpoint /v1/audio/transcriptions \
+    --ready-check-timeout-sec 600 \
+    --save-result \
+    --max-concurrency 512
+```
+
 #### Running With Sampling Parameters
 
 When using OpenAI-compatible backends such as `vllm`, optional sampling
@@ -521,6 +543,24 @@ vllm bench throughput \
   --max-lora-rank 8 \
   --enable-lora \
   --lora-path yard1/llama-2-7b-sql-lora-test
+```
+
+#### Synthetic Random Multimodal (random-mm)
+
+Generate synthetic multimodal inputs for offline throughput testing without external datasets.
+Use `--backend vllm-chat` so that image tokens are counted correctly.
+
+```bash
+vllm bench throughput \
+  --model Qwen/Qwen2-VL-7B-Instruct \
+  --backend vllm-chat \
+  --dataset-name random-mm \
+  --num-prompts 100 \
+  --random-input-len 300 \
+  --random-output-len 40 \
+  --random-mm-base-items-per-request 2 \
+  --random-mm-limit-mm-per-prompt '{"image": 3, "video": 0}' \
+  --random-mm-bucket-config '{(256, 256, 1): 0.7, (720, 1280, 1): 0.3}'
 ```
 
 </details>
@@ -824,8 +864,8 @@ Generate synthetic image inputs alongside random text prompts to stress-test vis
 
 Notes:
 
-- Works only with online benchmark via the OpenAI backend (`--backend openai-chat`) and endpoint `/v1/chat/completions`.
-- Video sampling is not yet implemented.
+- For online benchmarks, use `--backend openai-chat` with endpoint `/v1/chat/completions`.
+- For offline benchmarks, use `--backend vllm-chat` (see [Offline Throughput Benchmark](#-offline-throughput-benchmark) for an example).
 
 Start the server (example):
 
@@ -888,6 +928,74 @@ How sampling works:
 - If a modality (e.g., image) reaches its limit from `--random-mm-limit-mm-per-prompt`, all buckets of that modality are excluded and the remaining bucket probabilities are renormalized before continuing.
 This should be seen as an edge case, and if this behavior can be avoided by setting `--random-mm-limit-mm-per-prompt` to a large number. Note that this might result in errors due to engine config `--limit-mm-per-prompt`.
 - The resulting request contains synthetic image data in `multi_modal_data` (OpenAI Chat format). When `random-mm` is used with the OpenAI Chat backend, prompts remain text and MM content is attached via `multi_modal_data`.
+
+</details>
+
+### 🔬 Multimodal Processor Benchmark
+
+Benchmark per-stage latency of the multimodal (MM) input processor pipeline, including the encoder forward pass. This is useful for profiling preprocessing bottlenecks in vision-language models.
+
+<details class="admonition abstract" markdown="1">
+<summary>Show more</summary>
+
+The benchmark measures the following stages for each request:
+
+| Stage | Description |
+|-------|-------------|
+| `get_mm_hashes_secs` | Time spent hashing multimodal inputs |
+| `get_cache_missing_items_secs` | Time spent looking up the processor cache |
+| `apply_hf_processor_secs` | Time spent in the HuggingFace processor |
+| `merge_mm_kwargs_secs` | Time spent merging multimodal kwargs |
+| `apply_prompt_updates_secs` | Time spent updating prompt tokens |
+| `preprocessor_total_secs` | Total preprocessing time |
+| `encoder_forward_secs` | Time spent in the encoder model forward pass |
+| `num_encoder_calls` | Number of encoder invocations per request |
+
+The benchmark also reports end-to-end latency (TTFT + decode time) per
+request. Use `--metric-percentiles` to select which percentiles to report
+(default: p99) and `--output-json` to save results.
+
+#### Basic Example with Synthetic Data (random-mm)
+
+```bash
+vllm bench mm-processor \
+  --model Qwen/Qwen2-VL-7B-Instruct \
+  --dataset-name random-mm \
+  --num-prompts 50 \
+  --random-input-len 300 \
+  --random-output-len 40 \
+  --random-mm-base-items-per-request 2 \
+  --random-mm-limit-mm-per-prompt '{"image": 3, "video": 0}' \
+  --random-mm-bucket-config '{(256, 256, 1): 0.7, (720, 1280, 1): 0.3}'
+```
+
+#### Using a HuggingFace Dataset
+
+```bash
+vllm bench mm-processor \
+  --model Qwen/Qwen2-VL-7B-Instruct \
+  --dataset-name hf \
+  --dataset-path lmarena-ai/VisionArena-Chat \
+  --hf-split train \
+  --num-prompts 100
+```
+
+#### Warmup, Custom Percentiles, and JSON Output
+
+```bash
+vllm bench mm-processor \
+  --model Qwen/Qwen2-VL-7B-Instruct \
+  --dataset-name random-mm \
+  --num-prompts 200 \
+  --num-warmups 5 \
+  --random-input-len 300 \
+  --random-output-len 40 \
+  --random-mm-base-items-per-request 1 \
+  --metric-percentiles 50,90,95,99 \
+  --output-json results.json
+```
+
+See [`vllm bench mm-processor`](../cli/bench/mm_processor.md) for the full argument reference.
 
 </details>
 
