@@ -229,6 +229,11 @@ run_tests_for_model() {
       BASE_CMD="${BASE_CMD} --attention-backend=$ATTENTION_BACKEND"
     fi
 
+    # Add HMA flag if specified
+    if [[ -n "$ENABLE_HMA_VAR" ]]; then
+      BASE_CMD="${BASE_CMD} $ENABLE_HMA_VAR"
+    fi
+
   # DP-EP attention mode
   if [[ -z "$DP_EP" ]]; then
     BASE_CMD="${BASE_CMD} --tensor-parallel-size $DECODER_TP_SIZE"
