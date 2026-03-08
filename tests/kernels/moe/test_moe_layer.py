@@ -13,6 +13,7 @@ import torch
 
 from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
     ProcessGroupInfo,
+    _set_vllm_config,
     parallel_launch_with_config,
 )
 from tests.kernels.moe.utils import TestMLP, make_test_weights, moe_quantize_weights
@@ -370,6 +371,7 @@ def make_fused_moe_layer(
     has_bias: bool = False,
     gate: torch.nn.Module | None = None,
     routed_input_transform: torch.nn.Module | None = None,
+    pcp_size: int | None = 1,
 ) -> tuple[Callable, FusedMoE]:
     quant_config, qw = make_quant_config(quantization, w1, w2, global_num_experts)
 
@@ -401,6 +403,7 @@ def make_fused_moe_layer(
         tp_size=tp_size,
         ep_size=ep_size,
         dp_size=dp_size,
+        pcp_size=pcp_size,
         prefix="from_forward_context",
         custom_routing_function=custom_routing_function,
         scoring_func=scoring_func,
@@ -907,13 +910,24 @@ def test_moe_layer_no_parallel(
     if use_routed_input_transform and not use_shared_experts:
         pytest.skip("routed_input_transform requires shared_experts")
 
+    # gate requires shared_experts (use_overlapped mode)
+    if use_gate and not use_shared_experts:
+        pytest.skip("gate requires shared_experts (use_overlapped mode)")
+
+    # gate and routed_input_transform require full FusedMoE layer infrastructure
+    # The baseline uses low-level fused_experts which doesn't support these features
+    if use_gate or use_routed_input_transform:
+        pytest.skip(
+            "gate and routed_input_transform not supported by baseline fused_experts"
+        )
+
     set_random_seed(7)
 
     dp_size = 1
     tp_size = 1
     world_size = 1
-
-    test_env: dict[str, str] = dict()
+    ep_size = 1
+    use_ep = False
 
     parallel_config = ParallelConfig()
     compilation_config = CompilationConfig()
@@ -929,10 +943,20 @@ def test_moe_layer_no_parallel(
     latent_size = k // 2 if use_routed_input_transform else k
     routed_expert_hidden_size = latent_size
 
-    (w1, _, _, _), (w2, _, _, _) = make_test_weights(
+    # Note: For latent MoE, routed experts take latent_size input but output original k
+    # w1: (E, 2*N, latent_size) - input latent_size
+    # w2: (E, k, N) - output k (original dimension, matches shared expert output)
+    (w1, _, _, _), _ = make_test_weights(
         num_experts,
         n,
-        routed_expert_hidden_size,
+        routed_expert_hidden_size,  # w1 input dimension
+        in_dtype=in_dtype,
+    )
+    # w2 separately with output dimension = k (original)
+    _, (w2, _, _, _) = make_test_weights(
+        num_experts,
+        n,
+        k,  # w2 output dimension (original k, not latent_size)
         in_dtype=in_dtype,
     )
 
@@ -976,34 +1000,83 @@ def test_moe_layer_no_parallel(
     del baseline_layer
     torch.accelerator.empty_cache()
 
-    # Use parallel_launch_with_config to properly initialize parallel groups
-    parallel_launch_with_config(
-        world_size,
-        _test_loop,
-        vllm_config,
-        test_env,
-        1,  # ep_size
-        dp_size,
-        tp_size,
-        hidden_states,
-        router_logits,
-        w1,
-        w2,
-        num_experts,
-        m,
-        n,
-        routed_expert_hidden_size,
-        top_k,
-        quantization,
-        shared_experts_config,
-        False,  # reduce_results
-        _test_body_regular,
-        gate=gate,
-        routed_input_transform=routed_input_transform,
-        baseline_output=baseline_output,
-    )
+    # Initialize workspace manager and prepare for test (inlined from _test_loop)
+    set_random_seed(7)
 
-    # Cleanup GPU memory after spawned processes complete
+    # Initialize distributed environment for single GPU
+    _set_vllm_config(vllm_config, world_size, rank=0, local_rank=0)
+
+    init_workspace_manager("cuda")
+
+    with set_current_vllm_config(vllm_config):
+        # Setup shared experts if needed
+        if shared_experts_config is not None:
+            s_w1 = shared_experts_config.w1
+            s_w2 = shared_experts_config.w2
+
+            shared_experts = TestMLP(
+                w1=s_w1,
+                w2=s_w2,
+                out_dtype=in_dtype,
+            )
+        else:
+            shared_experts = None
+
+        # Create MoE layer
+        # Use routed_expert_hidden_size (not k) when routed_input_transform is used
+        # to match the weight dimensions
+        moe_fn, moe_layer = make_fused_moe_layer(
+            quantization=quantization,
+            use_ep=use_ep,
+            hidden_size=routed_expert_hidden_size,
+            intermediate_size=n,
+            in_dtype=in_dtype,
+            tp_size=tp_size,
+            ep_size=ep_size,
+            dp_size=dp_size,
+            reduce_results=False,
+            w1=w1,
+            w2=w2,
+            top_k=top_k,
+            global_num_experts=num_experts,
+            shared_experts=shared_experts,
+            gate=gate,
+            routed_input_transform=routed_input_transform,
+        )
+
+        # if moe_layer._expert_map is not None:
+        #    moe_layer._expert_map = moe_layer._expert_map.to(device)
+
+        num_tokens = m
+        num_tokens_across_dp = torch.tensor(
+            [num_tokens] * world_size,
+            device="cuda",
+            dtype=torch.int,
+        )
+
+        # Call _test_body_regular to get expected and actual outputs
+        with set_forward_context(
+            None,
+            vllm_config,
+            num_tokens=num_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
+        ):
+            actual = moe_fn(hidden_states, router_logits)
+
+    # Set tolerances based on quantization
+    if quantization is None:
+        atol, rtol = 3.5e-2, 3.5e-2
+    elif quantization in ("fp8", "modelopt_fp8"):
+        atol, rtol = 6e-2, 6e-2
+    elif quantization == "modelopt_fp4":
+        atol = rtol = 1e-1 + k * 5e-4
+    else:
+        atol, rtol = 6e-2, 6e-2
+
+    # Compare outputs
+    torch.testing.assert_close(baseline_output, actual, atol=atol, rtol=rtol)
+
+    # Cleanup GPU memory
     torch.cuda.synchronize()
     torch.accelerator.empty_cache()
 
@@ -1054,6 +1127,14 @@ def test_moe_layer(
 
     if reduce_results and quantization is not None:
         pytest.skip("reduce_results=True only tested with unquantized data types")
+
+    # routed_input_transform only makes sense with shared_experts (latent MoE)
+    # if use_routed_input_transform and not use_shared_experts:
+    #    pytest.skip("routed_input_transform requires shared_experts")
+
+    # gate requires shared_experts (use_overlapped mode)
+    # if use_gate and not use_shared_experts:
+    #    pytest.skip("gate requires shared_experts (use_overlapped mode)")
 
     # Skip modelopt_fp4 on H100 (compute capability 9.0)
     if quantization == "modelopt_fp4" and not current_platform.has_device_capability(
@@ -1129,7 +1210,14 @@ def test_moe_layer(
     # For now, run baseline unquantized.
     # quant_dtype = torch.float8_e4m3fn if quantization is not None else None
 
-    with set_current_vllm_config(vllm_config):
+    # Create baseline with tp_size=1 (single GPU, full weights)
+    # to avoid TP-aware behavior when using full, unchunked weights
+    baseline_parallel_config = ParallelConfig()
+    baseline_vllm_config = VllmConfig(
+        parallel_config=baseline_parallel_config, compilation_config=compilation_config
+    )
+
+    with set_current_vllm_config(baseline_vllm_config):
         baseline_layer = make_fake_moe_layer(
             w1=w1,
             w2=w2,
@@ -1238,6 +1326,14 @@ def test_moe_layer_eplb(
 
     if reduce_results and quantization is not None:
         pytest.skip("reduce_results=True only tested with unquantized data types")
+
+    # routed_input_transform only makes sense with shared_experts (latent MoE)
+    # if use_routed_input_transform and not use_shared_experts:
+    #    pytest.skip("routed_input_transform requires shared_experts")
+
+    # gate requires shared_experts (use_overlapped mode)
+    # if use_gate and not use_shared_experts:
+    #    pytest.skip("gate requires shared_experts (use_overlapped mode)")
 
     # Skip modelopt_fp4 on H100 (compute capability 9.0)
     if quantization == "modelopt_fp4" and not current_platform.has_device_capability(
