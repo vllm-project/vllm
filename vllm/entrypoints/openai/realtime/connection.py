@@ -106,7 +106,7 @@ class RealtimeConnection:
             error = self._check_model(model)
             if error is not None:
                 await self.send_error(
-                    error.message,
+                    error.error.message,
                     "invalid_model",
                 )
                 return
