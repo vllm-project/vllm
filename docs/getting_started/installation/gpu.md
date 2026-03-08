@@ -88,7 +88,6 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
 ### Pre-built images
 
-<!-- markdownlint-disable MD025 -->
 --8<-- [start:pre-built-images]
 
 === "NVIDIA CUDA"
@@ -104,13 +103,9 @@ vLLM is a Python library that supports the following GPU variants. Select your G
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:pre-built-images"
 
 --8<-- [end:pre-built-images]
-<!-- markdownlint-enable MD025 -->
 
-<!-- markdownlint-disable MD001 -->
 ### Build image from source
-<!-- markdownlint-enable MD001 -->
 
-<!-- markdownlint-disable MD025 -->
 --8<-- [start:build-image-from-source]
 
 === "NVIDIA CUDA"
@@ -126,7 +121,6 @@ vLLM is a Python library that supports the following GPU variants. Select your G
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:build-image-from-source"
 
 --8<-- [end:build-image-from-source]
-<!-- markdownlint-enable MD025 -->
 
 ## Supported features
 
