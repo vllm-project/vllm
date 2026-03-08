@@ -174,13 +174,6 @@ def _int8_quantize(
                 A_scale = torch.ones(1, dtype=torch.float32,
                                      device=A.device)
             A, A_scale, _ = ops.scaled_int8_quant(A, scale=A_scale)
-        else:
-            raise ValueError(
-                f"Unexpected int8 quantization config: "
-                f"per_act_token={per_act_token}, "
-                f"A_scale={A_scale}, "
-                f"block_shape={block_shape}"
-            )
     else:
         assert not per_act_token
         assert len(block_shape) == 2
