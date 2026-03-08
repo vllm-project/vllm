@@ -158,10 +158,7 @@ class ErnieForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQ
             mapper = mapper | _LEGACY_SUFFIX_MAPPER
 
         loader = AutoWeightsLoader(self, skip_prefixes=["cls.", "lm_head."])
-        loaded_params = loader.load_weights(weights_list, mapper=mapper)
-        if loaded_params is not None:
-            loaded_params.update({"classifier.weight", "classifier.bias"})
-        return loaded_params
+        return loader.load_weights(weights_list, mapper=mapper)
 
     def forward(
         self,
@@ -224,10 +221,7 @@ class ErnieForTokenClassification(nn.Module):
             mapper = mapper | _LEGACY_SUFFIX_MAPPER
 
         loader = AutoWeightsLoader(self, skip_prefixes=["cls.", "lm_head."])
-        loaded_params = loader.load_weights(weights_list, mapper=mapper)
-        if loaded_params is not None:
-            loaded_params.update({"classifier.weight", "classifier.bias"})
-        return loaded_params
+        return loader.load_weights(weights_list, mapper=mapper)
 
     def forward(
         self,

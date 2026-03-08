@@ -68,11 +68,7 @@ def test_ernie_sequence_classification_load_weights_maps_bert_prefix(
     loader = _RecordingLoader.instances[-1]
     assert loader.skip_prefixes == ["cls.", "lm_head."]
     assert loader.mapped_names == ["ernie.embeddings.LayerNorm.weight"]
-    assert loaded == {
-        "classifier.bias",
-        "classifier.weight",
-        "mapped.sentinel",
-    }
+    assert loaded == {"mapped.sentinel"}
 
 
 def test_ernie_token_classification_load_weights_maps_legacy_suffix(
@@ -89,8 +85,4 @@ def test_ernie_token_classification_load_weights_maps_legacy_suffix(
     loader = _RecordingLoader.instances[-1]
     assert loader.skip_prefixes == ["cls.", "lm_head."]
     assert loader.mapped_names == ["ernie.embeddings.LayerNorm.bias"]
-    assert loaded == {
-        "classifier.bias",
-        "classifier.weight",
-        "mapped.sentinel",
-    }
+    assert loaded == {"mapped.sentinel"}
