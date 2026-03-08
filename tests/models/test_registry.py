@@ -128,9 +128,7 @@ def test_hf_registry_coverage():
 
 
 def test_ernie_sequence_classification_supports_cross_encoding():
-    model_info = ModelRegistry._try_inspect_model_cls(
-        "ErnieForSequenceClassification"
-    )
+    model_info = ModelRegistry._try_inspect_model_cls("ErnieForSequenceClassification")
     assert model_info is not None
     assert not model_info.supports_multimodal
     assert model_info.supports_cross_encoding
