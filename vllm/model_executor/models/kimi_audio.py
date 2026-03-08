@@ -60,6 +60,30 @@ from vllm.v1.sample.metadata import SamplingMetadata
 
 logger = init_logger(__name__)
 
+# Kimi-Audio constants
+KIMIA_WHISPER_SUBFOLDER = "whisper-large-v3"
+
+
+def _create_whisper_config_from_hf(hf_config) -> WhisperConfig:
+    """Create WhisperConfig from Kimi-Audio HF config."""
+    return WhisperConfig(
+        d_model=getattr(hf_config, "d_model", 1280),
+        encoder_layers=getattr(hf_config, "encoder_layers", 32),
+        encoder_attention_heads=getattr(hf_config, "encoder_attention_heads", 20),
+        encoder_ffn_dim=getattr(hf_config, "encoder_ffn_dim", 5120),
+        decoder_layers=getattr(hf_config, "decoder_layers", 32),
+        decoder_attention_heads=getattr(hf_config, "decoder_attention_heads", 20),
+        decoder_ffn_dim=getattr(hf_config, "decoder_ffn_dim", 5120),
+        num_mel_bins=getattr(hf_config, "num_mel_bins", 128),
+        max_source_positions=getattr(hf_config, "max_source_positions", 1500),
+        max_target_positions=getattr(hf_config, "max_target_positions", 448),
+        scale_embedding=getattr(hf_config, "scale_embedding", False),
+        activation_function=getattr(hf_config, "activation_function", "gelu"),
+        dropout=getattr(hf_config, "dropout", 0.0),
+        attention_dropout=getattr(hf_config, "attention_dropout", 0.0),
+        activation_dropout=getattr(hf_config, "activation_dropout", 0.0),
+    )
+
 
 class KimiAudioWhisperEncoder(WhisperEncoder):
     """WhisperEncoder for Kimi-Audio with packed_modules_mapping."""
@@ -77,24 +101,7 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
         hf_config = vllm_config.model_config.hf_config
 
         # Create WhisperConfig with values from HF config
-        # HF config.json has correct values: d_model=1280, scale_embedding=False, etc.
-        config = WhisperConfig(
-            d_model=getattr(hf_config, "d_model", 1280),
-            encoder_layers=getattr(hf_config, "encoder_layers", 32),
-            encoder_attention_heads=getattr(hf_config, "encoder_attention_heads", 20),
-            encoder_ffn_dim=getattr(hf_config, "encoder_ffn_dim", 5120),
-            decoder_layers=getattr(hf_config, "decoder_layers", 32),
-            decoder_attention_heads=getattr(hf_config, "decoder_attention_heads", 20),
-            decoder_ffn_dim=getattr(hf_config, "decoder_ffn_dim", 5120),
-            num_mel_bins=getattr(hf_config, "num_mel_bins", 128),
-            max_source_positions=getattr(hf_config, "max_source_positions", 1500),
-            max_target_positions=getattr(hf_config, "max_target_positions", 448),
-            scale_embedding=getattr(hf_config, "scale_embedding", False),
-            activation_function=getattr(hf_config, "activation_function", "gelu"),
-            dropout=getattr(hf_config, "dropout", 0.0),
-            attention_dropout=getattr(hf_config, "attention_dropout", 0.0),
-            activation_dropout=getattr(hf_config, "activation_dropout", 0.0),
-        )
+        config = _create_whisper_config_from_hf(hf_config)
 
         # Temporarily replace hf_config for WhisperEncoder.__init__()
         original_config = vllm_config.model_config.hf_config
@@ -125,21 +132,16 @@ class KimiAudioProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> KimiAudioProcessor:
         """Get or create the KimiAudioProcessor."""
         if KimiAudioProcessingInfo._processor is None:
-            # Use cached_feature_extractor_from_config with subfolder
-            # Kimi-Audio uses Whisper with 128 mel bins (not standard 80)
+            # Load feature extractor and tokenizer
             feature_extractor = cached_feature_extractor_from_config(
-                self.ctx.model_config, subfolder="whisper-large-v3"
+                self.ctx.model_config, subfolder=KIMIA_WHISPER_SUBFOLDER
             )
-
-            # Use KimiAudioTokenizer for Kimi-Audio
-            model_path = self.ctx.model_config.model
-            trust_remote_code = self.ctx.model_config.trust_remote_code
             tokenizer = KimiAudioTokenizer.from_pretrained(
-                model_path, trust_remote_code=trust_remote_code
+                self.ctx.model_config.model,
+                trust_remote_code=self.ctx.model_config.trust_remote_code,
             )
 
-            # Special tokens are already loaded from tokenizer_config.json
-            # No need to add them again - just verify they exist
+            # Verify special tokens exist
             assert tokenizer.added_tokens_decoder.get(
                 KimiAudioProcessor.KIMIA_MEDIA_BEGIN
             ), "Missing <|im_media_begin|> token"
@@ -155,10 +157,8 @@ class KimiAudioProcessingInfo(BaseProcessingInfo):
 
     def get_feature_extractor(self, **kwargs: object):
         """Get feature extractor using vLLM's cached loader."""
-        # Kimi-Audio uses Whisper with 128 mel bins (not standard 80)
-        # Must load from whisper-large-v3 subfolder
         return cached_feature_extractor_from_config(
-            self.ctx.model_config, subfolder="whisper-large-v3"
+            self.ctx.model_config, subfolder=KIMIA_WHISPER_SUBFOLDER
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -208,12 +208,11 @@ class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo
         }
 
 
-def _kimiaudio_field_config(hf_inputs: Mapping[str, torch.Tensor]):
-    """Field config for Kimi-Audio multimodal data."""
-    return dict(
-        whisper_input_features=MultiModalFieldConfig.batched("audio"),
-        feature_attention_mask=MultiModalFieldConfig.batched("audio"),
-    )
+# Field config for Kimi-Audio multimodal data
+_KIMIAUDIO_FIELD_CONFIG = {
+    "whisper_input_features": MultiModalFieldConfig.batched("audio"),
+    "feature_attention_mask": MultiModalFieldConfig.batched("audio"),
+}
 
 
 class KimiAudioMultiModalDataParser(MultiModalDataParser):
@@ -232,7 +231,7 @@ class KimiAudioMultiModalDataParser(MultiModalDataParser):
                 data,
                 modality="audio",
                 required_fields={"whisper_input_features", "feature_attention_mask"},
-                fields_factory=_kimiaudio_field_config,
+                fields_factory=lambda hf_inputs: _KIMIAUDIO_FIELD_CONFIG,
             )
 
         return super()._parse_audio_data(data)
@@ -280,7 +279,7 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, Any]:
         """Get multi-modal field configuration."""
-        return _kimiaudio_field_config(hf_inputs)
+        return _KIMIAUDIO_FIELD_CONFIG
 
     def _get_prompt_updates(
         self,
@@ -392,12 +391,10 @@ class KimiAudioForConditionalGeneration(
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # Audio projector (VQ-Adaptor)
-            # checkpoint uses model.vq_adaptor.layers.0,3,4
             "model.vq_adaptor.layers.0.": "multi_modal_projector.vq_adaptor_layers_0.",
             "model.vq_adaptor.layers.3.": "multi_modal_projector.vq_adaptor_layers_3.",
             "model.vq_adaptor.layers.4.": "multi_modal_projector.vq_adaptor_layers_4.",
-            # Language model - checkpoint uses model.layers.*
-            # we use language_model.model.layers.*
+            # Language model
             "model.layers.": "language_model.model.layers.",
             # Embeddings and output
             "model.embed_tokens.": "language_model.model.embed_tokens.",
@@ -406,37 +403,28 @@ class KimiAudioForConditionalGeneration(
         }
     )
 
+    # Audio placeholder token sequence
+    AUDIO_PLACEHOLDER = "<|im_media_begin|><|im_kimia_text_blank|><|im_media_end|>"
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        if modality.startswith("audio"):
-            return "<|im_media_begin|><|im_kimia_text_blank|><|im_media_end|>"
-        return None
+        return cls.AUDIO_PLACEHOLDER if modality.startswith("audio") else None
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.vllm_config = vllm_config
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
-        self.multimodal_config = multimodal_config
-        # Store model path for loading Whisper weights
-        # Note: For local models, ensure whisper-large-v3/ subfolder exists
-        # For HF models, Whisper weights should be in the model repository
+        self.multimodal_config = vllm_config.model_config.multimodal_config
         self.model_path = vllm_config.model_config.model
 
-        # Use KimiAudioWhisperEncoder for audio feature extraction
-        # (subclass of WhisperEncoder with class-level packed_modules_mapping)
         self.audio_tower = KimiAudioWhisperEncoder(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "audio_tower"),
         )
 
-        # Read projector dimensions from HF config
         self.multi_modal_projector = KimiAudioMultiModalProjector(
-            whisper_dim=getattr(
-                self.config, "kimia_adaptor_input_dim", 5120
-            ),  # Kimi-Audio custom Whisper encoder dim (5120)
-            llm_dim=self.config.hidden_size,  # From LLM config
+            whisper_dim=getattr(self.config, "kimia_adaptor_input_dim", 5120),
+            llm_dim=self.config.hidden_size,
             prefix=maybe_prefix(prefix, "multi_modal_projector"),
         )
 
@@ -606,9 +594,8 @@ class KimiAudioForConditionalGeneration(
         loaded = loader.load_weights(main_weights, mapper=self.hf_to_vllm_mapper)
 
         # Load Whisper encoder weights from subfolder
-        # Whisper weights are stored in whisper-large-v3/ subfolder
         whisper_path = os.path.join(
-            self.model_path, "whisper-large-v3/model.safetensors"
+            self.model_path, f"{KIMIA_WHISPER_SUBFOLDER}/model.safetensors"
         )
         if os.path.exists(whisper_path):
             whisper_loaded = self._load_whisper_weights_from_file(whisper_path)
@@ -712,12 +699,10 @@ class KimiAudioForConditionalGeneration(
         cls, model_config: ModelConfig, task_type: str
     ) -> SpeechToTextConfig:
         """Get speech-to-text config with custom processor."""
-        # Load feature extractor from model path
-        # Kimi-Audio stores Whisper extractor in whisper-large-v3/ subfolder
         feature_extractor = AutoFeatureExtractor.from_pretrained(
             model_config.model,
             trust_remote_code=model_config.trust_remote_code,
-            subfolder="whisper-large-v3",
+            subfolder=KIMIA_WHISPER_SUBFOLDER,
         )
 
         # Get tokenizer (this handles the TikTokenTokenizer properly)
@@ -753,7 +738,6 @@ class KimiAudioForConditionalGeneration(
             revision=model_config.tokenizer_revision,
             trust_remote_code=model_config.trust_remote_code,
         )
-        audio_placeholder = cls.get_placeholder_str("audio", 0)
 
         if task_type not in ("transcribe", "translate"):
             raise ValueError(
@@ -762,12 +746,11 @@ class KimiAudioForConditionalGeneration(
             )
 
         # Incorporate request_prompt as context/instruction if provided
-        # This can guide the model's style or provide previous context
-        if request_prompt:
-            # Insert prompt before audio as instruction/context
-            user_content = f"{request_prompt}\n{audio_placeholder}"
-        else:
-            user_content = audio_placeholder
+        user_content = (
+            f"{request_prompt}\n{cls.AUDIO_PLACEHOLDER}"
+            if request_prompt
+            else cls.AUDIO_PLACEHOLDER
+        )
 
         prompt = (
             f"<|im_kimia_user_msg_start|>{user_content}"
