@@ -1153,11 +1153,11 @@ def _render_table(
 ) -> list[str]:
     """Render a markdown table from column specs and backend data."""
     header = "| " + " | ".join(name for name, _ in columns) + " |"
-    sep = "|" + "|".join("-" * (len(name) + 2) for name, _ in columns) + "|"
+    sep = "| " + " | ".join("-" * len(name) for name, _ in columns) + " |"
     lines = [header, sep]
     for info in sorted(backends, key=_sort_key):
         row = "| " + " | ".join(fmt(info) for _, fmt in columns) + " |"
-        lines.append(row)
+        lines.append(row.replace("  ", " "))
     return lines
 
 
