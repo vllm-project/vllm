@@ -197,8 +197,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 shrink_config, expand_config = self._get_lora_moe_configs(
                     op_prefix="w13",
                     num_loras=(
-                        self.punica_wrapper.token_mapping_meta.num_active_loras_cpu.item()
-                        if self.punica_wrapper.lora_config.specialize_active_lora
+                        self.punica_wrapper.token_mapping_meta.num_active_loras_cpu.item()  # type: ignore[attr-defined]
+                        if self.punica_wrapper.lora_config.specialize_active_lora  # type: ignore[attr-defined]
                         else self.max_loras
                     ),
                     rank=max_lora_rank,
@@ -292,8 +292,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 shrink_config, expand_config = self._get_lora_moe_configs(
                     op_prefix="w2",
                     num_loras=(
-                        self.punica_wrapper.token_mapping_meta.num_active_loras_cpu.item()
-                        if self.punica_wrapper.lora_config.specialize_active_lora
+                        self.punica_wrapper.token_mapping_meta.num_active_loras_cpu.item()  # type: ignore[attr-defined]
+                        if self.punica_wrapper.lora_config.specialize_active_lora  # type: ignore[attr-defined]
                         else self.max_loras
                     ),
                     rank=max_lora_rank,
