@@ -10,18 +10,6 @@ reasons:
 
 import importlib
 
-from vllm.transformers_utils.processors.bagel import BagelProcessor
-from vllm.transformers_utils.processors.deepseek_vl2 import DeepseekVLV2Processor
-from vllm.transformers_utils.processors.fireredasr2_processor import (
-    FireRedASR2Processor,
-)
-from vllm.transformers_utils.processors.funasr_processor import FunASRProcessor
-from vllm.transformers_utils.processors.hunyuan_vl import HunYuanVLProcessor
-from vllm.transformers_utils.processors.hunyuan_vl_image import HunYuanVLImageProcessor
-from vllm.transformers_utils.processors.kimi_audio import KimiAudioProcessor
-from vllm.transformers_utils.processors.ovis import OvisProcessor
-from vllm.transformers_utils.processors.ovis2_5 import Ovis2_5Processor
-
 __all__ = [
     "BagelProcessor",
     "DeepseekVLV2Processor",
@@ -36,7 +24,16 @@ __all__ = [
 ]
 
 _CLASS_TO_MODULE: dict[str, str] = {
+    "BagelProcessor": "vllm.transformers_utils.processors.bagel",
+    "DeepseekVLV2Processor": "vllm.transformers_utils.processors.deepseek_vl2",
+    "FireRedASR2Processor": "vllm.transformers_utils.processors.fireredasr2",
+    "FunASRProcessor": "vllm.transformers_utils.processors.funasr",
+    "HunYuanVLProcessor": "vllm.transformers_utils.processors.hunyuan_vl",
+    "HunYuanVLImageProcessor": "vllm.transformers_utils.processors.hunyuan_vl_image",
     "KimiAudioProcessor": "vllm.transformers_utils.processors.kimi_audio",
+    "OvisProcessor": "vllm.transformers_utils.processors.ovis",
+    "Ovis2_5Processor": "vllm.transformers_utils.processors.ovis2_5",
+    "Qwen3ASRProcessor": "vllm.transformers_utils.processors.qwen3_asr",
 }
 
 
