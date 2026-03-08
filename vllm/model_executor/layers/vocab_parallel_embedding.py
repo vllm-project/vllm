@@ -76,7 +76,7 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         output = F.embedding(input_, layer.weight)
         # Support FP8 weight storage: cast to compute dtype after lookup
         if output.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-            output = output.to(torch.bfloat16)
+            output = output.to(torch.get_default_dtype())
         return output
 
 
