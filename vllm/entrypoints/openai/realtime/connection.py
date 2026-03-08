@@ -51,6 +51,10 @@ class RealtimeConnection:
         self._is_model_validated = False
 
         self._max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
+        # Track cumulative audio bytes across all chunks to prevent
+        # memory exhaustion from many small chunks bypassing the per-chunk
+        # size check.
+        self._accumulated_audio_bytes: int = 0
 
     async def handle_connection(self):
         """Main connection loop."""
@@ -117,11 +121,16 @@ class RealtimeConnection:
                 # Check against the original byte size (PCM16), not
                 # the element count of the float32 array, to match the
                 # threshold semantics used in speech_to_text.py.
-                if len(audio_bytes) / 1024**2 > self._max_audio_filesize_mb:
+                # Track cumulative size to prevent bypass via many small
+                # chunks that individually pass but collectively exhaust
+                # memory.
+                self._accumulated_audio_bytes += len(audio_bytes)
+                accumulated_mb = self._accumulated_audio_bytes / 1024**2
+                if accumulated_mb > self._max_audio_filesize_mb:
                     raise VLLMValidationError(
                         "Maximum file size exceeded",
                         parameter="audio_filesize_mb",
-                        value=len(audio_bytes) / 1024**2,
+                        value=accumulated_mb,
                     )
                 if len(audio_array) == 0:
                     raise VLLMValidationError("Can't process empty audio.")
@@ -250,9 +259,10 @@ class RealtimeConnection:
             # Send final completion event
             await self.send(TranscriptionDone(text=full_text, usage=usage))
 
-            # Clear queue for next utterance
+            # Clear queue and reset accumulated size for next utterance
             while not self.audio_queue.empty():
                 self.audio_queue.get_nowait()
+            self._accumulated_audio_bytes = 0
 
         except Exception as e:
             logger.exception("Error in generation: %s", e)
