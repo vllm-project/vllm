@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from vllm.config import set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
@@ -95,7 +96,12 @@ def worker_process(
             side_effect=make_operation_tracker("nccl_all_reduce", original_all_reduce),
         )
 
-        with init_patch, memory_patch, all_reduce_patch:
+        with (
+            init_patch,
+            memory_patch,
+            all_reduce_patch,
+            set_current_vllm_config(vllm_config),
+        ):
             # Initialize device (this is where we test the order)
             worker.init_device()
 

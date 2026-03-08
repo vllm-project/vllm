@@ -24,6 +24,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 EngineId = str
+# block ids as returned by the hybrid KV cache manager. list[list[int]] are allow
+# mutability and are for connector internal use only.
+BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
 def get_kv_connector_cache_layout():
@@ -336,6 +339,7 @@ class TpKVTopology:
             self._cross_layers_blocks = (
                 len(self.tensor_shape) == len(kv_cache_shape) + 1
             )
+            self.tensor_shape: torch.Size
 
         if self._cross_layers_blocks:
             logger.debug("Using cross-layer KV cache")

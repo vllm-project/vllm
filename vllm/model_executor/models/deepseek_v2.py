@@ -47,7 +47,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import GateLinear, SharedFusedMoE
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -75,6 +75,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
@@ -221,73 +222,6 @@ class DeepseekV2MLP(nn.Module):
         return x
 
 
-class DeepSeekV2Gate(ReplicatedLinear):
-    def __init__(
-        self,
-        hidden_size: int,
-        n_experts: int,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ):
-        assert quant_config is None
-        super().__init__(
-            hidden_size,
-            n_experts,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate",
-        )
-
-        # Unquantized only, will be called "weight".
-        assert hasattr(self, "weight")
-        is_hopper_or_blackwell = current_platform.is_device_capability(
-            (9, 0)
-        ) or current_platform.is_device_capability_family(100)
-        SUPPORTED_NUM_EXPERTS = [256, 384]
-        SUPPORTED_HIDDEN_SIZES = [7168]
-
-        self.allow_dsv3_router_gemm = (
-            current_platform.is_cuda()
-            and is_hopper_or_blackwell
-            and n_experts in SUPPORTED_NUM_EXPERTS
-            and hidden_size in SUPPORTED_HIDDEN_SIZES
-        )
-
-        self._out_dtype: torch.dtype | None = None
-
-    def set_out_dtype(self, out_dtype: torch.dtype) -> None:
-        """
-        Set out dtype for the router logits. This is needed after
-        __init__, b/c we need to check if the trtllm kernel is
-        selected before we decide between bf16 and fp32.
-        """
-
-        if self._out_dtype is not None:
-            raise ValueError("out_dtype has already been set")
-        else:
-            self._out_dtype = out_dtype
-
-    @property
-    def out_dtype(self) -> torch.dtype:
-        if self._out_dtype is None:
-            raise ValueError("out_dtype has not been set yet")
-        return self._out_dtype
-
-    def forward(
-        self,
-        x: torch.Tensor,
-    ) -> tuple[torch.Tensor, None]:
-        """
-        Use specialized GEMM for low batch size for DSV3 and KIMI.
-        """
-        if self.allow_dsv3_router_gemm and x.shape[0] <= 16:
-            return ops.dsv3_router_gemm(
-                hidden_states=x, router_weight=self.weight, output_dtype=self.out_dtype
-            ), None
-        else:
-            return super().forward(x)
-
-
 class DeepseekV2MoE(nn.Module):
     def __init__(
         self,
@@ -316,10 +250,9 @@ class DeepseekV2MoE(nn.Module):
                 "Only silu is supported for now."
             )
 
-        self.gate = DeepSeekV2Gate(
+        self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
         if getattr(config, "topk_method", None) == "noaux_tc":
@@ -785,7 +718,45 @@ class Indexer(nn.Module):
         return self.indexer_op(hidden_states, q_fp8, k, weights)
 
 
-class DeepSeekV2FusedQkvAProj(MergedColumnParallelLinear):
+def _min_latency_fused_qkv_a_proj_impl(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Dynamically run min-latency gemm if num_tokens <= 16.
+    This must be wrapped in a custom op because our torch.compile integration
+    does not support runtime dispatching on num_tokens.
+    """
+    num_tokens = input_.shape[0]
+    if 0 < num_tokens <= 16:
+        output = torch.empty(
+            num_tokens,
+            weight.shape[0],
+            dtype=torch.bfloat16,
+            device=input_.device,
+        )
+        ops.dsv3_fused_a_gemm(output, input_, weight.T)
+        return output
+    else:
+        return torch.nn.functional.linear(input_, weight)
+
+
+def _min_latency_fused_qkv_a_proj_fake(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    return input_.new_empty(input_.shape[0], weight.shape[0])
+
+
+direct_register_custom_op(
+    op_name="min_latency_fused_qkv_a_proj",
+    op_func=_min_latency_fused_qkv_a_proj_impl,
+    mutates_args=[],
+    fake_impl=_min_latency_fused_qkv_a_proj_fake,
+)
+
+
+class DeepSeekV2FusedQkvAProjLinear(MergedColumnParallelLinear):
     def __init__(
         self,
         input_size: int,
@@ -820,19 +791,8 @@ class DeepSeekV2FusedQkvAProj(MergedColumnParallelLinear):
         self,
         input_,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.nn.Parameter | None]:
-        num_tokens = input_.shape[0]
-        if self._use_min_latency_gemm and (0 < num_tokens <= 16):
-            output = torch.empty(
-                num_tokens,
-                2112,
-                dtype=torch.bfloat16,
-                device=input_.device,
-            )
-            ops.dsv3_fused_a_gemm(
-                output,
-                input_,
-                self.weight.T,
-            )
+        if self._use_min_latency_gemm:
+            output = torch.ops.vllm.min_latency_fused_qkv_a_proj(input_, self.weight)
             if not self.return_bias:
                 return output
             output_bias = self.bias if self.skip_bias_add else None
@@ -888,7 +848,7 @@ class DeepseekV2MLAAttention(nn.Module):
         self.max_position_embeddings = max_position_embeddings
 
         if self.q_lora_rank is not None:
-            self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProj(
+            self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProjLinear(
                 self.hidden_size,
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 quant_config=quant_config,
