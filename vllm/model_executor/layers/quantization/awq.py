@@ -258,6 +258,15 @@ class AWQLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        from vllm.platforms import current_platform
+
+        if current_platform.is_mps():
+            from vllm.model_executor.layers.quantization.utils.mps_dequant import (
+                awq_dequant_matmul,
+            )
+
+            return awq_dequant_matmul(x, layer, bias, self.quant_config)
+
         qweight = layer.qweight
         scales = layer.scales
         qzeros = layer.qzeros

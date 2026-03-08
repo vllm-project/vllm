@@ -349,11 +349,27 @@ class GPTQLinearMethod(LinearMethodBase):
         layer.exllama_state = exllama_state
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        from vllm.platforms import current_platform
+
         # for torch.compile
         layer.qzeros = Parameter(layer.qzeros.data, requires_grad=False)
         layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
         layer.g_idx = Parameter(layer.g_idx.data, requires_grad=False)
         layer.scales = Parameter(layer.scales.data, requires_grad=False)
+
+        if current_platform.is_mps():
+            # On MPS, skip gptq_shuffle (CUDA-only exllama reorder).
+            # Our Metal dequant kernel handles the original (pre-shuffle)
+            # weight layout from the checkpoint.
+            if layer.exllama_state == ExllamaState.UNINITIALIZED:
+                if self.quant_config.desc_act:
+                    layer.g_idx.data = torch.argsort(layer.g_idx).to(torch.int)
+                else:
+                    layer.g_idx.data = torch.empty(
+                        (0,), dtype=torch.int, device=layer.g_idx.device
+                    )
+                layer.exllama_state = ExllamaState.READY
+            return
 
         # exllama needs to shuffle the weight after the weight is loaded
         # here we do the shuffle on first forward pass
@@ -373,6 +389,21 @@ class GPTQLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        from vllm.platforms import current_platform
+
+        if current_platform.is_mps():
+            from vllm.model_executor.layers.quantization.utils.mps_dequant import (
+                gptq_dequant_matmul,
+            )
+
+            return gptq_dequant_matmul(
+                x,
+                layer,
+                bias,
+                self.quant_config,
+                self.use_v2_format,
+            )
+
         out_shape = x.shape[:-1] + (layer.qweight.shape[-1],)
         reshaped_x = x.reshape(-1, x.shape[-1])
 
