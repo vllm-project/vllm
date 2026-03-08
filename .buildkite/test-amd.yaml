@@ -834,6 +834,7 @@ steps:
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
   - pytest -v -s distributed/test_symm_mem_allreduce.py
+  - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
   # OLD rlhf examples
   - cd ../examples/offline_inference
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
@@ -1060,8 +1061,8 @@ steps:
   - vllm/model_executor/models/mlp_speculator.py
   - tests/v1/spec_decode/test_acceptance_length.py
   commands:
-    - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
-    - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
+  - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
+  - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
 
 
 - label: V1 attention (H100-MI325) # 14.5m
@@ -1206,8 +1207,7 @@ steps:
   - vllm/
   - tests/compile
   commands:
-  - "find compile/ -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \\\\;"
-
+  - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 
 - label: PyTorch Compilation Passes Unit Tests # TBD
@@ -1216,10 +1216,10 @@ steps:
   agent_pool: mi325_1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-    - vllm/
-    - tests/compile/passes
+  - vllm/
+  - tests/compile/passes
   commands:
-  - "find compile/passes -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \\\\;"
+  - pytest -s -v compile/passes --ignore compile/passes/distributed
 
 
 - label: PyTorch Fullgraph Smoke Test # 29.2m
@@ -1233,7 +1233,7 @@ steps:
   - vllm/
   - tests/compile
   commands:
-  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -exec pytest -s -v {} \\\\;"
+  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -exec pytest -s -v {} \\;"
 
 
 - label: PyTorch Fullgraph # 8.7m
@@ -2021,11 +2021,11 @@ steps:
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
-    - tests/v1/kv_connector/nixl_integration/
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - tests/v1/kv_connector/nixl_integration/
   commands:
-    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-    - CROSS_LAYERS_BLOCKS=1 ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - CROSS_LAYERS_BLOCKS=True ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 
 - label: Distributed Tests (4 GPUs)(A100-MI325) # 20.9m
@@ -2231,17 +2231,17 @@ steps:
   num_gpus: 1
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
-    - csrc/quantization/
-    - vllm/model_executor/
-    - vllm/v1/attention/
-    - vllm/compilation/
-    - tests/compile/fusions_e2e/
+  - csrc/quantization/
+  - vllm/model_executor/
+  - vllm/v1/attention/
+  - vllm/compilation/
+  - tests/compile/fusions_e2e/
   commands:
-    - rocm-smi
-    # Run all models and attn backends but only Inductor partition and native custom ops
-    - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and not +rms_norm and not +quant_fp8'"
-    # Different from CUDA, Qwen requires +rms_norm and +quant_fp8 as rms+quant fusion is only supported on AITER
-    - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and +rms_norm and +quant_fp8 and qwen3'"
+  - rocm-smi
+  # Run all models and attn backends but only Inductor partition and native custom ops
+  - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and not +rms_norm and not +quant_fp8'"
+  # Different from CUDA, Qwen requires +rms_norm and +quant_fp8 as rms+quant fusion is only supported on AITER
+  - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and +rms_norm and +quant_fp8 and qwen3'"
 
 
 - label: Fusion E2E Config Sweep (H100-MI325) # TBD
@@ -2251,16 +2251,16 @@ steps:
   num_gpus: 1
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
-    - csrc/quantization/
-    - vllm/compilation/
-    - vllm/model_executor/layers/layernorm.py
-    - vllm/model_executor/layers/activation.py
-    - vllm/model_executor/layers/attention/attention.py
-    - vllm/model_executor/layers/quantization/input_quant_fp8.py
-    - tests/compile/fusions_e2e/
+  - csrc/quantization/
+  - vllm/compilation/
+  - vllm/model_executor/layers/layernorm.py
+  - vllm/model_executor/layers/activation.py
+  - vllm/model_executor/layers/attention/attention.py
+  - vllm/model_executor/layers/quantization/input_quant_fp8.py
+  - tests/compile/fusions_e2e/
   commands:
-    - rocm-smi
-    - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
+  - rocm-smi
+  - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
 
 ## There are no ops on ROCm for these tests.
 ## The test still passes but the logs are not useful.
@@ -2515,6 +2515,7 @@ steps:
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
   - pytest -v -s distributed/test_symm_mem_allreduce.py
+  - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
   # OLD rlhf examples
   - cd ../examples/offline_inference
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
@@ -2731,8 +2732,8 @@ steps:
   - vllm/model_executor/models/mlp_speculator.py
   - tests/v1/spec_decode/test_acceptance_length.py
   commands:
-    - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
-    - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
+  - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
+  - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
 
 
 - label: V1 attention (B200-MI355) # TBD
@@ -2871,8 +2872,7 @@ steps:
   - vllm/
   - tests/compile
   commands:
-  - "find compile/ -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \\\\;"
-
+  - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 
 - label: PyTorch Compilation Passes Unit Tests # TBD
@@ -2882,10 +2882,10 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-    - vllm/
-    - tests/compile/passes
+  - vllm/
+  - tests/compile/passes
   commands:
-  - "find compile/passes -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \\\\;"
+  - pytest -s -v compile/passes --ignore compile/passes/distributed
 
 
 - label: PyTorch Fullgraph Smoke Test # TBD
@@ -2900,7 +2900,7 @@ steps:
   - vllm/
   - tests/compile
   commands:
-  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -exec pytest -s -v {} \\\\;"
+  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -exec pytest -s -v {} \\;"
 
 
 - label: PyTorch Fullgraph # TBD
@@ -3406,9 +3406,9 @@ steps:
   - vllm/v1/attention/selector.py
   - vllm/platforms/rocm.py
   commands:
-    - rocm-smi
-    - python3 examples/offline_inference/basic/chat.py
-    - pytest -v -s tests/kernels/attention/test_attention_selector.py
+  - rocm-smi
+  - python3 examples/offline_inference/basic/chat.py
+  - pytest -v -s tests/kernels/attention/test_attention_selector.py
 
 
 - label: Distributed Comm Ops # TBD
@@ -3530,9 +3530,12 @@ steps:
   - pytest -v -s plugins_tests/test_platform_plugins.py
   - pip uninstall vllm_add_dummy_platform -y
   # END: platform plugin tests
+  # BEGIN: generic io_processor plugins functions
+  - pytest -v -s ./plugins_tests/test_io_processor_plugins.py
+  # END: generic io_processor plugins functions
   # BEGIN: `io_processor` plugins test, all the code in between uses the `prithvi_io_processor` plugin
   - pip install -e ./plugins/prithvi_io_processor_plugin
-  - pytest -v -s plugins_tests/test_io_processor_plugins.py
+  - pytest -v -s plugins_tests/test_terratorch_io_processor_plugins.py
   - pip uninstall prithvi_io_processor_plugin -y
   # END: `io_processor` plugins test
   # BEGIN: `bge_m3_sparse io_processor` test
@@ -3659,11 +3662,11 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
-    - tests/v1/kv_connector/nixl_integration/
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - tests/v1/kv_connector/nixl_integration/
   commands:
-    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-    - CROSS_LAYERS_BLOCKS=1 ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - CROSS_LAYERS_BLOCKS=True ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 
 - label: Distributed Tests (4 GPUs)(A100-MI355) # TBD
