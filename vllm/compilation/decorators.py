@@ -30,7 +30,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-from .monitor import start_monitoring_torch_compile
+from .monitor import monitor_profiling_run, monitor_torch_compile
 
 if TYPE_CHECKING:
     # Only added on nightly/2.10 so wrap
@@ -407,10 +407,10 @@ def _support_torch_compile(
         if envs.VLLM_USE_AOT_COMPILE:
             """
             When using torch.compile in AOT mode, we store the cache artifacts
-            under VLLM_CACHE_ROOT/torch_aot_compile/{hash}/rank_i_j. The {hash}
-            contains all of the factors except for the source files being
-            traced through, because we don't actually know which source files
-            to check at this point (before dynamo runs).
+            under VLLM_CACHE_ROOT/torch_compile_cache/torch_aot_compile/{hash}
+            The {hash} contains all of the factors except for the source files
+            being traced through, because we don't actually know which source
+            files to check at this point (before dynamo runs).
             On loading we will actually look at the source files being traced
             through. If any source file have changed (compared with the
             serialized backend artifacts), then we need to generate a new AOT
@@ -424,6 +424,7 @@ def _support_torch_compile(
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT,
+                "torch_compile_cache",
                 "torch_aot_compile",
                 hash_key,
             )
@@ -433,25 +434,37 @@ def _support_torch_compile(
             cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
             aot_compilation_path = os.path.join(cache_dir, "model")
             try:
-                with (
-                    set_current_vllm_config(self.vllm_config),
-                    open(aot_compilation_path, "rb") as f,
-                ):
-                    start_monitoring_torch_compile(self.vllm_config)
-                    loaded_fn = torch.compiler.load_compiled_function(
-                        f, f_globals=self.forward.__globals__
-                    )
-                _verify_source_unchanged(loaded_fn.source_info(), self.vllm_config)
-                if not self.compilation_config.dynamic_shapes_config.evaluate_guards:
-                    loaded_fn.disable_guard_check()
+                with monitor_torch_compile(self.vllm_config):
+                    with (
+                        set_current_vllm_config(self.vllm_config),
+                        open(aot_compilation_path, "rb") as f,
+                    ):
+                        loaded_fn = torch.compiler.load_compiled_function(
+                            f, f_globals=self.forward.__globals__
+                        )
+                    _verify_source_unchanged(loaded_fn.source_info(), self.vllm_config)
+                    ds_config = self.compilation_config.dynamic_shapes_config
+                    if not ds_config.evaluate_guards:
+                        loaded_fn.disable_guard_check()
+                    # Eagerly load compiled artifacts now that traced_files
+                    # is populated by _verify_source_unchanged.
+                    with maybe_use_cudagraph_partition_wrapper(self.vllm_config):
+                        loaded_fn._artifacts.compiled_fn.finalize_loading(
+                            self.vllm_config
+                        )
                 self.aot_compiled_fn = loaded_fn
                 self.was_aot_compile_fn_loaded_from_disk = True
             except Exception as e:
                 if os.path.exists(aot_compilation_path):
+                    if isinstance(e, EOFError):
+                        message = "Compile cache file corrupted."
+                    else:
+                        message = str(e)
                     logger.warning(
-                        "Cannot load aot compilation from path %s, error: %s",
+                        "Compiling model again due to a load failure from %s, "
+                        "reason: %s",
                         aot_compilation_path,
-                        str(e),
+                        message,
                     )
                 if envs.VLLM_FORCE_AOT_LOAD:
                     raise e
@@ -459,9 +472,12 @@ def _support_torch_compile(
                 logger.info(
                     "Directly load AOT compilation from path %s", aot_compilation_path
                 )
-                # Apply partition wrapper context for proper CUDA graph capture
-                with maybe_use_cudagraph_partition_wrapper(self.vllm_config):
-                    return self.aot_compiled_fn(self, *args, **kwargs)
+                with (
+                    monitor_profiling_run(),
+                    maybe_use_cudagraph_partition_wrapper(self.vllm_config),
+                ):
+                    output = self.aot_compiled_fn(self, *args, **kwargs)
+                return output
 
         if self.compiled:
             assert (
@@ -479,8 +495,6 @@ def _support_torch_compile(
             **kwargs,
         )
 
-        # here, it is the starting point of the `torch.compile` process
-        start_monitoring_torch_compile(self.vllm_config)
         original_code_object = self.original_code_object()
         logger.debug("Start compiling function %s", original_code_object)
 
@@ -546,17 +560,28 @@ def _support_torch_compile(
                 logger.warning("Detected eager backend, disabling AOT compile.")
                 use_aot_compile = False
             if use_aot_compile:
-                from vllm.compilation.backends import set_on_compilation_complete
-
                 # store the path for saving after warmup
                 self._aot_compilation_path = aot_compilation_path
                 self._aot_cache_dir = cache_dir
-                # set callback in context so it's available when compilation completes
-                with set_on_compilation_complete(self.save_aot_compiled_function):
+                with monitor_torch_compile(self.vllm_config):
                     self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
+                    # All compilation is done at this point, save the
+                    # AOT artifact.
+                    self.save_aot_compiled_function()
+
+                with monitor_profiling_run():
                     output = self.aot_compiled_fn(self, *args, **kwargs)
             else:
-                output = TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)  # type: ignore[arg-type]
+                with monitor_torch_compile(
+                    self.vllm_config,
+                    "torch.compile and initial profiling/warmup "
+                    "run together took %.2f s in total",
+                ):
+                    output = TorchCompileWithNoGuardsWrapper.__call__(
+                        self,  # type: ignore[arg-type]
+                        *args,
+                        **kwargs,
+                    )
 
         self.compiled = True
         return output
@@ -571,11 +596,18 @@ def _support_torch_compile(
             self.aot_compiled_fn and self._aot_compilation_path and self._aot_cache_dir
         )
 
-        logger.info("saving AOT compiled function to %s", self._aot_compilation_path)
         try:
             os.makedirs(self._aot_cache_dir, exist_ok=True)
-            self.aot_compiled_fn.save_compiled_function(self._aot_compilation_path)
-            logger.info("saved AOT compiled function to %s", self._aot_compilation_path)
+            # File saving should be atomic, so we will save to a temporary location
+            # first. Should be upstreamed to PyTorch 2.12 as well.
+            tmp_file = f"{self._aot_compilation_path}.{os.getpid()}.tmp"
+            self.aot_compiled_fn.save_compiled_function(tmp_file)
+            os.replace(tmp_file, self._aot_compilation_path)
+            logger.info_once(
+                "saved AOT compiled function to %s",
+                self._aot_compilation_path,
+                scope="local",
+            )
         except Exception as e:
             logger.warning(
                 "unable to save AOT compiled function to %s: %s",
