@@ -154,11 +154,11 @@ class KimiAudioTokenizer(TokenizerLike):
             self._token_to_id[token_str] = token_id
             self._id_to_token[token_id] = token_str
 
+        # Initialize added_tokens_decoder before adding special tokens
+        self._added_tokens_decoder: dict[int, Any] = {}
+
         # Add Kimi-Audio special tokens
         self._add_kimiaudio_special_tokens()
-
-        # Add special tokens from added_tokens_decoder (populated later)
-        self._added_tokens_decoder: dict[int, Any] = {}
 
         # Set default special token IDs (will be updated when special tokens are added)
         self._bos_token_id = 151643  # Kimi-Audio BOS
@@ -172,54 +172,28 @@ class KimiAudioTokenizer(TokenizerLike):
 
     def _add_kimiaudio_special_tokens(self) -> None:
         """Add Kimi-Audio special tokens to the tokenizer."""
-        special_tokens = [
-            AddedToken(
-                "<|im_media_begin|>",
-                single_word=True,
-                normalized=False,
-                special=True,
-            ),
-            AddedToken(
-                "<|im_media_end|>", single_word=True, normalized=False, special=True
-            ),
-            AddedToken(
-                "<|im_kimia_text_blank|>",
-                single_word=True,
-                normalized=False,
-                special=True,
-            ),
-            AddedToken(
-                "<|im_msg_end|>", single_word=True, normalized=False, special=True
-            ),
-            AddedToken(
-                "<|im_kimia_user_msg_start|>",
-                single_word=True,
-                normalized=False,
-                special=True,
-            ),
-            AddedToken(
-                "<|im_kimia_assistant_msg_start|>",
-                single_word=True,
-                normalized=False,
-                special=True,
-            ),
-        ]
-        # Check if tokens already exist
-        try:
-            existing = set(self._added_tokens_decoder.values())
-            tokens_to_add = [
-                t
-                for t in special_tokens
-                if t.content not in {e.content for e in existing}
-            ]
-            if tokens_to_add:
-                for token in tokens_to_add:
-                    token_id = len(self._token_to_id) + len(self._added_tokens_decoder)
-                    self._added_tokens_decoder[token_id] = token.content
-                    self._token_to_id[token.content] = token_id
-                    self._id_to_token[token_id] = token.content
-        except Exception:
-            pass  # Ignore errors if tokenizer doesn't support added_tokens
+        # Tokens should already be in self._special_tokens from tokenizer_config.json
+        # Just add them to added_tokens_decoder for compatibility
+        kimiaudio_special_tokens = {
+            "<|im_media_begin|>": 151661,
+            "<|im_media_end|>": 151663,
+            "<|im_kimia_text_blank|>": 151666,
+            "<|im_msg_end|>": 151645,
+            "<|im_kimia_user_msg_start|>": 151670,
+            "<|im_kimia_assistant_msg_start|>": 151671,
+        }
+
+        for token_str, token_id in kimiaudio_special_tokens.items():
+            # Only add if not already present
+            if token_id not in self._added_tokens_decoder:
+                self._added_tokens_decoder[token_id] = AddedToken(
+                    token_str, single_word=True, normalized=False, special=True
+                )
+                # Also ensure it's in _token_to_id and _id_to_token
+                if token_str not in self._token_to_id:
+                    self._token_to_id[token_str] = token_id
+                if token_id not in self._id_to_token:
+                    self._id_to_token[token_id] = token_str
 
     def num_special_tokens_to_add(self) -> int:
         return 0

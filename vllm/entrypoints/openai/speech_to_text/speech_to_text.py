@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import inspect
 import io
 import math
 import time
@@ -13,19 +14,6 @@ import numpy as np
 from fastapi import Request
 from soundfile import LibsndfileError
 from transformers import PreTrainedTokenizerBase
-from vllm.entrypoints.openai.speech_to_text.protocol import (
-    TranscriptionResponse,
-    TranscriptionResponseStreamChoice,
-    TranscriptionResponseVerbose,
-    TranscriptionSegment,
-    TranscriptionStreamResponse,
-    TranslationResponse,
-    TranslationResponseStreamChoice,
-    TranslationResponseVerbose,
-    TranslationSegment,
-    TranslationStreamResponse,
-)
-from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
@@ -38,6 +26,18 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing, SpeechToTextRequest
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.speech_to_text.protocol import (
+    TranscriptionResponse,
+    TranscriptionResponseStreamChoice,
+    TranscriptionResponseVerbose,
+    TranscriptionSegment,
+    TranscriptionStreamResponse,
+    TranslationResponse,
+    TranslationResponseStreamChoice,
+    TranslationResponseVerbose,
+    TranslationSegment,
+    TranslationStreamResponse,
+)
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import ProcessorInputs
@@ -50,6 +50,7 @@ from vllm.model_executor.models import (
 from vllm.multimodal.audio import split_audio
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
+from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
 from vllm.tokenizers import get_tokenizer
 from vllm.transformers_utils.processor import cached_feature_extractor_from_config
 from vllm.utils.import_utils import PlaceholderModule
@@ -412,7 +413,13 @@ class OpenAISpeechToText(OpenAIServing):
         in this implementation and will be None. See docs for details.
         """
         BASE_OFFSET = 0.02
-        init_token = self.tokenizer.encode("<|0.00|>", add_special_tokens=False)[0]
+        # Handle different tokenizer signatures
+        sig = inspect.signature(self.tokenizer.encode)
+        if "add_special_tokens" in sig.parameters:
+            init_token = self.tokenizer.encode("<|0.00|>", add_special_tokens=False)[0]
+        else:
+            # TikTokenTokenizer uses bos/eos instead
+            init_token = self.tokenizer.encode("<|0.00|>", bos=False, eos=False)[0]
         if tokens[-1] == self.tokenizer.eos_token_id:
             tokens = tokens[:-1]
 

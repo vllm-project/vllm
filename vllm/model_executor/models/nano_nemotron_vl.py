@@ -1466,12 +1466,25 @@ class NanoNemotronVLMultiModalProcessor(
         prompt = processor_inputs.prompt
         tokenizer = self.info.get_tokenizer()
         if not isinstance(prompt, str):
-            prompt = tokenizer.decode(prompt, skip_special_tokens=False)
+            # Handle different tokenizer signatures
+            import inspect
+
+            sig = inspect.signature(tokenizer.decode)
+            if "skip_special_tokens" in sig.parameters:
+                prompt = tokenizer.decode(prompt, skip_special_tokens=False)
+            else:
+                prompt = tokenizer.decode(prompt)
 
         for _ in audio_items:
             prompt = prompt.replace("<video>", "<video>" + AUDIO_CONTEXT, 1)
 
-        processor_inputs.prompt = tokenizer.encode(prompt, add_special_tokens=False)
+        # Handle different tokenizer signatures
+        sig = inspect.signature(tokenizer.encode)
+        if "add_special_tokens" in sig.parameters:
+            processor_inputs.prompt = tokenizer.encode(prompt, add_special_tokens=False)
+        else:
+            # TikTokenTokenizer uses bos/eos instead
+            processor_inputs.prompt = tokenizer.encode(prompt, bos=False, eos=False)
 
         if processor_inputs.tokenization_kwargs is None:
             processor_inputs.tokenization_kwargs = {}

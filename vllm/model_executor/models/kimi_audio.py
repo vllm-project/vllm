@@ -48,7 +48,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.processing.processor import BaseMultiModalProcessor
 from vllm.sequence import IntermediateTensors
-from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.tokenizers import cached_get_tokenizer
 from vllm.transformers_utils.processors.kimi_audio import (
     KimiAudioProcessor,
     _get_feat_extract_output_lengths,
@@ -122,8 +122,6 @@ class KimiAudioProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> KimiAudioProcessor:
         """Get or create the KimiAudioProcessor."""
         if KimiAudioProcessingInfo._processor is None:
-            from transformers import AddedToken
-
             # Use cached_feature_extractor_from_config with subfolder
             # Kimi-Audio uses Whisper with 128 mel bins (not standard 80)
             from vllm.transformers_utils.processor import (
@@ -143,20 +141,14 @@ class KimiAudioProcessingInfo(BaseProcessingInfo):
                 model_path, trust_remote_code=trust_remote_code
             )
 
-            # Add special tokens to tokenizer's added_tokens_decoder
-            special_tokens = {
-                "<|im_media_begin|>": KimiAudioProcessor.KIMIA_MEDIA_BEGIN,
-                "<|im_media_end|>": KimiAudioProcessor.KIMIA_MEDIA_END,
-                "<|im_kimia_text_blank|>": KimiAudioProcessor.KIMIA_TEXT_BLANK,
-                "<|im_msg_end|>": 151645,
-                "<|im_kimia_user_msg_start|>": 151646,
-                "<|im_kimia_assistant_msg_start|>": 151647,
-            }
-            # Add to tokenizer's added_tokens_decoder
-            for token_str, token_id in special_tokens.items():
-                tokenizer.added_tokens_decoder[token_id] = AddedToken(
-                    token_str, single_word=True, normalized=False, special=True
-                )
+            # Special tokens are already loaded from tokenizer_config.json
+            # No need to add them again - just verify they exist
+            assert tokenizer.added_tokens_decoder.get(
+                KimiAudioProcessor.KIMIA_MEDIA_BEGIN
+            ), "Missing <|im_media_begin|> token"
+            assert tokenizer.added_tokens_decoder.get(
+                KimiAudioProcessor.KIMIA_TEXT_BLANK
+            ), "Missing <|im_kimia_text_blank|> token"
 
             KimiAudioProcessingInfo._processor = KimiAudioProcessor(
                 feature_extractor=feature_extractor, tokenizer=tokenizer
@@ -729,7 +721,15 @@ class KimiAudioForConditionalGeneration(
         request_prompt: str,
         to_language: str | None,
     ) -> PromptType:
-        tokenizer = cached_tokenizer_from_config(model_config)
+        from vllm.tokenizers.kimi_audio import KimiAudioTokenizer
+
+        tokenizer = cached_get_tokenizer(
+            model_config.tokenizer,
+            tokenizer_cls=KimiAudioTokenizer,
+            tokenizer_mode=model_config.tokenizer_mode,
+            revision=model_config.tokenizer_revision,
+            trust_remote_code=model_config.trust_remote_code,
+        )
         audio_placeholder = cls.get_placeholder_str("audio", 0)
 
         if task_type not in ("transcribe", "translate"):

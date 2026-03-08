@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
@@ -70,7 +71,12 @@ def _cached_encode(
     *,
     add_special_tokens: bool = True,
 ) -> list[int]:
-    return tokenizer.encode(text, add_special_tokens=add_special_tokens)
+    # Handle different tokenizer signatures
+    sig = inspect.signature(tokenizer.encode)
+    if "add_special_tokens" in sig.parameters:
+        return tokenizer.encode(text, add_special_tokens=add_special_tokens)
+    # TikTokenTokenizer uses bos/eos instead
+    return tokenizer.encode(text, bos=add_special_tokens, eos=add_special_tokens)
 
 
 @lru_cache(maxsize=2048)
@@ -80,7 +86,13 @@ def _cached_decode(
     *,
     skip_special_tokens: bool = False,
 ) -> str:
-    return tokenizer.decode(list(token_ids), skip_special_tokens=skip_special_tokens)
+    # Some tokenizers (e.g., TikTokenTokenizer) don't support skip_special_tokens
+    sig = inspect.signature(tokenizer.decode)
+    if "skip_special_tokens" in sig.parameters:
+        return tokenizer.decode(
+            list(token_ids), skip_special_tokens=skip_special_tokens
+        )
+    return tokenizer.decode(list(token_ids))
 
 
 def _seq2text(
@@ -112,7 +124,12 @@ def _seq2tokens(
             raise ValueError("You cannot encode text when `skip_tokenizer_init=True`")
 
         if not use_cache:
-            return tokenizer.encode(seq, add_special_tokens=False)
+            # Handle different tokenizer signatures
+            sig = inspect.signature(tokenizer.encode)
+            if "add_special_tokens" in sig.parameters:
+                return tokenizer.encode(seq, add_special_tokens=False)
+            # TikTokenTokenizer uses bos/eos instead
+            return tokenizer.encode(seq, bos=False, eos=False)
 
         return _cached_encode(tokenizer, seq, add_special_tokens=False)
 
