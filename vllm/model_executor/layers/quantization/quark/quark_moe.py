@@ -507,7 +507,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
 
 
 class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
-    """Quark W8A8 INT8 MoE method for per-tensor static quantization."""
+    """Quark W8A8 INT8 MoE method."""
 
     def __init__(
         self,
