@@ -13,7 +13,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 import numpy as np
@@ -947,7 +947,8 @@ class NixlConnectorWorker:
 
         # Config.
         self.vllm_config = vllm_config
-        self.block_size = vllm_config.cache_config.block_size
+        # mypy will complain on re-assignment otherwise.
+        self.block_size: int = cast(int, vllm_config.cache_config.block_size)
 
         if vllm_config.kv_transfer_config is None:
             raise ValueError("kv_transfer_config must be set for NixlConnector")
@@ -1474,7 +1475,6 @@ class NixlConnectorWorker:
 
         # Enable different block lengths for different layers when MLA is used.
         self.block_len_per_layer = list[int]()
-        self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
         for layer_name, cache_or_caches in xfer_buffers.items():
             cache_list = (
                 cache_or_caches if self.kv_topo.split_k_and_v else [cache_or_caches]
@@ -1503,9 +1503,6 @@ class NixlConnectorWorker:
 
                 self.block_len_per_layer.append(
                     curr_tensor_size_bytes // self.num_blocks
-                )
-                self.slot_size_per_layer.append(
-                    self.block_len_per_layer[-1] // self.block_size
                 )
 
                 if not self.use_mla:
@@ -1539,10 +1536,6 @@ class NixlConnectorWorker:
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
         if self.kv_topo.is_kv_layout_blocks_first:
-            for i in range(len(self.slot_size_per_layer)):
-                assert self.slot_size_per_layer[i] % 2 == 0
-                self.slot_size_per_layer[i] //= 2
-
             # NOTE (NickLucche) When FlashInfer is used, memory is registered
             # with joint KV for each block. This minimizes the overhead in
             # registerMem allowing faster descs queries. In order to be able to
