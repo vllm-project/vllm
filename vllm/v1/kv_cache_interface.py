@@ -91,6 +91,10 @@ class AttentionSpec(KVCacheSpec):
             * get_dtype_size(self.dtype)
         )
 
+    @classmethod
+    def merge_from_grouping(cls, specs: list[Self], group_size: int) -> Self:
+        return replace(cls.merge(specs), group_size=group_size)
+
 
 @dataclass(frozen=True, kw_only=True)
 class FullAttentionSpec(AttentionSpec):
@@ -476,20 +480,6 @@ class KVCacheGroupSpec:
     layer_names: list[str]
     # The KV cache spec of this manager layer
     kv_cache_spec: KVCacheSpec
-
-    @property
-    def group_size(self) -> int:
-        """
-        The size of this group.
-        Normally, it is the length of the layer names.
-        For Mamba models, some FullAttn layers are grouped together and map
-        to the same KV cache block, so the group size will be smaller than
-        the number of layers.
-        """
-        if isinstance(self.kv_cache_spec, FullAttentionSpec):
-            return cdiv(len(self.layer_names), self.kv_cache_spec.group_size)
-        else:
-            return len(self.layer_names)
 
 
 @dataclass
