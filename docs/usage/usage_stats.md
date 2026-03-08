@@ -59,3 +59,10 @@ export VLLM_NO_USAGE_STATS=1
 export DO_NOT_TRACK=1
 mkdir -p ~/.config/vllm && touch ~/.config/vllm/do_not_track
 ```
+
+## Usage Stats V2 (Planned)
+
+A comprehensive redesign of usage stats is planned to capture additional hardware topology, model metadata, and anonymized workload information. This will help guide vLLM's product direction, feature deprecation, and optimization priorities. See the design documentation:
+
+- [Usage Stats V2 PRD](../design/usage_stats_v2_prd.md) - Product requirements and competitive analysis
+- [Usage Stats V2 Design](../design/usage_stats_v2_design.md) - Technical design and implementation sketch
