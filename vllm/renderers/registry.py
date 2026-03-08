@@ -84,6 +84,11 @@ def renderer_from_config(config: "VllmConfig", **kwargs):
         and model_config.model_impl == "terratorch"
     ):
         renderer_mode = "terratorch"
+    elif tokenizer_mode == "kimi_audio":
+        # Kimi-Audio uses custom renderer that returns HfRenderer instance
+        from vllm.renderers.kimi_audio import KimiAudioRenderer
+
+        return KimiAudioRenderer.from_config(config, tokenizer_kwargs=kwargs)
     else:
         renderer_mode = tokenizer_mode
 
