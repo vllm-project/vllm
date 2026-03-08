@@ -9,8 +9,10 @@ import vllm.config
 import vllm.ir.ops
 import vllm.plugins
 from tests.compile.backend import TestBackend
+from tests.kernels.quantization.nvfp4_utils import quant_nvfp4_tensor
 from tests.utils import TestBlockFP8Layer, TestFP8Layer
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
+from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
 from vllm.compilation.passes.fusion.rms_quant_fusion import (
     FUSED_OPS,
@@ -41,6 +43,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
+    kNvfp4Dynamic,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
@@ -251,6 +254,77 @@ class TestModel(torch.nn.Module):
         )
 
 
+class TestNvfp4Model(torch.nn.Module):
+    def __init__(self, hidden_size: int, eps: float):
+        super().__init__()
+        self.norm = [RMSNorm(hidden_size, eps) for _ in range(4)]
+        self.enable_rms_norm_custom_op = self.norm[0].enabled()
+
+        self.w = [torch.rand((hidden_size, hidden_size)) for _ in range(3)]
+        self.agscale = [torch.rand((1, 1), dtype=torch.float32) for _ in range(3)]
+
+        w_quant = [quant_nvfp4_tensor(w) for w in self.w]
+        self.wq = [q[0] for q in w_quant]
+        self.wscale = [q[1] for q in w_quant]
+        wgscale = [q[2] for q in w_quant]
+        self.alpha = [(1 / (w * a)).reshape(1) for w, a in zip(wgscale, self.agscale)]
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = resid = torch.relu(x)
+        y = self.norm[0](x)
+
+        yq, y_scale = scaled_fp4_quant(y, self.agscale[0])
+        x2 = cutlass_scaled_fp4_mm(
+            yq,
+            self.wq[0],
+            y_scale,
+            self.wscale[0],
+            self.alpha[0],
+            out_dtype=y.dtype,
+        )
+
+        y2, resid = self.norm[1](x2, resid)
+        yq2, y_scale2 = scaled_fp4_quant(y2, self.agscale[1])
+        x3 = cutlass_scaled_fp4_mm(
+            yq2,
+            self.wq[1],
+            y_scale2,
+            self.wscale[1],
+            self.alpha[1],
+            out_dtype=y2.dtype,
+        )
+
+        y3, resid = self.norm[2](x3, resid)
+        yq3, y_scale3 = scaled_fp4_quant(y3, self.agscale[2])
+        x4 = cutlass_scaled_fp4_mm(
+            yq3,
+            self.wq[2],
+            y_scale3,
+            self.wscale[2],
+            self.alpha[2],
+            out_dtype=y3.dtype,
+        )
+
+        y4, _ = self.norm[3](x4, resid)
+        return y4
+
+    def ops_in_model_before(self):
+        return [QUANT_OPS[kNvfp4Dynamic]]
+
+    def ops_in_model_after(self):
+        return [
+            torch.ops.vllm.flashinfer_rmsnorm_fp4quant.default,
+            torch.ops.vllm.flashinfer_add_rmsnorm_fp4quant.default,
+        ]
+
+    def ops_in_model_before_partial(self):
+        return (
+            [RMS_OP, RMS_ADD_OP]
+            if self.enable_rms_norm_custom_op
+            else [torch.ops.aten.rsqrt]
+        )
+
+
 def _run_fusion_test(
     model,
     fusion_pass,
@@ -375,6 +449,76 @@ def test_fusion_rmsnorm_quant(
             # 6 = 3x2 (3xRMS_ADD, 2 each)
             assert n_add_nodes(backend.graph_pre_pass) == 6
             assert n_add_nodes(backend.graph_post_pass) == 2
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("hidden_size", [256])
+@pytest.mark.parametrize("num_tokens", [257])
+@pytest.mark.parametrize("eps", [1e-5, 1e-6])
+@pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_fusion_rmsnorm_nvfp4_quant(
+    dtype: torch.dtype,
+    hidden_size: int,
+    num_tokens: int,
+    eps: float,
+    enable_rms_norm_custom_op: bool,
+):
+    if not hasattr(torch.ops._C, "scaled_fp4_quant"):
+        pytest.skip("scaled_fp4_quant is not available")
+    if not current_platform.has_device_capability(100):
+        pytest.skip("NVFP4 is only supported on Blackwell")
+    if not hasattr(torch.ops, "vllm") or not hasattr(
+        torch.ops.vllm, "flashinfer_rmsnorm_fp4quant"
+    ):
+        pytest.skip("flashinfer_rmsnorm_fp4quant is not available")
+    if not hasattr(torch.ops.vllm, "flashinfer_add_rmsnorm_fp4quant"):
+        pytest.skip("flashinfer_add_rmsnorm_fp4quant is not available")
+
+    custom_ops = ["none"]
+    if enable_rms_norm_custom_op:
+        custom_ops.append("+rms_norm")
+
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=custom_ops,
+            pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
+        ),
+    )
+
+    with vllm.config.set_current_vllm_config(vllm_config):
+        torch.set_default_device("cuda")
+        torch.set_default_dtype(dtype)
+        torch.manual_seed(1)
+
+        fusion_pass = RMSNormQuantFusionPass(vllm_config)
+        noop_pass = NoOpEliminationPass(vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
+
+        backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
+        backend2 = TestBackend(noop_pass, cleanup_pass)
+
+        model = TestNvfp4Model(hidden_size=hidden_size, eps=eps)
+
+        x = torch.rand(num_tokens, hidden_size)
+        torch._dynamo.mark_dynamic(x, 0)
+
+        model_fused = torch.compile(model, backend=backend)
+        result_fused = model_fused(x)
+
+        model_unfused = torch.compile(model, backend=backend2)
+        result_unfused = model_unfused(x)
+
+        torch.testing.assert_close(result_fused, result_unfused, atol=2e-1, rtol=2e-1)
+
+        assert fusion_pass.matched_count == 3
+        backend.check_before_ops(model.ops_in_model_before())
+        backend.check_after_ops(model.ops_in_model_after())
+        backend.check_before_ops(
+            model.ops_in_model_before_partial(), fully_replaced=False
+        )
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16])

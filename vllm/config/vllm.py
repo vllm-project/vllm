@@ -93,12 +93,15 @@ IS_DENSE = False
 
 def enable_norm_fusion(cfg: "VllmConfig") -> bool:
     """Enable if either RMS norm or quant FP8 custom op is active;
-    otherwise Inductor handles fusion."""
+    otherwise Inductor handles fusion.
+    Also enable for FP4 models as FP4 quant is always custom so Inductor
+    cannot fuse it."""
 
     return (
         cfg.compilation_config.is_custom_op_enabled("rms_norm")
         or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
         or cfg.kernel_config.ir_op_priority.rms_norm[0] != "native"
+        or (cfg.model_config is not None and cfg.model_config.is_nvfp4_quantized())
     )
 
 
