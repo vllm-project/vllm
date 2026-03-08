@@ -267,16 +267,40 @@ class LLMEngine:
             self.engine_core.add_request(request)
             return
 
-        parent_req = ParentRequest(request_id, params)
-        # Set n=1 for prefill (execute prefill only once).
-        parent_req.sampling_params.n = 1
-        request.sampling_params.n = 1
-        request.parallel_sampling_n = parent_req.n
+        # Check if this is a KV producer (P-side in PD disaggregation).
+        # P-side uses delayed split: keep as single request, split after prefill.
+        # D-side or non-PD scenario uses immediate split: create n child requests.
+        is_kv_producer = (
+            self.vllm_config.kv_transfer_config is not None
+            and self.vllm_config.kv_transfer_config.is_kv_producer
+        )
 
-        # Make a new RequestState and queue.
-        self.output_processor.add_request(request, prompt_text, parent_req, 0)
-        # Add the request to EngineCore.
-        self.engine_core.add_request(request)
+        if is_kv_producer:
+            # P-side (KV producer): delayed split for PD disaggregation.
+            parent_req = ParentRequest(request_id, params)
+            # Set n=1 for prefill (execute prefill only once).
+            parent_req.sampling_params.n = 1
+            request.sampling_params.n = 1
+            request.parallel_sampling_n = parent_req.n
+
+            # Make a new RequestState and queue.
+            self.output_processor.add_request(request, prompt_text, parent_req, 0)
+            # Add the request to EngineCore.
+            self.engine_core.add_request(request)
+        else:
+            # D-side (KV consumer) or non-PD scenario: immediate split.
+            # Fan out n child requests for independent sampling.
+            from copy import copy
+            parent_req = ParentRequest(request_id, params)
+            for idx in range(parent_req.n):
+                child_req_id, child_params = parent_req.get_child_info(idx)
+                child_request = request if idx == parent_req.n - 1 else copy(request)
+                child_request.request_id = child_req_id
+                child_request.sampling_params = child_params
+                self.output_processor.add_request(
+                    child_request, prompt_text, parent_req, idx
+                )
+                self.engine_core.add_request(child_request)
 
     def step(self) -> list[RequestOutput | PoolingRequestOutput]:
         if self.should_execute_dummy_batch:

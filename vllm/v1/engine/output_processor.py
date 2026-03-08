@@ -468,12 +468,31 @@ class OutputProcessor:
 
         request_outputs: list[RequestOutput | PoolingRequestOutput] = []
         reqs_to_abort: list[str] = []
+        pending_parent_states: dict[str, RequestState] = {}
+
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
             req_state = self.request_states.get(req_id)
+
             if req_state is None:
+                if (engine_core_output.parent_request_id is not None and engine_core_output.child_index > 0):
+                    parent_req_state = pending_parent_states.get(engine_core_output.parent_request_id)
+                    if parent_req_state is not None:
+                        child_request_output = self._make_child_request_output(
+                            engine_core_output, parent_req_state)
+                        if child_request_output is not None:
+                            if parent_req_state.queue is not None:
+                                parent_req_state.queue.put(child_request_output)
+                            else:
+                                request_outputs.append(child_request_output)
                 # Ignore output for already-aborted request.
                 continue
+
+            # If this is a parent request (child_index == 0), save to pending cache
+            # before processing so child requests can access it later.
+            if (engine_core_output.parent_request_id is not None
+                    and engine_core_output.child_index == 0):
+                pending_parent_states[req_id] = req_state
 
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(
@@ -521,6 +540,7 @@ class OutputProcessor:
             # Free completed requests.
             if finish_reason is not None:
                 self.request_states.pop(req_id)
+                # pending_parent_states.pop(req_id, None)
                 # Remove parent request if applicable.
                 parent_req = req_state.parent_req
                 if parent_req and not parent_req.child_requests:
@@ -542,6 +562,80 @@ class OutputProcessor:
         return OutputProcessorOutput(
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
+        )
+
+    def _make_child_request_output(
+        self,
+        engine_core_output: EngineCoreOutput,
+        parent_req_state: RequestState,
+    ) -> RequestOutput | None:
+        """Create a RequestOutput for a parallel sampling child request.
+
+        This is used in PD disaggregation scenario where child requests are
+        created in Scheduler but not added to OutputProcessor.request_states.
+        The child request uses parent's req_state to create CompletionOutput
+        and aggregates via parent_req.get_outputs().
+
+        Args:
+            engine_core_output: The output for the child request.
+            parent_req_state: The RequestState of the parent request.
+
+        Returns:
+            A RequestOutput for the child request, or None if aggregation
+            is not complete yet (in FINAL_ONLY mode).
+        """
+        parent_req = parent_req_state.parent_req
+        assert parent_req is not None, (
+            "Child request requires parent_req_state to have parent_req"
+        )
+
+        finished = engine_core_output.finish_reason is not None
+        delta = parent_req_state.output_kind == RequestOutputKind.DELTA
+
+        if parent_req_state.detokenizer is not None:
+            text = parent_req_state.detokenizer.output_text
+            token_ids = parent_req_state.detokenizer.output_token_ids
+        else:
+            text = ""
+            token_ids = engine_core_output.new_token_ids
+
+        if parent_req_state.logprobs_processor is not None:
+            logprobs = parent_req_state.logprobs_processor.logprobs
+            if delta and logprobs:
+                logprobs = logprobs[-len(token_ids):]
+            cumulative_logprob = parent_req_state.logprobs_processor.cumulative_logprob
+        else:
+            logprobs = None
+            cumulative_logprob = None
+
+        completion_output = CompletionOutput(
+            index=engine_core_output.child_index,
+            text=text,
+            token_ids=token_ids,
+            logprobs=logprobs,
+            cumulative_logprob=cumulative_logprob,
+            finish_reason=str(engine_core_output.finish_reason)
+            if engine_core_output.finish_reason else None,
+            stop_reason=engine_core_output.stop_reason,
+        )
+
+        request_id, outputs, finished = parent_req.get_outputs(
+            engine_core_output.request_id,
+            completion_output,
+        )
+
+        if not outputs:
+            return None
+
+        return RequestOutput(
+            request_id=request_id,
+            prompt=parent_req_state.prompt,
+            prompt_token_ids=parent_req_state.prompt_token_ids,
+            prompt_logprobs=None,
+            outputs=outputs,
+            finished=finished,
+            kv_transfer_params=engine_core_output.kv_transfer_params,
+            num_cached_tokens=engine_core_output.num_cached_tokens,
         )
 
     def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):

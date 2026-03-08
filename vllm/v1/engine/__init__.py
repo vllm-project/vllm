@@ -137,6 +137,12 @@ class EngineCoreOutput(
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
 
+    # Parallel sampling parent request association.
+    # For child requests created by _split_parallel_sampling_request(),
+    # these fields identify the parent request and child index.
+    parent_request_id: str | None = None
+    child_index: int = 0
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

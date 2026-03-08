@@ -44,6 +44,7 @@ class Request:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
+        parallel_sampling_n: int = 1,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -129,7 +130,7 @@ class Request:
         # The number of tokens that have been computed remotely.
         self.num_external_computed_tokens = 0
         # Parallel sampling support.
-        self.parallel_sampling_n: int = 1
+        self.parallel_sampling_n: int = parallel_sampling_n
 
         self.parent_request_id: str | None = None
         self.child_index: int = 0
@@ -138,6 +139,7 @@ class Request:
         
         self.block_hashes: list[BlockHash] = []
         self.get_hash_new_full_blocks: Callable[[], list[BlockHash]] | None = None
+        self.block_hasher = block_hasher
         if block_hasher is not None:
             self.get_hash_new_full_blocks = partial(block_hasher, self)
             self.block_hashes = self.get_hash_new_full_blocks()

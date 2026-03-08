@@ -1111,18 +1111,17 @@ class Scheduler(SchedulerInterface):
             status_before_stop = request.status
 
             # Check for stop and update request status.
+            child_requests: list[Request] = []
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids
                 )
-                is_first_output = request.num_output_tokens == 0
                 # Split parallel sampling request after prefill completes.
                 if (
-                    is_first_output
-                    and not stopped
+                    stopped
                     and request.parallel_sampling_n > 1
                 ):
-                    self._split_parallel_sampling_request(request)
+                    child_requests = self._split_parallel_sampling_request(request)
             # Stop checking for pooler models.
             pooler_output = None
             if pooler_outputs:
@@ -1171,8 +1170,51 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        # Parallel sampling parent request association.
+                        parent_request_id=request.parent_request_id,
+                        child_index=request.child_index,
                     )
                 )
+
+                # Generate EngineCoreOutput for child requests (parallel sampling).
+                # Child requests share the parent's first token and need kv_transfer_params
+                # to be forwarded to D side in PD disaggregation scenario.
+                for child_request in child_requests:
+                    child_kv_transfer_params = None
+                    if self.connector is not None:
+                        # Child request status is FINISHED_LENGTH_CAPPED,
+                        # so _connector_finished will generate kv_transfer_params.
+                        _, child_kv_transfer_params = self._connector_finished(
+                            child_request)
+
+                    # Child shares parent's first token.
+                    child_new_token_ids = list(new_token_ids) if new_token_ids else []
+
+                    if child_new_token_ids or child_kv_transfer_params:
+                        outputs[child_request.client_index].append(
+                            EngineCoreOutput(
+                                request_id=child_request.request_id,
+                                new_token_ids=child_new_token_ids,
+                                finish_reason=child_request.get_finished_reason(
+                                ),
+                                new_logprobs=None,  # Child logprobs handled on D side
+                                new_prompt_logprobs_tensors=None,
+                                pooling_output=None,
+                                stop_reason=None,
+                                events=[],
+                                kv_transfer_params=child_kv_transfer_params,
+                                trace_headers=child_request.trace_headers,
+                                num_cached_tokens=child_request.num_cached_tokens,
+                                num_nans_in_logits=0,
+                                parent_request_id=child_request.parent_request_id,
+                                child_index=child_request.child_index,
+                            ))
+
+                    # Mark child request as finished.
+                    self.finished_req_ids.add(child_request.request_id)
+                    if self.finished_req_ids_dict is not None:
+                        self.finished_req_ids_dict[child_request.client_index].add(
+                            child_request.request_id)
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
@@ -1299,8 +1341,7 @@ class Scheduler(SchedulerInterface):
                 cache_salt=request.cache_salt,
                 priority=request.priority,
                 trace_headers=request.trace_headers,
-                block_hasher=self.block_hasher,
-                resumable=request.resumable,
+                block_hasher=request.block_hasher,
             )
 
             # Set child request fields.
@@ -1319,12 +1360,16 @@ class Scheduler(SchedulerInterface):
                 child_request._output_token_ids = request._output_token_ids.copy()
                 child_request._all_token_ids = request._all_token_ids.copy()
 
-            # Set running status (child should continue from decode).
-            child_request.status = RequestStatus.RUNNING
+            # Set status to FINISHED_LENGTH_CAPPED so that _connector_finished
+            # will generate kv_transfer_params for KV Transfer to D side.
+            # Note: This is specifically for PD disaggregation scenario where
+            # child requests need to be forwarded to D side after prefill.
+            child_request.status = RequestStatus.FINISHED_LENGTH_CAPPED
 
-            # Add to scheduler.
+            # Add to scheduler (but NOT to waiting queue).
+            # Child requests will be forwarded to D side via EngineCoreOutput
+            # and kv_transfer_params.
             self.requests[child_id] = child_request
-            self.waiting.add_request(child_request)
 
             child_requests.append(child_request)
 
@@ -1583,7 +1628,14 @@ class Scheduler(SchedulerInterface):
         if self.connector is None:
             return False, None
 
-        block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+        # For parallel sampling child requests, use parent's block_ids
+        # since child requests share parent's KV cache blocks.
+        if (request.parent_request_id is not None
+                and request.child_index > 0):
+            block_ids = self.kv_cache_manager.get_block_ids(
+                request.parent_request_id)
+        else:
+            block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
 
         if not isinstance(self.connector, SupportsHMA):
             # NOTE(Kuntai): We should deprecate this code path after we enforce
