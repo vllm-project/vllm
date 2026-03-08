@@ -453,7 +453,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
                 remaining_budget = max(
                     0, state["thinking_token_budget"] - state["think_count"]
                 )
-                state["check_count_down"] = remaining_budget
+                state["check_count_down"] = max(0, remaining_budget - 1)
             else:
                 state["check_count_down"] = state["thinking_token_budget"]
 
