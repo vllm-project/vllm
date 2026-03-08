@@ -83,11 +83,17 @@ def extract_audio_from_video_bytes(
 
 
 class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
+    """Configuration values can be user-provided either by --media-io-kwargs or
+    by the runtime API field "media_io_kwargs". Ensure proper validation and
+    error handling.
+    """
+
     def __init__(self, **kwargs) -> None:
         super().__init__()
 
         # `kwargs` contains custom arguments from
-        # --media-io-kwargs for this modality.
+        # --media-io-kwargs for this modality, merged with
+        # per-request runtime media_io_kwargs via merge_kwargs().
         # They can be passed to the underlying
         # media loaders (e.g. custom implementations)
         # for flexible control.
@@ -122,6 +128,11 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
 
 
 class AudioEmbeddingMediaIO(MediaIO[torch.Tensor]):
+    """Configuration values can be user-provided either by --media-io-kwargs or
+    by the runtime API field "media_io_kwargs". Ensure proper validation and
+    error handling.
+    """
+
     def __init__(self) -> None:
         super().__init__()
 
