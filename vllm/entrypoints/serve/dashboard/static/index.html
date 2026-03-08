@@ -1008,10 +1008,32 @@
             border-top: 1px solid var(--border);
             color: var(--muted-foreground);
             font-style: italic;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 400px;
+            overflow-y: auto;
         }
 
         .thinking-content.expanded {
             display: block;
+        }
+
+        .thinking-block.streaming .thinking-content {
+            display: block;
+        }
+
+        .thinking-block.streaming .thinking-header span:last-child {
+            color: var(--vllm-blue);
+        }
+
+        @keyframes thinkPulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .thinking-block.streaming .thinking-header span:first-child::after {
+            content: '...';
+            animation: thinkPulse 1.2s ease-in-out infinite;
         }
 
         .message-meta {
@@ -2673,13 +2695,28 @@
             updateContextStats();
         }
 
-        // Parse thinking tags
-        function parseThinking(text) {
-            const match = text.match(/<think>([\s\S]*?)<\/think>/);
-            if (match) {
-                return { thinking: match[1].trim(), response: text.replace(/<think>[\s\S]*?<\/think>/, '').trim() };
+        // Parse <think> tags from content text (fallback for models that embed reasoning in content)
+        function parseThinkTags(text) {
+            const closedMatch = text.match(/<think>([\s\S]*?)<\/think>/);
+            if (closedMatch) {
+                return { thinking: closedMatch[1].trim(), response: text.replace(/<think>[\s\S]*?<\/think>/, '').trim(), done: true };
             }
-            return { thinking: null, response: text };
+            const openMatch = text.match(/<think>([\s\S]*)$/);
+            if (openMatch) {
+                return { thinking: openMatch[1].trim(), response: '', done: false };
+            }
+            return { thinking: null, response: text, done: true };
+        }
+
+        function renderThinkingBlock(thinkingText, isStreaming) {
+            const streamClass = isStreaming ? ' streaming' : '';
+            const expandHint = isStreaming ? 'Streaming' : 'Click to expand';
+            return `<div class="thinking-block${streamClass}">
+                <div class="thinking-header" onclick="this.nextElementSibling.classList.toggle('expanded')">
+                    <span>Thinking</span><span style="font-size:11px;color:var(--muted-foreground)">${expandHint}</span>
+                </div>
+                <div class="thinking-content${isStreaming ? ' expanded' : ''}">${esc(thinkingText)}</div>
+            </div>`;
         }
 
         // Escape HTML
@@ -2751,6 +2788,9 @@
             const startTime = Date.now();
             let tokens = 0;
             let fullContent = '';
+            let fullReasoning = '';
+            let reasoningDone = false;
+            let finishReason = '';
 
             try {
                 const requestParams = buildRequestParams();
@@ -2786,23 +2826,51 @@
                         const trimmed = line.trim();
                         if (trimmed.startsWith('data: ') && trimmed.slice(6) !== '[DONE]') {
                             try {
-                                const delta = JSON.parse(trimmed.slice(6)).choices?.[0]?.delta?.content;
-                                if (delta) {
-                                    fullContent += delta;
-                                    tokens++;
+                                const parsed = JSON.parse(trimmed.slice(6));
+                                const choice = parsed.choices?.[0];
+                                if (choice?.finish_reason) finishReason = choice.finish_reason;
+                                const delta = choice?.delta;
+                                if (!delta) continue;
 
-                                    const { thinking, response } = parseThinking(fullContent);
-                                    let html = '';
+                                const deltaContent = delta.content || '';
+                                const deltaReasoning = delta.reasoning || delta.reasoning_content || '';
+
+                                if (deltaContent || deltaReasoning) tokens++;
+
+                                // Accumulate reasoning from the structured field
+                                if (deltaReasoning) {
+                                    fullReasoning += deltaReasoning;
+                                }
+
+                                if (deltaContent) {
+                                    if (fullReasoning && !reasoningDone) reasoningDone = true;
+                                    fullContent += deltaContent;
+                                }
+
+                                // Build the display HTML
+                                let html = '';
+
+                                if (fullReasoning) {
+                                    // Structured reasoning from delta.reasoning
+                                    const isStreaming = !reasoningDone;
+                                    html += renderThinkingBlock(fullReasoning, isStreaming);
+                                    html += esc(fullContent);
+                                } else if (fullContent) {
+                                    // Fallback: parse <think> tags from content text
+                                    const { thinking, response, done: tagDone } = parseThinkTags(fullContent);
                                     if (thinking) {
-                                        html = `<div class="thinking-block">
-                                            <div class="thinking-header" onclick="this.nextElementSibling.classList.toggle('expanded')">
-                                                <span>Thinking</span><span style="font-size:11px;color:var(--muted-foreground)">Click to expand</span>
-                                            </div>
-                                            <div class="thinking-content">${esc(thinking)}</div>
-                                        </div>`;
+                                        html += renderThinkingBlock(thinking, !tagDone);
                                     }
                                     html += esc(response);
+                                }
+
+                                if (html) {
                                     responseEl.innerHTML = html;
+                                    // Auto-scroll the thinking content to bottom during streaming
+                                    const thinkEl = responseEl.querySelector('.thinking-content');
+                                    if (thinkEl && !reasoningDone) {
+                                        thinkEl.scrollTop = thinkEl.scrollHeight;
+                                    }
                                     messages.scrollTop = messages.scrollHeight;
                                 }
                             } catch (e) {}
@@ -2810,7 +2878,25 @@
                     }
                 }
 
-                conversationHistory.push({ role: 'assistant', content: fullContent });
+                // Finalize thinking block after streaming ends
+                const streamingBlock = responseEl.querySelector('.thinking-block.streaming');
+                if (streamingBlock) {
+                    streamingBlock.classList.remove('streaming');
+                    const thinkContent = streamingBlock.querySelector('.thinking-content');
+                    const hintSpan = streamingBlock.querySelector('.thinking-header span:last-child');
+
+                    if (fullReasoning && !fullContent) {
+                        // All output was reasoning, no content — keep expanded as the response
+                        if (thinkContent) thinkContent.classList.add('expanded');
+                        if (hintSpan) hintSpan.textContent = 'Click to collapse';
+                    } else {
+                        if (thinkContent) thinkContent.classList.remove('expanded');
+                        if (hintSpan) hintSpan.textContent = 'Click to expand';
+                    }
+                }
+
+                const historyContent = fullContent || fullReasoning || '';
+                conversationHistory.push({ role: 'assistant', content: historyContent });
                 updateContextStats();
 
                 // Stats for message meta
@@ -2820,7 +2906,9 @@
                 // Add meta
                 const meta = document.createElement('div');
                 meta.className = 'message-meta';
-                meta.textContent = `${tokens} tokens · ${elapsed.toFixed(2)}s · ${speed.toFixed(1)} tok/s`;
+                let metaText = `${tokens} tokens · ${elapsed.toFixed(2)}s · ${speed.toFixed(1)} tok/s`;
+                if (finishReason) metaText += ` · ${finishReason}`;
+                meta.textContent = metaText;
                 assistantDiv.appendChild(meta);
 
             } catch (e) {
