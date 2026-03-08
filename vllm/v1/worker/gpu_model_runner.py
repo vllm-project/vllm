@@ -5731,7 +5731,10 @@ class GPUModelRunner(
             )
             return 0
 
-        # Initialize encoder CUDA graph manager if enabled
+        # Initialize encoder CUDA graph manager if enabled.
+        # Use get_model() to unwrap CUDAGraphWrapper/UBatchWrapper,
+        # because @runtime_checkable Protocol isinstance() checks do not
+        # work through __getattr__ forwarding.
         if (
             self.compilation_config.cudagraph_mm_encoder
             and self.supports_mm_inputs
@@ -5745,12 +5748,13 @@ class GPUModelRunner(
                 EncoderCudaGraphManager,
             )
 
-            if supports_encoder_cudagraph(self.model):
+            raw_model = self.get_model()
+            if supports_encoder_cudagraph(raw_model):
                 self.encoder_cudagraph_manager = EncoderCudaGraphManager(
                     vllm_config=self.vllm_config,
                     device=self.device,
                     dtype=self.dtype,
-                    model=cast(SupportsEncoderCudaGraph, self.model),
+                    model=cast(SupportsEncoderCudaGraph, raw_model),
                 )
                 logger.info("Initialized EncoderCudaGraphManager for vision encoder")
 
