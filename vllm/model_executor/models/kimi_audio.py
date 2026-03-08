@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from safetensors import safe_open
-from transformers import BatchFeature, WhisperConfig
+from transformers import AutoFeatureExtractor, BatchFeature, WhisperConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.inputs.data import PromptType, TokensPrompt
@@ -725,8 +725,6 @@ class KimiAudioForConditionalGeneration(
         cls, model_config: ModelConfig, task_type: str
     ) -> SpeechToTextConfig:
         """Get speech-to-text config with custom processor."""
-        from transformers import AutoFeatureExtractor
-
         # Import custom processor from vLLM utils
         from vllm.transformers_utils.processors.kimi_audio import KimiAudioProcessor
         from vllm.transformers_utils.tokenizer import get_tokenizer
