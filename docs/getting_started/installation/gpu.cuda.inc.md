@@ -35,6 +35,23 @@ We recommend leveraging `uv` to [automatically select the appropriate PyTorch in
 !!! note
     NVIDIA Blackwell GPUs (B200, GB200) require a minimum of CUDA 12.8, so make sure you are installing PyTorch wheels with at least that version. PyTorch itself offers a [dedicated interface](https://pytorch.org/get-started/locally/) to determine the appropriate pip command to run for a given target configuration.
 
+!!! note "GPT-OSS models on Blackwell GPUs"
+    For consumer Blackwell GPUs (e.g., RTX 5090) running GPT-OSS models (`openai/gpt-oss-120b`, `openai/gpt-oss-20b`), CUDA 13.0 is recommended for optimal stability. GPT-OSS models use MXFP4 kernels, FlashInfer, and MoE routing kernels that are optimized for Hopper/Blackwell architectures and work best with CUDA 13.0. If you encounter `CUBLAS_STATUS_INVALID_VALUE` errors with CUDA 12.x, install the CUDA 13.0 variant:
+
+    ```bash
+    export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
+    export CPU_ARCH=$(uname -m)
+    uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu130-cp38-abi3-manylinux_2_35_${CPU_ARCH}.whl --extra-index-url https://download.pytorch.org/whl/cu130
+    ```
+
+    Or use the nightly build with CUDA 13.0:
+
+    ```bash
+    uv pip install -U vllm \
+        --torch-backend=auto \
+        --extra-index-url https://wheels.vllm.ai/nightly/cu130
+    ```
+
 As of now, vLLM's binaries are compiled with CUDA 12.9 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 12.8, 13.0, and public PyTorch release versions:
 
 ```bash
