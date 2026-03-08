@@ -287,13 +287,7 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, Any]:
         """Get multi-modal field configuration."""
-        # Only include fields that are actually present
-        fields = {}
-        if "whisper_input_features" in hf_inputs:
-            fields["whisper_input_features"] = MultiModalFieldConfig.batched("audio")
-        if "feature_attention_mask" in hf_inputs:
-            fields["feature_attention_mask"] = MultiModalFieldConfig.batched("audio")
-        return fields
+        return _kimiaudio_field_config(hf_inputs)
 
     def _get_prompt_updates(
         self,
