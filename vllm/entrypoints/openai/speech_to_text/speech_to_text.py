@@ -391,9 +391,7 @@ class OpenAISpeechToText(OpenAIServing):
         # timestamps to drift by ~0.5 s per chunk because ``split_audio``
         # searches for a low-energy split point within the overlap window,
         # making each chunk slightly shorter than ``max_audio_clip_s``.
-        chunk_durations = [
-            float(chunk.shape[-1]) / sr for chunk in chunks
-        ]
+        chunk_durations = [float(chunk.shape[-1]) / sr for chunk in chunks]
 
         return engine_prompts, duration, chunk_durations
 
@@ -527,12 +525,14 @@ class OpenAISpeechToText(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        engine_prompts, duration_s, chunk_durations = (
-            await self._preprocess_speech_to_text(
-                request=request,
-                audio_data=audio_data,
-                request_id=request_id,
-            )
+        (
+            engine_prompts,
+            duration_s,
+            chunk_durations,
+        ) = await self._preprocess_speech_to_text(
+            request=request,
+            audio_data=audio_data,
+            request_id=request_id,
         )
 
         # Schedule the request and get the result generator.
