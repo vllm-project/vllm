@@ -141,7 +141,6 @@ def _create_vllm_config(
     cache_config = CacheConfig(
         block_size=config.block_size,
         cache_dtype="auto",
-        swap_space=0,
     )
     cache_config.num_gpu_blocks = max_num_blocks
     cache_config.num_cpu_blocks = 0

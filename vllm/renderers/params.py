@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
+from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.import_utils import LazyLoader
 
@@ -52,8 +53,15 @@ class ChatParams:
     chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
     """The kwargs to pass to the chat template."""
 
-    def with_defaults(self, default_chat_template_kwargs: dict[str, Any] | None):
-        if not default_chat_template_kwargs:
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None
+    """Per-modality kwargs for media I/O (loading/decoding images, videos, etc.)."""
+
+    def with_defaults(
+        self,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
+        default_media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+    ):
+        if not default_chat_template_kwargs and not default_media_io_kwargs:
             return self
 
         return ChatParams(
@@ -62,6 +70,10 @@ class ChatParams:
             chat_template_kwargs=merge_kwargs(
                 default_chat_template_kwargs,
                 self.chat_template_kwargs,
+            ),
+            media_io_kwargs=merge_media_io_kwargs(
+                default_media_io_kwargs,
+                self.media_io_kwargs,
             ),
         )
 
