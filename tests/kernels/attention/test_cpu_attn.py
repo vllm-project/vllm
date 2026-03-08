@@ -400,9 +400,7 @@ def test_varlen_with_paged_kv_normal_vec(
 @pytest.mark.parametrize("use_alibi", [False])
 @pytest.mark.parametrize("use_sink", [False])
 @pytest.mark.parametrize("isa", ["amx"])
-@pytest.mark.skipif(
-    not torch.cpu._is_amx_tile_supported(), reason="no AMX support."
-)
+@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
 def test_varlen_with_paged_kv_normal_amx(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
