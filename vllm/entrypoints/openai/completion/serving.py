@@ -449,9 +449,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     and request.include_metrics
                     and num_prompts == 1
                 ):
-                    last_metrics = (
-                        last_res.metrics if last_res is not None else None
-                    )
+                    last_metrics = last_res.metrics if last_res is not None else None
                     num_sequences = request.n or 1
                     stream_per_request_metrics = build_per_request_timing_metrics(
                         last_metrics,

@@ -165,9 +165,7 @@ async def test_metrics_disabled_include_metrics_true_returns_none():
         num_generation_tokens=2,
     )
     mock_engine = _make_mock_engine(metrics=stats)
-    serving_chat = _build_serving_chat(
-        mock_engine, enable_per_request_metrics=False
-    )
+    serving_chat = _build_serving_chat(mock_engine, enable_per_request_metrics=False)
 
     request = ChatCompletionRequest(
         model=MODEL_NAME,
@@ -184,9 +182,7 @@ async def test_metrics_disabled_include_metrics_true_returns_none():
 @pytest.mark.asyncio
 async def test_metrics_disabled_include_metrics_false_returns_none():
     mock_engine = _make_mock_engine()
-    serving_chat = _build_serving_chat(
-        mock_engine, enable_per_request_metrics=False
-    )
+    serving_chat = _build_serving_chat(mock_engine, enable_per_request_metrics=False)
 
     request = ChatCompletionRequest(
         model=MODEL_NAME,
@@ -215,9 +211,7 @@ async def test_metrics_enabled_include_metrics_false_returns_none():
         num_generation_tokens=2,
     )
     mock_engine = _make_mock_engine(metrics=stats)
-    serving_chat = _build_serving_chat(
-        mock_engine, enable_per_request_metrics=True
-    )
+    serving_chat = _build_serving_chat(mock_engine, enable_per_request_metrics=True)
 
     request = ChatCompletionRequest(
         model=MODEL_NAME,
@@ -241,9 +235,7 @@ async def test_metrics_enabled_include_metrics_true_returns_populated():
         num_generation_tokens=2,
     )
     mock_engine = _make_mock_engine(metrics=stats)
-    serving_chat = _build_serving_chat(
-        mock_engine, enable_per_request_metrics=True
-    )
+    serving_chat = _build_serving_chat(mock_engine, enable_per_request_metrics=True)
 
     request = ChatCompletionRequest(
         model=MODEL_NAME,
@@ -263,9 +255,7 @@ async def test_metrics_enabled_include_metrics_true_returns_populated():
 @pytest.mark.asyncio
 async def test_metrics_enabled_no_request_output_metrics():
     mock_engine = _make_mock_engine(metrics=None)
-    serving_chat = _build_serving_chat(
-        mock_engine, enable_per_request_metrics=True
-    )
+    serving_chat = _build_serving_chat(mock_engine, enable_per_request_metrics=True)
 
     request = ChatCompletionRequest(
         model=MODEL_NAME,

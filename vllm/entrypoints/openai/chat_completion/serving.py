@@ -1326,23 +1326,17 @@ class OpenAIServingChat(OpenAIServing):
 
                 if reasoning_parser is not None and last_res is not None:
                     reasoning_tokens = sum(
-                        reasoning_parser.count_reasoning_tokens(
-                            list(output.token_ids)
-                        )
+                        reasoning_parser.count_reasoning_tokens(list(output.token_ids))
                         for output in last_res.outputs
                     )
                     if reasoning_tokens > 0:
-                        final_usage.completion_tokens_details = (
-                            CompletionTokensDetails(
-                                reasoning_tokens=reasoning_tokens
-                            )
+                        final_usage.completion_tokens_details = CompletionTokensDetails(
+                            reasoning_tokens=reasoning_tokens
                         )
 
                 stream_per_request_metrics: PerRequestTimingMetrics | None = None
                 if self.enable_per_request_metrics and request.include_metrics:
-                    last_metrics = (
-                        last_res.metrics if last_res is not None else None
-                    )
+                    last_metrics = last_res.metrics if last_res is not None else None
                     num_sequences = request.n or 1
                     stream_per_request_metrics = build_per_request_timing_metrics(
                         last_metrics, completion_tokens // num_sequences
@@ -1743,9 +1737,7 @@ class OpenAIServingChat(OpenAIServing):
 
         if reasoning_parser is not None:
             reasoning_tokens = sum(
-                reasoning_parser.count_reasoning_tokens(
-                    list(output.token_ids)
-                )
+                reasoning_parser.count_reasoning_tokens(list(output.token_ids))
                 for output in final_res.outputs
             )
             if reasoning_tokens > 0:
