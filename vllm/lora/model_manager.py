@@ -596,7 +596,7 @@ class LoRAModelManager:
                 replacement_loras[i] = None
             # HACK Temporary solution for the pool model.
             if self.is_pooling_model and not lora_model.check_lora_name(module_name):
-                replaced_module_name = module_name.replace("model.", "")
+                replaced_module_name = module_name.removeprefix("model.")
                 if lora_model.check_lora_name(replaced_module_name):
                     module_name = replaced_module_name
             if module_name.endswith(".experts"):
