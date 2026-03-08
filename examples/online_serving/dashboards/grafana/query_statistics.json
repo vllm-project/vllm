@@ -349,7 +349,7 @@
         "defaults": {
           "color": { "mode": "thresholds" },
           "mappings": [
-            { "options": { "Calcultion": { "index": 0, "text": "Last (not null)" } }, "type": "value" }
+            { "options": { "Calculation": { "index": 0, "text": "Last (not null)" } }, "type": "value" }
           ],
           "thresholds": {
             "mode": "absolute",

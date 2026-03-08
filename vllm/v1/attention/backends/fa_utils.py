@@ -4,6 +4,7 @@
 from typing import Any
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -55,9 +56,6 @@ elif current_platform.is_rocm():
 def get_flash_attn_version(
     requires_alibi: bool = False, head_size: int | None = None
 ) -> int | None:
-    # import here to avoid circular dependencies
-    from vllm.platforms import current_platform
-
     if current_platform.is_xpu():
         return 2
     if current_platform.is_rocm():
@@ -111,6 +109,16 @@ def get_flash_attn_version(
         if requires_alibi and fa_version == 4:
             logger.warning_once(
                 "Cannot use FA version 4 with ALiBi, defaulting to FA version 2."
+            )
+            fa_version = 2
+
+        # FA4 currently uses batch-shape-dependent scheduling
+        # heuristics on SM100+, which breaks batch invariance.
+        if vllm_is_batch_invariant() and fa_version == 4:
+            logger.warning_once(
+                "Cannot use FA version 4 with batch invariance, "
+                "defaulting to FA version 2.",
+                scope="local",
             )
             fa_version = 2
 
