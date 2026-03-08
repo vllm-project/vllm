@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from itertools import islice
 
 import torch
+import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
@@ -241,8 +242,6 @@ def _gdn_recurrence_pytorch(
     The ``ssm_state`` tensor is updated in-place per sequence slot; no
     separate ``last_recurrent_state`` copy is required.
     """
-    import torch.nn.functional as F
-
     H, K = q.shape[2], q.shape[3]
     HV, V = v.shape[2], v.shape[3]
     gva_ratio = HV // H
@@ -556,10 +555,12 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # (chunk_gated_delta_rule) and fused_recurrent_gated_delta_rule
         # produce silently incorrect output.  Fall back to a pure-PyTorch
         # implementation that is correct on all compute capabilities.
-        self._use_pytorch_gdn = (
-            current_platform.is_cuda()
-            and current_platform.get_device_capability() >= (12, 0)
+        _cap = (
+            current_platform.get_device_capability()
+            if current_platform.is_cuda()
+            else None
         )
+        self._use_pytorch_gdn = _cap is not None and _cap >= (12, 0)
         if self._use_pytorch_gdn:
             logger.info_once(
                 "SM12.0+ detected: using PyTorch GDN fallback for "
@@ -917,8 +918,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 # SM12.0 fallback: g_non_spec / beta_non_spec are None in the
                 # decode path (fused_gdn_gating is only called for prefills),
                 # so recompute them from the raw parameters.
-                import torch.nn.functional as F
-
                 _a = (
                     a.index_select(0, non_spec_token_indx)
                     if spec_sequence_masks is not None
@@ -1685,12 +1684,10 @@ def fused_gdn_gating(
     TODO maybe use torch.compile to replace this triton kernel
     """
     # PyTorch fallback for SM12.0+ (Blackwell) where Triton is incorrect
-    if current_platform.is_cuda() and current_platform.get_device_capability() >= (
-        12,
-        0,
-    ):
-        import torch.nn.functional as F
-
+    _cap = (
+        current_platform.get_device_capability() if current_platform.is_cuda() else None
+    )
+    if _cap is not None and _cap >= (12, 0):
         x = a.float() + dt_bias.float()
         g = (-A_log.float().exp() * F.softplus(x)).unsqueeze(0)  # [1, T, HV]
         beta_out = b.float().sigmoid().to(b.dtype).unsqueeze(0)  # [1, T, HV]
