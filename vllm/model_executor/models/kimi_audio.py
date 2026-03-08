@@ -724,8 +724,11 @@ class KimiAudioForConditionalGeneration(
         from vllm.transformers_utils.tokenizer import get_tokenizer
 
         # Load feature extractor from model path
+        # Kimi-Audio stores Whisper extractor in whisper-large-v3/ subfolder
         feature_extractor = AutoFeatureExtractor.from_pretrained(
-            model_config.model, trust_remote_code=model_config.trust_remote_code
+            model_config.model,
+            trust_remote_code=model_config.trust_remote_code,
+            subfolder="whisper-large-v3",
         )
 
         # Get tokenizer (this handles the TikTokenTokenizer properly)
