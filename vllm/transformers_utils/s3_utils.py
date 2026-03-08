@@ -82,8 +82,17 @@ def list_files(
     prefix = "/".join(parts[1:])
     bucket_name = parts[0]
 
-    objects = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
-    paths = [obj["Key"] for obj in objects.get("Contents", [])]
+    paths = []
+    continuation_token = None
+    while True:
+        kwargs = {"Bucket": bucket_name, "Prefix": prefix}
+        if continuation_token is not None:
+            kwargs["ContinuationToken"] = continuation_token
+        objects = s3.list_objects_v2(**kwargs)
+        paths.extend(obj["Key"] for obj in objects.get("Contents", []))
+        if not objects.get("IsTruncated", False):
+            break
+        continuation_token = objects.get("NextContinuationToken")
 
     paths = _filter_ignore(paths, ["*/"])
     if allow_pattern is not None:
