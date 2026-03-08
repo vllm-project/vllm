@@ -162,8 +162,18 @@ def _int8_quantize(
     # activations apply per-token quantization. Otherwise, assume
     # activation tensor-wise fp8/int8 quantization, dynamic or static
     if block_shape is None:
-        assert per_act_token, "int8 quantization only supports block or channel-wise"
-        A, A_scale = per_token_quant_int8(A)
+        if per_act_token:
+            A, A_scale = per_token_quant_int8(A)
+        elif A_scale is not None:
+            # Static per-tensor: use the optimized CUDA kernel
+            A, A_scale, _ = ops.scaled_int8_quant(A, scale=A_scale)
+        elif A_scale is None:
+            # Dynamic per-tensor: compute scale then quantize via kernel
+            A_scale = A.abs().max() / 127.0
+            if A_scale == 0:
+                A_scale = torch.ones(1, dtype=torch.float32,
+                                     device=A.device)
+            A, A_scale, _ = ops.scaled_int8_quant(A, scale=A_scale)
     else:
         assert not per_act_token
         assert len(block_shape) == 2
