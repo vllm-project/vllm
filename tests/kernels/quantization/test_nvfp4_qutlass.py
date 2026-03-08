@@ -21,6 +21,7 @@ import pytest
 import torch
 from compressed_tensors.transform.utils.hadamard import deterministic_hadamard_matrix
 
+from tests.kernels.utils import rtne_fp4
 from vllm import _custom_ops as ops  # use existing nvfp4 gemm in vllm
 from vllm._custom_ops import fusedQuantizeNv
 from vllm.model_executor.layers.quantization.qutlass_utils import to_blocked
@@ -46,45 +47,6 @@ def get_hadamard_matrix(group_size: int, dtype: torch.dtype, device: torch.devic
         deterministic_hadamard_matrix(group_size, dtype=dtype, device=device)
         * group_size**-0.5
     )
-
-
-def _rtne_fp4(x: torch.Tensor):
-    device = x.device
-    grid = torch.tensor(
-        [
-            -6.0,
-            -4.0,
-            -3.0,
-            -2.0,
-            -1.5,
-            -1.0,
-            -0.5,
-            -0.0,
-            0.0,
-            0.5,
-            1.0,
-            1.5,
-            2.0,
-            3.0,
-            4.0,
-            6.0,
-        ],
-        dtype=x.dtype,
-        device=x.device,
-    )
-    grid_int = torch.tensor(
-        [-1, -2, -3, -4, -5, -6, -7, -8, 0, 1, 2, 3, 4, 5, 6, 7],
-        dtype=torch.uint8,
-        device=device,
-    )
-    inds = torch.bucketize(x, grid)
-    lo, hi = (inds - 1).clamp(min=0, max=15), inds.clamp(min=0, max=15)
-    g_lo, g_hi = grid[lo], grid[hi]
-    pick_hi = (g_hi - x < x - g_lo) | (g_hi - x == x - g_lo) & (grid_int[hi] % 2 == 0)
-    y = torch.where(pick_hi, g_hi, g_lo)
-    y_int = torch.where(pick_hi, grid_int[hi], grid_int[lo])
-    y_int_packed = (y_int[..., 1::2] & 0xF) << 4 | y_int[..., ::2] & 0xF
-    return y, y_int_packed
 
 
 def _dq_fp4(x_e2m1: torch.Tensor, x_e4m3: torch.Tensor, alpha: float):
@@ -164,7 +126,7 @@ def _forward_quantize_ref(x: torch.Tensor, h: torch.Tensor, rot_size: int):
     for i in range(8):
         clip_mask_ref |= clip_mask_unpacked_ref[..., i::8].to(dtype=torch.uint8) << i
 
-    xh_fp4_ref, xh_e2m1_ref = _rtne_fp4(xh_scaled_ref64)
+    xh_fp4_ref, xh_e2m1_ref = rtne_fp4(xh_scaled_ref64)
     xh_dq, xh_fp4_dq, scales_dq = _dq_fp4(xh_e2m1_ref, xh_e4m3_ref, 6.0)
     clip_mask_unpacked_dq = _unpack_mask(clip_mask_ref)
 
