@@ -114,9 +114,7 @@ class ErnieEmbeddingModel(BertEmbeddingModel):
 
 
 @default_pooling_type(seq_pooling_type="CLS")
-class ErnieForSequenceClassification(
-    nn.Module, SupportsCrossEncoding, SupportsQuant
-):
+class ErnieForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQuant):
     is_pooling_model = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
