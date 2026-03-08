@@ -49,6 +49,7 @@ class DeepseekV32Renderer(BaseRenderer[DeepseekV32Tokenizer]):
             messages,
             self.model_config,
             content_format="string",
+            media_io_kwargs=params.media_io_kwargs,
         )
 
         prompt_raw = tokenizer.apply_chat_template(
@@ -75,6 +76,7 @@ class DeepseekV32Renderer(BaseRenderer[DeepseekV32Tokenizer]):
             messages,
             self.model_config,
             content_format="string",
+            media_io_kwargs=params.media_io_kwargs,
         )
 
         prompt_raw = tokenizer.apply_chat_template(
