@@ -24,7 +24,6 @@
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 
-import os
 from collections.abc import Iterable
 from itertools import islice
 
@@ -75,6 +74,7 @@ from .utils import (
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
+    maybe_compress_lm_head_to_fp8,
     maybe_prefix,
 )
 
@@ -559,6 +559,7 @@ class LlamaForCausalLM(
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
+        self._compress_lm_head = vllm_config.model_config.fp8_lm_head
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.model.aux_hidden_state_layers = layers
@@ -608,27 +609,8 @@ class LlamaForCausalLM(
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         loaded = loader.load_weights(weights)
-
-        # Compress lm_head to FP8 to save VRAM on large-vocab models.
-        # Saves ~640 MB for 131K vocab x 5120 dim.
-        # Enabled by VLLM_FP8_LM_HEAD=1 env var.
-        # The UnquantizedLinearMethod.apply() handles FP8->compute_dtype cast.
-        if (
-            os.environ.get("VLLM_FP8_LM_HEAD")
-            and not self.config.tie_word_embeddings
-            and hasattr(self.lm_head, "weight")
-            and self.lm_head.weight.dtype != torch.float8_e4m3fn
-        ):
-            saved_mb = self.lm_head.weight.numel() / 1024**2
-            self.lm_head.weight = torch.nn.Parameter(
-                self.lm_head.weight.data.to(torch.float8_e4m3fn),
-                requires_grad=False,
-            )
-            logger.info(
-                "Compressed lm_head to float8_e4m3fn (saved %.0f MB VRAM)",
-                saved_mb,
-            )
-
+        if self._compress_lm_head:
+            maybe_compress_lm_head_to_fp8(self, logger)
         return loaded
 
 
