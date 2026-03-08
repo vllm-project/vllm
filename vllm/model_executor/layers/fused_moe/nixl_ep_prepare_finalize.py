@@ -55,19 +55,12 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     # NOTE: Keep this list sorted, maybe_roundup_layer_hidden_size depends
     # on it.
     SUPPORTED_HIDDEN_SIZES = [2048, 2560, 3072, 4096, 5120, 6144, 7168, 8192]
+    assert sorted(set(SUPPORTED_HIDDEN_SIZES)) == SUPPORTED_HIDDEN_SIZES
 
     @staticmethod
     def maybe_roundup_layer_hidden_size(hidden_size: int) -> int:
         # Round up hidden size to the closest supported hidden size.
         _supported_hs = NixlEPPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES
-        # Check sorted
-        num_supported_hs = len(_supported_hs)
-        assert all(
-            [
-                _supported_hs[i] < _supported_hs[i + 1]
-                for i in range(num_supported_hs - 1)
-            ]
-        )
 
         for x in _supported_hs:
             if x >= hidden_size:
