@@ -210,6 +210,82 @@ class ChunkGatedDeltaRule(CustomOp):
         )
 
 
+def _gdn_recurrence_pytorch(
+    q: torch.Tensor,  # [1, T, H, K]
+    k: torch.Tensor,  # [1, T, H, K]
+    v: torch.Tensor,  # [1, T, HV, V]
+    g: torch.Tensor,  # [1, T, HV] or [T, HV], float32 (log-decays)
+    beta: torch.Tensor,  # [1, T, HV] or [T, HV]
+    ssm_state: torch.Tensor,  # [N_slots, HV, V, K] — full KV-cache state buffer
+    state_indices: torch.Tensor,  # [N] — slot index of each sequence in ssm_state
+    cu_seqlens: torch.Tensor,  # [N+1] — cumulative token counts
+) -> torch.Tensor:  # [1, T, HV, V]
+    """
+    Pure-PyTorch GatedDeltaRule recurrence for Qwen3Next/Qwen3.5.
+
+    Used as a fallback on SM12.0 (Blackwell / RTX 5080+) where the Triton
+    kernels ``chunk_gated_delta_rule`` and ``fused_recurrent_gated_delta_rule``
+    produce silently incorrect output.  The PyTorch path is slower but
+    numerically correct on all CUDA compute capabilities.
+
+    Implements the GatedDeltaNet update rule:
+        h_t = h_{t-1} * exp(g_t) + beta_t * (v_t - h_{t-1} @ k_t) outer k_t
+        o_t = h_t @ q_t
+
+    Q and K are L2-normalised and Q is additionally scaled by ``1/sqrt(K)``
+    to match HuggingFace's ``use_qk_l2norm_in_kernel=True`` convention.
+
+    Handles GVA (Grouped Value Attention, ``HV > H``) by broadcasting Q/K
+    heads: value head ``i_hv`` uses key/query head ``i_hv // (HV // H)``.
+
+    The ``ssm_state`` tensor is updated in-place per sequence slot; no
+    separate ``last_recurrent_state`` copy is required.
+    """
+    import torch.nn.functional as F
+
+    H, K = q.shape[2], q.shape[3]
+    HV, V = v.shape[2], v.shape[3]
+    gva_ratio = HV // H
+
+    # L2-normalise Q and K; scale Q by 1/sqrt(K) (use_qk_l2norm_in_kernel=True)
+    scale = 1.0 / (K**0.5)
+    q_f = F.normalize(q[0].float(), dim=-1) * scale  # [T, H, K]
+    k_f = F.normalize(k[0].float(), dim=-1)  # [T, H, K]
+    v_f = v[0].float()  # [T, HV, V]
+    g_f = (g[0] if g.dim() == 3 else g).float()  # [T, HV]
+    b_f = (beta[0] if beta.dim() == 3 else beta).float()  # [T, HV]
+
+    # Expand H -> HV for Q and K (GVA broadcast)
+    hv_to_h = torch.arange(HV, device=q.device) // gva_ratio  # [HV]
+    k_hv = k_f[:, hv_to_h, :]  # [T, HV, K]
+    q_hv = q_f[:, hv_to_h, :]  # [T, HV, K]
+
+    # Transfer index tensors to CPU once (avoids per-step GPU syncs)
+    cu_list = cu_seqlens.cpu().tolist()
+    idx_list = state_indices.cpu().tolist()
+
+    T_total = q.shape[1]
+    o = torch.empty(1, T_total, HV, V, dtype=v.dtype, device=v.device)
+
+    for i_n in range(len(cu_list) - 1):
+        bos, eos = int(cu_list[i_n]), int(cu_list[i_n + 1])
+        if eos == bos:
+            continue
+        slot = int(idx_list[i_n])
+        h = ssm_state[slot].float()  # [HV, V, K]
+
+        for t in range(bos, eos):
+            h = h * g_f[t, :, None, None].exp()  # decay  [HV, V, K]
+            h_k = (h * k_hv[t, :, None, :]).sum(-1)  # h @ k  [HV, V]
+            v_tilde = b_f[t, :, None] * (v_f[t] - h_k)  # target [HV, V]
+            h = h + v_tilde[:, :, None] * k_hv[t, :, None, :]  # update
+            o[0, t] = (h * q_hv[t, :, None, :]).sum(-1).to(v.dtype)  # output
+
+        ssm_state[slot] = h.to(ssm_state.dtype)
+
+    return o  # [1, T, HV, V]
+
+
 class Qwen3NextSparseMoeBlock(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -475,6 +551,21 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         )
 
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+
+        # SM12.0 (Blackwell / RTX 5080+): both the FLA Triton kernel
+        # (chunk_gated_delta_rule) and fused_recurrent_gated_delta_rule
+        # produce silently incorrect output.  Fall back to a pure-PyTorch
+        # implementation that is correct on all compute capabilities.
+        self._use_pytorch_gdn = (
+            current_platform.is_cuda()
+            and current_platform.get_device_capability() >= (12, 0)
+        )
+        if self._use_pytorch_gdn:
+            logger.info_once(
+                "SM12.0+ detected: using PyTorch GDN fallback for "
+                "Qwen3Next/Qwen3.5 (Triton GDN kernels are incorrect on "
+                "Blackwell)."
+            )
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -747,6 +838,20 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
+            if self._use_pytorch_gdn:
+                # SM12.0: fused_sigmoid_gating_delta_rule_update is a Triton
+                # kernel that produces incorrect output on Blackwell.
+                # Multi-token speculative decoding requires per-step state
+                # management (spec_state_indices_tensor is 2-D) which is not
+                # yet supported in the PyTorch GDN fallback.
+                raise RuntimeError(
+                    "Speculative decoding with Qwen3Next/Qwen3.5 on SM12.0+ "
+                    "(Blackwell / RTX 5080+) is not yet supported. The Triton "
+                    "fused_sigmoid_gating_delta_rule_update kernel produces "
+                    "incorrect output on this architecture. "
+                    "Please disable speculative decoding to use this model on "
+                    "RTX 5080+ GPUs."
+                )
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
@@ -771,45 +876,95 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         # 2.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
-            initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
-            initial_state[~has_initial_state, ...] = 0
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = self.chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=non_spec_query_start_loc,
-                use_qk_l2norm_in_kernel=True,
-            )
-            # Init cache
-            ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
-                ssm_state.dtype
-            )
-        elif attn_metadata.num_decodes > 0:
-            core_attn_out_non_spec, last_recurrent_state = (
-                fused_sigmoid_gating_delta_rule_update(
-                    A_log=self.A_log,
-                    a=a,
-                    b=b,
-                    dt_bias=self.dt_bias,
+            if self._use_pytorch_gdn:
+                # SM12.0 fallback: update ssm_state in-place
+                ssm_state[non_spec_state_indices_tensor[~has_initial_state]] = 0
+                core_attn_out_non_spec = _gdn_recurrence_pytorch(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
-                    initial_state=ssm_state,
-                    inplace_final_state=True,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    ssm_state=ssm_state,
+                    state_indices=non_spec_state_indices_tensor,
+                    cu_seqlens=non_spec_query_start_loc[
+                        : attn_metadata.num_prefills + 1
+                    ],
+                )
+            else:
+                initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
+                initial_state[~has_initial_state, ...] = 0
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                ) = self.chunk_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    cu_seqlens=non_spec_query_start_loc,
+                    use_qk_l2norm_in_kernel=True,
+                )
+                # Init cache
+                ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
+                    ssm_state.dtype
+                )
+        elif attn_metadata.num_decodes > 0:
+            if self._use_pytorch_gdn:
+                # SM12.0 fallback: g_non_spec / beta_non_spec are None in the
+                # decode path (fused_gdn_gating is only called for prefills),
+                # so recompute them from the raw parameters.
+                import torch.nn.functional as F
+
+                _a = (
+                    a.index_select(0, non_spec_token_indx)
+                    if spec_sequence_masks is not None
+                    else a
+                )
+                _b = (
+                    b.index_select(0, non_spec_token_indx)
+                    if spec_sequence_masks is not None
+                    else b
+                )
+                _g = (
+                    -self.A_log.float().exp()
+                    * F.softplus(_a.float() + self.dt_bias.float())
+                ).unsqueeze(0)  # [1, T, HV]
+                _beta = _b.float().sigmoid().to(_b.dtype).unsqueeze(0)  # [1, T, HV]
+                core_attn_out_non_spec = _gdn_recurrence_pytorch(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=_g,
+                    beta=_beta,
+                    ssm_state=ssm_state,
+                    state_indices=non_spec_state_indices_tensor,
                     cu_seqlens=non_spec_query_start_loc[
                         : attn_metadata.num_decodes + 1
                     ],
-                    ssm_state_indices=non_spec_state_indices_tensor,
-                    use_qk_l2norm_in_kernel=True,
                 )
-            )
+            else:
+                core_attn_out_non_spec, last_recurrent_state = (
+                    fused_sigmoid_gating_delta_rule_update(
+                        A_log=self.A_log,
+                        a=a,
+                        b=b,
+                        dt_bias=self.dt_bias,
+                        q=query_non_spec,
+                        k=key_non_spec,
+                        v=value_non_spec,
+                        initial_state=ssm_state,
+                        inplace_final_state=True,
+                        cu_seqlens=non_spec_query_start_loc[
+                            : attn_metadata.num_decodes + 1
+                        ],
+                        ssm_state_indices=non_spec_state_indices_tensor,
+                        use_qk_l2norm_in_kernel=True,
+                    )
+                )
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 
@@ -1524,8 +1679,23 @@ def fused_gdn_gating(
     Fused computation of g and beta for Gated Delta Net.
     g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
     beta_output = b.sigmoid()
+
+    On SM12.0+ (Blackwell) the Triton kernel produces incorrect output;
+    a pure-PyTorch fallback is used instead.
     TODO maybe use torch.compile to replace this triton kernel
     """
+    # PyTorch fallback for SM12.0+ (Blackwell) where Triton is incorrect
+    if current_platform.is_cuda() and current_platform.get_device_capability() >= (
+        12,
+        0,
+    ):
+        import torch.nn.functional as F
+
+        x = a.float() + dt_bias.float()
+        g = (-A_log.float().exp() * F.softplus(x)).unsqueeze(0)  # [1, T, HV]
+        beta_out = b.float().sigmoid().to(b.dtype).unsqueeze(0)  # [1, T, HV]
+        return g, beta_out
+
     batch, num_heads = a.shape
     seq_len = 1
     grid = (batch, seq_len, triton.cdiv(num_heads, 8))
