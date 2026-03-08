@@ -47,7 +47,6 @@ MTPModelTypes = Literal[
     "step3p5_mtp",
 ]
 EagleModelTypes = Literal["eagle", "eagle3", "extract_hidden_states", MTPModelTypes]
-NgramGPUTypes = Literal["ngram_gpu"]
 SpeculativeMethod = Literal[
     "ngram",
     "medusa",
@@ -55,7 +54,6 @@ SpeculativeMethod = Literal[
     "draft_model",
     "suffix",
     EagleModelTypes,
-    NgramGPUTypes,
 ]
 
 
@@ -366,8 +364,6 @@ class SpeculativeConfig:
                     self.quantization = self.target_model_config.quantization
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
-            elif self.method == "ngram_gpu":
-                self.model = "ngram_gpu"
             elif self.method == "suffix":
                 self.model = "suffix"
             elif self.method == "extract_hidden_states":
@@ -378,9 +374,8 @@ class SpeculativeConfig:
                 )
 
         if self.method in ("ngram", "[ngram]"):
+            # Unified to "ngram" internally
             self.method = "ngram"
-
-        if self.method in ("ngram", "ngram_gpu"):
             # Set default values if not provided
             if self.prompt_lookup_min is None and self.prompt_lookup_max is None:
                 # TODO(woosuk): Tune these values. They are arbitrarily chosen.
@@ -836,9 +831,6 @@ class SpeculativeConfig:
 
     def uses_extract_hidden_states(self) -> bool:
         return self.method == "extract_hidden_states"
-
-    def use_ngram_gpu(self) -> bool:
-        return self.method == "ngram_gpu"
 
     def __repr__(self) -> str:
         method = self.method
