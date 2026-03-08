@@ -67,6 +67,9 @@ def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
     finally:
         cap.release()
 
+    if not frames:
+        return np.empty((0,), dtype=np.uint8)
+
     frames = np.stack(frames)
     if len(frames) < num_frames:
         raise ValueError(
