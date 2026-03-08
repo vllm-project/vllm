@@ -930,8 +930,11 @@ def test_moe_layer_no_parallel(
     if use_gate and not use_shared_experts:
         pytest.skip("gate requires shared_experts (use_overlapped mode)")
 
-    if use_routed_input_transform and quantization is not None:
-        pytest.skip("routed input transform + quantization not currently working.")
+    if use_routed_input_transform and quantization is not None and k >= 2048:
+        pytest.skip(
+            "routed_input_transform + quantization + higher hidden dimensions "
+            "leads to large differences."
+        )
 
     set_random_seed(7)
 
@@ -1063,9 +1066,6 @@ def test_moe_layer_no_parallel(
             routed_input_transform=routed_input_transform,
             routed_output_transform=routed_output_transform,
         )
-
-        # if moe_layer._expert_map is not None:
-        #    moe_layer._expert_map = moe_layer._expert_map.to(device)
 
         num_tokens = m
         num_tokens_across_dp = torch.tensor(
