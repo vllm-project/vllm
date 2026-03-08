@@ -5578,6 +5578,11 @@ class GPUModelRunner(
 
     def _cleanup_profiling_kv_cache(self) -> None:
         torch.accelerator.synchronize()
+
+        capturer = RoutedExpertsCapturer.get_instance()
+        if capturer is not None:
+            capturer.cleanup()
+
         if hasattr(self, "kv_caches") and self.kv_caches:
             for i in range(len(self.kv_caches)):
                 self.kv_caches[i] = None  # type: ignore

@@ -218,6 +218,8 @@ class RoutedExpertsCapturer:
 
     def cleanup(self) -> None:
         """Explicitly clean up shared memory resources."""
+        global _global_experts_capturer
+
         if self._shm is not None:
             try:
                 self._shm.close()
@@ -226,6 +228,13 @@ class RoutedExpertsCapturer:
                 logger.debug("Exception during cleanup for capturer", exc_info=True)
             finally:
                 self._shm = None
+
+        self._device_buffer = None
+        self._host_buffer_view = None
+        self._lock_file = None
+
+        if _global_experts_capturer is self:
+            _global_experts_capturer = None
 
     def __del__(self) -> None:
         """Clean up shared memory on destruction."""

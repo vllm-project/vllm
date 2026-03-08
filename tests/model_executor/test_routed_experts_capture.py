@@ -158,3 +158,56 @@ def test_gpu_model_runner_binding_stage(monkeypatch):
     assert callable(dummy_module.router.capture_fn)
     dummy_module.router.capture_fn(torch.tensor([[9, 10]]))
     assert len(capturer.calls) == 1
+
+
+def test_routed_experts_capturer_cleanup_allows_recreate():
+    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+        RoutedExpertsCapturer,
+    )
+
+    existing = RoutedExpertsCapturer.get_instance()
+    if existing is not None:
+        existing.cleanup()
+
+    first = RoutedExpertsCapturer.create()
+    first._device_buffer = torch.zeros(1, dtype=torch.int32)
+
+    first.cleanup()
+    assert RoutedExpertsCapturer.get_instance() is None
+    assert first._device_buffer is None
+
+    second = RoutedExpertsCapturer.create()
+    assert second is not first
+    second.cleanup()
+
+
+def test_gpu_model_runner_cleanup_profiling_kv_cache_resets_capturer(monkeypatch):
+    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+        RoutedExpertsCapturer,
+    )
+    from vllm.v1.worker import gpu_model_runner as gmr
+
+    existing = RoutedExpertsCapturer.get_instance()
+    if existing is not None:
+        existing.cleanup()
+
+    accelerator = getattr(torch, "accelerator", types.SimpleNamespace())
+    monkeypatch.setattr(torch, "accelerator", accelerator, raising=False)
+    monkeypatch.setattr(accelerator, "synchronize", lambda: None, raising=False)
+    monkeypatch.setattr(accelerator, "empty_cache", lambda: None, raising=False)
+
+    dummy_self = types.SimpleNamespace(
+        cache_config=types.SimpleNamespace(num_gpu_blocks=1),
+        compilation_config=types.SimpleNamespace(
+            static_forward_context={"dummy": types.SimpleNamespace(kv_cache=[object()])}
+        ),
+    )
+
+    capturer = RoutedExpertsCapturer.create()
+    capturer._device_buffer = torch.zeros(1, dtype=torch.int32)
+
+    gmr.GPUModelRunner._cleanup_profiling_kv_cache(dummy_self)
+
+    assert RoutedExpertsCapturer.get_instance() is None
+    assert dummy_self.cache_config.num_gpu_blocks is None
+    assert dummy_self.compilation_config.static_forward_context["dummy"].kv_cache == []
