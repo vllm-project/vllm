@@ -1962,18 +1962,18 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
                 "EPLB is not supported for FlashInfer TRTLLM MXFP8 MoE backend."
             )
 
-        supported_activations = [MoEActivation.SILU]
-        if layer.activation not in supported_activations:
-            raise NotImplementedError(
-                "FlashInfer TRTLLM MXFP8 MoE supports only "
-                f"{supported_activations}, got {layer.activation}."
-            )
-
         # Map vLLM MoEActivation to FlashInfer ActivationType.
         activation_map = {
             MoEActivation.SILU: ActivationType.Swiglu,
             MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
         }
+
+        if layer.activation not in activation_map:
+            raise NotImplementedError(
+                "FlashInfer TRTLLM MXFP8 MoE supports only "
+                f"{activation_map.keys()}, got {layer.activation}."
+            )
+
         fi_activation_type: ActivationType = activation_map[layer.activation]
 
         # DeepSeekV3 routing requires float32 logits; others expect bfloat16.
@@ -2017,13 +2017,8 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             use_shuffled_weight=True,
             weight_layout=0,
             fp8_quantization_type=Fp8QuantizationType.MxFp8,
+            activation_type=fi_activation_type,
         )
-
-        if fi_activation_type != ActivationType.Swiglu:
-            raise NotImplementedError(
-                "FlashInfer TRTLLM MXFP8 MoE supports only Swiglu activation, "
-                f"got {fi_activation_type}."
-            )
 
         return flashinfer_trtllm_fp8_block_scale_moe(**kwargs)
 
