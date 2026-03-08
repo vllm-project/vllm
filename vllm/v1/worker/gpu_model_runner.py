@@ -180,6 +180,7 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
+from vllm.v1.worker.gpu.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
@@ -490,6 +491,7 @@ class GPUModelRunner(
 
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
+        self.late_interaction_runner = LateInteractionRunner()
 
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
@@ -825,6 +827,7 @@ class GPUModelRunner(
         """
         if self.mm_budget:
             self.mm_budget.reset_cache()
+        self.late_interaction_runner.clear()
 
     def reset_encoder_cache(self) -> None:
         """Clear the GPU-side encoder cache storing vision embeddings.
@@ -833,6 +836,7 @@ class GPUModelRunner(
         stale embeddings computed with old weights are not reused.
         """
         self.encoder_cache.clear()
+        self.late_interaction_runner.clear()
 
     @torch.inference_mode()
     def init_fp8_kv_scales(self) -> None:
@@ -996,6 +1000,9 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+        self.late_interaction_runner.on_requests_finished(
+            scheduler_output.finished_req_ids
+        )
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -1083,6 +1090,7 @@ class GPUModelRunner(
                 lora_request=new_req_data.lora_request,
             )
             self.requests[req_id] = req_state
+            self.late_interaction_runner.register_request(req_id, pooling_params)
 
             if sampling_params and sampling_params.prompt_logprobs is not None:
                 self.num_prompt_logprobs[req_id] = (
@@ -1354,6 +1362,7 @@ class GPUModelRunner(
         req_state.prompt_embeds = new_req_data.prompt_embeds
         req_state.sampling_params = new_req_data.sampling_params
         req_state.pooling_params = new_req_data.pooling_params
+        self.late_interaction_runner.register_request(req_id, req_state.pooling_params)
         req_state.block_ids = new_req_data.block_ids
         req_state.num_computed_tokens = new_req_data.num_computed_tokens
         req_state.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
@@ -2869,6 +2878,12 @@ class GPUModelRunner(
             seq_len == prompt_len
             for seq_len, prompt_len in zip(seq_lens_cpu, pooling_metadata.prompt_lens)
         ]
+        raw_pooler_output = self.late_interaction_runner.postprocess_pooler_output(
+            raw_pooler_output=raw_pooler_output,
+            pooling_params=pooling_metadata.pooling_params,
+            req_ids=self.input_batch.req_ids,
+            finished_mask=finished_mask,
+        )
 
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids.copy(),
