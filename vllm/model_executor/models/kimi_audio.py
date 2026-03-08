@@ -477,8 +477,6 @@ class KimiAudioForConditionalGeneration(
         """Embed input IDs and fuse with audio embeddings.
 
         Kimi-Audio fusion: inputs_embeds = text_emb + whisper_emb × √2
-
-        Handles batched inputs using is_multimodal mask for position mapping.
         """
         # Get text embeddings
         inputs_embeds = self.language_model.model.embed_tokens(input_ids)
@@ -486,39 +484,26 @@ class KimiAudioForConditionalGeneration(
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
 
-        # Flatten audio embeddings: list of [seq_len, hidden] -> [total_tokens, hidden]
-        audio_flat = torch.cat([emb for emb in multimodal_embeddings], dim=0)
+        # multimodal_embeddings[0] = audio embeddings [seq_len, hidden]
+        audio_embeds = multimodal_embeddings[0]
+        scale_factor = 2**0.5
 
-        if is_multimodal is not None and is_multimodal.any():
-            # Use is_multimodal mask (provided by vLLM v1)
-            scale_factor = 2**0.5
-            inputs_embeds_flat = inputs_embeds.view(-1, inputs_embeds.shape[-1])
-            text_at_mm = inputs_embeds_flat[is_multimodal]
+        # Find audio placeholder positions (KIMIA_TEXT_BLANK token)
+        audio_mask = input_ids == KimiAudioProcessor.KIMIA_TEXT_BLANK
 
-            if text_at_mm.shape[0] == audio_flat.shape[0]:
-                fused = (text_at_mm + audio_flat.to(inputs_embeds.dtype)) * scale_factor
-                inputs_embeds_flat[is_multimodal] = fused
-        else:
-            # Fallback: find placeholder positions (for v0 or testing)
-            audio_mask = input_ids == KimiAudioProcessor.KIMIA_TEXT_BLANK
-            if audio_mask.any():
-                audio_positions = audio_mask.nonzero(as_tuple=True)[0]
-                if audio_positions.numel() > 0:
-                    # Audio embeddings replace positions after blank token
-                    pos = audio_positions[0].item() + 1
-                    audio_len = min(audio_flat.shape[0], inputs_embeds.shape[0] - pos)
+        if audio_mask.any():
+            audio_positions = audio_mask.nonzero(as_tuple=True)[0]
 
-                    scale_factor = 2**0.5
-                    text_embeds = inputs_embeds.view(-1, inputs_embeds.shape[-1])[
-                        pos : pos + audio_len
-                    ]
-                    audio_subset = audio_flat[:audio_len]
+            if audio_positions.numel() > 0:
+                begin_pos = audio_positions[0].item()
+                pos = begin_pos + 1
+                audio_len = audio_embeds.shape[0]
+                end_pos = pos + audio_len
 
-                    if text_embeds.shape[0] == audio_subset.shape[0]:
-                        fused = (text_embeds + audio_subset) * scale_factor
-                        inputs_embeds.view(-1, inputs_embeds.shape[-1])[
-                            pos : pos + audio_len
-                        ] = fused
+                # Fuse: (text_emb + audio_emb) * √2
+                text_embeds = inputs_embeds[pos:end_pos, :]
+                fused_embeds = (text_embeds + audio_embeds) * scale_factor
+                inputs_embeds[pos:end_pos, :] = fused_embeds
 
         return inputs_embeds
 
