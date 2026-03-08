@@ -201,6 +201,30 @@ def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# Kimi-Audio-7B-Instruct
+def run_kimi_audio(question: str, audio_count: int) -> ModelRequestData:
+    model_name = "moonshotai/Kimi-Audio-7B-Instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"audio": audio_count},
+    )
+
+    # Kimi-Audio uses special media tokens for audio input
+    audio_placeholder = (
+        "<|im_media_begin|><|im_kimia_audio|><|im_media_end|>" * audio_count
+    )
+    prompt = f"{audio_placeholder}{question}"
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # MiDashengLM
 def run_midashenglm(question: str, audio_count: int):
     model_name = "mispeech/midashenglm-7b"
@@ -485,6 +509,7 @@ model_example_map = {
     "glmasr": run_glmasr,
     "funaudiochat": run_funaudiochat,
     "granite_speech": run_granite_speech,
+    "kimi_audio": run_kimi_audio,
     "midashenglm": run_midashenglm,
     "minicpmo": run_minicpmo,
     "phi4_mm": run_phi4mm,
