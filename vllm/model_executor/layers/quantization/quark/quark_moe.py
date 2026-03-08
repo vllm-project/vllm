@@ -730,10 +730,19 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             get_current_vllm_config().model_config.hf_config, "model_type", None
         )
 
-        self.emulate = (
-            not current_platform.supports_mx()
-            or not self.ocp_mx_scheme.startswith("w_mxfp4")
-        ) and (self.mxfp4_backend is None or not self.use_rocm_aiter_moe)
+        # Native CK path requires MX hardware + w_mxfp4 scheme + AITER MoE.
+        # The Triton mxfp4 backend is available for weight-only mxfp4.
+        # If neither path is available, fall back to emulation (dequant to
+        # high-precision and compute in BF16).
+        can_use_native_ck = (
+            current_platform.supports_mx()
+            and self.ocp_mx_scheme is not None
+            and self.ocp_mx_scheme.startswith("w_mxfp4")
+            and self.use_rocm_aiter_moe
+        )
+        can_use_mxfp4_backend = self.mxfp4_backend is not None
+
+        self.emulate = not (can_use_native_ck or can_use_mxfp4_backend)
 
         # CK's pre-compiled MXFP4 MoE GEMM kernel instances have dimension
         # alignment requirements. When violated (e.g. MiniMax-M2.1 with
@@ -769,7 +778,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 "does not support native MXFP4/MXFP6 "
                 "computation. Simulated weight dequantization and activation "
                 "QDQ (quantize and dequantize) will be used, with the linear "
-                "layers computed in high precision."
+                "layers computed in high precision. If you see gibberish "
+                "output with native mode, try VLLM_ROCM_USE_AITER_MOE=0 "
+                "to force emulation as a workaround."
             )
         else:
             logger.warning_once(
@@ -965,6 +976,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             return
 
         from aiter.utility.fp4_utils import e8m0_shuffle
+
+        try:
+            import aiter
+
+            aiter_version = getattr(aiter, "__version__", "unknown")
+        except ImportError:
+            aiter_version = "unknown"
+        logger.info("Using AITER %s for MXFP4 MoE weight processing", aiter_version)
 
         # Pre-shuffle weight scales
         s0, s1, _ = layer.w13_weight_scale.shape
