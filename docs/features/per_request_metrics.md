@@ -62,7 +62,7 @@ All fields are `null` if the underlying timing data is not available for that re
 
 ### Reasoning Token Details
 
-For reasoning models (e.g. DeepSeek-R1, Apriel), the `usage` object includes a
+For reasoning models, the `usage` object includes a
 `completion_tokens_details` field that separates reasoning tokens from content tokens:
 
 ```json
