@@ -1637,8 +1637,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "0"))
     ),
     # NIXL EP environment variables
-    # These are temporarily registered here for Ray to pass to downstream
-    # EngineCore actors
     "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
         os.getenv("VLLM_NIXL_EP_MAX_NUM_RANKS", "32")
     ),
