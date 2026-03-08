@@ -3,7 +3,6 @@
 from typing import Any, cast
 
 from vllm.config import VllmConfig
-from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.kimi_audio import KimiAudioTokenizer
 
 from .hf import HfRenderer, HfTokenizer
@@ -22,6 +21,8 @@ class KimiAudioRenderer(HfRenderer):
         tokenizer_kwargs: dict[str, Any],
     ) -> "HfRenderer":
         """Create an HfRenderer instance for Kimi-Audio models."""
+        from vllm.tokenizers.registry import get_tokenizer
+
         model_config = config.model_config
         if model_config.skip_tokenizer_init:
             tokenizer = None
@@ -30,9 +31,12 @@ class KimiAudioRenderer(HfRenderer):
             tokenizer_kwargs = {
                 k: v for k, v in tokenizer_kwargs.items() if k != "tokenizer_cls"
             }
+            # Use get_tokenizer directly instead of cached_get_tokenizer
+            # (KimiAudioTokenizer doesn't work with get_cached_tokenizer)
             tokenizer = cast(
                 HfTokenizer,
-                cached_get_tokenizer(
+                get_tokenizer(
+                    model_config.tokenizer,
                     tokenizer_cls=KimiAudioTokenizer,  # type: ignore[arg-type]
                     **tokenizer_kwargs,
                 ),

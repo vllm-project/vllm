@@ -23,7 +23,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
 question_per_audio_count = {
     0: "What is 1+1?",
-    1: "What is recited in the audio?",
+    1: "Please transcribe the audio",
     2: "What sport and what nursery rhyme are referenced?",
 }
 
@@ -203,6 +203,7 @@ def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
 
 # Kimi-Audio-7B-Instruct
 def run_kimi_audio(question: str, audio_count: int) -> ModelRequestData:
+    """Kimi-Audio-7B-Instruct for audio transcription and understanding."""
     model_name = "moonshotai/Kimi-Audio-7B-Instruct"
 
     engine_args = EngineArgs(
@@ -213,15 +214,18 @@ def run_kimi_audio(question: str, audio_count: int) -> ModelRequestData:
         limit_mm_per_prompt={"audio": audio_count},
     )
 
-    # Kimi-Audio uses special media tokens for audio input
-    audio_placeholder = (
-        "<|im_media_begin|><|im_kimia_audio|><|im_media_end|>" * audio_count
-    )
+    # Kimi-Audio uses <|im_kimia_text_blank|> as placeholder for audio features
+    audio_placeholder = "<|im_kimia_text_blank|>" * audio_count
+    # Default prompt for transcription
+    if not question:
+        question = "Please transcribe the audio"
     prompt = f"{audio_placeholder}{question}"
 
+    # Stop at EOS token (151644) to prevent repetition
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
+        stop_token_ids=[151644],
     )
 
 
@@ -603,7 +607,10 @@ def main(args):
     # We set temperature to 0.2 so that outputs can be different
     # even when all prompts are identical when running batch inference.
     sampling_params = SamplingParams(
-        temperature=0.2, max_tokens=64, stop_token_ids=req_data.stop_token_ids
+        temperature=0.2,
+        max_tokens=128,
+        stop_token_ids=req_data.stop_token_ids,
+        repetition_penalty=1.1,
     )
 
     def get_input(start, end):

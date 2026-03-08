@@ -74,23 +74,43 @@ RENDERER_REGISTRY = RendererRegistry(
 
 
 def renderer_from_config(config: "VllmConfig", **kwargs):
+    from vllm.model_executor.model_loader import get_model_cls
+
     model_config = config.model_config
+
     tokenizer_mode, tokenizer_name, args, kwargs = tokenizer_args_from_config(
         model_config, **kwargs
     )
+
+    # Override tokenizer_mode for Kimi-Audio models
+    import contextlib
+
+    model_cls = None
+    with contextlib.suppress(Exception):
+        model_cls = get_model_cls(model_config)
+
+    if model_cls is not None and model_cls.__name__ in (
+        "KimiAudioForConditionalGeneration",
+        "MoonshotKimiaForCausalLM",
+    ):
+        tokenizer_mode = "kimi_audio"
 
     if (
         model_config.tokenizer_mode == "auto"
         and model_config.model_impl == "terratorch"
     ):
         renderer_mode = "terratorch"
-    elif tokenizer_mode == "kimi_audio":
-        # Kimi-Audio uses custom renderer that returns HfRenderer instance
-        from vllm.renderers.kimi_audio import KimiAudioRenderer
-
-        return KimiAudioRenderer.from_config(config, tokenizer_kwargs=kwargs)
     else:
         renderer_mode = tokenizer_mode
+
+    # KimiAudioRenderer.from_config() uses model_config.tokenizer directly
+    # so we don't need to pass tokenizer_name in kwargs
+    if renderer_mode == "kimi_audio":
+        return RENDERER_REGISTRY.load_renderer(
+            renderer_mode,
+            config,
+            tokenizer_kwargs=kwargs,
+        )
 
     return RENDERER_REGISTRY.load_renderer(
         renderer_mode,
