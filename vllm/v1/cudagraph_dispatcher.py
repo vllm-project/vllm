@@ -137,7 +137,7 @@ class CudagraphDispatcher:
         num_tokens_padded = self._bs_to_padded_graph_size[num_tokens]
 
         if uniform_decode and self.cudagraph_mode.has_mode(CUDAGraphMode.FULL):
-            num_reqs = num_tokens_padded // uniform_decode_query_len
+            num_reqs = min(num_tokens_padded // uniform_decode_query_len, max_num_seqs)
             assert num_tokens_padded % uniform_decode_query_len == 0
         else:
             uniform_decode = False
@@ -293,16 +293,14 @@ class CudagraphDispatcher:
                 )
                 effective_num_active_loras = self.vllm_config.lora_config.max_loras + 1
 
+        normalized_uniform = uniform_decode and self.cudagraph_mode.separate_routine()
         batch_desc = self._create_padded_batch_descriptor(
-            num_tokens, uniform_decode, has_lora, effective_num_active_loras
+            num_tokens, normalized_uniform, has_lora, effective_num_active_loras
         )
 
         if CUDAGraphMode.FULL in allowed_modes:
             # check if key exists for full cudagraph
-            # For pure FULL mode, keys are registered with uniform=False.
             batch_desc_to_check = batch_desc
-            if self.cudagraph_mode == CUDAGraphMode.FULL:
-                batch_desc_to_check = replace(batch_desc, uniform=False)
             if batch_desc_to_check in self.cudagraph_keys[CUDAGraphMode.FULL]:
                 return CUDAGraphMode.FULL, batch_desc_to_check
 
@@ -336,8 +334,11 @@ class CudagraphDispatcher:
         for mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
             descs = list(self.cudagraph_keys[mode])
             if descs:
-                # Sort by num_tokens descending (largest first)
-                descs.sort(key=lambda d: d.num_tokens, reverse=True)
+                # Sort by (num_tokens, num_active_loras) descending
+                descs.sort(
+                    key=lambda d: (d.num_tokens, d.num_active_loras),
+                    reverse=True,
+                )
                 result.append((mode, descs))
 
         return result

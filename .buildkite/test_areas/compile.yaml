@@ -36,6 +36,16 @@ steps:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py
 
+- label: AsyncTP Correctness Tests (B200)
+  timeout_in_minutes: 50
+  working_dir: "/vllm-workspace/"
+  device: b200
+  optional: true
+  num_devices: 2
+  commands:
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+  - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py
+
 - label: Distributed Compile Unit Tests (2xH100)
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/"
@@ -49,7 +59,7 @@ steps:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - pytest -s -v tests/compile/passes/distributed
 
-- label: Fusion and Compile Unit Tests (B200)
+- label: Fusion and Compile Unit Tests (2xB200)
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/"
   device: b200
