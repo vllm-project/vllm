@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
 from typing import Any
 
 import torch
@@ -421,6 +422,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
 
     # (nixl_ep_buffer, ep_size)
     _buffer: tuple[Any, int] | None = None
+    _lock = threading.Lock()
 
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
@@ -473,26 +475,29 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         NixlEPAll2AllManager._buffer = (buffer, new_ep_size)
 
     def get_handle(self, kwargs):
-        if (
-            NixlEPAll2AllManager._buffer is not None
-            and NixlEPAll2AllManager._buffer[1] == self.cpu_group.size()
-        ):
-            return NixlEPAll2AllManager._buffer[0]
+        with NixlEPAll2AllManager._lock:
+            if (
+                NixlEPAll2AllManager._buffer is not None
+                and NixlEPAll2AllManager._buffer[1] == self.cpu_group.size()
+            ):
+                return NixlEPAll2AllManager._buffer[0]
 
-        num_experts_per_rank = kwargs["num_global_experts"] // kwargs["num_ep_ranks"]
-        nixl_kwargs = dict(
-            max_num_tokens_per_dp_rank=kwargs["max_num_tokens_per_dp_rank"],
-            token_hidden_size=kwargs["token_hidden_size"],
-            num_experts_per_rank=num_experts_per_rank,
-        )
-        if NixlEPAll2AllManager._buffer is None:
-            self._init_buffer(**nixl_kwargs)
-        else:
-            self._update_buffer()
+            num_experts_per_rank = (
+                kwargs["num_global_experts"] // kwargs["num_ep_ranks"]
+            )
+            nixl_kwargs = dict(
+                max_num_tokens_per_dp_rank=kwargs["max_num_tokens_per_dp_rank"],
+                token_hidden_size=kwargs["token_hidden_size"],
+                num_experts_per_rank=num_experts_per_rank,
+            )
+            if NixlEPAll2AllManager._buffer is None:
+                self._init_buffer(**nixl_kwargs)
+            else:
+                self._update_buffer()
 
-        assert NixlEPAll2AllManager._buffer is not None
-        handle = NixlEPAll2AllManager._buffer[0]
-        return handle
+            assert NixlEPAll2AllManager._buffer is not None
+            handle = NixlEPAll2AllManager._buffer[0]
+            return handle
 
     def dispatch(
         self,
