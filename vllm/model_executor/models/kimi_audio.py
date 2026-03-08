@@ -617,26 +617,21 @@ class KimiAudioForConditionalGeneration(
         loaded = loader.load_weights(main_weights, mapper=self.hf_to_vllm_mapper)
 
         # Load Whisper encoder weights from subfolder
-        # Try multiple possible paths for Kimi-Audio models
-        possible_paths = [
-            # From stored model_path
-            os.path.join(self.model_path, "whisper-large-v3/model.safetensors"),
-            # Common installation paths
-            "/data1/moonshotai/Kimi-Audio-7B-Instruct/whisper-large-v3/model.safetensors",
-            f"{os.path.expanduser('~')}/models/Kimi-Audio-7B-Instruct/whisper-large-v3/model.safetensors",
-        ]
+        # Whisper weights are stored in whisper-large-v3/ subfolder
+        whisper_path = os.path.join(
+            self.model_path, "whisper-large-v3/model.safetensors"
+        )
+        if os.path.exists(whisper_path):
+            whisper_loaded = self._load_whisper_weights_from_file(whisper_path)
+            loaded.update(whisper_loaded)
+            logger.info("Loaded %d Whisper weights", len(whisper_loaded))
+        else:
+            logger.warning(
+                "Whisper encoder weights not found at %s. "
+                "Audio transcription may not work correctly.",
+                whisper_path,
+            )
 
-        whisper_loaded = set()
-        for whisper_path in possible_paths:
-            if os.path.exists(whisper_path):
-                whisper_loaded = self._load_whisper_weights_from_file(whisper_path)
-                break
-
-        if not whisper_loaded:
-            logger.warning("Whisper encoder weights not found in any expected location")
-
-        logger.info("Loaded %d Whisper weights", len(whisper_loaded))
-        loaded.update(whisper_loaded)
         logger.info("Total loaded weights: %d", len(loaded))
 
         return loaded
