@@ -13,7 +13,7 @@ Both locations need bounds checking before accessing lora_a[i] and lora_b[i].
 
 from vllm import LLM, SamplingParams
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     print("=" * 60)
     print("Testing LoRA + TP Fix for Issue #36372")
     print("=" * 60)
@@ -29,7 +29,7 @@ if __name__ == '__main__':
             enable_lora=True,
             max_model_len=512,
             gpu_memory_utilization=0.5,
-            trust_remote_code=True
+            trust_remote_code=True,
         )
 
         print("\n✓ Model loaded successfully with TP=2 and LoRA enabled!")
@@ -53,8 +53,10 @@ if __name__ == '__main__':
         print(f"\n❌ IndexError occurred: {e}")
         print("The bug is NOT fixed.")
         import traceback
+
         traceback.print_exc()
     except Exception as e:
         print(f"\n❌ Error occurred: {e}")
         import traceback
+
         traceback.print_exc()
