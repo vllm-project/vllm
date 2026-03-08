@@ -174,7 +174,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # On ROCm, do not allocate segment buffers so unified_attention uses the
         # 2D kernel path (writes only to output). This avoids "Write access to
         # read-only page" during full graph capture (#35169), like AITER unified.
-        if current_platform.is_rocm():
+        if current_platform.is_rocm() and self.decode_cudagraph_enabled:
             self.softmax_segm_output = None
             self.softmax_segm_max = None
             self.softmax_segm_expsum = None
