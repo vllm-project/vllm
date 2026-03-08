@@ -106,9 +106,6 @@ class MockReasoningConfig:
     think_start_token_ids = [THINK_START_TOKEN_ID]
     think_end_token_ids = [THINK_END_TOKEN_ID]
 
-    def is_thinking_enabled(self) -> bool:
-        return True
-
 
 def _generate_fake_sampling_metadata(
     num_output_tokens: int,
