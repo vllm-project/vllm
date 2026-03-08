@@ -317,7 +317,7 @@ def test_nemotron_flashinfer_moe(model_name, flashinfer_backend, monkeypatch):
             vllm_layer.shared_experts.down_proj
         )
 
-        actaul_output = vllm_layer(hidden_states)
+        actual_output = vllm_layer(hidden_states)
 
         ref_output = ref_hf_layer(hidden_states)
-        torch.testing.assert_close(ref_output, actaul_output, rtol=1e-2, atol=1e-1)
+        torch.testing.assert_close(ref_output, actual_output, rtol=1e-2, atol=1e-1)
