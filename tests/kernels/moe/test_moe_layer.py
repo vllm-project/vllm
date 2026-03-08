@@ -371,6 +371,7 @@ def make_fused_moe_layer(
     has_bias: bool = False,
     gate: torch.nn.Module | None = None,
     routed_input_transform: torch.nn.Module | None = None,
+    routed_output_transform: torch.nn.Module | None = None,
     pcp_size: int | None = 1,
 ) -> tuple[Callable, FusedMoE]:
     quant_config, qw = make_quant_config(quantization, w1, w2, global_num_experts)
@@ -446,6 +447,11 @@ def make_fused_moe_layer(
                 hidden_states, router_logits
             )
 
+        # Apply routed output transform if provided
+        # (e.g., latent space -> original space)
+        if routed_output_transform is not None:
+            final_hidden_states = routed_output_transform(final_hidden_states)
+
         if shared_experts is not None:
             assert not reduce_results
             assert final_shared_states is not None
@@ -487,6 +493,7 @@ def make_fake_moe_layer(
     logical_replica_count: torch.Tensor | None = None,
     gate: torch.nn.Module | None = None,
     routed_input_transform: torch.nn.Module | None = None,
+    routed_output_transform: torch.nn.Module | None = None,
 ) -> Callable:
     activation = MoEActivation.from_str(activation)
 
@@ -538,13 +545,15 @@ def make_fake_moe_layer(
         # Save original hidden_states for shared experts (before transform)
         original_hidden_states = hidden_states
 
-        # If gate provided, compute router_logits from hidden_states
-        if gate is not None:
-            router_logits, _ = gate(hidden_states)
-
         # Apply routed input transform if provided
         if routed_input_transform is not None:
             hidden_states = routed_input_transform(hidden_states)
+
+        # If gate provided, compute router_logits from hidden_states
+        # Note: gate operates on transformed hidden_states (after
+        # routed_input_transform)
+        if gate is not None:
+            router_logits, _ = gate(hidden_states)
 
         topk_weights, topk_ids = router.select_experts(
             hidden_states=hidden_states,
@@ -571,6 +580,11 @@ def make_fake_moe_layer(
             global_num_experts=global_num_experts,
             expert_map=expert_map,
         )
+
+        # Apply routed output transform if provided
+        # (e.g., latent space -> original space)
+        if routed_output_transform is not None:
+            output = routed_output_transform(output)
 
         if shared_experts is not None:
             assert shared_output is not None
@@ -914,13 +928,6 @@ def test_moe_layer_no_parallel(
     if use_gate and not use_shared_experts:
         pytest.skip("gate requires shared_experts (use_overlapped mode)")
 
-    # gate and routed_input_transform require full FusedMoE layer infrastructure
-    # The baseline uses low-level fused_experts which doesn't support these features
-    if use_gate or use_routed_input_transform:
-        pytest.skip(
-            "gate and routed_input_transform not supported by baseline fused_experts"
-        )
-
     set_random_seed(7)
 
     dp_size = 1
@@ -943,20 +950,16 @@ def test_moe_layer_no_parallel(
     latent_size = k // 2 if use_routed_input_transform else k
     routed_expert_hidden_size = latent_size
 
-    # Note: For latent MoE, routed experts take latent_size input but output original k
+    # Note: For latent MoE, routed experts operate entirely in latent space
+    # (k//2). The routed_output_transform then projects back to k before
+    # adding with shared experts.
     # w1: (E, 2*N, latent_size) - input latent_size
-    # w2: (E, k, N) - output k (original dimension, matches shared expert output)
-    (w1, _, _, _), _ = make_test_weights(
+    # w2: (E, latent_size, N) - output latent_size (fused_experts returns
+    # same shape as input)
+    (w1, _, _, _), (w2, _, _, _) = make_test_weights(
         num_experts,
         n,
-        routed_expert_hidden_size,  # w1 input dimension
-        in_dtype=in_dtype,
-    )
-    # w2 separately with output dimension = k (original)
-    _, (w2, _, _, _) = make_test_weights(
-        num_experts,
-        n,
-        k,  # w2 output dimension (original k, not latent_size)
+        routed_expert_hidden_size,  # Both w1 input and w2 output use latent_size
         in_dtype=in_dtype,
     )
 
@@ -968,12 +971,22 @@ def test_moe_layer_no_parallel(
     else:
         shared_experts_config = None
 
-    # Create gate if needed
-    gate = SimpleGate(k, num_experts, in_dtype) if use_gate else None
-
     # Create routed input transform if needed
     routed_input_transform = (
         SimpleRoutedInputTransform(k, latent_size, in_dtype)
+        if use_routed_input_transform
+        else None
+    )
+
+    # Create gate if needed
+    # Note: gate is called AFTER routed_input_transform, so it should expect
+    # the transformed dimension (latent_size) when routed_input_transform is used
+    gate_input_dim = latent_size if use_routed_input_transform else k
+    gate = SimpleGate(gate_input_dim, num_experts, in_dtype) if use_gate else None
+
+    # Create routed output transform if needed (projects latent space back to original)
+    routed_output_transform = (
+        SimpleRoutedInputTransform(latent_size, k, in_dtype)
         if use_routed_input_transform
         else None
     )
@@ -990,6 +1003,7 @@ def test_moe_layer_no_parallel(
             shared_experts_config=shared_experts_config,
             gate=gate,
             routed_input_transform=routed_input_transform,
+            routed_output_transform=routed_output_transform,
         )
 
     hidden_states = torch.randn((m, k), device="cuda", dtype=in_dtype) / 10
@@ -1042,6 +1056,7 @@ def test_moe_layer_no_parallel(
             shared_experts=shared_experts,
             gate=gate,
             routed_input_transform=routed_input_transform,
+            routed_output_transform=routed_output_transform,
         )
 
         # if moe_layer._expert_map is not None:
