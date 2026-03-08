@@ -228,7 +228,7 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
 
         return ProcessorInputs(
             prompt=prompt_ids,
-            mm_items=dummy_mm_items,
+            mm_data_items=dummy_mm_items,
             hf_processor_mm_kwargs=mm_processor_kwargs or {},
             tokenization_kwargs={"truncation": False},
         )
@@ -299,6 +299,7 @@ class HCXVisionV2MultiModalProcessor(
         processed_outputs = self.info.ctx.call_hf_processor(
             hf_processor=hf_processor,
             data=data,
+            kwargs=dict(**mm_kwargs, **tok_kwargs),
         )
 
         return processed_outputs
@@ -310,16 +311,15 @@ class HCXVisionV2MultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
     ) -> bool:
-        # HyperCLOVAX V2 has a token case mismatch bug:
-        # - Chat template uses <|IMAGE_PAD|> (uppercase)
-        # - HF processor (Qwen2_5_VLProcessor) expects <|image_pad|> (lowercase)
-        # - Tokenizer vocab has <|IMAGE_PAD|> (uppercase) = token ID 128060
-        #
-        # The HF processor's token expansion fails because it looks for lowercase
-        # but the tokenized prompt has uppercase tokens. We bypass HF processor's
-        # expansion and let vLLM handle it via _get_prompt_updates using the
-        # correct token IDs from hf_config.
-        return False
+        # Match BaseMultiModalProcessor behavior:
+        # - raw multimodal inputs: HF processor applies updates
+        # - embedding inputs: vLLM applies updates
+        return super()._hf_processor_applies_updates(
+            prompt_text,
+            mm_items,
+            hf_processor_mm_kwargs,
+            tokenization_kwargs,
+        )
 
     def _get_prompt_updates(
         self,
