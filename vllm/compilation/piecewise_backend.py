@@ -258,22 +258,7 @@ class PiecewiseBackend:
             else:
                 args_list = get_fake_args_from_graph(self.graph)
 
-            # TODO(https://github.com/vllm-project/vllm/issues/35766)
-            # Can we remove strict_autograd_cache and
-            # force_non_lazy_backward_lowering overrides?
-            # I added them explicitly because this is what they are
-            # set to before the refactor
-            # (https://github.com/vllm-project/vllm/pull/35472).
-            # They affect the aotautograd cache key computation
-            # but they shouldn't have any effect on the actual
-            # compilation.
-            config_patches = dict(
-                bundled_autograd_cache=True,
-                strict_autograd_cache=False,
-            )
-            if hasattr(torch._functorch.config, "force_non_lazy_backward_lowering"):
-                config_patches["force_non_lazy_backward_lowering"] = False
-            with torch._functorch.config.patch(**config_patches):
+            with torch._functorch.config.patch(bundled_autograd_cache=True):
                 range_entry.runnable = self.vllm_backend.compiler_manager.compile(
                     self.graph,
                     args_list,
