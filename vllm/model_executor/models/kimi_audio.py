@@ -16,7 +16,6 @@ from transformers import WhisperConfig as HFWhisperConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.inputs.data import PromptType, TokensPrompt
-from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -59,8 +58,6 @@ from vllm.transformers_utils.processors.kimi_audio import (
 )
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.v1.sample.metadata import SamplingMetadata
-
-logger = init_logger(__name__)
 
 # Kimi-Audio constants
 KIMIA_WHISPER_SUBFOLDER = "whisper-large-v3"
@@ -575,33 +572,13 @@ class KimiAudioForConditionalGeneration(
         if os.path.exists(whisper_path):
             whisper_loaded = self._load_whisper_weights_from_file(whisper_path)
             loaded.update(whisper_loaded)
-            logger.info("Loaded %d Whisper weights", len(whisper_loaded))
-        else:
-            logger.warning(
-                "Whisper encoder weights not found at %s. "
-                "Audio transcription may not work correctly.",
-                whisper_path,
-            )
-
-        logger.info("Total loaded weights: %d", len(loaded))
 
         return loaded
 
     def _load_whisper_weights_from_file(self, whisper_path: str) -> set[str]:
         """Load Whisper encoder weights from safetensors file with transformations."""
         if not os.path.exists(whisper_path):
-            logger.warning(
-                "Whisper encoder weights not found at %s. "
-                "Audio transcription may not work correctly.",
-                whisper_path,
-            )
             return set()
-
-        # Get all audio_tower param names for debugging
-        audio_tower_params = set(
-            name for name, _ in self.audio_tower.named_parameters()
-        )
-        logger.info("audio_tower has %d parameters", len(audio_tower_params))
 
         # Step 1: Load raw weights from safetensors file
         whisper_weights = []
@@ -655,17 +632,6 @@ class KimiAudioForConditionalGeneration(
 
         # Add embed_positions which is initialized randomly
         whisper_loaded.add("audio_tower.embed_positions.weight")
-
-        # Debug: check what's missing
-        missing = audio_tower_params - whisper_loaded
-        if missing:
-            logger.info(
-                "Missing %d audio_tower params: %s...",
-                len(missing),
-                sorted(missing)[:10],
-            )
-        else:
-            logger.info("All audio_tower params loaded!")
 
         return whisper_loaded
 
