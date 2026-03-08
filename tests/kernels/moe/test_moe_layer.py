@@ -644,6 +644,9 @@ def _test_body_eplb(
     top_k: int,
     shared_experts,
     reduce_results: bool,
+    gate: torch.nn.Module | None,
+    routed_input_transform: torch.nn.Module | None,
+    routed_output_transform: torch.nn.Module | None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """EPLB test body: compare output before and after expert weight rearrangement."""
@@ -663,10 +666,14 @@ def _test_body_eplb(
     del cc.static_forward_context["from_forward_context"]
     cc.static_all_moe_layers.remove("from_forward_context")
 
+    # Determine hidden size for MoE layer
+    # When using routed_input_transform, experts operate in latent space
+    hidden_size_for_layer = k // 2 if routed_input_transform is not None else k
+
     moe_fn, moe_layer = make_fused_moe_layer(
         quantization=quantization,
         use_ep=use_ep,
-        hidden_size=k,
+        hidden_size=hidden_size_for_layer,
         intermediate_size=n,
         in_dtype=in_dtype,
         tp_size=tp_size,
@@ -679,6 +686,9 @@ def _test_body_eplb(
         global_num_experts=num_experts,
         shared_experts=shared_experts,
         enable_eplb=True,
+        gate=gate,
+        routed_input_transform=routed_input_transform,
+        routed_output_transform=routed_output_transform,
     )
 
     if moe_layer._expert_map is not None:
@@ -756,6 +766,7 @@ def _test_loop(
     test_body_fn: Callable,
     gate: torch.nn.Module | None,
     routed_input_transform: torch.nn.Module | None,
+    routed_output_transform: torch.nn.Module | None,
     **kwargs,
 ) -> None:
     """Generic test loop that sets up environment and delegates to test_body_fn.
@@ -801,6 +812,8 @@ def _test_loop(
         gate = gate.to(device)
     if routed_input_transform is not None:
         routed_input_transform = routed_input_transform.to(device)
+    if routed_output_transform is not None:
+        routed_output_transform = routed_output_transform.to(device)
 
     with set_current_vllm_config(vllm_config):
         # Setup shared experts if needed
@@ -820,11 +833,15 @@ def _test_loop(
         else:
             shared_experts = None
 
+        # Determine hidden size for MoE layer
+        # When using routed_input_transform, experts operate in latent space
+        hidden_size_for_layer = k // 2 if routed_input_transform is not None else k
+
         # Create initial MoE layer
         moe_fn, moe_layer = make_fused_moe_layer(
             quantization=quantization,
             use_ep=use_ep,
-            hidden_size=k,
+            hidden_size=hidden_size_for_layer,
             intermediate_size=n,
             in_dtype=in_dtype,
             tp_size=tp_size,
@@ -838,6 +855,7 @@ def _test_loop(
             shared_experts=shared_experts,
             gate=gate,
             routed_input_transform=routed_input_transform,
+            routed_output_transform=routed_output_transform,
         )
 
         if moe_layer._expert_map is not None:
@@ -877,6 +895,9 @@ def _test_loop(
             top_k=top_k,
             shared_experts=shared_experts,
             reduce_results=reduce_results,
+            gate=gate,
+            routed_input_transform=routed_input_transform,
+            routed_output_transform=routed_output_transform,
             **kwargs,
         )
 
@@ -1110,6 +1131,8 @@ def test_moe_layer_no_parallel(
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("use_shared_experts", [False, True])
 @pytest.mark.parametrize("reduce_results", [False, True])
+@pytest.mark.parametrize("use_gate", [False, True])
+@pytest.mark.parametrize("use_routed_input_transform", [False, True])
 def test_moe_layer(
     m: int,
     n: int,
@@ -1123,6 +1146,8 @@ def test_moe_layer(
     backend: str,
     use_shared_experts: bool,
     reduce_results: bool,
+    use_gate: bool,
+    use_routed_input_transform: bool,
     monkeypatch,
 ):
     """Test MoE layer with parallelism (multi-GPU or TP/EP enabled).
@@ -1149,12 +1174,18 @@ def test_moe_layer(
         pytest.skip("reduce_results=True only tested with unquantized data types")
 
     # routed_input_transform only makes sense with shared_experts (latent MoE)
-    # if use_routed_input_transform and not use_shared_experts:
-    #    pytest.skip("routed_input_transform requires shared_experts")
+    if use_routed_input_transform and not use_shared_experts:
+        pytest.skip("routed_input_transform requires shared_experts")
 
     # gate requires shared_experts (use_overlapped mode)
-    # if use_gate and not use_shared_experts:
-    #    pytest.skip("gate requires shared_experts (use_overlapped mode)")
+    if use_gate and not use_shared_experts:
+        pytest.skip("gate requires shared_experts (use_overlapped mode)")
+
+    if use_routed_input_transform and quantization is not None and k >= 2048:
+        pytest.skip(
+            "routed_input_transform + quantization + higher hidden dimensions "
+            "leads to large differences."
+        )
 
     # Skip modelopt_fp4 on H100 (compute capability 9.0)
     if quantization == "modelopt_fp4" and not current_platform.has_device_capability(
@@ -1212,10 +1243,20 @@ def test_moe_layer(
 
     in_dtype = torch.bfloat16
 
+    # Determine dimensions for routed experts (may be transformed)
+    latent_size = k // 2 if use_routed_input_transform else k
+    routed_expert_hidden_size = latent_size
+
+    # Note: For latent MoE, routed experts operate entirely in latent space
+    # (k//2). The routed_output_transform then projects back to k before
+    # adding with shared experts.
+    # w1: (E, 2*N, latent_size) - input latent_size
+    # w2: (E, latent_size, N) - output latent_size (fused_experts returns
+    # same shape as input)
     (w1, _, _, _), (w2, _, _, _) = make_test_weights(
         num_experts,
         n,
-        k,
+        routed_expert_hidden_size,  # Both w1 input and w2 output use latent_size
         in_dtype=in_dtype,
     )
 
@@ -1226,6 +1267,26 @@ def test_moe_layer(
         )
     else:
         shared_experts_config = None
+
+    # Create routed input transform if needed
+    routed_input_transform = (
+        SimpleRoutedInputTransform(k, latent_size, in_dtype)
+        if use_routed_input_transform
+        else None
+    )
+
+    # Create gate if needed
+    # Note: gate is called AFTER routed_input_transform, so it should expect
+    # the transformed dimension (latent_size) when routed_input_transform is used
+    gate_input_dim = latent_size if use_routed_input_transform else k
+    gate = SimpleGate(gate_input_dim, num_experts, in_dtype) if use_gate else None
+
+    # Create routed output transform if needed (projects latent space back to original)
+    routed_output_transform = (
+        SimpleRoutedInputTransform(latent_size, k, in_dtype)
+        if use_routed_input_transform
+        else None
+    )
 
     # For now, run baseline unquantized.
     # quant_dtype = torch.float8_e4m3fn if quantization is not None else None
@@ -1247,6 +1308,9 @@ def test_moe_layer(
             quant_dtype=None,  # quant_dtype,
             renormalize=False,
             shared_experts_config=shared_experts_config,
+            gate=gate,
+            routed_input_transform=routed_input_transform,
+            routed_output_transform=routed_output_transform,
         )
 
     hidden_states = torch.randn((m, k), device="cuda", dtype=in_dtype) / 10
@@ -1279,8 +1343,9 @@ def test_moe_layer(
         shared_experts_config,
         reduce_results,
         _test_body_regular,
-        gate=None,
-        routed_input_transform=None,
+        gate=gate,
+        routed_input_transform=routed_input_transform,
+        routed_output_transform=routed_output_transform,
         baseline_output=baseline_output,
     )
 
@@ -1315,6 +1380,8 @@ EPLB_PARALLEL_COMBOS = [
 @pytest.mark.parametrize("backend", EPLB_SUPPORTED_BACKENDS)
 @pytest.mark.parametrize("use_shared_experts", [False, True])
 @pytest.mark.parametrize("reduce_results", [False, True])
+@pytest.mark.parametrize("use_gate", [False, True])
+@pytest.mark.parametrize("use_routed_input_transform", [False, True])
 def test_moe_layer_eplb(
     m: int,
     n: int,
@@ -1328,6 +1395,8 @@ def test_moe_layer_eplb(
     backend: str,
     use_shared_experts: bool,
     reduce_results: bool,
+    use_gate: bool,
+    use_routed_input_transform: bool,
     monkeypatch,
 ):
     set_random_seed(7)
@@ -1348,12 +1417,18 @@ def test_moe_layer_eplb(
         pytest.skip("reduce_results=True only tested with unquantized data types")
 
     # routed_input_transform only makes sense with shared_experts (latent MoE)
-    # if use_routed_input_transform and not use_shared_experts:
-    #    pytest.skip("routed_input_transform requires shared_experts")
+    if use_routed_input_transform and not use_shared_experts:
+        pytest.skip("routed_input_transform requires shared_experts")
 
     # gate requires shared_experts (use_overlapped mode)
-    # if use_gate and not use_shared_experts:
-    #    pytest.skip("gate requires shared_experts (use_overlapped mode)")
+    if use_gate and not use_shared_experts:
+        pytest.skip("gate requires shared_experts (use_overlapped mode)")
+
+    if use_routed_input_transform and quantization is not None and k >= 2048:
+        pytest.skip(
+            "routed_input_transform + quantization + higher hidden dimensions "
+            "leads to large differences."
+        )
 
     # Skip modelopt_fp4 on H100 (compute capability 9.0)
     if quantization == "modelopt_fp4" and not current_platform.has_device_capability(
@@ -1391,10 +1466,20 @@ def test_moe_layer_eplb(
 
     in_dtype = torch.bfloat16
 
+    # Determine dimensions for routed experts (may be transformed)
+    latent_size = k // 2 if use_routed_input_transform else k
+    routed_expert_hidden_size = latent_size
+
+    # Note: For latent MoE, routed experts operate entirely in latent space
+    # (k//2). The routed_output_transform then projects back to k before
+    # adding with shared experts.
+    # w1: (E, 2*N, latent_size) - input latent_size
+    # w2: (E, latent_size, N) - output latent_size (fused_experts returns
+    # same shape as input)
     (w1, _, _, _), (w2, _, _, _) = make_test_weights(
         num_experts,
         n,
-        k,
+        routed_expert_hidden_size,  # Both w1 input and w2 output use latent_size
         in_dtype=in_dtype,
     )
     # Keep weights on CPU — workers will .to(device).
@@ -1409,6 +1494,26 @@ def test_moe_layer_eplb(
         )
     else:
         shared_experts_config = None
+
+    # Create routed input transform if needed
+    routed_input_transform = (
+        SimpleRoutedInputTransform(k, latent_size, in_dtype)
+        if use_routed_input_transform
+        else None
+    )
+
+    # Create gate if needed
+    # Note: gate is called AFTER routed_input_transform, so it should expect
+    # the transformed dimension (latent_size) when routed_input_transform is used
+    gate_input_dim = latent_size if use_routed_input_transform else k
+    gate = SimpleGate(gate_input_dim, num_experts, in_dtype) if use_gate else None
+
+    # Create routed output transform if needed (projects latent space back to original)
+    routed_output_transform = (
+        SimpleRoutedInputTransform(latent_size, k, in_dtype)
+        if use_routed_input_transform
+        else None
+    )
 
     hidden_states = torch.randn((m, k), dtype=in_dtype) / 10
     router_logits = torch.randn((m, num_experts), dtype=in_dtype)
@@ -1434,8 +1539,9 @@ def test_moe_layer_eplb(
         shared_experts_config,
         reduce_results,
         _test_body_eplb,
-        gate=None,
-        routed_input_transform=None,
+        gate=gate,
+        routed_input_transform=routed_input_transform,
+        routed_output_transform=routed_output_transform,
     )
 
     # Cleanup GPU memory after spawned processes complete
