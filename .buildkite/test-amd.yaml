@@ -120,6 +120,7 @@ steps:
   grade: Blocking
   optional: true
   soft_fail: true
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - requirements/nightly_torch_test.txt
   commands:
@@ -132,6 +133,7 @@ steps:
   agent_pool: mi325_1
   grade: Blocking
   optional: true
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/detokenizer
@@ -149,6 +151,7 @@ steps:
   agent_pool: mi325_1
   optional: true
   no_gpu: true
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/test_inputs.py
@@ -182,6 +185,7 @@ steps:
   agent_pool: mi325_1
   grade: Blocking
   optional: true
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
   - setup.py
@@ -197,6 +201,7 @@ steps:
   optional: true
   fast_check: true
   torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/basic_correctness/test_basic_correctness
@@ -435,6 +440,7 @@ steps:
   agent_pool: mi325_2
   num_gpus: 2
   grade: Blocking
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/v1/tracing
@@ -466,6 +472,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   grade: Blocking
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/engine
@@ -483,6 +490,7 @@ steps:
   agent_pool: mi325_1
   grade: Blocking
   optional: true
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/v1
@@ -497,6 +505,7 @@ steps:
   agent_pool: mi325_2
   optional: true
   grade: Blocking
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/v1
@@ -510,6 +519,7 @@ steps:
   agent_pool: mi325_4
   optional: true
   grade: Blocking
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/v1
@@ -523,6 +533,7 @@ steps:
   agent_pool: mi325_1
   grade: Blocking
   optional: true
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/v1
@@ -597,6 +608,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   grade: Blocking
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/config/attention.py
   - vllm/model_executor/layers/attention
@@ -768,6 +780,7 @@ steps:
   agent_pool: mi325_1
   grade: Blocking
   torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -1618,7 +1631,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-fp8.txt --tp-size=4
 
 
-- label: LM Eval Large Models (4 GPUs)(MI325) # 17.3m
+- label: LM Eval Large Models (4 GPUs)(A100-MI325) # 17.3m
   timeout_in_minutes: 27
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
@@ -1801,6 +1814,7 @@ steps:
   agent_pool: mi355_1
   optional: true
   soft_fail: true
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - requirements/nightly_torch_test.txt
   commands:
@@ -1812,6 +1826,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   optional: true
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/multimodal
@@ -1827,6 +1842,7 @@ steps:
   agent_pool: mi355_1
   no_gpu: true
   optional: true
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/test_inputs.py
@@ -1859,6 +1875,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   optional: true
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
   - setup.py
@@ -1872,6 +1889,7 @@ steps:
   agent_pool: mi355_1
   fast_check: true
   torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/basic_correctness/test_basic_correctness
@@ -2118,6 +2136,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   optional: true
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/engine
@@ -2417,6 +2436,7 @@ steps:
   agent_pool: mi355_1
   grade: Blocking
   torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -2506,6 +2526,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
@@ -3089,6 +3110,7 @@ steps:
   agent_pool: mi355_4
   num_gpus: 4
   optional: true
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/lora
   - tests/lora
@@ -3232,7 +3254,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-fp8.txt --tp-size=4
 
 
-- label: LM Eval Large Models (4 GPUs)(MI355) # TBD
+- label: LM Eval Large Models (4 GPUs)(A100-MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_4
