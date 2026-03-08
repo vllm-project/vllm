@@ -26,6 +26,10 @@ class KimiAudioRenderer(HfRenderer):
         if model_config.skip_tokenizer_init:
             tokenizer = None
         else:
+            # Remove tokenizer_cls from kwargs to avoid duplicate argument
+            tokenizer_kwargs = {
+                k: v for k, v in tokenizer_kwargs.items() if k != "tokenizer_cls"
+            }
             tokenizer = cast(
                 HfTokenizer,
                 cached_get_tokenizer(
