@@ -436,18 +436,11 @@ class KimiAudioForConditionalGeneration(
         self.model_path = vllm_config.model_config.model
 
         # Use KimiAudioWhisperEncoder for audio feature extraction
+        # (subclass of WhisperEncoder with class-level packed_modules_mapping)
         self.audio_tower = KimiAudioWhisperEncoder(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "audio_tower"),
         )
-        # Add packed_modules_mapping for proper Q/K/V fusion during weight loading
-        self.audio_tower.packed_modules_mapping = {
-            "self_attn.qkv_proj": [
-                "self_attn.q_proj",
-                "self_attn.k_proj",
-                "self_attn.v_proj",
-            ],
-        }
 
         # Read projector dimensions from HF config
         self.multi_modal_projector = KimiAudioMultiModalProjector(
