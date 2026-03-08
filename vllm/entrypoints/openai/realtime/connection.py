@@ -114,11 +114,14 @@ class RealtimeConnection:
                     / 32768.0
                 )
 
-                if len(audio_array) / 1024**2 > self._max_audio_filesize_mb:
+                # Check against the original byte size (PCM16), not
+                # the element count of the float32 array, to match the
+                # threshold semantics used in speech_to_text.py.
+                if len(audio_bytes) / 1024**2 > self._max_audio_filesize_mb:
                     raise VLLMValidationError(
                         "Maximum file size exceeded",
                         parameter="audio_filesize_mb",
-                        value=len(audio_array) / 1024**2,
+                        value=len(audio_bytes) / 1024**2,
                     )
                 if len(audio_array) == 0:
                     raise VLLMValidationError("Can't process empty audio.")
