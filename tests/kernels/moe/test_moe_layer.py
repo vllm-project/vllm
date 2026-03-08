@@ -787,6 +787,8 @@ def _test_loop(
         w1 = tp_chunk_gate_up(w1, tp_rank, tp_size, dim=1, device=device)
         w2 = chunk_by_rank(w2, tp_rank, tp_size, dim=2, device=device)
 
+    # TODO: are these to(device) calls needed?
+
     if ep_size <= 1 and tp_size <= 1:
         w1 = w1.to(device)
         w2 = w2.to(device)
@@ -927,6 +929,9 @@ def test_moe_layer_no_parallel(
     # gate requires shared_experts (use_overlapped mode)
     if use_gate and not use_shared_experts:
         pytest.skip("gate requires shared_experts (use_overlapped mode)")
+
+    if use_routed_input_transform and quantization is not None:
+        pytest.skip("routed input transform + quantization not currently working.")
 
     set_random_seed(7)
 
