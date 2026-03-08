@@ -166,11 +166,6 @@ class CudagraphDispatcher:
         # get the correct cudagraph mode after backend support is resolved.
         self.cudagraph_mode = cudagraph_mode
 
-        # Clear any stale keys from previous initialization (e.g. from
-        # CUDA graph memory profiling which uses a temporary KV cache).
-        for key_set in self.cudagraph_keys.values():
-            key_set.clear()
-
         # Early exit if cudagraphs are disabled
         if cudagraph_mode == CUDAGraphMode.NONE:
             self.keys_initialized = True
