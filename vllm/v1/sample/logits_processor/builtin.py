@@ -505,13 +505,16 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
 
             for i1, i2, direction in batch_update.moved:
                 if direction == MoveDirectionality.SWAP:
-                    state1 = self._state.get(i1, {})
-                    state2 = self._state.get(i2, {})
-                    if state1 or state2:
-                        self._state[i1] = state2
+                    state1 = self._state.pop(i1, None)
+                    state2 = self._state.pop(i2, None)
+                    if state1 is not None:
                         self._state[i2] = state1
+                    if state2 is not None:
+                        self._state[i1] = state2
                 else:
-                    self._state[i2] = self._state.pop(i1, {})
+                    state = self._state.pop(i1, None)
+                    if state is not None:
+                        self._state[i2] = state
 
         for state in self._state.values():
             self._update_think_state(state)
