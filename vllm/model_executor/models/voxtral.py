@@ -892,7 +892,7 @@ class VoxtralEncoderModel(nn.Module):
         input_embeds, chunks_per_example = self.prepare_inputs_for_conv(input_features)
 
         # [total_num_chunks, ceil(chunk_size / downsample_factor), hidden_size]
-        out = self.whisper_encoder([input_embeds])
+        out = self.whisper_encoder(input_embeds)
 
         # Re-concatenate the chunks
         chunk_idx = 0
