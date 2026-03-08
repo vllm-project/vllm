@@ -444,12 +444,18 @@ class OpenAIServingCompletion(OpenAIServing):
 
             if include_usage:
                 stream_per_request_metrics: PerRequestTimingMetrics | None = None
-                if self.enable_per_request_metrics and request.include_metrics:
+                if (
+                    self.enable_per_request_metrics
+                    and request.include_metrics
+                    and num_prompts == 1
+                ):
                     last_metrics = (
                         last_res.metrics if last_res is not None else None
                     )
+                    num_sequences = request.n or 1
                     stream_per_request_metrics = build_per_request_timing_metrics(
-                        last_metrics, total_completion_tokens
+                        last_metrics,
+                        total_completion_tokens // num_sequences,
                     )
 
                 final_usage_chunk = CompletionStreamResponse(
@@ -582,12 +588,17 @@ class OpenAIServingCompletion(OpenAIServing):
         request_metadata.final_usage_info = usage
 
         per_request_metrics: PerRequestTimingMetrics | None = None
-        if self.enable_per_request_metrics and request.include_metrics:
+        if (
+            self.enable_per_request_metrics
+            and request.include_metrics
+            and len(final_res_batch) == 1
+        ):
             last_metrics = (
                 last_final_res.metrics if last_final_res is not None else None
             )
+            num_sequences = request.n or 1
             per_request_metrics = build_per_request_timing_metrics(
-                last_metrics, num_generated_tokens
+                last_metrics, num_generated_tokens // num_sequences
             )
 
         if final_res_batch:

@@ -1343,8 +1343,9 @@ class OpenAIServingChat(OpenAIServing):
                     last_metrics = (
                         last_res.metrics if last_res is not None else None
                     )
+                    num_sequences = request.n or 1
                     stream_per_request_metrics = build_per_request_timing_metrics(
-                        last_metrics, completion_tokens
+                        last_metrics, completion_tokens // num_sequences
                     )
 
                 final_usage_chunk = ChatCompletionStreamResponse(
@@ -1754,8 +1755,9 @@ class OpenAIServingChat(OpenAIServing):
 
         per_request_metrics: PerRequestTimingMetrics | None = None
         if self.enable_per_request_metrics and request.include_metrics:
+            num_sequences = request.n or 1
             per_request_metrics = build_per_request_timing_metrics(
-                final_res.metrics, num_generated_tokens
+                final_res.metrics, num_generated_tokens // num_sequences
             )
 
         request_metadata.final_usage_info = usage
