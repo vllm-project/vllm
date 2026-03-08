@@ -245,6 +245,8 @@ class LayerwiseProfileResults(profile):
         total_cuda_time = self._total_cuda_time()
 
         def pct_cuda_time(cuda_time_us):
+            if total_cuda_time == 0:
+                return 0.0
             return (cuda_time_us / total_cuda_time) * 100
 
         def build_summary_stats_tree_df(
