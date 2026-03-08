@@ -1321,14 +1321,14 @@ def get_image_size(image: ImageInput) -> ImageSize:
         raise ValueError(f"Unknown image type: {type(image)}")
 
 
-def exif_tranpose(
+def exif_transpose(
     images: ImageInput | None,
 ) -> ImageInput | None:
     if images is None:
         return None
     if images is not None and isinstance(images, (list, tuple)):
         images = [
-            exif_tranpose(img) if isinstance(img, Image) else img for img in images
+            exif_transpose(img) if isinstance(img, Image) else img for img in images
         ]
     elif images is not None and isinstance(images, Image):
         images = ImageOps.exif_transpose(images)
@@ -1667,7 +1667,7 @@ class Molmo2ProcessorWrapper:
         **kwargs: object,
     ) -> BatchFeature:
         inputs = [text]
-        images = exif_tranpose(images)
+        images = exif_transpose(images)
         if getattr(self.processor, "image_processor", None) is not None:
             inputs.append(images)
         if getattr(self.processor, "video_processor", None) is not None:
@@ -2352,7 +2352,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         def get_image_replacement_molmo2(item_idx: int) -> list[int]:
             images = mm_items.get_items("image", ImageProcessorItems)
             image = images.get(item_idx)
-            image = exif_tranpose(image)
+            image = exif_transpose(image)
 
             resize_nrows, resize_cols = processor.get_base_grid_size(is_video=False)
             if use_single_crop_col_tokens is not None:

@@ -126,6 +126,7 @@ class ModelConfig:
     - "slow" will always use the slow tokenizer.\n
     - "mistral" will always use the tokenizer from `mistral_common`.\n
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
+    - "qwen_vl" will always use the tokenizer from `qwen_vl`.\n
     - Other custom values can be supported via plugins."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model

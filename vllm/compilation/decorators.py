@@ -30,7 +30,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-from .monitor import start_monitoring_torch_compile
+from .monitor import monitor_profiling_run, monitor_torch_compile
 
 if TYPE_CHECKING:
     # Only added on nightly/2.10 so wrap
@@ -434,17 +434,24 @@ def _support_torch_compile(
             cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
             aot_compilation_path = os.path.join(cache_dir, "model")
             try:
-                with (
-                    set_current_vllm_config(self.vllm_config),
-                    open(aot_compilation_path, "rb") as f,
-                ):
-                    start_monitoring_torch_compile(self.vllm_config)
-                    loaded_fn = torch.compiler.load_compiled_function(
-                        f, f_globals=self.forward.__globals__
-                    )
-                _verify_source_unchanged(loaded_fn.source_info(), self.vllm_config)
-                if not self.compilation_config.dynamic_shapes_config.evaluate_guards:
-                    loaded_fn.disable_guard_check()
+                with monitor_torch_compile(self.vllm_config):
+                    with (
+                        set_current_vllm_config(self.vllm_config),
+                        open(aot_compilation_path, "rb") as f,
+                    ):
+                        loaded_fn = torch.compiler.load_compiled_function(
+                            f, f_globals=self.forward.__globals__
+                        )
+                    _verify_source_unchanged(loaded_fn.source_info(), self.vllm_config)
+                    ds_config = self.compilation_config.dynamic_shapes_config
+                    if not ds_config.evaluate_guards:
+                        loaded_fn.disable_guard_check()
+                    # Eagerly load compiled artifacts now that traced_files
+                    # is populated by _verify_source_unchanged.
+                    with maybe_use_cudagraph_partition_wrapper(self.vllm_config):
+                        loaded_fn._artifacts.compiled_fn.finalize_loading(
+                            self.vllm_config
+                        )
                 self.aot_compiled_fn = loaded_fn
                 self.was_aot_compile_fn_loaded_from_disk = True
             except Exception as e:
@@ -465,12 +472,11 @@ def _support_torch_compile(
                 logger.info(
                     "Directly load AOT compilation from path %s", aot_compilation_path
                 )
-                # Apply partition wrapper context for proper CUDA graph capture
-                from .monitor import end_monitoring_torch_compile
-
-                with maybe_use_cudagraph_partition_wrapper(self.vllm_config):
+                with (
+                    monitor_profiling_run(),
+                    maybe_use_cudagraph_partition_wrapper(self.vllm_config),
+                ):
                     output = self.aot_compiled_fn(self, *args, **kwargs)
-                end_monitoring_torch_compile(self.vllm_config)
                 return output
 
         if self.compiled:
@@ -489,8 +495,6 @@ def _support_torch_compile(
             **kwargs,
         )
 
-        # here, it is the starting point of the `torch.compile` process
-        start_monitoring_torch_compile(self.vllm_config)
         original_code_object = self.original_code_object()
         logger.debug("Start compiling function %s", original_code_object)
 
@@ -559,16 +563,26 @@ def _support_torch_compile(
                 # store the path for saving after warmup
                 self._aot_compilation_path = aot_compilation_path
                 self._aot_cache_dir = cache_dir
-                self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
-                # All compilation is done at this point, save the AOT artifact.
-                self.save_aot_compiled_function()
-                output = self.aot_compiled_fn(self, *args, **kwargs)
+                with monitor_torch_compile(self.vllm_config):
+                    self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
+                    # All compilation is done at this point, save the
+                    # AOT artifact.
+                    self.save_aot_compiled_function()
+
+                with monitor_profiling_run():
+                    output = self.aot_compiled_fn(self, *args, **kwargs)
             else:
-                output = TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)  # type: ignore[arg-type]
+                with monitor_torch_compile(
+                    self.vllm_config,
+                    "torch.compile and initial profiling/warmup "
+                    "run together took %.2f s in total",
+                ):
+                    output = TorchCompileWithNoGuardsWrapper.__call__(
+                        self,  # type: ignore[arg-type]
+                        *args,
+                        **kwargs,
+                    )
 
-        from .monitor import end_monitoring_torch_compile
-
-        end_monitoring_torch_compile(self.vllm_config)
         self.compiled = True
         return output
 
@@ -582,7 +596,6 @@ def _support_torch_compile(
             self.aot_compiled_fn and self._aot_compilation_path and self._aot_cache_dir
         )
 
-        logger.info("saving AOT compiled function to %s", self._aot_compilation_path)
         try:
             os.makedirs(self._aot_cache_dir, exist_ok=True)
             # File saving should be atomic, so we will save to a temporary location
@@ -590,7 +603,11 @@ def _support_torch_compile(
             tmp_file = f"{self._aot_compilation_path}.{os.getpid()}.tmp"
             self.aot_compiled_fn.save_compiled_function(tmp_file)
             os.replace(tmp_file, self._aot_compilation_path)
-            logger.info("saved AOT compiled function to %s", self._aot_compilation_path)
+            logger.info_once(
+                "saved AOT compiled function to %s",
+                self._aot_compilation_path,
+                scope="local",
+            )
         except Exception as e:
             logger.warning(
                 "unable to save AOT compiled function to %s: %s",

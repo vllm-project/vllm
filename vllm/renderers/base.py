@@ -75,6 +75,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self.config = config
         self.model_config = config.model_config
+        self.api_process_rank = config.parallel_config._api_process_rank
 
         self.tokenizer = tokenizer
 
@@ -539,7 +540,7 @@ class BaseRenderer(ABC, Generic[_T]):
         from vllm.multimodal.parse import parse_mm_uuids
         from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 
-        mm_req_id = f"renderer-mm-{self._mm_req_counter.inc(1)}"
+        mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
 
         mm_processor = self.get_mm_processor()
 

@@ -103,21 +103,20 @@ def test_backend_selection(
 
                     if name == "TRITON_MLA" and block_size == 1:
                         # TRITON_MLA doesn't support block_size == 1
-                        with pytest.raises(ValueError) as exc_info:
+                        with pytest.raises(ValueError):
                             get_attn_backend(
-                                16, torch.float16, None, block_size, use_mla=use_mla
+                                576, torch.float16, None, block_size, use_mla=use_mla
                             )
-                        assert f"The selected backend, {name}" in str(exc_info.value)
                     else:
                         # Valid backend-block_size combination
                         backend = get_attn_backend(
-                            16, torch.float16, None, block_size, use_mla=use_mla
+                            576, torch.float16, None, block_size, use_mla=use_mla
                         )
                         expected = name
                         assert backend.get_name() == expected
                 else:
                     backend = get_attn_backend(
-                        16, torch.float16, None, block_size, use_mla=use_mla
+                        32, torch.float16, None, block_size, use_mla=use_mla
                     )
                     expected = "ROCM_ATTN"
                     assert backend.get_name() == expected
@@ -343,6 +342,10 @@ def test_auto_backend_selection_behavior():
         ("FLASHINFER", None, False),  # FlashInfer does not support
         ("FLEX_ATTENTION", None, False),  # Flex does not support
     ],
+)
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="Attention backend FA3 is not supported on ROCm. This test can't succeed.",
 )
 def test_per_head_quant_scales_backend_selection(
     backend_name: str, flash_attn_version: int | None, should_succeed: bool

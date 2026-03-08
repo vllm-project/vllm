@@ -252,7 +252,7 @@ class AttentionBackend(ABC):
             else:
                 invalid_reasons.append("non-MLA not supported")
         if has_sink and not cls.supports_sink():
-            invalid_reasons.append("sink setting not supported")
+            invalid_reasons.append("attention sinks not supported")
         if use_sparse != cls.is_sparse():
             if use_sparse:
                 invalid_reasons.append("sparse not supported")

@@ -26,7 +26,7 @@ from functools import cached_property
 
 import PIL
 import torch
-from transformers import AutoProcessor, BatchFeature
+from transformers import BatchFeature
 from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
@@ -453,6 +453,3 @@ class OvisProcessor(ProcessorMixin):
             dict.fromkeys(tokenizer_input_names + image_processor_input_names)
         )
         return names_from_processor + ["second_per_grid_ts"]
-
-
-AutoProcessor.register("OvisProcessor", OvisProcessor)

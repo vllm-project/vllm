@@ -606,7 +606,7 @@ class FusedMoEExperts(ABC):
         """
         Whether the kernel supports deployment in particular parallel config.
 
-        Can be overriden if a kernel does not support EP, SP or some other
+        Can be overridden if a kernel does not support EP, SP or some other
         configuration.
         """
         raise NotImplementedError
@@ -620,7 +620,7 @@ class FusedMoEExperts(ABC):
         """
         Whether the kernel supports a routing method (e.g. GroupedTopK).
 
-        Can be overriden by monolithic kernels that execute the router
+        Can be overridden by monolithic kernels that execute the router
         in addition to the experts if certain routers are not supported.
         """
         return True
@@ -633,7 +633,7 @@ class FusedMoEExperts(ABC):
         """
         Whether a kernel supports a particular dtype for router logits input.
 
-        Can be overriden by monolithic kernels that execute the router
+        Can be overridden by monolithic kernels that execute the router
         in addition to the experts if certain dtypes are not supported.
         """
         return True
@@ -1519,7 +1519,7 @@ class FusedMoEKernelModularImpl:
             assert not disable_inplace()
             output = hidden_states
         else:
-            output = torch.zeros_like(hidden_states)
+            output = torch.empty_like(hidden_states)
 
         local_num_experts = w1.size(0)
         if global_num_experts == -1:

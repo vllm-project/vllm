@@ -9,7 +9,6 @@ import torchaudio.compliance.kaldi as kaldi
 from torch.nn.utils.rnn import pad_sequence
 from transformers import (
     AutoFeatureExtractor,
-    AutoProcessor,
     BatchFeature,
 )
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
@@ -370,7 +369,7 @@ class FunASRFeatureExtractor(SequenceFeatureExtractor):
         )
         olens = 1 + (speech_lengths - 3 + 2 * 1) // 2
         olens = 1 + (olens - 3 + 2 * 1) // 2
-        fake_token_len = (olens - 1) // 2 + 1
+        fake_token_lengths = (olens - 1) // 2 + 1
         if isinstance(input_features[0], list):
             padded_inputs["input_features"] = [
                 np.asarray(feature, dtype=np.float32) for feature in input_features
@@ -382,8 +381,10 @@ class FunASRFeatureExtractor(SequenceFeatureExtractor):
         if return_tensors is not None:
             padded_inputs = padded_inputs.convert_to_tensors(return_tensors)
 
+        fake_token_lengths = torch.clamp(fake_token_lengths, min=1)
+
         padded_inputs["speech_lengths"] = speech_lengths
-        padded_inputs["fake_token_len"] = fake_token_len
+        padded_inputs["fake_token_lengths"] = fake_token_lengths
 
         return padded_inputs
 
@@ -471,7 +472,7 @@ class FunASRProcessor(ProcessorMixin):
             for sample in text:
                 replace_str = []
                 while self.audio_token in sample:
-                    num_audio_tokens = inputs["fake_token_len"].item()
+                    num_audio_tokens = inputs["fake_token_lengths"].item()
 
                     expanded_audio_token = self.audio_token * num_audio_tokens
 
@@ -501,4 +502,3 @@ class FunASRProcessor(ProcessorMixin):
 
 
 AutoFeatureExtractor.register("FunASRFeatureExtractor", FunASRFeatureExtractor)
-AutoProcessor.register("FunASRProcessor", FunASRProcessor)
