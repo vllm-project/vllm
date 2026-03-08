@@ -200,14 +200,13 @@ def _lora_expand(
 
     K = lora_b_weights[0].shape[-1]  # K= rank
     ADD_INPUTS = add_inputs
-    MAX_LORAS = lora_ids.size(0)
     CAST_TYPE = False
     NUM_SLICES = len(lora_b_weights)
 
     # Triton kernel configs.
     kernel_config = get_lora_op_configs(
         op_type="expand",
-        max_loras=MAX_LORAS,
+        max_loras=num_active_loras.item(),
         batch=M,
         hidden_size=MAX_N,
         rank=K,

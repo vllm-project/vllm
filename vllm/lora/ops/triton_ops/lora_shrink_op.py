@@ -191,12 +191,10 @@ def _lora_shrink(
     )
     N, K = lora_a_weights[0].shape[-2:]  # K=hidden_size,N=rank
     NUM_SLICES = len(lora_a_weights)
-    MAX_LORAS = lora_ids.size(0)
-
     # Triton kernel configs
     kernel_config = get_lora_op_configs(
         "shrink",
-        max_loras=MAX_LORAS,
+        max_loras=num_active_loras.item(),
         batch=M,
         hidden_size=K,
         rank=N,
