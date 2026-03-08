@@ -28,10 +28,6 @@ from transformers import BatchFeature, ProcessorMixin
 from transformers.audio_utils import AudioInput
 from transformers.tokenization_utils_base import TextInput
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
-
 
 def _get_feat_extract_output_lengths(input_lengths: torch.Tensor) -> torch.Tensor:
     """Compute output lengths after Whisper feature extraction."""
