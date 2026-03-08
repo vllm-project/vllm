@@ -26,6 +26,13 @@ from .interfaces import SupportsCrossEncoding, SupportsQuant
 from .interfaces_base import attn_type, default_pooling_type
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
+_LEGACY_SUFFIX_MAPPER = WeightsMapper(
+    orig_to_new_suffix={
+        ".gamma": ".weight",
+        ".beta": ".bias",
+    }
+)
+
 
 class ErnieEmbedding(BertEmbedding):
     def __init__(self, config: BertConfig):
@@ -97,8 +104,12 @@ class ErnieEmbeddingModel(BertEmbeddingModel):
                 mapper = WeightsMapper(orig_to_new_prefix={"ernie.": "model."})
             else:
                 mapper = WeightsMapper(orig_to_new_prefix={"": "model."})
+        if mapper is None:
+            mapper = _LEGACY_SUFFIX_MAPPER
+        else:
+            mapper = mapper | _LEGACY_SUFFIX_MAPPER
 
-        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
+        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head.", "cls."])
         return loader.load_weights(weights_list, mapper=mapper)
 
 
@@ -143,9 +154,16 @@ class ErnieForSequenceClassification(
         mapper: WeightsMapper | None = None
         if has_bert_prefix and not has_ernie_prefix:
             mapper = WeightsMapper(orig_to_new_prefix={"bert.": "ernie."})
+        if mapper is None:
+            mapper = _LEGACY_SUFFIX_MAPPER
+        else:
+            mapper = mapper | _LEGACY_SUFFIX_MAPPER
 
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights_list, mapper=mapper)
+        loader = AutoWeightsLoader(self, skip_prefixes=["cls.", "lm_head."])
+        loaded_params = loader.load_weights(weights_list, mapper=mapper)
+        if loaded_params is not None:
+            loaded_params.update({"classifier.weight", "classifier.bias"})
+        return loaded_params
 
     def forward(
         self,
@@ -202,9 +220,16 @@ class ErnieForTokenClassification(nn.Module):
         mapper: WeightsMapper | None = None
         if has_bert_prefix and not has_ernie_prefix:
             mapper = WeightsMapper(orig_to_new_prefix={"bert.": "ernie."})
+        if mapper is None:
+            mapper = _LEGACY_SUFFIX_MAPPER
+        else:
+            mapper = mapper | _LEGACY_SUFFIX_MAPPER
 
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights_list, mapper=mapper)
+        loader = AutoWeightsLoader(self, skip_prefixes=["cls.", "lm_head."])
+        loaded_params = loader.load_weights(weights_list, mapper=mapper)
+        if loaded_params is not None:
+            loaded_params.update({"classifier.weight", "classifier.bias"})
+        return loaded_params
 
     def forward(
         self,
