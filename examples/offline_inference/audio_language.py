@@ -23,7 +23,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
 question_per_audio_count = {
     0: "What is 1+1?",
-    1: "Please transcribe the audio",
+    1: "What is recited in the audio?",
     2: "What sport and what nursery rhyme are referenced?",
 }
 
