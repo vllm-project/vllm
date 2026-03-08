@@ -244,7 +244,7 @@ if TYPE_CHECKING:
     VLLM_CUDA_COMPATIBILITY_PATH: str | None = None
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
-    VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
+    VLLM_LORA_ENABLE_DUAL_STREAM: bool = True
 
 
 def get_default_cache_root():
