@@ -49,10 +49,13 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.processing.processor import BaseMultiModalProcessor
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_get_tokenizer
+from vllm.tokenizers.kimi_audio import KimiAudioTokenizer
+from vllm.transformers_utils.processor import cached_feature_extractor_from_config
 from vllm.transformers_utils.processors.kimi_audio import (
     KimiAudioProcessor,
     _get_feat_extract_output_lengths,
 )
+from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.v1.sample.metadata import SamplingMetadata
 
 logger = init_logger(__name__)
@@ -124,15 +127,9 @@ class KimiAudioProcessingInfo(BaseProcessingInfo):
         if KimiAudioProcessingInfo._processor is None:
             # Use cached_feature_extractor_from_config with subfolder
             # Kimi-Audio uses Whisper with 128 mel bins (not standard 80)
-            from vllm.transformers_utils.processor import (
-                cached_feature_extractor_from_config,
-            )
-
             feature_extractor = cached_feature_extractor_from_config(
                 self.ctx.model_config, subfolder="whisper-large-v3"
             )
-
-            from vllm.tokenizers.kimi_audio import KimiAudioTokenizer
 
             # Use KimiAudioTokenizer for Kimi-Audio
             model_path = self.ctx.model_config.model
@@ -158,10 +155,6 @@ class KimiAudioProcessingInfo(BaseProcessingInfo):
 
     def get_feature_extractor(self, **kwargs: object):
         """Get feature extractor using vLLM's cached loader."""
-        from vllm.transformers_utils.processor import (
-            cached_feature_extractor_from_config,
-        )
-
         # Kimi-Audio uses Whisper with 128 mel bins (not standard 80)
         # Must load from whisper-large-v3 subfolder
         return cached_feature_extractor_from_config(
@@ -719,10 +712,6 @@ class KimiAudioForConditionalGeneration(
         cls, model_config: ModelConfig, task_type: str
     ) -> SpeechToTextConfig:
         """Get speech-to-text config with custom processor."""
-        # Import custom processor from vLLM utils
-        from vllm.transformers_utils.processors.kimi_audio import KimiAudioProcessor
-        from vllm.transformers_utils.tokenizer import get_tokenizer
-
         # Load feature extractor from model path
         # Kimi-Audio stores Whisper extractor in whisper-large-v3/ subfolder
         feature_extractor = AutoFeatureExtractor.from_pretrained(
@@ -757,8 +746,6 @@ class KimiAudioForConditionalGeneration(
         request_prompt: str,
         to_language: str | None,
     ) -> PromptType:
-        from vllm.tokenizers.kimi_audio import KimiAudioTokenizer
-
         tokenizer = cached_get_tokenizer(
             model_config.tokenizer,
             tokenizer_cls=KimiAudioTokenizer,

@@ -4,6 +4,7 @@ from typing import Any, cast
 
 from vllm.config import VllmConfig
 from vllm.tokenizers.kimi_audio import KimiAudioTokenizer
+from vllm.tokenizers.registry import get_tokenizer
 
 from .hf import HfRenderer, HfTokenizer
 
@@ -21,8 +22,6 @@ class KimiAudioRenderer(HfRenderer):
         tokenizer_kwargs: dict[str, Any],
     ) -> "HfRenderer":
         """Create an HfRenderer instance for Kimi-Audio models."""
-        from vllm.tokenizers.registry import get_tokenizer
-
         model_config = config.model_config
         if model_config.skip_tokenizer_init:
             tokenizer = None
