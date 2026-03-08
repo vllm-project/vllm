@@ -32,6 +32,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.models.whisper import WhisperEncoder
+from vllm.model_executor.models.whisper_utils import ISO639_1_SUPPORTED_LANGS
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.multimodal.parse import (
@@ -373,18 +374,10 @@ class KimiAudioForConditionalGeneration(
 ):
     """Kimi-Audio model for ASR transcription."""
 
+    # Kimi-Audio supports a subset of Whisper's supported languages
     supported_languages: ClassVar[Mapping[str, str]] = {
-        "zh": "Chinese",
-        "en": "English",
-        "ja": "Japanese",
-        "ko": "Korean",
-        "de": "German",
-        "fr": "French",
-        "es": "Spanish",
-        "it": "Italian",
-        "pt": "Portuguese",
-        "ru": "Russian",
-        "ar": "Arabic",
+        k: ISO639_1_SUPPORTED_LANGS[k]
+        for k in ["zh", "en", "ja", "ko", "de", "fr", "es", "it", "pt", "ru", "ar"]
     }
     supports_transcription: ClassVar[Literal[True]] = True
 
