@@ -220,9 +220,10 @@ class EncoderCudaGraphManager:
         num_items = self.model.get_encoder_cudagraph_num_items(mm_kwargs)
         max_budget = self.token_budgets[-1]
 
-        per_item_out_tokens = self.model.get_encoder_cudagraph_per_item_output_tokens(
-            mm_kwargs
-        )
+        per_item_out_tokens: list[int] = [
+            int(t) for t in
+            self.model.get_encoder_cudagraph_per_item_output_tokens(mm_kwargs)
+        ]
 
         # Sort ascending by output token count (smallest first)
         sorted_indices = sorted(range(num_items), key=lambda i: per_item_out_tokens[i])
@@ -308,7 +309,7 @@ class EncoderCudaGraphManager:
                     batch_mm_kwargs, self.max_batch_size
                 )
 
-                # graph_hits counted inside _run_budget_graph after replay
+                # graph_hits counted inside _run_budget_graph after replay.
                 output = self._run_budget_graph(
                     batch_mm_kwargs, token_budget, replay.buffers
                 )
@@ -318,7 +319,7 @@ class EncoderCudaGraphManager:
                     n_tok = per_item_out_tokens[orig_idx]
                     outputs_by_orig_idx[orig_idx] = output[
                         output_offset : output_offset + n_tok
-                    ]
+                    ].clone()
                     output_offset += n_tok
 
         # Return in original batch order (caller maps outputs to token positions)
@@ -480,9 +481,10 @@ class EncoderCudaGraphManager:
             List of encoder outputs (one per item).
         """
         if self.use_dp:
-            per_item_out_tokens = (
+            per_item_out_tokens: list[int] = [
+                int(t) for t in
                 self.model.get_encoder_cudagraph_per_item_output_tokens(mm_kwargs)
-            )
+            ]
 
             (
                 local_mm_kwargs,
