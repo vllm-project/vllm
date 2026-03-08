@@ -94,6 +94,9 @@ def renderer_from_config(config: "VllmConfig", **kwargs):
         "MoonshotKimiaForCausalLM",
     ):
         tokenizer_mode = "kimi_audio"
+        # Update model_config so other components (e.g., multimodal registry)
+        # also use the correct tokenizer mode
+        model_config.tokenizer_mode = "kimi_audio"
 
     if (
         model_config.tokenizer_mode == "auto"
