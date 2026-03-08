@@ -4,7 +4,6 @@
 import asyncio
 import json
 import warnings
-import numpy as np
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Iterable
@@ -12,7 +11,15 @@ from dataclasses import dataclass
 from functools import cached_property, lru_cache, partial
 from itertools import accumulate
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, TypeVar, cast, Union, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Generic,
+    Literal,
+    TypeAlias,
+    TypeVar,
+    cast,
+)
 
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
@@ -899,13 +906,15 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             allowed_local_media_path=tracker.allowed_local_media_path,
             allowed_media_domains=tracker.allowed_media_domains,
         )
-        self._mm_processor_kwargs: Optional[dict[str, Any]] = None
+        self._mm_processor_kwargs: dict[str, Any] | None = None
 
     @property
     def model_config(self) -> ModelConfig:
         return self._tracker.model_config
-    
-    def set_mm_processor_kwargs(self, mm_processor_kwargs: Optional[dict[str, Any]]) -> None:
+
+    def set_mm_processor_kwargs(
+        self, mm_processor_kwargs: dict[str, Any] | None
+    ) -> None:
         """Set mm_processor_kwargs for use in parsing."""
         self._mm_processor_kwargs = mm_processor_kwargs
 
@@ -1038,87 +1047,16 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
         placeholder = self._tracker.add("video", coro)
         self._add_placeholder("video", placeholder)
-        
+
         # Extract audio from video if use_audio_in_video is True
-        if video_url and self._mm_processor_kwargs and self._mm_processor_kwargs.get("use_audio_in_video", False):
+        if (
+            video_url
+            and self._mm_processor_kwargs
+            and self._mm_processor_kwargs.get("use_audio_in_video", False)
+        ):
             audio_coro = self._audio_with_uuid_async(video_url, uuid)
             audio_placeholder = self._tracker.add("audio", audio_coro)
             self._add_placeholder("audio", audio_placeholder)
-    
-    async def _extract_audio_from_video_async(self, video_url: str, uuid: str | None = None):
-        """
-        Extract audio from video URL using librosa.
-        Returns tuple of (audio_array, sample_rate) compatible with audio format.
-
-        All blocking I/O operations are run in a thread pool to avoid blocking the event loop.
-        """
-        import asyncio
-        import os
-        import tempfile
-        from urllib.parse import urlparse
-
-        # Parse URL to determine type
-        parsed_url = urlparse(video_url)
-        temp_video_file_path = None
-
-        def _download_video_sync(url: str) -> bytes:
-            """Synchronous video download - runs in thread pool."""
-            from urllib.request import urlopen
-
-            return urlopen(url).read()
-
-        def _write_temp_file_sync(data: bytes, suffix: str) -> str:
-            """Synchronous temp file write - runs in thread pool."""
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
-                temp_file.write(data)
-                return temp_file.name
-
-        def _load_audio_sync(file_path: str) -> tuple[np.ndarray, Union[int, float]]:
-            """Synchronous audio loading with librosa - runs in thread pool."""
-            import librosa
-
-            return librosa.load(file_path, sr=16000)
-
-        def _cleanup_file_sync(file_path: str) -> None:
-            """Synchronous file deletion - runs in thread pool."""
-            try:
-                if os.path.exists(file_path):
-                    os.unlink(file_path)
-            except OSError:
-                pass
-
-        try:
-            if parsed_url.scheme in ("http", "https"):
-                # Download video from HTTP/HTTPS URL asynchronously
-                video_data = await asyncio.to_thread(_download_video_sync, video_url)
-                # Write temp file asynchronously
-                temp_video_file_path = await asyncio.to_thread(_write_temp_file_sync, video_data, ".mp4")
-            elif parsed_url.scheme == "file":
-                # Use file path directly (handle Windows paths)
-                from urllib.request import url2pathname
-
-                temp_video_file_path = url2pathname(parsed_url.path)
-            elif parsed_url.scheme == "data":
-                # Handle data URL (base64 encoded video)
-                import base64
-
-                header, data = video_url.split(",", 1)
-                video_data = base64.b64decode(data)
-                # Write temp file asynchronously
-                temp_video_file_path = await asyncio.to_thread(_write_temp_file_sync, video_data, ".mp4")
-            else:
-                # Assume it's a local file path
-                temp_video_file_path = video_url
-
-            # Extract audio using librosa asynchronously (CPU-intensive, runs in thread pool)
-            audio_array, sample_rate = await asyncio.to_thread(_load_audio_sync, temp_video_file_path)
-
-            return (audio_array, sample_rate), uuid
-        finally:
-            # Clean up temporary file if we created one (asynchronously)
-            if temp_video_file_path and parsed_url.scheme in ("http", "https", "data"):
-                await asyncio.to_thread(_cleanup_file_sync, temp_video_file_path)
-
 
 
 @dataclass
@@ -1430,12 +1368,12 @@ def _parse_chat_message_content_parts(
     *,
     wrap_dicts: bool,
     interleave_strings: bool,
-    mm_processor_kwargs: Optional[dict[str, Any]] = None,
+    mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> list[ConversationMessage]:
     content = list[_ContentPart]()
 
     mm_parser = mm_tracker.create_parser()
-    
+
     # Set mm_processor_kwargs if parser supports it
     if hasattr(mm_parser, "set_mm_processor_kwargs"):
         mm_parser.set_mm_processor_kwargs(mm_processor_kwargs)
@@ -1556,7 +1494,7 @@ def _parse_chat_message_content(
     mm_tracker: BaseMultiModalItemTracker,
     content_format: ChatTemplateContentFormat,
     interleave_strings: bool,
-    mm_processor_kwargs: Optional[dict[str, Any]] = None,
+    mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> list[ConversationMessage]:
     role = message["role"]
     content = message.get("content")
@@ -1634,7 +1572,7 @@ def parse_chat_messages(
     model_config: ModelConfig,
     content_format: ChatTemplateContentFormat,
     media_io_kwargs: dict[str, dict[str, Any]] | None = None,
-    mm_processor_kwargs: Optional[dict[str, Any]] = None,
+    mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
@@ -1670,7 +1608,7 @@ async def parse_chat_messages_async(
     model_config: ModelConfig,
     content_format: ChatTemplateContentFormat,
     media_io_kwargs: dict[str, dict[str, Any]] | None = None,
-    mm_processor_kwargs: Optional[dict[str, Any]] = None,
+    mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
