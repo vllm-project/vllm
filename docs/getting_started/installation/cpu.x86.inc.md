@@ -48,7 +48,7 @@ uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VE
     export LD_PRELOAD="$TC_PATH:$IOMP_PATH:$LD_PRELOAD"
     ```
 
-#### Install the latest code**
+#### Install the latest code
 
 To install the wheel built from the latest main branch:
 
@@ -56,7 +56,7 @@ To install the wheel built from the latest main branch:
 uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/cpu --index-strategy first-index --torch-backend cpu
 ```
 
-#### Install specific revisions**
+#### Install specific revisions
 
 If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), you can specify the commit hash in the URL:
 
