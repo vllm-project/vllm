@@ -2018,16 +2018,14 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             weight_layout=0,
             fp8_quantization_type=Fp8QuantizationType.MxFp8,
         )
-        # activation_type was added in FlashInfer v0.7.x; only pass it
-        # when non-default (Swiglu) to stay compatible with older versions.
-        if fi_activation_type != ActivationType.Swiglu:
-            kwargs["activation_type"] = fi_activation_type
 
-        out = flashinfer_trtllm_fp8_block_scale_moe(**kwargs)
-        # With do_finalize=True (the default), FlashInfer currently returns
-        # a single Tensor. In flashinfer v0.8.0 this will change to List[Tensor].
-        # Handle both to stay forward-compatible.
-        return out[0] if isinstance(out, (tuple, list)) else out
+        if fi_activation_type != ActivationType.Swiglu:
+            raise NotImplementedError(
+                "FlashInfer TRTLLM MXFP8 MoE supports only Swiglu activation, "
+                f"got {fi_activation_type}."
+            )
+
+        return flashinfer_trtllm_fp8_block_scale_moe(**kwargs)
 
     def apply(
         self,
