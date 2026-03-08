@@ -83,6 +83,7 @@ class FlashMLASparseBackend(AttentionBackend):
         "auto",
         "bfloat16",
         "fp8_ds_mla",
+        "fp8",  # alias for fp8_ds_mla
     ]
 
     @staticmethod
@@ -566,6 +567,12 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             128 if current_platform.is_device_capability_family(100) else 64
         )
         self.fp8_decode_padded_heads = self._compute_fp8_decode_padded_heads(num_heads)
+
+        if kv_cache_dtype.startswith("fp8"):
+            assert kv_cache_dtype == "fp8_ds_mla", (
+                "FlashMLA Sparse Attention backend fp8 only supports "
+                "fp8_ds_mla kv-cache dtype"
+            )
 
         if kv_cache_dtype == "fp8_ds_mla":
             # Reserve workspace during initialization
