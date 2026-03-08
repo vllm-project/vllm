@@ -264,9 +264,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
 
-        for i, (lora_a_i, lora_b_i) in enumerate(
-            zip(lora_a, lora_b, strict=False)
-        ):
+        for i, (lora_a_i, lora_b_i) in enumerate(zip(lora_a, lora_b, strict=False)):
             if lora_a_i is not None:
                 self.lora_a_stacked[i][
                     index, 0, : lora_a_i.shape[0], : lora_a_i.shape[1]
