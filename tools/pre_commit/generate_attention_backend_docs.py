@@ -1268,7 +1268,7 @@ def _priority_table(title: str, backends: list[str]) -> list[str]:
         f"**{title}:**",
         "",
         "| Priority | Backend |",
-        "|----------|---------|",
+        "| -------- | ------- |",
         *[f"| {i} | `{b}` |" for i, b in enumerate(backends, 1)],
         "",
     ]
@@ -1317,7 +1317,7 @@ def generate_legend() -> str:
     return """## Legend
 
 | Column | Description |
-|--------|-------------|
+| ------ | ----------- |
 | **Dtypes** | Supported model data types (fp16, bf16, fp32) |
 | **KV Dtypes** | Supported KV cache data types (`auto`, `fp8`, `fp8_e4m3`, etc.) |
 | **Block Sizes** | Supported KV cache block sizes (%N means multiples of N) |
@@ -1348,7 +1348,7 @@ def generate_mla_section(
         "configuration.",
         "",
         "| Backend | Description | Compute Cap. | Enable | Disable | Notes |",
-        "|---------|-------------|--------------|--------|---------|-------|",
+        "| ------- | ----------- | ------------ | ------ | ------- | ----- |",
     ]
 
     for backend in prefill_backends:
@@ -1360,7 +1360,7 @@ def generate_mla_section(
             backend["disable"],
             backend.get("notes", ""),
         )
-        lines.append(row)
+        lines.append(row.replace("  ", " "))
 
     lines.extend(
         [

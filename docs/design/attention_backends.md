@@ -101,7 +101,7 @@ Priority is **1 = highest** (tried first).
 **Blackwell (SM 10.x):**
 
 | Priority | Backend |
-|----------|---------|
+| -------- | ------- |
 | 1 | `FLASHINFER` |
 | 2 | `FLASH_ATTN` |
 | 3 | `TRITON_ATTN` |
@@ -110,7 +110,7 @@ Priority is **1 = highest** (tried first).
 **Ampere/Hopper (SM 8.x-9.x):**
 
 | Priority | Backend |
-|----------|---------|
+| -------- | ------- |
 | 1 | `FLASH_ATTN` |
 | 2 | `FLASHINFER` |
 | 3 | `TRITON_ATTN` |
@@ -121,7 +121,7 @@ Priority is **1 = highest** (tried first).
 **Blackwell (SM 10.x):**
 
 | Priority | Backend |
-|----------|---------|
+| -------- | ------- |
 | 1 | `FLASHINFER_MLA` |
 | 2 | `CUTLASS_MLA` |
 | 3 | `FLASH_ATTN_MLA` |
@@ -133,7 +133,7 @@ Priority is **1 = highest** (tried first).
 **Ampere/Hopper (SM 8.x-9.x):**
 
 | Priority | Backend |
-|----------|---------|
+| -------- | ------- |
 | 1 | `FLASH_ATTN_MLA` |
 | 2 | `FLASHMLA` |
 | 3 | `FLASHINFER_MLA` |
@@ -145,7 +145,7 @@ Priority is **1 = highest** (tried first).
 ## Legend
 
 | Column | Description |
-|--------|-------------|
+| ------ | ----------- |
 | **Dtypes** | Supported model data types (fp16, bf16, fp32) |
 | **KV Dtypes** | Supported KV cache data types (`auto`, `fp8`, `fp8_e4m3`, etc.) |
 | **Block Sizes** | Supported KV cache block sizes (%N means multiples of N) |
@@ -191,10 +191,10 @@ The prefill backend is selected at runtime based on hardware and
 configuration.
 
 | Backend | Description | Compute Cap. | Enable | Disable | Notes |
-|---------|-------------|--------------|--------|---------|-------|
+| ------- | ----------- | ------------ | ------ | ------- | ----- |
 | TRT-LLM Ragged‡ | TensorRT-LLM ragged attention | 10.x | Default on SM100 | `-ac.use_trtllm_ragged_deepseek_prefill=0` | DeepSeek R1 dims only |
 | FlashInfer | FlashInfer CUTLASS backend | 10.x | `-ac.disable_flashinfer_prefill=0` | `-ac.disable_flashinfer_prefill=1` | DeepSeek R1 dims only |
-| cuDNN | cuDNN-based attention | 10.x | `-ac.use_cudnn_prefill=1` | `-ac.use_cudnn_prefill=0` |  |
+| cuDNN | cuDNN-based attention | 10.x | `-ac.use_cudnn_prefill=1` | `-ac.use_cudnn_prefill=0` | |
 | FlashAttention | FlashAttention varlen (FA2/FA3) | Any | Default fallback | Use other backends | FA3 on SM90, FA2 otherwise |
 
 > **‡** TRT-LLM Ragged is the default on Blackwell (SM100).
