@@ -355,6 +355,7 @@ class OpenAIServingChat(OpenAIServing):
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
+        reasoning_ended: bool | None = None
         for i, engine_prompt in enumerate(engine_prompts):
             prompt_token_ids = self._extract_prompt_components(engine_prompt).token_ids
 
@@ -429,6 +430,8 @@ class OpenAIServingChat(OpenAIServing):
         assert len(generators) == 1
         (result_generator,) = generators
 
+        prompt_is_reasoning_end = bool(reasoning_ended)
+
         if request.stream:
             return self.chat_completion_stream_generator(
                 request,
@@ -439,6 +442,7 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 request_metadata,
                 reasoning_parser,
+                prompt_is_reasoning_end=prompt_is_reasoning_end,
             )
 
         return await self.chat_completion_full_generator(
@@ -450,9 +454,7 @@ class OpenAIServingChat(OpenAIServing):
             tokenizer,
             request_metadata,
             reasoning_parser,
-            prompt_is_reasoning_end=bool(reasoning_ended)
-            if reasoning_ended is not None
-            else False,
+            prompt_is_reasoning_end=prompt_is_reasoning_end,
         )
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
@@ -609,6 +611,7 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         reasoning_parser: ReasoningParser | None = None,
+        prompt_is_reasoning_end: bool = False,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
@@ -656,7 +659,9 @@ class OpenAIServingChat(OpenAIServing):
             # For reasoning parser and tool call all enabled
             added_content_delta_arr = [False] * num_choices
             reasoning_end_arr = [False] * num_choices
-            prompt_is_reasoning_end_arr: list[bool | None] = [None] * num_choices
+            prompt_is_reasoning_end_arr: list[bool | None] = [
+                prompt_is_reasoning_end
+            ] * num_choices
         else:
             all_previous_token_ids = None
 
@@ -780,16 +785,6 @@ class OpenAIServingChat(OpenAIServing):
                     i = output.index
                     tool_parser = tool_parsers[i]
 
-                    if (
-                        reasoning_parser
-                        and res.prompt_token_ids
-                        and prompt_is_reasoning_end_arr[i] is None
-                    ):
-                        # only check once per choice, because prompt_token_ids
-                        # are the same for all deltas in that choice
-                        prompt_is_reasoning_end_arr[i] = (
-                            reasoning_parser.is_reasoning_end(res.prompt_token_ids)
-                        )
                     if finish_reason_sent[i]:
                         continue
 
