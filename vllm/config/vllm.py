@@ -1795,6 +1795,6 @@ def get_layers_from_vllm_config(
     return {
             layer_name: forward_context[layer_name]
             for layer_name in layer_names
-            if layer_name in forward_context                                        # skip other PP stages
+            if layer_name in forward_context
             and isinstance(forward_context[layer_name], layer_type)
         }
