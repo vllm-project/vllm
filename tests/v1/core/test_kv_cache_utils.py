@@ -38,6 +38,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    CrossAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -2136,3 +2137,19 @@ def test_unify_hybrid_kv_cache_specs():
     assert kv_cache_spec["sw_layer"].sliding_window == 1024
     # MambaSpec should be unchanged
     assert kv_cache_spec["mamba_layer"] == mamba_spec
+
+    # 7. CrossAttentionSpec + MambaSpec, should still raise ValueError
+    #    (unsupported mix - not all non-Mamba specs are unified)
+    cross_attn_spec = CrossAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.float32,
+    )
+    kv_cache_spec = {
+        "cross_attn_layer": cross_attn_spec,
+        "attn_layer": new_kv_cache_spec(),
+        "mamba_layer": mamba_spec,
+    }
+    with pytest.raises(ValueError):
+        kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
