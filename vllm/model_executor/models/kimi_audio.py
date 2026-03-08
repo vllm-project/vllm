@@ -433,6 +433,8 @@ class KimiAudioForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
         self.multimodal_config = multimodal_config
         # Store model path for loading Whisper weights
+        # Note: For local models, ensure whisper-large-v3/ subfolder exists
+        # For HF models, Whisper weights should be in the model repository
         self.model_path = vllm_config.model_config.model
 
         # Use KimiAudioWhisperEncoder for audio feature extraction
