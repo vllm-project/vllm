@@ -478,7 +478,7 @@ class KimiAudioForConditionalGeneration(
 
         Kimi-Audio fusion: inputs_embeds = text_emb + whisper_emb × √2
 
-        Handles batched inputs and multiple audios per sample.
+        Handles batched inputs using is_multimodal mask for position mapping.
         """
         # Get text embeddings
         inputs_embeds = self.language_model.model.embed_tokens(input_ids)
@@ -486,38 +486,39 @@ class KimiAudioForConditionalGeneration(
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
 
-        # Handle batch: tuple of [seq_len, hidden] per batch item
-        batch_size = input_ids.shape[0]
-        scale_factor = 2**0.5
+        # Flatten audio embeddings: list of [seq_len, hidden] -> [total_tokens, hidden]
+        audio_flat = torch.cat([emb for emb in multimodal_embeddings], dim=0)
 
-        for b_idx in range(batch_size):
-            audio_embeds = multimodal_embeddings[b_idx]
+        if is_multimodal is not None and is_multimodal.any():
+            # Use is_multimodal mask (provided by vLLM v1)
+            scale_factor = 2**0.5
+            inputs_embeds_flat = inputs_embeds.view(-1, inputs_embeds.shape[-1])
+            text_at_mm = inputs_embeds_flat[is_multimodal]
 
-            # Find positions in this specific batch item
-            audio_mask = input_ids[b_idx] == KimiAudioProcessor.KIMIA_TEXT_BLANK
-            if not audio_mask.any():
-                continue
+            if text_at_mm.shape[0] == audio_flat.shape[0]:
+                fused = (text_at_mm + audio_flat.to(inputs_embeds.dtype)) * scale_factor
+                inputs_embeds_flat[is_multimodal] = fused
+        else:
+            # Fallback: find placeholder positions (for v0 or testing)
+            audio_mask = input_ids == KimiAudioProcessor.KIMIA_TEXT_BLANK
+            if audio_mask.any():
+                audio_positions = audio_mask.nonzero(as_tuple=True)[0]
+                if audio_positions.numel() > 0:
+                    # Audio embeddings replace positions after blank token
+                    pos = audio_positions[0].item() + 1
+                    audio_len = min(audio_flat.shape[0], inputs_embeds.shape[0] - pos)
 
-            # Get contiguous block positions (Kimi uses single audio block per sample)
-            positions = audio_mask.nonzero(as_tuple=True)[0]
-            if positions.numel() == 0:
-                continue
+                    scale_factor = 2**0.5
+                    text_embeds = inputs_embeds.view(-1, inputs_embeds.shape[-1])[
+                        pos : pos + audio_len
+                    ]
+                    audio_subset = audio_flat[:audio_len]
 
-            # Insert audio after the blank token
-            start_pos = positions[0].item() + 1
-            audio_len = audio_embeds.shape[0]
-            end_pos = start_pos + audio_len
-
-            # Truncate if audio too long for context
-            if end_pos > inputs_embeds.shape[1]:
-                audio_embeds = audio_embeds[: inputs_embeds.shape[1] - start_pos]
-                end_pos = inputs_embeds.shape[1]
-
-            # Kimi fusion: (text + audio) * √2
-            text_embeds = inputs_embeds[b_idx, start_pos:end_pos, :]
-            if text_embeds.shape[0] == audio_embeds.shape[0]:
-                fused = (text_embeds + audio_embeds) * scale_factor
-                inputs_embeds[b_idx, start_pos:end_pos, :] = fused
+                    if text_embeds.shape[0] == audio_subset.shape[0]:
+                        fused = (text_embeds + audio_subset) * scale_factor
+                        inputs_embeds.view(-1, inputs_embeds.shape[-1])[
+                            pos : pos + audio_len
+                        ] = fused
 
         return inputs_embeds
 
