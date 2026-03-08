@@ -22,23 +22,13 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     """
     cached_tokenizer = copy.copy(tokenizer)
 
-    # Handle tokenizers that don't have all_special_ids/all_special_tokens
-    # (e.g., TikTokenTokenizer)
-    tokenizer_all_special_ids = getattr(tokenizer, "all_special_ids", [])
-    tokenizer_all_special_tokens = getattr(tokenizer, "all_special_tokens", [])
-    try:
-        tokenizer_vocab = tokenizer.get_vocab()
-    except NotImplementedError:
-        # TikTokenTokenizer doesn't implement get_vocab()
-        tokenizer_vocab = {}
-    try:
-        tokenizer_len = len(tokenizer)
-    except AttributeError:
-        # TikTokenTokenizer doesn't have total_vocab_size
-        tokenizer_len = 0
+    tokenizer_all_special_ids = tokenizer.all_special_ids
+    tokenizer_all_special_tokens = tokenizer.all_special_tokens
+    tokenizer_vocab = tokenizer.get_vocab()
+    tokenizer_len = len(tokenizer)
 
-    max_token_id = max(tokenizer_vocab.values()) if tokenizer_vocab else 0
-    max_chars_per_token = max((len(tok) for tok in tokenizer_vocab), default=0)
+    max_token_id = max(tokenizer_vocab.values())
+    max_chars_per_token = max(len(tok) for tok in tokenizer_vocab)
 
     # Some tokenizers (e.g., QwenTokenizer) have special tokens that
     # are added and included in the implementation of the vocab_size

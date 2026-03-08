@@ -257,6 +257,10 @@ class KimiAudioTokenizer(TokenizerLike):
     def get_vocab(self) -> dict[str, int]:
         return dict(self._token_to_id)
 
+    def __len__(self) -> int:
+        """Return vocab size for compatibility with HF tokenizer interface."""
+        return self._tokenizer.n_vocab
+
     def get_added_vocab(self) -> dict[str, int]:
         return {
             str(token): token_id
