@@ -450,6 +450,9 @@ class OpenAIServingChat(OpenAIServing):
             tokenizer,
             request_metadata,
             reasoning_parser,
+            prompt_is_reasoning_end=bool(reasoning_ended)
+            if reasoning_ended is not None
+            else False,
         )
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
@@ -1375,6 +1378,7 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         reasoning_parser: ReasoningParser | None = None,
+        prompt_is_reasoning_end: bool = False,
     ) -> ErrorResponse | ChatCompletionResponse:
         from vllm.tokenizers.mistral import MistralTokenizer
 
@@ -1467,9 +1471,12 @@ class OpenAIServingChat(OpenAIServing):
                 choices.append(choice_data)
                 continue
 
-            if reasoning_parser:
-                # If the reasoning parser is enabled,
-                # tool calls are extracted exclusively from the content.
+            if reasoning_parser and not prompt_is_reasoning_end:
+                # If the reasoning parser is enabled and the prompt
+                # did not already end reasoning (e.g. template placed
+                # <think>\n\n</think> for disabled thinking), extract
+                # reasoning from the output. This is consistent with
+                # the streaming path which checks prompt_is_reasoning_end.
                 reasoning, content = reasoning_parser.extract_reasoning(
                     output.text, request=request
                 )
