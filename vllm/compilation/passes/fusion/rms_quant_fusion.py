@@ -593,7 +593,7 @@ class RMSNormNvfp4QuantPattern:
         input = torch.empty(5, 16, dtype=self.model_dtype, device=self.device)
         weight = torch.empty(16, dtype=self.model_dtype, device=self.device)
         quant_result = torch.empty(5, 8, dtype=FP4_DTYPE, device=self.device)
-        output_scale = torch.empty(128, 4, dtype=torch.int32, device=self.device)
+        output_scale = torch.empty(128, 1, dtype=torch.int32, device=self.device)
         input_scale = torch.empty(1, 1, dtype=torch.float32, device=self.device)
         return [quant_result, output_scale, input, weight, input_scale]
 
@@ -659,7 +659,7 @@ class FusedAddRMSNormNvfp4QuantPattern:
         weight = torch.empty(16, dtype=self.model_dtype, device=self.device)
         residual = torch.empty(5, 16, dtype=self.model_dtype, device=self.device)
         quant_result = torch.empty(5, 8, dtype=FP4_DTYPE, device=self.device)
-        output_scale = torch.empty(128, 4, dtype=torch.int32, device=self.device)
+        output_scale = torch.empty(128, 1, dtype=torch.int32, device=self.device)
         input_scale = torch.empty(1, 1, dtype=torch.float32, device=self.device)
         return [quant_result, output_scale, input, weight, residual, input_scale]
 
