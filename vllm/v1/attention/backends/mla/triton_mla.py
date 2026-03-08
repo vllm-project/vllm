@@ -119,20 +119,25 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        # Determine compute dtype — Triton kernels need BF16/FP16, not FP8.
-        compute_dtype = torch.bfloat16
-
-        if self.kv_cache_dtype.startswith("fp8"):
-            # Dequantize FP8 cache to BF16 before Triton kernel.
-            k_scale = layer._k_scale.float() if hasattr(layer, "_k_scale") else 1.0
-            kv_c_and_k_pe_cache = (kv_c_and_k_pe_cache.float() * k_scale).to(
-                compute_dtype
-            )
-
         if type(q) is tuple:
             q = torch.cat(q, dim=-1)
 
         assert isinstance(q, torch.Tensor)
+
+        # Determine compute dtype — Triton kernels need BF16/FP16, not FP8.
+        # Derive from q's dtype when possible; fall back to model default for
+        # FP8-quantized queries (element_size()==1 means FP8).
+        if q.dtype.is_floating_point and q.element_size() == 1:
+            compute_dtype = torch.get_default_dtype()
+        else:
+            compute_dtype = q.dtype
+
+        if self.kv_cache_dtype.startswith("fp8"):
+            # Dequantize FP8 cache before Triton kernel.
+            k_scale = layer._k_scale.float() if hasattr(layer, "_k_scale") else 1.0
+            kv_c_and_k_pe_cache = (kv_c_and_k_pe_cache.float() * k_scale).to(
+                compute_dtype
+            )
 
         # Query may have been quantized to FP8 by the caller — dequantize.
         if q.dtype.is_floating_point and q.element_size() == 1:
