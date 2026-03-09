@@ -276,6 +276,25 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 endif()
 
 #
+# monitorx extension - TODO compiler flags for intrinsics
+#
+
+set(VLLM_MONTIORX_EXT_SRC
+  "csrc/monitorx.cpp")
+
+set_gencode_flags_for_srcs(
+  SRCS "${VLLM_MONITORX_EXT_SRC}"
+)
+define_extension_target(
+  monitorx
+  DESTINATION vllm
+  LANGUAGE CXX
+  SOURCES ${VLLM_MONTIORX_EXT_SRC}
+  COMPILE_FLAGS "-mmwaitx"
+  USE_SABI 3.11
+  WITH_SOABI)
+
+#
 # _C extension
 #
 

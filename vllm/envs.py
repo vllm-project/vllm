@@ -1646,6 +1646,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
         os.getenv("VLLM_NIXL_EP_MAX_NUM_RANKS", "32")
     ),
+    # If set to 1, use monitorx/monitorx instructions to poll in a more efficient
+    # way when using the mp backend. (Requires an AMD CPU.)
+    "VLLM_USE_MONITORX": lambda: bool(
+        int(
+            os.getenv("VLLM_USE_MONITORX", "1")
+        ) # TODO Default to "0", this is just for testing
+    ),
 }
 
 
