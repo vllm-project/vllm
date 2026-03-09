@@ -78,7 +78,15 @@ inline int64_t get_available_l2_size() {
   static int64_t size = []() {
     auto caps = at::cpu::get_cpu_capabilities();
     const uint32_t l2_cache_size = caps.at("l2_cache_size").toInt();
-    return l2_cache_size >> 1;  // use 50% of L2 cache
+#if defined(__powerpc64__) || defined(__ppc64__)
+    // POWER8 has 512KB L2 cache per core
+    const uint32_t l2_cache_size = 512 * 1024;
+#elif __has_include(<ATen/cpu/vec/vec.h>) && defined(AT_HAVE_L2_CACHE_SIZE)
+    const uint32_t l2_cache_size = at::cpu::L2_cache_size();
+#else
+    // Default fallback for older PyTorch versions
+    const uint32_t l2_cache_size = 256 * 1024;  // Assume 256KB L2
+#endif    return l2_cache_size >> 1;  // use 50% of L2 cache
   }();
   return size;
 #endif

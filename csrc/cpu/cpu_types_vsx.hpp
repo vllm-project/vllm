@@ -7,6 +7,21 @@
 #include <algorithm>
 #include <torch/all.h>
 
+// POWER8 compatibility - vec_xst_len is POWER9+
+#if defined(__POWER8_VECTOR__) && !defined(__POWER9_VECTOR__)
+  #include <cstring>
+template <typename V, typename T>
+static inline void vec_xst_len_compat(V vec, T* ptr, size_t len) {
+  union {
+    V v;
+    char c[16];
+  } u;
+  u.v = vec;
+  std::memcpy(ptr, u.c, len);
+}
+  #define vec_xst_len(v, p, l) vec_xst_len_compat(v, p, static_cast<size_t>(l))
+#endif
+
 namespace vec_op {
 
 // FIXME: FP16 is not fully supported in Torch-CPU
