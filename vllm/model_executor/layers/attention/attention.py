@@ -519,7 +519,6 @@ class Attention(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # Block size may get updated after model loading, refresh it
         block_size = vllm_config.cache_config.block_size
-        attn_group_size = vllm_config.cache_config.mamba_num_attn_pages
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER
         if self.sliding_window is not None:
@@ -540,7 +539,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
-                group_size=attn_group_size,
             )
 
 
