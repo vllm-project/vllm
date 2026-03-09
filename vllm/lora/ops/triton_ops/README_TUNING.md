@@ -58,18 +58,3 @@ The `gpu_name` can be automatically detected by calling `torch.cuda.get_device_n
 
 Optimal kernel configuration files are saved as JSON files with the structure `config_data[max_loras][num_slices][m][k][n][i]`,
 where `i` is an optional dimension in the `fused_moe_lora` configuration, representing the intermediate size of the MoE layer.
-
-### Supported Config Keys
-
-The following keys are supported in the JSON config entries for `fused_moe_lora` shrink/expand kernels:
-
-| Key           | Type    | Default | Description                                                       |
-|---------------|---------|---------|-------------------------------------------------------------------|
-| `BLOCK_SIZE_M`| int     | 64      | Tile size along the M (token) dimension                          |
-| `BLOCK_SIZE_N`| int     | 64      | Tile size along the N (output) dimension                         |
-| `BLOCK_SIZE_K`| int     | 32      | Tile size along the K (input) dimension                          |
-| `GROUP_SIZE_M`| int     | 8       | Number of M-tiles to group for L2 cache reuse                    |
-| `NUM_WARPS`   | int     | 4       | Number of warps per thread block                                 |
-| `NUM_STAGES`  | int     | 3       | Number of pipeline stages for async memory copies                |
-| `SPLIT_K`     | int     | 1       | Number of K-dimension splits for reduction                       |
-| `USE_TMA`     | bool    | true    | Whether to use Tensor Memory Accelerator (TMA) for data loading  |
