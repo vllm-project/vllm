@@ -685,7 +685,6 @@ class Gemma3nForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         # NOTE (NickLucche) Each pass needs tokens to compute PLE so we cache
         # them here, as the model  forward has only access to the input_embeds.
@@ -710,7 +709,6 @@ class Gemma3nForConditionalGeneration(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(

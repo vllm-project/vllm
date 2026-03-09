@@ -298,7 +298,6 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         *,
         is_multimodal: torch.Tensor | None = None,
         # Multi-modal token ID may exceed vocab size
-        handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
         """Pass post-conv embeddings directly as input.
 
