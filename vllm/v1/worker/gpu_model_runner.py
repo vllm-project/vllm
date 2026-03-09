@@ -4206,6 +4206,12 @@ class GPUModelRunner(
         sampled_count_event = self.valid_sampled_token_count_event
         if sampled_count_event is None or prev_sampled_token_ids is None:
             return []
+        # With async spec decode, the drafter may start its next round
+        # before the target's D2H copy of these counts has completed.
+        # This is only used to prevent unbounded drift in CPU-side num_computed_tokens.
+        # It's acceptable for the CPU value to be slightly stale because the GPU side is
+        # the source of truth, corrected by update_num_computed_tokens_for_batch_change.
+        # Without async, we must block because the CPU value is used directly.
         if blocking:
             sampled_count_event.synchronize()
         elif not sampled_count_event.query():
