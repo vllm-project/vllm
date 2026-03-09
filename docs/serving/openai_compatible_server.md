@@ -67,7 +67,6 @@ In addition, we have the following custom APIs:
 - [Render API](#render-api) (`/v1/chat/completions/render`, `/v1/completions/render`)
     - Available on both `vllm serve` and `vllm launch render` servers.
     - Returns rendered inputs (conversation messages and token IDs) without running inference.
-    - Useful for debugging preprocessing, inspecting tokenization, or building CPU-only preprocessing pipelines.
 - [Tokenizer API](#tokenizer-api) (`/tokenize`, `/detokenize`)
     - Applicable to any model with a tokenizer.
 - [Pooling API](#pooling-api) (`/pooling`)
@@ -1113,9 +1112,7 @@ The following extra parameters are supported:
 
 ### Render API
 
-Our Render API runs the full request preprocessing pipeline — chat template rendering, tokenization,
-and tool/reasoning parsing — and returns the rendered inputs without inference. It is available on
-both a standard `vllm serve` server and a CPU-only [`vllm launch render`](../cli/launch.md) server.
+Our Render API runs the full request preprocessing pipeline — chat template rendering, tokenization, and tool/reasoning parsing — and returns the rendered inputs without inference. It is available on both a standard `vllm serve` server and a CPU-only [`vllm launch render`](../cli/launch.md) server.
 
 Two endpoints are provided:
 
