@@ -219,6 +219,7 @@ def _update_num_computed_tokens_for_batch_change(
     Requests that had drafts: corrected = prev_gpu + valid_count.
     New requests or non-draft (e.g. prefills): use CPU value directly.
     """
+    # Clamp because prev_positions can be -1 for new requests
     gather_indices = prev_positions.clamp(min=0)
 
     valid_counts = valid_sampled_token_count[gather_indices]
